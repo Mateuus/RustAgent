@@ -105,13 +105,19 @@ Legenda: `[ ]` a fazer · `[~]` em curso · `[x]` pronto e verificado
 
 ## Etapa 8 — Painel
 
-- [ ] base: layout, tema, `ui/*`, `lib/api/*`, hooks
-- [ ] `/entrar` — login de operador + CSRF
-- [ ] `/` — cartões dos servidores
-- [ ] `/servidores` — lista + criar
-- [ ] `/servidor/[id]` — visão, operações (log ao vivo), plugins, configuração
-- [ ] `/config`
-- [ ] `npm run build -w panel` e o core servindo `panel/out`
+- [x] base: layout, tema e `ui/*` trazidos do painel antigo; `lib/api.ts` novo
+      (cliente único, com o CSRF em memória)
+- [x] `/entrar` — login de operador + CSRF
+- [x] `/` — cartões dos servidores + criar (a lista e a visão geral viraram **uma
+      tela só**: duas telas com o mesmo conteúdo é manutenção dobrada)
+- [x] `/servidor?id=<id>` — visão, operações (log ao vivo com barra de progresso),
+      plugins. **Query string, e não rota dinâmica**: o export estático exigiria
+      saber os ids em tempo de build, e eles nascem em tempo de execução
+- [x] `/config` — o agente (versão, tempo de pé) e como mudar a configuração
+- [x] `npm run build -w panel` gera 9 páginas estáticas e o core serve `panel/out`
+- [x] **verificado**: `GET /` devolve o painel; senha errada recusa com
+      `INVALID_CREDENTIALS`; o POST **sem** o header de CSRF é barrado com 403 e
+      **com** ele cria o servidor (201)
 
 ## Etapa 9 — Fechamento
 

@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+ *  TOKENS — fonte única do design system.
+ *
+ *  O tailwind.config.ts só dá nome de utilitário a estas
+ *  variáveis. Mudou a estética, muda AQUI e o resto acompanha.
+ *
+ *  Estética: superfícies quase pretas, cantos retos, bordas de
+ *  1px, barras verticais de acento, tabelas densas.
+ * ============================================================ */
+@layer base {
+  :root {
+    /* Superfícies e texto */
+    --bg: #0f0f0f;
+    --surface: #1b1b1b;
+    --surface-2: #262626;
+    --border: #2e2e2e;
+    --text: #e8e8e8;
+    --text-muted: #9a9a9a;
+
+    /* Chrome.
+     *
+     * Sobre fundo --bg estas cores medem, em contraste:
+     *   rust  3.74:1  -> ícone, borda e barra de acento (WCAG
+     *                    1.4.11 pede 3:1). NÃO serve para texto
+     *                    corrido, que precisa de 4.5:1.
+     *   olive 4.87:1  -> passa para texto, mas por pouco.
+     *   amber 9.97:1  -> passa com folga; é a cor de foco.
+     *
+     * Por isso os avisos do painel são texto em --text com
+     * ÍCONE e BORDA coloridos, e não texto colorido. */
+    --rust-red: #c43f2c;
+    --olive: #6f8942;
+    --amber: #e6b265;
+
+    /* Paleta de GRÁFICO, nesta ordem.
+     *
+     * Separada do chrome de propósito: --rust-red e --olive têm
+     * ΔE 3.4 sob deuteranopia, ou seja, quem tem esse tipo de
+     * daltonismo não distingue as duas numa legenda. Como a
+     * separação tritan desta paleta é 6.5 (a banda mínima),
+     * todo gráfico com 2+ séries precisa de rótulo direto ou
+     * legenda: identidade nunca por cor sozinha.
+     *
+     * Nenhum gráfico existe no MVP. Os tokens ficam prontos. */
+    --chart-1: #d9623f;
+    --chart-2: #4a90c4;
+    --chart-3: #a8862b;
+    --chart-4: #9b6fc4;
+  }
+
+  html {
+    /* Faz o navegador desenhar scrollbar e controles nativos
+     * em tema escuro — sem isso o <input type=number> aparece
+     * branco no meio da tela preta. */
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--text);
+  }
+
+  /* Foco visível em TUDO que recebe foco, com a cor de maior
+   * contraste da paleta. `outline-offset` afasta o traço da
+   * borda de 1px do controle, senão os dois se confundem. */
+  :focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--rust-red);
+    color: #ffffff;
+  }
+
+  /* O <input type=number> ganha setas que empurram o texto e
+   * mudam de largura conforme o hover. Numa linha densa isso
+   * desloca o resto do formulário. */
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+
+  input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  /* Fundo do <dialog> modal — a gaveta de navegação em tela
+   * estreita. O ::backdrop é pseudo-elemento do navegador e não
+   * alcança utilitário do Tailwind; escurecer é o que separa a
+   * gaveta do conteúdo que ficou atrás dela. */
+  dialog::backdrop {
+    background-color: rgb(0 0 0 / 0.7);
+  }
+}

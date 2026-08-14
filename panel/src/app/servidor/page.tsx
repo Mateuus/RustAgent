@@ -1,0 +1,195 @@
+'use client';
+
+// ============================================================
+//  /servidor?id=<id>  -  a página de um servidor.
+//
+//  ####  POR QUE QUERY STRING, E NÃO /servidor/[id]  ####
+//
+//  O painel é EXPORT ESTÁTICO: uma rota dinâmica exigiria
+//  `generateStaticParams`, ou seja, saber em tempo de BUILD quais
+//  servidores existem. Eles nascem em tempo de execução, pelo
+//  próprio painel. Query string resolve sem inventar um servidor
+//  Next só para isso.
+// ============================================================
+
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useCallback, useEffect, useState } from 'react';
+
+import { OperationsPanel } from '@/components/operations-panel';
+import { PluginsPanel } from '@/components/plugins-panel';
+import { ServerStateBadge } from '@/components/server-state';
+import { RequireSession } from '@/components/session';
+import { Button } from '@/components/ui/button';
+import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
+
+type Tab = 'visao' | 'operacoes' | 'plugins';
+
+export default function ServidorPage() {
+  return (
+    <RequireSession>
+      {/* `useSearchParams` exige Suspense no export estático. */}
+      <Suspense fallback={null}>
+        <Servidor />
+      </Suspense>
+    </RequireSession>
+  );
+}
+
+function Servidor() {
+  const params = useSearchParams();
+  const id = params.get('id') ?? '';
+
+  const [server, setServer] = useState<ServerView | null>(null);
+  const [steam, setSteam] = useState<SteamUpdate | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>('visao');
+
+  const load = useCallback(async () => {
+    if (id === '') {
+      return;
+    }
+
+    try {
+      const response = await agent.server(id);
+
+      setServer(response.server);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+
+    try {
+      setSteam(await agent.steamUpdate(id));
+    } catch {
+      // O retrato da Steam é informação secundária: sem ele a
+      // página continua servindo para operar o servidor.
+    }
+  }, [id]);
+
+  useEffect(() => {
+    void load();
+
+    const timer = setInterval(() => void load(), 5_000);
+
+    return () => clearInterval(timer);
+  }, [load]);
+
+  if (id === '') {
+    return <p className="text-sm text-muted">Nenhum servidor selecionado.</p>;
+  }
+
+  return (
+    <div>
+      <Link href="/" className="text-2xs uppercase tracking-wider text-muted hover:text-foreground">
+        ← todos os servidores
+      </Link>
+
+      {error !== null && <p className="mt-4 border border-rust bg-surface-2 p-3 text-sm">{error}</p>}
+
+      {server !== null && (
+        <>
+          <div className="mb-6 mt-2 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h1 className="font-condensed text-2xl font-bold uppercase tracking-wide">
+                {server.name}
+              </h1>
+              <p className="truncate text-sm text-muted">{server.hostname}</p>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-3">
+              <ServerStateBadge server={server} />
+
+              <Button
+                size="sm"
+                onClick={() => {
+                  void agent
+                    .setEnabled(server.id, !server.enabled)
+                    .then(() => load())
+                    .catch((cause: unknown) =>
+                      setError(cause instanceof Error ? cause.message : String(cause)),
+                    );
+                }}
+              >
+                {server.enabled ? 'Parar de cuidar' : 'Cuidar deste servidor'}
+              </Button>
+            </div>
+          </div>
+
+          {steam?.updateAvailable === true && (
+            <p className="mb-4 border border-amber bg-surface-2 p-3 text-sm">
+              Há atualização do Rust publicada (build {steam.published}; instalado{' '}
+              {steam.installed}). Use <strong>Atualizar avisando</strong> para derrubar com aviso no
+              chat.
+            </p>
+          )}
+
+          {steam !== null && steam.lastError !== null && (
+            <p className="mb-4 border border-rust bg-surface-2 p-3 text-2xs">
+              Não consegui conferir a versão publicada: {steam.lastError}
+            </p>
+          )}
+
+          <nav className="mb-4 flex gap-1 border-b border-border">
+            {(
+              [
+                ['visao', 'Visão'],
+                ['operacoes', 'Operações'],
+                ['plugins', 'Plugins'],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                className={
+                  'px-4 py-2 text-sm ' +
+                  (tab === key
+                    ? 'border-b-2 border-rust text-foreground'
+                    : 'border-b-2 border-transparent text-muted hover:text-foreground')
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+
+          {tab === 'visao' && <Visao server={server} steam={steam} />}
+          {tab === 'operacoes' && <OperationsPanel serverId={server.id} />}
+          {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+function Visao({ server, steam }: { server: ServerView; steam: SteamUpdate | null }) {
+  const rows: [string, string][] = [
+    ['id', server.id],
+    ['identity (pasta de saves)', server.identity],
+    ['mapa', `${server.map} · ${String(server.worldSize)} · seed ${String(server.seed)}`],
+    ['jogadores', `até ${String(server.maxPlayers)}`],
+    [
+      'portas',
+      `jogo ${String(server.ports.game)} · rcon ${String(server.ports.rcon)} · query ${String(
+        server.ports.query,
+      )} · app ${String(server.ports.app)}`,
+    ],
+    ['instalação', server.paths.installDir],
+    ['configuração', server.paths.configPath],
+    ['logs', server.paths.logsDir],
+    ['build instalado', steam?.installed ?? '—'],
+    ['build publicado', steam?.published ?? '—'],
+  ];
+
+  return (
+    <dl className="divide-y divide-border border border-border bg-surface text-sm">
+      {rows.map(([label, value]) => (
+        <div key={label} className="flex gap-4 px-4 py-2">
+          <dt className="w-56 shrink-0 text-muted">{label}</dt>
+          <dd className="min-w-0 break-all">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
