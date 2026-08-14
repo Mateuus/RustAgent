@@ -786,6 +786,28 @@ export const agent = {
    * agente. Fazer a tela chamar o PUT várias vezes poria essa regra
    * no navegador, que é onde ela não tem teste.
    */
+  /**
+   * Deixa este servidor com os mesmos plugins de outro.
+   *
+   * O "conjunto" é um servidor que já funciona: uma lista salva no
+   * banco envelheceria sozinha, e o servidor novo nasceria faltando
+   * o plugin que entrou depois. A configuração de cada um NÃO vem
+   * junto — ela é daquele servidor.
+   */
+  copyPluginsFrom: (id: string, from: string) =>
+    api<{
+      ok: true;
+      from: string;
+      enabled: string[];
+      alreadyEnabled: string[];
+      /** O que não deu para trazer, com o motivo de cada um. */
+      skipped: { plugin: string; reason: string }[];
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/plugins/copy-from`, {
+      method: 'POST',
+      body: { from },
+    }),
+
   enableWithDeps: (id: string, pluginId: number) =>
     api<{
       ok: true;

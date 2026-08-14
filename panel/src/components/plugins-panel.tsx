@@ -49,6 +49,10 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
   /** O id do plugin em voo, ou `null`. Trava só a linha dele. */
   const [busy, setBusy] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
+  /** Os OUTROS servidores deste agente — a origem da cópia. */
+  const [outros, setOutros] = useState<readonly string[]>([]);
+  const [copySource, setCopySource] = useState('');
+  const [copying, setCopying] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -65,6 +69,21 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Só os outros: copiar de si mesmo é a única origem que o agente
+  // recusa, e oferecê-la seria oferecer um erro.
+  useEffect(() => {
+    void agent
+      .servers()
+      .then((response) => {
+        setOutros(response.servers.map((server) => server.id).filter((id) => id !== serverId));
+      })
+      .catch(() => {
+        // Sem a lista, a faixa de copiar não aparece. É o suficiente:
+        // ela é atalho, e o resto da tela funciona sem ela.
+        setOutros([]);
+      });
+  }, [serverId]);
 
   async function setEnabled(plugin: ServerPlugin, enabled: boolean, force = false): Promise<void> {
     setBusy(plugin.id);
@@ -154,6 +173,38 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
       setError(message);
     } finally {
       setBusy(null);
+    }
+  }
+
+  /** Liga aqui o mesmo conjunto que outro servidor usa. */
+  async function copyFrom(): Promise<void> {
+    if (copySource === '') return;
+
+    setCopying(true);
+    setNotice(null);
+
+    try {
+      const response = await agent.copyPluginsFrom(serverId, copySource);
+
+      toast.success(`Plugins copiados de ${copySource}`, { description: response.message });
+
+      // O que NÃO veio fica na tela, e não no toast: é a lista de
+      // arquivos que ainda precisam ser enviados aqui, e ela precisa
+      // poder ser lida com calma.
+      if (response.skipped.length > 0) {
+        setNotice(
+          response.skipped.map((item) => `${item.plugin}: ${item.reason}`).join('\n'),
+        );
+      }
+
+      await load();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      toast.error('Não consegui copiar', { description: message });
+      setError(message);
+    } finally {
+      setCopying(false);
     }
   }
 
@@ -253,6 +304,44 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
               />
             ))}
           </Column>
+        </div>
+      )}
+
+      {/* ####  UM SERVIDOR NOVO NÃO PODE SER SEIS CLIQUES  ####
+
+          O "conjunto" aqui é um servidor que já funciona. Uma lista
+          salva no banco envelheceria sozinha: no dia em que o
+          servidor de verdade ganhasse o sétimo plugin, o conjunto
+          continuaria com seis. */}
+      {plugins !== null && outros.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center gap-3 border border-border bg-surface p-3">
+          <p className="min-w-0 flex-1 text-2xs leading-relaxed text-muted">
+            <strong className="text-foreground">Copiar de outro servidor.</strong> Liga aqui os
+            mesmos plugins que outro servidor usa, com as dependências na ordem certa. A
+            configuração de cada um não vem junto — ela é de lá.
+          </p>
+
+          <select
+            value={copySource}
+            onChange={(event) => setCopySource(event.target.value)}
+            className="h-8 border border-border bg-surface-2 px-2 text-2xs text-foreground"
+          >
+            <option value="">escolha o servidor…</option>
+            {outros.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={copying || copySource === ''}
+            onClick={() => void copyFrom()}
+          >
+            {copying ? 'Copiando…' : 'Copiar plugins'}
+          </Button>
         </div>
       )}
 

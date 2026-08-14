@@ -59,6 +59,7 @@ const serverConfigParams = z.object({
 
 const toggleBody = z.object({ enabled: z.boolean() });
 const configBody = z.object({ text: z.string() });
+const copyFromBody = z.object({ from: z.string().min(1) });
 const forceQuery = z.object({ force: z.enum(['0', '1']).optional() });
 
 /** O `.cs` que veio no multipart, conferido. */
@@ -327,6 +328,37 @@ export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDep
           ? `${result.plugin.name} já estava ligado, com todas as dependências.`
           : `Ligados nesta ordem: ${result.enabled.join(' → ')}. A ordem é a das dependências — ` +
             'o Oxide segura um plugin enquanto o que ele exige não estiver carregado.',
+    };
+  });
+
+  /**
+   * Deixa este servidor com os mesmos plugins de outro.
+   *
+   * O "conjunto" é um servidor que já funciona — ver
+   * `PluginLibrary.copyFrom`. A configuração de cada plugin NÃO vem
+   * junto: ela é de lá.
+   */
+  app.post('/servers/:id/plugins/copy-from', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { from } = copyFromBody.parse(request.body);
+
+    const result = await deps.library.copyFrom(id, from);
+
+    return {
+      ok: true,
+      from,
+      ...result,
+      message: [
+        result.enabled.length === 0
+          ? `Nada foi ligado: este servidor já tinha tudo o que "${from}" usa.`
+          : `Ligados aqui: ${result.enabled.join(', ')}.`,
+        result.skipped.length === 0
+          ? null
+          : `${String(result.skipped.length)} não vieram — veja "skipped" para o motivo de cada um.`,
+        'A configuração de cada plugin não foi copiada: ela é daquele servidor.',
+      ]
+        .filter((parte): parte is string => parte !== null)
+        .join(' '),
     };
   });
 

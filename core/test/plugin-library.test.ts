@@ -893,6 +893,86 @@ describe('remover do acervo', () => {
   });
 });
 
+describe('copiar os plugins de outro servidor', () => {
+  it('####  o servidor novo nasce com o conjunto do que já funciona  ####', async () => {
+    // Antes, um servidor novo era ligar seis plugins na mão, um a um,
+    // e na ordem certa.
+    const agente = await harness.library.add(
+      'OrigemZAgent.cs',
+      pluginSource('1.0.0', { className: 'OrigemZAgent' }),
+    );
+    const vip = await harness.library.add(
+      'OrigemZVip.cs',
+      pluginSource('1.0.0', { className: 'OrigemZVip', requires: ['OrigemZAgent'] }),
+    );
+
+    await harness.library.enableWithDeps(SERVER_ID, vip.plugin.id);
+    harness.commands.length = 0;
+
+    const result = await harness.library.copyFrom(OTHER_ID, SERVER_ID);
+
+    // A dependência entra antes, como em qualquer ligação daqui.
+    expect(result.enabled).toEqual(['OrigemZAgent', 'OrigemZVip']);
+    expect(result.skipped).toEqual([]);
+    expect(harness.repository.serverPlugin(OTHER_ID, agente.plugin.id)?.enabled).toBe(true);
+  });
+
+  it('o custom do outro servidor NÃO atravessa, e o motivo é dito', async () => {
+    // Ele existe só lá: nem a biblioteca nem este servidor o
+    // enxergam. Ficar calado deixaria o servidor novo incompleto sem
+    // ninguém saber.
+    const custom = await harness.library.addCustom(
+      SERVER_ID,
+      'MeuEvento.cs',
+      pluginSource('1.0.0', { className: 'MeuEvento' }),
+    );
+
+    await harness.library.setEnabled(SERVER_ID, custom.plugin.id, true);
+
+    const result = await harness.library.copyFrom(OTHER_ID, SERVER_ID);
+
+    expect(result.enabled).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]?.plugin).toBe('MeuEvento');
+    expect(result.skipped[0]?.reason).toMatch(/custom de "server01"/);
+  });
+
+  it('o que já estava ligado não é recarregado', async () => {
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+    await harness.library.setEnabled(OTHER_ID, plugin.id, true);
+    harness.commands.length = 0;
+
+    const result = await harness.library.copyFrom(OTHER_ID, SERVER_ID);
+
+    expect(result.enabled).toEqual([]);
+    expect(result.alreadyEnabled).toEqual([PLUGIN_NAME]);
+    expect(harness.commands).toEqual([]);
+  });
+
+  it('a configuração NÃO vem junto', async () => {
+    // Copiar `oxide\config` levaria o preço do VIP e a mensagem de
+    // boas-vindas de um servidor para o outro.
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+    await writeFile(join(harness.configDir, `${PLUGIN_NAME}.json`), '{"Preco": 10}', 'utf8');
+
+    await harness.library.copyFrom(OTHER_ID, SERVER_ID);
+
+    const { configs } = await harness.library.configList(OTHER_ID);
+
+    expect(configs).toEqual([]);
+  });
+
+  it('recusa copiar de si mesmo', async () => {
+    await expect(harness.library.copyFrom(SERVER_ID, SERVER_ID)).rejects.toMatchObject({
+      status: 400,
+    });
+  });
+});
+
 describe('a tela de rede', () => {
   it('diz quem depende do plugin ANTES de alguém remover', async () => {
     // Remover da biblioteca remove de TODOS os servidores, e leva

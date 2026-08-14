@@ -244,6 +244,20 @@ export interface EnableWithDepsResult {
   }[];
 }
 
+export interface CopyPluginsResult {
+  /** Ligados agora, aqui. */
+  readonly enabled: readonly string[];
+  /** Já estavam ligados: a cópia não mexeu neles. */
+  readonly alreadyEnabled: readonly string[];
+  /**
+   * O que NÃO deu para trazer, e por quê.
+   *
+   * É a parte mais importante da resposta: sem ela, o servidor novo
+   * nasce faltando plugin e ninguém fica sabendo.
+   */
+  readonly skipped: readonly { readonly plugin: string; readonly reason: string }[];
+}
+
 /** Uma config da pasta, com o que o acervo sabe daquele nome. */
 export interface PluginConfigView extends PluginConfigInfo {
   /** O `[Info]` do `.cs`, quando o plugin está no acervo. */
@@ -664,6 +678,22 @@ export class PluginLibrary {
    * acervo.
    */
   async enableWithDeps(serverId: string, pluginId: number): Promise<EnableWithDepsResult> {
+    const result = await this.#enableWithDeps(serverId, pluginId);
+
+    return { ...result, plugin: await this.#serverViewOf(serverId, pluginId) };
+  }
+
+  /**
+   * O miolo do anterior, sem montar a view.
+   *
+   * A view custa um `serverList` inteiro — duas varreduras de pasta e
+   * uma adoção. Num laço de trinta plugins (ver `copyFrom`), seriam
+   * trinta varreduras para montar trinta objetos que ninguém lê.
+   */
+  async #enableWithDeps(
+    serverId: string,
+    pluginId: number,
+  ): Promise<Omit<EnableWithDepsResult, 'plugin'>> {
     const alvo = this.#requirePlugin(pluginId);
 
     // A partir do acervo DAQUELE servidor: a biblioteca mais os
@@ -758,11 +788,104 @@ export class PluginLibrary {
       'plugin ligado com as dependências',
     );
 
+    return { enabled, alreadyEnabled: already, reloads };
+  }
+
+  /**
+   * Deixa este servidor com os mesmos plugins de outro.
+   *
+   * ####  O CONJUNTO É UM SERVIDOR QUE JÁ FUNCIONA  ####
+   *
+   * A alternativa seria cadastrar "conjuntos" no banco — uma lista
+   * de nomes com um rótulo. Ela nasceria certa e envelheceria
+   * sozinha: no dia em que o servidor de verdade ganhasse o sétimo
+   * plugin, o conjunto continuaria com seis, e o servidor novo
+   * nasceria faltando um. Duas fontes para o mesmo fato, e a que
+   * ninguém atualiza é a que a tela mostra.
+   *
+   * Copiar do servidor que está no ar não tem esse problema: o que
+   * ele usa hoje é, por definição, o conjunto de hoje.
+   *
+   * ####  O QUE NÃO ATRAVESSA  ####
+   *
+   * O CUSTOM do outro servidor. Ele existe só lá — nem a biblioteca
+   * nem este servidor o enxergam —, e ligar aqui um `.cs` que não
+   * está no acervo daqui é impossível. Esses voltam em `skipped`,
+   * com o motivo: é o que diz ao operador quais arquivos ainda
+   * precisa enviar, em vez de deixar o servidor novo silenciosamente
+   * incompleto.
+   *
+   * A CONFIGURAÇÃO também não vem junto. Copiar `oxide\config` seria
+   * levar o preço do VIP e a mensagem de boas-vindas de um servidor
+   * para o outro — e o segundo passaria a anunciar o nome do
+   * primeiro no chat.
+   */
+  async copyFrom(targetId: string, sourceId: string): Promise<CopyPluginsResult> {
+    this.#pathsOf(targetId);
+    this.#pathsOf(sourceId);
+
+    if (targetId === sourceId) {
+      throw new ApiError(
+        'INVALID_COPY_SOURCE',
+        'A origem e o destino são o mesmo servidor.',
+        400,
+      );
+    }
+
+    const ligadosLa = this.#deps.repository
+      .serverPlugins(sourceId)
+      .filter((row) => row.enabled)
+      .map((row) => this.#deps.repository.get(row.pluginId))
+      .filter((plugin): plugin is PluginRecord => plugin !== null);
+
+    const acervoAqui = new Map(
+      this.#deps.repository.availableFor(targetId).map((plugin) => [plugin.name, plugin]),
+    );
+
+    const enabled: string[] = [];
+    const already: string[] = [];
+    const skipped: { plugin: string; reason: string }[] = [];
+
+    for (const plugin of ligadosLa) {
+      const aqui = acervoAqui.get(plugin.name);
+
+      if (aqui === undefined) {
+        skipped.push({
+          plugin: plugin.name,
+          reason:
+            `"${plugin.name}" é custom de "${sourceId}" e não existe no acervo deste servidor. ` +
+            'Envie o .cs aqui — ou publique-o na biblioteca, para todos.',
+        });
+        continue;
+      }
+
+      try {
+        const result = await this.#enableWithDeps(targetId, aqui.id);
+
+        enabled.push(...result.enabled);
+        already.push(...result.alreadyEnabled);
+      } catch (error) {
+        // ####  UM QUE FALHA NÃO SEGURA OS OUTROS  ####
+        //
+        // Abortar no meio deixaria o servidor com metade do conjunto
+        // e nenhuma lista do que faltou. O motivo de cada recusa —
+        // homônimo ocupando o nome, dependência que não existe aqui —
+        // já vem escrito na mensagem do erro.
+        skipped.push({ plugin: plugin.name, reason: toError(error).message });
+      }
+    }
+
+    this.#deps.logger.info(
+      { server: targetId, from: sourceId, enabled, skipped: skipped.length },
+      'plugins copiados de outro servidor',
+    );
+
     return {
-      plugin: await this.#serverViewOf(serverId, pluginId),
-      enabled,
-      alreadyEnabled: already,
-      reloads,
+      // Um plugin pode aparecer duas vezes: ligado como dependência
+      // de outro, e depois na própria vez dele.
+      enabled: [...new Set(enabled)],
+      alreadyEnabled: [...new Set(already)].filter((name) => !enabled.includes(name)),
+      skipped,
     };
   }
 
