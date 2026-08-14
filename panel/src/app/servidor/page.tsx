@@ -12,6 +12,7 @@
 //  Next só para isso.
 // ============================================================
 
+import { LayoutList, Puzzle, Settings2, SlidersHorizontal, TerminalSquare } from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState } from 'react';
@@ -20,6 +21,7 @@ import { ConsolePanel } from '@/components/console-panel';
 import { OperationsPanel } from '@/components/operations-panel';
 import { PageHeader } from '@/components/page-header';
 import { PluginsPanel } from '@/components/plugins-panel';
+import { ServerSettings } from '@/components/server-settings';
 import { ServerStateBadge } from '@/components/server-state';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
@@ -27,7 +29,22 @@ import { Button } from '@/components/ui/button';
 import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
 import { toast } from '@/lib/toast';
 
-type Tab = 'visao' | 'console' | 'operacoes' | 'plugins';
+type Tab = 'visao' | 'console' | 'operacoes' | 'plugins' | 'config';
+
+/**
+ * As abas, com ícone.
+ *
+ * O ícone não decora: com cinco abas, ele é o que a vista pega
+ * antes de ler — e é o que permite achar "Console" de relance
+ * numa tela que se abre dezenas de vezes por dia.
+ */
+const TABS = [
+  { key: 'visao', label: 'Visão', Icon: LayoutList },
+  { key: 'console', label: 'Console', Icon: TerminalSquare },
+  { key: 'operacoes', label: 'Operações', Icon: SlidersHorizontal },
+  { key: 'plugins', label: 'Plugins', Icon: Puzzle },
+  { key: 'config', label: 'Configurações', Icon: Settings2 },
+] as const;
 
 export default function ServidorPage() {
   return (
@@ -166,50 +183,37 @@ function Servidor() {
             </p>
           )}
 
-          <nav className="mb-4 flex gap-1 border-b border-border">
-            {(
-              [
-                ['visao', 'Visão'],
-                ['console', 'Console'],
-                ['operacoes', 'Operações'],
-                ['plugins', 'Plugins'],
-              ] as const
-            ).map(([key, label]) => (
+          <nav className="mb-4 flex gap-1 overflow-x-auto border-b border-border">
+            {TABS.map(({ key, label, Icon }) => (
               <button
                 key={key}
                 type="button"
                 onClick={() => setTab(key)}
                 className={
-                  'px-4 py-2 text-sm ' +
+                  'flex shrink-0 items-center gap-2 px-4 py-2 text-sm ' +
                   (tab === key
                     ? 'border-b-2 border-rust text-foreground'
                     : 'border-b-2 border-transparent text-muted hover:text-foreground')
                 }
               >
+                <Icon aria-hidden="true" className={'h-4 w-4' + (tab === key ? ' text-rust' : '')} />
                 {label}
               </button>
             ))}
           </nav>
 
-          {tab === 'visao' && <Visao server={server} steam={steam} onChanged={() => void load()} />}
+          {tab === 'visao' && <Visao server={server} steam={steam} />}
           {tab === 'console' && <ConsolePanel serverId={server.id} />}
           {tab === 'operacoes' && <OperationsPanel serverId={server.id} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
+          {tab === 'config' && <ServerSettings server={server} onChanged={() => void load()} />}
         </>
       )}
     </div>
   );
 }
 
-function Visao({
-  server,
-  steam,
-  onChanged,
-}: {
-  server: ServerView;
-  steam: SteamUpdate | null;
-  onChanged: () => void;
-}) {
+function Visao({ server, steam }: { server: ServerView; steam: SteamUpdate | null }) {
   const rows: [string, string][] = [
     ['id', server.id],
     ['processo', server.running === true ? `no ar (pid ${String(server.pid ?? 0)})` : 'parado'],
@@ -240,63 +244,9 @@ function Visao({
         ))}
       </dl>
 
-      {/* ####  A JANELA DO JOGO  ####
-
-          Um serviço 24/7 não quer uma janela por servidor, e por
-          isso o padrão é sem. Mas quem administra a máquina de
-          perto quer poder olhar o console sem o painel — e essa é
-          uma decisão de quem opera, não nossa. */}
-      <div className="border border-border bg-surface p-4 text-sm">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <p className="font-condensed text-sm font-bold uppercase tracking-wide">
-              Janela de console do jogo
-            </p>
-            <p className="mt-1 text-muted">
-              {server.consoleWindow
-                ? 'O servidor sobe numa janela própria, e ela aparece na barra de tarefas.'
-                : 'O servidor sobe sem janela (o log vai para o arquivo e para a aba Console).'}
-            </p>
-          </div>
-
-          <Button
-            size="sm"
-            variant={server.consoleWindow ? 'outline' : 'primary'}
-            onClick={() => {
-              void agent
-                .setConsoleWindow(server.id, !server.consoleWindow)
-                .then((response) => {
-                  toast.success(
-                    server.consoleWindow ? 'Janela desligada' : 'Janela ligada',
-                    { description: response.message },
-                  );
-
-                  onChanged();
-                })
-                .catch((cause: unknown) => {
-                  toast.error('Não deu', {
-                    description: cause instanceof Error ? cause.message : String(cause),
-                  });
-                });
-            }}
-          >
-            {server.consoleWindow ? 'Desligar janela' : 'Ligar janela'}
-          </Button>
-        </div>
-
-        {server.consoleWindow && (
-          <p className="mt-3 border border-amber bg-surface-2 p-3 text-2xs">
-            <strong>Cuidado com o clique.</strong> O console do Windows vem com o Modo de Edição
-            Rápida ligado: clicar dentro da janela põe o console em seleção e <strong>congela o
-            servidor</strong> — com os jogadores dentro — até alguém apertar Enter ali.
-          </p>
-        )}
-
-        <p className="mt-3 text-2xs text-muted">
-          A mudança vale no próximo start: uma janela não aparece para um processo que já está no
-          ar.
-        </p>
-      </div>
+      {/* A janela de console e o resto da configuração moram na
+          aba Configurações: opção espalhada é a que ninguém acha
+          na hora. */}
     </div>
   );
 }

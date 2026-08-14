@@ -92,6 +92,11 @@ export interface ServerView {
   readonly worldSize: number;
   readonly seed: number;
   readonly maxPlayers: number;
+  readonly saveInterval: number;
+  readonly description: string;
+  readonly url: string;
+  readonly headerImage: string;
+  readonly steam: { appId: string; login: string; branch: string };
   readonly ports: { game: number; rcon: number; query: number; app: number };
   readonly rcon: { connected: boolean; state: string } | null;
   readonly paths: { installDir: string; configPath: string; logsDir: string };
@@ -373,6 +378,11 @@ export class ServerSupervisor {
       worldSize: config.worldSize,
       seed: config.seed,
       maxPlayers: config.maxPlayers,
+      saveInterval: config.saveInterval,
+      description: config.description,
+      url: config.url,
+      headerImage: config.headerImage,
+      steam: { ...config.steam },
       ports: {
         game: config.ports.game,
         rcon: config.ports.rcon,
@@ -427,6 +437,160 @@ export class ServerSupervisor {
 
     this.#reconcile(config);
     this.#adopt(config);
+  }
+
+  /**
+   * O que muda no `.ini` e SÓ vale no próximo start do jogo.
+   *
+   * O agente relê o arquivo antes de subir (ver `#start`, em
+   * ops/service.ts), então a mudança não se perde — mas o mundo
+   * que já está carregado não muda de mapa nem de seed. Dizer
+   * isso é a diferença entre uma tela que engana e uma que
+   * informa.
+   */
+  static readonly RESTART_KEYS = new Set([
+    'hostname',
+    'identity',
+    'description',
+    'url',
+    'headerImage',
+    'map',
+    'seed',
+    'worldSize',
+    'maxPlayers',
+    'saveInterval',
+    'consoleWindow',
+    'gamePort',
+    'queryPort',
+    'appPort',
+    'rconPort',
+    'rconPassword',
+    'steamAppId',
+    'steamLogin',
+    'steamBranch',
+  ]);
+
+  /**
+   * Grava configuração no `.ini` daquele servidor.
+   *
+   * Recebe os campos com o nome que a API usa e traduz para as
+   * chaves do arquivo — a tradução mora AQUI, num lugar só, e não
+   * espalhada pelas rotas.
+   *
+   * @returns quais campos só valem depois de reiniciar o jogo.
+   * @throws {ApiError}
+   */
+  updateSettings(id: string, patch: Readonly<Record<string, string | number | boolean>>): string[] {
+    const config = this.configOf(id);
+
+    if (config === null) {
+      throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
+    }
+
+    const KEY_OF: Readonly<Record<string, string>> = {
+      name: 'SERVER_NAME',
+      hostname: 'SERVER_HOSTNAME',
+      identity: 'SERVER_IDENTITY',
+      description: 'SERVER_DESCRIPTION',
+      url: 'SERVER_URL',
+      headerImage: 'SERVER_HEADERIMAGE',
+      map: 'SERVER_LEVEL',
+      seed: 'SERVER_SEED',
+      worldSize: 'SERVER_WORLDSIZE',
+      maxPlayers: 'SERVER_MAXPLAYERS',
+      saveInterval: 'SERVER_SAVEINTERVAL',
+      consoleWindow: 'SERVER_CONSOLE_WINDOW',
+      gamePort: 'SERVER_PORT',
+      queryPort: 'SERVER_QUERYPORT',
+      appPort: 'SERVER_APPPORT',
+      rconPort: 'RCON_PORT',
+      rconPassword: 'RCON_PASSWORD',
+      steamAppId: 'STEAM_APPID',
+      steamLogin: 'STEAM_LOGIN',
+      steamBranch: 'STEAM_BRANCH',
+    };
+
+    const values: Record<string, string> = {};
+    const requiresRestart: string[] = [];
+
+    for (const [field, value] of Object.entries(patch)) {
+      const key = KEY_OF[field];
+
+      if (key === undefined) {
+        continue;
+      }
+
+      values[key] = typeof value === 'boolean' ? (value ? '1' : '0') : String(value);
+
+      if (ServerSupervisor.RESTART_KEYS.has(field)) {
+        requiresRestart.push(field);
+      }
+    }
+
+    if (Object.keys(values).length === 0) {
+      return [];
+    }
+
+    this.#assertPortsFree(id, patch);
+    this.#writeIni(config, values);
+
+    // Reler é o que garante que a API devolve o que o ARQUIVO
+    // diz, e não o que a requisição pediu — as duas coisas
+    // divergem quando uma chave é recusada ou normalizada.
+    const updated = readServerConfig(this.#deps.paths, id);
+
+    this.#configs.set(id, updated);
+    this.#reconcile(updated);
+
+    if (!this.#mounted.has(id)) {
+      this.#adopt(updated);
+    }
+
+    return requiresRestart;
+  }
+
+  /**
+   * Porta pedida que já é de OUTRO servidor.
+   *
+   * A pergunta é ao cadastro, e não ao sistema operacional: o
+   * conflito que importa aqui é com outro servidor DESTE agente —
+   * o do SO é conferido na hora de subir, quando ele é definitivo.
+   */
+  #assertPortsFree(id: string, patch: Readonly<Record<string, string | number | boolean>>): void {
+    const FIELD_OF: Readonly<Record<string, 'game' | 'query' | 'app' | 'rcon'>> = {
+      gamePort: 'game',
+      queryPort: 'query',
+      appPort: 'app',
+      rconPort: 'rcon',
+    };
+
+    for (const [field, kind] of Object.entries(FIELD_OF)) {
+      const raw = patch[field];
+
+      if (raw === undefined) {
+        continue;
+      }
+
+      const port = Number(raw);
+
+      for (const other of this.list()) {
+        if (other.id === id) {
+          continue;
+        }
+
+        const taken = Object.entries(other.ports).find(([, value]) => value === port);
+
+        if (taken !== undefined) {
+          throw new ApiError(
+            'PORT_BLOCK_TAKEN',
+            `A porta ${String(port)} (${kind}) já é do servidor "${other.id}" (${taken[0]}). ` +
+              'Duas configurações com a mesma porta não sobem juntas — e o sintoma é o segundo ' +
+              'servidor carregar o mundo inteiro e ficar sem aparecer na lista da Steam.',
+            409,
+          );
+        }
+      }
+    }
   }
 
   /**

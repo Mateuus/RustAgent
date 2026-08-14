@@ -15,9 +15,17 @@ import type { ServersRepository } from '../../db/servers-repository.js';
 import {
   createServer,
   createServerBodySchema,
+  FORBIDDEN_RCON_PASSWORD_CHARS,
+  iniText,
   isCreateServerError,
   suggestedPortBlockFor,
 } from '../../servers/create-server.js';
+import {
+  MAP_LEVELS,
+  MAX_SEED,
+  MAX_WORLD_SIZE,
+  MIN_WORLD_SIZE,
+} from '../../servers/map-levels.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { ApiError, zodErrorToResponse } from '../error-response.js';
 
@@ -27,11 +35,58 @@ export interface ServerRoutesDeps {
   readonly supervisor: ServerSupervisor;
 }
 
+/**
+ * O corpo do PATCH: a configuração do servidor, campo a campo.
+ *
+ * `.strict()` pelo mesmo motivo do resto da API: um painel que
+ * mande `world_size` em vez de `worldSize` precisa saber na hora,
+ * em vez de "salvar" e não mudar nada.
+ *
+ * As faixas repetem as do `.ini` (config.ts) de propósito: recusar
+ * aqui devolve uma frase para a tela; recusar lá derruba o
+ * servidor no próximo boot.
+ */
 const patchSchema = z
   .object({
+    /** O agente cuida deste servidor? */
     enabled: z.boolean().optional(),
     /** A janela de console do jogo. Vale no próximo start. */
     consoleWindow: z.boolean().optional(),
+
+    name: iniText('name', 80).optional(),
+    hostname: iniText('hostname', 120).optional(),
+    description: iniText('description', 500).optional().or(z.literal('')),
+    url: iniText('url', 300).optional().or(z.literal('')),
+    headerImage: iniText('headerImage', 300).optional().or(z.literal('')),
+
+    map: z.enum(MAP_LEVELS).optional(),
+    seed: z.number().int().min(0).max(MAX_SEED).optional(),
+    worldSize: z.number().int().min(MIN_WORLD_SIZE).max(MAX_WORLD_SIZE).optional(),
+    maxPlayers: z.number().int().min(1).max(1_000).optional(),
+    saveInterval: z.number().int().min(30).max(86_400).optional(),
+
+    gamePort: z.number().int().min(1).max(65_535).optional(),
+    queryPort: z.number().int().min(1).max(65_535).optional(),
+    appPort: z.number().int().min(1).max(65_535).optional(),
+    rconPort: z.number().int().min(1).max(65_535).optional(),
+
+    rconPassword: z
+      .string()
+      .min(8, 'a senha do RCON precisa ter pelo menos 8 caracteres')
+      .max(200)
+      .refine(
+        (value) => !FORBIDDEN_RCON_PASSWORD_CHARS.test(value),
+        'a senha do RCON não pode conter "/", "\\", "?", "#" nem espaços: o WebRCON a ' +
+          'transporta no caminho da URL e o Rust compara o caminho cru',
+      )
+      .optional(),
+
+    steamAppId: z.string().regex(/^\d{1,10}$/, 'o AppID é numérico').optional(),
+    steamLogin: z
+      .string()
+      .regex(/^[A-Za-z0-9_.-]{1,64}$/, 'login inválido para o SteamCMD')
+      .optional(),
+    steamBranch: z.string().max(64).optional().or(z.literal('')),
   })
   .strict();
 
@@ -144,32 +199,37 @@ export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDep
       throw unknownServer(id, deps);
     }
 
-    if (body.consoleWindow !== undefined) {
-      deps.supervisor.setConsoleWindow(id, body.consoleWindow);
-    }
+    // Tudo o que é do `.ini` vai numa gravação só: duas escritas
+    // no mesmo arquivo por uma tela de configuração é a chance de
+    // a segunda falhar e deixar metade aplicada.
+    const { enabled, ...settings } = body;
+    const requiresRestart = deps.supervisor.updateSettings(id, settings);
 
-    if (body.enabled === true) {
+    if (enabled === true) {
       deps.supervisor.enable(id);
-    } else if (body.enabled === false) {
+    } else if (enabled === false) {
       await deps.supervisor.disable(id);
     }
 
     await deps.supervisor.scanProcesses();
 
+    const running = deps.supervisor.view(id)?.running === true;
+
     return {
       ok: true,
       server: deps.supervisor.view(id),
-      // Dito em voz alta: a janela não aparece num processo que já
-      // está no ar, e quem trocou a opção precisa saber que o
-      // efeito não é agora.
-      ...(body.consoleWindow === undefined
-        ? {}
-        : {
-            requiresRestart: ['consoleWindow'],
+      requiresRestart,
+      // Dito em voz alta, e SÓ quando importa: um mundo já
+      // carregado não muda de mapa nem de seed, e uma janela não
+      // aparece num processo que já está no ar. Sem esta frase, a
+      // tela diria "salvo" e a pessoa concluiria que não funcionou.
+      ...(requiresRestart.length > 0 && running
+        ? {
             message:
-              'A janela de console vale a partir do próximo start do servidor — ' +
-              'ela não aparece num processo que já está rodando.',
-          }),
+              `Gravado. ${requiresRestart.join(', ')} só vale(m) a partir do próximo start — ` +
+              'o servidor está no ar agora e continua com o que carregou.',
+          }
+        : {}),
     };
   });
 

@@ -110,6 +110,11 @@ export interface ServerView {
   worldSize: number;
   seed: number;
   maxPlayers: number;
+  saveInterval: number;
+  description: string;
+  url: string;
+  headerImage: string;
+  steam: { appId: string; login: string; branch: string };
   ports: { game: number; rcon: number; query: number; app: number };
   rcon: { connected: boolean; state: string } | null;
   paths: { installDir: string; configPath: string; logsDir: string };
@@ -240,10 +245,17 @@ export const agent = {
       body: { enabled },
     }),
 
-  setConsoleWindow: (id: string, consoleWindow: boolean) =>
-    api<{ ok: true; server: ServerView; message?: string }>(
+  /**
+   * A configuração daquele servidor, campo a campo.
+   *
+   * Uma função só para o PATCH inteiro: um método por campo
+   * multiplicaria a mesma chamada por vinte, e a tela de
+   * configuração grava vários de uma vez.
+   */
+  patchServer: (id: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; server: ServerView; requiresRestart?: string[]; message?: string }>(
       `/api/servers/${encodeURIComponent(id)}`,
-      { method: 'PATCH', body: { consoleWindow } },
+      { method: 'PATCH', body: patch },
     ),
 
   operations: (id: string) =>

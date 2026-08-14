@@ -112,7 +112,7 @@ export const SERVER_INI_TEMPLATE_FILE = 'server.example.ini';
  * linha seria lida como outra chave. `RCON_PASSWORD` embutida num
  * nome de servidor é o exemplo de por que isto é recusado na borda.
  */
-function iniText(label: string, max: number) {
+export function iniText(label: string, max: number) {
   return z
     .string({ invalid_type_error: `${label} precisa ser texto` })
     .trim()
