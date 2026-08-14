@@ -31,6 +31,7 @@ import { Copy, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { BanDialog } from '@/components/ban-dialog';
+import { MapView } from '@/components/map-view';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
@@ -38,6 +39,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
   agent,
+  agentUrl,
   type AdminEntry,
   type AdminLevel,
   type ChatLine,
@@ -63,6 +65,12 @@ const SECTIONS: readonly { key: Section; label: string }[] = [
 /** Quanto tempo entre as leituras de cada sub-aba. */
 const PLAYERS_POLL_MS = 5_000;
 const CHAT_POLL_MS = 2_000;
+
+/**
+ * De quanto em quanto tempo perguntar pela imagem do mapa que ainda
+ * está sendo desenhada. O render leva dezenas de segundos.
+ */
+const MAP_RETRY_MS = 15_000;
 
 export function AdminPanel({ server }: { server: ServerView }) {
   const [section, setSection] = useState<Section>('jogadores');
@@ -174,11 +182,23 @@ function copySteamId(steamId: string): void {
 //  Jogadores
 // ------------------------------------------------------------
 
+/** Lista, mapa, ou os dois. Ver o alternador no cabeçalho. */
+type PlayersMode = 'lista' | 'dividido' | 'mapa';
+
 function PlayersSection({ server }: { server: ServerView }) {
   const [snapshot, setSnapshot] = useState<PlayersSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [banning, setBanning] = useState<GamePlayer | null>(null);
+  /**
+   * Começa DIVIDIDO: as duas perguntas ("quem está aí" e "onde
+   * eles estão") são feitas juntas na maior parte das vezes, e
+   * abrir num modo que esconde metade obrigaria um clique antes de
+   * qualquer resposta.
+   */
+  const [mode, setMode] = useState<PlayersMode>('dividido');
+  /** O SteamID selecionado. É o mesmo nos dois lados. */
+  const [selected, setSelected] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -233,12 +253,14 @@ function PlayersSection({ server }: { server: ServerView }) {
     }
   }
 
+  const players = snapshot?.players ?? [];
+  const semPosicao = players.filter((player) => player.position === null).length;
+  const mapImage = useMapImage(server.id);
+
   return (
-    <>
+    <div className="space-y-3">
       {error !== null && (
-        <div className="mb-4">
-          <StateBlock variant="error" title="Não consegui ler quem está online" detail={error} />
-        </div>
+        <StateBlock variant="error" title="Não consegui ler quem está online" detail={error} />
       )}
 
       {snapshot === null && error === null && (
@@ -246,128 +268,160 @@ function PlayersSection({ server }: { server: ServerView }) {
       )}
 
       {snapshot !== null && (
-        <Card
-          title={`Online (${String(snapshot.total)})`}
-          hint={
-            snapshot.source === 'plugin'
-              ? `Lido pelo ${snapshot.plugin.name}: com posição, vida e estado.`
-              : 'Lido pelo playerlist nativo do Rust.'
-          }
-          aside={
-            /* ####  A QUEDA PARA O NATIVO É DITA, E TEM SAÍDA  ####
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-surface px-4 py-2">
+            <div className="min-w-0">
+              <h3 className="font-condensed text-sm font-bold uppercase tracking-wide">
+                Online <span className="text-muted">({String(snapshot.total)})</span>
+              </h3>
+              <p className="mt-0.5 text-2xs text-muted">
+                {snapshot.source === 'plugin'
+                  ? `Lido pelo ${snapshot.plugin.name}: com posição, vida e estado.`
+                  : 'Lido pelo playerlist nativo do Rust — sem posição.'}
+              </p>
+            </div>
 
-               Sem esta faixa, a coluna de posição simplesmente
-               apareceria vazia — e "a posição sumiu" é uma caça ao
-               defeito que não existe. Com o plugin no acervo e
-               desligado, o botão resolve aqui mesmo. */
-            snapshot.source === 'nativo' && snapshot.plugin.id !== null ? (
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={busy !== null}
-                onClick={() => void enablePlugin(snapshot.plugin.id ?? 0)}
-              >
-                {busy === 'plugin' ? 'Ligando…' : `Ligar o ${snapshot.plugin.name}`}
-              </Button>
-            ) : undefined
-          }
-        >
+            <div className="flex flex-wrap items-center gap-3">
+              {/* ####  OS TRÊS MODOS  ####
+
+                  A lista e o mapa respondem a perguntas
+                  diferentes: "quem está aí" se lê numa lista,
+                  "onde eles estão" se vê num mapa. Um alternador
+                  em vez de uma divisória arrastável porque a
+                  escolha é entre TRÊS estados nomeados — e não
+                  entre trezentas larguras que ninguém quer
+                  ajustar. */}
+              <div className="flex items-stretch border border-border">
+                {(
+                  [
+                    ['lista', 'Lista'],
+                    ['dividido', 'Dividido'],
+                    ['mapa', 'Mapa'],
+                  ] as const
+                ).map(([key, label], index) => (
+                  <div key={key} className="flex items-stretch">
+                    {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
+
+                    <button
+                      type="button"
+                      aria-pressed={mode === key}
+                      onClick={() => setMode(key)}
+                      className={cn(
+                        'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+                        mode === key
+                          ? 'bg-surface-2 text-foreground'
+                          : 'text-muted hover:text-foreground',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* ####  A QUEDA PARA O NATIVO TEM SAÍDA  ####
+
+                  Sem o plugin não há posição, e o mapa fica vazio.
+                  Com ele no acervo e desligado, o botão resolve
+                  aqui mesmo — em vez de mandar a pessoa para outra
+                  aba descobrir sozinha o que fazer. */}
+              {snapshot.source === 'nativo' && snapshot.plugin.id !== null && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={busy !== null}
+                  onClick={() => void enablePlugin(snapshot.plugin.id ?? 0)}
+                >
+                  {busy === 'plugin' ? 'Ligando…' : `Ligar o ${snapshot.plugin.name}`}
+                </Button>
+              )}
+            </div>
+          </div>
+
           {snapshot.source === 'nativo' && (
-            <p className="border-b border-border bg-surface-2 px-4 py-3 text-2xs leading-relaxed">
+            <p className="border border-amber bg-surface-2 px-4 py-3 text-2xs leading-relaxed">
               O <strong>{snapshot.plugin.name}</strong>{' '}
               {snapshot.plugin.id === null
-                ? 'não está no acervo deste servidor — envie o .cs na aba Plugins para ter posição e estado.'
-                : 'está desligado aqui. Sem ele, o playerlist do Rust não informa posição, nem se o jogador está vivo ou dormindo.'}
+                ? 'não está no acervo deste servidor — envie o .cs na aba Plugins para ter posição, mapa e estado.'
+                : 'está desligado aqui. Sem ele o playerlist do Rust não informa posição, nem se o jogador está vivo ou dormindo — e o mapa fica sem pontos.'}
             </p>
           )}
 
-          {snapshot.players.length === 0 ? (
-            <p className="px-4 py-6 text-center text-2xs text-muted">
-              Ninguém online agora. Este número vem do servidor — não é uma suposição da tela.
+          {snapshot.source === 'plugin' && semPosicao > 0 && (
+            <p className="border border-border bg-surface-2 px-4 py-3 text-2xs leading-relaxed text-muted">
+              {String(semPosicao)} jogador(es) sem posição conhecida aparecem na lista e{' '}
+              <strong>não</strong> no mapa. Sumir dos dois seria esconder gente que está no
+              servidor.
             </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="border-b border-border">
-                  <tr>
-                    <HeaderCell>Jogador</HeaderCell>
-                    <HeaderCell>Estado</HeaderCell>
-                    <HeaderCell numeric>Vida</HeaderCell>
-                    <HeaderCell numeric>Ping</HeaderCell>
-                    <HeaderCell numeric>Conectado</HeaderCell>
-                    <HeaderCell>Posição</HeaderCell>
-                    <HeaderCell>
-                      <span className="sr-only">Ações</span>
-                    </HeaderCell>
-                  </tr>
-                </thead>
-
-                <tbody className="divide-y divide-border">
-                  {snapshot.players.map((player) => (
-                    <tr key={player.steamId}>
-                      <td className="px-3 py-2">
-                        <p className="truncate">{player.name}</p>
-                        <p className="truncate font-mono text-2xs text-muted">{player.steamId}</p>
-                      </td>
-
-                      <td className="px-3 py-2 text-muted">{estadoDe(player)}</td>
-
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {player.health === null ? EM_DASH : Math.round(player.health)}
-                      </td>
-
-                      <td className="px-3 py-2 text-right tabular-nums text-muted">
-                        {player.ping === null ? EM_DASH : `${String(player.ping)} ms`}
-                      </td>
-
-                      <td className="px-3 py-2 text-right tabular-nums text-muted">
-                        {formatDuration(player.connectedSeconds)}
-                      </td>
-
-                      <td className="px-3 py-2 font-mono text-2xs text-muted">
-                        {player.position === null
-                          ? EM_DASH
-                          : `${player.position.x.toFixed(0)}, ${player.position.z.toFixed(0)}`}
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <div className="flex items-center justify-end gap-2">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            aria-label={`Copiar o SteamID de ${player.name}`}
-                            onClick={() => copySteamId(player.steamId)}
-                          >
-                            <Copy aria-hidden="true" className="h-4 w-4" />
-                          </Button>
-
-                          <ConfirmButton
-                            variant="primary"
-                            disabled={busy !== null}
-                            icon={null}
-                            label="Expulsar"
-                            confirmLabel="Expulsar mesmo"
-                            hint={`${player.name} cai do servidor agora. Ele pode voltar a qualquer momento.`}
-                            onConfirm={() => void kick(player)}
-                          />
-
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            disabled={busy !== null}
-                            onClick={() => setBanning(player)}
-                          >
-                            Banir
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           )}
-        </Card>
+
+          <div
+            className={cn(
+              'grid gap-3',
+              // No dividido a lista tem largura de leitura e o mapa
+              // fica com o resto. Abaixo de lg elas empilham: lado a
+              // lado numa tela estreita deixaria as duas inúteis.
+              mode === 'dividido' && 'lg:grid-cols-[minmax(20rem,28rem)_1fr]',
+            )}
+          >
+            {mode !== 'mapa' && (
+              <PlayerList
+                players={players}
+                selected={selected}
+                busy={busy}
+                onSelect={(player) =>
+                  setSelected(player.steamId === selected ? null : player.steamId)
+                }
+                onKick={(player) => void kick(player)}
+                onBan={(player) => setBanning(player)}
+                compact={mode === 'dividido'}
+              />
+            )}
+
+            {mode !== 'lista' && (
+              <div className="space-y-2">
+                <div className="h-[38rem] min-h-64">
+                  <MapView
+                    players={players}
+                    world={snapshot.world}
+                    selected={selected}
+                    imageUrl={mapImage.url}
+                    coverage={mapImage.coverage}
+                    onSelect={(player) =>
+                      setSelected(player.steamId === selected ? null : player.steamId)
+                    }
+                  />
+                </div>
+
+                {/* O desenho é do JOGO, e leva dezenas de segundos.
+                    Dizer isso é a diferença entre "está vindo" e um
+                    mapa que parece quebrado. */}
+                {mapImage.url === null && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 border border-border bg-surface-2 px-3 py-2">
+                    <p className="min-w-0 flex-1 text-2xs leading-relaxed text-muted">
+                      {mapImage.pending
+                        ? 'O jogo está desenhando a imagem deste mundo — ela aparece aqui sozinha, em alguns segundos.'
+                        : 'Ainda não há imagem deste mundo.'}{' '}
+                      Isso acontece <strong>uma vez por wipe</strong>: o arquivo leva o tamanho e a
+                      seed no nome, e o mapa novo refaz o desenho por conta própria.
+                    </p>
+
+                    {/* ####  QUANDO ESTE BOTÃO É PRECISO  ####
+
+                        O render automático acontece na conexão do
+                        RCON. Quem apagar a imagem com o servidor JÁ
+                        no ar não dispara nada — e sem este botão a
+                        única saída seria reiniciar o servidor para
+                        ter um mapa de volta. */}
+                    <Button size="sm" variant="outline" onClick={() => mapImage.render()}>
+                      Desenhar agora
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </>
       )}
 
       {/* A `key` força um formulário limpo a cada jogador: sem ela,
@@ -384,7 +438,272 @@ function PlayersSection({ server }: { server: ServerView }) {
           onDone={() => void load()}
         />
       )}
-    </>
+    </div>
+  );
+}
+
+/**
+ * A imagem do mundo, baixada uma vez.
+ *
+ * ####  POR QUE `fetch` + `blob:`, E NÃO `<image href="/api/…">`  ####
+ *
+ * A rota é autenticada. Em produção o painel e o agente moram na
+ * mesma origem e o cookie iria sozinho — mas em desenvolvimento o
+ * painel roda em :3100 e o agente em :8787, e uma imagem
+ * cross-origin NÃO leva credencial: a tela quebraria só no
+ * ambiente de quem a está construindo.
+ *
+ * Com `fetch(credentials: 'include')` os dois casos ficam iguais, e
+ * o `blob:` sai do endereço — o navegador não refaz a requisição a
+ * cada redesenho do SVG.
+ *
+ * ####  E ELA PODE AINDA NÃO EXISTIR  ####
+ *
+ * O agente pede o render ao jogo quando o RCON conecta num mundo
+ * sem imagem, e o desenho leva dezenas de segundos. Enquanto isso,
+ * `available` é falso — e a tela volta a perguntar, em vez de
+ * decidir que não há mapa.
+ */
+function useMapImage(serverId: string): {
+  readonly url: string | null;
+  /** Quantas unidades do mundo a imagem cobre. Ver `MapView`. */
+  readonly coverage: number | null;
+  readonly pending: boolean;
+  readonly message: string | null;
+  /** Pede o render agora. Ver o comentário no botão. */
+  readonly render: () => void;
+} {
+  const [url, setUrl] = useState<string | null>(null);
+  const [coverage, setCoverage] = useState<number | null>(null);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+
+    async function load(): Promise<void> {
+      try {
+        const info = await agent.mapImage(serverId);
+
+        if (cancelled) {
+          return;
+        }
+
+        setMessage(info.message ?? null);
+
+        if (info.url === null) {
+          setPending(true);
+          return;
+        }
+
+        const response = await fetch(agentUrl(info.url), { credentials: 'include' });
+
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        objectUrl = URL.createObjectURL(await response.blob());
+
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+
+        setCoverage(info.coverage);
+        setUrl(objectUrl);
+        setPending(false);
+      } catch {
+        // Sem imagem a tela continua servindo: a grade e os pontos
+        // é que respondem "onde eles estão".
+        if (!cancelled) {
+          setPending(false);
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      cancelled = true;
+
+      if (objectUrl !== null) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [serverId, attempt]);
+
+  // Enquanto o jogo desenha, a tela volta a perguntar. O timer só
+  // existe enquanto falta imagem — pronto, ele nunca mais roda.
+  useEffect(() => {
+    if (url !== null) {
+      return;
+    }
+
+    const timer = setTimeout(() => setAttempt((value) => value + 1), MAP_RETRY_MS);
+
+    return () => clearTimeout(timer);
+  }, [url, attempt]);
+
+  const render = useCallback(() => {
+    void (async () => {
+      try {
+        const response = await agent.renderMap(serverId);
+
+        setPending(true);
+        toast.info('Desenhando o mapa', { description: response.message });
+        // Volta a perguntar já: o `attempt` é o que reinicia o
+        // ciclo de leitura.
+        setAttempt((value) => value + 1);
+      } catch (cause) {
+        toast.error('Não consegui pedir o render', {
+          description: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    })();
+  }, [serverId]);
+
+  return { url, coverage, pending, message, render };
+}
+
+/**
+ * A lista de quem está online.
+ *
+ * ####  LINHAS, E NÃO UMA TABELA  ####
+ *
+ * Ela precisa caber numa coluna estreita ao lado do mapa E ocupar a
+ * tela inteira sozinha. Uma tabela de sete colunas não faz as duas
+ * coisas: no dividido ela viraria rolagem horizontal, que é o jeito
+ * mais rápido de tornar uma lista inútil.
+ *
+ * ####  AS AÇÕES SÓ NA LINHA SELECIONADA  ####
+ *
+ * Três botões por linha, em duzentas linhas, é uma parede de
+ * botões — e todos ficam pequenos demais para acertar. Selecionar
+ * primeiro também é o gesto que o mapa já pede: clicar no ponto
+ * abre as mesmas ações.
+ */
+function PlayerList({
+  players,
+  selected,
+  busy,
+  compact,
+  onSelect,
+  onKick,
+  onBan,
+}: {
+  players: readonly GamePlayer[];
+  selected: string | null;
+  busy: string | null;
+  compact: boolean;
+  onSelect: (player: GamePlayer) => void;
+  onKick: (player: GamePlayer) => void;
+  onBan: (player: GamePlayer) => void;
+}) {
+  if (players.length === 0) {
+    return (
+      <section className="border border-border bg-surface">
+        <p className="px-4 py-6 text-center text-2xs text-muted">
+          Ninguém online agora. Este número vem do servidor — não é uma suposição da tela.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="max-h-[38rem] overflow-y-auto border border-border bg-surface">
+      <ul className="divide-y divide-border">
+        {players.map((player) => {
+          const isSelected = selected === player.steamId;
+
+          return (
+            <li key={player.steamId}>
+              <button
+                type="button"
+                aria-expanded={isSelected}
+                onClick={() => onSelect(player)}
+                className={cn(
+                  'flex w-full items-center gap-3 px-3 py-2 text-left',
+                  isSelected ? 'bg-surface-2' : 'hover:bg-surface-2',
+                )}
+              >
+                {/* O ponto repete a forma do mapa: quem olhou para
+                    um reconhece o outro sem legenda nova. */}
+                <span
+                  aria-hidden
+                  className={cn(
+                    'h-2 w-2 shrink-0 rounded-full',
+                    player.isAlive === false
+                      ? 'bg-rust'
+                      : player.isSleeping === true
+                        ? 'bg-amber'
+                        : player.isAlive === null
+                          ? 'bg-muted'
+                          : 'bg-olive',
+                  )}
+                />
+
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm">{player.name}</span>
+                  <span className="block truncate text-2xs text-muted">
+                    {estadoDe(player)} · {formatDuration(player.connectedSeconds)}
+                    {compact ? '' : ` · ${player.steamId}`}
+                  </span>
+                </span>
+
+                <span className="shrink-0 text-right">
+                  {/* A célula do mapa é a resposta útil para "onde
+                      ele está" — `120, -840` obriga a traduzir. */}
+                  <span className="block font-mono text-2xs">{player.grid ?? EM_DASH}</span>
+                  <span className="block text-2xs text-muted">
+                    {player.health === null ? EM_DASH : `${String(Math.round(player.health))} ♥`}
+                    {player.ping === null ? '' : ` · ${String(player.ping)} ms`}
+                  </span>
+                </span>
+              </button>
+
+              {isSelected && (
+                <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-surface-2 px-3 py-2">
+                  <span className="mr-auto truncate font-mono text-2xs text-muted">
+                    {player.steamId}
+                  </span>
+
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Copiar o SteamID de ${player.name}`}
+                    onClick={() => copySteamId(player.steamId)}
+                  >
+                    <Copy aria-hidden="true" className="h-4 w-4" />
+                    Copiar
+                  </Button>
+
+                  <ConfirmButton
+                    variant="primary"
+                    disabled={busy !== null}
+                    icon={null}
+                    label="Expulsar"
+                    confirmLabel="Expulsar mesmo"
+                    hint={`${player.name} cai do servidor agora. Ele pode voltar a qualquer momento.`}
+                    onConfirm={() => onKick(player)}
+                  />
+
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={busy !== null}
+                    onClick={() => onBan(player)}
+                  >
+                    Banir
+                  </Button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 

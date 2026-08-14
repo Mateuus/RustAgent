@@ -31,6 +31,7 @@ import { openDatabase } from './db/database.js';
 import { runMigrations } from './db/migrations.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
+import { MapImageKeeper } from './game/map-image.js';
 import { PlayersReader } from './game/players.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
@@ -122,6 +123,7 @@ async function main(): Promise<void> {
   // não perde a reconciliação — ela acontece no `reconcileAll` do
   // boot.
   let bans: BanList | null = null;
+  let mapImages: MapImageKeeper | null = null;
 
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
@@ -130,8 +132,12 @@ async function main(): Promise<void> {
     logger,
     startTimeoutMs: agent.ops.startTimeoutMs,
     repository,
+    // O RCON conectar é o instante em que o agente volta a alcançar
+    // o servidor: é quando a lista de banidos pode ter divergido, e
+    // é quando dá para saber qual mundo está carregado.
     onRconConnected: (serverId) => {
       void bans?.reconcile(serverId);
+      void mapImages?.ensure(serverId);
     },
   });
 
@@ -175,6 +181,12 @@ async function main(): Promise<void> {
   const banWatcher = new BanExpiryWatcher({ bans, logger });
 
   banWatcher.start();
+
+  // A imagem do mapa: desenhada pelo próprio jogo, UMA vez por
+  // mundo. O nome do arquivo carrega tamanho e seed, então o wipe
+  // refaz o desenho sozinho — e nenhuma subida seguinte repete o
+  // trabalho. Ver game/map-image.ts.
+  mapImages = new MapImageKeeper({ servers: supervisor, logger });
 
   // Quem está online. Ele pergunta ao acervo se o OrigemZAgent está
   // ligado naquele servidor e escolhe a fonte — `origemz.players`

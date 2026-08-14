@@ -34,9 +34,10 @@
 //  travessão, e um "vivo" inventado é pior que um campo vazio.
 // ============================================================
 
+import { sanitizeArgument } from '../bans/rust-bans.js';
 import { ApiError } from '../http/error-response.js';
 import type { OpsRcon } from '../ops/service.js';
-import { sanitizeArgument } from '../bans/rust-bans.js';
+import { gridLabel, worldGrid, type WorldGrid } from './grid.js';
 import {
   buildPlayersCommand,
   firstJsonLine,
@@ -57,6 +58,18 @@ export interface PlayerView {
   readonly ping: number | null;
   readonly connectedSeconds: number | null;
   readonly position: Position | null;
+  /**
+   * A célula do mapa: `G12`.
+   *
+   * Calculada AQUI, e não na tela, por dois motivos: a constante da
+   * grade tem um dono só (game/grid.ts), e é assim que a lista de
+   * jogadores mostra "onde ele está" numa coluna — `G12` responde a
+   * pergunta que `(120.5, -840.2)` obriga a traduzir.
+   *
+   * `null` sem posição, ou seja, sempre que a fonte for o
+   * `playerlist` nativo.
+   */
+  readonly grid: string | null;
 }
 
 /** O estado de um plugin no acervo daquele servidor. */
@@ -85,6 +98,16 @@ export interface PlayersSnapshot {
   /** Quantos estão conectados no total. */
   readonly total: number;
   readonly players: readonly PlayerView[];
+  /**
+   * O tamanho do mundo e a grade dele.
+   *
+   * Vai junto porque é o que o Map View precisa para desenhar: a
+   * projeção depende do `size`, e as letras/números das células
+   * dependem do `cellSize`. Mandá-los daqui é o que impede a
+   * constante da grade de existir uma segunda vez no navegador —
+   * e de as duas divergirem no dia em que o jogo mudar a dela.
+   */
+  readonly world: WorldGrid;
   /**
    * O plugin que daria a posição, e o estado dele aqui.
    *
@@ -128,19 +151,22 @@ export class PlayersReader {
   /**
    * A lista de quem está online.
    *
+   * `worldSize` vem do `.ini` daquele servidor e serve à grade: sem
+   * ele não há como dizer em que célula do mapa alguém está, e o
+   * Map View não teria como projetar nada.
+   *
    * @throws {ApiError} 503 sem RCON, 502 quando o plugin responde
    * fora do contrato.
    */
-  async list(serverId: string, rcon: OpsRcon): Promise<PlayersSnapshot> {
+  async list(serverId: string, rcon: OpsRcon, worldSize: number): Promise<PlayersSnapshot> {
     assertConnected(serverId, rcon);
 
     const plugin = await this.#stateOf(serverId);
+    const world = worldGrid(worldSize);
 
-    if (plugin.enabled) {
-      return { ...(await readFromPlugin(rcon)), plugin: { name: PLAYERS_PLUGIN, ...plugin } };
-    }
+    const read = plugin.enabled ? await readFromPlugin(rcon, world) : await readNative(rcon);
 
-    return { ...(await readNative(rcon)), plugin: { name: PLAYERS_PLUGIN, ...plugin } };
+    return { ...read, world, plugin: { name: PLAYERS_PLUGIN, ...plugin } };
   }
 
   /**
@@ -213,7 +239,8 @@ export async function kickPlayer(
  */
 async function readFromPlugin(
   rcon: OpsRcon,
-): Promise<Omit<PlayersSnapshot, 'plugin'>> {
+  world: WorldGrid,
+): Promise<Omit<PlayersSnapshot, 'plugin' | 'world'>> {
   const players: PlayerView[] = [];
   let offset = 0;
   let total = 0;
@@ -241,7 +268,7 @@ async function readFromPlugin(
     }
 
     total = parsed.data.count;
-    players.push(...parsed.data.players.map(toPlayerView));
+    players.push(...parsed.data.players.map((player) => toPlayerView(player, world)));
 
     // Página vazia é como o plugin diz que acabou — e o `limit`
     // que volta é o JÁ NORMALIZADO, não o que pedimos.
@@ -262,7 +289,7 @@ async function readFromPlugin(
  * `ConnectedSeconds` e `Health`. O que não existe ali é POSIÇÃO, e
  * é por isso que o Map View depende do plugin.
  */
-async function readNative(rcon: OpsRcon): Promise<Omit<PlayersSnapshot, 'plugin'>> {
+async function readNative(rcon: OpsRcon): Promise<Omit<PlayersSnapshot, 'plugin' | 'world'>> {
   const raw = await rcon.send('playerlist');
   let parsed: unknown;
 
@@ -300,16 +327,19 @@ async function readNative(rcon: OpsRcon): Promise<Omit<PlayersSnapshot, 'plugin'
   };
 }
 
-function toPlayerView(player: {
-  steamId: string;
-  name: string;
-  health: number;
-  isAlive: boolean;
-  isSleeping: boolean;
-  ping: number;
-  connectedSeconds: number;
-  position: Position;
-}): PlayerView {
+function toPlayerView(
+  player: {
+    steamId: string;
+    name: string;
+    health: number;
+    isAlive: boolean;
+    isSleeping: boolean;
+    ping: number;
+    connectedSeconds: number;
+    position: Position;
+  },
+  world: WorldGrid,
+): PlayerView {
   return {
     steamId: player.steamId,
     name: player.name,
@@ -319,6 +349,9 @@ function toPlayerView(player: {
     ping: player.ping,
     connectedSeconds: player.connectedSeconds,
     position: player.position,
+    // `x` e `z`. O `y` é ALTURA e não entra na grade — usar `(x, y)`
+    // é o erro que funciona até alguém subir num prédio.
+    grid: gridLabel(player.position.x, player.position.z, world.size),
   };
 }
 
@@ -341,6 +374,9 @@ function toNativePlayerView(entry: Record<string, unknown>): PlayerView | null {
     ping: asNumber(entry.Ping ?? entry.ping),
     connectedSeconds: asNumber(entry.ConnectedSeconds ?? entry.connectedSeconds),
     position: null,
+    // Sem posição não há célula. Inventar uma seria mandar quem
+    // procura para um lugar onde o jogador não está.
+    grid: null,
   };
 }
 

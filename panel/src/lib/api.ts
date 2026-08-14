@@ -45,6 +45,18 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * O endereço completo de um caminho do agente.
+ *
+ * Existe para o que NÃO passa por `api()`: a imagem do mapa é
+ * baixada como binário, e precisa do mesmo prefixo que as chamadas
+ * de JSON usam — vazio em produção, `NEXT_PUBLIC_AGENT_URL` no
+ * desenvolvimento.
+ */
+export function agentUrl(path: string): string {
+  return `${BASE}${path}`;
+}
+
 export interface RequestOptions {
   readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   readonly body?: unknown;
@@ -373,6 +385,28 @@ export interface GamePlayer {
   ping: number | null;
   connectedSeconds: number | null;
   position: { x: number; y: number; z: number } | null;
+  /**
+   * A célula do mapa: `G12`.
+   *
+   * Calculada pelo AGENTE, e não aqui: a constante da grade tem um
+   * dono só. `null` sem posição — ou seja, sempre que a fonte for o
+   * `playerlist` nativo.
+   */
+  grid: string | null;
+}
+
+/**
+ * O mundo daquele servidor, e a grade dele.
+ *
+ * Vem do agente porque o Map View precisa dos dois para desenhar: a
+ * projeção depende do `size`, e as letras/números das células do
+ * `cellSize`.
+ */
+export interface WorldGrid {
+  size: number;
+  cellSize: number;
+  cols: number;
+  rows: number;
 }
 
 export interface PlayersSnapshot {
@@ -390,6 +424,8 @@ export interface PlayersSnapshot {
   plugin: { name: string; id: number | null; enabled: boolean };
   /** Os campos que a fonte atual não fornece. */
   missing: string[];
+  /** O tamanho do mundo e a grade — o que o Map View desenha. */
+  world: WorldGrid;
 }
 
 /**
@@ -679,6 +715,45 @@ export const agent = {
       method: 'POST',
       body: { message },
     }),
+
+  /**
+   * A imagem do mapa daquele mundo.
+   *
+   * Ela é desenhada pelo próprio jogo, UMA vez por wipe: o agente
+   * pede o render sozinho quando o RCON conecta e não há arquivo
+   * para aquele tamanho+seed. `available: false` é o estado normal
+   * de um mundo recém-criado enquanto o desenho não termina.
+   */
+  mapImage: (id: string) =>
+    api<{
+      ok: true;
+      available: boolean;
+      path: string;
+      bytes: number | null;
+      generatedAt: string | null;
+      worldSize: number;
+      seed: number;
+      /** O lado do PNG, em pixels. */
+      pixels: number | null;
+      /**
+       * Quantas unidades do mundo a imagem cobre.
+       *
+       * MAIOR que o `worldSize`: o jogo desenha uma faixa de oceano
+       * em volta (4000 rende 5000). Projetar sobre o worldSize põe
+       * quem está na costa no meio do mar.
+       */
+      coverage: number | null;
+      /** O caminho DA ROTA, não o do disco. `null` sem imagem. */
+      url: string | null;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/map`),
+
+  /** Força o render. O automático já cobre o caso normal. */
+  renderMap: (id: string) =>
+    api<{ ok: true; path: string; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/map/render`,
+      { method: 'POST' },
+    ),
 
   admins: (id: string) =>
     api<{

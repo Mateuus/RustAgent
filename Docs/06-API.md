@@ -534,13 +534,26 @@ nativo — que não tem posição nem estado. A resposta diz qual foi usada:
 { "ok": true, "source": "plugin", "total": 42,
   "plugin": { "name": "OrigemZAgent", "id": 7, "enabled": true },
   "missing": [],
+  "world": { "size": 4000, "cellSize": 146.3, "cols": 28, "rows": 28 },
   "players": [
     { "steamId": "76561198000000000", "name": "Fulano",
       "health": 87.5, "isAlive": true, "isSleeping": false,
       "ping": 42, "connectedSeconds": 900,
-      "position": { "x": 120.5, "y": 32.1, "z": -840.2 } }
-  ] }
+      "position": { "x": 120.5, "y": 32.1, "z": -840.2 },
+      "grid": "I3" } ]
+}
 ```
+
+**`grid` é calculado pelo agente**, e não pela tela: a constante da grade
+(`146.3` unidades por célula, a mesma que o jogo usa para desenhar o mapa) tem um
+dono só. `G12` é como jogador e admin falam de posição — `(120.5, -840.2)` obriga
+a traduzir. `null` sem posição, ou seja, sempre que a fonte for o `playerlist`.
+
+**`world`** acompanha porque é o que o Map View precisa para desenhar: a projeção
+depende do `size`, e as letras/números das células do `cellSize`. Note que
+`cellSize` **não** deriva do `size` — mundos de 3000 e 6000 têm células iguais e
+quantidades diferentes delas, que é por que a última coluna do mapa do jogo é
+sempre mais estreita.
 
 Com `"source": "nativo"`, `position`, `isAlive` e `isSleeping` vêm **`null`** e
 `missing` os enumera. Nunca `0` nem `false`: um "morto" inventado é pior que um
@@ -554,6 +567,59 @@ são respostas diferentes, e a segunda não pode se disfarçar da primeira.
 
 O `kick` age sobre quem está **conectado** — expulsar é tirar da partida agora,
 não impedir de voltar. Para impedir, o caminho é a BanList.
+
+### A imagem do mapa
+
+| Rota | |
+|---|---|
+| `GET /api/servers/:id/map` | o que existe em disco. **Não renderiza** |
+| `GET /api/servers/:id/map/image` | o PNG |
+| `POST /api/servers/:id/map/render` | força o desenho |
+
+**A imagem não vem de fora.** O caminho óbvio seria o RustMaps — chave de API,
+seed, e uma dependência externa no meio de uma tela que precisa funcionar num
+dedicado sem internet liberada. O servidor sabe fazer isso sozinho:
+`world.rendermap` é um comando do próprio Rust que grava um PNG de alta resolução
+ao lado da instalação, em `Servers\<id>\map_<worldSize>_<seed>.png`.
+
+**Ela é desenhada uma vez por mundo, e o agente cuida disso.** O render acontece
+quando o RCON conecta e não há imagem para aquele mundo — o que dá exatamente o
+ciclo certo:
+
+| | |
+|---|---|
+| primeira subida do mapa novo | desenha (e é o melhor momento: servidor recém-subido, ninguém dentro para sentir o engasgo) |
+| toda subida seguinte | o arquivo existe, não faz nada |
+| wipe | a seed muda, o **nome** muda, o arquivo não existe, e o desenho refaz sozinho |
+
+Não há cache para invalidar nem imagem de outro mapa aparecendo por engano: quem
+responde "esta imagem é deste mundo?" é o nome do arquivo.
+
+MEDIDO neste servidor: ~17,5 MB de PNG, e o comando passa dos cinco segundos do
+timeout de RCON. Por isso o `POST` responde assim que o comando **sai** — esperar
+pelo fim transformaria um desenho que aconteceu num erro na tela. Quem chamou
+descobre que terminou pelo `GET /map` passando a dizer `available: true`.
+
+O `POST` existe para o que o automático não cobre: a imagem apagada com o
+servidor já no ar, a que saiu corrompida, o mapa customizado que mudou sem mudar
+a seed.
+
+```json
+{ "ok": true, "available": true,
+  "path": "F:\\…\\Servers\\server01\\map_4000_12345.png",
+  "bytes": 18370560, "generatedAt": "2026-08-14T21:13:16.322Z",
+  "worldSize": 4000, "seed": 12345,
+  "url": "/api/servers/server01/map/image" }
+```
+
+`url` é o caminho **da rota**, e não o do disco: o painel roda no navegador e não
+alcança `F:\…`. Servir o arquivo pelo agente é também o que evita expor uma pasta
+inteira da instalação — e o caminho nunca vem da requisição, é montado a partir
+do `.ini` daquele servidor.
+
+O PNG sai com `Cache-Control: private, max-age=86400, immutable`. Ele pode: o
+nome do arquivo carrega tamanho e seed, então a imagem de um mundo nunca muda, e
+o wipe troca a URL.
 
 ### Chat
 

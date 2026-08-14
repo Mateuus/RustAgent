@@ -232,9 +232,65 @@ de 1px.
   Jogadores | Chat | Admins | Banidos | Comandos
 ```
 
-**Jogadores.** Quem está online, com vida, ping, tempo de conexão e posição. Por
-linha: *Copiar SteamID*, *Expulsar* (confirmação em dois passos) e *Banir* (abre
-o diálogo).
+**Jogadores.** A lista e o **mapa**, lado a lado — porque são duas perguntas
+diferentes sobre a mesma coisa: *quem está aí* se lê numa lista, *onde eles
+estão* se vê num mapa.
+
+```
+  [ Lista | Dividido | Mapa ]
+
+┌─ LISTA ──────────────┐  ┌─ MAPA ─────────────────────┐
+│ ● Fulano        I3   │  │      A  B  C  D  E  F  G   │
+│   acordado · 1h20    │  │   0 ┌──┬──┬──┬──┬──┬──┬──┐ │
+│                      │  │   1 │  │  │  │ ●│  │  │  │ │
+│ ● Ciclano       G12  │  │   2 │  │ ○│  │  │  │  │  │ │
+│   dormindo · 12min   │  │   3 │  │  │  │  │  │ ✕│  │ │
+└──────────────────────┘  └────────────────────────────┘
+```
+
+O alternador tem **três** modos porque a escolha é entre três estados nomeados —
+e não entre trezentas larguras que ninguém quer ajustar com o mouse. Abaixo de
+`lg` as duas colunas empilham: lado a lado numa tela estreita deixaria as duas
+inúteis.
+
+A seleção é **a mesma dos dois lados**: clicar num ponto do mapa abre as ações
+daquele jogador na lista, e clicar na lista destaca o ponto. Por jogador:
+*Copiar SteamID*, *Expulsar* (confirmação em dois passos) e *Banir* (abre o
+diálogo).
+
+As ações aparecem só na linha **selecionada**. Três botões em duzentas linhas é
+uma parede de botões, e todos ficam pequenos demais para acertar.
+
+A lista é de linhas, e não uma tabela: ela precisa caber numa coluna estreita ao
+lado do mapa **e** ocupar a tela inteira sozinha. Uma tabela de sete colunas não
+faz as duas coisas — no modo dividido ela viraria rolagem horizontal, que é o
+jeito mais rápido de tornar uma lista inútil.
+
+A posição aparece como **célula do mapa** (`I3`), calculada pelo agente. É a
+resposta que serve: `(-819, 1538)` obriga a traduzir.
+
+### O mapa
+
+Fundo com a **imagem real do mundo**, desenhada pelo próprio jogo — sem RustMaps,
+sem chave, sem serviço externo. Ela é gerada uma vez por wipe, sozinha (ver
+[06-API.md](06-API.md)); enquanto não existe, o mapa funciona com a grade vazia e
+a tela diz que o desenho está a caminho, com um botão para forçar.
+
+Por cima, a grade com as coordenadas do Rust (A, B, C… / 0, 1, 2…) e um ponto por
+jogador. **A forma diz o estado, e não só a cor** — disco cheio é acordado, anel
+é dormindo, `✕` é morto. Cor sozinha não fala com quem não separa verde de âmbar,
+a mesma regra do ponto de estado do servidor.
+
+O nome aparece no hover e na seleção, não o tempo todo: duzentos nomes viram uma
+mancha ilegível.
+
+Quem **não tem posição** continua na lista e não vai para o mapa, com uma frase
+dizendo quantos são. Sumir dos dois seria esconder gente que está no servidor.
+
+O movimento **não é interpolado**: o ponto pula da posição antiga para a nova a
+cada leitura. Animação contínua custa FPS no navegador o tempo todo, e essa lição
+já foi paga uma vez (ver [09-ROADMAP.md](09-ROADMAP.md), o overlay de
+propagandas).
 
 A **fonte não é escolha de quem olha**. Com o `OrigemZAgent` ligado, a lista vem
 do plugin e tem posição; sem ele vem do `playerlist` nativo, que não tem. A tela

@@ -22,11 +22,14 @@
 //  resposta não pode ser um encolher de ombros.
 // ============================================================
 
+import { createReadStream } from 'node:fs';
+
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { grantAdmin, readAdmins, revokeAdmin } from '../../game/admins.js';
 import { DEFAULT_CHAT_LIMIT, MAX_CHAT_LIMIT, readChat } from '../../game/chat.js';
+import { mapImagePath, readMapImage, renderMapImage } from '../../game/map-image.js';
 import { kickPlayer, type PlayersReader } from '../../game/players.js';
 import type { ServerContext } from '../../servers/context.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
@@ -132,7 +135,12 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
     const { id } = serverParams.parse(request.params);
     const context = contextOf(deps, id);
 
-    return { ok: true, ...(await deps.players.list(id, context.rcon)) };
+    // O `worldSize` sai do `.ini`, que é a fonte da verdade do
+    // servidor. Ele é o que permite dizer em que célula do mapa
+    // cada um está — e o que o Map View usa para projetar.
+    const worldSize = deps.supervisor.configOf(id)?.worldSize ?? 0;
+
+    return { ok: true, ...(await deps.players.list(id, context.rcon, worldSize)) };
   });
 
   app.post('/servers/:id/players/:steamId/kick', async (request) => {
@@ -161,6 +169,135 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
       message:
         `${steamId} foi expulso. Ele pode entrar de novo a qualquer momento — para impedir, ` +
         'use Banir.',
+    };
+  });
+
+  // ==========================================================
+  //  A imagem do mapa
+  // ==========================================================
+
+  /**
+   * O retrato do que existe em disco. NÃO renderiza nada.
+   *
+   * A tela abre com isto e decide entre desenhar o mapa com fundo
+   * ou oferecer o botão — renderizar sozinho a cada abertura seria
+   * um engasgo no servidor por visita. Ver game/map-image.ts.
+   */
+  app.get('/servers/:id/map', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const config = deps.supervisor.configOf(id);
+
+    if (config === null) {
+      throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
+    }
+
+    const image = await readMapImage(config.paths.installDir, config.worldSize, config.seed);
+
+    return {
+      ok: true,
+      ...image,
+      // O caminho da imagem é o da PRÓPRIA rota, e não o do disco:
+      // o painel roda no navegador e não alcança `F:\...`.
+      url: image.available ? `/api/servers/${encodeURIComponent(id)}/map/image` : null,
+      ...(image.available
+        ? {}
+        : {
+            message:
+              'Ainda não há imagem para este mundo. Ela é desenhada pelo próprio jogo, uma vez ' +
+              'por wipe — o botão manda o comando.',
+          }),
+    };
+  });
+
+  /**
+   * O PNG.
+   *
+   * ####  POR QUE ELE PASSA PELO AGENTE  ####
+   *
+   * O painel é servido de `panel/out` e o arquivo mora ao lado da
+   * instalação do jogo, em outro lugar do disco. Servi-lo aqui é o
+   * que evita expor uma pasta inteira do servidor ao navegador.
+   *
+   * O caminho NÃO vem da requisição: ele é montado a partir do
+   * `.ini` daquele servidor (tamanho e seed). Não há nome de
+   * arquivo do usuário no meio.
+   */
+  app.get('/servers/:id/map/image', async (request, reply) => {
+    const { id } = serverParams.parse(request.params);
+    const config = deps.supervisor.configOf(id);
+
+    if (config === null) {
+      throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
+    }
+
+    const image = await readMapImage(config.paths.installDir, config.worldSize, config.seed);
+
+    if (!image.available) {
+      throw new ApiError(
+        'MAP_IMAGE_MISSING',
+        `Ainda não há imagem do mapa para o mundo ${String(config.worldSize)} / seed ` +
+          `${String(config.seed)} deste servidor. Peça o render na aba Administração.`,
+        404,
+      );
+    }
+
+    // 17 MB por abertura de tela seria absurdo: o nome do arquivo
+    // já contém tamanho e seed, então a imagem de um mundo NUNCA
+    // muda. `immutable` diz isso ao navegador, e o wipe resolve o
+    // resto trocando a URL.
+    void reply.header('Cache-Control', 'private, max-age=86400, immutable');
+    void reply.type('image/png');
+
+    return reply.send(createReadStream(image.path));
+  });
+
+  /**
+   * Manda o jogo desenhar o mapa.
+   *
+   * ####  NORMALMENTE NINGUÉM PRECISA DISTO  ####
+   *
+   * O agente desenha sozinho quando o RCON conecta e não há imagem
+   * daquele mundo — o que dá uma vez por wipe, no melhor momento
+   * possível (servidor recém-subido, ninguém dentro). Ver
+   * game/map-image.ts.
+   *
+   * Esta rota existe para o resto: a imagem que saiu corrompida, o
+   * mapa customizado que mudou sem mudar a seed, o operador que
+   * quer refazer agora. Ela força mesmo havendo arquivo.
+   *
+   * Responde assim que o comando SAI: o render passa dos cinco
+   * segundos do timeout de RCON, e esperar por ele transformaria um
+   * desenho que ACONTECEU num erro na tela. Quem chamou descobre
+   * que terminou pelo `GET /map` passando a dizer `available`.
+   */
+  app.post('/servers/:id/map/render', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const context = contextOf(deps, id);
+    const config = deps.supervisor.configOf(id);
+
+    if (config === null) {
+      throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
+    }
+
+    if (!context.rcon.isConnected) {
+      throw new ApiError(
+        'RCON_UNAVAILABLE',
+        `Sem conexão com o RCON do servidor "${id}". Quem desenha o mapa é o jogo, e ele precisa ` +
+          'estar no ar.',
+        503,
+      );
+    }
+
+    await renderMapImage(context.rcon);
+
+    request.log.info({ server: id, by: operatorOf(request) }, 'render do mapa pedido');
+
+    return {
+      ok: true,
+      path: mapImagePath(config.paths.installDir, config.worldSize, config.seed),
+      message:
+        'O jogo está desenhando o mapa. São alguns segundos, e o servidor pode engasgar enquanto ' +
+        'isso — a imagem aparece aqui sozinha quando ficar pronta.',
     };
   });
 
