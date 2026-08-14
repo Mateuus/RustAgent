@@ -45,17 +45,26 @@ Configs/*.ini
 #
 #  O schema do banco vai para o git - em core/src/db/migrations.ts.
 # ------------------------------------------------------------
-Servers/
-SteamCMD/
-Logs/
-logs/
-Backups/
-Plugins/
-data/
+#  ####  A BARRA DA FRENTE NAO E ENFEITE  ####
+#
+#  Sem ela, o padrao casa em QUALQUER nivel - e no Windows o git
+#  compara sem diferenciar maiusculas (core.ignorecase). "Servers/"
+#  solto engoliu `core/src/servers/` inteiro: seis arquivos do
+#  multi-servidor sumiram do repositorio sem nenhum aviso, e o
+#  `git status` ficou limpo porque, para ele, nao havia nada ali.
+#
+#  Toda pasta de runtime abaixo e da RAIZ do projeto. Ancore.
+/Servers/
+/SteamCMD/
+/Logs/
+/logs/
+/Backups/
+/Plugins/
+/data/
 
 # O SteamCMD deixa crash dump na pasta de onde foi chamado. Nao e
 # nosso, nao serve para nada aqui, e vem com nome novo toda vez.
-dumps/
+/dumps/
 
 # ------------------------------------------------------------
 #  Ferramentas
