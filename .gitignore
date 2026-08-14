@@ -53,6 +53,10 @@ Backups/
 Plugins/
 data/
 
+# O SteamCMD deixa crash dump na pasta de onde foi chamado. Nao e
+# nosso, nao serve para nada aqui, e vem com nome novo toda vez.
+dumps/
+
 # ------------------------------------------------------------
 #  Ferramentas
 # ------------------------------------------------------------

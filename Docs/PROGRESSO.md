@@ -51,25 +51,34 @@ Legenda: `[ ]` a fazer · `[~]` em curso · `[x]` pronto e verificado
 - [x] `rcon/` (client, frames, socket, url, errors, typed-emitter) — copiado
 - [x] `servers/ports.ts`, `registry.ts`, `create-server.ts` (sem os `.bat` nas mensagens)
 - [x] `servers/map-levels.ts` (extraído do `map-pool-repository` antigo)
-- [ ] `servers/context.ts`, `supervisor.ts`
-- [ ] `http/routes/servers.ts` (listar, criar, patch, delete)
-- [ ] criar um servidor pela API, com `.ini` escrito e portas sugeridas
+- [x] `servers/context.ts`, `supervisor.ts` (dois cadastros: ligados e desligados)
+- [x] `http/routes/servers.ts` (listar, criar, patch, delete, comando de RCON)
+- [x] **verificado**: criar pela API escreve `Configs\pvp1.ini` com o bloco de portas 0,
+      a lista mostra `installed:false`, e ligar sem o jogo em disco recusa com
+      409 `SERVER_NOT_INSTALLED`
 - [ ] os testes do `rcon/` vindos do projeto antigo
 
 ## Etapa 4 — Instalar (o marco)
 
-- [ ] `steam/steamcmd.ts` — garantir o cliente e rodar `app_update`
-- [ ] `oxide/install.ts`
-- [ ] `ops/run.ts`, `ops/operations.ts` (estado, trava, log incremental)
-- [ ] `http/routes/operations.ts`
-- [ ] **instalar um servidor do zero pela API, com log ao vivo**
+- [x] `steam/steamcmd.ts` — garantir o cliente e rodar `app_update`
+- [x] `oxide/install.ts` (release do GitHub + URL direta como plano B)
+- [x] `ops/run.ts`, `ops/operations.ts` (estado, trava por recurso, log incremental)
+- [x] `ops/service.ts` — as sete operações
+- [x] `http/routes/operations.ts` (202, log incremental, cancelar)
+- [x] **verificado**: `server-install` responde 202, o SteamCMD é **baixado, extraído
+      e executado de verdade** (`Steam Console Client (c) Valve Corporation`), e a
+      segunda instalação simultânea recusa com `OPERATION_IN_PROGRESS` dizendo quem
+      segura a trava
+- [ ] um `app_update` completo (~6 GB) numa máquina de verdade
 
 ## Etapa 5 — Ciclo de vida
 
-- [ ] `ops/server-process.ts` — start destacado, descoberta por linha de comando
-- [ ] `server-start`, `server-stop`, `server-restart`
-- [ ] espera pelo RCON com estado *iniciando*
-- [ ] conferência de porta ocupada antes de subir
+- [x] `ops/server-process.ts` — start destacado, descoberta por linha de comando
+      (`wmic`, com PowerShell de reserva)
+- [x] `server-start`, `server-stop`, `server-restart`
+- [x] espera pelo RCON depois de subir (o "subiu" é o RCON responder)
+- [x] conferência de porta ocupada antes de subir
+- [ ] exercitar contra um servidor de Rust instalado
 
 ## Etapa 6 — Steam
 

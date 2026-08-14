@@ -24,7 +24,10 @@ import { ZodError } from 'zod';
 
 import type { OperatorAuth } from '../auth/operator.js';
 import type { AgentConfig } from '../config.js';
+import type { ServersRepository } from '../db/servers-repository.js';
 import type { Logger } from '../logger.js';
+import type { OperationStore } from '../ops/operations.js';
+import type { ServerSupervisor } from '../servers/supervisor.js';
 import { createAuthGuard } from './auth.js';
 import {
   apiErrorToResponse,
@@ -34,6 +37,8 @@ import {
 } from './error-response.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
+import { registerOperationRoutes } from './routes/operations.js';
+import { registerServerRoutes } from './routes/servers.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -42,6 +47,9 @@ export interface BuildServerOptions {
   readonly version: string;
   readonly startedAt: number;
   readonly servers: () => readonly HealthServerView[];
+  readonly supervisor: ServerSupervisor;
+  readonly repository: ServersRepository;
+  readonly operations: OperationStore;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -112,11 +120,25 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     async (api) => {
       api.addHook('preHandler', requireAuth);
 
-      // As rotas da Fase 1 entram aqui conforme cada etapa fecha:
-      //   registerServerRoutes(api, deps)
-      //   registerOperationRoutes(api, deps)
-      //   registerPluginRoutes(api, deps)
-      api.get('/servers', async () => ({ ok: true, servers: [] }));
+      registerServerRoutes(api, {
+        paths: options.config.paths,
+        repository: options.repository,
+        supervisor: options.supervisor,
+      });
+
+      // As rotas de operação só existem com OPS_ENABLED=1. Com 0
+      // elas nem são registradas — respondem 404, e não 403: quem
+      // desligou não quer nem anunciar que elas existiriam.
+      if (options.config.ops.enabled) {
+        registerOperationRoutes(api, {
+          store: options.operations,
+          supervisor: options.supervisor,
+        });
+      }
+
+      // Ainda a fazer nesta fase:
+      //   registerPluginRoutes(api, deps)     — Etapa 7
+      //   registerSteamUpdateRoutes(api, ...) — Etapa 6
     },
     { prefix: '/api' },
   );

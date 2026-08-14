@@ -26,8 +26,11 @@ import { OperatorAuth } from './auth/operator.js';
 import { ConfigError, loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { runMigrations } from './db/migrations.js';
+import { ServersRepository } from './db/servers-repository.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
+import { OperationLock, OperationStore } from './ops/operations.js';
+import { ServerSupervisor } from './servers/supervisor.js';
 import { toError } from './util.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
@@ -89,7 +92,27 @@ async function main(): Promise<void> {
     logger.info({ count: applied.length }, 'migrações aplicadas');
   }
 
-  // ---- 3. HTTP ---------------------------------------------
+  // ---- 3. os servidores -------------------------------------
+  //
+  // O supervisor reconcilia a tabela a partir dos `.ini` e monta
+  // o contexto de quem está ligado E instalado. Quem não está
+  // fica com o serviço restrito — só a operação de instalar.
+  const repository = new ServersRepository(db);
+  const operations = new OperationStore();
+  const lock = new OperationLock();
+
+  const supervisor = new ServerSupervisor({
+    paths: agent.paths,
+    store: operations,
+    lock,
+    logger,
+    startTimeoutMs: agent.ops.startTimeoutMs,
+    repository,
+  });
+
+  supervisor.mountAll(servers);
+
+  // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
     passwordHash: agent.panel.passwordHash,
@@ -109,10 +132,15 @@ async function main(): Promise<void> {
     operators,
     version: VERSION,
     startedAt,
-    // Enquanto o supervisor não entra (Etapa 3), o /health
-    // descreve o que a configuração diz — e nada mais. Um retrato
-    // inventado seria pior que um retrato pequeno.
-    servers: () => servers.map((server) => ({ id: server.id, enabled: server.enabled, rcon: null })),
+    supervisor,
+    repository,
+    operations,
+    servers: () =>
+      supervisor.list().map((server) => ({
+        id: server.id,
+        enabled: server.enabled,
+        rcon: server.rcon,
+      })),
   });
 
   await app.listen({ host: agent.host, port: agent.port });
@@ -151,6 +179,10 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         await app.close();
+        // Os contextos depois do HTTP: fechar o RCON com uma
+        // requisição em voo faria a rota estourar em vez de
+        // responder.
+        await supervisor.stopAll();
         // O `close()` do better-sqlite3 faz o checkpoint do WAL.
         // Sem ele, o `-wal` cresce e o próximo boot paga a conta.
         db.close();
