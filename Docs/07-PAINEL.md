@@ -193,6 +193,31 @@ duas telas.
 configuração** (`oxide\config\<Nome>.json` e `oxide\data\`). A tela diz isso: se
 tirar parecesse caro, ninguém usaria o botão.
 
+**Ligar junto.** Quando falta dependência, ao lado do aviso há o botão *"Ligar
+junto com X, Y"*: uma chamada só, e o agente liga na ordem topológica —
+dependência primeiro. Avisar e deixar a pessoa ligar três plugins na mão, na
+ordem certa, é passar a regra para quem não a conhece.
+
+**O custom sai por aqui.** Ele é deste servidor, e nenhuma outra tela o enxerga:
+sem o botão de remover na linha dele, um custom que ninguém mais usa ficaria na
+coluna de disponíveis para sempre. O plugin da **biblioteca** não tem esse botão
+aqui, de propósito — removê-lo tira de todos os servidores, e essa decisão é da
+tela de rede, onde se vê quem usa o quê.
+
+**"Ativo" não é o mesmo que "rodando".** Se o Oxide recusou compilar o plugin, a
+linha diz isso em vermelho — *"está no servidor, mas não está rodando"* — com a
+frase do compilador junto, que é a que diz a linha do erro e é o que se manda
+para quem escreveu o plugin. Antes, isso voltava só dentro da resposta de quem
+clicou, num bloco que rolava para fora da tela: quem clicou ia embora achando
+que aplicou, e o sintoma aparecia no jogo horas depois.
+
+**Copiar de outro servidor.** No rodapé da aba, uma faixa liga aqui o mesmo
+conjunto que outro servidor usa — um servidor novo deixa de ser seis plugins
+ligados na mão. O que não pôde vir (o custom do outro servidor) fica na tela com
+o motivo, porque é a lista de `.cs` que ainda precisam ser enviados aqui. A
+configuração de cada plugin **não** é copiada: ela é daquele servidor, e trazê-la
+faria este anunciar o nome do outro no chat.
+
 Depois de ligar ou aplicar, a resposta do Oxide aparece na tela — inclusive o
 erro de compilação, se houver. Gravar e carregar são coisas diferentes.
 
@@ -245,7 +270,45 @@ livre, com a resposta do servidor na tela.
 ### Configuração
 
 Os campos do `.ini` que dá para mudar pelo painel, com aviso claro do que só
-vale depois de reiniciar o servidor.
+vale depois de reiniciar o servidor. Sete sub-abas: *Geral*, *Mundo*, *Rede*,
+*RCON*, *SteamCMD*, **Plugins** e *Avançado*.
+
+#### A sub-aba Plugins
+
+`Servers\<id>\oxide\config\<Nome>.json` — a configuração de cada plugin, sem
+abrir editor de texto na máquina onde o servidor mora.
+
+Ela mora **aqui**, e não na aba Plugins, porque são duas perguntas diferentes: a
+aba Plugins responde *o que este servidor usa* — liga, desliga, aplica versão —,
+e isto é ajuste, que é o assunto de Configurações. O arquivo do plugin fica ao
+lado do mundo, das portas e do SteamCMD, que é onde se procura por ajuste.
+
+A lista da esquerda vem da **pasta**, e não do acervo: a config sobrevive ao
+plugin, e a órfã — o `.json` de um que saiu — é justamente a que alguém vai
+procurar para recuperar horas de trabalho. Ela aparece marcada como *fora do
+acervo*; a de um plugin desligado, como *desligado*, com o aviso de que o que
+for gravado vale quando ele for ligado.
+
+À direita, um **editor de texto monoespaçado** — e não um formulário gerado a
+partir do JSON. A estrutura muda por plugin, e um formulário erra em qualquer
+coisa aninhada: a lista de itens da loja, o mapa de permissões por nível. O que
+ele mostraria seria uma versão empobrecida do arquivo, e o que gravasse de volta
+seria pior.
+
+O que a tela **deve** fazer é não deixar gravar lixo: o `JSON.parse` roda a cada
+tecla, a mensagem dele fica à vista (é ela que diz a posição do erro) e o botão
+de gravar só vale enquanto o texto for válido. JSON quebrado não derruba a tela
+— derruba o plugin, no servidor, com os jogadores dentro.
+
+*Gravar e recarregar* é um botão só: mexer no arquivo com o plugin carregado não
+tem efeito nenhum até o `oxide.reload`. Depois de gravar, a tela adota o texto
+que o **agente** devolveu, e não o que a pessoa digitou — vários plugins chamam
+`SaveConfig()` ao carregar e reescrevem a própria config. E mostra o que o Oxide
+respondeu, que é onde aparece o campo que o plugin esperava e não veio.
+
+*Voltar ao padrão* apaga o arquivo para o plugin recriá-lo. É confirmação em
+dois passos, e há cópia em `Backups\<id>\oxide-config\` — de toda escrita, não
+só desta.
 
 ---
 
@@ -262,6 +325,12 @@ Plugins do servidor deles.
 Por linha: o título e o arquivo, o autor, a versão, **em quais servidores está
 ativo** (os nomes, não a contagem — "2 servidores" obriga a ir procurar quem
 são), o tamanho e *Remover*.
+
+Abaixo do nome, **quem depende dele**: "OrigemZVip não carrega sem este". Quem
+remove daqui remove de todos os servidores de uma vez, e leva junto, em cada um,
+quem o exigia — ler isso só na confirmação é tarde para quem ainda está
+decidindo o que remover. Quem calcula é o agente, sobre a biblioteca inteira; no
+navegador seria adivinhação sem teste.
 
 Nome, autor e versão saem do `[Info(...)]` do próprio `.cs`. Não há formulário
 de metadados: seria a segunda fonte para o mesmo fato, e a segunda é a que

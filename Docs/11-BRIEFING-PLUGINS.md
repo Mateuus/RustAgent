@@ -4,6 +4,38 @@
 > inteiro a quem vai construir — humano ou agente — sem precisar de mais
 > contexto do que os arquivos que ele mesmo aponta.
 
+> ## ✅ Executado em 14/08/2026
+>
+> Os itens 1, 2 e 3 deste briefing estão **construídos, testados e commitados**.
+> O que está escrito abaixo continua valendo como o *porquê* de cada decisão —
+> mas leia primeiro esta caixa, para não refazer o que já existe.
+>
+> | O que o briefing pedia | Onde ficou | Diferença em relação ao pedido |
+> |---|---|---|
+> | Config do plugin pela tela | `core/src/oxide/plugin-config.ts`, `panel/src/components/plugin-configs.tsx` | A tela é a sub-aba **Plugins de _Configurações_**, e não a aba Plugins — decisão do dono. As rotas são `/api/servers/:id/plugin-configs/:plugin`, com o **nome** como chave, e não `:pluginId`: a config sobrevive ao plugin, e uma rota por id não abriria a do que saiu do acervo |
+> | Ligar as dependências junto | `PluginLibrary.enableWithDeps`, `POST …/enable-with-deps` | Como pedido: ordem topológica, 409 no ciclo dizendo quem está nele, 409 na dependência ausente |
+> | Remover o custom pela aba | `panel/src/components/plugins-panel.tsx` | Como pedido |
+> | Dependências na tela de rede | `PluginLibrary.list` + `panel/src/app/plugins/page.tsx` | Como pedido — quem calcula é o agente |
+> | Erro de compilação em destaque | `reloadFailed` em `plugins.ts`, `lastReload` na view | O estado mora **em memória**, não no banco: um alarme velho é pior que nenhum |
+> | Conjuntos de plugins | `PluginLibrary.copyFrom`, `POST …/plugins/copy-from` | **Não** virou cadastro de conjuntos. O conjunto é um servidor que já funciona — uma lista salva envelheceria sozinha, e o servidor novo nasceria faltando o plugin que entrou depois |
+>
+> **Nenhuma migração foi usada.** A 007 continua livre.
+>
+> ### A armadilha que apareceu no caminho
+>
+> O `OrigemZQueue.cs` não aparecia na tela. As duas leituras do `.cs` — a trava
+> de conteúdo (4 KB) e a dos metadados (8 KB) — olhavam só o **começo** do
+> arquivo, e o cabeçalho dele tem 104 linhas: o primeiro `using` cai no byte
+> 4733. A trava concluía "isto não é C#", a varredura da pasta engolia a recusa
+> num aviso de log, e o plugin simplesmente não entrava no acervo.
+>
+> Hoje as duas leituras olham o arquivo **inteiro**, no que sobra depois de tirar
+> os comentários (`core/src/oxide/csharp-source.ts`). Isso importa para quem for
+> escrever código novo aqui: **o estilo desta base é cabeçalho grande, e qualquer
+> "olhe os primeiros N KB" é o próximo bug**.
+>
+> Verificação atual: `npm test -w core` dá **129 testes** passando (eram 53).
+
 Projeto: `F:\Projects\RustAgent` (Windows, Node 20+, npm workspaces —
 `core` = Fastify/TypeScript, `panel` = Next.js em export estático servido pelo
 próprio core).

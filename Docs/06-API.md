@@ -360,6 +360,150 @@ Se o Oxide recusou compilar, `ok` continua `true` (o arquivo **foi** gravado) e
 faria o operador achar que a ação falhou. Com o servidor parado, `sent` é
 `false` e o plugin carrega no próximo start — o que também não é erro.
 
+### `POST /api/servers/:id/plugins/:pluginId/enable-with-deps`
+
+Liga o plugin **e** as dependências duras que faltam, na ordem topológica —
+dependência primeiro.
+
+Uma rota, e não a tela chamando o `PUT` várias vezes: a ordem é regra, e no
+navegador ela não teria teste. E a ordem não é detalhe — o Oxide segura um
+plugin cujo `// Requires:` não está carregado e o solta sozinho quando a
+dependência aparece, então ligar na ordem errada "funciona" com um intervalo em
+que o servidor está com metade do conjunto no ar.
+
+```json
+{ "ok": true, "plugin": { "…": "…" },
+  "enabled": ["OrigemZAgent", "OrigemZVip"],
+  "alreadyEnabled": ["OrigemZUI"],
+  "reloads": [{ "plugin": "OrigemZAgent", "sent": true, "output": "Loaded plugin…" }],
+  "message": "Ligados nesta ordem: OrigemZAgent → OrigemZVip…" }
+```
+
+Duas recusas, ambas `409`:
+
+- **`PLUGIN_DEPENDENCY_CYCLE`** — dois plugins que se declaram um ao outro. A
+  mensagem diz quem está no círculo (`A → B → A`), porque nenhuma ordem de
+  carregamento resolve: o `// Requires:` de um deles está errado e o `.cs`
+  precisa ser corrigido.
+- **`PLUGIN_DEPENDENCY_MISSING`** — a dependência não está na biblioteca nem nos
+  customs daquele servidor. Ligar o que não existe não é uma opção a oferecer.
+
+Só as dependências **duras** entram. O `[PluginReference]` é mole — o plugin
+carrega e roda sem ela —, e arrastar junto o que o `.cs` apenas menciona ligaria
+coisa que ninguém pediu.
+
+### `POST /api/servers/:id/plugins/copy-from`
+
+Corpo: `{ "from": "server01" }`. Liga aqui o mesmo conjunto que aquele servidor
+usa, cada um com as dependências na ordem certa.
+
+**O conjunto é um servidor que já funciona.** Cadastrar "conjuntos" no banco
+seria uma segunda fonte para o mesmo fato: no dia em que o servidor de verdade
+ganhasse o sétimo plugin, a lista salva continuaria com seis, e o servidor novo
+nasceria faltando um.
+
+```json
+{ "ok": true, "from": "server01",
+  "enabled": ["OrigemZAgent", "OrigemZVip"],
+  "alreadyEnabled": ["OrigemZUI"],
+  "skipped": [{ "plugin": "MeuEvento",
+                "reason": "\"MeuEvento\" é custom de \"server01\" e não existe no acervo deste servidor…" }],
+  "message": "Ligados aqui: … 1 não vieram…" }
+```
+
+O `skipped` é a parte que importa: sem ele, o servidor novo nasce faltando
+plugin e ninguém fica sabendo. Um plugin que falha **não segura os outros** —
+abortar no meio deixaria metade do conjunto ligada e nenhuma lista do que
+faltou.
+
+A **configuração não vem junto**: ela é daquele servidor. Copiar `oxide\config`
+levaria o preço do VIP e a mensagem de boas-vindas de um servidor para o outro.
+
+Copiar de si mesmo responde `400 INVALID_COPY_SOURCE`.
+
+### O plugin que não compila
+
+Cada plugin ligado traz o desfecho do último `oxide.reload` dele **naquele
+servidor**:
+
+```json
+"lastReload": { "at": "2026-08-14T20:31:00.000Z", "failed": true,
+                "output": "Error while compiling: OrigemZVip.cs(214,13): error CS0103…" }
+```
+
+`failed` é o agente lendo a resposta do Oxide — que não devolve código de erro,
+devolve prosa (`error CS0103` é o compilador da Microsoft; o resto são frases do
+loader). O que ele não reconhece vira `false` de propósito: um alarme falso na
+linha faria ninguém acreditar no verdadeiro.
+
+O campo é `null` para plugin desligado e para quem não foi recarregado desde que
+o agente subiu. O dado mora **em memória** e morre com o processo: ele afirma "o
+Oxide respondeu isto agora há pouco", e guardá-lo entre reinícios faria a tela
+mostrar, dias depois, o erro de um arquivo já corrigido.
+
+É o que permite a tela dizer **"está no servidor, mas não está rodando"** na
+linha do plugin. Antes, isso só existia dentro do `reload.output` da resposta de
+quem clicou — e quem não clicou nunca via.
+
+### A configuração de cada plugin
+
+`oxide\config\<Nome>.json`, o arquivo que o **plugin** cria no primeiro
+carregamento com os padrões dele. Quatro rotas:
+
+```
+GET    /api/servers/:id/plugin-configs            o que há na pasta
+GET    /api/servers/:id/plugin-configs/:plugin    o JSON de hoje
+PUT    /api/servers/:id/plugin-configs/:plugin    grava e recarrega
+DELETE /api/servers/:id/plugin-configs/:plugin    apaga: o plugin recria
+```
+
+**A chave é o NOME, e não o `:pluginId`** — contra a regra do resto desta seção,
+e de propósito. A config mora do lado do jogo e sobrevive ao plugin: desligar
+não a apaga, remover do acervo não a apaga. Uma rota por id não conseguiria
+abrir a config do plugin que saiu do acervo, que é justamente a que alguém vai
+procurar para recuperar horas de ajuste.
+
+Pela mesma razão, **a lista vem da pasta**, e não do banco:
+
+```json
+{ "ok": true, "configDir": "F:\\…\\Servers\\server01\\oxide\\config",
+  "configs": [{ "plugin": "OrigemZVip", "file": "OrigemZVip.json",
+                "bytes": 503, "modifiedAt": "2026-08-14T…",
+                "title": "Origem Z Vip", "inStore": true, "enabled": true }] }
+```
+
+`inStore: false` é a config **órfã** — o `.json` de um plugin que saiu. Ela
+aparece de propósito.
+
+O `PUT` recebe `{ "text": "…" }` e faz, nesta ordem:
+
+1. **confere o JSON** — o que não passa responde `400 INVALID_PLUGIN_CONFIG` com
+   a posição do erro, e o arquivo em disco não muda. O Oxide não carrega um
+   plugin com a config quebrada, e o erro dele sairia no console do jogo, longe
+   de quem clicou;
+2. **copia** o que estava lá para `Backups\<id>\oxide-config\<Nome>-<epoch>.json`
+   — falhar aqui interrompe a escrita (`500 PLUGIN_CONFIG_BACKUP_FAILED`);
+3. grava;
+4. **recarrega, se o plugin estiver ligado ali**. De um plugin que aquele
+   servidor não usa, o `oxide.reload` só encheria o console com um erro que não
+   é erro;
+5. **relê do disco.**
+
+O passo 5 não é zelo: vários plugins chamam `SaveConfig()` ao carregar e
+reescrevem a própria config normalizando o que leram. O `config` da resposta é o
+que ficou em disco **depois** do reload — devolver o texto enviado faria a tela
+afirmar uma coisa que o arquivo não diz mais.
+
+O `DELETE` é o "voltar ao padrão": copia, apaga, recarrega. Com o plugin
+carregado, ele recria o arquivo na hora; desligado, `config` volta `null` e o
+arquivo nasce quando alguém o ligar.
+
+O nome passa por `pluginConfigPath`, irmão do `pluginPath` — sem ele, um
+`..\..\..\Configs\server01.ini` reescreveria o arquivo que decide em que porta o
+servidor sobe (`400 INVALID_PLUGIN_NAME`). O teto do texto é 256 KB, abaixo do
+`bodyLimit` de 1 MB do Fastify, para que a recusa seja a nossa, em português, e
+não um 413 em inglês.
+
 ---
 
 ## Administração
