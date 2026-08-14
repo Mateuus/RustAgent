@@ -18,10 +18,14 @@
 //     upload substituiria um assembly do loader — o servidor
 //     deixaria de subir, e ninguém ligaria isso a um upload.
 //
-//  2. O CONTEÚDO precisa parecer C# e caber no limite. Não é
-//     antivírus: é o que impede um upload errado (um .zip
-//     renomeado, um PDF) de virar um arquivo que o Oxide tenta
+//  2. O CONTEÚDO precisa ser texto com cara de C# e caber no
+//     limite. Não é antivírus: é o que impede um upload errado (um
+//     .zip renomeado, um PDF) de virar um arquivo que o Oxide tenta
 //     compilar em laço, enchendo o log do servidor.
+//
+//     Ela recusa pelo que o arquivo É — a assinatura do zip, do
+//     PDF, da .dll —, e não pela ausência de palavras. Ver
+//     `assertLooksLikeCSharp`.
 // ============================================================
 
 import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -30,6 +34,7 @@ import { join, resolve } from 'node:path';
 import { ApiError } from '../http/error-response.js';
 import type { OpsRcon } from '../ops/service.js';
 import { toError } from '../util.js';
+import { decodeSource, stripComments } from './csharp-source.js';
 
 /** Nome de arquivo aceito. Sem barra, sem `..`, sempre `.cs`. */
 export const PLUGIN_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,64}\.cs$/;
@@ -137,24 +142,83 @@ export interface InstallPluginResult {
 }
 
 /**
- * O arquivo parece C#?
+ * Os enganos que chegam com nome de `.cs`, reconhecidos pelos
+ * primeiros bytes.
  *
- * Heurística deliberadamente frouxa: qualquer coisa que tenha
- * `using`, `namespace`, `class` ou o atributo `[Info(...)]` do
- * Oxide passa. O que ela pega é o engano grosseiro — zip, PDF,
- * imagem —, e para isso os primeiros bytes bastam.
+ * Dizer "isto é um .zip" é outra coisa que dizer "não achei a
+ * palavra class": a primeira manda extrair o arquivo, a segunda
+ * manda procurar defeito no plugin — que está inteiro, dentro do
+ * zip. A `.dll` está na lista porque é o engano mais caro: é o que
+ * alguém tenta enviar depois de compilar o plugin por fora.
+ */
+const FILE_SIGNATURES: readonly { readonly magic: Buffer; readonly what: string }[] = [
+  { magic: Buffer.from([0x50, 0x4b]), what: 'um .zip (ou um .docx, .jar — todos são zip por dentro)' },
+  { magic: Buffer.from('%PDF', 'latin1'), what: 'um PDF' },
+  { magic: Buffer.from([0x89, 0x50, 0x4e, 0x47]), what: 'uma imagem PNG' },
+  { magic: Buffer.from([0xff, 0xd8, 0xff]), what: 'uma imagem JPEG' },
+  { magic: Buffer.from('GIF8', 'latin1'), what: 'uma imagem GIF' },
+  { magic: Buffer.from('Rar!', 'latin1'), what: 'um .rar' },
+  { magic: Buffer.from([0x37, 0x7a, 0xbc, 0xaf]), what: 'um .7z' },
+  { magic: Buffer.from([0x1f, 0x8b]), what: 'um .gz' },
+  { magic: Buffer.from('MZ', 'latin1'), what: 'um .exe ou uma .dll — o plugin vai em código-fonte, não compilado' },
+];
+
+/**
+ * O arquivo é C#?
+ *
+ * ####  A PERGUNTA É SOBRE O CÓDIGO, NÃO SOBRE O COMEÇO  ####
+ *
+ * A heurística continua frouxa de propósito — `using`, `namespace`,
+ * `class` ou o `[Info(...)]` do Oxide, qualquer um serve. O que
+ * mudou é ONDE ela procura: no arquivo inteiro, e no que sobra
+ * depois de tirar os comentários.
+ *
+ * Olhar só os primeiros 4 KB custou o `OrigemZQueue.cs`, cujo
+ * cabeçalho tem 104 linhas: a trava só via prosa, recusava o
+ * plugin, e a varredura da pasta engolia a recusa num aviso de log.
+ * Ele simplesmente não aparecia na tela. Um número maior ali
+ * adiaria o mesmo bug para o próximo cabeçalho — o estilo desta
+ * base é escrever cabeçalho, e cabeçalho cresce.
+ *
+ * Descartar comentário ainda aperta a trava: um `.md` que fala
+ * sobre plugins não passa mais só por citar a palavra `class`.
  */
 function assertLooksLikeCSharp(content: Buffer): void {
-  const head = content.subarray(0, 4_096).toString('utf8');
+  for (const { magic, what } of FILE_SIGNATURES) {
+    if (content.subarray(0, magic.length).equals(magic)) {
+      throw new ApiError(
+        'INVALID_PLUGIN_CONTENT',
+        `O arquivo enviado é ${what} — não o código-fonte de um plugin. ` +
+          'Envie o .cs; se ele veio dentro de um pacote, extraia antes.',
+        400,
+      );
+    }
+  }
 
-  if (/\b(using|namespace|class)\b/.test(head) || head.includes('[Info(')) {
+  const source = decodeSource(content);
+
+  // Byte zero no meio do texto é binário desconhecido. O UTF-16
+  // legítimo não chega aqui: o `decodeSource` já o converteu pelo
+  // BOM, e o que sobra são bytes zero de verdade.
+  if (source.includes('\u0000')) {
+    throw new ApiError(
+      'INVALID_PLUGIN_CONTENT',
+      'O arquivo enviado não é texto: ele tem bytes binários no meio. Envie o .cs do plugin.',
+      400,
+    );
+  }
+
+  const code = stripComments(source);
+
+  if (/\b(using|namespace|class)\b/.test(code) || code.includes('[Info(')) {
     return;
   }
 
   throw new ApiError(
     'INVALID_PLUGIN_CONTENT',
-    'O arquivo enviado não parece um plugin em C#: não achei "using", "namespace", "class" ' +
-      'nem o atributo [Info(...)] no começo dele. Envie o .cs do plugin, não o zip.',
+    'O arquivo enviado não parece um plugin em C#: fora dos comentários não há "using", ' +
+      '"namespace", "class" nem o atributo [Info(...)] em lugar nenhum dele. Envie o .cs do ' +
+      'plugin.',
     400,
   );
 }

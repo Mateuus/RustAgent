@@ -29,6 +29,8 @@
 
 import { createHash } from 'node:crypto';
 
+import { decodeSource, stripComments } from './csharp-source.js';
+
 export interface PluginMetadata {
   /** O 1º argumento do `[Info]`. `null` se o arquivo não declara. */
   readonly title: string | null;
@@ -105,22 +107,13 @@ const REQUIRES_PATTERN = /^[ \t]*\/\/[ \t]*Requires:[ \t]*(.+)$/gim;
  *
  * Exigir `... Plugin <Nome>;` logo depois do `]` basta, porque nas
  * frases de comentário o que vem depois nunca é a declaração.
+ *
+ * Hoje a regex já roda sobre o código SEM comentários, e essa
+ * exigência virou a segunda trava. Ela fica: é ela que continua
+ * valendo se um dia alguém procurar referência no texto cru.
  */
 const REFERENCE_PATTERN =
   /\[\s*PluginReference\s*(?:\(\s*"([^"]*)"\s*\))?\s*\]\s*(?:(?:private|public|protected|internal|static|readonly)\s+)*Plugin\s+(\w+)\s*[;=]/g;
-
-/**
- * Até onde procurar o `[Info]` e o `[Description]`.
- *
- * Eles ficam logo antes da declaração da classe, depois dos
- * `using` — nunca passa de alguns milhares de caracteres. Varrer o
- * arquivo inteiro atrás deles multiplicaria o trabalho da regex por
- * um plugin de 180 KB sem chance de achar nada a mais.
- *
- * As DEPENDÊNCIAS são outra história e leem o arquivo todo: ver
- * `readDependencies`.
- */
-const METADATA_HEAD_CHARS = 8_192;
 
 /** Vazio vira `null`: `[Info("", "", "")]` não é metadado. */
 function orNull(value: string | undefined): string | null {
@@ -154,8 +147,17 @@ function uniqueNames(names: readonly (string | undefined)[]): readonly string[] 
  * plugin grande isso pode ser na linha mil e duzentos. Ler só o
  * cabeçalho pegaria metade das dependências, que é pior que
  * nenhuma: a tela diria "nada depende disto" com confiança.
+ *
+ * ####  UM LÊ O COMENTÁRIO, O OUTRO LÊ O CÓDIGO  ####
+ *
+ * O `// Requires:` É um comentário — o Oxide o lê assim, e por isso
+ * ele sai do `source` cru. O `[PluginReference]` é declaração, e sai
+ * do `code`, onde comentário nenhum sobrou para confundi-lo.
  */
-function readDependencies(source: string): {
+function readDependencies(
+  source: string,
+  code: string,
+): {
   requires: readonly string[];
   references: readonly string[];
 } {
@@ -168,7 +170,7 @@ function readDependencies(source: string): {
 
   const references: (string | undefined)[] = [];
 
-  for (const match of source.matchAll(REFERENCE_PATTERN)) {
+  for (const match of code.matchAll(REFERENCE_PATTERN)) {
     // O apelido do atributo ganha do nome do campo.
     references.push(match[1] ?? match[2]);
   }
@@ -184,12 +186,29 @@ function readDependencies(source: string): {
   };
 }
 
+/**
+ * O que o `.cs` diz de si.
+ *
+ * ####  SEM JANELA, E SEM COMENTÁRIO  ####
+ *
+ * Havia aqui um "procure nos primeiros 8 KB", pela razão de que o
+ * `[Info]` mora logo antes da classe. Mora — mas o que vem ANTES
+ * dele é o cabeçalho, e o do `OrigemZQueue.cs` sozinho ocupa 4,7 KB.
+ * O plugin seguinte, com trinta linhas a mais de cabeçalho, entraria
+ * no acervo sem título, sem autor e sem versão, e a tela mostraria
+ * três travessões como se o arquivo não declarasse nada.
+ *
+ * Ler o arquivo todo só é seguro porque o comentário sai antes: os
+ * cabeçalhos daqui citam `[Info(...)]` como exemplo, e a primeira
+ * ocorrência no texto cru poderia ser a da prosa. Mostrar a versão
+ * do exemplo é pior que não mostrar nenhuma.
+ */
 export function readPluginMetadata(content: Buffer): PluginMetadata {
-  const source = content.toString('utf8');
-  const head = source.slice(0, METADATA_HEAD_CHARS);
+  const source = decodeSource(content);
+  const code = stripComments(source);
 
-  const info = INFO_PATTERN.exec(head);
-  const description = DESCRIPTION_PATTERN.exec(head);
+  const info = INFO_PATTERN.exec(code);
+  const description = DESCRIPTION_PATTERN.exec(code);
 
   return {
     title: orNull(info?.[1]),
@@ -197,7 +216,7 @@ export function readPluginMetadata(content: Buffer): PluginMetadata {
     // Um dos dois grupos casa, nunca os dois: aspas OU número.
     version: orNull(info?.[3] ?? info?.[4]),
     description: orNull(description?.[1]),
-    ...readDependencies(source),
+    ...readDependencies(source, code),
   };
 }
 

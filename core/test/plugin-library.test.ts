@@ -415,6 +415,77 @@ describe('as dependências entre plugins', () => {
     expect(plugin.requires).toEqual([]);
   });
 
+  it('o cabeçalho grande não esconde o metadado do plugin', async () => {
+    // O `OrigemZQueue.cs` tem 104 linhas de comentário antes do
+    // primeiro `using`, e o `[Info]` dele cai no caractere 5.248. As
+    // duas leituras liam só o começo do arquivo — uma com 4 KB, a
+    // outra com 8 KB — e o plugin ou sumia do acervo, ou entrava com
+    // título, autor e versão nulos, que a tela mostra como três
+    // travessões. Nenhuma das duas coisas dá erro em lugar nenhum.
+    const header = Array.from(
+      { length: 300 },
+      (_, line) => `//  linha ${String(line)} do cabeçalho, explicando por que o arquivo existe`,
+    ).join('\n');
+
+    const source = Buffer.from(
+      [
+        header,
+        '',
+        'using Oxide.Core;',
+        '',
+        'namespace Oxide.Plugins',
+        '{',
+        '    [Info("Origem Z Fila", "OrigemZ", "2.1.0")]',
+        '    [Description("A fila de entrada")]',
+        '    public class OrigemZQueue : RustPlugin',
+        '    {',
+        '        [PluginReference] private Plugin OrigemZUI;',
+        '    }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+
+    expect(source.byteLength).toBeGreaterThan(9_000);
+
+    const { plugin } = await harness.library.add('OrigemZQueue.cs', source);
+
+    expect(plugin.title).toBe('Origem Z Fila');
+    expect(plugin.author).toBe('OrigemZ');
+    expect(plugin.version).toBe('2.1.0');
+    expect(plugin.references).toEqual(['OrigemZUI']);
+  });
+
+  it('o "[Info]" citado no cabeçalho não vira o metadado do plugin', async () => {
+    // Os cabeçalhos daqui ensinam pelo exemplo. Ler o arquivo inteiro
+    // sem descartar comentário só trocaria um bug por outro pior: a
+    // tela mostraria a versão do exemplo como se fosse a do plugin, e
+    // um metadado errado ninguém confere.
+    const source = Buffer.from(
+      [
+        '//  Todo plugin de Oxide se declara assim:',
+        '//',
+        '//      [Info("Exemplo Didático", "Fulano", "9.9.9")]',
+        '//      [Description("o que ele faz")]',
+        '',
+        'using Oxide.Core;',
+        'namespace Oxide.Plugins',
+        '{',
+        '    [Info("Origem Z Player", "OrigemZ", "1.4.0")]',
+        '    public class OrigemZPlayer : RustPlugin',
+        '    {',
+        '    }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const { plugin } = await harness.library.add(PLUGIN_FILE, source);
+
+    expect(plugin.title).toBe('Origem Z Player');
+    expect(plugin.version).toBe('1.4.0');
+  });
+
   it('a declaração de verdade é lida, mesmo quebrada em duas linhas', async () => {
     const source = Buffer.from(
       [
