@@ -23,7 +23,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ui/confirm-button';
 import { agent, type OperationDetail, type OperationKind } from '@/lib/api';
+import { toast } from '@/lib/toast';
 
 /** Enquanto há operação rodando. Parado, o log não muda. */
 const POLL_MS = 1_000;
@@ -117,14 +119,29 @@ export function OperationsPanel({ serverId }: { serverId: string }) {
     return () => clearInterval(timer);
   }, [operation, follow]);
 
-  // Terminou: os botões mudam (instalado agora aceita iniciar).
+  // Terminou: os botões mudam (instalado agora aceita iniciar) e
+  // o desfecho vira toast — quem disparou uma instalação de uma
+  // hora não fica olhando a tela até o fim.
   const status = operation?.status;
+  const finishedMessage = operation?.message ?? undefined;
 
   useEffect(() => {
-    if (status !== undefined && status !== 'running') {
-      void loadKinds();
+    if (status === undefined || status === 'running') {
+      return;
     }
-  }, [status, loadKinds]);
+
+    void loadKinds();
+
+    if (status === 'succeeded') {
+      toast.success('Operação concluída');
+    } else if (status === 'failed') {
+      // `duration: null` prende o toast: uma falha de instalação
+      // é justamente o que não pode sumir sozinho da tela.
+      toast.error('A operação falhou', { description: finishedMessage, duration: null });
+    } else {
+      toast.warning('Operação cancelada');
+    }
+  }, [status, finishedMessage, loadKinds]);
 
   useEffect(() => {
     if (stickToBottom.current && logRef.current !== null) {
@@ -143,8 +160,13 @@ export function OperationsPanel({ serverId }: { serverId: string }) {
       await follow(response.operationId);
     } catch (cause) {
       // A recusa vem com a frase do core: "o SteamCMD já está
-      // ocupado com…", "o servidor está no ar…".
-      setError(cause instanceof Error ? cause.message : String(cause));
+      // ocupado com…", "o servidor está no ar…". Ela vai para o
+      // toast E fica na tela: o toast some, e a explicação do que
+      // impediu a operação precisa continuar legível.
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      toast.error('A operação não pôde começar', { description: message });
+      setError(message);
     }
   }
 
@@ -153,26 +175,40 @@ export function OperationsPanel({ serverId }: { serverId: string }) {
   return (
     <div>
       <div className="mb-4 flex flex-wrap gap-2">
-        {ORDER.filter((kind) => kinds.includes(kind)).map((kind) => (
-          <Button
-            key={kind}
-            variant={kind === 'server-install' || kind === 'server-start' ? 'primary' : 'outline'}
-            disabled={running}
-            onClick={() => {
-              if (kind === 'server-stop' || kind === 'server-restart') {
-                if (
-                  !confirm('Isso derruba quem estiver jogando. O mundo é salvo antes. Confirma?')
-                ) {
-                  return;
-                }
-              }
+        {ORDER.filter((kind) => kinds.includes(kind)).map((kind) => {
+          // ####  O QUE DERRUBA JOGADOR PEDE CONFIRMAÇÃO  ####
+          //
+          // E não com o `confirm()` do navegador: ele não é do
+          // design system, não diz o que se perde e some atrás da
+          // janela em quem tem dois monitores. O `ConfirmButton`
+          // troca o próprio botão pela pergunta, no lugar onde a
+          // pessoa clicou.
+          if (kind === 'server-stop' || kind === 'server-restart') {
+            return (
+              <ConfirmButton
+                key={kind}
+                variant="danger"
+                disabled={running}
+                icon={null}
+                label={LABEL[kind]}
+                confirmLabel={`${LABEL[kind]} mesmo`}
+                hint="Isso derruba quem estiver jogando. O mundo é salvo antes de encerrar."
+                onConfirm={() => void start(kind)}
+              />
+            );
+          }
 
-              void start(kind);
-            }}
-          >
-            {LABEL[kind]}
-          </Button>
-        ))}
+          return (
+            <Button
+              key={kind}
+              variant={kind === 'server-install' || kind === 'server-start' ? 'primary' : 'outline'}
+              disabled={running}
+              onClick={() => void start(kind)}
+            >
+              {LABEL[kind]}
+            </Button>
+          );
+        })}
       </div>
 
       {error !== null && <p className="mb-4 border border-rust bg-surface-2 p-3 text-sm">{error}</p>}

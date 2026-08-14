@@ -12,7 +12,10 @@
 
 import { useEffect, useState } from 'react';
 
+import { PageHeader } from '@/components/page-header';
+import { Section } from '@/components/section';
 import { RequireSession } from '@/components/session';
+import { StateBlock } from '@/components/state-block';
 import { api } from '@/lib/api';
 
 interface Health {
@@ -63,12 +66,14 @@ function Agente() {
 
   return (
     <div className="max-w-3xl">
-      <h1 className="mb-6 font-condensed text-2xl font-bold uppercase tracking-wide">O agente</h1>
+      <PageHeader title="O agente" description="O processo que cuida dos servidores." />
 
-      {error !== null && <p className="mb-4 border border-rust bg-surface-2 p-3 text-sm">{error}</p>}
+      {error !== null && (
+        <StateBlock variant="offline" title="O agente não respondeu" detail={error} />
+      )}
 
       {health !== null && (
-        <dl className="mb-8 divide-y divide-border border border-border bg-surface text-sm">
+        <dl className="mb-8 mt-4 divide-y divide-border border border-border bg-surface text-sm">
           <Row label="versão" value={health.version} />
           <Row
             label="estado"
@@ -89,8 +94,7 @@ function Agente() {
         </dl>
       )}
 
-      <div className="border border-border bg-surface p-4 text-sm">
-        <p className="mb-2 font-condensed uppercase tracking-wide">Como mudar a configuração</p>
+      <Section title="Como mudar a configuração" contentClassName="text-sm">
         <p className="mb-3 text-muted">
           Edite o <code>.env</code> na raiz do projeto e reinicie o serviço:
         </p>
@@ -102,7 +106,7 @@ function Agente() {
           Para trocar a senha do painel, rode <code>npm run panel:senha -w core</code> e ponha o
           resultado em <code>PANEL_PASSWORD_HASH</code>.
         </p>
-      </div>
+      </Section>
     </div>
   );
 }

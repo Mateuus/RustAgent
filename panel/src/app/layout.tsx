@@ -19,6 +19,7 @@ import '@fontsource/inter/600.css';
 
 import { AppShell } from '@/components/app-shell';
 import { SessionProvider } from '@/components/session';
+import { ToastViewport } from '@/components/ui/toast';
 
 import './globals.css';
 
@@ -33,6 +34,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-screen bg-background font-sans text-foreground antialiased">
         <SessionProvider>
           <AppShell>{children}</AppShell>
+          {/* A pilha de avisos é do app inteiro: um toast disparado
+              na tela do servidor precisa sobreviver à navegação. */}
+          <ToastViewport />
         </SessionProvider>
       </body>
     </html>

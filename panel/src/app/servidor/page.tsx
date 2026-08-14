@@ -17,11 +17,14 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState } from 'react';
 
 import { OperationsPanel } from '@/components/operations-panel';
+import { PageHeader } from '@/components/page-header';
 import { PluginsPanel } from '@/components/plugins-panel';
 import { ServerStateBadge } from '@/components/server-state';
 import { RequireSession } from '@/components/session';
+import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
+import { toast } from '@/lib/toast';
 
 type Tab = 'visao' | 'operacoes' | 'plugins';
 
@@ -85,36 +88,54 @@ function Servidor() {
         ← todos os servidores
       </Link>
 
-      {error !== null && <p className="mt-4 border border-rust bg-surface-2 p-3 text-sm">{error}</p>}
+      {error !== null && (
+        <div className="mt-4">
+          <StateBlock variant="error" title="Não consegui ler este servidor" detail={error} />
+        </div>
+      )}
+
+      {server === null && error === null && (
+        <div className="mt-4">
+          <StateBlock variant="loading" title="Carregando…" />
+        </div>
+      )}
 
       {server !== null && (
         <>
-          <div className="mb-6 mt-2 flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <h1 className="font-condensed text-2xl font-bold uppercase tracking-wide">
-                {server.name}
-              </h1>
-              <p className="truncate text-sm text-muted">{server.hostname}</p>
-            </div>
+          <PageHeader
+            title={server.name}
+            description={server.hostname}
+            aside={
+              <div className="flex shrink-0 items-center gap-3">
+                <ServerStateBadge server={server} />
 
-            <div className="flex shrink-0 items-center gap-3">
-              <ServerStateBadge server={server} />
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    void agent
+                      .setEnabled(server.id, !server.enabled)
+                      .then(() => {
+                        toast.success(
+                          server.enabled
+                            ? 'O agente parou de cuidar deste servidor'
+                            : 'O agente passou a cuidar deste servidor',
+                        );
 
-              <Button
-                size="sm"
-                onClick={() => {
-                  void agent
-                    .setEnabled(server.id, !server.enabled)
-                    .then(() => load())
-                    .catch((cause: unknown) =>
-                      setError(cause instanceof Error ? cause.message : String(cause)),
-                    );
-                }}
-              >
-                {server.enabled ? 'Parar de cuidar' : 'Cuidar deste servidor'}
-              </Button>
-            </div>
-          </div>
+                        return load();
+                      })
+                      .catch((cause: unknown) => {
+                        const message = cause instanceof Error ? cause.message : String(cause);
+
+                        toast.error('Não deu', { description: message });
+                        setError(message);
+                      });
+                  }}
+                >
+                  {server.enabled ? 'Parar de cuidar' : 'Cuidar deste servidor'}
+                </Button>
+              </div>
+            }
+          />
 
           {steam?.updateAvailable === true && (
             <p className="mb-4 border border-amber bg-surface-2 p-3 text-sm">

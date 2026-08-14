@@ -14,8 +14,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ui/confirm-button';
 import { agent, type PluginInfo } from '@/lib/api';
+import { toast } from '@/lib/toast';
 
 export function PluginsPanel({ serverId }: { serverId: string }) {
   const [plugins, setPlugins] = useState<PluginInfo[] | null>(null);
@@ -50,6 +53,13 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
     try {
       const response = await agent.uploadPlugin(serverId, file);
 
+      // ####  GRAVAR E CARREGAR SÃO COISAS DIFERENTES  ####
+      //
+      // O toast confirma o ENVIO (que deu certo); a resposta do
+      // Oxide fica na tela, porque é lá que aparece o erro de
+      // compilação — e esse precisa poder ser lido com calma.
+      toast.success(`${response.name} enviado`);
+
       setNotice(
         response.reload.output === null
           ? response.message
@@ -58,7 +68,10 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
 
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      toast.error('O envio foi recusado', { description: message });
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -98,11 +111,21 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
         </pre>
       )}
 
+      {plugins === null && error === null && (
+        <StateBlock variant="loading" title="Lendo a pasta de plugins…" />
+      )}
+
       {plugins !== null && plugins.length === 0 && (
-        <p className="border border-border bg-surface p-6 text-center text-sm text-muted">
-          Nenhum plugin instalado. Envie um <code>.cs</code> — vale para os plugins deste projeto e
-          para qualquer um baixado do uMod.
-        </p>
+        <StateBlock
+          variant="empty"
+          title="Nenhum plugin instalado"
+          detail={
+            <>
+              Envie um <code>.cs</code> — vale para os plugins deste projeto e para qualquer um
+              baixado do uMod. Com o servidor parado, ele carrega no próximo start.
+            </>
+          }
+        />
       )}
 
       <div className="divide-y divide-border border border-border bg-surface">
@@ -122,33 +145,43 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
                 onClick={() => {
                   void agent
                     .reloadPlugin(serverId, plugin.name)
-                    .then((response) => setNotice(response.reload.output ?? 'Recarregado.'))
-                    .catch((cause: unknown) =>
-                      setError(cause instanceof Error ? cause.message : String(cause)),
-                    );
+                    .then((response) => {
+                      toast.success(`${plugin.name} recarregado`);
+                      setNotice(response.reload.output ?? 'Recarregado.');
+                    })
+                    .catch((cause: unknown) => {
+                      const message = cause instanceof Error ? cause.message : String(cause);
+
+                      toast.error('Não consegui recarregar', { description: message });
+                      setError(message);
+                    });
                 }}
               >
                 Recarregar
               </Button>
 
-              <Button
-                size="sm"
+              <ConfirmButton
                 variant="danger"
-                onClick={() => {
-                  if (!confirm(`Remover ${plugin.name} deste servidor?`)) {
-                    return;
-                  }
-
+                disabled={busy}
+                icon={null}
+                label="Remover"
+                confirmLabel="Remover mesmo"
+                hint={`${plugin.name} é apagado do servidor e descarregado do Oxide.`}
+                onConfirm={() => {
                   void agent
                     .removePlugin(serverId, plugin.name)
-                    .then(() => load())
-                    .catch((cause: unknown) =>
-                      setError(cause instanceof Error ? cause.message : String(cause)),
-                    );
+                    .then(() => {
+                      toast.success(`${plugin.name} removido`);
+                      return load();
+                    })
+                    .catch((cause: unknown) => {
+                      const message = cause instanceof Error ? cause.message : String(cause);
+
+                      toast.error('Não consegui remover', { description: message });
+                      setError(message);
+                    });
                 }}
-              >
-                Remover
-              </Button>
+              />
             </div>
           </div>
         ))}

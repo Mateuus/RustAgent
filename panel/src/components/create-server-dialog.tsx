@@ -19,9 +19,11 @@
 import { useState, type FormEvent } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { agent, type PortBlock } from '@/lib/api';
+import { toast } from '@/lib/toast';
 
 const MAPS = ['Procedural Map', 'Barren', 'HapisIsland', 'Craggy Island'];
 
@@ -69,10 +71,16 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
         rconPassword,
       });
 
+      toast.success(`Servidor "${id.trim()}" criado.`, {
+        description: 'Ele nasce desligado — o próximo passo é Instalar.',
+      });
+
       onCreated();
     } catch (cause) {
       // A frase vem do core — ela conhece a regra (id em uso,
-      // porta ocupada, senha com caractere proibido).
+      // porta ocupada, senha com caractere proibido). Fica no
+      // formulário, e não num toast: ela aponta um campo que a
+      // pessoa precisa corrigir sem perder o que digitou.
       setError(cause instanceof Error ? cause.message : 'Não consegui falar com o agente.');
     } finally {
       setBusy(false);
@@ -80,14 +88,8 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-6">
-      <form
-        onSubmit={(event) => void onSubmit(event)}
-        className="w-full max-w-lg border border-border bg-surface p-6"
-      >
-        <h2 className="mb-1 font-condensed text-xl font-bold uppercase tracking-wide">
-          Criar servidor
-        </h2>
+    <Dialog open title="Criar servidor" onClose={onClose} busy={busy}>
+      <form onSubmit={(event) => void onSubmit(event)}>
         <p className="mb-6 text-sm text-muted">
           Isto escreve o <code>Configs\&lt;id&gt;.ini</code> e reserva as portas. O jogo é baixado
           depois, no botão Instalar.
@@ -199,6 +201,6 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
           </Button>
         </div>
       </form>
-    </div>
+    </Dialog>
   );
 }

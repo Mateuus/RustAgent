@@ -17,8 +17,10 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 import { CreateServerDialog } from '@/components/create-server-dialog';
+import { PageHeader } from '@/components/page-header';
 import { ServerStateBadge } from '@/components/server-state';
 import { RequireSession } from '@/components/session';
+import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { agent, type PortBlock, type ServerView } from '@/lib/api';
 
@@ -61,38 +63,47 @@ function Servers() {
 
   return (
     <div>
-      <div className="mb-6 flex items-end justify-between">
-        <div>
-          <h1 className="font-condensed text-2xl font-bold uppercase tracking-wide">Servidores</h1>
-          <p className="text-sm text-muted">
-            {servers === null
-              ? 'Carregando…'
-              : `${String(servers.length)} servidor(es) nesta máquina`}
-          </p>
-        </div>
-
-        <Button variant="primary" onClick={() => setCreating(true)}>
-          Criar servidor
-        </Button>
-      </div>
-
-      {error !== null && <p className="mb-4 border border-rust bg-surface-2 p-3 text-sm">{error}</p>}
-
-      {servers !== null && servers.length === 0 && (
-        <div className="border border-border bg-surface p-8 text-center">
-          <p className="mb-2 font-condensed text-lg uppercase">Nenhum servidor ainda</p>
-          <p className="mb-4 text-sm text-muted">
-            Criar um servidor escreve o <code>Configs\&lt;id&gt;.ini</code> e escolhe um bloco de
-            portas livre. Ele nasce desligado — o passo seguinte é instalar, que baixa o jogo pelo
-            SteamCMD.
-          </p>
+      <PageHeader
+        title="Servidores"
+        description={
+          servers === null
+            ? 'Carregando…'
+            : `${String(servers.length)} servidor(es) nesta máquina`
+        }
+        aside={
           <Button variant="primary" onClick={() => setCreating(true)}>
-            Criar o primeiro
+            Criar servidor
           </Button>
-        </div>
+        }
+      />
+
+      {/* Os três estados de uma lista, cada um com a sua cara: o
+          `StateBlock` é o mesmo do resto do painel, e é o que
+          impede "carregando" virar tabela vazia e erro virar
+          "nenhum servidor". */}
+      {error !== null && (
+        <StateBlock variant="error" title="Não consegui falar com o agente" detail={error} />
       )}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {error === null && servers === null && (
+        <StateBlock variant="loading" title="Carregando os servidores…" />
+      )}
+
+      {error === null && servers !== null && servers.length === 0 && (
+        <StateBlock
+          variant="empty"
+          title="Nenhum servidor ainda"
+          detail={
+            <>
+              Criar um servidor escreve o <code>Configs\&lt;id&gt;.ini</code> e reserva um bloco de
+              portas livre. Ele nasce desligado — o passo seguinte é Instalar, que baixa o jogo
+              pelo SteamCMD.
+            </>
+          }
+        />
+      )}
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {servers?.map((server) => <ServerCard key={server.id} server={server} />)}
       </div>
 
