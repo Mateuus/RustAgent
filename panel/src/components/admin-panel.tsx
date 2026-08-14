@@ -38,7 +38,6 @@ import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Toggle } from '@/components/ui/toggle';
 import {
   agent,
   agentUrl,
@@ -837,20 +836,35 @@ function PlayersFilters({
               <div>
                 <Label>O que o mapa mostra</Label>
 
-                <div className="mt-1 flex items-center justify-between gap-3">
-                  <span className="min-w-0 text-2xs leading-relaxed text-muted">
-                    Monumentos{totalMonumentos > 0 ? ` (${String(totalMonumentos)})` : ''} — é o que
-                    faz o mapa ser legível: &ldquo;perto do Launch Site&rdquo; diz mais que
-                    qualquer coordenada.
+                {/* ####  CHECKBOX, E NÃO O SEGMENTADO  ####
+
+                    O segmentado (Ligado/Desligado escrito) é para
+                    UM estado que vale por si — a janela de console
+                    do servidor, o agente cuidar dele. Aqui é uma
+                    LISTA de camadas que se marca e desmarca, e ela
+                    vai crescer: com quatro linhas, quatro pares de
+                    botões escritos viram uma parede. Checkbox é o
+                    controle que a lista pede, e continua dizendo o
+                    estado sem depender de cor. */}
+                <label className="mt-1 flex cursor-pointer items-center justify-between gap-3 py-1">
+                  <span className="min-w-0 text-sm">
+                    Monumentos{' '}
+                    <span className="text-muted">
+                      ({String(totalMonumentos)})
+                    </span>
                   </span>
 
-                  <Toggle
-                    on={mostrarMonumentos}
-                    busy={false}
-                    label="Mostrar monumentos no mapa"
-                    onChange={onMostrarMonumentos}
+                  <input
+                    type="checkbox"
+                    checked={mostrarMonumentos}
+                    onChange={(event) => onMostrarMonumentos(event.target.checked)}
+                    // `accent-color` pinta o check nativo com a cor
+                    // do painel sem reimplementar o controle — e o
+                    // nativo traz foco por teclado e leitor de tela
+                    // de graça.
+                    className="h-4 w-4 shrink-0 accent-[color:var(--rust-red)]"
                   />
-                </div>
+                </label>
               </div>
 
               <p className="border-t border-border pt-2 text-2xs leading-relaxed text-muted">
