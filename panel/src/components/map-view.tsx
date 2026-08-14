@@ -118,6 +118,20 @@ export interface MapViewProps {
    * `null` = sem imagem, e aí o desenho é do mundo puro.
    */
   readonly coverage?: number | null;
+  /**
+   * Arrastar um jogador com Ctrl o TELEPORTA para onde foi solto.
+   *
+   * ####  POR QUE COM Ctrl, E NÃO ARRASTANDO DIRETO  ####
+   *
+   * Arrastar é o gesto de mover o MAPA — e num mapa cheio de pontos
+   * a mão passa por cima deles o tempo todo. Sem o modificador, um
+   * arraste que começasse por acidente sobre alguém o mandaria para
+   * o outro lado da ilha, e não existe desfazer.
+   *
+   * `undefined` = a tela não oferece o gesto (o plugin que executa
+   * o teleporte não está ligado ali).
+   */
+  readonly onTeleport?: (player: GamePlayer, target: { x: number; z: number }) => void;
 }
 
 /**
@@ -159,12 +173,28 @@ export function MapView({
   onSelect,
   imageUrl = null,
   coverage = null,
+  onTeleport,
 }: MapViewProps) {
   const [hovered, setHovered] = useState<string | null>(null);
+  /** O jogador sendo arrastado com Ctrl, e onde o cursor está. */
+  const [teleporting, setTeleporting] = useState<{
+    player: GamePlayer;
+    px: number;
+    py: number;
+  } | null>(null);
   const [view, setView] = useState<View>(FULL_VIEW);
   const svgRef = useRef<SVGSVGElement | null>(null);
   /** De onde o arraste começou, em coordenadas do desenho. */
   const dragFrom = useRef<{ x: number; y: number; view: View } | null>(null);
+
+  // ####  A ESCALA VEM ANTES DOS GESTOS  ####
+  //
+  // O que o quadrado do desenho representa: a cobertura da IMAGEM
+  // quando há imagem (maior que o mundo — o jogo desenha oceano em
+  // volta), o mundo puro quando não há. Os callbacks de arraste
+  // convertem desenho -> mundo com este número, então ele precisa
+  // existir antes deles.
+  const span = imageUrl !== null && coverage !== null && coverage > 0 ? coverage : world.size;
 
   /** Tela -> desenho. É o que faz o zoom respeitar o cursor. */
   const toDrawing = useCallback(
@@ -255,6 +285,16 @@ export function MapView({
 
   const onPointerMove = useCallback(
     (event: PointerEvent<SVGSVGElement>) => {
+      // O arraste de um JOGADOR tem precedência sobre o do mapa:
+      // enquanto ele acontece, o mapa fica parado — mover os dois
+      // ao mesmo tempo deixaria o destino escapando do cursor.
+      if (teleporting !== null) {
+        const ponto = toDrawing(event.clientX, event.clientY, view);
+
+        setTeleporting({ ...teleporting, px: ponto.x, py: ponto.y });
+        return;
+      }
+
       const from = dragFrom.current;
 
       if (from === null) {
@@ -271,16 +311,36 @@ export function MapView({
         }),
       );
     },
-    [toDrawing],
+    [toDrawing, teleporting, view],
   );
 
-  const endDrag = useCallback((event: PointerEvent<SVGSVGElement>) => {
-    dragFrom.current = null;
+  const endDrag = useCallback(
+    (event: PointerEvent<SVGSVGElement>) => {
+      dragFrom.current = null;
 
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }, []);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      if (teleporting === null) {
+        return;
+      }
+
+      const alvo = teleporting;
+
+      setTeleporting(null);
+
+      // Desenho -> mundo. É a volta exata da projeção: sem o
+      // `span/2 - …` no eixo Z, soltar no norte teleportaria para o
+      // sul, e o erro só apareceria com o jogador reclamando.
+      const half = span / 2;
+      const x = (alvo.px / SIDE) * span - half;
+      const z = half - (alvo.py / SIDE) * span;
+
+      onTeleport?.(alvo.player, { x, z });
+    },
+    [onTeleport, span, teleporting],
+  );
 
   const zoomed = view.side < MAX_SIDE;
 
@@ -292,10 +352,6 @@ export function MapView({
       </div>
     );
   }
-
-  // O que o quadrado do desenho representa. Com imagem é a
-  // cobertura DELA (maior que o mundo); sem imagem, o mundo puro.
-  const span = imageUrl !== null && coverage !== null && coverage > 0 ? coverage : world.size;
 
   // ####  A GRADE É DO MUNDO, E A IMAGEM É MAIOR QUE ELE  ####
   //
@@ -325,11 +381,23 @@ export function MapView({
   );
 
   return (
-    <div className="relative h-full w-full overflow-hidden border border-border bg-background">
+    // `select-none` TAMBÉM aqui, e não só no <svg>: o gesto de
+    // arrastar começa no container e a seleção do navegador pega os
+    // rótulos da grade como se fossem texto — a tela fica coberta de
+    // letras destacadas no meio do movimento.
+    <div className="relative h-full w-full select-none overflow-hidden border border-border bg-background">
       <svg
         ref={svgRef}
         viewBox={`${String(view.x)} ${String(view.y)} ${String(view.side)} ${String(view.side)}`}
-        className={cn('h-full w-full touch-none', zoomed ? 'cursor-grab' : 'cursor-default')}
+        // `select-none`: arrastar sobre um SVG seleciona os rótulos
+        // da grade como se fossem texto, e a tela fica coberta de
+        // letras destacadas em azul no meio do gesto de mover o
+        // mapa. `touch-none` faz o mesmo pelo lado do toque, onde o
+        // arraste viraria rolagem da página.
+        className={cn(
+          'h-full w-full touch-none select-none',
+          zoomed ? 'cursor-grab' : 'cursor-default',
+        )}
         role="img"
         aria-label={`Mapa do mundo com ${String(plotted.length)} jogador(es)`}
         onWheel={onWheel}
@@ -449,10 +517,32 @@ export function MapView({
             <g
               key={player.steamId}
               transform={`translate(${String(px)} ${String(py)})`}
-              className="cursor-pointer"
+              className={cn(onTeleport === undefined ? 'cursor-pointer' : 'cursor-move')}
               onMouseEnter={() => setHovered(player.steamId)}
               onMouseLeave={() => setHovered(null)}
               onClick={() => onSelect(player)}
+              onPointerDown={(event) => {
+                // ####  SÓ COM Ctrl  ####
+                //
+                // Sem o modificador, o arraste é o do MAPA — e num
+                // mapa cheio de pontos a mão passa por cima deles o
+                // tempo todo. Um arraste começado por acidente
+                // sobre alguém o mandaria para o outro lado da
+                // ilha, e não existe desfazer.
+                if (!event.ctrlKey || onTeleport === undefined || event.button !== 0) {
+                  return;
+                }
+
+                // Impede o pan do mapa de começar junto: os dois
+                // ao mesmo tempo deixariam o destino escapando do
+                // cursor.
+                event.stopPropagation();
+
+                const ponto = toDrawing(event.clientX, event.clientY, view);
+
+                setTeleporting({ player, px: ponto.x, py: ponto.y });
+                svgRef.current?.setPointerCapture(event.pointerId);
+              }}
             >
               {/* O alvo de clique é maior que o ponto: um círculo de
                   6px é difícil de acertar com o mouse e impossível
@@ -502,7 +592,63 @@ export function MapView({
             </g>
           );
         })}
+
+        {/* O trajeto do teleporte: de onde ele está até onde vai
+            cair. Desenhado por último para ficar sobre tudo. */}
+        {teleporting?.player.position != null && (
+          <g className="pointer-events-none">
+            {(() => {
+              const origem = project(teleporting.player.position, span);
+
+              return (
+                <>
+                  <line
+                    x1={origem.px}
+                    y1={origem.py}
+                    x2={teleporting.px}
+                    y2={teleporting.py}
+                    className="stroke-amber"
+                    strokeWidth={2 * k}
+                    strokeDasharray={`${String(6 * k)} ${String(4 * k)}`}
+                  />
+
+                  <g transform={`translate(${String(teleporting.px)} ${String(teleporting.py)})`}>
+                    <circle r={10 * k} className="fill-none stroke-amber" strokeWidth={2 * k} />
+                    <line
+                      x1={-14 * k}
+                      y1={0}
+                      x2={14 * k}
+                      y2={0}
+                      className="stroke-amber"
+                      strokeWidth={2 * k}
+                    />
+                    <line
+                      x1={0}
+                      y1={-14 * k}
+                      x2={0}
+                      y2={14 * k}
+                      className="stroke-amber"
+                      strokeWidth={2 * k}
+                    />
+                  </g>
+                </>
+              );
+            })()}
+          </g>
+        )}
       </svg>
+
+      {/* ####  O DESTINO DO TELEPORTE, ENQUANTO SE ARRASTA  ####
+
+          Uma linha do ponto de origem até o cursor e um alvo no
+          fim. Sem esse retorno, soltar o botão é um salto no
+          escuro: a pessoa não sabe onde o jogador vai parar até ele
+          já ter parado — e teleporte não tem desfazer. */}
+      {teleporting !== null && (
+        <div className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 border border-amber bg-surface px-3 py-1 text-2xs">
+          Solte para teleportar <strong>{teleporting.player.name}</strong>
+        </div>
+      )}
 
       {/* ####  OS BOTÕES DE ZOOM NÃO SÃO REDUNDANTES  ####
 

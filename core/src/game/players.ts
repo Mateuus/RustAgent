@@ -40,10 +40,13 @@ import type { OpsRcon } from '../ops/service.js';
 import { gridLabel, worldGrid, type WorldGrid } from './grid.js';
 import {
   buildPlayersCommand,
+  buildTeleportCommand,
   firstJsonLine,
+  PLAYER_ACTIONS_PLUGIN,
   PLAYERS_DEFAULT_LIMIT,
   PLAYERS_PLUGIN,
   playersResponseSchema,
+  teleportResponseSchema,
   type Position,
 } from './plugin-contract.js';
 
@@ -223,6 +226,79 @@ export async function kickPlayer(
   const clean = sanitizeArgument(reason, 'expulso por um administrador');
 
   return rcon.send(`kick ${steamId} "${clean}"`);
+}
+
+/**
+ * Move o jogador para um ponto do mundo.
+ *
+ * ####  A ALTURA NÃO VEM DAQUI  ####
+ *
+ * `y` é opcional e o normal é omiti-lo: quem arrasta o boneco num
+ * mapa 2D escolhe X e Z, e quem sabe a altura do chão naquele ponto
+ * é o servidor. O plugin resolve pelo terreno (e pela água, quando
+ * ela está por cima) e devolve a posição FINAL.
+ *
+ * Mandar o `y` de onde o jogador estava enterraria quem vai para a
+ * montanha e largaria no ar quem vai para o vale — preso num caso,
+ * caindo no outro.
+ *
+ * @throws {ApiError} 503 sem RCON, 409 sem o plugin, 502 quando a
+ * resposta não bate com o contrato.
+ */
+export async function teleportPlayer(
+  serverId: string,
+  rcon: OpsRcon,
+  steamId: string,
+  target: { readonly x: number; readonly z: number; readonly y?: number | undefined },
+): Promise<{ readonly position: Position; readonly heightAdjusted: boolean }> {
+  assertConnected(serverId, rcon);
+
+  const raw = await rcon.send(buildTeleportCommand({ steamId, ...target }));
+  const parsed = teleportResponseSchema.safeParse(firstJsonLine(raw));
+
+  if (!parsed.success) {
+    // Resposta vazia é o sintoma de comando inexistente: o console
+    // do Rust não reclama de um comando que não conhece, ele apenas
+    // não responde. Dizer isso poupa a caça ao defeito que não
+    // existe.
+    throw new ApiError(
+      'PLUGIN_INVALID_RESPONSE',
+      raw.trim() === ''
+        ? `O ${PLAYER_ACTIONS_PLUGIN} não respondeu ao teleporte. Ele está ligado neste ` +
+          'servidor? O comando vem desse plugin — sem ele, o jogo não tem como mover um ' +
+          'jogador para uma posição pelo RCON.'
+        : `O ${PLAYER_ACTIONS_PLUGIN} respondeu ao teleporte fora do contrato: ` +
+          raw.trim().slice(0, 300),
+      502,
+    );
+  }
+
+  if (!parsed.data.ok) {
+    if (parsed.data.error === 'OUTSIDE_WORLD') {
+      throw new ApiError(
+        'OUTSIDE_WORLD',
+        'Esse ponto está fora do mundo. Fora da borda não há terreno, e o jogador cairia sem ' +
+          'parar.',
+        400,
+      );
+    }
+
+    if (parsed.data.error === 'PLAYER_NOT_FOUND') {
+      throw new ApiError(
+        'PLAYER_NOT_FOUND',
+        `${steamId} não está mais neste servidor — nem online, nem dormindo.`,
+        404,
+      );
+    }
+
+    throw new ApiError(
+      'PLUGIN_ERROR',
+      `O ${PLAYER_ACTIONS_PLUGIN} recusou o teleporte: ${parsed.data.error}.`,
+      502,
+    );
+  }
+
+  return { position: parsed.data.position, heightAdjusted: parsed.data.heightAdjusted };
 }
 
 // ------------------------------------------------------------

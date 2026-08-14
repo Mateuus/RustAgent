@@ -283,6 +283,32 @@ function PlayersSection({ server }: { server: ServerView }) {
     }
   }
 
+  /**
+   * O teleporte por arraste.
+   *
+   * A tela NÃO redesenha o ponto onde ele foi solto: ela recarrega e
+   * usa a posição que o SERVIDOR devolveu. A altura é resolvida lá,
+   * e o jogador pode parar alguns metros acima ou abaixo do que um
+   * mapa 2D sugere — desenhar o palpite seria a tela afirmando uma
+   * coisa que ela não sabe.
+   */
+  async function teleport(player: GamePlayer, target: { x: number; z: number }): Promise<void> {
+    setBusy(player.steamId);
+
+    try {
+      const response = await agent.teleportPlayer(server.id, player.steamId, target);
+
+      toast.success(`${player.name} foi movido`, { description: response.message });
+      await load();
+    } catch (cause) {
+      toast.error('Não consegui teleportar', {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function enablePlugin(pluginId: number): Promise<void> {
     setBusy('plugin');
 
@@ -475,6 +501,14 @@ function PlayersSection({ server }: { server: ServerView }) {
                     onSelect={(player) =>
                       setSelected(player.steamId === selected ? null : player.steamId)
                     }
+                    // Só com a fonte do plugin: sem ele não existe
+                    // comando que mova um jogador, e oferecer o
+                    // gesto seria prometer o que o servidor não faz.
+                    onTeleport={
+                      snapshot.source === 'plugin'
+                        ? (player, target) => void teleport(player, target)
+                        : undefined
+                    }
                   />
                 </div>
 
@@ -598,6 +632,14 @@ function PlayersSection({ server }: { server: ServerView }) {
                     coverage={mapImage.coverage}
                     onSelect={(player) =>
                       setSelected(player.steamId === selected ? null : player.steamId)
+                    }
+                    // Só com a fonte do plugin: sem ele não existe
+                    // comando que mova um jogador, e oferecer o
+                    // gesto seria prometer o que o servidor não faz.
+                    onTeleport={
+                      snapshot.source === 'plugin'
+                        ? (player, target) => void teleport(player, target)
+                        : undefined
                     }
                   />
                 </div>

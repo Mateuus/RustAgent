@@ -30,7 +30,7 @@ import { z } from 'zod';
 import { grantAdmin, readAdmins, revokeAdmin } from '../../game/admins.js';
 import { DEFAULT_CHAT_LIMIT, MAX_CHAT_LIMIT, readChat } from '../../game/chat.js';
 import { mapImagePath, readMapImage, renderMapImage } from '../../game/map-image.js';
-import { kickPlayer, type PlayersReader } from '../../game/players.js';
+import { kickPlayer, teleportPlayer, type PlayersReader } from '../../game/players.js';
 import type { ServerContext } from '../../servers/context.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { ApiError } from '../error-response.js';
@@ -47,6 +47,21 @@ const chatQuery = z.object({
 });
 
 const kickBody = z.object({ reason: z.string().trim().max(200).optional() }).strict();
+
+/**
+ * O destino de um teleporte.
+ *
+ * `y` é opcional de propósito — ver a rota. A faixa de ±10.000
+ * cobre qualquer mundo do Rust com folga; quem recusa de verdade é
+ * o plugin, que conhece o tamanho do mundo carregado.
+ */
+const teleportBody = z
+  .object({
+    x: z.number().finite().min(-10_000).max(10_000),
+    z: z.number().finite().min(-10_000).max(10_000),
+    y: z.number().finite().min(-2_000).max(5_000).optional(),
+  })
+  .strict();
 
 const sayBody = z
   .object({
@@ -169,6 +184,47 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
       message:
         `${steamId} foi expulso. Ele pode entrar de novo a qualquer momento — para impedir, ` +
         'use Banir.',
+    };
+  });
+
+  /**
+   * Move o jogador para um ponto do mundo.
+   *
+   * ####  O `y` NÃO VEM DA TELA  ####
+   *
+   * Quem arrasta o boneco no mapa escolhe X e Z; altura não existe
+   * num mapa 2D. Sem ele, o plugin resolve pelo terreno e devolve
+   * onde o jogador de fato parou — e é essa posição que a tela usa
+   * para redesenhar o ponto, em vez de supor que ele chegou onde
+   * foi solto.
+   */
+  app.post('/servers/:id/players/:steamId/teleport', async (request) => {
+    const { id, steamId } = playerParams.parse(request.params);
+    const target = teleportBody.parse(request.body);
+    const context = contextOf(deps, id);
+
+    const result = await teleportPlayer(id, context.rcon, steamId, target);
+    const by = operatorOf(request);
+
+    // Mover um jogador é destrutivo do ponto de vista dele: ele
+    // perde o lugar onde estava. Fica registrado, com quem pediu.
+    request.log.warn(
+      { server: id, steamId, by, to: result.position, heightAdjusted: result.heightAdjusted },
+      'jogador teleportado pelo painel',
+    );
+
+    context.console.pushLocal(
+      `${by ?? 'alguém'} teleportou ${steamId} para ` +
+        `${result.position.x.toFixed(0)}, ${result.position.z.toFixed(0)}`,
+    );
+
+    return {
+      ok: true,
+      steamId,
+      ...result,
+      message: result.heightAdjusted
+        ? 'Jogador movido. A altura foi resolvida pelo terreno do destino.'
+        : 'Jogador movido para a altura informada.',
     };
   });
 

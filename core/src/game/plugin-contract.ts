@@ -57,7 +57,19 @@ import { z } from 'zod';
 export const PLUGIN_COMMANDS = {
   /** `origemz.players [offset] [limit]` — quem está online. */
   players: 'origemz.players',
+  /** `origemz.player.teleport <steamId> <x> <z> [y]`. */
+  teleport: 'origemz.player.teleport',
 } as const;
+
+/**
+ * O plugin que serve o teleporte.
+ *
+ * NÃO é o mesmo do `origemz.players`: as ações sobre um jogador
+ * moram no `OrigemZPlayer`, e a leitura da lista no
+ * `OrigemZAgent`. Confundir os dois faria a tela oferecer arrastar
+ * o boneco num servidor onde o comando não existe.
+ */
+export const PLAYER_ACTIONS_PLUGIN = 'OrigemZPlayer';
 
 /** O plugin que serve o `origemz.players`. */
 export const PLAYERS_PLUGIN = 'OrigemZAgent';
@@ -138,6 +150,49 @@ export type PlayersResponse = z.infer<typeof playersResponseSchema>;
 export function buildPlayersCommand(params: { offset: number; limit: number }): string {
   return `${PLUGIN_COMMANDS.players} ${String(params.offset)} ${String(params.limit)}`;
 }
+
+/**
+ * `origemz.player.teleport <steamId> <x> <z> [y]`
+ *
+ * ####  O `y` É OPCIONAL, E O NORMAL É OMITI-LO  ####
+ *
+ * Quem arrasta o boneco no mapa escolhe X e Z — altura não existe
+ * num mapa 2D. Sem o terceiro número, o PLUGIN resolve a altura
+ * pelo terreno (e pela água, quando ela está por cima).
+ *
+ * Mandar o `y` de onde o jogador estava seria o erro clássico: ele
+ * é enterrado dentro da montanha ou largado a duzentos metros do
+ * chão — preso num caso, caindo no outro, e queda no Rust tira
+ * vida.
+ */
+export function buildTeleportCommand(params: {
+  steamId: string;
+  x: number;
+  z: number;
+  y?: number | undefined;
+}): string {
+  const base = `${PLUGIN_COMMANDS.teleport} ${params.steamId} ${params.x.toFixed(2)} ${params.z.toFixed(2)}`;
+
+  return params.y === undefined ? base : `${base} ${params.y.toFixed(2)}`;
+}
+
+/**
+ * `{"ok":true,"steamId":"…","position":{…},"heightAdjusted":true}`
+ *
+ * A posição que volta é a FINAL, e não a pedida: com a altura
+ * resolvida pelo terreno, só o servidor sabe onde o jogador parou.
+ */
+export const teleportOkSchema = z.object({
+  ok: z.literal(true),
+  steamId: z.string(),
+  position: positionSchema,
+  heightAdjusted: z.boolean(),
+});
+
+export const teleportResponseSchema = z.discriminatedUnion('ok', [
+  teleportOkSchema,
+  pluginErrorSchema,
+]);
 
 /**
  * A primeira linha da resposta que é um JSON válido.

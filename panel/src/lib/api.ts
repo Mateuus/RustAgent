@@ -702,6 +702,27 @@ export const agent = {
    * dono é o jogo, que guarda as mensagens de antes de o agente
    * subir.
    */
+  /**
+   * Move o jogador para um ponto do mundo.
+   *
+   * `y` é omitido de propósito: quem arrasta o boneco no mapa
+   * escolhe X e Z, e quem sabe a altura do chão ali é o servidor. A
+   * resposta traz a posição FINAL — é ela que a tela usa para
+   * redesenhar o ponto, em vez de supor que ele chegou onde foi
+   * solto.
+   */
+  teleportPlayer: (id: string, steamId: string, target: { x: number; z: number; y?: number }) =>
+    api<{
+      ok: true;
+      steamId: string;
+      position: { x: number; y: number; z: number };
+      heightAdjusted: boolean;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/players/${encodeURIComponent(steamId)}/teleport`, {
+      method: 'POST',
+      body: target,
+    }),
+
   chat: (id: string, limit = 100) =>
     api<{
       ok: true;
