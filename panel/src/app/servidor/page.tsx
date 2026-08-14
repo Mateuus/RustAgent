@@ -216,7 +216,7 @@ function Servidor() {
 
           {tab === 'visao' && <Visao server={server} steam={steam} />}
           {tab === 'console' && <ConsolePanel serverId={server.id} />}
-          {tab === 'operacoes' && <OperationsPanel serverId={server.id} />}
+          {tab === 'operacoes' && <OperationsPanel server={server} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
           {tab === 'config' && <ServerSettings server={server} onChanged={() => void load()} />}
         </>
