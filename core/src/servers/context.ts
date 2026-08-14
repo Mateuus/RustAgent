@@ -23,6 +23,7 @@ import type { Logger } from '../logger.js';
 import type { OperationLock, OperationStore } from '../ops/operations.js';
 import { OperationsService } from '../ops/service.js';
 import { RconClient } from '../rcon/client.js';
+import { ChatBuffer } from './chat-buffer.js';
 import { ConsoleBuffer } from './console-buffer.js';
 
 export interface ServerContextDeps {
@@ -31,6 +32,22 @@ export interface ServerContextDeps {
   readonly lock: OperationLock;
   readonly logger: Logger;
   readonly startTimeoutMs: number;
+  /**
+   * Chamado toda vez que o RCON deste servidor conecta.
+   *
+   * ####  É O GANCHO DA RECONCILIAÇÃO  ####
+   *
+   * A lista de banidos do agente e o `bans.cfg` do servidor podem
+   * divergir enquanto eles não se falam — alguém banindo à mão no
+   * console, um ban de rede aplicado com o servidor parado. O
+   * momento de fechar essa diferença é exatamente este: quando o
+   * agente volta a alcançar o servidor.
+   *
+   * Cobre os três momentos do briefing de uma vez, porque os três
+   * passam por aqui: o boot do agente, o servidor sendo ligado e a
+   * reconexão do RCON.
+   */
+  readonly onRconConnected?: (serverId: string) => void;
 }
 
 export class ServerContext {
@@ -39,6 +56,15 @@ export class ServerContext {
   readonly operations: OperationsService;
   /** O que o servidor está dizendo agora. Ver console-buffer.ts. */
   readonly console = new ConsoleBuffer();
+  /**
+   * Só o que os JOGADORES dizem. Ver chat-buffer.ts.
+   *
+   * Anel próprio, e não um filtro sobre o console: meia hora de
+   * conversa sai do buffer de 500 linhas empurrada por carga de
+   * plugin e aviso de save, que é ruído para quem administra o
+   * chat.
+   */
+  readonly chat = new ChatBuffer();
 
   constructor(config: ServerConfig, deps: ServerContextDeps) {
     this.config = config;
@@ -58,12 +84,32 @@ export class ServerContext {
     // vai para o buffer — é o que a tela de Console mostra. O
     // ouvinte é montado no CONSTRUTOR, e não no `start()`: as
     // primeiras linhas chegam junto com a conexão.
+    //
+    // ####  UM OUVINTE, DOIS DESTINOS  ####
+    //
+    // O chat sai do MESMO evento, e não de um segundo
+    // `rcon.on('log')`. Dois ouvintes independentes sobre o mesmo
+    // socket é o desenho que um dia entrega metade das linhas para
+    // cada um — e a metade que some é sempre a que alguém estava
+    // procurando. Quem decide o que é conversa é o próprio
+    // ChatBuffer.
     this.rcon.on('log', (entry) => {
       this.console.push(entry);
+      this.chat.push(entry);
     });
 
     this.rcon.on('connected', () => {
       this.console.pushLocal('conectado ao RCON');
+
+      // Ver `onRconConnected`: é aqui que a lista de banidos deste
+      // servidor volta a ser conferida. O `try` existe porque um
+      // erro num ouvinte de evento derrubaria a conexão que acabou
+      // de subir — e a lista pode esperar, a conexão não.
+      try {
+        deps.onRconConnected?.(config.id);
+      } catch (error) {
+        logger.warn({ err: error }, 'o gancho de reconexão falhou');
+      }
     });
 
     this.rcon.on('disconnected', (info) => {

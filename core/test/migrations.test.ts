@@ -93,8 +93,15 @@ describe('003 — o plugin custom', () => {
   it('preserva o plugin da biblioteca, agora sem dono', () => {
     const db = seeded();
 
-    // A 003 recria as tabelas; a 004 acrescenta as dependências.
-    expect(runMigrations(db).map((migration) => migration.id)).toEqual([3, 4]);
+    // Tudo o que faltava a partir da 002 é aplicado de uma vez.
+    //
+    // A lista sai do próprio `MIGRATIONS`, e não escrita à mão:
+    // fixada em `[3, 4]`, esta linha quebraria a cada migração nova
+    // — e o que ela existe para provar não é QUANTAS migrações há,
+    // é que a 003 recria as tabelas sem perder dado.
+    expect(runMigrations(db).map((migration) => migration.id)).toEqual(
+      MIGRATIONS.filter((migration) => migration.id > 2).map((migration) => migration.id),
+    );
 
     const plugin = db.prepare('SELECT * FROM plugins').get() as {
       id: number;

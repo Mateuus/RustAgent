@@ -316,6 +316,108 @@ export interface SystemInfo {
   };
 }
 
+// ------------------------------------------------------------
+//  Administração e banimentos
+// ------------------------------------------------------------
+
+/**
+ * Um jogador conectado, venha ele do plugin ou do `playerlist`.
+ *
+ * Quase tudo é anulável porque as duas fontes não dão as mesmas
+ * coisas: sem o `OrigemZAgent`, `position`, `isAlive` e
+ * `isSleeping` vêm `null`. Ausente vira travessão, nunca zero — um
+ * "morto" inventado é pior que um campo vazio.
+ */
+export interface GamePlayer {
+  steamId: string;
+  name: string;
+  health: number | null;
+  isAlive: boolean | null;
+  isSleeping: boolean | null;
+  ping: number | null;
+  connectedSeconds: number | null;
+  position: { x: number; y: number; z: number } | null;
+}
+
+export interface PlayersSnapshot {
+  /** De onde veio esta lista. A tela diz isso em voz alta. */
+  source: 'plugin' | 'nativo';
+  total: number;
+  players: GamePlayer[];
+  /**
+   * O plugin que daria a posição, e o estado dele aqui.
+   *
+   * `id` nulo = ele não está no acervo deste servidor, e aí o
+   * caminho é a aba Plugins. Com id e desligado, a tela oferece
+   * ligar sem sair daqui.
+   */
+  plugin: { name: string; id: number | null; enabled: boolean };
+  /** Os campos que a fonte atual não fornece. */
+  missing: string[];
+}
+
+export interface ChatLine {
+  n: number;
+  at: string;
+  steamId: string | null;
+  name: string | null;
+  text: string;
+  channel: 'global' | 'equipe' | null;
+}
+
+export type AdminLevel = 'owner' | 'moderator';
+
+export interface AdminEntry {
+  steamId: string;
+  level: AdminLevel;
+  name: string | null;
+  note: string | null;
+}
+
+export type BanScope = 'network' | 'servers';
+
+/**
+ * Um banimento da lista do agente.
+ *
+ * `steamId` é STRING — e é assim que ele atravessa a tela inteira.
+ * Em número, um SteamID64 passa de 2^53 e perde precisão: o ban
+ * iria para a conta errada.
+ */
+export interface Ban {
+  id: number;
+  steamId: string;
+  name: string | null;
+  reason: string;
+  scope: BanScope;
+  /** Vazio num `network` — ali ele quer dizer "todos". */
+  servers: string[];
+  createdAt: string;
+  createdBy: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  origin: 'panel' | 'adopted';
+  active: boolean;
+  /** Passou da data e o relógio ainda não o soltou. */
+  expired: boolean;
+}
+
+/** O mesmo ban, visto de dentro de um servidor. */
+export interface ServerBan extends Ban {
+  source: 'rede' | 'especifico' | 'adotado';
+}
+
+export interface BanSyncResult {
+  serverId: string;
+  applied: string[];
+  removed: string[];
+  adopted: string[];
+  extended: string[];
+  /** Preenchido = a rodada não aconteceu, e este é o motivo. */
+  skipped: string | null;
+  message: string;
+}
+
 /**
  * O que a tela chama, com nome de verbo.
  *
@@ -492,6 +594,117 @@ export const agent = {
     api<{ ok: true } & SteamUpdate>(`/api/servers/${encodeURIComponent(id)}/steam-update/check`, {
       method: 'POST',
     }),
+
+  // ---- Administração: jogadores, chat e admins -------------
+  //
+  // A escolha da FONTE de `players` não é da tela: o agente sabe se
+  // o OrigemZAgent está ligado naquele servidor e usa o que há. O
+  // que vem na resposta é qual fonte foi usada e o que falta nela.
+
+  players: (id: string) =>
+    api<{ ok: true } & PlayersSnapshot>(`/api/servers/${encodeURIComponent(id)}/players`),
+
+  kickPlayer: (id: string, steamId: string, reason?: string) =>
+    api<{ ok: true; steamId: string; output: string; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/players/${encodeURIComponent(steamId)}/kick`,
+      { method: 'POST', body: reason === undefined ? {} : { reason } },
+    ),
+
+  chat: (id: string, fromLine: number) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      lines: ChatLine[];
+      nextLine: number;
+      droppedLines: number;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/chat?fromLine=${String(fromLine)}`),
+
+  say: (id: string, message: string) =>
+    api<{ ok: true; message: string }>(`/api/servers/${encodeURIComponent(id)}/chat`, {
+      method: 'POST',
+      body: { message },
+    }),
+
+  admins: (id: string) =>
+    api<{
+      ok: true;
+      admins: AdminEntry[];
+      source: 'servidor' | 'ausente';
+      path: string;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/admins`),
+
+  /** Promove. Vale na hora, com o jogador dentro do jogo inclusive. */
+  grantAdmin: (id: string, input: { steamId: string; name?: string; level: AdminLevel }) =>
+    api<{ ok: true; output: string; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/admins`,
+      { method: 'POST', body: input },
+    ),
+
+  /**
+   * Rebaixa.
+   *
+   * O `level` não é opcional de verdade: `removeowner` não tira um
+   * moderador, e mandar o errado não dá erro — não faz nada.
+   */
+  revokeAdmin: (id: string, steamId: string, level: AdminLevel) =>
+    api<{ ok: true; output: string; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/admins/${encodeURIComponent(steamId)}?level=${level}`,
+      { method: 'DELETE' },
+    ),
+
+  // ---- A BanList global ------------------------------------
+
+  bans: (options: { active?: boolean; query?: string } = {}) => {
+    const params = new URLSearchParams();
+
+    if (options.active === true) {
+      params.set('active', '1');
+    }
+
+    if (options.query !== undefined && options.query.trim() !== '') {
+      params.set('q', options.query.trim());
+    }
+
+    const query = params.toString();
+
+    return api<{ ok: true; bans: Ban[]; servers: string[] }>(
+      `/api/bans${query === '' ? '' : `?${query}`}`,
+    );
+  },
+
+  createBan: (input: {
+    steamId: string;
+    name?: string;
+    reason: string;
+    scope: BanScope;
+    servers?: string[];
+    /** ISO-8601. Ausente = permanente. */
+    expiresAt?: string | null;
+  }) =>
+    api<{ ok: true; ban: Ban; applied: string[]; pending: string[]; message: string }>('/api/bans', {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Revoga. A linha continua no histórico, com quem revogou. */
+  revokeBan: (steamId: string) =>
+    api<{ ok: true; ban: Ban; removed: string[]; pending: string[]; message: string }>(
+      `/api/bans/${encodeURIComponent(steamId)}`,
+      { method: 'DELETE' },
+    ),
+
+  serverBans: (id: string) =>
+    api<{ ok: true; bans: ServerBan[]; connected: boolean }>(
+      `/api/servers/${encodeURIComponent(id)}/bans`,
+    ),
+
+  syncServerBans: (id: string) =>
+    api<{ ok: true } & BanSyncResult>(`/api/servers/${encodeURIComponent(id)}/bans/sync`, {
+      method: 'POST',
+    }),
+
   // ---- a configuração de cada plugin -----------------------
   //
   // `oxide\config\<Nome>.json`, na sub-aba Plugins de Configurações.
@@ -529,6 +742,7 @@ export const agent = {
       `/api/servers/${encodeURIComponent(id)}/plugin-configs/${encodeURIComponent(plugin)}`,
       { method: 'DELETE' },
     ),
+
   /**
    * Liga o plugin E as dependências duras que faltam.
    *

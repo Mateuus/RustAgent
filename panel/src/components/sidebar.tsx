@@ -22,6 +22,7 @@
 // ============================================================
 
 import {
+  Ban,
   ChevronsLeft,
   ChevronsRight,
   LayoutDashboard,
@@ -68,6 +69,12 @@ const NAV: readonly NavItem[] = [
     label: 'Plugins',
     hint: 'A biblioteca do agente: um .cs, uma vez, para todos os servidores',
     Icon: Puzzle,
+  },
+  {
+    href: '/banidos/',
+    label: 'Banidos',
+    hint: 'A lista do agente: quem está fora, de onde, e até quando',
+    Icon: Ban,
   },
   {
     href: '/config/',

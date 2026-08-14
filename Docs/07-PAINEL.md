@@ -15,10 +15,14 @@ Em desenvolvimento o painel roda em `localhost:3100` e fala com o core em
   /entrar             login do operador
   /                   os servidores, lado a lado, + criar
   /servidor?id=<id>   a página de um servidor  (abas)
+  /plugins            a biblioteca de plugins do agente
+  /banidos            a BanList do agente
   /config             o agente
 ```
 
-Quatro. O painel antigo tem doze, e a diferença é exatamente o escopo da Fase 1.
+As duas telas de REDE — plugins e banidos — existem pelo mesmo motivo: as duas
+guardam estado que vale para todos os servidores, e espalhá-lo por servidor foi
+justamente o problema que elas resolveram.
 
 Duas decisões tomadas na implementação, e o porquê de cada uma:
 
@@ -192,6 +196,52 @@ tirar parecesse caro, ninguém usaria o botão.
 Depois de ligar ou aplicar, a resposta do Oxide aparece na tela — inclusive o
 erro de compilação, se houver. Gravar e carregar são coisas diferentes.
 
+### Administração
+
+Entre **Visão** e **Console**, porque é a ordem do uso: quem abre a página de um
+servidor quer primeiro saber como ele está, e logo em seguida quem está dentro
+dele. Cinco sub-abas, no mesmo desenho de *Configurações* — pílulas com divisória
+de 1px.
+
+```
+  Jogadores | Chat | Admins | Banidos | Comandos
+```
+
+**Jogadores.** Quem está online, com vida, ping, tempo de conexão e posição. Por
+linha: *Copiar SteamID*, *Expulsar* (confirmação em dois passos) e *Banir* (abre
+o diálogo).
+
+A **fonte não é escolha de quem olha**. Com o `OrigemZAgent` ligado, a lista vem
+do plugin e tem posição; sem ele vem do `playerlist` nativo, que não tem. A tela
+diz qual está em uso e — quando o plugin está no acervo e desligado — oferece
+*Ligar* ali mesmo. Um seletor de fonte transferiria para quem administra uma
+decisão que o agente já sabe tomar.
+
+O que a fonte atual não dá vira **travessão**, nunca zero e nunca "morto". A
+faixa acima da tabela explica o travessão antes de alguém concluir que a posição
+sumiu — caçar um defeito que não existe é o pior desfecho desta tela.
+
+**Chat.** As mensagens dos jogadores, com o horário e o autor, mais um campo para
+falar (`say`). Mensagem de **equipe** ganha uma etiqueta: lida como global, ela
+faz quem administra achar que o combinado foi dito para todo mundo. A rolagem
+para quando a pessoa sobe, igual ao console.
+
+**Admins.** Quem é owner e quem é moderador, lidos do `users.cfg`, com promover e
+rebaixar. A tela diz, em voz alta, que **o arquivo é lido e nunca escrito**:
+editá-lo à mão com o servidor no ar perde a mudança no próximo `server.writecfg`,
+sem erro nenhum. Quem muda o estado é o comando pelo RCON.
+
+**Banidos.** O que vale naquele servidor, com a origem de cada linha — *rede*,
+*específico* ou *adotado do bans.cfg* — e o botão de *Sincronizar agora*. Ele
+fica desabilitado com o RCON fora do ar, com o motivo no `title`: um botão que
+falha sempre é pior que um botão inerte que se explica.
+
+**Comandos.** Os atalhos da semana (`server.save`, `server.writecfg`,
+`oxide.reload *`, `weather.rain 0`, `env.time 12`), cada um com **o que ele faz
+de verdade** escrito ao lado — `oxide.reload *` derruba todos os plugins por
+alguns segundos, e isso precisa estar escrito antes do clique. Mais um campo
+livre, com a resposta do servidor na tela.
+
 ### Configuração
 
 Os campos do `.ini` que dá para mudar pelo painel, com aviso claro do que só
@@ -224,6 +274,42 @@ aplicar é na aba daquele servidor.
 
 Remover com servidores usando não mostra "tem certeza?": mostra **quais**
 servidores perdem o plugin, com a frase que veio do agente.
+
+---
+
+## `/banidos` — a BanList
+
+A tela de **rede**. Antes, cada servidor tinha a lista dele no `bans.cfg`: um
+jogador expulso do `pvp1` entrava no `pvp2` no minuto seguinte, e quem administra
+descobria pelo Discord. Aqui o banimento é estado do **agente**, e cada servidor
+é espelho.
+
+Tabela, pelo mesmo motivo da lista de servidores e da de plugins: é uma tela de
+comparação — varrer a coluna de vencimento de cima a baixo e achar quem já devia
+ter saído.
+
+Por linha: o nome e o SteamID, o motivo, **onde vale** (os nomes dos servidores,
+ou *toda a rede*), quem aplicou, a situação e *Revogar*.
+
+O filtro nasce em **Ativos**. Sem ele a lista viraria um histórico onde ninguém
+acha quem está banido agora — e o histórico é justamente o que não se apaga:
+revogar preenche `revokedAt` e `revokedBy`, e a linha fica. É o que responde à
+segunda discussão sobre o mesmo jogador.
+
+### O diálogo de banir
+
+Três decisões, e por isso um diálogo e não um `ConfirmButton`: o **motivo** (vai
+para o `bans.cfg` e para o histórico), o **alcance** e o **prazo**.
+
+O alcance é a decisão que envelhece, e o texto ao lado de cada opção diz isso:
+*toda a rede* vale nos servidores que ainda vão ser criados; *servidores
+escolhidos* vale só nos marcados, e um servidor criado depois **não** herda o
+banimento.
+
+O prazo oferece Permanente, 1, 3, 7 e 30 dias — e a tela avisa que **o jogo não
+tem banimento com prazo**: quem solta na data é um relógio do agente, e só
+enquanto ele estiver no ar. Um "vence em 7 dias" sem essa frase é uma promessa
+que o Rust não faz.
 
 ---
 

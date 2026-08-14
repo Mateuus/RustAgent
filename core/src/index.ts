@@ -23,11 +23,15 @@
 // ============================================================
 
 import { OperatorAuth } from './auth/operator.js';
+import { BanExpiryWatcher } from './bans/expiry-watcher.js';
+import { BanList } from './bans/service.js';
 import { ConfigError, loadConfig } from './config.js';
+import { BansRepository } from './db/bans-repository.js';
 import { openDatabase } from './db/database.js';
 import { runMigrations } from './db/migrations.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
+import { PlayersReader } from './game/players.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
@@ -104,6 +108,21 @@ async function main(): Promise<void> {
   const operations = new OperationStore();
   const lock = new OperationLock();
 
+  // ####  A INDIREÇÃO AQUI NÃO É PREGUIÇA  ####
+  //
+  // O supervisor precisa avisar a BanList quando um RCON conecta, e
+  // a BanList precisa do supervisor para saber quais servidores
+  // existem. Um dos dois tem de ser montado primeiro, e quem manda
+  // nessa ordem é o RCON: o contexto de um servidor ligado começa a
+  // conectar dentro do `mountAll`.
+  //
+  // A variável resolve isso sem inverter a montagem: o gancho
+  // existe desde o começo e passa a ter dono quando a BanList
+  // nasce, poucas linhas abaixo. Uma conexão que suba antes disso
+  // não perde a reconciliação — ela acontece no `reconcileAll` do
+  // boot.
+  let bans: BanList | null = null;
+
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
     store: operations,
@@ -111,6 +130,9 @@ async function main(): Promise<void> {
     logger,
     startTimeoutMs: agent.ops.startTimeoutMs,
     repository,
+    onRconConnected: (serverId) => {
+      void bans?.reconcile(serverId);
+    },
   });
 
   supervisor.mountAll(servers);
@@ -131,6 +153,44 @@ async function main(): Promise<void> {
   });
 
   void library.adoptAll();
+
+  // ---- a lista de banidos -----------------------------------
+  //
+  // A fonte é a tabela `bans`; cada `bans.cfg` é espelho. A
+  // reconciliação do boot NÃO segura a subida (`void`): ela fala
+  // com N servidores pelo RCON, e a porta da API não pode esperar
+  // por isso. Os servidores que ainda não conectaram entram pelo
+  // gancho `onRconConnected`, acima.
+  bans = new BanList({
+    repository: new BansRepository(db),
+    servers: supervisor,
+    logger,
+  });
+
+  void bans.reconcileAll();
+
+  // O relógio dos banimentos temporários. O ban do Rust é
+  // permanente — quem cumpre o prazo é este relógio, e sem ele o
+  // `expires_at` seria enfeite.
+  const banWatcher = new BanExpiryWatcher({ bans, logger });
+
+  banWatcher.start();
+
+  // Quem está online. Ele pergunta ao acervo se o OrigemZAgent está
+  // ligado naquele servidor e escolhe a fonte — `origemz.players`
+  // ou o `playerlist` nativo. A pergunta passa pelo `serverList` do
+  // acervo de propósito: ler a tabela de plugins direto daqui seria
+  // um segundo caminho para a mesma resposta.
+  const players = new PlayersReader({
+    plugins: {
+      stateOf: async (serverId, pluginName) => {
+        const { plugins } = await library.serverList(serverId);
+        const found = plugins.find((plugin) => plugin.name === pluginName);
+
+        return { id: found?.id ?? null, enabled: found?.enabled === true };
+      },
+    },
+  });
 
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
@@ -172,6 +232,8 @@ async function main(): Promise<void> {
     operations,
     steamWatcher,
     library,
+    bans,
+    players,
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,
@@ -215,9 +277,10 @@ async function main(): Promise<void> {
 
     void (async () => {
       try {
-        // O relógio primeiro: uma rodada que começasse agora
+        // Os relógios primeiro: uma rodada que começasse agora
         // falaria com um supervisor já parado.
         steamWatcher.stop();
+        banWatcher.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

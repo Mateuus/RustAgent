@@ -59,6 +59,14 @@ export interface SupervisorDeps {
   readonly logger: Logger;
   readonly startTimeoutMs: number;
   readonly repository: ServersRepository;
+  /**
+   * Repassado a cada `ServerContext`. Ver `ServerContextDeps`.
+   *
+   * É o gancho da reconciliação da lista de banidos: ele dispara
+   * quando o RCON daquele servidor conecta, que é o instante em
+   * que os dois lados podem ter divergido sem ninguém ver.
+   */
+  readonly onRconConnected?: (serverId: string) => void;
 }
 
 /** O retrato de um servidor para a API. Ver Docs\06-API.md. */

@@ -12,11 +12,19 @@
 //  Next só para isso.
 // ============================================================
 
-import { LayoutList, Puzzle, Settings2, SlidersHorizontal, TerminalSquare } from 'lucide-react';
+import {
+  LayoutList,
+  Puzzle,
+  Settings2,
+  ShieldCheck,
+  SlidersHorizontal,
+  TerminalSquare,
+} from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState } from 'react';
 
+import { AdminPanel } from '@/components/admin-panel';
 import { ConsolePanel } from '@/components/console-panel';
 import { OperationsPanel } from '@/components/operations-panel';
 import { PageHeader } from '@/components/page-header';
@@ -29,17 +37,25 @@ import { Button } from '@/components/ui/button';
 import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
 import { toast } from '@/lib/toast';
 
-type Tab = 'visao' | 'console' | 'operacoes' | 'plugins' | 'config';
+type Tab = 'visao' | 'administracao' | 'console' | 'operacoes' | 'plugins' | 'config';
 
 /**
  * As abas, com ícone.
  *
- * O ícone não decora: com cinco abas, ele é o que a vista pega
- * antes de ler — e é o que permite achar "Console" de relance
- * numa tela que se abre dezenas de vezes por dia.
+ * O ícone não decora: com seis abas, ele é o que a vista pega antes
+ * de ler — e é o que permite achar "Console" de relance numa tela
+ * que se abre dezenas de vezes por dia.
+ *
+ * ####  ADMINISTRAÇÃO VEM LOGO DEPOIS DE VISÃO  ####
+ *
+ * A ordem é a do uso: quem abre a página de um servidor quer
+ * primeiro saber como ele está, e logo em seguida quem está dentro
+ * dele. Console e Operações são o que se procura quando algo deu
+ * errado, e configurar é o que se faz uma vez.
  */
 const TABS = [
   { key: 'visao', label: 'Visão', Icon: LayoutList },
+  { key: 'administracao', label: 'Administração', Icon: ShieldCheck },
   { key: 'console', label: 'Console', Icon: TerminalSquare },
   { key: 'operacoes', label: 'Operações', Icon: SlidersHorizontal },
   { key: 'plugins', label: 'Plugins', Icon: Puzzle },
@@ -215,6 +231,7 @@ function Servidor() {
           </nav>
 
           {tab === 'visao' && <Visao server={server} steam={steam} />}
+          {tab === 'administracao' && <AdminPanel server={server} />}
           {tab === 'console' && <ConsolePanel serverId={server.id} />}
           {tab === 'operacoes' && <OperationsPanel server={server} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}

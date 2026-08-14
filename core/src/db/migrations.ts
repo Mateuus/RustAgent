@@ -351,11 +351,126 @@ ALTER TABLE plugins ADD COLUMN requires TEXT;
 ALTER TABLE plugins ADD COLUMN plugin_refs TEXT;
 `;
 
+// ------------------------------------------------------------
+//  005 — a BanList global
+//
+//  ####  O BANIMENTO PASSA A SER ESTADO DO AGENTE  ####
+//
+//  Até aqui cada servidor tinha a lista dele, no `bans.cfg`. Um
+//  jogador expulso do `pvp1` entrava no `pvp2` no minuto seguinte,
+//  e quem administra descobria pelo Discord. Com esta tabela a
+//  lista é UMA, e cada `bans.cfg` vira espelho — quem mantém os
+//  dois lados iguais é bans/service.ts.
+//
+//  ####  POR QUE `network` NÃO É UMA LISTA COM TODOS OS
+//        SERVIDORES  ####
+//
+//  Porque a lista seria a de HOJE. No dia em que o `pvp3` for
+//  cadastrado, todo ban de rede feito antes dele deixaria de valer
+//  lá — em silêncio, sem erro nenhum, e a descoberta seria o
+//  banido jogando. `scope = 'network'` não enumera ninguém, e por
+//  isso não envelhece.
+//
+//  `scope = 'servers'` é o outro caso, e ele é real: o desafeto de
+//  um servidor de PVP que não tem nada a ver com o PVE ao lado.
+//  Esse enumera, em `ban_servers`.
+//
+//  ####  REVOGAR NÃO APAGA A LINHA  ####
+//
+//  `revoked_at` preenchido é o ban que deixou de valer. Apagar a
+//  linha responderia "quem está banido?" e destruiria "quem JÁ
+//  esteve banido, por quê, e quem o soltou" — que é a pergunta de
+//  toda segunda discussão sobre o mesmo jogador.
+//
+//  ####  O `origin` SEPARA O QUE NASCEU AQUI DO QUE FOI ADOTADO  ####
+//
+//      'panel'    alguém baniu pelo agente
+//      'adopted'  já estava no `bans.cfg` quando o agente chegou
+//
+//  A adoção é o que impede a reconciliação de virar um `unban` em
+//  massa no primeiro boot: um ban que o agente não conhece foi
+//  decisão de alguém, e quem acabou de chegar é o agente.
+// ------------------------------------------------------------
+const BANS_SCHEMA = `
+CREATE TABLE bans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- TEXT, e não INTEGER: um SteamID64 tem 17 dígitos e passa de
+  -- 2^53. Em número ele perderia precisão na ida e volta pelo
+  -- JSON, e o ban iria para a CONTA ERRADA.
+  steam_id TEXT NOT NULL,
+
+  -- O nome de quando foi banido. NULL quando ninguém sabia — é o
+  -- caso do ban por SteamID com o jogador offline.
+  name TEXT,
+
+  reason TEXT NOT NULL,
+
+  -- 'network' = vale em TODO servidor, inclusive nos que ainda vão
+  --             nascer. Não enumera ninguém (ver o cabeçalho).
+  -- 'servers' = vale nos listados em ban_servers, e em nenhum outro.
+  scope TEXT NOT NULL CHECK (scope IN ('network', 'servers')),
+
+  created_at INTEGER NOT NULL,
+  -- O operador que aplicou. "Quem baniu este jogador?" é a
+  -- primeira pergunta de toda discussão sobre banimento.
+  created_by TEXT,
+
+  -- NULL = permanente. Preenchido, quem desbane é o relógio do
+  -- agente: o ban do Rust não tem prazo (ver bans/expiry-watcher.ts).
+  expires_at INTEGER,
+
+  -- NULL = ativo. Ver o cabeçalho: revogar não apaga a linha.
+  revoked_at INTEGER,
+  revoked_by TEXT,
+
+  origin TEXT NOT NULL DEFAULT 'panel' CHECK (origin IN ('panel', 'adopted'))
+);
+
+-- UM banimento ATIVO por SteamID.
+--
+-- Dois ativos não têm resposta para "qual motivo vale?" nem para
+-- "revogar fecha qual?" — e a segunda é pior, porque a tela
+-- mostraria o jogador solto com um ban ainda de pé.
+--
+-- Índice PARCIAL: o histórico pode ter dez linhas revogadas do
+-- mesmo SteamID, e deve mesmo.
+CREATE UNIQUE INDEX idx_bans_active ON bans (steam_id) WHERE revoked_at IS NULL;
+
+-- A tela de rede lista do mais recente para o mais antigo.
+CREATE INDEX idx_bans_created ON bans (created_at DESC);
+
+-- ----------------------------------------------------------
+--  Os servidores de um ban de escopo 'servers'.
+--
+--  Um ban 'network' NÃO tem linha aqui: enumerá-lo seria
+--  transformá-lo justamente no que ele existe para não ser.
+--
+--  ####  APAGAR O SERVIDOR ESVAZIA O BAN, E NÃO O REVOGA  ####
+--
+--  A cascata tira as linhas daqui, e o ban pode ficar ativo sem
+--  servidor nenhum. É o comportamento certo: revogá-lo por causa
+--  de um servidor removido seria soltar um jogador por um motivo
+--  que não tem nada a ver com ele. A tela mostra o ban sem alvo, e
+--  quem administra decide.
+-- ----------------------------------------------------------
+CREATE TABLE ban_servers (
+  ban_id    INTEGER NOT NULL REFERENCES bans(id) ON DELETE CASCADE,
+  server_id TEXT    NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (ban_id, server_id)
+);
+
+-- "O que vale NESTE servidor?" é a pergunta da aba Administração,
+-- e sem o índice ela varre a tabela inteira a cada abertura.
+CREATE INDEX idx_ban_servers_server ON ban_servers (server_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
   { id: 3, name: 'custom-plugins', sql: CUSTOM_PLUGINS_SCHEMA },
   { id: 4, name: 'plugin-dependencies', sql: PLUGIN_DEPENDENCIES_SCHEMA },
+  { id: 5, name: 'bans', sql: BANS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

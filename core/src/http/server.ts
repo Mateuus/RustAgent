@@ -24,8 +24,10 @@ import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstanc
 import { ZodError } from 'zod';
 
 import type { OperatorAuth } from '../auth/operator.js';
+import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
 import type { ServersRepository } from '../db/servers-repository.js';
+import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
 import type { PluginLibrary } from '../oxide/library.js';
@@ -38,7 +40,9 @@ import {
   isApiError,
   zodErrorToResponse,
 } from './error-response.js';
+import { registerAdminRoutes } from './routes/admin.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerBanRoutes } from './routes/bans.js';
 import { registerConsoleRoutes } from './routes/console.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
 import { registerOperationRoutes } from './routes/operations.js';
@@ -60,6 +64,10 @@ export interface BuildServerOptions {
   readonly steamWatcher: SteamUpdateWatcher;
   /** A biblioteca de plugins do agente. Ver oxide/library.ts. */
   readonly library: PluginLibrary;
+  /** A lista de banidos, global. Ver bans/service.ts. */
+  readonly bans: BanList;
+  /** Quem está online, com ou sem plugin. Ver game/players.ts. */
+  readonly players: PlayersReader;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -166,6 +174,13 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         watcher: options.steamWatcher,
         supervisor: options.supervisor,
       });
+
+      registerAdminRoutes(api, {
+        supervisor: options.supervisor,
+        players: options.players,
+      });
+
+      registerBanRoutes(api, { bans: options.bans, supervisor: options.supervisor });
     },
     { prefix: '/api' },
   );
