@@ -538,7 +538,9 @@ describe('a ficha de um jogador banido', () => {
     // E o exemplo vem rotulado, num campo à parte: mock misturado
     // com dado é a única coisa pior que não ter o dado.
     expect(timeline.sample.measured).toBe(false);
-    expect(timeline.sample.events.every((event) => event.kind !== 'ban')).toBe(true);
+    // O exemplo é só o que ainda NÃO é medido, e mora num campo
+    // separado: nada dele encosta na lista de `events`.
+    expect(timeline.sample.events.map((event) => event.kind)).toEqual(['kill', 'death']);
   });
 });
 

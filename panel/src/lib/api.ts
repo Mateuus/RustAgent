@@ -472,6 +472,92 @@ export interface AdminEntry {
   note: string | null;
 }
 
+// ------------------------------------------------------------
+//  Os jogadores da REDE
+//
+//  Não confundir com `GamePlayer`, acima: aquele é quem está
+//  conectado AGORA naquele servidor, lido do RCON; estes vêm da
+//  base do agente e sobrevivem ao wipe e ao reinício.
+//
+//  `steamId` é STRING em toda parte — em número, um SteamID64
+//  passa de 2^53 e a ficha vira de outra pessoa.
+// ------------------------------------------------------------
+
+/** Uma linha da tela de rede. */
+export interface NetworkPlayer {
+  steamId: string;
+  name: string;
+  /** Na REDE, e nunca muda: é o "jogador desde". */
+  firstSeen: string;
+  lastSeen: string;
+  online: boolean;
+  /** Onde ele está AGORA. Vazio quando está offline. */
+  onlineOn: string[];
+  /** O último servidor em que foi visto. `null` = nenhum. */
+  lastServerId: string | null;
+  /** Está banido agora? Vem da BanList, e não de uma cópia. */
+  banned: boolean;
+}
+
+/** O que ele fez em UM servidor. */
+export interface PlayerServer {
+  serverId: string;
+  firstSeen: string;
+  lastSeen: string;
+  online: boolean;
+  joinedAt: string | null;
+  leftAt: string | null;
+  /** Por que a última sessão fechou. `null` = o jogo não disse. */
+  leaveReason: string | null;
+  sessions: number;
+  /** Somado no fechamento de cada sessão. */
+  playedSeconds: number;
+}
+
+export interface PlayerIdentity {
+  steamId: string;
+  name: string;
+  /** `null` = o agente nunca o viu jogar. Ver `known`. */
+  firstSeen: string | null;
+  lastSeen: string | null;
+  lastIp: string | null;
+  online: boolean;
+  /**
+   * O agente já o viu jogar?
+   *
+   * `false` é a ficha de quem existe só na lista de banidos — e ela
+   * é justamente a que se procura depois de banir um SteamID que
+   * nunca entrou.
+   */
+  known: boolean;
+}
+
+export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'ban' | 'unban';
+
+export interface PlayerEvent {
+  at: string;
+  kind: PlayerEventKind;
+  /** `null` num ban de rede: ele não é de servidor nenhum. */
+  serverId: string | null;
+  actor: string | null;
+  detail: string | null;
+}
+
+/**
+ * A estrutura do que ainda NÃO é medido.
+ *
+ * Kill e morte não existem hoje — nem no RCON nem no plugin. O
+ * agente manda o exemplo num campo separado, com `measured: false`
+ * e a frase que explica: a tela desenha isso rotulado, e nunca
+ * junto dos eventos de verdade.
+ */
+export interface PlayerEventSample {
+  measured: false;
+  label: string;
+  note: string;
+  events: { at: string; kind: 'kill' | 'death'; serverId: string; detail: string }[];
+}
+
 export type BanScope = 'network' | 'servers';
 
 /**
@@ -828,6 +914,69 @@ export const agent = {
     api<{ ok: true; output: string; message: string }>(
       `/api/servers/${encodeURIComponent(id)}/admins/${encodeURIComponent(steamId)}?level=${level}`,
       { method: 'DELETE' },
+    ),
+
+  // ---- Os jogadores da rede --------------------------------
+  //
+  // A listagem é PAGINADA desde a primeira versão: uma rede com
+  // meses de vida tem dezenas de milhares de jogadores, e uma
+  // chamada que devolvesse todos travaria o navegador antes de
+  // derrubar o agente.
+
+  networkPlayers: (options: {
+    query?: string;
+    online?: boolean;
+    limit: number;
+    offset: number;
+  }) => {
+    const params = new URLSearchParams();
+
+    if (options.query !== undefined && options.query.trim() !== '') {
+      params.set('q', options.query.trim());
+    }
+
+    if (options.online === true) {
+      params.set('online', '1');
+    }
+
+    params.set('limit', String(options.limit));
+    params.set('offset', String(options.offset));
+
+    return api<{
+      ok: true;
+      players: NetworkPlayer[];
+      /** O que veio nesta página. */
+      count: number;
+      /** O que casou com o filtro, antes da paginação. */
+      total: number;
+      limit: number;
+      offset: number;
+    }>(`/api/players?${params.toString()}`);
+  },
+
+  /**
+   * A ficha.
+   *
+   * `ban` vem da BanList — a mesma linha que a tela de Banidos
+   * mostra, e não uma cópia guardada do lado do jogador.
+   */
+  networkPlayer: (steamId: string) =>
+    api<{
+      ok: true;
+      player: PlayerIdentity;
+      ban: Ban | null;
+      servers: PlayerServer[];
+    }>(`/api/players/${encodeURIComponent(steamId)}`),
+
+  playerServers: (steamId: string) =>
+    api<{ ok: true; servers: PlayerServer[] }>(
+      `/api/players/${encodeURIComponent(steamId)}/servers`,
+    ),
+
+  /** O histórico. Ver `PlayerEventSample` para o que é exemplo. */
+  playerEvents: (steamId: string, limit = 50) =>
+    api<{ ok: true; events: PlayerEvent[]; sample: PlayerEventSample }>(
+      `/api/players/${encodeURIComponent(steamId)}/events?limit=${String(limit)}`,
     ),
 
   // ---- A BanList global ------------------------------------

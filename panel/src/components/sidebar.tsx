@@ -31,6 +31,7 @@ import {
   Puzzle,
   Server,
   Settings,
+  Users,
   X,
   type LucideIcon,
 } from 'lucide-react';
@@ -69,6 +70,12 @@ const NAV: readonly NavItem[] = [
     label: 'Plugins',
     hint: 'A biblioteca do agente: um .cs, uma vez, para todos os servidores',
     Icon: Puzzle,
+  },
+  {
+    href: '/jogadores/',
+    label: 'Jogadores',
+    hint: 'Quem já jogou na rede: onde está agora, desde quando, e o que aconteceu com ele',
+    Icon: Users,
   },
   {
     href: '/banidos/',

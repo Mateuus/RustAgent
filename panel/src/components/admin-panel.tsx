@@ -50,6 +50,7 @@ import {
   type ServerBan,
   type ServerView,
 } from '@/lib/api';
+import { copySteamId } from '@/lib/clipboard';
 import { EM_DASH, formatDuration } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
@@ -154,30 +155,6 @@ function HeaderCell({ children, numeric }: { children: ReactNode; numeric?: bool
       {children}
     </th>
   );
-}
-
-/**
- * Copia o SteamID.
- *
- * ####  A API DE ÁREA DE TRANSFERÊNCIA NÃO EXISTE EM TODO LUGAR  ####
- *
- * Ela exige contexto seguro, e o painel é servido por HTTP puro num
- * IP de rede local com frequência. Falhar em silêncio ali deixaria
- * um botão que não faz nada; o desfecho é mostrar o id no toast, de
- * onde ainda dá para copiar à mão.
- */
-function copySteamId(steamId: string): void {
-  void (async () => {
-    try {
-      await navigator.clipboard.writeText(steamId);
-      toast.success('SteamID copiado', { description: steamId });
-    } catch {
-      toast.info('Copie à mão', {
-        description: `${steamId} — o navegador só libera a área de transferência em HTTPS.`,
-        duration: null,
-      });
-    }
-  })();
 }
 
 // ------------------------------------------------------------

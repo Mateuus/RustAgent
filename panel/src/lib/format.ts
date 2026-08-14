@@ -47,6 +47,69 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${String(minutes)}min`;
 }
 
+/**
+ * Uma data ISO em "há 5 min", "há 3 h", "ontem" ou a data cheia.
+ *
+ * ####  RELATIVO PERTO, ABSOLUTO LONGE  ####
+ *
+ * "Visto por último" é uma coluna que se lê de relance para
+ * decidir se alguém está por aí AGORA: "há 5 min" responde isso, e
+ * "14/08/2026 20:31" obriga a fazer a conta de cabeça. Passada uma
+ * semana a conta inverte — "há 23 dias" não localiza nada, e a
+ * data localiza.
+ */
+export function formatWhen(value: string | null | undefined): string {
+  if (value === null || value === undefined || value === '') {
+    return EM_DASH;
+  }
+
+  const at = Date.parse(value);
+
+  if (!Number.isFinite(at)) {
+    return EM_DASH;
+  }
+
+  const seconds = Math.round((Date.now() - at) / 1000);
+
+  // Menos de um minuto (inclusive negativo) é "agora": o relógio do
+  // agente e o do navegador não são o mesmo, e um "há -3 min" na
+  // tela pareceria defeito.
+  if (seconds < 60) {
+    return 'agora';
+  }
+
+  if (seconds < 3_600) {
+    return `há ${String(Math.floor(seconds / 60))} min`;
+  }
+
+  if (seconds < 86_400) {
+    return `há ${String(Math.floor(seconds / 3_600))} h`;
+  }
+
+  if (seconds < 172_800) {
+    return 'ontem';
+  }
+
+  if (seconds < 604_800) {
+    return `há ${String(Math.floor(seconds / 86_400))} dias`;
+  }
+
+  return new Date(at).toLocaleDateString('pt-BR');
+}
+
+/** Data e hora completas, para quando a precisão importa. */
+export function formatDateTime(value: string | null | undefined): string {
+  if (value === null || value === undefined || value === '') {
+    return EM_DASH;
+  }
+
+  const at = Date.parse(value);
+
+  return Number.isFinite(at)
+    ? new Date(at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+    : EM_DASH;
+}
+
 export function formatInteger(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return EM_DASH;
