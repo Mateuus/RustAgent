@@ -27,7 +27,7 @@
 //  concluir que o servidor está vazio.
 // ============================================================
 
-import { Copy, RefreshCw } from 'lucide-react';
+import { Copy, Maximize2, RefreshCw, Search, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { BanDialog } from '@/components/ban-dialog';
@@ -35,6 +35,7 @@ import { MapView } from '@/components/map-view';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -185,6 +186,34 @@ function copySteamId(steamId: string): void {
 /** Lista, mapa, ou os dois. Ver o alternador no cabeçalho. */
 type PlayersMode = 'lista' | 'dividido' | 'mapa';
 
+/**
+ * O estado de um jogador, reduzido ao que a tela filtra.
+ *
+ * `desconhecido` existe porque o `playerlist` nativo não diz se
+ * alguém está vivo: sem esta quarta chave, um filtro ligado
+ * esconderia a lista inteira num servidor sem o plugin.
+ */
+type EstadoChave = 'acordado' | 'dormindo' | 'morto' | 'desconhecido';
+
+function estadoChave(player: GamePlayer): EstadoChave {
+  if (player.isAlive === null) {
+    return 'desconhecido';
+  }
+
+  if (!player.isAlive) {
+    return 'morto';
+  }
+
+  return player.isSleeping === true ? 'dormindo' : 'acordado';
+}
+
+const ESTADO_LABEL: Record<EstadoChave, string> = {
+  acordado: 'Acordados',
+  dormindo: 'Dormindo',
+  morto: 'Mortos',
+  desconhecido: 'Sem estado',
+};
+
 function PlayersSection({ server }: { server: ServerView }) {
   const [snapshot, setSnapshot] = useState<PlayersSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -199,6 +228,24 @@ function PlayersSection({ server }: { server: ServerView }) {
   const [mode, setMode] = useState<PlayersMode>('dividido');
   /** O SteamID selecionado. É o mesmo nos dois lados. */
   const [selected, setSelected] = useState<string | null>(null);
+  /** Nome, SteamID ou célula do mapa. */
+  const [busca, setBusca] = useState('');
+  /**
+   * Quais estados aparecem.
+   *
+   * Os três nascem ligados: um filtro que começa escondendo gente
+   * faria a contagem da tela discordar da do servidor logo na
+   * abertura, e ninguém procuraria a causa num filtro que não
+   * pediu.
+   */
+  const [estados, setEstados] = useState<Record<EstadoChave, boolean>>({
+    acordado: true,
+    dormindo: true,
+    morto: true,
+    desconhecido: true,
+  });
+  /** O mapa ocupando a página inteira. */
+  const [fullscreen, setFullscreen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -253,9 +300,33 @@ function PlayersSection({ server }: { server: ServerView }) {
     }
   }
 
-  const players = snapshot?.players ?? [];
-  const semPosicao = players.filter((player) => player.position === null).length;
+  const todos = snapshot?.players ?? [];
   const mapImage = useMapImage(server.id);
+
+  /**
+   * A busca e os filtros valem para a LISTA E PARA O MAPA.
+   *
+   * Filtrar só a lista deixaria a tela contando duas histórias: um
+   * nome procurado sumindo da lista e continuando como ponto no
+   * mapa, sem nada dizendo qual das duas responde à pergunta.
+   */
+  const players = todos.filter((player) => {
+    if (!estados[estadoChave(player)]) {
+      return false;
+    }
+
+    const alvo = busca.trim().toLowerCase();
+
+    return (
+      alvo === '' ||
+      player.name.toLowerCase().includes(alvo) ||
+      player.steamId.includes(alvo) ||
+      (player.grid ?? '').toLowerCase() === alvo
+    );
+  });
+
+  const semPosicao = players.filter((player) => player.position === null).length;
+  const escondidos = todos.length - players.length;
 
   return (
     <div className="space-y-3">
@@ -335,8 +406,22 @@ function PlayersSection({ server }: { server: ServerView }) {
                   {busy === 'plugin' ? 'Ligando…' : `Ligar o ${snapshot.plugin.name}`}
                 </Button>
               )}
+
+              <Button size="sm" variant="outline" onClick={() => setFullscreen(true)}>
+                <Maximize2 aria-hidden="true" className="h-4 w-4" />
+                Tela cheia
+              </Button>
             </div>
           </div>
+
+          <PlayersFilters
+            busca={busca}
+            onBusca={setBusca}
+            estados={estados}
+            onEstados={setEstados}
+            contagem={todos}
+            escondidos={escondidos}
+          />
 
           {snapshot.source === 'nativo' && (
             <p className="border border-amber bg-surface-2 px-4 py-3 text-2xs leading-relaxed">
@@ -424,6 +509,104 @@ function PlayersSection({ server }: { server: ServerView }) {
         </>
       )}
 
+      {/* ####  A TELA CHEIA É A MESMA TELA  ####
+
+          Os mesmos componentes, o mesmo estado, a mesma seleção —
+          só com espaço. Uma segunda implementação do mapa "para o
+          modal" seria a que divergiria no primeiro ajuste, e o
+          usuário veria dois mapas com comportamentos diferentes. */}
+      <Dialog
+        open={fullscreen}
+        title={`${server.name} — jogadores e mapa`}
+        onClose={() => setFullscreen(false)}
+        className="h-[94vh] w-[96vw] max-w-none"
+      >
+        {snapshot !== null && (
+          <div className="flex h-[calc(94vh-3.5rem)] flex-col gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-stretch border border-border">
+                {(
+                  [
+                    ['lista', 'Lista'],
+                    ['dividido', 'Dividido'],
+                    ['mapa', 'Mapa'],
+                  ] as const
+                ).map(([key, label], index) => (
+                  <div key={key} className="flex items-stretch">
+                    {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
+
+                    <button
+                      type="button"
+                      aria-pressed={mode === key}
+                      onClick={() => setMode(key)}
+                      className={cn(
+                        'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+                        mode === key
+                          ? 'bg-surface-2 text-foreground'
+                          : 'text-muted hover:text-foreground',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <span className="text-2xs text-muted">
+                {String(players.length)} de {String(todos.length)} online
+              </span>
+            </div>
+
+            <PlayersFilters
+              busca={busca}
+              onBusca={setBusca}
+              estados={estados}
+              onEstados={setEstados}
+              contagem={todos}
+              escondidos={escondidos}
+            />
+
+            <div
+              className={cn(
+                'grid min-h-0 flex-1 gap-3',
+                mode === 'dividido' && 'lg:grid-cols-[minmax(20rem,26rem)_1fr]',
+              )}
+            >
+              {mode !== 'mapa' && (
+                <div className="min-h-0 overflow-y-auto">
+                  <PlayerList
+                    players={players}
+                    selected={selected}
+                    busy={busy}
+                    compact={mode === 'dividido'}
+                    onSelect={(player) =>
+                      setSelected(player.steamId === selected ? null : player.steamId)
+                    }
+                    onKick={(player) => void kick(player)}
+                    onBan={(player) => setBanning(player)}
+                  />
+                </div>
+              )}
+
+              {mode !== 'lista' && (
+                <div className="min-h-0">
+                  <MapView
+                    players={players}
+                    world={snapshot.world}
+                    selected={selected}
+                    imageUrl={mapImage.url}
+                    coverage={mapImage.coverage}
+                    onSelect={(player) =>
+                      setSelected(player.steamId === selected ? null : player.steamId)
+                    }
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </Dialog>
+
       {/* A `key` força um formulário limpo a cada jogador: sem ela,
           o motivo digitado para um sobreviveria para o próximo. */}
       {banning !== null && (
@@ -437,6 +620,94 @@ function PlayersSection({ server }: { server: ServerView }) {
           onClose={() => setBanning(null)}
           onDone={() => void load()}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * A busca e os filtros de estado.
+ *
+ * ####  ELES VALEM PARA OS DOIS LADOS  ####
+ *
+ * Filtrar só a lista deixaria a tela contando duas histórias: o
+ * nome procurado sumindo da lista e continuando como ponto no mapa.
+ *
+ * ####  E O QUE FOI ESCONDIDO É DITO  ####
+ *
+ * "3 escondidos pelo filtro" é a diferença entre um servidor vazio
+ * e um filtro ligado — e sem essa frase, os dois têm exatamente a
+ * mesma aparência.
+ */
+function PlayersFilters({
+  busca,
+  onBusca,
+  estados,
+  onEstados,
+  contagem,
+  escondidos,
+}: {
+  busca: string;
+  onBusca: (value: string) => void;
+  estados: Record<EstadoChave, boolean>;
+  onEstados: (value: Record<EstadoChave, boolean>) => void;
+  contagem: readonly GamePlayer[];
+  escondidos: number;
+}) {
+  const porEstado = (chave: EstadoChave): number =>
+    contagem.filter((player) => estadoChave(player) === chave).length;
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <label className="flex min-w-56 flex-1 items-center gap-2 border border-border bg-surface-2 px-2">
+        <Search aria-hidden="true" className="h-4 w-4 shrink-0 text-muted" />
+        <Input
+          value={busca}
+          placeholder="nome, SteamID ou célula (ex.: H3)"
+          aria-label="Procurar jogador"
+          className="border-0 bg-transparent px-0 hover:border-0"
+          onChange={(event) => onBusca(event.target.value)}
+        />
+        {busca !== '' && (
+          <Button size="sm" variant="ghost" aria-label="Limpar a busca" onClick={() => onBusca('')}>
+            <X aria-hidden="true" className="h-4 w-4" />
+          </Button>
+        )}
+      </label>
+
+      <div className="flex flex-wrap gap-2">
+        {(['acordado', 'dormindo', 'morto', 'desconhecido'] as const).map((chave) => {
+          const total = porEstado(chave);
+
+          // O estado que não existe na lista não vira botão: um
+          // filtro de "mortos" num servidor sem mortos é ruído.
+          if (total === 0 && estados[chave]) {
+            return null;
+          }
+
+          return (
+            <button
+              key={chave}
+              type="button"
+              aria-pressed={estados[chave]}
+              onClick={() => onEstados({ ...estados, [chave]: !estados[chave] })}
+              className={cn(
+                'border px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+                estados[chave]
+                  ? 'border-border bg-surface-2 text-foreground'
+                  : 'border-border text-muted line-through hover:text-foreground',
+              )}
+            >
+              {ESTADO_LABEL[chave]} ({String(total)})
+            </button>
+          );
+        })}
+      </div>
+
+      {escondidos > 0 && (
+        <span className="text-2xs text-muted">
+          {String(escondidos)} escondido(s) pelo filtro
+        </span>
       )}
     </div>
   );
