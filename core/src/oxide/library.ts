@@ -192,6 +192,20 @@ export interface ToggleResult {
   readonly reload: PluginReloadResult;
 }
 
+export interface EnableWithDepsResult {
+  readonly plugin: ServerPluginView;
+  /** O que esta chamada ligou, na ordem em que foram ligados. */
+  readonly enabled: readonly string[];
+  /** O que já estava ligado e não foi tocado. */
+  readonly alreadyEnabled: readonly string[];
+  /** O que o Oxide respondeu a cada um — é onde mora o erro de compilação. */
+  readonly reloads: readonly {
+    readonly plugin: string;
+    readonly sent: boolean;
+    readonly output: string | null;
+  }[];
+}
+
 /** Uma config da pasta, com o que o acervo sabe daquele nome. */
 export interface PluginConfigView extends PluginConfigInfo {
   /** O `[Info]` do `.cs`, quando o plugin está no acervo. */
@@ -544,6 +558,140 @@ export class PluginLibrary {
       : await this.#unloadFrom(serverId, plugin);
 
     return { plugin: await this.#serverViewOf(serverId, pluginId), reload };
+  }
+
+  /**
+   * Liga o plugin E as dependências duras que faltam, na ordem.
+   *
+   * ####  A ORDEM NÃO É DETALHE  ####
+   *
+   * O Oxide segura um plugin cujo `// Requires:` não está carregado
+   * — e o solta sozinho quando a dependência aparece. Ligar na ordem
+   * errada, então, "funciona"... com um intervalo em que o servidor
+   * está com metade do conjunto no ar. Num plugin de VIP isso é
+   * jogador entrando sem benefício e abrindo ticket.
+   *
+   * A ordem daqui é a topológica: dependência primeiro, dependente
+   * depois. É pós-ordem de uma busca em profundidade, que é a mesma
+   * coisa dita de outro jeito.
+   *
+   * ####  POR QUE UMA ROTA, E NÃO A TELA CHAMANDO O PUT N VEZES  ####
+   *
+   * Porque a regra de ordenação ficaria no navegador, que é o lugar
+   * onde ela não tem teste — e onde metade das ligações acontece com
+   * a aba já fechada.
+   *
+   * ####  SÓ AS DURAS  ####
+   *
+   * `[PluginReference]` é dependência MOLE: o plugin carrega e roda
+   * sem ela. Arrastar junto o que o `.cs` só menciona ligaria coisa
+   * que ninguém pediu — e ligar plugin por conta própria é o tipo de
+   * ajuda que assusta.
+   *
+   * @throws {ApiError} 409 com o ciclo, ou com o nome que falta no
+   * acervo.
+   */
+  async enableWithDeps(serverId: string, pluginId: number): Promise<EnableWithDepsResult> {
+    const alvo = this.#requirePlugin(pluginId);
+
+    // A partir do acervo DAQUELE servidor: a biblioteca mais os
+    // customs dele. É contra este conjunto que "a dependência
+    // existe?" faz sentido.
+    const acervo = new Map(
+      this.#deps.repository.availableFor(serverId).map((plugin) => [plugin.name, plugin]),
+    );
+
+    const ordem: PluginRecord[] = [];
+    const estado = new Map<string, 'visitando' | 'pronto'>();
+    const caminho: string[] = [];
+
+    const visitar = (plugin: PluginRecord): void => {
+      const marca = estado.get(plugin.name);
+
+      if (marca === 'pronto') {
+        return;
+      }
+
+      if (marca === 'visitando') {
+        // ####  CICLO  ####
+        //
+        // Não deveria existir — mas o `.cs` é de terceiros, e dois
+        // plugins que se declaram um ao outro fariam esta função
+        // descer para sempre. Recusar dizendo QUEM está no ciclo é a
+        // única resposta útil: os arquivos precisam ser corrigidos, e
+        // nenhuma ordem de ligação resolve.
+        const desde = caminho.indexOf(plugin.name);
+        const ciclo = [...caminho.slice(desde === -1 ? 0 : desde), plugin.name];
+
+        throw new ApiError(
+          'PLUGIN_DEPENDENCY_CYCLE',
+          `Estes plugins dependem uns dos outros em círculo: ${ciclo.join(' → ')}. ` +
+            'Não há ordem de carregamento que resolva isso — o "// Requires:" de um deles está ' +
+            'errado e precisa ser corrigido no .cs.',
+          409,
+        );
+      }
+
+      estado.set(plugin.name, 'visitando');
+      caminho.push(plugin.name);
+
+      for (const nome of plugin.requires ?? []) {
+        const dependencia = acervo.get(nome);
+
+        if (dependencia === undefined) {
+          throw new ApiError(
+            'PLUGIN_DEPENDENCY_MISSING',
+            `"${plugin.name}" precisa de "${nome}", que não está na biblioteca nem nos plugins ` +
+              `custom de "${serverId}". Envie o .cs de "${nome}" antes — ligar o que não existe ` +
+              'não é uma opção.',
+            409,
+          );
+        }
+
+        visitar(dependencia);
+      }
+
+      caminho.pop();
+      estado.set(plugin.name, 'pronto');
+      ordem.push(plugin);
+    };
+
+    visitar(alvo);
+
+    const state = new Map(
+      this.#deps.repository.serverPlugins(serverId).map((row) => [row.pluginId, row]),
+    );
+
+    const enabled: string[] = [];
+    const already: string[] = [];
+    const reloads: { plugin: string; sent: boolean; output: string | null }[] = [];
+
+    for (const plugin of ordem) {
+      if (state.get(plugin.id)?.enabled === true) {
+        // Já ligado NÃO é recopiado aqui: isto é "ligue o que falta",
+        // e reaplicar o resto do conjunto recarregaria plugins que
+        // ninguém mandou mexer.
+        already.push(plugin.name);
+        continue;
+      }
+
+      const reload = await this.#applyTo(serverId, plugin);
+
+      enabled.push(plugin.name);
+      reloads.push({ plugin: plugin.name, sent: reload.sent, output: reload.output });
+    }
+
+    this.#deps.logger.info(
+      { server: serverId, plugin: alvo.name, enabled, already },
+      'plugin ligado com as dependências',
+    );
+
+    return {
+      plugin: await this.#serverViewOf(serverId, pluginId),
+      enabled,
+      alreadyEnabled: already,
+      reloads,
+    };
   }
 
   /**

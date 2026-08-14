@@ -309,6 +309,27 @@ export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDep
     };
   });
 
+  /**
+   * Liga o plugin E o que ele precisa, na ordem certa.
+   *
+   * Uma rota, e não a tela chamando o `PUT` várias vezes: a ordem
+   * topológica é regra, e no navegador ela não teria teste.
+   */
+  app.post('/servers/:id/plugins/:pluginId/enable-with-deps', async (request) => {
+    const { id, pluginId } = serverPluginParams.parse(request.params);
+    const result = await deps.library.enableWithDeps(id, pluginId);
+
+    return {
+      ok: true,
+      ...result,
+      message:
+        result.enabled.length === 0
+          ? `${result.plugin.name} já estava ligado, com todas as dependências.`
+          : `Ligados nesta ordem: ${result.enabled.join(' → ')}. A ordem é a das dependências — ` +
+            'o Oxide segura um plugin enquanto o que ele exige não estiver carregado.',
+    };
+  });
+
   app.post('/servers/:id/plugins/:pluginId/reload', async (request) => {
     const { id, pluginId } = serverPluginParams.parse(request.params);
     const reload = await deps.library.reload(id, pluginId);

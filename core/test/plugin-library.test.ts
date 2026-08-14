@@ -885,6 +885,115 @@ describe('remover do acervo', () => {
   });
 });
 
+describe('ligar com as dependências', () => {
+  /** `A` depende de `B`, que depende de `C`. Todos na biblioteca. */
+  async function corrente(): Promise<{ a: number; b: number; c: number }> {
+    const c = await harness.library.add('C.cs', pluginSource('1.0.0', { className: 'C' }));
+    const b = await harness.library.add(
+      'B.cs',
+      pluginSource('1.0.0', { className: 'B', requires: ['C'] }),
+    );
+    const a = await harness.library.add(
+      'A.cs',
+      pluginSource('1.0.0', { className: 'A', requires: ['B'] }),
+    );
+
+    return { a: a.plugin.id, b: b.plugin.id, c: c.plugin.id };
+  }
+
+  it('####  liga na ordem topológica: a dependência primeiro  ####', async () => {
+    const { a } = await corrente();
+
+    const result = await harness.library.enableWithDeps(SERVER_ID, a);
+
+    // C antes de B, B antes de A. Na ordem inversa o servidor ficaria
+    // um intervalo com metade do conjunto no ar — no VIP, é jogador
+    // entrando sem benefício.
+    expect(result.enabled).toEqual(['C', 'B', 'A']);
+    expect(harness.commands).toEqual(['oxide.reload C', 'oxide.reload B', 'oxide.reload A']);
+  });
+
+  it('não recarrega o que já estava ligado', async () => {
+    const { a, c } = await corrente();
+
+    await harness.library.setEnabled(SERVER_ID, c, true);
+    harness.commands.length = 0;
+
+    const result = await harness.library.enableWithDeps(SERVER_ID, a);
+
+    expect(result.alreadyEnabled).toEqual(['C']);
+    expect(result.enabled).toEqual(['B', 'A']);
+    // Reaplicar o C recarregaria um plugin que ninguém mandou mexer.
+    expect(harness.commands).toEqual(['oxide.reload B', 'oxide.reload A']);
+  });
+
+  it('recusa o ciclo dizendo quem está nele', async () => {
+    // Não deveria existir — mas o `.cs` é de terceiros, e sem esta
+    // trava a busca desceria para sempre.
+    await harness.library.add('X.cs', pluginSource('1.0.0', { className: 'X', requires: ['Y'] }));
+    const y = await harness.library.add(
+      'Y.cs',
+      pluginSource('1.0.0', { className: 'Y', requires: ['X'] }),
+    );
+
+    await expect(harness.library.enableWithDeps(SERVER_ID, y.plugin.id)).rejects.toMatchObject({
+      status: 409,
+      code: 'PLUGIN_DEPENDENCY_CYCLE',
+    });
+
+    // E nada foi ligado no caminho: a recusa vem antes de tocar em disco.
+    expect(harness.commands).toEqual([]);
+  });
+
+  it('recusa quando a dependência não está no acervo', async () => {
+    const { plugin } = await harness.library.add(
+      'Sozinho.cs',
+      pluginSource('1.0.0', { className: 'Sozinho', requires: ['NuncaEnviado'] }),
+    );
+
+    await expect(harness.library.enableWithDeps(SERVER_ID, plugin.id)).rejects.toMatchObject({
+      status: 409,
+      code: 'PLUGIN_DEPENDENCY_MISSING',
+    });
+
+    expect(harness.commands).toEqual([]);
+  });
+
+  it('a dependência pode ser um custom daquele servidor', async () => {
+    // O acervo do servidor é a biblioteca MAIS os customs dele — e é
+    // contra esse conjunto que a dependência é procurada.
+    await harness.library.addCustom(
+      SERVER_ID,
+      'Base.cs',
+      pluginSource('1.0.0', { className: 'Base' }),
+    );
+
+    const { plugin } = await harness.library.add(
+      'UsaBase.cs',
+      pluginSource('1.0.0', { className: 'UsaBase', requires: ['Base'] }),
+    );
+
+    const result = await harness.library.enableWithDeps(SERVER_ID, plugin.id);
+
+    expect(result.enabled).toEqual(['Base', 'UsaBase']);
+  });
+
+  it('o "[PluginReference]" NÃO arrasta ninguém junto', async () => {
+    // Dependência mole: o plugin carrega e roda sem ela. Ligar o que
+    // o `.cs` só menciona seria ligar coisa que ninguém pediu.
+    await harness.library.add('Kits.cs', pluginSource('1.0.0', { className: 'Kits' }));
+
+    const { plugin } = await harness.library.add(
+      'Loja.cs',
+      pluginSource('1.0.0', { className: 'Loja', references: ['Kits'] }),
+    );
+
+    const result = await harness.library.enableWithDeps(SERVER_ID, plugin.id);
+
+    expect(result.enabled).toEqual(['Loja']);
+  });
+});
+
 describe('a configuração de cada plugin', () => {
   const CONFIG_PATH_OF = (plugin: string): string => join(harness.configDir, `${plugin}.json`);
   const ANTES = '{\n  "Preco": 10\n}';

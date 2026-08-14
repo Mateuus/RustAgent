@@ -529,4 +529,24 @@ export const agent = {
       `/api/servers/${encodeURIComponent(id)}/plugin-configs/${encodeURIComponent(plugin)}`,
       { method: 'DELETE' },
     ),
+  /**
+   * Liga o plugin E as dependências duras que faltam.
+   *
+   * Uma chamada só: a ordem — dependência primeiro — é regra do
+   * agente. Fazer a tela chamar o PUT várias vezes poria essa regra
+   * no navegador, que é onde ela não tem teste.
+   */
+  enableWithDeps: (id: string, pluginId: number) =>
+    api<{
+      ok: true;
+      plugin: ServerPlugin;
+      /** O que esta chamada ligou, na ordem. */
+      enabled: string[];
+      alreadyEnabled: string[];
+      reloads: { plugin: string; sent: boolean; output: string | null }[];
+      message: string;
+    }>(
+      `/api/servers/${encodeURIComponent(id)}/plugins/${String(pluginId)}/enable-with-deps`,
+      { method: 'POST' },
+    ),
 };

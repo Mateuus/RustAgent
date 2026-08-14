@@ -93,6 +93,44 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
     }
   }
 
+  /**
+   * Liga o plugin E o que falta, na ordem que o agente decide.
+   *
+   * A ordem mora no core de propósito: aqui ela não teria teste, e é
+   * a diferença entre o conjunto entrar inteiro e o servidor passar
+   * um intervalo com metade dele no ar.
+   */
+  async function enableWithDeps(plugin: ServerPlugin): Promise<void> {
+    setBusy(plugin.id);
+    setNotice(null);
+
+    try {
+      const response = await agent.enableWithDeps(serverId, plugin.id);
+
+      toast.success(response.message);
+
+      // O que o Oxide respondeu a CADA um: com três plugins ligados
+      // de uma vez, "deu erro" sem dizer em qual não ajuda ninguém.
+      const saida = response.reloads
+        .filter((reload) => reload.output !== null && reload.output.trim() !== '')
+        .map((reload) => `${reload.plugin}: ${String(reload.output)}`)
+        .join('\n');
+
+      if (saida !== '') {
+        setNotice(saida);
+      }
+
+      await load();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      toast.error('Não consegui ligar o conjunto', { description: message });
+      setError(message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function upload(file: File): Promise<void> {
     setUploading(true);
     setNotice(null);
@@ -159,6 +197,7 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
                 plugin={plugin}
                 busy={busy === plugin.id}
                 onEnable={() => void setEnabled(plugin, true)}
+                onEnableWithDeps={() => void enableWithDeps(plugin)}
               />
             ))}
           </Column>
@@ -315,10 +354,13 @@ function AvailableRow({
   plugin,
   busy,
   onEnable,
+  onEnableWithDeps,
 }: {
   plugin: ServerPlugin;
   busy: boolean;
   onEnable: () => void;
+  /** Liga este e as dependências que faltam, na ordem do agente. */
+  onEnableWithDeps: () => void;
 }) {
   return (
     <div className="px-4 py-3">
@@ -349,10 +391,21 @@ function AvailableRow({
           é permitido — o que não pode é a tela dizer "ativo" e nada
           acontecer no jogo, sem explicação. */}
       {plugin.blockedBy === null && plugin.missingRequires.length > 0 && (
-        <p className="mt-2 text-2xs leading-relaxed text-muted">
-          Depende de <strong>{plugin.missingRequires.join(', ')}</strong>, que não está ligado
-          aqui. Dá para ligar assim mesmo — o Oxide só o carrega quando a dependência entrar.
-        </p>
+        <div className="mt-2 space-y-2">
+          <p className="text-2xs leading-relaxed text-muted">
+            Depende de <strong>{plugin.missingRequires.join(', ')}</strong>, que não está ligado
+            aqui. Dá para ligar assim mesmo — o Oxide só o carrega quando a dependência entrar.
+          </p>
+
+          {/* ####  RESOLVER É MELHOR QUE AVISAR  ####
+
+              Avisar e deixar a pessoa ligar três plugins na mão, na
+              ordem certa, é passar a regra para quem não a conhece.
+              O agente sabe a ordem: dependência primeiro. */}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onEnableWithDeps}>
+            {busy ? 'Ligando…' : `Ligar junto com ${plugin.missingRequires.join(', ')}`}
+          </Button>
+        </div>
       )}
     </div>
   );
