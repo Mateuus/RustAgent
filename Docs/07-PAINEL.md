@@ -16,13 +16,15 @@ Em desenvolvimento o painel roda em `localhost:3100` e fala com o core em
   /                   os servidores, lado a lado, + criar
   /servidor?id=<id>   a página de um servidor  (abas)
   /plugins            a biblioteca de plugins do agente
+  /jogadores          quem já jogou na rede
+  /jogador?id=<id>    a ficha de um jogador  (abas)
   /banidos            a BanList do agente
   /config             o agente
 ```
 
-As duas telas de REDE — plugins e banidos — existem pelo mesmo motivo: as duas
-guardam estado que vale para todos os servidores, e espalhá-lo por servidor foi
-justamente o problema que elas resolveram.
+As três telas de REDE — plugins, jogadores e banidos — existem pelo mesmo
+motivo: as três guardam estado que vale para todos os servidores, e espalhá-lo
+por servidor foi justamente o problema que elas resolveram.
 
 Duas decisões tomadas na implementação, e o porquê de cada uma:
 
@@ -410,6 +412,66 @@ aplicar é na aba daquele servidor.
 
 Remover com servidores usando não mostra "tem certeza?": mostra **quais**
 servidores perdem o plugin, com a frase que veio do agente.
+
+---
+
+## `/jogadores` — quem já jogou na rede
+
+A tela de **rede**. Antes dela, jogador só existia enquanto conectado: a aba
+Administração de um servidor mostrava quem estava lá naquele instante, e quem
+fechava o jogo sumia da tela — não havia onde responder "quem é este SteamID que
+apareceu no `bans.cfg`?".
+
+Tabela, pelo mesmo motivo das outras telas de rede: é uma tela de comparação —
+varrer a coluna *visto por último* de cima a baixo e achar quem sumiu.
+
+Por linha: o nome e o SteamID, **onde ele está agora** (ou o último servidor em
+que esteve), quando foi visto pela última vez, desde quando joga na rede e um
+sinal de *banido*. O ponto ao lado do nome segue a regra do resto do painel — a
+forma diz o estado, e não só a cor: disco cheio é online, anel é offline.
+
+Busca por nome ou SteamID e um filtro de *online agora*. **Paginação de
+verdade**, com `1–50 de 12.480`: uma lista infinita trava o navegador antes de
+derrubar o agente, e um "carregar mais" para sempre esconde de quem procura o
+fato de que há dez mil linhas. Trocar de filtro volta para a primeira página —
+senão a tela ficaria vazia sem explicação, porque o resultado novo pode nem ter
+três páginas.
+
+---
+
+## `/jogador?id=<steamId>` — a ficha
+
+Query string pelo mesmo motivo de `/servidor`: o painel é export estático, e os
+jogadores nascem em tempo de execução.
+
+Três abas, porque são três perguntas:
+
+**Identidade.** Nome, SteamID com *Copiar*, jogador desde, visto por último e o
+último IP — que é travessão num servidor com o `OrigemZAgent` ligado, porque
+quem traz endereço é o `playerlist` nativo. Mais o estado de banimento, com
+*Banir* (o mesmo `BanDialog` da tela de Banidos) ou *Revogar* em confirmação de
+dois passos. **O ban é a mesma linha da BanList** — revogar aqui aparece lá na
+leitura seguinte, porque não há cópia no meio.
+
+Quem só existe por causa de um banimento — o ban por SteamID de alguém offline,
+o adotado de um `bans.cfg` — tem ficha, com um aviso dizendo que o agente nunca
+o viu entrar e as datas em branco. É justamente a ficha que se procura.
+
+**Servidores.** Onde ele joga, desde quando em cada um, sessões e tempo. Cada
+servidor tem o seu "joga aqui desde": quem entrou hoje no PVE e joga no PVP
+desde maio é *jogador desde maio* na rede e *desde hoje* no PVE. Tempo zero com
+sessão aberta vira **"na primeira sessão"**, e não "0min": o tempo é somado no
+fechamento, e um zero ali seria lido como "nunca jogou".
+
+**Histórico.** A linha do tempo: entrou, saiu, expulso, teleportado, banido,
+revogado. As duas últimas vêm da tabela `bans` — quem revoga mexe num lugar só.
+
+Abaixo dela, um bloco tracejado com a etiqueta **"exemplo — ainda não é
+medido"**: a estrutura de kill e morte, com a frase do agente dizendo que nada
+ali aconteceu. Kill e morte não existem hoje (o RCON não os entrega e o plugin
+não os coleta), e um mock que não se anuncia é uma mentira. Ele vem do agente,
+num campo separado dos eventos de verdade — a tela não inventa exemplo, e a
+frase que explica nasce em quem conhece a regra.
 
 ---
 

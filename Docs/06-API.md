@@ -47,6 +47,7 @@ Formato único. Programe contra `error`; `message` pode mudar sem aviso.
 | `RCON_UNAVAILABLE` | 503 | sem conexão com aquele servidor de Rust |
 | `RCON_TIMEOUT` | 504 | comando enviado, resposta não voltou |
 | `INVALID_STEAM_ID` | 400 | não é um SteamID64 de 17 dígitos |
+| `PLAYER_NOT_FOUND` | 404 | este agente nunca viu esse SteamID |
 | `BAN_ALREADY_ACTIVE` | 409 | já há banimento ativo para aquele SteamID |
 | `BAN_NOT_FOUND` | 404 | não há banimento ativo para revogar |
 | `BAN_WITHOUT_SERVERS` | 400 | escopo `servers` sem dizer em quais |
@@ -555,6 +556,10 @@ depende do `size`, e as letras/números das células do `cellSize`. Note que
 quantidades diferentes delas, que é por que a última coluna do mapa do jogo é
 sempre mais estreita.
 
+A falta anda nos dois sentidos: o `playerlist` traz o **endereço** do jogador, e
+o plugin não — daí o `ip` na linha, e o `missing: ["ip"]` com a fonte do plugin.
+É de lá que sai o último IP da ficha do jogador.
+
 Com `"source": "nativo"`, `position`, `isAlive` e `isSleeping` vêm **`null`** e
 `missing` os enumera. Nunca `0` nem `false`: um "morto" inventado é pior que um
 campo vazio. `plugin.id` é o que a tela usa para oferecer **ligar** o plugin sem
@@ -822,6 +827,120 @@ resposta em formato desconhecido) **adia** a rodada, e a resposta diz por quê e
 
 ---
 
+## Jogadores
+
+```
+  /api/servers/:id/players   quem está CONECTADO agora (acima, em Administração)
+  /api/players               quem já JOGOU na rede — a base do agente
+```
+
+As duas precisam existir, e confundi-las é o erro caro: a primeira é estado do
+servidor, lido do RCON a cada chamada e inexistente com o jogo fora do ar; a
+segunda é do agente, mora no SQLite e sobrevive ao wipe e ao reinício. Um
+`/api/players` que devolvesse conectados esvaziaria sozinho de madrugada — e não
+haveria onde responder "quem é este SteamID que foi banido em março?".
+
+**`steamId` é string em toda a API**, pela mesma razão dos banimentos: 17
+dígitos passam de 2^53, e em número a ficha volta a ser de outra pessoa.
+
+| Rota | |
+|---|---|
+| `GET /api/players?q=&online=1&limit=&offset=` | a lista, **paginada** |
+| `GET /api/players/:steamId` | a ficha |
+| `GET /api/players/:steamId/servers` | onde ele joga, e desde quando |
+| `GET /api/players/:steamId/events?limit=` | o histórico dele |
+
+**A listagem é paginada desde a primeira versão.** Uma rede com meses de vida
+tem dezenas de milhares de jogadores, e uma rota que devolve tudo é a que um dia
+derruba o agente. `total` vem junto — sem ele a tela não sabe se há página
+seguinte; `count` é o que veio nesta página. O teto de `limit` é 200.
+
+```json
+{ "ok": true, "count": 1, "total": 12480, "limit": 50, "offset": 0,
+  "players": [
+    { "steamId": "76561198123456789", "name": "Fulano",
+      "firstSeen": "2026-05-10T20:00:00.000Z",
+      "lastSeen": "2026-08-14T23:37:05.553Z",
+      "online": true, "onlineOn": ["pvp1"], "lastServerId": "pvp1",
+      "banned": false } ] }
+```
+
+A ficha **junta** o que já existe em vez de duplicar:
+
+```json
+{ "ok": true,
+  "player": { "steamId": "76561198123456789", "name": "Fulano",
+              "firstSeen": "…", "lastSeen": "…", "lastIp": null,
+              "online": true, "known": true },
+  "ban": { "…": "o ban ATIVO, vindo da BanList. null se não há" },
+  "servers": [ { "serverId": "pvp1", "firstSeen": "…", "lastSeen": "…",
+                 "online": true, "joinedAt": "…", "leftAt": null,
+                 "leaveReason": null, "sessions": 42,
+                 "playedSeconds": 187200 } ] }
+```
+
+O `ban` sai da tabela `bans`, e **não** de uma coluna em `players`: duas fontes
+para "ele está banido?" divergem no primeiro ajuste, e a que divergiria é a
+cópia.
+
+`known: false` é a ficha de quem o agente **nunca viu jogar** — o ban por
+SteamID de alguém offline, ou o adotado de um `bans.cfg`. Ela responde `200` com
+as datas nulas, porque é justamente a ficha que se procura depois de banir um id
+que nunca entrou. O `404 PLAYER_NOT_FOUND` fica reservado para o que ele
+significa: este SteamID nunca passou por este agente, em canto nenhum.
+
+`lastIp` é anulável de propósito: quem traz endereço é o `playerlist` nativo, e
+o `origemz.players` não — um IP inventado é pior que um campo vazio.
+
+### A presença: como o agente sabe quem está online
+
+Por **varredura**, e não por linha de log: a cada 15 s ele compara quem o
+servidor lista com quem a tabela diz estar dentro. Quem apareceu, entrou; quem
+sumiu, saiu. O texto de uma linha de log tem dono — e o dono não somos nós, como
+o chat já ensinou.
+
+A hora da entrada vem do `connectedSeconds` que as duas fontes de jogadores já
+trazem, e não do relógio do agente. É isso que faz a reconciliação do boot
+deixar de ser um caso especial: ela é a primeira varredura. Sem ela, um agente
+reiniciado com gente dentro deixaria sessões abertas para sempre e o tempo
+jogado explodiria.
+
+| Situação | O que o agente faz |
+|---|---|
+| na lista, sem sessão aberta | abre a sessão na hora em que ela **começou** |
+| sessão aberta, fora da lista | fecha no **último instante em que o jogador foi visto** |
+| na lista, e conectou depois da sessão aberta | reconectou sem o agente ver: fecha aquela e abre outra |
+| não deu para ler a lista | **adia** — supor lista vazia fecharia a sessão de todo mundo |
+
+O tempo jogado é somado no **fechamento**, e fechar duas vezes não dobra o
+número. Um jogador dormindo continua conectado no Rust e continua online aqui:
+"sem posição" não é "offline".
+
+### O histórico
+
+```json
+{ "ok": true,
+  "events": [ { "at": "…", "kind": "kick", "serverId": "pvp1",
+                "actor": "mateus", "detail": "insulto no chat" } ],
+  "sample": { "measured": false, "label": "exemplo — ainda não é medido",
+              "note": "Kill e morte ainda não existem…",
+              "events": [ { "at": "…", "kind": "kill", "…": "…" } ] } }
+```
+
+`kind` é `join`, `leave`, `kick`, `teleport`, `ban` ou `unban`. Os dois últimos
+**não são gravados**: eles são lidos da tabela `bans` na hora da resposta, com
+quem aplicou e quem revogou. Um ban de rede vem com `serverId: null` — ele não é
+de servidor nenhum.
+
+**`sample` é a estrutura do que ainda não é medido**, e vem num campo separado
+de propósito. Kill e morte não existem hoje: perguntamos ao servidor
+(`find kill`, `find death`, `find stats`) e o RCON só oferece o `combatlog` do
+próprio jogador; o plugin ainda não os coleta. Mock misturado com dado é a única
+coisa pior que não ter o dado — por isso `measured: false` e a frase que
+explica.
+
+---
+
 ## Comando de RCON
 
 `POST /api/servers/:id/rcon` `{"command":"playerlist"}` → a resposta crua.
@@ -836,9 +955,13 @@ fazer isso.
 ## O que **não** existe nesta API
 
 Ditas em voz alta, para ninguém procurar: entrega de item (`give`),
-idempotência, jogadores **persistidos** (a lista de online é lida do servidor a
-cada chamada, e nada dela é guardado), VIP, loja, wipe, propagandas, webhooks,
-auto-update do agente. Ver [09-ROADMAP.md](09-ROADMAP.md).
+idempotência, **ranking**, kills e mortes (ver o `sample` acima), VIP, loja,
+wipe, propagandas, webhooks, auto-update do agente. Ver
+[09-ROADMAP.md](09-ROADMAP.md).
+
+O ranking fica de fora porque depende de kills e tempo MEDIDOS, e construí-lo
+sobre exemplo seria fixar uma regra de pontuação em cima de números falsos. O
+que existe é onde guardar o que ele vai somar.
 
 Os **admins** existem, mas só como comando: o agente lê o `users.cfg` e manda
 `ownerid`/`moderatorid`. Não há tabela de administradores, e nenhum nível de
