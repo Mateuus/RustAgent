@@ -29,6 +29,7 @@ import type { ServersRepository } from '../db/servers-repository.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
+import type { SteamUpdateWatcher } from '../steam/update-watcher.js';
 import { createAuthGuard } from './auth.js';
 import {
   apiErrorToResponse,
@@ -41,6 +42,7 @@ import { registerHealthRoutes, type HealthServerView } from './routes/health.js'
 import { registerOperationRoutes } from './routes/operations.js';
 import { registerPluginRoutes } from './routes/plugins.js';
 import { registerServerRoutes } from './routes/servers.js';
+import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -52,6 +54,7 @@ export interface BuildServerOptions {
   readonly supervisor: ServerSupervisor;
   readonly repository: ServersRepository;
   readonly operations: OperationStore;
+  readonly steamWatcher: SteamUpdateWatcher;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -145,8 +148,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
       registerPluginRoutes(api, { supervisor: options.supervisor });
 
-      // Ainda a fazer nesta fase:
-      //   registerSteamUpdateRoutes(api, ...) — Etapa 6
+      registerSteamUpdateRoutes(api, {
+        watcher: options.steamWatcher,
+        supervisor: options.supervisor,
+      });
     },
     { prefix: '/api' },
   );

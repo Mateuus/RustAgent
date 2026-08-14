@@ -31,6 +31,7 @@ import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
 import { ServerSupervisor } from './servers/supervisor.js';
+import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
@@ -112,6 +113,21 @@ async function main(): Promise<void> {
 
   supervisor.mountAll(servers);
 
+  // O vigia da Steam: compara o build instalado com o publicado e,
+  // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
+  // sozinho. Ele cede a vez ao SteamCMD sempre que há operação
+  // rodando.
+  const steamWatcher = new SteamUpdateWatcher({
+    supervisor,
+    paths: agent.paths,
+    lock,
+    logger,
+    intervalMs: agent.steam.checkIntervalMs,
+    autoUpdate: agent.steam.autoUpdate,
+  });
+
+  steamWatcher.start();
+
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
@@ -135,6 +151,7 @@ async function main(): Promise<void> {
     supervisor,
     repository,
     operations,
+    steamWatcher,
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,
@@ -178,6 +195,9 @@ async function main(): Promise<void> {
 
     void (async () => {
       try {
+        // O relógio primeiro: uma rodada que começasse agora
+        // falaria com um supervisor já parado.
+        steamWatcher.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

@@ -82,10 +82,15 @@ Legenda: `[ ]` a fazer · `[~]` em curso · `[x]` pronto e verificado
 
 ## Etapa 6 — Steam
 
-- [ ] `steam/vdf.ts`, `steam/builds.ts`
-- [ ] `steam/update-watcher.ts` (15 min, cede a vez ao lock)
-- [ ] `server-auto-update` com contagem no chat
-- [ ] `http/routes/steam-updates.ts`
+- [x] `steam/vdf.ts`, `steam/builds.ts` (copiados)
+- [x] `steam/update-watcher.ts` (15 min, cede a vez ao lock, três tentativas por
+      build com uma hora entre elas)
+- [x] `server-auto-update` com contagem no chat (em `ops/service.ts`)
+- [x] `http/routes/steam-updates.ts`
+- [x] **verificado**: o `POST .../steam-update/check` consultou o catálogo da Steam
+      de verdade e trouxe o build publicado (24613624); com nada instalado,
+      `updateAvailable` fica `false` — a trava 2, que impede o agente de "atualizar"
+      uma instalação que não existe
 
 ## Etapa 7 — Plugins
 
