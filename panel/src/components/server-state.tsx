@@ -17,18 +17,36 @@
 
 import type { ServerView } from '@/lib/api';
 
-export type ServerState = 'nao-instalado' | 'parado' | 'conectando' | 'no-ar';
+export type ServerState = 'nao-instalado' | 'parado' | 'conectando' | 'no-ar' | 'sem-agente';
 
+/**
+ * ####  O PROCESSO MANDA MAIS QUE O RCON  ####
+ *
+ * A primeira versão desta função só olhava o RCON, e no primeiro
+ * teste de verdade ela chamou de "parado" um servidor que estava
+ * a 59% de CPU com o mundo carregado. O que ela via era o agente
+ * não estar cuidando dele — outra coisa.
+ *
+ * Agora o processo decide: rodando é rodando. O que o RCON
+ * acrescenta é se o agente CONSEGUE FALAR com ele.
+ */
 export function serverStateOf(server: ServerView): ServerState {
   if (!server.installed) {
     return 'nao-instalado';
   }
 
-  if (server.rcon === null) {
-    return 'parado';
+  if (server.running === true) {
+    if (server.rcon === null) {
+      // No ar, e o agente não cuida dele: os botões de operação
+      // não valem, e a tela precisa dizer isso em vez de mostrar
+      // um verde que promete controle que não existe.
+      return 'sem-agente';
+    }
+
+    return server.rcon.connected ? 'no-ar' : 'conectando';
   }
 
-  return server.rcon.connected ? 'no-ar' : 'conectando';
+  return 'parado';
 }
 
 const LABEL: Record<ServerState, string> = {
@@ -36,6 +54,7 @@ const LABEL: Record<ServerState, string> = {
   parado: 'parado',
   conectando: 'conectando',
   'no-ar': 'no ar',
+  'sem-agente': 'no ar, sem o agente',
 };
 
 // A cor NUNCA é o único sinal: o texto ao lado diz o mesmo, para
@@ -45,6 +64,7 @@ const DOT: Record<ServerState, string> = {
   parado: 'bg-muted',
   conectando: 'bg-amber',
   'no-ar': 'bg-olive',
+  'sem-agente': 'bg-amber',
 };
 
 export function ServerStateBadge({ server }: { server: ServerView }) {

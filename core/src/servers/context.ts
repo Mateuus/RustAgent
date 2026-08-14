@@ -23,6 +23,7 @@ import type { Logger } from '../logger.js';
 import type { OperationLock, OperationStore } from '../ops/operations.js';
 import { OperationsService } from '../ops/service.js';
 import { RconClient } from '../rcon/client.js';
+import { ConsoleBuffer } from './console-buffer.js';
 
 export interface ServerContextDeps {
   readonly paths: AgentPaths;
@@ -36,6 +37,8 @@ export class ServerContext {
   readonly config: ServerConfig;
   readonly rcon: RconClient;
   readonly operations: OperationsService;
+  /** O que o servidor está dizendo agora. Ver console-buffer.ts. */
+  readonly console = new ConsoleBuffer();
 
   constructor(config: ServerConfig, deps: ServerContextDeps) {
     this.config = config;
@@ -49,6 +52,25 @@ export class ServerContext {
       port: config.rcon.port,
       password: config.rcon.password,
       logger,
+    });
+
+    // Toda linha que o servidor manda sem ser resposta de comando
+    // vai para o buffer — é o que a tela de Console mostra. O
+    // ouvinte é montado no CONSTRUTOR, e não no `start()`: as
+    // primeiras linhas chegam junto com a conexão.
+    this.rcon.on('log', (entry) => {
+      this.console.push(entry);
+    });
+
+    this.rcon.on('connected', () => {
+      this.console.pushLocal('conectado ao RCON');
+    });
+
+    this.rcon.on('disconnected', (info) => {
+      this.console.pushLocal(
+        `conexão com o RCON caiu (${String(info.code)}${info.reason === '' ? '' : ` ${info.reason}`})`,
+        'Warning',
+      );
     });
 
     this.operations = new OperationsService({

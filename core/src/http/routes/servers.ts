@@ -56,13 +56,20 @@ function unknownServer(id: string, deps: ServerRoutesDeps): ApiError {
 
 export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDeps): void {
   // ---- listar ---------------------------------------------
-  app.get('/servers', async () => ({
-    ok: true,
-    servers: deps.supervisor.list(),
-    // O formulário do painel mostra as quatro portas ENQUANTO a
-    // pessoa digita o nome, antes de qualquer criação.
-    suggestedPortBlock: suggestedPortBlockFor(deps.repository),
-  }));
+  app.get('/servers', async () => {
+    // A varredura de processos ANTES da lista: é ela que preenche
+    // o `running`. Sem isso a tela chamaria de "parado" um
+    // servidor que está no ar sem o agente cuidar dele.
+    await deps.supervisor.scanProcesses();
+
+    return {
+      ok: true,
+      servers: deps.supervisor.list(),
+      // O formulário do painel mostra as quatro portas ENQUANTO a
+      // pessoa digita o nome, antes de qualquer criação.
+      suggestedPortBlock: suggestedPortBlockFor(deps.repository),
+    };
+  });
 
   // ---- criar ----------------------------------------------
   app.post('/servers', async (request, reply) => {
@@ -114,6 +121,9 @@ export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDep
   // ---- um servidor ----------------------------------------
   app.get('/servers/:id', async (request) => {
     const { id } = paramsSchema.parse(request.params);
+
+    await deps.supervisor.scanProcesses();
+
     const view = deps.supervisor.view(id);
 
     if (view === null) {

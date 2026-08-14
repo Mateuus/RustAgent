@@ -95,6 +95,25 @@ export interface OperationsServiceOptions {
    * agente não enxerga nem sabe derrubar.
    */
   readonly allowedKinds?: readonly OperationKind[];
+
+  /**
+   * Chamado quando a instalação TERMINA BEM.
+   *
+   * ####  DEPOIS DE INSTALAR, CUIDAR É AUTOMÁTICO  ####
+   *
+   * "Cuidar" (o `SERVER_ENABLED`) existe por um motivo técnico:
+   * montar o cliente RCON de um servidor sem jogo em disco produz
+   * um socket reconectando para sempre numa porta onde nunca vai
+   * haver processo. Esse motivo vale ATÉ a instalação terminar —
+   * e some no instante em que ela termina.
+   *
+   * Deixar o passo na mão do operador era expor uma restrição
+   * nossa como se fosse decisão dele: ninguém instala um servidor
+   * para NÃO cuidar dele. Agora o agente adota sozinho, e o botão
+   * de parar de cuidar continua existindo para o caso raro
+   * (manutenção com o agente fora do caminho).
+   */
+  readonly onInstalled?: () => void;
 }
 
 /** Os marcos do aviso de atualização, em segundos. */
@@ -313,6 +332,21 @@ export class OperationsService {
     operation.log('[agente] jogo instalado. Aplicando o Oxide por cima...');
 
     await this.#oxide(operation);
+
+    // A partir daqui o servidor TEM jogo em disco, e o motivo de o
+    // agente não cuidar dele deixou de existir. Ver `onInstalled`.
+    if (this.#options.onInstalled !== undefined) {
+      try {
+        this.#options.onInstalled();
+        operation.log('[agente] o agente passou a cuidar deste servidor. Pode iniciar.');
+      } catch (error) {
+        // Adotar é conveniência: falhar aqui não invalida a
+        // instalação, que é o que a operação prometeu fazer.
+        operation.log(
+          `[agente] instalado, mas não consegui passar a cuidar dele: ${toError(error).message}`,
+        );
+      }
+    }
   }
 
   async #oxide(operation: Operation): Promise<void> {

@@ -16,6 +16,7 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState } from 'react';
 
+import { ConsolePanel } from '@/components/console-panel';
 import { OperationsPanel } from '@/components/operations-panel';
 import { PageHeader } from '@/components/page-header';
 import { PluginsPanel } from '@/components/plugins-panel';
@@ -26,7 +27,7 @@ import { Button } from '@/components/ui/button';
 import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
 import { toast } from '@/lib/toast';
 
-type Tab = 'visao' | 'operacoes' | 'plugins';
+type Tab = 'visao' | 'console' | 'operacoes' | 'plugins';
 
 export default function ServidorPage() {
   return (
@@ -109,8 +110,22 @@ function Servidor() {
               <div className="flex shrink-0 items-center gap-3">
                 <ServerStateBadge server={server} />
 
+                {/* ####  CUIDAR VIRA AUTOMÁTICO DEPOIS DE INSTALAR  ####
+
+                    O agente adota o servidor sozinho quando a
+                    instalação termina — este botão existe para o
+                    caso raro: tirar o agente do caminho durante
+                    uma manutenção feita à mão. Por isso ele é
+                    discreto, e não o passo seguinte em destaque
+                    que já foi. */}
                 <Button
                   size="sm"
+                  variant="ghost"
+                  title={
+                    server.enabled
+                      ? 'O agente deixa de manter o RCON deste servidor. As operações param de valer.'
+                      : 'O agente passa a manter o RCON e a aceitar operações deste servidor.'
+                  }
                   onClick={() => {
                     void agent
                       .setEnabled(server.id, !server.enabled)
@@ -155,6 +170,7 @@ function Servidor() {
             {(
               [
                 ['visao', 'Visão'],
+                ['console', 'Console'],
                 ['operacoes', 'Operações'],
                 ['plugins', 'Plugins'],
               ] as const
@@ -176,6 +192,7 @@ function Servidor() {
           </nav>
 
           {tab === 'visao' && <Visao server={server} steam={steam} />}
+          {tab === 'console' && <ConsolePanel serverId={server.id} />}
           {tab === 'operacoes' && <OperationsPanel serverId={server.id} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
         </>

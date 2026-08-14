@@ -101,6 +101,9 @@ export interface ServerView {
   hostname: string;
   enabled: boolean;
   installed: boolean;
+  /** O processo está no ar? `null` = ainda não varremos. */
+  running: boolean | null;
+  pid: number | null;
   map: string;
   worldSize: number;
   seed: number;
@@ -253,6 +256,28 @@ export const agent = {
 
   cancelOperation: (opId: string) =>
     api<{ ok: true }>(`/api/operations/${encodeURIComponent(opId)}/cancel`, { method: 'POST' }),
+
+  console: (id: string, fromLine: number) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      state?: string;
+      lines: { n: number; at: string; text: string; type: string }[];
+      nextLine: number;
+      droppedLines: number;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/console?fromLine=${String(fromLine)}`),
+
+  consoleFile: (id: string, lines = 200) =>
+    api<{ ok: true; path: string; lines: string[]; message?: string }>(
+      `/api/servers/${encodeURIComponent(id)}/console/file?lines=${String(lines)}`,
+    ),
+
+  rcon: (id: string, command: string) =>
+    api<{ ok: true; command: string; response: string }>(
+      `/api/servers/${encodeURIComponent(id)}/rcon`,
+      { method: 'POST', body: { command } },
+    ),
 
   plugins: (id: string) =>
     api<{ ok: true; pluginsDir: string; plugins: PluginInfo[] }>(

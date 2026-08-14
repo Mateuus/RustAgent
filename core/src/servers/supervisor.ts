@@ -46,6 +46,7 @@ import type { ServersRepository } from '../db/servers-repository.js';
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import type { OperationLock, OperationStore } from '../ops/operations.js';
+import { commandLineValue, listRustProcesses } from '../ops/server-process.js';
 import { disconnectedRcon, OperationsService } from '../ops/service.js';
 import { toError } from '../util.js';
 import { ServerContext } from './context.js';
@@ -68,6 +69,23 @@ export interface ServerView {
   readonly hostname: string;
   readonly enabled: boolean;
   readonly installed: boolean;
+  /**
+   * O `RustDedicated.exe` daquele servidor está rodando NA
+   * MÁQUINA?
+   *
+   * ####  ISTO É DIFERENTE DE `rcon.connected`  ####
+   *
+   * O processo pode estar no ar sem o agente cuidar dele — foi
+   * exatamente o que aconteceu no primeiro teste desta versão: o
+   * servidor rodando a 59% de CPU e o painel dizendo "parado",
+   * porque a única coisa que a tela sabia era do RCON.
+   *
+   * `null` = ainda não varremos os processos (a varredura é
+   * assíncrona e tem cache). Nunca `false` por omissão: "não sei"
+   * e "não está rodando" são respostas diferentes.
+   */
+  readonly running: boolean | null;
+  readonly pid: number | null;
   readonly map: string;
   readonly worldSize: number;
   readonly seed: number;
@@ -77,10 +95,17 @@ export interface ServerView {
   readonly paths: { installDir: string; configPath: string; logsDir: string };
 }
 
+/** Quanto tempo a varredura de processos vale. Ver `scanProcesses`. */
+const PROCESS_SCAN_TTL_MS = 3_000;
+
 export class ServerSupervisor {
   readonly #deps: SupervisorDeps;
   readonly #mounted = new Map<string, ServerContext>();
   readonly #unmounted = new Map<string, { config: ServerConfig; operations: OperationsService }>();
+
+  /** id -> pid do RustDedicated, ou `null` se não achamos. */
+  readonly #processes = new Map<string, number | null>();
+  #scannedAt = 0;
 
   constructor(deps: SupervisorDeps) {
     this.#deps = deps;
@@ -178,6 +203,11 @@ export class ServerSupervisor {
         // `server-start` subiria um processo que o agente não
         // enxerga nem sabe derrubar.
         allowedKinds: ['server-install'],
+        // E a saída dela: terminada a instalação, o agente adota o
+        // servidor sozinho. Ver `onInstalled`, em ops/service.ts.
+        onInstalled: () => {
+          this.enable(config.id);
+        },
       }),
     });
 
@@ -254,6 +284,43 @@ export class ServerSupervisor {
     return [...this.#mounted.keys(), ...this.#unmounted.keys()].sort();
   }
 
+  /**
+   * Varre os processos da máquina e guarda o resultado.
+   *
+   * UMA varredura serve para TODOS os servidores: `wmic` custa
+   * ~200 ms, e chamá-lo por servidor faria a lista de cinco
+   * servidores levar um segundo. O cache curto (3 s) cobre o
+   * polling do painel sem envelhecer a ponto de mentir.
+   */
+  async scanProcesses(): Promise<void> {
+    if (Date.now() - this.#scannedAt < PROCESS_SCAN_TTL_MS) {
+      return;
+    }
+
+    const processes = await listRustProcesses();
+
+    this.#processes.clear();
+
+    for (const id of this.ids()) {
+      const config = this.configOf(id);
+
+      if (config === null) {
+        continue;
+      }
+
+      const found = processes.find((process) => {
+        const identity = commandLineValue(process.commandLine, 'server\\.identity');
+        const rconPort = commandLineValue(process.commandLine, 'rcon\\.port');
+
+        return identity === config.identity || rconPort === String(config.ports.rcon);
+      });
+
+      this.#processes.set(id, found?.pid ?? null);
+    }
+
+    this.#scannedAt = Date.now();
+  }
+
   list(): readonly ServerView[] {
     return this.ids()
       .map((id) => this.view(id))
@@ -275,6 +342,10 @@ export class ServerSupervisor {
       hostname: config.hostname,
       enabled: config.enabled,
       installed: isInstalled(config.paths),
+      // `has` distingue "varremos e não achamos" (false) de "ainda
+      // não varremos" (null). Ver o campo em `ServerView`.
+      running: this.#processes.has(id) ? this.#processes.get(id) !== null : null,
+      pid: this.#processes.get(id) ?? null,
       map: config.level,
       worldSize: config.worldSize,
       seed: config.seed,

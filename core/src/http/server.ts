@@ -38,6 +38,7 @@ import {
   zodErrorToResponse,
 } from './error-response.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerConsoleRoutes } from './routes/console.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
 import { registerOperationRoutes } from './routes/operations.js';
 import { registerPluginRoutes } from './routes/plugins.js';
@@ -153,6 +154,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
           supervisor: options.supervisor,
         });
       }
+
+      registerConsoleRoutes(api, { supervisor: options.supervisor });
 
       registerPluginRoutes(api, { supervisor: options.supervisor });
 

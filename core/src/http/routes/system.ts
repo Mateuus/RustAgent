@@ -69,6 +69,9 @@ async function diskOf(path: string): Promise<{ total: number; free: number } | n
 export function registerSystemRoutes(app: FastifyInstance, deps: SystemRoutesDeps): void {
   app.get('/system', async () => {
     const processors = cpus();
+
+    await deps.supervisor.scanProcesses();
+
     const servers = deps.supervisor.list();
 
     // A pasta pode ainda não existir (máquina nova, nenhum
@@ -122,7 +125,10 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRoutesDep
         installed: servers.filter((server) => server.installed).length,
         // "Cuidado pelo agente" — não é o mesmo que estar no ar.
         enabled: servers.filter((server) => server.enabled).length,
-        online: servers.filter((server) => server.rcon?.connected === true).length,
+        // "No ar" é o PROCESSO existir — inclusive o que roda sem
+        // o agente cuidar dele. Contar só os de RCON conectado
+        // diria "0 no ar" com o servidor cheio de gente.
+        online: servers.filter((server) => server.running === true).length,
         // A soma dos slots dá a capacidade da máquina em jogadores,
         // que é a outra metade de "aguenta mais um?".
         maxPlayers: servers.reduce((sum, server) => sum + server.maxPlayers, 0),
