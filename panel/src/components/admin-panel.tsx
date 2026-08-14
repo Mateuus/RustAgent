@@ -412,21 +412,19 @@ function ChatSection({ serverId }: { serverId: string }) {
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
 
-  const cursor = useRef(0);
   const logRef = useRef<HTMLDivElement | null>(null);
   const stickToBottom = useRef(true);
 
   const load = useCallback(async () => {
     try {
-      const response = await agent.chat(serverId, cursor.current);
+      const response = await agent.chat(serverId);
 
-      cursor.current = response.nextLine;
+      // A lista é SUBSTITUÍDA, e não acumulada: o histórico é do
+      // servidor, e o que chega já é a janela inteira. Acumular
+      // duplicaria cada mensagem a cada volta do polling.
       setConnected(response.connected);
       setNotice(response.message ?? null);
-
-      if (response.lines.length > 0) {
-        setLines((previous) => [...previous.slice(-500), ...response.lines]);
-      }
+      setLines(response.lines);
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : String(cause));
     }
@@ -496,12 +494,15 @@ function ChatSection({ serverId }: { serverId: string }) {
       >
         {lines.length === 0 ? (
           <p className="text-2xs text-muted">
-            Nada ainda. As mensagens aparecem conforme os jogadores falam — o histórico começa
-            quando o agente conecta, e some quando ele reinicia.
+            Nada ainda. As mensagens vêm do histórico do próprio servidor — ele guarda o que foi
+            dito antes de o agente subir.
           </p>
         ) : (
-          lines.map((line) => (
-            <div key={line.n} className="flex flex-wrap items-baseline gap-2">
+          lines.map((line, index) => (
+            // A key é a posição: a lista é substituída inteira a
+            // cada leitura, e duas mensagens iguais no mesmo segundo
+            // são possíveis (o mesmo jogador repetindo).
+            <div key={`${String(index)}-${line.at}`} className="flex flex-wrap items-baseline gap-2">
               <span className="shrink-0 font-mono text-2xs text-muted">
                 {new Date(line.at).toLocaleTimeString('pt-BR')}
               </span>
@@ -509,13 +510,38 @@ function ChatSection({ serverId }: { serverId: string }) {
               {/* O canal importa: uma mensagem de equipe lida como
                   global faz quem administra achar que o combinado
                   foi dito para todo mundo. */}
-              {line.channel === 'equipe' && (
+              {line.channel !== null && line.channel !== 'global' && (
                 <span className="shrink-0 font-condensed text-2xs font-bold uppercase tracking-wide text-amber">
-                  equipe
+                  {line.channel}
                 </span>
               )}
 
-              <span className="shrink-0 font-medium">{line.name ?? EM_DASH}</span>
+              {/* ####  A TAG DO GRUPO  ####
+
+                  É o [VIP OURO] / [ADMIN] que o plugin de chat põe
+                  na frente do nome no jogo. Mostrá-la aqui é o que
+                  faz esta aba ser a MESMA conversa que os jogadores
+                  estão vendo — sem ela, quem administra não sabe se
+                  está falando com um VIP ou com um novato. */}
+              {line.tag !== null && (
+                <span
+                  className="shrink-0 font-condensed text-2xs font-bold uppercase tracking-wide"
+                  style={line.color === null ? undefined : { color: line.color }}
+                >
+                  {line.tag}
+                </span>
+              )}
+
+              {/* A cor vem do grupo, conferida pelo agente. Ela é a
+                  mesma que o jogador vê no jogo — e é o que permite
+                  reconhecer quem é quem de relance. */}
+              <span
+                className="shrink-0 font-medium"
+                style={line.color === null ? undefined : { color: line.color }}
+              >
+                {line.name}
+              </span>
+
               <span className="min-w-0 break-words text-muted">{line.text}</span>
             </div>
           ))
@@ -536,7 +562,15 @@ function ChatSection({ serverId }: { serverId: string }) {
       </form>
 
       <p className="text-2xs leading-relaxed text-muted">
-        A mensagem sai como <code>say</code>, no nome do servidor. Aspas e{' '}
+        A conversa é lida do <strong>histórico do servidor</strong>, e não de um buffer do agente:
+        ela continua inteira depois de um restart do agente, e aparece mesmo com um plugin de chat
+        formatando as mensagens — que é quando o log do RCON deixa de trazê-las. A tag do grupo
+        (<code>[VIP OURO]</code>, <code>[ADMIN]</code>) e a cor do nome são as mesmas que o jogador
+        vê.
+      </p>
+
+      <p className="text-2xs leading-relaxed text-muted">
+        A mensagem que você envia sai como <code>say</code>, no nome do servidor. Aspas e{' '}
         <code>&lt;color&gt;</code> são removidos: o <code>say</code> do Rust quebra com aspas, e o
         rich text deixaria qualquer texto se passar por mensagem de admin.
       </p>

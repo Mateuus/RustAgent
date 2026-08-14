@@ -392,13 +392,24 @@ export interface PlayersSnapshot {
   missing: string[];
 }
 
+/**
+ * Uma mensagem do histórico de chat do SERVIDOR.
+ *
+ * Não é um buffer do agente: vem do `chat.tail`, que o jogo mantém
+ * e que sobrevive ao reinício do agente. É também o único lugar
+ * onde a mensagem existe quando há um plugin de chat formatando —
+ * ele cancela a original, e com ela some o frame de chat do RCON.
+ */
 export interface ChatLine {
-  n: number;
   at: string;
   steamId: string | null;
-  name: string | null;
+  name: string;
+  /** `[VIP OURO]`, `[ADMIN]` — a tag do grupo. `null` = sem tag. */
+  tag: string | null;
   text: string;
-  channel: 'global' | 'equipe' | null;
+  channel: 'global' | 'equipe' | 'servidor' | 'cartas' | 'local' | null;
+  /** A cor do nome naquele grupo, já conferida pelo agente. */
+  color: string | null;
 }
 
 export type AdminLevel = 'owner' | 'moderator';
@@ -646,15 +657,22 @@ export const agent = {
       { method: 'POST', body: reason === undefined ? {} : { reason } },
     ),
 
-  chat: (id: string, fromLine: number) =>
+  /**
+   * As últimas mensagens do histórico do servidor.
+   *
+   * Sem cursor de propósito: a lista é uma JANELA das últimas N, e
+   * é substituída inteira a cada leitura. Um cursor incremental
+   * pressuporia que o agente é dono do histórico — e ele não é: o
+   * dono é o jogo, que guarda as mensagens de antes de o agente
+   * subir.
+   */
+  chat: (id: string, limit = 100) =>
     api<{
       ok: true;
       connected: boolean;
       lines: ChatLine[];
-      nextLine: number;
-      droppedLines: number;
       message?: string;
-    }>(`/api/servers/${encodeURIComponent(id)}/chat?fromLine=${String(fromLine)}`),
+    }>(`/api/servers/${encodeURIComponent(id)}/chat?limit=${String(limit)}`),
 
   say: (id: string, message: string) =>
     api<{ ok: true; message: string }>(`/api/servers/${encodeURIComponent(id)}/chat`, {

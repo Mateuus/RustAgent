@@ -246,10 +246,21 @@ O que a fonte atual não dá vira **travessão**, nunca zero e nunca "morto". A
 faixa acima da tabela explica o travessão antes de alguém concluir que a posição
 sumiu — caçar um defeito que não existe é o pior desfecho desta tela.
 
-**Chat.** As mensagens dos jogadores, com o horário e o autor, mais um campo para
-falar (`say`). Mensagem de **equipe** ganha uma etiqueta: lida como global, ela
-faz quem administra achar que o combinado foi dito para todo mundo. A rolagem
-para quando a pessoa sobe, igual ao console.
+**Chat.** As mensagens dos jogadores com o horário, a **tag do grupo**
+(`[VIP OURO]`, `[ADMIN]`) e o nome **na cor daquele grupo** — a mesma conversa
+que os jogadores estão vendo no jogo. Sem a tag, quem administra não sabe se está
+falando com um VIP ou com um novato. Mais um campo para falar (`say`).
+
+A conversa vem do **histórico do servidor**, e não de um buffer do agente. A
+primeira versão lia as linhas de chat do RCON e ficava vazia com o servidor cheio
+de gente conversando: um plugin de chat cancela a mensagem original para
+reenviá-la formatada, e com ela some o frame de chat do WebRCON. O histórico do
+jogo é alimentado nos dois caminhos — e sobrevive ao reinício do agente, coisa
+que um buffer em memória não faz.
+
+Canal diferente de global ganha etiqueta: uma mensagem de **equipe** lida como
+global faz quem administra achar que o combinado foi dito para todo mundo. A
+rolagem para quando a pessoa sobe, igual ao console.
 
 **Admins.** Quem é owner e quem é moderador, lidos do `users.cfg`, com promover e
 rebaixar. A tela diz, em voz alta, que **o arquivo é lido e nunca escrito**:

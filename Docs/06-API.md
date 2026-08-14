@@ -559,27 +559,61 @@ não impedir de voltar. Para impedir, o caminho é a BanList.
 
 | Rota | |
 |---|---|
-| `GET /api/servers/:id/chat?fromLine=N` | as mensagens, por cursor |
+| `GET /api/servers/:id/chat?limit=100` | as últimas mensagens |
 | `POST /api/servers/:id/chat` | `{ "message": "…" }` — sai como `say` |
 
-Mesmo desenho do console e do log de operação: `fromLine` é o `nextLine` da vez
-anterior. O buffer é **próprio**, e não um filtro sobre o console: num servidor
-cheio, meia hora de conversa sairia do buffer de 500 linhas empurrada por carga
-de plugin e aviso de save.
+**A fonte é o histórico do JOGO (`chat.tail`), e não um buffer do agente.** A
+primeira versão disto guardava as linhas de chat que passavam pelo evento de log
+do RCON, e ficou **vazia** no primeiro servidor de verdade — pelo motivo que
+torna a lição útil:
+
+um plugin de chat (`OrigemZChat`, portado do BetterChat) **cancela** a mensagem
+original no `OnPlayerChat` para reenviá-la formatada, com tag e cor. Cancelada a
+original, o servidor deixa de emitir o frame `Type: "Chat"` do WebRCON. O que
+sobra no console é um `Puts` do plugin, cujo texto **o dono do servidor
+configura** — decorá-lo seria quebrar no dia em que alguém editasse o config.
+
+O `chat.tail` é alimentado nos dois caminhos: o do jogo e o `Chat.Record` que um
+plugin bem-comportado chama justamente para não sumir das ferramentas de admin.
+E ele traz o que um buffer não traz: o histórico **sobrevive ao reinício do
+agente**.
 
 ```json
-{ "ok": true, "connected": true, "nextLine": 128, "droppedLines": 0,
-  "lines": [ { "n": 127, "at": "2026-08-14T18:24:11.007Z",
+{ "ok": true, "connected": true,
+  "lines": [ { "at": "2026-08-14T18:24:11.007Z",
                "steamId": "76561198000000000", "name": "Fulano",
+               "tag": "[VIP OURO]", "color": "#ffd700",
                "text": "alguem viu o helicoptero?", "channel": "global" } ] }
 ```
 
-`channel` distingue `global` de `equipe` — uma mensagem de equipe lida como
-global faz quem administra achar que o combinado foi dito para todo mundo.
-`null` quando a linha não diz.
+**Sem cursor, de propósito:** a resposta é uma *janela* das últimas `limit`
+mensagens, substituída inteira a cada leitura. Um cursor incremental pressuporia
+que o agente é dono do histórico — e o dono é o jogo, que guarda o que foi dito
+antes de o agente subir.
+
+**`tag` e `color` vêm de dentro da mensagem.** Com um plugin de chat no caminho,
+o campo `Message` do histórico vem RENDERIZADO no formato que o dono configurou
+(`{Title} {Username}: {Message}`), ou seja `"[VIP OURO] Fulano: oi"`. O agente
+corta no `<nome>:`: o que vem antes é a tag, o que vem depois é o texto. Sem esse
+corte a tela escreveria "Fulano: [VIP OURO] Fulano: oi", já que o nome tem coluna
+própria. Num servidor sem plugin de chat, `tag` é `null` e o texto vai inteiro.
+
+`color` é conferido contra `#hex` ou um nome de cor antes de sair — ele vem do
+config de um plugin e vai para o `style` da tela, e sem a trava seria um caminho
+para injetar CSS.
+
+`channel` é `global`, `equipe`, `servidor`, `cartas` ou `local`. A distinção
+importa: uma mensagem de equipe lida como global faz quem administra achar que o
+combinado foi dito para todo mundo.
+
+`steamId` é `null` nas mensagens do próprio servidor (o `say`, o aviso de
+atualização) — o histórico traz `"0"` ali, e devolvê-lo faria a tela oferecer
+banir uma conta que não existe.
 
 No `POST`, aspas e `<color>` são **removidos**: o `say` do Rust quebra com aspas
-no meio, e o rich text deixaria qualquer texto se passar por mensagem de admin.
+no meio, e o rich text deixaria qualquer texto se passar por mensagem de admin. A
+mensagem enviada **não** é guardada deste lado: o próprio jogo a registra no
+histórico, e é de lá que a leitura seguinte a traz.
 
 ### Admins
 

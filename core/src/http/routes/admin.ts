@@ -26,6 +26,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { grantAdmin, readAdmins, revokeAdmin } from '../../game/admins.js';
+import { DEFAULT_CHAT_LIMIT, MAX_CHAT_LIMIT, readChat } from '../../game/chat.js';
 import { kickPlayer, type PlayersReader } from '../../game/players.js';
 import type { ServerContext } from '../../servers/context.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
@@ -38,7 +39,9 @@ export interface AdminRoutesDeps {
 
 const serverParams = z.object({ id: z.string().min(1) });
 const playerParams = z.object({ id: z.string().min(1), steamId: z.string().min(1) });
-const cursorQuery = z.object({ fromLine: z.coerce.number().int().min(0).optional() });
+const chatQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_CHAT_LIMIT).optional(),
+});
 
 const kickBody = z.object({ reason: z.string().trim().max(200).optional() }).strict();
 
@@ -166,12 +169,23 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
   // ==========================================================
 
   /**
-   * As mensagens, por cursor — igual ao console e ao log de
-   * operação. `fromLine` é o `nextLine` da vez anterior.
+   * As últimas mensagens, lidas do HISTÓRICO DO JOGO.
+   *
+   * ####  NÃO É UM BUFFER DO AGENTE  ####
+   *
+   * A primeira versão disto guardava as linhas de chat que passavam
+   * pelo RCON. Um plugin de chat (o `OrigemZChat` desta rede)
+   * CANCELA a mensagem original para reenviá-la formatada, e com
+   * isso o frame de chat do WebRCON deixa de existir — a aba ficava
+   * vazia com o servidor cheio de gente conversando.
+   *
+   * `chat.tail` é o histórico do próprio servidor, que o jogo
+   * alimenta nos dois caminhos. Ele ainda sobrevive ao reinício do
+   * agente, coisa que um buffer em memória não faz. Ver game/chat.ts.
    */
   app.get('/servers/:id/chat', async (request) => {
     const { id } = serverParams.parse(request.params);
-    const { fromLine } = cursorQuery.parse(request.query);
+    const { limit } = chatQuery.parse(request.query);
     const context = deps.supervisor.contextOf(id);
 
     if (context === null) {
@@ -185,27 +199,37 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
         ok: true,
         connected: false,
         lines: [],
-        nextLine: 0,
-        droppedLines: 0,
         message:
-          `O agente não está cuidando do servidor "${id}", então não há chat ao vivo. As ` +
-          'mensagens passam pelo RCON, e ele só existe com o servidor sob o agente.',
+          `O agente não está cuidando do servidor "${id}", então não há chat. O histórico é do ` +
+          'servidor, e é pelo RCON que se pergunta por ele.',
       };
     }
 
+    if (!context.rcon.isConnected) {
+      return {
+        ok: true,
+        connected: false,
+        lines: [],
+        message:
+          `O RCON do servidor "${id}" está fora do ar. O histórico de chat continua guardado no ` +
+          'servidor e aparece aqui assim que a conexão voltar.',
+      };
+    }
+
+    const lines = await readChat(id, context.rcon, limit ?? DEFAULT_CHAT_LIMIT);
+
     return {
       ok: true,
-      connected: context.rcon.isConnected,
-      lines: context.chat.from(fromLine ?? 0).map((line) => ({
-        n: line.n,
+      connected: true,
+      lines: lines.map((line) => ({
         at: new Date(line.at).toISOString(),
         steamId: line.steamId,
         name: line.name,
+        tag: line.tag,
         text: line.text,
         channel: line.channel,
+        color: line.color,
       })),
-      nextLine: context.chat.nextLine,
-      droppedLines: context.chat.droppedLines,
     };
   });
 
@@ -239,10 +263,11 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
 
     await context.rcon.send(`say "${clean}"`);
 
-    // O `say` NÃO volta como linha de chat pelo RCON — ele é
-    // resposta de comando, não transmissão. Sem isto, a mensagem
-    // que a pessoa acabou de mandar não apareceria na própria aba.
-    context.chat.pushLocal(clean, operatorOf(request) ?? 'agente');
+    // Não há nada a guardar deste lado: o próprio jogo registra o
+    // `say` no histórico (como uma mensagem do SERVER), e é de lá
+    // que a tela lê. Uma cópia local seria uma segunda verdade, e
+    // ela apareceria duplicada na leitura seguinte.
+    request.log.info({ server: id, by: operatorOf(request) }, 'mensagem enviada ao chat do jogo');
 
     return { ok: true, message: clean };
   });

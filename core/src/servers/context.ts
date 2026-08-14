@@ -23,7 +23,6 @@ import type { Logger } from '../logger.js';
 import type { OperationLock, OperationStore } from '../ops/operations.js';
 import { OperationsService } from '../ops/service.js';
 import { RconClient } from '../rcon/client.js';
-import { ChatBuffer } from './chat-buffer.js';
 import { ConsoleBuffer } from './console-buffer.js';
 
 export interface ServerContextDeps {
@@ -56,15 +55,6 @@ export class ServerContext {
   readonly operations: OperationsService;
   /** O que o servidor está dizendo agora. Ver console-buffer.ts. */
   readonly console = new ConsoleBuffer();
-  /**
-   * Só o que os JOGADORES dizem. Ver chat-buffer.ts.
-   *
-   * Anel próprio, e não um filtro sobre o console: meia hora de
-   * conversa sai do buffer de 500 linhas empurrada por carga de
-   * plugin e aviso de save, que é ruído para quem administra o
-   * chat.
-   */
-  readonly chat = new ChatBuffer();
 
   constructor(config: ServerConfig, deps: ServerContextDeps) {
     this.config = config;
@@ -85,17 +75,15 @@ export class ServerContext {
     // ouvinte é montado no CONSTRUTOR, e não no `start()`: as
     // primeiras linhas chegam junto com a conexão.
     //
-    // ####  UM OUVINTE, DOIS DESTINOS  ####
+    // ####  O CHAT NÃO SAI DAQUI  ####
     //
-    // O chat sai do MESMO evento, e não de um segundo
-    // `rcon.on('log')`. Dois ouvintes independentes sobre o mesmo
-    // socket é o desenho que um dia entrega metade das linhas para
-    // cada um — e a metade que some é sempre a que alguém estava
-    // procurando. Quem decide o que é conversa é o próprio
-    // ChatBuffer.
+    // Ele já saiu: havia um `ChatBuffer` alimentado por este mesmo
+    // evento, e ele ficava VAZIO num servidor com plugin de chat.
+    // Um plugin que formata a mensagem cancela a original, e com
+    // ela some o frame de chat do WebRCON. A aba lê o histórico do
+    // próprio jogo (`chat.tail`) — ver game/chat.ts.
     this.rcon.on('log', (entry) => {
       this.console.push(entry);
-      this.chat.push(entry);
     });
 
     this.rcon.on('connected', () => {
