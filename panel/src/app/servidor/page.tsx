@@ -191,7 +191,7 @@ function Servidor() {
             ))}
           </nav>
 
-          {tab === 'visao' && <Visao server={server} steam={steam} />}
+          {tab === 'visao' && <Visao server={server} steam={steam} onChanged={() => void load()} />}
           {tab === 'console' && <ConsolePanel serverId={server.id} />}
           {tab === 'operacoes' && <OperationsPanel serverId={server.id} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
@@ -201,9 +201,18 @@ function Servidor() {
   );
 }
 
-function Visao({ server, steam }: { server: ServerView; steam: SteamUpdate | null }) {
+function Visao({
+  server,
+  steam,
+  onChanged,
+}: {
+  server: ServerView;
+  steam: SteamUpdate | null;
+  onChanged: () => void;
+}) {
   const rows: [string, string][] = [
     ['id', server.id],
+    ['processo', server.running === true ? `no ar (pid ${String(server.pid ?? 0)})` : 'parado'],
     ['identity (pasta de saves)', server.identity],
     ['mapa', `${server.map} · ${String(server.worldSize)} · seed ${String(server.seed)}`],
     ['jogadores', `até ${String(server.maxPlayers)}`],
@@ -221,13 +230,73 @@ function Visao({ server, steam }: { server: ServerView; steam: SteamUpdate | nul
   ];
 
   return (
-    <dl className="divide-y divide-border border border-border bg-surface text-sm">
-      {rows.map(([label, value]) => (
-        <div key={label} className="flex gap-4 px-4 py-2">
-          <dt className="w-56 shrink-0 text-muted">{label}</dt>
-          <dd className="min-w-0 break-all">{value}</dd>
+    <div className="space-y-4">
+      <dl className="divide-y divide-border border border-border bg-surface text-sm">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex gap-4 px-4 py-2">
+            <dt className="w-56 shrink-0 text-muted">{label}</dt>
+            <dd className="min-w-0 break-all">{value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      {/* ####  A JANELA DO JOGO  ####
+
+          Um serviço 24/7 não quer uma janela por servidor, e por
+          isso o padrão é sem. Mas quem administra a máquina de
+          perto quer poder olhar o console sem o painel — e essa é
+          uma decisão de quem opera, não nossa. */}
+      <div className="border border-border bg-surface p-4 text-sm">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="font-condensed text-sm font-bold uppercase tracking-wide">
+              Janela de console do jogo
+            </p>
+            <p className="mt-1 text-muted">
+              {server.consoleWindow
+                ? 'O servidor sobe numa janela própria, e ela aparece na barra de tarefas.'
+                : 'O servidor sobe sem janela (o log vai para o arquivo e para a aba Console).'}
+            </p>
+          </div>
+
+          <Button
+            size="sm"
+            variant={server.consoleWindow ? 'outline' : 'primary'}
+            onClick={() => {
+              void agent
+                .setConsoleWindow(server.id, !server.consoleWindow)
+                .then((response) => {
+                  toast.success(
+                    server.consoleWindow ? 'Janela desligada' : 'Janela ligada',
+                    { description: response.message },
+                  );
+
+                  onChanged();
+                })
+                .catch((cause: unknown) => {
+                  toast.error('Não deu', {
+                    description: cause instanceof Error ? cause.message : String(cause),
+                  });
+                });
+            }}
+          >
+            {server.consoleWindow ? 'Desligar janela' : 'Ligar janela'}
+          </Button>
         </div>
-      ))}
-    </dl>
+
+        {server.consoleWindow && (
+          <p className="mt-3 border border-amber bg-surface-2 p-3 text-2xs">
+            <strong>Cuidado com o clique.</strong> O console do Windows vem com o Modo de Edição
+            Rápida ligado: clicar dentro da janela põe o console em seleção e <strong>congela o
+            servidor</strong> — com os jogadores dentro — até alguém apertar Enter ali.
+          </p>
+        )}
+
+        <p className="mt-3 text-2xs text-muted">
+          A mudança vale no próximo start: uma janela não aparece para um processo que já está no
+          ar.
+        </p>
+      </div>
+    </div>
   );
 }

@@ -257,6 +257,23 @@ export interface ServerConfig {
   readonly saveInterval: number;
   /** `SERVER_ENABLED`: o agente cuida deste servidor? */
   readonly enabled: boolean;
+  /**
+   * `SERVER_CONSOLE_WINDOW`: abrir a janela de console do jogo?
+   *
+   * ####  ISTO NÃO MUDA O QUE O SERVIDOR FAZ  ####
+   *
+   * Muda quem consegue olhar para ele sem o painel. Com janela, o
+   * processo aparece na barra de tarefas e dá para acompanhá-lo
+   * na máquina — que é como se administrava antes do agente.
+   *
+   * O padrão é 0 num serviço 24/7: uma janela por servidor num
+   * dedicado com cinco deles é bagunça, e — pior — o "Modo de
+   * Edição Rápida" do console do Windows CONGELA o processo se
+   * alguém clicar dentro da janela sem querer. O servidor trava
+   * com os jogadores dentro e só volta quando alguém aperta
+   * Enter.
+   */
+  readonly consoleWindow: boolean;
   readonly ports: ServerPorts;
   readonly rcon: {
     readonly host: string;
@@ -436,6 +453,7 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
     maxPlayers: requiredInt(values, 'SERVER_MAXPLAYERS', id, 1, 1_000),
     saveInterval: requiredInt(values, 'SERVER_SAVEINTERVAL', id, 30, 86_400),
     enabled: (values.SERVER_ENABLED ?? '1').trim() === '1',
+    consoleWindow: (values.SERVER_CONSOLE_WINDOW ?? '0').trim() === '1',
     ports: { game: gamePort, query: queryPort, app: appPort, rcon: rconPort },
     rcon: {
       host: (values.RCON_HOST ?? '').trim() || '127.0.0.1',

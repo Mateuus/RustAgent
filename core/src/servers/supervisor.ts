@@ -69,6 +69,8 @@ export interface ServerView {
   readonly hostname: string;
   readonly enabled: boolean;
   readonly installed: boolean;
+  /** O jogo sobe com janela de console? Ver `ServerConfig`. */
+  readonly consoleWindow: boolean;
   /**
    * O `RustDedicated.exe` daquele servidor está rodando NA
    * MÁQUINA?
@@ -106,6 +108,17 @@ export class ServerSupervisor {
   /** id -> pid do RustDedicated, ou `null` se não achamos. */
   readonly #processes = new Map<string, number | null>();
   #scannedAt = 0;
+
+  /**
+   * A configuração MAIS RECENTE lida do disco, por servidor.
+   *
+   * O `ServerContext` guarda a de quando foi montado — e ela fica
+   * velha no instante em que alguém edita o `.ini` pelo painel.
+   * Sem este mapa, o PATCH gravava a mudança no arquivo e a
+   * resposta devolvia o valor antigo: a tela mostrava o
+   * interruptor voltando sozinho.
+   */
+  readonly #configs = new Map<string, ServerConfig>();
 
   constructor(deps: SupervisorDeps) {
     this.#deps = deps;
@@ -169,6 +182,8 @@ export class ServerSupervisor {
   }
 
   #adopt(config: ServerConfig): void {
+    this.#configs.set(config.id, config);
+
     // Ligado E instalado -> contexto completo.
     if (config.enabled && isInstalled(config.paths)) {
       const context = new ServerContext(config, this.#deps);
@@ -253,7 +268,14 @@ export class ServerSupervisor {
   // ------------------------------------------------------
 
   configOf(id: string): ServerConfig | null {
-    return this.#mounted.get(id)?.config ?? this.#unmounted.get(id)?.config ?? null;
+    // O mapa vem primeiro: ele tem o que o `.ini` diz AGORA. Ver
+    // `#configs`.
+    return (
+      this.#configs.get(id) ??
+      this.#mounted.get(id)?.config ??
+      this.#unmounted.get(id)?.config ??
+      null
+    );
   }
 
   contextOf(id: string): ServerContext | null {
@@ -329,9 +351,9 @@ export class ServerSupervisor {
 
   view(id: string): ServerView | null {
     const context = this.#mounted.get(id);
-    const config = context?.config ?? this.#unmounted.get(id)?.config;
+    const config = this.configOf(id);
 
-    if (config === undefined) {
+    if (config === null) {
       return null;
     }
 
@@ -342,6 +364,7 @@ export class ServerSupervisor {
       hostname: config.hostname,
       enabled: config.enabled,
       installed: isInstalled(config.paths),
+      consoleWindow: config.consoleWindow,
       // `has` distingue "varremos e não achamos" (false) de "ainda
       // não varremos" (null). Ver o campo em `ServerView`.
       running: this.#processes.has(id) ? this.#processes.get(id) !== null : null,
@@ -406,6 +429,46 @@ export class ServerSupervisor {
     this.#adopt(config);
   }
 
+  /**
+   * Liga ou desliga a janela de console do jogo.
+   *
+   * Vale no PRÓXIMO start: uma janela não aparece para um
+   * processo que já está no ar, e derrubar o servidor para trocar
+   * isso seria uma decisão de quem opera, não deste método.
+   *
+   * @throws {ApiError}
+   */
+  setConsoleWindow(id: string, value: boolean): void {
+    const config = this.configOf(id);
+
+    if (config === null) {
+      throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
+    }
+
+    this.#writeIni(config, { SERVER_CONSOLE_WINDOW: value ? '1' : '0' });
+
+    // Reler o `.ini` em vez de mexer no objeto em memória: é o
+    // arquivo que manda.
+    const updated = readServerConfig(this.#deps.paths, id);
+    const mounted = this.#mounted.get(id);
+
+    this.#configs.set(id, updated);
+
+    if (mounted === undefined) {
+      this.#adopt(updated);
+      return;
+    }
+
+    // Servidor montado: trocar o contexto inteiro derrubaria o
+    // RCON por causa de uma preferência de janela. O contexto
+    // guarda a configuração de quando foi montado, e o `start`
+    // seguinte lê o arquivo de novo — que é onde a mudança vale.
+    this.#deps.logger.info(
+      { server: id, consoleWindow: value },
+      'janela de console do jogo alterada; vale no próximo start',
+    );
+  }
+
   /** Para de cuidar. A ordem está no cabeçalho deste arquivo. */
   async disable(id: string): Promise<void> {
     const context = this.#mounted.get(id);
@@ -443,6 +506,8 @@ export class ServerSupervisor {
     await this.disable(id);
     this.#unmounted.delete(id);
     this.#mounted.delete(id);
+    this.#configs.delete(id);
+    this.#processes.delete(id);
   }
 
   /** O desligamento do agente inteiro. */
@@ -452,27 +517,30 @@ export class ServerSupervisor {
   }
 
   /**
-   * Grava `SERVER_ENABLED` no `.ini`, preservando o resto.
+   * Grava chaves no `.ini` daquele servidor, preservando o resto.
    *
    * Pela mesma função que a criação usa (`applyIniValues`): uma
    * segunda implementação de "trocar uma chave do .ini" é a que
    * um dia apaga um comentário — ou a senha de RCON.
    */
-  #writeEnabled(config: ServerConfig, enabled: boolean): void {
+  #writeIni(config: ServerConfig, values: Record<string, string>): void {
     const path = config.paths.configPath;
 
     try {
       const content = readFileSync(path, 'utf8');
 
-      writeFileSync(path, applyIniValues(content, { SERVER_ENABLED: enabled ? '1' : '0' }), 'utf8');
+      writeFileSync(path, applyIniValues(content, values), 'utf8');
     } catch (error) {
       throw new ApiError(
         'SERVER_CONFIG_WRITE_FAILED',
-        `Não consegui escrever ${path}: ${toError(error).message}. O servidor NÃO foi ` +
-          `${enabled ? 'ligado' : 'desligado'} — sem gravar o arquivo, o próximo boot ` +
-          'desfaria a mudança em silêncio.',
+        `Não consegui escrever ${path}: ${toError(error).message}. A mudança NÃO foi ` +
+          'aplicada — sem gravar o arquivo, o próximo boot a desfaria em silêncio.',
         500,
       );
     }
+  }
+
+  #writeEnabled(config: ServerConfig, enabled: boolean): void {
+    this.#writeIni(config, { SERVER_ENABLED: enabled ? '1' : '0' });
   }
 }

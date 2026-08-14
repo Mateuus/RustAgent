@@ -104,6 +104,8 @@ export interface ServerView {
   /** O processo está no ar? `null` = ainda não varremos. */
   running: boolean | null;
   pid: number | null;
+  /** O jogo sobe com janela de console própria? */
+  consoleWindow: boolean;
   map: string;
   worldSize: number;
   seed: number;
@@ -237,6 +239,12 @@ export const agent = {
       method: 'PATCH',
       body: { enabled },
     }),
+
+  setConsoleWindow: (id: string, consoleWindow: boolean) =>
+    api<{ ok: true; server: ServerView; message?: string }>(
+      `/api/servers/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body: { consoleWindow } },
+    ),
 
   operations: (id: string) =>
     api<{ ok: true; kinds: OperationKind[]; operations: OperationView[] }>(

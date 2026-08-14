@@ -29,7 +29,7 @@
 
 import { existsSync } from 'node:fs';
 
-import type { AgentPaths, ServerConfig } from '../config.js';
+import { readServerConfig, type AgentPaths, type ServerConfig } from '../config.js';
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import { installOxide } from '../oxide/install.js';
@@ -364,8 +364,30 @@ export class OperationsService {
 
   /** Sobe o processo e espera o RCON responder. */
   async #start(operation: Operation): Promise<void> {
+    // ####  A CONFIGURAÇÃO É RELIDA AQUI  ####
+    //
+    // O contexto guarda o `.ini` de quando foi montado, e entre
+    // aquele instante e este alguém pode ter mudado o mapa, a
+    // seed ou a janela de console — pelo painel ou no editor. É
+    // ESTE start que precisa refletir o arquivo, senão a mudança
+    // só valeria depois de reiniciar o agente, e ninguém liga uma
+    // coisa à outra.
+    //
+    // Falha na leitura cai para a configuração em memória: subir
+    // com o que temos é melhor que não subir.
+    let server = this.#options.server;
+
+    try {
+      server = readServerConfig(this.#options.paths, server.id);
+    } catch (error) {
+      operation.log(
+        `[agente] não consegui reler ${server.paths.configPath} (${toError(error).message}); ` +
+          'subindo com a configuração que já estava carregada.',
+      );
+    }
+
     const started = await startServer({
-      server: this.#options.server,
+      server,
       onLine: (line) => operation.log(line),
     });
 

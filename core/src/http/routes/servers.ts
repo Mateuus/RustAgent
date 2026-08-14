@@ -30,6 +30,8 @@ export interface ServerRoutesDeps {
 const patchSchema = z
   .object({
     enabled: z.boolean().optional(),
+    /** A janela de console do jogo. Vale no próximo start. */
+    consoleWindow: z.boolean().optional(),
   })
   .strict();
 
@@ -142,13 +144,33 @@ export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDep
       throw unknownServer(id, deps);
     }
 
+    if (body.consoleWindow !== undefined) {
+      deps.supervisor.setConsoleWindow(id, body.consoleWindow);
+    }
+
     if (body.enabled === true) {
       deps.supervisor.enable(id);
     } else if (body.enabled === false) {
       await deps.supervisor.disable(id);
     }
 
-    return { ok: true, server: deps.supervisor.view(id) };
+    await deps.supervisor.scanProcesses();
+
+    return {
+      ok: true,
+      server: deps.supervisor.view(id),
+      // Dito em voz alta: a janela não aparece num processo que já
+      // está no ar, e quem trocou a opção precisa saber que o
+      // efeito não é agora.
+      ...(body.consoleWindow === undefined
+        ? {}
+        : {
+            requiresRestart: ['consoleWindow'],
+            message:
+              'A janela de console vale a partir do próximo start do servidor — ' +
+              'ela não aparece num processo que já está rodando.',
+          }),
+    };
   });
 
   // ---- remover --------------------------------------------

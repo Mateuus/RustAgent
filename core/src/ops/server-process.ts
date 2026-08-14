@@ -164,6 +164,32 @@ export async function findServerProcess(server: ServerConfig): Promise<RustProce
   );
 }
 
+/**
+ * Espera o processo daquele servidor aparecer.
+ *
+ * Só o modo COM JANELA precisa disto: lá quem nasce é o `cmd`, e
+ * ele morre assim que o `start` dispara — o PID do jogo tem de ser
+ * descoberto depois, pela linha de comando.
+ */
+async function waitForProcess(
+  server: ServerConfig,
+  timeoutMs: number,
+): Promise<RustProcessInfo | null> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const found = await findServerProcess(server);
+
+    if (found !== null) {
+      return found;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+
+  return null;
+}
+
 /** A porta está livre NESTA máquina? */
 export function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -285,6 +311,74 @@ export async function startServer(options: StartServerOptions): Promise<StartedS
 
   options.onLine(`[agente] subindo ${server.paths.exePath}`);
   options.onLine(`[agente] log do jogo: ${logFile}`);
+
+  // ========================================================
+  //  COM JANELA, OU SEM
+  //
+  //  `SERVER_CONSOLE_WINDOW=1` sobe o jogo numa janela de console
+  //  própria, como acontecia quando se rodava o `.bat` à mão. É
+  //  útil para quem administra a máquina de perto: o processo
+  //  aparece na barra de tarefas e dá para acompanhá-lo sem o
+  //  painel.
+  //
+  //  A janela só existe com o `start` do cmd: `windowsHide: false`
+  //  sozinho não cria console para um processo que herda o do pai
+  //  — e o pai aqui é um serviço, que não tem nenhum.
+  //
+  //  ####  E POR QUE O PADRÃO CONTINUA SENDO SEM  ####
+  //
+  //  O console do Windows vem com o "Modo de Edição Rápida"
+  //  ligado. Um clique dentro da janela põe o console em modo de
+  //  SELEÇÃO, e a partir daí toda escrita fica BLOQUEADA: o
+  //  RustDedicated continua tentando imprimir, o buffer enche, e
+  //  o processo inteiro PARA — com os jogadores dentro. O sintoma
+  //  é o servidor "travar" e voltar a andar sozinho quando alguém
+  //  aperta Enter na janela.
+  //
+  //  Quem liga a janela precisa saber disso, e é por isso que o
+  //  aviso está no `.ini`, na tela e aqui.
+  // ========================================================
+  if (server.consoleWindow) {
+    options.onLine(
+      '[agente] abrindo a janela de console do jogo. CUIDADO: um clique dentro dela ' +
+        'congela o servidor (Modo de Edição Rápida do Windows) até alguém apertar Enter.',
+    );
+
+    // `start "titulo"` — o primeiro argumento entre aspas é SEMPRE
+    // o título da janela para o `start`. Sem ele, o caminho do
+    // executável viraria o título e o `start` ficaria sem o
+    // programa a rodar.
+    const windowed = spawn(
+      'cmd.exe',
+      [
+        '/c',
+        'start',
+        `RustAgent - ${server.id}`,
+        '/D',
+        server.paths.installDir,
+        server.paths.exePath,
+        ...serverArgs(server, logFile),
+      ],
+      { cwd: server.paths.installDir, detached: true, stdio: 'ignore', windowsHide: false },
+    );
+
+    windowed.unref();
+
+    // O `cmd` sai assim que o `start` dispara, então o PID dele
+    // não é o do jogo. Quem descobre o processo de verdade é o
+    // `findServerProcess`, pela linha de comando — e é por isso
+    // que ele existe (ver o cabeçalho deste arquivo).
+    const found = await waitForProcess(server, 30_000);
+
+    if (found === null) {
+      throw new Error(
+        'a janela foi aberta, mas o RustDedicated.exe não apareceu na lista de processos em ' +
+          '30 s. Veja a janela: o jogo pode ter recusado algum argumento.',
+      );
+    }
+
+    return { pid: found.pid, logFile };
+  }
 
   // ####  O CAMINHO É ABSOLUTO, E O cwd É OBRIGATÓRIO  ####
   //
