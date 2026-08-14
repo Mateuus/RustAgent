@@ -178,24 +178,29 @@ export function ConsolePanel({ serverId }: { serverId: string }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex border border-border">
+        <div className="flex items-stretch border border-border">
           {(
             [
               ['vivo', 'Ao vivo'],
               ['arquivo', 'Arquivo do jogo'],
             ] as const
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setSource(key)}
-              className={cn(
-                'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
-                source === key ? 'bg-surface-2 text-foreground' : 'text-muted hover:text-foreground',
-              )}
-            >
-              {label}
-            </button>
+          ).map(([key, label], index) => (
+            <div key={key} className="flex items-stretch">
+              {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
+
+              <button
+                type="button"
+                onClick={() => setSource(key)}
+                className={cn(
+                  'px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
+                  source === key
+                    ? 'bg-surface-2 text-foreground'
+                    : 'text-muted hover:text-foreground',
+                )}
+              >
+                {label}
+              </button>
+            </div>
           ))}
         </div>
 

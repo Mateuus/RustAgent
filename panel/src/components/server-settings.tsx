@@ -242,21 +242,27 @@ export function ServerSettings({
       {/* As sub-abas. Pílulas, e não a mesma barra sublinhada das
           abas de cima: dois níveis com o mesmo desenho fazem a
           pessoa perder de vista onde está. */}
-      <div className="flex flex-wrap gap-1 border border-border bg-surface p-1">
-        {SECTIONS.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            onClick={() => setSection(item.key)}
-            className={cn(
-              'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
-              section === item.key
-                ? 'bg-surface-2 text-foreground'
-                : 'text-muted hover:text-foreground',
-            )}
-          >
-            {item.label}
-          </button>
+      <div className="flex flex-wrap items-stretch border border-border bg-surface">
+        {SECTIONS.map((item, index) => (
+          <div key={item.key} className="flex items-stretch">
+            {/* A divisória entre as seções, pela mesma razão das
+                abas de cima: sem ela, seis rótulos em maiúsculas
+                viram uma faixa contínua de texto. */}
+            {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
+
+            <button
+              type="button"
+              onClick={() => setSection(item.key)}
+              className={cn(
+                'px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
+                section === item.key
+                  ? 'bg-surface-2 text-foreground'
+                  : 'text-muted hover:text-foreground',
+              )}
+            >
+              {item.label}
+            </button>
+          </div>
         ))}
       </div>
 

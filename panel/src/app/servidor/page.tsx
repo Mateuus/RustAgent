@@ -183,22 +183,34 @@ function Servidor() {
             </p>
           )}
 
-          <nav className="mb-4 flex gap-1 overflow-x-auto border-b border-border">
-            {TABS.map(({ key, label, Icon }) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setTab(key)}
-                className={
-                  'flex shrink-0 items-center gap-2 px-4 py-2 text-sm ' +
-                  (tab === key
-                    ? 'border-b-2 border-rust text-foreground'
-                    : 'border-b-2 border-transparent text-muted hover:text-foreground')
-                }
-              >
-                <Icon aria-hidden="true" className={'h-4 w-4' + (tab === key ? ' text-rust' : '')} />
-                {label}
-              </button>
+          {/* A divisória vertical entre as abas (`border-l` a
+              partir da segunda) é o que separa cinco alvos de
+              clique que, sem ela, viram uma faixa contínua de
+              texto. Ela para ANTES da linha de baixo — daí o
+              `my-2`, e não uma borda de altura cheia que cruzaria
+              o sublinhado da aba ativa. */}
+          <nav className="mb-4 flex overflow-x-auto border-b border-border">
+            {TABS.map(({ key, label, Icon }, index) => (
+              <div key={key} className="flex shrink-0 items-stretch">
+                {index > 0 && <span aria-hidden className="my-2 w-px bg-border" />}
+
+                <button
+                  type="button"
+                  onClick={() => setTab(key)}
+                  className={
+                    'flex items-center gap-2 px-5 py-2 text-sm ' +
+                    (tab === key
+                      ? 'border-b-2 border-rust text-foreground'
+                      : 'border-b-2 border-transparent text-muted hover:text-foreground')
+                  }
+                >
+                  <Icon
+                    aria-hidden="true"
+                    className={'h-4 w-4' + (tab === key ? ' text-rust' : '')}
+                  />
+                  {label}
+                </button>
+              </div>
             ))}
           </nav>
 
