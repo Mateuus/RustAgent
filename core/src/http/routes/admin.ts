@@ -27,6 +27,7 @@ import { createReadStream } from 'node:fs';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
+import type { PlayerEventInput } from '../../db/players-repository.js';
 import { grantAdmin, readAdmins, revokeAdmin } from '../../game/admins.js';
 import { DEFAULT_CHAT_LIMIT, MAX_CHAT_LIMIT, readChat } from '../../game/chat.js';
 import { mapImagePath, readMapImage, renderMapImage } from '../../game/map-image.js';
@@ -36,11 +37,25 @@ import type { ServerContext } from '../../servers/context.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { ApiError } from '../error-response.js';
 
+/**
+ * Onde o que o painel faz com um jogador fica registrado.
+ *
+ * Interface mínima: quem a satisfaz é o `PlayerDirectory`, e um
+ * teste a satisfaz com uma função. Ela existe para que estas rotas
+ * não precisem conhecer o repositório inteiro para gravar uma
+ * linha.
+ */
+export interface PlayerActionLog {
+  recordAction(event: PlayerEventInput): void;
+}
+
 export interface AdminRoutesDeps {
   readonly supervisor: ServerSupervisor;
   readonly players: PlayersReader;
   /** Os monumentos do mundo, guardados por seed. */
   readonly monuments: MonumentReader;
+  /** A ficha do jogador. Ver `PlayerActionLog`. */
+  readonly history: PlayerActionLog;
 }
 
 const serverParams = z.object({ id: z.string().min(1) });
@@ -180,6 +195,17 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
       `${by ?? 'alguém'} expulsou ${steamId}${reason === undefined ? '' : ` (${reason})`}`,
     );
 
+    // E na ficha DELE. O log responde "o que o agente fez hoje"; a
+    // ficha responde "o que já aconteceu com este jogador" — e é a
+    // segunda pergunta que alguém faz três semanas depois.
+    deps.history.recordAction({
+      steamId,
+      serverId: id,
+      kind: 'kick',
+      actor: by,
+      detail: reason ?? null,
+    });
+
     return {
       ok: true,
       steamId,
@@ -220,6 +246,17 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
       `${by ?? 'alguém'} teleportou ${steamId} para ` +
         `${result.position.x.toFixed(0)}, ${result.position.z.toFixed(0)}`,
     );
+
+    // A posição gravada é a FINAL, e não a pedida: a altura foi
+    // resolvida pelo terreno, e é onde o jogador de fato parou que
+    // responde "para onde ele foi levado?".
+    deps.history.recordAction({
+      steamId,
+      serverId: id,
+      kind: 'teleport',
+      actor: by,
+      detail: `${result.position.x.toFixed(0)}, ${result.position.z.toFixed(0)}`,
+    });
 
     return {
       ok: true,

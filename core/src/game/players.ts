@@ -32,6 +32,14 @@
 //  Sem o plugin, `position`, `isAlive` e `isSleeping` vêm `null` —
 //  nunca `0` nem `false`. Ver Docs\07-PAINEL.md: ausente vira
 //  travessão, e um "vivo" inventado é pior que um campo vazio.
+//
+//  ####  E A FALTA ANDA NOS DOIS SENTIDOS  ####
+//
+//  O `playerlist` nativo traz uma coisa que o plugin não tem: o
+//  ENDEREÇO do jogador. É de lá que sai o `last_ip` da tabela de
+//  jogadores — e é por isso que aquela coluna é anulável. Num
+//  servidor com o OrigemZAgent ligado ela simplesmente não é
+//  preenchida, e isso é melhor que um IP adivinhado.
 // ============================================================
 
 import { sanitizeArgument } from '../bans/rust-bans.js';
@@ -73,6 +81,14 @@ export interface PlayerView {
    * `playerlist` nativo.
    */
   readonly grid: string | null;
+  /**
+   * O endereço de onde ele está jogando, sem a porta.
+   *
+   * Só a fonte NATIVA traz (`playerlist` responde
+   * `"Address": "203.0.113.10:53248"`); com o plugin é `null`. É o
+   * que alimenta `players.last_ip` — ver a migração 006.
+   */
+  readonly ip: string | null;
 }
 
 /** O estado de um plugin no acervo daquele servidor. */
@@ -355,7 +371,9 @@ async function readFromPlugin(
     offset += parsed.data.limit;
   }
 
-  return { source: 'plugin', total, players, missing: [] };
+  // O plugin dá tudo menos o endereço — ver o cabeçalho. Dizer
+  // isso aqui é o que impede a tela de concluir que o IP sumiu.
+  return { source: 'plugin', total, players, missing: ['ip'] };
 }
 
 /**
@@ -428,6 +446,8 @@ function toPlayerView(
     // `x` e `z`. O `y` é ALTURA e não entra na grade — usar `(x, y)`
     // é o erro que funciona até alguém subir num prédio.
     grid: gridLabel(player.position.x, player.position.z, world.size),
+    // O contrato do plugin não tem endereço. Ver o cabeçalho.
+    ip: null,
   };
 }
 
@@ -453,7 +473,29 @@ function toNativePlayerView(entry: Record<string, unknown>): PlayerView | null {
     // Sem posição não há célula. Inventar uma seria mandar quem
     // procura para um lugar onde o jogador não está.
     grid: null,
+    ip: addressToIp(asString(entry.Address ?? entry.address)),
   };
+}
+
+/**
+ * `"203.0.113.10:53248"` -> `"203.0.113.10"`.
+ *
+ * A porta é do socket daquela conexão e muda a cada entrada: ela
+ * não identifica ninguém, e guardá-la faria dois registros do
+ * mesmo jogador parecerem endereços diferentes.
+ *
+ * O corte é na ÚLTIMA `:` porque um IPv6 vem cheio delas
+ * (`[::1]:53248`); os colchetes ficam, e são a forma canônica.
+ */
+function addressToIp(address: string | null): string | null {
+  if (address === null) {
+    return null;
+  }
+
+  const cut = address.lastIndexOf(':');
+  const ip = cut < 0 ? address : address.slice(0, cut);
+
+  return ip === '' ? null : ip;
 }
 
 function assertConnected(serverId: string, rcon: OpsRcon): void {

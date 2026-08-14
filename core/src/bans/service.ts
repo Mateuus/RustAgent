@@ -165,6 +165,31 @@ export class BanList {
     return this.#deps.repository.list(options).map((ban) => toBanView(ban, now));
   }
 
+  /**
+   * A linha daquele SteamID que ainda não foi revogada.
+   *
+   * É o que a ficha do jogador mostra, e é por aqui que ela
+   * pergunta: uma coluna `banned` na tabela de jogadores seria a
+   * segunda fonte para o mesmo fato, e as duas divergiriam no
+   * primeiro ajuste. `null` = nunca banido, ou já revogado.
+   *
+   * Repare que "não revogado" ainda pode estar VENCIDO — o
+   * `active` e o `expired` da resposta separam os dois, e a
+   * diferença é curta: o relógio passa por ele em um minuto.
+   */
+  activeOf(steamId: string): BanView | null {
+    const ban = this.#deps.repository.activeOf(steamId);
+
+    return ban === null ? null : toBanView(ban, Date.now());
+  }
+
+  /** Tudo o que já houve com aquele SteamID, do mais novo ao mais antigo. */
+  historyOf(steamId: string): readonly BanView[] {
+    const now = Date.now();
+
+    return this.#deps.repository.historyOf(steamId).map((ban) => toBanView(ban, now));
+  }
+
   /** O que vale NAQUELE servidor, com a origem de cada linha. */
   serverBans(serverId: string): readonly ServerBanView[] {
     const now = Date.now();

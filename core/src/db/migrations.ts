@@ -465,12 +465,179 @@ CREATE TABLE ban_servers (
 CREATE INDEX idx_ban_servers_server ON ban_servers (server_id);
 `;
 
+// ------------------------------------------------------------
+//  006 — o jogador como entidade
+//
+//  ####  ATÉ AQUI, JOGADOR SÓ EXISTIA ENQUANTO CONECTADO  ####
+//
+//  A lista de quem está online é lida do servidor a cada chamada
+//  (game/players.ts) e nada dela era guardado: fechou o jogo,
+//  sumiu da tela. Não havia a quem pendurar o banimento, o
+//  histórico, o ranking e a loja — e a BanList já sentia isso,
+//  guardando um `name` solto que ninguém consegue atualizar.
+//
+//  ####  DUAS TABELAS, E A SEPARAÇÃO NÃO É ORGANIZAÇÃO  ####
+//
+//      players         QUEM ele é    — um por SteamID, para a rede
+//      player_servers  O QUE ele fez — uma linha por (servidor, jogador)
+//
+//  "Quem é este jogador?" tem UMA resposta: o nome, desde quando
+//  joga aqui, se está banido. Se ela morasse por servidor, um
+//  jogador com cinco servidores teria cinco "desde quando" e o
+//  banimento de rede não teria a quem se pendurar.
+//
+//  E o contrário também: "desde quando ele joga NO PVE?" é outra
+//  pergunta. Quem joga no `pvp1` desde maio e entrou no `pve`
+//  ontem é jogador desde maio na REDE e desde ontem NO PVE. Uma
+//  coluna só apaga essa diferença — foi o defeito que o projeto
+//  anterior levou 33 migrações para consertar: com a sessão
+//  corrente numa linha só, entrar no B marcava a pessoa como
+//  offline no A, onde ela ainda estava jogando.
+//
+//  ####  O QUE ESTAS TABELAS NÃO GUARDAM  ####
+//
+//  Banimento. Ele já é global desde a 005, e a ficha do jogador
+//  LÊ de lá. Uma coluna `banned` aqui seria a segunda fonte para
+//  "ele está banido?" — e a segunda é a que diverge no primeiro
+//  ajuste, porque quem revoga mexe na `bans` e esquece do resto.
+// ------------------------------------------------------------
+const PLAYERS_SCHEMA = `
+CREATE TABLE players (
+  -- A CHAVE É O SteamID, e ele é TEXT.
+  --
+  -- 17 dígitos passam de 2^53: em INTEGER o id volta arredondado
+  -- e a ficha seria de OUTRA PESSOA, sem erro nenhum no caminho.
+  -- Mesma razão da coluna homônima em \`bans\`.
+  steam_id TEXT PRIMARY KEY,
+
+  -- O nome mais recente que vimos. Ele MUDA — o histórico de
+  -- nomes é uma tabela futura, e inventá-la agora seria guardar
+  -- linha para uma tela que não existe.
+  name TEXT NOT NULL,
+
+  -- Epoch ms. \`first_seen\` NUNCA muda depois da inserção: é o
+  -- "jogador desde", e reescrevê-lo apagaria a única informação
+  -- daqui que não dá para reconstruir de nenhuma outra fonte.
+  first_seen INTEGER NOT NULL,
+  last_seen  INTEGER NOT NULL,
+
+  -- O último IP visto. NULLABLE de propósito: o \`playerlist\`
+  -- nativo traz (campo \`Address\`), o \`origemz.players\` não — e
+  -- um IP inventado é pior que um campo vazio.
+  last_ip TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- A busca da tela de rede é por nome, e ela ignora maiúsculas.
+CREATE INDEX idx_players_name ON players (name COLLATE NOCASE);
+
+-- A listagem padrão: quem apareceu por último primeiro. DESC no
+-- índice para o ORDER BY não virar sort a cada página.
+CREATE INDEX idx_players_last_seen ON players (last_seen DESC);
+
+-- ----------------------------------------------------------
+--  player_servers — o que ele fez em CADA servidor.
+-- ----------------------------------------------------------
+CREATE TABLE player_servers (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id  TEXT NOT NULL REFERENCES players(steam_id) ON DELETE CASCADE,
+
+  -- Primeira e última vez NESTE servidor. As irmãs de rede moram
+  -- em \`players\`, e as duas respostas são diferentes.
+  first_seen INTEGER NOT NULL,
+  last_seen  INTEGER NOT NULL,
+
+  -- A sessão CORRENTE neste servidor. Uma por servidor é o ponto:
+  -- é o que permite estar online no pvp1 e ter saído do pve.
+  -- \`joined_at\` preenchido com \`left_at\` nulo = está online AQUI.
+  joined_at    INTEGER,
+  left_at      INTEGER,
+  leave_reason TEXT,
+
+  sessions INTEGER NOT NULL DEFAULT 0,
+
+  -- Tempo somado, em SEGUNDOS, contado no FECHAMENTO da sessão.
+  -- Somar durante a sessão exigiria escrever a cada varredura, e
+  -- um agente derrubado no meio deixaria o número inflado para
+  -- sempre — ver players/presence.ts.
+  played_seconds INTEGER NOT NULL DEFAULT 0,
+
+  PRIMARY KEY (server_id, steam_id)
+);
+
+-- "Em quais servidores este jogador jogou?" é a pergunta da ficha
+-- e da listagem. A chave primária começa por \`server_id\`, então
+-- filtrar só pela segunda coluna não teria por onde entrar — e a
+-- varredura seria do produto servidores × jogadores, por página.
+CREATE INDEX idx_player_servers_player ON player_servers (steam_id);
+
+-- ----------------------------------------------------------
+--  player_events — a linha do tempo.
+--
+--  ####  ELA GUARDA O QUE NÃO TEM OUTRA CASA  ####
+--
+--  A sessão CORRENTE mora em \`player_servers\` e responde "ele
+--  está online agora?". Ela não responde "o que aconteceu com
+--  este jogador na semana passada" — numa linha por (servidor,
+--  jogador) só cabem a última entrada e a última saída.
+--
+--  Os banimentos NÃO entram aqui: eles já são linhas em \`bans\`,
+--  com quem aplicou e quem revogou. A linha do tempo os LÊ de lá
+--  e mistura na ordem (ver players/service.ts). Copiá-los para cá
+--  faria a ficha mostrar como ativo um ban revogado pelo caminho
+--  que não escrevesse nos dois lugares.
+--
+--  ####  E POR QUE EXPULSAR E TELEPORTAR ENTRAM  ####
+--
+--  Porque hoje eles só existem no log do processo, que ninguém
+--  abre para responder "por que este jogador foi expulso ontem?".
+--  O log continua recebendo — ele é do AGENTE; isto aqui é do
+--  JOGADOR, e é o que a ficha dele mostra.
+-- ----------------------------------------------------------
+CREATE TABLE player_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  steam_id TEXT NOT NULL,
+
+  -- O servidor onde aconteceu. Cascata, como toda coluna que
+  -- aponta para \`servers\`: apagar um servidor leva junto o que só
+  -- fazia sentido dentro dele.
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  --   'join'      entrou (a varredura o viu chegar)
+  --   'leave'     saiu   (a varredura o viu sumir)
+  --   'kick'      expulso pelo painel
+  --   'teleport'  movido pelo painel
+  kind TEXT NOT NULL CHECK (kind IN ('join', 'leave', 'kick', 'teleport')),
+
+  at INTEGER NOT NULL,
+
+  -- Quem PEDIU, quando foi alguém: o operador do painel. NULL nos
+  -- eventos que o jogo produziu sozinho (entrar, sair).
+  actor TEXT,
+
+  -- O detalhe daquele tipo: o motivo da saída, o motivo do kick, o
+  -- destino do teleporte. Texto livre porque é para ler, não para
+  -- filtrar — e uma coluna por tipo deixaria a tabela cheia de
+  -- NULL que ninguém consulta.
+  detail TEXT
+);
+
+-- A ficha pede "os N últimos deste jogador", e é o único acesso
+-- que existe hoje. Sem o índice, cada abertura varre a tabela
+-- inteira — que é a que mais cresce de todas.
+CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
   { id: 3, name: 'custom-plugins', sql: CUSTOM_PLUGINS_SCHEMA },
   { id: 4, name: 'plugin-dependencies', sql: PLUGIN_DEPENDENCIES_SCHEMA },
   { id: 5, name: 'bans', sql: BANS_SCHEMA },
+  { id: 6, name: 'players', sql: PLAYERS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

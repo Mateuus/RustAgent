@@ -29,6 +29,7 @@ import { ConfigError, loadConfig } from './config.js';
 import { BansRepository } from './db/bans-repository.js';
 import { openDatabase } from './db/database.js';
 import { runMigrations } from './db/migrations.js';
+import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { MapImageKeeper } from './game/map-image.js';
@@ -38,6 +39,8 @@ import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
 import { PluginLibrary } from './oxide/library.js';
+import { PresenceTracker, PresenceWatcher } from './players/presence.js';
+import { PlayerDirectory } from './players/service.js';
 import { ServerSupervisor } from './servers/supervisor.js';
 import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
@@ -125,6 +128,7 @@ async function main(): Promise<void> {
   // boot.
   let bans: BanList | null = null;
   let mapImages: MapImageKeeper | null = null;
+  let presence: PresenceTracker | null = null;
 
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
@@ -139,6 +143,11 @@ async function main(): Promise<void> {
     onRconConnected: (serverId) => {
       void bans?.reconcile(serverId);
       void mapImages?.ensure(serverId);
+      // E a presença pelo mesmo motivo da lista de banidos: enquanto
+      // os dois lados não se falam, quem entrou e quem saiu passou
+      // sem ninguém ver. É aqui que as sessões que ficaram abertas
+      // são fechadas — ver players/presence.ts.
+      void presence?.sync(serverId);
     },
   });
 
@@ -209,6 +218,35 @@ async function main(): Promise<void> {
   // por seed: eles só mudam no wipe.
   const monuments = new MonumentReader();
 
+  // ---- os jogadores da rede ---------------------------------
+  //
+  // Até aqui o jogador só existia enquanto conectado: a lista era
+  // lida do RCON e jogada fora. `players`/`player_servers` são a
+  // identidade dele — e é a elas que o histórico, o ranking e a
+  // loja vão se pendurar.
+  //
+  // A presença é uma VARREDURA, e não um leitor de linha de log:
+  // ela compara quem o servidor lista com quem a tabela diz estar
+  // online. O relógio começa a bater no boot, e a primeira rodada é
+  // o que fecha as sessões que ficaram abertas quando o agente
+  // caiu — ver players/presence.ts.
+  const playersRepository = new PlayersRepository(db);
+
+  presence = new PresenceTracker({
+    repository: playersRepository,
+    reader: players,
+    servers: supervisor,
+    logger,
+  });
+
+  const presenceWatcher = new PresenceWatcher({ tracker: presence, logger });
+
+  presenceWatcher.start();
+
+  // A ficha e a listagem. O banimento dela é LIDO da BanList: uma
+  // coluna `banned` aqui seria a segunda fonte para o mesmo fato.
+  const directory = new PlayerDirectory({ repository: playersRepository, bans });
+
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
   // sozinho. Ele cede a vez ao SteamCMD sempre que há operação
@@ -251,6 +289,7 @@ async function main(): Promise<void> {
     library,
     bans,
     players,
+    directory,
     monuments,
     servers: () =>
       supervisor.list().map((server) => ({
@@ -299,6 +338,7 @@ async function main(): Promise<void> {
         // falaria com um supervisor já parado.
         steamWatcher.stop();
         banWatcher.stop();
+        presenceWatcher.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

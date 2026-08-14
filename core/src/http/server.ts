@@ -32,6 +32,7 @@ import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
 import type { PluginLibrary } from '../oxide/library.js';
+import type { PlayerDirectory } from '../players/service.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import type { SteamUpdateWatcher } from '../steam/update-watcher.js';
 import { createAuthGuard } from './auth.js';
@@ -47,6 +48,7 @@ import { registerBanRoutes } from './routes/bans.js';
 import { registerConsoleRoutes } from './routes/console.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
 import { registerOperationRoutes } from './routes/operations.js';
+import { registerPlayerRoutes } from './routes/players.js';
 import { registerPluginRoutes } from './routes/plugins.js';
 import { registerServerRoutes } from './routes/servers.js';
 import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
@@ -69,6 +71,15 @@ export interface BuildServerOptions {
   readonly bans: BanList;
   /** Quem está online, com ou sem plugin. Ver game/players.ts. */
   readonly players: PlayersReader;
+  /**
+   * A base de jogadores da REDE. Ver players/service.ts.
+   *
+   * Repare que ela e o `players` acima respondem a perguntas
+   * diferentes: aquele é quem está conectado AGORA naquele
+   * servidor, lido do RCON; este é todo mundo que já jogou, lido
+   * do banco. Os dois convivem porque as duas telas existem.
+   */
+  readonly directory: PlayerDirectory;
   /** Os monumentos do mundo. Ver game/monuments.ts. */
   readonly monuments: MonumentReader;
 }
@@ -182,9 +193,18 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         supervisor: options.supervisor,
         players: options.players,
         monuments: options.monuments,
+        // Expulsar e teleportar passam a deixar rastro na ficha do
+        // jogador, e não só no log do processo.
+        history: options.directory,
       });
 
       registerBanRoutes(api, { bans: options.bans, supervisor: options.supervisor });
+
+      // A base de jogadores da rede. Vem DEPOIS das rotas de
+      // servidor porque é o caminho `/players` da raiz — o
+      // `/servers/:id/players`, que é outra coisa, já foi
+      // registrado por `registerAdminRoutes`.
+      registerPlayerRoutes(api, { directory: options.directory });
     },
     { prefix: '/api' },
   );

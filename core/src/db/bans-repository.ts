@@ -234,6 +234,27 @@ export class BansRepository {
   }
 
   /**
+   * TODAS as linhas daquele SteamID, da mais nova para a mais
+   * antiga.
+   *
+   * É o que a linha do tempo da ficha do jogador consome: ali a
+   * pergunta não é "ele está banido?", é "o que já aconteceu com
+   * ele?" — e um banimento revogado em março faz parte da resposta
+   * tanto quanto o ativo de hoje.
+   */
+  historyOf(steamId: string): readonly BanRecord[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM bans
+          WHERE steam_id = @steam_id
+          ORDER BY created_at DESC, id DESC`,
+      )
+      .all({ steam_id: steamId }) as BanRow[];
+
+    return this.#withServers(rows);
+  }
+
+  /**
    * O que vale NAQUELE servidor, agora.
    *
    * ####  O `network` ENTRA SEM ESTAR LISTADO  ####
