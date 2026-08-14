@@ -30,6 +30,7 @@ import { z } from 'zod';
 import { grantAdmin, readAdmins, revokeAdmin } from '../../game/admins.js';
 import { DEFAULT_CHAT_LIMIT, MAX_CHAT_LIMIT, readChat } from '../../game/chat.js';
 import { mapImagePath, readMapImage, renderMapImage } from '../../game/map-image.js';
+import type { MonumentReader } from '../../game/monuments.js';
 import { kickPlayer, teleportPlayer, type PlayersReader } from '../../game/players.js';
 import type { ServerContext } from '../../servers/context.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
@@ -38,6 +39,8 @@ import { ApiError } from '../error-response.js';
 export interface AdminRoutesDeps {
   readonly supervisor: ServerSupervisor;
   readonly players: PlayersReader;
+  /** Os monumentos do mundo, guardados por seed. */
+  readonly monuments: MonumentReader;
 }
 
 const serverParams = z.object({ id: z.string().min(1) });
@@ -226,6 +229,31 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
         ? 'Jogador movido. A altura foi resolvida pelo terreno do destino.'
         : 'Jogador movido para a altura informada.',
     };
+  });
+
+  /**
+   * Os monumentos daquele mundo.
+   *
+   * Nativo do jogo (`world.monuments`), sem plugin nenhum. A lista
+   * é guardada por tamanho+seed: monumento nasce com a seed e só
+   * muda no wipe, então relê-la a cada abertura de mapa seria mandar
+   * um comando para receber sempre a mesma resposta.
+   */
+  app.get('/servers/:id/monuments', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const context = contextOf(deps, id);
+    const config = deps.supervisor.configOf(id);
+
+    if (config === null) {
+      throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
+    }
+
+    const monuments = await deps.monuments.list(id, context.rcon, {
+      worldSize: config.worldSize,
+      seed: config.seed,
+    });
+
+    return { ok: true, monuments };
   });
 
   // ==========================================================

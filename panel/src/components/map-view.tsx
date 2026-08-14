@@ -40,7 +40,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent, type WheelEvent } from 'react';
 
 import { Button } from '@/components/ui/button';
-import type { GamePlayer, WorldGrid } from '@/lib/api';
+import type { GamePlayer, MapMonument, WorldGrid } from '@/lib/api';
 import { EM_DASH } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
@@ -132,6 +132,14 @@ export interface MapViewProps {
    * o teleporte não está ligado ali).
    */
   readonly onTeleport?: (player: GamePlayer, target: { x: number; z: number }) => void;
+  /**
+   * Os monumentos, quando a tela pede para mostrá-los.
+   *
+   * Eles são o que faz o mapa ser LEGÍVEL: "ele está perto do
+   * Launch Site" diz mais do que qualquer coordenada, e é assim que
+   * as pessoas falam de posição no jogo.
+   */
+  readonly monuments?: readonly MapMonument[];
 }
 
 /**
@@ -174,6 +182,7 @@ export function MapView({
   imageUrl = null,
   coverage = null,
   onTeleport,
+  monuments = [],
 }: MapViewProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   /** O jogador sendo arrastado com Ctrl, e onde o cursor está. */
@@ -496,6 +505,35 @@ export function MapView({
           className="fill-none stroke-border"
           strokeWidth={2}
         />
+
+        {/* ####  OS MONUMENTOS VÊM ANTES DOS JOGADORES  ####
+
+            Eles são referência, e referência fica ATRÁS: um ponto
+            de jogador escondido debaixo do rótulo de um monumento é
+            um jogador que ninguém vê. */}
+        {monuments.map((monument) => {
+          const { px, py } = project(monument, span);
+
+          return (
+            <g
+              key={`${monument.name}-${String(monument.x)}-${String(monument.z)}`}
+              transform={`translate(${String(px)} ${String(py)})`}
+              className="pointer-events-none"
+            >
+              <circle r={3 * k} className="fill-muted" opacity={0.9} />
+              <text
+                x={0}
+                y={-7 * k}
+                textAnchor="middle"
+                fontSize={11 * k}
+                className="fill-muted"
+                style={{ paintOrder: 'stroke', stroke: 'var(--bg)', strokeWidth: 3 * k }}
+              >
+                {monument.name}
+              </text>
+            </g>
+          );
+        })}
 
         {/* Os jogadores por último: ficam por cima de tudo.
 

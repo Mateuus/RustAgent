@@ -27,7 +27,7 @@
 //  concluir que o servidor está vazio.
 // ============================================================
 
-import { Copy, Maximize2, RefreshCw, Search, X } from 'lucide-react';
+import { Copy, Maximize2, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { BanDialog } from '@/components/ban-dialog';
@@ -38,6 +38,7 @@ import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Toggle } from '@/components/ui/toggle';
 import {
   agent,
   agentUrl,
@@ -45,6 +46,7 @@ import {
   type AdminLevel,
   type ChatLine,
   type GamePlayer,
+  type MapMonument,
   type PlayersSnapshot,
   type ServerBan,
   type ServerView,
@@ -246,6 +248,9 @@ function PlayersSection({ server }: { server: ServerView }) {
   });
   /** O mapa ocupando a página inteira. */
   const [fullscreen, setFullscreen] = useState(false);
+  /** Os monumentos por cima do mapa. */
+  const [mostrarMonumentos, setMostrarMonumentos] = useState(true);
+  const [monumentos, setMonumentos] = useState<MapMonument[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -265,6 +270,30 @@ function PlayersSection({ server }: { server: ServerView }) {
 
     return () => clearInterval(timer);
   }, [load]);
+
+  // Os monumentos são lidos UMA vez por servidor: eles nascem com a
+  // seed e só mudam no wipe, e o agente já os guarda por seed. Pôr
+  // isso no polling seria pedir de novo o que não muda.
+  useEffect(() => {
+    let cancelado = false;
+
+    void (async () => {
+      try {
+        const response = await agent.monuments(server.id);
+
+        if (!cancelado) {
+          setMonumentos(response.monuments);
+        }
+      } catch {
+        // Sem monumentos o mapa continua servindo: eles são
+        // referência, não o conteúdo.
+      }
+    })();
+
+    return () => {
+      cancelado = true;
+    };
+  }, [server.id]);
 
   async function kick(player: GamePlayer): Promise<void> {
     setBusy(player.steamId);
@@ -447,6 +476,9 @@ function PlayersSection({ server }: { server: ServerView }) {
             onEstados={setEstados}
             contagem={todos}
             escondidos={escondidos}
+            mostrarMonumentos={mostrarMonumentos}
+            onMostrarMonumentos={setMostrarMonumentos}
+            totalMonumentos={monumentos.length}
           />
 
           {snapshot.source === 'nativo' && (
@@ -498,6 +530,7 @@ function PlayersSection({ server }: { server: ServerView }) {
                     selected={selected}
                     imageUrl={mapImage.url}
                     coverage={mapImage.coverage}
+                    monuments={mostrarMonumentos ? monumentos : []}
                     onSelect={(player) =>
                       setSelected(player.steamId === selected ? null : player.steamId)
                     }
@@ -598,6 +631,9 @@ function PlayersSection({ server }: { server: ServerView }) {
               onEstados={setEstados}
               contagem={todos}
               escondidos={escondidos}
+              mostrarMonumentos={mostrarMonumentos}
+              onMostrarMonumentos={setMostrarMonumentos}
+              totalMonumentos={monumentos.length}
             />
 
             <div
@@ -630,6 +666,7 @@ function PlayersSection({ server }: { server: ServerView }) {
                     selected={selected}
                     imageUrl={mapImage.url}
                     coverage={mapImage.coverage}
+                    monuments={mostrarMonumentos ? monumentos : []}
                     onSelect={(player) =>
                       setSelected(player.steamId === selected ? null : player.steamId)
                     }
@@ -688,6 +725,9 @@ function PlayersFilters({
   onEstados,
   contagem,
   escondidos,
+  mostrarMonumentos,
+  onMostrarMonumentos,
+  totalMonumentos,
 }: {
   busca: string;
   onBusca: (value: string) => void;
@@ -695,9 +735,16 @@ function PlayersFilters({
   onEstados: (value: Record<EstadoChave, boolean>) => void;
   contagem: readonly GamePlayer[];
   escondidos: number;
+  mostrarMonumentos: boolean;
+  onMostrarMonumentos: (value: boolean) => void;
+  totalMonumentos: number;
 }) {
+  const [aberto, setAberto] = useState(false);
+
   const porEstado = (chave: EstadoChave): number =>
     contagem.filter((player) => estadoChave(player) === chave).length;
+
+  const escondendo = Object.values(estados).some((ligado) => !ligado);
 
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -717,39 +764,106 @@ function PlayersFilters({
         )}
       </label>
 
-      <div className="flex flex-wrap gap-2">
-        {(['acordado', 'dormindo', 'morto', 'desconhecido'] as const).map((chave) => {
-          const total = porEstado(chave);
+      {/* ####  UM PAINEL, E NÃO UMA FILEIRA DE BOTÕES  ####
 
-          // O estado que não existe na lista não vira botão: um
-          // filtro de "mortos" num servidor sem mortos é ruído.
-          if (total === 0 && estados[chave]) {
-            return null;
-          }
+          As opções do mapa vão crescer (monumentos hoje; veículos e
+          bases quando o plugin souber respondê-los). Espalhadas
+          pelo cabeçalho, cada uma nova empurraria a busca para fora
+          da tela. Recolhidas, o cabeçalho continua sendo o mesmo
+          com dez opções ou com três. */}
+      <div className="relative">
+        <Button
+          size="sm"
+          variant="outline"
+          aria-expanded={aberto}
+          aria-haspopup="dialog"
+          onClick={() => setAberto(!aberto)}
+        >
+          <SlidersHorizontal aria-hidden="true" className="h-4 w-4" />
+          Filtros
+          {/* O ponto avisa que HÁ filtro ligado: um painel fechado
+              escondendo gente é indistinguível de um servidor
+              vazio. */}
+          {(escondendo || escondidos > 0) && (
+            <span aria-hidden className="ml-1 h-2 w-2 rounded-full bg-amber" />
+          )}
+        </Button>
 
-          return (
+        {aberto && (
+          <>
+            {/* Clicar fora fecha. Sem isto o painel fica preso na
+                tela e cobre justamente o mapa que se quer ver. */}
             <button
-              key={chave}
               type="button"
-              aria-pressed={estados[chave]}
-              onClick={() => onEstados({ ...estados, [chave]: !estados[chave] })}
-              className={cn(
-                'border px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
-                estados[chave]
-                  ? 'border-border bg-surface-2 text-foreground'
-                  : 'border-border text-muted line-through hover:text-foreground',
-              )}
-            >
-              {ESTADO_LABEL[chave]} ({String(total)})
-            </button>
-          );
-        })}
+              aria-label="Fechar os filtros"
+              className="fixed inset-0 z-10 cursor-default"
+              onClick={() => setAberto(false)}
+            />
+
+            <div className="absolute right-0 z-20 mt-1 w-72 space-y-4 border border-border bg-surface p-3 shadow-lg">
+              <div>
+                <Label>Quem aparece</Label>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {(['acordado', 'dormindo', 'morto', 'desconhecido'] as const).map((chave) => {
+                    const total = porEstado(chave);
+
+                    // O estado que não existe na lista não vira
+                    // botão: um filtro de "mortos" num servidor sem
+                    // mortos é ruído.
+                    if (total === 0 && estados[chave]) {
+                      return null;
+                    }
+
+                    return (
+                      <button
+                        key={chave}
+                        type="button"
+                        aria-pressed={estados[chave]}
+                        onClick={() => onEstados({ ...estados, [chave]: !estados[chave] })}
+                        className={cn(
+                          'border px-2 py-1 font-condensed text-2xs font-bold uppercase tracking-wide',
+                          estados[chave]
+                            ? 'border-border bg-surface-2 text-foreground'
+                            : 'border-border text-muted line-through hover:text-foreground',
+                        )}
+                      >
+                        {ESTADO_LABEL[chave]} ({String(total)})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <Label>O que o mapa mostra</Label>
+
+                <div className="mt-1 flex items-center justify-between gap-3">
+                  <span className="min-w-0 text-2xs leading-relaxed text-muted">
+                    Monumentos{totalMonumentos > 0 ? ` (${String(totalMonumentos)})` : ''} — é o que
+                    faz o mapa ser legível: &ldquo;perto do Launch Site&rdquo; diz mais que
+                    qualquer coordenada.
+                  </span>
+
+                  <Toggle
+                    on={mostrarMonumentos}
+                    busy={false}
+                    label="Mostrar monumentos no mapa"
+                    onChange={onMostrarMonumentos}
+                  />
+                </div>
+              </div>
+
+              <p className="border-t border-border pt-2 text-2xs leading-relaxed text-muted">
+                Veículos e bases ainda não entram aqui: o jogo não tem comando que os liste com
+                posição, e o plugin precisaria de um novo para isso.
+              </p>
+            </div>
+          </>
+        )}
       </div>
 
       {escondidos > 0 && (
-        <span className="text-2xs text-muted">
-          {String(escondidos)} escondido(s) pelo filtro
-        </span>
+        <span className="text-2xs text-muted">{String(escondidos)} escondido(s) pelo filtro</span>
       )}
     </div>
   );

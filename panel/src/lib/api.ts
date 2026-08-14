@@ -409,6 +409,21 @@ export interface WorldGrid {
   rows: number;
 }
 
+/**
+ * Um monumento do mundo.
+ *
+ * Sem `y`: altura não entra num mapa 2D. Eles são a referência fixa
+ * do mapa — foi com o Harbor, que fica na costa, que a escala da
+ * imagem foi conferida.
+ */
+export interface MapMonument {
+  type: string;
+  name: string;
+  x: number;
+  z: number;
+  grid: string | null;
+}
+
 export interface PlayersSnapshot {
   /** De onde veio esta lista. A tela diz isso em voz alta. */
   source: 'plugin' | 'nativo';
@@ -768,6 +783,17 @@ export const agent = {
       url: string | null;
       message?: string;
     }>(`/api/servers/${encodeURIComponent(id)}/map`),
+
+  /**
+   * Os monumentos daquele mundo.
+   *
+   * Nativo do jogo, e guardado pelo agente por tamanho+seed: eles
+   * nascem com a seed e só mudam no wipe.
+   */
+  monuments: (id: string) =>
+    api<{ ok: true; monuments: MapMonument[] }>(
+      `/api/servers/${encodeURIComponent(id)}/monuments`,
+    ),
 
   /** Força o render. O automático já cobre o caso normal. */
   renderMap: (id: string) =>

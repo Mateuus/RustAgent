@@ -32,6 +32,7 @@ import { runMigrations } from './db/migrations.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { MapImageKeeper } from './game/map-image.js';
+import { MonumentReader } from './game/monuments.js';
 import { PlayersReader } from './game/players.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
@@ -204,6 +205,10 @@ async function main(): Promise<void> {
     },
   });
 
+  // Os monumentos do mundo, para o mapa. Nativo do jogo e guardado
+  // por seed: eles só mudam no wipe.
+  const monuments = new MonumentReader();
+
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
   // sozinho. Ele cede a vez ao SteamCMD sempre que há operação
@@ -246,6 +251,7 @@ async function main(): Promise<void> {
     library,
     bans,
     players,
+    monuments,
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,

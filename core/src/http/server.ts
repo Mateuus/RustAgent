@@ -27,6 +27,7 @@ import type { OperatorAuth } from '../auth/operator.js';
 import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
 import type { ServersRepository } from '../db/servers-repository.js';
+import type { MonumentReader } from '../game/monuments.js';
 import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
@@ -68,6 +69,8 @@ export interface BuildServerOptions {
   readonly bans: BanList;
   /** Quem está online, com ou sem plugin. Ver game/players.ts. */
   readonly players: PlayersReader;
+  /** Os monumentos do mundo. Ver game/monuments.ts. */
+  readonly monuments: MonumentReader;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -178,6 +181,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       registerAdminRoutes(api, {
         supervisor: options.supervisor,
         players: options.players,
+        monuments: options.monuments,
       });
 
       registerBanRoutes(api, { bans: options.bans, supervisor: options.supervisor });
