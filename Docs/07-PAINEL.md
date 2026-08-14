@@ -12,14 +12,26 @@ Em desenvolvimento o painel roda em `localhost:3100` e fala com o core em
 ## As telas
 
 ```
-  /entrar          login do operador
-  /                visão geral: os servidores, lado a lado
-  /servidores      a lista completa + criar
-  /servidor/[id]   a página de um servidor  (abas)
-  /config          configuração do agente
+  /entrar             login do operador
+  /                   os servidores, lado a lado, + criar
+  /servidor?id=<id>   a página de um servidor  (abas)
+  /config             o agente
 ```
 
-Cinco. O painel antigo tem doze, e a diferença é exatamente o escopo da Fase 1.
+Quatro. O painel antigo tem doze, e a diferença é exatamente o escopo da Fase 1.
+
+Duas decisões tomadas na implementação, e o porquê de cada uma:
+
+**A lista e a visão geral são a MESMA tela.** O plano previa `/` e `/servidores`
+separadas; construindo, as duas mostravam o mesmo conteúdo com títulos
+diferentes. Duas telas iguais é manutenção dobrada para nada — o botão *Criar
+servidor* mora na de cima.
+
+**`/servidor` usa query string, e não `/servidor/[id]`.** O painel é export
+estático: uma rota dinâmica exigiria `generateStaticParams`, ou seja, saber em
+tempo de **build** quais servidores existem. Eles nascem em tempo de execução,
+pelo próprio painel. Query string resolve sem subir um servidor Next só para
+isso.
 
 ---
 
