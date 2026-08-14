@@ -43,6 +43,7 @@ import { registerOperationRoutes } from './routes/operations.js';
 import { registerPluginRoutes } from './routes/plugins.js';
 import { registerServerRoutes } from './routes/servers.js';
 import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
+import { registerSystemRoutes } from './routes/system.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -129,6 +130,13 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   void app.register(
     async (api) => {
       api.addHook('preHandler', requireAuth);
+
+      registerSystemRoutes(api, {
+        paths: options.config.paths,
+        supervisor: options.supervisor,
+        version: options.version,
+        startedAt: options.startedAt,
+      });
 
       registerServerRoutes(api, {
         paths: options.config.paths,

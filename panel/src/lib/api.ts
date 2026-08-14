@@ -163,6 +163,38 @@ export interface SteamUpdate {
   attempts: number;
 }
 
+/** O retrato da máquina e do agente. Ver `core/src/http/routes/system.ts`. */
+export interface SystemInfo {
+  machine: {
+    hostname: string;
+    platform: string;
+    release: string;
+    arch: string;
+    cpu: { model: string | null; cores: number; speedMhz: number | null };
+    /** `null` no Windows — lá o loadavg é sempre zero. */
+    load1: number | null;
+    memory: { total: number; free: number };
+    disk: { total: number; free: number } | null;
+    uptimeSeconds: number;
+  };
+  agent: {
+    version: string;
+    startedAt: string;
+    uptimeSeconds: number;
+    pid: number;
+    node: string;
+    rssBytes: number;
+    paths: { root: string; servers: string; steamCmd: string; logs: string };
+  };
+  servers: {
+    total: number;
+    installed: number;
+    enabled: number;
+    online: number;
+    maxPlayers: number;
+  };
+}
+
 /**
  * O que a tela chama, com nome de verbo.
  *
@@ -180,6 +212,8 @@ export const agent = {
   logout: () => api<{ ok: true }>('/auth/logout', { method: 'POST' }),
 
   session: () => api<{ ok: true; user: string; csrfToken: string }>('/auth/session'),
+
+  system: () => api<{ ok: true } & SystemInfo>('/api/system'),
 
   servers: () =>
     api<{ ok: true; servers: ServerView[]; suggestedPortBlock: PortBlock | null }>('/api/servers'),
