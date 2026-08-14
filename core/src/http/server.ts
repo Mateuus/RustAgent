@@ -18,6 +18,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
 import staticFiles from '@fastify/static';
 import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
 import { ZodError } from 'zod';
@@ -38,6 +39,7 @@ import {
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
 import { registerOperationRoutes } from './routes/operations.js';
+import { registerPluginRoutes } from './routes/plugins.js';
 import { registerServerRoutes } from './routes/servers.js';
 
 export interface BuildServerOptions {
@@ -70,6 +72,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   });
 
   void app.register(cookie);
+
+  // O upload de plugin. O teto de 256 KB é do próprio plugin
+  // (oxide/plugins.ts); aqui ele é repetido porque o multipart
+  // precisa recusar ANTES de ler o corpo inteiro na memória.
+  void app.register(multipart, { limits: { fileSize: 256 * 1024, files: 1 } });
 
   // ---- o error handler: uma forma de erro para a API toda ----
   app.setErrorHandler(async (error: FastifyError, request, reply) => {
@@ -136,8 +143,9 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         });
       }
 
+      registerPluginRoutes(api, { supervisor: options.supervisor });
+
       // Ainda a fazer nesta fase:
-      //   registerPluginRoutes(api, deps)     — Etapa 7
       //   registerSteamUpdateRoutes(api, ...) — Etapa 6
     },
     { prefix: '/api' },

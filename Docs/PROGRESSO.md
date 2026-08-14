@@ -89,9 +89,14 @@ Legenda: `[ ]` a fazer · `[~]` em curso · `[x]` pronto e verificado
 
 ## Etapa 7 — Plugins
 
-- [ ] `oxide/plugins.ts` (listar, instalar, remover, reload)
-- [ ] `http/routes/plugins.ts` com upload multipart
-- [ ] travas: regex do nome, caminho conferido, limite de tamanho
+- [x] `oxide/plugins.ts` (listar, instalar, remover, reload)
+- [x] `http/routes/plugins.ts` com upload multipart
+- [x] travas: regex do nome, caminho conferido, limite de tamanho, conteúdo que
+      precisa parecer C#
+- [x] **verificado**: enviar um `.cs` grava em `Servers\<id>\oxide\plugins` e diz
+      que o servidor parado carrega no próximo start; um arquivo que não é C# é
+      recusado com a frase que ensina; `core/test/plugins.test.ts` cobre a
+      travessia de caminho (10 testes, todos passando)
 
 ## Etapa 8 — Painel
 
@@ -119,3 +124,19 @@ _(o que foi descoberto no caminho e muda alguma decisão vai aqui, com data)_
 - **2026-08-14** — projeto iniciado. O projeto antigo
   (`F:\Projects\Rust\RustAgent`) continua intocado e rodando; ele é a fonte da
   migração, não o destino de nenhuma mudança.
+
+- **2026-08-14** — o `devserver` e o fallback para o layout antigo **não vieram**:
+  numa árvore nova não existe instalação anterior a acomodar, e isso simplificou
+  quatro funções de `config.ts`.
+
+- **2026-08-14** — a lista de jogadores online sai do `playerlist` **nativo** do
+  Rust, e não de um plugin. É o que mantém a Fase 1 sem depender de plugin
+  nenhum — inclusive na contagem regressiva do `server-auto-update`, que usa
+  "servidor vazio" para encurtar o aviso.
+
+- **2026-08-14** — descoberto num teste: uma linha em `servers` sem o
+  `Configs\<id>.ini` correspondente (um `.ini` apagado à mão) deixa o id
+  **reservado** — `POST /api/servers` recusa com 409 por causa de um servidor que
+  não aparece em lista nenhuma. O supervisor passou a **avisar no boot**, com o
+  que fazer. Apagar a linha sozinho seria pior: nas fases seguintes ela leva
+  junto, em cascata, o histórico daquele servidor.
