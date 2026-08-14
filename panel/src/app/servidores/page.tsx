@@ -1,20 +1,24 @@
 'use client';
 
 // ============================================================
-//  /  -  a visão geral: um cartão por servidor.
+//  /servidores  -  a lista.
 //
-//  O cartão responde de longe: em que estado ele está, que mapa,
-//  que portas, e qual é o próximo passo.
+//  ####  TABELA, E NÃO CARTÃO  ####
 //
-//  ####  O ESTADO SAI DO AGENTE, NÃO DA TELA  ####
+//  Cartão é bom para poucos itens e leitura solta; esta tela é de
+//  COMPARAÇÃO — quem opera quer varrer a coluna "situação" e a de
+//  portas de cima a baixo e achar o que está fora do lugar. Em
+//  cartão, cada valor fica numa posição diferente da tela e o olho
+//  precisa recomeçar a cada bloco.
 //
-//  Nada aqui adivinha se uma operação vai dar certo: a lista de
-//  `kinds` vem do core, e uma recusa vem com a frase de quem
-//  conhece a regra. Botão escondido não ensina nada.
+//  As colunas seguem o padrão do design system: cabeçalho em
+//  condensed 2xs maiúsculo, número alinhado à direita e com
+//  `tabular-nums` — sem largura fixa de dígito a coluna treme a
+//  cada atualização.
 // ============================================================
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { CreateServerDialog } from '@/components/create-server-dialog';
 import { PageHeader } from '@/components/page-header';
@@ -23,11 +27,25 @@ import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { agent, type PortBlock, type ServerView } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
-/** De quanto em quanto tempo a lista se refresca. */
 const POLL_MS = 5_000;
 
-export default function VisaoGeralPage() {
+function HeaderCell({ children, numeric }: { children: ReactNode; numeric?: boolean }) {
+  return (
+    <th
+      scope="col"
+      className={cn(
+        'px-3 py-2 font-condensed text-2xs font-bold uppercase tracking-wide text-muted',
+        numeric === true ? 'text-right' : 'text-left',
+      )}
+    >
+      {children}
+    </th>
+  );
+}
+
+export default function ServidoresPage() {
   return (
     <RequireSession>
       <Servers />
@@ -62,14 +80,10 @@ function Servers() {
   }, [load]);
 
   return (
-    <div>
+    <div className="space-y-4">
       <PageHeader
         title="Servidores"
-        description={
-          servers === null
-            ? 'Carregando…'
-            : `${String(servers.length)} servidor(es) nesta máquina`
-        }
+        description={servers === null ? 'Carregando…' : `${String(servers.length)} nesta máquina`}
         aside={
           <Button variant="primary" onClick={() => setCreating(true)}>
             Criar servidor
@@ -77,10 +91,6 @@ function Servers() {
         }
       />
 
-      {/* Os três estados de uma lista, cada um com a sua cara: o
-          `StateBlock` é o mesmo do resto do painel, e é o que
-          impede "carregando" virar tabela vazia e erro virar
-          "nenhum servidor". */}
       {error !== null && (
         <StateBlock variant="error" title="Não consegui falar com o agente" detail={error} />
       )}
@@ -103,9 +113,82 @@ function Servers() {
         />
       )}
 
-      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {servers?.map((server) => <ServerCard key={server.id} server={server} />)}
-      </div>
+      {servers !== null && servers.length > 0 && (
+        <div className="border border-border bg-surface">
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-[13px]">
+              <caption className="sr-only">Servidores de Rust desta máquina</caption>
+
+              <thead>
+                <tr className="border-b border-border">
+                  <HeaderCell>Servidor</HeaderCell>
+                  <HeaderCell>ID</HeaderCell>
+                  <HeaderCell>Situação</HeaderCell>
+                  <HeaderCell>Mapa</HeaderCell>
+                  <HeaderCell numeric>Mundo</HeaderCell>
+                  <HeaderCell numeric>Vagas</HeaderCell>
+                  <HeaderCell numeric>Jogo</HeaderCell>
+                  <HeaderCell numeric>RCON</HeaderCell>
+                  <HeaderCell numeric>
+                    {/* Cabeçalho só para o leitor de tela: escrever
+                        "Ações" em cima de um botão que já se lê é
+                        ruído para quem enxerga. */}
+                    <span className="sr-only">Ações</span>
+                  </HeaderCell>
+                </tr>
+              </thead>
+
+              <tbody>
+                {servers.map((server) => (
+                  <tr
+                    key={server.id}
+                    className="border-b border-border last:border-b-0 hover:bg-surface-2"
+                  >
+                    <td className="px-3 py-2">
+                      <span className="block truncate font-condensed text-sm font-bold uppercase tracking-wide text-foreground">
+                        {server.name}
+                      </span>
+                      <span className="block truncate text-2xs text-muted">{server.hostname}</span>
+                    </td>
+
+                    <td className="px-3 py-2">
+                      <code className="text-muted">{server.id}</code>
+                    </td>
+
+                    <td className="px-3 py-2">
+                      <ServerStateBadge server={server} />
+                    </td>
+
+                    <td className="px-3 py-2 text-muted">{server.map}</td>
+
+                    <td className="px-3 py-2 text-right tabular-nums text-muted">
+                      {String(server.worldSize)}
+                    </td>
+
+                    <td className="px-3 py-2 text-right tabular-nums text-muted">
+                      {String(server.maxPlayers)}
+                    </td>
+
+                    <td className="px-3 py-2 text-right tabular-nums text-muted">
+                      {String(server.ports.game)}
+                    </td>
+
+                    <td className="px-3 py-2 text-right tabular-nums text-muted">
+                      {String(server.ports.rcon)}
+                    </td>
+
+                    <td className="px-3 py-2 text-right">
+                      <Link href={`/servidor/?id=${encodeURIComponent(server.id)}`}>
+                        <Button size="sm">Abrir</Button>
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {creating && (
         <CreateServerDialog
@@ -117,40 +200,6 @@ function Servers() {
           }}
         />
       )}
-    </div>
-  );
-}
-
-function ServerCard({ server }: { server: ServerView }) {
-  return (
-    <div className="border border-border bg-surface p-4">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate font-condensed text-lg font-bold uppercase">{server.name}</p>
-          <p className="truncate text-sm text-muted">{server.hostname}</p>
-        </div>
-
-        <ServerStateBadge server={server} />
-      </div>
-
-      <dl className="mb-4 grid grid-cols-2 gap-y-1 text-sm">
-        <dt className="text-muted">Mapa</dt>
-        <dd className="text-right">
-          {server.map} · {String(server.worldSize)}
-        </dd>
-
-        <dt className="text-muted">Jogadores</dt>
-        <dd className="text-right">até {String(server.maxPlayers)}</dd>
-
-        <dt className="text-muted">Portas</dt>
-        <dd className="text-right tabular-nums">
-          {server.ports.game} · {server.ports.rcon}
-        </dd>
-      </dl>
-
-      <Link href={`/servidor/?id=${encodeURIComponent(server.id)}`}>
-        <Button className="w-full">Abrir</Button>
-      </Link>
     </div>
   );
 }
