@@ -17,6 +17,7 @@ import {
   MAX_PLUGIN_BYTES,
   PLUGIN_NAME_PATTERN,
   pluginPath,
+  reloadFailed,
 } from '../src/oxide/plugins.js';
 
 const PLUGINS_DIR = 'F:\\Projects\\RustAgent\\Servers\\pvp1\\oxide\\plugins';
@@ -76,6 +77,28 @@ function refusal(content: Buffer): string | null {
     return error.message;
   }
 }
+
+describe('reloadFailed', () => {
+  it.each([
+    ['Error while compiling: OrigemZVip.cs(214,13): error CS0103: The name x does not exist'],
+    ['Failed to compile OrigemZVip: syntax error'],
+    ['Failed to load plugin OrigemZVip'],
+  ])('reconhece a recusa do Oxide: %s', (output) => {
+    expect(reloadFailed(output)).toBe(true);
+  });
+
+  it.each([
+    ['Loaded plugin Origem Z Vip v1.4.0 by OrigemZ'],
+    ['Unloaded plugin Origem Z Vip v1.4.0'],
+    // O plugin fala de erro no PRÓPRIO texto dele, e não é sobre
+    // compilar. Alarme falso na linha faria ninguém acreditar no
+    // alarme verdadeiro.
+    ['OrigemZVip: nenhum erro encontrado na configuracao'],
+    [null],
+  ])('não inventa erro onde não há: %s', (output) => {
+    expect(reloadFailed(output)).toBe(false);
+  });
+});
 
 describe('assertPluginContent', () => {
   it('aceita um plugin comum', () => {

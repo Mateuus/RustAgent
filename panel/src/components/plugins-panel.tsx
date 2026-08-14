@@ -131,6 +131,32 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
     }
   }
 
+  /**
+   * Tira o custom do acervo deste servidor.
+   *
+   * `force` porque o botão já é uma confirmação em dois passos, e o
+   * aviso dele diz o que se perde. Um segundo 409 aqui só faria a
+   * pessoa clicar duas vezes na mesma decisão.
+   */
+  async function removeCustom(plugin: ServerPlugin): Promise<void> {
+    setBusy(plugin.id);
+    setNotice(null);
+
+    try {
+      const response = await agent.removePlugin(plugin.id, true);
+
+      toast.success(response.message);
+      await load();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      toast.error('Não consegui remover', { description: message });
+      setError(message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function upload(file: File): Promise<void> {
     setUploading(true);
     setNotice(null);
@@ -198,6 +224,7 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
                 busy={busy === plugin.id}
                 onEnable={() => void setEnabled(plugin, true)}
                 onEnableWithDeps={() => void enableWithDeps(plugin)}
+                onRemove={() => void removeCustom(plugin)}
               />
             ))}
           </Column>
@@ -355,21 +382,47 @@ function AvailableRow({
   busy,
   onEnable,
   onEnableWithDeps,
+  onRemove,
 }: {
   plugin: ServerPlugin;
   busy: boolean;
   onEnable: () => void;
   /** Liga este e as dependências que faltam, na ordem do agente. */
   onEnableWithDeps: () => void;
+  /** Só para o custom deste servidor. Ver o botão. */
+  onRemove: () => void;
 }) {
   return (
     <div className="px-4 py-3">
       <div className="flex items-start justify-between gap-3">
         <PluginIdentity plugin={plugin} />
 
-        <Button size="sm" disabled={busy || plugin.blockedBy !== null} onClick={onEnable}>
-          {busy ? 'Ligando…' : 'Ligar'}
-        </Button>
+        <div className="flex shrink-0 items-start gap-2">
+          {/* ####  O CUSTOM SAI POR AQUI, E SÓ POR AQUI  ####
+
+              Ele é deste servidor: nenhuma outra tela o enxerga, e
+              sem este botão um custom que ninguém mais usa ficaria
+              na coluna de disponíveis para sempre.
+
+              O da BIBLIOTECA não tem botão aqui de propósito —
+              removê-lo tira de todos os servidores, e essa decisão
+              é da tela de rede, onde se vê quem usa o quê. */}
+          {plugin.serverId !== null && (
+            <ConfirmButton
+              variant="danger"
+              disabled={busy}
+              icon={null}
+              label="Remover"
+              confirmLabel="Apagar o .cs"
+              hint="Apaga o .cs deste servidor e tira o plugin do acervo. A configuração em oxide\config fica."
+              onConfirm={onRemove}
+            />
+          )}
+
+          <Button size="sm" disabled={busy || plugin.blockedBy !== null} onClick={onEnable}>
+            {busy ? 'Ligando…' : 'Ligar'}
+          </Button>
+        </div>
       </div>
 
       {/* ####  O HOMÔNIMO JÁ OCUPA O LUGAR  ####
@@ -424,6 +477,7 @@ function ActiveRow({
 }) {
   const { hard, soft } = plugin.dependents;
   const arrastaOutros = hard.length > 0 || soft.length > 0;
+  const naoCompilou = plugin.lastReload?.failed === true;
 
   return (
     <div className="px-4 py-3">
@@ -472,6 +526,35 @@ function ActiveRow({
           )}
           {soft.length > 0 && <>{soft.join(', ')} usa este quando ele está no ar.</>}
         </p>
+      )}
+
+      {/* ####  ATIVO NÃO É O MESMO QUE RODANDO  ####
+
+          O arquivo está no lugar, o interruptor diz "ativo" — e o
+          Oxide recusou o plugin. Antes, isso voltava dentro do
+          `reload.output`, num bloco de dez linhas que rolava para
+          fora da tela: quem clicou ia embora achando que aplicou, e
+          o sintoma aparecia no jogo horas depois.
+
+          A frase do compilador fica junto porque é ela que diz a
+          LINHA do erro — e é o que se manda para quem escreveu o
+          plugin. */}
+      {naoCompilou && (
+        <div className="mt-3 border border-rust bg-surface-2 p-3">
+          <p className="flex items-start gap-2 text-2xs font-bold leading-relaxed text-rust">
+            <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              O Oxide não conseguiu carregar este plugin. Ele está no servidor, mas não está
+              rodando.
+            </span>
+          </p>
+
+          {plugin.lastReload?.output !== null && plugin.lastReload !== null && (
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-3xs leading-relaxed text-muted">
+              {plugin.lastReload.output}
+            </pre>
+          )}
+        </div>
       )}
 
       {/* ####  O sha256 DIVERGIU  ####

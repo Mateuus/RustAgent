@@ -133,6 +133,42 @@ export interface PluginReloadResult {
   readonly sent: boolean;
   /** O que o Oxide respondeu — inclusive o erro de compilação. */
   readonly output: string | null;
+  /**
+   * A resposta do Oxide é um erro de COMPILAÇÃO?
+   *
+   * Ver `reloadFailed`. `false` também quando não deu para saber: o
+   * que não se reconhece não vira alarme.
+   */
+  readonly failed: boolean;
+}
+
+/**
+ * O plugin deixou de compilar?
+ *
+ * ####  POR QUE ISTO PRECISA EXISTIR  ####
+ *
+ * "Gravei e recarreguei" e "o plugin está rodando" são coisas
+ * diferentes, e a segunda é a que interessa. O erro de compilação
+ * volta DENTRO do `reload.output`, junto de tudo o mais que o Oxide
+ * responde — e num texto de dez linhas que rolou para fora da tela
+ * ninguém o vê. Quem clicou vai embora achando que aplicou.
+ *
+ * ####  É HEURÍSTICA SOBRE TEXTO DE TERCEIROS  ####
+ *
+ * O Oxide não devolve código de erro: devolve prosa. `error CS0103`
+ * é o compilador da Microsoft dizendo o que houve, e as outras três
+ * frases são as do próprio loader. O que não casar aqui responde
+ * `false` de propósito — um alarme falso na linha do plugin faria
+ * ninguém mais acreditar no alarme verdadeiro.
+ */
+export function reloadFailed(output: string | null): boolean {
+  if (output === null) {
+    return false;
+  }
+
+  return /\berror CS\d+|Error while compiling|Failed to compile|Failed to load|Plugin .* failed/i.test(
+    output,
+  );
 }
 
 export interface InstallPluginResult {
@@ -257,13 +293,17 @@ async function sendPluginCommand(rcon: OpsRcon, command: string): Promise<Plugin
     // Servidor parado NÃO é erro aqui: o arquivo está no lugar, e
     // o Oxide o carrega no próximo start. Dizer isso é melhor que
     // recusar o upload.
-    return { sent: false, output: null };
+    return { sent: false, output: null, failed: false };
   }
 
   try {
-    return { sent: true, output: await rcon.send(command) };
+    const output = await rcon.send(command);
+
+    return { sent: true, output, failed: reloadFailed(output) };
   } catch (error) {
-    return { sent: false, output: toError(error).message };
+    // Falhar o RCON não é falhar a compilação: o plugin pode estar
+    // ótimo, e quem caiu foi a conexão.
+    return { sent: false, output: toError(error).message, failed: false };
   }
 }
 

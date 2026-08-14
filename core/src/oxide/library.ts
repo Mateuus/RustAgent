@@ -129,9 +129,47 @@ export interface PluginView {
   readonly servers: readonly string[];
 }
 
+/**
+ * Um plugin da BIBLIOTECA, como a tela de rede o mostra.
+ *
+ * O `dependents` daqui responde sobre o acervo inteiro — "quem, na
+ * biblioteca, exige este?" —, e não sobre um servidor. É a pergunta
+ * de quem está prestes a remover o plugin de todos de uma vez.
+ */
+export interface LibraryPluginView extends PluginView {
+  readonly dependents: {
+    /** Sai do ar junto, em todo servidor onde os dois estiverem. */
+    readonly hard: readonly string[];
+    /** Continua no ar, sem a parte que usava este. */
+    readonly soft: readonly string[];
+  };
+}
+
+/**
+ * O que o Oxide respondeu no último `oxide.reload` daquele plugin.
+ *
+ * Vale para a sessão do agente, e não para sempre — ver
+ * `PluginLibrary.#lastReload`.
+ */
+export interface LastReload {
+  /** ISO. Quando o comando foi mandado. */
+  readonly at: string;
+  /** Erro de COMPILAÇÃO. Ver `reloadFailed`. */
+  readonly failed: boolean;
+  readonly output: string | null;
+}
+
 /** O mesmo plugin, visto de dentro de UM servidor. */
 export interface ServerPluginView extends PluginView {
   readonly enabled: boolean;
+  /**
+   * O desfecho do último reload deste plugin AQUI.
+   *
+   * `null` = não recarregamos nada desde que o agente subiu. É o que
+   * permite a linha da tela dizer "não compilou" em vez de esconder
+   * o erro num texto que rolou para fora.
+   */
+  readonly lastReload: LastReload | null;
   /** O sha256 do que está em disco naquele servidor. */
   readonly appliedSha: string | null;
   readonly appliedAt: string | null;
@@ -279,6 +317,22 @@ function dependentsOf(
 export class PluginLibrary {
   readonly #deps: PluginLibraryDeps;
 
+  /**
+   * O último `oxide.reload` de cada plugin, por servidor.
+   *
+   * ####  POR QUE EM MEMÓRIA, E NÃO NO BANCO  ####
+   *
+   * O dado morre com o processo — e é isso que se quer. Ele afirma
+   * "o Oxide respondeu isto agora há pouco"; guardá-lo entre
+   * reinícios faria a tela mostrar, dias depois, um erro de
+   * compilação de um arquivo que já foi corrigido, sobre um servidor
+   * que talvez nem esteja no ar. Um alarme velho é pior que nenhum.
+   *
+   * A chave é `<servidor>::<nome>`, e não o id do plugin: quem
+   * compila é o `.cs` que está NAQUELE servidor.
+   */
+  readonly #lastReload = new Map<string, LastReload>();
+
   constructor(deps: PluginLibraryDeps) {
     this.#deps = deps;
   }
@@ -296,14 +350,28 @@ export class PluginLibrary {
    *
    * Reconcilia a pasta antes de listar. Ver `syncStore`.
    */
-  async list(): Promise<readonly PluginView[]> {
+  async list(): Promise<readonly LibraryPluginView[]> {
     await this.#syncDir(null);
 
     const active = this.#deps.repository.activeServersByPlugin();
+    const biblioteca = this.#deps.repository.library();
 
-    return this.#deps.repository
-      .library()
-      .map((plugin) => this.#toView(plugin, active.get(plugin.id) ?? []));
+    return biblioteca.map(
+      (plugin): LibraryPluginView => ({
+        ...this.#toView(plugin, active.get(plugin.id) ?? []),
+        // ####  QUEM REMOVE DA REDE PRECISA VER ISTO ANTES  ####
+        //
+        // Tirar o `OrigemZAgent` da biblioteca é tirá-lo de TODOS os
+        // servidores que o usam, e com ele caem os três plugins que
+        // o exigem — em cada um deles. A tela de rede mostrava "ativo
+        // em: server01, server02" e mais nada; o resto da conta ficava
+        // para depois do clique.
+        //
+        // Aqui o universo é a biblioteca inteira, e não um servidor:
+        // é a pergunta certa para uma tela que decide por todos.
+        dependents: dependentsOf(plugin.name, biblioteca),
+      }),
+    );
   }
 
   /**
@@ -370,6 +438,10 @@ export class PluginLibrary {
               : 'custom',
         missingRequires: (plugin.requires ?? []).filter((name) => !onlineNames.has(name)),
         dependents: dependentsOf(plugin.name, [...holderOf.values()]),
+        // Só para quem está ligado: um plugin desligado não tem
+        // reload a comentar, e mostrar o erro de quando ele esteve no
+        // ar mandaria consertar o que já foi tirado.
+        lastReload: enabled ? (this.#lastReload.get(`${serverId}::${plugin.name}`) ?? null) : null,
       };
     });
 
@@ -750,7 +822,7 @@ export class PluginLibrary {
   reload(serverId: string, pluginId: number): Promise<PluginReloadResult> {
     const plugin = this.#requirePlugin(pluginId);
 
-    return reloadPlugin(this.#rconOf(serverId), plugin.name);
+    return this.#reloadAndRemember(serverId, plugin.name);
   }
 
   // ------------------------------------------------------
@@ -900,10 +972,10 @@ export class PluginLibrary {
       record === undefined ||
       this.#deps.repository.serverPlugin(serverId, record.id)?.enabled !== true
     ) {
-      return { sent: false, output: null };
+      return { sent: false, output: null, failed: false };
     }
 
-    return reloadPlugin(this.#rconOf(serverId), plugin);
+    return this.#reloadAndRemember(serverId, plugin);
   }
 
   /** Copia do acervo para o servidor e manda recarregar. */
@@ -931,7 +1003,7 @@ export class PluginLibrary {
     // sobre uma cópia que não existe.
     this.#deps.repository.setServerPlugin(serverId, plugin.id, true, plugin.sha256);
 
-    const reload = await reloadPlugin(this.#rconOf(serverId), plugin.name);
+    const reload = await this.#reloadAndRemember(serverId, plugin.name);
 
     this.#deps.logger.info(
       { server: serverId, plugin: plugin.name, sent: reload.sent },
@@ -1348,6 +1420,37 @@ export class PluginLibrary {
    */
   #rconOf(serverId: string): OpsRcon {
     return this.#deps.servers.contextOf(serverId)?.rcon ?? disconnectedRcon(serverId);
+  }
+
+  /**
+   * Recarrega e guarda o que o Oxide respondeu.
+   *
+   * TODO reload deste arquivo passa por aqui — é o que garante que a
+   * linha da tela fale do último de verdade, e não do último que
+   * alguém lembrou de registrar.
+   */
+  async #reloadAndRemember(serverId: string, plugin: string): Promise<PluginReloadResult> {
+    const reload = await reloadPlugin(this.#rconOf(serverId), plugin);
+
+    // Com o servidor parado não houve resposta nenhuma: guardar isso
+    // apagaria o resultado anterior, que ainda é a última notícia de
+    // verdade sobre aquele plugin.
+    if (reload.sent) {
+      this.#lastReload.set(`${serverId}::${plugin}`, {
+        at: new Date().toISOString(),
+        failed: reload.failed,
+        output: reload.output,
+      });
+    }
+
+    if (reload.failed) {
+      this.#deps.logger.warn(
+        { server: serverId, plugin, output: reload.output },
+        'o Oxide recusou este plugin ao recarregar',
+      );
+    }
+
+    return reload;
   }
 
   async #serverViewOf(serverId: string, pluginId: number): Promise<ServerPluginView> {

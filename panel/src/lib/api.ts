@@ -184,10 +184,46 @@ export interface LibraryPlugin {
   updatedAt: string;
   /** Os ids dos servidores em que ele está ATIVO. */
   servers: string[];
+  /**
+   * Quem, na BIBLIOTECA, depende deste.
+   *
+   * Na tela de rede a pergunta é sobre o acervo inteiro: remover
+   * daqui remove de todos os servidores de uma vez. Dentro de um
+   * servidor, o mesmo campo fala só de quem está ligado ali.
+   */
+  dependents: PluginDependents;
 }
 
 /** O mesmo plugin, visto de dentro de um servidor. */
+/**
+ * Quem depende de um plugin.
+ *
+ * `hard` (`// Requires:`) sai do ar junto; `soft`
+ * (`[PluginReference]`) continua no ar sem a parte que usava o
+ * outro — que é pior de descobrir, porque nada aparece no log.
+ */
+export interface PluginDependents {
+  hard: string[];
+  soft: string[];
+}
+
+/** O desfecho do último `oxide.reload` daquele plugin, ali. */
+export interface LastReload {
+  at: string;
+  /**
+   * Erro de COMPILAÇÃO — o plugin está no servidor e não roda.
+   *
+   * O agente decide isto pelo texto que o Oxide respondeu; o que ele
+   * não reconhece vira `false`, porque alarme falso na linha faria
+   * ninguém acreditar no verdadeiro.
+   */
+  failed: boolean;
+  output: string | null;
+}
+
 export interface ServerPlugin extends LibraryPlugin {
+  /** `null` = nenhum reload desde que o agente subiu. */
+  lastReload: LastReload | null;
   enabled: boolean;
   appliedSha: string | null;
   appliedAt: string | null;

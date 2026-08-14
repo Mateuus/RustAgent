@@ -230,6 +230,33 @@ function Library() {
                     <td className="px-3 py-2">
                       <p className="truncate">{plugin.title ?? plugin.name}</p>
                       <p className="truncate text-2xs text-muted">{plugin.file}</p>
+
+                      {/* ####  A DEPENDÊNCIA APARECE ANTES DO CLIQUE  ####
+
+                          Quem remove daqui remove de TODOS os
+                          servidores — e leva junto, em cada um, quem
+                          exigia este plugin. Ler isso só na
+                          confirmação é tarde para quem ainda está
+                          decidindo o que remover. */}
+                      {plugin.dependents.hard.length > 0 && (
+                        <p className="mt-1 text-2xs leading-relaxed text-amber">
+                          {plugin.dependents.hard.join(', ')}{' '}
+                          {plugin.dependents.hard.length > 1 ? 'não carregam' : 'não carrega'} sem
+                          este.
+                        </p>
+                      )}
+
+                      {plugin.dependents.soft.length > 0 && (
+                        <p className="mt-1 text-2xs leading-relaxed text-muted">
+                          {plugin.dependents.soft.join(', ')} usa este quando ele está no ar.
+                        </p>
+                      )}
+
+                      {plugin.requires.length > 0 && (
+                        <p className="mt-1 text-2xs leading-relaxed text-muted">
+                          Depende de {plugin.requires.join(', ')}.
+                        </p>
+                      )}
                     </td>
 
                     <td className="px-3 py-2 text-muted">{plugin.author ?? EM_DASH}</td>

@@ -87,6 +87,8 @@ interface Harness {
   readonly configDir: string;
   /** Os comandos que chegaram ao RCON, na ordem. */
   readonly commands: string[];
+  /** Troca o que o RCON falso responde ao próximo comando. */
+  respondWith(output: string): void;
 }
 
 let harness: Harness;
@@ -145,11 +147,14 @@ beforeEach(async () => {
 
   const commands: string[] = [];
 
+  /** O que o RCON falso responde. Ver `respondWith` no harness. */
+  let resposta = 'ok';
+
   const rcon: OpsRcon = {
     isConnected: true,
     send: (command: string) => {
       commands.push(command);
-      return Promise.resolve('ok');
+      return Promise.resolve(resposta);
     },
   };
 
@@ -193,6 +198,9 @@ beforeEach(async () => {
     pluginsDir,
     configDir,
     commands,
+    respondWith: (output: string) => {
+      resposta = output;
+    },
   };
 });
 
@@ -882,6 +890,80 @@ describe('remover do acervo', () => {
 
     expect(harness.repository.findLibrary(PLUGIN_NAME)?.id).toBe(pluginId);
     expect(existsSync(join(harness.libraryDir, PLUGIN_FILE))).toBe(true);
+  });
+});
+
+describe('a tela de rede', () => {
+  it('diz quem depende do plugin ANTES de alguém remover', async () => {
+    // Remover da biblioteca remove de TODOS os servidores, e leva
+    // junto quem exigia o plugin — em cada um deles. A tela de rede
+    // mostrava "ativo em: server01" e mais nada.
+    await harness.library.add(
+      'OrigemZAgent.cs',
+      pluginSource('1.0.0', { className: 'OrigemZAgent' }),
+    );
+    await harness.library.add(
+      'OrigemZVip.cs',
+      pluginSource('1.0.0', { className: 'OrigemZVip', requires: ['OrigemZAgent'] }),
+    );
+    await harness.library.add(
+      'Loja.cs',
+      pluginSource('1.0.0', { className: 'Loja', references: ['OrigemZAgent'] }),
+    );
+
+    const agente = (await harness.library.list()).find((plugin) => plugin.name === 'OrigemZAgent');
+
+    expect(agente?.dependents.hard).toEqual(['OrigemZVip']);
+    expect(agente?.dependents.soft).toEqual(['Loja']);
+  });
+});
+
+describe('o plugin que não compila', () => {
+  it('####  ligado e recusado pelo Oxide vira estado na linha  ####', async () => {
+    // "Ativo" e "rodando" são coisas diferentes. Antes, a recusa do
+    // Oxide voltava só dentro do `reload.output` — num bloco de dez
+    // linhas que rolava para fora da tela —, e quem clicou ia embora
+    // achando que aplicou.
+    harness.respondWith(
+      'Error while compiling: OrigemZPlayer.cs(214,13): error CS0103: The name x does not exist',
+    );
+
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+
+    const { plugins } = await harness.library.serverList(SERVER_ID);
+    const view = plugins.find((candidate) => candidate.id === plugin.id);
+
+    expect(view?.lastReload?.failed).toBe(true);
+    // A frase do compilador fica junto: é ela que diz a LINHA, e é o
+    // que se manda para quem escreveu o plugin.
+    expect(view?.lastReload?.output).toContain('error CS0103');
+  });
+
+  it('a resposta normal do Oxide não vira alarme', async () => {
+    harness.respondWith('Loaded plugin Origem Z Player v1.0.0 by OrigemZ');
+
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+
+    const { plugins } = await harness.library.serverList(SERVER_ID);
+
+    expect(plugins.find((candidate) => candidate.id === plugin.id)?.lastReload?.failed).toBe(false);
+  });
+
+  it('desligar limpa o estado: não se conserta o que já saiu', async () => {
+    harness.respondWith('Error while compiling: error CS0103');
+
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+    await harness.library.setEnabled(SERVER_ID, plugin.id, false);
+
+    const { plugins } = await harness.library.serverList(SERVER_ID);
+
+    expect(plugins.find((candidate) => candidate.id === plugin.id)?.lastReload).toBeNull();
   });
 });
 
