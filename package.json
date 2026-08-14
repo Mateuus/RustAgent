@@ -1,0 +1,22 @@
+{
+  "name": "rustagent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agente que controla vários servidores dedicados de Rust na mesma máquina",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "workspaces": [
+    "core",
+    "panel"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w core",
+    "build": "npm run build -w core && npm run build -w panel",
+    "start": "npm run start -w core",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  }
+}

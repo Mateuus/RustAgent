@@ -1,0 +1,42 @@
+{
+  // ============================================================
+  //  Opções compartilhadas por todos os pacotes do workspace.
+  //  Cada pacote tem seu próprio tsconfig.json que faz
+  //  "extends": "../tsconfig.base.json".
+  // ============================================================
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+
+    // ESM de verdade: o pacote é "type": "module" e roda no Node
+    // sem bundler. Com NodeNext os imports relativos PRECISAM
+    // terminar em ".js" — inclusive apontando para arquivos .ts,
+    // porque o que roda é o .js compilado.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+
+    // ---- Rigor -------------------------------------------------
+    "strict": true,
+
+    // Exigido pela tarefa: acessar array[i] ou record[k] passa a
+    // devolver "T | undefined". É chato, e é exatamente o ponto:
+    // um snapshot de jogadores indexado errado vira undefined
+    // silencioso em produção sem isso.
+    "noUncheckedIndexedAccess": true,
+
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // ---- Saída -------------------------------------------------
+    "declaration": true,
+    "sourceMap": true,
+    "skipLibCheck": true
+  }
+}

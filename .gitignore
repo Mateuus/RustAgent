@@ -1,0 +1,59 @@
+# ------------------------------------------------------------
+#  Dependencias e build
+# ------------------------------------------------------------
+node_modules/
+dist/
+out/
+.next/
+*.tsbuildinfo
+coverage/
+
+# ------------------------------------------------------------
+#  Segredos
+#
+#  O .env tem o AGENT_API_TOKEN e o hash da senha do painel.
+#  So o .env.example vai para o git.
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+
+# ------------------------------------------------------------
+#  Configuracao dos servidores
+#
+#  Cada Configs\<id>.ini tem a SENHA DE RCON daquele servidor
+#  dentro. Quem tem essa senha executa qualquer comando no
+#  servidor - isso nao vai para repositorio nenhum.
+#
+#  O modelo, esse sim, e versionado: e dele que todo servidor
+#  novo nasce (ver servers/create-server.ts).
+# ------------------------------------------------------------
+Configs/*.ini
+!Configs/server.example.ini
+
+# ------------------------------------------------------------
+#  Estado da maquina
+#
+#  Servers\  sao dezenas de GB por servidor (a instalacao do
+#            jogo, baixada pelo SteamCMD)
+#  SteamCMD\ o cliente, ~300 MB mais cache de catalogo
+#  Logs\     log do RustDedicated e transcricao do SteamCMD
+#  Backups\  copias do oxide\ antes de cada reinstalacao
+#  data\     o SQLite do agente (e os -wal/-shm do modo WAL)
+#  Plugins\  os .cs enviados pelo painel
+#
+#  O schema do banco vai para o git - em core/src/db/migrations.ts.
+# ------------------------------------------------------------
+Servers/
+SteamCMD/
+Logs/
+logs/
+Backups/
+Plugins/
+data/
+
+# ------------------------------------------------------------
+#  Ferramentas
+# ------------------------------------------------------------
+.pm2/

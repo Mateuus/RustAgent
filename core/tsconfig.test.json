@@ -1,0 +1,23 @@
+{
+  // ============================================================
+  //  Config de TYPECHECK: src + test, sem emitir nada.
+  //  É o que roda em "pnpm typecheck".
+  // ============================================================
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+
+    // rootDir precisa ser a raiz do pacote, nao src/.
+    //
+    // O tsconfig.json de build fixa rootDir em "src" para o dist/
+    // sair achatado. Aqui o include e maior (test/ e
+    // vitest.config.ts ficam FORA de src/), e o rootDir herdado
+    // faria o tsc recusar cada um deles com TS6059.
+    //
+    // Com noEmit: true o rootDir nao afeta saida nenhuma - ele so
+    // delimita o programa. Por isso alargar aqui e seguro.
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+}

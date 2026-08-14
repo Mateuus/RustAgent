@@ -1,0 +1,51 @@
+{
+  // ============================================================
+  //  Herda o rigor do workspace (strict, noUncheckedIndexedAccess,
+  //  noUnusedLocals) e troca só o que o Next exige.
+  //
+  //  O tsconfig.base.json foi escrito para o core, que roda ESM
+  //  puro no Node: "module": "NodeNext" e imports terminando em
+  //  ".js". Aqui quem resolve os módulos é o bundler do Next, e
+  //  NodeNext faria o tsc exigir extensão em todo import relativo
+  //  — inclusive nos que o Next resolve sozinho.
+  // ============================================================
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "jsx": "preserve",
+    // Quem emite é o Next; o tsc aqui só confere tipos.
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    "incremental": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next",
+    "out"
+  ]
+}
