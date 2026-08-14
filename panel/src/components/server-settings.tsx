@@ -30,6 +30,8 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+// O interruptor mora em ui\ porque a lista de plugins também o usa.
+import { Toggle } from '@/components/ui/toggle';
 import { agent, type ServerView } from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
@@ -96,65 +98,6 @@ function Field({ label, hint, children }: { label: string; hint?: ReactNode; chi
       <Label>{label}</Label>
       {children}
       {hint !== undefined && <p className="mt-1 text-2xs leading-relaxed text-muted">{hint}</p>}
-    </div>
-  );
-}
-
-/**
- * O interruptor: DOIS SEGMENTOS, e não uma pílula deslizante.
- *
- * ####  POR QUE NÃO O SWITCH DE SEMPRE  ####
- *
- * O design system não tem forma orgânica: a escala de raio inteira
- * foi redefinida para no máximo 4px (ver tailwind.config.ts), e uma
- * pílula com bolinha destoa de tudo o que está em volta. Pior: com
- * o fundo vermelho, o knob escuro simplesmente sumia.
- *
- * O segmentado resolve os dois e ganha uma terceira coisa: ele diz
- * em PALAVRAS o que está ligado. Cor sozinha não fala com quem não
- * separa vermelho de cinza — e "qual lado é o ligado?" é a dúvida
- * clássica do switch sem rótulo.
- */
-function Toggle({
-  on,
-  busy,
-  onChange,
-  labels = ['Ligado', 'Desligado'],
-}: {
-  on: boolean;
-  busy: boolean;
-  onChange: (value: boolean) => void;
-  labels?: readonly [string, string];
-}) {
-  return (
-    <div
-      role="group"
-      className={cn('flex shrink-0 border border-border', busy && 'opacity-50')}
-    >
-      {([true, false] as const).map((value, index) => (
-        <button
-          key={String(value)}
-          type="button"
-          aria-pressed={on === value}
-          disabled={busy}
-          onClick={() => {
-            if (on !== value) {
-              onChange(value);
-            }
-          }}
-          className={cn(
-            'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide transition-colors',
-            index === 1 && 'border-l border-border',
-            on === value
-              ? value
-                ? 'bg-rust text-white'
-                : 'bg-surface-2 text-foreground'
-              : 'text-muted hover:text-foreground',
-          )}
-        >
-          {labels[index]}
-        </button>
-      ))}
     </div>
   );
 }

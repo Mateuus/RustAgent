@@ -185,6 +185,18 @@ export interface AgentPaths {
   readonly logsDir: string;
   /** `Backups\` — cópias do `oxide\` antes de reinstalar. */
   readonly backupsDir: string;
+  /**
+   * `Plugins\` — a BIBLIOTECA de plugins do agente.
+   *
+   * ####  UM LUGAR SÓ PARA O .cs, E NÃO UM POR SERVIDOR  ####
+   *
+   * Aqui mora a cópia de referência de cada plugin; a de cada
+   * servidor, em `Servers\<id>\oxide\plugins`, é derivada desta.
+   * Sem a biblioteca, atualizar um plugin em cinco servidores é
+   * subir o mesmo arquivo cinco vezes — e ninguém consegue dizer
+   * se as cinco cópias são iguais.
+   */
+  readonly pluginLibraryDir: string;
   /** O SQLite do agente. */
   readonly dbPath: string;
 }
@@ -563,6 +575,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoadedConfig {
     steamCmdDir: pathFromEnv(merged.STEAMCMD_DIR, root, join(root, 'SteamCMD')),
     logsDir: pathFromEnv(merged.LOGS_DIR, root, join(root, 'Logs')),
     backupsDir: pathFromEnv(merged.BACKUPS_DIR, root, join(root, 'Backups')),
+    pluginLibraryDir: pathFromEnv(merged.PLUGIN_LIBRARY_DIR, root, join(root, 'Plugins')),
     dbPath: pathFromEnv(merged.AGENT_DB_PATH, root, join(root, 'data', 'rustagent.db')),
   };
 

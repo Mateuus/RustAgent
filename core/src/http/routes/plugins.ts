@@ -1,119 +1,229 @@
 // ============================================================
-//  routes/plugins.ts  -  a tela que instala plugin.
+//  routes/plugins.ts  -  o acervo de plugins, e o que cada
+//  servidor liga dele.
 //
-//  É o que a Fase 1 entrega do lado dos plugins: o agente não
-//  conhece nenhum deles, mas sabe instalar qualquer `.cs` em
-//  qualquer servidor e pedir ao Oxide que recarregue (ver
-//  Docs\03-DECISOES.md, D6).
+//  Duas famílias de rota, porque são dois assuntos:
+//
+//      /api/plugins                a BIBLIOTECA — vale para todos
+//      /api/servers/:id/plugins    o acervo DAQUELE servidor (a
+//                                  biblioteca + os customs dele) e
+//                                  o que está ligado
+//
+//  ####  O UPLOAD EXISTE NOS DOIS LUGARES, E SIGNIFICA COISAS
+//        DIFERENTES  ####
+//
+//    POST /api/plugins               entra para a biblioteca:
+//                                    qualquer servidor pode ligar
+//
+//    POST /api/servers/:id/plugins   entra como CUSTOM daquele
+//                                    servidor: nenhum outro o vê
+//
+//  O segundo é o `.cs` do evento de um fim de semana, o teste que
+//  não vai para os outros. Mandá-lo para a biblioteca de todos
+//  seria poluir a tela de rede com o experimento de um servidor.
+//
+//  ------------------------------------------------------------
+//  ####  `:pluginId` É NÚMERO, E NÃO O NOME  ####
+//
+//  O nome não é único: a biblioteca pode ter um `Kits` e o `pvp1`
+//  ter outro, custom, com conteúdo diferente. Uma rota por nome
+//  seria ambígua justamente no caso que a migração 003 existe para
+//  permitir.
 // ============================================================
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import { disconnectedRcon, type OpsRcon } from '../../ops/service.js';
-import {
-  installPlugin,
-  listPlugins,
-  MAX_PLUGIN_BYTES,
-  reloadPlugin,
-  removePlugin,
-} from '../../oxide/plugins.js';
-import type { ServerSupervisor } from '../../servers/supervisor.js';
+import type { PluginLibrary } from '../../oxide/library.js';
+import { MAX_PLUGIN_BYTES } from '../../oxide/plugins.js';
 import { ApiError } from '../error-response.js';
 
 export interface PluginRoutesDeps {
-  readonly supervisor: ServerSupervisor;
+  readonly library: PluginLibrary;
 }
 
 const serverParams = z.object({ id: z.string().min(1) });
-const pluginParams = z.object({ id: z.string().min(1), name: z.string().min(1) });
+const pluginParams = z.object({ pluginId: z.coerce.number().int().positive() });
+const serverPluginParams = z.object({
+  id: z.string().min(1),
+  pluginId: z.coerce.number().int().positive(),
+});
 
-/**
- * A pasta de plugins e o RCON daquele servidor.
- *
- * Servidor DESLIGADO também responde: o arquivo pode ser
- * instalado com o jogo parado, e o Oxide o carrega no próximo
- * start. Recusar aqui obrigaria a ligar o servidor só para
- * preparar a pasta.
- */
-function targetOf(deps: PluginRoutesDeps, id: string): { pluginsDir: string; rcon: OpsRcon } {
-  const config = deps.supervisor.configOf(id);
+const toggleBody = z.object({ enabled: z.boolean() });
+const forceQuery = z.object({ force: z.enum(['0', '1']).optional() });
 
-  if (config === null) {
-    throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}" neste agente.`, 404);
+/** O `.cs` que veio no multipart, conferido. */
+async function uploadedFile(
+  request: FastifyRequest,
+): Promise<{ filename: string; content: Buffer }> {
+  if (!request.isMultipart()) {
+    throw new ApiError(
+      'INVALID_BODY',
+      'Mande o arquivo do plugin como multipart/form-data (campo "file").',
+      400,
+    );
   }
 
-  return {
-    pluginsDir: config.paths.pluginsDir,
-    rcon: deps.supervisor.contextOf(id)?.rcon ?? disconnectedRcon(id),
-  };
+  const file = await request.file({ limits: { fileSize: MAX_PLUGIN_BYTES } });
+
+  if (file === undefined) {
+    throw new ApiError('INVALID_BODY', 'Nenhum arquivo veio na requisição.', 400);
+  }
+
+  return { filename: file.filename, content: await file.toBuffer() };
+}
+
+/**
+ * O texto de "gravei, mas não apliquei".
+ *
+ * ####  ENVIAR NÃO É APLICAR  ####
+ *
+ * O acervo ficou em dia; os servidores que já usam o plugin
+ * continuam com a versão anterior até alguém aplicar. Dizer isso na
+ * resposta é o que evita a conclusão de que "subiu, então já está
+ * valendo".
+ */
+function storedMessage(pendingServers: readonly string[], where: string): string {
+  if (pendingServers.length === 0) {
+    return `Plugin gravado ${where}.`;
+  }
+
+  return (
+    `Plugin gravado ${where}. ${pendingServers.join(', ')} ainda está na versão anterior — ` +
+    'aplique a atualização na aba Plugins de cada um.'
+  );
 }
 
 export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDeps): void {
-  app.get('/servers/:id/plugins', async (request) => {
-    const { id } = serverParams.parse(request.params);
-    const { pluginsDir } = targetOf(deps, id);
+  // ==========================================================
+  //  A biblioteca (nível de rede)
+  // ==========================================================
 
-    return { ok: true, pluginsDir, plugins: await listPlugins(pluginsDir) };
+  // ####  ESTE GET VARRE `Plugins\`  ####
+  //
+  // Um `.cs` copiado para a pasta à mão entra para a biblioteca
+  // aqui. É o que faz "copiar trinta arquivos de uma vez" valer
+  // tanto quanto trinta uploads. Ver PluginLibrary.syncStore.
+  app.get('/plugins', async () => ({ ok: true, plugins: await deps.library.list() }));
+
+  app.post('/plugins', async (request) => {
+    const { filename, content } = await uploadedFile(request);
+    const result = await deps.library.add(filename, content);
+
+    return { ok: true, ...result, message: storedMessage(result.pendingServers, 'na biblioteca') };
   });
 
-  // ---- enviar ---------------------------------------------
-  app.post('/servers/:id/plugins', async (request) => {
-    const { id } = serverParams.parse(request.params);
-    const { pluginsDir, rcon } = targetOf(deps, id);
+  app.delete('/plugins/:pluginId', async (request) => {
+    const { pluginId } = pluginParams.parse(request.params);
+    const { force } = forceQuery.parse(request.query);
 
-    if (!request.isMultipart()) {
-      throw new ApiError(
-        'INVALID_BODY',
-        'Mande o arquivo do plugin como multipart/form-data (campo "file").',
-        400,
-      );
-    }
-
-    const file = await request.file({ limits: { fileSize: MAX_PLUGIN_BYTES } });
-
-    if (file === undefined) {
-      throw new ApiError('INVALID_BODY', 'Nenhum arquivo veio na requisição.', 400);
-    }
-
-    const content = await file.toBuffer();
-
-    const result = await installPlugin({
-      pluginsDir,
-      name: file.filename,
-      content,
-      rcon,
-    });
+    // Sem `force`, a biblioteca recusa com 409 dizendo QUAIS
+    // servidores usam o plugin. Ver PluginLibrary.remove.
+    const result = await deps.library.remove(pluginId, force === '1');
 
     return {
       ok: true,
       ...result,
-      // Gravar e carregar são coisas diferentes: `ok` é sobre o
-      // arquivo, `reload.output` é sobre o Oxide ter aceitado.
-      message: result.reload.sent
-        ? 'Plugin enviado e recarregado. Veja em reload.output o que o Oxide respondeu.'
-        : 'Plugin enviado. O servidor está parado — ele carrega no próximo start.',
+      message:
+        result.removedFrom.length === 0
+          ? `${result.name} saiu do acervo.`
+          : `${result.name} saiu do acervo e de ${result.removedFrom.join(', ')}. ` +
+            'A configuração em oxide\\config foi preservada.',
     };
   });
 
-  app.delete('/servers/:id/plugins/:name', async (request) => {
-    const { id, name } = pluginParams.parse(request.params);
-    const { pluginsDir, rcon } = targetOf(deps, id);
+  // ==========================================================
+  //  O acervo daquele servidor
+  // ==========================================================
 
-    const unload = await removePlugin(pluginsDir, name, rcon);
+  /**
+   * A biblioteca mais os customs deste servidor, cada um com
+   * `enabled`, `updateAvailable` e `blockedBy`.
+   *
+   * ####  ESTE GET ADOTA  ####
+   *
+   * Um `.cs` que alguém copiou à mão para `oxide\plugins` entra
+   * para o acervo aqui, como custom deste servidor — e é o momento
+   * certo, porque é quando alguém está olhando para a tela dele. A
+   * alternativa seria o operador ver um plugin carregado no jogo e
+   * ausente do painel, sem nada explicando a diferença.
+   */
+  app.get('/servers/:id/plugins', async (request) => {
+    const { id } = serverParams.parse(request.params);
 
-    return { ok: true, name, unload };
+    return { ok: true, ...(await deps.library.serverList(id)) };
   });
 
-  app.post('/servers/:id/plugins/:name/reload', async (request) => {
-    const { id, name } = pluginParams.parse(request.params);
-    const { rcon } = targetOf(deps, id);
+  /** O upload CUSTOM: entra só para este servidor. */
+  app.post('/servers/:id/plugins', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { filename, content } = await uploadedFile(request);
 
-    if (!name.toLowerCase().endsWith('.cs')) {
-      throw new ApiError('INVALID_PLUGIN_NAME', 'O nome precisa terminar em .cs.', 400);
-    }
+    const result = await deps.library.addCustom(id, filename, content);
 
-    const reload = await reloadPlugin(rcon, name.slice(0, -3));
+    return {
+      ok: true,
+      ...result,
+      message:
+        `${storedMessage(result.pendingServers, `nos plugins custom de ${id}`)} ` +
+        'Ligue-o na coluna de disponíveis para aplicá-lo ao servidor.',
+    };
+  });
+
+  /**
+   * Liga, desliga — e aplica a atualização.
+   *
+   * `{ enabled: true }` num plugin JÁ ligado recopia o arquivo do
+   * acervo e recarrega: é assim que "há versão nova para aplicar"
+   * vira "aplicada". Uma rota separada para isso seria um segundo
+   * caminho para copiar-e-recarregar, e os dois divergiriam no
+   * primeiro ajuste.
+   */
+  app.put('/servers/:id/plugins/:pluginId', async (request) => {
+    const { id, pluginId } = serverPluginParams.parse(request.params);
+    const { enabled } = toggleBody.parse(request.body);
+    const { force } = forceQuery.parse(request.query);
+
+    // Sem `force`, desligar um plugin do qual outros dependem
+    // responde 409 dizendo quem cai junto. Ver
+    // PluginLibrary.setEnabled.
+    const result = await deps.library.setEnabled(id, pluginId, enabled, force === '1');
+    const { name, missingRequires } = result.plugin;
+
+    return {
+      ok: true,
+      ...result,
+      // Gravar e carregar são coisas diferentes: o arquivo pode ir
+      // para o lugar certo e o plugin não compilar. O que o Oxide
+      // respondeu — inclusive o erro de compilação — está em
+      // `reload.output`.
+      message: [
+        result.reload.sent
+          ? enabled
+            ? `${name} aplicado e recarregado. Veja em reload.output o que o Oxide respondeu.`
+            : `${name} descarregado e removido deste servidor. A configuração dele foi preservada.`
+          : enabled
+            ? `${name} copiado. O servidor está parado — o Oxide o carrega no próximo start.`
+            : `${name} removido deste servidor. Ele estava parado, então não houve o que descarregar.`,
+        // ####  LIGADO NÃO É O MESMO QUE CARREGADO  ####
+        //
+        // Com uma dependência dura faltando, o Oxide segura o
+        // plugin até ela aparecer. O arquivo está lá, a tela diz
+        // "ativo", e nada acontece no jogo — dizer isto aqui é o
+        // que evita a caça ao erro que não existe.
+        enabled && missingRequires.length > 0
+          ? `Atenção: ele depende de ${missingRequires.join(', ')}, que não está ligado aqui — ` +
+            'o Oxide só vai carregá-lo quando isso mudar.'
+          : null,
+      ]
+        .filter((parte): parte is string => parte !== null)
+        .join(' '),
+    };
+  });
+
+  app.post('/servers/:id/plugins/:pluginId/reload', async (request) => {
+    const { id, pluginId } = serverPluginParams.parse(request.params);
+    const reload = await deps.library.reload(id, pluginId);
 
     if (!reload.sent && reload.output === null) {
       throw new ApiError(
@@ -123,6 +233,6 @@ export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDep
       );
     }
 
-    return { ok: true, name, reload };
+    return { ok: true, reload };
   });
 }

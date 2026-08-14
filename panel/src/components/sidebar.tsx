@@ -27,6 +27,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Puzzle,
   Server,
   Settings,
   X,
@@ -61,6 +62,12 @@ const NAV: readonly NavItem[] = [
     label: 'Servidores',
     hint: 'Criar, instalar, subir e cuidar de cada servidor',
     Icon: Server,
+  },
+  {
+    href: '/plugins/',
+    label: 'Plugins',
+    hint: 'A biblioteca do agente: um .cs, uma vez, para todos os servidores',
+    Icon: Puzzle,
   },
   {
     href: '/config/',

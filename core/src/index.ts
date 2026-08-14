@@ -26,10 +26,12 @@ import { OperatorAuth } from './auth/operator.js';
 import { ConfigError, loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { runMigrations } from './db/migrations.js';
+import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
+import { PluginLibrary } from './oxide/library.js';
 import { ServerSupervisor } from './servers/supervisor.js';
 import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
@@ -113,6 +115,23 @@ async function main(): Promise<void> {
 
   supervisor.mountAll(servers);
 
+  // A biblioteca de plugins. A varredura de adoção vem LOGO DEPOIS
+  // do `mountAll` porque ela precisa dos servidores já espelhados na
+  // tabela `servers` — a chave estrangeira de `server_plugins`
+  // aponta para lá.
+  //
+  // Ela não segura a subida: `void` de propósito, com o erro
+  // tratado dentro. Um `.cs` ilegível num servidor não pode adiar a
+  // abertura da porta da API.
+  const library = new PluginLibrary({
+    libraryDir: agent.paths.pluginLibraryDir,
+    repository: new PluginsRepository(db),
+    servers: supervisor,
+    logger,
+  });
+
+  void library.adoptAll();
+
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
   // sozinho. Ele cede a vez ao SteamCMD sempre que há operação
@@ -152,6 +171,7 @@ async function main(): Promise<void> {
     repository,
     operations,
     steamWatcher,
+    library,
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,

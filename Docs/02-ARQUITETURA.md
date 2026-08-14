@@ -32,7 +32,8 @@ RustAgent/
 │   │   │   ├── database.ts
 │   │   │   ├── migrations.ts
 │   │   │   ├── schema-version.ts
-│   │   │   └── servers-repository.ts
+│   │   │   ├── servers-repository.ts
+│   │   │   └── plugins-repository.ts   a biblioteca e o que cada um ativou
 │   │   ├── rcon/               cliente WebRCON
 │   │   │   ├── client.ts  frames.ts  socket.ts  url.ts  errors.ts
 │   │   │   └── typed-emitter.ts
@@ -49,7 +50,9 @@ RustAgent/
 │   │   │   └── update-watcher.ts
 │   │   ├── oxide/              ####  NOVO
 │   │   │   ├── install.ts      baixa e aplica o Oxide.Rust.zip
-│   │   │   └── plugins.ts      listar/instalar/remover .cs
+│   │   │   ├── plugins.ts      o .cs de UM servidor, em disco
+│   │   │   ├── plugin-metadata.ts  [Info(...)] e sha256 do .cs
+│   │   │   └── library.ts      o acervo: enviar, ligar, adotar
 │   │   ├── ops/                as operações
 │   │   │   ├── operations.ts   a máquina de estados + trava + log
 │   │   │   ├── server-process.ts   subir/derrubar o RustDedicated
@@ -67,7 +70,7 @@ RustAgent/
 │
 ├── panel/                  o painel (Next.js, export estático)
 │   ├── package.json  next.config.mjs  tailwind.config.ts
-│   ├── src/app/            rotas: /entrar /servidores /servidor /config
+│   ├── src/app/            rotas: /entrar /servidores /servidor /plugins /config
 │   ├── src/components/
 │   └── src/lib/
 │
@@ -77,7 +80,8 @@ RustAgent/
     ├── SteamCMD/           o cliente, UM para a máquina inteira
     ├── Logs/<id>/          o log do RustDedicated e o do SteamCMD
     ├── Backups/<id>/       cópias do oxide\ antes de reinstalar
-    ├── Plugins/<id>/       .cs enviados pelo painel (staging)
+    ├── Plugins/            a BIBLIOTECA: um .cs, uma vez, para todos
+    │   └── <id>/           os plugins CUSTOM daquele servidor
     └── data/rustagent.db   o SQLite
 ```
 

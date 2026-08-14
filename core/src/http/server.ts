@@ -28,6 +28,7 @@ import type { AgentConfig } from '../config.js';
 import type { ServersRepository } from '../db/servers-repository.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
+import type { PluginLibrary } from '../oxide/library.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import type { SteamUpdateWatcher } from '../steam/update-watcher.js';
 import { createAuthGuard } from './auth.js';
@@ -57,6 +58,8 @@ export interface BuildServerOptions {
   readonly repository: ServersRepository;
   readonly operations: OperationStore;
   readonly steamWatcher: SteamUpdateWatcher;
+  /** A biblioteca de plugins do agente. Ver oxide/library.ts. */
+  readonly library: PluginLibrary;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -157,7 +160,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
       registerConsoleRoutes(api, { supervisor: options.supervisor });
 
-      registerPluginRoutes(api, { supervisor: options.supervisor });
+      registerPluginRoutes(api, { library: options.library });
 
       registerSteamUpdateRoutes(api, {
         watcher: options.steamWatcher,

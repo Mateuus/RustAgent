@@ -126,14 +126,104 @@ dentro dessa confirmação, com o texto dizendo o que se perde.
 
 ### Plugins
 
-Lista dos `.cs` daquele servidor, com envio por arrastar-e-soltar. Cada linha
-tem *Recarregar* e *Remover*. Depois de enviar, a resposta do Oxide aparece na
-tela — inclusive o erro de compilação, se houver.
+**Duas colunas, porque são duas perguntas.**
+
+```
+┌─ DISPONÍVEIS ──────────┐  ┌─ ATIVOS NESTE SERVIDOR ─┐
+│ ┐ arraste o .cs aqui ┌ │  │ OrigemZPlayer    v1.2.3 │
+│ └──────────────────┘   │  │  ⚠ versão nova [Aplicar]│
+│                        │  │                 [Tirar] │
+│ Kits          [Ligar]  │  │                         │
+│ MeuEvento     [Ligar]  │  │ ServerRewards    v2.1.0 │
+│  (custom deste server) │  │                 [Tirar] │
+└────────────────────────┘  └─────────────────────────┘
+```
+
+À esquerda, o que dá para ligar: a **biblioteca do agente** (ver `/plugins`,
+adiante) mais os **plugins custom deste servidor**. À direita, o que está
+rodando. Numa lista só com interruptor por linha, "o que está no ar?" exigia
+varrer trinta linhas lendo o estado de cada uma; separado, a resposta é uma
+coluna — e ligar/tirar vira mover de lado, que é o gesto que a cabeça já faz.
+
+Cada linha diz de onde o plugin vem: *biblioteca* ou *custom deste servidor*.
+
+**A área de arrastar-e-soltar envia um plugin custom.** O `.cs` largado ali é
+deste servidor e de mais ninguém: não aparece na tela de rede nem no acervo dos
+outros. É o evento de um fim de semana, o teste que não vai para os demais. Para
+valer em todos, o lugar é `/plugins`. A área também é um botão — arrastar não é
+descobrível sozinho.
+
+Quando a biblioteca tem um `Kits` e este servidor tem um `Kits` custom, ligar o
+segundo é **recusado**: os dois gravam o mesmo arquivo e o Oxide carrega um só.
+O botão nasce desabilitado, com a frase dizendo qual está no caminho — um botão
+inerte sem explicação é um mistério, e a pessoa clica de novo achando que
+travou.
+
+### Os plugins que dependem uns dos outros
+
+Três dos `OrigemZ*` começam com `// Requires: OrigemZAgent` — diretiva do
+próprio Oxide, que não carrega o plugin enquanto a dependência não estiver
+carregada. A tela trata os dois lados disso:
+
+**Ao ligar**, se falta uma dependência, a linha diz de quem ele depende e que o
+Oxide só vai carregá-lo quando ela entrar. Ligar continua permitido: é o
+comportamento real do jogo, e impedir seria inventar uma regra que o servidor
+não tem. O que não pode é a tela dizer "ativo" e nada acontecer, sem explicação.
+
+**Ao tirar**, se outros dependem dele, o botão vira confirmação em dois passos e
+escreve os nomes: quem *sai do ar junto* (`// Requires:`) e quem *continua no ar
+sem a parte que usava este* (`[PluginReference]`). Os dependentes também
+aparecem na linha o tempo todo, antes de alguém pensar em tirar — descobrir a
+dependência no meio da confirmação é tarde para quem estava só olhando a lista.
+
+Sem isso, tirar o `OrigemZAgent` derrubaria três plugins em silêncio, e o
+sintoma apareceria no jogo — kit que não vem, fila que não ordena — sem nada
+ligando uma coisa à outra.
+
+Quando o `sha256` do que está em disco difere do do acervo, a linha ativa ganha
+o aviso **"há versão nova para aplicar"** com o botão ao lado — sem ele, a única
+pista seria a versão da tela de rede não bater com a de cá, e ninguém compara
+duas telas.
+
+*Tirar* descarrega o plugin e apaga o `.cs` daquele servidor, mas **preserva a
+configuração** (`oxide\config\<Nome>.json` e `oxide\data\`). A tela diz isso: se
+tirar parecesse caro, ninguém usaria o botão.
+
+Depois de ligar ou aplicar, a resposta do Oxide aparece na tela — inclusive o
+erro de compilação, se houver. Gravar e carregar são coisas diferentes.
 
 ### Configuração
 
 Os campos do `.ini` que dá para mudar pelo painel, com aviso claro do que só
 vale depois de reiniciar o servidor.
+
+---
+
+## `/plugins` — a biblioteca
+
+A tela de **rede**, e não de servidor: um `.cs` entra aqui uma vez e fica
+disponível para todos. Tabela, pelo mesmo motivo da lista de servidores — é uma
+tela de comparação, e o que se quer é varrer a coluna de versão de cima a baixo.
+
+Os plugins **custom** não aparecem aqui: eles são de um servidor só, e listá-los
+encheria esta tela de coisas que mais ninguém pode usar. Eles moram na aba
+Plugins do servidor deles.
+
+Por linha: o título e o arquivo, o autor, a versão, **em quais servidores está
+ativo** (os nomes, não a contagem — "2 servidores" obriga a ir procurar quem
+são), o tamanho e *Remover*.
+
+Nome, autor e versão saem do `[Info(...)]` do próprio `.cs`. Não há formulário
+de metadados: seria a segunda fonte para o mesmo fato, e a segunda é a que
+diverge no dia em que alguém sobe a versão nova sem reabrir o formulário.
+
+**Enviar não é aplicar.** Subir uma versão nova atualiza a biblioteca e não mexe
+em servidor nenhum — cinco servidores no ar recarregando um plugin porque alguém
+arrastou um arquivo é susto que ninguém pediu. A tela diz quem ficou para trás;
+aplicar é na aba daquele servidor.
+
+Remover com servidores usando não mostra "tem certeza?": mostra **quais**
+servidores perdem o plugin, com a frase que veio do agente.
 
 ---
 

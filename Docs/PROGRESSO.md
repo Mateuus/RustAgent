@@ -119,6 +119,44 @@ Legenda: `[ ]` a fazer · `[~]` em curso · `[x]` pronto e verificado
       `INVALID_CREDENTIALS`; o POST **sem** o header de CSRF é barrado com 403 e
       **com** ele cria o servidor (201)
 
+## Etapa 10 — O acervo de plugins (Fase Administração, bloco 1)
+
+Ver [10-FASE-ADMINISTRACAO.md](10-FASE-ADMINISTRACAO.md), seção 1.
+
+- [x] migração **002**: `plugins` (a biblioteca) e `server_plugins` (o que cada
+      servidor ativou), com os dois `sha256` que respondem "há atualização?"
+- [x] migração **003**: o plugin **custom** de um servidor. `plugins` ganha
+      `server_id` (NULL = biblioteca) e passa a ter chave sintética — o nome
+      deixou de ser único, porque dois servidores podem ter customs homônimos
+      com conteúdos diferentes
+- [x] `db/plugins-repository.ts` — as duas tabelas, sem tocar em disco
+- [x] `oxide/plugin-metadata.ts` — `[Info(...)]`/`[Description(...)]` lidos do
+      próprio `.cs`, mais o sha256. **Sem formulário de metadados**: seria a
+      segunda fonte para o mesmo fato
+- [x] `oxide/library.ts` — enviar (rede e custom), remover, ligar, desligar,
+      aplicar e **adotar**, mais a trava do homônimo já ligado
+- [x] rotas: `/api/plugins` (biblioteca), `POST /api/servers/:id/plugins`
+      (custom) e `PUT /api/servers/:id/plugins/:pluginId`
+- [x] painel: `/plugins` (a biblioteca, tabela) e a aba do servidor em **duas
+      colunas** — disponíveis (com arrastar-e-soltar) e ativos
+- [x] migração **004**: `requires` e `plugin_refs` — de quem cada plugin
+      depende, lido do próprio `.cs`
+- [x] **a pasta manda no acervo**: o agente varre `Plugins\` e `Plugins\<id>\` no
+      boot e a cada abertura de tela. Copiar trinta `.cs` de uma vez vale tanto
+      quanto trinta uploads. Arquivo removido da pasta **não** apaga a linha
+- [x] **dependências**: `missingRequires` avisa o que falta ao ligar (sem
+      impedir — o Oxide segura o plugin até a dependência entrar), e tirar um
+      plugin do qual outros dependem é recusado com os nomes de quem cai
+- [x] os seis `OrigemZ*` copiados de `F:\Projects\Rust\Plugins` para `Plugins\`
+- [x] **verificado**: 53 testes passando. `plugin-library.test.ts` (36) — ligar
+      copia e grava o `applied_sha`; desligar apaga o `.cs` e **preserva**
+      `oxide\config\<Nome>.json`; o custom não vaza para outro servidor; o
+      homônimo é recusado; a adoção traz o que já estava lá sem apagar nada; a
+      pasta alimenta o acervo; tirar o `OrigemZAgent` avisa quem cai junto.
+      `migrations.test.ts` (7) — a 003 preserva plugin e ligações da 002.
+      `tsc`, `build -w panel` e os dois `lint` limpos
+- [ ] **na máquina**: reiniciar o agente e ligar o `OrigemZAgent` no `server01`
+
 ## Etapa 9 — Fechamento
 
 - [ ] `README.md` da raiz revisado
@@ -144,6 +182,58 @@ _(o que foi descoberto no caminho e muda alguma decisão vai aqui, com data)_
   Rust, e não de um plugin. É o que mantém a Fase 1 sem depender de plugin
   nenhum — inclusive na contagem regressiva do `server-auto-update`, que usa
   "servidor vazio" para encurtar o aviso.
+
+- **2026-08-14** — **enviar um plugin não o aplica nos servidores.** O briefing
+  não decidia isso, e o caminho automático era tentador: subir o `.cs` e
+  recarregar em todo mundo que já o usa. Ficou manual, servidor a servidor. Cinco
+  servidores no ar recarregando um plugin porque alguém arrastou um arquivo é um
+  efeito que ninguém pede — e um plugin que não compila derrubaria os cinco de
+  uma vez, em vez de um só, com alguém olhando. A API devolve `pendingServers` e
+  a tela do servidor mostra o aviso de atualização pendente.
+
+- **2026-08-14** — a **adoção nunca sobrescreve o acervo**. Um `.cs` que já
+  estava em `oxide\plugins` e cujo nome já existe no acervo não substitui o
+  arquivo de lá: a linha nasce com o `applied_sha` do disco, e a divergência
+  aparece na tela como "há versão nova para aplicar". Escolher um lado
+  sozinho — qualquer um dos dois — sobrescreveria trabalho de alguém em silêncio.
+
+- **2026-08-14** — **o plugin custom existe, e é de um servidor só** (migração
+  003, decidida depois do briefing). O desenho original tinha um lugar só, a
+  biblioteca de rede, e faltava o caso comum: o `.cs` que só faz sentido naquele
+  servidor. O custo foi trocar a chave de `plugins` — o nome deixou de ser único,
+  porque `pvp1` e `pvp2` podem ter cada um o seu `MeuEvento.cs` com conteúdo
+  diferente, que é justamente o que "custom" quer dizer. Daí a chave sintética e
+  os dois índices parciais: um `UNIQUE(name, server_id)` comum não serviria,
+  porque no SQLite dois NULL são distintos entre si e a biblioteca aceitaria dois
+  "Kits".
+
+- **2026-08-14** — **`// Requires:` não é comentário.** É diretiva do Oxide: ele
+  não carrega o plugin enquanto a dependência não estiver carregada. Três dos
+  `OrigemZ*` dependem do `OrigemZAgent`, e sem ler isso o agente deixaria alguém
+  tirar o agente do ar derrubando os outros três em silêncio — com o sintoma
+  aparecendo no jogo, sem nada ligando uma coisa à outra. Daí a migração 004 e a
+  recusa com confirmação.
+
+- **2026-08-14** — a leitura de `[PluginReference]` **casava dentro de
+  comentários**. Os nossos plugins explicam o mecanismo em prosa
+  (`// Consumida por outro plugin com [PluginReference] + Call(...)`), e a
+  primeira versão da regex saía dali com `memoria`, `mapa` e `System` como se
+  fossem dependências. Exigir o tipo `Plugin` logo após o `]` resolveu. Metadado
+  errado é pior que ausente: a tela avisaria que tirar um plugin quebra outro que
+  nem existe, e quem lesse isso duas vezes pararia de ler os avisos.
+
+- **2026-08-14** — a **pasta é um caminho de entrada de primeira classe**. O
+  upload pelo painel não pode ser o único jeito de um `.cs` entrar: quem tem
+  trinta plugins num repositório os copia de uma vez. O agente varre `Plugins\` e
+  `Plugins\<id>\` no boot e a cada abertura de tela. O inverso NÃO vale — arquivo
+  que sumiu da pasta não apaga a linha, porque a cascata levaria junto o registro
+  de quem ativou o quê.
+
+- **2026-08-14** — a **adoção liga por NOME, não por id**, e respeita quem já
+  está ligado. O teste pegou isto: com a biblioteca e um custom homônimos, a
+  varredura adotava o desligado por cima do arquivo em disco, e a tela passava a
+  mostrar DOIS plugins ligados para um `.cs` só — com o Oxide rodando um e sem
+  dizer qual. O arquivo em disco pertence a quem está ligado ali.
 
 - **2026-08-14** — descoberto num teste: uma linha em `servers` sem o
   `Configs\<id>.ini` correspondente (um `.ini` apagado à mão) deixa o id

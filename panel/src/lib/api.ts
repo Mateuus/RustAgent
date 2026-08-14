@@ -46,7 +46,7 @@ export class ApiError extends Error {
 }
 
 export interface RequestOptions {
-  readonly method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   readonly body?: unknown;
   /** Upload de plugin: o corpo vai como está, sem JSON. */
   readonly form?: FormData;
@@ -154,11 +154,80 @@ export interface OperationDetail extends OperationView {
   droppedLines: number;
 }
 
-export interface PluginInfo {
+/**
+ * Um plugin do acervo do agente.
+ *
+ * Os metadados vêm do `[Info(...)]` do próprio `.cs` — por isso são
+ * anuláveis: nem todo plugin de uso interno declara autor e versão,
+ * e a tela mostra travessão em vez de inventar.
+ */
+export interface LibraryPlugin {
+  /** A chave. O NOME não é único entre biblioteca e customs. */
+  id: number;
+  /** `OrigemZPlayer` — é o que o `oxide.reload` recebe. */
   name: string;
-  plugin: string;
+  /** `OrigemZPlayer.cs`. */
+  file: string;
+  /** `null` = da biblioteca; um id = custom DAQUELE servidor. */
+  serverId: string | null;
+  title: string | null;
+  author: string | null;
+  version: string | null;
+  description: string | null;
   bytes: number;
-  modifiedAt: string;
+  sha256: string;
+  /** `// Requires: X` — de quem ele não carrega sem. */
+  requires: string[];
+  /** `[PluginReference]` — de quem ele usa, mas sobrevive sem. */
+  references: string[];
+  addedAt: string;
+  updatedAt: string;
+  /** Os ids dos servidores em que ele está ATIVO. */
+  servers: string[];
+}
+
+/** O mesmo plugin, visto de dentro de um servidor. */
+export interface ServerPlugin extends LibraryPlugin {
+  enabled: boolean;
+  appliedSha: string | null;
+  appliedAt: string | null;
+  /** Ligado, mas com arquivo diferente do do acervo. */
+  updateAvailable: boolean;
+  /**
+   * Um homônimo já ocupa o lugar dele naquele servidor.
+   *
+   * Os dois gravariam o mesmo `.cs` e o Oxide carrega um só, então
+   * ligar o segundo é recusado. `null` = livre.
+   */
+  blockedBy: 'biblioteca' | 'custom' | null;
+  /**
+   * Dependências duras que NÃO estão ligadas neste servidor.
+   *
+   * Ligar assim mesmo funciona — o Oxide segura o plugin até elas
+   * aparecerem. Mas a tela precisa dizer, senão é "liguei e não
+   * aconteceu nada".
+   */
+  missingRequires: string[];
+  /**
+   * Quem, ligado aqui, depende deste plugin.
+   *
+   * `hard` sai do ar junto se este for tirado; `soft` continua no ar
+   * sem a parte que usava este.
+   */
+  dependents: { hard: string[]; soft: string[] };
+}
+
+/**
+ * A resposta dos dois uploads — biblioteca e custom.
+ *
+ * `pendingServers` é quem já usa o plugin e ficou na versão
+ * anterior: enviar não aplica, de propósito.
+ */
+export interface PluginUploadResponse {
+  ok: true;
+  plugin: LibraryPlugin;
+  pendingServers: string[];
+  message: string;
 }
 
 export interface SteamUpdate {
@@ -299,30 +368,78 @@ export const agent = {
       { method: 'POST', body: { command } },
     ),
 
-  plugins: (id: string) =>
-    api<{ ok: true; pluginsDir: string; plugins: PluginInfo[] }>(
-      `/api/servers/${encodeURIComponent(id)}/plugins`,
-    ),
+  // ---- a biblioteca (nível de rede) ------------------------
 
-  uploadPlugin: (id: string, file: File) => {
+  plugins: () => api<{ ok: true; plugins: LibraryPlugin[] }>('/api/plugins'),
+
+  uploadPlugin: (file: File) => {
     const form = new FormData();
 
     form.append('file', file);
 
-    return api<{ ok: true; name: string; message: string; reload: { output: string | null } }>(
-      `/api/servers/${encodeURIComponent(id)}/plugins`,
-      { method: 'POST', form },
-    );
+    return api<PluginUploadResponse>('/api/plugins', { method: 'POST', form });
   },
 
-  removePlugin: (id: string, name: string) =>
-    api<{ ok: true }>(`/api/servers/${encodeURIComponent(id)}/plugins/${encodeURIComponent(name)}`, {
-      method: 'DELETE',
-    }),
+  /**
+   * Tira o plugin do acervo.
+   *
+   * Sem `force`, com servidores usando, o agente responde 409
+   * dizendo QUAIS — é essa frase que a confirmação da tela mostra.
+   */
+  removePlugin: (pluginId: number, force = false) =>
+    api<{ ok: true; name: string; removedFrom: string[]; message: string }>(
+      `/api/plugins/${String(pluginId)}${force ? '?force=1' : ''}`,
+      { method: 'DELETE' },
+    ),
 
-  reloadPlugin: (id: string, name: string) =>
-    api<{ ok: true; reload: { output: string | null } }>(
-      `/api/servers/${encodeURIComponent(id)}/plugins/${encodeURIComponent(name)}/reload`,
+  // ---- o acervo daquele servidor ---------------------------
+
+  serverPlugins: (id: string) =>
+    api<{ ok: true; pluginsDir: string; plugins: ServerPlugin[] }>(
+      `/api/servers/${encodeURIComponent(id)}/plugins`,
+    ),
+
+  /**
+   * O `.cs` CUSTOM daquele servidor.
+   *
+   * Diferente de `uploadPlugin`: este não entra na biblioteca de
+   * rede — nenhum outro servidor o enxerga.
+   */
+  uploadServerPlugin: (id: string, file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<PluginUploadResponse>(`/api/servers/${encodeURIComponent(id)}/plugins`, {
+      method: 'POST',
+      form,
+    });
+  },
+
+  /**
+   * Liga, desliga — e aplica a atualização.
+   *
+   * `true` num plugin já ligado recopia o arquivo do acervo e
+   * recarrega: é assim que "há versão nova" vira "aplicada".
+   *
+   * Sem `force`, desligar um plugin do qual outros dependem responde
+   * 409 dizendo quem cai junto — é essa frase que a confirmação da
+   * tela mostra.
+   */
+  setServerPlugin: (id: string, pluginId: number, enabled: boolean, force = false) =>
+    api<{
+      ok: true;
+      plugin: ServerPlugin;
+      reload: { sent: boolean; output: string | null };
+      message: string;
+    }>(
+      `/api/servers/${encodeURIComponent(id)}/plugins/${String(pluginId)}${force ? '?force=1' : ''}`,
+      { method: 'PUT', body: { enabled } },
+    ),
+
+  reloadPlugin: (id: string, pluginId: number) =>
+    api<{ ok: true; reload: { sent: boolean; output: string | null } }>(
+      `/api/servers/${encodeURIComponent(id)}/plugins/${String(pluginId)}/reload`,
       { method: 'POST' },
     ),
 

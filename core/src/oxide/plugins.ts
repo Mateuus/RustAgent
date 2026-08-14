@@ -159,6 +159,35 @@ function assertLooksLikeCSharp(content: Buffer): void {
   );
 }
 
+/**
+ * As três recusas de CONTEÚDO, num lugar só.
+ *
+ * Exportada porque a biblioteca (oxide/library.ts) grava o mesmo
+ * `.cs` numa pasta diferente e precisa exatamente destas travas.
+ * Uma segunda cópia delas lá seria a que um dia deixaria de
+ * conferir o tamanho — e o Oxide passaria a tentar compilar um zip
+ * em laço, enchendo o log do servidor.
+ *
+ * @throws {ApiError} 400.
+ */
+export function assertPluginContent(content: Buffer): void {
+  if (content.length === 0) {
+    throw new ApiError('EMPTY_PLUGIN', 'O arquivo enviado está vazio.', 400);
+  }
+
+  if (content.length > MAX_PLUGIN_BYTES) {
+    throw new ApiError(
+      'PLUGIN_TOO_LARGE',
+      `O arquivo tem ${String(Math.round(content.length / 1024))} KB e o limite é ` +
+        `${String(MAX_PLUGIN_BYTES / 1024)} KB. Um plugin de Rust não chega perto disso — ` +
+        'confira se você não enviou um zip por engano.',
+      400,
+    );
+  }
+
+  assertLooksLikeCSharp(content);
+}
+
 async function sendPluginCommand(rcon: OpsRcon, command: string): Promise<PluginReloadResult> {
   if (!rcon.isConnected) {
     // Servidor parado NÃO é erro aqui: o arquivo está no lugar, e
@@ -192,21 +221,7 @@ export function reloadPlugin(rcon: OpsRcon, plugin: string): Promise<PluginReloa
 export async function installPlugin(options: InstallPluginOptions): Promise<InstallPluginResult> {
   const target = pluginPath(options.pluginsDir, options.name);
 
-  if (options.content.length === 0) {
-    throw new ApiError('EMPTY_PLUGIN', 'O arquivo enviado está vazio.', 400);
-  }
-
-  if (options.content.length > MAX_PLUGIN_BYTES) {
-    throw new ApiError(
-      'PLUGIN_TOO_LARGE',
-      `O arquivo tem ${String(Math.round(options.content.length / 1024))} KB e o limite é ` +
-        `${String(MAX_PLUGIN_BYTES / 1024)} KB. Um plugin de Rust não chega perto disso — ` +
-        'confira se você não enviou um zip por engano.',
-      400,
-    );
-  }
-
-  assertLooksLikeCSharp(options.content);
+  assertPluginContent(options.content);
 
   await mkdir(options.pluginsDir, { recursive: true });
 
