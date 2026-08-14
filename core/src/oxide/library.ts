@@ -48,6 +48,17 @@ import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import { disconnectedRcon, type OpsRcon } from '../ops/service.js';
 import { toError } from '../util.js';
+import {
+  assertValidJson,
+  backupPluginConfig,
+  listPluginConfigs,
+  MAX_CONFIG_BYTES,
+  readPluginConfig,
+  removePluginConfig,
+  writePluginConfig,
+  type PluginConfigContent,
+  type PluginConfigInfo,
+} from './plugin-config.js';
 import { readPluginMetadata, sha256Of } from './plugin-metadata.js';
 import {
   assertPluginContent,
@@ -72,7 +83,15 @@ export interface PluginServers {
   /** Os ids que este agente conhece. */
   ids(): readonly string[];
   /** `null` = não existe servidor com este id. */
-  configOf(id: string): { readonly paths: { readonly pluginsDir: string } } | null;
+  configOf(id: string): {
+    readonly paths: {
+      readonly pluginsDir: string;
+      /** `Servers\<id>\oxide\config` — o `.json` de cada plugin. */
+      readonly oxideConfigDir: string;
+      /** `Backups\<id>\` — a cópia antes de mexer na config. */
+      readonly backupsDir: string;
+    };
+  } | null;
   /** `null` = existe, mas está desligado — sem RCON. */
   contextOf(id: string): { readonly rcon: OpsRcon } | null;
 }
@@ -170,6 +189,35 @@ export interface AddPluginResult {
 
 export interface ToggleResult {
   readonly plugin: ServerPluginView;
+  readonly reload: PluginReloadResult;
+}
+
+/** Uma config da pasta, com o que o acervo sabe daquele nome. */
+export interface PluginConfigView extends PluginConfigInfo {
+  /** O `[Info]` do `.cs`, quando o plugin está no acervo. */
+  readonly title: string | null;
+  /**
+   * O plugin existe no acervo deste servidor?
+   *
+   * `false` é a config ÓRFÃ: o `.json` do plugin que saiu, ou de um
+   * que nunca passou pelo agente. Ela continua na lista de
+   * propósito — ver `configList`.
+   */
+  readonly inStore: boolean;
+  /** Ele está LIGADO aqui? Só então gravar recarrega algo. */
+  readonly enabled: boolean;
+}
+
+export interface PluginConfigWriteResult {
+  /**
+   * Como o arquivo ficou DEPOIS do reload.
+   *
+   * `null` = não existe: no `configReset` de um plugin desligado, o
+   * arquivo só volta quando alguém o ligar.
+   */
+  readonly config: PluginConfigContent | null;
+  /** Onde foi parar a versão anterior. `null` = não havia arquivo. */
+  readonly backup: string | null;
   readonly reload: PluginReloadResult;
 }
 
@@ -555,6 +603,159 @@ export class PluginLibrary {
     const plugin = this.#requirePlugin(pluginId);
 
     return reloadPlugin(this.#rconOf(serverId), plugin.name);
+  }
+
+  // ------------------------------------------------------
+  //  A configuração de cada plugin
+  // ------------------------------------------------------
+
+  /**
+   * O que há em `oxide\config` daquele servidor.
+   *
+   * ####  QUEM MANDA NA LISTA É A PASTA, NÃO O ACERVO  ####
+   *
+   * A config sobrevive ao plugin: desligar não a apaga, remover do
+   * acervo não a apaga. Listar a partir do acervo esconderia
+   * justamente o arquivo que alguém foi procurar — o do plugin que
+   * saiu semana passada e cuja configuração ele quer de volta.
+   *
+   * O acervo entra como ENFEITE de cada linha (`enabled`, `title`),
+   * e não como filtro.
+   */
+  async configList(serverId: string): Promise<{
+    readonly configDir: string;
+    readonly configs: readonly PluginConfigView[];
+  }> {
+    const configDir = this.#pathsOf(serverId).oxideConfigDir;
+    const known = new Map(
+      this.#deps.repository.availableFor(serverId).map((plugin) => [plugin.name, plugin]),
+    );
+    const state = new Map(
+      this.#deps.repository.serverPlugins(serverId).map((row) => [row.pluginId, row]),
+    );
+
+    const configs = (await listPluginConfigs(configDir)).map((config): PluginConfigView => {
+      const plugin = known.get(config.plugin);
+
+      return {
+        ...config,
+        title: plugin?.title ?? null,
+        // Sem plugin no acervo: a config está órfã. A tela diz isso
+        // em vez de escondê-la — ver o cabeçalho.
+        inStore: plugin !== undefined,
+        enabled: plugin !== undefined && state.get(plugin.id)?.enabled === true,
+      };
+    });
+
+    return { configDir, configs };
+  }
+
+  /** O JSON de hoje, ou `null` se o plugin ainda não o criou. */
+  configRead(serverId: string, plugin: string): Promise<PluginConfigContent | null> {
+    return readPluginConfig(this.#pathsOf(serverId).oxideConfigDir, plugin);
+  }
+
+  /**
+   * Grava a config e recarrega o plugin.
+   *
+   * ####  A ORDEM É TODA A SEGURANÇA DISTO  ####
+   *
+   *   1. conferir o JSON — o que não passa não chega ao disco, e o
+   *      arquivo de ontem continua valendo;
+   *   2. copiar o que estava lá para `Backups\<id>\oxide-config\`;
+   *   3. gravar;
+   *   4. recarregar, se o plugin estiver ligado aqui;
+   *   5. RELER do disco.
+   *
+   * O passo 5 não é zelo: vários plugins chamam `SaveConfig()` ao
+   * carregar e reescrevem o arquivo normalizando o que leram.
+   * Devolver o texto que o operador enviou faria a tela afirmar uma
+   * coisa que o arquivo não diz mais — e a divergência só apareceria
+   * na próxima vez que alguém abrisse a tela.
+   */
+  async configWrite(
+    serverId: string,
+    plugin: string,
+    text: string,
+  ): Promise<PluginConfigWriteResult> {
+    const { oxideConfigDir, backupsDir } = this.#pathsOf(serverId);
+
+    if (Buffer.byteLength(text, 'utf8') > MAX_CONFIG_BYTES) {
+      throw new ApiError(
+        'PLUGIN_CONFIG_TOO_LARGE',
+        `A configuração tem ${String(Math.round(Buffer.byteLength(text, 'utf8') / 1024))} KB e o ` +
+          `limite é ${String(MAX_CONFIG_BYTES / 1024)} KB.`,
+        400,
+      );
+    }
+
+    assertValidJson(text);
+
+    const backup = await backupPluginConfig(oxideConfigDir, backupsDir, plugin, Date.now());
+
+    await writePluginConfig(oxideConfigDir, plugin, text);
+
+    const reload = await this.#reloadIfEnabled(serverId, plugin);
+
+    this.#deps.logger.info(
+      { server: serverId, plugin, backup, reloaded: reload.sent },
+      'configuração de plugin gravada',
+    );
+
+    return { config: await readPluginConfig(oxideConfigDir, plugin), backup, reload };
+  }
+
+  /**
+   * Apaga a config: o plugin a recria com os padrões dele.
+   *
+   * É o "voltar ao padrão" da tela, e por isso o backup vem antes —
+   * é a única coisa entre um clique e a perda de horas de ajuste.
+   *
+   * Com o plugin carregado, o `oxide.reload` faz o arquivo nascer de
+   * novo na hora. Com ele desligado, a config volta a existir quando
+   * alguém o ligar; até lá, a resposta traz `config: null`, que a
+   * tela mostra como "o plugin ainda não criou este arquivo".
+   */
+  async configReset(serverId: string, plugin: string): Promise<PluginConfigWriteResult> {
+    const { oxideConfigDir, backupsDir } = this.#pathsOf(serverId);
+
+    const backup = await backupPluginConfig(oxideConfigDir, backupsDir, plugin, Date.now());
+
+    await removePluginConfig(oxideConfigDir, plugin);
+
+    const reload = await this.#reloadIfEnabled(serverId, plugin);
+
+    this.#deps.logger.info(
+      { server: serverId, plugin, backup, reloaded: reload.sent },
+      'configuração de plugin restaurada ao padrão',
+    );
+
+    return { config: await readPluginConfig(oxideConfigDir, plugin), backup, reload };
+  }
+
+  /**
+   * Recarrega — mas só o que está ligado ALI.
+   *
+   * Mandar `oxide.reload` de um plugin que aquele servidor não usa
+   * enche o console do jogo com um erro que não é erro nenhum, e o
+   * operador acabaria procurando defeito num plugin que ele nem
+   * ligou. Editar a config de um plugin desligado é legítimo: o
+   * arquivo está lá, e o que ele diz passa a valer quando alguém o
+   * ligar.
+   */
+  async #reloadIfEnabled(serverId: string, plugin: string): Promise<PluginReloadResult> {
+    const record = this.#deps.repository
+      .availableFor(serverId)
+      .find((candidate) => candidate.name === plugin);
+
+    if (
+      record === undefined ||
+      this.#deps.repository.serverPlugin(serverId, record.id)?.enabled !== true
+    ) {
+      return { sent: false, output: null };
+    }
+
+    return reloadPlugin(this.#rconOf(serverId), plugin);
   }
 
   /** Copia do acervo para o servidor e manda recarregar. */
@@ -970,7 +1171,11 @@ export class PluginLibrary {
     return plugin;
   }
 
-  #pluginsDirOf(serverId: string): string {
+  #pathsOf(serverId: string): {
+    readonly pluginsDir: string;
+    readonly oxideConfigDir: string;
+    readonly backupsDir: string;
+  } {
     const config = this.#deps.servers.configOf(serverId);
 
     if (config === null) {
@@ -981,7 +1186,11 @@ export class PluginLibrary {
       );
     }
 
-    return config.paths.pluginsDir;
+    return config.paths;
+  }
+
+  #pluginsDirOf(serverId: string): string {
+    return this.#pathsOf(serverId).pluginsDir;
   }
 
   /**

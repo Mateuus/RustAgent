@@ -49,7 +49,16 @@ const serverPluginParams = z.object({
   pluginId: z.coerce.number().int().positive(),
 });
 
+const serverConfigParams = z.object({
+  id: z.string().min(1),
+  // A trava de verdade é o `pluginConfigPath`, que confere o
+  // alfabeto E o caminho resolvido. Aqui só se recusa o vazio: uma
+  // segunda cópia do padrão do nome seria a que um dia diverge.
+  plugin: z.string().min(1).max(64),
+});
+
 const toggleBody = z.object({ enabled: z.boolean() });
+const configBody = z.object({ text: z.string() });
 const forceQuery = z.object({ force: z.enum(['0', '1']).optional() });
 
 /** O `.cs` que veio no multipart, conferido. */
@@ -218,6 +227,85 @@ export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDep
       ]
         .filter((parte): parte is string => parte !== null)
         .join(' '),
+    };
+  });
+
+  // ==========================================================
+  //  A configuração de cada plugin
+  // ==========================================================
+
+  //  ####  AQUI A CHAVE É O NOME, E NÃO O `:pluginId`  ####
+  //
+  //  Contra a regra do resto deste arquivo, e de propósito: a config
+  //  mora em `oxide\config\<Nome>.json`, do lado do jogo, e sobrevive
+  //  ao plugin. Desligar não a apaga; tirar do acervo não a apaga.
+  //
+  //  Uma rota por `:pluginId` não conseguiria abrir a config do
+  //  plugin que saiu do acervo — que é exatamente a que alguém vai
+  //  procurar, para recuperar horas de ajuste. E o nome não é
+  //  ambíguo aqui: naquela pasta, `Kits.json` é um arquivo só,
+  //  qualquer que tenha sido o `Kits` que o criou.
+
+  app.get('/servers/:id/plugin-configs', async (request) => {
+    const { id } = serverParams.parse(request.params);
+
+    return { ok: true, ...(await deps.library.configList(id)) };
+  });
+
+  app.get('/servers/:id/plugin-configs/:plugin', async (request) => {
+    const { id, plugin } = serverConfigParams.parse(request.params);
+    const config = await deps.library.configRead(id, plugin);
+
+    return {
+      ok: true,
+      plugin,
+      config,
+      // Ausente não é erro: o plugin só cria o arquivo quando carrega
+      // pela primeira vez. Um 404 aqui apareceria na tela como
+      // "deu problema", e o certo a dizer é o que falta acontecer.
+      message:
+        config === null
+          ? `${plugin} ainda não criou o arquivo de configuração. Ele nasce com os padrões do ` +
+            'plugin no primeiro carregamento — ligue-o neste servidor e o arquivo aparece.'
+          : null,
+    };
+  });
+
+  app.put('/servers/:id/plugin-configs/:plugin', async (request) => {
+    const { id, plugin } = serverConfigParams.parse(request.params);
+    const { text } = configBody.parse(request.body);
+
+    const result = await deps.library.configWrite(id, plugin, text);
+
+    return {
+      ok: true,
+      plugin,
+      ...result,
+      // O que a tela mostra depois de gravar. As duas frases são
+      // situações diferentes, e chamar as duas de "salvo" faria o
+      // operador esperar um efeito que não veio.
+      message: result.reload.sent
+        ? `Configuração de ${plugin} gravada e o plugin recarregado. Veja em reload.output o que ` +
+          'o Oxide respondeu — é ali que aparece o campo que o plugin esperava e não veio.'
+        : `Configuração de ${plugin} gravada. Ela passa a valer quando o plugin estiver ligado ` +
+          'neste servidor e o servidor estiver no ar.',
+    };
+  });
+
+  app.delete('/servers/:id/plugin-configs/:plugin', async (request) => {
+    const { id, plugin } = serverConfigParams.parse(request.params);
+    const result = await deps.library.configReset(id, plugin);
+
+    return {
+      ok: true,
+      plugin,
+      ...result,
+      message:
+        result.config === null
+          ? `Configuração de ${plugin} apagada. O plugin a recria com os padrões dele no próximo ` +
+            'carregamento.'
+          : `Configuração de ${plugin} restaurada: o plugin recriou o arquivo com os padrões ` +
+            'dele.',
     };
   });
 

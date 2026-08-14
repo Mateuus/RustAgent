@@ -230,6 +230,48 @@ export interface PluginUploadResponse {
   message: string;
 }
 
+/** Uma linha da sub-aba Plugins de Configurações. */
+export interface PluginConfigSummary {
+  /** `OrigemZVip` — o nome do arquivo, sem o `.json`. */
+  plugin: string;
+  file: string;
+  bytes: number;
+  modifiedAt: string;
+  /** O `[Info]` do `.cs`, quando o plugin está no acervo. */
+  title: string | null;
+  /**
+   * O plugin existe no acervo deste servidor?
+   *
+   * `false` é a config órfã: o `.json` de um plugin que saiu. Ela
+   * aparece na lista de propósito — é a que alguém vai procurar para
+   * recuperar horas de ajuste.
+   */
+  inStore: boolean;
+  /** Ligado aqui? Só então gravar recarrega alguma coisa. */
+  enabled: boolean;
+}
+
+export interface PluginConfigFile {
+  plugin: string;
+  file: string;
+  bytes: number;
+  modifiedAt: string;
+  /** O JSON, como está em disco. */
+  text: string;
+}
+
+/** O desfecho de gravar ou restaurar. */
+export interface PluginConfigWriteResponse {
+  ok: true;
+  plugin: string;
+  /** Como o arquivo ficou DEPOIS do reload. `null` = não existe. */
+  config: PluginConfigFile | null;
+  /** Onde foi parar a versão anterior. `null` = não havia arquivo. */
+  backup: string | null;
+  reload: { sent: boolean; output: string | null };
+  message: string;
+}
+
 export interface SteamUpdate {
   appId: string;
   branch: string;
@@ -450,4 +492,41 @@ export const agent = {
     api<{ ok: true } & SteamUpdate>(`/api/servers/${encodeURIComponent(id)}/steam-update/check`, {
       method: 'POST',
     }),
+  // ---- a configuração de cada plugin -----------------------
+  //
+  // `oxide\config\<Nome>.json`, na sub-aba Plugins de Configurações.
+  // A chave é o NOME do plugin, e não o id do acervo: o arquivo mora
+  // do lado do jogo e sobrevive ao plugin — desligar não o apaga,
+  // remover do acervo não o apaga.
+
+  pluginConfigs: (id: string) =>
+    api<{ ok: true; configDir: string; configs: PluginConfigSummary[] }>(
+      `/api/servers/${encodeURIComponent(id)}/plugin-configs`,
+    ),
+
+  /** `config: null` = o plugin ainda não criou o arquivo. */
+  pluginConfig: (id: string, plugin: string) =>
+    api<{ ok: true; plugin: string; config: PluginConfigFile | null; message: string | null }>(
+      `/api/servers/${encodeURIComponent(id)}/plugin-configs/${encodeURIComponent(plugin)}`,
+    ),
+
+  /**
+   * Grava, recarrega o plugin e RELÊ o arquivo.
+   *
+   * O `config` da resposta é o que ficou em disco DEPOIS do reload —
+   * vários plugins reescrevem a própria config ao carregar, e é esse
+   * texto que a tela precisa mostrar.
+   */
+  savePluginConfig: (id: string, plugin: string, text: string) =>
+    api<PluginConfigWriteResponse>(
+      `/api/servers/${encodeURIComponent(id)}/plugin-configs/${encodeURIComponent(plugin)}`,
+      { method: 'PUT', body: { text } },
+    ),
+
+  /** O "voltar ao padrão": apaga o arquivo e o plugin o recria. */
+  resetPluginConfig: (id: string, plugin: string) =>
+    api<PluginConfigWriteResponse>(
+      `/api/servers/${encodeURIComponent(id)}/plugin-configs/${encodeURIComponent(plugin)}`,
+      { method: 'DELETE' },
+    ),
 };

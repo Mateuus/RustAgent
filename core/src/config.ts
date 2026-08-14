@@ -248,6 +248,18 @@ export interface ServerPaths {
   readonly exePath: string;
   /** `Servers\<id>\oxide\plugins`. */
   readonly pluginsDir: string;
+  /**
+   * `Servers\<id>\oxide\config` — o `.json` de cada plugin.
+   *
+   * ####  ELE NÃO É NOSSO, E SOBREVIVE A TUDO  ####
+   *
+   * Quem cria o arquivo é o PLUGIN, no primeiro carregamento, com os
+   * padrões dele. Desligar o plugin não apaga a config, tirar o
+   * plugin do acervo não apaga, reinstalar o Oxide não apaga — porque
+   * ali moram horas de ajuste fino, e perdê-las por um clique faria
+   * ninguém mais mexer em nada.
+   */
+  readonly oxideConfigDir: string;
   readonly logsDir: string;
   readonly backupsDir: string;
 }
@@ -355,6 +367,7 @@ export function resolveServerPaths(paths: AgentPaths, id: string): ServerPaths {
     installDir,
     exePath: join(installDir, RUST_DEDICATED_EXE),
     pluginsDir: join(installDir, 'oxide', 'plugins'),
+    oxideConfigDir: join(installDir, 'oxide', 'config'),
     logsDir: join(paths.logsDir, id),
     backupsDir: join(paths.backupsDir, id),
   };

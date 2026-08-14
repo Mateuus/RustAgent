@@ -27,6 +27,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 
+import { PluginConfigs } from '@/components/plugin-configs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -38,7 +39,7 @@ import { cn } from '@/lib/utils';
 
 const MAPS = ['Procedural Map', 'Barren', 'HapisIsland', 'Craggy Island'];
 
-type Section = 'geral' | 'mundo' | 'rede' | 'rcon' | 'steam' | 'avancado';
+type Section = 'geral' | 'mundo' | 'rede' | 'rcon' | 'steam' | 'plugins' | 'avancado';
 
 const SECTIONS: readonly { key: Section; label: string }[] = [
   { key: 'geral', label: 'Geral' },
@@ -46,6 +47,14 @@ const SECTIONS: readonly { key: Section; label: string }[] = [
   { key: 'rede', label: 'Rede' },
   { key: 'rcon', label: 'RCON' },
   { key: 'steam', label: 'SteamCMD' },
+  // ####  A CONFIGURAÇÃO DOS PLUGINS MORA AQUI, E NÃO NA ABA
+  //       PLUGINS  ####
+  //
+  // A aba Plugins responde "o que este servidor usa" — liga,
+  // desliga, aplica a versão nova. Isto aqui é configuração, que é o
+  // assunto desta aba: o `oxide\config\<Nome>.json` fica ao lado do
+  // mundo, das portas e do SteamCMD, que é onde se procura ajuste.
+  { key: 'plugins', label: 'Plugins' },
   { key: 'avancado', label: 'Avançado' },
 ];
 
@@ -477,6 +486,8 @@ export function ServerSettings({
           </Field>
         </Card>
       )}
+
+      {section === 'plugins' && <PluginConfigs serverId={server.id} />}
 
       {section === 'avancado' && (
         <div className="space-y-4">

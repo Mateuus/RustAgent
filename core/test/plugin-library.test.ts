@@ -21,7 +21,7 @@
 // ============================================================
 
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -163,7 +163,16 @@ beforeEach(async () => {
     configOf: (id) => {
       const dir = dirs[id];
 
-      return dir === undefined ? null : { paths: { pluginsDir: dir } };
+      return dir === undefined
+        ? null
+        : {
+            paths: {
+              pluginsDir: dir,
+              // Irmãs da pasta de plugins, como em `resolveServerPaths`.
+              oxideConfigDir: join(dir, '..', 'config'),
+              backupsDir: join(root, 'Backups', id),
+            },
+          };
     },
     contextOf: (id) => (dirs[id] === undefined ? null : { rcon }),
   };
@@ -873,5 +882,136 @@ describe('remover do acervo', () => {
 
     expect(harness.repository.findLibrary(PLUGIN_NAME)?.id).toBe(pluginId);
     expect(existsSync(join(harness.libraryDir, PLUGIN_FILE))).toBe(true);
+  });
+});
+
+describe('a configuração de cada plugin', () => {
+  const CONFIG_PATH_OF = (plugin: string): string => join(harness.configDir, `${plugin}.json`);
+  const ANTES = '{\n  "Preco": 10\n}';
+  const DEPOIS = '{\n  "Preco": 25\n}';
+
+  /** Os backups daquele servidor, em ordem. */
+  async function backups(): Promise<string[]> {
+    const dir = join(harness.root, 'Backups', SERVER_ID, 'oxide-config');
+
+    try {
+      return (await readdir(dir)).sort();
+    } catch {
+      return [];
+    }
+  }
+
+  it('lista o que está na pasta, e não o que está no acervo', async () => {
+    // A config ÓRFÃ — de um plugin que saiu, ou que nunca passou pelo
+    // agente — é justamente a que alguém vai procurar para recuperar
+    // horas de ajuste. Escondê-la seria esconder o arquivo que está
+    // lá, em disco.
+    await writeFile(CONFIG_PATH_OF('PluginQueSaiu'), ANTES, 'utf8');
+    await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+    await writeFile(CONFIG_PATH_OF(PLUGIN_NAME), ANTES, 'utf8');
+
+    const { configs } = await harness.library.configList(SERVER_ID);
+
+    expect(configs.map((config) => config.plugin)).toEqual(['OrigemZPlayer', 'PluginQueSaiu']);
+    expect(configs.find((config) => config.plugin === 'PluginQueSaiu')?.inStore).toBe(false);
+    expect(configs.find((config) => config.plugin === PLUGIN_NAME)?.inStore).toBe(true);
+  });
+
+  it('####  JSON inválido é recusado, e o arquivo em disco não muda  ####', async () => {
+    await writeFile(CONFIG_PATH_OF(PLUGIN_NAME), ANTES, 'utf8');
+
+    // O Oxide não carrega um plugin com a config quebrada, e o erro
+    // dele sai no console do jogo — longe de quem clicou em gravar.
+    // Recusar antes de escrever é o que impede a tela de derrubar um
+    // plugin que estava no ar.
+    await expect(
+      harness.library.configWrite(SERVER_ID, PLUGIN_NAME, '{"Preco": 25,}'),
+    ).rejects.toMatchObject({ status: 400, code: 'INVALID_PLUGIN_CONFIG' });
+
+    expect(await readFile(CONFIG_PATH_OF(PLUGIN_NAME), 'utf8')).toBe(ANTES);
+    // E nem backup houve: nada foi tocado.
+    expect(await backups()).toEqual([]);
+  });
+
+  it('gravar faz backup ANTES, e o backup tem o conteúdo anterior', async () => {
+    await writeFile(CONFIG_PATH_OF(PLUGIN_NAME), ANTES, 'utf8');
+
+    const { backup, config } = await harness.library.configWrite(SERVER_ID, PLUGIN_NAME, DEPOIS);
+
+    expect(backup).not.toBeNull();
+    // O backup guarda o que ESTAVA lá — se guardasse o novo, não
+    // serviria para desfazer nada.
+    expect(await readFile(backup ?? '', 'utf8')).toBe(ANTES);
+    expect(config?.text).toBe(DEPOIS);
+    expect(await readFile(CONFIG_PATH_OF(PLUGIN_NAME), 'utf8')).toBe(DEPOIS);
+  });
+
+  it('a primeira gravação, sem arquivo anterior, não inventa backup', async () => {
+    const { backup } = await harness.library.configWrite(SERVER_ID, PLUGIN_NAME, DEPOIS);
+
+    expect(backup).toBeNull();
+    expect(await backups()).toEqual([]);
+  });
+
+  it('gravar recarrega o plugin LIGADO aqui', async () => {
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+    harness.commands.length = 0;
+
+    const { reload } = await harness.library.configWrite(SERVER_ID, PLUGIN_NAME, DEPOIS);
+
+    expect(reload.sent).toBe(true);
+    expect(harness.commands).toEqual([`oxide.reload ${PLUGIN_NAME}`]);
+  });
+
+  it('gravar a config de um plugin DESLIGADO não manda comando nenhum', async () => {
+    // Editar a config de um plugin desligado é legítimo: o arquivo
+    // está lá e passa a valer quando alguém o ligar. O que não pode é
+    // mandar `oxide.reload` de um plugin que aquele servidor não usa
+    // — o console do jogo encheria de um erro que não é erro.
+    await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+    harness.commands.length = 0;
+
+    const { reload } = await harness.library.configWrite(SERVER_ID, PLUGIN_NAME, DEPOIS);
+
+    expect(reload.sent).toBe(false);
+    expect(harness.commands).toEqual([]);
+    expect(await readFile(CONFIG_PATH_OF(PLUGIN_NAME), 'utf8')).toBe(DEPOIS);
+  });
+
+  it('restaurar apaga a config, faz backup e NÃO desliga o plugin', async () => {
+    const { plugin } = await harness.library.add(PLUGIN_FILE, pluginSource('1.0.0'));
+
+    await harness.library.setEnabled(SERVER_ID, plugin.id, true);
+    await writeFile(CONFIG_PATH_OF(PLUGIN_NAME), ANTES, 'utf8');
+
+    const { backup, config } = await harness.library.configReset(SERVER_ID, PLUGIN_NAME);
+
+    expect(await readFile(backup ?? '', 'utf8')).toBe(ANTES);
+    // Quem recria o arquivo é o plugin, no próximo carregamento. O
+    // RCON aqui é de mentira, então ninguém o recriou.
+    expect(config).toBeNull();
+    expect(existsSync(CONFIG_PATH_OF(PLUGIN_NAME))).toBe(false);
+    // O `.cs` e o interruptor não são da conta do "voltar ao padrão".
+    expect(existsSync(join(harness.pluginsDir, PLUGIN_FILE))).toBe(true);
+    expect(harness.repository.serverPlugin(SERVER_ID, plugin.id)?.enabled).toBe(true);
+  });
+
+  it('o nome com travessia é recusado antes de tocar em disco', async () => {
+    // `oxide\config\..\..\..\Configs\server01.ini` é o arquivo que
+    // decide em que porta o servidor sobe.
+    for (const nome of ['..\\..\\Configs\\server01', '../../evil', 'C:\\Windows\\System32\\x']) {
+      await expect(harness.library.configWrite(SERVER_ID, nome, DEPOIS)).rejects.toMatchObject({
+        status: 400,
+        code: 'INVALID_PLUGIN_NAME',
+      });
+    }
+  });
+
+  it('config vazia é recusada, com o caminho do "voltar ao padrão" na mensagem', async () => {
+    await expect(
+      harness.library.configWrite(SERVER_ID, PLUGIN_NAME, '   '),
+    ).rejects.toMatchObject({ status: 400 });
   });
 });
