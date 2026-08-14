@@ -100,36 +100,62 @@ function Field({ label, hint, children }: { label: string; hint?: ReactNode; chi
   );
 }
 
+/**
+ * O interruptor: DOIS SEGMENTOS, e não uma pílula deslizante.
+ *
+ * ####  POR QUE NÃO O SWITCH DE SEMPRE  ####
+ *
+ * O design system não tem forma orgânica: a escala de raio inteira
+ * foi redefinida para no máximo 4px (ver tailwind.config.ts), e uma
+ * pílula com bolinha destoa de tudo o que está em volta. Pior: com
+ * o fundo vermelho, o knob escuro simplesmente sumia.
+ *
+ * O segmentado resolve os dois e ganha uma terceira coisa: ele diz
+ * em PALAVRAS o que está ligado. Cor sozinha não fala com quem não
+ * separa vermelho de cinza — e "qual lado é o ligado?" é a dúvida
+ * clássica do switch sem rótulo.
+ */
 function Toggle({
   on,
   busy,
   onChange,
+  labels = ['Ligado', 'Desligado'],
 }: {
   on: boolean;
   busy: boolean;
   onChange: (value: boolean) => void;
+  labels?: readonly [string, string];
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      disabled={busy}
-      onClick={() => onChange(!on)}
-      className={cn(
-        'relative h-6 w-11 shrink-0 border transition-colors',
-        on ? 'border-rust bg-rust' : 'border-border bg-surface-2',
-        busy && 'opacity-50',
-      )}
+    <div
+      role="group"
+      className={cn('flex shrink-0 border border-border', busy && 'opacity-50')}
     >
-      <span
-        aria-hidden
-        className={cn(
-          'absolute top-0.5 h-4 w-4 bg-background transition-transform',
-          on ? 'translate-x-6' : 'translate-x-1',
-        )}
-      />
-    </button>
+      {([true, false] as const).map((value, index) => (
+        <button
+          key={String(value)}
+          type="button"
+          aria-pressed={on === value}
+          disabled={busy}
+          onClick={() => {
+            if (on !== value) {
+              onChange(value);
+            }
+          }}
+          className={cn(
+            'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide transition-colors',
+            index === 1 && 'border-l border-border',
+            on === value
+              ? value
+                ? 'bg-rust text-white'
+                : 'bg-surface-2 text-foreground'
+              : 'text-muted hover:text-foreground',
+          )}
+        >
+          {labels[index]}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -554,6 +580,7 @@ export function ServerSettings({
               <Toggle
                 on={server.enabled}
                 busy={busy}
+                labels={['Cuidando', 'Ignorando']}
                 onChange={(value) => void save({ enabled: value }, 'Cuidar do servidor')}
               />
             </div>
