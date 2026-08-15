@@ -59,8 +59,29 @@ Configs/*.ini
 /Logs/
 /logs/
 /Backups/
-/Plugins/
 /data/
+
+# ------------------------------------------------------------
+#  Plugins\  -  a biblioteca, com UMA excecao
+#
+#  ####  OS NOSSOS .cs SAO CODIGO, E NAO CONTEUDO  ####
+#
+#  A pasta e a biblioteca do agente e recebe upload pelo painel:
+#  plugin de terceiro vive aqui, e ele nao e nosso para versionar.
+#
+#  Mas os `OrigemZ*.cs` sao a OUTRA PONTA de contratos que moram no
+#  repositorio. `OrigemZUI.cs` le, campo a campo, o que
+#  core/src/types/ui-transport.ts escreve; `OrigemZAgent.cs` responde
+#  os comandos que core/src/game/ chama pelo nome. Com metade do
+#  contrato fora do git, uma mudanca coordenada nos dois lados
+#  chegava ao commit pela metade — e a outra metade so existia na
+#  maquina de quem editou.
+#
+#  Por isso a pasta continua ignorada e eles sao desfeitos da regra.
+#  Um plugin de terceiro fica de fora sem ninguem precisar lembrar.
+# ------------------------------------------------------------
+/Plugins/*
+!/Plugins/OrigemZ*.cs
 
 # O SteamCMD deixa crash dump na pasta de onde foi chamado. Nao e
 # nosso, nao serve para nada aqui, e vem com nome novo toda vez.
