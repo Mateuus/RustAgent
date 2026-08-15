@@ -179,15 +179,6 @@ async function main(): Promise<void> {
       // plugin: um servidor que subiu agora não tem menu nenhum
       // até alguém mandar.
       uiSync?.pushSoon(serverId, 'rcon-connected');
-    },
-    // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
-    //
-    // O menu inteiro não cabe num frame de RCON, então só a tela de
-    // entrada é empurrada e as outras descem quando o jogador
-    // navega. O pedido chega como linha do console — ver
-    // game/ui-sync.ts.
-    onConsoleLine: (serverId, line) => {
-      uiSync?.handleLine(serverId, line);
 
       // ####  E O VIP E OS KITS PELO MESMO MOTIVO — MAIS UM  ####
       //
@@ -198,6 +189,26 @@ async function main(): Promise<void> {
       // sincronizar na mão.
       void vips?.reconcile(serverId);
       void loadoutSync?.push(serverId, 'rcon-connected');
+    },
+    // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
+    //
+    // O menu inteiro não cabe num frame de RCON, então só a tela de
+    // entrada é empurrada e as outras descem quando o jogador
+    // navega. O pedido chega como linha do console — ver
+    // game/ui-sync.ts.
+    // ####  E AQUI SÓ ENTRA QUEM SABE IGNORAR UMA LINHA  ####
+    //
+    // Este gancho recebe TODA linha do servidor — centenas por
+    // minuto num servidor cheio. Um `sync` chamado daqui vira um
+    // laço: ele imprime no console, a linha volta por este mesmo
+    // caminho, e o sync dispara de novo. Aconteceu no merge das
+    // duas frentes, e o console do jogo virou um paredão de
+    // `loadout.sync` repetido.
+    //
+    // O `handleLine` recusa em duas comparações de string a linha
+    // que não é um pedido do plugin de interface.
+    onConsoleLine: (serverId, line) => {
+      uiSync?.handleLine(serverId, line);
     },
   });
 
