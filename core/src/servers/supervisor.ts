@@ -67,6 +67,14 @@ export interface SupervisorDeps {
    * que os dois lados podem ter divergido sem ninguém ver.
    */
   readonly onRconConnected?: (serverId: string) => void;
+  /**
+   * Repassado a cada `ServerContext`. Ver `ServerContextDeps`.
+   *
+   * É por ele que o plugin da interface PEDE uma tela: o pedido
+   * chega como uma linha do console, e este é o único lugar por
+   * onde essas linhas passam.
+   */
+  readonly onConsoleLine?: (serverId: string, line: string) => void;
 }
 
 /** O retrato de um servidor para a API. Ver Docs\06-API.md. */

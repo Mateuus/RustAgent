@@ -29,12 +29,18 @@ import { ConfigError, loadConfig } from './config.js';
 import { BansRepository } from './db/bans-repository.js';
 import { openDatabase } from './db/database.js';
 import { runMigrations } from './db/migrations.js';
+import { ItemsRepository } from './db/items-repository.js';
 import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
+import { UiDocumentsRepository } from './db/ui-documents-repository.js';
+import { ItemCatalog } from './game/item-catalog.js';
 import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader } from './game/players.js';
+import { loadUiImages } from './game/ui-images.js';
+import { buildMainMenu } from './game/ui-preset-main-menu.js';
+import { UiSync } from './game/ui-sync.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
@@ -129,6 +135,10 @@ async function main(): Promise<void> {
   let bans: BanList | null = null;
   let mapImages: MapImageKeeper | null = null;
   let presence: PresenceTracker | null = null;
+  // Pela mesma razão dos de cima: o catálogo de itens confere na
+  // reconexão do RCON, e a interface é reenviada por ela.
+  let itemCatalog: ItemCatalog | null = null;
+  let uiSync: UiSync | null = null;
 
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
@@ -148,6 +158,24 @@ async function main(): Promise<void> {
       // sem ninguém ver. É aqui que as sessões que ficaram abertas
       // são fechadas — ver players/presence.ts.
       void presence?.sync(serverId);
+      // O catálogo de itens envelhece com a VERSÃO DO JOGO, e não
+      // com o tempo: um update da Facepunch reinicia o servidor, e
+      // este é o instante em que dá para descobrir isso. Ver
+      // game/item-catalog.ts.
+      void itemCatalog?.sync(serverId);
+      // E a interface porque o cache dela vive na memória do
+      // plugin: um servidor que subiu agora não tem menu nenhum
+      // até alguém mandar.
+      uiSync?.pushSoon(serverId, 'rcon-connected');
+    },
+    // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
+    //
+    // O menu inteiro não cabe num frame de RCON, então só a tela de
+    // entrada é empurrada e as outras descem quando o jogador
+    // navega. O pedido chega como linha do console — ver
+    // game/ui-sync.ts.
+    onConsoleLine: (serverId, line) => {
+      uiSync?.handleLine(serverId, line);
     },
   });
 
@@ -247,6 +275,61 @@ async function main(): Promise<void> {
   // coluna `banned` aqui seria a segunda fonte para o mesmo fato.
   const directory = new PlayerDirectory({ repository: playersRepository, bans });
 
+  // ---- o catálogo de itens e as interfaces -------------------
+  //
+  // ####  AS DUAS SOBREVIVEM AO SERVIDOR DESLIGADO  ####
+  //
+  // A lista de itens vem do jogo (`origemz.items`), mas mora no
+  // banco: montar um kit é trabalho de madrugada, com tudo parado.
+  // Ela é conferida na reconexão do RCON e só é relida quando o
+  // PROTOCOLO do jogo muda — catálogo de item não envelhece com o
+  // tempo, envelhece com a versão.
+  //
+  // A interface é o caminho contrário: o desenho mora aqui e
+  // precisa ser EMPURRADO para o plugin, que guarda tudo em
+  // memória. Um `oxide.reload` esvazia esse cache sem o agente
+  // ficar sabendo — daí o relógio periódico e o pedido que o
+  // próprio plugin faz.
+  const itemsRepository = new ItemsRepository(db);
+
+  itemCatalog = new ItemCatalog({
+    repository: itemsRepository,
+    servers: supervisor,
+    logger,
+  });
+
+  const uiDocuments = new UiDocumentsRepository(db, logger);
+
+  // ####  O MENU PRINCIPAL NASCE NO PRIMEIRO BOOT  ####
+  //
+  // E só nele: a condição é a tabela estar VAZIA, não o slug estar
+  // ausente. Recriá-lo por slug desfaria, a cada subida, quem o
+  // tivesse apagado de propósito — e quem o editou perderia a
+  // edição se trocasse o identificador.
+  //
+  // Ele nasce sem servidor nenhum ligado a ele: escolher o menu de
+  // cada servidor é decisão de quem administra, em Configurações.
+  if (uiDocuments.list().length === 0) {
+    const seeded = uiDocuments.create(buildMainMenu());
+
+    logger.info(
+      { uiDocument: seeded.slug },
+      'nenhuma interface no banco: o Menu Principal foi criado a partir do modelo',
+    );
+  }
+
+  uiSync = new UiSync({
+    repository: uiDocuments,
+    servers: supervisor,
+    logger,
+    // Lidas UMA vez, no boot: são bytes de PNG que não mudam
+    // enquanto o processo vive, e relê-las a cada envio seria ler
+    // disco para mandar o mesmo conteúdo.
+    images: loadUiImages(agent.paths.root, logger),
+  });
+
+  uiSync.start();
+
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
   // sozinho. Ele cede a vez ao SteamCMD sempre que há operação
@@ -291,6 +374,10 @@ async function main(): Promise<void> {
     players,
     directory,
     monuments,
+    items: itemsRepository,
+    itemCatalog,
+    uiDocuments,
+    uiSync,
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,
@@ -339,6 +426,7 @@ async function main(): Promise<void> {
         steamWatcher.stop();
         banWatcher.stop();
         presenceWatcher.stop();
+        uiSync.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

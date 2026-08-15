@@ -14,6 +14,7 @@
 
 import {
   LayoutList,
+  LayoutTemplate,
   Puzzle,
   Settings2,
   ShieldCheck,
@@ -29,6 +30,7 @@ import { ConsolePanel } from '@/components/console-panel';
 import { OperationsPanel } from '@/components/operations-panel';
 import { PageHeader } from '@/components/page-header';
 import { PluginsPanel } from '@/components/plugins-panel';
+import { ServerMenuPanel } from '@/components/server-menu-panel';
 import { ServerSettings } from '@/components/server-settings';
 import { ServerStateBadge } from '@/components/server-state';
 import { RequireSession } from '@/components/session';
@@ -37,7 +39,7 @@ import { Button } from '@/components/ui/button';
 import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
 import { toast } from '@/lib/toast';
 
-type Tab = 'visao' | 'administracao' | 'console' | 'operacoes' | 'plugins' | 'config';
+type Tab = 'visao' | 'administracao' | 'console' | 'operacoes' | 'plugins' | 'menu' | 'config';
 
 /**
  * As abas, com ícone.
@@ -59,6 +61,13 @@ const TABS = [
   { key: 'console', label: 'Console', Icon: TerminalSquare },
   { key: 'operacoes', label: 'Operações', Icon: SlidersHorizontal },
   { key: 'plugins', label: 'Plugins', Icon: Puzzle },
+  // ####  MENU VEM ANTES DE CONFIGURAÇÕES  ####
+  //
+  // É o que os JOGADORES veem, e por isso se mexe nele muito mais
+  // do que nas portas ou no SteamCMD. As páginas do menu ficam
+  // aqui; o desenho delas é da rede e mora em Interface, na barra
+  // lateral.
+  { key: 'menu', label: 'Menu', Icon: LayoutTemplate },
   { key: 'config', label: 'Configurações', Icon: Settings2 },
 ] as const;
 
@@ -235,6 +244,7 @@ function Servidor() {
           {tab === 'console' && <ConsolePanel serverId={server.id} />}
           {tab === 'operacoes' && <OperationsPanel server={server} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
+          {tab === 'menu' && <ServerMenuPanel serverId={server.id} />}
           {tab === 'config' && <ServerSettings server={server} onChanged={() => void load()} />}
         </>
       )}

@@ -631,6 +631,184 @@ CREATE TABLE player_events (
 CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
 `;
 
+// ------------------------------------------------------------
+//  007 — o catálogo de itens
+//
+//  ####  ATÉ AQUI, A LISTA DE ITENS SÓ EXISTIA COM UM SERVIDOR
+//        NO AR  ####
+//
+//  Ela é lida do `origemz.items`, ou seja, do RCON. Montar um kit
+//  ou uma entrega exigia decorar `rifle.ak` — e exigia isso com o
+//  servidor ligado, que é justamente quando ninguém quer mexer.
+//  Com a tabela, a busca por "Assault Rifle" responde de
+//  madrugada, com tudo parado.
+//
+//  ####  A CHAVE É O SHORTNAME  ####
+//
+//  É ele que todo comando do jogo recebe (`inventory.give`, o
+//  kit, a entrega), e é ele que não muda entre wipes. O `item_id`
+//  numérico vem junto porque alguns comandos o pedem — e porque é
+//  ele que muda quando a Facepunch renomeia um item mantendo o
+//  shortname.
+//
+//  ####  ITEM QUE SUMIU DO JOGO NÃO É APAGADO  ####
+//
+//  E isso não é preguiça: um kit montado no mês passado aponta
+//  para ele, e apagar a linha deixaria o kit com um shortname
+//  órfão que ninguém consegue explicar. A linha fica, e a leitura
+//  a MARCA — daí a tela do kit conseguir dizer "este item não
+//  existe mais nesta versão do jogo".
+//
+//  Quem responde "ainda existe?" são as duas datas mais o carimbo
+//  da varredura, guardado em `meta`:
+//
+//      last_seen == items.scanned_at   o jogo listou na última
+//                                      varredura
+//      last_seen <  items.scanned_at   sumiu
+//
+//  Uma coluna `removed` seria a segunda fonte para o mesmo fato, e
+//  ela ficaria errada no dia em que uma varredura escrevesse as
+//  datas e esquecesse dela.
+//
+//  ####  A INVALIDAÇÃO É POR PROTOCOLO, E NÃO POR TTL  ####
+//
+//  Catálogo de item não envelhece com o tempo: ele muda quando o
+//  JOGO muda, e só então. Um TTL de dez minutos refaria o trabalho
+//  144 vezes por dia para descobrir 143 vezes que nada mudou — e
+//  ainda ficaria dez minutos errado depois de um update.
+//
+//  `items.protocol` guarda o `Protocol` do `serverinfo` que gerou
+//  o catálogo (`"2632.287.1"` hoje). Diferente → releia. Igual →
+//  não faça nada. E o gatilho vem de graça: um update reinicia o
+//  servidor, o RCON cai e reconecta, e `onRconConnected` dispara.
+// ------------------------------------------------------------
+const ITEMS_SCHEMA = `
+CREATE TABLE items (
+  -- Ver o cabeçalho: a chave é o shortname, e não o id numérico.
+  shortname     TEXT PRIMARY KEY,
+
+  -- "Assault Rifle". É por ele que a tela busca.
+  display_name  TEXT NOT NULL,
+
+  item_id       INTEGER NOT NULL,
+  category      TEXT NOT NULL,
+  max_stack     INTEGER NOT NULL,
+  has_condition INTEGER NOT NULL CHECK (has_condition IN (0, 1)),
+
+  -- Epoch ms. \`first_seen\` NUNCA muda depois da inserção: é
+  -- "desde quando este item existe no jogo, para este agente".
+  -- \`last_seen\` é a última varredura que o listou — ver o
+  -- cabeçalho para como ele marca o que sumiu.
+  first_seen    INTEGER NOT NULL,
+  last_seen     INTEGER NOT NULL
+);
+
+-- A busca da tela é por nome, e ela ignora maiúsculas.
+CREATE INDEX idx_items_name ON items (display_name COLLATE NOCASE);
+
+-- O filtro por categoria é o segundo gesto de quem procura item,
+-- e sem o índice ele varre as ~1250 linhas a cada tecla.
+CREATE INDEX idx_items_category ON items (category);
+`;
+
+// ------------------------------------------------------------
+//  008 — as interfaces do jogo
+//
+//  ####  O DESENHO É DA REDE; O QUE APARECE É DO SERVIDOR  ####
+//
+//  Esta é a decisão que manda no formato das duas tabelas. Uma
+//  interface POR SERVIDOR faria seis cópias do mesmo menu, e a
+//  sétima mudança seria feita em cinco delas. Um documento só, sem
+//  escolha por servidor, faria o PVE anunciar a loja que ele não
+//  tem.
+//
+//      ui_documents   o DESENHO, um por menu, da rede inteira
+//      server_ui      o que CADA servidor usa dele, e o que
+//                     esconde
+//
+//  ####  POR QUE O DOCUMENTO É UMA COLUNA JSON  ####
+//
+//  A pergunta que se faz é sempre "me dá o documento inteiro" — o
+//  editor carrega tudo, o transporte manda tudo. Normalizar
+//  elemento, âncora, cor e ação em tabelas daria junções para
+//  responder o que já cabe numa leitura, e um esquema para migrar
+//  a cada campo novo do editor.
+//
+//  O que PRECISA ser normalizado é o que se consulta de fora, e
+//  está fora do JSON: \`slug\`, \`revision\` e quem usa.
+//
+//  ####  A REVISÃO É O QUE DIZ AO SERVIDOR QUE ELE ESTÁ VELHO  ####
+//
+//  O plugin guarda a interface na memória dele. Sem um número que
+//  suba a cada gravação, "editei e o jogo continua igual" não
+//  teria como ser respondido — nem pela tela, nem por quem
+//  administra.
+// ------------------------------------------------------------
+const UI_DOCUMENTS_SCHEMA = `
+CREATE TABLE ui_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- "menu-principal". Estável, porque o servidor aponta para ele
+  -- e porque é o que abre o editor.
+  slug     TEXT NOT NULL UNIQUE,
+  name     TEXT NOT NULL,
+
+  -- O documento inteiro, como JSON. Ver o cabeçalho.
+  document TEXT NOT NULL,
+
+  -- Sobe a cada gravação. Ver o cabeçalho.
+  revision INTEGER NOT NULL DEFAULT 1,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- ----------------------------------------------------------
+--  server_ui — o que ESTE servidor usa, e o que ele esconde.
+--
+--  ####  \`enabled\` E \`hidden\` RESPONDEM COISAS DIFERENTES  ####
+--
+--      enabled = 0   o documento continua escolhido, mas não é
+--                    empurrado: é o "desliguei para testar"
+--      hidden        os pedaços que ELE não mostra, com o resto
+--                    do menu igual ao dos outros
+--
+--  Apagar a linha para desligar destruiria a lista de escondidos
+--  junto — e religar exigiria reconfigurar do zero. Mesma regra do
+--  \`server_plugins.enabled\` da migração 002.
+--
+--  ####  applied_revision É O QUE ESTÁ NO JOGO  ####
+--
+--  E ele é diferente de \`ui_documents.revision\`, que é o que
+--  está no agente. Divergiram, há mudança para aplicar — a mesma
+--  ideia dos dois sha256 dos plugins. Sem a segunda coluna, a
+--  única forma de responder isso seria perguntar ao plugin a cada
+--  abertura de tela, e a resposta sumiria com o servidor parado.
+-- ----------------------------------------------------------
+CREATE TABLE server_ui (
+  server_id   TEXT    NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  document_id INTEGER NOT NULL REFERENCES ui_documents(id) ON DELETE CASCADE,
+
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+
+  -- Os ids dos elementos e telas que ESTE servidor desliga, como
+  -- JSON. '[]' = mostra tudo, e é o padrão.
+  hidden TEXT NOT NULL DEFAULT '[]',
+
+  -- NULL = nunca foi aplicado neste servidor.
+  applied_revision INTEGER,
+  applied_at       INTEGER,
+
+  PRIMARY KEY (server_id, document_id)
+);
+
+-- "Quem usa este documento?" é a pergunta da listagem do editor, e
+-- ela é feita para CADA linha. A chave primária começa por
+-- \`server_id\`, então filtrar pela segunda coluna não teria por
+-- onde entrar.
+CREATE INDEX idx_server_ui_document ON server_ui (document_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -638,6 +816,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 4, name: 'plugin-dependencies', sql: PLUGIN_DEPENDENCIES_SCHEMA },
   { id: 5, name: 'bans', sql: BANS_SCHEMA },
   { id: 6, name: 'players', sql: PLAYERS_SCHEMA },
+  { id: 7, name: 'items', sql: ITEMS_SCHEMA },
+  { id: 8, name: 'ui-documents', sql: UI_DOCUMENTS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

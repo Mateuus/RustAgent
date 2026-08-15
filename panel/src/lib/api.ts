@@ -652,6 +652,104 @@ export interface BanSyncResult {
  * `/api/servers/${id}` escrito em cinco lugares é o que fica para
  * trás no dia em que a rota mudar.
  */
+// ------------------------------------------------------------
+//  ITENS E INTERFACE
+// ------------------------------------------------------------
+
+/** Um item do catálogo do agente. Ver `GET /api/items`. */
+export interface CatalogItem {
+  /** `rifle.ak`. É o que todo comando do jogo recebe. */
+  shortname: string;
+  /** `Assault Rifle`. É por ele que a busca acha. */
+  displayName: string;
+  itemId: number;
+  category: string;
+  maxStack: number;
+  hasCondition: boolean;
+  firstSeen: string;
+  lastSeen: string;
+  /**
+   * O jogo não lista mais este item.
+   *
+   * A linha continua no agente de propósito: um kit do mês passado
+   * aponta para ela.
+   */
+  removed: boolean;
+}
+
+/**
+ * De quando é o catálogo, e de onde ele veio.
+ *
+ * Vai em TODA resposta de leitura de item. Uma tela que mostra
+ * 1252 itens sem dizer que eles são de três versões atrás é uma
+ * tela que mente.
+ */
+export interface ItemCatalogInfo {
+  /** O `Protocol` do jogo que gerou o catálogo. */
+  protocol: string | null;
+  updatedAt: string | null;
+  total: number;
+  /** `servidor` = há um servidor no ar conferindo isto agora. */
+  source: 'servidor' | 'banco';
+  /** A frase que explica o estado, quando ele precisa. */
+  note: string | null;
+}
+
+export interface ItemsPage {
+  count: number;
+  total: number;
+  items: CatalogItem[];
+  catalog: ItemCatalogInfo;
+}
+
+/** O que um servidor faz com uma interface. */
+export interface ServerUiBinding {
+  serverId: string;
+  documentId: number;
+  enabled: boolean;
+  /** Os ids que ESTE servidor esconde. */
+  hidden: string[];
+  /** A revisão que está no jogo. `null` = nunca foi aplicada. */
+  appliedRevision: number | null;
+  appliedAt: string | null;
+}
+
+export interface UiDocumentSummary {
+  id: number;
+  slug: string;
+  name: string;
+  command: string;
+  revision: number;
+  screens: number;
+  createdAt: string;
+  updatedAt: string;
+  servers: ServerUiBinding[];
+}
+
+/** O documento inteiro. `document` é o modelo de `lib/ui-doc`. */
+export interface UiDocumentDetail {
+  id: number;
+  slug: string;
+  name: string;
+  revision: number;
+  document: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A conversão para CUI, feita pelo AGENTE.
+ *
+ * `payload` responde à pergunta que o editor precisa fazer antes de
+ * o menu chegar ao jogo: a carga inicial cabe no frame do RCON?
+ * Passando do teto, o envio é recusado inteiro.
+ */
+export interface UiPreview {
+  screen: { id: string; name: string; kind: 'page' | 'modal' };
+  cui: { name: string; parent: string; components: Record<string, unknown>[] }[];
+  payload: { bytes: number; limit: number; fits: boolean };
+}
+
 export const agent = {
   login: (user: string, password: string) =>
     api<{ ok: true; user: string; csrfToken: string }>('/auth/login', {
@@ -1233,6 +1331,156 @@ export const agent = {
       message: string;
     }>(
       `/api/servers/${encodeURIComponent(id)}/plugins/${String(pluginId)}/enable-with-deps`,
+      { method: 'POST' },
+    ),
+
+  // ----------------------------------------------------------
+  //  ITENS
+  //
+  //  Nenhuma destas fala com o jogo: o catálogo mora no agente, e
+  //  é por isso que a tela responde com todos os servidores
+  //  parados. A exceção é o `refreshItems`, que é justamente o
+  //  pedido explícito de ir lá.
+  // ----------------------------------------------------------
+
+  items: (params: {
+    query?: string;
+    category?: string;
+    /** `true` = só o que sumiu do jogo; `false` = só o que existe. */
+    removed?: boolean | undefined;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const search = new URLSearchParams();
+
+    if (params.query !== undefined && params.query.trim() !== '') {
+      search.set('q', params.query.trim());
+    }
+
+    if (params.category !== undefined && params.category !== '') {
+      search.set('category', params.category);
+    }
+
+    if (params.removed !== undefined) {
+      search.set('removed', params.removed ? '1' : '0');
+    }
+
+    if (params.limit !== undefined) {
+      search.set('limit', String(params.limit));
+    }
+
+    if (params.offset !== undefined && params.offset > 0) {
+      search.set('offset', String(params.offset));
+    }
+
+    const query = search.toString();
+
+    return api<ItemsPage & { ok: true }>(`/api/items${query === '' ? '' : `?${query}`}`);
+  },
+
+  itemCategories: () =>
+    api<{ ok: true; categories: { category: string; total: number }[]; catalog: ItemCatalogInfo }>(
+      '/api/items/categories',
+    ),
+
+  /** Relê o catálogo do jogo. Precisa de um servidor no ar. */
+  refreshItems: () =>
+    api<{
+      ok: true;
+      scan: { added: number; present: number; removed: number; protocol: string | null };
+      catalog: ItemCatalogInfo;
+    }>('/api/items/refresh', { method: 'POST' }),
+
+  // ----------------------------------------------------------
+  //  INTERFACE
+  //
+  //  O DESENHO é da rede (`/ui/documents`); o que APARECE é do
+  //  servidor (`/servers/:id/ui`). São duas famílias de rota
+  //  porque são duas decisões diferentes.
+  // ----------------------------------------------------------
+
+  uiDocuments: () => api<{ ok: true; documents: UiDocumentSummary[] }>('/api/ui/documents'),
+
+  uiDocument: (id: number) =>
+    api<{ ok: true; document: UiDocumentDetail }>(`/api/ui/documents/${String(id)}`),
+
+  /** Os modelos que o botão "Criar a partir do modelo" oferece. */
+  uiPresets: () => api<{ ok: true; presets: string[] }>('/api/ui/presets'),
+
+  /**
+   * Cria a partir de um MODELO.
+   *
+   * O desenho do modelo mora no agente, e não aqui: é o mesmo
+   * documento que ele cria sozinho no primeiro boot, e tê-lo num
+   * lugar só é o que impede os dois caminhos de darem menus
+   * diferentes.
+   */
+  createUiFromPreset: (preset: string) =>
+    api<{ ok: true; document: UiDocumentDetail }>('/api/ui/documents', {
+      method: 'POST',
+      body: { preset },
+    }),
+
+  createUiDocument: (document: unknown) =>
+    api<{ ok: true; document: UiDocumentDetail }>('/api/ui/documents', {
+      method: 'POST',
+      body: { document },
+    }),
+
+  /** Grava o documento INTEIRO e sobe a revisão. */
+  saveUiDocument: (id: number, document: unknown) =>
+    api<{ ok: true; document: UiDocumentDetail }>(`/api/ui/documents/${String(id)}`, {
+      method: 'PUT',
+      body: { document },
+    }),
+
+  deleteUiDocument: (id: number) =>
+    api<{ ok: true }>(`/api/ui/documents/${String(id)}`, { method: 'DELETE' }),
+
+  /**
+   * Modelo -> CUI, pelo agente, sem tocar em servidor nenhum.
+   *
+   * `document` opcional: mandando o que está sendo editado, dá para
+   * conferir a conversão ANTES de gravar — que é quando o erro é
+   * barato de corrigir.
+   */
+  previewUiDocument: (
+    id: number,
+    body: { screenId?: string; serverId?: string; document?: unknown } = {},
+  ) => api<UiPreview & { ok: true }>(`/api/ui/documents/${String(id)}/preview`, {
+    method: 'POST',
+    body,
+  }),
+
+  /** O que ESTE servidor usa, e as interfaces que existem. */
+  serverUi: (id: string) =>
+    api<{
+      ok: true;
+      binding: ServerUiBinding | null;
+      documents: {
+        id: number;
+        slug: string;
+        name: string;
+        command: string;
+        revision: number;
+        screens: number;
+      }[];
+    }>(`/api/servers/${encodeURIComponent(id)}/ui`),
+
+  /** Escolhe o menu deste servidor e o que ele esconde. */
+  setServerUi: (
+    id: string,
+    body: { documentId: number | null; enabled?: boolean; hidden?: string[] },
+  ) =>
+    api<{ ok: true; binding: ServerUiBinding | null }>(
+      `/api/servers/${encodeURIComponent(id)}/ui`,
+      { method: 'PUT', body },
+    ),
+
+  /** Empurra agora. Síncrono: quem clicou está olhando. */
+  pushServerUi: (id: string) =>
+    api<{ ok: true; documents: number; bytes: number }>(
+      `/api/servers/${encodeURIComponent(id)}/ui/push`,
       { method: 'POST' },
     ),
 };
