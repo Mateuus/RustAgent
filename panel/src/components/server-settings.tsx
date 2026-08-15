@@ -27,6 +27,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 
+import { OxidePanel } from '@/components/oxide-panel';
 import { PluginConfigs } from '@/components/plugin-configs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -39,7 +40,7 @@ import { cn } from '@/lib/utils';
 
 const MAPS = ['Procedural Map', 'Barren', 'HapisIsland', 'Craggy Island'];
 
-type Section = 'geral' | 'mundo' | 'rede' | 'rcon' | 'steam' | 'plugins' | 'avancado';
+type Section = 'geral' | 'mundo' | 'rede' | 'rcon' | 'steam' | 'plugins' | 'oxide' | 'avancado';
 
 const SECTIONS: readonly { key: Section; label: string }[] = [
   { key: 'geral', label: 'Geral' },
@@ -55,6 +56,13 @@ const SECTIONS: readonly { key: Section; label: string }[] = [
   // assunto desta aba: o `oxide\config\<Nome>.json` fica ao lado do
   // mundo, das portas e do SteamCMD, que é onde se procura ajuste.
   { key: 'plugins', label: 'Plugins' },
+  // ####  E O OXIDE FICA AO LADO DELA  ####
+  //
+  // A sub-aba Plugins ajusta o `.json` de CADA plugin; esta ajusta
+  // o que o Oxide sabe sobre PESSOAS — os grupos, quem está neles
+  // e o que cada um concede. É onde o VIP de fato acontece: o
+  // nível é um grupo, e o plugin só o cria.
+  { key: 'oxide', label: 'Oxide' },
   { key: 'avancado', label: 'Avançado' },
 ];
 
@@ -488,6 +496,8 @@ export function ServerSettings({
       )}
 
       {section === 'plugins' && <PluginConfigs serverId={server.id} />}
+
+      {section === 'oxide' && <OxidePanel serverId={server.id} />}
 
       {section === 'avancado' && (
         <div className="space-y-4">

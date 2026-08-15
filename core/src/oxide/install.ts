@@ -26,7 +26,7 @@
 // ============================================================
 
 import { existsSync } from 'node:fs';
-import { cp, mkdir } from 'node:fs/promises';
+import { cp, mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { extractZip } from '../util/zip.js';
@@ -51,6 +51,41 @@ const REQUIRED_ASSEMBLIES = [
 
 /** As pastas que o Oxide usa, criadas antecipadamente. */
 const OXIDE_DIRS = ['plugins', 'config', 'data', 'lang', 'logs'];
+
+/**
+ * O `oxide.config.json` daquele servidor, como está em disco.
+ *
+ * ####  ELE É DO FRAMEWORK, E NÃO DE UM PLUGIN  ####
+ *
+ * Mora em `Servers\<id>\oxide\oxide.config.json` — um nível ACIMA
+ * de `oxide\config\`, que é onde ficam os `.json` de cada plugin
+ * (ver oxide/plugin-config.ts). Ali dentro estão o prefixo dos
+ * comandos de chat, os grupos padrão (`default`, `admin`), o
+ * compilador e o console do Oxide.
+ *
+ * Só leitura, e de propósito: o Oxide o lê no START. Gravar com o
+ * servidor no ar não teria efeito até o próximo boot, e a tela
+ * estaria dizendo que mudou algo que não mudou — a mesma armadilha
+ * do `users.cfg`.
+ *
+ * `text: null` = o arquivo não existe, que é o estado de um
+ * servidor que ainda não subiu depois de instalar o Oxide.
+ */
+export async function readOxideFrameworkConfig(installDir: string): Promise<{
+  readonly path: string;
+  readonly text: string | null;
+  readonly modifiedAt: string | null;
+}> {
+  const path = join(installDir, 'oxide', 'oxide.config.json');
+
+  try {
+    const [text, stats] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
+
+    return { path, text, modifiedAt: new Date(stats.mtimeMs).toISOString() };
+  } catch {
+    return { path, text: null, modifiedAt: null };
+  }
+}
 
 export interface InstallOxideOptions {
   /** `Servers\<id>\`. */

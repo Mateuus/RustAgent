@@ -53,6 +53,11 @@ Formato único. Programe contra `error`; `message` pode mudar sem aviso.
 | `BAN_WITHOUT_SERVERS` | 400 | escopo `servers` sem dizer em quais |
 | `BAN_ALREADY_EXPIRED` | 400 | a data de vencimento já passou |
 | `PLUGIN_INVALID_RESPONSE` | 502 | o plugin respondeu fora do contrato |
+| `OXIDE_GROUP_NOT_FOUND` | 404 | o Oxide não conhece aquele grupo |
+| `OXIDE_PERMISSION_NOT_FOUND` | 404 | nenhum plugin registrou aquela permissão |
+| `OXIDE_PLAYER_NOT_FOUND` | 404 | o Oxide nunca viu aquele jogador ali |
+| `OXIDE_INVALID_NAME` / `OXIDE_INVALID_PARENT` | 400 | nome fora de formato, ou herança circular |
+| `OXIDE_COMMAND_REFUSED` | 502 | o console respondeu com o uso do comando |
 | `INTERNAL_ERROR` | 500 | inesperado (detalhes só no log) |
 
 ---
@@ -824,6 +829,68 @@ resposta em formato desconhecido) **adia** a rodada, e a resposta diz por quê e
   "skipped": null,
   "message": "1 banimento(s) aplicado(s)." }
 ```
+
+---
+
+## Oxide: grupos e permissões
+
+```
+  GET    /api/servers/:id/oxide              o framework em si
+  GET    /api/servers/:id/oxide/permissions  grupos e permissões
+  POST   /api/servers/:id/oxide/groups                   cria
+  PATCH  /api/servers/:id/oxide/groups/:group            título, rank, pai
+  DELETE /api/servers/:id/oxide/groups/:group            apaga
+  POST   /api/servers/:id/oxide/groups/:group/permissions        concede
+  DELETE /api/servers/:id/oxide/groups/:group/permissions/:perm  revoga
+  POST   /api/servers/:id/oxide/groups/:group/members            põe alguém
+  DELETE /api/servers/:id/oxide/groups/:group/members/:steamId   tira
+```
+
+**Grupo é o que dá poder no Rust modado.** Um VIP é um jogador dentro de
+`origemz.vip.gold`, que herda de `silver`, que herda de `bronze` — hierarquia que
+o `OrigemZVip` cria sozinho ao carregar, a partir do config dele. O que não
+existia era como ver quem está dentro dela e o que cada nível concede sem
+digitar `oxide.show` no Console e ler prosa em inglês.
+
+**O arquivo não é editado, nunca.** O estado mora em `oxide\data\*.data`,
+protobuf que o próprio Oxide reescreve — mesma regra do `users.cfg`: quem muda é
+o comando pelo RCON, e o agente manda `oxide.save` depois de cada mudança.
+
+```json
+{ "ok": true, "connected": true, "truncated": 0,
+  "groups": [
+    { "name": "origemz.vip.gold",
+      "members": [ { "steamId": "76561198123456789", "name": "Fulano" } ],
+      "permissions": ["loja.desconto"],
+      "parents": ["origemz.vip.silver", "origemz.vip.bronze"],
+      "inherited": [ { "group": "origemz.vip.silver", "permissions": ["fila.prioridade"] } ] } ],
+  "permissions": ["oxide.plugins", "origemzchat.admin"] }
+```
+
+`parents` sai das seções `Parent group '…'` que o `oxide.show group` imprime: o
+console não anuncia o pai, ele lista as permissões dele. É a única forma de ver
+a herança sem abrir o protobuf.
+
+**Ler responde 200 mesmo com o servidor parado** (`connected: false` e uma
+frase); **agir exige o RCON de pé** (`503`). Não existe enfileirar concessão de
+permissão: uma que "vai acontecer depois" é uma que ninguém confere.
+
+**A permissão precisa existir antes.** Quem as registra é o plugin, ao carregar
+— o `oxide.grant` recusa o que ninguém registrou, e por isso a tela oferece uma
+lista em vez de um campo de texto.
+
+**O console não devolve título nem rank**: ele só os aceita. O `PATCH` grava os
+dois, e a tela avisa que os campos começam vazios por isso.
+
+`GET /oxide` traz a versão, os plugins **carregados** (`oxide.plugins` — o que o
+Oxide compilou de verdade, que é diferente do acervo do agente) e o
+`oxide.config.json` do framework, em leitura: ele é lido no START do servidor, e
+gravá-lo com o jogo no ar não teria efeito até o próximo boot.
+
+Não há rota para conceder permissão **direto a um jogador**. Ela existe no Oxide
+e é o que faz um servidor virar uma colcha de retalhos que ninguém audita — quem
+dá poder é o grupo. As permissões soltas de alguém continuam visíveis na
+leitura, para que dê para descobrir que existem.
 
 ---
 

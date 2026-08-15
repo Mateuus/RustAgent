@@ -473,6 +473,49 @@ export interface AdminEntry {
 }
 
 // ------------------------------------------------------------
+//  O Oxide daquele servidor
+//
+//  Grupo é o que dá poder no Rust modado: um VIP é um jogador
+//  dentro de `origemz.vip.gold`, que herda de `silver`, que herda
+//  de `bronze`. Tudo isto vive DENTRO do servidor (protobuf que o
+//  próprio Oxide reescreve), então a fonte é o console — e é por
+//  isso que a tela precisa do servidor no ar para mudar qualquer
+//  coisa.
+// ------------------------------------------------------------
+
+export interface OxideMember {
+  steamId: string;
+  /** O nome de quando o Oxide o viu. `null` = ele não trouxe. */
+  name: string | null;
+}
+
+export interface OxideGroup {
+  name: string;
+  members: OxideMember[];
+  /** O que foi concedido DIRETAMENTE a ele. */
+  permissions: string[];
+  /** A cadeia de pais, do mais próximo ao mais distante. */
+  parents: string[];
+  /** O que ele ganha de cada pai. */
+  inherited: { group: string; permissions: string[] }[];
+}
+
+/** Um plugin que o Oxide diz estar rodando AGORA. */
+export interface OxideLoadedPlugin {
+  name: string;
+  version: string | null;
+  author: string | null;
+  file: string | null;
+}
+
+export interface OxideFrameworkConfig {
+  path: string;
+  /** `null` = o arquivo ainda não existe (o servidor nunca subiu). */
+  text: string | null;
+  modifiedAt: string | null;
+}
+
+// ------------------------------------------------------------
 //  Os jogadores da REDE
 //
 //  Não confundir com `GamePlayer`, acima: aquele é quem está
@@ -913,6 +956,88 @@ export const agent = {
   revokeAdmin: (id: string, steamId: string, level: AdminLevel) =>
     api<{ ok: true; output: string; message: string }>(
       `/api/servers/${encodeURIComponent(id)}/admins/${encodeURIComponent(steamId)}?level=${level}`,
+      { method: 'DELETE' },
+    ),
+
+  // ---- O Oxide daquele servidor ----------------------------
+  //
+  // Ler responde 200 mesmo com o servidor parado (`connected:
+  // false` e uma frase); AGIR exige o RCON de pé — não existe
+  // enfileirar uma concessão de permissão.
+
+  oxide: (id: string) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      oxide: { version: string | null; branch: string | null };
+      plugins: OxideLoadedPlugin[];
+      config: OxideFrameworkConfig;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/oxide`),
+
+  oxidePermissions: (id: string) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      groups: OxideGroup[];
+      /** Tudo o que os plugins registraram naquele servidor. */
+      permissions: string[];
+      /** Grupos que ficaram sem detalhe. `0` é o normal. */
+      truncated: number;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/oxide/permissions`),
+
+  createOxideGroup: (
+    id: string,
+    input: { name: string; title?: string; rank?: number; parent?: string },
+  ) =>
+    api<{ ok: true; message: string }>(`/api/servers/${encodeURIComponent(id)}/oxide/groups`, {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** `parent: ''` DESLIGA a herança; ausente não mexe nela. */
+  patchOxideGroup: (
+    id: string,
+    group: string,
+    patch: { title?: string; rank?: number; parent?: string },
+  ) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/oxide/groups/${encodeURIComponent(group)}`,
+      { method: 'PATCH', body: patch },
+    ),
+
+  removeOxideGroup: (id: string, group: string) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/oxide/groups/${encodeURIComponent(group)}`,
+      { method: 'DELETE' },
+    ),
+
+  grantOxidePermission: (id: string, group: string, permission: string) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/oxide/groups/${encodeURIComponent(group)}/permissions`,
+      { method: 'POST', body: { permission } },
+    ),
+
+  revokeOxidePermission: (id: string, group: string, permission: string) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/oxide/groups/${encodeURIComponent(
+        group,
+      )}/permissions/${encodeURIComponent(permission)}`,
+      { method: 'DELETE' },
+    ),
+
+  addOxideMember: (id: string, group: string, steamId: string) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/oxide/groups/${encodeURIComponent(group)}/members`,
+      { method: 'POST', body: { steamId } },
+    ),
+
+  removeOxideMember: (id: string, group: string, steamId: string) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/oxide/groups/${encodeURIComponent(
+        group,
+      )}/members/${encodeURIComponent(steamId)}`,
       { method: 'DELETE' },
     ),
 

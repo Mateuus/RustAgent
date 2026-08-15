@@ -48,6 +48,7 @@ import { registerBanRoutes } from './routes/bans.js';
 import { registerConsoleRoutes } from './routes/console.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
 import { registerOperationRoutes } from './routes/operations.js';
+import { registerOxideRoutes } from './routes/oxide.js';
 import { registerPlayerRoutes } from './routes/players.js';
 import { registerPluginRoutes } from './routes/plugins.js';
 import { registerServerRoutes } from './routes/servers.js';
@@ -183,6 +184,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       registerConsoleRoutes(api, { supervisor: options.supervisor });
 
       registerPluginRoutes(api, { library: options.library });
+
+      // Os grupos e as permissões do Oxide. Eles moram DENTRO do
+      // servidor (protobuf reescrito por ele), então tudo aqui
+      // passa pelo console — nada de editar arquivo.
+      registerOxideRoutes(api, { supervisor: options.supervisor });
 
       registerSteamUpdateRoutes(api, {
         watcher: options.steamWatcher,

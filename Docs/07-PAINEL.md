@@ -339,8 +339,8 @@ livre, com a resposta do servidor na tela.
 ### Configuração
 
 Os campos do `.ini` que dá para mudar pelo painel, com aviso claro do que só
-vale depois de reiniciar o servidor. Sete sub-abas: *Geral*, *Mundo*, *Rede*,
-*RCON*, *SteamCMD*, **Plugins** e *Avançado*.
+vale depois de reiniciar o servidor. Oito sub-abas: *Geral*, *Mundo*, *Rede*,
+*RCON*, *SteamCMD*, **Plugins**, **Oxide** e *Avançado*.
 
 #### A sub-aba Plugins
 
@@ -378,6 +378,43 @@ respondeu, que é onde aparece o campo que o plugin esperava e não veio.
 *Voltar ao padrão* apaga o arquivo para o plugin recriá-lo. É confirmação em
 dois passos, e há cópia em `Backups\<id>\oxide-config\` — de toda escrita, não
 só desta.
+
+#### A sub-aba Oxide
+
+Ao lado da de Plugins, e a diferença entre as duas é o assunto: aquela ajusta o
+`.json` de **cada plugin**; esta mostra o que o Oxide sabe sobre **pessoas** — os
+grupos, quem está dentro de cada um e o que cada um concede.
+
+**É aqui que o VIP de fato acontece.** O nível é um grupo
+(`origemz.vip.bronze` → `silver` → `gold`, cada um herdando do anterior), e o
+plugin só o *cria*: quem entra nele, e o que ele passa a valer, era invisível
+fora do Console. A herança aparece na linha de cada grupo — *herda de
+origemz.vip.silver → origemz.vip.bronze* —, e as permissões vindas dos pais
+ficam separadas das próprias, sem botão de revogar: tirar dali é decisão do
+grupo pai, e o mesmo botão sugeriria que dá para desfazer daqui.
+
+**O arquivo não é editado, nunca.** Grupos e permissões moram em
+`oxide\data\*.data`, protobuf que o próprio Oxide reescreve — a tela diz isso em
+voz alta, e tudo o que ela faz passa por comando, com `oxide.save` em seguida.
+Mesma regra da aba Admins, e pelo mesmo motivo.
+
+A permissão a conceder é uma **lista**, e não um campo de texto: quem cria
+permissão é o plugin, ao carregar, e digitar uma que não existe é o jeito mais
+rápido de achar que se concedeu alguma coisa (o Oxide recusa, com a frase que a
+tela mostra).
+
+Título e rank começam **vazios**, com a frase dizendo por quê: o console não os
+devolve, só os aceita. Preencher com um palpite seria a tela afirmando o que não
+sabe.
+
+Acima, o bloco do próprio Oxide: versão, os plugins **carregados** — o que ele
+compilou de verdade, que é diferente do acervo do agente, e é onde se vê o
+plugin que está em disco e não roda — e o `oxide.config.json`, em leitura. Ele é
+lido no start do servidor, e um editor aqui gravaria algo que só valeria no
+próximo boot.
+
+Com o servidor parado, a tela abre assim mesmo e diz o que não dá para saber:
+configuração se confere **antes** de subir.
 
 ---
 
