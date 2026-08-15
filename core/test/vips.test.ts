@@ -61,6 +61,13 @@ interface FakeServer {
   connected: boolean;
   /** O `OrigemZVip` está carregado aqui? Ver o `origemz.vip.apply`. */
   hasVipPlugin: boolean;
+  /**
+   * O `apply` responde com a linha de LOG, e não com o JSON.
+   *
+   * É o que o servidor de verdade faz — MEDIDO. Ver
+   * `applyAccepted`, em vip/service.ts.
+   */
+  applyRepliesWithLog: boolean;
   /** Onde mora o `oxide\config` deste servidor. */
   readonly configDir: string;
 }
@@ -98,6 +105,7 @@ function makeServer(): FakeServer {
     lastVipPayload: null,
     connected: true,
     hasVipPlugin: true,
+    applyRepliesWithLog: false,
     configDir,
   };
 }
@@ -189,6 +197,16 @@ function fakeRcon(server: FakeServer): OpsRcon {
           } else {
             group.delete(steamId);
           }
+        }
+
+        // A resposta que o servidor de VERDADE dá: a linha do
+        // `Puts` do plugin, casada com o identifier do pedido no
+        // lugar do JSON. Ver `applyAccepted`.
+        if (server.applyRepliesWithLog) {
+          return Promise.resolve(
+            `[OrigemZVip] origemz.vip.apply ${steamId}: nivel ${best?.Tier ?? '-'}, ` +
+              '1 grupo(s) concedido(s) e 0 retirado(s).',
+          );
         }
 
         return Promise.resolve(
@@ -424,6 +442,31 @@ describe('conceder põe no grupo e empurra o estado', () => {
       expect(server.groups.get('origemz.vip.silver')?.has(STEAM_ID)).toBe(false);
       expect(server.lastVipPayload?.players[STEAM_ID]?.[0]?.tier).toBe('gold');
     }
+  });
+
+  it('e aceita a resposta do plugin mesmo quando ela vem como linha de log', async () => {
+    const pvp1 = harness.servers.get('pvp1');
+
+    // MEDIDO no server01: o `Puts` do OrigemZVip sai antes do
+    // `ReplyWith` e é casado no lugar da resposta. Sem reconhecer
+    // essa forma, o agente concluiria que o plugin não respondeu e
+    // refaria o trabalho inteiro pelo `oxide.usergroup`.
+    if (pvp1 !== undefined) {
+      pvp1.applyRepliesWithLog = true;
+    }
+
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'admin',
+    });
+
+    expect(pvp1?.groups.get('origemz.vip.gold')?.has(STEAM_ID)).toBe(true);
+    // E o caminho de reserva NÃO foi acionado: nenhum
+    // `oxide.usergroup` saiu para este servidor.
+    expect(pvp1?.commands.some((command) => command.startsWith('oxide.usergroup'))).toBe(false);
   });
 
   it('e sem o OrigemZVip o agente faz o mesmo pelos grupos do Oxide', async () => {

@@ -277,8 +277,9 @@ describe('a entrega que não acontece', () => {
     expect(resultado.status).toBe('falhou');
     expect(resultado.delivered).toBe(0);
     // O motivo vem do plugin e sobrevive até o histórico: é a
-    // pergunta que o suporte recebe.
-    expect(resultado.detail).toContain('PLAYER_NOT_FOUND');
+    // pergunta que o suporte recebe. E ele chega TRADUZIDO —
+    // "PLAYER_NOT_FOUND" não diz o que fazer.
+    expect(resultado.detail).toContain('saiu do servidor');
 
     const claim = harness.kits.claim(resultado.claimId);
 

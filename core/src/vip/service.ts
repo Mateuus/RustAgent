@@ -687,9 +687,8 @@ export class VipList {
 
     try {
       const raw = await rcon.send(`${VIP_APPLY_COMMAND} ${steamId}`);
-      const line = firstJsonLine(raw);
 
-      if (line !== null && (line as { ok?: unknown }).ok === true) {
+      if (applyAccepted(raw)) {
         return true;
       }
     } catch (error) {
@@ -856,6 +855,42 @@ export class VipList {
       );
     }
   }
+}
+
+/**
+ * O `origemz.vip.apply` deu certo?
+ *
+ * ####  A RESPOSTA DELE CHEGA COMO LINHA DE LOG  ####
+ *
+ * MEDIDO no `server01`. Mandando `origemz.vip.apply 7656…`, o que
+ * volta pelo RCON é
+ *
+ *     [OrigemZVip] origemz.vip.apply 7656…: nivel gold, 1 grupo(s)
+ *     concedido(s) e 0 retirado(s).
+ *
+ * e NÃO o `{"ok":true,…}` que o cabeçalho do comando promete. A
+ * causa está documentada no próprio `OrigemZAgent.cs`: um `Puts`
+ * dentro de um `ConsoleCommand` sai com o MESMO Identifier do
+ * pedido e ANTES do `arg.ReplyWith` — o agente casa a primeira
+ * mensagem não-diagnóstica com o identifier, então a linha de log
+ * chega no lugar da resposta. O `OrigemZAgent` resolveu isso
+ * adiando o `Puts` um frame; o `OrigemZVip` ainda não.
+ *
+ * Reconhecer as duas formas é o que evita o agente concluir que o
+ * plugin não respondeu e refazer o trabalho inteiro pelo
+ * `oxide.usergroup` — o desfecho seria o mesmo, mas com o dobro de
+ * comandos e um aviso no log a cada concessão.
+ */
+function applyAccepted(raw: string): boolean {
+  const line = firstJsonLine(raw);
+
+  if (line !== null && (line as { ok?: unknown }).ok === true) {
+    return true;
+  }
+
+  // A linha de log do plugin. `nivel` sem acento porque o fonte
+  // dele é ASCII puro de propósito (ver o cabeçalho do lang).
+  return new RegExp(`${VIP_APPLY_COMMAND}\\s+\\d{17}:\\s*nivel`, 'i').test(raw);
 }
 
 /** Epoch ms -> ISO, com o `null` sobrevivendo. */
