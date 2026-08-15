@@ -631,6 +631,284 @@ CREATE TABLE player_events (
 CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
 `;
 
+// ------------------------------------------------------------
+//  010 — o VIP
+//
+//  ####  O VIP É DA REDE, E O ESTADO É DO AGENTE  ####
+//
+//  Quem compra compra da REDE, e por isso não há `server_id` aqui:
+//  a alternativa produziria a pergunta "comprei no PVP e não tenho
+//  no PVE?" com a resposta errada. O que é por servidor é o GRUPO
+//  DO OXIDE, que é como o VIP vira efeito dentro do jogo.
+//
+//  E o dono do estado é esta tabela, não o plugin. O `OrigemZAgent`
+//  guarda um cache DESCARTÁVEL, repovoado a cada
+//  `origemz.vip.sync`: se a fonte fosse o jogo, um wipe ou um
+//  `oxide.reload` apagaria VIP comprado com dinheiro.
+//
+//  ####  RENOVAR ESTENDE A LINHA QUE EXISTE  ####
+//
+//  Quem compra 30 dias em cima de 20 que faltam fica com 50, e a
+//  data nova é `max(agora, vencimento) + prazo`. Somar a partir de
+//  "agora" faria a renovação antecipada tirar dias de quem pagou —
+//  o pior jeito possível de tratar quem paga. Ver
+//  db/vips-repository.ts.
+// ------------------------------------------------------------
+const VIPS_SCHEMA = `
+CREATE TABLE vips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- TEXT, como em toda parte: 17 dígitos passam de 2^53 e em
+  -- número o id volta arredondado — o VIP iria para OUTRA CONTA.
+  steam_id TEXT NOT NULL,
+
+  -- 'bronze' | 'silver' | 'gold' — o \`Tier\` do OrigemZVip.json.
+  -- TEXT e não um enum fechado: o nível é configurável no plugin, e
+  -- um CHECK aqui obrigaria uma migração a cada nível novo.
+  tier TEXT NOT NULL,
+
+  -- Epoch ms. NULL = permanente (o VIP vitalício existe e é
+  -- vendido).
+  expires_at INTEGER,
+
+  -- De onde ele veio:
+  --   'loja'     comprado
+  --   'painel'   um admin concedeu
+  --   'adotado'  o jogador JÁ ESTAVA no grupo do Oxide quando o
+  --              agente chegou. Sem este caso a reconciliação
+  --              tiraria do grupo quem alguém pôs à mão — a mesma
+  --              lição da BanList (migração 005).
+  origin TEXT NOT NULL CHECK (origin IN ('loja', 'painel', 'adotado')),
+  created_at INTEGER NOT NULL,
+  created_by TEXT,
+
+  -- NULL = vale. Revogar NÃO apaga a linha: a segunda discussão
+  -- sobre o mesmo jogador precisa da primeira. Mesma regra dos
+  -- banimentos.
+  --
+  -- \`revoked_at\` preenchido com \`revoked_by\` NULO é a assinatura
+  -- do RELÓGIO: ninguém revogou, o prazo acabou.
+  revoked_at INTEGER,
+  revoked_by TEXT
+);
+
+-- UM VIP ativo por (jogador, nível). Dois seriam duas datas de
+-- vencimento para o mesmo benefício, e nenhuma resposta para "qual
+-- vale?" nem para "revogar fecha qual?".
+--
+-- Índice PARCIAL: o histórico pode ter dez linhas revogadas do
+-- mesmo par, e deve mesmo.
+CREATE UNIQUE INDEX idx_vips_active ON vips (steam_id, tier) WHERE revoked_at IS NULL;
+
+-- O relógio pergunta "quem venceu?" a cada rodada. Sem o índice,
+-- cada batida varre a tabela inteira.
+CREATE INDEX idx_vips_expires ON vips (expires_at) WHERE revoked_at IS NULL;
+
+-- A ficha do jogador e a sincronização perguntam pelo SteamID.
+CREATE INDEX idx_vips_player ON vips (steam_id);
+`;
+
+// ------------------------------------------------------------
+//  011 — o loadout de cada grupo
+//
+//  ####  A LISTA É DERIVADA DOS GRUPOS, E NÃO MANTIDA À MÃO  ####
+//
+//  "Criou um novo grupo, aparece o loadout. Apagou o loadout, some
+//  daquele lugar." Ou seja: quem enumera os loadouts de um servidor
+//  são os GRUPOS DO OXIDE dele (\`oxide.show groups\`), e esta tabela
+//  só guarda o que cada um recebe. Uma lista própria de níveis
+//  envelheceria em silêncio — o grupo novo nasceria sem lugar na
+//  tela.
+//
+//  Isso casa com o que o plugin já faz: o \`origemz.loadout.sync\`
+//  recebe o estado COMPLETO, e "nível que sumiu fica sem kit".
+// ------------------------------------------------------------
+const LOADOUTS_SCHEMA = `
+CREATE TABLE loadouts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O NOME DO GRUPO do Oxide (\`origemz.vip.gold\`, \`default\`).
+  --
+  -- Não há chave estrangeira: o grupo vive DENTRO do servidor, num
+  -- protobuf que o próprio Oxide reescreve, e não numa tabela
+  -- nossa. Um grupo apagado no Oxide deixa um loadout órfão — e a
+  -- TELA mostra isso, em vez de o banco apagar sozinho o trabalho
+  -- de alguém.
+  group_name TEXT NOT NULL,
+
+  -- Os itens, como JSON, no formato que o plugin já espera:
+  -- [{ slot, shortname, amount, skinId, position }]
+  --
+  -- JSON numa coluna, e não uma tabela de itens: a pergunta é
+  -- sempre "o kit INTEIRO deste grupo", o conjunto é reescrito
+  -- inteiro a cada edição (é configuração, não histórico), e o
+  -- formato é o do \`LoadoutItemPayload\` do plugin — que atravessa
+  -- daqui até o jogo sem ninguém remontá-lo.
+  items TEXT NOT NULL DEFAULT '[]',
+
+  -- Desligado é diferente de apagado: o loadout continua guardado e
+  -- some do payload empurrado ao jogo. É o "tira do ar sem perder
+  -- meia hora de montagem".
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  updated_at INTEGER NOT NULL,
+  updated_by TEXT,
+
+  UNIQUE (server_id, group_name)
+);
+`;
+
+// ------------------------------------------------------------
+//  012 — os kits da loja
+//
+//  ####  UM KIT É DA REDE; CADA SERVIDOR DECIDE SE O OFERECE  ####
+//
+//  Mesma razão da biblioteca de plugins: um kit por servidor faria
+//  cinco cópias do mesmo kit, e a sexta mudança entraria em quatro
+//  delas. \`kit_servers\` é onde o alcance mora.
+// ------------------------------------------------------------
+const KITS_SCHEMA = `
+CREATE TABLE kits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- O identificador estável, para o site e para a interface do jogo
+  -- apontarem sem depender do id numérico.
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT,
+
+  --   'compra'    o jogador paga e leva
+  --   'resgate'   uma vez por jogador, para sempre
+  --   'cooldown'  de N em N segundos
+  kind TEXT NOT NULL CHECK (kind IN ('compra', 'resgate', 'cooldown')),
+
+  -- Só em 'compra'. Em CENTAVOS, inteiro: dinheiro em float é o
+  -- erro que aparece no extrato do cliente.
+  price_cents INTEGER,
+
+  -- Só em 'cooldown'. Em SEGUNDOS.
+  --
+  -- E não existe \`next_at\`: "pode pegar de novo?" é
+  -- \`agora - último claim >= cooldown\`, calculado na hora. Um campo
+  -- guardado seria um segundo lugar para a mesma verdade — e ele
+  -- erraria no dia em que alguém mudasse o cooldown do kit.
+  cooldown_seconds INTEGER,
+
+  -- NULL = qualquer um. Preenchido = só quem tem aquele nível de
+  -- VIP, ou um mais alto. É o resgate do VIP Ouro.
+  required_tier TEXT,
+
+  items TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE kit_servers (
+  kit_id    INTEGER NOT NULL REFERENCES kits(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (kit_id, server_id)
+);
+
+-- "Quais kits este servidor oferece?" é a pergunta da tela do
+-- servidor e da entrega. A chave primária começa por \`kit_id\`,
+-- então filtrar só pela segunda coluna não teria por onde entrar.
+CREATE INDEX idx_kit_servers_server ON kit_servers (server_id);
+`;
+
+// ------------------------------------------------------------
+//  013 — quem já pegou o quê
+//
+//  Uma linha por ENTREGA. É ela que responde "ele já pegou?" e
+//  "quando ele pode pegar de novo?" — e é ela que o suporte lê
+//  quando o jogador diz que não recebeu.
+//
+//  ####  A LINHA NASCE ANTES DO COMANDO  ####
+//
+//  Gravar só depois do sucesso faria a entrega que travou no meio
+//  (agente derrubado, RCON caindo) desaparecer do histórico — e ela
+//  é justamente a que gera reclamação. Ver kits/service.ts: a linha
+//  nasce como \`falhou\`, com o motivo "entrega interrompida", e é
+//  fechada com o desfecho de verdade.
+// ------------------------------------------------------------
+const KIT_CLAIMS_SCHEMA = `
+CREATE TABLE kit_claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kit_id     INTEGER NOT NULL REFERENCES kits(id) ON DELETE CASCADE,
+  steam_id   TEXT NOT NULL,
+  server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  claimed_at INTEGER NOT NULL,
+
+  -- 'entregue' | 'falhou'. A falha FICA: uma entrega que não
+  -- aconteceu é a pergunta que o suporte recebe.
+  status TEXT NOT NULL CHECK (status IN ('entregue', 'falhou')),
+  detail TEXT
+);
+
+-- "Ele já pegou este kit?" e "quando foi a última vez?" são a mesma
+-- consulta, e ela roda a cada resgate.
+CREATE INDEX idx_kit_claims_player ON kit_claims (steam_id, kit_id, claimed_at DESC);
+
+-- "Quem já pegou este kit?" é a tela do kit.
+CREATE INDEX idx_kit_claims_kit ON kit_claims (kit_id, claimed_at DESC);
+`;
+
+// ------------------------------------------------------------
+//  014 — o VIP e o kit entram na linha do tempo do jogador
+//
+//  ####  O CHECK DA 006 NÃO CONHECE OS DOIS  ####
+//
+//  Ele admite \`join|leave|kick|teleport\`, e o SQLite não altera um
+//  CHECK no lugar: a tabela é recriada com os dados copiados, como
+//  na 003.
+//
+//  ####  E POR QUE ELES ENTRAM  ####
+//
+//  "Por que este jogador tem Ouro?" e "ele já pegou este kit?" têm
+//  resposta em \`vips\` e em \`kit_claims\` — mas a ficha mostra UMA
+//  linha do tempo, e um VIP concedido em março precisa aparecer ao
+//  lado do banimento de abril.
+//
+//  Os banimentos são LIDOS da tabela deles na hora de montar a
+//  ficha (ver players/service.ts) porque há UM ban ativo por
+//  jogador, e a história inteira cabe em dois itens. O VIP e o kit
+//  não cabem nesse formato: um jogador tem vários níveis e dezenas
+//  de resgates, e o que a ficha quer não é o estado — é o
+//  ACONTECIMENTO, com a data em que ele aconteceu.
+// ------------------------------------------------------------
+const PLAYER_EVENTS_VIP_SCHEMA = `
+ALTER TABLE player_events RENAME TO player_events_006;
+
+CREATE TABLE player_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  steam_id  TEXT NOT NULL,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  --   'join'      entrou (a varredura o viu chegar)
+  --   'leave'     saiu   (a varredura o viu sumir)
+  --   'kick'      expulso pelo painel
+  --   'teleport'  movido pelo painel
+  --   'vip'       ganhou, renovou ou perdeu um nível
+  --   'kit'       resgatou (ou tentou resgatar) um kit
+  kind TEXT NOT NULL CHECK (kind IN ('join', 'leave', 'kick', 'teleport', 'vip', 'kit')),
+
+  at INTEGER NOT NULL,
+  actor TEXT,
+  detail TEXT
+);
+
+-- O \`id\` vai junto: ele é a ordem de desempate da ficha (\`at DESC,
+-- id DESC\`), e uma renumeração faria dois eventos do mesmo
+-- milissegundo trocarem de lugar na tela.
+INSERT INTO player_events (id, steam_id, server_id, kind, at, actor, detail)
+SELECT id, steam_id, server_id, kind, at, actor, detail FROM player_events_006;
+
+DROP TABLE player_events_006;
+
+CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -638,6 +916,13 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 4, name: 'plugin-dependencies', sql: PLUGIN_DEPENDENCIES_SCHEMA },
   { id: 5, name: 'bans', sql: BANS_SCHEMA },
   { id: 6, name: 'players', sql: PLAYERS_SCHEMA },
+  // 007 a 009 são da outra frente (itens e interface); a faixa
+  // desta é 010–014. Ver Docs\\15-BRIEFING-VIP-LOADOUTS-KITS.md.
+  { id: 10, name: 'vips', sql: VIPS_SCHEMA },
+  { id: 11, name: 'loadouts', sql: LOADOUTS_SCHEMA },
+  { id: 12, name: 'kits', sql: KITS_SCHEMA },
+  { id: 13, name: 'kit-claims', sql: KIT_CLAIMS_SCHEMA },
+  { id: 14, name: 'player-events-vip-kit', sql: PLAYER_EVENTS_VIP_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

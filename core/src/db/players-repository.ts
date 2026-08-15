@@ -70,8 +70,15 @@ export interface PlayerServerRecord {
   readonly playedSeconds: number;
 }
 
-/** O tipo de um evento da linha do tempo. Ver a migração 006. */
-export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport';
+/**
+ * O tipo de um evento da linha do tempo.
+ *
+ * Os quatro primeiros são da migração 006; `vip` e `kit` entraram
+ * com a 014, que ampliou o `CHECK` da tabela. Acrescentar um valor
+ * aqui SEM a migração faria o `INSERT` estourar no banco — e só na
+ * máquina de quem já está de pé.
+ */
+export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'vip' | 'kit';
 
 export interface PlayerEventRecord {
   readonly id: number;
@@ -561,8 +568,11 @@ function toEvent(row: PlayerEventRow): PlayerEventRecord {
   };
 }
 
+/** Os mesmos valores do `CHECK` da tabela. Ver `PlayerEventKind`. */
+const EVENT_KINDS: readonly string[] = ['join', 'leave', 'kick', 'teleport', 'vip', 'kit'];
+
 function isEventKind(value: string): value is PlayerEventKind {
-  return value === 'join' || value === 'leave' || value === 'kick' || value === 'teleport';
+  return EVENT_KINDS.includes(value);
 }
 
 /** Este jogador está online AGORA, em algum servidor? */
