@@ -165,7 +165,9 @@ namespace Oxide.Plugins
 
                 Puts("Kit ao nascer: " + (_config.AplicarKitAoNascer ? "ligado" : "desligado") +
                      ". Itens de fabrica do Rust: " +
-                     (_config.RemoverItensPadraoDoJogo ? "removidos" : "mantidos") + ".");
+                     (_config.RemoverItensPadraoDoJogo
+                         ? "removidos so de quem tem kit"
+                         : "mantidos") + ".");
             }
             catch (Exception ex)
             {
@@ -182,16 +184,59 @@ namespace Oxide.Plugins
         //  jogo dar os itens e limpar depois, e nesse meio-tempo o
         //  jogador ja viu a tocha aparecer e sumir.
         //
-        //  Devolver `true` quando a chave esta ligada, e null
-        //  quando nao esta. NUNCA `false`: no Oxide o que conta e
-        //  ser diferente de null, entao `false` cancelaria do mesmo
+        //  Devolver `true` para cancelar, e null para deixar o jogo
+        //  fazer o dele. NUNCA `false`: no Oxide o que conta e ser
+        //  diferente de null, entao `false` cancelaria do mesmo
         //  jeito - e leria como se nao cancelasse.
+        //
+        //  ####  SO CANCELA QUEM TEM COM O QUE SUBSTITUIR  ####
+        //
+        //  ISTO ACONTECEU EM PRODUCAO: o nivel `normal` estava sem
+        //  kit, este hook cancelou os itens de fabrica assim mesmo,
+        //  e o jogador NASCEU PELADO. Cada peca fez o que devia; a
+        //  soma e que estava errada.
+        //
+        //  Cancelar so faz sentido quando existe kit para colocar
+        //  no lugar. Sem kit, o jogo da o dele: tocha e pedra sao um
+        //  comeco pior que o kit e MUITO melhor que nada, e sao o
+        //  que o Rust faz sozinho quando ninguem interfere.
+        //
+        //  A pergunta e barata: o loadout vem do cache em memoria do
+        //  OrigemZAgent, sem ida a rede nem ao disco - e este hook
+        //  roda no meio do nascimento do jogador.
         // ========================================================
         private object OnDefaultItemsReceive(PlayerInventory inventory)
         {
             try
             {
-                if (!_ready || !_config.RemoverItensPadraoDoJogo)
+                // `AplicarKitAoNascer` desligado e o mesmo buraco por
+                // outra porta: ninguem viria dar o kit no lugar do
+                // que este hook tirasse (ver PluginConfig.Default).
+                if (!_ready || !_config.RemoverItensPadraoDoJogo || !_config.AplicarKitAoNascer)
+                {
+                    return null;
+                }
+
+                if (inventory == null || OrigemZAgent == null)
+                {
+                    // Sem saber de quem e o inventario, ou sem o hub
+                    // para perguntar, a escolha segura e a do jogo.
+                    return null;
+                }
+
+                BasePlayer player = inventory.baseEntity;
+
+                if (player == null || player.IsNpc)
+                {
+                    return null;
+                }
+
+                List<LoadoutItem> items = ReadLoadout(ResolveTier(player));
+
+                // Vazio = o nivel nao tem kit, OU o cache ainda nao
+                // chegou depois de um reload. Nos dois casos nao ha
+                // o que substituir, e o certo e nao mexer.
+                if (items == null || items.Count == 0)
                 {
                     return null;
                 }
@@ -527,27 +572,30 @@ namespace Oxide.Plugins
                 {
                     // #### MAS ELE PRECISA APARECER NO LOG ####
                     //
-                    // Com os itens de fabrica removidos, kit vazio
-                    // significa JOGADOR NASCENDO DE MAOS VAZIAS - e
-                    // isso era silencioso: nenhum erro, nenhum
-                    // aviso, porque cada peca estava fazendo o que
-                    // devia.
+                    // Ninguem nasce mais de maos vazias: o
+                    // OnDefaultItemsReceive faz a mesma pergunta
+                    // antes de cancelar, e sem kit deixa o jogo dar
+                    // a tocha e a pedra dele.
                     //
-                    // Foi assim que um cache de kits esvaziado por
-                    // um oxide.reload passou 25 minutos sem
-                    // ninguem notar. O aviso e o unico jeito de a
-                    // causa aparecer perto do sintoma.
+                    // O aviso continua porque o jogador ESTA
+                    // recebendo o de fabrica no lugar do que o admin
+                    // configurou, e isso e silencioso: nenhum erro,
+                    // nenhuma reclamacao, cada peca fazendo o que
+                    // devia. Foi assim que um cache de kits
+                    // esvaziado por um oxide.reload passou 25
+                    // minutos sem ninguem notar.
                     //
                     // So no NASCIMENTO: o botao "dar o kit" da
                     // ficha aplicado a um nivel sem kit e uma
                     // escolha de quem clicou, nao uma surpresa.
                     if (isSpawn && _config.RemoverItensPadraoDoJogo)
                     {
-                        PrintWarning("Jogador " + player.UserIDString + " nasceu SEM NADA: o nivel '" +
-                                     tier + "' esta sem kit e os itens de fabrica do Rust estao " +
-                                     "removidos. Confira Configuracoes > Player > Loadout no painel " +
-                                     "- e se o kit existir la, o cache deste plugin pode ter sido " +
-                                     "esvaziado por um reload (ele se repoe sozinho em ate 5 min).");
+                        PrintWarning("Jogador " + player.UserIDString + " nasceu com a TOCHA E A PEDRA " +
+                                     "do Rust: o nivel '" + tier + "' esta sem kit, entao o de fabrica " +
+                                     "ficou de pe para ele nao nascer pelado. Confira Configuracoes > " +
+                                     "Player > Loadout no painel - e se o kit existir la, o cache deste " +
+                                     "plugin pode ter sido esvaziado por um reload (ele se repoe " +
+                                     "sozinho em ate 5 min).");
                     }
 
                     return LoadoutOutcome.Applied(tier, 0, 0);
@@ -1596,8 +1644,10 @@ namespace Oxide.Plugins
 
                 // O par que faz o sistema fazer sentido: sem tirar
                 // os itens de fabrica, o kit `normal` vira tocha +
-                // pedra + kit; sem aplicar o kit, o jogador nasce
-                // pelado. Ligar os dois e a configuracao coerente.
+                // pedra + kit. O contrario nao da mais em jogador
+                // pelado - o OnDefaultItemsReceive so tira a tocha
+                // quando ha kit E o kit ao nascer esta ligado -, mas
+                // ligar os dois continua sendo a config coerente.
                 config.RemoverItensPadraoDoJogo = true;
                 config.AplicarKitAoNascer = true;
 
