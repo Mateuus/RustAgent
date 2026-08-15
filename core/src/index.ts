@@ -22,6 +22,8 @@
 //  eles funcionam, e é assim que se desenvolve.
 // ============================================================
 
+import { randomUUID } from 'node:crypto';
+
 import { OperatorAuth } from './auth/operator.js';
 import { BanExpiryWatcher } from './bans/expiry-watcher.js';
 import { BanList } from './bans/service.js';
@@ -46,8 +48,10 @@ import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader } from './game/players.js';
 import { loadUiImages } from './game/ui-images.js';
+import { buildKitsScreen, KITS_SCREEN_ID } from './game/ui-kits-screen.js';
 import { buildMainMenu } from './game/ui-preset-main-menu.js';
 import { UiSync } from './game/ui-sync.js';
+import { toGeneratedScreenBundle } from './types/ui-transport.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
@@ -394,6 +398,46 @@ async function main(): Promise<void> {
     repository: uiDocuments,
     servers: supervisor,
     logger,
+    // ####  A PÁGINA DE KITS É MONTADA DO BANCO  ####
+    //
+    // Ela tem endereço no documento e nenhum conteúdo gravado: um
+    // kit criado no painel precisa aparecer no jogo sem ninguém
+    // abrir o editor, e o botão precisa saber se AQUELE jogador já
+    // pegou. Ver game/ui-kits-screen.ts.
+    generatedScreens: async ({ serverId, document, screenId, steamId }) => {
+      if (screenId !== KITS_SCREEN_ID) {
+        return null;
+      }
+
+      const offers = await kits.listForServer(serverId, steamId);
+
+      return toGeneratedScreenBundle(document, buildKitsScreen(offers), screenId);
+    },
+    // O clique de RESGATE, já autenticado pelo segredo. A frase que
+    // o jogador lê nasce no `KitStore`, que é quem conhece a regra
+    // — "você já pegou este kit" e "não deu para entregar" são
+    // coisas diferentes, e só ele sabe qual das duas foi.
+    onBuy: async ({ serverId, steamId, offerId }) => {
+      const kit = kits.list().find((entry) => entry.slug === offerId);
+
+      if (kit === undefined) {
+        return 'Este kit não existe mais.';
+      }
+
+      const result = await kits.claim({ kitId: kit.id, serverId, steamId, actor: 'menu' });
+
+      return result.status === 'entregue'
+        ? `${kit.name}: ${String(result.delivered)} de ${String(result.total)} item(ns) no seu inventário.`
+        : (result.detail ?? 'Não deu para entregar o kit agora.');
+    },
+    // ####  O SEGREDO SEPARA O CLIQUE DO CHAT  ####
+    //
+    // O agente lê o console inteiro, e o chat dos jogadores passa
+    // por ele. Sem o segredo, alguém digitando o marcador pediria
+    // um kit. Ele é sorteado A CADA SUBIDA: um segredo guardado em
+    // disco vazaria junto com qualquer backup, e não há nada aqui
+    // que precise sobreviver a um restart.
+    secret: randomUUID(),
     // Lidas UMA vez, no boot: são bytes de PNG que não mudam
     // enquanto o processo vive, e relê-las a cada envio seria ler
     // disco para mandar o mesmo conteúdo.

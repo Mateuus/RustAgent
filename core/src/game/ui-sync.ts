@@ -41,7 +41,7 @@
 
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { Logger } from '../logger.js';
-import { applyHidden } from '../types/ui-document.js';
+import { applyHidden, type UiDocument } from '../types/ui-document.js';
 import {
   buildUiDocCommand,
   buildUiScreenCommand,
@@ -52,9 +52,13 @@ import {
   toScreenBundle,
   uiDocRequestSchema,
   uiScreenRequestSchema,
+  buildUiBuyResultCommand,
+  uiBuyRequestSchema,
+  UI_BUY_MARKER,
   UI_DOC_MAX_BYTES,
   UI_REQUEST_MARKER,
   type UiDocumentPayload,
+  type UiScreenBundle,
 } from '../types/ui-transport.js';
 import { toError } from '../util.js';
 import { buildUiImageCommand, type UiImageAsset } from './ui-images.js';
@@ -139,6 +143,39 @@ export interface UiSyncDeps {
    * tabela.
    */
   readonly images?: readonly UiImageAsset[];
+  /**
+   * Telas que o AGENTE monta, em vez de virem do documento.
+   *
+   * A de kits é uma lista que muda sem ninguém abrir o editor — e
+   * que depende de QUEM está pedindo, porque o botão precisa saber
+   * quem já pegou. Ver game/ui-kits-screen.ts.
+   *
+   * Devolve `null` para tudo o que não é dela, e aí o caminho
+   * normal segue: ler a tela gravada.
+   */
+  readonly generatedScreens?: (input: {
+    readonly serverId: string;
+    readonly document: UiDocument;
+    readonly screenId: string;
+    readonly steamId: string | undefined;
+  }) => Promise<UiScreenBundle | null>;
+  /**
+   * O clique de resgate, já autenticado pelo segredo.
+   *
+   * Devolve a frase que o jogador vai ler. Ela nasce em quem
+   * conhece a regra (o `KitStore`), e não aqui.
+   */
+  readonly onBuy?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly offerId: string;
+  }) => Promise<string>;
+  /**
+   * O segredo que autentica os pedidos de resgate.
+   *
+   * Ausente = resgate desligado. Ver `UiDocPayload.secret`.
+   */
+  readonly secret?: string;
 }
 
 export class UiSync {
@@ -253,7 +290,10 @@ export class UiSync {
         documents.push(toDocumentPayload(applyHidden(stored.document, binding.hidden)));
       }
 
-      const encoded = encodeUiDocPayload({ documents });
+      const encoded = encodeUiDocPayload({
+        documents,
+        ...(this.#deps.secret === undefined ? {} : { secret: this.#deps.secret }),
+      });
 
       if (encoded.length > UI_DOC_MAX_BYTES) {
         const reason =
@@ -323,7 +363,19 @@ export class UiSync {
    * linha do servidor. Uma exceção aqui levaria o stream junto.
    */
   handleLine(serverId: string, line: string): void {
-    if (!line.includes(PLUGIN_PREFIX) || !line.includes(UI_REQUEST_MARKER)) {
+    if (!line.includes(PLUGIN_PREFIX)) {
+      return;
+    }
+
+    // O pedido de RESGATE vem no mesmo canal, com outro marcador —
+    // e com um SEGREDO, porque este aqui move item. Ver
+    // `UiDocPayload.secret`.
+    if (line.includes(UI_BUY_MARKER)) {
+      this.#handleBuy(serverId, line);
+      return;
+    }
+
+    if (!line.includes(UI_REQUEST_MARKER)) {
       return;
     }
 
@@ -357,9 +409,91 @@ export class UiSync {
     });
   }
 
+  /**
+   * O clique de resgate. NUNCA lança.
+   *
+   * ####  O SEGREDO É CONFERIDO ANTES DE QUALQUER COISA  ####
+   *
+   * O chat dos jogadores passa por este mesmo cano. Sem a
+   * conferência, alguém digitando o marcador no chat pediria um
+   * kit — e o pedido chegaria com o prefixo do plugin, porque o
+   * Oxide o põe em toda linha que o plugin imprime, inclusive nas
+   * que ele imprime POR CAUSA do chat.
+   *
+   * Uma linha forjada é DESCARTADA em silêncio: responder "segredo
+   * errado" ensinaria a tentar de novo.
+   */
+  #handleBuy(serverId: string, line: string): void {
+    const at = line.indexOf(UI_BUY_MARKER);
+
+    let payload: unknown;
+
+    try {
+      payload = JSON.parse(line.slice(at + UI_BUY_MARKER.length).trim());
+    } catch {
+      return;
+    }
+
+    const parsed = uiBuyRequestSchema.safeParse(payload);
+
+    if (!parsed.success) {
+      return;
+    }
+
+    const secret = this.#deps.secret;
+
+    if (secret === undefined || parsed.data.secret !== secret) {
+      this.#deps.logger.warn(
+        { server: serverId, steamId: parsed.data.steamId },
+        'pedido de resgate com segredo que não confere; descartado',
+      );
+      return;
+    }
+
+    const onBuy = this.#deps.onBuy;
+
+    if (onBuy === undefined) {
+      return;
+    }
+
+    void (async () => {
+      const context = this.#deps.servers.contextOf(serverId);
+
+      // O jogador está com a tela travada esperando. Falha PRECISA
+      // virar resposta — e a frase vem de quem conhece a regra.
+      let message: string;
+
+      try {
+        message = await onBuy({
+          serverId,
+          steamId: parsed.data.steamId,
+          offerId: parsed.data.offerId,
+        });
+      } catch (error) {
+        message = toError(error).message;
+      }
+
+      if (context !== null && context.rcon.isConnected) {
+        await context.rcon.send(
+          buildUiBuyResultCommand({ requestId: parsed.data.requestId, message }),
+        );
+      }
+    })().catch((error: unknown) => {
+      this.#deps.logger.warn(
+        { server: serverId, err: toError(error) },
+        'o atendimento de um resgate lançou',
+      );
+    });
+  }
+
   async #serve(
     serverId: string,
-    request: { readonly requestId: string; readonly documentId: string; readonly screenId: string },
+    request: {
+      readonly requestId: string;
+      readonly documentId: string;
+      readonly screenId: string;
+      readonly steamId?: string;
+    },
   ): Promise<void> {
     const context = this.#deps.servers.contextOf(serverId);
 
@@ -398,9 +532,37 @@ export class UiSync {
     }
 
     const document = applyHidden(bound.stored.document, bound.binding.hidden);
+
+    // ####  TELA GERADA VEM PRIMEIRO  ####
+    //
+    // A de kits tem um endereço no documento e nenhum conteúdo
+    // gravado: ele é montado do banco AGORA, e depende de quem
+    // pediu. Perguntar antes de ler o documento é o que faz um kit
+    // criado no painel aparecer no jogo sem ninguém abrir o
+    // editor.
+    let generated: UiScreenBundle | null = null;
+
+    if (this.#deps.generatedScreens !== undefined) {
+      try {
+        generated = await this.#deps.generatedScreens({
+          serverId,
+          document,
+          screenId: request.screenId,
+          steamId: request.steamId,
+        });
+      } catch (error) {
+        // Falhar ao gerar não pode virar espera eterna: cai para o
+        // caminho normal, que desenha o que está no documento.
+        this.#deps.logger.warn(
+          { server: serverId, screen: request.screenId, err: toError(error) },
+          'não consegui montar a tela gerada; servindo a do documento',
+        );
+      }
+    }
+
     // Converte AQUI, no agente: o plugin recebe CUI pronto e não
     // sabe nada sobre o modelo — ver game/ui-cui.ts.
-    const screen = toScreenBundle(document, request.screenId);
+    const screen = generated ?? toScreenBundle(document, request.screenId);
 
     if (screen === null) {
       await fail('SCREEN_NOT_FOUND');

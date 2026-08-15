@@ -47,7 +47,7 @@ import {
   type CuiElement,
   type UiActionEntry,
 } from '../game/ui-cui.js';
-import type { UiDocument } from './ui-document.js';
+import type { UiDocument, UiScreen } from './ui-document.js';
 
 // ------------------------------------------------------------
 //  Os comandos de console que o plugin expõe.
@@ -230,6 +230,44 @@ export function toScreenBundle(document: UiDocument, screenId: string): UiScreen
   };
 }
 
+/**
+ * Uma tela GERADA pelo agente, empacotada como as outras.
+ *
+ * O plugin não vê diferença: recebe CUI pronto e a tabela de
+ * ações, igual a uma tela do editor. A única marca é `volatile`,
+ * que o impede de guardar — a lista de kits mostra "daqui a 2h" e
+ * quem já pegou o quê, e em cache ela mostraria isso para sempre.
+ *
+ * ####  SEM FADE  ####
+ *
+ * O fade existe para a interface ENTRAR na tela. Numa tela que o
+ * agente remonta a cada clique, ele re-anima tudo do zero e o que
+ * o jogador vê é a lista sumindo e voltando.
+ *
+ * `activeScreenId` é o endereço que o SHELL conhece: sem ele, o
+ * destaque do botão KITS sumiria justamente ao entrar em KITS.
+ */
+export function toGeneratedScreenBundle(
+  document: UiDocument,
+  screen: UiScreen,
+  activeScreenId: string,
+): UiScreenBundle {
+  const shell = documentUsesShell(document);
+
+  return {
+    id: screen.id,
+    name: screen.name,
+    kind: screen.kind,
+    cui: shell ? screenContentToCui(document, screen, 0) : screenToCui(document, screen),
+    updates: shell ? screenUpdatesToCui(document, screen, activeScreenId) : [],
+    // O SHELL entra junto: os botões do cabeçalho são os mesmos, e
+    // sem eles o plugin recusaria o clique em HOME enquanto o
+    // jogador estivesse na lista de kits.
+    actions: collectScreenActions(screen, document.shell),
+    volatile: true,
+  };
+}
+
 export interface UiDocumentPayload {
   readonly id: string;
   readonly command: string;
@@ -256,6 +294,51 @@ export interface UiDocumentPayload {
 
 export interface UiDocPayload {
   readonly documents: readonly UiDocumentPayload[];
+  /**
+   * O segredo que autentica os pedidos de RESGATE.
+   *
+   * ####  SÓ O PREFIXO DO PLUGIN NÃO BASTA  ####
+   *
+   * O agente lê o console INTEIRO, e o chat dos jogadores entra
+   * por ele. Uma mensagem de chat com "[OrigemZUI] #OZBUY# …"
+   * chegaria com o prefixo presente — e entregaria um kit a quem
+   * digitou.
+   *
+   * O segredo muda a cada reinício do agente e só existe na
+   * memória dos dois lados e numa linha de RCON que o jogador não
+   * vê. Ausente = resgate desligado, e o plugin AVISA o jogador em
+   * vez de deixar um botão que não faz nada.
+   */
+  readonly secret?: string;
+}
+
+/** O marcador do pedido de resgate. Ver `UiDocPayload.secret`. */
+export const UI_BUY_MARKER = '#OZBUY#';
+
+/**
+ * O pedido de resgate, como o plugin o imprime.
+ *
+ * `steamId` vem da CONEXÃO que clicou, do outro lado — nunca de um
+ * argumento do comando. `offerId` é o slug do kit, e é a única
+ * coisa que o botão carrega.
+ */
+export const uiBuyRequestSchema = z.object({
+  requestId: z.string().min(1).max(64),
+  secret: z.string().min(1).max(128),
+  steamId: z.string().regex(/^\d{17}$/),
+  offerId: z.string().min(1).max(64),
+  quantity: z.number().int().min(1).max(1000),
+  documentId: z.string().min(1).max(64),
+});
+
+/** `origemz.ui.buyresult <base64>` — o desfecho, para o jogador. */
+export interface UiBuyResultPayload {
+  readonly requestId: string;
+  readonly message: string;
+}
+
+export function buildUiBuyResultCommand(payload: UiBuyResultPayload): string {
+  return `origemz.ui.buyresult ${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64')}`;
 }
 
 /**

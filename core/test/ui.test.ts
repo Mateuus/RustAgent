@@ -30,7 +30,17 @@ import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/dat
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { UiDocumentsRepository } from '../src/db/ui-documents-repository.js';
-import { cuiColor, ROOT_NAME, screenToCui, shellToCui, type CuiElement } from '../src/game/ui-cui.js';
+import {
+  collectScreenActions,
+  cuiColor,
+  ROOT_NAME,
+  screenContentToCui,
+  screenToCui,
+  shellToCui,
+  type CuiElement,
+} from '../src/game/ui-cui.js';
+import { buildKitsScreen } from '../src/game/ui-kits-screen.js';
+import type { KitOfferView } from '../src/kits/service.js';
 import { buildMainMenu, MAIN_MENU_SLUG } from '../src/game/ui-preset-main-menu.js';
 import { UiSync } from '../src/game/ui-sync.js';
 import { apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
@@ -40,6 +50,7 @@ import { applyHidden, findDocumentProblems, walkElements } from '../src/types/ui
 import {
   encodeUiDocPayload,
   toDocumentPayload,
+  toGeneratedScreenBundle,
   UI_DOC_MAX_BYTES,
   UI_REQUEST_MARKER,
 } from '../src/types/ui-transport.js';
@@ -586,5 +597,95 @@ describe('o envio ao servidor', () => {
     expect(json).not.toContain('tela-loja');
     // E o que não foi escondido continua lá.
     expect(json).toContain('nav-kits');
+  });
+});
+
+// ------------------------------------------------------------
+//  A PÁGINA DE KITS, MONTADA DO BANCO
+// ------------------------------------------------------------
+
+describe('a página de kits', () => {
+  const offer = (over: Partial<KitOfferView> = {}): KitOfferView =>
+    ({
+      id: 1,
+      slug: 'kit-inicial',
+      name: 'Kit Inicial',
+      description: null,
+      kind: 'resgate',
+      priceCents: null,
+      cooldownSeconds: null,
+      requiredTier: null,
+      items: [{ slot: 'belt', shortname: 'rifle.ak', amount: 1, skinId: '0', position: 0 }],
+      enabled: true,
+      servers: ['pvp1'],
+      claimCount: 0,
+      createdAt: '2026-08-15T00:00:00.000Z',
+      updatedAt: '2026-08-15T00:00:00.000Z',
+      available: true,
+      reason: null,
+      nextAt: null,
+      ...over,
+    }) as KitOfferView;
+
+  it('põe um botão de resgate em quem PODE pegar', () => {
+    const screen = buildKitsScreen([offer()]);
+    const document = buildMainMenu();
+    const cui = screenContentToCui(document, screen);
+
+    const commands = cui
+      .flatMap((element) => element.components)
+      .filter((component) => component.type === 'UnityEngine.UI.Button')
+      .map((component) => String(component.command));
+
+    expect(commands.length).toBe(1);
+    // O botão carrega um ENDEREÇO. O slug vai na tabela de ações,
+    // não no comando.
+    expect(commands[0]).toMatch(/^origemz\.ui\.act \{token\} pegar-kit-inicial$/);
+
+    const actions = collectScreenActions(screen);
+
+    expect(actions['pegar-kit-inicial']).toEqual({
+      kind: 'store.buy',
+      offerId: 'kit-inicial',
+      quantity: 1,
+    });
+  });
+
+  it('mostra o MOTIVO, e não um botão morto, para quem não pode', () => {
+    // Um botão que recusa depois do clique faz o jogador clicar
+    // três vezes antes de desconfiar.
+    const screen = buildKitsScreen([
+      offer({ available: false, reason: 'você já pegou este kit' }),
+    ]);
+
+    const cui = screenContentToCui(buildMainMenu(), screen);
+    const buttons = cui
+      .flatMap((element) => element.components)
+      .filter((component) => component.type === 'UnityEngine.UI.Button');
+
+    expect(buttons).toEqual([]);
+    expect(JSON.stringify(cui)).toContain('você já pegou este kit');
+  });
+
+  it('diz quando a lista não coube em vez de sumir com o resto', () => {
+    const many = Array.from({ length: 9 }, (_, index) =>
+      offer({ slug: `kit-${String(index)}`, name: `Kit ${String(index)}` }),
+    );
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), buildKitsScreen(many)));
+
+    expect(json).toContain('não couberam');
+  });
+
+  it('a tela gerada é volátil: o plugin não pode guardá-la', () => {
+    // Ela mostra "daqui a 2h" e quem já pegou o quê. Em cache,
+    // mostraria isso para sempre.
+    const document = buildMainMenu();
+    const bundle = toGeneratedScreenBundle(document, buildKitsScreen([offer()]), 'tela-kits');
+
+    expect(bundle.volatile).toBe(true);
+    // E o SHELL entra na tabela de ações: sem isso o plugin
+    // recusaria o clique em HOME enquanto o jogador estivesse aqui.
+    expect(Object.keys(bundle.actions)).toContain('ir-home');
   });
 });
