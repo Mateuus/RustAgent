@@ -31,6 +31,7 @@ import {
   LogOut,
   Menu,
   Package,
+  Package2,
   Puzzle,
   Server,
   Settings,
@@ -103,10 +104,21 @@ const NAV: readonly NavItem[] = [
     hint: 'Quem tem VIP, de que nível, até quando — e de onde veio',
     Icon: Crown,
   },
+  // ####  KITS E LOJA SÃO DUAS COISAS  ####
+  //
+  // Kit é entrega com REGRA (uma vez por jogador, de N em N horas);
+  // oferta é entrega com PREÇO. Só a segunda move dinheiro — e é por
+  // isso que ela tem carteira, estorno e extrato.
+  {
+    href: '/kits/',
+    label: 'Kits',
+    hint: 'Os kits da rede: compra, resgate único e cooldown',
+    Icon: Package2,
+  },
   {
     href: '/loja/',
     label: 'Loja',
-    hint: 'Os kits da rede: compra, resgate único e cooldown',
+    hint: 'A vitrine em OZCoin: categorias, ofertas, VIP e veículos — com carteira e estorno',
     Icon: ShoppingBag,
   },
   {

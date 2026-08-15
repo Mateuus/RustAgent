@@ -90,6 +90,31 @@ function Interface() {
     }
   };
 
+  /**
+   * Volta o desenho ao modelo, sem trocar o documento.
+   *
+   * ####  POR QUE NÃO É "CRIAR OUTRO"  ####
+   *
+   * Criar do modelo dá um documento NOVO, e cada servidor teria de
+   * escolhê-lo de novo em Configurações. Isto reescreve o que já
+   * existe: o id que o plugin guarda e os vínculos ficam de pé, e o
+   * menu chega atualizado no próximo envio.
+   */
+  const restaurarDoModelo = async (id: number): Promise<void> => {
+    try {
+      const response = await agent.resetUiDocument(id, 'menu-principal');
+
+      toast.success('Interface restaurada', { description: response.message });
+      await load();
+
+      if (openId === id) {
+        await open(id);
+      }
+    } catch (cause) {
+      toast.error(cause instanceof ApiError ? cause.message : String(cause));
+    }
+  };
+
   const salvar = async (): Promise<void> => {
     if (openId === null || draft === null) {
       return;
@@ -244,19 +269,39 @@ function Interface() {
                     </td>
 
                     <td className="px-3 py-2 text-right">
-                      <ConfirmButton
-                        variant="danger"
-                        disabled={false}
-                        icon={<Trash2 aria-hidden="true" className="h-4 w-4" />}
-                        label="Remover"
-                        confirmLabel="Remover mesmo?"
-                        hint={
-                          item.servers.length === 0
-                            ? 'Ela some do agente. Nenhum servidor a usa.'
-                            : `${String(item.servers.length)} servidor(es) ficam sem menu no jogo.`
-                        }
-                        onConfirm={() => void remover(item.id)}
-                      />
+                      <div className="flex items-center justify-end gap-2">
+                        {/* ####  O MODELO ANDA; O DOCUMENTO NÃO  ####
+
+                            O menu nasce no primeiro boot e fica
+                            parado ali. Quando o modelo ganha algo
+                            novo — o saldo no cabeçalho, os modais da
+                            loja —, este é o caminho de volta, e ele
+                            preserva os servidores que já o
+                            escolheram. */}
+                        <ConfirmButton
+                          variant="primary"
+                          disabled={false}
+                          icon={null}
+                          label="Restaurar do modelo"
+                          confirmLabel="Substituir o desenho"
+                          hint="O desenho atual é substituído INTEIRO pelo modelo do agente. Os servidores que usam esta interface continuam com ela, e recebem a versão nova no próximo envio."
+                          onConfirm={() => void restaurarDoModelo(item.id)}
+                        />
+
+                        <ConfirmButton
+                          variant="danger"
+                          disabled={false}
+                          icon={<Trash2 aria-hidden="true" className="h-4 w-4" />}
+                          label="Remover"
+                          confirmLabel="Remover mesmo?"
+                          hint={
+                            item.servers.length === 0
+                              ? 'Ela some do agente. Nenhum servidor a usa.'
+                              : `${String(item.servers.length)} servidor(es) ficam sem menu no jogo.`
+                          }
+                          onConfirm={() => void remover(item.id)}
+                        />
+                      </div>
                     </td>
                   </tr>
                 ))}

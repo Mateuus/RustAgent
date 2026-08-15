@@ -54,6 +54,12 @@
 
 import type { UiAction, UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 
+import {
+  BUNDLE_TEMPLATE_ID,
+  BUY_TEMPLATE_ID,
+  RESULT_TEMPLATE_ID,
+} from './ui-store-template.js';
+
 /** O identificador do Menu Principal. É o `slug` no banco. */
 export const MAIN_MENU_SLUG = 'menu-principal';
 
@@ -77,6 +83,12 @@ const C = {
   textMuted: '#9A9A9A',
   /** --rust-red */
   rust: '#C43F2C',
+  /** --olive — o verde de "deu certo" */
+  olive: '#6B7F5B',
+  /** --amber — a cor do OZCoin, e só dele */
+  amber: '#E6B265',
+  /** --bg */
+  bg: '#0F0F0F',
   white: '#FFFFFF',
 } as const;
 
@@ -237,14 +249,19 @@ function button(
   rect: Rect,
   text: string,
   action: UiAction,
-  variant: 'nav' | 'close',
+  variant: 'nav' | 'close' | 'comprar',
   size = 12,
   activeOnScreenId: string | null = null,
 ): UiElement {
+  // `comprar` é a única variante com fundo: ela é a ação que move
+  // dinheiro, e uma ação irreversível não pode ter o mesmo peso
+  // visual de "cancelar".
   const style =
-    variant === 'nav'
-      ? { color: '#26262600', hover: C.surface2, pressed: '#1B1B1BFF' }
-      : { color: '#26262600', hover: C.rust, pressed: '#A83525FF' };
+    variant === 'comprar'
+      ? { color: C.rust, hover: '#D4553FFF', pressed: '#A83525FF', text: C.white }
+      : variant === 'nav'
+        ? { color: '#26262600', hover: C.surface2, pressed: '#1B1B1BFF', text: C.textMuted }
+        : { color: '#26262600', hover: C.rust, pressed: '#A83525FF', text: C.textMuted };
 
   return {
     id,
@@ -257,7 +274,7 @@ function button(
     text,
     fontSize: size,
     font: 'RobotoCondensed-Bold.ttf',
-    textColor: C.textMuted,
+    textColor: style.text,
     align: 'MiddleCenter',
     action,
     hoverColor: style.hover,
@@ -371,6 +388,107 @@ function buildShell(): UiElement[] {
       { id: 'ir-discord', kind: 'chat', command: DISCORD_COMMAND },
       'nav',
     ),
+
+    // ####  O VIP DO JOGADOR  ####
+    //
+    // Duas linhas à ESQUERDA da moeda: o nível em cima, quanto falta
+    // embaixo. Nascem VAZIOS — o agente os preenche quando a
+    // interface abre, pelo mesmo caminho do saldo (`#OZBAL#`).
+    //
+    // Vazio e não "SEM VIP": este cabeçalho é empurrado ao servidor
+    // sem jogador nenhum, e um texto fixo aqui seria lido como o
+    // estado de quem abriu o menu.
+    label(
+      'vip-word',
+      'VIP (palavra)',
+      {
+        anchorMin: { x: 1, y: 0.5 },
+        anchorMax: { x: 1, y: 0.5 },
+        offsetMin: { x: -300, y: 0 },
+        offsetMax: { x: -274, y: 15 },
+      },
+      '',
+      // ####  AS DUAS LINHAS COMEÇAM NO MESMO X  ####
+      //
+      // Alinhar à direita parecia natural (o cabeçalho inteiro gruda
+      // ali), mas o nível tem largura VARIÁVEL — BRONZE é maior que
+      // OURO — e o prazo ficava desencontrado dele. Pela esquerda, as
+      // duas nascem no mesmo ponto e o que varia sobra do lado
+      // direito, onde ninguém compara.
+      { size: 12, color: C.text, align: 'MiddleLeft' },
+    ),
+    // O NÍVEL, na cor dele — o agente manda a cor junto com o texto,
+    // porque ela muda com o nível.
+    label(
+      'vip-tier',
+      'VIP (nível)',
+      {
+        anchorMin: { x: 1, y: 0.5 },
+        anchorMax: { x: 1, y: 0.5 },
+        offsetMin: { x: -272, y: 0 },
+        offsetMax: { x: -152, y: 15 },
+      },
+      '',
+      { size: 12, color: C.amber, align: 'MiddleLeft' },
+    ),
+    label(
+      'vip-left',
+      'VIP (prazo)',
+      {
+        anchorMin: { x: 1, y: 0.5 },
+        anchorMax: { x: 1, y: 0.5 },
+        offsetMin: { x: -300, y: -15 },
+        offsetMax: { x: -152, y: -1 },
+      },
+      '',
+      { size: 10, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+
+    // ####  A MOEDA  ####
+    //
+    // O PNG vive em `Assets\ui\ozcoin.png` e é o agente que o entrega
+    // ao servidor; aqui fica só a chave. Ver game/ui-images.ts para
+    // por que não é URL.
+    //
+    // Um pouco maior que o texto ao lado porque a moeda é redonda: um
+    // círculo da mesma altura de uma maiúscula parece menor do que é.
+    {
+      id: 'coin',
+      name: 'OZCoin (ícone)',
+      type: 'image',
+      rect: {
+        anchorMin: { x: 1, y: 0.5 },
+        anchorMax: { x: 1, y: 0.5 },
+        offsetMin: { x: -138, y: -12 },
+        offsetMax: { x: -114, y: 12 },
+      },
+      source: { kind: 'stored', key: 'ozcoin' },
+      // Branco: o `color` de uma imagem TINGE. Qualquer outra cor
+      // aqui pintaria a moeda por cima.
+      color: C.white,
+      children: [],
+    },
+    label(
+      'coin-value',
+      'OZCoin (valor)',
+      {
+        anchorMin: { x: 1, y: 0.5 },
+        anchorMax: { x: 1, y: 0.5 },
+        offsetMin: { x: -108, y: -12 },
+        offsetMax: { x: -52, y: 12 },
+      },
+      // ####  O TRAÇO É PROPOSITAL  ####
+      //
+      // Esta tela é EMPURRADA ao servidor sem jogador nenhum — não há
+      // saldo a preencher aqui. O plugin pede o valor ao abrir a
+      // interface e o troca no lugar.
+      //
+      // Um número fixo seria pior que um traço: o jogador o leria
+      // como se fosse o saldo dele.
+      '—',
+      { size: 17, color: C.amber, align: 'MiddleLeft' },
+    ),
+
     button(
       'btn-fechar',
       'Fechar',
@@ -571,6 +689,433 @@ function buildPlaceholder(entry: NavEntry): UiElement[] {
   ];
 }
 
+// ============================================================
+//  OS MODAIS DA LOJA
+//
+//  ####  ELES SÃO MODELOS, E NÃO TELAS  ####
+//
+//  O agente PREENCHE estes desenhos com o item, o total e as ações —
+//  ver game/ui-store-template.ts. O que está escrito aqui é exemplo:
+//  "Nome do item" vira "Assault Rifle" na hora do clique.
+//
+//  A divisão é deliberada. Posição, cor, fonte e tamanho são do
+//  ADMIN, que os edita no painel sem tocar em TypeScript. As AÇÕES
+//  são do agente, sempre: elas carregam o `offerId` e a quantidade
+//  que serão cobrados, e vindas do documento um admin distraído
+//  mudaria o preço de uma compra.
+//
+//  ####  OS IDS TERMINAM EM SUFIXOS RECONHECIDOS  ####
+//
+//  `mcnome`, `mbtotal`, `mrok`. Renomear um deles no editor faz
+//  aquele campo parar de ser preenchido — em silêncio, com o texto
+//  de exemplo na tela. É o preço de o admin poder mover tudo o
+//  resto.
+// ============================================================
+
+/** O título no topo da caixa, comum aos três modais. */
+function modalHeader(): Rect {
+  return {
+    anchorMin: { x: 0, y: 1 },
+    anchorMax: { x: 1, y: 1 },
+    offsetMin: { x: 22, y: -46 },
+    offsetMax: { x: -22, y: -14 },
+  };
+}
+
+/** O véu escuro e a caixa no meio, com a faixa de acento. */
+function modalBox(
+  prefix: string,
+  width: number,
+  height: number,
+  accent: string,
+  children: readonly UiElement[],
+): UiElement[] {
+  return [
+    panel(`${prefix}-veu`, 'Véu', inset(0, 0, 0, 0), '#000000B3', [
+      panel(
+        `${prefix}-caixa`,
+        'Caixa',
+        {
+          anchorMin: { x: 0.5, y: 0.5 },
+          anchorMax: { x: 0.5, y: 0.5 },
+          offsetMin: { x: -width / 2, y: -height / 2 },
+          offsetMax: { x: width / 2, y: height / 2 },
+        },
+        C.surface,
+        [panel(`${prefix}-acento`, 'Acento', topBar(3), accent), ...children],
+      ),
+    ]),
+  ];
+}
+
+/**
+ * O par número + moeda, com a moeda fixa à direita.
+ *
+ * São DOIS elementos porque o CUI não tem texto com imagem embutida
+ * — e por isso eles precisam ser posicionados um ao lado do outro à
+ * mão.
+ */
+function coinValue(
+  suffix: string,
+  name: string,
+  bottom: number,
+  height: number,
+  size: number,
+  color: string,
+): UiElement[] {
+  const icon = size + 2;
+
+  return [
+    label(
+      suffix,
+      name,
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: 22, y: bottom },
+        offsetMax: { x: -(22 + icon + 5), y: bottom + height },
+      },
+      '0',
+      { size, color, align: 'MiddleRight' },
+    ),
+    {
+      id: `${suffix}coin`,
+      name: `${name} (moeda)`,
+      type: 'image',
+      rect: {
+        anchorMin: { x: 1, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: -(22 + icon), y: bottom + (height - icon) / 2 },
+        offsetMax: { x: -22, y: bottom + (height + icon) / 2 },
+      },
+      source: { kind: 'stored', key: 'ozcoin' },
+      color: C.white,
+      children: [],
+    },
+  ];
+}
+
+/** O modal de um item solto: o único com seletor de quantidade. */
+function buildBuyModal(): UiElement[] {
+  const stepper = (id: string, glyph: string, left: number): UiElement =>
+    button(
+      id,
+      glyph === '+' ? 'Mais' : 'Menos',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: left, y: -142 },
+        offsetMax: { x: left + 28, y: -114 },
+      },
+      glyph,
+      // Ação de EXEMPLO: o agente a substitui pela de verdade, com a
+      // quantidade certa. Ver ui-store-template.ts.
+      { id: `${id}-a`, kind: 'modal.close' },
+      'nav',
+      15,
+    );
+
+  return modalBox('mc', 420, 285, C.rust, [
+    label('mcnome', 'Nome do item', modalHeader(), 'Nome do item', { size: 16 }),
+
+    {
+      id: 'mcicone',
+      name: 'Ícone do item',
+      type: 'image',
+      rect: {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: 22, y: -140 },
+        offsetMax: { x: 102, y: -60 },
+      },
+      // O agente troca pelo item da oferta.
+      source: { kind: 'item', itemId: 1545779598, skinId: '0' },
+      color: C.white,
+      children: [],
+    },
+
+    label(
+      'mcdesc',
+      'Descrição',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 116, y: -86 },
+        offsetMax: { x: -22, y: -62 },
+      },
+      'Uma unidade por compra',
+      { size: 12, color: C.textMuted, align: 'MiddleLeft', font: 'RobotoCondensed-Regular.ttf' },
+    ),
+
+    label(
+      'mc-rotulo-qtd',
+      'Rótulo quantidade',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 116, y: -112 },
+        offsetMax: { x: -22, y: -92 },
+      },
+      'QUANTIDADE',
+      { size: 10, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+
+    stepper('mcmenos', '−', 116),
+
+    panel(
+      'mc-caixa-qtd',
+      'Caixa da quantidade',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: 148, y: -142 },
+        offsetMax: { x: 196, y: -114 },
+      },
+      C.bg,
+      [label('mcqtd', 'Quantidade', inset(0, 0, 0, 0), '1', { size: 14 })],
+    ),
+
+    stepper('mcmais', '+', 200),
+
+    label(
+      'mc-rotulo-total',
+      'Rótulo total',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 22, y: 78 },
+        offsetMax: { x: 120, y: 104 },
+      },
+      'TOTAL',
+      { size: 11, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+
+    ...coinValue('mctotal', 'Total', 78, 26, 18, C.amber),
+    ...coinValue('mcsaldo', 'Saldo', 54, 18, 11, C.textMuted),
+
+    button(
+      'mccancelar',
+      'Cancelar',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 22, y: 16 },
+        offsetMax: { x: 110, y: 46 },
+      },
+      'CANCELAR',
+      { id: 'mccancelar-a', kind: 'modal.close' },
+      'nav',
+      12,
+    ),
+
+    button(
+      'mccomprar',
+      'Comprar',
+      {
+        anchorMin: { x: 1, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: -170, y: 16 },
+        offsetMax: { x: -22, y: 46 },
+      },
+      'CONFIRMAR COMPRA',
+      // Substituída pelo agente pela ação de compra de verdade.
+      { id: 'mccomprar-a', kind: 'modal.close' },
+      'comprar',
+      12,
+    ),
+  ]);
+}
+
+/**
+ * O modal de kit, VIP e veículo.
+ *
+ * Sem seletor de quantidade: "3x Kit Base" não é uma compra que
+ * alguém queira fazer, e "2x VIP Ouro 30 dias" é ambíguo — vira 60
+ * dias ou dois VIPs?
+ */
+function buildBundleModal(): UiElement[] {
+  return modalBox('mb', 420, 340, C.rust, [
+    label('mbnome', 'Nome', modalHeader(), 'Nome do pacote', { size: 16 }),
+
+    {
+      id: 'mbicone',
+      name: 'Ícone',
+      type: 'image',
+      rect: {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: 22, y: -140 },
+        offsetMax: { x: 102, y: -60 },
+      },
+      source: { kind: 'item', itemId: 1189981699, skinId: '0' },
+      color: C.white,
+      children: [],
+    },
+
+    label(
+      'mbdesc',
+      'Resumo',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 116, y: -86 },
+        offsetMax: { x: -22, y: -62 },
+      },
+      '3 itens no kit',
+      { size: 12, color: C.textMuted, align: 'MiddleLeft', font: 'RobotoCondensed-Regular.ttf' },
+    ),
+
+    label(
+      'mbtitulo',
+      'Título da lista',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 22, y: -168 },
+        offsetMax: { x: -22, y: -152 },
+      },
+      'O QUE VEM NO KIT',
+      { size: 10, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+
+    // ####  O SLOT  ####
+    //
+    // Nasce VAZIO de propósito. Mova e redimensione à vontade — é a
+    // área que o agente preenche com o conteúdo do pacote, e um
+    // desenho fixo não teria como abrir espaço para três itens hoje e
+    // sete amanhã.
+    panel(
+      'mblista',
+      'Lista (preenchida pelo agente)',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 22, y: -304 },
+        offsetMax: { x: -22, y: -172 },
+      },
+      '#00000000',
+    ),
+
+    label(
+      'mb-rotulo-total',
+      'Rótulo total',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 22, y: 78 },
+        offsetMax: { x: 120, y: 104 },
+      },
+      'TOTAL',
+      { size: 11, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+
+    ...coinValue('mbtotal', 'Total', 78, 26, 18, C.amber),
+
+    label(
+      'mbsaldo',
+      'Saldo',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: 22, y: 54 },
+        offsetMax: { x: -22, y: 72 },
+      },
+      'Seu saldo: 0',
+      { size: 11, color: C.textMuted, align: 'MiddleRight' },
+    ),
+
+    button(
+      'mbcancelar',
+      'Cancelar',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 22, y: 16 },
+        offsetMax: { x: 110, y: 46 },
+      },
+      'CANCELAR',
+      { id: 'mbcancelar-a', kind: 'modal.close' },
+      'nav',
+      12,
+    ),
+
+    button(
+      'mbcomprar',
+      'Comprar',
+      {
+        anchorMin: { x: 1, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: -170, y: 16 },
+        offsetMax: { x: -22, y: 46 },
+      },
+      'CONFIRMAR COMPRA',
+      { id: 'mbcomprar-a', kind: 'modal.close' },
+      'comprar',
+      12,
+    ),
+  ]);
+}
+
+/**
+ * O aviso do desfecho.
+ *
+ * ####  POR QUE ELE É UM MODAL, E NÃO UMA LINHA DE CHAT  ####
+ *
+ * A mensagem de chat aparece atrás do menu aberto, no canto, e some
+ * sozinha. Quem acabou de gastar OZCoin fica olhando a loja sem
+ * saber se funcionou — e clica de novo. O modal exige um OK.
+ */
+function buildResultModal(): UiElement[] {
+  return modalBox('mr', 400, 190, C.olive, [
+    label('mrtitulo', 'Título', modalHeader(), 'COMPRA CONCLUÍDA', {
+      size: 15,
+      color: C.olive,
+      align: 'MiddleLeft',
+    }),
+
+    label(
+      'mrmsg',
+      'Mensagem',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 22, y: 60 },
+        offsetMax: { x: -22, y: -52 },
+      },
+      'O que aconteceu com a compra aparece aqui.',
+      { size: 13, align: 'UpperLeft', font: 'RobotoCondensed-Regular.ttf' },
+    ),
+
+    label(
+      'mrsaldo',
+      'Saldo',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 22, y: 16 },
+        offsetMax: { x: 200, y: 44 },
+      },
+      'Saldo: 0',
+      { size: 12, color: C.amber, align: 'MiddleLeft' },
+    ),
+
+    button(
+      'mrok',
+      'OK',
+      {
+        anchorMin: { x: 1, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: -110, y: 16 },
+        offsetMax: { x: -22, y: 44 },
+      },
+      'OK',
+      { id: 'mrok-a', kind: 'modal.close' },
+      'nav',
+      12,
+    ),
+  ]);
+}
+
 // ------------------------------------------------------------
 //  O DOCUMENTO
 // ------------------------------------------------------------
@@ -601,6 +1146,32 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
         elements: buildPlaceholder(entry),
       }),
     ),
+
+    // ####  OS MODAIS DA LOJA  ####
+    //
+    // Eles NÃO são navegáveis: nenhum botão do menu leva a eles. São
+    // MODELOS que o agente preenche na hora do clique — ver
+    // game/ui-store-template.ts.
+    //
+    // Ficam no documento (e não no código do gerador) para que o
+    // admin possa mover, recolorir e redimensionar tudo no editor.
+    // Apagá-los é legítimo: o gerador cai no layout embutido.
+    //
+    // Eles também não pesam na carga inicial: só a tela de ENTRADA
+    // viaja nela — o resto vai no índice, com id e nome.
+    { id: BUY_TEMPLATE_ID, name: 'Modal · comprar item', kind: 'modal', elements: buildBuyModal() },
+    {
+      id: BUNDLE_TEMPLATE_ID,
+      name: 'Modal · comprar pacote',
+      kind: 'modal',
+      elements: buildBundleModal(),
+    },
+    {
+      id: RESULT_TEMPLATE_ID,
+      name: 'Modal · resultado',
+      kind: 'modal',
+      elements: buildResultModal(),
+    },
   ];
 
   return {

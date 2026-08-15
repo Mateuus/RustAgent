@@ -24,7 +24,7 @@
 //  ajuste.
 // ============================================================
 
-import { Ban as BanIcon, Copy, Crown, History, IdCard, Server } from 'lucide-react';
+import { Ban as BanIcon, Copy, Crown, History, IdCard, Server, Wallet } from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
@@ -35,6 +35,8 @@ import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { VipDialog } from '@/components/vip-dialog';
 import {
   agent,
@@ -43,14 +45,16 @@ import {
   type PlayerEventSample,
   type PlayerIdentity,
   type PlayerServer,
+  type StorePurchase,
   type Vip,
+  type WalletView,
 } from '@/lib/api';
 import { copySteamId } from '@/lib/clipboard';
 import { EM_DASH, formatDateTime, formatDuration, formatInteger, formatWhen } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-type Tab = 'identidade' | 'servidores' | 'vip' | 'historico';
+type Tab = 'identidade' | 'servidores' | 'vip' | 'carteira' | 'historico';
 
 const TABS = [
   { key: 'identidade', label: 'Identidade', Icon: IdCard },
@@ -61,6 +65,10 @@ const TABS = [
   // das abas é a da pergunta: quem é, onde joga, o que tem, e por
   // último o que já aconteceu.
   { key: 'vip', label: 'VIP', Icon: Crown },
+  // A carteira ao lado do VIP pelo mesmo motivo: ela é estado. E é
+  // aqui que chega quem veio do Discord perguntar "paguei e não
+  // recebi" — o saldo, o extrato e as compras na mesma tela.
+  { key: 'carteira', label: 'Carteira', Icon: Wallet },
   { key: 'historico', label: 'Histórico', Icon: History },
 ] as const;
 
@@ -254,6 +262,8 @@ function Jogador() {
             {tab === 'servidores' && <Servidores servers={servers} known={player.known} />}
 
             {tab === 'vip' && <VipDoJogador steamId={steamId} />}
+
+            {tab === 'carteira' && <CarteiraDoJogador steamId={steamId} />}
 
             {tab === 'historico' && <Historico steamId={steamId} />}
           </div>
@@ -833,6 +843,254 @@ function VipDoJogador({ steamId }: { readonly steamId: string }) {
             void load();
           }}
         />
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------
+//  Carteira
+//
+//  ####  O SALDO, O EXTRATO E AS COMPRAS NA MESMA TELA  ####
+//
+//  Quem abre esta aba quase sempre veio de uma pergunta só: "paguei
+//  e não recebi". Ela só tem resposta com as três coisas juntas — o
+//  saldo de agora, o lançamento que o tirou, e a compra que aquele
+//  lançamento pagou.
+//
+//  ####  E O LANÇAMENTO À MÃO SÓ EXISTE NA CARTEIRA LOCAL  ####
+//
+//  Com a remota no ar, quem manda no saldo é o site externo: um
+//  crédito daqui criaria um número que ele não conhece. O formulário
+//  SOME, e a tela diz por quê — um botão que sempre recusa é pior
+//  que um botão ausente.
+// ------------------------------------------------------------
+function CarteiraDoJogador({ steamId }: { readonly steamId: string }) {
+  const [wallet, setWallet] = useState<WalletView | null>(null);
+  const [purchases, setPurchases] = useState<StorePurchase[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await agent.wallet(steamId);
+
+      setWallet(response);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+
+    try {
+      setPurchases((await agent.storePurchases({ steamId, limit: 50 })).purchases);
+    } catch {
+      // O histórico de compras é secundário: sem ele o saldo e o
+      // extrato continuam respondendo.
+    }
+  }, [steamId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function move(): Promise<void> {
+    const value = Number(amount);
+
+    if (!Number.isInteger(value) || value === 0) {
+      toast.error('Confira o valor', {
+        description: 'em OZCoin INTEIRO. Negativo tira do saldo; a moeda não tem centavo.',
+      });
+
+      return;
+    }
+
+    if (reason.trim() === '') {
+      toast.error('Confira o motivo', {
+        description: 'ele fica no extrato, e é a única resposta a "de onde veio este saldo?".',
+      });
+
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      const response = await agent.moveWallet(steamId, { amount: value, reason: reason.trim() });
+
+      toast.success(value > 0 ? 'Saldo creditado' : 'Saldo debitado', {
+        description: `Agora ele tem ${response.balance.toLocaleString('pt-BR')} OZ.`,
+      });
+
+      setAmount('');
+      setReason('');
+      await load();
+    } catch (cause) {
+      toast.error('Não consegui lançar', {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {error !== null && (
+        <StateBlock variant="error" title="Não consegui ler a carteira" detail={error} />
+      )}
+
+      {wallet === null && error === null && <StateBlock variant="loading" title="Lendo o saldo…" />}
+
+      {wallet !== null && (
+        <>
+          <section className="border border-border bg-surface p-4">
+            <p className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+              Saldo
+            </p>
+
+            <p className="mt-1 font-mono text-3xl text-amber">
+              {wallet.balance.toLocaleString('pt-BR')} OZ
+            </p>
+
+            <p className="mt-1 text-2xs leading-relaxed text-muted">
+              {wallet.source === 'local'
+                ? 'A carteira deste agente é a LOCAL: o saldo mora no banco dele.'
+                : 'O saldo vem do SITE EXTERNO. O extrato abaixo é o do agente — história, não o valor de hoje.'}
+            </p>
+          </section>
+
+          {wallet.source === 'local' && (
+            <section className="border border-border bg-surface p-4">
+              <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+                <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
+                Lançar à mão
+              </h2>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-[10rem_1fr_auto] sm:items-end">
+                <div>
+                  <Label>Valor em OZ</Label>
+                  <Input
+                    type="number"
+                    step={1}
+                    value={amount}
+                    placeholder="500"
+                    disabled={busy}
+                    onChange={(event) => setAmount(event.target.value)}
+                    className="font-mono"
+                  />
+                </div>
+
+                <div>
+                  <Label>Motivo</Label>
+                  <Input
+                    value={reason}
+                    placeholder="estorno da compra presa"
+                    disabled={busy}
+                    onChange={(event) => setReason(event.target.value)}
+                  />
+                </div>
+
+                <Button variant="primary" disabled={busy} onClick={() => void move()}>
+                  Lançar
+                </Button>
+              </div>
+
+              <p className="mt-2 text-2xs leading-relaxed text-muted">
+                Negativo <strong>tira</strong>. O motivo fica no extrato — é a única resposta a
+                &ldquo;de onde veio este saldo?&rdquo; daqui a três meses.
+              </p>
+            </section>
+          )}
+
+          <section className="border border-border bg-surface">
+            <div className="border-b border-border px-3 py-2">
+              <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+                <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
+                Extrato
+              </h2>
+            </div>
+
+            {wallet.entries.length === 0 ? (
+              <div className="p-3">
+                <StateBlock variant="empty" title="Nenhum lançamento ainda" />
+              </div>
+            ) : (
+              <ul className="divide-y divide-border">
+                {wallet.entries.map((entry) => (
+                  <li key={entry.id} className="flex flex-wrap gap-x-3 gap-y-1 px-3 py-2 text-sm">
+                    <span
+                      className={cn(
+                        'w-24 shrink-0 text-right font-mono',
+                        entry.amount < 0 ? 'text-rust' : 'text-olive',
+                      )}
+                    >
+                      {entry.amount > 0 ? '+' : ''}
+                      {entry.amount.toLocaleString('pt-BR')}
+                    </span>
+
+                    {/* O saldo DEPOIS: é ele que faz a coluna ao lado
+                        virar uma conta que fecha. */}
+                    <span className="w-24 shrink-0 text-right font-mono text-2xs text-muted">
+                      {entry.balance.toLocaleString('pt-BR')}
+                    </span>
+
+                    <span className="min-w-40 flex-1 truncate">{entry.reason}</span>
+
+                    <span className="text-2xs text-muted">{formatWhen(entry.createdAt)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {purchases.length > 0 && (
+            <section className="border border-border bg-surface">
+              <div className="border-b border-border px-3 py-2">
+                <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+                  <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
+                  O que ele comprou
+                </h2>
+              </div>
+
+              <ul className="divide-y divide-border">
+                {purchases.map((purchase) => (
+                  <li
+                    key={purchase.id}
+                    className="flex flex-wrap gap-x-3 gap-y-1 px-3 py-2 text-sm"
+                  >
+                    <span className="min-w-40 flex-1 truncate">{purchase.offerName}</span>
+
+                    <span className="font-mono text-2xs text-amber">
+                      {purchase.totalPrice.toLocaleString('pt-BR')} OZ
+                    </span>
+
+                    <span className="text-2xs text-muted">{purchase.serverId}</span>
+
+                    <span className="text-2xs text-muted">{formatWhen(purchase.createdAt)}</span>
+
+                    <span
+                      className={cn(
+                        'text-2xs',
+                        purchase.state === 'failed'
+                          ? 'text-rust'
+                          : purchase.state === 'delivered'
+                            ? 'text-muted'
+                            : 'text-amber',
+                      )}
+                    >
+                      {purchase.state === 'failed'
+                        ? 'PRESA — pagou e não recebeu'
+                        : purchase.state}
+                      {purchase.error === null ? '' : ` — ${purchase.error}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </>
       )}
     </div>
   );

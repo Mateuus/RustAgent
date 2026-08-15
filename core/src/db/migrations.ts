@@ -1087,6 +1087,444 @@ DROP TABLE player_events_006;
 CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
 `;
 
+// ------------------------------------------------------------
+//  015 — a loja: categorias, ofertas e o que cada uma entrega
+//
+//  ####  A LOJA É DA REDE; A COMPRA É DE UM LUGAR  ####
+//
+//  Categorias e ofertas NÃO têm `server_id`: a vitrine é a mesma em
+//  todo servidor, e é isso que faz criar uma promoção uma vez em vez
+//  de cinco. O que tem servidor é a COMPRA — ela foi paga por um
+//  jogador que estava em algum mundo, e o item nasceu no inventário
+//  dele lá.
+//
+//  Mesma escolha dos kits (012) e dos VIPs (010), pelo mesmo motivo.
+//
+//  ####  A OFERTA TEM QUATRO FORMATOS, E ELES NÃO SÃO COSMÉTICOS  ####
+//
+//    item     um item do jogo. O ícone é ele mesmo.
+//    bundle   um kit: vários itens numa compra. Alguém precisa
+//             ESCOLHER o ícone — não existe "o item" de um kit.
+//    vip      um nível com prazo, mais a lista de vantagens.
+//    vehicle  um veículo que nasce no mundo. É o único que pode
+//             falhar por motivo legítimo: não caber onde a pessoa
+//             está.
+//
+//  Os quatro entregam pela mesma tabela filha. O que muda é o que a
+//  loja mostra e o que a compra concede ALÉM dos itens.
+//
+//  ####  A COMPRA GUARDA UMA CÓPIA DA OFERTA  ####
+//
+//  `store_purchases` copia nome, preço e ícone em vez de apontar
+//  para `store_offers`. Não é redundância: a oferta pode ser editada
+//  ou apagada depois, e o histórico precisa dizer o que a pessoa
+//  PAGOU — não o preço de hoje.
+//
+//  Uma junção responderia "quanto custa"; a cópia responde "quanto
+//  custou", que é a pergunta do suporte.
+// ------------------------------------------------------------
+const STORE_SCHEMA = `
+CREATE TABLE store_categories (
+  id   TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+
+  -- A ordem das abas no jogo. Empate desempata por nome, para a
+  -- barra não trocar de ordem entre duas leituras.
+  position INTEGER NOT NULL DEFAULT 0,
+
+  -- Categoria desligada leva as ofertas dela junto — é o que
+  -- "desligar a categoria" significa para quem administra.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE store_offers (
+  id          TEXT PRIMARY KEY,
+  category_id TEXT NOT NULL REFERENCES store_categories(id) ON DELETE CASCADE,
+
+  kind TEXT NOT NULL CHECK (kind IN ('item', 'bundle', 'vip', 'vehicle')),
+
+  -- O DESENHO da oferta na loja. Vem de campo próprio, e não do
+  -- item entregue: um kit de dez coisas não tem "o item", e quem
+  -- escolhe o ícone é o admin.
+  --
+  -- \`icon_skin_id\` é TEXT porque id de workshop passa de 2^53 e
+  -- não sobreviveria a um número de JavaScript.
+  icon_shortname TEXT NOT NULL,
+  icon_item_id   INTEGER NOT NULL,
+  icon_skin_id   TEXT NOT NULL DEFAULT '0',
+
+  -- Só em 'vip'. \`vip_days\` NULL = VITALÍCIO, que é o que "sem
+  -- vencimento" significa no vips-repository.
+  vip_tier TEXT,
+  vip_days INTEGER,
+
+  -- Só em 'vehicle'. \`prefab\` é o NOME CURTO (minicopter,
+  -- rowboat): o jogo resolve o caminho, e ele não muda quando a
+  -- Facepunch move um arquivo.
+  vehicle_prefab TEXT,
+  vehicle_fuel   INTEGER NOT NULL DEFAULT 0,
+
+  name TEXT NOT NULL,
+
+  -- Em OZCoin INTEIRO. A moeda não tem centavo, e saldo em float é
+  -- como um débito de 10 vira 9,999999 e sobra um troco que a tela
+  -- arredonda para zero.
+  price INTEGER NOT NULL,
+
+  -- O preço RISCADO ao lado, em promoção. NULL = não mostra nada.
+  -- Uma etiqueta de promoção sozinha diz que há desconto, mas não
+  -- QUANTO — é este número que a transforma em argumento.
+  old_price INTEGER,
+
+  position INTEGER NOT NULL DEFAULT 0,
+  enabled  INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- Lista fechada, e não texto livre: cada etiqueta tem cor própria
+  -- na loja, e um valor solto sairia sem cor nenhuma — visível no
+  -- painel e invisível no jogo.
+  badge TEXT CHECK (badge IS NULL OR badge IN ('promo', 'novo', 'destaque')),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- "O que tem nesta categoria?" é a pergunta de cada clique numa aba
+-- da loja, no jogo.
+CREATE INDEX idx_store_offers_category ON store_offers (category_id, position);
+
+-- O que a compra ENTREGA. Vazio é estado válido durante a edição —
+-- um kit começa sem itens; a borda HTTP é quem recusa publicar
+-- assim.
+CREATE TABLE store_offer_items (
+  id        TEXT PRIMARY KEY,
+  offer_id  TEXT NOT NULL REFERENCES store_offers(id) ON DELETE CASCADE,
+  shortname TEXT NOT NULL,
+  item_id   INTEGER NOT NULL,
+  skin_id   TEXT NOT NULL DEFAULT '0',
+  amount    INTEGER NOT NULL,
+  position  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_store_offer_items_offer ON store_offer_items (offer_id, position);
+
+-- As vantagens listadas no modal, só para 'vip'. Elas não são
+-- coisas: são promessas, e por isso são TEXTO e não itens.
+CREATE TABLE store_offer_perks (
+  id       TEXT PRIMARY KEY,
+  offer_id TEXT NOT NULL REFERENCES store_offers(id) ON DELETE CASCADE,
+  text     TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_store_offer_perks_offer ON store_offer_perks (offer_id, position);
+
+-- ----------------------------------------------------------
+--  store_purchases — o que aconteceu, e em que estado parou.
+--
+--  ####  OS ESTADOS SÃO UMA MÁQUINA, E ELA TEM UM BECO  ####
+--
+--    pending    a linha nasceu; nada foi movido ainda
+--    debited    o dinheiro saiu
+--    delivered  o item chegou. FIM feliz.
+--    refunded   a entrega falhou e o valor voltou
+--    failed     debitou, não entregou E não estornou
+--
+--  O último é o beco: ele PRECISA DE GENTE. Sem um estado próprio,
+--  esse caso seria uma linha de log que ninguém lê — e o jogador
+--  que perdeu o saldo descobriria no Discord.
+--
+--  ####  SEM FK PARA \`servers\`  ####
+--
+--  Ao contrário de \`kit_claims\` e do resto do projeto. Apagar um
+--  servidor não pode apagar o comprovante de uma compra: ele é a
+--  resposta a "eu paguei e não recebi", e essa pergunta chega
+--  meses depois, às vezes de um servidor que já não existe.
+-- ----------------------------------------------------------
+CREATE TABLE store_purchases (
+  id        TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  -- O id da oferta E uma cópia do que ela era. Ver o cabeçalho.
+  offer_id    TEXT NOT NULL,
+  offer_name  TEXT NOT NULL,
+  shortname   TEXT NOT NULL,
+  skin_id     TEXT NOT NULL DEFAULT '0',
+  amount      INTEGER NOT NULL,
+  unit_price  INTEGER NOT NULL,
+  total_price INTEGER NOT NULL,
+
+  state TEXT NOT NULL
+    CHECK (state IN ('pending', 'debited', 'delivered', 'refunded', 'failed')),
+  error TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- "O que este jogador comprou?" — a ficha dele e o suporte.
+CREATE INDEX idx_store_purchases_player ON store_purchases (steam_id, created_at DESC);
+
+-- "O que travou?" — a tela das compras presas, que é o motivo de
+-- \`failed\` existir. Índice PARCIAL: as entregues são a esmagadora
+-- maioria e não interessam a esta pergunta.
+CREATE INDEX idx_store_purchases_stuck ON store_purchases (created_at DESC)
+  WHERE state IN ('pending', 'debited', 'failed');
+
+CREATE INDEX idx_store_purchases_server ON store_purchases (server_id, created_at DESC);
+`;
+
+// ------------------------------------------------------------
+//  016 — a carteira do agente
+//
+//  ####  ELA É UMA DAS DUAS FONTES, NÃO A ÚNICA  ####
+//
+//  O saldo pode morar aqui ou no site externo — ver store/wallet.ts.
+//  Quem chama não sabe qual das duas está no ar, e a virada é uma
+//  variável de ambiente.
+//
+//  Esta tabela é a carteira LOCAL. Ela NÃO é migrada para a remota
+//  automaticamente: são carteiras diferentes, e somar uma na outra
+//  sem alguém mandar seria inventar dinheiro.
+//
+//  ####  O EXTRATO NÃO É LUXO  ####
+//
+//  Sem \`wallet_entries\`, "eu tinha 500 e agora tenho 200" não tem
+//  resposta — e essa pergunta chega no primeiro dia. O saldo é o
+//  estado; o extrato é o que explica como se chegou nele.
+//
+//  ####  O ID DO LANÇAMENTO É PRÓPRIO, E NÃO DERIVADO  ####
+//
+//  Débito e estorno da MESMA compra compartilham a \`reference\`.
+//  Derivar o id dela faria os dois colidirem no mesmo milissegundo —
+//  e o jogador ficaria sem o item E sem o dinheiro.
+// ------------------------------------------------------------
+const WALLETS_SCHEMA = `
+CREATE TABLE wallets (
+  steam_id TEXT PRIMARY KEY,
+
+  -- INTEIRO, e nunca negativo. Quem impede de verdade é a transação
+  -- do repositório; o CHECK é a rede embaixo dela — um saldo
+  -- negativo gravado é dinheiro inventado que ninguém explica
+  -- depois.
+  balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
+
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE wallet_entries (
+  id       TEXT PRIMARY KEY,
+  steam_id TEXT NOT NULL,
+
+  -- A VARIAÇÃO (negativa no débito) e o saldo DEPOIS dela. Os dois,
+  -- porque recalcular o saldo somando o extrato inteiro é a conta
+  -- que sai errada no dia em que uma linha se perde.
+  amount  INTEGER NOT NULL,
+  balance INTEGER NOT NULL,
+
+  reason TEXT NOT NULL,
+  -- O que liga o lançamento à compra. Ver o cabeçalho.
+  reference TEXT,
+
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_wallet_entries_player ON wallet_entries (steam_id, created_at DESC);
+`;
+
+// ------------------------------------------------------------
+//  017 — a compra entra na linha do tempo do jogador
+//
+//  Mesmo motivo do VIP e do kit na 014, e o mesmo procedimento: o
+//  SQLite não altera um CHECK no lugar, então a tabela é recriada
+//  com os dados copiados.
+//
+//  ####  POR QUE ELA PRECISA ESTAR NA FICHA  ####
+//
+//  `store_purchases` responde "o que ele comprou". A ficha responde
+//  outra coisa: "o que aconteceu com este jogador, em ordem" — e
+//  "comprou VIP Ouro" ao lado do banimento da semana seguinte é
+//  exatamente o que o suporte lê antes de responder.
+// ------------------------------------------------------------
+const PLAYER_EVENTS_STORE_SCHEMA = `
+ALTER TABLE player_events RENAME TO player_events_014;
+
+CREATE TABLE player_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  steam_id  TEXT NOT NULL,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  --   'join'      entrou (a varredura o viu chegar)
+  --   'leave'     saiu   (a varredura o viu sumir)
+  --   'kick'      expulso pelo painel
+  --   'teleport'  movido pelo painel
+  --   'vip'       ganhou, renovou ou perdeu um nível
+  --   'kit'       resgatou (ou tentou resgatar) um kit
+  --   'compra'    comprou algo na loja
+  kind TEXT NOT NULL
+    CHECK (kind IN ('join', 'leave', 'kick', 'teleport', 'vip', 'kit', 'compra')),
+
+  at INTEGER NOT NULL,
+  actor TEXT,
+  detail TEXT
+);
+
+INSERT INTO player_events (id, steam_id, server_id, kind, at, actor, detail)
+SELECT id, steam_id, server_id, kind, at, actor, detail FROM player_events_014;
+
+DROP TABLE player_events_014;
+
+CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
+`;
+
+// ------------------------------------------------------------
+//  018 — o extrato ganha uma ordem estável
+//
+//  ####  DOIS LANÇAMENTOS DO MESMO MILISSEGUNDO EMBARALHAVAM  ####
+//
+//  MEDIDO no teste: `created_at` é a ordenação do extrato, e o
+//  desempate era o `id` — que na 016 era um UUID ALEATÓRIO. Débito e
+//  estorno de uma compra que falha rápido caem no mesmo
+//  milissegundo, e a ordem entre eles saía sorteada.
+//
+//  O sintoma é pior do que parece: a coluna "saldo depois" só faz
+//  sentido em sequência. Fora de ordem, o extrato mostra o saldo
+//  subindo antes de cair — e quem o lê para conferir uma cobrança
+//  conclui que a conta não fecha.
+//
+//  Com \`AUTOINCREMENT\`, a ordem de INSERÇÃO vira o desempate, e ela
+//  é a ordem real dos fatos. O id continua PRÓPRIO (não derivado da
+//  \`reference\`), que era a razão de ele não ser a chave da compra —
+//  ver o cabeçalho da 016.
+// ------------------------------------------------------------
+const WALLET_ENTRIES_ORDER_SCHEMA = `
+ALTER TABLE wallet_entries RENAME TO wallet_entries_016;
+
+CREATE TABLE wallet_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  steam_id TEXT NOT NULL,
+  amount   INTEGER NOT NULL,
+  balance  INTEGER NOT NULL,
+
+  reason    TEXT NOT NULL,
+  reference TEXT,
+
+  created_at INTEGER NOT NULL
+);
+
+-- Sem o \`id\` antigo: ele era um UUID, e numerar de novo pela data é
+-- justamente a ordem que se quer daqui em diante.
+INSERT INTO wallet_entries (steam_id, amount, balance, reason, reference, created_at)
+SELECT steam_id, amount, balance, reason, reference, created_at
+  FROM wallet_entries_016
+ ORDER BY created_at ASC;
+
+DROP TABLE wallet_entries_016;
+
+CREATE INDEX idx_wallet_entries_player ON wallet_entries (steam_id, created_at DESC);
+`;
+
+// ------------------------------------------------------------
+//  019 — o kit ganha categoria
+//
+//  ####  A VITRINE PRECISA DE ABAS PELO MESMO MOTIVO DA LOJA  ####
+//
+//  Oito kits cabem numa página; vinte não. Sem um agrupamento, o
+//  jogador pagina até achar — e "onde está o kit de VIP?" vira uma
+//  busca em vez de um clique.
+//
+//  ####  TEXTO LIVRE, E NÃO UMA TABELA  ####
+//
+//  Uma tabela de categorias (como a da loja) traria id, ordem e
+//  ligado/desligado — três coisas para manter por uma aba que só
+//  precisa de um nome. A loja tem essa tabela porque lá a categoria
+//  é o que o admin publica e despublica; aqui ela é um rótulo.
+//
+//  NULL = sem categoria. A tela junta esses num grupo "GERAL", e não
+//  mostra aba nenhuma quando todos caem nele.
+// ------------------------------------------------------------
+const KIT_CATEGORY_SCHEMA = `
+ALTER TABLE kits ADD COLUMN category TEXT;
+`;
+
+// ------------------------------------------------------------
+//  020 — o kit que só libera algum tempo depois do wipe
+//
+//  ####  O PRIMEIRO DIA É O QUE DECIDE O WIPE  ####
+//
+//  Um kit avançado entregue na primeira hora apaga a corrida inicial
+//  — que é a parte do jogo que traz gente de volta a cada wipe. Com
+//  o atraso, ele continua existindo e deixa de ser um atalho para
+//  pular o começo.
+//
+//  ####  EM SEGUNDOS, COMO O COOLDOWN  ####
+//
+//  Mesma unidade da coluna ao lado, pelo mesmo motivo: minuto e hora
+//  são formatação, e formatação no banco é o que faz dois lugares
+//  discordarem sobre o que "2" significa.
+//
+//  NULL = sem bloqueio, que é o caso da esmagadora maioria.
+//
+//  A hora do wipe NÃO é gravada aqui: quem a sabe é o servidor
+//  (`SaveCreatedTime` do `serverinfo`) — ver game/wipe.ts.
+// ------------------------------------------------------------
+const KIT_WIPE_DELAY_SCHEMA = `
+ALTER TABLE kits ADD COLUMN wipe_delay_seconds INTEGER;
+`;
+
+// ------------------------------------------------------------
+//  021 — quem mexeu na loja, e o quê
+//
+//  ####  O PREÇO MUDA E NINGUÉM SABE QUEM MUDOU  ####
+//
+//  `store_offers` guarda o preço de AGORA. Quando um item amanhece
+//  custando o dobro, ela não tem como responder "quem fez isso, e
+//  quando?" — e essa é exatamente a pergunta que aparece quando o
+//  primeiro jogador reclama.
+//
+//  O log do processo registra (as rotas já logam), mas ele rola: em
+//  duas semanas a linha sumiu. Isto fica.
+//
+//  ####  O QUE ELE GUARDA É O FATO, NÃO O ESTADO  ####
+//
+//  `detail` é uma frase pronta ("preço 5000 -> 4500"), e não um
+//  diff estruturado. Um diff exigiria versionar a oferta inteira
+//  para ser reconstruído, e o que se lê numa auditoria é a FRASE —
+//  quem quiser o estado de hoje abre a vitrine.
+// ------------------------------------------------------------
+const STORE_AUDIT_SCHEMA = `
+CREATE TABLE store_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  at INTEGER NOT NULL,
+
+  -- Quem. NULL = veio pelo token de integração (o site), e não de
+  -- uma sessão do painel.
+  actor TEXT,
+
+  -- O que aconteceu: 'category.create', 'offer.update',
+  -- 'wallet.credit'… Texto livre porque a lista cresce com a loja, e
+  -- um CHECK aqui viraria uma migração por ação nova.
+  action TEXT NOT NULL,
+
+  -- Sobre o quê: o NOME da oferta ou o SteamID. Nome, e não id: quem
+  -- lê a auditoria quer reconhecer, e o id de uma oferta apagada não
+  -- diz nada.
+  target TEXT NOT NULL,
+
+  detail TEXT
+);
+
+-- A tela lê os últimos. Sem o índice, cada abertura varre a tabela
+-- que mais cresce depois das compras.
+CREATE INDEX idx_store_audit_at ON store_audit (at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -1104,6 +1542,13 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 12, name: 'kits', sql: KITS_SCHEMA },
   { id: 13, name: 'kit-claims', sql: KIT_CLAIMS_SCHEMA },
   { id: 14, name: 'player-events-vip-kit', sql: PLAYER_EVENTS_VIP_SCHEMA },
+  { id: 15, name: 'store', sql: STORE_SCHEMA },
+  { id: 16, name: 'wallets', sql: WALLETS_SCHEMA },
+  { id: 17, name: 'player-events-store', sql: PLAYER_EVENTS_STORE_SCHEMA },
+  { id: 18, name: 'wallet-entries-order', sql: WALLET_ENTRIES_ORDER_SCHEMA },
+  { id: 19, name: 'kit-category', sql: KIT_CATEGORY_SCHEMA },
+  { id: 20, name: 'kit-wipe-delay', sql: KIT_WIPE_DELAY_SCHEMA },
+  { id: 21, name: 'store-audit', sql: STORE_AUDIT_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

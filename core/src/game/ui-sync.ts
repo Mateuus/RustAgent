@@ -52,8 +52,11 @@ import {
   toScreenBundle,
   uiDocRequestSchema,
   uiScreenRequestSchema,
+  buildUiBalanceCommand,
   buildUiBuyResultCommand,
+  uiBalanceRequestSchema,
   uiBuyRequestSchema,
+  UI_BALANCE_MARKER,
   UI_BUY_MARKER,
   UI_DOC_MAX_BYTES,
   UI_REQUEST_MARKER,
@@ -61,6 +64,7 @@ import {
   type UiScreenBundle,
 } from '../types/ui-transport.js';
 import { toError } from '../util.js';
+import { headerUpdatesToCui, type CuiElement, type HeaderValue } from './ui-cui.js';
 import { buildUiImageCommand, type UiImageAsset } from './ui-images.js';
 
 /** O que o transporte precisa de um RCON. E nada além disso. */
@@ -160,22 +164,64 @@ export interface UiSyncDeps {
     readonly steamId: string | undefined;
   }) => Promise<UiScreenBundle | null>;
   /**
-   * O clique de resgate, já autenticado pelo segredo.
+   * O clique de COMPRAR ou RESGATAR, já autenticado pelo segredo.
    *
-   * Devolve a frase que o jogador vai ler. Ela nasce em quem
-   * conhece a regra (o `KitStore`), e não aqui.
+   * Devolve o desfecho pronto: a frase que o jogador vai ler nasce
+   * em quem conhece a regra (o `StoreService` ou o `KitStore`), e
+   * não aqui. O aviso a desenhar também — ele depende do documento,
+   * que chega junto, já podado para aquele servidor.
    */
   readonly onBuy?: (input: {
     readonly serverId: string;
     readonly steamId: string;
     readonly offerId: string;
-  }) => Promise<string>;
+    readonly quantity: number;
+    readonly document: UiDocument;
+    /**
+     * A página em que ele estava. Ausente = plugin antigo.
+     *
+     * É para onde o OK do aviso volta — e é isso que faz a lista
+     * aparecer atualizada em vez de continuar dizendo RESGATAR.
+     */
+    readonly screenId?: string;
+  }) => Promise<UiBuyOutcome>;
   /**
-   * O segredo que autentica os pedidos de resgate.
+   * O que mostrar no cabeçalho daquele jogador: saldo e VIP.
    *
-   * Ausente = resgate desligado. Ver `UiDocPayload.secret`.
+   * ####  POR QUE UM MAPA DE SUFIXOS, E NÃO UM OBJETO TIPADO  ####
+   *
+   * Quem monta os `CuiElement` é este arquivo, que conhece os
+   * documentos; quem sabe o saldo e o VIP é o `index`, que não
+   * conhece nenhum. O mapa é a fronteira entre os dois: chave = o
+   * fim do id do rótulo, valor = o texto (e a cor, quando ela muda).
+   *
+   * Ausente = o cabeçalho fica com o traço, que é honesto.
+   */
+  readonly onHeader?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+  }) => Promise<Readonly<Record<string, HeaderValue>>>;
+  /**
+   * O segredo que autentica os pedidos de compra e de saldo.
+   *
+   * Ausente = compra desligada. Ver `UiDocPayload.secret`.
    */
   readonly secret?: string;
+}
+
+/**
+ * O que aconteceu com o clique.
+ *
+ * `message` é o que o jogador lê — no aviso, e no chat quando não há
+ * aviso. `screen` é o modal já convertido; `null` quando não há
+ * documento para pendurá-lo.
+ */
+export interface UiBuyOutcome {
+  readonly ok: boolean;
+  readonly message: string;
+  /** `null` = não deu para consultar a carteira. */
+  readonly balance?: number | null;
+  readonly screen?: UiScreenBundle | null;
 }
 
 export class UiSync {
@@ -367,11 +413,19 @@ export class UiSync {
       return;
     }
 
-    // O pedido de RESGATE vem no mesmo canal, com outro marcador —
-    // e com um SEGREDO, porque este aqui move item. Ver
+    // O pedido de COMPRA vem no mesmo canal, com outro marcador — e
+    // com um SEGREDO, porque este aqui move dinheiro e item. Ver
     // `UiDocPayload.secret`.
     if (line.includes(UI_BUY_MARKER)) {
       this.#handleBuy(serverId, line);
+      return;
+    }
+
+    // O saldo do cabeçalho. Mesmo canal, mesmo segredo — aqui o
+    // estrago de uma forja seria revelar o saldo alheio, não
+    // gastá-lo, mas a regra vale para a família inteira.
+    if (line.includes(UI_BALANCE_MARKER)) {
+      this.#handleBalance(serverId, line);
       return;
     }
 
@@ -410,46 +464,27 @@ export class UiSync {
   }
 
   /**
-   * O clique de resgate. NUNCA lança.
+   * O clique de comprar (ou resgatar). NUNCA lança.
    *
    * ####  O SEGREDO É CONFERIDO ANTES DE QUALQUER COISA  ####
    *
    * O chat dos jogadores passa por este mesmo cano. Sem a
-   * conferência, alguém digitando o marcador no chat pediria um
-   * kit — e o pedido chegaria com o prefixo do plugin, porque o
-   * Oxide o põe em toda linha que o plugin imprime, inclusive nas
-   * que ele imprime POR CAUSA do chat.
+   * conferência, alguém digitando o marcador no chat compraria em
+   * nome de terceiro — e o pedido chegaria com o prefixo do plugin,
+   * porque o Oxide o põe em toda linha que o plugin imprime,
+   * inclusive nas que ele imprime POR CAUSA do chat.
    *
    * Uma linha forjada é DESCARTADA em silêncio: responder "segredo
    * errado" ensinaria a tentar de novo.
    */
   #handleBuy(serverId: string, line: string): void {
-    const at = line.indexOf(UI_BUY_MARKER);
+    const parsed = this.#authenticate(serverId, line, UI_BUY_MARKER, uiBuyRequestSchema);
 
-    let payload: unknown;
-
-    try {
-      payload = JSON.parse(line.slice(at + UI_BUY_MARKER.length).trim());
-    } catch {
+    if (parsed === null) {
       return;
     }
 
-    const parsed = uiBuyRequestSchema.safeParse(payload);
-
-    if (!parsed.success) {
-      return;
-    }
-
-    const secret = this.#deps.secret;
-
-    if (secret === undefined || parsed.data.secret !== secret) {
-      this.#deps.logger.warn(
-        { server: serverId, steamId: parsed.data.steamId },
-        'pedido de resgate com segredo que não confere; descartado',
-      );
-      return;
-    }
-
+    const request = parsed;
     const onBuy = this.#deps.onBuy;
 
     if (onBuy === undefined) {
@@ -458,32 +493,219 @@ export class UiSync {
 
     void (async () => {
       const context = this.#deps.servers.contextOf(serverId);
+      const document = this.#documentOf(serverId, request.documentId);
 
       // O jogador está com a tela travada esperando. Falha PRECISA
       // virar resposta — e a frase vem de quem conhece a regra.
-      let message: string;
+      let outcome: UiBuyOutcome;
 
       try {
-        message = await onBuy({
-          serverId,
-          steamId: parsed.data.steamId,
-          offerId: parsed.data.offerId,
-        });
+        outcome =
+          document === null
+            ? { ok: false, message: 'Este menu não está mais disponível.' }
+            : await onBuy({
+                serverId,
+                steamId: request.steamId,
+                offerId: request.offerId,
+                quantity: request.quantity,
+                document,
+                ...(request.screenId === undefined ? {} : { screenId: request.screenId }),
+              });
       } catch (error) {
-        message = toError(error).message;
+        outcome = { ok: false, message: toError(error).message };
       }
+
+      // O cabeçalho é relido DEPOIS da compra: o saldo mudou, e sem
+      // isto o aviso diria "saldo 9.700" com o topo ainda no valor
+      // antigo, na mesma tela, ao mesmo tempo.
+      const updates = await this.#headerUpdates(serverId, request.steamId);
 
       if (context !== null && context.rcon.isConnected) {
         await context.rcon.send(
-          buildUiBuyResultCommand({ requestId: parsed.data.requestId, message }),
+          buildUiBuyResultCommand({
+            requestId: request.requestId,
+            ok: outcome.ok,
+            message: outcome.message,
+            balance: outcome.balance ?? null,
+            updates,
+            screen: outcome.screen ?? null,
+            // Fecha em QUALQUER desfecho: com o modal aberto, o
+            // jogador clicaria de novo achando que não funcionou — e
+            // a segunda compra seria real.
+            closeModal: true,
+          }),
         );
       }
+
+      this.#deps.logger.info(
+        {
+          server: serverId,
+          steamId: request.steamId,
+          offerId: request.offerId,
+          quantity: request.quantity,
+          ok: outcome.ok,
+        },
+        'compra pedida do jogo',
+      );
     })().catch((error: unknown) => {
       this.#deps.logger.warn(
         { server: serverId, err: toError(error) },
-        'o atendimento de um resgate lançou',
+        'o atendimento de uma compra lançou',
       );
     });
+  }
+
+  /**
+   * O plugin perguntando o saldo. NUNCA lança.
+   *
+   * Silêncio quando não há o que responder: o traço continua no
+   * lugar do número, que é honesto — melhor não dizer nada do que
+   * dizer zero para quem tem saldo.
+   */
+  #handleBalance(serverId: string, line: string): void {
+    const parsed = this.#authenticate(serverId, line, UI_BALANCE_MARKER, uiBalanceRequestSchema);
+
+    if (parsed === null || this.#deps.onHeader === undefined) {
+      return;
+    }
+
+    const steamId = parsed.steamId;
+
+    void (async () => {
+      const updates = await this.#headerUpdates(serverId, steamId);
+
+      // ####  ESTE CAMINHO SERIA MUDO  ####
+      //
+      // Ele tem três saídas silenciosas — sem rótulo de saldo no
+      // documento, sem RCON, ou a carteira falhando — e o sintoma
+      // das três é o mesmo: o traço continua no cabeçalho. Sem log,
+      // a única forma de descobrir qual foi seria instrumentar o
+      // plugin e o agente à mão.
+      if (updates.length === 0) {
+        this.#deps.logger.warn(
+          { server: serverId, steamId },
+          'nenhum documento tem onde mostrar o saldo (o rótulo do cabeçalho sumiu?)',
+        );
+
+        return;
+      }
+
+      const context = this.#deps.servers.contextOf(serverId);
+
+      if (context === null || !context.rcon.isConnected) {
+        this.#deps.logger.warn({ server: serverId, steamId }, 'saldo pronto e o RCON caiu');
+
+        return;
+      }
+
+      await context.rcon.send(buildUiBalanceCommand(steamId, updates));
+    })().catch((error: unknown) => {
+      this.#deps.logger.warn(
+        { server: serverId, err: toError(error) },
+        'o atendimento de um pedido de saldo lançou',
+      );
+    });
+  }
+
+  /**
+   * Lê e AUTENTICA uma linha marcada. `null` = não é para nós.
+   *
+   * O segredo é conferido aqui, num lugar só: a compra e o saldo têm
+   * o mesmo controle, e duplicá-lo seria dar duas chances de esquecer
+   * metade dele.
+   */
+  #authenticate<T extends { readonly secret: string }>(
+    serverId: string,
+    line: string,
+    marker: string,
+    schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
+  ): T | null {
+    const at = line.indexOf(marker);
+
+    let payload: unknown;
+
+    try {
+      payload = JSON.parse(line.slice(at + marker.length).trim());
+    } catch {
+      return null;
+    }
+
+    const parsed = schema.safeParse(payload);
+
+    if (!parsed.success) {
+      return null;
+    }
+
+    const secret = this.#deps.secret;
+
+    if (secret === undefined || parsed.data.secret !== secret) {
+      // ####  ISTO ACONTECE SEM NINGUÉM ATACAR NADA  ####
+      //
+      // O segredo é sorteado a cada subida do agente. Reiniciar com
+      // um jogador de menu aberto deixa o plugin com o anterior — e
+      // todo pedido dele passa a ser descartado, que é a pior forma
+      // de falhar: o botão simplesmente para de funcionar.
+      //
+      // Reenviar a carga põe o segredo novo lá, e a loja volta ao ar
+      // sozinha. O debounce de `pushSoon` é o que impede uma enxurrada
+      // de linhas forjadas de virar uma enxurrada de envios.
+      this.#deps.logger.warn(
+        { server: serverId },
+        'pedido com segredo que não confere; descartado — reenviando a carga por precaução',
+      );
+
+      this.pushSoon(serverId, 'plugin-pediu');
+
+      return null;
+    }
+
+    return parsed.data;
+  }
+
+  /** O documento daquele servidor, já podado. `null` = não existe. */
+  #documentOf(serverId: string, documentId: string): UiDocument | null {
+    const bound = this.#deps.repository
+      .documentsFor(serverId)
+      .find((entry) => entry.stored.slug === documentId);
+
+    return bound === undefined ? null : applyHidden(bound.stored.document, bound.binding.hidden);
+  }
+
+  /**
+   * O cabeçalho daquele jogador, em CUI, para TODO documento.
+   *
+   * O jogador tem um menu aberto só, mas o agente não sabe qual — e
+   * um update que não encontra o elemento é ignorado pelo cliente.
+   * Mandar os dois é mais barato que rastrear.
+   */
+  async #headerUpdates(serverId: string, steamId: string): Promise<readonly CuiElement[]> {
+    if (this.#deps.onHeader === undefined) {
+      return [];
+    }
+
+    let values: Readonly<Record<string, HeaderValue>>;
+
+    try {
+      values = await this.#deps.onHeader({ serverId, steamId });
+    } catch (error) {
+      // A carteira fora do ar não pode derrubar a resposta da
+      // compra: ela já aconteceu, e o desfecho dela não depende
+      // desta leitura.
+      this.#deps.logger.warn(
+        { server: serverId, steamId, err: toError(error) },
+        'não consegui montar o cabeçalho',
+      );
+
+      return [];
+    }
+
+    const output: CuiElement[] = [];
+
+    for (const { stored, binding } of this.#deps.repository.documentsFor(serverId)) {
+      output.push(...headerUpdatesToCui(applyHidden(stored.document, binding.hidden), values));
+    }
+
+    return output;
   }
 
   async #serve(

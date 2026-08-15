@@ -225,6 +225,25 @@ export interface AgentConfig {
     readonly level: string;
     readonly pretty: boolean;
   };
+  /**
+   * De onde vem o saldo de OZCoin.
+   *
+   * ####  DUAS CARTEIRAS, E A ESCOLHA É UMA SÓ  ####
+   *
+   *     url vazio      -> carteira LOCAL (o banco do agente)
+   *     url preenchido -> carteira REMOTA (o site é o dono)
+   *
+   * A virada é preencher a variável e reiniciar. O saldo local NÃO
+   * é migrado: são carteiras diferentes, e somar uma na outra sem
+   * alguém mandar seria inventar dinheiro.
+   *
+   * Ver store/wallet.ts para o contrato que o site precisa cumprir.
+   */
+  readonly store: {
+    /** Base da API do site, sem barra no fim. Vazio = local. */
+    readonly walletUrl: string;
+    readonly walletToken: string;
+  };
   readonly paths: AgentPaths;
 }
 
@@ -634,6 +653,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoadedConfig {
       log: {
         level: (merged.LOG_LEVEL ?? 'info').trim() || 'info',
         pretty: boolFromEnv(merged.LOG_PRETTY, false),
+      },
+      store: {
+        // A barra final sai aqui, e não em quem monta a URL: assim
+        // `.../api` e `.../api/` viram a mesma coisa, e ninguém
+        // depura uma barra dupla no meio de um endereço.
+        walletUrl: (merged.STORE_WALLET_URL ?? '').trim().replace(/\/+$/, ''),
+        walletToken: (merged.STORE_WALLET_TOKEN ?? '').trim(),
       },
       paths,
     };

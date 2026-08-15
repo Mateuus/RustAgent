@@ -74,11 +74,11 @@ export interface PlayerServerRecord {
  * O tipo de um evento da linha do tempo.
  *
  * Os quatro primeiros são da migração 006; `vip` e `kit` entraram
- * com a 014, que ampliou o `CHECK` da tabela. Acrescentar um valor
- * aqui SEM a migração faria o `INSERT` estourar no banco — e só na
- * máquina de quem já está de pé.
+ * com a 014 e `compra` com a 017 — as duas ampliaram o `CHECK` da
+ * tabela. Acrescentar um valor aqui SEM a migração faria o `INSERT`
+ * estourar no banco — e só na máquina de quem já está de pé.
  */
-export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'vip' | 'kit';
+export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'vip' | 'kit' | 'compra';
 
 export interface PlayerEventRecord {
   readonly id: number;

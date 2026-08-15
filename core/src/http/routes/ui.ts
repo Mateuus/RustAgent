@@ -199,6 +199,71 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiRoutesDeps): void
     return { ok: true, document: toDocumentBody(saved) };
   });
 
+  /**
+   * Reescreve o documento pelo MODELO, mantendo id e vínculos.
+   *
+   * ####  POR QUE ISTO PRECISA EXISTIR  ####
+   *
+   * O Menu Principal nasce no primeiro boot e nunca mais muda — é um
+   * documento como qualquer outro a partir dali. Quando o modelo
+   * ganha algo novo (o saldo no cabeçalho, os modais da loja), quem
+   * já estava de pé fica com o menu antigo, e não há caminho para
+   * atualizá-lo sem recriar o documento e reconfigurar servidor por
+   * servidor.
+   *
+   * Esta rota é esse caminho. Ela é DESTRUTIVA e diz isso: o desenho
+   * atual é substituído inteiro. O que ela preserva é justamente o
+   * que reconfigurar custaria caro — o id que o plugin guarda e a
+   * escolha de cada servidor.
+   */
+  app.post('/ui/documents/:id/reset', async (request) => {
+    const { id } = idParams.parse(request.params);
+    const { preset } = z.object({ preset: z.string().min(1).max(64) }).parse(request.body);
+
+    const existing = mustGet(deps, id);
+    const build = UI_PRESETS[preset];
+
+    if (build === undefined) {
+      throw new ApiError(
+        'UI_PRESET_NOT_FOUND',
+        `Não existe modelo "${preset}". Os disponíveis: ${Object.keys(UI_PRESETS).join(', ')}.`,
+        404,
+      );
+    }
+
+    const fresh = build();
+
+    if (fresh.id !== existing.slug) {
+      throw new ApiError(
+        'UI_DOCUMENT_ID_MISMATCH',
+        `O modelo "${preset}" produz o identificador "${fresh.id}", e este documento é o ` +
+          `"${existing.slug}". Trocá-lo quebraria toda referência a ele, em silêncio.`,
+        409,
+      );
+    }
+
+    const saved = deps.repository.update(id, fresh);
+
+    if (saved === null) {
+      throw new ApiError('UI_DOCUMENT_NOT_FOUND', `A interface ${String(id)} não existe.`, 404);
+    }
+
+    deps.sync.pushAllSoon('documento-salvo');
+
+    request.log.warn(
+      { uiDocument: existing.slug, preset, revision: saved.revision },
+      'interface restaurada a partir do modelo',
+    );
+
+    return {
+      ok: true,
+      document: toDocumentBody(saved),
+      message:
+        `"${existing.slug}" voltou a ser o modelo "${preset}". Quem usava este menu recebe o ` +
+        'desenho novo no próximo envio.',
+    };
+  });
+
   app.delete('/ui/documents/:id', async (request) => {
     const { id } = idParams.parse(request.params);
 

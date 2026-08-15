@@ -48,9 +48,20 @@ import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader } from './game/players.js';
 import { loadUiImages } from './game/ui-images.js';
-import { buildKitsScreen, KITS_SCREEN_ID } from './game/ui-kits-screen.js';
+import { buildKitsScreen, KITS_SCREEN_ID, parseKitScreenId } from './game/ui-kits-screen.js';
 import { buildMainMenu } from './game/ui-preset-main-menu.js';
+import {
+  buildResult,
+  createHeaderProvider,
+  createStoreBuyHandler,
+  createStoreScreenProvider,
+} from './game/ui-store-bridge.js';
 import { UiSync } from './game/ui-sync.js';
+import { WipeClock } from './game/wipe.js';
+import { StoreRepository } from './db/store-repository.js';
+import { WalletsRepository } from './db/wallets-repository.js';
+import { StoreService } from './store/service.js';
+import { LocalWallet, RemoteWallet, type Wallet } from './store/wallet.js';
 import { toGeneratedScreenBundle } from './types/ui-transport.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
@@ -156,6 +167,13 @@ async function main(): Promise<void> {
   let vips: VipList | null = null;
   let loadoutSync: LoadoutSync | null = null;
 
+  // ####  A HORA DO WIPE VEM DO SERVIDOR  ####
+  //
+  // `SaveCreatedTime` do `serverinfo` — ver game/wipe.ts. Ele é
+  // cacheado até o RCON reconectar, que é o único momento em que um
+  // wipe pode ter acontecido.
+  const wipeClock = new WipeClock({ logger });
+
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
     store: operations,
@@ -179,6 +197,10 @@ async function main(): Promise<void> {
       // este é o instante em que dá para descobrir isso. Ver
       // game/item-catalog.ts.
       void itemCatalog?.sync(serverId);
+      // E a hora do wipe pela MESMA razão: para o save mudar, o
+      // servidor precisou parar e subir — e é exatamente isso que
+      // acabou de acontecer.
+      wipeClock.forget(serverId);
       // E a interface porque o cache dela vive na memória do
       // plugin: um servidor que subiu agora não tem menu nenhum
       // até alguém mandar.
@@ -374,6 +396,61 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // ---- a loja e a carteira ---------------------------------
+  //
+  // ####  A CARTEIRA É ESCOLHIDA UMA VEZ, AQUI  ####
+  //
+  // Com `STORE_WALLET_URL` preenchido, quem manda no saldo é o site
+  // externo; sem ele, o banco do agente. Ninguém mais neste processo
+  // precisa saber qual das duas está no ar — as duas implementam a
+  // mesma interface, e é isso que evita um `if` em cada ponto que
+  // mexe em dinheiro.
+  const storeRepository = new StoreRepository(db);
+  const walletsRepository = new WalletsRepository(db);
+
+  const wallet: Wallet =
+    agent.store.walletUrl === ''
+      ? new LocalWallet(walletsRepository)
+      : new RemoteWallet({
+          baseUrl: agent.store.walletUrl,
+          token: agent.store.walletToken,
+          logger,
+        });
+
+  logger.info(
+    { source: wallet.source, url: agent.store.walletUrl === '' ? null : agent.store.walletUrl },
+    wallet.source === 'local'
+      ? 'a carteira é a LOCAL (o banco do agente)'
+      : 'a carteira é a REMOTA (o site externo é o dono do saldo)',
+  );
+
+  const store = new StoreService({
+    repository: storeRepository,
+    wallet,
+    servers: supervisor,
+    // O VIP comprado nasce pelo MESMO caminho do concedido no
+    // painel: ele expira, aparece na lista e sincroniza com o
+    // plugin. Um segundo caminho seria um VIP que nunca vence.
+    vips,
+    logger,
+    history: directory,
+  });
+
+  /**
+   * A vitrine e os modais, montados do catálogo de AGORA.
+   *
+   * `nameOf` vem do catálogo de itens: a oferta guarda `rifle.ak`,
+   * que é o que o jogo precisa para entregar, mas numa lista de kit
+   * quem lê quer "Assault Rifle". Sem o catálogo lido, o recurso
+   * final é o próprio shortname — feio, mas nunca vazio.
+   */
+  const storeScreens = createStoreScreenProvider({
+    store,
+    wallet,
+    logger,
+    nameOf: (shortname) => itemsRepository.get(shortname)?.displayName ?? shortname,
+  });
+
   const uiDocuments = new UiDocumentsRepository(db, logger);
 
   // ####  O MENU PRINCIPAL NASCE NO PRIMEIRO BOOT  ####
@@ -398,38 +475,88 @@ async function main(): Promise<void> {
     repository: uiDocuments,
     servers: supervisor,
     logger,
-    // ####  A PÁGINA DE KITS É MONTADA DO BANCO  ####
+    // ####  DUAS TELAS SÃO MONTADAS DO BANCO  ####
     //
-    // Ela tem endereço no documento e nenhum conteúdo gravado: um
-    // kit criado no painel precisa aparecer no jogo sem ninguém
-    // abrir o editor, e o botão precisa saber se AQUELE jogador já
-    // pegou. Ver game/ui-kits-screen.ts.
-    generatedScreens: async ({ serverId, document, screenId, steamId }) => {
-      if (screenId !== KITS_SCREEN_ID) {
+    // A de KITS e a da LOJA têm endereço no documento e nenhum
+    // conteúdo gravado: o que o admin cria no painel precisa
+    // aparecer no jogo sem ninguém abrir o editor, e as duas
+    // dependem de QUEM está pedindo — uma para saber se ele já
+    // pegou, a outra para saber se ele pode pagar.
+    //
+    // A loja vem PRIMEIRO porque ela reconhece uma família de
+    // endereços (`tela-loja:categoria:2`, `ozitem:id:3`), e a de
+    // kits um id exato.
+    generatedScreens: async (input) => {
+      const fromStore = await storeScreens(input);
+
+      if (fromStore !== null) {
+        return fromStore;
+      }
+
+      const kitTarget = parseKitScreenId(input.screenId);
+
+      if (kitTarget === null) {
         return null;
       }
 
-      const offers = await kits.listForServer(serverId, steamId);
+      const offers = await kits.listForServer(input.serverId, input.steamId);
 
-      return toGeneratedScreenBundle(document, buildKitsScreen(offers), screenId);
+      return toGeneratedScreenBundle(
+        input.document,
+        buildKitsScreen({
+          offers,
+          target: kitTarget,
+          screenId: input.screenId,
+          // O ícone e o nome bonito vêm do catálogo: o kit guarda
+          // `rifle.ak`, e o CUI desenha por `itemId`.
+          itemOf: (shortname) => {
+            const item = itemsRepository.get(shortname);
+
+            return item === null ? null : { itemId: item.itemId, displayName: item.displayName };
+          },
+        }),
+        // O SHELL conhece `tela-kits`; o modal de detalhes é filho
+        // dela. Sem isto, abrir o "i" apagaria o destaque da aba.
+        KITS_SCREEN_ID,
+      );
     },
-    // O clique de RESGATE, já autenticado pelo segredo. A frase que
-    // o jogador lê nasce no `KitStore`, que é quem conhece a regra
-    // — "você já pegou este kit" e "não deu para entregar" são
-    // coisas diferentes, e só ele sabe qual das duas foi.
-    onBuy: async ({ serverId, steamId, offerId }) => {
-      const kit = kits.list().find((entry) => entry.slug === offerId);
+    // O clique de COMPRAR ou RESGATAR, já autenticado pelo segredo.
+    // A frase que o jogador lê nasce em quem conhece a regra — "você
+    // já pegou este kit", "saldo insuficiente" e "não deu para
+    // entregar" são coisas diferentes.
+    onBuy: createStoreBuyHandler({
+      store,
+      wallet,
+      logger,
+      // O `offerId` que não é de uma oferta pode ser o slug de um
+      // kit: os dois entram pelo mesmo botão. Ver `fallback` em
+      // game/ui-store-bridge.ts.
+      fallback: async ({ serverId, steamId, offerId, document, screenId }) => {
+        const kit = kits.list().find((entry) => entry.slug === offerId);
 
-      if (kit === undefined) {
-        return 'Este kit não existe mais.';
-      }
+        if (kit === undefined) {
+          return { ok: false, message: 'Este item não está mais na loja.' };
+        }
 
-      const result = await kits.claim({ kitId: kit.id, serverId, steamId, actor: 'menu' });
+        const result = await kits.claim({ kitId: kit.id, serverId, steamId, actor: 'menu' });
+        const ok = result.status === 'entregue';
 
-      return result.status === 'entregue'
-        ? `${kit.name}: ${String(result.delivered)} de ${String(result.total)} item(ns) no seu inventário.`
-        : (result.detail ?? 'Não deu para entregar o kit agora.');
-    },
+        const message = ok
+          ? `${kit.name}: ${String(result.delivered)} de ${String(result.total)} item(ns) no seu inventário.`
+          : (result.detail ?? 'Não deu para entregar o kit agora.');
+
+        // O mesmo aviso da loja: um kit resgatado e uma compra
+        // terminam do mesmo jeito na tela de quem clicou — e o OK
+        // volta para a lista, que chega com o card já atualizado.
+        return { ok, message, screen: buildResult(document, ok, message, null, screenId) };
+      },
+    }),
+    // O saldo e o VIP do cabeçalho, para aquele jogador.
+    //
+    // O VIP vem do REPOSITÓRIO, e não do `VipList`: o serviço
+    // devolve datas em ISO (é a forma da API), e o cabeçalho precisa
+    // do epoch para calcular quantos dias faltam.
+    onHeader: createHeaderProvider({ wallet, vips: vipsRepository, logger }),
     // ####  O SEGREDO SEPARA O CLIQUE DO CHAT  ####
     //
     // O agente lê o console inteiro, e o chat dos jogadores passa
@@ -479,6 +606,12 @@ async function main(): Promise<void> {
     },
     logger,
     history: directory,
+    // Quem responde "já passaram 2 h do wipe?". Sem resposta, o kit
+    // libera: recusar sem certeza puniria o jogador por um servidor
+    // que não respondeu.
+    wipe: {
+      at: (serverId) => wipeClock.at(serverId, supervisor.contextOf(serverId)?.rcon ?? null),
+    },
   });
 
   // O vigia da Steam: compara o build instalado com o publicado e,
@@ -532,6 +665,7 @@ async function main(): Promise<void> {
     vips,
     loadouts: { repository: loadoutsRepository, sync: loadoutSync },
     kits: { store: kits, repository: kitsRepository },
+    store: { repository: storeRepository, wallets: walletsRepository, service: store, wallet },
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,

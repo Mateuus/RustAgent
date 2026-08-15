@@ -769,11 +769,20 @@ export interface Kit {
   slug: string;
   name: string;
   description: string | null;
+  /** A aba em que ele aparece no menu do jogo. `null` = sem aba. */
+  category: string | null;
   kind: KitKind;
   /** Em CENTAVOS. `null` fora de `compra`. */
   priceCents: number | null;
   /** Em SEGUNDOS. `null` fora de `cooldown`. */
   cooldownSeconds: number | null;
+  /**
+   * Só libera este tanto de segundos DEPOIS do wipe.
+   *
+   * `null` = sem bloqueio. Quem sabe a hora do wipe é o servidor
+   * (`SaveCreatedTime` do `serverinfo`).
+   */
+  wipeDelaySeconds: number | null;
   /** `null` = qualquer um. */
   requiredTier: string | null;
   items: LoadoutItem[];
@@ -793,6 +802,10 @@ export interface KitOffer extends Kit {
   reason: string | null;
   /** Quando ele poderá de novo, num kit de cooldown. */
   nextAt: string | null;
+  /** A última vez que ELE pegou. `null` = nunca. */
+  lastClaimedAt: string | null;
+  /** Quantas vezes ELE pegou — diferente de `claimCount`, da rede. */
+  myClaims: number;
 }
 
 export interface KitClaim {
@@ -803,6 +816,153 @@ export interface KitClaim {
   claimedAt: string;
   status: 'entregue' | 'falhou';
   detail: string | null;
+}
+
+// ------------------------------------------------------------
+//  A LOJA
+//
+//  ####  ELA NÃO É A LISTA DE KITS  ####
+//
+//  Um kit é entrega com REGRA (uma vez por jogador, de N em N
+//  horas); uma oferta é entrega com PREÇO. Só a segunda move
+//  dinheiro — e é por isso que ela tem carteira, estorno e extrato,
+//  e o kit não.
+// ------------------------------------------------------------
+
+export interface StoreCategory {
+  id: string;
+  name: string;
+  position: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * O formato da oferta. A diferença não é cosmética:
+ *
+ *   item     um item do jogo, com quantidade por compra
+ *   bundle   um kit: vários itens, e o modal LISTA o que vem dentro
+ *   vip      um nível com prazo, mais as vantagens em texto
+ *   vehicle  um veículo que nasce no mundo
+ */
+export type OfferKind = 'item' | 'bundle' | 'vip' | 'vehicle';
+
+/** A etiqueta no canto do card, no jogo. Cada uma tem cor própria. */
+export type OfferBadge = 'promo' | 'novo' | 'destaque';
+
+export interface OfferItem {
+  shortname: string;
+  itemId: number;
+  /** String: id de workshop passa de 2^53. `'0'` = sem skin. */
+  skinId: string;
+  amount: number;
+}
+
+export interface StoreOffer {
+  id: string;
+  categoryId: string;
+  kind: OfferKind;
+  name: string;
+  /** Em OZCoin INTEIRO. A moeda não tem centavo. */
+  price: number;
+  /** O preço riscado ao lado. `null` = sem promoção. */
+  oldPrice: number | null;
+  position: number;
+  enabled: boolean;
+  badge: OfferBadge | null;
+  /** O desenho da oferta. De campo próprio: um kit não tem "o item". */
+  icon: { shortname: string; itemId: number; skinId: string };
+  items: OfferItem[];
+  /** As vantagens listadas, só em `vip`. */
+  perks: string[];
+  /** `null` fora de `vip`. `days: null` = vitalício. */
+  vip: { tier: string; days: number | null } | null;
+  /** `null` fora de `vehicle`. */
+  vehicle: { prefab: string; fuel: number } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O que a tela de criação manda. Sem id nem datas. */
+export type StoreOfferInput = Omit<StoreOffer, 'id' | 'createdAt' | 'updatedAt'>;
+
+/**
+ * Em que estado a compra parou.
+ *
+ *   pending    nasceu; nada foi movido
+ *   debited    o dinheiro saiu
+ *   delivered  o item chegou. Fim feliz.
+ *   refunded   a entrega falhou e o valor voltou
+ *   failed     debitou, não entregou E não estornou — precisa de gente
+ */
+export type PurchaseState = 'pending' | 'debited' | 'delivered' | 'refunded' | 'failed';
+
+export interface StorePurchase {
+  id: string;
+  serverId: string;
+  steamId: string;
+  offerId: string;
+  /** Uma CÓPIA do que a oferta era: ela pode ter mudado depois. */
+  offerName: string;
+  shortname: string;
+  skinId: string;
+  amount: number;
+  unitPrice: number;
+  totalPrice: number;
+  state: PurchaseState;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Uma linha do extrato. `amount` negativo é débito. */
+export interface WalletEntry {
+  id: number;
+  amount: number;
+  /** O saldo DEPOIS deste lançamento. */
+  balance: number;
+  reason: string;
+  reference: string | null;
+  createdAt: string;
+}
+
+/** Uma mexida na loja: quem, quando e o quê. */
+export interface StoreAuditEntry {
+  id: number;
+  at: string;
+  /** `null` = veio pelo token de integração, e não de uma sessão. */
+  actor: string | null;
+  action: string;
+  target: string;
+  detail: string | null;
+}
+
+/** Os números da primeira tela da loja. */
+export interface StoreStats {
+  offers: number;
+  categories: number;
+  /** Só o ENTREGUE conta: estornado não é venda. */
+  revenue: number;
+  delivered: number;
+  refunded: number;
+  /** Pagou, não recebeu e não estornou. Fora da janela de dias. */
+  stuck: number;
+  buyers: number;
+  top: { name: string; count: number; total: number }[];
+}
+
+export interface WalletView {
+  steamId: string;
+  balance: number;
+  /**
+   * De onde o saldo veio.
+   *
+   * `remote` = o site externo é o dono, e lançamentos à mão são
+   * recusados aqui. O extrato local vira história.
+   */
+  source: 'local' | 'remote';
+  entries: WalletEntry[];
 }
 
 /**
@@ -1598,6 +1758,24 @@ export const agent = {
       body: { document },
     }),
 
+  /**
+   * Reescreve a interface pelo MODELO, mantendo id e vínculos.
+   *
+   * ####  É DESTRUTIVO, E É POR ISSO QUE ELE EXISTE  ####
+   *
+   * O menu nasce no primeiro boot e nunca mais muda sozinho. Quando
+   * o modelo ganha algo novo — o saldo no cabeçalho, os modais da
+   * loja —, quem já estava de pé fica com o desenho antigo. Este é o
+   * caminho de volta, e ele preserva justamente o que reconfigurar
+   * custaria caro: o id que o plugin guarda e a escolha de cada
+   * servidor.
+   */
+  resetUiDocument: (id: number, preset: string) =>
+    api<{ ok: true; document: UiDocumentDetail; message: string }>(
+      `/api/ui/documents/${String(id)}/reset`,
+      { method: 'POST', body: { preset } },
+    ),
+
   /** Grava o documento INTEIRO e sobe a revisão. */
   saveUiDocument: (id: number, document: unknown) =>
     api<{ ok: true; document: UiDocumentDetail }>(`/api/ui/documents/${String(id)}`, {
@@ -1817,4 +1995,104 @@ export const agent = {
       method: 'POST',
       body: { steamId },
     }),
+
+  // ---- A LOJA ----------------------------------------------
+
+  storeCategories: () =>
+    api<{ ok: true; categories: StoreCategory[] }>('/api/store/categories'),
+
+  createStoreCategory: (input: { name: string; position: number; enabled: boolean }) =>
+    api<{ ok: true; category: StoreCategory }>('/api/store/categories', {
+      method: 'POST',
+      body: input,
+    }),
+
+  updateStoreCategory: (id: string, input: { name: string; position: number; enabled: boolean }) =>
+    api<{ ok: true; category: StoreCategory }>(`/api/store/categories/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  /** Leva as ofertas dela junto. A mensagem diz quantas. */
+  removeStoreCategory: (id: string) =>
+    api<{ ok: true; message: string }>(`/api/store/categories/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  storeOffers: (categoryId?: string) =>
+    api<{ ok: true; offers: StoreOffer[] }>(
+      '/api/store/offers' +
+        (categoryId === undefined ? '' : `?categoryId=${encodeURIComponent(categoryId)}`),
+    ),
+
+  createStoreOffer: (input: StoreOfferInput) =>
+    api<{ ok: true; offer: StoreOffer }>('/api/store/offers', { method: 'POST', body: input }),
+
+  updateStoreOffer: (id: string, input: StoreOfferInput) =>
+    api<{ ok: true; offer: StoreOffer }>(`/api/store/offers/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  removeStoreOffer: (id: string) =>
+    api<{ ok: true; message: string }>(`/api/store/offers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  /** O histórico. Sem filtro, é a rede inteira. */
+  storePurchases: (
+    options: {
+      serverId?: string;
+      steamId?: string;
+      state?: PurchaseState;
+      limit?: number;
+    } = {},
+  ) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) query.set('serverId', options.serverId);
+    if (options.steamId !== undefined) query.set('steamId', options.steamId);
+    if (options.state !== undefined) query.set('state', options.state);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+
+    const search = query.toString();
+
+    return api<{ ok: true; purchases: StorePurchase[] }>(
+      `/api/store/purchases${search === '' ? '' : `?${search}`}`,
+    );
+  },
+
+  /** O resumo da loja. `days` é a janela do que muda. */
+  storeStats: (days = 7) =>
+    api<{ ok: true; days: number; source: 'local' | 'remote'; stats: StoreStats }>(
+      `/api/store/stats?days=${String(days)}`,
+    ),
+
+  /** Quem mexeu na loja, e o quê. */
+  storeAudit: (limit = 100) =>
+    api<{ ok: true; entries: StoreAuditEntry[] }>(`/api/store/audit?limit=${String(limit)}`),
+
+  // ---- A CARTEIRA ------------------------------------------
+
+  wallet: (steamId: string) =>
+    api<{ ok: true } & WalletView>(`/api/players/${encodeURIComponent(steamId)}/wallet`),
+
+  /**
+   * Lançamento à mão. Negativo TIRA.
+   *
+   * Recusado com a carteira remota no ar: lá quem manda no saldo é o
+   * site, e um crédito daqui criaria um número que ele não conhece.
+   */
+  moveWallet: (steamId: string, input: { amount: number; reason: string }) =>
+    api<{ ok: true; steamId: string; balance: number }>(
+      `/api/players/${encodeURIComponent(steamId)}/wallet`,
+      { method: 'POST', body: input },
+    ),
+
+  /** Compra fora do jogo — o mesmo caminho que o site usa. */
+  buyOffer: (serverId: string, input: { steamId: string; offerId: string; quantity: number }) =>
+    api<{ ok: true; message: string; purchase: StorePurchase; balance: number }>(
+      `/api/servers/${encodeURIComponent(serverId)}/store/buy`,
+      { method: 'POST', body: input },
+    ),
 };

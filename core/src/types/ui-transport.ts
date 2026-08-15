@@ -329,16 +329,109 @@ export const uiBuyRequestSchema = z.object({
   offerId: z.string().min(1).max(64),
   quantity: z.number().int().min(1).max(1000),
   documentId: z.string().min(1).max(64),
+  /**
+   * A PÁGINA em que ele estava quando clicou.
+   *
+   * ####  ELA EXISTE POR UM DEFEITO VISÍVEL  ####
+   *
+   * Depois de pegar um kit, o card continuava dizendo RESGATAR: o
+   * modal é desenhado por cima, e a página atrás — a que mudou — não
+   * é redesenhada.
+   *
+   * Com ela, o botão OK do aviso vira uma NAVEGAÇÃO de volta, e a
+   * lista chega do banco de agora. Sem ela (plugin antigo), o OK só
+   * fecha o aviso, como antes.
+   *
+   * `:` é permitido porque endereços gerados o usam
+   * (`tela-kits:recursos:1`) — ele nunca é gravado como id.
+   */
+  screenId: z
+    .string()
+    .min(1)
+    .max(96)
+    .optional(),
 });
 
 /** `origemz.ui.buyresult <base64>` — o desfecho, para o jogador. */
 export interface UiBuyResultPayload {
   readonly requestId: string;
   readonly message: string;
+  /**
+   * Deu certo?
+   *
+   * Não é decorativo: é ele que pinta a faixa do aviso de verde ou
+   * de vermelho, e essa cor é o que se lê ANTES de qualquer palavra.
+   */
+  readonly ok?: boolean;
+  /** O saldo depois da compra. `null` = não deu para consultar. */
+  readonly balance?: number | null;
+  /**
+   * O cabeçalho a atualizar no lugar.
+   *
+   * Vêm com `update: true`: o saldo do topo muda sem o cabeçalho
+   * piscar. Sem isto, o modal diria "saldo 9.700" e o topo
+   * continuaria com o valor antigo, na mesma tela, ao mesmo tempo.
+   */
+  readonly updates?: readonly CuiElement[];
+  /**
+   * O aviso a desenhar, com o botão de OK.
+   *
+   * `null` = sem documento conhecido; aí o desfecho vai só pelo
+   * chat. Ver ui-store-screens.ts para por que ele é um modal e não
+   * uma linha de chat.
+   */
+  readonly screen?: UiScreenBundle | null;
+  /**
+   * Feche o modal.
+   *
+   * Verdadeiro em QUALQUER desfecho: com ele aberto, o jogador
+   * clicaria de novo achando que não funcionou — e a segunda compra
+   * seria real.
+   */
+  readonly closeModal?: boolean;
 }
 
 export function buildUiBuyResultCommand(payload: UiBuyResultPayload): string {
   return `origemz.ui.buyresult ${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64')}`;
+}
+
+// ------------------------------------------------------------
+//  O SALDO DO CABEÇALHO
+//
+//  ####  POR QUE ELE É PEDIDO, E NÃO EMPURRADO  ####
+//
+//  A carga inicial é montada UMA vez por servidor e vale para todo
+//  mundo — não há jogador nenhum nela. Então o rótulo do saldo nasce
+//  com um traço, e o plugin pergunta o número quando a interface
+//  ABRE, para aquele jogador.
+//
+//  Um valor fixo no documento seria pior que o traço: cada um leria
+//  o número do outro como se fosse o seu.
+// ------------------------------------------------------------
+
+/** O marcador do pedido de saldo. Leva segredo, como a compra. */
+export const UI_BALANCE_MARKER = '#OZBAL#';
+
+/**
+ * O plugin perguntando o saldo de um jogador.
+ *
+ * Leva o segredo pelo mesmo motivo da compra — só que aqui o
+ * estrago de uma forja seria revelar o saldo alheio, não gastá-lo.
+ */
+export const uiBalanceRequestSchema = z.object({
+  secret: z.string().min(1).max(128),
+  steamId: z.string().regex(/^\d{17}$/),
+});
+
+/**
+ * `origemz.ui.balance <steamId> <base64>`
+ *
+ * Sem `requestId`: não há o que correlacionar. O saldo é um valor
+ * só, e chegar duas vezes é inofensivo — a segunda escreve o mesmo
+ * número no mesmo lugar.
+ */
+export function buildUiBalanceCommand(steamId: string, updates: readonly CuiElement[]): string {
+  return `origemz.ui.balance ${steamId} ${Buffer.from(JSON.stringify(updates), 'utf8').toString('base64')}`;
 }
 
 /**

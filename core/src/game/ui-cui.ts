@@ -132,6 +132,42 @@ function actionCommand(actionId: string): string {
 }
 
 /**
+ * O texto de um rótulo, seguro para o caminho até o cliente.
+ *
+ * ####  ASPAS DUPLAS CHEGAM ESCAPADAS NA TELA  ####
+ *
+ * MEDIDO no jogo: um kit chamado `Kit Inicial` numa frase com aspas
+ * apareceu para o jogador como
+ *
+ *     O kit \"Kit Inicial\" é de resgate único
+ *
+ * com as barras à mostra. A causa está no fim do caminho: o
+ * `CuiHelper.AddUi` manda o JSON como ARGUMENTO de um comando de
+ * console (`player.SendConsoleCommand("AddUI", json)`), e essa
+ * serialização escapa as aspas de novo — o cliente recebe duas
+ * camadas de escape e desfaz uma só.
+ *
+ * Não dá para corrigir do lado de lá sem mexer no Oxide. Do lado de
+ * cá, a saída é o texto não ter aspas retas: as tipográficas (“ ”)
+ * atravessam intactas e são, aliás, as certas em português.
+ *
+ * A troca acontece AQUI, na emissão, e não em cada gerador de tela:
+ * ela precisa valer também para o que o admin digitar no editor —
+ * ele veria o mesmo defeito, e não teria como saber por quê.
+ */
+function cuiText(text: string): string {
+  let open = true;
+
+  return text.replace(/"/g, () => {
+    const quote = open ? '“' : '”';
+
+    open = !open;
+
+    return quote;
+  });
+}
+
+/**
  * O skin como NÚMERO, ou 0 quando não há.
  *
  * O cliente lê com `(ulong)obj.GetNumber("skinid")`, então string
@@ -185,7 +221,7 @@ function emitElement(
         components: [
           {
             type: 'UnityEngine.UI.Text',
-            text: element.text,
+            text: cuiText(element.text),
             fontSize: element.fontSize,
             font: element.font,
             align: element.align,
@@ -235,7 +271,7 @@ function emitElement(
         components: [
           {
             type: 'UnityEngine.UI.Text',
-            text: element.text,
+            text: cuiText(element.text),
             fontSize: element.fontSize,
             font: element.font,
             align: element.align,
@@ -490,7 +526,7 @@ export function screenUpdatesToCui(
           components: [
             {
               type: 'UnityEngine.UI.Text',
-              text: element.text,
+              text: cuiText(element.text),
               fontSize: element.fontSize,
               font: element.font,
               align: element.align,
@@ -511,6 +547,130 @@ export function screenUpdatesToCui(
   visit(document.shell);
 
   return output;
+}
+
+// ------------------------------------------------------------
+//  OS ROTULOS DO CABEÇALHO — saldo e VIP
+//
+//  ####  ELES SÃO TROCADOS NO LUGAR, E NÃO REDESENHADOS  ####
+//
+//  O saldo mora no SHELL, que é desenhado uma vez e nunca mais —
+//  esse é o ponto dele. Depois de uma compra o número precisa mudar,
+//  e recriar o elemento faria o cabeçalho piscar, que é justamente o
+//  defeito que o shell existe para corrigir.
+//
+//  `update: true` troca os componentes do elemento existente. Sem
+//  `RectTransform` de propósito: a posição não mudou, e reenviá-la
+//  só daria ao cliente mais uma chance de errar.
+//
+//  ####  COMO O AGENTE SABE QUAL RÓTULO É QUAL  ####
+//
+//  Pelo FIM do id. O modelo não tem campos "aqui vai o saldo" /
+//  "aqui vai o VIP", e inventá-los exigiria o editor expor uma
+//  escolha por dado — então o acordo é uma CONVENÇÃO: o preset cria
+//  os rótulos com os sufixos declarados abaixo.
+//
+//  Ela pode ser quebrada, e de propósito: renomear um deles no
+//  editor faz aquele dado parar de atualizar, sem quebrar mais nada.
+// ------------------------------------------------------------
+
+/** O saldo de OZCoin. */
+export const BALANCE_ELEMENT_SUFFIX = 'coin-value';
+
+/** A palavra "VIP", que SOME quando não há VIP nenhum. */
+export const VIP_WORD_ELEMENT_SUFFIX = 'vip-word';
+
+/** O nível do jogador, na cor dele. */
+export const VIP_TIER_ELEMENT_SUFFIX = 'vip-tier';
+
+/** Quanto falta dele, embaixo do nível. */
+export const VIP_LEFT_ELEMENT_SUFFIX = 'vip-left';
+
+/**
+ * O que trocar num rótulo do cabeçalho.
+ *
+ * String = só o texto, mantendo a cor do documento. Com `color`, a
+ * cor também muda — e o único caso disso hoje é o nível de VIP, que
+ * é bronze, prata ou ouro conforme o nível.
+ */
+export type HeaderValue = string | { readonly text: string; readonly color: string };
+
+/**
+ * Troca no lugar os rótulos do cabeçalho.
+ *
+ * ####  UM MAPA, E NÃO UM CAMPO POR COISA  ####
+ *
+ * O cabeçalho mostra saldo, nível de VIP e quanto falta dele. A
+ * regra dos três é a mesma: achar pelo fim do id e trocar o texto
+ * sem recriar o elemento. Uma função por rótulo repetiria a
+ * travessia da árvore inteira — e o próximo dado do cabeçalho
+ * pediria uma quarta cópia.
+ *
+ * Rótulo ausente no documento simplesmente não gera update: um menu
+ * sem saldo no cabeçalho é legítimo, e é o de quem não usa a loja.
+ */
+export function headerUpdatesToCui(
+  document: UiDocument,
+  values: Readonly<Record<string, HeaderValue>>,
+): readonly CuiElement[] {
+  const output: CuiElement[] = [];
+
+  const visit = (elements: readonly UiElement[]): void => {
+    for (const element of elements) {
+      if (element.type === 'label') {
+        for (const [suffix, value] of Object.entries(values)) {
+          if (!matchesSuffix(element.id, suffix)) {
+            continue;
+          }
+
+          const text = typeof value === 'string' ? value : value.text;
+          // Sem cor no valor, vale a do documento: é o que deixa o
+          // admin recolorir o saldo no editor sem que o agente
+          // desfaça a escolha dele no primeiro update.
+          const color = typeof value === 'string' ? element.color : value.color;
+
+          output.push({
+            name: `${ROOT_NAME}.${element.id}`,
+            parent: ROOT_NAME,
+            update: true,
+            components: [
+              {
+                type: 'UnityEngine.UI.Text',
+                text: cuiText(text),
+                fontSize: element.fontSize,
+                font: element.font,
+                align: element.align,
+                color: cuiColor(color),
+              },
+            ],
+          });
+        }
+      }
+
+      visit(element.children);
+    }
+  };
+
+  // Só o SHELL: é lá que o cabeçalho mora, e é ele que não é
+  // redesenhado. Um rótulo de mesmo sufixo dentro de uma tela seria
+  // reescrito na próxima navegação de qualquer jeito.
+  visit(document.shell);
+
+  return output;
+}
+
+/**
+ * O id termina com este sufixo?
+ *
+ * O hífen é ignorado dos dois lados: um preset que gere `coinvalue`
+ * e a convenção escrita `coin-value` precisam casar, e sem isso o
+ * saldo nunca atualizaria — em silêncio, que é a pior forma de esta
+ * convenção falhar.
+ */
+function matchesSuffix(id: string, suffix: string): boolean {
+  const clean = (value: string): string => value.replace(/-/g, '').toLowerCase();
+
+  return clean(id).endsWith(clean(suffix));
 }
 
 // ------------------------------------------------------------

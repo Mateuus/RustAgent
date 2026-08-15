@@ -70,6 +70,8 @@ import { registerItemRoutes } from './routes/items.js';
 import { registerUiRoutes } from './routes/ui.js';
 // ---- VIP, loadouts e kits ----
 import { registerVipRoutes } from './routes/vips.js';
+// ---- a loja e a carteira ----
+import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -128,6 +130,15 @@ export interface BuildServerOptions {
     readonly store: KitStore;
     readonly repository: KitsRepository;
   };
+  /**
+   * A LOJA: categorias, ofertas, carteira e histórico de compras.
+   *
+   * Separada dos kits de propósito, e não por acaso de nomenclatura:
+   * um kit é entrega com REGRA (uma vez por jogador, de N em N
+   * horas); uma oferta é entrega com PREÇO. Só a segunda move
+   * dinheiro, e é ela que precisa de débito, estorno e extrato.
+   */
+  readonly store: Omit<StoreRoutesDeps, 'supervisor'>;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -290,6 +301,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         repository: options.kits.repository,
         supervisor: options.supervisor,
       });
+
+      // A loja depois dos kits porque ela DEPENDE do VIP: uma oferta
+      // de VIP concede pelo `VipList`, e não por um segundo caminho.
+      registerStoreRoutes(api, { ...options.store, supervisor: options.supervisor });
     },
     { prefix: '/api' },
   );
