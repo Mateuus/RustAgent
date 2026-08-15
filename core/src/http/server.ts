@@ -27,9 +27,14 @@ import type { OperatorAuth } from '../auth/operator.js';
 import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
 import type { ItemsRepository } from '../db/items-repository.js';
+import type { KitsRepository } from '../db/kits-repository.js';
+import type { LoadoutsRepository } from '../db/loadouts-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { ItemCatalog } from '../game/item-catalog.js';
+import type { KitStore } from '../kits/service.js';
+import type { LoadoutSync } from '../loadouts/sync.js';
+import type { VipList } from '../vip/service.js';
 import type { MonumentReader } from '../game/monuments.js';
 import type { UiSync } from '../game/ui-sync.js';
 import type { PlayersReader } from '../game/players.js';
@@ -51,6 +56,8 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerBanRoutes } from './routes/bans.js';
 import { registerConsoleRoutes } from './routes/console.js';
 import { registerHealthRoutes, type HealthServerView } from './routes/health.js';
+import { registerKitRoutes } from './routes/kits.js';
+import { registerLoadoutRoutes } from './routes/loadouts.js';
 import { registerOperationRoutes } from './routes/operations.js';
 import { registerOxideRoutes } from './routes/oxide.js';
 import { registerPlayerRoutes } from './routes/players.js';
@@ -61,6 +68,8 @@ import { registerSystemRoutes } from './routes/system.js';
 // ---- itens e interface ----
 import { registerItemRoutes } from './routes/items.js';
 import { registerUiRoutes } from './routes/ui.js';
+// ---- VIP, loadouts e kits ----
+import { registerVipRoutes } from './routes/vips.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -101,6 +110,24 @@ export interface BuildServerOptions {
   readonly uiDocuments: UiDocumentsRepository;
   /** O transporte até o jogo. Ver game/ui-sync.ts. */
   readonly uiSync: UiSync;
+  // ---- o VIP, os loadouts e a loja de kits ----------------
+  //
+  // Ver Docs\15-BRIEFING-VIP-LOADOUTS-KITS.md. Os três chegam
+  // juntos porque compartilham o mesmo caminho até o jogo: o
+  // agente é a fonte, e o plugin recebe o estado COMPLETO.
+
+  /** O VIP da rede. Ver vip/service.ts. */
+  readonly vips: VipList;
+  /** O que cada grupo recebe ao nascer, por servidor. */
+  readonly loadouts: {
+    readonly repository: LoadoutsRepository;
+    readonly sync: LoadoutSync;
+  };
+  /** A loja de kits, e a entrega dentro do jogo. */
+  readonly kits: {
+    readonly store: KitStore;
+    readonly repository: KitsRepository;
+  };
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -242,6 +269,26 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         repository: options.uiDocuments,
         sync: options.uiSync,
         servers: options.supervisor,
+      });
+
+      // ---- o VIP, os loadouts e a loja ---------------------
+      //
+      // Três blocos no fim, e nesta ordem, porque é a ordem da
+      // dependência entre eles: o VIP é o direito, o loadout é o
+      // que cada grupo recebe, e o kit é o loadout com regra de
+      // entrega. Ver Docs\15-BRIEFING-VIP-LOADOUTS-KITS.md.
+      registerVipRoutes(api, { vips: options.vips, servers: options.supervisor });
+
+      registerLoadoutRoutes(api, {
+        repository: options.loadouts.repository,
+        sync: options.loadouts.sync,
+        supervisor: options.supervisor,
+      });
+
+      registerKitRoutes(api, {
+        store: options.kits.store,
+        repository: options.kits.repository,
+        supervisor: options.supervisor,
       });
     },
     { prefix: '/api' },

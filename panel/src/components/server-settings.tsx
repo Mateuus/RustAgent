@@ -27,6 +27,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 
+import { LoadoutPanel } from '@/components/loadout-panel';
 import { OxidePanel } from '@/components/oxide-panel';
 import { ServerUiPanel } from '@/components/server-ui-panel';
 import { PluginConfigs } from '@/components/plugin-configs';
@@ -50,6 +51,7 @@ type Section =
   | 'plugins'
   | 'oxide'
   | 'interface'
+  | 'loadouts'
   | 'avancado';
 
 const SECTIONS: readonly { key: Section; label: string }[] = [
@@ -80,6 +82,13 @@ const SECTIONS: readonly { key: Section; label: string }[] = [
   // dele — a mesma natureza das outras sub-abas, que ajustam este
   // servidor e não a rede.
   { key: 'interface', label: 'Interface' },
+  // ####  E O LOADOUT VEM LOGO DEPOIS DO OXIDE  ####
+  //
+  // A ordem é a da pergunta: na sub-aba Oxide se decide QUEM está
+  // em cada grupo, e aqui o que cada grupo GANHA ao nascer. A
+  // lista desta é derivada da daquela — grupo novo aparece aqui
+  // vazio, sem ninguém precisar cadastrá-lo duas vezes.
+  { key: 'loadouts', label: 'Loadouts' },
   { key: 'avancado', label: 'Avançado' },
 ];
 
@@ -517,6 +526,7 @@ export function ServerSettings({
       {section === 'oxide' && <OxidePanel serverId={server.id} />}
 
       {section === 'interface' && <ServerUiPanel serverId={server.id} />}
+      {section === 'loadouts' && <LoadoutPanel serverId={server.id} />}
 
       {section === 'avancado' && (
         <div className="space-y-4">

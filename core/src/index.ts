@@ -28,6 +28,8 @@ import { BanList } from './bans/service.js';
 import { ConfigError, loadConfig } from './config.js';
 import { BansRepository } from './db/bans-repository.js';
 import { openDatabase } from './db/database.js';
+import { KitsRepository } from './db/kits-repository.js';
+import { LoadoutsRepository } from './db/loadouts-repository.js';
 import { runMigrations } from './db/migrations.js';
 import { ItemsRepository } from './db/items-repository.js';
 import { PlayersRepository } from './db/players-repository.js';
@@ -35,6 +37,11 @@ import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { ItemCatalog } from './game/item-catalog.js';
+import { VipsRepository } from './db/vips-repository.js';
+import { KitStore } from './kits/service.js';
+import { LoadoutSync } from './loadouts/sync.js';
+import { VipExpiryWatcher } from './vip/expiry-watcher.js';
+import { VipList } from './vip/service.js';
 import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader } from './game/players.js';
@@ -139,6 +146,11 @@ async function main(): Promise<void> {
   // reconexão do RCON, e a interface é reenviada por ela.
   let itemCatalog: ItemCatalog | null = null;
   let uiSync: UiSync | null = null;
+  // Os dois da fase de VIP e kits, pela MESMA razão dos de cima:
+  // eles precisam do supervisor, e o gancho de reconexão precisa
+  // deles. Ver o bloco de montagem, mais abaixo.
+  let vips: VipList | null = null;
+  let loadoutSync: LoadoutSync | null = null;
 
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
@@ -176,6 +188,16 @@ async function main(): Promise<void> {
     // game/ui-sync.ts.
     onConsoleLine: (serverId, line) => {
       uiSync?.handleLine(serverId, line);
+
+      // ####  E O VIP E OS KITS PELO MESMO MOTIVO — MAIS UM  ####
+      //
+      // Recarregar um plugin ESVAZIA o cache dele e derruba o RCON
+      // junto. Toda (re)conexão repassa os dois estados completos:
+      // é o que conserta sozinho wipe, update do jogo, restart do
+      // servidor e `oxide.reload`, sem ninguém lembrar de
+      // sincronizar na mão.
+      void vips?.reconcile(serverId);
+      void loadoutSync?.push(serverId, 'rcon-connected');
     },
   });
 
@@ -298,6 +320,45 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // ---- o VIP, os loadouts e a loja de kits ------------------
+  //
+  // O agente é a FONTE dos três: o plugin guarda um cache
+  // descartável, repovoado a cada sincronização. Se a fonte fosse o
+  // jogo, um wipe ou um `oxide.reload` apagaria VIP comprado com
+  // dinheiro.
+  //
+  // A reconciliação do boot NÃO segura a subida (`void`): ela fala
+  // com N servidores pelo RCON, e a porta da API não pode esperar
+  // por isso. Os que ainda não conectaram entram pelo gancho
+  // `onRconConnected`, acima.
+  const vipsRepository = new VipsRepository(db);
+  const loadoutsRepository = new LoadoutsRepository(db);
+  const kitsRepository = new KitsRepository(db);
+
+  vips = new VipList({
+    repository: vipsRepository,
+    servers: supervisor,
+    logger,
+    // "Ganhou VIP" vira uma linha na ficha do jogador — ver a
+    // migração 014.
+    history: directory,
+  });
+
+  void vips.reconcileAll();
+
+  // O relógio dos VIPs com prazo. Sem ele, `expires_at` seria
+  // enfeite: a data passaria e o jogador continuaria com a tag, a
+  // vaga na fila e o kit.
+  const vipWatcher = new VipExpiryWatcher({ vips, logger });
+
+  vipWatcher.start();
+
+  loadoutSync = new LoadoutSync({
+    repository: loadoutsRepository,
+    servers: supervisor,
+    logger,
+  });
+
   const uiDocuments = new UiDocumentsRepository(db, logger);
 
   // ####  O MENU PRINCIPAL NASCE NO PRIMEIRO BOOT  ####
@@ -329,6 +390,41 @@ async function main(): Promise<void> {
   });
 
   uiSync.start();
+
+  void loadoutSync.pushAll('boot');
+
+  // A loja. Ela pergunta ao `PlayersReader` quem está online —
+  // entrega exige o jogador dentro do servidor, porque item entra
+  // em inventário e inventário só existe para quem está conectado.
+  //
+  // `null` = não deu para perguntar, e é DIFERENTE de lista vazia:
+  // com `null` a entrega é recusada dizendo que não deu para
+  // conferir, em vez de afirmar que o jogador está fora.
+  const kits = new KitStore({
+    repository: kitsRepository,
+    vips: vipsRepository,
+    servers: supervisor,
+    presence: {
+      online: async (serverId) => {
+        const context = supervisor.contextOf(serverId);
+
+        if (context === null || !context.rcon.isConnected) {
+          return null;
+        }
+
+        try {
+          const worldSize = supervisor.configOf(serverId)?.worldSize ?? 0;
+          const snapshot = await players.list(serverId, context.rcon, worldSize);
+
+          return snapshot.players.map((player) => player.steamId);
+        } catch {
+          return null;
+        }
+      },
+    },
+    logger,
+    history: directory,
+  });
 
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
@@ -378,6 +474,9 @@ async function main(): Promise<void> {
     itemCatalog,
     uiDocuments,
     uiSync,
+    vips,
+    loadouts: { repository: loadoutsRepository, sync: loadoutSync },
+    kits: { store: kits, repository: kitsRepository },
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,
@@ -427,6 +526,10 @@ async function main(): Promise<void> {
         banWatcher.stop();
         presenceWatcher.stop();
         uiSync.stop();
+        // O dos VIPs junto dos outros: um relógio esquecido aqui é
+        // uma rodada que começa depois de o supervisor já ter
+        // parado, falando com um RCON que não existe mais.
+        vipWatcher.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

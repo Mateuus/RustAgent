@@ -575,7 +575,17 @@ export interface PlayerIdentity {
   known: boolean;
 }
 
-export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'ban' | 'unban';
+export type PlayerEventKind =
+  | 'join'
+  | 'leave'
+  | 'kick'
+  | 'teleport'
+  | 'ban'
+  | 'unban'
+  // Os dois entraram com a migração 014: ganhar VIP e resgatar kit
+  // são acontecimentos, e a ficha mostra UMA linha do tempo.
+  | 'vip'
+  | 'kit';
 
 export interface PlayerEvent {
   at: string;
@@ -643,6 +653,156 @@ export interface BanSyncResult {
   /** Preenchido = a rodada não aconteceu, e este é o motivo. */
   skipped: string | null;
   message: string;
+}
+
+// ------------------------------------------------------------
+//  O VIP, os loadouts e a loja
+//
+//  Ver Docs\15-BRIEFING-VIP-LOADOUTS-KITS.md. Três assuntos com o
+//  mesmo caminho até o jogo: o agente é a fonte, e o plugin recebe
+//  o estado COMPLETO a cada mudança.
+//
+//  `steamId` e `skinId` são STRING em toda parte — os dois passam
+//  de 2^53 e voltariam arredondados de um `number`. Dinheiro é
+//  inteiro em CENTAVOS, pelo mesmo motivo ao contrário: float é o
+//  erro que aparece no extrato.
+// ------------------------------------------------------------
+
+export type VipOrigin = 'loja' | 'painel' | 'adotado';
+
+/** Uma concessão de VIP. Ela é da REDE, não de um servidor. */
+export interface Vip {
+  id: number;
+  steamId: string;
+  /** `bronze` | `silver` | `gold` — o Tier do OrigemZVip.json. */
+  tier: string;
+  /** ISO-8601. `null` = vitalício. */
+  expiresAt: string | null;
+  origin: VipOrigin;
+  createdAt: string;
+  createdBy: string | null;
+  revokedAt: string | null;
+  /** `null` COM `revokedAt` preenchido = foi o relógio. */
+  revokedBy: string | null;
+  /** Vale AGORA: não revogado e não vencido. */
+  active: boolean;
+  /** Passou da data e o relógio ainda não o revogou. */
+  expired: boolean;
+  /** `null` = o agente nunca viu este jogador. */
+  playerName?: string | null;
+}
+
+/**
+ * Um nível de VIP, como o servidor o declara.
+ *
+ * Vem do `OrigemZVip.json` de cada servidor — nunca de uma lista
+ * do painel. É o que permite oferecer um seletor em vez de um
+ * campo de texto: digitar um nível que não existe é o jeito mais
+ * rápido de vender um VIP que não vira efeito nenhum.
+ */
+export interface VipTier {
+  tier: string;
+  group: string;
+  title: string | null;
+  rank: number | null;
+  parentGroup: string | null;
+  /** Em quais servidores este nível existe. */
+  servers: string[];
+}
+
+/** O que uma sincronização fez naquele servidor. */
+export interface VipSyncResult {
+  serverId: string;
+  players: number;
+  added: string[];
+  removed: string[];
+  adopted: string[];
+  /** Preenchido = a rodada não aconteceu, e este é o motivo. */
+  skipped: string | null;
+}
+
+/** Os contêineres do jogador. Ver core/src/loadouts/items.ts. */
+export type LoadoutSlot = 'wear' | 'belt' | 'main';
+
+export interface LoadoutItem {
+  slot: LoadoutSlot;
+  shortname: string;
+  amount: number;
+  /** String, sempre: skin do workshop passa de 2^53. */
+  skinId: string;
+  position: number;
+}
+
+/**
+ * Um grupo daquele servidor, com o loadout dele.
+ *
+ * A lista é DERIVADA dos grupos do Oxide: grupo novo aparece
+ * vazio, e um loadout cujo grupo sumiu aparece com `exists: false`
+ * — órfão, em vez de apagado sozinho.
+ *
+ * `exists: null` = o servidor está fora do ar e ninguém pôde
+ * perguntar. É diferente de "o grupo não existe".
+ */
+export interface ServerLoadout {
+  name: string;
+  exists: boolean | null;
+  members: number | null;
+  items: LoadoutItem[];
+  enabled: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface LoadoutSyncResult {
+  serverId: string;
+  tiers: number;
+  items: number;
+  cachedTiers: number;
+  cachedItems: number;
+  skipped: string | null;
+}
+
+export type KitKind = 'compra' | 'resgate' | 'cooldown';
+
+export interface Kit {
+  id: number;
+  slug: string;
+  name: string;
+  description: string | null;
+  kind: KitKind;
+  /** Em CENTAVOS. `null` fora de `compra`. */
+  priceCents: number | null;
+  /** Em SEGUNDOS. `null` fora de `cooldown`. */
+  cooldownSeconds: number | null;
+  /** `null` = qualquer um. */
+  requiredTier: string | null;
+  items: LoadoutItem[];
+  enabled: boolean;
+  /** Em quais servidores ele é oferecido. */
+  servers: string[];
+  /** Quantas entregas deram certo. As que falharam não contam. */
+  claimCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O mesmo kit, do ponto de vista de um jogador. */
+export interface KitOffer extends Kit {
+  available: boolean;
+  /** Por que não. `null` quando pode. */
+  reason: string | null;
+  /** Quando ele poderá de novo, num kit de cooldown. */
+  nextAt: string | null;
+}
+
+export interface KitClaim {
+  id: number;
+  steamId: string;
+  playerName: string | null;
+  serverId: string;
+  claimedAt: string;
+  status: 'entregue' | 'falhou';
+  detail: string | null;
 }
 
 /**
@@ -1483,4 +1643,167 @@ export const agent = {
       `/api/servers/${encodeURIComponent(id)}/ui/push`,
       { method: 'POST' },
     ),
+  // ---- O VIP da rede ---------------------------------------
+  //
+  // PAGINADO desde a primeira versão, como a lista de jogadores:
+  // uma rede com meses de vida acumula concessões, e uma chamada
+  // que devolvesse todas travaria o navegador.
+
+  vips: (options: {
+    active?: boolean;
+    query?: string;
+    tier?: string;
+    limit: number;
+    offset: number;
+  }) => {
+    const params = new URLSearchParams();
+
+    if (options.active !== undefined) {
+      params.set('active', options.active ? '1' : '0');
+    }
+
+    if (options.query !== undefined && options.query.trim() !== '') {
+      params.set('q', options.query.trim());
+    }
+
+    if (options.tier !== undefined && options.tier !== '') {
+      params.set('tier', options.tier);
+    }
+
+    params.set('limit', String(options.limit));
+    params.set('offset', String(options.offset));
+
+    return api<{ ok: true; vips: Vip[]; count: number; total: number }>(
+      `/api/vips?${params.toString()}`,
+    );
+  },
+
+  /** Os níveis que os servidores declaram. Ver `VipTier`. */
+  vipTiers: () => api<{ ok: true; tiers: VipTier[]; message?: string }>('/api/vips/tiers'),
+
+  /**
+   * Concede ou RENOVA.
+   *
+   * `expiresAt: null` é VITALÍCIO, e o campo é obrigatório de
+   * propósito: um prazo esquecido viraria VIP eterno de graça, e
+   * ninguém repara num benefício que sobra.
+   */
+  grantVip: (input: {
+    steamId: string;
+    tier: string;
+    expiresAt: string | null;
+    origin?: 'loja' | 'painel';
+  }) =>
+    api<{
+      ok: true;
+      vip: Vip;
+      outcome: 'created' | 'extended';
+      results: VipSyncResult[];
+      message: string;
+    }>('/api/vips', { method: 'POST', body: input }),
+
+  /** Revoga. A linha continua no histórico, com quem revogou. */
+  revokeVip: (steamId: string, tier: string) =>
+    api<{ ok: true; vip: Vip; results: VipSyncResult[]; message: string }>(
+      `/api/vips/${encodeURIComponent(steamId)}/${encodeURIComponent(tier)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** O que este jogador tem agora, e o que ele já teve. */
+  playerVips: (steamId: string) =>
+    api<{ ok: true; active: Vip[]; history: Vip[] }>(
+      `/api/players/${encodeURIComponent(steamId)}/vips`,
+    ),
+
+  /** Reempurra o estado e reconcilia os grupos daquele servidor. */
+  syncServerVips: (id: string) =>
+    api<{ ok: true } & VipSyncResult & { message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/vips/sync`,
+      { method: 'POST' },
+    ),
+
+  // ---- Os loadouts daquele servidor ------------------------
+  //
+  // A lista vem dos GRUPOS do Oxide, e não de uma tabela nossa.
+
+  loadouts: (id: string) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      groups: ServerLoadout[];
+      truncated: number;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/loadouts`),
+
+  saveLoadout: (id: string, group: string, input: { items: LoadoutItem[]; enabled: boolean }) =>
+    api<{
+      ok: true;
+      loadout: ServerLoadout;
+      sync: LoadoutSyncResult;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/loadouts/${encodeURIComponent(group)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  /** Apaga. O payload seguinte não tem o grupo — e é assim que some do jogo. */
+  removeLoadout: (id: string, group: string) =>
+    api<{ ok: true; sync: LoadoutSyncResult; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/loadouts/${encodeURIComponent(group)}`,
+      { method: 'DELETE' },
+    ),
+
+  syncLoadouts: (id: string) =>
+    api<{ ok: true } & LoadoutSyncResult & { message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/loadouts/sync`,
+      { method: 'POST' },
+    ),
+
+  // ---- A loja de kits --------------------------------------
+
+  kits: () => api<{ ok: true; kits: Kit[] }>('/api/kits'),
+
+  createKit: (input: Omit<Kit, 'id' | 'claimCount' | 'createdAt' | 'updatedAt'>) =>
+    api<{ ok: true; kit: Kit; message: string }>('/api/kits', { method: 'POST', body: input }),
+
+  /** PUT, e não PATCH: a tela manda o kit inteiro. */
+  updateKit: (id: number, input: Omit<Kit, 'id' | 'claimCount' | 'createdAt' | 'updatedAt'>) =>
+    api<{ ok: true; kit: Kit; message: string }>(`/api/kits/${String(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  removeKit: (id: number) =>
+    api<{ ok: true; message: string }>(`/api/kits/${String(id)}`, { method: 'DELETE' }),
+
+  kitClaims: (id: number, options: { limit: number; offset: number }) =>
+    api<{ ok: true; claims: KitClaim[]; count: number; total: number }>(
+      `/api/kits/${String(id)}/claims?limit=${String(options.limit)}&offset=${String(options.offset)}`,
+    ),
+
+  /** Os kits daquele servidor. Com `steamId`, diz se ele pode pegar. */
+  serverKits: (id: string, steamId?: string) =>
+    api<{ ok: true; kits: KitOffer[] }>(
+      `/api/servers/${encodeURIComponent(id)}/kits` +
+        (steamId === undefined ? '' : `?steamId=${encodeURIComponent(steamId)}`),
+    ),
+
+  /**
+   * Entrega o kit AGORA.
+   *
+   * Exige o jogador dentro do servidor: item entra em inventário, e
+   * inventário só existe para quem está conectado.
+   */
+  claimKit: (id: string, kitId: number, steamId: string) =>
+    api<{
+      ok: true;
+      status: 'entregue' | 'falhou';
+      delivered: number;
+      total: number;
+      detail: string | null;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/kits/${String(kitId)}/claim`, {
+      method: 'POST',
+      body: { steamId },
+    }),
 };
