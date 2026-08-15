@@ -47,6 +47,21 @@ export interface ServerContextDeps {
    * reconexão do RCON.
    */
   readonly onRconConnected?: (serverId: string) => void;
+  /**
+   * Chamado para CADA linha que o servidor manda.
+   *
+   * ####  É POR AQUI QUE O PLUGIN PEDE UMA TELA  ####
+   *
+   * O `OrigemZUI` não tem como chamar o agente: o RCON é de mão
+   * única, e o que ele tem é o `Puts`. Então o pedido de tela sai
+   * como uma linha marcada no console, e este gancho é o único
+   * lugar por onde essas linhas passam — ver game/ui-sync.ts.
+   *
+   * Quem se inscrever aqui NÃO PODE LANÇAR: uma exceção subiria
+   * pelo ouvinte de evento do RCON e levaria junto o resto do
+   * stream. O `try` abaixo é a segunda trava, não a primeira.
+   */
+  readonly onConsoleLine?: (serverId: string, line: string) => void;
 }
 
 export class ServerContext {
@@ -84,6 +99,16 @@ export class ServerContext {
     // próprio jogo (`chat.tail`) — ver game/chat.ts.
     this.rcon.on('log', (entry) => {
       this.console.push(entry);
+
+      // O gancho vem DEPOIS do buffer: o console da tela é o que
+      // não pode ficar sem a linha, e um ouvinte lento não pode
+      // atrasá-lo. O `try` é a segunda trava — ver
+      // `onConsoleLine`.
+      try {
+        deps.onConsoleLine?.(config.id, entry.message);
+      } catch (error) {
+        logger.warn({ err: error }, 'o gancho de linha de console falhou');
+      }
     });
 
     this.rcon.on('connected', () => {

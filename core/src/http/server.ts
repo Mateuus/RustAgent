@@ -26,8 +26,12 @@ import { ZodError } from 'zod';
 import type { OperatorAuth } from '../auth/operator.js';
 import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
+import type { ItemsRepository } from '../db/items-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
+import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
+import type { ItemCatalog } from '../game/item-catalog.js';
 import type { MonumentReader } from '../game/monuments.js';
+import type { UiSync } from '../game/ui-sync.js';
 import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
@@ -54,6 +58,9 @@ import { registerPluginRoutes } from './routes/plugins.js';
 import { registerServerRoutes } from './routes/servers.js';
 import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
 import { registerSystemRoutes } from './routes/system.js';
+// ---- itens e interface ----
+import { registerItemRoutes } from './routes/items.js';
+import { registerUiRoutes } from './routes/ui.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -83,6 +90,17 @@ export interface BuildServerOptions {
   readonly directory: PlayerDirectory;
   /** Os monumentos do mundo. Ver game/monuments.ts. */
   readonly monuments: MonumentReader;
+
+  // ---- itens e interface ----
+
+  /** O catálogo guardado. Ver db/items-repository.ts. */
+  readonly items: ItemsRepository;
+  /** Quem relê o catálogo do jogo. Ver game/item-catalog.ts. */
+  readonly itemCatalog: ItemCatalog;
+  /** As interfaces. Ver db/ui-documents-repository.ts. */
+  readonly uiDocuments: UiDocumentsRepository;
+  /** O transporte até o jogo. Ver game/ui-sync.ts. */
+  readonly uiSync: UiSync;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -211,6 +229,20 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // `/servers/:id/players`, que é outra coisa, já foi
       // registrado por `registerAdminRoutes`.
       registerPlayerRoutes(api, { directory: options.directory });
+
+      // O catálogo de itens. Ele responde do BANCO, e por isso
+      // continua de pé com todos os servidores parados — que é
+      // justamente quando se monta um kit.
+      registerItemRoutes(api, { repository: options.items, catalog: options.itemCatalog });
+
+      // As interfaces do jogo. O desenho é da rede; o que cada
+      // servidor mostra dele é dado da ligação — daí as rotas
+      // virem em duas famílias.
+      registerUiRoutes(api, {
+        repository: options.uiDocuments,
+        sync: options.uiSync,
+        servers: options.supervisor,
+      });
     },
     { prefix: '/api' },
   );

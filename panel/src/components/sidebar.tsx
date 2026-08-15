@@ -26,8 +26,10 @@ import {
   ChevronsLeft,
   ChevronsRight,
   LayoutDashboard,
+  LayoutTemplate,
   LogOut,
   Menu,
+  Package,
   Puzzle,
   Server,
   Settings,
@@ -78,10 +80,22 @@ const NAV: readonly NavItem[] = [
     Icon: Users,
   },
   {
+    href: '/itens/',
+    label: 'Itens',
+    hint: 'O catálogo do jogo, guardado no agente — ele responde com os servidores parados',
+    Icon: Package,
+  },
+  {
     href: '/banidos/',
     label: 'Banidos',
     hint: 'A lista do agente: quem está fora, de onde, e até quando',
     Icon: Ban,
+  },
+  {
+    href: '/interface/',
+    label: 'Interface',
+    hint: 'O menu que os jogadores abrem no jogo: um desenho para a rede inteira',
+    Icon: LayoutTemplate,
   },
   {
     href: '/config/',

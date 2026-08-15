@@ -28,6 +28,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 
 import { OxidePanel } from '@/components/oxide-panel';
+import { ServerUiPanel } from '@/components/server-ui-panel';
 import { PluginConfigs } from '@/components/plugin-configs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -40,7 +41,16 @@ import { cn } from '@/lib/utils';
 
 const MAPS = ['Procedural Map', 'Barren', 'HapisIsland', 'Craggy Island'];
 
-type Section = 'geral' | 'mundo' | 'rede' | 'rcon' | 'steam' | 'plugins' | 'oxide' | 'avancado';
+type Section =
+  | 'geral'
+  | 'mundo'
+  | 'rede'
+  | 'rcon'
+  | 'steam'
+  | 'plugins'
+  | 'oxide'
+  | 'interface'
+  | 'avancado';
 
 const SECTIONS: readonly { key: Section; label: string }[] = [
   { key: 'geral', label: 'Geral' },
@@ -63,6 +73,13 @@ const SECTIONS: readonly { key: Section; label: string }[] = [
   // e o que cada um concede. É onde o VIP de fato acontece: o
   // nível é um grupo, e o plugin só o cria.
   { key: 'oxide', label: 'Oxide' },
+  // ####  E A INTERFACE FECHA O TRIO  ####
+  //
+  // O DESENHO do menu é da rede e mora em /interface. Aqui está o
+  // que é DESTE servidor: qual menu ele usa e o que ele esconde
+  // dele — a mesma natureza das outras sub-abas, que ajustam este
+  // servidor e não a rede.
+  { key: 'interface', label: 'Interface' },
   { key: 'avancado', label: 'Avançado' },
 ];
 
@@ -498,6 +515,8 @@ export function ServerSettings({
       {section === 'plugins' && <PluginConfigs serverId={server.id} />}
 
       {section === 'oxide' && <OxidePanel serverId={server.id} />}
+
+      {section === 'interface' && <ServerUiPanel serverId={server.id} />}
 
       {section === 'avancado' && (
         <div className="space-y-4">
