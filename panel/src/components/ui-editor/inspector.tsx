@@ -23,7 +23,7 @@
 import { Trash2 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 
-import { ItemPicker } from '@/components/item-picker';
+import { ItemCombobox } from '@/components/item-combobox';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { formatHexColor, parseHexColor } from '@/lib/ui-doc/color';
@@ -633,11 +633,13 @@ export function Inspector({ element, screens, onChange, onRemove }: InspectorPro
                   para o ícone — o que vai para o jogo é o id, que é
                   o que o CUI entende. */}
               <Field label="Item" hint="Busca no catálogo do agente. Funciona com tudo parado.">
-                <ItemPicker
-                  shortname={itemPreview}
-                  onPick={(item) => {
-                    setItemPreview(item.shortname);
-                    patch({ source: { kind: 'item', itemId: item.itemId, skinId: '0' } });
+                <ItemCombobox
+                  value={itemPreview}
+                  onValueChange={setItemPreview}
+                  onItemChange={(item) => {
+                    if (item !== null) {
+                      patch({ source: { kind: 'item', itemId: item.itemId, skinId: '0' } });
+                    }
                   }}
                 />
               </Field>

@@ -10,16 +10,18 @@
 //  ordem.
 //
 //  ------------------------------------------------------------
-//  ####  O CATÁLOGO DE ITENS AINDA PODE NÃO EXISTIR  ####
+//  ####  O ITEM SE ESCOLHE PELO NOME  ####
 //
-//  A busca por nome ("Assault Rifle") vem de `GET /api/items`, que
-//  outra frente está construindo. Enquanto ela não existir, o campo
-//  aceita o SHORTNAME digitado e a tela DIZ por quê — em vez de
-//  mostrar um seletor vazio que parece defeito.
+//  O campo VALE o shortname — é o que a entrega no jogo exige —
+//  mas ninguém decora `wall.frame.garagedoor`. A busca é por nome,
+//  com o ícone ao lado, e vem de `GET /api/items`: o catálogo mora
+//  no agente, então ela funciona com os servidores parados, que é
+//  quando alguém monta um kit.
 //
-//  O catálogo é consumido por HTTP, aqui na tela, e nunca por
-//  import: uma dependência de código entre duas branches em
-//  paralelo é o que impede as duas de compilar sozinhas.
+//  Ver components/item-combobox.tsx. Ele carrega VINTE itens por
+//  busca, e não o catálogo inteiro: são ~1250, e trazê-los todos
+//  para o navegador a cada abertura de tela seria pagar por uma
+//  lista que ninguém lê.
 //
 //  ####  O SLOT VALE PARA O LOADOUT; A LOJA ENTREGA NO
 //        INVENTÁRIO  ####
@@ -31,12 +33,13 @@
 // ============================================================
 
 import { Plus, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+
 
 import { Button } from '@/components/ui/button';
+import { ItemCombobox } from '@/components/item-combobox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api, type LoadoutItem, type LoadoutSlot } from '@/lib/api';
+import type { LoadoutItem, LoadoutSlot } from '@/lib/api';
 
 /** Os três contêineres do jogador, com o nome que quem monta usa. */
 const SLOTS: readonly { value: LoadoutSlot; label: string }[] = [
@@ -47,67 +50,6 @@ const SLOTS: readonly { value: LoadoutSlot; label: string }[] = [
 
 /** O teto do agente (core/src/loadouts/items.ts). */
 export const MAX_ITEMS = 60;
-
-/**
- * Um item do catálogo, como esta tela precisa vê-lo.
- *
- * Deliberadamente mínimo: o formato completo é da outra frente, e
- * depender de mais campos do que estes faria a tela quebrar a cada
- * ajuste no catálogo dela.
- */
-interface CatalogItem {
-  readonly shortname: string;
-  readonly name?: string;
-}
-
-/**
- * O catálogo, se ele já existir.
- *
- * `available` nasce `null` (ninguém perguntou ainda), vira `true`
- * quando a rota responde no formato esperado e `false` quando ela
- * não existe — e é esse último estado que faz a tela EXPLICAR em
- * vez de parecer quebrada.
- */
-function useItemCatalog(): { items: CatalogItem[]; available: boolean | null } {
-  const [items, setItems] = useState<CatalogItem[]>([]);
-  const [available, setAvailable] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const response = await api<{ items?: CatalogItem[] }>('/api/items?limit=2000');
-
-        if (cancelled) {
-          return;
-        }
-
-        // A rota é da outra frente: se o formato não for o que
-        // esperamos, a tela cai para o campo digitado em vez de
-        // quebrar.
-        if (!Array.isArray(response.items)) {
-          setAvailable(false);
-          return;
-        }
-
-        setItems(response.items.filter((item) => typeof item.shortname === 'string'));
-        setAvailable(true);
-      } catch {
-        // 404 enquanto o catálogo não existe. Não é erro da tela.
-        if (!cancelled) {
-          setAvailable(false);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return { items, available };
-}
 
 interface LoadoutEditorProps {
   readonly items: readonly LoadoutItem[];
@@ -130,7 +72,6 @@ export function LoadoutEditor({
   disabled = false,
   slotApplies = true,
 }: LoadoutEditorProps) {
-  const catalog = useItemCatalog();
 
   function update(index: number, patch: Partial<LoadoutItem>): void {
     onChange(items.map((item, position) => (position === index ? { ...item, ...patch } : item)));
@@ -169,15 +110,21 @@ export function LoadoutEditor({
           <div className="grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,0.8fr)]">
             <div>
               <Label>Item</Label>
-              <Input
-                // O `list` só tem efeito quando o catálogo existe;
-                // sem ele, o campo continua sendo texto livre.
-                list={catalog.available === true ? 'catalogo-de-itens' : undefined}
+              {/* ####  BUSCA POR NOME, COM O ÍCONE AO LADO  ####
+
+                  O campo continua VALENDO o shortname — é o que a
+                  entrega no jogo exige. O que mudou é como se chega
+                  nele: digitando "assault" em vez de decorar
+                  `rifle.ak`, e vendo a figura da arma antes de
+                  escolher.
+
+                  Digitar de cabeça é como o item errado entra num
+                  kit que só vai ser conferido quando chegar ao
+                  jogador. */}
+              <ItemCombobox
                 value={item.shortname}
-                placeholder="rifle.ak"
                 disabled={disabled}
-                onChange={(event) => update(index, { shortname: event.target.value.trim() })}
-                className="font-mono"
+                onValueChange={(shortname) => update(index, { shortname: shortname.trim() })}
               />
             </div>
 
@@ -252,16 +199,6 @@ export function LoadoutEditor({
         </div>
       ))}
 
-      {catalog.available === true && (
-        <datalist id="catalogo-de-itens">
-          {catalog.items.map((option) => (
-            <option key={option.shortname} value={option.shortname}>
-              {option.name ?? option.shortname}
-            </option>
-          ))}
-        </datalist>
-      )}
-
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Button
           variant="outline"
@@ -278,14 +215,18 @@ export function LoadoutEditor({
         </span>
       </div>
 
-      {catalog.available === false && (
-        <p className="border border-border bg-surface-2 px-3 py-2 text-2xs leading-relaxed text-muted">
-          O campo aceita o <strong>shortname</strong> do item, como o jogo o conhece (
-          <code>rifle.ak</code>, <code>wood</code>, <code>metal.refined</code>). A busca por nome
-          chega junto com o catálogo de itens, que está sendo construído — até lá, o shortname
-          digitado é o que vale, e o servidor recusa na entrega o que não existir.
-        </p>
-      )}
+      <p className="border border-border bg-surface-2 px-3 py-2 text-2xs leading-relaxed text-muted">
+        Busque pelo <strong>nome do jogo</strong>, em inglês (&ldquo;assault&rdquo;,
+        &ldquo;wood&rdquo;, &ldquo;medical&rdquo;) e escolha na lista — o ícone ao lado confirma que
+        é o item certo. O que fica gravado é o <strong>shortname</strong> (<code>rifle.ak</code>),
+        que é o que a entrega no jogo exige.
+      </p>
+
+      <p className="text-2xs leading-relaxed text-muted">
+        O catálogo vem do jogo e mora no agente, então a busca funciona com os servidores parados.
+        Um shortname digitado à mão continua valendo — o servidor recusa na entrega o que não
+        existir.
+      </p>
 
       {!slotApplies && (
         <p className="border border-amber bg-surface-2 px-3 py-2 text-2xs leading-relaxed">

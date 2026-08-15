@@ -1510,6 +1510,15 @@ export const agent = {
     removed?: boolean | undefined;
     limit?: number;
     offset?: number;
+    /**
+     * Cancela a busca anterior.
+     *
+     * O autocomplete dispara uma por tecla. Sem isto, a resposta de
+     * "wo" pode chegar DEPOIS da de "wood" e sobrescrever a lista
+     * certa — a tela mostraria o resultado de um texto que já não
+     * está no campo.
+     */
+    signal?: AbortSignal;
   }) => {
     const search = new URLSearchParams();
 
@@ -1535,7 +1544,9 @@ export const agent = {
 
     const query = search.toString();
 
-    return api<ItemsPage & { ok: true }>(`/api/items${query === '' ? '' : `?${query}`}`);
+    return api<ItemsPage & { ok: true }>(`/api/items${query === '' ? '' : `?${query}`}`, {
+      ...(params.signal === undefined ? {} : { signal: params.signal }),
+    });
   },
 
   itemCategories: () =>
