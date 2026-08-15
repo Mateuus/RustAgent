@@ -424,12 +424,24 @@ function buildShell(): UiElement[] {
           '#00000000',
         ),
 
-        // ####  O SLOT DE MODAL VEM DEPOIS  ####
+        // ####  O SLOT DE MODAL NÃO ENTRA NO SHELL  ####
         //
-        // No CUI a ordem da lista é a profundidade. Declarado antes
-        // do conteúdo, o modal apareceria ATRÁS da página que ele
-        // deveria cobrir.
-        panel(MODAL_SLOT, 'Modais', inset(0, 0, 0, 0), '#00000000'),
+        // Ele já esteve aqui, cobrindo a tela inteira e
+        // transparente — e ENGOLIA TODOS OS CLIQUES. No Unity,
+        // alpha 0 NÃO desliga o raycast: um painel invisível por
+        // cima continua interceptando, e o clique nem sai do
+        // cliente. O menu abria bonito e nenhum botão respondia,
+        // nem o de fechar.
+        //
+        // Quem cria o contêiner é o PLUGIN, ao abrir um modal, e
+        // ele o destrói ao fechar (ver `ModalContainerJson` em
+        // OrigemZUI.cs). Enquanto não há modal, não há nada por
+        // cima; quando há, bloquear o que está atrás passa a ser o
+        // comportamento certo.
+        //
+        // `modalSlotId` continua declarado no documento: ele é o
+        // NOME que o plugin dá a esse contêiner, e o mesmo que a
+        // conversão usa como `parent` do conteúdo do modal.
       ],
     ),
   ];

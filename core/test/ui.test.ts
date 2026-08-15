@@ -30,13 +30,13 @@ import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/dat
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { UiDocumentsRepository } from '../src/db/ui-documents-repository.js';
-import { cuiColor, screenToCui, type CuiElement } from '../src/game/ui-cui.js';
+import { cuiColor, ROOT_NAME, screenToCui, shellToCui, type CuiElement } from '../src/game/ui-cui.js';
 import { buildMainMenu, MAIN_MENU_SLUG } from '../src/game/ui-preset-main-menu.js';
 import { UiSync } from '../src/game/ui-sync.js';
 import { apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
 import { registerUiRoutes } from '../src/http/routes/ui.js';
 import { createLogger } from '../src/logger.js';
-import { applyHidden, findDocumentProblems } from '../src/types/ui-document.js';
+import { applyHidden, findDocumentProblems, walkElements } from '../src/types/ui-document.js';
 import {
   encodeUiDocPayload,
   toDocumentPayload,
@@ -170,6 +170,62 @@ describe('a carga inicial do Menu Principal', () => {
     // não é do shell: nada disso um schema pega, e cada um quebra
     // o menu de um jeito diferente no jogo.
     expect(findDocumentProblems(buildMainMenu())).toEqual([]);
+  });
+
+  /**
+   * ####  UM PAINEL TRANSPARENTE POR CIMA ENGOLE OS CLIQUES  ####
+   *
+   * Aconteceu: o slot de modal estava no shell, cobrindo a tela
+   * inteira com alpha 0. No Unity isso NÃO desliga o raycast — o
+   * menu abriu bonito no jogo e nenhum botão respondeu, nem o de
+   * fechar. O jogador ficou preso com o cursor liberado.
+   *
+   * Quem cria esse contêiner é o PLUGIN, e só enquanto há um modal
+   * aberto (ver `ModalContainerJson` em OrigemZUI.cs). O campo do
+   * documento é apenas o NOME que ele usa.
+   *
+   * O teste olha o que de fato vai ao jogo — o CUI do shell — e
+   * não o modelo: é lá que o elemento apareceria.
+   */
+  it('não desenha o slot de modal no cabeçalho', () => {
+    const document = buildMainMenu();
+    const shell = shellToCui(document);
+
+    expect(document.modalSlotId).not.toBeNull();
+    expect(shell.some((element) => element.name === `${ROOT_NAME}.${document.modalSlotId ?? ''}`)).toBe(
+      false,
+    );
+  });
+
+  /**
+   * O mesmo perigo, na forma geral: nada do cabeçalho pode cobrir
+   * os botões dele.
+   *
+   * Depois do slot de conteúdo, no shell, só cabe o que é menor que
+   * a tela. Um elemento esticado ali fica POR CIMA de tudo o que
+   * veio antes — inclusive da navegação.
+   */
+  it('não tem nada esticado no cabeçalho depois do slot de conteúdo', () => {
+    const document = buildMainMenu();
+
+    const stretched = (element: { rect: { anchorMin: { x: number }; anchorMax: { x: number } } }) =>
+      element.rect.anchorMin.x === 0 && element.rect.anchorMax.x === 1;
+
+    for (const { element } of walkElements(document.shell)) {
+      if (element.id === document.contentSlotId) {
+        continue;
+      }
+
+      // Os irmãos do slot de conteúdo, DEPOIS dele, não podem
+      // esticar sobre a tela toda.
+      const siblings = document.shell.flatMap((top) => top.children);
+      const slotIndex = siblings.findIndex((item) => item.id === document.contentSlotId);
+      const index = siblings.findIndex((item) => item.id === element.id);
+
+      if (slotIndex >= 0 && index > slotIndex) {
+        expect(stretched(element)).toBe(false);
+      }
+    }
   });
 
   it('é determinístico: montá-lo duas vezes dá o mesmo documento', () => {

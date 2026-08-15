@@ -70,8 +70,15 @@ export function findDocumentProblems(document: UiDocument): readonly DocumentPro
     });
   }
 
-  if (document.modalSlotId !== null && !slotIds.has(document.modalSlotId)) {
-    problems.push({ message: 'O slot de modal não é um elemento do cabeçalho.' });
+  // Ao contrário do de conteúdo — ver o mesmo comentário no core.
+  // Um painel transparente de tela cheia no cabeçalho engole todos
+  // os cliques, e o menu abre sem nenhum botão responder.
+  if (document.modalSlotId !== null && slotIds.has(document.modalSlotId)) {
+    problems.push({
+      message:
+        'O slot de modal NÃO pode ser um elemento do cabeçalho: um painel transparente por cima ' +
+        'da tela engole todos os cliques. Quem o cria é o plugin, só enquanto há um modal aberto.',
+    });
   }
 
   // Elementos e ações dividem o espaço de nomes: um id repetido

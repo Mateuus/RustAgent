@@ -492,9 +492,21 @@ export function findDocumentProblems(document: UiDocument): readonly DocumentPro
     });
   }
 
-  if (document.modalSlotId !== null && !slotIds.has(document.modalSlotId)) {
+  // ####  O SLOT DE MODAL NÃO PODE ESTAR NO CABEÇALHO  ####
+  //
+  // É o contrário do de conteúdo, e a diferença custou uma tarde:
+  // um painel de tela cheia e transparente no shell ENGOLE TODOS
+  // OS CLIQUES. No Unity, alpha 0 não desliga o raycast — o menu
+  // abre bonito e nenhum botão responde, nem o de fechar.
+  //
+  // Quem cria esse contêiner é o PLUGIN, só enquanto há um modal
+  // aberto. Aqui o campo é apenas o NOME que ele vai usar.
+  if (document.modalSlotId !== null && slotIds.has(document.modalSlotId)) {
     problems.push({
-      message: `O slot de modal ("${document.modalSlotId}") não é um elemento do cabeçalho.`,
+      message:
+        `O slot de modal ("${document.modalSlotId}") NÃO pode ser um elemento do cabeçalho: um ` +
+        'painel transparente por cima da tela engole todos os cliques, e o menu abriria sem ' +
+        'nenhum botão responder. Quem o cria é o plugin, e só enquanto há um modal aberto.',
     });
   }
 
