@@ -25,12 +25,14 @@ import {
   Ban,
   ChevronsLeft,
   ChevronsRight,
+  Crown,
   LayoutDashboard,
   LogOut,
   Menu,
   Puzzle,
   Server,
   Settings,
+  ShoppingBag,
   Users,
   X,
   type LucideIcon,
@@ -82,6 +84,22 @@ const NAV: readonly NavItem[] = [
     label: 'Banidos',
     hint: 'A lista do agente: quem está fora, de onde, e até quando',
     Icon: Ban,
+  },
+  // O VIP e a loja são de REDE, como os jogadores e os banidos:
+  // quem compra compra da rede, e um kit editado uma vez vale em
+  // todos os servidores que o oferecem. O que é por servidor — o
+  // loadout de cada grupo — mora em Configurações → Loadouts.
+  {
+    href: '/vips/',
+    label: 'VIPs',
+    hint: 'Quem tem VIP, de que nível, até quando — e de onde veio',
+    Icon: Crown,
+  },
+  {
+    href: '/loja/',
+    label: 'Loja',
+    hint: 'Os kits da rede: compra, resgate único e cooldown',
+    Icon: ShoppingBag,
   },
   {
     href: '/config/',

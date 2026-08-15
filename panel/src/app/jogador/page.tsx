@@ -24,7 +24,7 @@
 //  ajuste.
 // ============================================================
 
-import { Ban as BanIcon, Copy, History, IdCard, Server } from 'lucide-react';
+import { Ban as BanIcon, Copy, Crown, History, IdCard, Server } from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
@@ -35,6 +35,7 @@ import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { VipDialog } from '@/components/vip-dialog';
 import {
   agent,
   type Ban,
@@ -42,17 +43,24 @@ import {
   type PlayerEventSample,
   type PlayerIdentity,
   type PlayerServer,
+  type Vip,
 } from '@/lib/api';
 import { copySteamId } from '@/lib/clipboard';
 import { EM_DASH, formatDateTime, formatDuration, formatInteger, formatWhen } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-type Tab = 'identidade' | 'servidores' | 'historico';
+type Tab = 'identidade' | 'servidores' | 'vip' | 'historico';
 
 const TABS = [
   { key: 'identidade', label: 'Identidade', Icon: IdCard },
   { key: 'servidores', label: 'Servidores', Icon: Server },
+  // ####  O VIP VEM ANTES DO HISTÓRICO  ####
+  //
+  // Ele é ESTADO — "este jogador tem Ouro até dia 4?" —, e a ordem
+  // das abas é a da pergunta: quem é, onde joga, o que tem, e por
+  // último o que já aconteceu.
+  { key: 'vip', label: 'VIP', Icon: Crown },
   { key: 'historico', label: 'Histórico', Icon: History },
 ] as const;
 
@@ -244,6 +252,8 @@ function Jogador() {
             )}
 
             {tab === 'servidores' && <Servidores servers={servers} known={player.known} />}
+
+            {tab === 'vip' && <VipDoJogador steamId={steamId} />}
 
             {tab === 'historico' && <Historico steamId={steamId} />}
           </div>
@@ -532,6 +542,10 @@ const EVENT_LABEL: Record<PlayerEvent['kind'], string> = {
   teleport: 'teleportado',
   ban: 'banido',
   unban: 'banimento revogado',
+  // Os dois entraram com a migração 014. O rótulo é curto porque o
+  // detalhe do evento já diz qual nível e qual kit.
+  vip: 'VIP',
+  kit: 'kit',
 };
 
 function Historico({ steamId }: { steamId: string }) {
@@ -653,6 +667,172 @@ function Historico({ steamId }: { steamId: string }) {
             {sample.note}
           </p>
         </section>
+      )}
+    </div>
+  );
+}
+
+/**
+ * O VIP deste jogador: o que vale agora, e o que já valeu.
+ *
+ * ####  OS DOIS JUNTOS, E SEPARADOS  ####
+ *
+ * O ativo responde "ele tem Ouro?"; o histórico responde "ele diz
+ * que já teve" — e a segunda é a pergunta que chega pelo Discord.
+ * Misturá-los faria um VIP revogado em março parecer ativo.
+ *
+ * O VIP é de REDE: não há coluna de servidor aqui de propósito. O
+ * que é por servidor é o grupo do Oxide, e ele é conferido sozinho
+ * a cada conexão.
+ */
+function VipDoJogador({ steamId }: { readonly steamId: string }) {
+  const [active, setActive] = useState<Vip[] | null>(null);
+  const [history, setHistory] = useState<Vip[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [concedendo, setConcedendo] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await agent.playerVips(steamId);
+
+      setActive(response.active);
+      setHistory(response.history);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [steamId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function revoke(vip: Vip): Promise<void> {
+    setBusy(true);
+
+    try {
+      const response = await agent.revokeVip(vip.steamId, vip.tier);
+
+      toast.success('VIP revogado', { description: response.message });
+      await load();
+    } catch (cause) {
+      toast.error('Não consegui revogar', {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {error !== null && <StateBlock variant="error" title="Não consegui ler o VIP" detail={error} />}
+
+      {active === null && error === null && <StateBlock variant="loading" title="Lendo…" />}
+
+      {active !== null && (
+        <section className="border border-border bg-surface">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
+            <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+              <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />O que ele tem
+              agora
+            </h2>
+
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => setConcedendo(true)}>
+              Conceder ou renovar
+            </Button>
+          </header>
+
+          {active.length === 0 ? (
+            <p className="px-4 py-3 text-sm text-muted">
+              Este jogador não tem VIP nenhum. Um VIP concedido aqui vale em toda a rede.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {active.map((vip) => (
+                <li
+                  key={vip.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <p className="font-condensed text-sm font-bold uppercase tracking-wide">
+                      {vip.tier}
+                    </p>
+                    <p className="mt-1 text-2xs text-muted">
+                      desde {formatDateTime(vip.createdAt)} ·{' '}
+                      {vip.expiresAt === null
+                        ? 'vitalício'
+                        : `até ${formatDateTime(vip.expiresAt)}`}{' '}
+                      ·{' '}
+                      {vip.origin === 'adotado'
+                        ? 'adotado do grupo do Oxide'
+                        : `${vip.origin}${vip.createdBy === null ? '' : ` (${vip.createdBy})`}`}
+                    </p>
+                  </div>
+
+                  <ConfirmButton
+                    variant="danger"
+                    disabled={busy}
+                    icon={null}
+                    label="Revogar"
+                    confirmLabel="Revogar mesmo"
+                    hint={`Ele sai do grupo ${vip.tier} em todos os servidores. A linha fica no histórico.`}
+                    onConfirm={() => void revoke(vip)}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {history.length > 0 && (
+        <section className="border border-border bg-surface">
+          <header className="border-b border-border px-4 py-2">
+            <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+              <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
+              Tudo o que já houve
+            </h2>
+          </header>
+
+          <ol className="divide-y divide-border">
+            {history.map((vip) => (
+              <li
+                key={vip.id}
+                className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2 text-sm"
+              >
+                <span className="w-36 shrink-0 font-mono text-2xs text-muted">
+                  {formatDateTime(vip.createdAt)}
+                </span>
+                <span className="font-condensed text-2xs font-bold uppercase tracking-wide">
+                  {vip.tier}
+                </span>
+                <span className="min-w-0 flex-1 text-muted">
+                  {vip.revokedAt === null
+                    ? vip.expiresAt === null
+                      ? 'vitalício, ativo'
+                      : `${vip.expired ? 'vencido' : 'ativo'} — ${formatDateTime(vip.expiresAt)}`
+                    : `revogado em ${formatDateTime(vip.revokedAt)} por ${
+                        vip.revokedBy ?? 'prazo cumprido'
+                      }`}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      {concedendo && active !== null && (
+        <VipDialog
+          open
+          steamId={steamId}
+          current={active}
+          onClose={() => setConcedendo(false)}
+          onDone={() => {
+            void load();
+          }}
+        />
       )}
     </div>
   );
