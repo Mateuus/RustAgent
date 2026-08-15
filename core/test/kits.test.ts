@@ -46,6 +46,8 @@ const LEVELS = [
 
 interface FakeServer {
   readonly commands: string[];
+  /** Epoch ms do último wipe. `null` = não deu para saber. */
+  wipeAt: number | null;
   connected: boolean;
   /** Quem está dentro do servidor agora. `null` = não deu para ler. */
   online: string[] | null;
@@ -124,6 +126,9 @@ beforeEach(() => {
     online: [STEAM_ID],
     acceptsGive: true,
     configDir,
+    // Sem wipe conhecido, por padrão: é o estado de quem não usa a
+    // regra, e o que a maioria dos testes exercita.
+    wipeAt: null,
   };
 
   const kits = new KitsRepository(db);
@@ -144,6 +149,7 @@ beforeEach(() => {
       },
       presence: { online: () => Promise.resolve(server.online) },
       logger: createLogger({ log: { level: 'silent', pretty: false } }),
+      wipe: { at: () => Promise.resolve(server.wipeAt) },
     }),
   };
 });
@@ -159,6 +165,8 @@ function createKit(overrides: Partial<KitInput> = {}) {
     slug: 'kit-teste',
     name: 'Kit de teste',
     description: null,
+    category: null,
+    wipeDelaySeconds: null,
     kind: 'resgate',
     priceCents: null,
     cooldownSeconds: null,
@@ -379,6 +387,59 @@ describe('o jogador precisa estar dentro do servidor', () => {
   });
 });
 
+describe('o kit que só libera depois do wipe', () => {
+  /**
+   * ####  O PRIMEIRO DIA É O QUE DECIDE O WIPE  ####
+   *
+   * Um kit avançado entregue na primeira hora apaga a corrida
+   * inicial — que é a parte do jogo que traz gente de volta.
+   */
+  it('recusa antes da hora e diz quanto falta', async () => {
+    const kit = createKit({ wipeDelaySeconds: 7200 });
+
+    // O wipe foi há meia hora; o kit libera com duas.
+    harness.server.wipeAt = Date.now() - 30 * 60_000;
+
+    const offers = await harness.store.listForServer('pvp1', STEAM_ID);
+    const offer = offers.find((entry) => entry.id === kit.id);
+
+    expect(offer?.available).toBe(false);
+    expect(offer?.reason).toContain('depois do wipe');
+    // O `nextAt` é o mesmo campo do cooldown: a tela já sabe mostrar
+    // "EM 1 H 30 MIN" a partir dele.
+    expect(offer?.nextAt).not.toBeNull();
+
+    // E a ENTREGA recusa pela mesma regra: uma tela que oferece o
+    // botão e uma rota que aceita seria pior que o desencontro
+    // contrário.
+    await expect(
+      harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: null }),
+    ).rejects.toSatisfy((error: unknown) => isApiError(error) && error.code === 'KIT_AFTER_WIPE');
+  });
+
+  it('libera depois do prazo', async () => {
+    const kit = createKit({ wipeDelaySeconds: 7200 });
+
+    harness.server.wipeAt = Date.now() - 3 * 3_600_000;
+
+    const offers = await harness.store.listForServer('pvp1', STEAM_ID);
+
+    expect(offers.find((entry) => entry.id === kit.id)?.available).toBe(true);
+  });
+
+  it('sem saber a hora do wipe, LIBERA em vez de recusar', async () => {
+    // Recusar sem certeza puniria o jogador por um servidor que não
+    // respondeu — o mesmo critério do veículo sem espaço, na loja.
+    const kit = createKit({ wipeDelaySeconds: 7200 });
+
+    harness.server.wipeAt = null;
+
+    const offers = await harness.store.listForServer('pvp1', STEAM_ID);
+
+    expect(offers.find((entry) => entry.id === kit.id)?.available).toBe(true);
+  });
+});
+
 describe('o nível exigido', () => {
   it('recusa quem não tem o nível', async () => {
     const kit = createKit({ requiredTier: 'gold' });
@@ -456,6 +517,8 @@ describe('o kit é da rede, e cada servidor decide se o oferece', () => {
       slug: kit.slug,
       name: kit.name,
       description: null,
+    category: null,
+    wipeDelaySeconds: null,
       kind: 'compra',
       priceCents: 1990,
       cooldownSeconds: null,

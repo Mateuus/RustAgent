@@ -101,6 +101,18 @@ export interface KitHistory {
   recordAction(event: PlayerEventInput): void;
 }
 
+/**
+ * Quem sabe quando foi o último wipe daquele servidor.
+ *
+ * Interface mínima: quem a satisfaz em produção é o `WipeClock`
+ * (game/wipe.ts), que pergunta ao servidor e cacheia. `null` = não
+ * deu para saber — e aí o kit LIBERA, porque recusar sem certeza
+ * puniria o jogador por um servidor que não respondeu.
+ */
+export interface KitWipeClock {
+  at(serverId: string): Promise<number | null>;
+}
+
 export interface KitStoreDeps {
   readonly repository: KitsRepository;
   readonly vips: VipsRepository;
@@ -108,6 +120,8 @@ export interface KitStoreDeps {
   readonly presence: KitPresence;
   readonly logger: Logger;
   readonly history?: KitHistory | undefined;
+  /** Ausente = nenhum kit é bloqueado por wipe. */
+  readonly wipe?: KitWipeClock | undefined;
 }
 
 /** Um kit como a API o mostra. Datas em ISO. */
@@ -116,9 +130,13 @@ export interface KitView {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  /** A aba em que ele aparece no jogo. `null` = sem categoria. */
+  readonly category: string | null;
   readonly kind: KitRecord['kind'];
   readonly priceCents: number | null;
   readonly cooldownSeconds: number | null;
+  /** Só libera este tanto de segundos depois do wipe. */
+  readonly wipeDelaySeconds: number | null;
   readonly requiredTier: string | null;
   readonly items: readonly LoadoutItem[];
   readonly enabled: boolean;
@@ -136,6 +154,24 @@ export interface KitOfferView extends KitView {
   readonly reason: string | null;
   /** Quando ele poderá de novo, num kit de cooldown. ISO. */
   readonly nextAt: string | null;
+  /**
+   * A última vez que ELE levou este kit. ISO; `null` = nunca.
+   *
+   * ####  É A PERGUNTA QUE O JOGADOR FAZ  ####
+   *
+   * "Já peguei este?" e "quando peguei?" não têm resposta na tela
+   * sem isto — e sem resposta ele clica para descobrir, o que num
+   * kit de resgate único é justamente o clique que não dá para
+   * desfazer.
+   */
+  readonly lastClaimedAt: string | null;
+  /**
+   * Quantas vezes ELE já levou.
+   *
+   * Diferente de `claimCount`, que é o total da rede: aquele número
+   * é do admin, este é do jogador.
+   */
+  readonly myClaims: number;
 }
 
 export interface ClaimResult {
@@ -186,20 +222,29 @@ export class KitStore {
         available: kit.enabled,
         reason: kit.enabled ? null : 'Este kit está fora do ar.',
         nextAt: null,
+        lastClaimedAt: null,
+        myClaims: 0,
       }));
     }
 
-    const levels = await this.#levelsOf(serverId);
+    const [levels, wipeAt] = await Promise.all([
+      this.#levelsOf(serverId),
+      this.#wipeAt(serverId),
+    ]);
+
     const now = Date.now();
 
     return kits.map((kit) => {
-      const problem = this.#whyNot(kit, steamId, levels, now);
+      const problem = this.#whyNot(kit, steamId, levels, now, wipeAt);
+      const last = this.#deps.repository.lastDeliveredClaim(steamId, kit.id);
 
       return {
         ...toKitView(kit),
         available: problem === null,
         reason: problem?.reason ?? null,
         nextAt: problem?.nextAt ?? null,
+        lastClaimedAt: last === null ? null : new Date(last.claimedAt).toISOString(),
+        myClaims: this.#deps.repository.deliveredCountOf(steamId, kit.id),
       };
     });
   }
@@ -272,8 +317,14 @@ export class KitStore {
       );
     }
 
-    const levels = await this.#levelsOf(input.serverId);
-    const problem = this.#whyNot(kit, input.steamId, levels, Date.now());
+    const [levels, wipeAt] = await Promise.all([
+      this.#levelsOf(input.serverId),
+      this.#wipeAt(input.serverId),
+    ]);
+
+    // A MESMA função da vitrine: uma tela que oferece o botão e uma
+    // rota que recusa é o pior desencontro possível.
+    const problem = this.#whyNot(kit, input.steamId, levels, Date.now(), wipeAt);
 
     if (problem !== null) {
       throw new ApiError(problem.code, problem.reason, 409);
@@ -371,9 +422,33 @@ export class KitStore {
     steamId: string,
     levels: readonly VipTierLevel[],
     now: number,
+    /** Epoch ms do último wipe. `null` = não deu para saber. */
+    wipeAt: number | null = null,
   ): { readonly code: string; readonly reason: string; readonly nextAt: string | null } | null {
     if (!kit.enabled) {
       return { code: 'KIT_DISABLED', reason: `O kit "${kit.name}" está fora do ar.`, nextAt: null };
+    }
+
+    // ####  O KIT QUE SÓ LIBERA DEPOIS DO WIPE  ####
+    //
+    // Um kit avançado entregue na primeira hora apaga a corrida
+    // inicial, que é a parte do jogo que traz gente de volta.
+    //
+    // Sem saber a hora do wipe (`null`), o kit LIBERA. Recusar sem
+    // certeza puniria o jogador por um servidor que não respondeu —
+    // o mesmo critério do veículo sem espaço, na loja.
+    if (kit.wipeDelaySeconds !== null && wipeAt !== null) {
+      const free = wipeAt + kit.wipeDelaySeconds * 1000;
+
+      if (free > now) {
+        return {
+          code: 'KIT_AFTER_WIPE',
+          reason:
+            `O kit "${kit.name}" só libera ${describeWait(kit.wipeDelaySeconds * 1000)} depois do ` +
+            `wipe. Faltam ${describeWait(free - now)} (${new Date(free).toLocaleString('pt-BR')}).`,
+          nextAt: new Date(free).toISOString(),
+        };
+      }
     }
 
     if (kit.requiredTier !== null && !this.#hasTier(steamId, kit.requiredTier, levels, now)) {
@@ -509,6 +584,11 @@ export class KitStore {
     };
   }
 
+  /** Quando foi o wipe. `null` = sem relógio, ou sem resposta. */
+  async #wipeAt(serverId: string): Promise<number | null> {
+    return (await this.#deps.wipe?.at(serverId)) ?? null;
+  }
+
   async #levelsOf(serverId: string): Promise<readonly VipTierLevel[]> {
     const config = this.#deps.servers.configOf(serverId);
 
@@ -612,9 +692,11 @@ function toKitView(kit: KitRecord): KitView {
     slug: kit.slug,
     name: kit.name,
     description: kit.description,
+    category: kit.category,
     kind: kit.kind,
     priceCents: kit.priceCents,
     cooldownSeconds: kit.cooldownSeconds,
+    wipeDelaySeconds: kit.wipeDelaySeconds,
     requiredTier: kit.requiredTier,
     items: kit.items,
     enabled: kit.enabled,

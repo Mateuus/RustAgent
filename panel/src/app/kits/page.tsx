@@ -1,7 +1,19 @@
 'use client';
 
 // ============================================================
-//  /loja  -  os kits da rede.
+//  /kits  -  os kits da rede.
+//
+//  ####  KIT NÃO É OFERTA DA LOJA  ####
+//
+//  Um kit é entrega com REGRA: uma vez por jogador, de N em N horas.
+//  Ele pode ter preço anotado, mas o agente NÃO COBRA por ele — quem
+//  cobra é quem chama a rota.
+//
+//  A LOJA (`/loja`) é o outro sistema: ela tem carteira, débito,
+//  estorno e extrato. Os dois aparecem no mesmo menu do jogo, em
+//  abas diferentes, e entram pelo mesmo botão de comprar — quem
+//  decide qual é qual é a EXISTÊNCIA da oferta. Ver
+//  core/src/game/ui-store-bridge.ts.
 //
 //  ####  O KIT É DA REDE; CADA SERVIDOR DECIDE SE O OFERECE  ####
 //
@@ -35,10 +47,10 @@ import { EM_DASH, formatWhen } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-export default function LojaPage() {
+export default function KitsPage() {
   return (
     <RequireSession>
-      <Loja />
+      <Kits />
     </RequireSession>
   );
 }
@@ -54,7 +66,7 @@ function HeaderCell({ children }: { children: ReactNode }) {
   );
 }
 
-function Loja() {
+function Kits() {
   const [kits, setKits] = useState<Kit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -120,8 +132,8 @@ function Loja() {
   return (
     <div>
       <PageHeader
-        title="Loja"
-        description="Os kits da rede: compra, resgate único e cooldown."
+        title="Kits"
+        description="Os kits da rede: compra, resgate único e cooldown. Quem cobra em OZCoin é a Loja."
         aside={
           <Button variant="primary" disabled={busy} onClick={() => setEditing(null)}>
             Novo kit
@@ -150,6 +162,10 @@ function Loja() {
               <thead className="border-b border-border">
                 <tr>
                   <HeaderCell>Kit</HeaderCell>
+                  {/* A aba do jogo. Sem ela, "por que este kit não
+                      aparece junto dos outros?" só tem resposta
+                      abrindo o formulário de cada um. */}
+                  <HeaderCell>Categoria</HeaderCell>
                   <HeaderCell>Como recebe</HeaderCell>
                   <HeaderCell>Exige VIP</HeaderCell>
                   <HeaderCell>Onde</HeaderCell>
@@ -169,7 +185,23 @@ function Loja() {
                       <p className="truncate font-mono text-2xs text-muted">{kit.slug}</p>
                     </td>
 
-                    <td className="px-3 py-2">{regraDe(kit)}</td>
+                    <td className="px-3 py-2 text-muted">
+                      {kit.category ?? <span className="text-2xs uppercase">geral</span>}
+                    </td>
+
+                    <td className="px-3 py-2">
+                      {regraDe(kit)}
+
+                      {/* O bloqueio pós-wipe vale para os três tipos,
+                          e é a regra que mais surpreende quem não a
+                          configurou: sem ele à vista, "por que o kit
+                          não aparece?" vira uma caçada. */}
+                      {kit.wipeDelaySeconds !== null && (
+                        <span className="block text-2xs text-amber">
+                          só {String(Math.round(kit.wipeDelaySeconds / 3600))} h após o wipe
+                        </span>
+                      )}
+                    </td>
 
                     <td className="px-3 py-2 text-muted">{kit.requiredTier ?? EM_DASH}</td>
 

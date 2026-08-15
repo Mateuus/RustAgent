@@ -64,6 +64,14 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
   const [slug, setSlug] = useState(kit?.slug ?? '');
   const [name, setName] = useState(kit?.name ?? '');
   const [description, setDescription] = useState(kit?.description ?? '');
+  const [category, setCategory] = useState(kit?.category ?? '');
+  // Em HORAS na tela, em segundos no banco: quem administra pensa em
+  // "duas horas depois do wipe", não em 7200.
+  const [wipeHours, setWipeHours] = useState(
+    kit?.wipeDelaySeconds === null || kit?.wipeDelaySeconds === undefined
+      ? ''
+      : String(Math.round(kit.wipeDelaySeconds / 3600)),
+  );
   const [kind, setKind] = useState<KitKind>(kit?.kind ?? 'resgate');
   const [price, setPrice] = useState(centsToInput(kit?.priceCents));
   const [hours, setHours] = useState(
@@ -110,6 +118,9 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
       slug: slug.trim(),
       name: name.trim(),
       description: description.trim() === '' ? null : description.trim(),
+      category: category.trim() === '' ? null : category.trim(),
+      wipeDelaySeconds:
+        wipeHours.trim() === '' ? null : Math.max(1, Math.round(Number(wipeHours) * 3600)),
       kind,
       priceCents: kind === 'compra' ? inputToCents(price) : null,
       cooldownSeconds: kind === 'cooldown' ? hours * 3600 : null,
@@ -184,15 +195,34 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
           </div>
         </div>
 
-        <div>
-          <Label>Descrição</Label>
-          <textarea
-            value={description}
-            rows={2}
-            disabled={busy}
-            onChange={(event) => setDescription(event.target.value)}
-            className="w-full border border-border bg-surface-2 px-3 py-2 text-sm text-foreground"
-          />
+        <div className="grid gap-3 sm:grid-cols-[1fr_12rem]">
+          <div>
+            <Label>Descrição</Label>
+            <textarea
+              value={description}
+              rows={2}
+              disabled={busy}
+              onChange={(event) => setDescription(event.target.value)}
+              className="w-full border border-border bg-surface-2 px-3 py-2 text-sm text-foreground"
+            />
+            <p className="mt-1 text-2xs text-muted">
+              Aparece na aba <strong>Geral</strong> do kit, dentro do jogo.
+            </p>
+          </div>
+
+          <div>
+            <Label>Categoria</Label>
+            <Input
+              value={category}
+              placeholder="Iniciante"
+              disabled={busy}
+              onChange={(event) => setCategory(event.target.value)}
+            />
+            <p className="mt-1 text-2xs leading-relaxed text-muted">
+              A aba da página KITS no jogo. Em branco, o kit cai em <strong>GERAL</strong> — e com
+              uma categoria só a barra de abas nem aparece.
+            </p>
+          </div>
         </div>
 
         <div>
@@ -262,6 +292,28 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
         )}
 
         <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <Label>Só libera depois do wipe</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={1}
+                max={720}
+                value={wipeHours}
+                placeholder="—"
+                disabled={busy}
+                onChange={(event) => setWipeHours(event.target.value)}
+                className="w-24"
+              />
+              <span className="text-2xs text-muted">horas após o wipe</span>
+            </div>
+            <p className="mt-1 text-2xs leading-relaxed text-muted">
+              Em branco = libera sempre. Um kit avançado entregue na primeira hora apaga a corrida
+              inicial do wipe. A hora do wipe vem do <strong>servidor</strong> — se ele não
+              responder, o kit libera.
+            </p>
+          </div>
+
           <div>
             <Label>Nível de VIP exigido</Label>
             <select

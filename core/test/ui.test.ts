@@ -621,71 +621,242 @@ describe('a página de kits', () => {
       claimCount: 0,
       createdAt: '2026-08-15T00:00:00.000Z',
       updatedAt: '2026-08-15T00:00:00.000Z',
+      category: null,
       available: true,
       reason: null,
       nextAt: null,
+      lastClaimedAt: null,
+      myClaims: 0,
       ...over,
     }) as KitOfferView;
 
-  it('põe um botão de resgate em quem PODE pegar', () => {
-    const screen = buildKitsScreen([offer()]);
-    const document = buildMainMenu();
-    const cui = screenContentToCui(document, screen);
+  const grid = (offers: readonly KitOfferView[]) =>
+    buildKitsScreen({ offers, target: { kind: 'grid', category: null, page: 0 } });
 
-    const commands = cui
-      .flatMap((element) => element.components)
-      .filter((component) => component.type === 'UnityEngine.UI.Button')
-      .map((component) => String(component.command));
+  /** O catálogo de itens, para o ícone e o nome bonito. */
+  const itemOf = (shortname: string): { itemId: number; displayName: string } | null =>
+    shortname === 'rifle.ak' ? { itemId: 1_545_779_598, displayName: 'Assault Rifle' } : null;
 
-    expect(commands.length).toBe(1);
-    // O botão carrega um ENDEREÇO. O slug vai na tabela de ações,
-    // não no comando.
-    expect(commands[0]).toMatch(/^origemz\.ui\.act \{token\} pegar-kit-inicial$/);
-
+  it('o card PERGUNTA antes de resgatar; quem cobra é a confirmação', () => {
+    // ####  UM RESGATE ÚNICO É IRREVERSÍVEL  ####
+    //
+    // O botão fica num card pequeno, ao lado de outros sete. Sem a
+    // confirmação, um clique errado gasta a única chance.
+    const screen = grid([offer()]);
     const actions = collectScreenActions(screen);
 
-    expect(actions['pegar-kit-inicial']).toEqual({
+    expect(actions['pedir-kit-inicial']).toEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:confirmar',
+    });
+
+    // Nada na GRADE cobra: o `store.buy` não existe aqui.
+    expect(Object.values(actions).map((action) => action.kind)).not.toContain('store.buy');
+
+    const confirm = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'confirmar' },
+    });
+
+    // É AQUI, e em nenhum outro lugar, que o resgate acontece.
+    expect(collectScreenActions(confirm)['pegar-kit-inicial']).toEqual({
       kind: 'store.buy',
       offerId: 'kit-inicial',
       quantity: 1,
     });
+
+    const commands = screenContentToCui(buildMainMenu(), confirm)
+      .flatMap((element) => element.components)
+      .filter((component) => component.type === 'UnityEngine.UI.Button')
+      .map((component) => String(component.command));
+
+    // O botão carrega um ENDEREÇO. O slug vai na tabela de ações,
+    // não no comando.
+    expect(commands).toContain('origemz.ui.act {token} pegar-kit-inicial');
   });
 
-  it('mostra o MOTIVO, e não um botão morto, para quem não pode', () => {
-    // Um botão que recusa depois do clique faz o jogador clicar
-    // três vezes antes de desconfiar.
-    const screen = buildKitsScreen([
-      offer({ available: false, reason: 'você já pegou este kit' }),
+  it('a confirmação diz o que a REGRA custa, e não só "tem certeza?"', () => {
+    const unico = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'confirmar' },
+    });
+
+    const espera = buildKitsScreen({
+      offers: [offer({ kind: 'cooldown', cooldownSeconds: 7200 })],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'confirmar' },
+    });
+
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), unico))).toContain('resgate ÚNICO');
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), espera))).toContain('volta em 2 h');
+  });
+
+  it('separa os kits por categoria, e só mostra abas quando há mais de uma', () => {
+    const uma = grid([offer(), offer({ slug: 'kit-b', name: 'Kit B' })]);
+
+    // Uma aba solitária ocuparia trinta pixels para dizer o que a
+    // tela toda já diz.
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), uma))).not.toContain('GERAL');
+
+    const duas = grid([
+      offer({ category: 'Iniciante' }),
+      offer({ slug: 'kit-vip', name: 'Kit VIP', category: 'VIP' }),
     ]);
 
-    const cui = screenContentToCui(buildMainMenu(), screen);
-    const buttons = cui
-      .flatMap((element) => element.components)
-      .filter((component) => component.type === 'UnityEngine.UI.Button');
+    const actions = collectScreenActions(duas);
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), duas));
 
-    expect(buttons).toEqual([]);
-    expect(JSON.stringify(cui)).toContain('você já pegou este kit');
+    expect(json).toContain('INICIANTE');
+    expect(json).toContain('VIP');
+
+    // A aba é um ENDEREÇO com o slug da categoria — nem o nome cru
+    // (que levaria acento e espaço), nem o índice (que apontaria para
+    // outra aba assim que alguém criasse uma).
+    expect(Object.values(actions)).toContainEqual({
+      kind: 'navigate',
+      screenId: 'tela-kits:vip',
+    });
   });
 
-  it('diz quando a lista não coube em vez de sumir com o resto', () => {
-    const many = Array.from({ length: 9 }, (_, index) =>
+  it('mostra QUANTO FALTA quando o kit está em cooldown', () => {
+    // Um botão que recusa depois do clique faz o jogador clicar três
+    // vezes antes de desconfiar — e a frase da API ("o kit X é de
+    // resgate único, e 7656… já o pegou em…") não cabe num card.
+    const screen = grid([
+      offer({
+        kind: 'cooldown',
+        cooldownSeconds: 86_400,
+        available: false,
+        reason: 'a frase comprida do painel',
+        nextAt: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+      }),
+    ]);
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), screen));
+
+    expect(json).toContain('EM 2 H');
+    expect(json).not.toContain('a frase comprida do painel');
+
+    // Nenhum botão de compra: o único clicável é o "i".
+    expect(Object.values(collectScreenActions(screen)).map((action) => action.kind)).not.toContain(
+      'store.buy',
+    );
+  });
+
+  it('o resgate único já usado diz JÁ PEGOU', () => {
+    const screen = grid([offer({ available: false, lastClaimedAt: '2026-08-01T00:00:00.000Z' })]);
+
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), screen))).toContain('JÁ PEGOU');
+  });
+
+  it('pagina depois de oito kits, em vez de sumir com o resto', () => {
+    const many = Array.from({ length: 9 }, (_unused, index) =>
       offer({ slug: `kit-${String(index)}`, name: `Kit ${String(index)}` }),
     );
 
-    const json = JSON.stringify(screenContentToCui(buildMainMenu(), buildKitsScreen(many)));
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), grid(many)));
 
-    expect(json).toContain('não couberam');
+    expect(json).toContain('1 / 2');
+  });
+
+  it('o "i" abre o modal, e as abas são ENDEREÇOS', () => {
+    const screen = grid([offer()]);
+    const actions = collectScreenActions(screen);
+
+    expect(actions['akkit-inicialinfo']).toEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial',
+    });
+
+    // E o modal traz as duas abas, com a inativa levando à outra.
+    const info = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'geral' },
+      itemOf,
+    });
+
+    expect(Object.values(collectScreenActions(info))).toContainEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:itens',
+    });
+  });
+
+  it('a aba GERAL responde "quando peguei?" e "quantas vezes?"', () => {
+    const info = buildKitsScreen({
+      offers: [
+        offer({
+          kind: 'cooldown',
+          cooldownSeconds: 86_400,
+          myClaims: 3,
+          lastClaimedAt: '2026-08-10T15:30:00.000Z',
+        }),
+      ],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'geral' },
+    });
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), info));
+
+    expect(json).toContain('Você já pegou 3 vezes');
+    expect(json).toContain('Última vez');
+  });
+
+  it('a aba ITENS mostra o ícone do jogo, e não o shortname', () => {
+    const info = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens' },
+      itemOf,
+    });
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), info));
+
+    expect(json).toContain('Assault Rifle');
+    // O ícone vem do JOGO, pelo itemId — sem download, sem URL.
+    expect(json).toContain('"itemid":1545779598');
+  });
+
+  it('sem catálogo lido, a lista mostra o shortname e NÃO finge um ícone', () => {
+    const info = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens' },
+    });
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), info));
+
+    expect(json).toContain('rifle.ak');
+    expect(json).not.toContain('"itemid"');
   });
 
   it('a tela gerada é volátil: o plugin não pode guardá-la', () => {
-    // Ela mostra "daqui a 2h" e quem já pegou o quê. Em cache,
-    // mostraria isso para sempre.
+    // Ela mostra "EM 2 H" e quem já pegou o quê. Em cache, mostraria
+    // isso para sempre.
     const document = buildMainMenu();
-    const bundle = toGeneratedScreenBundle(document, buildKitsScreen([offer()]), 'tela-kits');
+    const bundle = toGeneratedScreenBundle(document, grid([offer()]), 'tela-kits');
 
     expect(bundle.volatile).toBe(true);
-    // E o SHELL entra na tabela de ações: sem isso o plugin
-    // recusaria o clique em HOME enquanto o jogador estivesse aqui.
+    // E o SHELL entra na tabela de ações: sem isso o plugin recusaria
+    // o clique em HOME enquanto o jogador estivesse aqui.
     expect(Object.keys(bundle.actions)).toContain('ir-home');
+  });
+
+  /**
+   * ####  ASPAS DUPLAS CHEGAM ESCAPADAS NA TELA  ####
+   *
+   * MEDIDO no jogo: o motivo de um kit apareceu como
+   *
+   *     O kit \"Kit Inicial\" é de resgate único
+   *
+   * com as barras à mostra. O `CuiHelper.AddUi` manda o JSON como
+   * ARGUMENTO de um comando de console, e essa serialização escapa as
+   * aspas de novo — o cliente desfaz uma camada só.
+   *
+   * A troca por aspas tipográficas acontece na EMISSÃO, para valer
+   * também no que o admin digitar no editor.
+   */
+  it('não deixa aspas retas chegarem ao cliente', () => {
+    const screen = grid([offer({ name: 'Kit "Inicial"' })]);
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), screen));
+
+    // No JSON serializado, uma aspa reta apareceria como `\"`.
+    expect(json).not.toContain('\\\\"');
+    expect(json).toContain('Kit “Inicial”');
   });
 });

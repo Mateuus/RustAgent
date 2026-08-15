@@ -57,11 +57,26 @@ export interface KitRecord {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  /**
+   * A aba em que ele aparece no jogo. `null` = sem categoria.
+   *
+   * Texto livre, e não uma tabela: aqui a categoria é um RÓTULO, e
+   * não algo que se publica e despublica como na loja. Ver a
+   * migração 019.
+   */
+  readonly category: string | null;
   readonly kind: KitKind;
   /** Em CENTAVOS. `null` fora de `compra`. */
   readonly priceCents: number | null;
   /** Em SEGUNDOS. `null` fora de `cooldown`. */
   readonly cooldownSeconds: number | null;
+  /**
+   * Só libera este tanto de segundos DEPOIS do wipe.
+   *
+   * `null` = sem bloqueio. Quem sabe a hora do wipe é o servidor —
+   * ver game/wipe.ts.
+   */
+  readonly wipeDelaySeconds: number | null;
   /** `null` = qualquer um. Preenchido = só quem tem aquele nível. */
   readonly requiredTier: string | null;
   readonly items: readonly LoadoutItem[];
@@ -86,9 +101,11 @@ export interface KitInput {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  readonly category: string | null;
   readonly kind: KitKind;
   readonly priceCents: number | null;
   readonly cooldownSeconds: number | null;
+  readonly wipeDelaySeconds: number | null;
   readonly requiredTier: string | null;
   readonly items: readonly LoadoutItem[];
   readonly enabled: boolean;
@@ -116,9 +133,11 @@ interface KitRow {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  readonly category: string | null;
   readonly kind: string;
   readonly price_cents: number | null;
   readonly cooldown_seconds: number | null;
+  readonly wipe_delay_seconds: number | null;
   readonly required_tier: string | null;
   readonly items: string;
   readonly enabled: number;
@@ -214,10 +233,10 @@ export class KitsRepository {
       const result = this.#db
         .prepare(
           `INSERT INTO kits
-             (slug, name, description, kind, price_cents, cooldown_seconds, required_tier,
+             (slug, name, description, category, kind, price_cents, cooldown_seconds, wipe_delay_seconds, required_tier,
               items, enabled, created_at, updated_at)
            VALUES
-             (@slug, @name, @description, @kind, @price_cents, @cooldown_seconds, @required_tier,
+             (@slug, @name, @description, @category, @kind, @price_cents, @cooldown_seconds, @wipe_delay_seconds, @required_tier,
               @items, @enabled, @created_at, @updated_at)`,
         )
         .run({ ...toColumns(input), created_at: now, updated_at: now });
@@ -255,8 +274,10 @@ export class KitsRepository {
       const result = this.#db
         .prepare(
           `UPDATE kits
-              SET slug = @slug, name = @name, description = @description, kind = @kind,
+              SET slug = @slug, name = @name, description = @description, category = @category,
+                  kind = @kind,
                   price_cents = @price_cents, cooldown_seconds = @cooldown_seconds,
+                  wipe_delay_seconds = @wipe_delay_seconds,
                   required_tier = @required_tier, items = @items, enabled = @enabled,
                   updated_at = @updated_at
             WHERE id = @id`,
@@ -371,6 +392,27 @@ export class KitsRepository {
     return row === undefined ? null : toClaim(row);
   }
 
+  /**
+   * Quantas vezes AQUELE jogador já levou este kit.
+   *
+   * Diferente de `KitRecord.claimCount`, que conta a rede inteira: a
+   * tela do jogo mostra este número para quem está olhando, e "47
+   * resgates" seria o total de todo mundo — uma informação que não
+   * responde à pergunta dele.
+   *
+   * Só as ENTREGUES, pelo mesmo motivo de `lastDeliveredClaim`.
+   */
+  deliveredCountOf(steamId: string, kitId: number): number {
+    return (
+      this.#db
+        .prepare(
+          `SELECT count(*) AS total FROM kit_claims
+            WHERE steam_id = @steam_id AND kit_id = @kit_id AND status = 'entregue'`,
+        )
+        .get({ steam_id: steamId, kit_id: kitId }) as { readonly total: number }
+    ).total;
+  }
+
   /** Quem já pegou este kit, do mais recente ao mais antigo. */
   claimsOf(
     kitId: number,
@@ -481,12 +523,18 @@ function toColumns(input: KitInput): Record<string, string | number | null> {
     slug: input.slug,
     name: input.name,
     description: input.description,
+    category: input.category,
     kind: input.kind,
     // Preço só faz sentido em `compra`, e cooldown só em
     // `cooldown`. Zerar o que não se aplica é o que impede um kit
     // que virou resgate de continuar cobrando na tela.
     price_cents: input.kind === 'compra' ? input.priceCents : null,
     cooldown_seconds: input.kind === 'cooldown' ? input.cooldownSeconds : null,
+    // O atraso pós-wipe NÃO é zerado por tipo: ele vale para os
+    // três. Um kit de compra liberado só depois do wipe é tão
+    // legítimo quanto um de resgate — a regra é sobre QUANDO, e não
+    // sobre COMO.
+    wipe_delay_seconds: input.wipeDelaySeconds,
     required_tier: input.requiredTier,
     items: serializeLoadoutItems(sortLoadoutItems(input.items)),
     // 0/1: o better-sqlite3 recusa boolean como parâmetro.
@@ -507,9 +555,11 @@ function toRecord(row: KitRow, servers: readonly string[], claimCount: number): 
     slug: row.slug,
     name: row.name,
     description: row.description,
+    category: row.category,
     kind: row.kind === 'compra' || row.kind === 'cooldown' ? row.kind : 'resgate',
     priceCents: row.price_cents,
     cooldownSeconds: row.cooldown_seconds,
+    wipeDelaySeconds: row.wipe_delay_seconds,
     requiredTier: row.required_tier,
     items: parseLoadoutItems(row.items),
     enabled: row.enabled === 1,

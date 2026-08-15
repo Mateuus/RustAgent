@@ -86,11 +86,30 @@ const kitBody = z
       ),
     name: z.string().trim().min(1).max(64),
     description: z.string().trim().max(400).nullable().default(null),
+    /**
+     * A aba do jogo. Vazio vira `null`: um rótulo de espaços em
+     * branco criaria uma aba sem nome, que ninguém consegue clicar
+     * de propósito.
+     */
+    category: z
+      .string()
+      .trim()
+      .max(32)
+      .nullable()
+      .default(null)
+      .transform((value) => (value === null || value === '' ? null : value)),
     kind: z.enum(['compra', 'resgate', 'cooldown']),
     /** Em CENTAVOS. Ver o cabeçalho. */
     priceCents: z.number().int().min(0).max(100_000_000).nullable().default(null),
     /** Em SEGUNDOS. */
     cooldownSeconds: z.number().int().min(1).max(31_536_000).nullable().default(null),
+    /**
+     * Em SEGUNDOS depois do wipe. `null` = sem bloqueio.
+     *
+     * Teto de 30 dias: acima disso o kit não estaria atrasado — ele
+     * estaria desligado, e desligar tem campo próprio.
+     */
+    wipeDelaySeconds: z.number().int().min(1).max(2_592_000).nullable().default(null),
     /** `null` = qualquer um. */
     requiredTier: z.string().trim().min(1).max(32).nullable().default(null),
     items: loadoutItemsSchema,
