@@ -112,6 +112,17 @@ export interface ServerView {
   readonly description: string;
   readonly url: string;
   readonly headerImage: string;
+  /**
+   * O servidor está trancado?
+   *
+   * ####  O BOOLEANO, E NUNCA A SENHA  ####
+   *
+   * A tela precisa dizer "este servidor pede senha" e oferecer o
+   * botão de abrir; para as duas coisas basta saber que existe. A
+   * senha em si sai do `.ini` e não tem por que atravessar a API —
+   * ela apareceria no devtools de quem abrisse a página.
+   */
+  readonly hasPassword: boolean;
   readonly steam: { appId: string; login: string; branch: string };
   readonly ports: { game: number; rcon: number; query: number; app: number };
   readonly rcon: { connected: boolean; state: string } | null;
@@ -398,6 +409,7 @@ export class ServerSupervisor {
       description: config.description,
       url: config.url,
       headerImage: config.headerImage,
+      hasPassword: config.password !== '',
       steam: { ...config.steam },
       ports: {
         game: config.ports.game,
@@ -470,6 +482,11 @@ export class ServerSupervisor {
     'description',
     'url',
     'headerImage',
+    // A senha entra na linha de comando do jogo: trocá-la com o
+    // servidor no ar não muda nada até ele subir de novo, e dizer
+    // isso é a diferença entre "não funcionou" e "vale no próximo
+    // start".
+    'password',
     'map',
     'seed',
     'worldSize',
@@ -510,6 +527,7 @@ export class ServerSupervisor {
       description: 'SERVER_DESCRIPTION',
       url: 'SERVER_URL',
       headerImage: 'SERVER_HEADERIMAGE',
+      password: 'SERVER_PASSWORD',
       map: 'SERVER_LEVEL',
       seed: 'SERVER_SEED',
       worldSize: 'SERVER_WORLDSIZE',

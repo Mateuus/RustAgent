@@ -293,6 +293,20 @@ export interface ServerConfig {
   readonly description: string;
   readonly url: string;
   readonly headerImage: string;
+  /**
+   * `SERVER_PASSWORD`: a senha que o JOGADOR digita para entrar.
+   *
+   * ####  ELA NÃO É A DO RCON  ####
+   *
+   * A do RCON dá o console inteiro do servidor; esta só tranca a
+   * porta. São campos separados de propósito — usar a mesma nas
+   * duas entregaria a administração a quem só queria jogar.
+   *
+   * Vazio = servidor aberto, que é o caso da esmagadora maioria.
+   * Com senha, ele continua aparecendo na lista da Steam: o que
+   * muda é que entrar exige o valor.
+   */
+  readonly password: string;
   readonly level: string;
   readonly seed: number;
   readonly worldSize: number;
@@ -487,6 +501,10 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
     id,
     name: (values.SERVER_NAME ?? '').trim() || hostname,
     hostname,
+    // Sem `trim()` cego: uma senha pode legitimamente ter espaço no
+    // meio. O que se remove é só o que o `.ini` acrescenta nas
+    // pontas.
+    password: (values.SERVER_PASSWORD ?? '').trim(),
     identity: (values.SERVER_IDENTITY ?? '').trim() || id,
     description: (values.SERVER_DESCRIPTION ?? '').trim(),
     url: (values.SERVER_URL ?? '').trim(),

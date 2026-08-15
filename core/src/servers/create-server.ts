@@ -193,6 +193,14 @@ export const createServerBodySchema = z
       .min(MIN_WORLD_SIZE, `worldSize não pode ser menor que ${String(MIN_WORLD_SIZE)}`)
       .max(MAX_WORLD_SIZE, `worldSize não pode passar de ${String(MAX_WORLD_SIZE)}`),
 
+    /**
+     * A senha que o JOGADOR digita para entrar. Vazia = aberto.
+     *
+     * Não é a do RCON: aquela dá o console inteiro do servidor,
+     * esta só tranca a porta. Ver `ServerConfig.password`.
+     */
+    password: iniText('password', 64).optional().or(z.literal('')),
+
     /** Ausente = a seed que o modelo já traz. */
     seed: z
       .number({ invalid_type_error: 'seed precisa ser número (não string)' })
@@ -406,6 +414,13 @@ export function createServer(options: CreateServerOptions): CreatedServer {
   // formulário não é um pedido para jogá-lo.
   if (input.seed !== undefined) {
     values.SERVER_SEED = String(input.seed);
+  }
+
+  // Vazia não vira linha: `SERVER_PASSWORD=` no arquivo é lido como
+  // "sem senha" pelo config.ts, mas escrever a chave sugere que há
+  // algo configurado ali. Ausente diz a verdade.
+  if (input.password !== undefined && input.password !== '') {
+    values.SERVER_PASSWORD = input.password;
   }
 
   writeConfigFile(configPath, id, renderServerIni(template, id, values));

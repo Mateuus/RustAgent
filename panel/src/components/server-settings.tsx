@@ -195,6 +195,14 @@ export function ServerSettings({
   const [section, setSection] = useState<Section>('geral');
   const [draft, setDraft] = useState<Draft>(() => draftOf(server));
   const [password, setPassword] = useState('');
+  /**
+   * A senha do JOGADOR.
+   *
+   * Ela NÃO entra no `Draft`: o agente devolve só `hasPassword`, e
+   * um campo que nasce vazio dentro de um formulário que grava tudo
+   * junto APAGARIA a senha de quem foi lá mudar o hostname.
+   */
+  const [joinPassword, setJoinPassword] = useState('');
   const [busy, setBusy] = useState(false);
 
   // O polling da página traz o servidor a cada 5 s. Recarregar o
@@ -311,6 +319,38 @@ export function ServerSettings({
               value={draft.headerImage}
               placeholder="https://…/header.png"
               onChange={(event) => setDraft({ ...draft, headerImage: event.target.value })}
+            />
+          </Field>
+        </Card>
+      )}
+
+      {section === 'geral' && (
+        <Card
+          title={server.hasPassword ? 'Senha do servidor · TRANCADO' : 'Senha do servidor'}
+          busy={busy}
+          warning="Esta é a senha do JOGADOR, e não a do RCON. Ela vale no próximo start do jogo."
+          saveLabel={joinPassword.trim() === '' ? 'Abrir servidor' : 'Definir senha'}
+          onSave={() => {
+            // Vazio LIMPA: é assim que se abre um servidor que estava
+            // trancado, e é o único caminho para isso.
+            void save({ password: joinPassword.trim() }, 'A senha do servidor').then(() =>
+              setJoinPassword(''),
+            );
+          }}
+        >
+          <Field
+            label={server.hasPassword ? 'Trocar por' : 'Nova senha'}
+            hint={
+              server.hasPassword
+                ? 'Este servidor PEDE senha hoje. Salvar com o campo vazio o abre para todo mundo.'
+                : 'Vazio = servidor aberto, que é como ele está. Com senha, ele continua na lista da Steam — o que muda é que entrar exige o valor.'
+            }
+          >
+            <Input
+              type="text"
+              value={joinPassword}
+              placeholder={server.hasPassword ? '••••••' : 'sem senha'}
+              onChange={(event) => setJoinPassword(event.target.value)}
             />
           </Field>
         </Card>

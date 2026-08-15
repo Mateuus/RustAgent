@@ -126,6 +126,8 @@ export interface ServerView {
   description: string;
   url: string;
   headerImage: string;
+  /** O servidor pede senha? A senha em si nunca sai do agente. */
+  hasPassword: boolean;
   steam: { appId: string; login: string; branch: string };
   ports: { game: number; rcon: number; query: number; app: number };
   rcon: { connected: boolean; state: string } | null;
