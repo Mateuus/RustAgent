@@ -3,15 +3,18 @@
 //
 //  ####  ERRO AQUI NÃO DÁ ERRO EM LUGAR NENHUM  ####
 //
-//  O `RustDedicated.exe` aceita o que receber. Um parâmetro a mais,
-//  vazio, não faz o processo reclamar — ele muda o comportamento do
-//  servidor e some. `+server.password ""` liga a proteção com uma
-//  senha em branco: o servidor passa a pedir algo que ninguém sabe,
-//  a lista de jogadores esvazia, e não há linha no log dizendo por
-//  quê.
+//  O `RustDedicated.exe` aceita o que receber. Um parâmetro que ele
+//  não conhece é IGNORADO em silêncio; um que ele conhece, com valor
+//  vazio, muda o comportamento do servidor sem nada no log.
 //
-//  Por isso os opcionais têm teste: eles só podem existir quando
-//  foram preenchidos.
+//  Foi assim que um `+server.password` inventado atravessou teste,
+//  build e produção: o jogo não reclamou, e o servidor continuou
+//  aberto para todo mundo. O convar não existe — `find password`
+//  responde só `rcon.*`, e `server.password` dá o mesmo erro de um
+//  nome sorteado.
+//
+//  Por isso os opcionais têm teste: eles só entram quando foram
+//  preenchidos, e só podem ser parâmetros que o jogo conhece.
 // ============================================================
 
 import { describe, expect, it } from 'vitest';
@@ -30,7 +33,6 @@ function config(over: Partial<ServerConfig> = {}): ServerConfig {
     description: '',
     url: '',
     headerImage: '',
-    password: '',
     level: 'Procedural Map',
     seed: 12_345,
     worldSize: 4000,
@@ -64,29 +66,6 @@ function valueOf(args: readonly string[], key: string): string | null {
 }
 
 describe('a linha de comando do jogo', () => {
-  it('NÃO manda senha quando o servidor é aberto', () => {
-    // `+server.password ""` trancaria o servidor com uma senha que
-    // ninguém sabe — e sem nada no log dizendo por quê.
-    const args = serverArgs(config(), 'F:\\Logs\\pvp1\\server.log');
-
-    expect(args).not.toContain('+server.password');
-  });
-
-  it('manda a senha quando ela existe', () => {
-    const args = serverArgs(config({ password: 'entra-quem-sabe' }), 'x.log');
-
-    expect(valueOf(args, '+server.password')).toBe('entra-quem-sabe');
-  });
-
-  it('a senha do jogador NÃO é a do RCON', () => {
-    // Usar a mesma nas duas entregaria a administração do servidor a
-    // quem só queria jogar.
-    const args = serverArgs(config({ password: 'so-para-entrar' }), 'x.log');
-
-    expect(valueOf(args, '+server.password')).toBe('so-para-entrar');
-    expect(valueOf(args, '+rcon.password')).toBe('senha-do-rcon');
-  });
-
   it('os outros opcionais seguem a mesma regra', () => {
     const vazio = serverArgs(config(), 'x.log');
 
@@ -114,21 +93,21 @@ describe('a linha de comando do jogo', () => {
 
 describe('a gravação do .ini', () => {
   it('reescreve a chave que já existe, no lugar dela', () => {
-    const ini = ['SERVER_HOSTNAME=Antigo', 'SERVER_PASSWORD=', 'SERVER_SEED=1'].join('\n');
-    const out = applyIniValues(ini, { SERVER_PASSWORD: 'nova' });
+    const ini = ['SERVER_HOSTNAME=Antigo', 'SERVER_URL=', 'SERVER_SEED=1'].join('\n');
+    const out = applyIniValues(ini, { SERVER_URL: 'https://novo' });
 
-    expect(out).toContain('SERVER_PASSWORD=nova');
+    expect(out).toContain('SERVER_URL=https://novo');
     // E não duplica a chave no fim.
-    expect(out.match(/SERVER_PASSWORD=/g)).toHaveLength(1);
+    expect(out.match(/SERVER_URL=/g)).toHaveLength(1);
   });
 
   it('acrescenta a chave que o modelo não trazia', () => {
-    // Um `.ini` gravado antes de o campo existir precisa continuar
+    // Um `.ini` gravado antes de um campo existir precisa continuar
     // funcionando: a chave entra no fim, com um comentário dizendo
     // de onde veio.
-    const out = applyIniValues('SERVER_HOSTNAME=X', { SERVER_PASSWORD: 'nova' });
+    const out = applyIniValues('SERVER_HOSTNAME=X', { SERVER_SAVEINTERVAL: '900' });
 
-    expect(out).toContain('SERVER_PASSWORD=nova');
+    expect(out).toContain('SERVER_SAVEINTERVAL=900');
   });
 
   it('preserva o CRLF do arquivo original', () => {

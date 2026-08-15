@@ -293,20 +293,22 @@ export interface ServerConfig {
   readonly description: string;
   readonly url: string;
   readonly headerImage: string;
-  /**
-   * `SERVER_PASSWORD`: a senha que o JOGADOR digita para entrar.
-   *
-   * ####  ELA NÃO É A DO RCON  ####
-   *
-   * A do RCON dá o console inteiro do servidor; esta só tranca a
-   * porta. São campos separados de propósito — usar a mesma nas
-   * duas entregaria a administração a quem só queria jogar.
-   *
-   * Vazio = servidor aberto, que é o caso da esmagadora maioria.
-   * Com senha, ele continua aparecendo na lista da Steam: o que
-   * muda é que entrar exige o valor.
-   */
-  readonly password: string;
+  // ####  NÃO EXISTE SENHA DE SERVIDOR NO RUST  ####
+  //
+  // Houve aqui um campo `password`, que virava `+server.password` na
+  // linha de comando. Ele NÃO FUNCIONA, e a checagem que faltou é de
+  // um comando só:
+  //
+  //     find password   ->  só convars de rcon.*
+  //     server.password ->  o mesmo erro de um nome inventado
+  //
+  // O jogo aceita qualquer `+x.y` na linha de comando sem reclamar;
+  // o que não existe é simplesmente ignorado. O servidor entrou
+  // direto, e nada no log disse por quê.
+  //
+  // Trancar um servidor de Rust é trabalho de PLUGIN (whitelist por
+  // SteamID, ou senha digitada no chat depois de entrar), e não de
+  // configuração.
   readonly level: string;
   readonly seed: number;
   readonly worldSize: number;
@@ -501,10 +503,6 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
     id,
     name: (values.SERVER_NAME ?? '').trim() || hostname,
     hostname,
-    // Sem `trim()` cego: uma senha pode legitimamente ter espaço no
-    // meio. O que se remove é só o que o `.ini` acrescenta nas
-    // pontas.
-    password: (values.SERVER_PASSWORD ?? '').trim(),
     identity: (values.SERVER_IDENTITY ?? '').trim() || id,
     description: (values.SERVER_DESCRIPTION ?? '').trim(),
     url: (values.SERVER_URL ?? '').trim(),

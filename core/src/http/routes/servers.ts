@@ -59,12 +59,6 @@ const patchSchema = z
     url: iniText('url', 300).optional().or(z.literal('')),
     headerImage: iniText('headerImage', 300).optional().or(z.literal('')),
 
-    /**
-     * A senha do JOGADOR. String vazia LIMPA — é assim que se abre
-     * um servidor que estava trancado.
-     */
-    password: iniText('password', 64).optional().or(z.literal('')),
-
     map: z.enum(MAP_LEVELS).optional(),
     seed: z.number().int().min(0).max(MAX_SEED).optional(),
     worldSize: z.number().int().min(MIN_WORLD_SIZE).max(MAX_WORLD_SIZE).optional(),

@@ -265,15 +265,6 @@ export function serverArgs(server: ServerConfig, logFile: string): string[] {
     args.push('+server.headerimage', server.headerImage);
   }
 
-  // ####  SENHA VAZIA NÃO PODE IR  ####
-  //
-  // `+server.password ""` liga a proteção com uma senha em branco:
-  // o servidor passa a pedir algo que ninguém sabe, e a lista de
-  // jogadores esvazia sem nada no log dizer por quê.
-  if (server.password !== '') {
-    args.push('+server.password', server.password);
-  }
-
   args.push('-logfile', logFile);
 
   return args;

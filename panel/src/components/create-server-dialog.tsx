@@ -65,8 +65,6 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
   const [maxPlayers, setMaxPlayers] = useState(200);
   /** Vazia = a do modelo. Ver o campo. */
   const [seed, setSeed] = useState('');
-  /** A do JOGADOR, e não a do RCON. Vazia = servidor aberto. */
-  const [password, setPassword] = useState('');
   const [rconPassword, setRconPassword] = useState(() => randomPassword());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -85,11 +83,9 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
         worldSize,
         maxPlayers,
         rconPassword,
-        // Os dois só viajam quando preenchidos: seed vazia mantém a
-        // do modelo (e não vira 0, que é um mundo válido e
-        // específico), e senha vazia deixa o servidor aberto.
+        // A seed só viaja quando preenchida: vazia mantém a do
+        // modelo, e não vira 0 — que é um mundo válido e específico.
         ...(seed.trim() === '' ? {} : { seed: Number(seed) }),
-        ...(password.trim() === '' ? {} : { password: password.trim() }),
       });
 
       toast.success(`Servidor "${id.trim()}" criado.`, {
@@ -228,20 +224,6 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
           )}
 
           <div>
-            <Label htmlFor="password">Senha do servidor</Label>
-            <Input
-              id="password"
-              value={password}
-              placeholder="vazio = servidor aberto"
-              onChange={(event) => setPassword(event.target.value)}
-            />
-            <p className="mt-1 text-2xs leading-relaxed text-muted">
-              O que o <strong>jogador</strong> digita para entrar. Com senha, o servidor continua na
-              lista da Steam — o que muda é que entrar exige o valor.
-            </p>
-          </div>
-
-          <div>
             <Label htmlFor="rcon">Senha do RCON</Label>
             <div className="flex gap-2">
               <Input
@@ -252,8 +234,8 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
               <Button onClick={() => setRconPassword(randomPassword())}>Nova</Button>
             </div>
             <p className="mt-1 text-2xs leading-relaxed text-muted">
-              Esta é a do <strong>console</strong>: quem a tem executa qualquer comando aqui. Nunca
-              a mesma da de cima.
+              Quem a tem executa <strong>qualquer comando</strong> neste servidor. Ela não tranca a
+              porta para o jogador — o Rust não tem senha de entrada.
             </p>
           </div>
         </div>
