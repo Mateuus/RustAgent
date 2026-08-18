@@ -37,10 +37,12 @@ import { ItemsRepository } from './db/items-repository.js';
 import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
+import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { ItemCatalog } from './game/item-catalog.js';
 import { VipsRepository } from './db/vips-repository.js';
 import { KitStore } from './kits/service.js';
+import { SpawnStatusSync } from './loadouts/status.js';
 import { LoadoutSync } from './loadouts/sync.js';
 import { VipExpiryWatcher } from './vip/expiry-watcher.js';
 import { VipList } from './vip/service.js';
@@ -166,6 +168,7 @@ async function main(): Promise<void> {
   // deles. Ver o bloco de montagem, mais abaixo.
   let vips: VipList | null = null;
   let loadoutSync: LoadoutSync | null = null;
+  let spawnStatusSync: SpawnStatusSync | null = null;
 
   // ####  A HORA DO WIPE VEM DO SERVIDOR  ####
   //
@@ -215,6 +218,9 @@ async function main(): Promise<void> {
       // sincronizar na mão.
       void vips?.reconcile(serverId);
       void loadoutSync?.push(serverId, 'rcon-connected');
+      // O status de nascimento é o terceiro cache do plugin, e ele
+      // esvazia junto com os outros dois.
+      void spawnStatusSync?.push(serverId, 'rcon-connected');
     },
     // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
     //
@@ -370,6 +376,7 @@ async function main(): Promise<void> {
   // `onRconConnected`, acima.
   const vipsRepository = new VipsRepository(db);
   const loadoutsRepository = new LoadoutsRepository(db);
+  const spawnStatusRepository = new SpawnStatusRepository(db);
   const kitsRepository = new KitsRepository(db);
 
   vips = new VipList({
@@ -392,6 +399,12 @@ async function main(): Promise<void> {
 
   loadoutSync = new LoadoutSync({
     repository: loadoutsRepository,
+    servers: supervisor,
+    logger,
+  });
+
+  spawnStatusSync = new SpawnStatusSync({
+    repository: spawnStatusRepository,
     servers: supervisor,
     logger,
   });
@@ -574,6 +587,7 @@ async function main(): Promise<void> {
   uiSync.start();
 
   void loadoutSync.pushAll('boot');
+  void spawnStatusSync.pushAll('boot');
 
   // A loja. Ela pergunta ao `PlayersReader` quem está online —
   // entrega exige o jogador dentro do servidor, porque item entra
@@ -663,7 +677,12 @@ async function main(): Promise<void> {
     uiDocuments,
     uiSync,
     vips,
-    loadouts: { repository: loadoutsRepository, sync: loadoutSync },
+    loadouts: {
+      repository: loadoutsRepository,
+      sync: loadoutSync,
+      statusRepository: spawnStatusRepository,
+      statusSync: spawnStatusSync,
+    },
     kits: { store: kits, repository: kitsRepository },
     store: { repository: storeRepository, wallets: walletsRepository, service: store, wallet },
     servers: () =>

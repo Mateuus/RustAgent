@@ -775,6 +775,43 @@ export interface LoadoutSyncResult {
   skipped: string | null;
 }
 
+/**
+ * Em que ESTADO o jogador daquele grupo acorda.
+ *
+ * Mesma lista de grupos do loadout, e as mesmas regras de órfão e
+ * de servidor fora do ar — ver `ServerLoadout`.
+ *
+ * `null` num atributo é resposta, e não ausência: quer dizer "o
+ * jogo decide este". É diferente de 0, que para fome e sede é
+ * nascer morrendo.
+ */
+export interface ServerSpawnStatus {
+  name: string;
+  exists: boolean | null;
+  members: number | null;
+  health: number | null;
+  calories: number | null;
+  hydration: number | null;
+  enabled: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface SpawnStatusSyncResult {
+  serverId: string;
+  tiers: number;
+  cachedTiers: number;
+  skipped: string | null;
+}
+
+/** O que o formulário grava. Ver core/src/loadouts/status.ts. */
+export interface SpawnStatusInput {
+  health: number | null;
+  calories: number | null;
+  hydration: number | null;
+  enabled: boolean;
+}
+
 export type KitKind = 'compra' | 'resgate' | 'cooldown';
 
 export interface Kit {
@@ -1958,6 +1995,45 @@ export const agent = {
   syncLoadouts: (id: string) =>
     api<{ ok: true } & LoadoutSyncResult & { message: string }>(
       `/api/servers/${encodeURIComponent(id)}/loadouts/sync`,
+      { method: 'POST' },
+    ),
+
+  // ---- O status de nascimento daquele servidor -------------
+  //
+  // A outra metade da mesma pergunta: o loadout é o que o jogador
+  // GANHA, isto é o estado em que ele ACORDA. Mesma lista de
+  // grupos; comandos diferentes no jogo.
+
+  spawnStatus: (id: string) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      groups: ServerSpawnStatus[];
+      truncated: number;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/spawn-status`),
+
+  saveSpawnStatus: (id: string, group: string, input: SpawnStatusInput) =>
+    api<{
+      ok: true;
+      status: ServerSpawnStatus;
+      sync: SpawnStatusSyncResult;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/spawn-status/${encodeURIComponent(group)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  /** Apaga. Quem nascer nesse grupo volta ao padrão do Rust. */
+  removeSpawnStatus: (id: string, group: string) =>
+    api<{ ok: true; sync: SpawnStatusSyncResult; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/spawn-status/${encodeURIComponent(group)}`,
+      { method: 'DELETE' },
+    ),
+
+  syncSpawnStatus: (id: string) =>
+    api<{ ok: true } & SpawnStatusSyncResult & { message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/spawn-status/sync`,
       { method: 'POST' },
     ),
 

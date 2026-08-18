@@ -103,6 +103,25 @@ export interface LoadoutSyncPayload {
 }
 
 /**
+ * O apelido de nível de cada grupo, em minúsculas.
+ *
+ * Exportada porque o STATUS de nascimento (loadouts/status.ts)
+ * atravessa exatamente o mesmo caminho e precisa das mesmas
+ * chaves: quem consome os dois é o `OrigemZPlayer`, e ele pergunta
+ * por NÍVEL. Duplicar o `default → normal` em dois arquivos daria
+ * a chance de um deles ser corrigido sozinho um dia.
+ */
+export function aliasesOf(levels: readonly VipTierLevel[]): ReadonlyMap<string, string> {
+  const aliasOf = new Map<string, string>(
+    levels.map((level) => [level.group.toLowerCase(), level.tier]),
+  );
+
+  aliasOf.set(DEFAULT_GROUP, NORMAL_TIER);
+
+  return aliasOf;
+}
+
+/**
  * Monta o payload a partir dos loadouts e dos níveis daquele
  * servidor.
  *
@@ -126,11 +145,7 @@ export function buildLoadoutPayload(
     tiers[loadout.groupName] = loadout.items;
   }
 
-  const aliasOf = new Map<string, string>(
-    levels.map((level) => [level.group.toLowerCase(), level.tier]),
-  );
-
-  aliasOf.set(DEFAULT_GROUP, NORMAL_TIER);
+  const aliasOf = aliasesOf(levels);
 
   for (const loadout of loadouts) {
     if (loadout.items.length === 0) {

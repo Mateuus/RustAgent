@@ -97,7 +97,7 @@ const NAV: readonly NavItem[] = [
   // O VIP e a loja são de REDE, como os jogadores e os banidos:
   // quem compra compra da rede, e um kit editado uma vez vale em
   // todos os servidores que o oferecem. O que é por servidor — o
-  // loadout de cada grupo — mora em Configurações → Loadouts.
+  // loadout de cada grupo — mora em Configurações → Player.
   {
     href: '/vips/',
     label: 'VIPs',

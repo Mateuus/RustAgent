@@ -1525,6 +1525,56 @@ CREATE TABLE store_audit (
 CREATE INDEX idx_store_audit_at ON store_audit (at DESC);
 `;
 
+// ------------------------------------------------------------
+//  022 — com quanta vida, fome e sede cada grupo nasce
+//
+//  ####  POR QUE NÃO É COLUNA NA `loadouts`  ####
+//
+//  Porque são duas configurações com ciclos de vida diferentes, e o
+//  jogo já as trata assim: o kit viaja no `origemz.loadout.sync` e o
+//  status no `origemz.status.sync`, cada um trocando o SEU cache.
+//  Colar os dois numa linha só faria "desliguei o loadout deste
+//  grupo" apagar junto o status dele — e ninguém pediu isso.
+//
+//  Grupo pode ter status sem kit (nasce pelado, mas de barriga
+//  cheia) e kit sem status (recebe o kit e o jogo decide o resto).
+//
+//  ####  NULL É "O JOGO DECIDE", E NÃO ZERO  ####
+//
+//  É o contrato do plugin, e ele é explícito: o `SpawnStatusPayload`
+//  usa `float?` justamente porque zero de fome é nascer morrendo, e
+//  isso é diferente de não configurar nada. Uma coluna NOT NULL
+//  DEFAULT 0 transformaria os dois casos no pior deles.
+//
+//  Linha com os três nulos é a mesma coisa que não haver linha — o
+//  plugin descarta essa entrada ao montar o cache. A tela evita
+//  criar uma; o banco não precisa proibir.
+// ------------------------------------------------------------
+const SPAWN_STATUS_SCHEMA = `
+CREATE TABLE spawn_status (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O NOME DO GRUPO do Oxide, pelas mesmas razões da 011: a lista é
+  -- derivada dos grupos daquele servidor, e não mantida aqui.
+  group_name TEXT NOT NULL,
+
+  -- REAL, e não INTEGER: o jogo trabalha em float, e 62.5 de sede é
+  -- valor legítimo. NULL = o jogo decide aquele atributo.
+  health REAL,
+  calories REAL,
+  hydration REAL,
+
+  -- Desligado é diferente de apagado, como no loadout: o status
+  -- continua guardado aqui e some do payload empurrado.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  updated_at INTEGER NOT NULL,
+  updated_by TEXT,
+
+  UNIQUE (server_id, group_name)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -1549,6 +1599,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 19, name: 'kit-category', sql: KIT_CATEGORY_SCHEMA },
   { id: 20, name: 'kit-wipe-delay', sql: KIT_WIPE_DELAY_SCHEMA },
   { id: 21, name: 'store-audit', sql: STORE_AUDIT_SCHEMA },
+  { id: 22, name: 'spawn-status', sql: SPAWN_STATUS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

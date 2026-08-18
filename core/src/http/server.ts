@@ -29,10 +29,12 @@ import type { AgentConfig } from '../config.js';
 import type { ItemsRepository } from '../db/items-repository.js';
 import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
+import type { SpawnStatusRepository } from '../db/spawn-status-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { ItemCatalog } from '../game/item-catalog.js';
 import type { KitStore } from '../kits/service.js';
+import type { SpawnStatusSync } from '../loadouts/status.js';
 import type { LoadoutSync } from '../loadouts/sync.js';
 import type { VipList } from '../vip/service.js';
 import type { MonumentReader } from '../game/monuments.js';
@@ -41,6 +43,7 @@ import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
 import type { PluginLibrary } from '../oxide/library.js';
+import { MAX_PLUGIN_BYTES } from '../oxide/plugins.js';
 import type { PlayerDirectory } from '../players/service.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import type { SteamUpdateWatcher } from '../steam/update-watcher.js';
@@ -120,10 +123,18 @@ export interface BuildServerOptions {
 
   /** O VIP da rede. Ver vip/service.ts. */
   readonly vips: VipList;
-  /** O que cada grupo recebe ao nascer, por servidor. */
+  /**
+   * O que cada grupo recebe ao nascer, por servidor — e em que
+   * ESTADO ele acorda (vida, fome e sede).
+   *
+   * Os dois juntos porque são a mesma tela; separados no jogo,
+   * porque são dois comandos e dois caches do plugin.
+   */
   readonly loadouts: {
     readonly repository: LoadoutsRepository;
     readonly sync: LoadoutSync;
+    readonly statusRepository: SpawnStatusRepository;
+    readonly statusSync: SpawnStatusSync;
   };
   /** A loja de kits, e a entrega dentro do jogo. */
   readonly kits: {
@@ -160,10 +171,13 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   void app.register(cookie);
 
-  // O upload de plugin. O teto de 256 KB é do próprio plugin
-  // (oxide/plugins.ts); aqui ele é repetido porque o multipart
-  // precisa recusar ANTES de ler o corpo inteiro na memória.
-  void app.register(multipart, { limits: { fileSize: 256 * 1024, files: 1 } });
+  // O upload de plugin. O teto é do próprio plugin
+  // (`MAX_PLUGIN_BYTES`, em oxide/plugins.ts) e vem IMPORTADO, e
+  // não copiado: aqui ele existe porque o multipart precisa recusar
+  // ANTES de ler o corpo inteiro na memória, e dois números soltos
+  // divergiriam no primeiro ajuste — deixando o multipart cortar o
+  // arquivo que a conferência aceitaria.
+  void app.register(multipart, { limits: { fileSize: MAX_PLUGIN_BYTES, files: 1 } });
 
   // ---- o error handler: uma forma de erro para a API toda ----
   app.setErrorHandler(async (error: FastifyError, request, reply) => {
@@ -293,6 +307,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       registerLoadoutRoutes(api, {
         repository: options.loadouts.repository,
         sync: options.loadouts.sync,
+        statusRepository: options.loadouts.statusRepository,
+        statusSync: options.loadouts.statusSync,
         supervisor: options.supervisor,
       });
 
