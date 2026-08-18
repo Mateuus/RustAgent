@@ -376,7 +376,7 @@ Duas travas, e as duas são de segurança, não de zelo:
   caminho final é conferido contra a pasta de plugins daquele servidor. Um
   `..\..\RustDedicated_Data\Managed\Oxide.Core.dll` no nome do upload
   substituiria um assembly do loader;
-- **o conteúdo precisa começar como C#** e caber no limite (256 KB). Não é
+- **o conteúdo precisa começar como C#** e caber no limite (2 MB). Não é
   antivírus — é o que impede que um upload errado vire um arquivo que o Oxide
   tenta compilar para sempre, enchendo o log.
 

@@ -80,7 +80,35 @@ async function uploadedFile(
     throw new ApiError('INVALID_BODY', 'Nenhum arquivo veio na requisição.', 400);
   }
 
-  return { filename: file.filename, content: await file.toBuffer() };
+  try {
+    return { filename: file.filename, content: await file.toBuffer() };
+  } catch (cause) {
+    // ####  QUEM ESTOURA O TETO É CORTADO AQUI, E NÃO NA
+    //       CONFERÊNCIA  ####
+    //
+    // O multipart para de ler no `fileSize` — que é o ponto: sem
+    // isso o agente carregaria o arquivo inteiro na memória só para
+    // depois recusá-lo. O preço é que o erro vem do
+    // @fastify/multipart, em inglês e falando de "multipart
+    // config", que não é o assunto de quem mandou um plugin grande
+    // demais.
+    if (isFileTooLarge(cause)) {
+      throw new ApiError(
+        'PLUGIN_TOO_LARGE',
+        `O arquivo passa de ${String(MAX_PLUGIN_BYTES / 1024 / 1024)} MB, que é o limite do ` +
+          'upload. Um plugin de Rust não chega perto disso — confira se você não enviou um zip ' +
+          'por engano.',
+        400,
+      );
+    }
+
+    throw cause;
+  }
+}
+
+/** O erro que o multipart lança quando o arquivo passa do teto. */
+function isFileTooLarge(cause: unknown): boolean {
+  return cause instanceof Error && (cause as { code?: unknown }).code === 'FST_REQ_FILE_TOO_LARGE';
 }
 
 /**

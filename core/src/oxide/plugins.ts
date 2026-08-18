@@ -39,8 +39,20 @@ import { decodeSource, stripComments } from './csharp-source.js';
 /** Nome de arquivo aceito. Sem barra, sem `..`, sempre `.cs`. */
 export const PLUGIN_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,64}\.cs$/;
 
-/** Teto do arquivo. O maior plugin conhecido tem ~180 KB. */
-export const MAX_PLUGIN_BYTES = 256 * 1024;
+/**
+ * Teto do arquivo.
+ *
+ * O maior plugin conhecido tem ~180 KB, e por um tempo o teto foi
+ * 256 KB por causa disso. Só que "o maior que eu conheço" não é
+ * limite de nada: um plugin de menu com muita tabela embutida passa
+ * fácil, e quem esbarra nisso não tem o que fazer além de pedir a
+ * alguém que mexa no código do agente.
+ *
+ * 2 MB continua recusando o engano que o teto existe para pegar —
+ * um zip ou um dump mandado no lugar do `.cs` — e cabe folgado na
+ * memória: o arquivo é lido inteiro num Buffer para ser conferido.
+ */
+export const MAX_PLUGIN_BYTES = 2 * 1024 * 1024;
 
 export interface PluginInfo {
   /** `MeuPlugin.cs`. */
@@ -279,7 +291,7 @@ export function assertPluginContent(content: Buffer): void {
     throw new ApiError(
       'PLUGIN_TOO_LARGE',
       `O arquivo tem ${String(Math.round(content.length / 1024))} KB e o limite é ` +
-        `${String(MAX_PLUGIN_BYTES / 1024)} KB. Um plugin de Rust não chega perto disso — ` +
+        `${String(MAX_PLUGIN_BYTES / 1024 / 1024)} MB. Um plugin de Rust não chega perto disso — ` +
         'confira se você não enviou um zip por engano.',
       400,
     );
