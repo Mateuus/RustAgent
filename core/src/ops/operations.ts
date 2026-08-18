@@ -51,6 +51,20 @@ export interface OperationLogLine {
   readonly text: string;
 }
 
+/**
+ * Para onde as linhas vão ALÉM da memória.
+ *
+ * Existe um só uso hoje — o arquivo em `Logs\<servidor>\ops\` —,
+ * e ele é a razão de a operação ter deixado de ser um objeto
+ * fechado: o console da tela morre no `pm2 restart`, e a pergunta
+ * "por que o update da madrugada falhou?" chega sempre depois
+ * disso. Ver `op-log-file.ts`.
+ */
+export interface OperationSink {
+  readonly line: (line: OperationLogLine) => void;
+  readonly close: (operation: Operation) => void;
+}
+
 export interface OperationView {
   readonly id: string;
   readonly kind: OperationKind;
@@ -86,10 +100,41 @@ export class Operation {
   readonly #lines: OperationLogLine[] = [];
   #dropped = 0;
   #next = 0;
+  #sink: OperationSink | null = null;
+
+  /**
+   * Resolve quando a operação termina — de qualquer jeito.
+   *
+   * É o que deixa o vigia da Steam saber COMO acabou a tentativa
+   * que ele mesmo disparou: sem isto, ele só sabia que tinha
+   * disparado, e a tela repetia "o agente atualiza sozinho"
+   * mesmo depois de três fracassos seguidos.
+   */
+  readonly done: Promise<Operation>;
+  readonly #settle: (operation: Operation) => void;
 
   constructor(kind: OperationKind, serverId: string) {
     this.kind = kind;
     this.serverId = serverId;
+
+    let settle: (operation: Operation) => void = () => undefined;
+
+    this.done = new Promise<Operation>((resolve) => {
+      settle = resolve;
+    });
+
+    this.#settle = settle;
+  }
+
+  /**
+   * Liga o despejo em arquivo. Uma vez só, antes de rodar.
+   *
+   * Fora do construtor porque quem sabe abrir o arquivo precisa
+   * do `id` e do `startedAt` — que só existem depois que a
+   * operação nasce.
+   */
+  pipeTo(sink: OperationSink): void {
+    this.#sink ??= sink;
   }
 
   get signal(): AbortSignal {
@@ -111,13 +156,20 @@ export class Operation {
   }
 
   log(text: string): void {
-    this.#lines.push({ n: this.#next, at: Date.now(), text });
+    const line: OperationLogLine = { n: this.#next, at: Date.now(), text };
+
+    this.#lines.push(line);
     this.#next += 1;
 
     if (this.#lines.length > MAX_LOG_LINES) {
       this.#lines.shift();
       this.#dropped += 1;
     }
+
+    // O arquivo recebe TUDO: o teto acima é da memória, e o que
+    // some dela é justamente o começo da instalação — onde mora
+    // metade das respostas.
+    this.#sink?.line(line);
   }
 
   /**
@@ -140,6 +192,9 @@ export class Operation {
     this.status = status;
     this.finishedAt = Date.now();
     this.message = message;
+
+    this.#sink?.close(this);
+    this.#settle(this);
   }
 
   /**

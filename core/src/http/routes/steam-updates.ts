@@ -28,8 +28,21 @@ function body(state: SteamUpdateState) {
   return {
     ok: true,
     ...state,
-    checkedAt: state.checkedAt === null ? null : new Date(state.checkedAt).toISOString(),
+    checkedAt: iso(state.checkedAt),
+    nextAttemptAt: iso(state.nextAttemptAt),
+    lastAttempt:
+      state.lastAttempt === null
+        ? null
+        : {
+            ...state.lastAttempt,
+            startedAt: iso(state.lastAttempt.startedAt),
+            finishedAt: iso(state.lastAttempt.finishedAt),
+          },
   };
+}
+
+function iso(at: number | null): string | null {
+  return at === null ? null : new Date(at).toISOString();
 }
 
 export function registerSteamUpdateRoutes(app: FastifyInstance, deps: SteamUpdateRoutesDeps): void {
@@ -40,7 +53,11 @@ export function registerSteamUpdateRoutes(app: FastifyInstance, deps: SteamUpdat
       throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
     }
 
-    return body(deps.watcher.stateOf(id));
+    // Relê o build EM DISCO (arquivo local, ~1 ms) e não o
+    // publicado (SteamCMD, ~4 s e lock). É o que faz o aviso de
+    // "há atualização" sumir assim que ela entra, em vez de
+    // sobreviver até a próxima rodada do vigia.
+    return body(await deps.watcher.refreshInstalled(id));
   });
 
   app.post('/servers/:id/steam-update/check', async (request) => {

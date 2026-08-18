@@ -199,14 +199,7 @@ function Servidor() {
               Há atualização do Rust publicada (build {steam.published}; instalado{' '}
               {steam.installed}).{' '}
               {steam.autoUpdate ? (
-                <>
-                  O agente <strong>atualiza sozinho</strong>: avisa no chat, conta o tempo, salva e
-                  sobe de novo. Para não esperar a próxima rodada, use{' '}
-                  <strong>Atualizar avisando</strong>.
-                  {steam.attempts > 0 && (
-                    <> Tentativas automáticas gastas neste build: {steam.attempts} de 3.</>
-                  )}
-                </>
+                <AutoUpdateStatus steam={steam} />
               ) : (
                 <>
                   A atualização automática está <strong>desligada</strong> (STEAM_AUTO_UPDATE=0 no
@@ -302,5 +295,78 @@ function Visao({ server, steam }: { server: ServerView; steam: SteamUpdate | nul
           aba Configurações: opção espalhada é a que ninguém acha
           na hora. */}
     </div>
+  );
+}
+
+/**
+ * O aviso de atualização, quando o agente atualiza sozinho.
+ *
+ * ####  "ELE ATUALIZA SOZINHO" NÃO É UM RELATO  ####
+ *
+ * Esta faixa dizia sempre a mesma frase: antes da primeira
+ * tentativa, entre uma falha e outra, e depois de desistir. Quem
+ * olhava a tela via a promessa de que o agente resolve — enquanto
+ * o build em disco continuava o velho, rodada após rodada, sem
+ * nada explicando por quê.
+ *
+ * Agora ela conta o que ACONTECEU: a tentativa em curso, o motivo
+ * da última falha, e quando sai a próxima. Falhar três vezes
+ * troca a promessa por um pedido de socorro — porque a essa
+ * altura é isso mesmo.
+ */
+function AutoUpdateStatus({ steam }: { steam: SteamUpdate }): React.JSX.Element {
+  const attempt = steam.lastAttempt;
+
+  if (attempt?.status === 'running') {
+    return (
+      <>
+        O agente está <strong>atualizando agora</strong> ({attempt.operationId}) — acompanhe em
+        Operações.
+      </>
+    );
+  }
+
+  const desistiu = steam.attempts >= steam.maxAttempts;
+
+  return (
+    <>
+      {attempt?.status === 'failed' && (
+        <>
+          A última tentativa automática <strong>falhou</strong>
+          {attempt.finishedAt !== null && <> às {new Date(attempt.finishedAt).toLocaleTimeString()}</>}
+          : {attempt.message ?? 'sem motivo registrado'} O log inteiro dela está em Operações →
+          Histórico, e também no arquivo em <code>Logs\&lt;servidor&gt;\ops\</code>.{' '}
+        </>
+      )}
+
+      {attempt?.status === 'cancelled' && <>A última tentativa automática foi cancelada. </>}
+
+      {desistiu ? (
+        <>
+          Foram <strong>{steam.attempts} de {steam.maxAttempts}</strong> tentativas neste build e o
+          agente <strong>parou de tentar</strong> — mais uma derrubada de servidor não conserta o
+          que está impedindo o SteamCMD. Resolva o que a mensagem acima aponta e use{' '}
+          <strong>Atualizar avisando</strong>.
+        </>
+      ) : (
+        <>
+          O agente <strong>atualiza sozinho</strong>: avisa no chat, conta o tempo, salva e sobe de
+          novo.{' '}
+          {steam.attempts > 0 && (
+            <>
+              Tentativas gastas neste build: {steam.attempts} de {steam.maxAttempts}.{' '}
+            </>
+          )}
+          {steam.nextAttemptAt === null ? (
+            <>Para não esperar a próxima rodada, use <strong>Atualizar avisando</strong>.</>
+          ) : (
+            <>
+              A próxima não sai antes das {new Date(steam.nextAttemptAt).toLocaleTimeString()} — para
+              não esperar, use <strong>Atualizar avisando</strong>.
+            </>
+          )}
+        </>
+      )}
+    </>
   );
 }

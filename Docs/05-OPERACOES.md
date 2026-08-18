@@ -238,6 +238,32 @@ Três travas que impedem o pior:
   `lastError` no estado, e a tela mostra em vermelho em vez de afirmar que está
   tudo certo.
 
+#### O que a tela diz enquanto isso
+
+O `GET /api/servers/<id>/steam-update` responde com o retrato — e **relê o
+`installed` do disco a cada chamada** (arquivo local, ~1 ms). Sem isso, uma
+atualização que dava certo deixava a faixa "há atualização publicada" na tela
+por mais quinze minutos, e o F5 não adiantava: a página relia o mesmo retrato
+velho, e parecia que a atualização não tinha pegado. O `published`, que custa
+~4 s e disputa o lock, continua vindo da última rodada do vigia.
+
+O estado também carrega **o que aconteceu na última tentativa automática**:
+
+```json
+"attempts": 1, "maxAttempts": 3,
+"nextAttemptAt": "2026-08-18T23:25:19.402Z",
+"lastAttempt": { "operationId": "op_d163abca", "status": "failed",
+                 "finishedAt": "2026-08-18T22:27:20.000Z",
+                 "message": "o SteamCMD não conseguiu atualizar o app 258550 em 3 tentativas…" }
+```
+
+Antes disso, a faixa repetia "o agente atualiza sozinho" antes da primeira
+tentativa, entre uma falha e outra e depois de desistir das três — a promessa de
+que o agente resolve, enquanto o build em disco continuava o velho e ninguém
+sabia por quê. Agora ela conta a tentativa em curso, o motivo da última falha e
+quando sai a próxima; esgotadas as três, troca a promessa pelo pedido de
+intervenção.
+
 ### Como o agente sabe que a atualização deu certo
 
 Nem pelo código de saída do SteamCMD (ele sai 7/8 em execuções boas), nem pelo
@@ -306,6 +332,29 @@ GET /api/operations/op_7f3a…?fromLine=0
 O painel repete a chamada com `fromLine=nextLine`. O histórico guarda as **20
 últimas** operações em memória e some quando o agente reinicia: não é registro
 de auditoria, é o que aconteceu nesta sessão.
+
+### E o que sobra depois: `Logs\<servidor>\ops\`
+
+O console acima é ao vivo, cabe 2.000 linhas e morre no `pm2 restart`. Como a
+saída do SteamCMD **nunca passou pelo log do agente**, quem fosse explicar de
+manhã uma atualização automática que falhou de madrugada não tinha o que ler.
+
+Por isso cada operação escreve também um arquivo, com tudo — sem o teto de
+2.000 linhas:
+
+```
+Logs\oz-vanilla\ops\2026-08-18_19-25-19_server-auto-update_op_d163abca.log
+
+  ======== server-auto-update · op_d163abca · servidor oz-vanilla
+  ======== começou em 2026-08-18T22:25:19.402Z
+  [19:26:21] [SteamCMD] baixando/validando o app 258550 (branch public) em …
+  [19:26:44] Error! App '258550' state is 0x486 after update job.
+  ======== FAILED em 121s — o SteamCMD não conseguiu atualizar o app …
+```
+
+A pasta guarda os **50 últimos** arquivos. Falha em escrever (disco cheio,
+permissão, antivírus) vira um aviso no log do agente e **não interrompe a
+operação**: no pior caso fica-se sem o arquivo, que é como era antes.
 
 ---
 

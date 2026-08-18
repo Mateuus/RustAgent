@@ -320,6 +320,16 @@ export interface PluginConfigWriteResponse {
   message: string;
 }
 
+/** Como terminou a última atualização que o agente disparou sozinho. */
+export interface AutoUpdateAttempt {
+  operationId: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  /** O motivo, quando falhou. */
+  message: string | null;
+}
+
 export interface SteamUpdate {
   appId: string;
   branch: string;
@@ -330,6 +340,9 @@ export interface SteamUpdate {
   lastError: string | null;
   autoUpdate: boolean;
   attempts: number;
+  maxAttempts: number;
+  lastAttempt: AutoUpdateAttempt | null;
+  nextAttemptAt: string | null;
 }
 
 /** O retrato da máquina e do agente. Ver `core/src/http/routes/system.ts`. */

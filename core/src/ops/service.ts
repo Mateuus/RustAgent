@@ -42,6 +42,7 @@ import {
 } from '../steam/builds.js';
 import { appUpdate, steamCmdExe } from '../steam/steamcmd.js';
 import { toError } from '../util.js';
+import { openOperationLogFile } from './op-log-file.js';
 import {
   Operation,
   type OperationKind,
@@ -250,6 +251,23 @@ export class OperationsService {
 
     const operation = new Operation(kind, this.serverId);
     const resources = resourcesFor(kind, this.serverId);
+
+    // ####  O QUE ACONTECE AQUI FICA GRAVADO  ####
+    //
+    // O console da tela é ao vivo e some no `pm2 restart`, e a
+    // saída do SteamCMD nunca passou pelo log do agente. Quem
+    // precisasse explicar uma atualização automática que falhou
+    // de madrugada não tinha o que ler. Agora tem — e a primeira
+    // linha da operação diz onde.
+    const file = openOperationLogFile(operation, {
+      logsDir: this.#options.server.paths.logsDir,
+      logger: this.#options.logger,
+    });
+
+    if (file !== null) {
+      operation.pipeTo(file.sink);
+      operation.log(`[agente] o log desta operação também vai para ${file.path}`);
+    }
 
     // A trava vem por último, depois de todas as recusas: pegá-la
     // antes faria uma requisição inválida bloquear o SteamCMD até

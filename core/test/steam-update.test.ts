@@ -20,7 +20,15 @@
 //  o BUILDID que sobrou no manifest.
 // ============================================================
 
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
+
+import { createLogger } from '../src/logger.js';
+import { openOperationLogFile } from '../src/ops/op-log-file.js';
+import { Operation } from '../src/ops/operations.js';
 
 import { isFullyInstalled, parseInstalledBuild } from '../src/steam/builds.js';
 import { explainAppState, progressOf, steamCmdFailure } from '../src/steam/steamcmd.js';
@@ -135,5 +143,64 @@ describe('o manifest de um job que abortou', () => {
 
     expect(build?.buildId).toBe('24793074');
     expect(isFullyInstalled(build)).toBe(true);
+  });
+});
+
+// ============================================================
+//  ####  O LOG DA OPERAÇÃO PRECISA SOBREVIVER À OPERAÇÃO  ####
+//
+//  A tentativa automática que falhou às 19:25 só existia no
+//  console ao vivo do painel: 2.000 linhas em memória, apagadas
+//  no `pm2 restart`. Quem fosse investigar de manhã encontrava o
+//  log do PM2 SEM UMA LINHA DO STEAMCMD — ele nunca passou por
+//  lá. Sem arquivo, não há o que ler; e sem o que ler, o palpite
+//  vira diagnóstico.
+// ============================================================
+
+describe('o log de uma operação em disco', () => {
+  it('grava as linhas e o desfecho, e o desfecho chega a quem esperava', async () => {
+    const logsDir = await mkdtemp(join(tmpdir(), 'rustagent-ops-'));
+    const operation = new Operation('server-auto-update', 'oz-vanilla');
+
+    const file = openOperationLogFile(operation, {
+      logsDir,
+      logger: createLogger({ log: { level: 'silent', pretty: false } }),
+    });
+
+    expect(file).not.toBeNull();
+    operation.pipeTo(file!.sink);
+
+    operation.log("Error! App '258550' state is 0x486 after update job.");
+    operation.finish('failed', 'o job terminou com o app no estado 0x486');
+
+    // `done` é o que o vigia da Steam usa para saber COMO acabou
+    // a tentativa que ele mesmo disparou.
+    const finished = await operation.done;
+
+    expect(finished.status).toBe('failed');
+
+    // A escrita ainda está a caminho do disco quando `finish`
+    // devolve o controle.
+    await file!.closed;
+
+    const text = await readFile(file!.path, 'utf8');
+
+    expect(text).toContain('server-auto-update');
+    expect(text).toContain("state is 0x486");
+    expect(text).toContain('FAILED');
+    expect(text).toContain('o job terminou com o app no estado 0x486');
+  });
+
+  it('a operação anda mesmo quando não dá para abrir o arquivo', () => {
+    const operation = new Operation('server-update', 'oz-vanilla');
+
+    // Sem `pipeTo`: é o que acontece quando a pasta de logs não
+    // aceita escrita. Escrever log não pode derrubar atualização.
+    expect(() => {
+      operation.log('[agente] seguindo sem arquivo');
+      operation.finish('succeeded', null);
+    }).not.toThrow();
+
+    expect(operation.logFrom(0)).toHaveLength(1);
   });
 });

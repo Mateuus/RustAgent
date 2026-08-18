@@ -51,7 +51,7 @@ import { existsSync } from 'node:fs';
 
 import type { AgentPaths } from '../config.js';
 import type { Logger } from '../logger.js';
-import type { OperationLock } from '../ops/operations.js';
+import type { Operation, OperationLock } from '../ops/operations.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import { toError } from '../util.js';
 import { pickBranch, queryRemoteBuilds, readInstalledBuild } from './builds.js';
@@ -66,6 +66,24 @@ const RETRY_INTERVAL_MS = 60 * 60_000;
 /** Teto da consulta ao catálogo. Ela costuma levar ~4 s. */
 const QUERY_TIMEOUT_MS = 60_000;
 
+/**
+ * O desfecho da última atualização que o VIGIA disparou.
+ *
+ * Sem isto, a tela só sabia que havia update publicado e repetia
+ * "o agente atualiza sozinho" — a mesma frase depois de acertar,
+ * depois de falhar uma vez e depois de desistir do build. Quem
+ * olhava não tinha como distinguir "vai acontecer" de "já
+ * aconteceu três vezes e deu errado".
+ */
+export interface AutoUpdateAttempt {
+  readonly operationId: string;
+  readonly startedAt: number;
+  readonly finishedAt: number | null;
+  readonly status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  /** O motivo, quando falhou. */
+  readonly message: string | null;
+}
+
 export interface SteamUpdateState {
   readonly appId: string;
   readonly branch: string;
@@ -79,6 +97,12 @@ export interface SteamUpdateState {
   readonly autoUpdate: boolean;
   /** Tentativas gastas com o build publicado atual. */
   readonly attempts: number;
+  /** Quantas cabem, ao todo, no mesmo build. */
+  readonly maxAttempts: number;
+  /** Como terminou a última delas. `null` = nenhuma ainda. */
+  readonly lastAttempt: AutoUpdateAttempt | null;
+  /** Quando sai a próxima, quando há uma marcada. Epoch ms. */
+  readonly nextAttemptAt: number | null;
 }
 
 interface MutableState {
@@ -90,6 +114,7 @@ interface MutableState {
   attemptsFor: string | null;
   attempts: number;
   lastAttemptAt: number | null;
+  lastAttempt: AutoUpdateAttempt | null;
 }
 
 export interface UpdateWatcherOptions {
@@ -172,7 +197,36 @@ export class SteamUpdateWatcher {
     }
   }
 
-  /** O último retrato. NÃO consulta a Steam. */
+  /**
+   * Relê o BUILD EM DISCO. NÃO consulta a Steam.
+   *
+   * ####  O AVISO TEM QUE SUMIR QUANDO O UPDATE ENTRA  ####
+   *
+   * O `installed` só era relido na rodada do vigia, de quinze em
+   * quinze minutos. Então uma atualização que dava certo — pelo
+   * botão, pelo automático ou por um UpdateServer.bat rodado à
+   * mão — deixava a faixa "há atualização publicada" na tela por
+   * mais um quarto de hora, e o F5 não adiantava: a página relia
+   * o mesmo retrato velho. Parece que a atualização não pegou.
+   *
+   * Ler o manifest custa um arquivo local de poucos KB, e é isso
+   * que o GET do painel faz a cada cinco segundos. O `published`,
+   * esse sim caro, continua vindo do último retrato.
+   */
+  async refreshInstalled(serverId: string): Promise<SteamUpdateState> {
+    const config = this.#options.supervisor.configOf(serverId);
+
+    if (config !== null) {
+      const state = this.#stateFor(serverId);
+      const installed = await readInstalledBuild(config.paths.installDir, config.steam.appId);
+
+      state.installed = installed?.buildId ?? null;
+    }
+
+    return this.stateOf(serverId);
+  }
+
+  /** O último retrato. NÃO lê disco nem consulta a Steam. */
   stateOf(serverId: string): SteamUpdateState {
     const config = this.#options.supervisor.configOf(serverId);
     const state = this.#states.get(serverId);
@@ -192,6 +246,9 @@ export class SteamUpdateWatcher {
       lastError: state?.lastError ?? null,
       autoUpdate: this.#options.autoUpdate,
       attempts: state?.attempts ?? 0,
+      maxAttempts: MAX_ATTEMPTS_PER_BUILD,
+      lastAttempt: state?.lastAttempt ?? null,
+      nextAttemptAt: nextAttemptAt(state ?? null),
     };
   }
 
@@ -325,16 +382,81 @@ export class SteamUpdateWatcher {
         // trocou o que está em disco.
         .start({ kind: 'server-auto-update', expectedBuild: snapshot.published ?? undefined });
 
+      state.lastAttempt = {
+        operationId: operation.id,
+        startedAt: operation.startedAt,
+        finishedAt: null,
+        status: 'running',
+        message: null,
+      };
+
       this.#options.logger.info(
         { server: serverId, operation: operation.id },
         'atualização automática disparada',
       );
+
+      // ####  DISPARAR NÃO É SABER O QUE ACONTECEU  ####
+      //
+      // O `start` volta assim que a operação começa — daí em
+      // diante ela roda sozinha por vários minutos. Sem acompanhar
+      // o fim, o vigia (e a tela) repetiam "o agente atualiza
+      // sozinho" enquanto três tentativas fracassavam em silêncio.
+      // E não dá para esperar aqui: isto roda dentro da rodada de
+      // conferência, e travá-la por meia hora pararia o vigia
+      // inteiro.
+      void this.#watchAttempt(serverId, state, operation);
     } catch (error) {
       // Recusa de pré-condição (servidor no ar sem RCON, trava
       // ocupada) não é falha da atualização: é "agora não".
       this.#options.logger.warn(
         { server: serverId, err: toError(error) },
         'não deu para disparar a atualização automática agora',
+      );
+    }
+  }
+
+  /**
+   * Espera a operação terminar e guarda o desfecho.
+   *
+   * Deu certo, o build em disco mudou: a conferência sai NA HORA,
+   * para o aviso de "há atualização" desaparecer da tela em vez
+   * de sobreviver até a próxima rodada de quinze minutos. Deu
+   * errado, o motivo fica guardado — é o que a tela passa a
+   * mostrar no lugar da promessa de que o agente resolve sozinho.
+   */
+  async #watchAttempt(serverId: string, state: MutableState, operation: Operation): Promise<void> {
+    const finished = await operation.done;
+
+    state.lastAttempt = {
+      operationId: finished.id,
+      startedAt: finished.startedAt,
+      finishedAt: finished.finishedAt,
+      status: finished.status === 'running' ? 'running' : finished.status,
+      message: finished.message,
+    };
+
+    if (finished.status !== 'succeeded') {
+      this.#options.logger.warn(
+        { server: serverId, operation: finished.id, status: finished.status },
+        'a atualização automática não terminou bem',
+      );
+
+      return;
+    }
+
+    // As tentativas eram deste build. Ele entrou: a conta zera, e
+    // não fica pendurada esperando o próximo update da Facepunch
+    // para ser reaproveitada.
+    state.attemptsFor = null;
+    state.attempts = 0;
+    state.lastAttemptAt = null;
+
+    try {
+      await this.check(serverId);
+    } catch (error) {
+      this.#options.logger.warn(
+        { server: serverId, err: toError(error) },
+        'a atualização deu certo, mas a reconferência do build falhou',
       );
     }
   }
@@ -351,6 +473,7 @@ export class SteamUpdateWatcher {
         attemptsFor: null,
         attempts: 0,
         lastAttemptAt: null,
+        lastAttempt: null,
       };
 
       this.#states.set(serverId, state);
@@ -358,4 +481,26 @@ export class SteamUpdateWatcher {
 
     return state;
   }
+}
+
+/**
+ * Quando sai a próxima tentativa automática. `null` quando não há
+ * uma marcada — porque nenhuma foi gasta, ou porque as três já
+ * foram e agora é com o humano.
+ *
+ * É um horário CALCULADO, e não agendado: a rodada do vigia é que
+ * dispara, e ela só passa de quinze em quinze minutos. Então isto
+ * é o "não antes de", que é justamente o que a tela precisa dizer
+ * para ninguém ficar olhando o relógio.
+ */
+function nextAttemptAt(state: MutableState | null): number | null {
+  if (state === null || state.lastAttemptAt === null) {
+    return null;
+  }
+
+  if (state.attempts >= MAX_ATTEMPTS_PER_BUILD) {
+    return null;
+  }
+
+  return state.lastAttemptAt + RETRY_INTERVAL_MS;
 }
