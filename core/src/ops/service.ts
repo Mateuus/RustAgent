@@ -33,7 +33,14 @@ import { readServerConfig, type AgentPaths, type ServerConfig } from '../config.
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import { installOxide } from '../oxide/install.js';
-import { appUpdate } from '../steam/steamcmd.js';
+import {
+  appManifestPath,
+  isFullyInstalled,
+  queryRemoteBuild,
+  readInstalledBuild,
+  type InstalledBuild,
+} from '../steam/builds.js';
+import { appUpdate, steamCmdExe } from '../steam/steamcmd.js';
 import { toError } from '../util.js';
 import {
   Operation,
@@ -76,6 +83,14 @@ export interface StartOperationInput {
   readonly force?: boolean;
   /** Minutos de aviso antes do `server-auto-update`. */
   readonly countdownMinutes?: number;
+  /**
+   * O build que a Steam publicou, quando quem pediu já sabe.
+   *
+   * É a régua da conferência do fim: o SteamCMD tem que ter
+   * deixado ESTE build em disco. Sem ele, a conferência pergunta à
+   * Steam na hora — o vigia passa porque acabou de perguntar.
+   */
+  readonly expectedBuild?: string;
 }
 
 export interface OperationsServiceOptions {
@@ -301,8 +316,10 @@ export class OperationsService {
   }
 
   /** SteamCMD + Oxide. É a operação que INSTALA e a que ATUALIZA. */
-  async #install(operation: Operation): Promise<void> {
+  async #install(operation: Operation, expectedBuild?: string | null): Promise<void> {
     const { server, paths } = this.#options;
+
+    const before = await readInstalledBuild(server.paths.installDir, server.steam.appId);
 
     await appUpdate({
       dir: paths.steamCmdDir,
@@ -317,16 +334,7 @@ export class OperationsService {
       signal: operation.signal,
     });
 
-    // ####  QUEM DECIDE SE DEU CERTO É ISTO  ####
-    //
-    // O código de saída do SteamCMD não é confiável (ver
-    // steam/steamcmd.ts). O executável do jogo em disco é.
-    if (!existsSync(server.paths.exePath)) {
-      throw new Error(
-        `o SteamCMD terminou, mas ${server.paths.exePath} não existe. A instalação NÃO ` +
-          'está boa — veja as últimas linhas do log acima.',
-      );
-    }
+    await this.#verifyInstall(operation, before, expectedBuild ?? null);
 
     operation.progress = 100;
     operation.log('[agente] jogo instalado. Aplicando o Oxide por cima...');
@@ -346,6 +354,108 @@ export class OperationsService {
           `[agente] instalado, mas não consegui passar a cuidar dele: ${toError(error).message}`,
         );
       }
+    }
+  }
+
+  /**
+   * O SteamCMD terminou. Terminou BEM?
+   *
+   * ------------------------------------------------------------
+   * ####  O EXECUTÁVEL EM DISCO SÓ RESPONDE À PRIMEIRA VEZ  ####
+   *
+   * Esta conferência começou olhando só o `RustDedicated.exe`, e
+   * isso basta para uma instalação nova. Numa ATUALIZAÇÃO o
+   * arquivo já está lá desde antes — então um job que morreu no
+   * meio passava por aqui inteiro, o Oxide era aplicado, o
+   * servidor subia e o painel dizia "jogo instalado" com o build
+   * velho. Um servidor de build velho recusa TODOS os jogadores,
+   * e ninguém descobre olhando a tela.
+   *
+   * O que responde à pergunta é o BUILDID no manifest, comparado
+   * com o publicado. Quando quem chamou já sabe o publicado (o
+   * vigia da Steam sabe), ele passa em `expected` e a gente
+   * economiza os ~4 s da consulta.
+   *
+   * ####  NÃO CONSEGUIR PERGUNTAR NÃO É REPROVAR  ####
+   *
+   * Com a Steam fora do ar, a consulta falha — e falhar a
+   * conferência aqui reprovaria uma atualização que pode ter dado
+   * certo. Nesse caso fica o registro no log, e o que já foi
+   * verificado (exe, manifest, arquivos inteiros) continua
+   * valendo.
+   */
+  async #verifyInstall(
+    operation: Operation,
+    before: InstalledBuild | null,
+    expected: string | null,
+  ): Promise<void> {
+    const { server } = this.#options;
+
+    if (!existsSync(server.paths.exePath)) {
+      throw new Error(
+        `o SteamCMD terminou, mas ${server.paths.exePath} não existe. A instalação NÃO ` +
+          'está boa — veja as últimas linhas do log acima.',
+      );
+    }
+
+    const after = await readInstalledBuild(server.paths.installDir, server.steam.appId);
+
+    if (after === null) {
+      throw new Error(
+        `o SteamCMD terminou, mas ${appManifestPath(server.paths.installDir, server.steam.appId)} ` +
+          'não existe ou não tem buildid. Sem o manifest não dá para afirmar o que está em ' +
+          'disco — trate como instalação incompleta e rode a operação de novo.',
+      );
+    }
+
+    if (!isFullyInstalled(after)) {
+      throw new Error(
+        `o manifest diz que a instalação está incompleta (StateFlags ${String(after.stateFlags)}). ` +
+          'Faltam arquivos ou o download parou no meio — rode a operação de novo.',
+      );
+    }
+
+    const published = expected ?? (await this.#publishedBuild(operation));
+
+    if (published !== null && after.buildId !== published) {
+      throw new Error(
+        `o SteamCMD terminou, mas o build em disco continua ${after.buildId} e o publicado é ` +
+          `${published}. A ATUALIZAÇÃO NÃO FOI APLICADA — um servidor de build velho recusa ` +
+          'todos os jogadores, então isto é falha e não aviso. Veja as linhas do SteamCMD acima.',
+      );
+    }
+
+    operation.log(
+      before === null
+        ? `[agente] build ${after.buildId} instalado.`
+        : before.buildId === after.buildId
+          ? `[agente] build ${after.buildId} — já era o que estava em disco.`
+          : `[agente] build ${before.buildId} -> ${after.buildId}.`,
+    );
+  }
+
+  /** O build publicado, para conferir. `null` quando não deu para perguntar. */
+  async #publishedBuild(operation: Operation): Promise<string | null> {
+    const { server, paths } = this.#options;
+
+    try {
+      const build = await queryRemoteBuild({
+        steamCmdExe: steamCmdExe(paths.steamCmdDir),
+        appId: server.steam.appId,
+        login: server.steam.login,
+        branch: server.steam.branch,
+        timeoutMs: 60_000,
+        logger: this.#options.logger,
+      });
+
+      return build.buildId;
+    } catch (error) {
+      operation.log(
+        `[agente] não deu para confirmar o build publicado (${toError(error).message}) — ` +
+          'sigo com o que está em disco.',
+      );
+
+      return null;
     }
   }
 
@@ -512,7 +622,33 @@ export class OperationsService {
       operation.log('[agente] o servidor já estava parado — indo direto para a atualização.');
     }
 
-    await this.#install(operation);
+    try {
+      await this.#install(operation, input.expectedBuild ?? null);
+    } catch (error) {
+      // ####  FALHOU ATUALIZANDO ≠ FICAR FORA DO AR  ####
+      //
+      // O servidor foi derrubado por NÓS. Deixá-lo parado
+      // trocaria "desatualizado" por "sumiu", e o segundo é pior:
+      // some da lista, e quem olha o Discord conclui que o
+      // servidor acabou. Ele volta com o build velho, a operação
+      // consta como FALHA e o painel mostra o motivo.
+      operation.log(`[agente] a atualização falhou: ${toError(error).message}`);
+
+      if (running) {
+        operation.log('[agente] subindo o servidor de volta para não deixá-lo fora do ar...');
+
+        try {
+          await this.#start(operation);
+        } catch (startError) {
+          operation.log(
+            `[agente] e ainda não consegui subir de volta: ${toError(startError).message}`,
+          );
+        }
+      }
+
+      throw error;
+    }
+
     await this.#start(operation);
   }
 

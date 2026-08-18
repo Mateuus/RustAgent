@@ -17,7 +17,7 @@
 // ============================================================
 
 import { existsSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm, statfs } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { run } from '../ops/run.js';
@@ -117,6 +117,17 @@ export interface AppUpdateOptions extends SteamCmdOptions {
   readonly onProgress?: (percent: number) => void;
 }
 
+/** Quantas execuções do `app_update` antes de desistir. */
+const MAX_APP_UPDATE_ATTEMPTS = 3;
+
+/** Respiro entre uma tentativa e a seguinte. */
+const RETRY_DELAY_MS = 15_000;
+
+export interface AppUpdateResult {
+  /** Quantas execuções do `app_update` foram necessárias. */
+  readonly attempts: number;
+}
+
 /**
  * `+app_update <appId> validate` naquela pasta.
  *
@@ -125,8 +136,32 @@ export interface AppUpdateOptions extends SteamCmdOptions {
  * defeito mais cara que existe aqui — um servidor que sobe com um
  * assembly meio gravado e cai minutos depois, com jogadores
  * dentro.
+ *
+ * ------------------------------------------------------------
+ * ####  O CÓDIGO DE SAÍDA NÃO SERVE. A SAÍDA SERVE.  ####
+ *
+ * O SteamCMD sai 0 em falhas de rede e sai 7/8 em execuções que
+ * deram certo, dependendo da versão — por isso o código é só
+ * registrado. O que NÃO é ambíguo é a linha de erro dele:
+ *
+ *     Error! App '258550' state is 0x486 after update job.
+ *
+ * Essa linha significa que o job terminou e o app continua fora
+ * de ordem. Antes, ela passava batida e o agente seguia para o
+ * Oxide, subia o servidor e anunciava "jogo instalado" com o
+ * build VELHO em disco — que é a pior saída possível, porque o
+ * servidor desatualizado recusa todo mundo em silêncio.
+ *
+ * ####  TENTAR DE NOVO ANTES DE DESISTIR  ####
+ *
+ * Boa parte desses erros é conteúdo parcial estragado em
+ * `steamapps\downloading` e some na execução seguinte. Então são
+ * três tentativas, apagando o download parcial entre elas. O que
+ * NÃO se apaga é o `appmanifest` nem os arquivos do jogo: isso
+ * transformaria uma atualização de 300 MB numa reinstalação de
+ * 25 GB sem ninguém pedir.
  */
-export async function appUpdate(options: AppUpdateOptions): Promise<void> {
+export async function appUpdate(options: AppUpdateOptions): Promise<AppUpdateResult> {
   const exe = await ensureSteamCmd(options);
 
   await mkdir(options.installDir, { recursive: true });
@@ -146,48 +181,223 @@ export async function appUpdate(options: AppUpdateOptions): Promise<void> {
 
   args.push('validate', '+quit');
 
-  options.onLine(
-    `[SteamCMD] baixando/validando o app ${options.appId} ` +
-      `(branch ${options.branch || 'public'}) em ${options.installDir}`,
-  );
+  let failure: string | null = null;
 
-  const result = await run({
-    command: exe,
-    args,
-    cwd: options.dir,
-    onLine: (line) => {
-      const percent = progressOf(line);
+  for (let attempt = 1; attempt <= MAX_APP_UPDATE_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) {
+      await clearPartialDownload(options);
+      await delay(RETRY_DELAY_MS, options.signal);
 
-      if (percent !== null) {
-        options.onProgress?.(percent);
+      if (options.signal?.aborted === true) {
+        throw new Error('o SteamCMD foi cancelado entre as tentativas.');
       }
+    }
 
-      options.onLine(line);
-    },
-    // Três horas: uma primeira instalação de 6 GB numa conexão
-    // ruim passa de uma hora, e o timeout existe só para não
-    // deixar um processo travado segurando a trava para sempre.
-    timeoutMs: 3 * 60 * 60_000,
-    signal: options.signal,
-  });
+    options.onLine(
+      `[SteamCMD] baixando/validando o app ${options.appId} ` +
+        `(branch ${options.branch || 'public'}) em ${options.installDir}` +
+        (attempt > 1 ? ` — tentativa ${String(attempt)} de ${String(MAX_APP_UPDATE_ATTEMPTS)}` : ''),
+    );
 
-  if (result.killed) {
-    throw new Error(
-      'o SteamCMD foi interrompido (cancelamento ou tempo esgotado). A instalação ficou ' +
-        'incompleta — rode a operação de novo: ele continua de onde parou.',
+    failure = null;
+
+    const result = await run({
+      command: exe,
+      args,
+      cwd: options.dir,
+      onLine: (line) => {
+        const percent = progressOf(line);
+
+        if (percent !== null) {
+          options.onProgress?.(percent);
+        }
+
+        // O PRIMEIRO erro é o que vale: os seguintes costumam ser
+        // consequência dele.
+        failure ??= steamCmdFailure(line);
+
+        options.onLine(line);
+      },
+      // Três horas: uma primeira instalação de 6 GB numa conexão
+      // ruim passa de uma hora, e o timeout existe só para não
+      // deixar um processo travado segurando a trava para sempre.
+      timeoutMs: 3 * 60 * 60_000,
+      signal: options.signal,
+    });
+
+    if (result.killed) {
+      throw new Error(
+        'o SteamCMD foi interrompido (cancelamento ou tempo esgotado). A instalação ficou ' +
+          'incompleta — rode a operação de novo: ele continua de onde parou.',
+      );
+    }
+
+    if (result.code !== 0) {
+      options.onLine(`[SteamCMD] terminou com código ${String(result.code)}`);
+    }
+
+    if (failure === null) {
+      return { attempts: attempt };
+    }
+
+    options.onLine(`[SteamCMD] esta execução NÃO deu certo: ${failure}`);
+  }
+
+  throw new Error(await appUpdateFailureMessage(options, failure));
+}
+
+/**
+ * O download parcial, que é o suspeito nº 1 de um job que morre
+ * sem baixar nada.
+ *
+ * Apagar isto é seguro: são pedaços do próximo build, não o jogo
+ * instalado. Falha em apagar não interrompe nada — a tentativa
+ * seguinte pode dar certo mesmo assim.
+ */
+async function clearPartialDownload(options: AppUpdateOptions): Promise<void> {
+  const partial = join(options.installDir, 'steamapps', 'downloading', options.appId);
+
+  if (!existsSync(partial)) {
+    return;
+  }
+
+  options.onLine(`[SteamCMD] apagando o download parcial em ${partial}...`);
+
+  try {
+    await rm(partial, { recursive: true, force: true });
+  } catch (error) {
+    options.onLine(
+      `[SteamCMD] não consegui apagar o download parcial ` +
+        `(${error instanceof Error ? error.message : String(error)}) — seguindo assim mesmo.`,
+    );
+  }
+}
+
+/** A recusa final: o que falhou, e o que olhar por causa disso. */
+async function appUpdateFailureMessage(
+  options: AppUpdateOptions,
+  failure: string | null,
+): Promise<string> {
+  const free = await freeSpaceGb(options.installDir);
+  const disk =
+    free === null
+      ? 'não consegui medir o espaço livre nesse disco'
+      : `livre no disco de ${options.installDir}: ${free.toFixed(1)} GB`;
+
+  return (
+    `o SteamCMD não conseguiu atualizar o app ${options.appId} em ` +
+    `${String(MAX_APP_UPDATE_ATTEMPTS)} tentativas — ${failure ?? 'motivo não identificado'}. ` +
+    'O build ANTIGO continua em disco: nada foi trocado. As causas, na ordem em que valem ' +
+    `a pena conferir: (1) espaço — uma atualização do Rust precisa de folga de dezenas de GB, e ${disk}; ` +
+    '(2) arquivo em uso — veja se sobrou um RustDedicated.exe rodando, e tire a pasta do servidor ' +
+    'do caminho do antivírus e do backup; (3) permissão de escrita na pasta do servidor. ' +
+    'Depois de resolver, mande a operação de novo.'
+  );
+}
+
+/** Espaço livre em GB no disco daquele caminho. `null` se não der. */
+async function freeSpaceGb(path: string): Promise<number | null> {
+  try {
+    const stat = await statfs(path);
+
+    return (stat.bsize * stat.bavail) / 1024 ** 3;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A linha é um erro do SteamCMD? Devolve a frase que explica.
+ *
+ * `null` para a esmagadora maioria das linhas — inclusive as que
+ * têm a palavra "error" e não são falha do job (o SteamCMD
+ * redireciona o stderr e anuncia isso em toda execução).
+ */
+export function steamCmdFailure(line: string): string | null {
+  const state = /Error!\s*App\s*'([^']+)'\s*state is\s*(0x[0-9a-f]+)/i.exec(line);
+
+  if (state?.[2] !== undefined) {
+    return (
+      `o job terminou com o app no estado ${state[2]} (${explainAppState(state[2])}) — ` +
+      'ou seja, a atualização NÃO foi aplicada'
     );
   }
 
-  // ####  O CÓDIGO DE SAÍDA DO STEAMCMD NÃO É CONFIÁVEL  ####
-  //
-  // Ele sai 0 em falhas de rede e sai 7/8 em execuções que deram
-  // certo, dependendo da versão. Quem decide se funcionou é o
-  // EXECUTÁVEL DO JOGO estar em disco, e essa conferência é de
-  // quem chamou (ops/service.ts) — que também sabe o nome do
-  // arquivo a procurar.
-  if (result.code !== 0) {
-    options.onLine(`[SteamCMD] terminou com código ${String(result.code)}`);
+  const failedInstall = /(?:ERROR!?)\s*Failed to install app\s*'?([^'\s]+)'?\s*(?:\(([^)]+)\))?/i.exec(
+    line,
+  );
+
+  if (failedInstall !== null) {
+    return `o SteamCMD recusou instalar o app${
+      failedInstall[2] === undefined ? '' : `: ${failedInstall[2]}`
+    }`;
   }
+
+  if (/Disk write failure|No space left|not enough (?:free )?disk space/i.test(line)) {
+    return 'faltou espaço em disco (ou a escrita foi recusada)';
+  }
+
+  if (/Login Failure|FAILED \(Invalid Password\)|Invalid Platform/i.test(line)) {
+    return 'o login na Steam falhou';
+  }
+
+  if (/Timeout downloading|Connection to Steam servers lost/i.test(line)) {
+    return 'a conexão com a Steam caiu no meio do download';
+  }
+
+  return null;
+}
+
+/**
+ * `StateFlags` em português.
+ *
+ * É um CAMPO DE BITS, e vários acendem juntos: `0x486` é
+ * "instalado por completo + atualização pendente + arquivos
+ * corrompidos + atualização começada e não terminada" — o retrato
+ * exato de um job que abortou no meio.
+ */
+export function explainAppState(hex: string): string {
+  const value = Number.parseInt(hex, 16);
+
+  if (!Number.isFinite(value)) {
+    return 'estado desconhecido';
+  }
+
+  const names: ReadonlyArray<readonly [number, string]> = [
+    [1, 'não instalado'],
+    [2, 'atualização pendente'],
+    [4, 'instalado por completo'],
+    [8, 'criptografado'],
+    [16, 'travado'],
+    [32, 'arquivos faltando'],
+    [64, 'jogo em execução'],
+    [128, 'arquivos corrompidos'],
+    [256, 'atualização em curso'],
+    [512, 'atualização pausada'],
+    [1024, 'atualização começada e não terminada'],
+    [2048, 'desinstalando'],
+    [4096, 'backup em curso'],
+  ];
+
+  const parts = names.filter(([bit]) => (value & bit) !== 0).map(([, name]) => name);
+
+  return parts.length === 0 ? 'estado desconhecido' : parts.join(' + ');
+}
+
+/** Espera que desiste junto com o cancelamento da operação. */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 /**

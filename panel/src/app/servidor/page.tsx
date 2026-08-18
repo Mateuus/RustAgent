@@ -197,8 +197,23 @@ function Servidor() {
           {steam?.updateAvailable === true && (
             <p className="mb-4 border border-amber bg-surface-2 p-3 text-sm">
               Há atualização do Rust publicada (build {steam.published}; instalado{' '}
-              {steam.installed}). Use <strong>Atualizar avisando</strong> para derrubar com aviso no
-              chat.
+              {steam.installed}).{' '}
+              {steam.autoUpdate ? (
+                <>
+                  O agente <strong>atualiza sozinho</strong>: avisa no chat, conta o tempo, salva e
+                  sobe de novo. Para não esperar a próxima rodada, use{' '}
+                  <strong>Atualizar avisando</strong>.
+                  {steam.attempts > 0 && (
+                    <> Tentativas automáticas gastas neste build: {steam.attempts} de 3.</>
+                  )}
+                </>
+              ) : (
+                <>
+                  A atualização automática está <strong>desligada</strong> (STEAM_AUTO_UPDATE=0 no
+                  .env do agente). Use <strong>Atualizar avisando</strong> para derrubar com aviso no
+                  chat.
+                </>
+              )}
             </p>
           )}
 

@@ -188,7 +188,8 @@ dispara **sozinho** quando a Facepunch publica um build novo:
   2. server.save
   3. quit  (encerramento limpo)
   4. o SteamCMD + o Oxide     (= server-install)
-  5. sobe e espera o RCON responder
+  5. confere o buildid que ficou em disco
+  6. sobe e espera o RCON responder
 ```
 
 - **servidor já parado** pula direto para o passo 4;
@@ -196,11 +197,20 @@ dispara **sozinho** quando a Facepunch publica um build novo:
 - **cancelar durante a contagem** avisa no chat que foi adiado, e nada cai;
 - **sem RCON com o servidor no ar**, recusa: não dá para avisar ninguém nem
   encerrar salvando. Uma atualização não vale o mundo de todo mundo desde o
-  último save. `force: true` passa por cima.
+  último save. `force: true` passa por cima;
+- **a atualização falhar não deixa o servidor fora do ar.** Quem o derrubou fomos
+  nós; ele volta com o build antigo, a operação consta como **falhou** e o painel
+  mostra o motivo. "Desatualizado" é ruim, "sumiu da lista" é pior.
+
+`STEAM_AUTO_UPDATE=1` (o padrão) é o que faz o passo 1 começar sozinho. Com `0`,
+o build novo só aparece no painel e a operação espera um clique.
 
 ### Como o agente sabe que há atualização
 
-De 15 em 15 minutos ele compara duas coisas:
+A primeira conferência sai **um minuto depois do agente subir** — antes ela só
+saía depois do intervalo inteiro, e um servidor recém-ligado passava quinze
+minutos desatualizado com o painel sem nada a mostrar. Depois disso, de 15 em 15
+minutos ele compara duas coisas:
 
 | | de onde sai | o que é |
 |---|---|---|
@@ -227,6 +237,37 @@ Três travas que impedem o pior:
 - **falhar em perguntar ≠ estar em dia.** Uma consulta que não foi vira
   `lastError` no estado, e a tela mostra em vermelho em vez de afirmar que está
   tudo certo.
+
+### Como o agente sabe que a atualização deu certo
+
+Nem pelo código de saída do SteamCMD (ele sai 7/8 em execuções boas), nem pelo
+`RustDedicated.exe` existir — numa **atualização** ele já existe desde antes, e
+foi assim que um job abortado passou por instalação boa, ganhou o Oxide, subiu o
+servidor e anunciou "jogo instalado" com o build velho em disco:
+
+```
+ Update state (0x3) reconfiguring, progress: 0.00 (0 / 0)
+Error! App '258550' state is 0x486 after update job.
+[SteamCMD] terminou com código 8
+```
+
+São duas conferências, e as duas precisam passar:
+
+1. **a linha de erro do SteamCMD.** `Error! App '...' state is 0x...` significa
+   que o job terminou e o app continua fora de ordem. O agente traduz o campo de
+   bits (`0x486` = instalado por completo + atualização pendente + arquivos
+   corrompidos + atualização começada e não terminada), **tenta de novo até três
+   vezes** apagando `steamapps\downloading\<appid>` entre elas, e só então
+   desiste — com uma mensagem que diz o espaço livre no disco e o que conferir.
+   O que ele **não** apaga é o `appmanifest` nem os arquivos do jogo: isso
+   trocaria uma atualização de 300 MB por uma reinstalação de 25 GB;
+2. **o `buildid` que sobrou no manifest.** Tem que ser o publicado. Quando o
+   vigia dispara a operação ele passa o build que acabou de ver; num clique pelo
+   painel, o agente pergunta à Steam no fim (~4 s). Não conseguir perguntar não
+   reprova nada — fica registrado no log da operação.
+
+Um servidor de build velho não fica lento: ele **recusa todos os jogadores**, em
+silêncio. Por isso essa diferença é falha da operação, e não um aviso.
 
 ---
 

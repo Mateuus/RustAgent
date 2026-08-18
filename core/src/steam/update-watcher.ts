@@ -99,12 +99,30 @@ export interface UpdateWatcherOptions {
   readonly logger: Logger;
   readonly intervalMs: number;
   readonly autoUpdate: boolean;
+  /** Quanto esperar, depois do boot, pela PRIMEIRA conferência. */
+  readonly firstCheckDelayMs?: number;
 }
+
+/**
+ * Quanto o vigia espera antes da primeira conferência.
+ *
+ * ####  A ATUALIZAÇÃO NÃO ESPERA O RELÓGIO DAR A VOLTA  ####
+ *
+ * A primeira rodada saía só depois do intervalo inteiro — quinze
+ * minutos em que um servidor recém-ligado pode estar
+ * desatualizado e recusando todo mundo, com o painel ainda sem
+ * nada a mostrar (nem o build instalado, nem o publicado). Um
+ * minuto é o bastante para o agente terminar de subir, montar os
+ * contextos e conectar os RCONs; a conferência não baixa nada e
+ * cede a vez a qualquer operação em curso.
+ */
+const DEFAULT_FIRST_CHECK_DELAY_MS = 60_000;
 
 export class SteamUpdateWatcher {
   readonly #options: UpdateWatcherOptions;
   readonly #states = new Map<string, MutableState>();
   #timer: NodeJS.Timeout | null = null;
+  #firstCheck: NodeJS.Timeout | null = null;
 
   constructor(options: UpdateWatcherOptions) {
     this.#options = options;
@@ -115,22 +133,30 @@ export class SteamUpdateWatcher {
       return;
     }
 
-    // `unref` para o relógio não segurar o processo no
-    // desligamento. A primeira rodada sai depois do primeiro
-    // intervalo: no boot, o agente tem coisa melhor a fazer do
-    // que falar com a Steam.
+    // `unref` nos dois relógios para nenhum deles segurar o
+    // processo no desligamento.
     this.#timer = setInterval(() => {
       void this.checkAll();
     }, this.#options.intervalMs);
 
     this.#timer.unref();
 
+    // A primeira conferência sai logo — ver
+    // `DEFAULT_FIRST_CHECK_DELAY_MS`.
+    this.#firstCheck = setTimeout(() => {
+      void this.checkAll();
+    }, this.#options.firstCheckDelayMs ?? DEFAULT_FIRST_CHECK_DELAY_MS);
+
+    this.#firstCheck.unref();
+
     this.#options.logger.info(
       {
         intervalMinutes: Math.round(this.#options.intervalMs / 60_000),
         autoUpdate: this.#options.autoUpdate,
       },
-      'vigia da Steam ligado',
+      this.#options.autoUpdate
+        ? 'vigia da Steam ligado — build novo derruba, atualiza e sobe sozinho'
+        : 'vigia da Steam ligado — só avisa (STEAM_AUTO_UPDATE=0)',
     );
   }
 
@@ -138,6 +164,11 @@ export class SteamUpdateWatcher {
     if (this.#timer !== null) {
       clearInterval(this.#timer);
       this.#timer = null;
+    }
+
+    if (this.#firstCheck !== null) {
+      clearTimeout(this.#firstCheck);
+      this.#firstCheck = null;
     }
   }
 
@@ -289,7 +320,10 @@ export class SteamUpdateWatcher {
     try {
       const operation = await this.#options.supervisor
         .operationsOf(serverId)
-        .start({ kind: 'server-auto-update' });
+        // O build publicado vai junto: é a régua com que a
+        // operação confere, no fim, se o SteamCMD realmente
+        // trocou o que está em disco.
+        .start({ kind: 'server-auto-update', expectedBuild: snapshot.published ?? undefined });
 
       this.#options.logger.info(
         { server: serverId, operation: operation.id },
