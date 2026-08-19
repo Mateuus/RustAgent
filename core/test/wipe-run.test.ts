@@ -40,12 +40,17 @@ import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/dat
 import { MapPoolRepository } from '../src/db/map-pool-repository.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
-import { WipeRunsRepository } from '../src/db/wipe-runs-repository.js';
-import { WipeScheduleRepository } from '../src/db/wipe-schedule-repository.js';
+import { WipeRunsRepository, type WipeRunRecord } from '../src/db/wipe-runs-repository.js';
+import {
+  WipeScheduleRepository,
+  type WipePlanInput,
+} from '../src/db/wipe-schedule-repository.js';
 import { WipesRepository } from '../src/db/wipes-repository.js';
 import { Operation } from '../src/ops/operations.js';
+import type { WipePlan } from '../src/types/wipe.js';
 import { readZipEntries, readZipEntryData } from '../src/util/zip.js';
 import { backupSaveFolder, pruneBackups } from '../src/wipe/backup.js';
+import { nextWipe, type NextWipeMap } from '../src/wipe/next-wipe.js';
 import {
   WipeRunner,
   type WipeAnnouncer,
@@ -533,6 +538,391 @@ describe('configurar', () => {
 
     expect(finished.mapAfter?.drawn).toBe(true);
     expect(finished.steps.find((step) => step.step === 'configurar')?.message).toContain('SORTEOU');
+  });
+});
+
+// ============================================================
+//  O MUNDO É O DO PLANO, E NÃO A CABEÇA DA FILA
+//
+//  ####  O DEFEITO QUE ESTA SEÇÃO PRENDE  ####
+//
+//  O passo `configurar` chamava `takeForWipe` direto, sem olhar o
+//  `mapSource` do plano. Um plano `keep` — "não troque o mundo" —
+//  trocava o mundo assim mesmo e ainda queimava a cabeça da fila;
+//  um `fixed` apontando para a entrada #2 subia a #1. E a tela do
+//  jogo e o chat, que já liam o plano, anunciavam a entrada certa:
+//  o VIP prata pagava pela prévia de um mundo que não ia subir.
+//
+//  Por isso toda asserção daqui vem em par: o que o executor FEZ,
+//  e o que `nextWipe` — a mesma decisão que vira frase no chat e
+//  imagem na tela — tinha ANUNCIADO. Um teste que só olhasse o
+//  executor ficaria verde no dia em que as duas voltassem a
+//  divergir.
+// ============================================================
+
+const SEMANA = 7 * 24 * 60 * 60 * 1000;
+
+/** O que o chat e a tela do jogo estão anunciando, agora. */
+function anunciado(s: Scenario): NextWipeMap | null {
+  const next = nextWipe(
+    SERVER,
+    { schedule: s.schedule, runs: s.runs, mapPool: s.mapPool },
+    Date.now(),
+  );
+
+  return next === null ? null : next.map;
+}
+
+/** Um wipe marcado na agenda, com a origem de mapa que o teste quer. */
+function plano(s: Scenario, input: Partial<WipePlanInput> = {}): WipePlan {
+  return s.schedule.createPlan(
+    SERVER,
+    { scheduledAt: Date.now() + SEMANA, bpPolicy: 'keep', ...input },
+    Date.now(),
+  );
+}
+
+/** A execução DAQUELE plano, começando agora. */
+function execucaoDe(s: Scenario, plan: WipePlan): WipeRunRecord {
+  return s.runs.create(SERVER, {
+    planId: plan.id,
+    kind: plan.kind,
+    bpPolicy: plan.bpPolicy,
+    mapBefore: { level: s.config.level, seed: String(s.config.seed), worldSize: s.config.worldSize },
+  });
+}
+
+/** Duas entradas prontas, na ordem: a #1 e a #2 da fila. */
+function fila(s: Scenario): { readonly primeira: number; readonly segunda: number } {
+  return {
+    primeira: s.mapPool.add(SERVER, { seed: '11111', worldSize: 4000 }).entry.id,
+    segunda: s.mapPool.add(SERVER, { seed: '22222', worldSize: 3000 }).entry.id,
+  };
+}
+
+describe('`keep`: o mundo NÃO muda', () => {
+  it('não troca o mundo, não escreve o .ini e não consome a fila', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'keep' }));
+
+    // O que a tela do jogo e o `{wipe.mapa}` estão dizendo AGORA.
+    expect(anunciado(s)).toEqual({ source: 'keep' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    // ####  O `.ini` NEM FOI ABERTO  ####
+    //
+    // E não é preciosismo: o patch normal grava `levelUrl` sempre,
+    // inclusive vazia. Num servidor de mapa custom isso apagaria o
+    // `.map` que o plano mandou manter.
+    expect(s.settings).toHaveLength(0);
+
+    // A fila continua inteira: as duas entradas esperando a vez.
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('ready');
+    expect(s.mapPool.next(SERVER)?.id).toBe(primeira);
+
+    // E o mundo gravado é o de agora, e não o da cabeça da fila.
+    expect(finished.mapAfter?.seed).toBe(String(s.config.seed));
+    expect(finished.mapAfter?.worldSize).toBe(s.config.worldSize);
+    expect(finished.mapAfter?.mapPoolId).toBeNull();
+    expect(finished.mapAfter?.drawn).toBe(false);
+    expect(finished.steps.find((step) => step.step === 'configurar')?.message).toContain('MANTER');
+  });
+
+  it('a retomada não consome fila nem depois de `configurar` ter passado', async () => {
+    const s = await scenario();
+    const { primeira } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'keep' }));
+
+    await s.runner.run({ serverId: SERVER, runId: run.id, operation: operation(), control: s.control });
+
+    // O agente reinicia, e alguém manda retomar a MESMA execução.
+    s.runs.markStep(run.id, 'subir', 'failed', 'o agente morreu aqui');
+    s.control.running = false;
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    expect(retomado.status).toBe('done');
+    expect(s.settings).toHaveLength(0);
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+    expect(retomado.steps.find((step) => step.step === 'configurar')?.status).toBe('done');
+  });
+
+  it('durante os avisos, o chat e a tela já anunciam o mundo que fica', async () => {
+    // ####  A JANELA DOS AVISOS É O DIA INTEIRO  ####
+    //
+    // A execução começa com a antecedência do maior aviso e só
+    // decide o mundo no `configurar`. Enquanto `map_after` é null,
+    // perguntar à fila faria um plano `keep` anunciar por 24 h a
+    // cabeça de uma fila que ele nem vai tocar.
+    const s = await scenario();
+
+    fila(s);
+    execucaoDe(s, plano(s, { mapSource: 'keep' }));
+
+    expect(anunciado(s)).toEqual({ source: 'keep' });
+  });
+});
+
+describe('`fixed`: a entrada APONTADA, esteja onde estiver na fila', () => {
+  it('consome a #2 e deixa a #1 esperando a vez', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+
+    const antes = anunciado(s);
+
+    expect(antes?.source).toBe('entry');
+    expect(antes?.source === 'entry' ? antes.entry.id : null).toBe(segunda);
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    // O que subiu é o que foi anunciado.
+    expect(finished.mapAfter?.mapPoolId).toBe(segunda);
+    expect(finished.mapAfter?.seed).toBe('22222');
+    expect(s.settings[0]).toMatchObject({ seed: '22222', worldSize: 3000 });
+
+    // A cabeça da fila NÃO foi queimada: ela é o mundo do wipe que vem.
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('used');
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+    expect(s.mapPool.next(SERVER)?.id).toBe(primeira);
+  });
+
+  it('a retomada não consome uma SEGUNDA entrada', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+
+    await s.runner.run({ serverId: SERVER, runId: run.id, operation: operation(), control: s.control });
+
+    s.runs.markStep(run.id, 'subir', 'failed', 'o agente morreu aqui');
+    s.control.running = false;
+
+    await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    expect(s.settings).toHaveLength(1);
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+  });
+
+  it('a entrada apontada sumiu da fila: cai para a cabeça, e o wipe acontece', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+
+    s.mapPool.remove(SERVER, segunda);
+
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+
+    const antes = anunciado(s);
+
+    expect(antes?.source === 'entry' ? antes.entry.id : null).toBe(primeira);
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.status).toBe('done');
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+  });
+
+  it('a entrada apontada JÁ FOI usada: cai para a cabeça, e não reescreve a história dela', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const usadaEm = Date.now() - SEMANA;
+
+    s.mapPool.markUsed(SERVER, segunda, usadaEm);
+
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    // O `used_at` continua contando quando ela entrou DE VERDADE.
+    expect(s.mapPool.get(SERVER, segunda)?.usedAt).toBe(usadaEm);
+  });
+
+  it('a entrada apontada ainda está `generating`: cai para a cabeça', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+
+    s.mapPool.markGenerating(SERVER, segunda, 'r5t6y7', false);
+
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('generating');
+  });
+
+  it('a fila inteira sumiu: o agente SORTEIA, e o wipe não fica bloqueado', async () => {
+    // A regra da fila de mapas continua valendo com `fixed`: falta
+    // de curadoria não pode ser motivo para o servidor não zerar.
+    const s = await scenario();
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: 4242 }));
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.status).toBe('done');
+    expect(finished.mapAfter?.drawn).toBe(true);
+  });
+});
+
+describe('o wipe FORÇADO e o mapa custom apontado a dedo', () => {
+  /** O primeiro forçado que a reconciliação materializar. */
+  function forcado(s: Scenario): WipePlan {
+    s.schedule.reconcile(SERVER, Date.now());
+
+    const plan = s.schedule
+      .listPlans(SERVER, { from: Date.now() })
+      .find((candidate) => candidate.kind === 'forced');
+
+    expect(plan).toBeDefined();
+
+    return plan as WipePlan;
+  }
+
+  it('sem a marca de compatibilidade, o `.map` de ontem NÃO sobe — nem apontado a dedo', async () => {
+    // ####  É ESTE O CASO QUE DEIXA O SERVIDOR SEM SUBIR  ####
+    //
+    // O forçado troca o binário do jogo. Um `.map` gerado na versão
+    // de ontem pode não carregar na de hoje, e o admin só descobre
+    // isso na madrugada, com o mundo velho já apagado.
+    const s = await scenario();
+    const { primeira } = fila(s);
+
+    const custom = s.mapPool.add(SERVER, {
+      kind: 'custom',
+      level: 'Ilha',
+      levelUrl: 'https://mapas.exemplo/ilha.map',
+    }).entry.id;
+
+    const plan = forcado(s);
+
+    s.schedule.updatePlan(SERVER, plan.id, { mapSource: 'fixed', mapPoolId: custom }, Date.now());
+
+    const run = s.runs.create(SERVER, {
+      planId: plan.id,
+      kind: 'forced',
+      bpPolicy: plan.bpPolicy,
+    });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    expect(finished.mapAfter?.levelUrl).toBeNull();
+    expect(s.mapPool.get(SERVER, custom)?.status).toBe('ready');
+  });
+
+  it('COM a marca, ele sobe: quem garantiu foi o admin', async () => {
+    const s = await scenario();
+
+    fila(s);
+
+    const custom = s.mapPool.add(SERVER, {
+      kind: 'custom',
+      level: 'Ilha',
+      levelUrl: 'https://mapas.exemplo/ilha.map',
+    }).entry.id;
+
+    s.mapPool.markVersionOk(SERVER, custom, true);
+
+    const plan = forcado(s);
+
+    s.schedule.updatePlan(SERVER, plan.id, { mapSource: 'fixed', mapPoolId: custom }, Date.now());
+
+    const run = s.runs.create(SERVER, {
+      planId: plan.id,
+      kind: 'forced',
+      bpPolicy: plan.bpPolicy,
+    });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(custom);
+    expect(s.settings[0]).toMatchObject({ levelUrl: 'https://mapas.exemplo/ilha.map' });
+  });
+});
+
+describe('`pool` e o wipe sem plano continuam na cabeça da fila', () => {
+  it('`pool` consome a #1', async () => {
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'pool' }));
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('ready');
+  });
+
+  it('o "WIPAR AGORA" sem plano nenhum também', async () => {
+    const s = await scenario();
+    const { primeira } = fila(s);
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
   });
 });
 

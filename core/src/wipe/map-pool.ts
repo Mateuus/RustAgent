@@ -33,7 +33,7 @@
 //  único do banco compara TEXTO.
 // ============================================================
 
-import { MAP_LEVELS, type MapLevel } from '../types/wipe.js';
+import { MAP_LEVELS, type MapLevel, type MapPoolEntry } from '../types/wipe.js';
 
 /** Faixa aceita pelo `server.worldsize`. Ver Configs\server.example.ini. */
 export const MIN_WORLD_SIZE = 1_000;
@@ -309,3 +309,39 @@ export function createMapUrlChecker(
 export const CUSTOM_IN_FORCED_REASON =
   'mapa custom sem a marca "compatível com a versão nova": o wipe forçado troca o binário do ' +
   'jogo, e um .map gerado na versão de ontem pode não carregar na de hoje';
+
+/**
+ * Esta entrada está barrada num wipe FORÇADO?
+ *
+ * Só mapa custom sem a marca de versão. Procedural nunca é
+ * barrado: quem gera o mundo é o próprio servidor, no boot, já na
+ * versão nova do jogo.
+ */
+export function blockedInForced(
+  entry: Pick<MapPoolEntry, 'kind' | 'versionOk'>,
+  forced: boolean,
+): boolean {
+  return forced && entry.kind === 'custom' && !entry.versionOk;
+}
+
+/**
+ * Esta entrada pode ser o mundo de um wipe que começa agora?
+ *
+ * ####  UMA REGRA SÓ, PARA QUEM ANUNCIA E PARA QUEM CONSOME  ####
+ *
+ * `MapPoolRepository.next`/`takeForWipe` (quem CONSOME) e o
+ * `mapOfPlan` de wipe/next-wipe.ts (quem ANUNCIA) fazem a mesma
+ * pergunta, e uma segunda escrita dela é como o agente passou a
+ * prometer na tela um mundo e a subir outro.
+ *
+ * `ready` e nada mais: `draft` e `generating` ainda não estão
+ * prontos, `failed` não carrega, e `used` já foi jogada — reprisar
+ * uma entrada consumida reescreveria o `used_at` dela e apagaria a
+ * história de quando ela entrou de verdade.
+ */
+export function usableForWipe(
+  entry: Pick<MapPoolEntry, 'kind' | 'versionOk' | 'status'>,
+  forced: boolean,
+): boolean {
+  return entry.status === 'ready' && !blockedInForced(entry, forced);
+}

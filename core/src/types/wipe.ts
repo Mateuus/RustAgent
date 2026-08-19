@@ -215,6 +215,15 @@ export interface MapPoolEntry {
   readonly thumbUrl: string | null;
   /** Os monumentos que o RustMaps achou, pelo nome. `null` = não sabemos. */
   readonly monuments: readonly string[] | null;
+  /**
+   * "Compatível com a versão nova", marcado na mão pelo admin.
+   *
+   * Só significa alguma coisa em `custom`: é ela que libera o
+   * arquivo `.map` para um wipe FORÇADO. Está no CONTRATO, e não
+   * só no registro do banco, porque QUAL mundo entra no próximo
+   * wipe depende dela — ver `usableForWipe`, em wipe/map-pool.ts.
+   */
+  readonly versionOk: boolean;
   readonly status: MapPoolStatus;
   /** Por que a geração ou a validação falhou, na língua de quem lê a tela. */
   readonly lastError: string | null;

@@ -41,6 +41,7 @@ import {
   MAX_WORLD_SIZE,
   MIN_WORLD_SIZE,
   RECENT_WIPES_WINDOW,
+  blockedInForced,
   drawSeed,
   isValidWorldSize,
   normalizeSeed,
@@ -54,17 +55,15 @@ import type { AgentDatabase } from './database.js';
  * ESTENDE o `MapPoolEntry` do contrato (types/wipe.ts), e não o
  * substitui: quem compila contra o contrato — a execução do wipe,
  * o RustMaps, a tela do jogo — continua enxergando exatamente os
- * campos publicados. Os três daqui são de operação, e não de
+ * campos publicados. Os dois daqui são de operação, e não de
  * contrato.
+ *
+ * `versionOk` MUDOU DE LADO e hoje está no contrato: quem decide
+ * qual mundo entra no próximo wipe precisa dela para não prometer
+ * um `.map` da versão de ontem a um wipe forçado. Ver
+ * `usableForWipe`, em wipe/map-pool.ts.
  */
 export interface MapPoolRecord extends MapPoolEntry {
-  /**
-   * "Compatível com a versão nova", marcado na mão.
-   *
-   * Só significa alguma coisa em `custom`: é ela que libera o
-   * arquivo para um wipe FORÇADO. Ver o cabeçalho da migração 024.
-   */
-  readonly versionOk: boolean;
   /** O recado de quem colou a seed. */
   readonly note: string | null;
   readonly updatedAt: number;
@@ -1083,17 +1082,6 @@ export class MapPoolRepository {
 
     return current;
   }
-}
-
-/**
- * Esta entrada está barrada num wipe forçado?
- *
- * Só mapa custom sem a marca de versão. Procedural nunca é
- * barrado: quem gera o mundo é o próprio servidor, no boot, já na
- * versão nova do jogo.
- */
-function blockedInForced(entry: MapPoolRecord, forced: boolean): boolean {
-  return forced && entry.kind === 'custom' && !entry.versionOk;
 }
 
 /**

@@ -50,6 +50,7 @@
 import type { WipeRunRecord, WipeWorld } from '../db/wipe-runs-repository.js';
 import type { WipeScheduleReader } from '../db/wipe-schedule-repository.js';
 import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind } from '../types/wipe.js';
+import { usableForWipe } from './map-pool.js';
 
 // ------------------------------------------------------------
 //  §1  DE ONDE OS FATOS VÊM
@@ -88,7 +89,10 @@ export interface NextWipeDeps {
  * anunciar um mundo que não ia subir.
  */
 export type NextWipeMap =
-  /** `mapSource: 'keep'` — o mesmo mundo de agora, com outra seed. */
+  /**
+   * `mapSource: 'keep'` — o mesmo mapa de agora: MESMA seed, mesmo
+   * tamanho, mesmo `levelUrl`. O que zera é o save, e não o mundo.
+   */
   | { readonly source: 'keep' }
   /** Uma entrada da fila: a escolhida a dedo, ou a primeira pronta. */
   | { readonly source: 'entry'; readonly entry: MapPoolEntry }
@@ -149,10 +153,7 @@ export function nextWipe(serverId: string, deps: NextWipeDeps, now: number): Nex
       // ele é a resposta mais certa que existe: a fila já foi
       // consumida, e olhar para a fila agora mostraria o mundo do
       // wipe SEGUINTE.
-      map:
-        run.mapAfter === null
-          ? mapOfPool(deps, serverId, run.kind === 'forced')
-          : { source: 'world', world: run.mapAfter },
+      map: run.mapAfter === null ? mapOfRun(deps, run) : { source: 'world', world: run.mapAfter },
       timeZone,
       planId: run.planId,
       running: true,
@@ -199,13 +200,47 @@ export function nextPendingPlan(plans: readonly WipePlan[]): WipePlan | null {
 }
 
 /**
+ * O mundo que a execução EM CURSO vai pôr no ar, antes de
+ * `configurar` gravá-lo.
+ *
+ * ####  A JANELA DOS AVISOS É QUASE TODA AQUI  ####
+ *
+ * A execução começa com a antecedência do maior aviso (o padrão
+ * começa em 1440 minutos) e só decide o mundo no `configurar`,
+ * minutos antes de subir. Nesse dia inteiro `mapAfter` é `null` —
+ * e é exatamente quando o chat e a tela do jogo estão anunciando.
+ * Perguntar à fila aqui faria um plano `keep` anunciar por 24 h a
+ * cabeça de uma fila que ele nem vai tocar.
+ *
+ * Sem plano — o "WIPAR AGORA" com hora marcada — não há o que
+ * respeitar, e a resposta é a fila.
+ */
+export function mapOfRun(deps: NextWipeDeps, run: WipeRunRecord): NextWipeMap {
+  const plan = run.planId === null ? null : deps.schedule.getPlan(run.serverId, run.planId);
+
+  return plan === null
+    ? mapOfPool(deps, run.serverId, run.kind === 'forced')
+    : mapOfPlan(deps, plan);
+}
+
+/**
  * O mundo que ESTE plano põe no ar.
  *
  * As quatro origens do `mapSource`, e não "a cabeça da fila
  * sempre": um plano `keep` não consome a fila, e um `fixed` aponta
  * para uma entrada que pode estar em qualquer posição.
+ *
+ * ####  ESTA FUNÇÃO É A ÚNICA DECISÃO QUE EXISTE  ####
+ *
+ * Quem anuncia (o chat, o passo `avisar`, a tela CALENDÁRIO) e
+ * quem executa (o passo `configurar`, em wipe/run.ts) chamam
+ * ESTA. O executor consome o que ela escolheu — nunca escolhe de
+ * novo. Uma segunda escolha, por mais parecida que fosse, é como
+ * o agente passou a prometer um mundo na tela e a subir outro.
  */
-export function mapOfPlan(deps: NextWipeDeps, plan: WipePlan): NextWipeMap {
+export function mapOfPlan(deps: Pick<NextWipeDeps, 'mapPool'>, plan: WipePlan): NextWipeMap {
+  const forced = plan.kind === 'forced';
+
   if (plan.mapSource === 'keep') {
     return { source: 'keep' };
   }
@@ -213,10 +248,20 @@ export function mapOfPlan(deps: NextWipeDeps, plan: WipePlan): NextWipeMap {
   if (plan.mapSource === 'fixed' && plan.mapPoolId !== null) {
     const chosen = deps.mapPool.get(plan.serverId, plan.mapPoolId);
 
-    return chosen === null ? UNDECIDED_MAP : { source: 'entry', entry: chosen };
+    // ####  A ENTRADA APONTADA PODE NÃO SERVIR MAIS  ####
+    //
+    // Ela some da fila, é consumida por um wipe anterior, fica
+    // presa em `generating`, ou é um `.map` custom sem a marca de
+    // compatibilidade num wipe FORÇADO — e este último é o que
+    // deixa o servidor sem subir na madrugada. Em qualquer um dos
+    // casos o plano cai para a fila, e a fila vazia sorteia: um
+    // ponteiro velho não pode ser motivo para o servidor não zerar.
+    if (chosen !== null && usableForWipe(chosen, forced)) {
+      return { source: 'entry', entry: chosen };
+    }
   }
 
-  return mapOfPool(deps, plan.serverId, plan.kind === 'forced');
+  return mapOfPool(deps, plan.serverId, forced);
 }
 
 /**
@@ -227,7 +272,11 @@ export function mapOfPlan(deps: NextWipeDeps, plan: WipePlan): NextWipeMap {
  * sobe na versão de amanhã, e prometê-lo ao VIP seria vender a
  * prévia de um mundo que não vai entrar.
  */
-export function mapOfPool(deps: NextWipeDeps, serverId: string, forced: boolean): NextWipeMap {
+export function mapOfPool(
+  deps: Pick<NextWipeDeps, 'mapPool'>,
+  serverId: string,
+  forced: boolean,
+): NextWipeMap {
   const entry = deps.mapPool.next(serverId, forced);
 
   return entry === null ? UNDECIDED_MAP : { source: 'entry', entry };

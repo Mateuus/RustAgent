@@ -62,6 +62,7 @@ import type { Operation } from '../ops/operations.js';
 import type { BpPolicy, WipePlanKind, WipeRunStep } from '../types/wipe.js';
 import { toError } from '../util.js';
 import { backupSaveFolder, checkBackupSpace } from './backup.js';
+import { mapOfPlan } from './next-wipe.js';
 import { resolvePluginDataTargets } from './plugin-data.js';
 import { classifySaveFolder, saveFolderPath } from './save-files.js';
 
@@ -680,6 +681,19 @@ export class WipeRunner implements WipeExecutor {
   /**
    * A seed e o tamanho do mundo novo, pelo supervisor.
    *
+   * ####  QUEM ESCOLHE O MUNDO É O PLANO  ####
+   *
+   * A escolha é `mapOfPlan`, de wipe/next-wipe.ts — a MESMA que o
+   * chat responde em `{wipe.mapa}` e que a tela CALENDÁRIO desenha
+   * para o VIP prata. Este passo CONSOME o que ela escolheu; ele
+   * não escolhe de novo. Enquanto escolhia sozinho — a cabeça da
+   * fila, sempre —, um plano `keep` trocava o mundo assim mesmo e
+   * um `fixed` apontando para a entrada #2 subia a #1, com a tela
+   * anunciando a certa o tempo todo.
+   *
+   * Sem plano (o "WIPAR AGORA" com hora marcada) a fila é a
+   * resposta, como sempre foi.
+   *
    * ####  NUNCA ESCREVER O `.ini` DIRETO  ####
    *
    * `supervisor.updateSettings` preserva os comentários do
@@ -691,13 +705,39 @@ export class WipeRunner implements WipeExecutor {
     const { serverId } = request;
 
     if (run.mapAfter !== null) {
-      // Retomada depois de o passo ter terminado: a fila já foi
-      // consumida, e consumi-la de novo queimaria a entrada
-      // seguinte por nada.
+      // ####  É ISTO QUE FAZ A RETOMADA SER SEGURA  ####
+      //
+      // O mundo gravado é a marca de que este passo terminou.
+      // Rodar de novo sem ela queimaria uma SEGUNDA entrada da
+      // fila, e num plano `keep` reescreveria o `.ini` de um mundo
+      // que ninguém mandou trocar.
       return `o mundo novo já estava escolhido: ${describeWorld(run.mapAfter)}.`;
     }
 
-    const taken = this.#deps.mapPool.takeForWipe(serverId, { forced: run.kind === 'forced' });
+    const plan = run.planId === null ? null : this.#deps.schedule.getPlan(serverId, run.planId);
+    const decision = plan === null ? null : mapOfPlan({ mapPool: this.#deps.mapPool }, plan);
+
+    // A MESMA `kind` que `mapOfPlan` acabou de olhar. Num wipe
+    // forçado a fila pula o mapa custom sem marca de versão, e as
+    // duas contas precisam concordar sobre qual wipe é este.
+    const forced = (plan ?? run).kind === 'forced';
+
+    if (decision?.source === 'keep') {
+      return this.#manterMundo(request, run);
+    }
+
+    // `fixed` consome A ENTRADA APONTADA, esteja ela onde estiver
+    // na fila. Quando o ponteiro não serve mais — sumiu, já foi
+    // usada, ainda está `generating`, ou é um `.map` custom sem a
+    // marca de compatibilidade num wipe forçado —, `mapOfPlan` já
+    // caiu para a fila, e o `takeForWipe` abaixo é o caminho.
+    const pinned =
+      plan?.mapSource === 'fixed' && decision?.source === 'entry' ? decision.entry : null;
+
+    const taken =
+      pinned === null
+        ? this.#deps.mapPool.takeForWipe(serverId, { forced })
+        : { entry: this.#deps.mapPool.markUsed(serverId, pinned.id), drawn: false, skipped: [] };
 
     for (const skipped of taken.skipped) {
       request.operation.log(`[wipe] pulei a entrada #${String(skipped.id)} da fila: ${skipped.reason}`);
@@ -736,9 +776,55 @@ export class WipeRunner implements WipeExecutor {
     this.#deps.servers.updateSettings(serverId, patch);
     this.#deps.runs.update(serverId, request.runId, { mapAfter: world });
 
-    return taken.drawn
-      ? `${describeWorld(world)} — a fila estava vazia, e o agente SORTEOU esta seed.`
-      : `${describeWorld(world)} (entrada #${String(entry.id)} da fila).`;
+    if (taken.drawn) {
+      return `${describeWorld(world)} — a fila estava vazia, e o agente SORTEOU esta seed.`;
+    }
+
+    return pinned === null
+      ? `${describeWorld(world)} (entrada #${String(entry.id)} da fila).`
+      : `${describeWorld(world)} (entrada #${String(entry.id)}, escolhida a dedo no plano).`;
+  }
+
+  /**
+   * `mapSource: 'keep'`: o mundo NÃO muda.
+   *
+   * ####  NEM A FILA, NEM O `.ini`  ####
+   *
+   * Nada de `takeForWipe` — consumir uma entrada aqui queimaria o
+   * mundo do wipe SEGUINTE por um wipe que nem ia usá-lo. E nada
+   * de `updateSettings`: o patch normal grava `levelUrl` sempre,
+   * inclusive vazia, e num servidor de mapa custom isso APAGARIA o
+   * `.map` que o plano mandou manter. O que zera é o save, e o
+   * passo `apagar` já o levou.
+   *
+   * O mundo é gravado em `map_after` do mesmo jeito, e por dois
+   * motivos: é a marca de idempotência que a retomada lê, e é o
+   * que o chat e a tela anunciam de `configurar` em diante — sem
+   * ela as duas voltariam a mostrar a cabeça da fila, que este
+   * wipe não tocou.
+   */
+  #manterMundo(request: WipeRunRequest, run: WipeRunRecord): string {
+    const { serverId } = request;
+    const config = this.#deps.servers.configOf(serverId);
+
+    const world: WipeWorld =
+      config === null
+        ? // O servidor sumiu do agente entre o começo e agora: o
+          // retrato tirado na criação da execução é o que resta, e
+          // ele é deste mesmo mundo.
+          (run.mapBefore ?? { level: null, seed: null, worldSize: null })
+        : {
+            level: config.level,
+            seed: String(config.seed),
+            worldSize: config.worldSize,
+            levelUrl: config.levelUrl === '' ? null : config.levelUrl,
+            mapPoolId: null,
+            drawn: false,
+          };
+
+    this.#deps.runs.update(serverId, request.runId, { mapAfter: world });
+
+    return `o plano manda MANTER o mundo: ${describeWorld(world)} continua, e a fila não foi tocada.`;
   }
 
   /** Sobe, e espera o RCON responder. "Subiu" é o RCON. */

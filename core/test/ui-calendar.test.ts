@@ -118,6 +118,7 @@ function mapEntry(over: Partial<MapPoolEntry> = {}): MapPoolEntry {
     previewUrl: 'https://files.rustmaps.com/img/287/b3c1f0a2/map.png',
     thumbUrl: null,
     monuments: null,
+    versionOk: false,
     status: 'ready',
     lastError: null,
     usedAt: null,
