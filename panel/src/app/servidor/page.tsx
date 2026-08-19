@@ -13,6 +13,7 @@
 // ============================================================
 
 import {
+  CalendarClock,
   LayoutList,
   LayoutTemplate,
   Puzzle,
@@ -36,10 +37,19 @@ import { ServerStateBadge } from '@/components/server-state';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
+import { WipePanel } from '@/components/wipe/wipe-panel';
 import { agent, type ServerView, type SteamUpdate } from '@/lib/api';
 import { toast } from '@/lib/toast';
 
-type Tab = 'visao' | 'administracao' | 'console' | 'operacoes' | 'plugins' | 'menu' | 'config';
+type Tab =
+  | 'visao'
+  | 'administracao'
+  | 'console'
+  | 'operacoes'
+  | 'plugins'
+  | 'menu'
+  | 'wipe'
+  | 'config';
 
 /**
  * As abas, com ícone.
@@ -68,6 +78,12 @@ const TABS = [
   // aqui; o desenho delas é da rede e mora em Interface, na barra
   // lateral.
   { key: 'menu', label: 'Menu', Icon: LayoutTemplate },
+  // ####  WIPE ENTRE MENU E CONFIGURAÇÕES  ####
+  //
+  // É a última coisa que mexe no que o JOGADOR vive — quando o
+  // mundo dele zera, e o que sobrevive — antes das telas de
+  // operador. Depois dela só vem configuração de máquina.
+  { key: 'wipe', label: 'WIPE', Icon: CalendarClock },
   { key: 'config', label: 'Configurações', Icon: Settings2 },
 ] as const;
 
@@ -253,6 +269,7 @@ function Servidor() {
           {tab === 'operacoes' && <OperationsPanel server={server} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
           {tab === 'menu' && <ServerMenuPanel serverId={server.id} />}
+          {tab === 'wipe' && <WipePanel server={server} />}
           {tab === 'config' && <ServerSettings server={server} onChanged={() => void load()} />}
         </>
       )}
