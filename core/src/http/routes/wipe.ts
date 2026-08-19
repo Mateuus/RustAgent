@@ -62,6 +62,7 @@ import { readVipTiers } from '../../vip/tiers.js';
 import { KEEP_CUSTOM_IN_FORCED_REASON, keepBlockedInForced } from '../../wipe/map-pool.js';
 import {
   nextWipe,
+  UNKNOWN_WORLD,
   type WipeCurrentWorldReader,
   type WipeRunsReader,
 } from '../../wipe/next-wipe.js';
@@ -103,7 +104,12 @@ export interface WipeRoutesDeps {
    * custom sem a marca de compatibilidade. Descobrir isso só na
    * madrugada da execução seria descobrir tarde demais.
    *
-   * Ausente = a agenda grava o que mandarem, como antes.
+   * Ela vale para os DOIS lados da mesma decisão: o PATCH da agenda
+   * recusa gravar o `keep` num forçado, e o `/upcoming/me` responde
+   * ao jogador o mesmo mundo que o executor vai subir.
+   *
+   * Ausente = a agenda grava o que mandarem, como antes, e a rota
+   * do jogador responde com `UNKNOWN_WORLD` — o `keep` vale.
    */
   readonly world?: WipeCurrentWorldReader;
 }
@@ -555,12 +561,23 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
     // A MESMA decisão do chat e da tela do jogo. Ver
     // wipe/next-wipe.ts: uma segunda conta aqui faria a rota do
     // jogador responder um wipe e o `{wipe.faltam}` responder outro.
+    //
+    // ####  E ELA PRECISA DOS QUATRO LEITORES, NÃO DE TRÊS  ####
+    //
+    // Esta chamada nasceu sem o `world`, e a frase acima deixou de
+    // ser verdade em silêncio: com o plano FORÇADO mandando MANTER
+    // um `.map` custom sem a marca de compatibilidade, a rota
+    // respondia "o mesmo mapa de agora" enquanto o executor, o
+    // `{wipe.mapa}` do chat e a tela CALENDÁRIO respondiam a
+    // entrada da fila. Hoje o tipo recusa a montagem incompleta —
+    // ver `NextWipeDeps.world`.
     const next = nextWipe(
       id,
       {
         schedule: deps.repository,
         runs: deps.runs ?? NOTHING_RUNNING,
         mapPool: deps.mapPool ?? NO_MAP_POOL,
+        world: deps.world ?? UNKNOWN_WORLD,
       },
       now,
     );

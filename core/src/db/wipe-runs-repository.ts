@@ -176,6 +176,12 @@ export interface WipeRunRecord {
   readonly backupPath: string | null;
   readonly mapBefore: WipeWorld | null;
   readonly mapAfter: WipeWorld | null;
+  /**
+   * O mundo que `configurar` ESCOLHEU, gravado antes do `.ini`.
+   *
+   * `null` = o passo ainda não decidiu. Ver `WipeMapDecision`.
+   */
+  readonly mapDecision: WipeMapDecision | null;
   readonly saveCreatedBefore: number | null;
   readonly saveCreatedAfter: number | null;
   readonly message: string | null;
@@ -193,6 +199,40 @@ export interface WipeWorld {
   /** O agente sorteou a seed porque a fila estava vazia. */
   readonly drawn?: boolean;
 }
+
+/**
+ * A decisão de mundo que o passo `configurar` TOMOU, congelada.
+ *
+ * ####  ESCOLHER NÃO É RECALCULAR  ####
+ *
+ * A decisão (`mapOfPlan`, em wipe/next-wipe.ts) lê o mundo de
+ * AGORA para uma pergunta: um wipe FORÇADO não MANTÉM um `.map`
+ * custom sem a marca de compatibilidade. E o próprio passo
+ * reescreve esse mundo — ele grava `levelurl` vazia no `.ini`
+ * antes de gravar o resultado no banco. Entre as duas escritas o
+ * agente pode morrer, e a retomada relia um `.ini` já procedural:
+ * a trava não pegava mais, o `keep` voltava a valer e o passo
+ * "mantinha" um mundo que tinha acabado de sair da FILA — com a
+ * entrada ainda `ready`, o `map_after` sem `map_pool_id` e a régua
+ * do VIP anunciando como "o próximo mundo" o que já estava no ar.
+ *
+ * Por isso a decisão é gravada ANTES do `.ini`, aqui, e a retomada
+ * a RELÊ em vez de refazê-la. Ela não consome nada: queimar a fila
+ * continua sendo o `commitWorld`, depois do `.ini`. Gravar a
+ * escolha e consumi-la são dois tempos, como já eram para a
+ * curadoria e para o sorteio.
+ *
+ * A entrada viaja por ID, e não por cópia: o nome, a seed e a nota
+ * dela continuam morando na fila, e uma cópia aqui seria uma
+ * segunda verdade sobre a mesma linha.
+ */
+export type WipeMapDecision =
+  /** O mundo de agora fica: `mapSource: 'keep'`, e nada o recusou. */
+  | { readonly source: 'keep' }
+  /** A entrada da fila que este wipe vai consumir. */
+  | { readonly source: 'entry'; readonly mapPoolId: number }
+  /** Nada na fila serve: o agente sorteia na hora de gravar o `.ini`. */
+  | { readonly source: 'undecided' };
 
 export interface WipeRunStepRecord {
   readonly step: WipeRunStep;
@@ -222,6 +262,8 @@ export interface WipeRunPatch {
   readonly finishedAt?: number | null | undefined;
   readonly backupPath?: string | null | undefined;
   readonly mapAfter?: WipeWorld | null | undefined;
+  /** A decisão congelada. Quem a grava é o passo `configurar`. */
+  readonly mapDecision?: WipeMapDecision | null | undefined;
   readonly saveCreatedAfter?: number | null | undefined;
   readonly message?: string | null | undefined;
 }
@@ -241,6 +283,7 @@ interface RunRow {
   readonly backup_path: string | null;
   readonly map_before: string | null;
   readonly map_after: string | null;
+  readonly map_decision: string | null;
   readonly save_created_before: number | null;
   readonly save_created_after: number | null;
   readonly message: string | null;
@@ -258,7 +301,7 @@ interface StepRow {
 
 const RUN_COLUMNS = `id, server_id, plan_id, operation_id, kind, bp_policy, full_wipe,
   started_at, wipe_at, finished_at, status, backup_path, map_before, map_after,
-  save_created_before, save_created_after, message`;
+  map_decision, save_created_before, save_created_after, message`;
 
 /**
  * ####  CADA SERVIDOR TEM AS SUAS EXECUÇÕES  ####
@@ -512,6 +555,11 @@ export class WipeRunsRepository {
       params.map_after = patch.mapAfter === null ? null : JSON.stringify(patch.mapAfter);
     }
 
+    if (patch.mapDecision !== undefined) {
+      sets.push('map_decision = @map_decision');
+      params.map_decision = patch.mapDecision === null ? null : JSON.stringify(patch.mapDecision);
+    }
+
     if (patch.saveCreatedAfter !== undefined) {
       sets.push('save_created_after = @save_created_after');
       params.save_created_after = patch.saveCreatedAfter;
@@ -678,6 +726,7 @@ export class WipeRunsRepository {
       backupPath: row.backup_path,
       mapBefore: parseWorld(row.map_before),
       mapAfter: parseWorld(row.map_after),
+      mapDecision: parseDecision(row.map_decision),
       saveCreatedBefore: row.save_created_before,
       saveCreatedAfter: row.save_created_after,
       message: row.message,
@@ -754,6 +803,41 @@ function parsePatterns(raw: string | undefined): readonly string[] {
     // para um palpite: o lado seguro desta chave é não apagar
     // nada.
     return [];
+  }
+}
+
+/**
+ * A decisão congelada, relida do JSON.
+ *
+ * TOLERANTE como o resto deste arquivo: linha estragada vira
+ * `null`, e `null` quer dizer "ainda não decidiu" — o passo
+ * `configurar` decide de novo, que é exatamente o que ele fazia
+ * antes de a coluna existir. Um `throw` aqui derrubaria a leitura
+ * da execução inteira, e com ela a tela do histórico.
+ */
+function parseDecision(raw: string | null): WipeMapDecision | null {
+  if (raw === null || raw.trim() === '') {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+
+    if (typeof parsed !== 'object' || parsed === null) {
+      return null;
+    }
+
+    const decision = parsed as Partial<{ source: string; mapPoolId: number }>;
+
+    if (decision.source === 'keep' || decision.source === 'undecided') {
+      return { source: decision.source };
+    }
+
+    return decision.source === 'entry' && typeof decision.mapPoolId === 'number'
+      ? { source: 'entry', mapPoolId: decision.mapPoolId }
+      : null;
+  } catch {
+    return null;
   }
 }
 

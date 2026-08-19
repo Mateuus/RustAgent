@@ -40,7 +40,11 @@ import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/dat
 import { MapPoolRepository } from '../src/db/map-pool-repository.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
-import { WipeRunsRepository, type WipeRunRecord } from '../src/db/wipe-runs-repository.js';
+import {
+  WipeRunsRepository,
+  type WipeRunRecord,
+  type WipeWorld,
+} from '../src/db/wipe-runs-repository.js';
 import {
   WipeScheduleRepository,
   type WipePlanInput,
@@ -79,6 +83,40 @@ const SAVE_FILES = [
   'sv.files.287.db-wal',
 ];
 
+/**
+ * O `WipeRunsRepository` com uma falha plantada no `commitWorld`.
+ *
+ * ####  A INTERRUPÇÃO QUE ESTE ARQUIVO PRECISA MEDIR  ####
+ *
+ * O passo `configurar` grava o `.ini` e SÓ DEPOIS o resultado no
+ * banco. Entre as duas escritas cabe uma interrupção — o agente
+ * morrendo, ou o próprio `commitWorld` lançando (um
+ * `MAP_NOT_FOUND` no `markUsed`, o SQLite ocupado). Nos dois casos
+ * o `.ini` já é o do mundo novo e o banco ainda não sabe de nada,
+ * e é exatamente aí que a retomada precisa chegar à MESMA decisão.
+ *
+ * `settingsErrors` planta a falha do OUTRO lado (o `.ini` que não
+ * grava); esta planta a de depois dele.
+ */
+class RunsComCommitQueFalha extends WipeRunsRepository {
+  readonly commitErrors: Error[] = [];
+
+  override commitWorld(
+    serverId: string,
+    id: number,
+    escolher: () => WipeWorld,
+    now: number = Date.now(),
+  ): WipeRunRecord {
+    const boom = this.commitErrors.shift();
+
+    if (boom !== undefined) {
+      throw boom;
+    }
+
+    return super.commitWorld(serverId, id, escolher, now);
+  }
+}
+
 const temporary: string[] = [];
 
 afterEach(async () => {
@@ -103,6 +141,14 @@ interface Scenario {
   readonly mapPool: MapPoolRepository;
   readonly runner: WipeRunner;
   readonly config: ServerConfig;
+  /**
+   * O `.ini` de AGORA — o de depois do que o wipe já gravou.
+   *
+   * `config` é o retrato do começo; este é o que o supervisor
+   * responderia se alguém perguntasse neste segundo, e é o que as
+   * superfícies que anunciam leem.
+   */
+  readonly configOf: () => ServerConfig;
   readonly saveDir: string;
   readonly backupsDir: string;
   readonly control: WipeServerControl & { running: boolean; readonly stops: number[] };
@@ -115,6 +161,8 @@ interface Scenario {
    * teste de atomicidade sem ele não existe.
    */
   readonly settingsErrors: Error[];
+  /** Erros que o `commitWorld` vai lançar. Ver `RunsComCommitQueFalha`. */
+  readonly commitErrors: Error[];
   readonly announced: number[];
 }
 
@@ -201,8 +249,19 @@ async function scenario(
 
   const settingsErrors: Error[] = [];
 
+  // ####  O `.ini` DE DEPOIS É O QUE O SUPERVISOR RELÊ  ####
+  //
+  // `updateSettings` escreve o arquivo, confere as portas e RELÊ o
+  // resultado: quem chamar `configOf` depois dele recebe o mundo
+  // NOVO, e é assim mesmo quando o agente morre no meio (o `.ini`
+  // já está em disco, e o boot seguinte o lê). Um stub que
+  // devolvesse para sempre o mundo do começo esconderia a única
+  // coisa que o passo `configurar` reescreve — e é dela que a
+  // decisão dele dependia.
+  let atual = config;
+
   const servers: WipeServers = {
-    configOf: () => config,
+    configOf: () => atual,
     updateSettings: (_id, patch) => {
       const boom = settingsErrors.shift();
 
@@ -211,6 +270,14 @@ async function scenario(
       }
 
       settings.push({ ...patch });
+
+      atual = {
+        ...atual,
+        ...(typeof patch.map === 'string' ? { level: patch.map } : {}),
+        ...(patch.seed === undefined ? {} : { seed: Number(patch.seed) }),
+        ...(typeof patch.worldSize === 'number' ? { worldSize: patch.worldSize } : {}),
+        ...(typeof patch.levelUrl === 'string' ? { levelUrl: patch.levelUrl } : {}),
+      } as ServerConfig;
 
       return [];
     },
@@ -235,7 +302,7 @@ async function scenario(
     rconConnected: true,
   };
 
-  const runs = new WipeRunsRepository(db);
+  const runs = new RunsComCommitQueFalha(db);
   const wipes = new WipesRepository(db);
   const schedule = new WipeScheduleRepository(db);
   const mapPool = new MapPoolRepository(db);
@@ -277,11 +344,13 @@ async function scenario(
     mapPool,
     runner,
     config,
+    configOf: () => atual,
     saveDir,
     backupsDir,
     control,
     settings,
     settingsErrors,
+    commitErrors: runs.commitErrors,
     announced,
   };
 }
@@ -611,7 +680,12 @@ function anunciado(s: Scenario): NextWipeMap | null {
       schedule: s.schedule,
       runs: s.runs,
       mapPool: s.mapPool,
-      world: currentWorldReader({ servers: { configOf: () => s.config }, mapPool: s.mapPool }),
+      world: currentWorldReader({
+        // O mundo de AGORA, e não o do começo da execução: é o
+        // `.ini` de agora que o chat e a tela do jogo leem.
+        servers: { configOf: () => s.configOf() },
+        mapPool: s.mapPool,
+      }),
     },
     Date.now(),
   );
@@ -1407,6 +1481,133 @@ describe('`keep` num wipe FORÇADO', () => {
     expect(s.settings).toHaveLength(0);
     expect(finished.mapAfter?.seed).toBe(String(s.config.seed));
     expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+  });
+
+  // ==========================================================
+  //  E A RETOMADA, QUE NÃO PODE CHEGAR A OUTRA DECISÃO
+  // ==========================================================
+  //
+  //  ####  A DECISÃO DEPENDIA DO ARQUIVO QUE O PASSO REESCREVE  ####
+  //
+  //  A trava acima lê o mundo de AGORA (`.map` custom sem marca ->
+  //  o forçado não mantém), e o próprio passo `configurar`
+  //  reescreve esse mundo: `levelurl` sai VAZIA no `.ini` antes de
+  //  o resultado chegar ao banco. Entre as duas escritas cabe uma
+  //  interrupção — e a retomada, relendo um `.ini` já procedural,
+  //  concluía que o `keep` VOLTAVA a valer.
+  //
+  //  O estrago não é um mapa trocado: é um mundo que veio da FILA
+  //  sem que ninguém tenha registrado que veio. A entrada continua
+  //  `ready`, o `map_after` não tem `map_pool_id`, e o wipe
+  //  seguinte promete — no chat, na tela do jogo, na prévia do
+  //  admin e para o executor — o mundo que JÁ ESTÁ no ar.
+  describe('a retomada relê a decisão, e não a refaz', () => {
+    it('o `.ini` já reescrito não faz o `keep` voltar a valer', async () => {
+      const s = await scenario({ levelUrl: ILHA });
+      const { primeira, segunda } = fila(s);
+      const plan = forcadoQueMantem(s);
+
+      const run = s.runs.create(SERVER, {
+        planId: plan.id,
+        kind: 'forced',
+        bpPolicy: plan.bpPolicy,
+      });
+
+      // O que as superfícies anunciam ANTES: a entrada #1.
+      const antes = anunciado(s);
+
+      expect(antes?.source === 'entry' ? antes.entry.id : null).toBe(primeira);
+
+      // A interrupção ENTRE o `.ini` e o commit. Ela vale pelas
+      // duas: o `commitWorld` lançando, e o agente morrendo com o
+      // `.ini` já em disco — nos dois casos o mundo de agora, para
+      // quem perguntar em seguida, é o NOVO.
+      s.commitErrors.push(new Error('o banco não respondeu'));
+
+      await expect(
+        s.runner.run({
+          serverId: SERVER,
+          runId: run.id,
+          operation: operation(),
+          control: s.control,
+        }),
+      ).rejects.toThrow('o banco não respondeu');
+
+      // O `.ini` já é o do mundo da fila, e o banco ainda não sabe
+      // de nada: nada consumido, nenhuma marca de idempotência.
+      expect(s.settings[0]).toMatchObject({ seed: '11111', levelUrl: '' });
+      expect(s.configOf().levelUrl).toBe('');
+      expect(s.runs.get(SERVER, run.id)?.mapAfter ?? null).toBeNull();
+      expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+
+      const op = operation();
+
+      const retomado = await s.runner.run({
+        serverId: SERVER,
+        runId: run.id,
+        operation: op,
+        control: s.control,
+        resume: true,
+      });
+
+      // A MESMA decisão da primeira tentativa: o mundo é o da fila,
+      // e o passo NÃO virou "manter".
+      expect(retomado.mapAfter?.seed).toBe('11111');
+      expect(retomado.mapAfter?.mapPoolId).toBe(primeira);
+      expect(retomado.mapAfter?.drawn).toBe(false);
+      expect(retomado.steps.find((step) => step.step === 'configurar')?.message).not.toContain(
+        'MANTER',
+      );
+      expect(logDe(op)).toContain('já estava escolhido');
+
+      // A fila registrou que a #1 subiu: UMA linha `used`, e ela.
+      expect(s.mapPool.get(SERVER, primeira)?.status).toBe('used');
+      expect(s.mapPool.list(SERVER).filter((entry) => entry.status === 'used')).toHaveLength(1);
+
+      // ####  E O QUE AS SUPERFÍCIES ANUNCIAM DEPOIS  ####
+      //
+      // O mundo da #1 está no ar. Com a entrada ainda `ready`, o
+      // wipe seguinte prometia ao VIP como "o próximo mundo" o
+      // mundo que já estava no ar. A vez agora é da #2.
+      const depois = anunciado(s);
+
+      expect(depois?.source === 'entry' ? depois.entry.id : null).toBe(segunda);
+    });
+
+    it('a decisão gravada é a que o chat e a tela leem enquanto a execução espera', async () => {
+      // O agente que MORRE não marca nada: a linha fica `running`
+      // até o boot seguinte chamar `orphan`. Nesse intervalo o
+      // `.ini` já é o do mundo novo — e recontar a decisão ali faria
+      // a tela do jogo prometer "o mesmo mapa de agora" para um
+      // wipe cuja escolha, gravada, é a entrada da fila que a
+      // retomada vai subir.
+      const s = await scenario({ levelUrl: ILHA });
+      const { primeira } = fila(s);
+      const plan = forcadoQueMantem(s);
+
+      const run = s.runs.create(SERVER, {
+        planId: plan.id,
+        kind: 'forced',
+        bpPolicy: plan.bpPolicy,
+      });
+
+      s.commitErrors.push(new Error('o banco não respondeu'));
+
+      await expect(
+        s.runner.run({
+          serverId: SERVER,
+          runId: run.id,
+          operation: operation(),
+          control: s.control,
+        }),
+      ).rejects.toThrow('o banco não respondeu');
+
+      s.runs.update(SERVER, run.id, { status: 'running' });
+
+      const durante = anunciado(s);
+
+      expect(durante?.source === 'entry' ? durante.entry.id : null).toBe(primeira);
+    });
   });
 });
 

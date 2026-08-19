@@ -46,7 +46,7 @@ import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ServerConfig } from '../config.js';
-import type { MapPoolPick, MapPoolRepository } from '../db/map-pool-repository.js';
+import type { MapPoolRepository } from '../db/map-pool-repository.js';
 import type {
   WipeAnnounceSettings,
   WipeExecSettings,
@@ -59,15 +59,18 @@ import type { WipesRepository } from '../db/wipes-repository.js';
 import type { Broadcaster } from '../game/broadcast.js';
 import type { Logger } from '../logger.js';
 import type { Operation } from '../ops/operations.js';
-import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind, WipeRunStep } from '../types/wipe.js';
+import type { BpPolicy, WipePlan, WipePlanKind, WipeRunStep } from '../types/wipe.js';
 import { toError } from '../util.js';
 import { backupSaveFolder, checkBackupSpace } from './backup.js';
 import { KEEP_CUSTOM_IN_FORCED_REASON, pinnedRejection } from './map-pool.js';
 import {
   currentWorldReader,
+  frozenOf,
+  mapOfFrozen,
   mapOfPlan,
   mapOfPool,
   type WipeCurrentWorldReader,
+  type WipeMapChoice,
 } from './next-wipe.js';
 import { resolvePluginDataTargets } from './plugin-data.js';
 import { classifySaveFolder, saveFolderPath } from './save-files.js';
@@ -738,10 +741,7 @@ export class WipeRunner implements WipeExecutor {
     // precisam concordar sobre qual wipe é este.
     const forced = (plan ?? run).kind === 'forced';
 
-    const decision =
-      plan === null
-        ? mapOfPool({ mapPool: this.#deps.mapPool }, serverId, forced)
-        : mapOfPlan({ mapPool: this.#deps.mapPool, world: this.#world }, plan);
+    const decision = this.#decidirMundo(request, run, plan, forced);
 
     if (decision.source === 'keep') {
       return this.#manterMundo(request, run);
@@ -790,20 +790,18 @@ export class WipeRunner implements WipeExecutor {
 
     // ####  ESCOLHER NÃO É QUEIMAR  ####
     //
-    // `pickForWipe` só LÊ: ele diz qual entrada seria consumida e
-    // quais ficaram pelo caminho. Quem a marca `used` é o fim
+    // `pickForWipe` só LÊ, e aqui ele nem escolhe mais: quem
+    // escolhe é a decisão lá em cima — a mesma que o chat e a tela
+    // anunciaram e a mesma que a retomada relê. O que ainda vem
+    // dele é a lista das entradas que ficaram pelo caminho, que é
+    // o aviso pelo qual o admin descobre que falta marcar a
+    // compatibilidade de um `.map`. Quem marca `used` é o fim
     // deste passo, depois de o `.ini` estar gravado.
-    //
-    // `MapPoolEntry` e não `MapPoolRecord`: daqui para baixo só o
-    // contrato mínimo é lido — nome, seed, tamanho, `levelUrl` e o
-    // id —, e é ele que a decisão devolve.
-    const picked: { readonly entry: MapPoolEntry | null; readonly skipped: MapPoolPick['skipped'] } =
-      pinned === null
-        ? this.#deps.mapPool.pickForWipe(serverId, { forced })
-        : { entry: pinned, skipped: [] };
+    const skipped =
+      pinned === null ? this.#deps.mapPool.pickForWipe(serverId, { forced }).skipped : [];
 
-    for (const skipped of picked.skipped) {
-      request.operation.log(`[wipe] pulei a entrada #${String(skipped.id)} da fila: ${skipped.reason}`);
+    for (const pulada of skipped) {
+      request.operation.log(`[wipe] pulei a entrada #${String(pulada.id)} da fila: ${pulada.reason}`);
     }
 
     // ####  O SORTEIO TAMBÉM SÓ ESCOLHE  ####
@@ -817,10 +815,14 @@ export class WipeRunner implements WipeExecutor {
     // com o `.ini` lançando duas vezes, três linhas `used` para um
     // wipe só — e três seeds fantasmas empurrando a memória de
     // `recentSeeds` para fora da janela dela.
+    //
+    // Daqui para baixo só o contrato mínimo da entrada é lido —
+    // nome, seed, tamanho, `levelUrl` e o id —, e é ele que a
+    // decisão devolve (`MapPoolEntry`, e não o registro inteiro).
     const escolha =
-      picked.entry === null
-        ? ({ tipo: 'sorteio', sorteada: this.#deps.mapPool.drawForWipe(serverId) } as const)
-        : ({ tipo: 'fila', entry: picked.entry } as const);
+      decision.source === 'entry'
+        ? ({ tipo: 'fila', entry: decision.entry } as const)
+        : ({ tipo: 'sorteio', sorteada: this.#deps.mapPool.drawForWipe(serverId) } as const);
 
     const mundo =
       escolha.tipo === 'fila'
@@ -904,6 +906,73 @@ export class WipeRunner implements WipeExecutor {
     return pinned === null
       ? `${describeWorld(mundo)} (entrada #${String(escolha.entry.id)} da fila).`
       : `${describeWorld(mundo)} (entrada #${String(escolha.entry.id)}, escolhida a dedo no plano).`;
+  }
+
+  /**
+   * QUAL mundo entra — decidido UMA VEZ, e gravado.
+   *
+   * ####  ESCOLHER NÃO É RECALCULAR  ####
+   *
+   * A decisão é `mapOfPlan`, e ela lê o mundo de AGORA por uma
+   * pergunta só: um wipe FORÇADO não MANTÉM um `.map` custom sem a
+   * marca de compatibilidade. O problema é que ESTE passo reescreve
+   * esse mesmo mundo — `patch.levelUrl` sai vazia logo abaixo,
+   * ANTES do `commitWorld`. Entre as duas escritas cabe uma
+   * interrupção: o agente morrendo (o `.ini` já está em disco, e o
+   * supervisor o relê no boot) ou o próprio `commitWorld` lançando.
+   *
+   * MEDIDO: `.map` custom sem marca, plano FORÇADO mandando MANTER,
+   * fila com a entrada #1. A trava pega, o `.ini` sai com a seed da
+   * #1 e a `levelurl` vazia — e a retomada, lendo um `.ini` já
+   * procedural, conclui que o `keep` agora VALE e cai no
+   * `#manterMundo`: entrada #1 ainda `ready`, `map_after` sem
+   * `map_pool_id`, nenhuma linha `used`, o log dizendo "a fila não
+   * foi tocada" — e as quatro superfícies anunciando como "o
+   * próximo mundo" o mundo que já estava no ar.
+   *
+   * Por isso a escolha é gravada ANTES de o `.ini` ser tocado, e a
+   * retomada a RELÊ. Gravar não consome nada: queimar a fila
+   * continua sendo o `commitWorld`, depois do `.ini` — um `.ini`
+   * que falha continua não custando entrada nenhuma, nem da
+   * curadoria nem do sorteio. Escolher e queimar já eram dois
+   * tempos; escolher e recalcular deixam de ser um só.
+   */
+  #decidirMundo(
+    request: WipeRunRequest,
+    run: WipeRunRecord,
+    plan: WipePlan | null,
+    forced: boolean,
+  ): WipeMapChoice {
+    const { serverId } = request;
+    const congelada = mapOfFrozen({ mapPool: this.#deps.mapPool }, serverId, run.mapDecision);
+
+    if (congelada !== null) {
+      request.operation.log(
+        `[wipe] o mundo deste wipe já estava escolhido: ${describeChoice(congelada)}. A retomada ` +
+          'relê a decisão — refazê-la contra o `.ini` que este passo reescreve daria outra.',
+      );
+
+      return congelada;
+    }
+
+    if (run.mapDecision !== null) {
+      // A entrada escolhida sumiu da fila entre uma tentativa e
+      // outra (alguém a apagou pela tela). Não há escolha a honrar,
+      // e o wipe não pode parar por isso: decide de novo, e a
+      // decisão nova é a que fica gravada.
+      request.operation.log(
+        '[wipe] a entrada que este wipe tinha escolhido não está mais na fila: escolhendo de novo.',
+      );
+    }
+
+    const decision =
+      plan === null
+        ? mapOfPool({ mapPool: this.#deps.mapPool }, serverId, forced)
+        : mapOfPlan({ mapPool: this.#deps.mapPool, world: this.#world }, plan);
+
+    this.#deps.runs.update(serverId, request.runId, { mapDecision: frozenOf(decision) });
+
+    return decision;
   }
 
   /**
@@ -1254,6 +1323,25 @@ export function parseSentOffsets(message: string | null): readonly number[] {
 
 function stepMessageOf(run: WipeRunRecord, step: WipeRunStep): string | null {
   return run.steps.find((entry) => entry.step === step)?.message ?? null;
+}
+
+/**
+ * A escolha, em uma linha de log.
+ *
+ * Ela existe para a retomada: o admin que abre o histórico
+ * precisa ler QUE decisão foi relida, e não só que houve uma.
+ */
+function describeChoice(choice: WipeMapChoice): string {
+  switch (choice.source) {
+    case 'keep':
+      return 'MANTER o mundo de agora';
+
+    case 'entry':
+      return `entrada #${String(choice.entry.id)} da fila`;
+
+    case 'undecided':
+      return 'sortear a seed, porque nada na fila serve para este wipe';
+  }
 }
 
 function describeWorld(world: WipeWorld): string {

@@ -123,8 +123,14 @@ export interface WipePreviewDeps {
      * Ele não está aqui para ser mostrado: é o que decide se um
      * wipe FORÇADO pode MANTER o mundo de hoje. Ver
      * `keepBlockedInForced`, em wipe/map-pool.ts.
+     *
+     * OBRIGATÓRIO, e pela mesma razão que o `NextWipeDeps.world`
+     * deixou de ser opcional: omiti-lo não dá erro nenhum, dá "o
+     * mundo é procedural" — e um ponto de decisão que responde
+     * diferente dos outros três não se anuncia, é descoberto na
+     * madrugada. `null` diz "procedural" por escrito.
      */
-    readonly levelUrl?: string | null;
+    readonly levelUrl: string | null;
   };
   readonly schedule: WipeScheduleReader;
   /**

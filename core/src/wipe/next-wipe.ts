@@ -47,7 +47,11 @@
 //      executar em seguida" e não "o que contar ao jogador".
 // ============================================================
 
-import type { WipeRunRecord, WipeWorld } from '../db/wipe-runs-repository.js';
+import type {
+  WipeMapDecision,
+  WipeRunRecord,
+  WipeWorld,
+} from '../db/wipe-runs-repository.js';
 import type { WipeScheduleReader } from '../db/wipe-schedule-repository.js';
 import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind } from '../types/wipe.js';
 import { isCustomWorld, keepBlockedInForced, usableForWipe } from './map-pool.js';
@@ -100,12 +104,35 @@ export interface NextWipeDeps {
   readonly runs: WipeRunsReader;
   readonly mapPool: WipeMapPoolReader;
   /**
-   * O mundo de agora. AUSENTE = o `keep` vale sempre, como valia
-   * antes desta pergunta existir: quem não sabe qual é o mundo não
-   * tem como recusar mantê-lo.
+   * O mundo de agora.
+   *
+   * ####  ELE NÃO É OPCIONAL, E ISSO É O CONSERTO  ####
+   *
+   * Ele já foi (`world?`), e o preço apareceu em um dos quatro
+   * pontos de decisão: o `GET /wipe/upcoming/me` montava este
+   * objeto sem ele e ninguém percebia, porque a omissão compila.
+   * Com o plano FORÇADO mandando MANTER um `.map` custom sem
+   * marca, a rota respondia "o mesmo mapa de agora" e o executor,
+   * o chat e a tela do jogo respondiam a entrada da fila: dois
+   * mundos para o mesmo wipe, e o jogador acreditando no que viu
+   * por último.
+   *
+   * Quem não sabe em que mundo o servidor está passa
+   * `UNKNOWN_WORLD` — de propósito, e por escrito. "Não sei" é uma
+   * resposta legítima (o `keep` vale, como valia antes desta
+   * pergunta existir); esquecer não é.
    */
-  readonly world?: WipeCurrentWorldReader | undefined;
+  readonly world: WipeCurrentWorldReader;
 }
+
+/**
+ * O leitor de quem NÃO SABE em que mundo o servidor está.
+ *
+ * Com ele o `keep` vale sempre: "não consegui ler o `.ini`" não
+ * pode virar motivo para trocar um mundo que ninguém mandou
+ * trocar. Ver `keepBlockedInForced`, em wipe/map-pool.ts.
+ */
+export const UNKNOWN_WORLD: WipeCurrentWorldReader = { currentWorld: () => null };
 
 /**
  * O leitor do mundo de agora, montado do supervisor e da fila.
@@ -172,8 +199,63 @@ export type NextWipeMap =
   /** Ninguém escolheu: o agente sorteia na hora. */
   | { readonly source: 'undecided' };
 
+/**
+ * O que uma DECISÃO pode ser: as três que `mapOfPlan` devolve.
+ *
+ * `world` fica de fora porque ele não é decisão nenhuma — é o
+ * registro do que já foi decidido e gravado (`map_after`). A
+ * distinção existe para o tipo: só uma escolha se congela, e
+ * `frozenOf` não precisa de um caso que nunca acontece.
+ */
+export type WipeMapChoice = Exclude<NextWipeMap, { readonly source: 'world' }>;
+
 /** O mundo ainda não decidido, como constante, para não repetir o literal. */
-export const UNDECIDED_MAP: NextWipeMap = { source: 'undecided' };
+export const UNDECIDED_MAP: WipeMapChoice = { source: 'undecided' };
+
+/**
+ * A escolha, na forma que o banco guarda.
+ *
+ * A entrada viaja por ID: o nome, a seed e a nota dela continuam
+ * morando na fila, e uma cópia na linha da execução seria uma
+ * segunda verdade sobre a mesma coisa.
+ */
+export function frozenOf(map: WipeMapChoice): WipeMapDecision {
+  return map.source === 'entry' ? { source: 'entry', mapPoolId: map.entry.id } : map;
+}
+
+/**
+ * A escolha congelada, relida.
+ *
+ * ####  RELER NÃO É REFAZER, E É ESSE O PONTO  ####
+ *
+ * Quem tem uma decisão gravada não pergunta de novo: perguntar de
+ * novo é como a retomada do passo `configurar` chegava a uma
+ * resposta diferente da primeira tentativa — contra um `.ini` que
+ * o próprio passo tinha acabado de reescrever. Ver
+ * `WipeMapDecision`, em db/wipe-runs-repository.ts.
+ *
+ * `null` = não há decisão gravada, ou a entrada dela sumiu da fila
+ * no meio do caminho. Nos dois casos quem chama decide de novo —
+ * uma entrada que não existe mais não é uma escolha que se possa
+ * honrar.
+ */
+export function mapOfFrozen(
+  deps: Pick<NextWipeDeps, 'mapPool'>,
+  serverId: string,
+  frozen: WipeMapDecision | null,
+): WipeMapChoice | null {
+  if (frozen === null) {
+    return null;
+  }
+
+  if (frozen.source !== 'entry') {
+    return frozen;
+  }
+
+  const entry = deps.mapPool.get(serverId, frozen.mapPoolId);
+
+  return entry === null ? null : { source: 'entry', entry };
+}
 
 /**
  * O próximo wipe deste servidor, já decidido.
@@ -287,6 +369,20 @@ export function nextPendingPlan(plans: readonly WipePlan[]): WipePlan | null {
  * respeitar, e a resposta é a fila.
  */
 export function mapOfRun(deps: NextWipeDeps, run: WipeRunRecord): NextWipeMap {
+  // ####  A DECISÃO JÁ TOMADA VEM ANTES DE QUALQUER CONTA  ####
+  //
+  // Entre o `.ini` gravado e o `map_after` a execução pode ficar
+  // parada por horas, esperando alguém mandar retomar — e nesse
+  // intervalo o `.ini` já é o do mundo NOVO. Recontar aqui faria a
+  // tela do jogo prometer "o mesmo mapa de agora" para um wipe
+  // cuja escolha, gravada, é a entrada da fila que a retomada vai
+  // subir. É a mesma razão de `map_after` vir antes desta função.
+  const frozen = mapOfFrozen(deps, run.serverId, run.mapDecision);
+
+  if (frozen !== null) {
+    return frozen;
+  }
+
   const plan = run.planId === null ? null : deps.schedule.getPlan(run.serverId, run.planId);
 
   return plan === null
@@ -314,9 +410,9 @@ export function mapOfRun(deps: NextWipeDeps, run: WipeRunRecord): NextWipeMap {
 export function mapOfPlan(
   deps: Pick<NextWipeDeps, 'mapPool' | 'world'>,
   plan: WipePlan,
-): NextWipeMap {
+): WipeMapChoice {
   const forced = plan.kind === 'forced';
-  const daFila = (): NextWipeMap => mapOfPool(deps, plan.serverId, forced);
+  const daFila = (): WipeMapChoice => mapOfPool(deps, plan.serverId, forced);
 
   // ####  AS QUATRO ORIGENS, ESCRITAS  ####
   //
@@ -336,7 +432,7 @@ export function mapOfPlan(
       // `blockedInForced` existe para impedir, na noite em que
       // impedir importa. Mundo procedural continua sendo mantido
       // sem atrito. Ver `keepBlockedInForced`.
-      return keepBlockedInForced(deps.world?.currentWorld(plan.serverId) ?? null, forced)
+      return keepBlockedInForced(deps.world.currentWorld(plan.serverId), forced)
         ? daFila()
         : { source: 'keep' };
 
@@ -383,7 +479,7 @@ export function mapOfPool(
   deps: Pick<NextWipeDeps, 'mapPool'>,
   serverId: string,
   forced: boolean,
-): NextWipeMap {
+): WipeMapChoice {
   const entry = deps.mapPool.next(serverId, forced);
 
   return entry === null ? UNDECIDED_MAP : { source: 'entry', entry };

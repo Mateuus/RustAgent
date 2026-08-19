@@ -1119,9 +1119,11 @@ export interface CalendarScreenProviderOptions {
    * FORÇADO não MANTÉM um `.map` custom sem a marca de
    * compatibilidade, e sem esta leitura a tela anunciaria "o mesmo
    * mapa de agora" para um mundo que o wipe vai trocar. Ver
-   * `NextWipeDeps.world`.
+   * `NextWipeDeps.world`, que não aceita mais a omissão: quem não
+   * sabe em que mundo o servidor está passa `UNKNOWN_WORLD`, por
+   * escrito.
    */
-  readonly world?: WipeCurrentWorldReader;
+  readonly world: WipeCurrentWorldReader;
   readonly vips: CalendarVipReader;
   /**
    * Os níveis daquele servidor (o `OrigemZVip.json`).

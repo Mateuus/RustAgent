@@ -2327,6 +2327,40 @@ CREATE TABLE events (
 CREATE INDEX idx_events_quando ON events (server_id, starts_at);
 `;
 
+// ------------------------------------------------------------
+//  029 — a decisão de mundo do wipe, CONGELADA antes do `.ini`
+//
+//  ####  A DECISÃO DEPENDIA DO ARQUIVO QUE O PASSO REESCREVE  ####
+//
+//  `mapOfPlan` (wipe/next-wipe.ts) lê o mundo de AGORA por uma
+//  pergunta só: um wipe FORÇADO não MANTÉM um `.map` custom sem a
+//  marca de compatibilidade. E o passo `configurar` reescreve esse
+//  mesmo mundo — ele grava `levelurl` vazia no `.ini` ANTES de
+//  gravar o resultado no banco.
+//
+//  MEDIDO: servidor com `.map` custom sem marca, plano FORÇADO
+//  mandando MANTER, fila com a entrada #1. A trava pega, o `.ini`
+//  sai com a seed da #1, e o agente morre antes do commit. Na
+//  retomada o `.ini` já é procedural, a trava NÃO pega, o `keep`
+//  volta a valer — e o passo "mantém" um mundo que tinha acabado
+//  de sair da fila: entrada #1 ainda `ready`, `map_after` sem
+//  `map_pool_id`, e a régua do VIP anunciando como "o próximo
+//  mundo" o mundo que já estava no ar.
+//
+//  Esta coluna guarda a escolha (`keep`, a entrada #N, ou "não há
+//  nada na fila"), gravada ANTES do `.ini` e RELIDA na retomada.
+//  Ela não consome nada: queimar a fila continua sendo o
+//  `commitWorld`, depois do `.ini`. Escolher e queimar já eram
+//  dois tempos; escolher e RECALCULAR passam a ser um só.
+//
+//  NULL = o passo `configurar` ainda não decidiu, e é assim que
+//  nascem todas as execuções — inclusive as que já estavam no
+//  banco quando esta coluna chegou.
+// ------------------------------------------------------------
+const WIPE_RUN_MAP_DECISION_SCHEMA = `
+ALTER TABLE wipe_runs ADD COLUMN map_decision TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2363,6 +2397,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // ordem do array é a ordem em que o banco aplica.
   { id: 27, name: 'events', sql: EVENTS_SCHEMA },
   { id: 28, name: 'bp-snapshots', sql: BP_SNAPSHOTS_SCHEMA },
+  // A 29 é da mesma frente do wipe: a decisão de mundo que a
+  // retomada precisa RELER, em vez de refazer contra um `.ini`
+  // que o próprio passo acabou de reescrever.
+  { id: 29, name: 'wipe-run-map-decision', sql: WIPE_RUN_MAP_DECISION_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

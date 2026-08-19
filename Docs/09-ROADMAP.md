@@ -93,7 +93,9 @@ O que está na árvore:
   `/wipe/upcoming/me`, recortadas pelo nível de VIP com o mesmo código.
 
 Migrações **23** (`wipe-schedule`), **24** (`wipe-map-pool`), **25**
-(`wipe-runs`), **26** (`messages`), **27** (`events`) e **28** (`bp-snapshots`).
+(`wipe-runs`), **26** (`messages`), **27** (`events`), **28** (`bp-snapshots`) e
+**29** (`wipe-run-map-decision`, a escolha de mundo que a retomada relê em vez de
+refazer).
 No painel, a aba **WIPE** com seis sub-abas (Geral, Agenda, Mapas, Execução,
 Blueprints, Configuração) e o item **MENSAGENS** na barra lateral. No plugin,
 `origemz.bp.export` e `origemz.bp.restore`.

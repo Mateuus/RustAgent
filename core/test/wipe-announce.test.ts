@@ -52,6 +52,7 @@ import { VariableRegistry } from '../src/messages/variables.js';
 import { Operation } from '../src/ops/operations.js';
 import type { BroadcastInput, BroadcastResult } from '../src/types/messages.js';
 import { WipeBroadcastAnnouncer } from '../src/wipe/announce.js';
+import { UNKNOWN_WORLD } from '../src/wipe/next-wipe.js';
 import { WipeRunner, type WipeServerControl, type WipeServers } from '../src/wipe/run.js';
 
 const SERVER = 'pvp1';
@@ -111,6 +112,9 @@ function readers(installDir = ''): Readers {
     schedule: scheduleRepo,
     runs: runsRepo,
     mapPool: poolRepo,
+    // Esta suíte fala de FRASE, e não de mapa custom: não há `.ini`
+    // para ler. Dizê-lo por escrito é o que o tipo passou a exigir.
+    world: UNKNOWN_WORLD,
     scheduleRepo,
     runsRepo,
     poolRepo,

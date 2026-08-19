@@ -56,7 +56,13 @@ import { walkElements, type UiElement, type UiScreen } from '../src/types/ui-doc
 import { UI_REQUEST_MARKER } from '../src/types/ui-transport.js';
 import type { MapPoolEntry, WipePlan, WipeSettings } from '../src/types/wipe.js';
 import type { VipTierLevel } from '../src/vip/tiers.js';
-import { nextWipe, type NextWipe } from '../src/wipe/next-wipe.js';
+import {
+  currentWorldReader,
+  nextWipe,
+  UNKNOWN_WORLD,
+  type NextWipe,
+  type WipeCurrentWorldReader,
+} from '../src/wipe/next-wipe.js';
 
 const silent = createLogger({ log: { level: 'silent', pretty: false } });
 
@@ -148,6 +154,8 @@ interface DecideInput {
   readonly runs?: readonly WipeRunRecord[];
   readonly now?: number;
   readonly timeZone?: string;
+  /** O mundo de agora, para quem fala do `keep` num wipe forçado. */
+  readonly world?: WipeCurrentWorldReader;
 }
 
 /**
@@ -184,6 +192,11 @@ function decide(input: DecideInput = {}): NextWipe | null {
           ) ?? null,
         get: (_serverId, id) => queue.find((entry) => entry.id === id) ?? null,
       },
+      // Esta suíte fala de RECORTE por VIP, e não de mapa custom:
+      // ninguém aqui pergunta em que mundo o servidor está. Dizê-lo
+      // por escrito é o que o tipo passou a exigir — foi a omissão
+      // silenciosa que deixou o `/upcoming/me` com uma segunda conta.
+      world: input.world ?? UNKNOWN_WORLD,
     },
     input.now ?? NOW,
   );
@@ -205,6 +218,7 @@ function run(over: Partial<WipeRunRecord> = {}): WipeRunRecord {
     backupPath: null,
     mapBefore: null,
     mapAfter: null,
+    mapDecision: null,
     saveCreatedBefore: null,
     saveCreatedAfter: null,
     message: null,
@@ -1329,6 +1343,7 @@ beforeEach(() => {
       schedule,
       runs,
       mapPool,
+      world: UNKNOWN_WORLD,
       vips,
       now: () => NOW,
     }),
@@ -1501,6 +1516,7 @@ describe('quando o provedor não consegue montar a página', () => {
       },
       runs: { running: explode },
       mapPool: { list: explode, next: explode, get: explode },
+      world: { currentWorld: explode },
       vips: { activeOf: () => [] },
       now: () => NOW,
     });
@@ -1524,7 +1540,10 @@ describe('quando o provedor não consegue montar a página', () => {
 // ============================================================
 
 describe('GET /wipe/upcoming/me', () => {
-  function buildApi() {
+  /** O `.map` de fora que o servidor estaria rodando AGORA. */
+  const ILHA = 'https://mapas.exemplo/ilha.map';
+
+  function buildApi(options: { readonly levelUrl?: string } = {}) {
     const db = openDatabase({ file: MEMORY_DATABASE });
 
     runMigrations(db);
@@ -1548,19 +1567,40 @@ describe('GET /wipe/upcoming/me', () => {
     repository.createPlan(SERVER, { scheduledAt: Date.now() + 3 * DAY, bpPolicy: 'wipe' }, Date.now());
     mapPool.add(SERVER, { seed: SECRET_SEED, worldSize: 4000 });
 
+    // A rota só chama `ids()` e `configOf()`: montar o supervisor
+    // de verdade traria processo, RCON e disco para um teste que
+    // fala de recorte. O `levelUrl` é o mundo de agora, e ele entra
+    // numa decisão só — ver `keepBlockedInForced`.
+    const supervisor = {
+      ids: () => [SERVER],
+      configOf: () =>
+        options.levelUrl === undefined
+          ? null
+          : {
+              levelUrl: options.levelUrl,
+              // A régua do VIP lê os níveis do `OrigemZVip.json`
+              // daquele servidor. A pasta não existe, e é assim
+              // mesmo: `readVipTiers` responde vazio em vez de
+              // lançar.
+              paths: { oxideConfigDir: '/nao/existe/oxide/config' },
+            },
+    } as unknown as ServerSupervisor;
+
     const app = Fastify();
 
     void app.register(
       async (api) => {
         registerWipeRoutes(api, {
           repository,
-          // A rota só chama `ids()` e `configOf()`: montar o
-          // supervisor de verdade traria processo, RCON e disco
-          // para um teste que fala de recorte.
-          supervisor: { ids: () => [SERVER], configOf: () => null } as unknown as ServerSupervisor,
+          supervisor,
           mapPool,
           vips,
           runs,
+          // O MESMO leitor que o http/server.ts liga na produção. É
+          // ele que faz um wipe FORÇADO não MANTER um `.map` custom
+          // sem a marca de compatibilidade — e a rota do jogador
+          // montava a decisão sem ele.
+          world: currentWorldReader({ servers: supervisor, mapPool }),
         });
 
         return Promise.resolve();
@@ -1568,7 +1608,7 @@ describe('GET /wipe/upcoming/me', () => {
       { prefix: '/api' },
     );
 
-    return { app, db, vips, runs };
+    return { app, db, vips, runs, repository, mapPool };
   }
 
   it('sem steamId, devolve a agenda e nenhum mapa', async () => {
@@ -1656,6 +1696,83 @@ describe('GET /wipe/upcoming/me', () => {
     expect(body.maps).toEqual([]);
     // O corte é o MESMO da tela do jogo, porque é a mesma função.
     expect(response.body).not.toContain(SECRET_SEED);
+
+    await app.close();
+    db.close();
+  });
+
+  it('no forçado que NÃO mantém o mapa custom, responde o mundo da FILA', async () => {
+    // ####  O QUARTO PONTO DE DECISÃO, E O ÚNICO SEM O `world`  ####
+    //
+    // Esta rota montava o `nextWipe` sem o leitor do mundo de
+    // agora. Com o plano FORÇADO mandando MANTER um `.map` custom
+    // sem a marca de compatibilidade, ela respondia "o mesmo mapa
+    // de agora" enquanto o executor, o `{wipe.mapa}` do chat e a
+    // tela CALENDÁRIO respondiam a entrada da fila: o jogador que
+    // abre o menu no jogo e o que consulta a rota liam mundos
+    // DIFERENTES para o mesmo wipe. Ver `keepBlockedInForced`.
+    const { app, db, vips, repository, mapPool } = buildApi({ levelUrl: ILHA });
+    await app.ready();
+
+    const now = Date.now();
+
+    repository.reconcile(SERVER, now);
+
+    const plans = repository.listPlans(SERVER, { from: now });
+    const forced = plans.find((plan) => plan.kind === 'forced');
+
+    expect(forced).toBeDefined();
+
+    // Só os forçados ficam de pé, e o primeiro deles é este: o
+    // cartão grande tem de ser o dele. (Um forçado NÃO se pula —
+    // ele acontece com ou sem o agente.)
+    for (const plan of plans) {
+      if (plan.kind !== 'forced') {
+        repository.skipPlan(SERVER, plan.id, now);
+      }
+    }
+
+    // Direto no repositório: a ROTA da agenda recusa gravar isto
+    // (409 WIPE_KEEP_IN_FORCED), e o que se prende aqui é o plano
+    // que já estava gravado quando a trava chegou.
+    repository.updatePlan(SERVER, forced?.id ?? 0, { mapSource: 'keep' }, now);
+
+    vips.grant({
+      steamId: PLAYER,
+      tier: 'silver',
+      expiresAt: null,
+      origin: 'painel',
+      createdBy: 'teste',
+    });
+
+    const response = await app.inject(
+      `/api/servers/${SERVER}/wipe/upcoming/me?steamId=${PLAYER}`,
+    );
+
+    const body = response.json() as {
+      readonly next: {
+        readonly kind: string;
+        readonly map: string | null;
+        readonly mapFrom: string | null;
+      } | null;
+    };
+
+    expect(body.next?.kind).toBe('forced');
+    // A MESMA resposta do executor, do chat e da tela do jogo: o
+    // mundo sai da fila, e não é "o mesmo mapa de agora".
+    expect(body.next?.mapFrom).toBe('entry');
+    expect(body.next?.map).toBe('procedural 4000');
+
+    // E a decisão que a rota responde é a MESMA função que as
+    // outras três consultam, com os mesmos leitores.
+    const decidido = decide({
+      plans: repository.listPlans(SERVER, { from: now }),
+      queue: mapPool.list(SERVER),
+      world: currentWorldReader({ servers: { configOf: () => ({ levelUrl: ILHA }) }, mapPool }),
+      now,
+    });
+
+    expect(decidido?.map.source).toBe('entry');
 
     await app.close();
     db.close();
