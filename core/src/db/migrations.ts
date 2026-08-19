@@ -1949,6 +1949,183 @@ CREATE TABLE message_log (
 CREATE INDEX idx_message_log_message ON message_log (message_id, at DESC);
 `;
 
+// ------------------------------------------------------------
+//  025  -  AS EXECUÇÕES  (Frente D)
+//
+//  ####  A OPERAÇÃO VIVE EM MEMÓRIA; O WIPE PRECISA DE MAIS  ####
+//
+//  Toda operação do agente (instalar, subir, atualizar) mora no
+//  `OperationStore`, que guarda vinte e some no `pm2 restart`.
+//  Para um wipe isso não basta por dois motivos, e cada um deles é
+//  uma tabela aqui:
+//
+//    1. "o que aconteceu no wipe do dia 6?" é uma pergunta feita
+//       SEMANAS depois. `wipe_runs` responde.
+//    2. "retomar do passo que falhou" exige saber em que passo
+//       parou. `wipe_run_steps` responde — e é o que impede a
+//       única alternativa, que seria rodar tudo de novo e apagar
+//       um mundo que já é o novo.
+//
+//  ####  E A TERCEIRA TABELA É A CONFERÊNCIA INDEPENDENTE  ####
+//
+//  `wipes` não é o que a execução RELATOU: é o mundo que o
+//  `WipeClock` VIU nascer, lendo o `SaveCreatedTime` do próprio
+//  servidor. As duas coisas podem discordar — uma execução que
+//  relata sucesso e um save que não mudou é exatamente o defeito
+//  que ninguém pega sem uma segunda fonte. Ver Docs\16 §6.
+//
+//  Ela também é lida por quem não é desta frente: a fila de mapas
+//  pergunta a ela quais seeds saíram nos últimos wipes (ver
+//  `recentSeeds` em db/map-pool-repository.ts), e por isso as
+//  colunas `server_id`, `seed` e `detected_at` são contrato.
+// ------------------------------------------------------------
+const WIPE_RUNS_SCHEMA = `
+CREATE TABLE wipe_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O wipe da agenda que virou esta execução. NULL = "WIPAR
+  -- AGORA", que não sai de plano nenhum.
+  plan_id INTEGER REFERENCES wipe_plans(id) ON DELETE SET NULL,
+
+  -- O \`op_xxxxxxxx\` do OperationStore ENQUANTO ele existe. Depois
+  -- do restart ele aponta para nada, e é justamente assim que o
+  -- boot descobre a execução órfã: linha \`running\` cuja operação
+  -- não está mais viva.
+  operation_id TEXT,
+
+  -- ####  O QUE IMPEDE O DUPLO-CLIQUE DE ZERAR DUAS VEZES  ####
+  --
+  -- A \`Idempotency-Key\` do POST. O índice único abaixo é a
+  -- garantia de verdade: duas requisições idênticas correndo
+  -- juntas não se enxergam na consulta, mas a segunda esbarra no
+  -- índice — e aí a rota devolve a execução que já existe, em vez
+  -- de começar outra.
+  idempotency_key TEXT,
+
+  kind TEXT NOT NULL CHECK (kind IN ('cadence', 'forced', 'manual')),
+
+  bp_policy TEXT NOT NULL DEFAULT 'keep'
+    CHECK (bp_policy IN ('keep', 'wipe', 'wipe_except_vip')),
+
+  -- O full wipe é um MODO, e não uma quarta política de
+  -- blueprint: ele acrescenta a lista de dados de plugin ao que
+  -- a política já apaga.
+  full_wipe INTEGER NOT NULL DEFAULT 0 CHECK (full_wipe IN (0, 1)),
+
+  -- Quando a EXECUÇÃO começou. Ela começa antes do wipe: o passo
+  -- \`avisar\` precisa do tempo dos offsets ("faltam 15 min") para
+  -- caber inteiro.
+  started_at INTEGER NOT NULL,
+
+  -- Quando o MUNDO zera. É a hora que o jogador vê no aviso, e a
+  -- que separa \`started_at\` de "a que horas foi o wipe do dia 6".
+  -- Igual a \`started_at\` num wipe sem aviso nenhum.
+  wipe_at INTEGER NOT NULL,
+
+  finished_at INTEGER,
+
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'done', 'failed', 'cancelled')),
+
+  -- O zip. NULL = não houve backup (desligado, ou não chegou lá).
+  backup_path TEXT,
+
+  -- JSON do mundo de ANTES e do de DEPOIS: seed, tamanho, level.
+  -- Guardados na linha, e não por id da fila, porque a entrada da
+  -- fila pode ser apagada e a pergunta "com que seed o servidor
+  -- rodou naquele mês?" continua tendo de ter resposta.
+  map_before TEXT,
+  map_after TEXT,
+
+  -- O \`SaveCreatedTime\` lido antes e depois. Os dois iguais no
+  -- fim é um wipe que RELATOU sucesso sem ter trocado o mundo.
+  save_created_before INTEGER,
+  save_created_after INTEGER,
+
+  -- A frase do desfecho, na língua de quem lê a tela.
+  message TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Ver o comentário de \`idempotency_key\`. PARCIAL porque a maior
+-- parte das execuções (as que o relógio dispara) não tem chave
+-- nenhuma, e NULL não colide com NULL neste índice.
+CREATE UNIQUE INDEX idx_wipe_runs_idempotency
+    ON wipe_runs (server_id, idempotency_key)
+ WHERE idempotency_key IS NOT NULL;
+
+-- A tela abre pelo histórico daquele servidor, do mais novo para
+-- o mais velho.
+CREATE INDEX idx_wipe_runs_server ON wipe_runs (server_id, started_at DESC);
+
+CREATE TABLE wipe_run_steps (
+  run_id INTEGER NOT NULL REFERENCES wipe_runs(id) ON DELETE CASCADE,
+
+  -- Sem acento de propósito: o valor viaja em chave primária, em
+  -- JSON de rota e em nome de passo no log. Ver WIPE_RUN_STEPS em
+  -- types/wipe.ts.
+  step TEXT NOT NULL CHECK (step IN (
+    'avisar', 'esvaziar', 'parar', 'backup', 'apagar',
+    'configurar', 'subir', 'pos-wipe'
+  )),
+
+  -- A ordem de execução, gravada na linha. A tela desenha por ela
+  -- em vez de conhecer a sequência: um passo novo no meio, um dia,
+  -- não exige tocar no painel.
+  position INTEGER NOT NULL,
+
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'done', 'failed', 'skipped')),
+
+  started_at INTEGER,
+  finished_at INTEGER,
+
+  -- O que aquele passo fez, ou por que não fez. É a linha que a
+  -- tela mostra ao lado do ✔.
+  message TEXT,
+
+  PRIMARY KEY (run_id, step)
+);
+
+CREATE TABLE wipes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O \`SaveCreatedTime\` do \`serverinfo\`, em epoch ms: a hora em
+  -- que aquele mundo NASCEU. É a identidade do mundo, e por isso
+  -- é ele que carrega o índice único.
+  save_created_at INTEGER NOT NULL,
+
+  level TEXT,
+
+  -- TEXTO, como em \`map_pool.seed\`, e pelo mesmo motivo: ela é
+  -- comparada e exibida, nunca somada.
+  seed TEXT,
+
+  world_size INTEGER,
+
+  -- Quando o AGENTE viu. Diferente de \`save_created_at\` sempre
+  -- que o mundo nasceu com o agente parado.
+  detected_at INTEGER NOT NULL,
+
+  -- A execução que criou este mundo. NULL = apareceu sem o agente
+  -- ter mandado (wipe na mão, servidor adotado com mundo velho) —
+  -- e registrar isso é o que impede a agenda de mentir.
+  wipe_run_id INTEGER REFERENCES wipe_runs(id) ON DELETE SET NULL
+);
+
+-- Um mundo é um \`save_created_at\`. Ver o \`INSERT OR IGNORE\` de
+-- db/wipes-repository.ts: sem este índice, cada boot do agente
+-- registraria o mesmo mundo de novo.
+CREATE UNIQUE INDEX idx_wipes_world ON wipes (server_id, save_created_at);
+
+-- A fila de mapas pergunta "quais seeds saíram por último?".
+CREATE INDEX idx_wipes_recent ON wipes (server_id, detected_at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -1979,7 +2156,7 @@ export const MIGRATIONS: readonly Migration[] = [
   // o mesmo número dão merge limpo e banco quebrado.
   { id: 23, name: 'wipe-schedule', sql: WIPE_SCHEDULE_SCHEMA },
   { id: 24, name: 'wipe-map-pool', sql: WIPE_MAP_POOL_SCHEMA },
-  // 25 fica vaga: e a Frente D (wipe-runs), que ainda nao entrou.
+  { id: 25, name: 'wipe-runs', sql: WIPE_RUNS_SCHEMA },
   { id: 26, name: 'messages', sql: MESSAGES_SCHEMA },
 ];
 

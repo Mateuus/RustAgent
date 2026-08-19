@@ -63,6 +63,15 @@ export interface RequestOptions {
   /** Upload de plugin: o corpo vai como está, sem JSON. */
   readonly form?: FormData;
   readonly signal?: AbortSignal;
+  /**
+   * Cabeçalhos a mais.
+   *
+   * Existe por causa da `Idempotency-Key` do wipe: ela precisa ser a
+   * MESMA em duas requisições que são a mesma intenção, e por isso
+   * não pode ser gerada aqui dentro — quem a escolhe é a tela, que
+   * sabe quando o clique é novo. Ver `startWipeRun`.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -76,6 +85,10 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   if (csrfToken !== null && method !== 'GET') {
     headers['X-CSRF-Token'] = csrfToken;
   }
+
+  // Por último: o que quem chamou pediu explicitamente vence o que
+  // este arquivo montou sozinho.
+  Object.assign(headers, options.headers ?? {});
 
   const response = await fetch(`${BASE}${path}`, {
     method,
@@ -2549,6 +2562,116 @@ export const agent = {
       method: 'POST',
       body: staging === undefined ? {} : { staging },
     }),
+
+  // ---- O WIPE: a execução  (a que apaga arquivo) -----------
+  //
+  // ####  ESTE BLOCO É A LINHA DIVISÓRIA DO PAINEL  ####
+  //
+  // Tudo acima lê e configura. Daqui em diante o painel manda o
+  // agente PARAR o servidor e APAGAR o mundo. É por isso que o
+  // `startWipeRun` é o único método deste arquivo que exige duas
+  // confirmações — ver o comentário dele.
+
+  /**
+   * O que este wipe vai apagar, lido do disco AGORA.
+   *
+   * Leitura pura: nada é escrito, e por isso ela pode ser chamada a
+   * cada abertura de tela, com o servidor no ar e cheio de gente.
+   */
+  wipePreview: (serverId: string) =>
+    api<WipePreviewResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/preview`),
+
+  /** O que existe DE VERDADE em `oxide\data` e nos `.db` do save. */
+  wipePluginData: (serverId: string) =>
+    api<WipePluginDataResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/plugin-data`),
+
+  /** Como o agente EXECUTA: avisos, esvaziar, backup, full wipe. */
+  wipeExecSettings: (serverId: string) =>
+    api<WipeExecSettingsResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/exec-settings`,
+    ),
+
+  saveWipeExecSettings: (serverId: string, settings: WipeExecSettings) =>
+    api<WipeExecSettingsResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/exec-settings`,
+      { method: 'PUT', body: settings },
+    ),
+
+  /**
+   * ####  WIPAR. É ESTE.  ####
+   *
+   * Duas confirmações, e as duas são obrigatórias no agente:
+   *
+   *   `identity`         o nome do servidor, DIGITADO por quem
+   *                      clicou. É a mesma confirmação que o GitHub
+   *                      pede para apagar um repositório.
+   *   `Idempotency-Key`  a MESMA chave é a mesma intenção. Um
+   *                      duplo-clique manda a mesma chave, e o
+   *                      agente devolve a execução que já começou
+   *                      em vez de começar outra.
+   *
+   * A chave vem de FORA deste método de propósito: gerá-la aqui
+   * dentro produziria uma chave nova a cada chamada — ou seja,
+   * exatamente o duplo-clique que ela existe para impedir, com a
+   * aparência de estar protegido.
+   */
+  startWipeRun: (
+    serverId: string,
+    input: {
+      identity: string;
+      idempotencyKey: string;
+      planId?: number | null;
+      bpPolicy?: BpPolicy;
+      fullWipe?: boolean;
+      /** Epoch ms. Ausente = agora. Com hora futura, os avisos saem antes. */
+      at?: number;
+    },
+  ) => {
+    const { idempotencyKey, ...body } = input;
+
+    return api<WipeRunStartResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/runs`, {
+      method: 'POST',
+      body,
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
+  },
+
+  /** O histórico de execuções, e os mundos que o agente detectou. */
+  wipeRuns: (serverId: string, limit?: number) =>
+    api<WipeRunsResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/runs${
+        limit === undefined ? '' : `?limit=${String(limit)}`
+      }`,
+    ),
+
+  /**
+   * Uma execução, com os passos e o log a partir do cursor.
+   *
+   * O log é da OPERAÇÃO, e ela vive em memória: depois de um
+   * reinício do agente ele some, e o que sobra são os passos, que
+   * estão no banco. O campo `live` diz qual dos dois casos é — sem
+   * ele, a tela mostraria um console vazio como se fosse silêncio.
+   */
+  wipeRun: (serverId: string, runId: number, fromLine = 0) =>
+    api<WipeRunDetailResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/runs/${String(runId)}?fromLine=${String(
+        fromLine,
+      )}`,
+    ),
+
+  /** Retoma do primeiro passo que não terminou. Não roda tudo de novo. */
+  resumeWipeRun: (serverId: string, runId: number) =>
+    api<WipeRunStartResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/runs/${String(runId)}/resume`,
+      { method: 'POST' },
+    ),
+
+  /** Pede a parada. NÃO desfaz o que já foi apagado. */
+  cancelWipeRun: (serverId: string, runId: number) =>
+    api<{ ok: true; now: number; run: WipeRun | null; message: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/runs/${String(runId)}/cancel`,
+      { method: 'POST' },
+    ),
 };
 
 // ------------------------------------------------------------
@@ -2789,5 +2912,248 @@ export interface RustMapsStatus {
   /** O teto que a API ANUNCIA — e que ninguém mediu ainda. */
   readonly announcedRateLimit: number;
   readonly callsPerTick: number;
+  readonly message: string;
+}
+
+// ------------------------------------------------------------
+//  O WIPE: a execução
+//
+//  ####  ESTES TIPOS ESPELHAM core/src/types/wipe.ts E
+//        core/src/db/wipe-runs-repository.ts  ####
+//
+//  O painel é export estático e não importa do `core` — os dois
+//  lados são compilados separados. Um campo renomeado lá precisa
+//  ser renomeado aqui, e o teste que pega a divergência é a tela
+//  aberta contra o agente de verdade.
+// ------------------------------------------------------------
+
+/** Os oito passos, na ordem. Sem acento: eles são chave primária. */
+export const WIPE_RUN_STEPS = [
+  'avisar',
+  'esvaziar',
+  'parar',
+  'backup',
+  'apagar',
+  'configurar',
+  'subir',
+  'pos-wipe',
+] as const;
+
+export type WipeRunStep = (typeof WIPE_RUN_STEPS)[number];
+
+/** `skipped` não é falha: é desfecho normal de passo desligado. */
+export type WipeStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+/** `cancelled` com dois eles, como no OperationStatus. */
+export type WipeRunStatus = 'running' | 'done' | 'failed' | 'cancelled';
+
+/** O mundo de antes ou o de depois de uma execução. */
+export interface WipeWorld {
+  readonly level: string | null;
+  readonly seed: string | null;
+  readonly worldSize: number | null;
+  readonly levelUrl?: string | null;
+  readonly mapPoolId?: number | null;
+  /** O agente sorteou a seed porque a fila estava vazia. */
+  readonly drawn?: boolean;
+}
+
+export interface WipeRunStepView {
+  readonly step: WipeRunStep;
+  readonly position: number;
+  readonly status: WipeStepStatus;
+  readonly startedAt: number | null;
+  readonly finishedAt: number | null;
+  /** O que aquele passo fez, ou por que não fez. Vai ao lado do ✔. */
+  readonly message: string | null;
+}
+
+/** Uma execução de wipe: o que aconteceu, passo a passo. */
+export interface WipeRun {
+  readonly id: number;
+  readonly serverId: string;
+  readonly planId: number | null;
+  readonly operationId: string | null;
+  readonly kind: WipePlanKind;
+  readonly bpPolicy: BpPolicy;
+  readonly fullWipe: boolean;
+  readonly startedAt: number;
+  /** Quando o MUNDO zera. Depois de `startedAt` quando há avisos. */
+  readonly wipeAt: number;
+  readonly finishedAt: number | null;
+  readonly status: WipeRunStatus;
+  readonly backupPath: string | null;
+  readonly mapBefore: WipeWorld | null;
+  readonly mapAfter: WipeWorld | null;
+  readonly saveCreatedBefore: number | null;
+  readonly saveCreatedAfter: number | null;
+  readonly message: string | null;
+  readonly steps: readonly WipeRunStepView[];
+}
+
+/** Um mundo que o agente VIU nascer, pelo SaveCreatedTime. */
+export interface DetectedWipe {
+  readonly id: number;
+  readonly serverId: string;
+  readonly saveCreatedAt: number;
+  readonly level: string | null;
+  readonly seed: string | null;
+  readonly worldSize: number | null;
+  readonly detectedAt: number;
+  /** `null` = apareceu sem o agente ter mandado (wipe na mão). */
+  readonly wipeRunId: number | null;
+}
+
+/** O que acontece com um arquivo neste wipe, e por quê. */
+export interface WipeClassifiedFile {
+  readonly name: string;
+  readonly bytes: number;
+  readonly fate: 'delete' | 'keep';
+  readonly group: 'world' | 'uploads' | 'deaths' | 'blueprints' | 'players' | 'other';
+  /** A frase que a tela mostra. Todo arquivo tem uma. */
+  readonly reason: string;
+}
+
+export interface WipeSaveFolder {
+  readonly path: string;
+  /** `false` = o servidor nunca subiu. Não é erro. */
+  readonly exists: boolean;
+  readonly files: readonly WipeClassifiedFile[];
+  readonly deletedCount: number;
+  readonly deletedBytes: number;
+  readonly keptCount: number;
+  readonly keptBytes: number;
+}
+
+/** Um candidato do full wipe. NADA vem marcado por padrão. */
+export interface WipePluginDataFile {
+  /** Caminho relativo à pasta do servidor, com `/`. É o padrão salvo. */
+  readonly path: string;
+  readonly area: 'save' | 'oxide';
+  readonly bytes: number;
+  readonly modifiedAt: number;
+  readonly selected: boolean;
+}
+
+export interface WipePluginDataResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly files: readonly WipePluginDataFile[];
+  /** Marcados que hoje não casam com nada. A escolha CONTINUA salva. */
+  readonly missing: readonly string[];
+}
+
+/**
+ * Impedimento é diferente de aviso.
+ *
+ * `blockers` recusam o wipe, e cada um tem conserto; `warnings`
+ * deixam passar, mas alguém precisa saber.
+ */
+export interface WipeNotice {
+  readonly code: string;
+  readonly message: string;
+}
+
+/** "O que este wipe vai apagar", lido do disco agora. */
+export interface WipePreviewResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly plan: WipePlan | null;
+  readonly nextForcedAt: number;
+  readonly bpPolicy: BpPolicy;
+  readonly fullWipe: boolean;
+  readonly nextMap: WipeMap | null;
+  readonly server: {
+    readonly id: string;
+    readonly identity: string;
+    readonly level: string | null;
+    readonly seed: string | null;
+    readonly worldSize: number | null;
+    readonly saveFolder: string;
+    /** `null` = não deu para perguntar. */
+    readonly running: boolean | null;
+    readonly rconConnected: boolean;
+    readonly online: number | null;
+  };
+  readonly files: WipeSaveFolder;
+  readonly pluginData: { readonly files: readonly WipePluginDataFile[]; readonly missing: readonly string[] };
+  readonly backup: {
+    readonly dir: string;
+    readonly enabled: boolean;
+    readonly needBytes: number;
+    /** `null` = não deu para medir o disco. Não é reprovação. */
+    readonly freeBytes: number | null;
+    readonly ok: boolean;
+    readonly reason: string | null;
+  };
+  readonly blockers: readonly WipeNotice[];
+  readonly warnings: readonly WipeNotice[];
+}
+
+/** Como o agente executa. Espelha `WipeExecSettings` do core. */
+export interface WipeExecSettings {
+  readonly announce: {
+    /** Quantos minutos ANTES cada aviso sai. Do maior para o menor. */
+    readonly offsetsMinutes: readonly number[];
+    readonly text: string;
+    readonly tag: string;
+    readonly tagColor: string;
+    readonly color: string;
+    readonly size: number;
+  };
+  readonly drain: {
+    readonly enabled: boolean;
+    readonly waitMinutes: number;
+    /** Matar o processo sem RCON. Perde tudo desde o último save. */
+    readonly force: boolean;
+  };
+  readonly backup: { readonly enabled: boolean; readonly keep: number };
+  /** O full wipe. A lista nasce VAZIA, e é de padrões. */
+  readonly pluginData: { readonly enabled: boolean; readonly patterns: readonly string[] };
+  readonly post: {
+    readonly resync: boolean;
+    readonly announce: boolean;
+    readonly announceText: string;
+  };
+}
+
+export interface WipeExecSettingsResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly settings: WipeExecSettings;
+  readonly message?: string;
+}
+
+export interface WipeRunsResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly runs: readonly WipeRun[];
+  readonly worlds: readonly DetectedWipe[];
+}
+
+/** Uma linha do log da operação. O cursor é o `n`. */
+export interface WipeRunLogLine {
+  readonly n: number;
+  readonly at: number;
+  readonly text: string;
+}
+
+export interface WipeRunDetailResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly run: WipeRun;
+  /** A operação ainda está viva? `false` = só os passos, do banco. */
+  readonly live: boolean;
+  readonly operation: OperationView | null;
+  readonly lines: readonly WipeRunLogLine[];
+  readonly nextLine: number;
+  readonly droppedLines: number;
+}
+
+export interface WipeRunStartResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly run: WipeRun | null;
+  readonly operationId: string | null;
   readonly message: string;
 }

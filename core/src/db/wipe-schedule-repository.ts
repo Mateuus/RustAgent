@@ -832,6 +832,66 @@ export class WipeScheduleRepository implements WipeScheduleReader {
       );
     }
   }
+
+  // ======================================================
+  //  O QUE A EXECUÇÃO ESCREVE DE VOLTA  (Frente D)
+  // ======================================================
+  //
+  //  Acrescentado no fim, e é um método só. Ele fica AQUI, e não
+  //  no repositório das execuções, porque quem escreve na tabela
+  //  `wipe_plans` é este arquivo: dois escritores na mesma tabela
+  //  são dois lugares para consertar quando a regra da agenda
+  //  mudar, e nenhum dos dois enxerga o outro.
+  //
+  //  ####  SEM ISTO, O SERVIDOR ZERA DUAS VEZES  ####
+  //
+  //  Um plano executado que continuasse `planned` seria disparado
+  //  de novo na volta seguinte do relógio (wipe/scheduler.ts) — e
+  //  a segunda vez pegaria um mundo de minutos de idade.
+
+  /**
+   * Marca um plano como consumido pela execução.
+   *
+   * Só sai de `planned` ou `running`: um plano que um humano já
+   * pulou (`skipped`) ou que foi absorvido não volta a ser
+   * `done` porque uma execução atrasada terminou.
+   */
+  markPlanStatus(
+    serverId: string,
+    id: number,
+    status: 'running' | 'done' | 'failed',
+    now: number = Date.now(),
+  ): WipePlan | null {
+    this.#db
+      .prepare(
+        `UPDATE wipe_plans SET status = @status, updated_at = @now
+          WHERE server_id = @server_id AND id = @id
+            AND status IN ('planned', 'running')`,
+      )
+      .run({ server_id: serverId, id, status, now });
+
+    return this.getPlan(serverId, id);
+  }
+
+  /**
+   * Os planos vencidos que ninguém executou.
+   *
+   * ####  O PASSADO CONTA, E ELE CONTA INTEIRO  ####
+   *
+   * A janela não tem piso: um plano de três dias atrás, com o
+   * agente que ficou desligado esses três dias, CONTINUA sendo um
+   * wipe que o dono do servidor pediu. Descartá-lo por ser velho
+   * transformaria "o agente estava fora do ar" em "o wipe não
+   * aconteceu, e ninguém falou nada".
+   *
+   * Quem decide o que fazer com um plano muito atrasado é o
+   * relógio de wipe/scheduler.ts, que tem o contexto para avisar.
+   */
+  duePlans(serverId: string, until: number): readonly WipePlan[] {
+    return this.listPlans(serverId, { to: until }).filter(
+      (plan) => plan.status === 'planned' && plan.scheduledAt <= until,
+    );
+  }
 }
 
 /**

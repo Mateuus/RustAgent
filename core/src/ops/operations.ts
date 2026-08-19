@@ -26,6 +26,20 @@ export const OPERATION_KINDS = [
   'server-restart',
   'server-auto-update',
   'oxide-install',
+  // ####  A ÚNICA OPERAÇÃO QUE APAGA ARQUIVO  ####
+  //
+  // Ela herda de graça o que as outras já têm: a trava por
+  // recurso, o log com cursor, o cancelamento por árvore de
+  // processo e o arquivo em Logs\<servidor>\ops\. O que ela tem
+  // a mais — os passos gravados e a retomada — mora no banco, em
+  // `wipe_runs`, porque este registro aqui é de MEMÓRIA e some no
+  // `pm2 restart`. Ver wipe/run.ts e Docs\16 §6.
+  //
+  // Ela NÃO se dispara por `POST /operations`: a rota genérica não
+  // tem como exigir a confirmação por `identity` nem a
+  // `Idempotency-Key`, e a pré-condição em service.ts recusa uma
+  // chamada que não venha de `POST /wipe/runs`.
+  'wipe-run',
 ] as const;
 
 export type OperationKind = (typeof OPERATION_KINDS)[number];

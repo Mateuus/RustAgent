@@ -78,6 +78,10 @@ import { toError } from './util.js';
 import { WipeScheduleRepository } from './db/wipe-schedule-repository.js';
 // ---- o wipe: a fila de mapas ----
 import { MapPoolRepository } from './db/map-pool-repository.js';
+import { WipeRunsRepository } from './db/wipe-runs-repository.js';
+import { WipesRepository } from './db/wipes-repository.js';
+import { WipeRunner, type WipeExecutor } from './wipe/run.js';
+import { WipeScheduler } from './wipe/scheduler.js';
 // ---- as mensagens agendadas ----
 import { MessagesRepository } from './db/messages-repository.js';
 import { PluginBroadcaster } from './game/broadcast.js';
@@ -189,6 +193,16 @@ async function main(): Promise<void> {
   // wipe pode ter acontecido.
   const wipeClock = new WipeClock({ logger });
 
+  // ####  O RUNNER DO WIPE CHEGA DEPOIS DO SUPERVISOR  ####
+  //
+  // Ele precisa do supervisor (para `updateSettings`) e do
+  // `Broadcaster` (que precisa do supervisor também); o supervisor
+  // precisa dele para entregá-lo a cada `OperationsService`. Um dos
+  // dois tem que chegar depois — e o encaminhador abaixo é o mesmo
+  // padrão que este arquivo já usa para o VIP, os banimentos e a
+  // presença.
+  let wipeRunner: WipeExecutor | null = null;
+
   const supervisor = new ServerSupervisor({
     paths: agent.paths,
     store: operations,
@@ -253,6 +267,19 @@ async function main(): Promise<void> {
     // que não é um pedido do plugin de interface.
     onConsoleLine: (serverId, line) => {
       uiSync?.handleLine(serverId, line);
+    },
+    // Ver o comentário do `let wipeRunner`, logo acima.
+    wipeRunner: {
+      run: (request) => {
+        if (wipeRunner === null) {
+          throw new Error(
+            'a execução de wipe ainda não terminou de ser montada neste agente; tente de novo em ' +
+              'alguns segundos',
+          );
+        }
+
+        return wipeRunner.run(request);
+      },
     },
   });
 
@@ -766,7 +793,7 @@ async function main(): Promise<void> {
   //
   // A chave é lida do ambiente aqui, e não do `config.ts`, por um
   // motivo de convivência: nesta onda o `config.ts` está reservado
-  // a outra frente (a chave SERVER_LEVELURL, Docs §0.2), e uma
+  // a outra frente (a chave SERVER_LEVELURL, Docs\17 §0.2), e uma
   // linha a mais lá seria conflito de merge num arquivo que já
   // está sendo editado. O `.env` já foi carregado pelo
   // `loadConfig()` lá em cima, então `process.env` aqui é o
@@ -783,6 +810,133 @@ async function main(): Promise<void> {
   });
 
   rustmaps.start();
+
+  // ---- a EXECUÇÃO do wipe -----------------------------------
+  //
+  // ####  A LINHA DIVISÓRIA DO AGENTE  ####
+  //
+  // Tudo o que veio até aqui INFORMA. Daqui em diante ele APAGA
+  // ARQUIVO: para o servidor, zipa o save, remove o mundo, escreve
+  // a seed nova e sobe. Ver Docs\16 §15 — a etapa 5 é a que separa
+  // as duas metades do sistema.
+  const wipeRuns = new WipeRunsRepository(db);
+  const detectedWipes = new WipesRepository(db);
+
+  wipeRunner = new WipeRunner({
+    runs: wipeRuns,
+    wipes: detectedWipes,
+    schedule: wipeSchedule,
+    mapPool,
+    servers: supervisor,
+    world: {
+      forget: (serverId) => {
+        wipeClock.forget(serverId);
+      },
+      saveCreatedAt: (serverId) =>
+        wipeClock.at(serverId, supervisor.contextOf(serverId)?.rcon ?? null),
+    },
+    // O MESMO transporte das mensagens agendadas. Ver o bloco delas,
+    // acima: três maneiras de mandar texto ao jogo dariam três
+    // formatos de aviso e três lugares para consertar.
+    broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
+    // ####  O LOCUTOR DOS AVISOS AINDA NÃO EXISTE  ####
+    //
+    // As falas de "faltam 15 min" são da Frente F, e o ponto de
+    // chamada está pronto em wipe/run.ts, no passo `avisar`. Sem
+    // ele, aquele passo apenas ESPERA a hora — o que é o
+    // comportamento certo, e não uma falta: o wipe acontece na hora
+    // marcada de qualquer jeito.
+    announcer: undefined,
+    // O mundo novo sobe sem plugin sabendo de nada: o cache do
+    // OrigemZ vive na memória do plugin, e o wipe derruba o RCON.
+    // Isto repassa os estados completos — e é o mesmo caminho do
+    // gancho `onRconConnected`, para não haver duas verdades sobre
+    // "o que ressincronizar depois de subir".
+    resync: async (serverId) => {
+      await vips?.reconcile(serverId);
+      await loadoutSync?.push(serverId, 'rcon-connected');
+      await spawnStatusSync?.push(serverId, 'rcon-connected');
+      uiSync?.pushSoon(serverId, 'rcon-connected');
+    },
+    logger,
+  });
+
+  // ####  O QUE FICOU `running` DE UMA SESSÃO ANTERIOR  ####
+  //
+  // Uma execução cuja operação não existe mais (o agente reiniciou
+  // no meio) vira `failed`, com a frase dizendo isso — e a tela
+  // oferece retomar. Deixá-la `running` para sempre é a única saída
+  // pior: ela bloquearia o próximo wipe pela trava por recurso, não
+  // apareceria como problema em lugar nenhum, e não ofereceria
+  // retomada.
+  for (const orphan of wipeRuns.running()) {
+    const alive = orphan.operationId !== null && operations.get(orphan.operationId) !== null;
+
+    if (alive) {
+      continue;
+    }
+
+    wipeRuns.orphan(orphan.serverId, orphan.id);
+
+    logger.warn(
+      { server: orphan.serverId, run: orphan.id },
+      'execução de wipe interrompida por um reinício do agente; marcada como falha, e a tela ' +
+        'oferece retomar',
+    );
+  }
+
+  // O relógio que dispara o plano vencido. Ele acorda de trinta em
+  // trinta segundos e NUNCA lança: uma exceção sem dono mataria o
+  // laço, e a partir dali nenhum wipe agendado aconteceria — em
+  // silêncio. Ver wipe/scheduler.ts.
+  const wipeScheduler = new WipeScheduler({
+    schedule: wipeSchedule,
+    runs: wipeRuns,
+    servers: () => supervisor.ids(),
+    launcher: {
+      launch: async ({ serverId, planId }) => {
+        const context = supervisor.contextOf(serverId);
+
+        if (context === null) {
+          throw new Error(
+            `o agente não está cuidando do servidor "${serverId}" — o wipe agendado não pode ` +
+              'começar sozinho',
+          );
+        }
+
+        const plan = wipeSchedule.getPlan(serverId, planId);
+
+        if (plan === null) {
+          throw new Error(`o wipe agendado ${String(planId)} sumiu da agenda`);
+        }
+
+        const config = supervisor.configOf(serverId);
+        const exec = wipeRuns.getExecSettings(serverId);
+
+        const run = wipeRuns.create(serverId, {
+          planId: plan.id,
+          kind: plan.kind,
+          bpPolicy: plan.bpPolicy,
+          fullWipe: exec.pluginData.enabled,
+          // O plano no PASSADO (o agente estava desligado na hora)
+          // zera agora, e não numa data que já foi: esperar por um
+          // instante que passou seria não zerar nunca.
+          wipeAt: Math.max(plan.scheduledAt, Date.now()),
+          mapBefore:
+            config === null
+              ? null
+              : { level: config.level, seed: String(config.seed), worldSize: config.worldSize },
+          saveCreatedBefore: await wipeClock.at(serverId, context.rcon),
+        });
+
+        await context.operations.start({ kind: 'wipe-run', wipe: { runId: run.id } });
+        wipeSchedule.markPlanStatus(serverId, plan.id, 'running');
+      },
+    },
+    logger,
+  });
+
+  wipeScheduler.start();
 
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
@@ -826,6 +980,17 @@ async function main(): Promise<void> {
     },
     kits: { store: kits, repository: kitsRepository },
     store: { repository: storeRepository, wallets: walletsRepository, service: store, wallet },
+    wipeRuns: {
+      runs: wipeRuns,
+      wipes: detectedWipes,
+      world: {
+        forget: (serverId) => {
+          wipeClock.forget(serverId);
+        },
+        saveCreatedAt: (serverId) =>
+          wipeClock.at(serverId, supervisor.contextOf(serverId)?.rcon ?? null),
+      },
+    },
     messages: {
       repository: messagesRepository,
       service: messages,
@@ -902,6 +1067,14 @@ async function main(): Promise<void> {
         // a internet, e uma resposta que chegasse depois do
         // `db.close()` gravaria num banco fechado.
         rustmaps.stop();
+        // E o do wipe por último dos relógios, e pelo motivo mais
+        // duro de todos: uma volta que começasse agora dispararia
+        // uma operação que PARA O SERVIDOR — num agente que está
+        // desligando, e que não estaria mais lá para subi-lo de
+        // volta. Uma execução JÁ em curso não é interrompida aqui:
+        // ela morre com o processo, e o boot seguinte a marca como
+        // falha com a frase que oferece retomar.
+        wipeScheduler.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

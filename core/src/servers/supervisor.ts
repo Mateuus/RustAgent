@@ -50,6 +50,7 @@ import { commandLineValue, listRustProcesses } from '../ops/server-process.js';
 import { disconnectedRcon, OperationsService } from '../ops/service.js';
 import { toError } from '../util.js';
 import { ServerContext } from './context.js';
+import type { WipeExecutor } from '../wipe/run.js';
 import { applyIniValues } from './create-server.js';
 
 export interface SupervisorDeps {
@@ -75,6 +76,14 @@ export interface SupervisorDeps {
    * onde essas linhas passam.
    */
   readonly onConsoleLine?: (serverId: string, line: string) => void;
+  /**
+   * Repassado a cada `ServerContext`. Ver `ServerContextDeps`.
+   *
+   * É quem sabe executar um wipe. O supervisor não o usa: ele só o
+   * entrega ao `OperationsService` de cada servidor, que é quem
+   * empresta ao wipe os verbos de parar e subir.
+   */
+  readonly wipeRunner?: WipeExecutor;
 }
 
 /** O retrato de um servidor para a API. Ver Docs\06-API.md. */

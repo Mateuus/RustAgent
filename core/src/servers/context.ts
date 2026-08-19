@@ -23,6 +23,7 @@ import type { Logger } from '../logger.js';
 import type { OperationLock, OperationStore } from '../ops/operations.js';
 import { OperationsService } from '../ops/service.js';
 import { RconClient } from '../rcon/client.js';
+import type { WipeExecutor } from '../wipe/run.js';
 import { ConsoleBuffer } from './console-buffer.js';
 
 export interface ServerContextDeps {
@@ -62,6 +63,17 @@ export interface ServerContextDeps {
    * stream. O `try` abaixo é a segunda trava, não a primeira.
    */
   readonly onConsoleLine?: (serverId: string, line: string) => void;
+
+  /**
+   * Quem sabe executar um wipe. Ausente = este agente não wipa.
+   *
+   * Repassado ao `OperationsService` de cada servidor, porque é ele
+   * que empresta ao wipe os verbos de parar e subir (ver
+   * ops/service.ts, `#wipeRun`). Ele é ÚNICO no agente e serve a
+   * todos os servidores: quem diz de qual servidor é cada execução
+   * é o `serverId` que vai em cada chamada.
+   */
+  readonly wipeRunner?: WipeExecutor;
 }
 
 export class ServerContext {
@@ -140,6 +152,7 @@ export class ServerContext {
       rcon: this.rcon,
       logger,
       startTimeoutMs: deps.startTimeoutMs,
+      wipeRunner: deps.wipeRunner,
     });
   }
 

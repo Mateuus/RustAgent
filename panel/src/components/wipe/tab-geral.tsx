@@ -6,15 +6,15 @@
 //  É a sub-aba de LEITURA: o admin abre, olha de relance e sabe
 //  se anuncia o wipe hoje ou amanhã. Quem configura é a Agenda.
 //
-//  ####  ESTA TELA NÃO EXECUTA WIPE  ####
+//  ####  ESTA TELA NÃO EXECUTA WIPE — E CONTINUA NÃO EXECUTANDO  ####
 //
-//  E isso precisa estar ESCRITO nela, não só no comentário. Um
-//  painel que mostra "próximo wipe em 3 h" com botões ao lado dá
-//  a impressão de que o agente vai executá-lo sozinho — enquanto
-//  a execução (parar, apagar, subir, com backup e log passo a
-//  passo) ainda está sendo construída. Por isso a faixa no topo,
-//  e por isso o botão WIPAR AGORA não existe aqui: ele nasce
-//  junto com a coisa que ele dispara.
+//  A faixa que dizia isso saiu quando a execução entrou, porque ela
+//  tinha virado mentira: o agente zera o servidor sozinho agora.
+//  Mas o BOTÃO continua não estando aqui, e de propósito: wipar
+//  exige ver a lista de arquivos que vão sumir e digitar o identity
+//  do servidor, e as duas coisas moram na sub-aba Execução, ao lado
+//  do log e da retomada. Um botão vermelho no meio de uma tela de
+//  leitura é clicado por reflexo.
 //
 //  ####  A CONTAGEM SAI DO RELÓGIO DO AGENTE  ####
 //
@@ -79,23 +79,6 @@ export function TabGeral({
 
   return (
     <div className="space-y-4">
-      {/* ####  A FAIXA SAI QUANDO A EXECUÇÃO ENTRAR  ####
-          Ela é a diferença entre um calendário honesto e a
-          promessa de um agente que ainda não faz o que a tela
-          sugere. */}
-      <StateBlock
-        variant="empty"
-        title="Esta tela ainda não executa wipe."
-        detail={
-          <>
-            Ela mantém o <strong>calendário</strong>: as datas, a política de blueprint e a
-            cadência. Zerar o servidor continua sendo manual — parar, apagar, subir e o backup
-            entram com a sub-aba <strong>Execução</strong>, e o botão de wipar nasce junto com
-            eles.
-          </>
-        }
-      />
-
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="Próximo wipe">
           {next === null ? (

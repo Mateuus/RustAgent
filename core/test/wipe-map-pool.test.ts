@@ -34,6 +34,7 @@ import {
 } from '../src/db/map-pool-repository.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
+import { WipesRepository } from '../src/db/wipes-repository.js';
 import { serverArgs } from '../src/ops/server-process.js';
 import { ServerSupervisor } from '../src/servers/supervisor.js';
 import {
@@ -229,27 +230,39 @@ describe('a fila de mapas', () => {
 });
 
 describe('o histórico de mundos detectados', () => {
-  it('entra na conta quando a tabela existe, e não estorva quando não existe', () => {
+  it('não estorva quando a tabela não existe', () => {
+    // ####  ESTE TESTE ENVELHECEU BEM, E DE PROPÓSITO  ####
+    //
+    // Ele nasceu quando `wipes` ainda não existia: a migração 025 é
+    // de outra frente, e a fila precisava funcionar sem ela. A 025
+    // chegou — então o que se prova aqui agora é o outro lado da
+    // mesma conferência, e ele continua valendo: um agente que caia
+    // para uma versão anterior do banco não pode estourar ao abrir
+    // a fila de mapas.
     const db = database();
     const pool = poolOf(db, [10, 20]);
 
-    // Sem a tabela `wipes` (ela é da migração 025, de outra
-    // frente), a fila já usada responde sozinha.
+    db.exec('DROP TABLE wipes');
+
     expect(pool.recentSeeds(SERVER)).toEqual([]);
+    expect(pool.add(SERVER, { worldSize: 4000 }).entry.seed).toBe('10');
 
-    // Quando ela chegar, com estas colunas, entra na conta.
-    db.exec(`
-      CREATE TABLE wipes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        server_id TEXT NOT NULL,
-        seed TEXT,
-        detected_at INTEGER NOT NULL
-      );
-    `);
+    db.close();
+  });
 
-    db.prepare(
-      "INSERT INTO wipes (server_id, seed, detected_at) VALUES ('pvp1', '10', 1760000000000)",
-    ).run();
+  it('entra na conta quando a tabela existe', () => {
+    const db = database();
+    const pool = poolOf(db, [10, 20]);
+
+    // Agora pela tabela DE VERDADE, criada pela migração 025 e
+    // escrita pelo repositório dela — e não por um CREATE TABLE
+    // escrito à mão neste arquivo, que divergiria do banco real no
+    // dia em que a coluna mudasse.
+    new WipesRepository(db).record(
+      SERVER,
+      { saveCreatedAt: 1_760_000_000_000, seed: '10', worldSize: 4000 },
+      1_760_000_000_000,
+    );
 
     expect(pool.recentSeeds(SERVER)).toContain('10');
 

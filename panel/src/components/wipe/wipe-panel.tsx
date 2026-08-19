@@ -12,10 +12,10 @@
 //    Configuração  como o agente executa: avisa, espera, apaga o quê?
 //    Execução      o que aconteceu, passo a passo?
 //
-//  As duas primeiras estão montadas. As outras quatro têm o ponto
-//  de montagem pronto e, enquanto vazias, mostram um bloco dizendo
-//  que aquela parte está sendo construída — trocar cada uma é
-//  substituir UMA linha lá embaixo.
+//  Cinco estão montadas. Blueprints ainda tem o ponto de montagem
+//  pronto e, enquanto vazia, mostra um bloco dizendo que aquela
+//  parte está sendo construída — trocá-la é substituir UMA linha lá
+//  embaixo, como as outras já foram.
 //
 //  ####  ELA CARREGA OS DADOS, AS SUB-ABAS SÓ DESENHAM  ####
 //
@@ -37,6 +37,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { TabAgenda } from '@/components/wipe/tab-agenda';
+import { TabConfiguracao } from '@/components/wipe/tab-configuracao';
+import { TabExecucao } from '@/components/wipe/tab-execucao';
 import { TabGeral } from '@/components/wipe/tab-geral';
 import { TabMapas } from '@/components/wipe/tab-mapas';
 import { useAgentClock } from '@/components/wipe/use-agent-clock';
@@ -276,12 +278,19 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             Cada linha abaixo é de outra frente, e cada uma é UMA
             linha de propósito: quem construir a sub-aba troca o
             <EmConstrucao/> pelo componente dela e não encosta em
-            mais nada deste arquivo. Mapas já entrou assim. */}
+            mais nada deste arquivo. Mapas, Configuração e Execução
+            já entraram assim.
+
+            E as duas últimas carregam os PRÓPRIOS dados, em vez de
+            recebê-los daqui: a lista de arquivos que o wipe vai
+            apagar é lida do disco a cada abertura, e o log de uma
+            execução em curso anda de dois em dois segundos — nada
+            disso é a agenda, que este componente carrega uma vez. */}
 
         {tab === 'mapas' && <TabMapas serverId={serverId} />}
         {tab === 'blueprints' && <EmConstrucao tab="blueprints" />}
-        {tab === 'configuracao' && <EmConstrucao tab="configuracao" />}
-        {tab === 'execucao' && <EmConstrucao tab="execucao" />}
+        {tab === 'configuracao' && <TabConfiguracao serverId={serverId} />}
+        {tab === 'execucao' && <TabExecucao serverId={serverId} />}
       </div>
     </div>
   );
@@ -296,7 +305,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
  */
 const EM_CONSTRUCAO: Readonly<
   Record<
-    Exclude<WipeTab, 'geral' | 'agenda' | 'mapas'>,
+    Exclude<WipeTab, 'geral' | 'agenda' | 'mapas' | 'configuracao' | 'execucao'>,
     { readonly title: string; readonly detail: string }
   >
 > = {
@@ -304,16 +313,6 @@ const EM_CONSTRUCAO: Readonly<
     title: 'A régua de blueprints ainda está sendo construída.',
     detail:
       'Ela vai responder quem recomeça sabendo o quê: quanto cada nível de VIP leva de volta, com quanto atraso, e o snapshot tirado antes do wipe. A política de cada wipe (manter, zerar, ou zerar menos para VIP) já se escolhe na sub-aba Agenda.',
-  },
-  configuracao: {
-    title: 'A configuração da execução ainda está sendo construída.',
-    detail:
-      'Ela vai responder como o agente executa: em quanto tempo antes ele avisa no chat, quanto espera o servidor esvaziar, se copia o save antes de apagar e quais dados de plugin o full wipe leva.',
-  },
-  execucao: {
-    title: 'A execução ainda está sendo construída.',
-    detail:
-      'Ela vai responder o que aconteceu, passo a passo — avisar, esvaziar, parar, backup, apagar, configurar, subir — e permitir retomar do passo que falhou. Até ela entrar, esta tela mantém o calendário e o wipe é feito à mão.',
   },
 };
 

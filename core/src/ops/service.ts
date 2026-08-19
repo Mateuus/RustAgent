@@ -50,6 +50,7 @@ import {
   type OperationStore,
 } from './operations.js';
 import { findServerProcess, killServerProcess, startServer } from './server-process.js';
+import type { WipeExecutor, WipeServerControl } from '../wipe/run.js';
 
 /**
  * O que o serviço precisa do RCON.
@@ -92,6 +93,23 @@ export interface StartOperationInput {
    * Steam na hora — o vigia passa porque acabou de perguntar.
    */
   readonly expectedBuild?: string;
+  /**
+   * A execução de wipe que esta operação vai tocar.
+   *
+   * ####  ELA É O QUE PROVA QUE A CHAMADA VEIO DA ROTA CERTA  ####
+   *
+   * `POST /operations` aceita qualquer `kind` do `OPERATION_KINDS`,
+   * e não tem como exigir a `Idempotency-Key` nem o `identity`
+   * digitado que o wipe exige (Docs\16 §8). Então a pré-condição
+   * de `wipe-run` é a presença deste campo: quem o preenche é
+   * `POST /wipe/runs`, que já conferiu as duas coisas e já abriu a
+   * linha em `wipe_runs`.
+   */
+  readonly wipe?: {
+    readonly runId: number;
+    /** Retomada: os passos já concluídos não rodam de novo. */
+    readonly resume?: boolean;
+  };
 }
 
 export interface OperationsServiceOptions {
@@ -130,6 +148,18 @@ export interface OperationsServiceOptions {
    * (manutenção com o agente fora do caminho).
    */
   readonly onInstalled?: () => void;
+
+  /**
+   * Quem sabe executar um wipe. Ausente = este agente não wipa.
+   *
+   * A máquina de passos mora em wipe/run.ts, e não aqui, porque o
+   * que ela precisa (a agenda, a fila de mapas, o backup, o
+   * Broadcaster) não tem nada a ver com o que este serviço faz. O
+   * que ela precisa DESTE arquivo são quatro verbos — parar,
+   * subir, saber se está no ar, contar quem está online —, e eles
+   * vão no `WipeServerControl` montado em `#wipeRun`.
+   */
+  readonly wipeRunner?: WipeExecutor;
 }
 
 /** Os marcos do aviso de atualização, em segundos. */
@@ -152,6 +182,19 @@ export class OperationsService {
   /** O jogo está em disco? */
   get installed(): boolean {
     return existsSync(this.#options.server.paths.exePath);
+  }
+
+  /**
+   * O processo do jogo está de pé?
+   *
+   * Público porque quem monta a prévia do wipe precisa da resposta
+   * ANTES de qualquer coisa acontecer, e a pergunta é a mesma que
+   * as pré-condições daqui já fazem. Uma segunda maneira de
+   * procurar o processo divergiria da primeira no dia em que a
+   * linha de comando mudasse.
+   */
+  async isRunning(): Promise<boolean> {
+    return (await this.#processInfo()) !== null;
   }
 
   /**
@@ -181,6 +224,11 @@ export class OperationsService {
       'server-restart',
       'server-auto-update',
       'oxide-install',
+      // No fim, e é a última da lista de propósito: ela é a única
+      // que apaga o trabalho dos jogadores. A tela de Operações não
+      // desenha botão para ela (o `ACTIONS` do painel não a tem);
+      // quem a dispara é a sub-aba Execução do wipe.
+      'wipe-run',
     ];
   }
 
@@ -247,6 +295,34 @@ export class OperationsService {
           'MATAR o processo — e aí se perde tudo desde o último save automático.',
         503,
       );
+    }
+
+    // ####  AS DUAS RECUSAS DO WIPE  ####
+    //
+    // A primeira é a que impede `POST /operations {kind:'wipe-run'}`
+    // de zerar um servidor: aquela rota não tem como exigir o
+    // `identity` digitado nem a `Idempotency-Key`, e as duas são
+    // obrigatórias (Docs\16 §8). Quem preenche `input.wipe` é
+    // `POST /wipe/runs`, depois de conferir as duas e de abrir a
+    // linha em `wipe_runs`.
+    if (kind === 'wipe-run') {
+      if (this.#options.wipeRunner === undefined) {
+        throw new ApiError(
+          'WIPE_NOT_AVAILABLE',
+          `Este agente não sabe executar wipe no servidor "${this.serverId}".`,
+          409,
+        );
+      }
+
+      if (input.wipe === undefined) {
+        throw new ApiError(
+          'WIPE_MUST_BE_CONFIRMED',
+          'Um wipe não começa por esta rota. Ele apaga o trabalho de todos os jogadores, e por ' +
+            'isso exige a confirmação pelo identity do servidor e uma Idempotency-Key — as duas ' +
+            'em POST /api/servers/<id>/wipe/runs.',
+          409,
+        );
+      }
     }
 
     const operation = new Operation(kind, this.serverId);
@@ -330,7 +406,60 @@ export class OperationsService {
       case 'server-auto-update':
         await this.#autoUpdate(operation, input);
         return;
+
+      case 'wipe-run':
+        await this.#wipeRun(operation, input);
+        return;
     }
+  }
+
+  /**
+   * O wipe. Este arquivo não sabe o que é um wipe — ele só empresta
+   * os verbos.
+   *
+   * ####  POR QUE O CONTROLE É PASSADO, E NÃO A TRAVA REPETIDA  ####
+   *
+   * A máquina de passos precisa parar e subir o servidor no meio da
+   * execução. Chamar `this.start({ kind: 'server-stop' })` daqui
+   * esbarraria na trava de `server:<id>` que ESTA MESMA operação
+   * acabou de pegar — a operação se recusaria a si mesma. Então ela
+   * recebe os quatro verbos direto, já dentro da trava, e o que
+   * sobe e desce continua sendo o código único de `#stop`/`#start`.
+   */
+  async #wipeRun(operation: Operation, input: StartOperationInput): Promise<void> {
+    const runner = this.#options.wipeRunner;
+    const wipe = input.wipe;
+
+    if (runner === undefined || wipe === undefined) {
+      // As duas recusas já aconteceram em `start()`, antes do 202.
+      // Este guarda existe para o compilador, e para o dia em que
+      // alguém chamar `#execute` de outro lugar.
+      throw new Error('esta operação de wipe chegou aqui sem a execução que ela deveria tocar');
+    }
+
+    // Guardado numa variável porque o `get` abaixo não enxerga o
+    // `this` da classe. O objeto é o mesmo, e `isConnected` nele é
+    // vivo: o valor lido é sempre o de agora, e não o do momento em
+    // que o wipe começou — que pode ter sido horas antes.
+    const rcon = this.#options.rcon;
+
+    const control: WipeServerControl = {
+      isRunning: async () => (await this.#processInfo()) !== null,
+      stop: (force) => this.#stop(operation, force),
+      start: () => this.#start(operation),
+      online: () => this.#onlinePlayers(),
+      get rconConnected() {
+        return rcon.isConnected;
+      },
+    };
+
+    await runner.run({
+      serverId: this.serverId,
+      runId: wipe.runId,
+      operation,
+      control,
+      resume: wipe.resume === true,
+    });
   }
 
   /** SteamCMD + Oxide. É a operação que INSTALA e a que ATUALIZA. */
@@ -775,6 +904,12 @@ export function resourcesFor(kind: OperationKind, serverId: string): readonly st
     case 'server-stop':
     case 'server-restart':
       return [`server:${serverId}`];
+
+    // O wipe para, escreve em disco e sobe: ele disputa os dois. E
+    // NÃO disputa o `steamcmd` — atualizar o jogo antes do wipe
+    // forçado é uma operação à parte, disparada antes desta.
+    case 'wipe-run':
+      return [`disk:${serverId}`, `server:${serverId}`];
   }
 }
 

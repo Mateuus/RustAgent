@@ -80,7 +80,11 @@ import type { WipeScheduleRepository } from '../db/wipe-schedule-repository.js';
 import { registerWipeRoutes } from './routes/wipe.js';
 // ---- o wipe: a fila de mapas ----
 import type { MapPoolRepository } from '../db/map-pool-repository.js';
+import type { WipeRunsRepository } from '../db/wipe-runs-repository.js';
+import type { WipesRepository } from '../db/wipes-repository.js';
+import type { WipeWorldClock } from '../wipe/run.js';
 import { registerWipeMapsRoutes } from './routes/wipe-maps.js';
+import { registerWipeRunRoutes } from './routes/wipe-runs.js';
 // ---- as mensagens agendadas ----
 import type { MessagesRepository } from '../db/messages-repository.js';
 import type { MessagesService } from '../messages/service.js';
@@ -182,6 +186,21 @@ export interface BuildServerOptions {
    * wipe. Ver db/map-pool-repository.ts.
    */
   readonly mapPool: MapPoolRepository;
+
+  /**
+   * A EXECUÇÃO do wipe: a prévia, a lista do full wipe, os runs.
+   *
+   * É a única parte do agente que apaga o trabalho dos jogadores, e
+   * é por isso que ela chega aqui com tudo de que precisa para
+   * recusar ANTES de começar — o supervisor (para conferir o
+   * identity digitado), o `OperationStore` (para o log ao vivo) e o
+   * relógio do mundo (para saber se o wipe realmente trocou o save).
+   */
+  readonly wipeRuns: {
+    readonly runs: WipeRunsRepository;
+    readonly wipes: WipesRepository;
+    readonly world: WipeWorldClock;
+  };
 
   /**
    * AS MENSAGENS AGENDADAS: o que o servidor fala sozinho.
@@ -416,12 +435,28 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
       // A prévia do mapa, por último: ela é a única aqui que fala
       // com um serviço de FORA, e é a única cuja indisponibilidade
-      // não muda nada do que o agente faz. Ver Docs,
+      // não muda nada do que o agente faz. Ver Docs\17,
       // §"Frente H", regra 1.
       registerRustMapsRoutes(api, {
         watcher: options.rustmaps,
         repository: options.mapPool,
         supervisor: options.supervisor,
+      });
+
+      // ####  A EXECUÇÃO VEM POR ÚLTIMO, E DE PROPÓSITO  ####
+      //
+      // Ela é a única deste bloco que APAGA ARQUIVO. Registrá-la no
+      // fim deixa claro, para quem lê este arquivo de cima a baixo,
+      // que tudo o que veio antes é leitura e configuração — e que
+      // a linha divisória do agente é esta.
+      registerWipeRunRoutes(api, {
+        runs: options.wipeRuns.runs,
+        wipes: options.wipeRuns.wipes,
+        schedule: options.wipeSchedule,
+        mapPool: options.mapPool,
+        supervisor: options.supervisor,
+        store: options.operations,
+        world: options.wipeRuns.world,
       });
     },
     { prefix: '/api' },
