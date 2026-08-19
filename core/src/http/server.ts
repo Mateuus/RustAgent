@@ -81,6 +81,11 @@ import { registerWipeRoutes } from './routes/wipe.js';
 // ---- o wipe: a fila de mapas ----
 import type { MapPoolRepository } from '../db/map-pool-repository.js';
 import { registerWipeMapsRoutes } from './routes/wipe-maps.js';
+// ---- as mensagens agendadas ----
+import type { MessagesRepository } from '../db/messages-repository.js';
+import type { MessagesService } from '../messages/service.js';
+import type { VariableRegistry } from '../messages/variables.js';
+import { registerMessageRoutes } from './routes/messages.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -174,6 +179,22 @@ export interface BuildServerOptions {
    * wipe. Ver db/map-pool-repository.ts.
    */
   readonly mapPool: MapPoolRepository;
+
+  /**
+   * AS MENSAGENS AGENDADAS: o que o servidor fala sozinho.
+   *
+   * De REDE, como o VIP e o kit — a mensagem é escrita uma vez e
+   * sai nos servidores escolhidos. O `variables` vem junto porque a
+   * lista de `{…}` que a tela mostra é a do REGISTRO, e não uma
+   * constante do painel: quem registra `{wipe.*}` é o módulo de
+   * wipe, e uma lista escrita à mão mentiria no dia em que ele
+   * entrasse.
+   */
+  readonly messages: {
+    readonly repository: MessagesRepository;
+    readonly service: MessagesService;
+    readonly variables: VariableRegistry;
+  };
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -362,6 +383,17 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // escolhe o mapa do próximo wipe.
       registerWipeMapsRoutes(api, {
         repository: options.mapPool,
+        supervisor: options.supervisor,
+      });
+
+      // As mensagens agendadas, e a fala avulsa do
+      // `POST /chat/broadcast`. Elas vêm por último porque não são
+      // pré-requisito de ninguém: o transporte (`Broadcaster`) é
+      // que é compartilhado, e ele é injetado, não registrado.
+      registerMessageRoutes(api, {
+        repository: options.messages.repository,
+        service: options.messages.service,
+        variables: options.messages.variables,
         supervisor: options.supervisor,
       });
     },

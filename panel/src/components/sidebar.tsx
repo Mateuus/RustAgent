@@ -38,6 +38,7 @@ import {
   ShoppingBag,
   Users,
   X,
+  Megaphone,
   type LucideIcon,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -120,6 +121,16 @@ const NAV: readonly NavItem[] = [
     label: 'Loja',
     hint: 'A vitrine em OZCoin: categorias, ofertas, VIP e veículos — com carteira e estorno',
     Icon: ShoppingBag,
+  },
+  // A mensagem é de REDE, pela mesma razão do VIP e do kit: escrevo
+  // uma vez e escolho em quais servidores ela sai. O que é de UM
+  // servidor — o wipe dele, a agenda dele — mora na página do
+  // servidor, e não aqui.
+  {
+    href: '/mensagens/',
+    label: 'Mensagens',
+    hint: 'O que o servidor fala sozinho: avisos, convites e lembretes, cada um no seu ritmo',
+    Icon: Megaphone,
   },
   {
     href: '/interface/',
