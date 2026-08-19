@@ -498,6 +498,12 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
                       )}
                     >
                       {file.path}
+                      {/* O satélite não é uma escolha à parte: marcar
+                          o banco leva o `-wal` junto, e é isso que
+                          impede um banco pela metade. */}
+                      {file.companions.length > 0 && (
+                        <span className="text-muted"> + {file.companions.length} satélite(s)</span>
+                      )}
                     </span>
                     <span className="ml-auto shrink-0 text-2xs text-muted">
                       {kb(file.bytes)} · {stamp(file.modifiedAt)}
@@ -506,6 +512,28 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
                 </li>
               ))}
             </ul>
+          )}
+
+          {/* ---- O QUE A LISTA NÃO ESTÁ MOSTRANDO ---- */}
+          {disk !== null && disk.truncated && (
+            <StateBlock
+              variant="empty"
+              title={`A lista mostra ${String(disk.files.length)} de ${String(disk.total)} arquivos.`}
+              detail="O corte é só da tela — os marcados vêm na frente. O wipe apaga TUDO o que casa com os padrões marcados, e não só o que coube aqui."
+            />
+          )}
+
+          {disk !== null && disk.notScanned.length > 0 && (
+            <StateBlock
+              variant="empty"
+              title="Há pastas fundas demais que o agente não varreu."
+              detail={
+                <>
+                  {disk.notScanned.join(', ')}. O que está dentro delas não aparece nesta lista, e o
+                  full wipe não vai levar.
+                </>
+              }
+            />
           )}
 
           {disk !== null && disk.missing.length > 0 && (

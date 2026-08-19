@@ -3069,17 +3069,35 @@ export interface WipePluginDataFile {
   /** Caminho relativo à pasta do servidor, com `/`. É o padrão salvo. */
   readonly path: string;
   readonly area: 'save' | 'oxide';
+  /** O tamanho da linha: o arquivo mais os satélites dele. */
   readonly bytes: number;
   readonly modifiedAt: number;
+  /**
+   * Os `-wal`/`-shm`/`-journal` que somem JUNTO com este arquivo.
+   *
+   * Não são linha própria: marcar a linha marca o conjunto. O `-wal`
+   * sozinho é um banco pela metade nos dois sentidos.
+   */
+  readonly companions: readonly string[];
   readonly selected: boolean;
 }
 
-export interface WipePluginDataResponse {
-  readonly ok: true;
-  readonly now: number;
+/** A lista do full wipe: o que a tela mostra, e o que ela não mostra. */
+export interface WipePluginDataListing {
   readonly files: readonly WipePluginDataFile[];
   /** Marcados que hoje não casam com nada. A escolha CONTINUA salva. */
   readonly missing: readonly string[];
+  /** Quantas linhas existem de verdade, antes do corte da tela. */
+  readonly total: number;
+  /** `true` quando `files` é um pedaço. O que o wipe apaga não é cortado. */
+  readonly truncated: boolean;
+  /** Pastas de `oxide\data` fundas demais para a varredura. */
+  readonly notScanned: readonly string[];
+}
+
+export interface WipePluginDataResponse extends WipePluginDataListing {
+  readonly ok: true;
+  readonly now: number;
 }
 
 /**
@@ -3128,7 +3146,7 @@ export interface WipePreviewResponse {
     readonly online: number | null;
   };
   readonly files: WipeSaveFolder;
-  readonly pluginData: { readonly files: readonly WipePluginDataFile[]; readonly missing: readonly string[] };
+  readonly pluginData: WipePluginDataListing;
   readonly backup: {
     readonly dir: string;
     readonly enabled: boolean;

@@ -179,7 +179,7 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
         selected: exec.pluginData.patterns,
         bpPolicy,
       })
-    : { files: [], missing: [] };
+    : { files: [], missing: [], total: 0, truncated: false, notScanned: [] };
 
   const backup = await checkBackupSpace(saveFolder, deps.backupsDir);
 
@@ -347,6 +347,31 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
       message:
         'O full wipe está ligado, mas nenhum arquivo de plugin foi marcado — então ele não vai ' +
         'levar nada além do que a política já leva. Escolha os arquivos na sub-aba Configuração.',
+    });
+  }
+
+  // ####  A LISTA CORTADA PRECISA SE ANUNCIAR  ####
+  //
+  // O corte é só da tela — o purge varre o disco inteiro. Mas quem
+  // confere a prévia precisa saber que está olhando um pedaço, ou
+  // vai concluir que o resto não existe.
+  if (pluginData.truncated) {
+    warnings.push({
+      code: 'PLUGIN_DATA_TRUNCATED',
+      message:
+        `Existem ${String(pluginData.total)} arquivos de dados de plugin, e a tela mostra os ` +
+        `${String(pluginData.files.length)} primeiros (os marcados vêm na frente). O que o wipe ` +
+        'apaga NÃO é o que cabe na tela: é tudo o que casa com os padrões marcados.',
+    });
+  }
+
+  if (pluginData.notScanned.length > 0) {
+    warnings.push({
+      code: 'PLUGIN_DATA_TOO_DEEP',
+      message:
+        `A varredura de oxide\\data não desceu ${String(pluginData.notScanned.length)} pasta(s) ` +
+        `por serem fundas demais: ${pluginData.notScanned.slice(0, 5).join(', ')}. O que está ` +
+        'dentro delas não aparece na lista e o full wipe não vai levar.',
     });
   }
 
