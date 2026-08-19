@@ -75,6 +75,9 @@ import { registerUiRoutes } from './routes/ui.js';
 import { registerVipRoutes } from './routes/vips.js';
 // ---- a loja e a carteira ----
 import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
+// ---- o wipe: a fila de mapas ----
+import type { MapPoolRepository } from '../db/map-pool-repository.js';
+import { registerWipeMapsRoutes } from './routes/wipe-maps.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -150,6 +153,11 @@ export interface BuildServerOptions {
    * dinheiro, e é ela que precisa de débito, estorno e extrato.
    */
   readonly store: Omit<StoreRoutesDeps, 'supervisor'>;
+  /**
+   * A FILA DE MAPAS de cada servidor: qual mundo entra no próximo
+   * wipe. Ver db/map-pool-repository.ts.
+   */
+  readonly mapPool: MapPoolRepository;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -321,6 +329,17 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // A loja depois dos kits porque ela DEPENDE do VIP: uma oferta
       // de VIP concede pelo `VipList`, e não por um segundo caminho.
       registerStoreRoutes(api, { ...options.store, supervisor: options.supervisor });
+
+      // ---- o wipe -----------------------------------------
+      //
+      // A fila de mapas responde em QUE MUNDO o servidor volta
+      // depois de zerar. Ela é lida do banco, então continua de
+      // pé com o servidor parado — que é exatamente quando se
+      // escolhe o mapa do próximo wipe.
+      registerWipeMapsRoutes(api, {
+        repository: options.mapPool,
+        supervisor: options.supervisor,
+      });
     },
     { prefix: '/api' },
   );

@@ -265,6 +265,23 @@ export function serverArgs(server: ServerConfig, logFile: string): string[] {
     args.push('+server.headerimage', server.headerImage);
   }
 
+  // ####  O MAPA CUSTOM, E POR QUE O VAZIO NÃO ENTRA  ####
+  //
+  // Um servidor com SERVER_LEVELURL vazio precisa subir com
+  // EXATAMENTE os mesmos argumentos de antes desta chave existir.
+  // `+server.levelurl ""` não daria erro — o jogo aceita qualquer
+  // `+x.y` e ignora em silêncio o que não faz sentido —, e é
+  // justamente por isso que ele não pode entrar: um parâmetro de
+  // mundo com valor vazio é o tipo de coisa que muda o boot sem
+  // nada no log dizendo por quê (ver o comentário da "senha de
+  // servidor", em config.ts).
+  //
+  // Preenchido, ele manda: o servidor baixa o `.map` e a seed
+  // acima deixa de valer.
+  if (server.levelUrl !== '') {
+    args.push('+server.levelurl', server.levelUrl);
+  }
+
   args.push('-logfile', logFile);
 
   return args;

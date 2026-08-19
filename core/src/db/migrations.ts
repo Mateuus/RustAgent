@@ -1575,6 +1575,126 @@ CREATE TABLE spawn_status (
 );
 `;
 
+// ------------------------------------------------------------
+//  024 — a fila de mapas
+//
+//  Qual mundo entra no próximo wipe, e no seguinte, e no
+//  seguinte. O admin acha uma seed no rustmaps.com, cola aqui, e
+//  ela espera a vez.
+//
+//  ####  A FILA GUARDA A DECISÃO, E NÃO O MUNDO  ####
+//
+//  Num mapa procedural o arquivo do terreno nem existe antes de o
+//  servidor subir: quem o gera é o próprio Rust, no boot, a partir
+//  da seed. "Seed 18422, tamanho 4000" É o mapa — e por isso a
+//  fila pode ser preenchida com meses de antecedência sem risco,
+//  enquanto um `.map` gerado hoje pode não carregar no binário de
+//  amanhã.
+//
+//  ####  O ÚNICO É PARCIAL, E ISSO É A REGRA EM SQL  ####
+//
+//  `(server_id, seed, world_size) WHERE status <> 'used'`: a mesma
+//  seed não pode estar duas vezes ESPERANDO — isso é sempre um
+//  Ctrl+V repetido — mas PODE ser reprisada meses depois, que é
+//  escolha legítima. Um único total proibiria a reprise; único
+//  nenhum deixaria a fila com o mesmo mundo duas vezes, e ninguém
+//  perceberia até o segundo wipe.
+//
+//  Em mapa custom `seed` é NULL, e o SQLite trata NULL como
+//  distinto num índice único — dois `.map` diferentes convivem sem
+//  precisar de exceção nenhuma.
+//
+//  ####  AS COLUNAS DO RUSTMAPS NASCEM AQUI E FICAM VAZIAS  ####
+//
+//  `rustmaps_id`, `staging`, `preview_url`, `thumb_url`,
+//  `monuments`, `last_error` e o status `generating` não têm quem
+//  os preencha nesta migração: quem preenche é a frente do
+//  RustMaps, que NÃO tem número de migração reservado (ver
+//  Docs\\17 §0.1). Criá-los agora é o que evita uma migração só
+//  para acrescentar coluna — e prévia é enfeite: sem ela o wipe
+//  usa a seed do mesmo jeito.
+//
+//  ####  `version_ok` É A TRAVA DO MAPA CUSTOM  ####
+//
+//  Uma entrada `custom` não pode ser consumida por wipe FORÇADO
+//  sem alguém garantir, na mão, que aquele arquivo serve para a
+//  versão nova do jogo. A marca é uma COLUNA, e não uma pergunta
+//  na hora do wipe: na madrugada do forçado não há ninguém para
+//  responder.
+// ------------------------------------------------------------
+const WIPE_MAP_POOL_SCHEMA = `
+CREATE TABLE map_pool (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- A ordem na fila. Entra no próximo wipe o menor \`position\`
+  -- pronto. Buraco é normal: apagar a entrada do meio não
+  -- renumera as outras.
+  position INTEGER NOT NULL,
+
+  kind TEXT NOT NULL DEFAULT 'procedural' CHECK (kind IN ('procedural', 'custom')),
+
+  -- TEXTO, e não INTEGER: a seed é transportada, comparada e
+  -- exibida — nunca somada. Como texto ela atravessa o .ini, o
+  -- RCON e a URL do RustMaps sem ganhar um ".0" no caminho.
+  -- NULL em mapa custom.
+  seed TEXT,
+
+  -- 1000..6000, conferido na borda. NULL em mapa custom: o .map
+  -- traz o tamanho dele dentro.
+  world_size INTEGER,
+
+  -- \`server.level\`. Texto livre porque um mapa de fora traz o
+  -- nome dele.
+  level TEXT,
+
+  -- O .map de fora, para \`server.levelurl\`. NULL em procedural.
+  level_url TEXT,
+
+  -- ---- o que o RustMaps preenche (ver o cabeçalho) ----
+  rustmaps_id TEXT,
+  staging INTEGER NOT NULL DEFAULT 0 CHECK (staging IN (0, 1)),
+  preview_url TEXT,
+  thumb_url TEXT,
+  -- JSON com os nomes dos monumentos. NULL = não sabemos, que é
+  -- diferente de "nenhum".
+  monuments TEXT,
+
+  status TEXT NOT NULL DEFAULT 'ready'
+    CHECK (status IN ('draft', 'generating', 'ready', 'used', 'failed')),
+
+  -- Por que a geração ou a validação da URL falhou, na língua de
+  -- quem lê a tela.
+  last_error TEXT,
+
+  -- A marca "compatível com a versão nova". Ver o cabeçalho.
+  version_ok INTEGER NOT NULL DEFAULT 0 CHECK (version_ok IN (0, 1)),
+
+  -- O recado de quem colou a seed, para quem for ler a fila
+  -- depois ("o mapa da liga", "pedido do Discord").
+  note TEXT,
+
+  -- Epoch ms de quando este mundo entrou num wipe. NULL = ainda
+  -- na fila.
+  used_at INTEGER,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- A regra do cabeçalho, em SQL.
+CREATE UNIQUE INDEX idx_map_pool_seed
+    ON map_pool (server_id, seed, world_size)
+ WHERE status <> 'used';
+
+-- A tela abre pela fila daquele servidor, em ordem.
+CREATE INDEX idx_map_pool_queue ON map_pool (server_id, position);
+
+-- "Que mapas já jogamos?" varre só as usadas, da mais recente
+-- para trás — é a consulta do aviso de seed repetida.
+CREATE INDEX idx_map_pool_used ON map_pool (server_id, used_at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -1600,6 +1720,11 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 20, name: 'kit-wipe-delay', sql: KIT_WIPE_DELAY_SCHEMA },
   { id: 21, name: 'store-audit', sql: STORE_AUDIT_SCHEMA },
   { id: 22, name: 'spawn-status', sql: SPAWN_STATUS_SCHEMA },
+  // 023 em diante: WIPE, calendario e mensagens. Cada frente tem
+  // o SEU numero reservado (Docs\\17 §0.1) — duas frentes olhando
+  // "o proximo livre" e escrevendo o mesmo numero dao merge limpo
+  // e banco quebrado.
+  { id: 24, name: 'wipe-map-pool', sql: WIPE_MAP_POOL_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

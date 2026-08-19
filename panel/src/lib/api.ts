@@ -2184,4 +2184,137 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/store/buy`,
       { method: 'POST', body: input },
     ),
+
+  // ---- O WIPE: A FILA DE MAPAS -----------------------------
+  //
+  // Em que MUNDO o servidor volta depois de zerar. A fila é lida
+  // do banco, então ela responde com o servidor parado — que é
+  // exatamente quando se escolhe o mapa do próximo wipe.
+
+  /**
+   * A fila inteira, com as já usadas no fim.
+   *
+   * `next` é a primeira pronta; `willDraw` diz que não há nenhuma
+   * e que o agente vai sortear na hora do wipe — a tela mostra
+   * isso como informação, e não como problema.
+   */
+  wipeMaps: (serverId: string) =>
+    api<{
+      ok: true;
+      count: number;
+      maps: WipeMap[];
+      next: WipeMap | null;
+      willDraw: boolean;
+      message: string | null;
+    }>(`/api/servers/${encodeURIComponent(serverId)}/wipe/maps`),
+
+  /** Cola uma seed (ou um link de `.map`) no fim da fila. */
+  addWipeMap: (serverId: string, input: WipeMapInput) =>
+    api<{
+      ok: true;
+      map: WipeMap;
+      warnings: WipeMapWarning[];
+      drawn: boolean;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(serverId)}/wipe/maps`, {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Sorteia uma seed que não está na fila nem saiu nos últimos wipes. */
+  drawWipeMap: (serverId: string, input: { worldSize?: number; level?: string } = {}) =>
+    api<{
+      ok: true;
+      map: WipeMap;
+      warnings: WipeMapWarning[];
+      drawn: boolean;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(serverId)}/wipe/maps/random`, {
+      method: 'POST',
+      body: input,
+    }),
+
+  /**
+   * Grava a ordem da fila.
+   *
+   * Manda a fila INTEIRA, e não "mova para cima": com movimento
+   * relativo, duas telas abertas produzem uma ordem que nenhuma
+   * das duas pediu.
+   */
+  reorderWipeMaps: (serverId: string, ids: number[]) =>
+    api<{ ok: true; count: number; maps: WipeMap[]; message: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/maps/reorder`,
+      { method: 'POST', body: { ids } },
+    ),
+
+  /** A marca "compatível com a versão nova" de um mapa custom. */
+  markWipeMapVersion: (serverId: string, mapId: number, versionOk: boolean) =>
+    api<{ ok: true; map: WipeMap; message: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/maps/${String(mapId)}`,
+      { method: 'PATCH', body: { versionOk } },
+    ),
+
+  removeWipeMap: (serverId: string, mapId: number) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/maps/${String(mapId)}`,
+      { method: 'DELETE' },
+    ),
 };
+
+// ------------------------------------------------------------
+//  O WIPE: a fila de mapas
+// ------------------------------------------------------------
+
+/** Em que pé está uma entrada da fila. Espelha core/src/types/wipe.ts. */
+export type WipeMapStatus = 'draft' | 'generating' | 'ready' | 'used' | 'failed';
+
+/**
+ * Um mundo esperando a vez.
+ *
+ * ####  A SEED É TEXTO  ####
+ *
+ * Ela é transportada, comparada e exibida — nunca somada. Como
+ * número ela ganharia um `.0` no caminho e viraria outra seed.
+ */
+export interface WipeMap {
+  id: number;
+  serverId: string;
+  position: number;
+  kind: 'procedural' | 'custom';
+  seed: string | null;
+  worldSize: number | null;
+  level: string | null;
+  levelUrl: string | null;
+  /** Preenchidos pelo RustMaps. Vazios não impedem wipe nenhum. */
+  rustmapsId: string | null;
+  staging: boolean;
+  previewUrl: string | null;
+  thumbUrl: string | null;
+  monuments: string[] | null;
+  status: WipeMapStatus;
+  lastError: string | null;
+  /** Só em custom: libera o arquivo para um wipe FORÇADO. */
+  versionOk: boolean;
+  note: string | null;
+  /** Epoch ms. `null` = ainda na fila. */
+  usedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WipeMapInput {
+  kind?: 'procedural' | 'custom';
+  /** `null` = o agente sorteia. */
+  seed?: string | null;
+  worldSize?: number;
+  level?: string;
+  levelUrl?: string | null;
+  versionOk?: boolean;
+  note?: string | null;
+}
+
+/** Aviso que acompanha um 201 e NÃO impede nada. */
+export interface WipeMapWarning {
+  code: 'SEED_ALREADY_PLAYED';
+  message: string;
+}

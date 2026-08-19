@@ -312,6 +312,24 @@ export interface ServerConfig {
   readonly level: string;
   readonly seed: number;
   readonly worldSize: number;
+  /**
+   * `SERVER_LEVELURL`: o link de um arquivo `.map` de fora.
+   *
+   * ####  VAZIO É O NORMAL, E SIGNIFICA PROCEDURAL  ####
+   *
+   * Com a chave vazia o servidor gera o mundo a partir de `seed` e
+   * `worldSize`, e a linha de comando sai EXATAMENTE como sempre
+   * saiu — `+server.levelurl` não entra nela. Isso não é economia
+   * de bytes: é a lição do `+server.password`, logo acima. O jogo
+   * aceita qualquer `+x.y` sem reclamar e ignora em silêncio o que
+   * não faz sentido, então um parâmetro vazio na linha de comando
+   * não dá erro nenhum — ele só muda (ou deixa de mudar) o
+   * comportamento sem nada no log dizendo por quê.
+   *
+   * Preenchido, o servidor BAIXA o arquivo no boot e a seed deixa
+   * de valer.
+   */
+  readonly levelUrl: string;
   readonly maxPlayers: number;
   readonly saveInterval: number;
   /** `SERVER_ENABLED`: o agente cuida deste servidor? */
@@ -510,6 +528,10 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
     level: (values.SERVER_LEVEL ?? '').trim() || 'Procedural Map',
     seed: requiredInt(values, 'SERVER_SEED', id, 0, 2_147_483_647),
     worldSize: requiredInt(values, 'SERVER_WORLDSIZE', id, 1_000, 6_000),
+    // Opcional, e vazio por padrão: um `.ini` escrito antes desta
+    // chave existir continua valendo, e continua subindo o
+    // servidor com os mesmos argumentos de sempre.
+    levelUrl: (values.SERVER_LEVELURL ?? '').trim(),
     maxPlayers: requiredInt(values, 'SERVER_MAXPLAYERS', id, 1, 1_000),
     saveInterval: requiredInt(values, 'SERVER_SAVEINTERVAL', id, 30, 86_400),
     enabled: (values.SERVER_ENABLED ?? '1').trim() === '1',
