@@ -23,7 +23,7 @@
 //  naquele dia é como se perde uma configuração em silêncio.
 // ============================================================
 
-import { AlertTriangle, Plus, Save, X } from 'lucide-react';
+import { AlertTriangle, MessageSquare, Plus, Save, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Section } from '@/components/section';
@@ -51,6 +51,7 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [novoOffset, setNovoOffset] = useState('');
+  const [testando, setTestando] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -103,6 +104,46 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
     },
     [load, serverId],
   );
+
+  /**
+   * Manda o texto do aviso AGORA, pelo caminho de verdade.
+   *
+   * Nada é gravado: `POST /chat/broadcast` é uma fala avulsa, e ela
+   * não mexe em execução, em agenda nem no horário de mensagem
+   * nenhuma. A resposta traz o texto JÁ resolvido — é ela que
+   * responde "o {wipe.faltam} está pegando?" sem esperar o wipe.
+   */
+  const testarNoChat = useCallback(async () => {
+    if (settings === null) {
+      return;
+    }
+
+    setTestando(true);
+
+    try {
+      const response = await agent.broadcastChat({
+        serverId,
+        text: settings.announce.text,
+        tag: settings.announce.tag,
+        tagColor: settings.announce.tagColor,
+        color: settings.announce.color,
+        size: settings.announce.size,
+      });
+
+      // O texto resolvido vai na descrição de propósito: um "enviado"
+      // sozinho não mostra que a variável virou número.
+      toast.success('Aviso enviado ao chat', { description: response.text });
+    } catch (cause) {
+      // Servidor parado, RCON caído, plugin fora do ar: o teste
+      // falhar é justamente o que ele existe para descobrir — e
+      // ANTES do wipe, e não durante.
+      toast.error('Não deu para falar no chat', {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setTestando(false);
+    }
+  }, [serverId, settings]);
 
   if (loading) {
     return <StateBlock variant="loading" title="Consultando o agente…" />;
@@ -283,6 +324,36 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
             A APARÊNCIA é aplicada pelo plugin, e não pelo agente: ele manda o texto cru mais estes
             campos. Formatar dos dois lados criaria duas verdades sobre como um aviso se parece.
           </p>
+
+          {/*
+            ####  TESTAR É VER O AVISO DE VERDADE  ####
+
+            O botão manda a fala AGORA, pelo mesmo transporte e com a
+            mesma resolução de variáveis do aviso automático — e não
+            uma prévia montada aqui no navegador. Uma prévia local
+            responderia "o texto está bonito?"; a pergunta que custa
+            caro é outra: "o {wipe.faltam} está pegando neste
+            servidor?". Só o agente sabe responder isso.
+
+            Ele NÃO abre um segundo caminho de envio: é a rota avulsa
+            do módulo de mensagens, que chama o mesmo `Broadcaster`.
+          */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="md"
+              variant="ghost"
+              disabled={busy || testando || settings.announce.text.trim() === ''}
+              onClick={() => {
+                void testarNoChat();
+              }}
+            >
+              <MessageSquare aria-hidden className="mr-1 h-4 w-4" />
+              testar no chat agora
+            </Button>
+            <span className="text-2xs text-muted">
+              A fala sai no chat de quem está online neste servidor, com as variáveis já resolvidas.
+            </span>
+          </div>
         </div>
       </Section>
 
