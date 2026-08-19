@@ -45,8 +45,14 @@ import {
   DEFAULT_WIPE_HORIZON_DAYS,
   type WipeScheduleRepository,
 } from '../../db/wipe-schedule-repository.js';
+import {
+  buildPlayerCalendar,
+  type CalendarMapQueueReader,
+  type CalendarVipReader,
+} from '../../game/ui-calendar-screen.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { BP_POLICIES, COLLISION_POLICIES, MAP_SOURCES } from '../../types/wipe.js';
+import { readVipTiers } from '../../vip/tiers.js';
 import { isValidTimeZone, nextForcedWipe } from '../../wipe/schedule.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
@@ -54,6 +60,13 @@ import { operatorOf } from './admin.js';
 export interface WipeRoutesDeps {
   readonly repository: WipeScheduleRepository;
   readonly supervisor: ServerSupervisor;
+  /**
+   * A fila de mapas, para o `/upcoming/me`. Ausente = sem mundo a
+   * mostrar, e a resposta sai com a lista vazia em vez de um 500.
+   */
+  readonly mapPool?: CalendarMapQueueReader;
+  /** Quem tem VIP, para o recorte do `/upcoming/me`. */
+  readonly vips?: CalendarVipReader;
 }
 
 /** Quantos wipes o `/upcoming` devolve por padrão. */
@@ -69,6 +82,19 @@ const plansQuery = z.object({
 });
 
 const upcomingQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_UPCOMING_LIMIT).optional(),
+});
+
+/**
+ * O `/upcoming/me`: o mesmo teto, mais QUEM está perguntando.
+ *
+ * O SteamID é string em toda parte deste projeto — 17 dígitos
+ * passam de 2^53, e convertido para número ele volta arredondado
+ * (ver db/vips-repository.ts). Ausente = a resposta de quem não
+ * tem VIP.
+ */
+const upcomingMeQuery = z.object({
+  steamId: z.string().trim().min(1).max(32).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_UPCOMING_LIMIT).optional(),
 });
 
@@ -382,6 +408,80 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
             'poder explicar a semana sem wipe.',
     };
   });
+
+  // ==========================================================
+  //  O que UM JOGADOR pode ver do futuro
+  // ==========================================================
+
+  /**
+   * A agenda RECORTADA pelo nível de VIP daquele jogador.
+   *
+   * ####  ELA NÃO É O `/upcoming` COM UM FILTRO NA TELA  ####
+   *
+   * O `/upcoming` acima é do painel: ele mostra tudo porque quem o
+   * lê é quem administra. Esta responde à pergunta do JOGADOR, e a
+   * régua do Docs\16 §9.3 vale aqui do mesmo jeito que vale na tela
+   * do jogo:
+   *
+   *   sem VIP / bronze   a data e a política de blueprint
+   *   silver             + o mapa do próximo wipe (sem a seed)
+   *   gold               + os três próximos
+   *
+   * O corte acontece em `buildPlayerCalendar`, que é o MESMO que a
+   * tela do jogo usa (game/ui-calendar-screen.ts). Dois recortes,
+   * um por caminho, dariam duas respostas para a mesma pergunta — e
+   * a que vaza seria descoberta por quem tem interesse em vazá-la.
+   *
+   * Sem `?steamId=`, a resposta é a de quem não tem VIP: negar por
+   * falta de identidade é a saída conservadora.
+   */
+  app.get('/servers/:id/wipe/upcoming/me', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { steamId, limit } = upcomingMeQuery.parse(request.query);
+
+    assertServer(deps, id);
+
+    const now = Date.now();
+    const settings = deps.repository.getSettings(id);
+
+    const tiers =
+      steamId === undefined || deps.vips === undefined
+        ? []
+        : deps.vips.activeOf(steamId, now).map((vip) => vip.tier);
+
+    const calendar = buildPlayerCalendar({
+      now,
+      timeZone: settings.cadence.timeZone,
+      plans: deps.repository.listPlans(id, { from: now }),
+      queue: deps.mapPool?.list(id) ?? [],
+      tiers,
+      // A hierarquia entre níveis é do `OrigemZVip.json` daquele
+      // servidor. Sem VIP nenhum não há o que comparar, e ler o
+      // arquivo seria ir ao disco para confirmar um zero.
+      levels: tiers.length === 0 ? [] : await levelsOf(deps, id),
+      ...(limit === undefined ? {} : { limit }),
+    });
+
+    return { ok: true, ...calendar, nextForcedAt: nextForcedWipe(now) };
+  });
+}
+
+/**
+ * Os níveis de VIP daquele servidor.
+ *
+ * Nunca lança: um `OrigemZVip.json` ausente ou quebrado não pode
+ * derrubar a agenda do jogador — o pior que acontece é um nível
+ * ainda não declarado não desbloquear o mapa. Mesma escolha do
+ * `#levelsOf` dos kits.
+ */
+async function levelsOf(deps: WipeRoutesDeps, serverId: string) {
+  const config = deps.supervisor.configOf(serverId);
+
+  if (config === null) {
+    return [];
+  }
+
+  return (await readVipTiers(config.paths.oxideConfigDir)).levels;
 }
 
 /**

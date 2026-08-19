@@ -2260,6 +2260,73 @@ CREATE TABLE bp_item_benches (
 );
 `;
 
+// ------------------------------------------------------------
+//  027 — os eventos  *(Frente G)*
+//
+//  ####  A TABELA NASCE ANTES DA TELA, E DE PROPÓSITO  ####
+//
+//  Não há rota de evento, não há tela de evento e não há nada que
+//  escreva aqui nesta fase (Docs\16 §12). A tabela existe agora
+//  porque o CALENDÁRIO — o do jogo e a grade do painel — vai ler
+//  wipes e eventos JUNTOS, e descobrir isso depois custaria
+//  refazer os dois: a linha do calendário passaria a ter duas
+//  origens e um formato de marcação que ninguém desenhou para
+//  conviver.
+//
+//  Uma tabela vazia não custa nada; uma migração no meio de uma
+//  tela pronta custa a tela.
+//
+//  ####  O EVENTO NÃO EXECUTA NADA  ####
+//
+//  Não há operação de evento, e não vai haver: quem faz o evento
+//  acontecer é um plugin ou uma pessoa. Isto aqui é o que o
+//  jogador LÊ — "sexta, 20:00, Raid Night" —, e é por isso que a
+//  tabela tem descrição e imagem, e não tem passo, estado nem
+//  log.
+//
+//  ####  ELE É DE UM SERVIDOR, AO CONTRÁRIO DA MENSAGEM  ####
+//
+//  A mensagem é de REDE (uma linha, uma lista de alvos); o evento
+//  é do servidor onde ele acontece. Um "Raid Night no pvp1" não é
+//  o mesmo acontecimento que um "Raid Night no pve" — eles têm
+//  horários, participantes e sentidos diferentes.
+//
+//  E as datas são epoch ms UTC, como todas as outras deste banco.
+//  Horário local sem fuso é como o evento desliza uma hora sozinho
+//  em novembro.
+// ------------------------------------------------------------
+const EVENTS_SCHEMA = `
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O que o jogador lê na grade: 'Raid Night'.
+  name TEXT NOT NULL,
+
+  -- A família do evento, para a cor e o ícone. Texto livre porque
+  -- quem inventa evento é quem administra, e uma lista fechada
+  -- aqui viraria uma migração a cada ideia nova.
+  kind TEXT NOT NULL DEFAULT 'evento',
+
+  -- Epoch ms UTC. \`ends_at\` NULL = acontecimento de um instante
+  -- só, e não um período.
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER,
+
+  description TEXT,
+  image_url TEXT,
+
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  created_at INTEGER NOT NULL
+);
+
+-- A pergunta das duas telas é a mesma: "o que acontece neste
+-- servidor daqui para a frente?".
+CREATE INDEX idx_events_quando ON events (server_id, starts_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2292,6 +2359,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 24, name: 'wipe-map-pool', sql: WIPE_MAP_POOL_SCHEMA },
   { id: 25, name: 'wipe-runs', sql: WIPE_RUNS_SCHEMA },
   { id: 26, name: 'messages', sql: MESSAGES_SCHEMA },
+  // A 27 entra AQUI, e não no fim: o número é reservado, e a
+  // ordem do array é a ordem em que o banco aplica.
+  { id: 27, name: 'events', sql: EVENTS_SCHEMA },
   { id: 28, name: 'bp-snapshots', sql: BP_SNAPSHOTS_SCHEMA },
 ];
 

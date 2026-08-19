@@ -200,6 +200,30 @@ export function itemImage(
   };
 }
 
+/**
+ * Uma imagem BAIXADA PELO CLIENTE, a partir da URL.
+ *
+ * ####  QUEM BAIXA É O JOGADOR, E NÃO O AGENTE  ####
+ *
+ * O CUI leva a URL num `RawImage` e cada cliente busca os bytes
+ * por conta própria. É o que permite mostrar a prévia do mapa do
+ * RustMaps sem o agente guardar arquivo nenhum — e é também por
+ * que a URL precisa ser pública: o que estiver atrás de login não
+ * carrega para ninguém.
+ */
+export function urlImage(id: string, url: string, rect: Rect): UiElement {
+  return {
+    id,
+    name: id,
+    type: 'image',
+    rect,
+    source: { kind: 'url', url },
+    // Branco: `color` numa imagem TINGE. Ver `itemImage`.
+    color: C.white,
+    children: [],
+  };
+}
+
 /** O véu escuro e a caixa no meio, com a faixa de acento no topo. */
 export function modalFrame(
   width: number,

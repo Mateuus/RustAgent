@@ -96,6 +96,12 @@ import { BlueprintService } from './wipe/blueprints.js';
 // ---- a ponte: os avisos de wipe são mensagens (Docs\16 §11) ----
 import { registerWipeVariables } from './messages/providers/wipe.js';
 import { WipeBroadcastAnnouncer } from './wipe/announce.js';
+// ---- o calendário dentro do jogo (Docs\16 §9.3) ----
+import {
+  createCalendarScreenProvider,
+  type CalendarScreenProvider,
+} from './game/ui-calendar-screen.js';
+import { readVipTiers } from './vip/tiers.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -191,6 +197,12 @@ async function main(): Promise<void> {
   let vips: VipList | null = null;
   let loadoutSync: LoadoutSync | null = null;
   let spawnStatusSync: SpawnStatusSync | null = null;
+  // A página CALENDÁRIO do menu do jogo, pela mesma razão: ela lê a
+  // agenda e a fila de mapas, que nascem bem abaixo, e quem a chama
+  // é o `generatedScreens` do `UiSync`, que só corre no clique do
+  // jogador. `null` = ainda não montada, e aí a tela do documento
+  // responde no lugar.
+  let calendarScreens: CalendarScreenProvider | null = null;
 
   // ####  A HORA DO WIPE VEM DO SERVIDOR  ####
   //
@@ -554,7 +566,14 @@ async function main(): Promise<void> {
       const kitTarget = parseKitScreenId(input.screenId);
 
       if (kitTarget === null) {
-        return null;
+        // ####  E, POR ÚLTIMO, O CALENDÁRIO  ####
+        //
+        // Ele reconhece um id EXATO (`tela-calendario`) e devolve
+        // `null` para o resto — inclusive para as telas desenhadas
+        // no editor, que seguem pelo caminho normal. Ele fica no
+        // fim porque é o mais novo, e porque a agenda de onde ele
+        // lê nasce depois do `UiSync` (ver a variável lá em cima).
+        return (await calendarScreens?.(input)) ?? null;
       }
 
       const offers = await kits.listForServer(input.serverId, input.steamId);
@@ -816,6 +835,28 @@ async function main(): Promise<void> {
   });
 
   rustmaps.start();
+
+  // ####  A PÁGINA CALENDÁRIO DO MENU DO JOGO  ####
+  //
+  // Ela nasce AQUI, e não junto do `UiSync` lá em cima, porque
+  // depende da agenda e da fila de mapas — as duas são construídas
+  // nesta parte do arquivo. Quem a chama é o `generatedScreens`,
+  // que só corre quando um jogador clica em CALENDÁRIO: nesse
+  // instante tudo aqui já existe.
+  //
+  // O recorte por nível de VIP acontece DENTRO dela, antes de o
+  // documento existir — o que o jogador não pode ver não atravessa
+  // o RCON. Ver game/ui-calendar-screen.ts.
+  calendarScreens = createCalendarScreenProvider({
+    schedule: wipeSchedule,
+    mapPool,
+    vips: vipsRepository,
+    levelsOf: async (serverId) => {
+      const config = supervisor.configOf(serverId);
+
+      return config === null ? [] : (await readVipTiers(config.paths.oxideConfigDir)).levels;
+    },
+  });
 
   // ---- os blueprints que sobrevivem ao wipe -----------------
   //

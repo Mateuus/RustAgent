@@ -435,6 +435,12 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       registerWipeRoutes(api, {
         repository: options.wipeSchedule,
         supervisor: options.supervisor,
+        // As duas de baixo servem só ao `/wipe/upcoming/me`, que é
+        // a agenda RECORTADA pelo nível de VIP de um jogador — a
+        // mesma régua da tela do jogo (Docs\16 §9.3). As rotas de
+        // administração acima não as tocam.
+        mapPool: options.mapPool,
+        vips: options.vips,
       });
 
       // A fila de mapas responde em QUE MUNDO o servidor volta
