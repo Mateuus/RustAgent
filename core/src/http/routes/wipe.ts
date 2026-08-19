@@ -53,6 +53,7 @@ import {
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { BP_POLICIES, COLLISION_POLICIES, MAP_SOURCES } from '../../types/wipe.js';
 import { readVipTiers } from '../../vip/tiers.js';
+import { nextWipe, type WipeRunsReader } from '../../wipe/next-wipe.js';
 import { isValidTimeZone, nextForcedWipe } from '../../wipe/schedule.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
@@ -67,7 +68,37 @@ export interface WipeRoutesDeps {
   readonly mapPool?: CalendarMapQueueReader;
   /** Quem tem VIP, para o recorte do `/upcoming/me`. */
   readonly vips?: CalendarVipReader;
+  /**
+   * As execuções em curso, para o `/upcoming/me`.
+   *
+   * ####  ELA É PARTE DA RESPOSTA, E NÃO UM ENFEITE  ####
+   *
+   * O "WIPAR AGORA com hora marcada" não tem plano nenhum: quem
+   * sabe dele é `wipe_runs`. E nas horas que antecedem a hora
+   * marcada o plano está `running`, não `planned`. Sem este leitor,
+   * a rota do jogador responde uma coisa e o `{wipe.faltam}` do
+   * chat responde outra — que é a divergência que a Frente G existe
+   * para não ter.
+   *
+   * Ausente = a resposta cai só na agenda, e o servidor sobe do
+   * mesmo jeito. Quem a liga é http/server.ts.
+   */
+  readonly runs?: WipeRunsReader;
 }
+
+/**
+ * O que `nextWipe` lê quando a rota não recebeu tudo.
+ *
+ * Ausente é DIFERENTE de vazio só no nome: aqui "não sei" e "não
+ * tem" dão a mesma resposta, e ela nunca é um 500 na cara de um
+ * jogador que só queria saber quando é o wipe.
+ */
+const NOTHING_RUNNING: WipeRunsReader = { running: () => [] };
+const NO_MAP_POOL: CalendarMapQueueReader = {
+  list: () => [],
+  next: () => null,
+  get: () => null,
+};
 
 /** Quantos wipes o `/upcoming` devolve por padrão. */
 export const DEFAULT_UPCOMING_LIMIT = 10;
@@ -449,9 +480,23 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
         ? []
         : deps.vips.activeOf(steamId, now).map((vip) => vip.tier);
 
+    // A MESMA decisão do chat e da tela do jogo. Ver
+    // wipe/next-wipe.ts: uma segunda conta aqui faria a rota do
+    // jogador responder um wipe e o `{wipe.faltam}` responder outro.
+    const next = nextWipe(
+      id,
+      {
+        schedule: deps.repository,
+        runs: deps.runs ?? NOTHING_RUNNING,
+        mapPool: deps.mapPool ?? NO_MAP_POOL,
+      },
+      now,
+    );
+
     const calendar = buildPlayerCalendar({
       now,
       timeZone: settings.cadence.timeZone,
+      next,
       plans: deps.repository.listPlans(id, { from: now }),
       queue: deps.mapPool?.list(id) ?? [],
       tiers,

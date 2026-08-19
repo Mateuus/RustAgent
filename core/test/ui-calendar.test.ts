@@ -34,14 +34,17 @@ import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { UiDocumentsRepository } from '../src/db/ui-documents-repository.js';
 import { VipsRepository } from '../src/db/vips-repository.js';
+import { WipeRunsRepository, type WipeRunRecord } from '../src/db/wipe-runs-repository.js';
 import { WipeScheduleRepository } from '../src/db/wipe-schedule-repository.js';
 import {
   buildCalendarScreen,
+  buildEmptyCalendarBundle,
   buildPlayerCalendar,
   CALENDAR_SCREEN_ID,
   createCalendarScreenProvider,
   isCalendarScreenId,
   mapAllowanceOf,
+  type CalendarNextWipeView,
   type PlayerCalendar,
 } from '../src/game/ui-calendar-screen.js';
 import { buildMainMenu, MAIN_MENU_SLUG } from '../src/game/ui-preset-main-menu.js';
@@ -51,8 +54,9 @@ import { createLogger } from '../src/logger.js';
 import type { ServerSupervisor } from '../src/servers/supervisor.js';
 import { walkElements, type UiScreen } from '../src/types/ui-document.js';
 import { UI_REQUEST_MARKER } from '../src/types/ui-transport.js';
-import type { MapPoolEntry, WipePlan } from '../src/types/wipe.js';
+import type { MapPoolEntry, WipePlan, WipeSettings } from '../src/types/wipe.js';
 import type { VipTierLevel } from '../src/vip/tiers.js';
+import { nextWipe, type NextWipe } from '../src/wipe/next-wipe.js';
 
 const silent = createLogger({ log: { level: 'silent', pretty: false } });
 
@@ -122,6 +126,92 @@ function mapEntry(over: Partial<MapPoolEntry> = {}): MapPoolEntry {
   };
 }
 
+function settings(timeZone = 'UTC'): WipeSettings {
+  return {
+    cadence: {
+      enabled: true,
+      everyDays: 7,
+      anchorAt: NOW,
+      timeOfDay: '16:00',
+      timeZone,
+      bpPolicy: 'keep',
+    },
+    forced: { bpPolicy: 'keep' },
+    collision: { policy: 'absorb', windowHours: 36 },
+  };
+}
+
+interface DecideInput {
+  readonly plans?: readonly WipePlan[];
+  readonly queue?: readonly MapPoolEntry[];
+  readonly runs?: readonly WipeRunRecord[];
+  readonly now?: number;
+  readonly timeZone?: string;
+}
+
+/**
+ * QUAL é o próximo wipe, decidido pela MESMA função do chat.
+ *
+ * O teste não monta este objeto à mão de propósito: ele chama
+ * `nextWipe`, que é quem responde `{wipe.faltam}`. Uma tela montada
+ * sobre um `next` inventado passaria mesmo depois de o agente voltar
+ * a ter duas contas — que é exatamente o defeito que esta suíte
+ * existe para prender.
+ */
+function decide(input: DecideInput = {}): NextWipe | null {
+  const plans = input.plans ?? [];
+  const queue = input.queue ?? [];
+  const runs = input.runs ?? [];
+
+  return nextWipe(
+    SERVER,
+    {
+      schedule: {
+        getSettings: () => settings(input.timeZone),
+        listPlans: (_serverId, options) =>
+          plans.filter((item) => options?.from === undefined || item.scheduledAt >= options.from),
+        getPlan: (_serverId, id) => plans.find((item) => item.id === id) ?? null,
+        nextPlan: () => null,
+      },
+      runs: { running: () => runs },
+      mapPool: {
+        // A mesma regra do `MapPoolRepository.next`: só `ready`, e
+        // num wipe FORÇADO o custom sem marca de versão é pulado.
+        next: (_serverId, forced) =>
+          queue.find(
+            (entry) => entry.status === 'ready' && !(forced === true && entry.kind === 'custom'),
+          ) ?? null,
+        get: (_serverId, id) => queue.find((entry) => entry.id === id) ?? null,
+      },
+    },
+    input.now ?? NOW,
+  );
+}
+
+function run(over: Partial<WipeRunRecord> = {}): WipeRunRecord {
+  return {
+    id: 1,
+    serverId: SERVER,
+    planId: null,
+    operationId: null,
+    kind: 'manual',
+    bpPolicy: 'keep',
+    fullWipe: false,
+    startedAt: NOW,
+    wipeAt: NOW + 3 * HOUR,
+    finishedAt: null,
+    status: 'running',
+    backupPath: null,
+    mapBefore: null,
+    mapAfter: null,
+    saveCreatedBefore: null,
+    saveCreatedAfter: null,
+    message: null,
+    steps: [],
+    ...over,
+  };
+}
+
 /** Os níveis do `OrigemZVip.json`, como o plugin os declara. */
 const LEVELS: readonly VipTierLevel[] = [
   { tier: 'bronze', group: 'origemz.vip.bronze', title: 'Bronze', rank: 1, parentGroup: null },
@@ -164,8 +254,22 @@ function calendarOf(over: Partial<PlayerCalendar> = {}): PlayerCalendar {
     timeZone: 'America/Sao_Paulo',
     tier: null,
     mapsAllowed: 0,
+    next: null,
     wipes: [],
     maps: [],
+    ...over,
+  };
+}
+
+/** O cartão grande, para os testes que só olham o desenho. */
+function nextOf(over: Partial<CalendarNextWipeView> = {}): CalendarNextWipeView {
+  return {
+    scheduledAt: NOW + 6 * DAY + 4 * HOUR,
+    kind: 'cadence',
+    bpPolicy: 'keep',
+    running: false,
+    map: null,
+    image: null,
     ...over,
   };
 }
@@ -216,16 +320,36 @@ describe('a régua do VIP', () => {
       mapEntry({ id: 4, position: 3, seed: '333' }),
     ];
 
-    const base = { now: NOW, timeZone: 'UTC', plans: [plan()], queue, levels: LEVELS };
+    const plans = [plan()];
 
-    expect(buildPlayerCalendar({ ...base, tiers: [] }).maps).toEqual([]);
-    expect(buildPlayerCalendar({ ...base, tiers: ['silver'] }).maps).toHaveLength(1);
-    expect(buildPlayerCalendar({ ...base, tiers: ['gold'] }).maps).toHaveLength(3);
+    const base = {
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans, queue }),
+      plans,
+      queue,
+      levels: LEVELS,
+    };
+
+    // O mundo do PRÓXIMO wipe conta como o #1 da régua: ele é
+    // `next.image`, e não `maps[0]` — a fila e o plano podem
+    // apontar para entradas diferentes.
+    const seen = (tiers: readonly string[]): number => {
+      const calendar = buildPlayerCalendar({ ...base, tiers });
+
+      return (calendar.next?.image === null ? 0 : 1) + calendar.maps.length;
+    };
+
+    expect(seen([])).toBe(0);
+    expect(seen(['silver'])).toBe(1);
+    expect(seen(['gold'])).toBe(3);
 
     // O tipo não tem campo de seed, e o objeto tampouco: é isto que
     // impede a seed de chegar ao desenho por acidente.
-    for (const map of buildPlayerCalendar({ ...base, tiers: ['gold'] }).maps) {
-      expect(Object.keys(map)).not.toContain('seed');
+    const gold = buildPlayerCalendar({ ...base, tiers: ['gold'] });
+
+    for (const map of [gold.next?.image, ...gold.maps]) {
+      expect(Object.keys(map ?? {})).not.toContain('seed');
       expect(JSON.stringify(map)).not.toContain(SECRET_SEED);
     }
   });
@@ -236,54 +360,296 @@ describe('a régua do VIP', () => {
       mapEntry({ id: 2, seed: '999', status: 'ready', worldSize: 3500 }),
     ];
 
+    const plans = [plan()];
+
     const calendar = buildPlayerCalendar({
       now: NOW,
       timeZone: 'UTC',
-      plans: [plan()],
+      next: decide({ plans, queue }),
+      plans,
       queue,
       tiers: ['silver'],
       levels: LEVELS,
     });
 
-    expect(calendar.maps).toHaveLength(1);
-    expect(calendar.maps[0]?.worldSize).toBe(3500);
+    expect(calendar.next?.image?.worldSize).toBe(3500);
+    expect(calendar.maps).toHaveLength(0);
   });
 
   it('descarta a imagem cuja URL carrega a seed dentro', () => {
     // A página do RustMaps tem a forma `rustmaps.com/map/4000_18422`.
     // Se uma dessas cair na coluna, a imagem some e o resto fica: a
     // prévia é enfeite, e a seed não é.
+    const plans = [plan()];
+    const queue = [mapEntry({ previewUrl: `https://rustmaps.com/map/4000_${SECRET_SEED}` })];
+
     const calendar = buildPlayerCalendar({
       now: NOW,
       timeZone: 'UTC',
-      plans: [plan()],
-      queue: [mapEntry({ previewUrl: `https://rustmaps.com/map/4000_${SECRET_SEED}` })],
+      next: decide({ plans, queue }),
+      plans,
+      queue,
       tiers: ['silver'],
       levels: LEVELS,
     });
 
-    expect(calendar.maps[0]?.previewUrl).toBeNull();
+    expect(calendar.next?.image?.previewUrl).toBeNull();
+    // E a anulação deixa RASTRO: sem ele, um mundo com a prévia
+    // pronta no banco aparece para sempre como "ainda não ficou
+    // pronta", e ninguém tem por onde começar a procurar.
+    expect(calendar.next?.image?.imageHiddenBy).toBe('seed-na-url');
   });
 
-  it('o passado e o que já foi pulado ficam de fora', () => {
+  it('uma seed curta NÃO apaga a prévia por casar com pedaço da URL', () => {
+    // `files.rustmaps.com/img/287/b3c1f0a2/map.png` carrega dígitos
+    // no caminho, e `7` é seed válida. Com `includes`, o VIP lia
+    // PARA SEMPRE "a imagem deste mundo ainda não ficou pronta" com
+    // a prévia pronta no banco. A comparação é por TOKEN inteiro.
+    const plans = [plan()];
+    const queue = [mapEntry({ seed: '7' })];
+
     const calendar = buildPlayerCalendar({
       now: NOW,
       timeZone: 'UTC',
-      plans: [
-        plan({ id: 1, scheduledAt: NOW - DAY }),
-        plan({ id: 2, scheduledAt: NOW + DAY, status: 'skipped' }),
-        plan({ id: 3, scheduledAt: NOW + 2 * DAY }),
-        // O absorvido FICA, marcado: uma agenda com um buraco não
-        // explica por que terça não vai ter wipe.
-        plan({ id: 4, scheduledAt: NOW + 3 * DAY, status: 'absorbed' }),
-      ],
+      next: decide({ plans, queue }),
+      plans,
+      queue,
+      tiers: ['silver'],
+      levels: LEVELS,
+    });
+
+    expect(calendar.next?.image?.previewUrl).toBe(
+      'https://files.rustmaps.com/img/287/b3c1f0a2/map.png',
+    );
+    expect(calendar.next?.image?.imageHiddenBy).toBeNull();
+  });
+
+  it('o passado e o que já foi pulado ficam de fora', () => {
+    const plans = [
+      plan({ id: 1, scheduledAt: NOW - DAY }),
+      plan({ id: 2, scheduledAt: NOW + DAY, status: 'skipped' }),
+      plan({ id: 3, scheduledAt: NOW + 2 * DAY }),
+      // O absorvido FICA, marcado: uma agenda com um buraco não
+      // explica por que terça não vai ter wipe.
+      plan({ id: 4, scheduledAt: NOW + 3 * DAY, status: 'absorbed' }),
+    ];
+
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans }),
+      plans,
       queue: [],
       tiers: [],
       levels: [],
     });
 
-    expect(calendar.wipes.map((wipe) => wipe.scheduledAt)).toEqual([NOW + 2 * DAY, NOW + 3 * DAY]);
-    expect(calendar.wipes[1]?.absorbed).toBe(true);
+    // O #3 é o próximo, e ele tem cartão próprio: a lista "DEPOIS"
+    // não o repete.
+    expect(calendar.next?.scheduledAt).toBe(NOW + 2 * DAY);
+    expect(calendar.wipes.map((wipe) => wipe.scheduledAt)).toEqual([NOW + 3 * DAY]);
+    expect(calendar.wipes[0]?.absorbed).toBe(true);
+  });
+});
+
+// ============================================================
+//  §1b  QUAL WIPE É O PRÓXIMO — a mesma resposta do chat
+// ============================================================
+
+describe('o cartão PRÓXIMO WIPE', () => {
+  it('nas horas antes da hora marcada, o plano `running` é o próximo', () => {
+    // ####  O CENÁRIO MEDIDO  ####
+    //
+    // Quarta, 14:00. O wipe é quinta às 10:00 — daqui a 20 horas. O
+    // relógio já disparou o plano (a antecedência é o maior offset
+    // de aviso, 1440 min no padrão), então ele está `running` e o
+    // passo `avisar` já anuncia "WIPE em 20 horas" no chat.
+    //
+    // Um filtro que só aceita `planned` pula esse plano e mostra o
+    // da semana seguinte: "faltam 7 dias e 20 horas".
+    const plans = [
+      plan({ id: 1, scheduledAt: NOW + 20 * HOUR, status: 'running' }),
+      plan({ id: 2, scheduledAt: NOW + 20 * HOUR + 7 * DAY }),
+    ];
+
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans }),
+      plans,
+      queue: [],
+      tiers: [],
+      levels: [],
+    });
+
+    expect(calendar.next?.scheduledAt).toBe(NOW + 20 * HOUR);
+    expect(calendar.next?.running).toBe(true);
+
+    const text = textOf(buildCalendarScreen({ calendar }));
+
+    expect(text).toContain('faltam 20 horas');
+    expect(text).not.toContain('faltam 7 dias');
+    // E a tela diz que ele já está em curso: é a mesma janela em que
+    // o passo `avisar` está falando no chat.
+    expect(text).toContain('já começou');
+  });
+
+  it('o absorvido NA POSIÇÃO [0] não vira o cartão grande', () => {
+    // Colisão em `absorb`, com o wipe de cadência CAINDO ANTES do
+    // forçado: o absorvido é o mais próximo da agenda. No cartão
+    // grande ele daria ao jogador data, contagem regressiva e
+    // política de blueprint de um wipe que não vai acontecer — e
+    // sem a marca "cancelado pelo forçado", que só é desenhada na
+    // lista de baixo.
+    const plans = [
+      plan({ id: 1, scheduledAt: NOW + DAY, status: 'absorbed', bpPolicy: 'keep', absorbedBy: 2 }),
+      plan({ id: 2, scheduledAt: NOW + 2 * DAY, kind: 'forced', bpPolicy: 'wipe' }),
+    ];
+
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans }),
+      plans,
+      queue: [],
+      tiers: [],
+      levels: [],
+    });
+
+    expect(calendar.next?.scheduledAt).toBe(NOW + 2 * DAY);
+    expect(calendar.next?.kind).toBe('forced');
+    // E a política do cartão é a DO FORÇADO, e não a do cancelado.
+    expect(calendar.next?.bpPolicy).toBe('wipe');
+
+    const text = textOf(buildCalendarScreen({ calendar }));
+
+    expect(text).toContain('faltam 2 dias');
+    expect(text).toContain('zerados');
+    // O cancelado continua na agenda, marcado — uma lista com um
+    // buraco não explica por que terça não vai ter wipe.
+    expect(text).toContain('cancelado pelo forçado');
+  });
+
+  it('o WIPAR AGORA com hora marcada não tem plano, e mesmo assim conta', () => {
+    // `POST /wipe/runs` com `at` = agora + 3 h e sem `planId`: quem
+    // sabe deste wipe é `wipe_runs`, e só ela. Uma tela que lê só
+    // `wipe_plans` diz "sem wipe agendado" enquanto o chat conta as
+    // três horas.
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ runs: [run({ wipeAt: NOW + 3 * HOUR, bpPolicy: 'wipe_except_vip' })] }),
+      plans: [],
+      queue: [],
+      tiers: [],
+      levels: [],
+    });
+
+    const text = textOf(buildCalendarScreen({ calendar }));
+
+    expect(text).toContain('faltam 3 horas');
+    expect(text).not.toContain('SEM WIPE AGENDADO');
+    expect(text).toContain('mantidos só para quem tem VIP');
+  });
+
+  it('a execução em curso esconde o plano dela da lista DEPOIS', () => {
+    const plans = [
+      plan({ id: 7, scheduledAt: NOW + 2 * HOUR, status: 'running' }),
+      plan({ id: 8, scheduledAt: NOW + 7 * DAY }),
+    ];
+
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans, runs: [run({ planId: 7, wipeAt: NOW + 2 * HOUR })] }),
+      plans,
+      queue: [],
+      tiers: [],
+      levels: [],
+    });
+
+    expect(calendar.next?.scheduledAt).toBe(NOW + 2 * HOUR);
+    expect(calendar.wipes.map((wipe) => wipe.scheduledAt)).toEqual([NOW + 7 * DAY]);
+  });
+});
+
+// ============================================================
+//  §1c  O MUNDO ANUNCIADO É O DO PLANO
+// ============================================================
+
+describe('o mapa do próximo wipe', () => {
+  const queue = [
+    mapEntry({ id: 1, position: 0, worldSize: 4000 }),
+    mapEntry({ id: 2, position: 1, seed: '111', worldSize: 3000 }),
+  ];
+
+  function calendarFor(plans: readonly WipePlan[], entries = queue): PlayerCalendar {
+    return buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans, queue: entries }),
+      plans,
+      queue: entries,
+      tiers: ['silver'],
+      levels: LEVELS,
+    });
+  }
+
+  it('com `keep`, é o mesmo mundo de agora — e não a cabeça da fila', () => {
+    const calendar = calendarFor([plan({ mapSource: 'keep' })]);
+
+    // A MESMA frase de `{wipe.mapa}` no chat.
+    expect(calendar.next?.map).toBe('o mesmo mapa de agora');
+    expect(calendar.next?.image).toBeNull();
+    expect(textOf(buildCalendarScreen({ calendar }))).not.toContain('4000');
+  });
+
+  it('com `fixed`, é a entrada apontada, esteja onde estiver na fila', () => {
+    const calendar = calendarFor([plan({ mapSource: 'fixed', mapPoolId: 2 })]);
+
+    expect(calendar.next?.map).toBe('procedural 3000');
+    expect(calendar.next?.image?.worldSize).toBe(3000);
+    // E o que sobra da fila não repete o mundo já anunciado.
+    expect(calendar.maps.map((map) => map.worldSize)).not.toContain(3000);
+  });
+
+  it('num wipe FORÇADO, o custom sem marca de versão é pulado', () => {
+    // O `.map` de ontem não sobe na versão de amanhã: `next` o pula,
+    // e vender essa prévia ao VIP prata é vender o mundo errado.
+    const entries = [
+      mapEntry({ id: 1, position: 0, kind: 'custom', seed: null, level: 'Ilha', worldSize: null }),
+      mapEntry({ id: 2, position: 1, seed: '111', worldSize: 3000 }),
+    ];
+
+    const calendar = calendarFor([plan({ kind: 'forced', bpPolicy: 'wipe' })], entries);
+
+    expect(calendar.next?.map).toBe('procedural 3000');
+    expect(textOf(buildCalendarScreen({ calendar }))).not.toContain('Ilha');
+  });
+
+  it('sem fila, o cartão diz que o mundo é sorteado na hora', () => {
+    const calendar = calendarFor([plan()], []);
+
+    expect(calendar.next?.map).toBe('sorteado na hora');
+    expect(textOf(buildCalendarScreen({ calendar }))).toContain('sorteado na hora');
+  });
+
+  it('sem o nível, a frase do mundo NEM CHEGA a existir', () => {
+    const plans = [plan()];
+
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans, queue }),
+      plans,
+      queue,
+      tiers: [],
+      levels: LEVELS,
+    });
+
+    expect(calendar.next?.map).toBeNull();
+    expect(calendar.next?.image).toBeNull();
+    expect(JSON.stringify(calendar)).not.toContain('4000');
   });
 });
 
@@ -310,18 +676,7 @@ describe('a tela do calendário', () => {
   });
 
   it('mostra a data, quanto falta e o que o wipe leva', () => {
-    const screen = buildCalendarScreen({
-      calendar: calendarOf({
-        wipes: [
-          {
-            scheduledAt: NOW + 6 * DAY + 4 * HOUR,
-            kind: 'cadence',
-            bpPolicy: 'keep',
-            absorbed: false,
-          },
-        ],
-      }),
-    });
+    const screen = buildCalendarScreen({ calendar: calendarOf({ next: nextOf() }) });
 
     const text = textOf(screen);
 
@@ -340,9 +695,7 @@ describe('a tela do calendário', () => {
 
     const first = textOf(
       buildCalendarScreen({
-        calendar: calendarOf({
-          wipes: [{ scheduledAt: wipeAt, kind: 'forced', bpPolicy: 'keep', absorbed: false }],
-        }),
+        calendar: calendarOf({ next: nextOf({ scheduledAt: wipeAt, kind: 'forced' }) }),
       }),
     );
 
@@ -350,7 +703,7 @@ describe('a tela do calendário', () => {
       buildCalendarScreen({
         calendar: calendarOf({
           now: NOW + 30 * 60_000,
-          wipes: [{ scheduledAt: wipeAt, kind: 'forced', bpPolicy: 'keep', absorbed: false }],
+          next: nextOf({ scheduledAt: wipeAt, kind: 'forced' }),
         }),
       }),
     );
@@ -370,11 +723,15 @@ describe('a tela do calendário', () => {
   });
 
   it('quem alcança vê o tamanho e a imagem — nunca a seed', () => {
+    const plans = [plan()];
+    const queue = [mapEntry(), mapEntry({ id: 2, seed: '777', worldSize: 3000 })];
+
     const calendar = buildPlayerCalendar({
       now: NOW,
       timeZone: 'UTC',
-      plans: [plan()],
-      queue: [mapEntry(), mapEntry({ id: 2, seed: '777', worldSize: 3000 })],
+      next: decide({ plans, queue }),
+      plans,
+      queue,
       tiers: ['gold'],
       levels: LEVELS,
     });
@@ -389,11 +746,25 @@ describe('a tela do calendário', () => {
 
   it('com a fila vazia, diz que o mundo é sorteado na hora', () => {
     const text = textOf(
+      buildCalendarScreen({
+        calendar: calendarOf({
+          mapsAllowed: 1,
+          tier: 'silver',
+          next: nextOf({ map: 'sorteado na hora' }),
+        }),
+      }),
+    );
+
+    expect(text).toContain('sorteado na hora');
+  });
+
+  it('sem wipe marcado, a coluna do mapa não promete mundo nenhum', () => {
+    const text = textOf(
       buildCalendarScreen({ calendar: calendarOf({ mapsAllowed: 1, tier: 'silver' }) }),
     );
 
-    expect(text).toContain('A FILA DE MAPAS ESTÁ VAZIA');
-    expect(text).toContain('sorteado na hora');
+    expect(text).toContain('SEM MUNDO ESCOLHIDO');
+    expect(text).toContain('Quando o próximo wipe for marcado');
   });
 
   it('o id volta IDÊNTICO ao pedido', () => {
@@ -423,6 +794,7 @@ interface Harness {
   readonly server: FakeServer;
   readonly sync: UiSync;
   readonly vips: VipsRepository;
+  readonly runs: WipeRunsRepository;
 }
 
 let harness: Harness;
@@ -446,6 +818,7 @@ beforeEach(() => {
   const schedule = new WipeScheduleRepository(db);
   const mapPool = new MapPoolRepository(db);
   const vips = new VipsRepository(db);
+  const runs = new WipeRunsRepository(db);
 
   schedule.createPlan(SERVER, { scheduledAt: NOW + 6 * DAY + 4 * HOUR, bpPolicy: 'keep' }, NOW);
 
@@ -495,13 +868,14 @@ beforeEach(() => {
     logger: silent,
     generatedScreens: createCalendarScreenProvider({
       schedule,
+      runs,
       mapPool,
       vips,
       now: () => NOW,
     }),
   });
 
-  harness = { db, server, sync, vips };
+  harness = { db, server, sync, vips, runs };
 });
 
 /** Pede a tela como o plugin pede, e devolve o JSON que saiu. */
@@ -613,6 +987,55 @@ describe('o comando que chega ao servidor', () => {
 });
 
 // ============================================================
+//  §3b  ELA NUNCA CAI NO RETÂNGULO DO PRESET
+// ============================================================
+
+describe('quando o provedor não consegue montar a página', () => {
+  const document = buildMainMenu();
+
+  it('a tela de emergência é VOLÁTIL, e por isso some no clique seguinte', () => {
+    const bundle = buildEmptyCalendarBundle(document, CALENDAR_SCREEN_ID, NOW);
+
+    // A do documento ("Wipes e eventos programados entram aqui") NÃO
+    // é volátil: o plugin a guarda no cache e o servidor inteiro
+    // fica com o retângulo antigo por até cinco minutos.
+    expect(bundle.volatile).toBe(true);
+    expect(bundle.id).toBe(CALENDAR_SCREEN_ID);
+  });
+
+  it('o banco fora do ar não derruba o pedido — ele vira a tela vazia', async () => {
+    const explode = (): never => {
+      throw new Error('o banco não respondeu');
+    };
+
+    const provider = createCalendarScreenProvider({
+      schedule: {
+        getSettings: explode,
+        listPlans: explode,
+        getPlan: explode,
+        nextPlan: explode,
+      },
+      runs: { running: explode },
+      mapPool: { list: explode, next: explode, get: explode },
+      vips: { activeOf: () => [] },
+      now: () => NOW,
+    });
+
+    const bundle = await provider({
+      serverId: SERVER,
+      document,
+      screenId: CALENDAR_SCREEN_ID,
+      steamId: undefined,
+    });
+
+    // Não lança, e não devolve `null`: um `null` faria o `UiSync`
+    // servir a tela DESENHADA, que fica em cache.
+    expect(bundle?.volatile).toBe(true);
+    expect(JSON.stringify(bundle)).toContain('SEM WIPE AGENDADO');
+  });
+});
+
+// ============================================================
 //  §4  A ROTA DO JOGADOR
 // ============================================================
 
@@ -636,6 +1059,7 @@ describe('GET /wipe/upcoming/me', () => {
     const repository = new WipeScheduleRepository(db);
     const mapPool = new MapPoolRepository(db);
     const vips = new VipsRepository(db);
+    const runs = new WipeRunsRepository(db);
 
     repository.createPlan(SERVER, { scheduledAt: Date.now() + 3 * DAY, bpPolicy: 'wipe' }, Date.now());
     mapPool.add(SERVER, { seed: SECRET_SEED, worldSize: 4000 });
@@ -652,6 +1076,7 @@ describe('GET /wipe/upcoming/me', () => {
           supervisor: { ids: () => [SERVER], configOf: () => null } as unknown as ServerSupervisor,
           mapPool,
           vips,
+          runs,
         });
 
         return Promise.resolve();
@@ -659,7 +1084,7 @@ describe('GET /wipe/upcoming/me', () => {
       { prefix: '/api' },
     );
 
-    return { app, db, vips };
+    return { app, db, vips, runs };
   }
 
   it('sem steamId, devolve a agenda e nenhum mapa', async () => {
@@ -670,14 +1095,45 @@ describe('GET /wipe/upcoming/me', () => {
     const body = response.json() as {
       readonly mapsAllowed: number;
       readonly maps: readonly unknown[];
+      readonly next: { readonly map: string | null } | null;
       readonly wipes: readonly unknown[];
     };
 
     expect(response.statusCode).toBe(200);
-    expect(body.wipes).toHaveLength(1);
+    // O único wipe da agenda É o próximo: ele vai no cartão, e a
+    // lista "DEPOIS" não o repete.
+    expect(body.next).not.toBeNull();
+    expect(body.wipes).toEqual([]);
     expect(body.mapsAllowed).toBe(0);
     expect(body.maps).toEqual([]);
+    // Sem VIP, nem a FRASE do mundo atravessa.
+    expect(body.next?.map).toBeNull();
     expect(response.body).not.toContain(SECRET_SEED);
+
+    await app.close();
+    db.close();
+  });
+
+  it('conta a execução em curso, e não o plano da semana que vem', async () => {
+    // A rota do jogador e o `{wipe.faltam}` do chat respondem a
+    // MESMA pergunta: se ela lesse só `wipe_plans`, o "WIPAR AGORA
+    // com hora marcada" — que não tem plano — sumiria dela.
+    const { app, db, runs } = buildApi();
+    await app.ready();
+
+    const started = runs.create(SERVER, {
+      kind: 'manual',
+      bpPolicy: 'wipe',
+      wipeAt: Date.now() + 2 * HOUR,
+    });
+
+    const response = await app.inject(`/api/servers/${SERVER}/wipe/upcoming/me`);
+    const body = response.json() as {
+      readonly next: { readonly scheduledAt: number; readonly running: boolean } | null;
+    };
+
+    expect(body.next?.scheduledAt).toBe(started.wipeAt);
+    expect(body.next?.running).toBe(true);
 
     await app.close();
     db.close();
@@ -702,12 +1158,18 @@ describe('GET /wipe/upcoming/me', () => {
     const body = response.json() as {
       readonly tier: string | null;
       readonly mapsAllowed: number;
+      readonly next: { readonly map: string | null; readonly image: { worldSize: number } | null };
       readonly maps: readonly { readonly worldSize: number }[];
     };
 
     expect(body.tier).toBe('silver');
     expect(body.mapsAllowed).toBe(1);
-    expect(body.maps[0]?.worldSize).toBe(4000);
+    // O mundo do PRÓXIMO wipe é o #1 da régua, e ele vem do PLANO —
+    // não da cabeça da fila. A prata para aqui: `maps` é o que vem
+    // ATRÁS dele, e é do ouro.
+    expect(body.next.image?.worldSize).toBe(4000);
+    expect(body.next.map).toBe('procedural 4000');
+    expect(body.maps).toEqual([]);
     // O corte é o MESMO da tela do jogo, porque é a mesma função.
     expect(response.body).not.toContain(SECRET_SEED);
 

@@ -33,6 +33,14 @@
 //  plano tem: sem o passo 1, o aviso de 15 minutos sairia dizendo
 //  "WIPE em sem wipe agendado".
 //
+//  ####  E A CONTA MORA EM wipe/next-wipe.ts  ####
+//
+//  Os três passos acima são executados por `nextWipe`, e não por
+//  este arquivo, porque um TERCEIRO caminho faz a mesma pergunta: a
+//  página CALENDÁRIO do menu do jogo. Enquanto ela tinha a cópia
+//  dela da decisão, o chat anunciava um wipe e o menu anunciava
+//  outro. Aqui ficou o que sempre foi daqui — virar FRASE.
+//
 //  ------------------------------------------------------------
 //  ####  NUNCA VAZIO  ####
 //
@@ -56,9 +64,9 @@
 //  do jogo, e não uma variável que vai para o chat de todo mundo.
 // ============================================================
 
-import type { WipeRunRecord, WipeWorld } from '../../db/wipe-runs-repository.js';
-import type { WipeScheduleReader } from '../../db/wipe-schedule-repository.js';
-import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind } from '../../types/wipe.js';
+import type { WipeWorld } from '../../db/wipe-runs-repository.js';
+import type { BpPolicy, MapPoolEntry, WipePlanKind } from '../../types/wipe.js';
+import { nextWipe, type NextWipeDeps, type NextWipeMap } from '../../wipe/next-wipe.js';
 import { localDateInZone, weekdayInZone, zoneOffsetMinutes } from '../../wipe/schedule.js';
 import type { VariableRegistry } from '../variables.js';
 
@@ -277,116 +285,78 @@ export function resolveWipeVariable(
 //  §5  DE ONDE OS FATOS VÊM
 // ------------------------------------------------------------
 
-/** As execuções em curso. O recorte mínimo de `WipeRunsRepository`. */
-export interface WipeRunsReader {
-  running(): readonly WipeRunRecord[];
-}
+/**
+ * ####  A DECISÃO MORA EM OUTRO ARQUIVO  ####
+ *
+ * QUAL é o próximo wipe e QUAL mundo é o dele saiu daqui para
+ * wipe/next-wipe.ts, e não porque este arquivo estava grande: a
+ * página CALENDÁRIO do menu do jogo precisa da MESMA resposta, e a
+ * cópia dela — parecida, e não igual — anunciava ao jogador um
+ * wipe diferente do que este provedor anunciava no chat.
+ *
+ * O que ficou aqui é o que sempre foi daqui: transformar a decisão
+ * em FRASE. A tela importa as mesmas funções de formato, então as
+ * duas leituras só podem divergir se alguém mudar uma delas de
+ * propósito.
+ */
+export type { WipeMapPoolReader, WipeRunsReader } from '../../wipe/next-wipe.js';
 
-/** A fila de mapas, só de leitura. O recorte de `MapPoolRepository`. */
-export interface WipeMapPoolReader {
-  next(serverId: string, forced?: boolean): MapPoolEntry | null;
-  get(serverId: string, id: number): MapPoolEntry | null;
-}
+/** Os três leitores de que as variáveis precisam. Ver `NextWipeDeps`. */
+export type WipeVariablesDeps = NextWipeDeps;
 
-export interface WipeVariablesDeps {
-  readonly schedule: WipeScheduleReader;
-  readonly runs: WipeRunsReader;
-  readonly mapPool: WipeMapPoolReader;
-}
+/** O que `{wipe.mapa}` responde quando o plano é `keep`. */
+export const SAME_MAP_AS_NOW = 'o mesmo mapa de agora';
 
 /**
  * Qual wipe as variáveis estão descrevendo, agora, neste servidor.
  *
  * A ordem — execução em curso, depois agenda — está explicada no
- * cabeçalho. `null` = não há wipe à vista.
+ * cabeçalho e implementada em `nextWipe`. `null` = não há wipe à
+ * vista.
  */
 export function currentWipeFacts(
   serverId: string,
   deps: WipeVariablesDeps,
   now: number,
 ): WipeFacts | null {
-  const timeZone = zoneOf(deps, serverId);
-  const run = deps.runs.running().find((candidate) => candidate.serverId === serverId);
+  const next = nextWipe(serverId, deps, now);
 
-  if (run !== undefined) {
-    return {
-      wipeAt: run.wipeAt,
-      kind: run.kind,
-      bpPolicy: run.bpPolicy,
-      // Depois do passo `configurar` o mundo novo já está gravado, e
-      // ele é a resposta mais certa que existe: a fila já foi
-      // consumida, e olhar para a fila agora mostraria o mundo do
-      // wipe SEGUINTE.
-      map:
-        run.mapAfter === null
-          ? mapOfPool(deps, serverId, run.kind === 'forced')
-          : describeMapWorld(run.mapAfter),
-      timeZone,
-    };
-  }
-
-  const plan = nextPendingPlan(deps.schedule.listPlans(serverId, { from: now }));
-
-  if (plan === null) {
+  if (next === null) {
     return null;
   }
 
   return {
-    wipeAt: plan.scheduledAt,
-    kind: plan.kind,
-    bpPolicy: plan.bpPolicy,
-    map: mapOfPlan(deps, plan),
-    timeZone,
+    wipeAt: next.wipeAt,
+    kind: next.kind,
+    bpPolicy: next.bpPolicy,
+    map: describeNextWipeMap(next.map),
+    timeZone: next.timeZone,
   };
 }
 
 /**
- * O próximo wipe que ainda vai acontecer.
+ * O mundo que a decisão escolheu, em uma frase curta.
  *
- * `planned` E `running`, exatamente como o `isPending` da aba
- * Geral (panel/src/components/wipe/labels.ts): é essa igualdade que
- * faz a frase do chat e a contagem da tela mostrarem o mesmo
- * número. Os outros estados — `done`, `skipped`, `failed`,
- * `absorbed` — estão na tabela para explicar um dia sem wipe, e não
- * para serem anunciados.
- */
-function nextPendingPlan(plans: readonly WipePlan[]): WipePlan | null {
-  return plans.find((plan) => plan.status === 'planned' || plan.status === 'running') ?? null;
-}
-
-function mapOfPlan(deps: WipeVariablesDeps, plan: WipePlan): string | null {
-  if (plan.mapSource === 'keep') {
-    return 'o mesmo mapa de agora';
-  }
-
-  if (plan.mapSource === 'fixed' && plan.mapPoolId !== null) {
-    const chosen = deps.mapPool.get(plan.serverId, plan.mapPoolId);
-
-    return chosen === null ? null : describeMapEntry(chosen);
-  }
-
-  return mapOfPool(deps, plan.serverId, plan.kind === 'forced');
-}
-
-function mapOfPool(deps: WipeVariablesDeps, serverId: string, forced: boolean): string | null {
-  const entry = deps.mapPool.next(serverId, forced);
-
-  return entry === null ? null : describeMapEntry(entry);
-}
-
-/**
- * O fuso da agenda deste servidor.
+ * `null` quando ninguém escolheu — a fila vazia é normal, e quem lê
+ * decide o que dizer no lugar (no chat, `MAP_DRAWN_ON_THE_SPOT`).
  *
- * Um servidor que não existe mais, ou um banco que ainda não tem a
- * linha, não pode derrubar uma frase de chat: a leitura falha para
- * o UTC, e o pior que acontece é a hora sair no fuso errado numa
- * frase — e não uma mensagem a menos.
+ * Exportada porque a tela do calendário escreve a MESMA frase a
+ * partir da MESMA união: é o que impede o menu do jogo de prometer
+ * um mundo e o chat prometer outro.
  */
-function zoneOf(deps: WipeVariablesDeps, serverId: string): string {
-  try {
-    return deps.schedule.getSettings(serverId).cadence.timeZone;
-  } catch {
-    return 'UTC';
+export function describeNextWipeMap(map: NextWipeMap): string | null {
+  switch (map.source) {
+    case 'keep':
+      return SAME_MAP_AS_NOW;
+
+    case 'entry':
+      return describeMapEntry(map.entry);
+
+    case 'world':
+      return describeMapWorld(map.world);
+
+    default:
+      return null;
   }
 }
 

@@ -44,31 +44,39 @@
 //  ####  A RÉGUA DO VIP, E POR QUE ELA VEM DE GRAÇA  ####
 //
 //    sem VIP / bronze   a data e a política de blueprint
-//    silver             + o mapa #1 (tamanho e imagem)
-//    gold               + os mapas #2 e #3
+//    silver             + o mundo DO PRÓXIMO WIPE (tamanho e imagem)
+//    gold               + os dois seguintes da fila
 //
 //  O dado já existe: a fila de mapas é do admin e o RustMaps já
 //  preencheu as imagens. "VIP vê o futuro" é produto que não custa
 //  uma tabela nova.
 //
 //  ------------------------------------------------------------
-//  ####  AS FRASES SÃO AS MESMAS DO CHAT  ####
+//  ####  A DECISÃO É A MESMA DO CHAT, E NÃO SÓ AS FRASES  ####
 //
 //  `formatWipeCountdown`, `formatWipeMoment`, `describeBpPolicy` e
 //  `describeMapEntry` vêm de messages/providers/wipe.ts, que é
-//  quem responde `{wipe.faltam}`. Uma segunda conta aqui daria
-//  duas respostas para "quando é o próximo wipe", e a divergência
-//  apareceria justamente no dia do wipe — o chat dizendo uma coisa
-//  e o menu outra.
+//  quem responde `{wipe.faltam}`. Mas reusar só o TEXTO não basta,
+//  e a primeira versão desta tela provou: ela reimplementou QUAL
+//  plano é o próximo e QUAL mapa é o dele, e às 14:00 de quarta,
+//  com wipe quinta às 10:00, o chat anunciava "WIPE em 20 horas"
+//  enquanto o menu dizia "faltam 7 dias e 20 horas". As frases
+//  eram idênticas; as respostas, não.
+//
+//  Por isso o `next` chega aqui PRONTO, de `nextWipe`
+//  (wipe/next-wipe.ts) — a mesma função que o provedor do chat
+//  chama. Esta tela desenha a decisão; ela não a toma.
 //
 //  Os construtores de tela vêm de ui-widgets.ts, compartilhados
 //  com a loja e os kits: duas cópias divergem no primeiro ajuste.
 // ============================================================
 
 import type { WipeScheduleReader } from '../db/wipe-schedule-repository.js';
+import type { Logger } from '../logger.js';
 import {
   describeBpPolicy,
   describeMapEntry,
+  describeNextWipeMap,
   formatWipeCountdown,
   formatWipeMoment,
   MAP_DRAWN_ON_THE_SPOT,
@@ -77,7 +85,14 @@ import {
 import type { UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transport.js';
 import type { BpPolicy, MapKind, MapPoolEntry, WipePlan, WipePlanKind } from '../types/wipe.js';
+import { toError } from '../util.js';
 import type { VipTierLevel } from '../vip/tiers.js';
+import {
+  nextWipe,
+  type NextWipe,
+  type WipeMapPoolReader,
+  type WipeRunsReader,
+} from '../wipe/next-wipe.js';
 
 import {
   C,
@@ -147,6 +162,47 @@ export interface CalendarWipeView {
 }
 
 /**
+ * O PRÓXIMO wipe — o do cartão grande.
+ *
+ * ####  ELE NÃO É `wipes[0]`  ####
+ *
+ * E não é por dois motivos, os dois medidos:
+ *
+ *   · o mais próximo da agenda pode estar `absorbed`. Com a
+ *     colisão em `absorb`, o wipe de cadência de quarta é cancelado
+ *     pelo forçado de quinta e continua na tabela, na frente dele.
+ *     No cartão grande, ele daria ao jogador data, contagem e
+ *     política de blueprint de um wipe que não vai acontecer;
+ *
+ *   · nas horas que antecedem a hora marcada o wipe já está
+ *     `running` — o relógio dispara com a antecedência do maior
+ *     aviso, 24 h no padrão. Um filtro que só aceitasse `planned`
+ *     pularia justamente o wipe que o chat está anunciando.
+ *
+ * Quem decide é `nextWipe`, de wipe/next-wipe.ts: a MESMA função
+ * que responde `{wipe.faltam}`.
+ */
+export interface CalendarNextWipeView {
+  /** Epoch ms UTC. */
+  readonly scheduledAt: number;
+  readonly kind: WipePlanKind;
+  readonly bpPolicy: BpPolicy;
+  /** A execução dele já começou: os avisos já estão saindo no chat. */
+  readonly running: boolean;
+  /**
+   * O mundo que entra, na frase do chat.
+   *
+   * `null` = o nível deste jogador não alcança o mapa. É diferente
+   * de "ninguém escolheu ainda", que tem frase própria
+   * (`MAP_DRAWN_ON_THE_SPOT`) — e é o que impede a régua do VIP de
+   * virar um buraco sem explicação.
+   */
+  readonly map: string | null;
+  /** A imagem daquele mundo, quando ele é uma entrada da fila. */
+  readonly image: CalendarMapView | null;
+}
+
+/**
  * Um mundo da fila, como o jogador o vê.
  *
  * ####  NÃO HÁ CAMPO PARA A SEED, E ISSO É O RECURSO  ####
@@ -163,6 +219,15 @@ export interface CalendarMapView {
   /** A imagem grande. `null` = ainda não veio do RustMaps. */
   readonly previewUrl: string | null;
   readonly thumbUrl: string | null;
+  /**
+   * Por que a imagem foi RETIRADA, quando ela existia.
+   *
+   * `null` = nada foi retirado (com ou sem imagem). A anulação
+   * precisa deixar rastro: sem este campo, um mundo com prévia
+   * pronta no banco aparecia para sempre como "ainda não ficou
+   * pronta", e ninguém tinha por onde começar a procurar.
+   */
+  readonly imageHiddenBy: 'seed-na-url' | null;
 }
 
 /** Tudo o que a tela daquele jogador pode desenhar. E nada além. */
@@ -173,17 +238,39 @@ export interface PlayerCalendar {
   readonly timeZone: string;
   /** O nível que mandou no recorte. `null` = sem VIP. */
   readonly tier: string | null;
-  /** Quantos mundos da fila este nível enxerga: 0, 1 ou 3. */
+  /** Quantos mundos este nível enxerga: 0, 1 ou 3. */
   readonly mapsAllowed: number;
-  /** O que vem por aí, do mais próximo para o mais distante. */
+  /** O do cartão grande. `null` = não há wipe à vista. */
+  readonly next: CalendarNextWipeView | null;
+  /**
+   * O RESTO da agenda, do mais próximo para o mais distante.
+   *
+   * Sem o `next` dentro: ele já tem cartão próprio, e repeti-lo
+   * aqui faria a lista "DEPOIS" começar pelo wipe que está logo
+   * acima dela.
+   */
   readonly wipes: readonly CalendarWipeView[];
-  /** Os mundos que ele PODE ver, na ordem da fila. Sem seed. */
+  /**
+   * Os mundos da FILA atrás do próximo, na ordem. Sem seed.
+   *
+   * O mundo do próximo wipe não está aqui: ele é `next.image`, e
+   * pode nem sair da fila (um plano `keep` não consome nenhuma
+   * entrada).
+   */
   readonly maps: readonly CalendarMapView[];
 }
 
 export interface PlayerCalendarInput {
   readonly now: number;
   readonly timeZone: string;
+  /**
+   * QUAL é o próximo wipe, já decidido por `nextWipe`.
+   *
+   * Vem pronto de fora, e não é calculado aqui, porque a decisão é
+   * do chat também: um `find` local sobre `plans` seria a segunda
+   * conta que esta frente existe para não ter. `null` = nenhum.
+   */
+  readonly next: NextWipe | null;
   /** A agenda já lida do banco, em ordem. */
   readonly plans: readonly WipePlan[];
   /** A fila de mapas daquele servidor, em ordem. */
@@ -248,13 +335,27 @@ export function mapAllowanceOf(
  */
 export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar {
   const allowance = mapAllowanceOf(input.tiers, input.levels);
+  const next = input.next;
 
   const wipes = input.plans
     .filter((plan) => plan.scheduledAt >= input.now)
-    // `planned` e `absorbed`, como o `/wipe/upcoming` do painel:
+    // ####  `running` ENTRA, E É O ESTADO DO DIA DO WIPE  ####
+    //
+    // Nas horas que antecedem a hora marcada o plano está
+    // `running` — o relógio dispara com a antecedência do maior
+    // aviso (24 h no padrão). Sem ele nesta lista, o wipe que o
+    // chat está anunciando some da agenda do jogador.
+    //
+    // `absorbed` fica, marcado, como no `/wipe/upcoming` do painel.
     // `done`, `skipped` e `failed` estão na tabela para explicar um
     // dia sem wipe, e não para serem prometidos a ninguém.
-    .filter((plan) => plan.status === 'planned' || plan.status === 'absorbed')
+    .filter(
+      (plan) =>
+        plan.status === 'planned' || plan.status === 'running' || plan.status === 'absorbed',
+    )
+    // O próximo já tem o cartão grande: repeti-lo faria a lista
+    // "DEPOIS" abrir com o wipe que está logo acima dela.
+    .filter((plan) => next === null || next.planId === null || plan.id !== next.planId)
     .slice(0, input.limit ?? CALENDAR_WIPE_LIMIT)
     .map(
       (plan): CalendarWipeView => ({
@@ -267,15 +368,48 @@ export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar 
 
   // Só os mundos PRONTOS: prometer um mapa que o RustMaps ainda
   // está desenhando é prometer o que pode não entrar.
-  const ready = input.queue.filter((entry) => entry.status === 'ready');
+  //
+  // E sem o mundo do PRÓXIMO wipe, que já é `next.image`: com
+  // `mapSource: 'fixed'` ele pode estar em qualquer posição da
+  // fila, e num wipe forçado a cabeça da fila pode ter sido pulada
+  // por ser custom sem marca de versão.
+  const chosen = next?.map.source === 'entry' ? next.map.entry : null;
+
+  const ready = input.queue.filter(
+    (entry) => entry.status === 'ready' && (chosen === null || entry.id !== chosen.id),
+  );
+
+  // O nível já paga pelo mundo do próximo wipe: o que sobra da
+  // régua é o que ele vê ATRÁS dele. Prata fica com zero; ouro,
+  // com dois.
+  const behind = Math.max(0, allowance.maps - 1);
 
   return {
     now: input.now,
     timeZone: input.timeZone,
     tier: allowance.tier,
     mapsAllowed: allowance.maps,
+    next:
+      next === null
+        ? null
+        : {
+            scheduledAt: next.wipeAt,
+            kind: next.kind,
+            bpPolicy: next.bpPolicy,
+            running: next.running,
+            // ####  O RECORTE ACONTECE AQUI, E NÃO NO DESENHO  ####
+            //
+            // Sem o nível, a frase do mundo nem chega a existir — e
+            // por isso não há como ela viajar escondida na payload
+            // do RCON atrás de um widget que ninguém desenhou.
+            map:
+              allowance.maps === 0
+                ? null
+                : (describeNextWipeMap(next.map) ?? MAP_DRAWN_ON_THE_SPOT),
+            image: allowance.maps === 0 || chosen === null ? null : toMapView(chosen),
+          },
     wipes,
-    maps: ready.slice(0, allowance.maps).map(toMapView),
+    maps: ready.slice(0, behind).map(toMapView),
   };
 }
 
@@ -292,18 +426,56 @@ export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar 
  * enfeite, e a seed não é.
  */
 function toMapView(entry: MapPoolEntry): CalendarMapView {
-  const withoutSeed = (url: string | null): string | null =>
-    url === null || (entry.seed !== null && entry.seed !== '' && url.includes(entry.seed))
-      ? null
-      : url;
+  // Uma de cada vez: se só a prévia grande carrega a seed, a
+  // miniatura continua servindo — perder as duas por causa de uma é
+  // desistir de uma imagem que não vaza nada.
+  const previewUrl = urlCarriesSeed(entry.previewUrl, entry.seed) ? null : entry.previewUrl;
+  const thumbUrl = urlCarriesSeed(entry.thumbUrl, entry.seed) ? null : entry.thumbUrl;
+  const hidden =
+    (entry.previewUrl !== null && previewUrl === null) ||
+    (entry.thumbUrl !== null && thumbUrl === null);
 
   return {
     kind: entry.kind,
     level: entry.level,
     worldSize: entry.worldSize,
-    previewUrl: withoutSeed(entry.previewUrl),
-    thumbUrl: withoutSeed(entry.thumbUrl),
+    previewUrl,
+    thumbUrl,
+    imageHiddenBy: hidden ? 'seed-na-url' : null,
   };
+}
+
+/**
+ * A URL entrega a seed deste mundo?
+ *
+ * ####  TOKEN INTEIRO, E NÃO SUBSTRING  ####
+ *
+ * `url.includes(seed)` parece a defesa óbvia e é uma armadilha:
+ * seed curta é válida neste projeto (`7`, `287`), e a URL do
+ * RustMaps carrega dígitos no caminho —
+ * `files.rustmaps.com/img/287/b3c1f0a2/map.png`. Com `includes`, a
+ * seed `7` casava com aquele `287` e o VIP lia PARA SEMPRE "a
+ * imagem deste mundo ainda não ficou pronta", com a prévia pronta
+ * no banco.
+ *
+ * Quebrar a URL em tokens alfanuméricos resolve o caso real — o
+ * vazamento é `.../map/4000_18422`, em que a seed é um token
+ * inteiro — sem anular a prévia de todo mundo.
+ *
+ * ####  O EMPATE CONTINUA CAINDO PARA O LADO SEGURO  ####
+ *
+ * Um segmento numérico igual à seed (`/287/` com seed `287`) é
+ * indistinguível de um vazamento, e aí a imagem some MESMO ASSIM.
+ * Perder uma prévia por coincidência é barato; entregar a seed
+ * dias antes do wipe, não. A diferença é que agora isso deixa
+ * rastro em `imageHiddenBy`, em vez de acontecer em silêncio.
+ */
+function urlCarriesSeed(url: string | null, seed: string | null): boolean {
+  if (url === null || url === '' || seed === null || seed === '') {
+    return false;
+  }
+
+  return url.split(/[^0-9A-Za-z]+/).includes(seed);
 }
 
 // ============================================================
@@ -461,9 +633,9 @@ function line(top: number, height: number): Rect {
  * jogador achar que a tela quebrou.
  */
 function nextWipeBody(calendar: PlayerCalendar): readonly UiElement[] {
-  const next = calendar.wipes[0];
+  const next = calendar.next;
 
-  if (next === undefined) {
+  if (next === null) {
     return [
       label('cal-prox-t', NO_WIPE_SCHEDULED.toUpperCase(), line(PAD, 28), {
         size: 17,
@@ -484,13 +656,11 @@ function nextWipeBody(calendar: PlayerCalendar): readonly UiElement[] {
 
   // ####  O MAPA SÓ ENTRA PARA QUEM TEM DIREITO  ####
   //
-  // E ele já chegou aqui recortado: `calendar.maps` está vazio para
-  // quem não alcança a régua. Não há `if` de desenho escondendo
-  // dado que veio junto na payload.
-  const map = calendar.maps[0];
-
-  if (map !== undefined) {
-    rows.push({ text: `MAPA          ${describeMapEntry(map)}`, item: null });
+  // E ele já chegou aqui recortado: `next.map` é `null` para quem
+  // não alcança a régua. Não há `if` de desenho escondendo dado que
+  // veio junto na payload.
+  if (next.map !== null) {
+    rows.push({ text: `MAPA          ${next.map}`, item: null });
   }
 
   rows.push({ text: `BLUEPRINTS    ${describeBpPolicy(next.bpPolicy)}`, item: null });
@@ -506,7 +676,11 @@ function nextWipeBody(calendar: PlayerCalendar): readonly UiElement[] {
 
     label(
       'cal-prox-c',
-      `faltam ${formatWipeCountdown(next.scheduledAt - calendar.now)}`,
+      // O wipe que já começou continua contando: a hora marcada é a
+      // do MUNDO zerando, e os avisos saem antes dela. Dizer "em
+      // curso" e esconder o número tiraria do jogador exatamente o
+      // que ele abriu a tela para ver.
+      countdownLine(next, calendar.now),
       line(PAD + 30, 22),
       { size: 14, align: 'MiddleLeft', color: C.amber, font: 'RobotoCondensed-Bold.ttf' },
     ),
@@ -520,9 +694,30 @@ function nextWipeBody(calendar: PlayerCalendar): readonly UiElement[] {
   ];
 }
 
+/**
+ * A contagem regressiva, com a marca de quem já está executando.
+ *
+ * A conta é a de `{wipe.faltam}` — a mesma função, o mesmo número.
+ * O que muda é a moldura: "já começou" na janela em que o passo
+ * `avisar` já está falando no chat, e a hora do mundo zerando ainda
+ * não chegou.
+ */
+function countdownLine(next: CalendarNextWipeView, now: number): string {
+  const remaining = formatWipeCountdown(next.scheduledAt - now);
+
+  if (remaining === 'agora') {
+    return 'o mundo está zerando agora';
+  }
+
+  return `${next.running ? 'já começou · ' : ''}faltam ${remaining}`;
+}
+
 /** A lista do que vem depois do próximo. */
 function laterBody(calendar: PlayerCalendar): readonly UiElement[] {
-  const rest = calendar.wipes.slice(1);
+  // Já vem sem o próximo: quem o tirou foi `buildPlayerCalendar`,
+  // pelo id do plano — e não um `slice(1)`, que dependia de o
+  // primeiro da lista ser o do cartão grande. Ele não era.
+  const rest = calendar.wipes;
 
   const rows: ContentRow[] =
     rest.length === 0
@@ -582,11 +777,18 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
     ];
   }
 
-  const first = calendar.maps[0];
+  // ####  O MUNDO É O DO PLANO, E NÃO A CABEÇA DA FILA  ####
+  //
+  // Quem o escolheu foi `mapOfPlan`, em wipe/next-wipe.ts, olhando
+  // o `mapSource`: `keep` responde "o mesmo mapa de agora",
+  // `fixed` busca a entrada apontada, e `pool` pede à fila — que
+  // num wipe FORÇADO pula o mapa custom sem marca de versão. É esta
+  // a prévia que o VIP prata comprou: a do mundo que vai subir.
+  const next = calendar.next;
 
-  if (first === undefined) {
+  if (next === null || next.map === null) {
     return [
-      label('cal-mapa-t', 'A FILA DE MAPAS ESTÁ VAZIA', line(PAD, 26), {
+      label('cal-mapa-t', 'SEM MUNDO ESCOLHIDO', line(PAD, 26), {
         size: 15,
         align: 'MiddleLeft',
         color: C.textMuted,
@@ -594,14 +796,17 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
       }),
       label(
         'cal-mapa-x',
-        `O mundo do próximo wipe é ${MAP_DRAWN_ON_THE_SPOT}.`,
+        next === null
+          ? 'Quando o próximo wipe for marcado, o mundo dele aparece aqui.'
+          : `O mundo do próximo wipe é ${MAP_DRAWN_ON_THE_SPOT}.`,
         line(PAD + 30, 22),
         { size: 12, align: 'MiddleLeft', color: C.textMuted },
       ),
     ];
   }
 
-  const image = first.previewUrl ?? first.thumbUrl;
+  const first = next.image;
+  const image = first?.previewUrl ?? first?.thumbUrl ?? null;
 
   const imageRect: Rect = {
     anchorMin: { x: 0.5, y: 1 },
@@ -614,16 +819,24 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
     // Sem imagem ainda, um retângulo vazio é honesto: ele não finge
     // ser um mundo que ninguém desenhou. A mesma escolha do card de
     // kit sem catálogo lido.
+    //
+    // E quando a imagem foi RETIRADA por carregar a seed, a frase
+    // diz isso: um "ainda não ficou pronta" sobre uma prévia que
+    // está pronta no banco manda o admin procurar no lugar errado.
     isDrawableUrl(image)
       ? urlImage('cal-mapa-i', image, imageRect)
       : panel('cal-mapa-i', imageRect, C.surface2, [
-          label('cal-mapa-in', 'a imagem deste mundo ainda não ficou pronta', fill(8, 8, 8, 8), {
-            size: 11,
-            color: C.textMuted,
-          }),
+          label(
+            'cal-mapa-in',
+            first?.imageHiddenBy === 'seed-na-url'
+              ? 'a prévia foi escondida: o endereço dela carrega a seed'
+              : 'a imagem deste mundo ainda não ficou pronta',
+            fill(8, 8, 8, 8),
+            { size: 11, color: C.textMuted },
+          ),
         ]),
 
-    label('cal-mapa-t', describeMapEntry(first).toUpperCase(), line(PAD + MAP_IMAGE + 10, 24), {
+    label('cal-mapa-t', next.map.toUpperCase(), line(PAD + MAP_IMAGE + 10, 24), {
       size: 15,
       align: 'MiddleCenter',
       font: 'RobotoCondensed-Bold.ttf',
@@ -632,7 +845,7 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
 
   // O OURO vê a fila; a PRATA vê só o próximo. A lista aparece
   // quando há o que listar, e não como um retângulo vazio.
-  const rest = calendar.maps.slice(1);
+  const rest = calendar.maps;
 
   if (rest.length > 0) {
     const top = PAD + MAP_IMAGE + 40;
@@ -672,8 +885,16 @@ function isDrawableUrl(url: string | null): url is string {
 //  §3  A LIGAÇÃO COM O RESTO DO AGENTE
 // ============================================================
 
-/** A fila de mapas, só de leitura. O recorte de `MapPoolRepository`. */
-export interface CalendarMapQueueReader {
+/**
+ * A fila de mapas, só de leitura. O recorte de `MapPoolRepository`.
+ *
+ * `next` e `get` vêm do `WipeMapPoolReader` porque QUAL mundo entra
+ * no próximo wipe é a decisão de `mapOfPlan` — a mesma que responde
+ * `{wipe.mapa}` no chat —, e ela precisa das duas: `fixed` busca
+ * pelo id, `pool` pede a cabeça da fila já sabendo se o wipe é
+ * forçado. `list` é a fila inteira, que é o que o OURO vê atrás.
+ */
+export interface CalendarMapQueueReader extends WipeMapPoolReader {
   list(serverId: string): readonly MapPoolEntry[];
 }
 
@@ -684,6 +905,17 @@ export interface CalendarVipReader {
 
 export interface CalendarScreenProviderOptions {
   readonly schedule: WipeScheduleReader;
+  /**
+   * As execuções em curso.
+   *
+   * ####  SEM ISTO A TELA MENTE NO DIA DO WIPE  ####
+   *
+   * O "WIPAR AGORA com hora marcada" (`POST /wipe/runs` com `at`)
+   * nem plano tem: só a execução sabe dele. Enquanto o chat conta
+   * três horas, uma tela que só lê `wipe_plans` diz "sem wipe
+   * agendado".
+   */
+  readonly runs: WipeRunsReader;
   readonly mapPool: CalendarMapQueueReader;
   readonly vips: CalendarVipReader;
   /**
@@ -696,6 +928,8 @@ export interface CalendarScreenProviderOptions {
   readonly levelsOf?: (serverId: string) => Promise<readonly VipTierLevel[]>;
   /** O relógio, injetável para o teste. */
   readonly now?: () => number;
+  /** Para registrar o que a tela não conseguiu ler. Ver o provedor. */
+  readonly logger?: Logger;
 }
 
 /**
@@ -718,6 +952,20 @@ export type CalendarScreenProvider = (input: {
  * Devolve `null` para tudo o que não é dela — é assim que o
  * `generatedScreens` do index.ts encadeia loja, kits e calendário
  * sem que nenhum deles saiba dos outros.
+ *
+ * ####  ELE NÃO LANÇA PARA O ENDEREÇO QUE É DELE  ####
+ *
+ * Uma exceção aqui não vira erro na tela: o `UiSync` a registra e
+ * cai para a tela DESENHADA do preset ("Wipes e eventos programados
+ * entram aqui"). E essa tela não é `volatile` — o plugin a guarda
+ * no cache do documento, e o servidor INTEIRO fica com o retângulo
+ * antigo por até cinco minutos, muito depois de o banco ter voltado
+ * a responder.
+ *
+ * Então tudo o que pode falhar (o fuso, o VIP, a agenda, a fila, o
+ * `OrigemZVip.json`) é lido com rede embaixo, e o pior desfecho é
+ * uma tela `volatile` dizendo o que ela não conseguiu ler — que o
+ * próximo clique refaz.
  */
 export function createCalendarScreenProvider(
   options: CalendarScreenProviderOptions,
@@ -728,39 +976,114 @@ export function createCalendarScreenProvider(
     }
 
     const now = (options.now ?? Date.now)();
-    const settings = options.schedule.getSettings(input.serverId);
 
-    // ####  O NÍVEL VEM DA CONEXÃO, NUNCA DO CLIQUE  ####
-    //
-    // O `steamId` chega do plugin junto do pedido, tirado de quem
-    // está com o menu aberto. Sem ele — plugin antigo, ou a carga
-    // inicial que vai ao servidor sem jogador nenhum —, a resposta
-    // é a de quem não tem VIP: negar por falta de identidade é a
-    // saída conservadora.
-    const tiers =
-      input.steamId === undefined
-        ? []
-        : options.vips.activeOf(input.steamId, now).map((vip) => vip.tier);
+    const pack = (calendar: PlayerCalendar): UiScreenBundle =>
+      toGeneratedScreenBundle(
+        input.document,
+        buildCalendarScreen({ calendar, screenId: input.screenId }),
+        // O SHELL conhece `tela-calendario`: sem isto, o destaque do
+        // botão CALENDÁRIO sumiria justamente ao entrar nele.
+        CALENDAR_SCREEN_ID,
+      );
 
-    // Sem VIP nenhum não há hierarquia a consultar, e ler o config
-    // do plugin seria ir ao disco para confirmar um zero.
-    const levels = tiers.length === 0 ? [] : ((await options.levelsOf?.(input.serverId)) ?? []);
+    try {
+      // ####  O NÍVEL VEM DA CONEXÃO, NUNCA DO CLIQUE  ####
+      //
+      // O `steamId` chega do plugin junto do pedido, tirado de quem
+      // está com o menu aberto. Sem ele — plugin antigo, ou a carga
+      // inicial que vai ao servidor sem jogador nenhum —, a resposta
+      // é a de quem não tem VIP: negar por falta de identidade é a
+      // saída conservadora.
+      const tiers =
+        input.steamId === undefined
+          ? []
+          : options.vips.activeOf(input.steamId, now).map((vip) => vip.tier);
 
-    const calendar = buildPlayerCalendar({
-      now,
-      timeZone: settings.cadence.timeZone,
-      plans: options.schedule.listPlans(input.serverId, { from: now }),
-      queue: options.mapPool.list(input.serverId),
-      tiers,
-      levels,
-    });
+      // Sem VIP nenhum não há hierarquia a consultar, e ler o config
+      // do plugin seria ir ao disco para confirmar um zero.
+      const levels = tiers.length === 0 ? [] : ((await options.levelsOf?.(input.serverId)) ?? []);
 
-    return toGeneratedScreenBundle(
-      input.document,
-      buildCalendarScreen({ calendar, screenId: input.screenId }),
-      // O SHELL conhece `tela-calendario`: sem isto, o destaque do
-      // botão CALENDÁRIO sumiria justamente ao entrar nele.
-      CALENDAR_SCREEN_ID,
-    );
+      // A MESMA decisão que responde `{wipe.faltam}` no chat. Ver
+      // wipe/next-wipe.ts.
+      const next = nextWipe(input.serverId, options, now);
+
+      const calendar = buildPlayerCalendar({
+        now,
+        timeZone: next?.timeZone ?? zoneOfServer(options, input.serverId),
+        next,
+        plans: options.schedule.listPlans(input.serverId, { from: now }),
+        queue: options.mapPool.list(input.serverId),
+        tiers,
+        levels,
+      });
+
+      for (const map of [calendar.next?.image ?? null, ...calendar.maps]) {
+        if (map?.imageHiddenBy === 'seed-na-url') {
+          options.logger?.warn(
+            { server: input.serverId, world: map.level, size: map.worldSize },
+            'a prévia deste mundo não foi enviada: o endereço dela carrega a seed',
+          );
+        }
+      }
+
+      return pack(calendar);
+    } catch (error) {
+      options.logger?.error(
+        { server: input.serverId, err: toError(error) },
+        'não consegui montar a página CALENDÁRIO; mando a tela vazia, que não fica em cache',
+      );
+
+      // Vazia, mas NOSSA: `volatile`, e por isso o próximo clique
+      // tenta de novo. A do documento ficaria colada por minutos.
+      return pack(emptyCalendar(now));
+    }
   };
+}
+
+/**
+ * A página CALENDÁRIO sem nada dentro, empacotada e VOLÁTIL.
+ *
+ * ####  ELA EXISTE PARA NÃO CAIR NA TELA DO PRESET  ####
+ *
+ * O `generatedScreens` do index.ts guarda o provedor numa variável
+ * que nasce vazia — a agenda e a fila de mapas são construídas
+ * depois do `UiSync`. Se por qualquer motivo o pedido chegar antes
+ * de ela ser preenchida, o `UiSync` serviria a tela DESENHADA do
+ * preset ("Wipes e eventos programados entram aqui"), que NÃO é
+ * volátil: o plugin a guarda no cache do documento e o servidor
+ * inteiro fica com o retângulo antigo por até cinco minutos.
+ *
+ * Esta aqui some no clique seguinte.
+ */
+export function buildEmptyCalendarBundle(
+  document: UiDocument,
+  screenId: string,
+  now: number = Date.now(),
+): UiScreenBundle {
+  return toGeneratedScreenBundle(
+    document,
+    buildCalendarScreen({ calendar: emptyCalendar(now), screenId }),
+    CALENDAR_SCREEN_ID,
+  );
+}
+
+function emptyCalendar(now: number): PlayerCalendar {
+  return {
+    now,
+    timeZone: 'UTC',
+    tier: null,
+    mapsAllowed: 0,
+    next: null,
+    wipes: [],
+    maps: [],
+  };
+}
+
+/** O fuso da agenda, sem derrubar a tela quando o banco não responde. */
+function zoneOfServer(options: CalendarScreenProviderOptions, serverId: string): string {
+  try {
+    return options.schedule.getSettings(serverId).cadence.timeZone;
+  } catch {
+    return 'UTC';
+  }
 }

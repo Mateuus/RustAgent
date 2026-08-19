@@ -98,7 +98,9 @@ import { registerWipeVariables } from './messages/providers/wipe.js';
 import { WipeBroadcastAnnouncer } from './wipe/announce.js';
 // ---- o calendário dentro do jogo (Docs\16 §9.3) ----
 import {
+  buildEmptyCalendarBundle,
   createCalendarScreenProvider,
+  isCalendarScreenId,
   type CalendarScreenProvider,
 } from './game/ui-calendar-screen.js';
 import { readVipTiers } from './vip/tiers.js';
@@ -573,7 +575,24 @@ async function main(): Promise<void> {
         // no editor, que seguem pelo caminho normal. Ele fica no
         // fim porque é o mais novo, e porque a agenda de onde ele
         // lê nasce depois do `UiSync` (ver a variável lá em cima).
-        return (await calendarScreens?.(input)) ?? null;
+        if (!isCalendarScreenId(input.screenId)) {
+          return null;
+        }
+
+        // ####  O CALENDÁRIO NUNCA CAI NA TELA DO PRESET  ####
+        //
+        // A subida inteira é síncrona, então na prática o provedor
+        // já está montado quando o primeiro pedido chega. Mas o
+        // custo de estar errado é alto e silencioso: sem o provedor,
+        // o `UiSync` serviria o retângulo DESENHADO ("Wipes e
+        // eventos programados entram aqui"), que não é `volatile` —
+        // o plugin o guarda e o servidor inteiro fica com ele por
+        // até cinco minutos. A tela vazia daqui some no clique
+        // seguinte.
+        return (
+          (await calendarScreens?.(input)) ??
+          buildEmptyCalendarBundle(input.document, input.screenId)
+        );
       }
 
       const offers = await kits.listForServer(input.serverId, input.steamId);
@@ -839,18 +858,32 @@ async function main(): Promise<void> {
   // ####  A PÁGINA CALENDÁRIO DO MENU DO JOGO  ####
   //
   // Ela nasce AQUI, e não junto do `UiSync` lá em cima, porque
-  // depende da agenda e da fila de mapas — as duas são construídas
-  // nesta parte do arquivo. Quem a chama é o `generatedScreens`,
-  // que só corre quando um jogador clica em CALENDÁRIO: nesse
-  // instante tudo aqui já existe.
+  // depende da agenda, da fila de mapas e das execuções em curso —
+  // as três são construídas nesta parte do arquivo. Quem a chama é
+  // o `generatedScreens`, que só corre quando um jogador clica em
+  // CALENDÁRIO: a subida inteira é síncrona até o `app.listen`, e
+  // nesse instante tudo aqui já existe. Se um dia deixar de ser, o
+  // `generatedScreens` responde a tela vazia e VOLÁTIL em vez do
+  // retângulo desenhado do preset — ver lá.
   //
   // O recorte por nível de VIP acontece DENTRO dela, antes de o
   // documento existir — o que o jogador não pode ver não atravessa
   // o RCON. Ver game/ui-calendar-screen.ts.
+  const wipeRuns = new WipeRunsRepository(db);
+
   calendarScreens = createCalendarScreenProvider({
     schedule: wipeSchedule,
+    // ####  ELA LÊ AS EXECUÇÕES, E NÃO SÓ A AGENDA  ####
+    //
+    // É o que o `{wipe.faltam}` do chat faz, e pelo mesmo motivo: o
+    // "WIPAR AGORA com hora marcada" não tem plano, e nas horas
+    // antes da hora marcada o plano está `running`. Sem isto a tela
+    // anunciaria o wipe da semana que vem enquanto o chat conta as
+    // horas do de hoje.
+    runs: wipeRuns,
     mapPool,
     vips: vipsRepository,
+    logger,
     levelsOf: async (serverId) => {
       const config = supervisor.configOf(serverId);
 
@@ -913,7 +946,10 @@ async function main(): Promise<void> {
   // ARQUIVO: para o servidor, zipa o save, remove o mundo, escreve
   // a seed nova e sobe. Ver Docs\16 §15 — a etapa 5 é a que separa
   // as duas metades do sistema.
-  const wipeRuns = new WipeRunsRepository(db);
+  //
+  // (O `wipeRuns` em si é só LEITURA E ESCRITA de tabela, e por
+  // isso ele nasce lá em cima, junto da fila de mapas: a página
+  // CALENDÁRIO precisa dele para saber que há um wipe executando.)
   const detectedWipes = new WipesRepository(db);
 
   wipeRunner = new WipeRunner({
