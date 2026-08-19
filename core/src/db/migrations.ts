@@ -35,12 +35,53 @@
 import type { Logger } from '../logger.js';
 import type { AgentDatabase } from './database.js';
 
-export interface Migration {
+interface MigrationBase {
   /** Ordem de aplicação. Único e crescente. */
   readonly id: number;
   /** Só para o log e para quem lê a tabela de controle. */
   readonly name: string;
+}
+
+/** O caso normal: DDL fixa, que não depende de nada. */
+export interface SqlMigration extends MigrationBase {
   readonly sql: string;
+}
+
+/**
+ * O caso raro: a migração precisa OLHAR o banco antes de decidir.
+ *
+ * Existe por causa das migrações de CONSERTO — as que acertam um
+ * banco que rodou uma versão anterior de uma migração já aplicada
+ * (ver a 030). Elas encontram bancos em dois estados: o que
+ * precisa do conserto e o que já nasceu certo. Em SQL puro não há
+ * como escrever "acrescente esta coluna se ela faltar", e um
+ * `ALTER TABLE ADD COLUMN` solto derrubaria toda instalação NOVA
+ * com "duplicate column name".
+ *
+ * Continua valendo tudo o que vale para as outras: roda uma vez,
+ * dentro da mesma transação, e fica registrada em
+ * `schema_migrations`.
+ */
+export interface RunMigration extends MigrationBase {
+  readonly run: (db: AgentDatabase) => void;
+}
+
+export type Migration = SqlMigration | RunMigration;
+
+/**
+ * Executa o passo, seja ele texto ou função.
+ *
+ * Exportada porque o teste também precisa aplicar uma migração
+ * avulsa para montar um banco parado num id — e ter DOIS lugares
+ * decidindo como um passo roda é o começo de eles discordarem.
+ */
+export function applyMigration(db: AgentDatabase, migration: Migration): void {
+  if ('sql' in migration) {
+    db.exec(migration.sql);
+    return;
+  }
+
+  migration.run(db);
 }
 
 // ------------------------------------------------------------
@@ -2361,6 +2402,89 @@ const WIPE_RUN_MAP_DECISION_SCHEMA = `
 ALTER TABLE wipe_runs ADD COLUMN map_decision TEXT;
 `;
 
+// ------------------------------------------------------------
+//  030 — a `wipe_at` que ficou de fora de quem migrou cedo
+//
+//  ####  ESTA MIGRAÇÃO NÃO ACRESCENTA NADA AO SCHEMA  ####
+//
+//  Ela CONSERTA. O schema de hoje já tem `wipe_runs.wipe_at`
+//  desde a 025 — mas houve uma janela em que a 025 já existia,
+//  já rodava, e a coluna ainda não tinha sido escrita nela.
+//  MEDIDO: o banco de desenvolvimento aplicou a 025 em
+//  2026-08-18 23:38, e a coluna entrou no `CREATE TABLE` da 025
+//  no commit ef21855, das 00:12 do dia seguinte.
+//
+//  E uma migração roda UMA VEZ: `runMigrations` pula todo id que
+//  já está em `schema_migrations`. Editar a 025 depois não toca
+//  em banco nenhum que já a rodou. Aquele banco ficou com a 025
+//  marcada como aplicada e sem a coluna — e o agente parou de
+//  subir, em `wipeRuns.running()`, com `no such column: wipe_at`.
+//  Docs\17 §0.1 já avisava desta classe de defeito; o teste que
+//  passa a pegá-la é core/test/schema-banco-antigo.test.ts.
+//
+//  ####  POR QUE `NOT NULL DEFAULT 0`, E NÃO ANULÁVEL  ####
+//
+//  Num banco NOVO a coluna é `INTEGER NOT NULL`, e é isso que o
+//  código conta: `WipeRunsRepository` lê `wipe_at` como número
+//  (nunca `number | null`) e SEMPRE o nomeia no INSERT. Deixá-la
+//  anulável no banco velho faria os dois bancos discordarem
+//  justamente na garantia que importa — e um dia um NULL chegaria
+//  na tela como `Invalid Date`.
+//
+//  O SQLite, por sua vez, recusa `ADD COLUMN ... NOT NULL` sem
+//  default: ele teria de inventar um valor para as linhas que já
+//  existem. Então o default é o preço do `NOT NULL`, e ele nunca
+//  entra em jogo — todo INSERT do repositório nomeia a coluna.
+//
+//  Sobram duas diferenças cosméticas contra um banco novo: o
+//  `DEFAULT 0` e a posição da coluna (o SQLite só acrescenta no
+//  fim). Nenhuma das duas é lida: nenhuma consulta deste projeto
+//  usa `SELECT *` em `wipe_runs` nem lê coluna por posição. As
+//  duas estão fixadas em teste, para não virarem descoberta.
+//
+//  Zerá-las exigiria RECONSTRUIR a tabela — e aí o remédio seria
+//  pior: `wipe_run_steps` referencia `wipe_runs(id)` com
+//  ON DELETE CASCADE, e com `foreign_keys = ON` (database.ts) o
+//  DROP da tabela pai dispara a cascata. O conserto apagaria o
+//  histórico de passos de todo wipe já executado.
+//
+//  ####  O BACKFILL É `started_at`  ####
+//
+//  A 025 define `wipe_at` como a hora em que o MUNDO zera, "igual
+//  a `started_at` num wipe sem aviso nenhum". Uma execução
+//  anterior à coluna não guardou outro horário — e não existe
+//  outro para inventar.
+//
+//  ####  E POR QUE ELA É FUNÇÃO, E NÃO SQL  ####
+//
+//  Ela roda nos dois tipos de banco: no que precisa do conserto e
+//  no que nasceu certo, onde a 025 de hoje já criou a coluna. Um
+//  `ALTER TABLE ADD COLUMN` solto derrubaria toda instalação NOVA
+//  com "duplicate column name", no primeiro boot. Em SQL puro não
+//  há "se faltar"; a pergunta ao `pragma_table_info` responde.
+// ------------------------------------------------------------
+function addWipeAtIfMissing(db: AgentDatabase): void {
+  const existing = db
+    .prepare(`SELECT 1 AS ok FROM pragma_table_info('wipe_runs') WHERE name = 'wipe_at'`)
+    .get();
+
+  // Banco novo: a 025 de hoje já a criou, no lugar certo e sem
+  // default. Nada a fazer — e é isto que deixa esta migração
+  // rodar em qualquer banco sem explodir.
+  if (existing !== undefined) {
+    return;
+  }
+
+  db.exec(`
+    ALTER TABLE wipe_runs ADD COLUMN wipe_at INTEGER NOT NULL DEFAULT 0;
+
+    -- Só as linhas que existiam ANTES da coluna, que são todas as
+    -- que existem neste ponto: quem escreve daqui para a frente
+    -- nomeia \`wipe_at\` no INSERT.
+    UPDATE wipe_runs SET wipe_at = started_at;
+  `);
+}
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2401,6 +2525,9 @@ export const MIGRATIONS: readonly Migration[] = [
   // retomada precisa RELER, em vez de refazer contra um `.ini`
   // que o próprio passo acabou de reescrever.
   { id: 29, name: 'wipe-run-map-decision', sql: WIPE_RUN_MAP_DECISION_SCHEMA },
+  // A 30 não acrescenta schema: ela ACERTA o banco que aplicou a
+  // 025 antes de a coluna `wipe_at` existir nela. Ver o cabeçalho.
+  { id: 30, name: 'wipe-run-wipe-at', run: addWipeAtIfMissing },
 ];
 
 /** Linha da tabela de controle. */
@@ -2445,7 +2572,7 @@ export function runMigrations(db: AgentDatabase, logger?: Logger): readonly Migr
     // DDL dentro de transação é suportado pelo SQLite (não é o
     // caso de todo banco).
     const apply = db.transaction((): void => {
-      db.exec(migration.sql);
+      applyMigration(db, migration);
       db.prepare(
         'INSERT INTO schema_migrations (id, name, applied_at) VALUES (@id, @name, @applied_at)',
       ).run({ id: migration.id, name: migration.name, applied_at: Date.now() });

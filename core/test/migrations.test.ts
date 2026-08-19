@@ -17,7 +17,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
-import { MIGRATIONS, runMigrations } from '../src/db/migrations.js';
+import { applyMigration, MIGRATIONS, runMigrations } from '../src/db/migrations.js';
 
 /**
  * Um banco parado na migração `upTo`.
@@ -38,7 +38,7 @@ function databaseAt(upTo: number): AgentDatabase {
   `);
 
   for (const migration of MIGRATIONS.filter((item) => item.id <= upTo)) {
-    db.exec(migration.sql);
+    applyMigration(db, migration);
     db.prepare(
       'INSERT INTO schema_migrations (id, name, applied_at) VALUES (@id, @name, @applied_at)',
     ).run({ id: migration.id, name: migration.name, applied_at: 1_760_000_000_000 });
