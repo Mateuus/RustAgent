@@ -1575,6 +1575,152 @@ CREATE TABLE spawn_status (
 );
 `;
 
+// ------------------------------------------------------------
+//  026 — o que o servidor fala sozinho  *(Frente E)*
+//
+//  ####  A MENSAGEM É DE REDE, COMO VIP, KIT E LOJA  ####
+//
+//  Não há `server_id` na tabela `messages`: há uma LISTA de alvos
+//  em `message_targets`, e lista VAZIA quer dizer TODOS. Escrever a
+//  mensagem uma vez e escolher onde ela sai é o que impede cinco
+//  cópias do mesmo aviso — e a sexta correção entrando em quatro
+//  delas.
+//
+//  ####  O RITMO É DE CADA MENSAGEM, E NÃO DO SERVIDOR  ####
+//
+//  O agente antigo tinha UM intervalo e um rodízio de frases. Aqui
+//  cada linha sabe quando é a próxima dela, e é o que permite o
+//  convite do Discord de meia em meia hora conviver com o aviso de
+//  manutenção de uma vez só, na terça de madrugada.
+//
+//  ####  HORÁRIO LOCAL É TEXTO `HH:MM` MAIS A ZONA IANA  ####
+//
+//  Nunca um instante com fuso embutido, exatamente como no wipe. É
+//  o que impede a mensagem das 20:00 deslizar uma hora sozinha em
+//  novembro. Instante mesmo — `run_at`, `last_sent_at`, `next_at` —
+//  é epoch ms UTC, como todas as outras datas deste banco.
+//
+//  ####  `next_at` É ESTADO, E É POR ISSO QUE ELE É INDEXADO  ####
+//
+//  O relógio pergunta "quem venceu?" de 30 em 30 segundos, para
+//  sempre. Sem o índice, essa pergunta varreria a tabela inteira
+//  duas vezes por minuto pelo resto da vida do processo.
+//
+//  ####  E O LOG GUARDA TAMBÉM O QUE NÃO SAIU  ####
+//
+//  A pergunta que ele responde é "essa mensagem está mesmo
+//  aparecendo?", e um log só de sucessos responde "sim" justamente
+//  quando a resposta é "não".
+// ------------------------------------------------------------
+const MESSAGES_SCHEMA = `
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- O nome na lista. É de quem administra; o jogador nunca o vê.
+  name TEXT NOT NULL,
+
+  -- O que sai no chat, com as variáveis ainda por resolver:
+  -- {servidor}, {online}, {wipe.faltam}. Variável desconhecida vai
+  -- LITERAL para o chat — ver core/src/messages/variables.ts.
+  text TEXT NOT NULL,
+
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- A ordem na tela, de 10 em 10 para caber alguém no meio. O mesmo
+  -- padrão do 'announcements' do agente anterior.
+  position INTEGER NOT NULL DEFAULT 0,
+
+  schedule_kind TEXT NOT NULL
+    CHECK (schedule_kind IN ('interval', 'daily', 'weekly', 'once')),
+
+  -- De quantos em quantos segundos, no ritmo 'interval'.
+  every_seconds INTEGER,
+
+  -- A hora local 'HH:MM' do 'daily' e do 'weekly'.
+  time_of_day TEXT,
+
+  -- Os dias do 'weekly', como '1,4', com 0 = domingo.
+  --
+  -- Texto, e não uma tabela de ligação: são no máximo sete números
+  -- que só existem juntos, sempre lidos com a mensagem e sempre
+  -- gravados de uma vez. Uma tabela seria um JOIN a mais em toda
+  -- leitura para nunca ser consultada sozinha.
+  weekdays TEXT,
+
+  -- O instante do 'once', em epoch ms UTC.
+  run_at INTEGER,
+
+  -- A zona IANA em que os horários acima são lidos.
+  time_zone TEXT NOT NULL DEFAULT 'America/Sao_Paulo',
+
+  -- A janela: 'HH:MM' nos dois, ou NULL nos dois = a qualquer hora.
+  -- Ela PODE virar a meia-noite ('22:00'-'02:00'), e o motor sabe
+  -- disso — a comparação ingênua faria a mensagem nunca sair.
+  window_from TEXT,
+  window_to TEXT,
+
+  -- Não fala para servidor vazio: o horário fica de pé até alguém
+  -- entrar, em vez de o contador correr sozinho na madrugada.
+  only_with_players INTEGER NOT NULL DEFAULT 0 CHECK (only_with_players IN (0, 1)),
+  min_players INTEGER NOT NULL DEFAULT 1,
+
+  -- A aparência, toda opcional: NULL = o padrão do plugin de chat.
+  tag TEXT,
+  tag_color TEXT,
+  color TEXT,
+  size INTEGER,
+
+  -- Gravado DEPOIS da entrega, nunca antes: uma mensagem que o RCON
+  -- recusou não pode aparecer na tela como enviada.
+  last_sent_at INTEGER,
+
+  -- Quando ela sai de novo. NULL = não há próxima, e é assim que a
+  -- 'once' se desliga sozinha depois de sair.
+  next_at INTEGER,
+
+  sent_count INTEGER NOT NULL DEFAULT 0,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- A consulta do relógio, e a única que roda para sempre.
+CREATE INDEX idx_messages_due ON messages (enabled, next_at);
+
+CREATE TABLE message_targets (
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  PRIMARY KEY (message_id, server_id)
+);
+
+CREATE TABLE message_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+
+  -- SEM chave estrangeira para servers, de propósito: o histórico
+  -- responde "saiu naquele dia, naquele servidor", e apagar um
+  -- servidor da frota não desfaz o que foi dito nele. É a mesma
+  -- razão pela qual a auditoria da loja guarda o NOME.
+  server_id TEXT NOT NULL,
+
+  at INTEGER NOT NULL,
+
+  -- Quantos receberam, segundo o plugin. Pelo 'say' é sempre 0, e
+  -- ali 0 quer dizer DESCONHECIDO: o jogo não devolve esse número.
+  players INTEGER NOT NULL DEFAULT 0,
+
+  ok INTEGER NOT NULL DEFAULT 1 CHECK (ok IN (0, 1)),
+
+  -- Por que não saiu. NULL quando saiu.
+  error TEXT
+);
+
+-- A tela lê as últimas DAQUELA mensagem.
+CREATE INDEX idx_message_log_message ON message_log (message_id, at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -1600,6 +1746,12 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 20, name: 'kit-wipe-delay', sql: KIT_WIPE_DELAY_SCHEMA },
   { id: 21, name: 'store-audit', sql: STORE_AUDIT_SCHEMA },
   { id: 22, name: 'spawn-status', sql: SPAWN_STATUS_SCHEMA },
+  // 23, 24 e 25 são das Frentes A, C e D (Docs/17 §0.1) — a
+  // numeração é RESERVADA por frente, e não "o próximo livre":
+  // duas frentes escrevendo o mesmo número dão merge limpo e banco
+  // quebrado, porque o SQLite aplica a primeira e ignora a segunda
+  // para sempre.
+  { id: 26, name: 'messages', sql: MESSAGES_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

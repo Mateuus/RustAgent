@@ -75,6 +75,11 @@ import { registerUiRoutes } from './routes/ui.js';
 import { registerVipRoutes } from './routes/vips.js';
 // ---- a loja e a carteira ----
 import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
+// ---- as mensagens agendadas ----
+import type { MessagesRepository } from '../db/messages-repository.js';
+import type { MessagesService } from '../messages/service.js';
+import type { VariableRegistry } from '../messages/variables.js';
+import { registerMessageRoutes } from './routes/messages.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -150,6 +155,21 @@ export interface BuildServerOptions {
    * dinheiro, e é ela que precisa de débito, estorno e extrato.
    */
   readonly store: Omit<StoreRoutesDeps, 'supervisor'>;
+  /**
+   * AS MENSAGENS AGENDADAS: o que o servidor fala sozinho.
+   *
+   * De REDE, como o VIP e o kit — a mensagem é escrita uma vez e
+   * sai nos servidores escolhidos. O `variables` vem junto porque a
+   * lista de `{…}` que a tela mostra é a do REGISTRO, e não uma
+   * constante do painel: quem registra `{wipe.*}` é o módulo de
+   * wipe, e uma lista escrita à mão mentiria no dia em que ele
+   * entrasse.
+   */
+  readonly messages: {
+    readonly repository: MessagesRepository;
+    readonly service: MessagesService;
+    readonly variables: VariableRegistry;
+  };
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -321,6 +341,17 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // A loja depois dos kits porque ela DEPENDE do VIP: uma oferta
       // de VIP concede pelo `VipList`, e não por um segundo caminho.
       registerStoreRoutes(api, { ...options.store, supervisor: options.supervisor });
+
+      // As mensagens agendadas, e a fala avulsa do
+      // `POST /chat/broadcast`. Elas vêm por último porque não são
+      // pré-requisito de ninguém: o transporte (`Broadcaster`) é
+      // que é compartilhado, e ele é injetado, não registrado.
+      registerMessageRoutes(api, {
+        repository: options.messages.repository,
+        service: options.messages.service,
+        variables: options.messages.variables,
+        supervisor: options.supervisor,
+      });
     },
     { prefix: '/api' },
   );

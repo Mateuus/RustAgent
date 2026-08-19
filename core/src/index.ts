@@ -74,6 +74,11 @@ import { PlayerDirectory } from './players/service.js';
 import { ServerSupervisor } from './servers/supervisor.js';
 import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
+// ---- as mensagens agendadas ----
+import { MessagesRepository } from './db/messages-repository.js';
+import { PluginBroadcaster } from './game/broadcast.js';
+import { MessagesService } from './messages/service.js';
+import { VariableRegistry, registerCoreVariables } from './messages/variables.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -643,6 +648,72 @@ async function main(): Promise<void> {
 
   steamWatcher.start();
 
+  // ---- as mensagens agendadas -------------------------------
+  //
+  // ####  UMA IMPLEMENTAÇÃO SÓ DE "FALAR NO CHAT"  ####
+  //
+  // O `PluginBroadcaster` é o transporte, e ele é ÚNICO: as
+  // mensagens do admin, os avisos de wipe e o anúncio do mundo novo
+  // passam todos por aqui. Três "mandar texto ao jogo" diferentes
+  // dariam três formatos de aviso, três jeitos de tratar o RCON
+  // caído e três lugares para consertar quando o plugin mudar de
+  // comando. Ver Docs\17-FRENTES-WIPE-E-MENSAGENS.md §10.
+  //
+  // ####  E O REGISTRO DE VARIÁVEIS É O PONTO DE ENCONTRO  ####
+  //
+  // O módulo de mensagens NÃO pode saber o que é um wipe (Docs\16
+  // §11). O núcleo registra `{servidor}`, `{online}` e `{max}`;
+  // quem entende de `{wipe.*}` se registra aqui também, sem que
+  // nada em `messages/` precise conhecer a agenda.
+  /**
+   * Quantos jogadores online naquele servidor.
+   *
+   * `null` = não deu para perguntar, e nunca zero: dizer "0
+   * jogadores" num servidor cheio porque o RCON piscou faria a
+   * mensagem `{online}` mentir E o "só com gente" calar uma
+   * mensagem sem motivo.
+   */
+  const onlinePlayersOf = async (serverId: string): Promise<number | null> => {
+    const context = supervisor.contextOf(serverId);
+
+    if (context === null || !context.rcon.isConnected) {
+      return null;
+    }
+
+    try {
+      const worldSize = supervisor.configOf(serverId)?.worldSize ?? 0;
+
+      return (await players.list(serverId, context.rcon, worldSize)).players.length;
+    } catch {
+      return null;
+    }
+  };
+
+  const messagesRepository = new MessagesRepository(db);
+  const messageVariables = new VariableRegistry({ logger });
+
+  registerCoreVariables(messageVariables, {
+    // O que o jogador lê na lista da Steam, e não o id interno: a
+    // frase sai no chat DELE.
+    nameOf: (serverId) => supervisor.configOf(serverId)?.hostname ?? serverId,
+    slotsOf: (serverId) => supervisor.configOf(serverId)?.maxPlayers ?? null,
+    onlineOf: (serverId) => onlinePlayersOf(serverId),
+  });
+
+  const messages = new MessagesService({
+    repository: messagesRepository,
+    broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
+    variables: messageVariables,
+    servers: supervisor,
+    // `null` = não deu para perguntar, e é DIFERENTE de zero: com
+    // `null` a mensagem não sai e o horário não anda, porque não dá
+    // para afirmar que o servidor está vazio.
+    presence: { online: (serverId) => onlinePlayersOf(serverId) },
+    logger,
+  });
+
+  messages.start();
+
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
@@ -685,6 +756,11 @@ async function main(): Promise<void> {
     },
     kits: { store: kits, repository: kitsRepository },
     store: { repository: storeRepository, wallets: walletsRepository, service: store, wallet },
+    messages: {
+      repository: messagesRepository,
+      service: messages,
+      variables: messageVariables,
+    },
     servers: () =>
       supervisor.list().map((server) => ({
         id: server.id,
@@ -738,6 +814,10 @@ async function main(): Promise<void> {
         // uma rodada que começa depois de o supervisor já ter
         // parado, falando com um RCON que não existe mais.
         vipWatcher.stop();
+        // E o das mensagens junto dos outros, pela mesma razão: uma
+        // volta que começasse agora falaria com um RCON que já não
+        // existe.
+        messages.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

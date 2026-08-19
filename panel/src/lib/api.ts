@@ -1120,6 +1120,125 @@ export interface UiPreview {
   payload: { bytes: number; limit: number; fits: boolean };
 }
 
+// ------------------------------------------------------------
+//  AS MENSAGENS
+//
+//  ####  ELAS SÃO DE REDE, COMO VIP, KIT E LOJA  ####
+//
+//  Escreve-se uma vez e escolhe-se em quais servidores a mensagem
+//  sai. Por isso não há `serverId` aqui: há uma LISTA de alvos, e
+//  lista VAZIA quer dizer TODOS.
+//
+//  ####  E CADA UMA TEM O SEU RITMO  ####
+//
+//  Não é um intervalo único com rodízio de frases: o convite do
+//  Discord de meia em meia hora convive com o aviso de manutenção
+//  de uma vez só, na terça de madrugada.
+// ------------------------------------------------------------
+
+/**
+ * Os quatro ritmos.
+ *
+ *   interval  de N em N segundos
+ *   daily     todo dia no mesmo horário
+ *   weekly    nos dias da semana escolhidos
+ *   once      uma vez só, num instante marcado
+ */
+export type ScheduleKind = 'interval' | 'daily' | 'weekly' | 'once';
+
+export interface Message {
+  id: number;
+  /** O nome na lista. É de quem administra; o jogador nunca o vê. */
+  name: string;
+  /** O texto com as variáveis ainda por resolver: `{servidor}`, `{online}`. */
+  text: string;
+  enabled: boolean;
+  /** A ordem na tela, de 10 em 10. */
+  position: number;
+  scheduleKind: ScheduleKind;
+  /** Em SEGUNDOS, no ritmo `interval`. `null` nos outros. */
+  everySeconds: number | null;
+  /** `HH:MM` local do `daily` e do `weekly`. */
+  timeOfDay: string | null;
+  /** 0 = domingo. Vazio fora do `weekly`. */
+  weekdays: number[];
+  /** O instante do `once`, em ISO. */
+  runAt: string | null;
+  /** A zona IANA em que os horários acima são lidos. */
+  timeZone: string;
+  /** Só sai entre estas horas. `null` nos dois = a qualquer hora. */
+  windowFrom: string | null;
+  windowTo: string | null;
+  onlyWithPlayers: boolean;
+  minPlayers: number;
+  tag: string | null;
+  tagColor: string | null;
+  color: string | null;
+  size: number | null;
+  lastSentAt: string | null;
+  /** Quando ela sai de novo. `null` = não há próxima. */
+  nextAt: string | null;
+  sentCount: number;
+  /** Em quais servidores ela sai. VAZIO = em TODOS. */
+  targets: string[];
+  /** A frase pronta da coluna REPETE, escrita pelo agente. */
+  schedule: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O que o formulário grava. Ver core/src/http/routes/messages.ts. */
+export interface MessageInput {
+  name: string;
+  text: string;
+  enabled: boolean;
+  scheduleKind: ScheduleKind;
+  everySeconds: number | null;
+  timeOfDay: string | null;
+  weekdays: number[];
+  /** ISO com fuso, como o `expiresAt` do VIP. */
+  runAt: string | null;
+  timeZone: string;
+  windowFrom: string | null;
+  windowTo: string | null;
+  onlyWithPlayers: boolean;
+  minPlayers: number;
+  tag: string | null;
+  tagColor: string | null;
+  color: string | null;
+  size: number | null;
+  targets: string[];
+}
+
+/** Uma linha do log: aquela mensagem, naquele servidor, naquele dia. */
+export interface MessageLogEntry {
+  id: number;
+  serverId: string;
+  at: string;
+  /** Quantos receberam. Pelo `say` é 0, e ali 0 = DESCONHECIDO. */
+  players: number;
+  ok: boolean;
+  error: string | null;
+}
+
+/** O desfecho de "testar agora", por servidor. */
+export interface MessageSendReport {
+  serverId: string;
+  ok: boolean;
+  players: number;
+  /** Por onde saiu: o plugin (com cor) ou o `say` do jogo. */
+  via: 'plugin' | 'say' | null;
+  /** O texto JÁ com as variáveis resolvidas. */
+  text: string;
+  error: string | null;
+}
+
+/** Os nomes que o agente sabe trocar. Vem do REGISTRO, não do painel. */
+export interface MessageVariables {
+  names: string[];
+  namespaces: string[];
+}
+
 export const agent = {
   login: (user: string, password: string) =>
     api<{ ok: true; user: string; csrfToken: string }>('/auth/login', {
@@ -2182,6 +2301,75 @@ export const agent = {
   buyOffer: (serverId: string, input: { steamId: string; offerId: string; quantity: number }) =>
     api<{ ok: true; message: string; purchase: StorePurchase; balance: number }>(
       `/api/servers/${encodeURIComponent(serverId)}/store/buy`,
+      { method: 'POST', body: input },
+    ),
+
+  // ---- AS MENSAGENS ----------------------------------------
+
+  messages: () =>
+    api<{ ok: true; messages: Message[]; variables: MessageVariables }>('/api/messages'),
+
+  createMessage: (input: MessageInput) =>
+    api<{ ok: true; message: Message; detail: string }>('/api/messages', {
+      method: 'POST',
+      body: input,
+    }),
+
+  /**
+   * PATCH, e não PUT: a lista liga e desliga com UM clique.
+   *
+   * Mandar o corpo inteiro para trocar um booleano faria a tela
+   * reenviar o texto e o ritmo a cada clique — com a chance de
+   * sobrescrever o que outra aba acabou de gravar.
+   */
+  updateMessage: (id: number, patch: Partial<MessageInput>) =>
+    api<{ ok: true; message: Message; detail: string }>(`/api/messages/${String(id)}`, {
+      method: 'PATCH',
+      body: patch,
+    }),
+
+  removeMessage: (id: number) =>
+    api<{ ok: true; detail: string }>(`/api/messages/${String(id)}`, { method: 'DELETE' }),
+
+  /** A fila INTEIRA, e não "suba esta". Ver core/src/db/messages-repository.ts. */
+  reorderMessages: (ids: number[]) =>
+    api<{ ok: true; messages: Message[] }>('/api/messages/reorder', {
+      method: 'POST',
+      body: { ids },
+    }),
+
+  /**
+   * Manda AGORA, sem mexer no `next_at`.
+   *
+   * Se testar consumisse o horário, conferir a mensagem seria
+   * mudá-la. A resposta traz o texto JÁ resolvido por servidor — é
+   * o que responde "o {wipe.faltam} está pegando?" sem entrar no
+   * jogo.
+   */
+  testMessage: (id: number, serverId?: string) =>
+    api<{ ok: true; reports: MessageSendReport[]; detail: string }>(
+      `/api/messages/${String(id)}/test`,
+      { method: 'POST', body: serverId === undefined ? {} : { serverId } },
+    ),
+
+  /** "Essa mensagem está mesmo aparecendo?" — inclusive quando não. */
+  messageLog: (id: number, limit = 100) =>
+    api<{ ok: true; entries: MessageLogEntry[] }>(
+      `/api/messages/${String(id)}/log?limit=${String(limit)}`,
+    ),
+
+  /** Uma fala avulsa, pelo MESMO transporte das mensagens agendadas. */
+  broadcastChat: (input: {
+    serverId: string;
+    text: string;
+    tag?: string;
+    tagColor?: string;
+    color?: string;
+    size?: number;
+    steamId?: string;
+  }) =>
+    api<{ ok: true; sent: number; via: 'plugin' | 'say'; text: string; detail: string }>(
+      '/api/chat/broadcast',
       { method: 'POST', body: input },
     ),
 };
