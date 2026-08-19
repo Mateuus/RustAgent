@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "status": "Forbidden",
+    "statusCode": 403,
+    "errors": ["Your subscription does not allow this operation"]
+  },
+  "data": null
+}

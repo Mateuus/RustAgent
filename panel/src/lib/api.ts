@@ -2514,6 +2514,41 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}`,
       { method: 'DELETE' },
     ),
+
+  // ---- O RUSTMAPS: a prévia do mapa ------------------------
+  //
+  // A imagem que o admin (e o VIP) vê antes de o mundo entrar. É
+  // ENFEITE: sem ela o wipe usa a seed do mesmo jeito, e nenhuma
+  // chamada daqui pode fazer a tela parecer quebrada.
+
+  /**
+   * A chave serve, e quanto ainda cabe nela?
+   *
+   * A resposta NUNCA traz a chave — nem prefixo, nem últimos
+   * dígitos. Ela vive no `.env` do agente, e o que volta é
+   * válida/inválida, o plano e a cota.
+   */
+  rustmapsStatus: (refresh = false) =>
+    api<RustMapsStatus>(`/api/wipe/rustmaps/status${refresh ? '?refresh=1' : ''}`),
+
+  /**
+   * Pede a prévia de uma entrada da fila, agora.
+   *
+   * Responde 200 mesmo com o RustMaps fora do ar: o que muda é o
+   * `outcome` e a frase. `staging` fica de fora no uso normal — o
+   * agente liga sozinho quando aquele mundo vai para um wipe
+   * FORÇADO.
+   */
+  generateWipeMapPreview: (serverId: string, mapId: number, staging?: boolean) =>
+    api<{
+      ok: true;
+      map: WipeMap;
+      outcome: RustMapsOutcome;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(serverId)}/wipe/maps/${String(mapId)}/generate`, {
+      method: 'POST',
+      body: staging === undefined ? {} : { staging },
+    }),
 };
 
 // ------------------------------------------------------------
@@ -2696,4 +2731,63 @@ export interface WipePlanResponse {
   readonly ok: true;
   readonly message?: string;
   readonly plan?: WipePlan;
+}
+
+// ------------------------------------------------------------
+//  O RUSTMAPS  -  a prévia
+//
+//  ####  A PRÉVIA É ENFEITE  ####
+//
+//  Nada aqui pode fazer a tela dizer que a fila está quebrada.
+//  Num mundo procedural a seed É o mapa: o terreno nasce no boot,
+//  com ou sem imagem, e o wipe acontece do mesmo jeito. Por isso
+//  todo campo abaixo aceita "não sabemos" — e por isso `outcome`
+//  existe: o `offline` é uma resposta normal, e não uma falha.
+// ------------------------------------------------------------
+
+/** O desfecho de uma conversa com o rustmaps.com. */
+export type RustMapsOutcome =
+  | 'ready'
+  | 'queued'
+  | 'denied'
+  | 'throttled'
+  | 'missing'
+  | 'offline'
+  | 'unconfigured';
+
+/** Quanto ainda cabe na chave. `null` = o serviço não disse. */
+export interface RustMapsQuota {
+  readonly limit: number | null;
+  readonly remaining: number | null;
+  /** Epoch ms de quando a janela reinicia. */
+  readonly resetAt: number | null;
+}
+
+/**
+ * O bloco RUSTMAPS da sub-aba Mapas.
+ *
+ * Repare no que NÃO está aqui: a chave. Ela vive no `.env` do
+ * agente, e uma chave que aparece na tela aparece também no print
+ * que alguém cola no Discord.
+ */
+export interface RustMapsStatus {
+  readonly ok: true;
+  /** Existe `RUSTMAPS_API_KEY` no `.env` do agente? */
+  readonly configured: boolean;
+  /** `null` = ainda não perguntamos, ou a pergunta não chegou lá. */
+  readonly valid: boolean | null;
+  /** O plano, quando a resposta o nomeia. Ver a frase de `message`. */
+  readonly plan: string | null;
+  readonly quota: RustMapsQuota;
+  readonly checkedAt: number | null;
+  /** O agente pede prévia sozinho ao ver uma seed sem imagem? */
+  readonly autoGenerate: boolean;
+  /** Por que a geração automática está desligada. `null` = ligada. */
+  readonly disabledReason: string | null;
+  /** Até quando o agente está recuando por 429/5xx. Epoch ms. */
+  readonly backoffUntil: number | null;
+  /** O teto que a API ANUNCIA — e que ninguém mediu ainda. */
+  readonly announcedRateLimit: number;
+  readonly callsPerTick: number;
+  readonly message: string;
 }

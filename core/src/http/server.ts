@@ -86,6 +86,9 @@ import type { MessagesRepository } from '../db/messages-repository.js';
 import type { MessagesService } from '../messages/service.js';
 import type { VariableRegistry } from '../messages/variables.js';
 import { registerMessageRoutes } from './routes/messages.js';
+// ---- o wipe: a prévia do mapa (RustMaps) ----
+import type { RustMapsWatcher } from '../wipe/rustmaps-poll.js';
+import { registerRustMapsRoutes } from './routes/rustmaps.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -195,6 +198,20 @@ export interface BuildServerOptions {
     readonly service: MessagesService;
     readonly variables: VariableRegistry;
   };
+
+  /**
+   * A PRÉVIA do mapa, do rustmaps.com.
+   *
+   * ####  ELA É ENFEITE  ####
+   *
+   * Nenhuma rota dela pode segurar um wipe: sem imagem, o mundo
+   * procedural nasce no boot a partir da seed do mesmo jeito. Ela
+   * chega como o vigia inteiro (e não só o cliente) porque a rota
+   * de status lê o retrato em memória — a chave nunca sai do
+   * `.env`, e perguntar ao RustMaps a cada abertura de tela
+   * gastaria cota para redesenhar o mesmo cadeado.
+   */
+  readonly rustmaps: RustMapsWatcher;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -394,6 +411,16 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         repository: options.messages.repository,
         service: options.messages.service,
         variables: options.messages.variables,
+        supervisor: options.supervisor,
+      });
+
+      // A prévia do mapa, por último: ela é a única aqui que fala
+      // com um serviço de FORA, e é a única cuja indisponibilidade
+      // não muda nada do que o agente faz. Ver Docs,
+      // §"Frente H", regra 1.
+      registerRustMapsRoutes(api, {
+        watcher: options.rustmaps,
+        repository: options.mapPool,
         supervisor: options.supervisor,
       });
     },

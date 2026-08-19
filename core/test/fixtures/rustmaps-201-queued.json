@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "status": "Success",
+    "statusCode": 201,
+    "errors": null
+  },
+  "data": {
+    "mapId": "7a19c8d5-1f60-4b23-8d0e-55b9a4c2e118",
+    "state": "Pending",
+    "queuePosition": 3
+  }
+}

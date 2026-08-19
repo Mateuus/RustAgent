@@ -83,6 +83,9 @@ import { MessagesRepository } from './db/messages-repository.js';
 import { PluginBroadcaster } from './game/broadcast.js';
 import { MessagesService } from './messages/service.js';
 import { VariableRegistry, registerCoreVariables } from './messages/variables.js';
+// ---- o wipe: a prévia do mapa (RustMaps) ----
+import { RustMapsWatcher } from './wipe/rustmaps-poll.js';
+import { RustMapsClient } from './wipe/rustmaps.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -750,6 +753,37 @@ async function main(): Promise<void> {
 
   messages.start();
 
+  // ---- a prévia do mapa (RustMaps) --------------------------
+  //
+  // ####  A ÚNICA PEÇA DO AGENTE QUE PODE FALTAR SEM CONSEQUÊNCIA  ####
+  //
+  // Ela desenha a imagem do mundo que vem no próximo wipe. Sem
+  // chave, sem rede ou com o site fora do ar, ela não faz nada — e
+  // NADA muda: num mapa procedural a seed É o mapa, o terreno
+  // nasce no boot e o wipe acontece igual. É por isso que o
+  // relógio dela não bloqueia a subida, não segura desligamento
+  // (`unref`) e nunca lança.
+  //
+  // A chave é lida do ambiente aqui, e não do `config.ts`, por um
+  // motivo de convivência: nesta onda o `config.ts` está reservado
+  // a outra frente (a chave SERVER_LEVELURL, Docs §0.2), e uma
+  // linha a mais lá seria conflito de merge num arquivo que já
+  // está sendo editado. O `.env` já foi carregado pelo
+  // `loadConfig()` lá em cima, então `process.env` aqui é o
+  // arquivo. Quando a poeira assentar, isto vira um campo do
+  // `AgentConfig` como os outros.
+  const mapPool = new MapPoolRepository(db);
+
+  const rustmaps = new RustMapsWatcher({
+    client: new RustMapsClient({ apiKey: process.env.RUSTMAPS_API_KEY ?? '' }),
+    repository: mapPool,
+    servers: supervisor,
+    logger,
+    autoGenerate: (process.env.RUSTMAPS_AUTO_GENERATE ?? '1').trim() !== '0',
+  });
+
+  rustmaps.start();
+
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
@@ -808,7 +842,11 @@ async function main(): Promise<void> {
     // A fila de mapas do wipe. Nasce aqui, sem relógio e sem
     // laço: ela só responde perguntas do painel até a execução do
     // wipe passar a consumi-la.
-    mapPool: new MapPoolRepository(db),
+    mapPool,
+
+    // E o vigia que põe imagem nessa fila. Ver o bloco acima: ele
+    // é a única peça do agente cuja ausência não muda nada.
+    rustmaps,
   });
 
   await app.listen({ host: agent.host, port: agent.port });
@@ -860,6 +898,10 @@ async function main(): Promise<void> {
         // volta que começasse agora falaria com um RCON que já não
         // existe.
         messages.stop();
+        // O da prévia junto: ele não fala com o jogo, mas fala com
+        // a internet, e uma resposta que chegasse depois do
+        // `db.close()` gravaria num banco fechado.
+        rustmaps.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

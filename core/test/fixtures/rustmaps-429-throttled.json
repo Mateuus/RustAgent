@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "status": "TooManyRequests",
+    "statusCode": 429,
+    "errors": ["Rate limit exceeded"]
+  },
+  "data": null
+}

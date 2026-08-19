@@ -35,16 +35,25 @@
 //  versão nova do jogo. O forçado troca o binário — um .map de
 //  ontem pode não carregar hoje, e o sintoma seria o servidor não
 //  subir de madrugada, com o mundo velho já apagado.
+//
+//  ####  E A PRÉVIA É ENFEITE  ####
+//
+//  A imagem vem do rustmaps.com, e ela pode não vir: chave
+//  ausente, site fora do ar, cota estourada. Nada disso é
+//  problema — a seed continua sendo o mapa, e o wipe acontece do
+//  mesmo jeito. Por isso o cartão sem imagem é um estado NORMAL
+//  desta tela, com a moldura vazia e o motivo escrito, e não uma
+//  faixa vermelha.
 // ============================================================
 
-import { ArrowDown, ArrowUp, Dices, Link2, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Dices, Image as ImageIcon, Link2, Plus, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { agent, type WipeMap } from '@/lib/api';
+import { agent, type RustMapsStatus, type WipeMap } from '@/lib/api';
 import { EM_DASH, formatDateTime } from '@/lib/format';
 import { toast } from '@/lib/toast';
 
@@ -77,10 +86,17 @@ function describe(map: WipeMap): string {
 /** O que o status quer dizer para quem olha a fila. */
 function statusLabel(map: WipeMap): string {
   if (map.status === 'ready') {
-    return map.previewUrl === null ? 'pronta' : 'pronta (com prévia)';
+    if (map.previewUrl !== null) {
+      return map.staging ? 'pronta (prévia de STAGING)' : 'pronta (com prévia)';
+    }
+
+    // Sem imagem é um estado NORMAL, e não um defeito: o que
+    // muda é só o cartão. Quando há motivo guardado, ele aparece
+    // no lugar do silêncio.
+    return map.lastError === null ? 'pronta · sem prévia' : 'pronta · sem prévia ainda';
   }
   if (map.status === 'generating') {
-    return 'gerando a prévia…';
+    return 'gerando a prévia no RustMaps…';
   }
   if (map.status === 'used') {
     return map.usedAt === null ? 'já jogada' : `jogada em ${formatDateTime(isoOf(map.usedAt))}`;
@@ -90,6 +106,32 @@ function statusLabel(map: WipeMap): string {
   }
 
   return 'rascunho';
+}
+
+/**
+ * O rótulo do canto do bloco RUSTMAPS.
+ *
+ * Três estados, e não dois: "não perguntamos ainda" é diferente
+ * de "não serve". Dizer que a chave é inválida porque o site
+ * estava fora do ar mandaria o admin trocar uma chave boa.
+ */
+function chaveLabel(status: RustMapsStatus): string {
+  if (!status.configured) {
+    return 'sem chave';
+  }
+  if (status.valid === true) {
+    return 'chave válida';
+  }
+  if (status.valid === false) {
+    return 'chave recusada';
+  }
+
+  return 'chave não conferida';
+}
+
+/** Esta entrada pode ganhar uma imagem do RustMaps? */
+function podeTerPrevia(map: WipeMap): boolean {
+  return map.kind === 'procedural' && map.seed !== null && map.status !== 'used';
 }
 
 /** Epoch ms -> ISO, que é o que os formatadores do painel leem. */
@@ -112,6 +154,19 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
   const [level, setLevel] = useState<string>(LEVELS[0]);
   const [levelUrl, setLevelUrl] = useState('');
 
+  /** O bloco RUSTMAPS. `null` = ainda não perguntamos ao agente. */
+  const [rustmaps, setRustmaps] = useState<RustMapsStatus | null>(null);
+
+  /**
+   * O id da entrada cuja imagem grande está aberta. `null` =
+   * nenhuma.
+   *
+   * O ID, e não a entrada: guardar o objeto deixaria na tela o
+   * retrato de antes de recarregar — quem acabou de mandar
+   * refazer a prévia continuaria olhando a imagem velha.
+   */
+  const [previaId, setPreviaId] = useState<number | null>(null);
+
   const load = useCallback(async () => {
     try {
       const response = await agent.wipeMaps(serverId);
@@ -124,12 +179,24 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
+
+    // ####  O RUSTMAPS VEM DEPOIS, E EM SEPARADO  ####
+    //
+    // Ele é enfeite: se esta chamada falhar, a FILA continua na
+    // tela do mesmo jeito. Juntar as duas num `Promise.all` faria
+    // um serviço de fora apagar a lista de mapas do admin.
+    try {
+      setRustmaps(await agent.rustmapsStatus());
+    } catch {
+      setRustmaps(null);
+    }
   }, [serverId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  const previa = (maps ?? []).find((map) => map.id === previaId) ?? null;
   const fila = (maps ?? []).filter(isQueued);
   const jogados = (maps ?? []).filter((map) => !isQueued(map));
 
@@ -286,6 +353,38 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
     }
   }
 
+  /**
+   * Pede a prévia de uma entrada, agora.
+   *
+   * ####  NENHUM DESFECHO AQUI É UM ERRO DA TELA  ####
+   *
+   * O agente responde 200 até com o RustMaps fora do ar, e a
+   * frase diz o que houve. Um `toast.error` no caso `offline`
+   * faria o admin procurar defeito numa fila que está
+   * perfeitamente utilizável — a seed continua sendo o mapa.
+   */
+  async function gerarPrevia(map: WipeMap): Promise<void> {
+    setBusy(true);
+
+    try {
+      const response = await agent.generateWipeMapPreview(serverId, map.id);
+
+      if (response.outcome === 'ready' || response.outcome === 'queued') {
+        toast.success('Prévia pedida', { description: response.message });
+      } else {
+        toast.warning('Sem prévia por enquanto', { description: response.message });
+      }
+
+      await load();
+    } catch (cause) {
+      toast.error('Não consegui pedir a prévia', {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remover(map: WipeMap): Promise<void> {
     setBusy(true);
 
@@ -361,18 +460,25 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
                     {map.kind === 'custom' ? '.map' : 'seed'}
                   </span>
                 ) : (
-                  // `<img>`, e não o `<Image>` do Next: o
-                  // otimizador dele não existe num export
-                  // estático, e a miniatura vem de um host de
-                  // fora (o RustMaps) que ele não conseguiria
-                  // processar de todo jeito.
-                  <img
-                    src={map.thumbUrl}
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
-                    className="h-12 w-12 shrink-0 border border-border object-cover"
-                  />
+                  // A miniatura abre a imagem grande. `<img>`, e
+                  // não o `<Image>` do Next: o otimizador dele não
+                  // existe num export estático, e a imagem vem de
+                  // um host de fora (o RustMaps) que ele não
+                  // conseguiria processar de todo jeito.
+                  <button
+                    type="button"
+                    aria-label={`Ver a prévia de ${describe(map)}`}
+                    onClick={() => setPreviaId(map.id)}
+                    className="shrink-0 border border-border hover:border-rust"
+                  >
+                    <img
+                      src={map.thumbUrl}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      className="h-12 w-12 object-cover"
+                    />
+                  </button>
                 )}
 
                 <div className="min-w-0 flex-1">
@@ -393,6 +499,13 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
 
                     {map.note !== null && <span>{map.note}</span>}
 
+                    {/* O motivo de ainda não haver imagem. Ele
+                        aparece em âmbar, e não em vermelho: a
+                        seed continua valendo, e o wipe também. */}
+                    {map.lastError !== null && map.status !== 'failed' && (
+                      <span className="text-amber">{map.lastError}</span>
+                    )}
+
                     {map.kind === 'custom' && (
                       <span className={map.versionOk ? 'text-olive' : 'text-amber'}>
                         {map.versionOk
@@ -404,6 +517,19 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-1">
+                  {podeTerPrevia(map) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      aria-label={`Gerar a prévia de ${describe(map)}`}
+                      onClick={() => void gerarPrevia(map)}
+                    >
+                      <ImageIcon aria-hidden="true" className="h-4 w-4" />
+                      {map.previewUrl === null ? 'Gerar prévia' : 'Refazer'}
+                    </Button>
+                  )}
+
                   {map.kind === 'custom' && (
                     <Button
                       variant="outline"
@@ -455,6 +581,117 @@ export function TabMapas({ serverId }: { readonly serverId: string }) {
             Nenhuma entrada está <strong>pronta</strong>: no próximo wipe o agente sorteia mesmo
             assim, e registra o que sorteou.
           </p>
+        )}
+      </Section>
+
+      {/* ---- A PRÉVIA ABERTA ------------------------------- */}
+      {previa !== null && previa.previewUrl !== null && (
+        <Section
+          title={`Prévia · ${describe(previa)}`}
+          aside={
+            <div className="flex items-center gap-2">
+              {previa.rustmapsId !== null && (
+                <a
+                  href={`https://rustmaps.com/map/${encodeURIComponent(previa.rustmapsId)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted hover:text-foreground"
+                >
+                  Abrir no RustMaps ↗
+                </a>
+              )}
+
+              <Button variant="ghost" size="sm" onClick={() => setPreviaId(null)}>
+                Fechar
+              </Button>
+            </div>
+          }
+        >
+          <img
+            src={previa.previewUrl}
+            alt={`Mapa ${describe(previa)}`}
+            loading="lazy"
+            decoding="async"
+            className="max-h-[70vh] w-full border border-border object-contain"
+          />
+
+          {previa.monuments !== null && previa.monuments.length > 0 && (
+            <p className="mt-2 text-2xs leading-relaxed text-muted">
+              <strong>{previa.monuments.length} monumentos:</strong>{' '}
+              {previa.monuments.join(', ')}
+            </p>
+          )}
+
+          {previa.staging && (
+            <p className="mt-2 text-2xs leading-relaxed text-amber">
+              Este retrato foi tirado no branch <strong>STAGING</strong> do RustMaps — a versão do
+              jogo que ainda vai entrar. É de propósito: este mundo é o do próximo wipe FORÇADO, e
+              uma imagem gerada na versão de hoje pode não descrever o mundo de amanhã.
+            </p>
+          )}
+        </Section>
+      )}
+
+      {/* ---- RUSTMAPS -------------------------------------- */}
+      <Section
+        title="RustMaps"
+        aside={
+          rustmaps !== null && (
+            <span className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+              {chaveLabel(rustmaps)}
+            </span>
+          )
+        }
+      >
+        {rustmaps === null ? (
+          <StateBlock
+            variant="offline"
+            title="Não consegui perguntar ao agente sobre a prévia"
+            detail="A fila acima continua valendo: a imagem é enfeite, e o wipe usa a seed com ou sem ela."
+          />
+        ) : (
+          <div className="space-y-2 text-2xs leading-relaxed text-muted">
+            <p className={rustmaps.valid === false ? 'text-amber' : undefined}>
+              {rustmaps.message}
+            </p>
+
+            {rustmaps.quota.limit !== null && (
+              <p>
+                cota da chave:{' '}
+                <span className="font-mono text-foreground">
+                  {rustmaps.quota.remaining ?? EM_DASH}/{rustmaps.quota.limit}
+                </span>{' '}
+                restantes na janela
+              </p>
+            )}
+
+            <p>
+              {rustmaps.autoGenerate
+                ? 'O agente pede a prévia sozinho quando uma seed nova entra na fila.'
+                : `Geração automática DESLIGADA: ${rustmaps.disabledReason ?? 'sem motivo registrado'}`}
+            </p>
+
+            <p>
+              O <strong>staging</strong> liga sozinho quando o mundo vai para um wipe{' '}
+              <strong>FORÇADO</strong> — não é caixinha para marcar. O forçado troca o binário do
+              jogo, e um mapa gerado na versão de hoje pode não servir amanhã; o branch de staging
+              é gerado contra a versão que vai entrar.
+            </p>
+
+            <p>
+              Prévia <strong>não é arquivo de mapa</strong>. Um mundo procedural nasce no boot do
+              servidor a partir da seed, e por isso a fila pode ser preenchida com meses de
+              antecedência. Já o gerador de mapa custom do RustMaps guarda o arquivo por cerca de{' '}
+              <strong>dois wipes mensais</strong> — pré-gerar com três meses de antecedência não
+              funciona nem no plano pago.
+            </p>
+
+            <p>
+              A chave mora no <code className="font-mono">.env</code> do agente
+              (<code className="font-mono">RUSTMAPS_API_KEY</code>) e nunca chega a esta tela.
+              Trocar a chave é editar o arquivo e reiniciar o agente.
+            </p>
+          </div>
         )}
       </Section>
 

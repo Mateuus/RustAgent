@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "status": "Conflict",
+    "statusCode": 409,
+    "errors": ["Map already exists, but is not ready yet"]
+  },
+  "data": {
+    "id": "7a19c8d5-1f60-4b23-8d0e-55b9a4c2e118"
+  }
+}

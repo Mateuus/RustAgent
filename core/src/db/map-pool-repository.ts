@@ -781,6 +781,308 @@ export class MapPoolRepository {
 
     return columns.has('seed') && columns.has('detected_at') && columns.has('server_id');
   }
+
+  // ======================================================
+  //  AS COLUNAS DO RUSTMAPS  (Frente H)
+  // ======================================================
+  //
+  //  A migração 024 criou `rustmaps_id`, `staging`, `preview_url`,
+  //  `thumb_url`, `monuments`, `last_error` e o status
+  //  `generating` — e as deixou vazias de propósito, dizendo no
+  //  cabeçalho quem as preencheria. É este bloco.
+  //
+  //  Ele fica AQUI, e não num repositório à parte, porque quem
+  //  escreve na tabela `map_pool` é este arquivo: dois escritores
+  //  na mesma tabela são dois lugares para consertar quando a
+  //  regra da fila mudar, e nenhum dos dois enxergaria o outro.
+  //
+  //  ####  A PRÉVIA É ENFEITE, E O CÓDIGO PRECISA MOSTRAR ISSO  ####
+  //
+  //  Nada aqui apaga seed, mexe em `position` ou toca em `used_at`.
+  //  O pior que um método deste bloco faz é gravar uma frase em
+  //  `last_error` — e num mundo procedural a seed continua sendo
+  //  o mapa com ou sem imagem. Ver Docs\17 §"Frente H", regra 1.
+
+  /**
+   * As entradas que ainda não têm prévia e poderiam ter.
+   *
+   * Procedurais prontas, sem `rustmaps_id` e sem imagem. É a fila
+   * de trabalho do relógio do RustMaps: mapa custom fica de fora
+   * porque a imagem dele vem do autor do arquivo, e entrada já
+   * usada é história.
+   */
+  withoutPreview(serverId: string): readonly MapPoolRecord[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM map_pool
+          WHERE server_id = @server_id
+            AND kind = 'procedural'
+            AND status = 'ready'
+            AND seed IS NOT NULL
+            AND rustmaps_id IS NULL
+            AND preview_url IS NULL
+          ORDER BY position ASC, id ASC`,
+      )
+      .all({ server_id: serverId }) as MapPoolRow[];
+
+    return rows.map(toRecord);
+  }
+
+  /** As entradas que o RustMaps aceitou e ainda está desenhando. */
+  generating(serverId: string): readonly MapPoolRecord[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM map_pool
+          WHERE server_id = @server_id AND status = 'generating'
+          ORDER BY position ASC, id ASC`,
+      )
+      .all({ server_id: serverId }) as MapPoolRow[];
+
+    return rows.map(toRecord);
+  }
+
+  /**
+   * O RustMaps aceitou o pedido e devolveu um id: a entrada passa
+   * a `generating`, e o relógio a acompanha.
+   *
+   * `last_error` é limpo aqui de propósito — o que estava escrito
+   * ali era sobre a tentativa anterior, e deixá-lo faria a tela
+   * mostrar um erro velho ao lado de um pedido novo.
+   */
+  markGenerating(
+    serverId: string,
+    id: number,
+    rustmapsId: string,
+    staging: boolean,
+    now: number = Date.now(),
+  ): MapPoolRecord {
+    this.#assertExists(serverId, id);
+
+    this.#db
+      .prepare(
+        `UPDATE map_pool
+            SET rustmaps_id = @rustmaps_id, staging = @staging, status = 'generating',
+                last_error = NULL, updated_at = @now
+          WHERE server_id = @server_id AND id = @id AND status <> 'used'`,
+      )
+      .run({ server_id: serverId, id, rustmaps_id: rustmapsId, staging: staging ? 1 : 0, now });
+
+    return this.#reread(serverId, id);
+  }
+
+  /**
+   * A prévia ficou pronta: as URLs entram e a entrada volta a
+   * `ready`.
+   *
+   * `monuments` vem como lista, e `null` significa "não sabemos" —
+   * uma lista vazia seria afirmar que o mundo não tem monumento
+   * nenhum, e uma resposta sem o campo não autoriza a dizer isso.
+   */
+  markPreviewReady(
+    serverId: string,
+    id: number,
+    preview: {
+      readonly rustmapsId: string;
+      readonly staging: boolean;
+      readonly previewUrl: string | null;
+      readonly thumbUrl: string | null;
+      readonly monuments: readonly string[] | null;
+    },
+    now: number = Date.now(),
+  ): MapPoolRecord {
+    this.#assertExists(serverId, id);
+
+    this.#db
+      .prepare(
+        `UPDATE map_pool
+            SET rustmaps_id = @rustmaps_id, staging = @staging, preview_url = @preview_url,
+                thumb_url = @thumb_url, monuments = @monuments, status = 'ready',
+                last_error = NULL, updated_at = @now
+          WHERE server_id = @server_id AND id = @id AND status <> 'used'`,
+      )
+      .run({
+        server_id: serverId,
+        id,
+        rustmaps_id: preview.rustmapsId,
+        staging: preview.staging ? 1 : 0,
+        preview_url: preview.previewUrl,
+        thumb_url: preview.thumbUrl,
+        monuments: preview.monuments === null ? null : JSON.stringify(preview.monuments),
+        now,
+      });
+
+    return this.#reread(serverId, id);
+  }
+
+  /**
+   * A prévia não vai sair, e a tela precisa dizer por quê.
+   *
+   * ####  UM ENFEITE NÃO CONDENA UM MUNDO  ####
+   *
+   * A entrada só cai para `failed` quando o MUNDO depende do
+   * RustMaps — isto é, num mapa `custom`, cujo arquivo ou existe
+   * ou o servidor não sobe. Num procedural o terreno nasce no
+   * boot a partir da seed, então ela volta para `ready` com a
+   * frase gravada: marcá-la `failed` faria uma imagem que não
+   * carregou tirar da fila a seed que o admin escolheu, que é
+   * exatamente o defeito que a regra 1 da frente existe para
+   * impedir.
+   */
+  markPreviewFailed(
+    serverId: string,
+    id: number,
+    reason: string,
+    now: number = Date.now(),
+  ): MapPoolRecord {
+    const current = this.#assertExists(serverId, id);
+    const status = current.kind === 'custom' ? 'failed' : 'ready';
+
+    this.#db
+      .prepare(
+        `UPDATE map_pool
+            SET status = @status, last_error = @reason, updated_at = @now
+          WHERE server_id = @server_id AND id = @id AND status <> 'used'`,
+      )
+      .run({ server_id: serverId, id, status, reason, now });
+
+    return this.#reread(serverId, id);
+  }
+
+  /**
+   * Guarda o recado sem mexer no estado.
+   *
+   * É o caminho do RustMaps fora do ar: a entrada continua
+   * `ready`, o wipe continua usando a seed, e o cartão passa a
+   * dizer "sem prévia" com o motivo em vez de um espaço em
+   * branco.
+   */
+  noteError(serverId: string, id: number, reason: string, now: number = Date.now()): void {
+    this.#db
+      .prepare(
+        `UPDATE map_pool SET last_error = @reason, updated_at = @now
+          WHERE server_id = @server_id AND id = @id AND status <> 'used'`,
+      )
+      .run({ server_id: serverId, id, reason, now });
+  }
+
+  /**
+   * Esta entrada vai ser o mundo de um wipe FORÇADO?
+   *
+   * ####  É ELA QUE LIGA O STAGING SOZINHO  ####
+   *
+   * A atualização mensal muda a geração do mundo: um retrato
+   * tirado na versão de hoje pode não descrever o mundo de
+   * amanhã. O RustMaps resolve com o branch `staging`, gerado
+   * contra a versão que VAI entrar — e por isso ele não é uma
+   * caixinha que alguém marca, e sim uma consequência de para
+   * onde a entrada aponta. Ver Docs\16 §9.1, "o staging".
+   *
+   * Duas formas de apontar, e as duas contam:
+   *   1. um plano `forced` que nomeia esta entrada (`map_pool_id`);
+   *   2. ela ser a próxima da fila E o próximo wipe ser forçado.
+   *
+   * A tabela `wipe_plans` é de outra frente (migração 023). Como
+   * em `recentSeeds`, a conferência é da tabela E das colunas:
+   * sem agenda no banco, a resposta é `false` — e prévia sem
+   * staging continua sendo prévia.
+   */
+  aimedAtForcedWipe(serverId: string, id: number, now: number = Date.now()): boolean {
+    if (!this.#canReadPlans()) {
+      return false;
+    }
+
+    const named = this.#db
+      .prepare(
+        `SELECT id FROM wipe_plans
+          WHERE server_id = @server_id AND map_pool_id = @id AND kind = 'forced'
+            AND status IN ('planned', 'running')
+          LIMIT 1`,
+      )
+      .get({ server_id: serverId, id }) as { readonly id: number } | undefined;
+
+    if (named !== undefined) {
+      return true;
+    }
+
+    const upcoming = this.#db
+      .prepare(
+        `SELECT kind FROM wipe_plans
+          WHERE server_id = @server_id AND scheduled_at >= @now
+            AND status IN ('planned', 'running')
+          ORDER BY scheduled_at ASC
+          LIMIT 1`,
+      )
+      .get({ server_id: serverId, now }) as { readonly kind: string } | undefined;
+
+    if (upcoming?.kind !== 'forced') {
+      return false;
+    }
+
+    // O próximo wipe é forçado: quem leva o staging é a entrada
+    // que ele vai consumir — a primeira da fila, com a mesma
+    // regra de `next` para mapa custom.
+    //
+    // ####  `generating` CONTA COMO FILA AQUI  ####
+    //
+    // Ela é a única diferença para o `next`, e ela existe por um
+    // caso concreto: uma entrada que já está sendo desenhada sai
+    // de `ready`, e sem esta linha uma segunda tentativa da mesma
+    // prévia seria pedida SEM staging — trocando um retrato certo
+    // por um da versão de ontem, bem no wipe em que isso importa.
+    const fila = this.#db
+      .prepare(
+        `SELECT * FROM map_pool
+          WHERE server_id = @server_id AND status IN ('ready', 'generating')
+          ORDER BY position ASC, id ASC`,
+      )
+      .all({ server_id: serverId }) as MapPoolRow[];
+
+    for (const row of fila) {
+      const entry = toRecord(row);
+
+      if (!blockedInForced(entry, true)) {
+        return entry.id === id;
+      }
+    }
+
+    return false;
+  }
+
+  /** Existe agenda de wipe neste banco? Ver `aimedAtForcedWipe`. */
+  #canReadPlans(): boolean {
+    const table = this.#db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'wipe_plans'")
+      .get() as { readonly name: string } | undefined;
+
+    if (table === undefined) {
+      return false;
+    }
+
+    const columns = new Set(
+      (this.#db.prepare('PRAGMA table_info(wipe_plans)').all() as { readonly name: string }[]).map(
+        (column) => column.name,
+      ),
+    );
+
+    return (
+      columns.has('map_pool_id') &&
+      columns.has('kind') &&
+      columns.has('status') &&
+      columns.has('scheduled_at') &&
+      columns.has('server_id')
+    );
+  }
+
+  /** @throws {MapPoolError} 404 quando a entrada não é deste servidor. */
+  #assertExists(serverId: string, id: number): MapPoolRecord {
+    const current = this.get(serverId, id);
+
+    if (current === null) {
+      throw new MapPoolError('MAP_NOT_FOUND', `O mapa ${String(id)} não está na fila.`, 404);
+    }
+
+    return current;
+  }
 }
 
 /**

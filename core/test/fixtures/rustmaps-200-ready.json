@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "status": "Success",
+    "statusCode": 200,
+    "errors": null
+  },
+  "data": {
+    "id": "b3c1f0a2-9d44-4e77-9a6f-2c1e7f0a5d31",
+    "type": "Procedural",
+    "seed": 18422,
+    "size": 4000,
+    "saveVersion": 287,
+    "url": "https://rustmaps.com/map/4000_18422",
+    "rawImageUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/map_raw.png",
+    "imageUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/map.png",
+    "imageIconUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/map_icons.png",
+    "thumbnailUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/thumbnail.png",
+    "isStaging": false,
+    "isCustomMap": false,
+    "canDownload": true,
+    "downloadUrl": "https://files.rustmaps.com/maps/287/b3c1f0a2/proceduralmap.4000.18422.287.map",
+    "totalMonuments": 12,
+    "landPercentageOfMap": 65,
+    "islands": 3,
+    "mountains": 7,
+    "iceLakes": 2,
+    "rivers": 4,
+    "monuments": [
+      { "type": "Launch Site" },
+      { "type": "Airfield" },
+      { "type": "Water Treatment Plant" },
+      { "type": "Military Tunnel" },
+      { "type": "Train Yard" },
+      { "type": "Power Plant" },
+      { "type": "Satellite Dish" },
+      { "type": "The Dome" },
+      { "type": "Sewer Branch" },
+      { "type": "Harbor" },
+      { "type": "Oxum's Gas Station" },
+      { "type": "Abandoned Supermarket" }
+    ]
+  }
+}
