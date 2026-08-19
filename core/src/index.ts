@@ -90,6 +90,9 @@ import { VariableRegistry, registerCoreVariables } from './messages/variables.js
 // ---- o wipe: a prévia do mapa (RustMaps) ----
 import { RustMapsWatcher } from './wipe/rustmaps-poll.js';
 import { RustMapsClient } from './wipe/rustmaps.js';
+// ---- o wipe: os blueprints que sobrevivem ----
+import { BpRepository } from './db/bp-repository.js';
+import { BlueprintService } from './wipe/blueprints.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -811,6 +814,53 @@ async function main(): Promise<void> {
 
   rustmaps.start();
 
+  // ---- os blueprints que sobrevivem ao wipe -----------------
+  //
+  // ####  ELE PRECISA NASCER ANTES DA EXECUÇÃO  ####
+  //
+  // A máquina de passos o chama em dois pontos: o snapshot, no
+  // último instante em que o RCON ainda responde, e a fila de
+  // devolução, depois de o mundo novo subir. Ver wipe/run.ts.
+  //
+  // O relógio dele é separado do relógio do wipe de propósito: a
+  // devolução acontece HORAS depois (o `delayHours` da régua), e
+  // com o jogador entrando — nada disso tem a ver com uma
+  // execução em curso.
+  const bpRepository = new BpRepository(db);
+
+  const blueprints = new BlueprintService({
+    repository: bpRepository,
+    // O VIP da REDE, e a tabela — e não o cache do plugin: o
+    // direito é conferido contra a fonte, no instante da entrega.
+    vips: vipsRepository,
+    servers: {
+      ids: () => supervisor.ids(),
+      rconOf: (serverId) => supervisor.contextOf(serverId)?.rcon ?? null,
+    },
+    // `null` = não deu para perguntar, e é DIFERENTE de "não há
+    // ninguém": com `null` a rodada não entrega nada e tenta de
+    // novo, em vez de concluir que o servidor está vazio.
+    online: async (serverId) => {
+      const context = supervisor.contextOf(serverId);
+
+      if (context === null || !context.rcon.isConnected) {
+        return null;
+      }
+
+      try {
+        const worldSize = supervisor.configOf(serverId)?.worldSize ?? 0;
+        const snapshot = await players.list(serverId, context.rcon, worldSize);
+
+        return snapshot.players.map((player) => player.steamId);
+      } catch {
+        return null;
+      }
+    },
+    logger,
+  });
+
+  blueprints.start();
+
   // ---- a EXECUÇÃO do wipe -----------------------------------
   //
   // ####  A LINHA DIVISÓRIA DO AGENTE  ####
@@ -859,6 +909,9 @@ async function main(): Promise<void> {
       uiSync?.pushSoon(serverId, 'rcon-connected');
     },
     logger,
+    // A Frente I. Sem ela, `wipe_except_vip` se comportaria como
+    // `wipe` — e o jogador que pagou recomeçaria sem nada.
+    blueprints,
   });
 
   // ####  O QUE FICOU `running` DE UMA SESSÃO ANTERIOR  ####
@@ -1012,6 +1065,12 @@ async function main(): Promise<void> {
     // E o vigia que põe imagem nessa fila. Ver o bloco acima: ele
     // é a única peça do agente cuja ausência não muda nada.
     rustmaps,
+
+    // A régua de blueprints, o snapshot e a devolução. O
+    // repositório vai junto do serviço porque a tela lê o retrato
+    // (quantos jogadores, quantos itens, quantos já receberam) sem
+    // falar com o jogo.
+    blueprints: { repository: bpRepository, service: blueprints },
   });
 
   await app.listen({ host: agent.host, port: agent.port });
@@ -1075,6 +1134,10 @@ async function main(): Promise<void> {
         // ela morre com o processo, e o boot seguinte a marca como
         // falha com a frase que oferece retomar.
         wipeScheduler.stop();
+        // E o da devolução de blueprints junto dos outros: uma
+        // rodada que começasse agora falaria com um RCON que já
+        // não existe, e marcaria como entregue o que não saiu.
+        blueprints.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

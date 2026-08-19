@@ -3459,5 +3459,744 @@ namespace Oxide.Plugins
             [JsonProperty("tiers")]
             public int Tiers { get; set; }
         }
+
+        // ========================================================
+        //  BLUEPRINTS QUE SOBREVIVEM AO WIPE
+        //
+        //      origemz.bp.export [offset] [limit]
+        //      origemz.bp.restore <base64>
+        //
+        //  #### POR QUE ISTO NAO E "PRESERVAR O ARQUIVO" ####
+        //
+        //  player.blueprints.<n>.db e UM arquivo so, de todos os
+        //  jogadores. Nao ha como apagar "os BPs de quem nao e VIP"
+        //  recortando arquivo. Pior: quando a Facepunch muda o
+        //  formato, o numero do nome muda e o arquivo antigo e
+        //  ignorado inteiro - a preservacao por arquivo evapora
+        //  justamente no wipe mais importante do ano.
+        //
+        //  A saida e um snapshot LOGICO: o agente le o que cada
+        //  jogador sabe ANTES do wipe, guarda no banco dele, e
+        //  devolve depois a quem tem direito.
+        //
+        //  #### O PLUGIN NAO DECIDE NADA ####
+        //
+        //  Quem sabe o nivel de VIP, a regua por bancada e o atraso
+        //  em horas e o AGENTE. Aqui so entram duas operacoes
+        //  burras: "diga o que este jogador sabe" e "ensine esta
+        //  lista pronta a este jogador". Decidir dos dois lados
+        //  daria duas reguas, e a que ninguem olha e a que fica
+        //  errada.
+        //
+        //  #### AS DUAS APIS DO JOGO, CONFERIDAS ####
+        //
+        //  Conferidas com o Mono.Cecil contra o Assembly-CSharp.dll
+        //  desta instalacao, e nao de memoria - o custo de errar um
+        //  nome aqui e o plugin INTEIRO nao compilar, e com ele
+        //  somem tambem os jogadores, os itens e o VIP:
+        //
+        //      ServerMgr.persistance                UserPersistance
+        //      UserPersistance.GetAllPlayerIDs()    List<ulong>
+        //      UserPersistance.GetPlayerInfo(ulong) PersistantPlayer
+        //      PersistantPlayer.unlockedItems       List<int>
+        //      PlayerBlueprints.UnlockList(List<ItemDefinition>)
+        //      ItemDefinition.Blueprint.GetWorkbenchLevel()
+        //
+        //  #### O PLANO DIZIA blueprints.Learn(...), E ELE NAO
+        //       EXISTE ####
+        //
+        //  Docs\16 e o PLANO.md do projeto anterior descrevem a
+        //  devolucao como `player.blueprints.Learn(itemDefinition)`.
+        //  Esse metodo NAO existe no PlayerBlueprints desta versao:
+        //  os publicos sao Unlock, UnlockList, IsUnlocked,
+        //  HasUnlocked, UnlockAll e Reset. Aqui usamos UnlockList,
+        //  que faz o lote inteiro com UM SendNetworkUpdateImmediate
+        //  e UM ClientRPC - devolver trezentos blueprints com
+        //  trezentas atualizacoes de rede e um engasgo no login.
+        // ========================================================
+
+        /// <summary>
+        /// `origemz.bp.export [offset] [limit]`
+        ///
+        /// O que cada jogador APRENDEU, direto do persistance -
+        /// funciona com o jogador OFFLINE, que e o caso normal na
+        /// hora do wipe (o passo `esvaziar` ja tirou todo mundo).
+        /// </summary>
+        private const string BpExportCommand = "origemz.bp.export";
+
+        /// <summary>
+        /// `origemz.bp.restore &lt;base64&gt;`
+        ///
+        /// A lista PRONTA, decidida pelo agente. Quem esta com o
+        /// BasePlayer carregado recebe na hora; quem nao esta fica
+        /// na fila e recebe no OnPlayerConnected.
+        /// </summary>
+        private const string BpRestoreCommand = "origemz.bp.restore";
+
+        // O persistance nao existe (servidor ainda subindo, ou
+        // ServerMgr nao inicializado). E DIFERENTE de "nenhum
+        // jogador": o agente precisa saber que nao deu para
+        // perguntar, senao ele grava um snapshot vazio e o wipe
+        // devolve nada a todo mundo.
+        private const string ErrorPersistenceUnavailable = "PERSISTENCE_UNAVAILABLE";
+
+        // A pagina montada passou do teto de frame. RECUSADA
+        // INTEIRA, nunca cortada: resposta truncada chega ao agente
+        // como JSON invalido, e um BP pela metade PARECE ter
+        // funcionado - o pior desfecho possivel. O agente reduz o
+        // limit e pede de novo.
+        private const string ErrorPayloadTooLarge = "PAYLOAD_TOO_LARGE";
+
+        // Paginacao do export.
+        //
+        // Um jogador que pesquisou tudo passa de 400 blueprints, e
+        // cada itemid ocupa ~11 bytes no JSON - ou seja, ~5 KB por
+        // jogador no pior caso, contra os ~140 bytes de um jogador
+        // no origemz.players. Por isso o padrao aqui e 25 e nao
+        // 250: e a mesma medida de 70 KB por frame (ver
+        // DefaultItemsLimit) dividida pelo tamanho de linha DESTA
+        // resposta.
+        private const int DefaultBpLimit = 25;
+        private const int MaxBpLimit = 100;
+
+        // O teto medido do frame do WebRCON neste projeto e ~70 KB
+        // (ver o comentario do DefaultItemsLimit). 60 KB deixa
+        // margem para o servidor sob carga.
+        private const int MaxBpExportBytes = 60000;
+
+        // Quantos steamIds cabem no campo "pending" da resposta.
+        //
+        // #### ELE E CONTRATO, E NAO SO DIAGNOSTICO ####
+        //
+        // O agente marca como ENTREGUE quem ficou de FORA desse
+        // campo. Se a lista fosse cortada, os nomes que sobrassem
+        // apareceriam como entregues sem terem recebido nada - e
+        // ninguem descobriria. Por isso o LOTE do outro lado e
+        // limitado ao mesmo numero (BP_RESTORE_MAX_PLAYERS, em
+        // core\src\wipe\blueprints.ts): com ele, esta lista nunca
+        // precisa ser cortada. Os dois numeros mudam juntos.
+        private const int MaxBpPendingReported = 50;
+
+        // ========================================================
+        //  A FILA DE DEVOLUCAO, DENTRO DO PLUGIN
+        //
+        //  #### ELA E VOLATIL, E ISSO E DE PROPOSITO ####
+        //
+        //  A fonte da verdade e o SQLite do agente (bp_restores).
+        //  Este dicionario e so o trecho final do caminho: o que
+        //  chegou aqui e ainda nao encontrou o jogador carregado.
+        //  Um oxide.reload o esvazia, e o agente reenvia - o mesmo
+        //  desenho dos caches de VIP e de kits.
+        //
+        //  Guardamos os IDS, e nao as ItemDefinition: a lista e
+        //  pequena, o dicionario fica leve, e resolver de novo no
+        //  login custa uma busca por item.
+        // ========================================================
+        private Dictionary<string, List<int>> _bpPending =
+            new Dictionary<string, List<int>>(StringComparer.Ordinal);
+
+        // ========================================================
+        //  origemz.bp.export [offset] [limit]
+        //
+        //  Resposta de sucesso (uma linha so, quebrada aqui para
+        //  caber no comentario):
+        //
+        //  {"ok":true,"count":312,"offset":0,"limit":25,
+        //   "players":[{"steamId":"7656...","items":[1234,5678]}],
+        //   "benches":{"1234":2}}
+        //
+        //  "count" e o TOTAL de jogadores conhecidos pelo
+        //  persistance, e nao o tamanho da pagina - e por ele que o
+        //  agente sabe quantas paginas pedir. "offset" e "limit"
+        //  voltam JA NORMALIZADOS.
+        //
+        //  #### A PAGINA PODE VIR COM MENOS JOGADORES DO QUE O
+        //       LIMIT, E ISSO NAO SIGNIFICA FIM DE LISTA ####
+        //
+        //  Quem nao aprendeu nada nao entra no array "players" -
+        //  seria um objeto de trinta bytes para dizer "nada". Quem
+        //  avanca a paginacao e o LIMIT, nunca players.Length; o
+        //  fim e count. Contar so quem tem item exigiria ler o
+        //  persistance da base inteira a cada pagina.
+        //
+        //  #### "benches" E DADO, E NAO DECISAO ####
+        //
+        //  E a bancada que o JOGO exige para cada item desta
+        //  pagina. Sem ela o agente nao teria como aplicar a regua
+        //  ("bronze volta ate a bancada 1"), porque essa informacao
+        //  nao existe em lugar nenhum do lado dele - o catalogo do
+        //  origemz.items nao a carrega. Item de nivel 0 fica FORA
+        //  do mapa: ausente quer dizer zero, e repetir 0 para
+        //  centenas de itens so engorda o frame.
+        // ========================================================
+        [ConsoleCommand(BpExportCommand)]
+        private void CommandBpExport(ConsoleSystem.Arg arg)
+        {
+            // Excecao que sobe de um ConsoleCommand vindo do RCON
+            // nao produz resposta nenhuma, e o agente fica
+            // pendurado ate o timeout. Todo caminho de saida
+            // responde alguma coisa.
+            try
+            {
+                arg.ReplyWith(HandleBpExport(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(BpExportCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleBpExport(ConsoleSystem.Arg arg)
+        {
+            int offset;
+            if (!TryReadInt(arg, 0, 0, out offset) || offset < 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            int limit;
+            if (!TryReadInt(arg, 1, DefaultBpLimit, out limit) || limit < 1)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            if (limit > MaxBpLimit)
+            {
+                limit = MaxBpLimit;
+            }
+
+            UserPersistance persistance = ServerPersistance();
+
+            if (persistance == null)
+            {
+                return BuildError(ErrorPersistenceUnavailable);
+            }
+
+            List<ulong> all = persistance.GetAllPlayerIDs();
+
+            if (all == null)
+            {
+                return BuildError(ErrorPersistenceUnavailable);
+            }
+
+            // Mesma regra do origemz.players: id que nao e
+            // SteamID64 nao casa com jogador nenhum. Filtrado ANTES
+            // de contar, senao o agente pediria uma pagina que
+            // nunca enche.
+            List<ulong> known = new List<ulong>();
+
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (IsSteamId64(all[i].ToString(CultureInfo.InvariantCulture)))
+                {
+                    known.Add(all[i]);
+                }
+            }
+
+            // long para nao estourar: offset int.MaxValue com limit
+            // 100 dobraria para negativo em int, e a janela passaria
+            // a nunca casar por acidente em vez de por regra.
+            long end = (long)offset + limit;
+
+            List<BpPlayerInfo> page = new List<BpPlayerInfo>();
+            Dictionary<string, int> benches = new Dictionary<string, int>(StringComparer.Ordinal);
+            HashSet<int> measured = new HashSet<int>();
+
+            for (int i = offset; i < known.Count && i < end; i++)
+            {
+                ulong id = known[i];
+                ProtoBuf.PersistantPlayer info = persistance.GetPlayerInfo(id);
+
+                if (info == null || info.unlockedItems == null || info.unlockedItems.Count == 0)
+                {
+                    continue;
+                }
+
+                HashSet<int> seen = new HashSet<int>();
+                List<int> items = new List<int>();
+
+                for (int k = 0; k < info.unlockedItems.Count; k++)
+                {
+                    int itemId = info.unlockedItems[k];
+
+                    // O persistance guarda uma lista, e nao um
+                    // conjunto. Repetido aqui viraria repetido no
+                    // banco do agente e no comando de volta.
+                    if (!seen.Add(itemId))
+                    {
+                        continue;
+                    }
+
+                    items.Add(itemId);
+                    MeasureBench(itemId, measured, benches);
+                }
+
+                page.Add(new BpPlayerInfo { SteamId = id.ToString(CultureInfo.InvariantCulture), Items = items });
+            }
+
+            string json = JsonConvert.SerializeObject(new BpExportOkResponse
+            {
+                Count = known.Count,
+                Offset = offset,
+                Limit = limit,
+                Players = page,
+                Benches = benches
+            });
+
+            // #### RECUSA INTEIRA, NUNCA CORTE ####
+            //
+            // Cortar a pagina aqui devolveria um snapshot pela
+            // metade que o agente aceitaria como completo - e o
+            // jogador descobriria a falta no wipe seguinte, sem
+            // nada no log dizendo por que.
+            if (Encoding.UTF8.GetByteCount(json) > MaxBpExportBytes)
+            {
+                PrintWarning(BpExportCommand + ": pagina de " + page.Count + " jogador(es) passou de " +
+                             MaxBpExportBytes + " bytes e foi recusada inteira. O agente reduz o limit " +
+                             "e pede de novo.");
+
+                return BuildError(ErrorPayloadTooLarge);
+            }
+
+            return json;
+        }
+
+        // A bancada exigida por um item, medida UMA vez por
+        // resposta. `measured` guarda quem ja foi olhado - inclusive
+        // os de nivel zero, que ficam fora do mapa e sem ele seriam
+        // reconsultados por jogador.
+        private static void MeasureBench(
+            int itemId,
+            HashSet<int> measured,
+            Dictionary<string, int> benches)
+        {
+            if (!measured.Add(itemId))
+            {
+                return;
+            }
+
+            ItemDefinition definition = ItemManager.FindItemDefinition(itemId);
+
+            if (definition == null || definition.Blueprint == null)
+            {
+                return;
+            }
+
+            // GetWorkbenchLevel(), e nao o campo
+            // workbenchLevelRequired: o metodo respeita o
+            // BlueprintOverride, que e como a Facepunch muda a
+            // bancada de um item sem mexer no prefab.
+            int level = definition.Blueprint.GetWorkbenchLevel();
+
+            if (level > 0)
+            {
+                benches[itemId.ToString(CultureInfo.InvariantCulture)] = level;
+            }
+        }
+
+        // ========================================================
+        //  origemz.bp.restore <base64>
+        //
+        //  Payload (base64 de um JSON de uma linha):
+        //
+        //      {"players":{"7656...":[1234,5678]}}
+        //
+        //  Resposta:
+        //
+        //      {"ok":true,"players":3,"applied":2,"queued":1,
+        //       "items":140,"dropped":0,"pending":["7656..."]}
+        //
+        //  #### BASE64 PELO MESMO MOTIVO DO origemz.vip.sync ####
+        //
+        //  MEDIDO: o parser de console do Rust come as aspas do
+        //  JSON cru. Ver DecodeBase64Payload.
+        //
+        //  #### PAYLOAD ILEGIVEL E RECUSADO INTEIRO ####
+        //
+        //  Base64 cortado no meio decodifica em JSON quebrado, e a
+        //  resposta certa e INVALID_ARGS com nada aplicado. Aplicar
+        //  "o que deu" deixaria jogadores com metade do que
+        //  aprenderam e o agente marcando a devolucao como
+        //  concluida.
+        //
+        //  #### ITEM QUE SUMIU DO JOGO E OUTRA COISA ####
+        //
+        //  Um itemid que este servidor nao conhece (a Facepunch
+        //  removeu o item entre um wipe e outro) NAO invalida a
+        //  carga: ele entra em "dropped", o agente registra, e o
+        //  resto e devolvido. Recusar tudo por causa de um item
+        //  extinto seria punir o jogador por uma atualizacao do
+        //  jogo.
+        // ========================================================
+        // O log adiado um frame pelo mesmo motivo medido no
+        // CommandVipSync: o Puts sai ANTES da resposta e seria
+        // casado como se FOSSE a resposta.
+        [ConsoleCommand(BpRestoreCommand)]
+        private void CommandBpRestore(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                string logLine;
+                string response = HandleBpRestore(arg, out logLine);
+
+                arg.ReplyWith(response);
+
+                if (logLine != null)
+                {
+                    string line = logLine;
+                    timer.Once(0f, delegate { Puts(line); });
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintError(BpRestoreCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleBpRestore(ConsoleSystem.Arg arg, out string logLine)
+        {
+            logLine = null;
+
+            if (arg.Args == null || arg.Args.Length == 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            string raw = JoinConsoleArgs(arg);
+            string payload = DecodeBase64Payload(raw);
+
+            if (payload == null)
+            {
+                payload = raw;
+            }
+
+            BpRestorePayload parsed;
+
+            try
+            {
+                parsed = JsonConvert.DeserializeObject<BpRestorePayload>(payload);
+            }
+            catch (Exception ex)
+            {
+                PrintWarning("Devolucao de blueprints recusada: JSON ilegivel. " + ex.Message);
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            if (parsed == null || parsed.Players == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            int applied = 0;
+            int queued = 0;
+            int items = 0;
+            int dropped = 0;
+            int failed = 0;
+            List<string> pending = new List<string>();
+
+            foreach (KeyValuePair<string, List<int>> entry in parsed.Players)
+            {
+                if (!IsSteamId64(entry.Key) || entry.Value == null || entry.Value.Count == 0)
+                {
+                    dropped++;
+                    continue;
+                }
+
+                List<ItemDefinition> definitions = new List<ItemDefinition>();
+                List<int> ids = new List<int>();
+                HashSet<int> seen = new HashSet<int>();
+
+                for (int i = 0; i < entry.Value.Count; i++)
+                {
+                    int itemId = entry.Value[i];
+
+                    if (!seen.Add(itemId))
+                    {
+                        continue;
+                    }
+
+                    ItemDefinition definition = ItemManager.FindItemDefinition(itemId);
+
+                    if (definition == null)
+                    {
+                        dropped++;
+                        continue;
+                    }
+
+                    definitions.Add(definition);
+                    ids.Add(itemId);
+                }
+
+                if (definitions.Count == 0)
+                {
+                    continue;
+                }
+
+                BasePlayer player = FindLoadedPlayer(entry.Key);
+
+                if (player == null)
+                {
+                    // #### A FILA, E A UNIAO COM O QUE JA ESTAVA
+                    //      NELA ####
+                    //
+                    // Duas cargas para o mesmo jogador offline
+                    // acontecem (o agente reenvia depois de um
+                    // reinicio). Substituir perderia a primeira.
+                    QueueBlueprints(entry.Key, ids);
+                    queued++;
+
+                    if (pending.Count < MaxBpPendingReported)
+                    {
+                        pending.Add(entry.Key);
+                    }
+
+                    continue;
+                }
+
+                if (!ApplyBlueprints(player, definitions))
+                {
+                    // Entra em "pending" junto com os da fila, e nao
+                    // por descuido: o campo quer dizer "NAO foi
+                    // aplicado agora", e o agente marca como
+                    // entregue exatamente quem esta FORA dele. Um
+                    // jogador que o jogo recusou aparecendo como
+                    // entregue e o defeito que ninguem descobre.
+                    failed++;
+
+                    if (pending.Count < MaxBpPendingReported)
+                    {
+                        pending.Add(entry.Key);
+                    }
+
+                    continue;
+                }
+
+                applied++;
+                items += definitions.Count;
+            }
+
+            logLine = BpRestoreCommand + ": " + applied + " aplicado(s) na hora, " + queued +
+                      " na fila do login, " + items + " blueprint(s) devolvido(s).";
+
+            if (failed > 0)
+            {
+                PrintWarning(BpRestoreCommand + ": " + failed + " jogador(es) com o BasePlayer " +
+                             "carregado nao receberam - ver o erro acima. O agente mantem a " +
+                             "devolucao pendente e tenta de novo.");
+            }
+
+            return JsonConvert.SerializeObject(new BpRestoreOkResponse
+            {
+                Players = parsed.Players.Count,
+                Applied = applied,
+                Queued = queued,
+                Items = items,
+                Dropped = dropped,
+                Pending = pending
+            });
+        }
+
+        // ========================================================
+        //  A DEVOLUCAO NO LOGIN
+        //
+        //  #### ELA NAO PODE ACONTECER NO BOOT ####
+        //
+        //  UnlockList mexe no PersistantPlayerInfo do BasePlayer e
+        //  manda um ClientRPC: sem o jogador carregado nao ha o que
+        //  chamar. Restaurar todo mundo ao subir nao e possivel - e
+        //  nem desejavel, porque metade nunca volta.
+        // ========================================================
+        private void OnPlayerConnected(BasePlayer player)
+        {
+            // Excecao num hook do Oxide vira linha de erro a cada
+            // conexao e, dependendo do hook, derruba a chamada dos
+            // outros plugins. Aqui ela nao pode escapar.
+            try
+            {
+                if (player == null)
+                {
+                    return;
+                }
+
+                List<int> ids;
+
+                if (!_bpPending.TryGetValue(player.UserIDString, out ids) || ids == null)
+                {
+                    return;
+                }
+
+                List<ItemDefinition> definitions = new List<ItemDefinition>();
+
+                for (int i = 0; i < ids.Count; i++)
+                {
+                    ItemDefinition definition = ItemManager.FindItemDefinition(ids[i]);
+
+                    if (definition != null)
+                    {
+                        definitions.Add(definition);
+                    }
+                }
+
+                // A entrada sai da fila ANTES de aplicar: se o
+                // UnlockList estourar, tentar de novo a cada
+                // reconexao repetiria o mesmo erro para sempre. Quem
+                // insiste e o agente, que tem o estado no banco.
+                _bpPending.Remove(player.UserIDString);
+
+                if (definitions.Count == 0)
+                {
+                    return;
+                }
+
+                if (ApplyBlueprints(player, definitions))
+                {
+                    Puts("Blueprints devolvidos no login de " + player.UserIDString + ": " +
+                         definitions.Count + " item(ns).");
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintError("Nao deu para devolver os blueprints no login: " + ex);
+            }
+        }
+
+        // Guarda para o login. Uniao, nunca substituicao - ver o
+        // comentario no HandleBpRestore.
+        private void QueueBlueprints(string steamId, List<int> ids)
+        {
+            List<int> current;
+
+            if (!_bpPending.TryGetValue(steamId, out current) || current == null)
+            {
+                _bpPending[steamId] = new List<int>(ids);
+                return;
+            }
+
+            HashSet<int> merged = new HashSet<int>(current);
+
+            for (int i = 0; i < ids.Count; i++)
+            {
+                if (merged.Add(ids[i]))
+                {
+                    current.Add(ids[i]);
+                }
+            }
+        }
+
+        // UM UnlockList para o lote inteiro: ele monta a lista
+        // nova, grava o PersistantPlayerInfo, manda UM
+        // SendNetworkUpdateImmediate e UM ClientRPC. Chamar Unlock
+        // item a item faria trezentas atualizacoes de rede no
+        // segundo em que o jogador entra.
+        //
+        // Devolve false quando o jogo recusou - e ai quem insiste e
+        // o agente.
+        private bool ApplyBlueprints(BasePlayer player, List<ItemDefinition> definitions)
+        {
+            try
+            {
+                player.blueprints.UnlockList(definitions);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PrintError("UnlockList falhou para " + player.UserIDString + ": " + ex);
+                return false;
+            }
+        }
+
+        // O BasePlayer daquele SteamID, conectado OU dormindo.
+        //
+        // Dormindo tambem serve: o que o UnlockList precisa e do
+        // BasePlayer carregado, e um jogador que acabou de sair
+        // continua no mundo como sleeper por um bom tempo.
+        private static BasePlayer FindLoadedPlayer(string steamId)
+        {
+            ulong id;
+
+            if (!ulong.TryParse(steamId, NumberStyles.None, CultureInfo.InvariantCulture, out id))
+            {
+                return null;
+            }
+
+            BasePlayer player = BasePlayer.FindByID(id);
+
+            return player != null ? player : BasePlayer.FindSleeping(id);
+        }
+
+        // O persistance do servidor, ou null quando ele ainda nao
+        // existe (ServerMgr nao inicializado). null NAO e "nenhum
+        // jogador": ver ErrorPersistenceUnavailable.
+        private static UserPersistance ServerPersistance()
+        {
+            ServerMgr manager = SingletonComponent<ServerMgr>.Instance;
+
+            return manager == null ? null : manager.persistance;
+        }
+
+        private class BpPlayerInfo
+        {
+            // String, e nao ulong: 17 digitos nao cabem num number
+            // de JavaScript sem perder precisao. Mesma regra do
+            // PlayerInfo.SteamId.
+            [JsonProperty("steamId")]
+            public string SteamId { get; set; }
+
+            [JsonProperty("items")]
+            public List<int> Items { get; set; }
+        }
+
+        private class BpExportOkResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok { get { return true; } }
+
+            [JsonProperty("count")]
+            public int Count { get; set; }
+
+            [JsonProperty("offset")]
+            public int Offset { get; set; }
+
+            [JsonProperty("limit")]
+            public int Limit { get; set; }
+
+            [JsonProperty("players")]
+            public List<BpPlayerInfo> Players { get; set; }
+
+            [JsonProperty("benches")]
+            public Dictionary<string, int> Benches { get; set; }
+        }
+
+        private class BpRestorePayload
+        {
+            [JsonProperty("players")]
+            public Dictionary<string, List<int>> Players { get; set; }
+        }
+
+        private class BpRestoreOkResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok { get { return true; } }
+
+            [JsonProperty("players")]
+            public int Players { get; set; }
+
+            [JsonProperty("applied")]
+            public int Applied { get; set; }
+
+            [JsonProperty("queued")]
+            public int Queued { get; set; }
+
+            [JsonProperty("items")]
+            public int Items { get; set; }
+
+            [JsonProperty("dropped")]
+            public int Dropped { get; set; }
+
+            [JsonProperty("pending")]
+            public List<string> Pending { get; set; }
+        }
     }
 }

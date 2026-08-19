@@ -136,6 +136,38 @@ export interface WipeWorldClock {
   saveCreatedAt(serverId: string): Promise<number | null>;
 }
 
+/**
+ * Quem guarda e devolve o que o jogador APRENDEU.
+ *
+ * É a Frente I, e ela entra em dois pontos desta máquina: o
+ * snapshot, antes de o mundo ser apagado, e a fila de devolução,
+ * no `pos-wipe`. A implementação está em wipe/blueprints.ts.
+ *
+ * ####  FALHAR AQUI NÃO CANCELA O WIPE  ####
+ *
+ * O contrato é o oposto do resto do arquivo: `snapshot` PODE
+ * lançar, e quem segura é o `catch` do chamador — a política do
+ * run cai para `wipe` e a linha do log diz isso. Um wipe travado
+ * porque o export não respondeu é pior que um wipe sem devolução.
+ */
+export interface WipeBlueprints {
+  snapshot(input: {
+    readonly serverId: string;
+    readonly wipeRunId: number;
+  }): Promise<{ readonly players: number; readonly items: number }>;
+  /**
+   * Quantas devoluções ficaram devendo.
+   *
+   * `0` = não havia snapshot DESTA execução, e é assim que "a
+   * política caiu para wipe" chega à linha do log.
+   */
+  enqueue(input: {
+    readonly serverId: string;
+    readonly wipeRunId: number;
+    readonly wipeAt: number;
+  }): number;
+}
+
 export interface WipeRunnerDeps {
   readonly runs: WipeRunsRepository;
   readonly wipes: WipesRepository;
@@ -149,6 +181,8 @@ export interface WipeRunnerDeps {
   readonly announcer?: WipeAnnouncer | undefined;
   /** VIP, loadouts, kits e catálogo, depois de o mundo novo subir. */
   readonly resync?: ((serverId: string) => Promise<void>) | undefined;
+  /** A Frente I. Sem ela, `wipe_except_vip` se comporta como `wipe`. */
+  readonly blueprints?: WipeBlueprints | undefined;
   readonly logger?: Logger | undefined;
 }
 
@@ -256,6 +290,18 @@ export class WipeRunner implements WipeExecutor {
       if (operation.cancelled) {
         runs.markStep(runId, step.name, 'skipped', 'a execução foi cancelada antes deste passo');
         continue;
+      }
+
+      // ####  O SNAPSHOT DE BLUEPRINTS ENTRA AQUI, E NÃO ANTES DE
+      //       `apagar`  ####
+      //
+      // Ele é lido pelo PLUGIN, dentro do jogo: entre `parar` e
+      // `apagar` o servidor já está fora do ar e não há a quem
+      // perguntar. Este é o último instante em que o RCON ainda
+      // responde — e é depois de `esvaziar`, então o persistance
+      // já recebeu o que os jogadores aprenderam na sessão.
+      if (step.name === 'parar') {
+        await this.#snapshotBlueprints(request, run as WipeRunRecord);
       }
 
       runs.markStep(runId, step.name, 'running');
@@ -775,12 +821,104 @@ export class WipeRunner implements WipeExecutor {
       }
     }
 
+    // ####  A FILA DE DEVOLUÇÃO DE BLUEPRINTS  ####
+    //
+    // Uma linha por jogador do snapshot — inclusive quem não é VIP
+    // hoje. Quem recebe de verdade é decidido na ENTREGA, contra o
+    // VIP vigente naquele instante: quem comprar VIP amanhã ainda
+    // encontra a linha dele aqui.
+    if (run.bpPolicy === 'wipe_except_vip') {
+      notes.push(this.#enqueueBlueprints(request, run));
+    }
+
     return notes.length === 0 ? 'nada a fazer depois de subir.' : `${notes.join('; ')}.`;
   }
 
   // ----------------------------------------------------------
   //  §4  Auxiliares
   // ----------------------------------------------------------
+
+  /**
+   * Guarda o que cada jogador sabe, antes de o mundo ser apagado.
+   *
+   * ####  ELE NUNCA DERRUBA O WIPE  ####
+   *
+   * O `catch` é aqui, e é ele que cumpre a regra: falhar o
+   * snapshot vira um AVISO no log, a política daquele run cai na
+   * prática para `wipe` (o `pos-wipe` não vai achar snapshot para
+   * enfileirar), e o mundo zera na hora marcada. Um wipe travado
+   * porque o export não respondeu é pior que um wipe sem
+   * devolução.
+   *
+   * Só roda com `wipe_except_vip`: nas outras duas políticas não
+   * há o que devolver, e gastar minutos lendo o persistance de uma
+   * base inteira com os jogadores esperando seria trabalho jogado
+   * fora.
+   */
+  async #snapshotBlueprints(request: WipeRunRequest, run: WipeRunRecord): Promise<void> {
+    if (run.bpPolicy !== 'wipe_except_vip') {
+      return;
+    }
+
+    const { operation } = request;
+
+    if (this.#deps.blueprints === undefined) {
+      operation.log(
+        '[wipe] ATENÇÃO: este wipe é "wipe_except_vip" e não há módulo de blueprints neste ' +
+          'agente. Ninguém vai receber os blueprints de volta — na prática, a política deste ' +
+          'run é "wipe".',
+      );
+
+      return;
+    }
+
+    try {
+      const result = await this.#deps.blueprints.snapshot({
+        serverId: request.serverId,
+        wipeRunId: request.runId,
+      });
+
+      operation.log(
+        `[wipe] blueprints guardados: ${String(result.players)} jogador(es), ` +
+          `${String(result.items)} item(ns). A devolução é enfileirada no pós-wipe.`,
+      );
+    } catch (error) {
+      // Alto e bom som, e no log da execução: é a única pista de
+      // que aquele wipe zerou o conhecimento de quem pagou.
+      operation.log(
+        `[wipe] ATENÇÃO: o snapshot de blueprints FALHOU (${toError(error).message}). O wipe ` +
+          'continua, e a política deste run cai para "wipe": ninguém vai receber blueprint de ' +
+          'volta.',
+      );
+
+      this.#deps.logger?.error(
+        { server: request.serverId, run: request.runId, err: toError(error) },
+        'o snapshot de blueprints falhou; o wipe segue com a política caída para "wipe"',
+      );
+    }
+  }
+
+  /** Abre a fila de devolução. Nunca lança: o mundo já nasceu. */
+  #enqueueBlueprints(request: WipeRunRequest, run: WipeRunRecord): string {
+    if (this.#deps.blueprints === undefined) {
+      return 'sem módulo de blueprints: nada a devolver';
+    }
+
+    try {
+      const queued = this.#deps.blueprints.enqueue({
+        serverId: request.serverId,
+        wipeRunId: request.runId,
+        wipeAt: run.wipeAt,
+      });
+
+      return queued === 0
+        ? 'nenhuma devolução de blueprint enfileirada (o snapshot não existe — a política deste ' +
+            'run caiu para "wipe")'
+        : `${String(queued)} devolução(ões) de blueprint na fila`;
+    } catch (error) {
+      return `a fila de devolução de blueprints não abriu (${toError(error).message})`;
+    }
+  }
 
   /**
    * Espera até um instante, acordando de trinta em trinta

@@ -2126,6 +2126,140 @@ CREATE UNIQUE INDEX idx_wipes_world ON wipes (server_id, save_created_at);
 CREATE INDEX idx_wipes_recent ON wipes (server_id, detected_at DESC);
 `;
 
+// ------------------------------------------------------------
+//  028 — os blueprints que sobrevivem ao wipe
+//
+//  ####  POR QUE PRESERVAR POR ARQUIVO NÃO FUNCIONA  ####
+//
+//  `player.blueprints.<n>.db` é UM arquivo só, de todos os
+//  jogadores: não há como apagar "os BPs de quem não é VIP"
+//  recortando arquivo. E quando a Facepunch muda o formato, o
+//  número no nome muda e o arquivo antigo é ignorado inteiro — a
+//  preservação por arquivo evapora justamente no wipe mais
+//  importante do ano.
+//
+//  A saída é um snapshot LÓGICO: o plugin lê o que cada jogador
+//  aprendeu (`origemz.bp.export`), o agente guarda aqui, e devolve
+//  depois a quem tem direito (`origemz.bp.restore`).
+//
+//  ####  O SNAPSHOT É DE TODO MUNDO  ####
+//
+//  E não só de quem é VIP. Salvar só de VIP criaria o caso em que
+//  alguém compra VIP no dia seguinte ao wipe e não tem o que
+//  restaurar. O direito é conferido na DEVOLUÇÃO, contra o VIP
+//  vigente naquele instante — por isso `bp_restores.tier` é
+//  preenchida na saída, e não na entrada.
+//
+//  ####  E ELE VALE PARA O WIPE SEGUINTE, E SÓ ELE  ####
+//
+//  Um snapshot novo substitui o anterior inteiro (ver
+//  db/bp-repository.ts). Restaurar o BP de três wipes atrás é
+//  ressuscitar vantagem que ninguém lembra ter dado.
+// ------------------------------------------------------------
+const BP_SNAPSHOTS_SCHEMA = `
+CREATE TABLE bp_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- A execução que tirou este snapshot. NULL = foi tirado na mão,
+  -- pelo botão da sub-aba Blueprints.
+  wipe_run_id INTEGER REFERENCES wipe_runs(id) ON DELETE SET NULL,
+
+  -- SteamID64 em TEXTO, como em toda parte deste banco: 17 dígitos
+  -- passam de 2^53 e um number arredondaria o dono do blueprint.
+  steam_id TEXT NOT NULL,
+
+  -- JSON com os itemIds que ele sabia. Inteiro do jogo, e não
+  -- shortname: é o que o persistance guarda e o que o
+  -- ItemManager.FindItemDefinition recebe de volta.
+  items TEXT NOT NULL,
+
+  item_count INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- Um snapshot por jogador por servidor. É o índice que faz "vale
+-- para o wipe seguinte, e só ele" ser regra do banco: não existe
+-- estado em que dois snapshots do mesmo jogador convivem.
+CREATE UNIQUE INDEX idx_bp_snapshots_player ON bp_snapshots (server_id, steam_id);
+
+-- "O que este wipe guardou?" — a pergunta da tela.
+CREATE INDEX idx_bp_snapshots_run ON bp_snapshots (server_id, wipe_run_id);
+
+CREATE TABLE bp_restores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- ####  ELA É ANULÁVEL, E NÃO POR DESCUIDO  ####
+  --
+  -- Com \`ON DELETE CASCADE\`, o snapshot novo levaria embora o
+  -- registro das devoluções do wipe anterior — inclusive as que
+  -- ninguém entrou para receber, que é justamente o que alguém vai
+  -- querer ler depois. Com \`SET NULL\`, a linha vira histórico:
+  -- ela guarda a quem era devida, o que saiu e quando, e o
+  -- \`state = 'expired'\` diz que ela não vale mais.
+  --
+  -- E o índice único abaixo continua valendo para as VIVAS: no
+  -- SQLite, NULL não colide com NULL num índice único.
+  snapshot_id INTEGER REFERENCES bp_snapshots(id) ON DELETE SET NULL,
+
+  steam_id TEXT NOT NULL,
+
+  -- O nível de VIP usado na entrega, e a lista que de fato saiu
+  -- depois da régua. Os dois NULOS enquanto ela não sai: quem
+  -- decide isso é o instante da devolução, não o do snapshot.
+  tier TEXT,
+  items TEXT,
+
+  -- Quando ela pode sair: a hora do wipe mais o atraso configurado.
+  -- 0 h = assim que o jogador entrar.
+  release_at INTEGER NOT NULL,
+
+  state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (state IN ('pending', 'sent', 'applied', 'expired', 'failed')),
+
+  -- Quantas vezes o comando saiu. Sem teto, um payload que o
+  -- plugin sempre recusa seria retentado a cada trinta segundos
+  -- até o wipe seguinte.
+  attempts INTEGER NOT NULL DEFAULT 0,
+
+  sent_at INTEGER,
+  applied_at INTEGER,
+  error TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- ####  A IDEMPOTÊNCIA, ESCRITA EM SQL  ####
+--
+-- O jogador que entra e sai três vezes não recebe três vezes, e
+-- não recebe zero. Um \`enqueue\` repetido (a retomada de um wipe)
+-- também não duplica a fila.
+CREATE UNIQUE INDEX idx_bp_restores_once ON bp_restores (snapshot_id, steam_id);
+
+-- O relógio pergunta "o que já venceu neste servidor?".
+CREATE INDEX idx_bp_restores_due ON bp_restores (server_id, state, release_at);
+
+-- ####  A BANCADA É UM FATO DO JOGO, E SÓ O PLUGIN A CONHECE  ####
+--
+-- A régua por nível ("bronze volta até a bancada 1") precisa saber
+-- que bancada cada item exige. Essa informação não existe do lado
+-- do agente: o catálogo do \`origemz.items\` não a carrega. Ela vem
+-- junto de cada página do \`origemz.bp.export\` e é guardada aqui,
+-- porque a devolução acontece HORAS depois — com o servidor
+-- possivelmente parado.
+CREATE TABLE bp_item_benches (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  item_id INTEGER NOT NULL,
+
+  -- 1, 2 ou 3. Item sem bancada não é gravado: ausência é zero.
+  workbench INTEGER NOT NULL,
+
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (server_id, item_id)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2158,6 +2292,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 24, name: 'wipe-map-pool', sql: WIPE_MAP_POOL_SCHEMA },
   { id: 25, name: 'wipe-runs', sql: WIPE_RUNS_SCHEMA },
   { id: 26, name: 'messages', sql: MESSAGES_SCHEMA },
+  { id: 28, name: 'bp-snapshots', sql: BP_SNAPSHOTS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

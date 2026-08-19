@@ -12,10 +12,10 @@
 //    Configuração  como o agente executa: avisa, espera, apaga o quê?
 //    Execução      o que aconteceu, passo a passo?
 //
-//  Cinco estão montadas. Blueprints ainda tem o ponto de montagem
-//  pronto e, enquanto vazia, mostra um bloco dizendo que aquela
-//  parte está sendo construída — trocá-la é substituir UMA linha lá
-//  embaixo, como as outras já foram.
+//  As seis estão montadas. Cada uma entrou trocando UMA linha lá
+//  embaixo, no bloco dos pontos de montagem — que é o que permitiu
+//  quatro frentes construírem sub-abas diferentes sem se
+//  encontrarem neste arquivo.
 //
 //  ####  ELA CARREGA OS DADOS, AS SUB-ABAS SÓ DESENHAM  ####
 //
@@ -37,6 +37,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { TabAgenda } from '@/components/wipe/tab-agenda';
+import { TabBlueprints } from '@/components/wipe/tab-blueprints';
 import { TabConfiguracao } from '@/components/wipe/tab-configuracao';
 import { TabExecucao } from '@/components/wipe/tab-execucao';
 import { TabGeral } from '@/components/wipe/tab-geral';
@@ -288,7 +289,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             disso é a agenda, que este componente carrega uma vez. */}
 
         {tab === 'mapas' && <TabMapas serverId={serverId} />}
-        {tab === 'blueprints' && <EmConstrucao tab="blueprints" />}
+        {tab === 'blueprints' && <TabBlueprints serverId={serverId} />}
         {tab === 'configuracao' && <TabConfiguracao serverId={serverId} />}
         {tab === 'execucao' && <TabExecucao serverId={serverId} />}
       </div>
@@ -296,28 +297,10 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
   );
 }
 
-/**
- * O que uma sub-aba ainda não montada diz.
- *
- * Ela não fica em branco e não some da barra: sumir esconderia
- * que o assunto existe, e o branco pareceria defeito. Cada uma diz
- * o que vai responder e o que fazer enquanto isso.
- */
-const EM_CONSTRUCAO: Readonly<
-  Record<
-    Exclude<WipeTab, 'geral' | 'agenda' | 'mapas' | 'configuracao' | 'execucao'>,
-    { readonly title: string; readonly detail: string }
-  >
-> = {
-  blueprints: {
-    title: 'A régua de blueprints ainda está sendo construída.',
-    detail:
-      'Ela vai responder quem recomeça sabendo o quê: quanto cada nível de VIP leva de volta, com quanto atraso, e o snapshot tirado antes do wipe. A política de cada wipe (manter, zerar, ou zerar menos para VIP) já se escolhe na sub-aba Agenda.',
-  },
-};
+/*  ####  NÃO HÁ MAIS SUB-ABA EM CONSTRUÇÃO  ####
 
-function EmConstrucao({ tab }: { readonly tab: keyof typeof EM_CONSTRUCAO }) {
-  const parte = EM_CONSTRUCAO[tab];
-
-  return <StateBlock variant="empty" title={parte.title} detail={parte.detail} />;
-}
+    As seis estão montadas. O bloco que dizia "esta parte está
+    sendo construída" saiu junto com a última delas (Blueprints):
+    deixá-lo aqui sem ninguém para mostrar seria código morto num
+    arquivo que quatro frentes leem para saber onde encaixar a
+    delas.  */

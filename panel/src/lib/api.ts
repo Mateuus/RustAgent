@@ -2672,6 +2672,45 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/wipe/runs/${String(runId)}/cancel`,
       { method: 'POST' },
     ),
+
+  // ---- O WIPE: os blueprints que sobrevivem ----------------
+  //
+  // ####  A ÚNICA PARTE DO WIPE QUE DEPENDE DE UM PLUGIN  ####
+  //
+  // O snapshot é lido pelo OrigemZAgent DENTRO do jogo, e a
+  // devolução é aplicada por ele no login. Por isso as duas rotas
+  // que falam com o jogo respondem 503 com o servidor fora do ar —
+  // e a tela mostra a frase em vez de fingir que guardou uma cópia.
+
+  /** A régua por nível, o último snapshot e quanto já foi devolvido. */
+  wipeBlueprints: (serverId: string) =>
+    api<WipeBlueprintsResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/blueprints`),
+
+  saveWipeBlueprints: (serverId: string, settings: BpSettings) =>
+    api<WipeBlueprintsSaveResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/blueprints/settings`,
+      { method: 'PUT', body: settings },
+    ),
+
+  /**
+   * Tira um snapshot AGORA.
+   *
+   * Ele substitui o anterior inteiro — é a mesma operação que o
+   * wipe faz sozinho antes de apagar, e existe para conferir que o
+   * caminho funciona ANTES do dia do wipe.
+   */
+  takeWipeBlueprintSnapshot: (serverId: string) =>
+    api<WipeBlueprintsSnapshotResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/blueprints/snapshot`,
+      { method: 'POST', body: {} },
+    ),
+
+  /** A devolução na mão. `force` devolve tudo mesmo sem VIP. */
+  restoreWipeBlueprints: (serverId: string, input: { steamId: string; force?: boolean }) =>
+    api<WipeBlueprintsRestoreResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/blueprints/restore`,
+      { method: 'POST', body: input },
+    ),
 };
 
 // ------------------------------------------------------------
@@ -3155,5 +3194,88 @@ export interface WipeRunStartResponse {
   readonly now: number;
   readonly run: WipeRun | null;
   readonly operationId: string | null;
+  readonly message: string;
+}
+
+// ------------------------------------------------------------
+//  O WIPE: os blueprints que sobrevivem
+// ------------------------------------------------------------
+
+/**
+ * Quanto um nível leva de volta. Espelha core/src/wipe/blueprints.ts.
+ *
+ *   none   nada — ele recomeça do zero como todo mundo
+ *   bench  tudo o que o jogo libera até aquela bancada
+ *   all    tudo o que ele sabia
+ */
+export type BpRuleMode = 'none' | 'bench' | 'all';
+
+export interface BpTierRule {
+  readonly mode: BpRuleMode;
+  /** 1, 2 ou 3. Só vale com `mode: 'bench'`. */
+  readonly bench: number;
+}
+
+export interface BpSettings {
+  /** A régua, por nível de VIP. A chave é o `tier` minúsculo. */
+  readonly tiers: Readonly<Record<string, BpTierRule>>;
+  /**
+   * Quantas horas depois do wipe a devolução é liberada.
+   *
+   * `0` = assim que o jogador entrar. Com atraso, a corrida
+   * inicial acontece sem a vantagem — é a manopla que separa
+   * "vantagem" de "servidor decidido no primeiro dia".
+   */
+  readonly delayHours: number;
+}
+
+/** O retrato do último snapshot. `null` = nunca foi tirado um. */
+export interface BpSnapshot {
+  readonly players: number;
+  readonly items: number;
+  readonly createdAt: number;
+  /** A execução que o tirou. `null` = foi tirado na mão. */
+  readonly wipeRunId: number | null;
+}
+
+/** Quantas devoluções em cada estado, no snapshot vigente. */
+export interface BpCounters {
+  readonly pending: number;
+  readonly sent: number;
+  readonly applied: number;
+  readonly expired: number;
+  readonly failed: number;
+}
+
+export interface WipeBlueprintsResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly settings: BpSettings;
+  readonly snapshot: BpSnapshot | null;
+  readonly counters: BpCounters;
+}
+
+export interface WipeBlueprintsSaveResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly settings: BpSettings;
+  readonly message: string;
+}
+
+export interface WipeBlueprintsSnapshotResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly snapshot: BpSnapshot | null;
+  readonly message: string;
+}
+
+export interface WipeBlueprintsRestoreResponse {
+  readonly ok: true;
+  readonly now: number;
+  /** Quantos blueprints saíram de verdade. `0` = nada foi enviado. */
+  readonly sent: number;
+  /** O nível usado na régua. `null` = ele não tinha nenhum. */
+  readonly tier: string | null;
+  readonly counters: BpCounters;
   readonly message: string;
 }

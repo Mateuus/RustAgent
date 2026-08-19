@@ -93,6 +93,10 @@ import { registerMessageRoutes } from './routes/messages.js';
 // ---- o wipe: a prévia do mapa (RustMaps) ----
 import type { RustMapsWatcher } from '../wipe/rustmaps-poll.js';
 import { registerRustMapsRoutes } from './routes/rustmaps.js';
+// ---- o wipe: os blueprints que sobrevivem ----
+import type { BpRepository } from '../db/bp-repository.js';
+import type { BlueprintService } from '../wipe/blueprints.js';
+import { registerWipeBlueprintRoutes } from './routes/wipe-blueprints.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -231,6 +235,26 @@ export interface BuildServerOptions {
    * gastaria cota para redesenhar o mesmo cadeado.
    */
   readonly rustmaps: RustMapsWatcher;
+
+  /**
+   * OS BLUEPRINTS QUE SOBREVIVEM AO WIPE.
+   *
+   * ####  A ÚNICA PARTE DO WIPE QUE DEPENDE DE UM PLUGIN  ####
+   *
+   * O snapshot é lido pelo `OrigemZAgent` dentro do jogo, e a
+   * devolução é aplicada por ele no login. Por isso as duas rotas
+   * que falam com o jogo (tirar snapshot, devolver na mão)
+   * respondem 503 com o servidor fora do ar, em vez de fingir que
+   * guardaram uma cópia.
+   *
+   * O repositório vem junto do serviço porque a tela lê o retrato
+   * — quantos jogadores, quantos itens, quantos já receberam — sem
+   * falar com o jogo.
+   */
+  readonly blueprints: {
+    readonly repository: BpRepository;
+    readonly service: BlueprintService;
+  };
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -457,6 +481,16 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         supervisor: options.supervisor,
         store: options.operations,
         world: options.wipeRuns.world,
+      });
+
+      // Os blueprints depois da execução, e não antes: eles são o
+      // que sobra de UM wipe para o seguinte, e ler este arquivo de
+      // cima a baixo deve contar a história nessa ordem — a agenda,
+      // o mapa, a mensagem, o wipe, e o que atravessa o wipe.
+      registerWipeBlueprintRoutes(api, {
+        repository: options.blueprints.repository,
+        service: options.blueprints.service,
+        supervisor: options.supervisor,
       });
     },
     { prefix: '/api' },
