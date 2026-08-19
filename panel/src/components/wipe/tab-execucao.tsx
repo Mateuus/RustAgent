@@ -46,6 +46,7 @@ import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { stepDuration } from '@/components/wipe/labels';
 import {
   agent,
   type WipeClassifiedFile,
@@ -295,7 +296,19 @@ function RunningRun({
   );
 }
 
-/** Os oito passos, com o estado de cada um e a frase do que ele fez. */
+/**
+ * Os oito passos, com o estado de cada um e a frase do que ele fez.
+ *
+ * ####  O RELÓGIO É O DA TENTATIVA QUE ESTÁ NA TELA  ####
+ *
+ * Numa retomada, o passo roda de novo: `startedAt` guarda a
+ * primeira vez (é o que responde "quando este wipe atacou este
+ * passo") e `attemptStartedAt` guarda a vez que produziu o ✔ ao
+ * lado. Mostrar o primeiro faria a linha dizer que o passo começou
+ * antes do crash e terminou depois da retomada — uma duração que é
+ * o tempo em que o agente esteve MORTO. Quando os dois diferem, o
+ * primeiro começo vai no `title`, que é onde ele não engana ninguém.
+ */
 function Steps({ steps }: { readonly steps: readonly WipeRunStepView[] }) {
   return (
     <ol className="space-y-1">
@@ -310,8 +323,18 @@ function Steps({ steps }: { readonly steps: readonly WipeRunStepView[] }) {
           >
             {step.step}
           </span>
-          <span className="w-16 shrink-0 text-2xs text-muted">
-            {step.startedAt === null ? '' : clock(step.startedAt)}
+          <span
+            className="w-16 shrink-0 text-2xs text-muted"
+            title={
+              step.startedAt === null || step.startedAt === step.attemptStartedAt
+                ? undefined
+                : `primeira tentativa às ${clock(step.startedAt)}`
+            }
+          >
+            {step.attemptStartedAt === null ? '' : clock(step.attemptStartedAt)}
+          </span>
+          <span className="w-14 shrink-0 text-right text-2xs text-muted">
+            {stepDuration(step)}
           </span>
           <span
             className={cn(

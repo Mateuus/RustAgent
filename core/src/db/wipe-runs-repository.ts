@@ -238,7 +238,19 @@ export interface WipeRunStepRecord {
   readonly step: WipeRunStep;
   readonly position: number;
   readonly status: WipeStepStatus;
+  /**
+   * A PRIMEIRA vez que este passo entrou em execução. Uma retomada
+   * não o move: ele é a resposta de "quando este wipe atacou este
+   * passo", semanas depois.
+   */
   readonly startedAt: number | null;
+  /**
+   * O começo da tentativa ATUAL — igual a `startedAt` até o passo
+   * rodar de novo. É ele que forma a duração com `finishedAt`;
+   * `startedAt` sozinho contaria o tempo em que o agente esteve
+   * morto entre o crash e a retomada.
+   */
+  readonly attemptStartedAt: number | null;
   readonly finishedAt: number | null;
   readonly message: string | null;
 }
@@ -295,6 +307,7 @@ interface StepRow {
   readonly position: number;
   readonly status: string;
   readonly started_at: number | null;
+  readonly attempt_started_at: number | null;
   readonly finished_at: number | null;
   readonly message: string | null;
 }
@@ -618,10 +631,30 @@ export class WipeRunsRepository {
   /**
    * Marca UM passo.
    *
-   * Só grava `started_at` na primeira vez que o passo vira
+   * ####  DOIS COMEÇOS, PORQUE SÃO DUAS PERGUNTAS  ####
+   *
+   * `started_at` só é gravado na PRIMEIRA vez que o passo vira
    * `running`: numa RETOMADA, o passo roda de novo e o começo
    * original é o que responde "a que horas este wipe começou de
    * verdade".
+   *
+   * `attempt_started_at` é o começo da tentativa ATUAL, e por
+   * isso é reescrito toda vez que o passo ENTRA em `running`.
+   * Sem ele a duração de um passo retomado (`finished_at` menos
+   * um `started_at` da tentativa que morreu) contaria o tempo em
+   * que o agente esteve MORTO: medido na simulação, um `apagar`
+   * de 8 arquivos marcando 20.901 ms porque a retomada veio 20 s
+   * depois do crash. Ver a migração 031.
+   *
+   * ####  "ENTRA em running", E NÃO "É MARCADO running"  ####
+   *
+   * O passo `avisar` chama este método com `running` a cada aviso
+   * que sai, para gravar a marca dos offsets já falados (ver
+   * `#avisar` em wipe/run.ts) — e ele espera HORAS de propósito.
+   * Recarimbar ali encolheria a duração do `avisar` para o
+   * trecho depois do último aviso. Por isso a condição olha o
+   * status ANTIGO da linha: só quem não estava `running` começa
+   * uma tentativa nova.
    */
   markStep(
     runId: number,
@@ -637,6 +670,9 @@ export class WipeRunsRepository {
                 started_at = CASE
                   WHEN @status = 'running' AND started_at IS NULL THEN @now
                   ELSE started_at END,
+                attempt_started_at = CASE
+                  WHEN @status = 'running' AND status <> 'running' THEN @now
+                  ELSE attempt_started_at END,
                 finished_at = CASE
                   WHEN @status IN ('done', 'failed', 'skipped') THEN @now
                   ELSE NULL END,
@@ -700,7 +736,8 @@ export class WipeRunsRepository {
   #toRecord(row: RunRow): WipeRunRecord {
     const steps = this.#db
       .prepare(
-        `SELECT run_id, step, position, status, started_at, finished_at, message
+        `SELECT run_id, step, position, status, started_at, attempt_started_at,
+                finished_at, message
            FROM wipe_run_steps WHERE run_id = @id ORDER BY position ASC`,
       )
       .all({ id: row.id }) as StepRow[];
@@ -741,6 +778,12 @@ export class WipeRunsRepository {
             ? (step.status as WipeStepStatus)
             : 'pending',
           startedAt: step.started_at,
+          // Uma linha gravada antes da migração 031 pode ter a
+          // coluna vazia mesmo com `started_at` preenchido (o
+          // backfill cobre as que existiam, mas não uma que um
+          // banco de teste tenha escrito à mão). O começo da
+          // primeira tentativa é a única resposta que sobra.
+          attemptStartedAt: step.attempt_started_at ?? step.started_at,
           finishedAt: step.finished_at,
           message: step.message,
         })),

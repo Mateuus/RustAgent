@@ -12,7 +12,14 @@
 // ============================================================
 
 import type { CalendarMark } from '@/components/wipe/calendar-month';
-import type { BpPolicy, CollisionPolicy, MapSource, WipePlan, WipePlanKind } from '@/lib/api';
+import type {
+  BpPolicy,
+  CollisionPolicy,
+  MapSource,
+  WipePlan,
+  WipePlanKind,
+  WipeRunStepView,
+} from '@/lib/api';
 import { EM_DASH } from '@/lib/format';
 
 export const BP_POLICY_LABEL: Readonly<Record<BpPolicy, string>> = {
@@ -206,6 +213,44 @@ export function formatTime(epochMs: number): string {
   }
 
   return new Date(epochMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * Quanto a tentativa de um passo levou, para a sub-aba Execução.
+ *
+ * ####  A CONTA É COM `attemptStartedAt`, NUNCA COM `startedAt`  ####
+ *
+ * Num passo RETOMADO os dois carimbos são de execuções
+ * diferentes: `startedAt` é o começo da tentativa que morreu
+ * (preservado de propósito — é o histórico do wipe), e
+ * `finishedAt` é o fim da tentativa que concluiu. A diferença
+ * entre eles é o tempo em que o agente esteve MORTO. Medido na
+ * simulação: um `apagar` de 8 arquivos marcando 20.901 ms porque a
+ * retomada veio 20 s depois do crash; retomar na manhã seguinte
+ * daria dez horas.
+ *
+ * Passo que nunca rodou (um `skipped`) ou ainda em andamento não
+ * mostra duração nenhuma: o relógio ao lado já diz o que há.
+ */
+export function stepDuration(step: WipeRunStepView): string {
+  if (step.attemptStartedAt === null || step.finishedAt === null) {
+    return '';
+  }
+
+  const ms = Math.max(0, step.finishedAt - step.attemptStartedAt);
+
+  if (ms < 1000) {
+    return `${String(ms)} ms`;
+  }
+
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(1)} s`;
+  }
+
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+
+  return `${String(minutes)}m ${String(seconds).padStart(2, '0')}s`;
 }
 
 /** Epoch ms -> `YYYY-MM-DD`, para o `<input type="date">`. */
