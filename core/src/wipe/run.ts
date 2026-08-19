@@ -104,8 +104,12 @@ export interface WipeServerControl {
  * escrever a frase, e um aviso perdido não tem como derrubar o
  * wipe — quem chama é que decide isso, e a decisão está aqui.
  *
- * O contrato é: NUNCA LANÇA. E, se lançar mesmo assim, o `catch`
- * do passo `avisar` segura.
+ * LANÇAR É PERMITIDO, e o `catch` do passo `avisar` segura: a fala
+ * que não saiu vira uma linha no log e o wipe segue. Quem entrega
+ * (wipe/announce.ts) deixa a falha do transporte subir DE
+ * PROPÓSITO — um locutor que a engolisse faria o `count` deste
+ * passo somar avisos que ninguém leu, e o histórico diria
+ * "2 aviso(s) no chat" com zero aviso no chat.
  */
 export interface WipeAnnouncer {
   announceOffset(input: {
