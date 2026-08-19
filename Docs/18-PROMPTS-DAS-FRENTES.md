@@ -549,9 +549,16 @@ CONSTRUA:
       origemz.bp.export <offset> <limit>   lê persistance.GetPlayerInfo(steamId)
                                            .unlockedItems — funciona OFFLINE
       origemz.bp.restore <base64>          guarda a lista e aplica com
-                                           blueprints.Learn(...) no
+                                           blueprints.UnlockList(...) no
                                            OnPlayerConnected (e já, para quem
                                            está online)
+      ATENÇÃO: NÃO existe blueprints.Learn(). Conferido com o Mono.Cecil no
+      Assembly-CSharp.dll DA INSTALAÇÃO: PlayerBlueprints expõe Unlock,
+      UnlockList, IsUnlocked, HasUnlocked, UnlockAll e Reset, e mais nada.
+      Chamar Learn faz o OrigemZAgent.cs INTEIRO parar de compilar, e com ele
+      caem players, items, give e vip.sync. UnlockList ainda é o certo por
+      outro motivo: ele faz o lote com UM SendNetworkUpdateImmediate e UM
+      ClientRPC.
   core/src/wipe/blueprints.ts           snapshot, régua por tier, devolução
   core/src/db/bp-repository.ts
   core/src/http/routes/wipe-blueprints.ts
@@ -570,7 +577,8 @@ REGRAS QUE NÃO SE NEGOCIAM:
    contra o VIP vigente naquele instante. Salvar só de VIP quebraria quem compra
    VIP no dia seguinte ao wipe.
 2. O snapshot vale para O WIPE SEGUINTE, E SÓ ELE. Depois expira.
-3. A devolução é NO LOGIN: Learn() exige o BasePlayer carregado.
+3. A devolução é NO LOGIN: UnlockList() mexe no PersistantPlayerInfo do
+   BasePlayer e manda um ClientRPC — sem o jogador carregado não há o que chamar.
 4. O export é PAGINADO, e a carga de volta é RECUSADA INTEIRA em vez de cortada.
    Um BP pela metade PARECE ter funcionado — é o pior desfecho possível.
 5. Devolução idempotente por (steam_id, snapshot_id): quem entra e sai três vezes

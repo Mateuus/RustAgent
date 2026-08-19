@@ -702,8 +702,28 @@ var info = SingletonComponent<ServerMgr>.Instance.persistance.GetPlayerInfo(stea
 foreach (var itemId in info.unlockedItems) { /* ... */ }
 
 // devolver — exige o BasePlayer carregado, ou seja, o jogador ONLINE
-player.blueprints.Learn(itemDefinition);
+player.blueprints.UnlockList(definitions);   // List<ItemDefinition>, o lote inteiro
 ```
+
+> **####  NÃO É `blueprints.Learn(...)` — ESSE MÉTODO NÃO EXISTE  ####**
+>
+> Este documento mandava `player.blueprints.Learn(itemDefinition)` até a Frente I
+> abrir o `Assembly-CSharp.dll` **da instalação real** com o Mono.Cecil e conferir
+> nome por nome. O que `PlayerBlueprints` expõe é `Unlock`, `UnlockList`,
+> `IsUnlocked`, `HasUnlocked`, `UnlockAll` e `Reset` — e **nenhum** `Learn`.
+>
+> Errar isto não dá um erro pequeno: o `Plugins/OrigemZAgent.cs` **inteiro** deixa
+> de compilar, e caem junto os comandos `origemz.players`, `origemz.items`,
+> `origemz.give` e `origemz.vip.sync`, que nada têm a ver com blueprint.
+>
+> `UnlockList` é também o certo por outro motivo: ele recebe a lista pronta e faz
+> UM `SendNetworkUpdateImmediate` e UM `ClientRPC`. Devolver trezentos blueprints
+> com `Unlock` item a item seriam trezentas atualizações de rede no segundo em que
+> o jogador entra.
+>
+> A lista das APIs conferidas está no cabeçalho do bloco de blueprints do próprio
+> `.cs`. **A fonte é o DLL, não este documento** — se as duas divergirem de novo,
+> quem está errado é o texto.
 
 Daí a sequência:
 
@@ -720,9 +740,10 @@ Daí a sequência:
 
 ### As quatro decisões que esse desenho força
 
-1. **Devolver no LOGIN, não no boot.** `Learn` precisa do `BasePlayer` carregado.
-   Restaurar todo mundo ao subir não é possível — e nem desejável, porque metade
-   nunca volta.
+1. **Devolver no LOGIN, não no boot.** `UnlockList` mexe no `PersistantPlayerInfo`
+   do `BasePlayer` e manda um `ClientRPC`: sem o jogador carregado não há o que
+   chamar. Restaurar todo mundo ao subir não é possível — e nem desejável, porque
+   metade nunca volta.
 2. **O snapshot tem prazo: vale para o wipe seguinte, e só ele.**
 3. **O direito é conferido na DEVOLUÇÃO, não no snapshot.** O snapshot é de todo
    mundo (é barato); quem recebe de volta é decidido contra o VIP **vigente

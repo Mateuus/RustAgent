@@ -1,6 +1,11 @@
-# 06 — API (Fase 1)
+# 06 — API
 
 Base: `http://127.0.0.1:8787`. Formato: JSON, sempre com `ok` no corpo.
+
+Este documento cobre as rotas da **Fase 1** e as do **wipe, calendário e
+mensagens** (Fase 6). As rotas das fases do meio — administração, itens, kits,
+VIP, loja — ainda não passaram por aqui; elas estão descritas nos briefings
+[10](10-FASE-ADMINISTRACAO.md) a [15](15-BRIEFING-VIP-LOADOUTS-KITS.md).
 
 ---
 
@@ -59,6 +64,34 @@ Formato único. Programe contra `error`; `message` pode mudar sem aviso.
 | `OXIDE_INVALID_NAME` / `OXIDE_INVALID_PARENT` | 400 | nome fora de formato, ou herança circular |
 | `OXIDE_COMMAND_REFUSED` | 502 | o console respondeu com o uso do comando |
 | `INTERNAL_ERROR` | 500 | inesperado (detalhes só no log) |
+
+Os do **wipe** e das **mensagens** (Fase 6), no mesmo formato:
+
+| Código | HTTP | Significado |
+|---|---|---|
+| `IDEMPOTENCY_KEY_REQUIRED` / `IDEMPOTENCY_KEY_TOO_LONG` | 400 | falta a `Idempotency-Key` no `POST /wipe/runs`, ou ela passa de 200 caracteres |
+| `WIPE_IDENTITY_MISMATCH` | 400 | o `identity` digitado não é o daquele servidor |
+| `WIPE_SCHEDULE_IN_THE_PAST` | 400 | wipe marcado — ou movido — para um instante que já passou |
+| `WIPE_SCHEDULE_CONFLICT` | 409 | já existe outro wipe naquele mesmo instante |
+| `WIPE_PLAN_NOT_FOUND` / `UNKNOWN_WIPE_PLAN` | 404 | não existe wipe marcado com aquele id |
+| `WIPE_PLAN_NOT_EDITABLE` | 409 | ele já aconteceu, ou está acontecendo |
+| `WIPE_FORCED_DATE_IS_FIXED` | 409 | a data do forçado é da Facepunch; só a política dele muda |
+| `WIPE_FORCED_CANNOT_BE_SKIPPED` | 409 | o forçado acontece com ou sem o agente |
+| `UNKNOWN_WIPE_RUN` | 404 | não existe execução de wipe com aquele id |
+| `WIPE_ALREADY_RUNNING` / `WIPE_ALREADY_DONE` | 409 | não se retoma o que está em curso, nem o que terminou |
+| `SERVER_NOT_MANAGED` | 409 | o servidor existe, mas está com `SERVER_ENABLED=0` |
+| `NO_DISK_SPACE` | 409 | impedimento do `preview`, recusado **antes** do 202 |
+| `MAP_NOT_FOUND` | 404 | aquela entrada não está na fila de mapas |
+| `MAP_ALREADY_USED` / `MAP_ALREADY_QUEUED` | 409 | o mundo já foi jogado, ou já está na fila |
+| `MAP_NOT_CUSTOM` | 409 | `versionOk` só existe em mapa custom |
+| `INVALID_SEED` / `INVALID_WORLD_SIZE` / `MAP_URL_REQUIRED` | 400 | seed fora de formato, tamanho fora da faixa, custom sem `.map` |
+| `DUPLICATED_ID` / `INCOMPLETE_ORDER` | 400 | o `reorder` não recebeu a fila **inteira** |
+| `MAP_URL_INVALID` / `MAP_URL_NOT_A_MAP` / `MAP_URL_UNREACHABLE` / `MAP_URL_TOO_BIG` | 422 | o corpo está certo; o arquivo do outro lado é que não serve |
+| `COULD_NOT_PICK_SEED` | 500 | o sorteio esgotou as tentativas |
+| `MESSAGE_NOT_FOUND` | 404 | não existe mensagem com aquele id |
+| `MESSAGE_NO_TARGET` | 409 | os alvos apontam para servidores que não existem mais |
+| `MESSAGE_INVALID_SCHEDULE` / `MESSAGE_INVALID_TIMEZONE` | 422 | ritmo incoerente, ou fuso desconhecido neste runtime |
+| `SERVER_NOT_FOUND` | 404 | id desconhecido em `targets` ou no `broadcast` |
 
 ---
 
@@ -1008,6 +1041,512 @@ explica.
 
 ---
 
+## Wipe
+
+```
+  /api/servers/:id/wipe/settings    QUANDO ele zera, e o que o wipe leva
+  /api/servers/:id/wipe/plans       a agenda materializada, wipe a wipe
+  /api/servers/:id/wipe/maps        em QUE MUNDO ele volta
+  /api/servers/:id/wipe/blueprints  quem recomeça sabendo o quê
+  /api/servers/:id/wipe/preview     o que vai apagar, lido do disco
+  /api/servers/:id/wipe/runs        A EXECUÇÃO — a única rota que apaga
+  /api/servers/:id/wipe/upcoming    o que vem por aí (e o recorte do jogador)
+  /api/wipe/rustmaps/status         a chave do RustMaps, sem mostrá-la
+```
+
+**Só `/runs` executa.** As outras dizem quando o wipe é, o que ele leva e o que
+ele apagaria; nenhuma delas para servidor, apaga arquivo ou manda RCON. É a
+separação que permite abrir a tela de wipe com o servidor cheio de gente.
+
+**Toda resposta de wipe traz `now`, e ele é o relógio DO AGENTE.** A contagem
+regressiva da tela sai dele, corrigida pela diferença para o relógio local: um
+navegador adiantado em dez minutos mostraria "faltam 3 min" para um wipe que
+ainda tem uma hora.
+
+**A seed é string em toda a API**, pela mesma razão do `steamId`: ela é
+transportada, comparada e exibida — nunca somada —, e em número um `.0` aparece
+no meio do caminho.
+
+### A agenda
+
+| Rota | |
+|---|---|
+| `GET /api/servers/:id/wipe/settings` | a cadência, o forçado e a colisão |
+| `PUT /api/servers/:id/wipe/settings` | grava **e** reconcilia, na mesma resposta |
+| `GET /api/servers/:id/wipe/plans?from=&to=` | a agenda; sem `from`, começa **agora** |
+| `POST /api/servers/:id/wipe/plans` | marca um wipe à mão. **201** |
+| `PATCH /api/servers/:id/wipe/plans/:planId` | adiar, política, mapa, nota |
+| `DELETE /api/servers/:id/wipe/plans/:planId` | **pula** — e não apaga |
+| `GET /api/servers/:id/wipe/upcoming?limit=` | os próximos, para o cartão da tela |
+| `GET /api/servers/:id/wipe/upcoming/me?steamId=&limit=` | a agenda recortada pelo VIP |
+
+O corpo do `PUT` é a configuração **inteira**. PUT, e não PATCH: a tela edita a
+cadência num formulário só, e um merge parcial abriria a pergunta "o que
+acontece com o que não veio?" — cuja única resposta segura seria não mexer, o
+oposto do que espera quem acabou de desligar a cadência.
+
+```json
+{ "cadence": { "enabled": true, "everyDays": 7, "anchorAt": 1754000000000,
+               "timeOfDay": "16:00", "timeZone": "America/Sao_Paulo",
+               "bpPolicy": "keep" },
+  "forced": { "bpPolicy": "wipe" },
+  "collision": { "policy": "absorb", "windowHours": 48 } }
+```
+
+| Campo | |
+|---|---|
+| `bpPolicy` | `keep`, `wipe` ou `wipe_except_vip` |
+| `collision.policy` | `reanchor` (o forçado vira o novo marco zero), `absorb` (o de cadência perto dele é cancelado), `ignore` (os dois acontecem) |
+| `cadence.everyDays` | 1 a 365 — acima disso não é cadência, é um wipe à mão |
+| `collision.windowHours` | 0 a 168, e só vale no `absorb` |
+
+O `forced` não tem `enabled`: ele acontece com ou sem nós, e a única escolha é o
+que ele leva. `timeZone` é conferido contra o **runtime**, e não contra uma lista
+nossa — a base de zonas do ICU muda com a versão do Node, e uma lista escrita à
+mão passaria a recusar zona que o próprio agente sabe calcular.
+
+O `PUT` grava, reconcilia e devolve a agenda recalculada (`reconciled` e
+`plans`): gravar sem reconciliar deixaria a tela mostrando a cadência nova ao
+lado das datas antigas, sem o admin saber qual das duas o agente vai obedecer.
+
+Toda resposta de agenda carrega o mesmo bloco:
+
+```json
+{ "ok": true, "now": 1755600000000, "nextForcedAt": 1756494000000,
+  "next": { "id": 12, "serverId": "pvp1", "kind": "cadence", "status": "planned",
+            "scheduledAt": 1755612000000, "bpPolicy": "keep",
+            "mapSource": "pool", "mapPoolId": null, "note": null } }
+```
+
+**`next` e `nextForcedAt` podem divergir, e é por isso que os dois vêm**: o
+próximo wipe pode ser um da cadência, três semanas antes do forçado, e sem os
+dois números a tela não consegue dizer "próximo wipe em 3 dias — e o forçado, em
+26". O forçado sai do **cálculo** (primeira quinta do mês, 19:00 UTC), e não da
+tabela: assim ele aparece mesmo num servidor cuja agenda nunca foi
+materializada.
+
+`kind` é `cadence`, `forced` ou `manual`. `status` é `planned`, `running`,
+`done`, `skipped`, `failed` ou `absorbed` — o absorvido continua na lista,
+marcado, porque uma agenda com um buraco não explica por que terça não vai ter
+wipe.
+
+**O forçado não se pula nem se move.** `DELETE` nele responde
+`409 WIPE_FORCED_CANNOT_BE_SKIPPED`, e mudar o `scheduledAt` dele responde
+`409 WIPE_FORCED_DATE_IS_FIXED`. Não é teimosia: a atualização mensal do Rust
+muda o protocolo e invalida o save do mundo, e o servidor não sobe com o mundo
+antigo. O que dá para escolher é o que ele leva.
+
+**`DELETE` num wipe de cadência não o tira da lista**: ele fica `skipped`, e a
+resposta devolve o plano. Some de verdade só o que foi marcado à mão — e aí
+`plan` vem `null`, porque nada o recria.
+
+O corpo do `POST /wipe/plans` — e o do `PATCH`, que é parcial e exige pelo menos
+um campo:
+
+```json
+{ "scheduledAt": 1755612000000, "bpPolicy": "keep",
+  "mapSource": "pool", "mapPoolId": null, "note": "wipe de aniversário" }
+```
+
+`mapSource` é `pool` (a fila decide), `random` (sorteia na hora), `fixed` (a
+entrada apontada por `mapPoolId`) ou `keep` (não troca o mundo). Um wipe marcado
+à mão nasce `manual` e **`pinned`**: a reconciliação não o apaga, e ele não é
+recalculado quando a cadência muda — e todo `PATCH` liga o `pinned`, senão adiar
+o wipe de sábado duraria até a próxima reconciliação. Marcar para um instante que
+já passou responde `400 WIPE_SCHEDULE_IN_THE_PAST`; dois wipes no mesmo instante,
+`409 WIPE_SCHEDULE_CONFLICT` — eles seriam uma parada de servidor contada duas
+vezes, e o `UNIQUE` do banco recusaria com um 500 sem explicação. Editar um wipe
+que já aconteceu responde `409 WIPE_PLAN_NOT_EDITABLE`.
+
+#### O que UM JOGADOR pode ver do futuro
+
+`/upcoming/me` **não** é o `/upcoming` com um filtro na tela. O corte acontece no
+mesmo `buildPlayerCalendar` que desenha a tela CALENDÁRIO dentro do jogo: dois
+recortes, um por caminho, dariam duas respostas para a mesma pergunta — e a que
+vaza seria descoberta por quem tem interesse em vazá-la.
+
+| Quem pergunta | O que volta |
+|---|---|
+| sem `?steamId=`, sem VIP, ou bronze | a data e a política de blueprint |
+| silver | + o mapa do próximo wipe, **sem a seed** |
+| gold | + os três próximos mundos da fila |
+
+```json
+{ "ok": true, "now": 1755600000000, "timeZone": "America/Sao_Paulo",
+  "tier": "silver", "mapsAllowed": 1,
+  "next": { "…": "o cartão grande" },
+  "wipes": [ { "…": "o resto da agenda, sem repetir o next" } ],
+  "maps": [ { "…": "a fila atrás do próximo, sem seed" } ],
+  "nextForcedAt": 1756494000000 }
+```
+
+Sem `steamId` a resposta é a de quem não tem VIP: negar por falta de identidade é
+a saída conservadora. E qual **é** o próximo wipe vem do mesmo cálculo que o
+`{wipe.faltam}` do chat usa — uma segunda conta aqui faria a rota do jogador
+responder um wipe e o chat responder outro.
+
+### A fila de mapas
+
+| Rota | |
+|---|---|
+| `GET /api/servers/:id/wipe/maps` | a fila em ordem, com `next` e `willDraw` |
+| `POST /api/servers/:id/wipe/maps` | põe um mundo na fila. **201** |
+| `POST /api/servers/:id/wipe/maps/random` | sorteia uma seed e a enfileira. **201** |
+| `POST /api/servers/:id/wipe/maps/reorder` | a ordem **inteira** |
+| `PATCH /api/servers/:id/wipe/maps/:mapId` | a marca `versionOk` do mapa custom |
+| `DELETE /api/servers/:id/wipe/maps/:mapId` | tira da fila |
+
+```json
+{ "kind": "procedural", "seed": "123456", "worldSize": 3500,
+  "level": "Procedural Map", "levelUrl": null, "versionOk": false, "note": null }
+```
+
+`seed` ausente ou `null` **sorteia** — é o mesmo sorteio que a execução usa
+quando a fila está vazia, e ele evita o que já está prometido na fila **e** o que
+os últimos wipes usaram. Um `custom` sem `levelUrl`, e um `procedural` com um,
+são recusados no schema: os dois o banco aceitaria, e os dois apareceriam depois
+como "o servidor não subiu depois do wipe".
+
+**A URL do mapa custom é conferida na borda, antes de a linha existir.** Um
+`HEAD` pergunta se ela responde, se termina em `.map` e qual o tamanho. O passo
+`apagar` é irreversível — descobrir que a URL não responde depois dele é ficar
+com o mundo velho apagado e o novo inexistente. A recusa é **422**, e não 400: o
+corpo está bem formado; o que não serve é o arquivo do outro lado.
+
+**`warnings` no 201 não é erro.** `SEED_ALREADY_PLAYED` não impede nada, mas
+quase sempre é engano — e um 201 mudo faria o admin descobrir a repetição no dia
+do wipe. O 201 traz também `drawn`, dizendo se a seed veio da mão ou do sorteio:
+a tela não pode anunciar como escolha do admin um número que o agente tirou
+sozinho.
+
+**`reorder` recebe a lista INTEIRA**, e não um "mova para cima": com duas telas
+abertas, um "para cima" de cada uma produz uma ordem que nenhuma das duas pediu.
+Id de fora da fila responde `404 MAP_NOT_FOUND`, id repetido `400 DUPLICATED_ID`
+e lista incompleta `400 INCOMPLETE_ORDER`.
+
+**`versionOk` é decisão de gente**, e é o que libera um `.map` para um wipe
+**forçado**: o agente não tem como saber se aquele arquivo carrega no binário de
+amanhã. `PATCH` num procedural responde `409 MAP_NOT_CUSTOM`.
+
+**Fila vazia não trava wipe.** `willDraw: true` diz que o agente vai sortear — a
+resposta explica isso em vez de deixar a tela concluir que o wipe está parado.
+`status` de uma entrada é `draft`, `generating`, `ready`, `used` ou `failed`.
+
+### A prévia do RustMaps
+
+| Rota | |
+|---|---|
+| `GET /api/wipe/rustmaps/status?refresh=1` | a chave serve? qual plano, quanta cota |
+| `POST /api/servers/:id/wipe/maps/:mapId/generate` | pede a prévia daquela entrada |
+
+**A chave não sai daqui.** `RUSTMAPS_API_KEY` vive no `.env`, e o status responde
+só *válida/inválida*, o plano e a cota. Nem prefixo, nem últimos quatro dígitos:
+uma chave que aparece na tela aparece também no print que alguém cola no Discord.
+Sem `?refresh=1` a resposta vem do último retrato — a tela recarrega sozinha, e
+perguntar ao RustMaps a cada abertura gastaria cota para redesenhar o mesmo
+cadeado.
+
+**Nenhuma das duas pode segurar um wipe.** O `POST` responde **200** mesmo com o
+RustMaps fora do ar; o que muda é `outcome` e a frase. Num mundo procedural a
+seed **é** o mapa, e a imagem é enfeite — um 5xx aqui faria a tela pintar de
+vermelho uma fila perfeitamente utilizável. As duas únicas recusas são de quem
+chamou: `404 MAP_NOT_FOUND` e `409 MAP_ALREADY_USED`.
+
+`announcedRateLimit` é o teto que a API **anuncia**, e está marcado assim de
+propósito: ninguém o mediu com uma chave de verdade. Ver
+[09-ROADMAP.md](09-ROADMAP.md).
+
+### Blueprints que sobrevivem ao wipe
+
+| Rota | |
+|---|---|
+| `GET /api/servers/:id/wipe/blueprints` | a régua, o último snapshot e os contadores |
+| `PUT /api/servers/:id/wipe/blueprints/settings` | a régua |
+| `POST /api/servers/:id/wipe/blueprints/snapshot` | tira um agora |
+| `POST /api/servers/:id/wipe/blueprints/restore` | devolve a **um** jogador |
+
+**Nenhuma delas apaga nada.** O snapshot **lê** o que o jogo sabe e grava no
+banco do agente; a devolução **ensina** de volta. Quem apaga blueprint é o passo
+`apagar` da execução.
+
+O snapshot é **lógico**, e não uma cópia de arquivo: `player.blueprints.<n>.db` é
+um arquivo só, de todos os jogadores, e não há como recortar "os BPs de quem não
+é VIP". Por isso ele **exige o servidor no ar** — quem lê é o `OrigemZAgent`
+dentro do jogo. Com o RCON fora a resposta é `503 RCON_UNAVAILABLE`, e não um
+snapshot vazio, que o wipe seguinte trataria como "ninguém sabia nada" e
+apagaria tudo com o agente achando que guardou uma cópia.
+
+```json
+{ "tiers": { "bronze": { "mode": "bench", "bench": 1 },
+             "silver": { "mode": "bench", "bench": 2 },
+             "gold":   { "mode": "all",   "bench": 3 } },
+  "delayHours": 0 }
+```
+
+`mode` é `none` (recomeça do zero), `bench` (tudo até aquela bancada, 1 a 3) ou
+`all`. O nome do nível é **texto livre**: ele vem do `OrigemZVip.json` daquele
+servidor, e um `enum` aqui recusaria um nível que o dono do servidor criou. Quem
+tem dois níveis leva o do melhor deles. `delayHours` vai até 168 — acima disso o
+snapshot já expirou —, e com atraso a corrida inicial acontece sem a vantagem.
+
+O snapshot é de **todo mundo**; quem recebe de volta é decidido **na devolução**,
+contra o VIP vigente naquele instante. Salvar só de VIP quebraria quem compra VIP
+no dia seguinte ao wipe. E ele vale para o wipe **seguinte, e só ele**.
+
+```json
+{ "ok": true, "now": 1755600000000,
+  "settings": { "…": "a régua acima" },
+  "snapshot": { "players": 240, "items": 31840,
+                "createdAt": 1755500000000, "wipeRunId": 7 },
+  "counters": { "pending": 12, "sent": 220, "applied": 218,
+                "expired": 0, "failed": 2 } }
+```
+
+`POST .../restore` leva `{ "steamId": "…", "force": false }`. `force: true`
+devolve o snapshot inteiro mesmo sem VIP — é o botão do suporte. A devolução
+acontece no **login** do jogador, e é idempotente por `(steamId, snapshot)`:
+quem entra e sai três vezes não recebe três vezes, e não recebe zero.
+
+### O que o wipe vai apagar
+
+| Rota | |
+|---|---|
+| `GET /api/servers/:id/wipe/preview` | os arquivos, do disco, com impedimentos e avisos |
+| `GET /api/servers/:id/wipe/plugin-data` | o que o *full wipe* levaria além disso |
+
+O `preview` não escreve nada, e por isso é seguro de chamar a cada abertura de
+tela — inclusive com o servidor no ar e cheio de gente. Ele devolve o mundo de
+hoje, o mundo que entra (`nextMap`), a pasta do save classificada, o espaço do
+backup e duas listas:
+
+| | |
+|---|---|
+| `blockers` | o que **recusa** o `POST /wipe/runs`, com 409 |
+| `warnings` | o que precisa ser dito e não impede nada |
+
+Hoje há **um** impedimento, `NO_DISK_SPACE`, e os avisos `NO_SAVE_FOLDER`,
+`EMPTY_MAP_POOL`, `BACKUP_DISABLED`, `BLUEPRINTS_WIPED`,
+`FULL_WIPE_WITHOUT_LIST`, `PLUGIN_DATA_MISSING` e `RCON_DOWN`.
+
+**O espaço é conferido aqui porque aqui o servidor ainda está no ar.** Descobrir
+o disco cheio no passo `backup` seria descobrir com o servidor já parado, os
+jogadores fora e uma operação que não dá para abandonar nem concluir.
+
+### Como o agente executa
+
+| Rota | |
+|---|---|
+| `GET /api/servers/:id/wipe/exec-settings` | os avisos, o esvaziamento, o backup, o full wipe e o pós-wipe |
+| `PUT /api/servers/:id/wipe/exec-settings` | grava a configuração inteira |
+
+```json
+{ "announce": { "offsetsMinutes": [1440, 360, 60, 15, 5, 1],
+                "text": "WIPE em {wipe.faltam}. Guardem o que puderem…",
+                "tag": "WIPE", "tagColor": "#ff4444",
+                "color": "#ffffff", "size": 15 },
+  "drain": { "enabled": true, "waitMinutes": 5, "force": false },
+  "backup": { "enabled": true, "keep": 3 },
+  "pluginData": { "enabled": false, "patterns": [] },
+  "post": { "resync": true, "announce": true,
+            "announceText": "Mundo novo no ar! Boa sorte a todos." } }
+```
+
+Os offsets vão do maior para o menor, até 2880 min (dois dias), no máximo 12.
+Cada padrão de `pluginData` é um caminho relativo à pasta do servidor; cabem 200,
+e o teto existe para uma lista colada de fora não virar uma varredura de disco a
+cada requisição.
+
+**A lista do full wipe nasce vazia, e isso não é esquecimento**: o
+`OrigemZVip.json` é o VIP que alguém pagou, e nenhum padrão nosso pode marcá-lo
+sozinho.
+
+### A execução
+
+| Rota | |
+|---|---|
+| `POST /api/servers/:id/wipe/runs` | **WIPAR AGORA**. `202` — ou `200`, se a chave repetir |
+| `GET /api/servers/:id/wipe/runs?limit=` | o histórico, com os mundos que já rodaram |
+| `GET /api/servers/:id/wipe/runs/:runId?fromLine=` | os passos e o log |
+| `POST /api/servers/:id/wipe/runs/:runId/resume` | retoma do passo que falhou. `202` |
+| `POST /api/servers/:id/wipe/runs/:runId/cancel` | pede a parada |
+
+> **`POST /wipe/runs` é a única rota do agente que apaga o trabalho de todos os
+> jogadores.** Ela exige **duas** coisas, e as duas são necessárias.
+
+| A trava | Onde | O que ela impede |
+|---|---|---|
+| `Idempotency-Key` | header, **obrigatório** | o duplo-clique zerar o servidor duas vezes |
+| `identity` | no corpo, **digitado** | o clique distraído que vence qualquer "tem certeza?" |
+
+A chave é gravada na linha, com índice único: a segunda chamada com a mesma chave
+recebe **200 e a MESMA execução**, e não uma nova. Duas requisições chegando
+juntas não se enxergam na consulta — quem as separa é o índice do banco, e a
+resposta ali é a mesma. Não mandar o header responde
+`400 IDEMPOTENCY_KEY_REQUIRED`: gerar uma chave aqui quando o cliente não manda
+seria escrever uma chave diferente a cada requisição, ou seja, exatamente o
+duplo-clique que ela existe para impedir, com a aparência de estar protegido.
+
+O `identity` é o `SERVER_IDENTITY` daquele servidor, digitado por inteiro. Ele
+**não** é um `?force=true`: é a confirmação forte que o GitHub usa para apagar
+repositório, e o motivo é o mesmo. Errar responde `400 WIPE_IDENTITY_MISMATCH`.
+
+```json
+{ "identity": "pvp1", "planId": 12, "bpPolicy": "wipe_except_vip",
+  "fullWipe": false, "at": 1755612000000 }
+```
+
+`planId` ausente é o WIPAR AGORA, que não consome plano nenhum. `at` no futuro faz
+o passo `avisar` cumprir os offsets antes de qualquer coisa acontecer — é o
+"wipar daqui a 15 min" com a contagem no chat. `bpPolicy` ausente cai no do
+plano; sem plano, em `keep`.
+
+**As recusas acontecem com o servidor ainda no ar.** Disco cheio vira 409 aqui,
+antes do 202 — e não no passo `backup`, que roda com o servidor já parado.
+
+A resposta é `202` com `run` e `operationId`. Os oito passos são `avisar`,
+`esvaziar`, `parar`, `backup`, `apagar`, `configurar`, `subir` e `pos-wipe`; o
+`status` da execução é `running`, `done`, `failed` ou `cancelled`.
+
+**O log é da OPERAÇÃO, e ela vive em memória.** Depois de um `pm2 restart` ele
+some, e o que sobra são os passos, que estão no banco. A resposta diz qual dos
+dois casos é (`live`), para a tela não mostrar um console vazio como se fosse
+silêncio. `fromLine` é o cursor, e `nextLine` volta com ele.
+
+**Retomar não roda tudo de novo.** Os passos já `done` são pulados: "de novo" no
+meio de um wipe significaria apagar um mundo que já é o novo. Retomar uma
+execução em curso responde `409 WIPE_ALREADY_RUNNING`; uma que terminou,
+`409 WIPE_ALREADY_DONE`.
+
+**Cancelar não desfaz.** Ele pede a parada; o que já foi apagado continua
+apagado — e por isso a resposta diz em que passo ela estava. Quem cancela um wipe
+no meio precisa saber se o servidor ficou sem mundo.
+
+---
+
+## Mensagens
+
+```
+  /api/messages        o que o servidor fala sozinho — a lista da REDE
+  /api/chat/broadcast  uma fala avulsa, agora
+```
+
+**A mensagem é de rede**, como VIP, kit e loja. Por isso não existe
+`/api/servers/:id/messages`: escreve-se uma vez e escolhe-se em quais servidores
+ela sai, na lista `targets`. **Lista vazia = todos** — pela mesma razão do
+`scope: "network"` dos banimentos.
+
+| Rota | |
+|---|---|
+| `GET /api/messages` | a lista, e os nomes de variável que o agente sabe trocar |
+| `POST /api/messages` | cria. **201** |
+| `PATCH /api/messages/:messageId` | edita **o que veio**, e só isso |
+| `DELETE /api/messages/:messageId` | remove, e o log vai junto |
+| `POST /api/messages/reorder` | a ordem da lista, inteira |
+| `POST /api/messages/:messageId/test` | manda **agora**, sem mexer no relógio |
+| `GET /api/messages/:messageId/log?limit=` | saiu mesmo? |
+| `POST /api/chat/broadcast` | uma fala avulsa |
+
+A lista traz junto `variables.names` e `variables.namespaces`, e eles vêm do
+**registro** do agente, não de uma constante do painel: quem registra `{wipe.*}`
+é outra parte do código, e uma lista escrita à mão no painel ficaria mentindo no
+dia em que ela mudasse.
+
+```json
+{ "name": "Discord", "text": "Entre no nosso Discord!",
+  "enabled": true, "scheduleKind": "interval", "everySeconds": 1800,
+  "timeOfDay": null, "weekdays": [], "runAt": null,
+  "timeZone": "America/Sao_Paulo", "windowFrom": "10:00", "windowTo": "23:00",
+  "onlyWithPlayers": true, "minPlayers": 1,
+  "tag": "AVISO", "tagColor": "#ffcc00", "color": "#ffffff", "size": 15,
+  "targets": ["pvp1"] }
+```
+
+| `scheduleKind` | O que ele exige |
+|---|---|
+| `interval` | `everySeconds`, de 10 s a 30 dias |
+| `daily` | `timeOfDay`, em `HH:MM` |
+| `weekly` | `timeOfDay` **e** pelo menos um dia em `weekdays` (0 = domingo) |
+| `once` | `runAt`, em ISO-8601 com fuso |
+
+**As quatro formas ficam honestas na borda.** Cada combinação faltante é um
+pedido que o **banco aceitaria** (as colunas são anuláveis) e que o admin
+descobriria como "a mensagem nunca sai" — o pior defeito possível numa mensagem,
+porque não parece defeito. A recusa é `422 MESSAGE_INVALID_SCHEDULE`, com a frase
+que diz o que preencher. A janela de horário é um **par**: um lado só é
+configuração pela metade, e um `timeOfDay` fora da janela ("todo dia às 03:00,
+mas só entre 10:00 e 23:00") é uma mensagem que nunca sairia. Fuso desconhecido
+neste runtime responde `422 MESSAGE_INVALID_TIMEZONE`.
+
+**As datas viajam em ISO e o banco guarda epoch ms**, como o `expiresAt` do VIP:
+`runAt`, `nextAt`, `lastSentAt`, `createdAt` e `updatedAt` saem em ISO-8601. A
+resposta traz também `position`, `sentCount` e `schedule` — a frase pronta que a
+coluna REPETE da tela mostra. `nextAt: null` é uma mensagem sem próxima saída.
+
+**`PATCH`, e não `PUT`** — diferente dos kits, e por um motivo concreto: a lista
+liga e desliga uma mensagem com **um clique**, e mandar o corpo inteiro para
+trocar um booleano faria a tela reenviar o texto e o ritmo a cada clique, com a
+chance de sobrescrever o que outra aba acabou de gravar. Em troca, a coerência é
+conferida no **resultado da mistura**, e não no que chegou: trocar só o
+`scheduleKind` para `weekly` deixaria a mensagem sem dia nenhum marcado.
+
+**`nextAt` não vem do corpo.** Ele é estado do relógio, e é sempre recalculado
+pelo agente — uma tela que pudesse mandá-lo empurraria uma mensagem para daqui a
+um ano sem ninguém entender por quê. E consertar uma vírgula **não** zera o
+relógio: só recalcula quem mexeu no ritmo (`scheduleKind`, `everySeconds`,
+`timeOfDay`, `weekdays`, `runAt`, `timeZone`), e sempre ao **religar** — uma
+mensagem desligada há semanas tem um horário de semanas atrás, que sairia na
+volta seguinte sem ninguém pedir.
+
+**Testar não pode adiar.** O `POST .../test` manda agora e **não** toca no
+`nextAt`: se o teste consumisse o horário, conferir a mensagem seria mudá-la, e
+quem clicasse duas vezes empurraria a próxima saída para daqui a uma hora sem
+saber. A resposta traz o texto **já resolvido**, por servidor — é o que responde
+"o `{wipe.faltam}` está pegando?" sem entrar no jogo:
+
+```json
+{ "ok": true,
+  "reports": [ { "serverId": "pvp1", "ok": true, "players": 37, "via": "plugin",
+                 "text": "WIPE em 2 h 15 min…", "error": null } ],
+  "detail": "Saiu em pvp1. O horário da próxima saída continua o mesmo." }
+```
+
+**O log traz as linhas que FALHARAM também**, com o motivo: um log só de sucessos
+responde "sim" justamente quando a resposta é "não". Uma mensagem cujos alvos
+apontam para servidores que não existem mais responde `409 MESSAGE_NO_TARGET` no
+teste — e um `targets` com id desconhecido responde `404 SERVER_NOT_FOUND` já na
+gravação, porque uma mensagem apontando para o nada seria indistinguível de uma
+bem configurada na tela.
+
+**`reorder` recebe a fila completa**, como o da fila de mapas, e pela mesma razão.
+
+**Remover apaga o histórico junto**, pela cascata. Quem quer calar preservando o
+histórico **desliga** (`enabled: false`) — e é isso que a frase da resposta diz.
+
+### `POST /api/chat/broadcast`
+
+A fala avulsa, pelo **mesmo transporte** das agendadas: é por aqui que um site
+externo, ou um plugin, faz o servidor falar. Ela não monta comando nenhum — uma
+segunda forma de mandar texto ao chat é exatamente o que esta fase existe para
+não ter.
+
+```json
+{ "serverId": "pvp1", "text": "Servidor reiniciando em 5 min",
+  "tag": "AVISO", "tagColor": "#ffcc00", "color": "#ffffff", "size": 15,
+  "steamId": "76561198000000000" }
+```
+
+`steamId` ausente fala para todo mundo que está online. A resposta diz por onde
+saiu: `via: "plugin"` traz em `sent` quantos receberam; `via: "say"` é o caminho
+do próprio jogo, sem cor, e aí o jogo **não** diz quantos receberam.
+
+**As cores são conferidas** (`#rgb` a `#rrggbbaa`). Elas vão para o `<color=…>`
+do jogo e para o `style` da prévia na tela; sem a conferência, o campo seria um
+caminho para injetar marcação. O texto vai até 512 caracteres: o comando viaja
+pelo RCON, e dez mil caracteres viram um frame que chega truncado ao plugin — um
+aviso pela metade, que **parece** ter funcionado.
+
+---
+
 ## Comando de RCON
 
 `POST /api/servers/:id/rcon` `{"command":"playerlist"}` → a resposta crua.
@@ -1021,10 +1560,13 @@ fazer isso.
 
 ## O que **não** existe nesta API
 
-Ditas em voz alta, para ninguém procurar: entrega de item (`give`),
-idempotência, **ranking**, kills e mortes (ver o `sample` acima), VIP, loja,
-wipe, propagandas, webhooks, auto-update do agente. Ver
-[09-ROADMAP.md](09-ROADMAP.md).
+Ditas em voz alta, para ninguém procurar: entrega de item (`give`), **ranking**,
+kills e mortes (ver o `sample` acima), VIP, loja, propagandas (o overlay CUI),
+webhooks, auto-update do agente. Ver [09-ROADMAP.md](09-ROADMAP.md).
+
+> **Wipe, calendário e mensagens saíram desta lista na Fase 6** — as rotas estão
+> nas duas seções acima. A **idempotência** também: o `POST /wipe/runs` a exige.
+> O resto da lista é da Fase 1 e não foi revisto nesta passada.
 
 O ranking fica de fora porque depende de kills e tempo MEDIDOS, e construí-lo
 sobre exemplo seria fixar uma regra de pontuação em cima de números falsos. O

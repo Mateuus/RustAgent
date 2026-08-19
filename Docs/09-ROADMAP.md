@@ -5,7 +5,7 @@ anterior de pé.
 
 ---
 
-## Fase 1 — Núcleo multi-servidor  ← estamos aqui
+## Fase 1 — Núcleo multi-servidor
 
 Criar, instalar, subir, parar, atualizar e instalar plugin, por vários
 servidores independentes, pela tela. Detalhe em
@@ -66,17 +66,62 @@ a que mais merece ser reescrita com calma.
 
 ---
 
-## Fase 6 — Wipe
+## Fase 6 — Wipe, calendário e mensagens  ← entregue
 
-**Planejada em detalhe:** [16-PLANO-WIPE-CALENDARIO-MENSAGENS.md](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md),
-com as frentes paralelas em [17-FRENTES-WIPE-E-MENSAGENS.md](17-FRENTES-WIPE-E-MENSAGENS.md).
+**Planejada em** [16-PLANO-WIPE-CALENDARIO-MENSAGENS.md](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md),
+**construída** por dez frentes paralelas
+([17-FRENTES-WIPE-E-MENSAGENS.md](17-FRENTES-WIPE-E-MENSAGENS.md) e
+[18-PROMPTS-DAS-FRENTES.md](18-PROMPTS-DAS-FRENTES.md)). As rotas estão em
+[06-API.md](06-API.md).
 
-- calendário (primeira quinta às 19:00 UTC, e o wipe semanal);
-- fila de mapas com seed/tamanho por rodada;
-- prévia do que será apagado, e o backup antes;
-- integração com o `server-auto-update` — a atualização mensal normalmente zera
-  o mapa, e "normalmente" é a palavra certa: prometer wipe onde não há faz
-  gente jogar fora a base à toa.
+O que está na árvore:
+
+- **a agenda**: cadência por servidor, o forçado da Facepunch (primeira quinta às
+  19:00 UTC) derivado do cálculo, e as três saídas para quando os dois colidem
+  (`reanchor`, `absorb`, `ignore`);
+- **a fila de mapas**: seed e tamanho por rodada, mapa custom com a URL conferida
+  na borda, e a prévia do RustMaps — que nunca segura um wipe;
+- **a execução**, em oito passos retomáveis (`avisar`, `esvaziar`, `parar`,
+  `backup`, `apagar`, `configurar`, `subir`, `pos-wipe`), com prévia do que será
+  apagado e o backup antes;
+- **os blueprints por VIP**: snapshot lógico antes de apagar, devolução no login
+  de quem tem direito, com régua por nível e atraso em horas;
+- **o agendador de mensagens** (que era a Fase 7): a lista de rede na barra
+  lateral, os quatro ritmos, a janela de horário e as variáveis — é ele quem
+  manda os avisos do wipe;
+- **o calendário para o jogador**: a tela CALENDÁRIO no `/menu` do jogo e a rota
+  `/wipe/upcoming/me`, recortadas pelo nível de VIP com o mesmo código.
+
+Migrações **23** (`wipe-schedule`), **24** (`wipe-map-pool`), **25**
+(`wipe-runs`), **26** (`messages`), **27** (`events`) e **28** (`bp-snapshots`).
+No painel, a aba **WIPE** com seis sub-abas (Geral, Agenda, Mapas, Execução,
+Blueprints, Configuração) e o item **MENSAGENS** na barra lateral. No plugin,
+`origemz.bp.export` e `origemz.bp.restore`.
+
+### O que NÃO foi validado
+
+Escrito aqui porque é verdade, e porque quem pegar isto depois precisa saber
+antes de prometer a alguém que funciona:
+
+- **nenhum wipe foi executado contra um servidor de Rust de verdade.** O que
+  existe são os testes do `core` e a leitura de disco do `preview`;
+- **o plugin nunca foi compilado** — não há Oxide.Compiler nesta máquina. As
+  APIs do jogo foram conferidas uma a uma com o Mono.Cecil contra o
+  `Assembly-CSharp.dll` da instalação (é o que derrubou o `blueprints.Learn` do
+  plano), mas conferir nome não é compilar;
+- **os fixtures do RustMaps não são capturas reais.** Os códigos HTTP são
+  confiáveis; os nomes dos campos, não. E o limite de requisições nunca foi
+  medido com uma chave — o que a API responde em `announcedRateLimit` é o que
+  ela *anuncia*;
+- **a tabela `events` (migração 27) existe e nenhuma linha de código a lê.** Foi
+  o combinado do [16 §12](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md): a tela do jogo
+  e a grade do calendário vão ler wipes e eventos juntos, e descobrir o formato
+  depois custaria refazer os dois.
+
+Falta ainda, e não bloqueia nada do que está acima: a integração com o
+`server-auto-update` — a atualização mensal **normalmente** zera o mapa, e
+"normalmente" é a palavra certa: prometer wipe onde não há faz gente jogar fora
+a base à toa.
 
 ---
 
@@ -84,9 +129,9 @@ com as frentes paralelas em [17-FRENTES-WIPE-E-MENSAGENS.md](17-FRENTES-WIPE-E-M
 
 Em ordem de valor, não de dependência:
 
-- avisos automáticos de chat → virou o **agendador de mensagens** do
-  [16-PLANO-WIPE-CALENDARIO-MENSAGENS.md](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md) §10,
-  e sobe junto com o wipe (é ele quem avisa)
+- ~~avisos automáticos de chat~~ → virou o **agendador de mensagens** do
+  [16-PLANO-WIPE-CALENDARIO-MENSAGENS.md](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md) §10
+  e **entregou junto com a Fase 6**, porque é ele quem avisa do wipe
 - propagandas (overlay CUI) e o editor de UI
 - webhooks e clientes de API com escopo
 - OpenAPI de volta, com o teste que reprova rota sem documentação

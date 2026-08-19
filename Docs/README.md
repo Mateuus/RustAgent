@@ -45,13 +45,13 @@ Leia nesta ordem na primeira vez:
 | 03 | [Decisões](03-DECISOES.md) | cada escolha e o porquê dela (o registro que evita refazer a discussão) |
 | 04 | [Plano de migração](04-PLANO-DE-MIGRACAO.md) | arquivo por arquivo: o que copia, o que reescreve, o que morre |
 | 05 | [Operações](05-OPERACOES.md) | SteamCMD, Oxide, instalar, subir, derrubar, atualizar — o coração |
-| 06 | [API](06-API.md) | as rotas da Fase 1, com os códigos de erro |
+| 06 | [API](06-API.md) | as rotas da Fase 1 e as do wipe e das mensagens, com os códigos de erro |
 | 07 | [Painel](07-PAINEL.md) | as telas da Fase 1 e o fluxo de "criar servidor até estar no ar" |
 | 08 | [Execução e deploy](08-EXECUCAO-E-DEPLOY.md) | `npm run dev`, PM2 no dedicado, o git |
 | 09 | [Roadmap](09-ROADMAP.md) | as fases seguintes, em ordem de dependência |
 | — | [Progresso](PROGRESSO.md) | checklist vivo: o que já foi feito, o que está em curso |
 
-Os documentos de **fase**, escritos quando cada frente começa (10 a 15 já foram
+Os documentos de **fase**, escritos quando cada frente começa (10 a 18 já foram
 executadas):
 
 | # | Documento | O que responde |
