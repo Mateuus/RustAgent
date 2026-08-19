@@ -18,6 +18,7 @@ import type {
   MapSource,
   WipePlan,
   WipePlanKind,
+  WipePluginDataFile,
   WipeRunStepView,
 } from '@/lib/api';
 import { EM_DASH } from '@/lib/format';
@@ -317,4 +318,87 @@ export function fromDateTimeFields(date: string, time: string): number | null {
   );
 
   return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+// ------------------------------------------------------------
+//  A lista do full wipe: marcar e DESMARCAR
+// ------------------------------------------------------------
+
+/**
+ * A lista salva depois de um clique na caixa de uma linha.
+ *
+ * ####  DESMARCAR TIRA O QUE MARCOU, E NÃO O CAMINHO  ####
+ *
+ * A linha é um ARQUIVO; a lista salva é de PADRÕES. Marcar pode
+ * ser os dois (a tela grava o caminho exato), mas desmarcar não:
+ * a marca também vem de um satélite (`...db-wal`, gravado antes de
+ * o par `.db`/`-wal` andar junto) e de um glob.
+ *
+ * MEDIDO com a lista `['server/server01/clans.287.db-wal']`: a
+ * tela abria com a linha do BANCO marcada; o clique tirava
+ * `file.path` — que não estava na lista —, a lista saía idêntica,
+ * a tela recarregava marcada, e o purge levava o par. A única
+ * caixa que removia aquele padrão, a do próprio `-wal`, tinha
+ * deixado de ser uma linha.
+ *
+ * Então o clique de desmarcar tira da lista exatamente os padrões
+ * que marcaram a linha — `selectedBy`, que o agente calcula com o
+ * MESMO casador do purge. E `selectionNote` diz, ANTES do clique,
+ * o que ele vai remover.
+ */
+export function patternsAfterToggle(
+  patterns: readonly string[],
+  file: WipePluginDataFile,
+): readonly string[] {
+  if (!file.selected) {
+    // Marcar é sempre o caminho exato: é a única linha que a tela
+    // sabe escrever, e a que não alarga a ordem de ninguém.
+    return patterns.some((pattern) => samePath(pattern, file.path))
+      ? patterns
+      : [...patterns, file.path];
+  }
+
+  return patterns.filter((pattern) => !file.selectedBy.includes(pattern));
+}
+
+/**
+ * O que a linha diz quando não foi o caminho dela que a marcou.
+ *
+ * `null` quando não há o que explicar — a linha desmarcada, e a
+ * marcada pelo próprio caminho, que é o caso normal.
+ *
+ * Quando há, a frase precisa dizer as duas coisas que o admin não
+ * tem como adivinhar: qual padrão está segurando aquela marca, e
+ * quantas OUTRAS linhas saem junto se ele clicar. Um padrão largo
+ * desmarcado às cegas é a mesma perda silenciosa, na outra direção.
+ */
+export function selectionNote(
+  file: WipePluginDataFile,
+  files: readonly WipePluginDataFile[],
+): string | null {
+  const outros = file.selectedBy.filter((pattern) => !samePath(pattern, file.path));
+
+  if (outros.length === 0) {
+    return null;
+  }
+
+  const juntas = files.filter(
+    (other) =>
+      other.path !== file.path && other.selectedBy.some((pattern) => outros.includes(pattern)),
+  ).length;
+
+  return (
+    `marcado por ${outros.join(', ')} — desmarcar tira esse padrão da lista` +
+    (juntas === 0 ? '' : `, e com ele mais ${String(juntas)} linha(s)`)
+  );
+}
+
+/**
+ * O padrão É o caminho desta linha?
+ *
+ * Sem diferenciar maiúscula de minúscula, como o agente casa os
+ * dois lados: o disco onde isto roda é o do Windows.
+ */
+function samePath(pattern: string, path: string): boolean {
+  return pattern.toLowerCase() === path.toLowerCase();
 }

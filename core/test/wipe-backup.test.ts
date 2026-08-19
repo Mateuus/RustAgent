@@ -28,7 +28,12 @@
 //       certa;
 //    4. dois backups no MESMO instante viram dois arquivos, e
 //       nenhum come o outro;
-//    5. a frase do passo diz o tamanho CRU e o do zip, com rótulo.
+//    5. a frase do passo diz o tamanho CRU e o do zip, com rótulo;
+//    6. um arquivo travado que o `apagar` NÃO leva não derruba
+//       nada: ele fica de fora do zip, continua em disco, e a
+//       frase do passo diz quem ficou;
+//    7. o zip guarda também o que o FULL WIPE apaga de fora da
+//       pasta do save — a carteira, o VIP.
 //
 //  ####  ESTE TESTE APAGA ARQUIVO  ####
 //
@@ -54,6 +59,7 @@ import { Operation } from '../src/ops/operations.js';
 import { readZipEntries, readZipEntryData } from '../src/util/zip.js';
 import { backupSaveFolder } from '../src/wipe/backup.js';
 import { WipeRunner, type WipeServerControl, type WipeServers } from '../src/wipe/run.js';
+import { classifyFile } from '../src/wipe/save-files.js';
 
 // ------------------------------------------------------------
 //  O `readFile` que recusa
@@ -110,7 +116,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 const SERVER = 'pvp1';
 const IDENTITY = 'pvp1';
 
-/** Os nomes medidos em Servers\server01\server\server01\. */
+/**
+ * Os nomes medidos em Servers\server01\server\server01\.
+ *
+ * `Log.EAC.txt` e `clans.287.db` estão aqui porque metade da pasta
+ * de verdade é assim: arquivo que o `apagar` NÃO leva. Uma árvore
+ * só de arquivos condenados não teria como mostrar a diferença
+ * entre "não consegui ler" e "não consegui ler algo em risco".
+ */
 const SAVE_FILES = [
   'proceduralmap.4000.12345.287.map',
   'proceduralmap.4000.12345.287.sav',
@@ -118,6 +131,8 @@ const SAVE_FILES = [
   'player.blueprints.16.db',
   'player.identities.16.db',
   'player.tokens.db',
+  'clans.287.db',
+  'Log.EAC.txt',
 ];
 
 const temporary: string[] = [];
@@ -133,6 +148,7 @@ afterEach(async () => {
 interface Cenario {
   readonly runs: WipeRunsRepository;
   readonly runner: WipeRunner;
+  readonly installDir: string;
   readonly saveDir: string;
   readonly backupsDir: string;
   readonly control: WipeServerControl & { running: boolean };
@@ -252,7 +268,7 @@ async function cenario(): Promise<Cenario> {
     backup: { enabled: true, keep: 3 },
   });
 
-  return { runs, runner, saveDir, backupsDir, control, settings };
+  return { runs, runner, installDir, saveDir, backupsDir, control, settings };
 }
 
 function operation(): Operation {
@@ -557,5 +573,251 @@ describe('o nome do zip é único', () => {
     // E o zip é menor que o cru — que é justamente a diferença que
     // a frase do passo precisava explicar.
     expect(result?.bytes).toBeLessThan(cru);
+  });
+});
+
+// ------------------------------------------------------------
+//  §4  A fatalidade segue o RISCO, e não a leitura
+// ------------------------------------------------------------
+
+/** A peneira que o passo `backup` monta: o que o `apagar` leva. */
+const APAGA = (name: string): boolean => classifyFile(name, 'keep').fate === 'delete';
+
+describe('um arquivo que o `apagar` NÃO leva não derruba o wipe', () => {
+  it('o Log.EAC.txt travado fica de fora do zip, e o backup termina', async () => {
+    // ####  O DESFECHO QUE ESTE TESTE IMPEDE  ####
+    //
+    // MEDIDO com o EAC segurando o próprio log depois de um
+    // RustDedicated morto à força — o caminho "o servidor travou,
+    // force o wipe": quatro retentativas, "backup FALHOU" em
+    // 3.755 ms, os quatro passos seguintes `pending`, nenhum zip,
+    // `.ini` não trocado e o servidor PARADO. Para proteger um
+    // arquivo que o `apagar` nunca ia encostar.
+    const s = await cenario();
+    const linhas: string[] = [];
+
+    travados.set(join(s.saveDir, 'Log.EAC.txt'), {
+      code: 'EBUSY',
+      restam: Number.POSITIVE_INFINITY,
+    });
+
+    const result = await backupSaveFolder({
+      saveDir: s.saveDir,
+      backupsDir: s.backupsDir,
+      readRetryDelaysMs: [1, 1],
+      deletes: APAGA,
+      onLine: (line) => linhas.push(line),
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.files).toBe(SAVE_FILES.length - 1);
+    // E ele não some em silêncio: a lista sobe para a frase do passo.
+    expect(result?.skipped).toEqual(['Log.EAC.txt']);
+    expect(linhas.join('\n')).toContain('não se deixou ler (EBUSY)');
+    expect(linhas.join('\n')).toContain('continua inteiro em disco');
+    // A frase que MENTIRIA sobre este arquivo não pode aparecer.
+    expect(linhas.join('\n')).not.toContain('sumiu antes de ser copiado');
+
+    const zips = await zipsDe(s.backupsDir);
+
+    expect(zips).toHaveLength(1);
+
+    // E o resto do save está lá DE VERDADE, com CRC conferido pelo
+    // leitor do próprio projeto.
+    const archive = await readFile(join(s.backupsDir, zips[0] as string));
+    const entries = readZipEntries(archive);
+
+    expect(entries.map((entry) => entry.path).sort()).toEqual(
+      SAVE_FILES.filter((name) => name !== 'Log.EAC.txt').sort(),
+    );
+  });
+
+  it('mas o `.sav` travado continua derrubando: ESSE o `apagar` leva', async () => {
+    // A metade que o conserto anterior acertou, e que não pode
+    // afrouxar: o mundo fora do zip é o mundo em lugar nenhum.
+    const s = await cenario();
+
+    travados.set(join(s.saveDir, 'proceduralmap.4000.12345.287.sav'), {
+      code: 'EBUSY',
+      restam: Number.POSITIVE_INFINITY,
+    });
+
+    await expect(
+      backupSaveFolder({
+        saveDir: s.saveDir,
+        backupsDir: s.backupsDir,
+        readRetryDelaysMs: [1],
+        deletes: APAGA,
+      }),
+    ).rejects.toThrow(/passo seguinte APAGA/);
+  });
+
+  it('e o `clans.287.db` MARCADO no full wipe volta a ser fatal', async () => {
+    // O mesmo arquivo, a mesma política, e o desfecho oposto: ele é
+    // `keep` para save-files.ts, mas o admin o marcou na lista do
+    // full wipe — e o passo `apagar` VAI levá-lo. A peneira é a
+    // união das duas coisas.
+    const s = await cenario();
+
+    travados.set(join(s.saveDir, 'clans.287.db'), {
+      code: 'EACCES',
+      restam: Number.POSITIVE_INFINITY,
+    });
+
+    await expect(
+      backupSaveFolder({
+        saveDir: s.saveDir,
+        backupsDir: s.backupsDir,
+        readRetryDelaysMs: [1],
+        deletes: (name) => APAGA(name) || name === 'clans.287.db',
+      }),
+    ).rejects.toThrow(/não consegui ler clans\.287\.db/);
+  });
+
+  it('quem não diz o que apaga é tratado como se apagasse tudo', async () => {
+    // O padrão é a recusa: sem a peneira não há como saber o que
+    // está em risco, e adivinhar para o lado permissivo é como o
+    // conteúdo se perde.
+    const s = await cenario();
+
+    travados.set(join(s.saveDir, 'Log.EAC.txt'), {
+      code: 'EBUSY',
+      restam: Number.POSITIVE_INFINITY,
+    });
+
+    await expect(
+      backupSaveFolder({
+        saveDir: s.saveDir,
+        backupsDir: s.backupsDir,
+        readRetryDelaysMs: [1],
+      }),
+    ).rejects.toThrow(/não consegui ler Log\.EAC\.txt/);
+  });
+});
+
+describe('o wipe inteiro, com um arquivo `keep` travado no backup', () => {
+  it(
+    'termina: mapa novo, servidor no ar, e o arquivo travado intacto em disco',
+    async () => {
+      const s = await cenario();
+      const op = operation();
+
+      travados.set(join(s.saveDir, 'Log.EAC.txt'), {
+        code: 'EBUSY',
+        restam: Number.POSITIVE_INFINITY,
+      });
+
+      const run = s.runs.create(SERVER, { kind: 'cadence', bpPolicy: 'keep' });
+
+      const finished = await s.runner.run({
+        serverId: SERVER,
+        runId: run.id,
+        operation: op,
+        control: s.control,
+      });
+
+      const passo = (nome: string): string | undefined =>
+        finished.steps.find((step) => step.step === nome)?.status;
+
+      expect(finished.status).toBe('done');
+      expect(passo('backup')).toBe('done');
+      expect(passo('apagar')).toBe('done');
+      // O `.ini` trocou e o servidor voltou: é o wipe da madrugada
+      // acontecendo, que era o que a fatalidade demais impedia.
+      expect(s.settings).toHaveLength(1);
+      expect(s.control.running).toBe(true);
+      // E o arquivo que ficou de fora do zip continua em disco —
+      // não havia conteúdo em risco.
+      expect(await readdir(s.saveDir)).toContain('Log.EAC.txt');
+
+      const message = finished.steps.find((step) => step.step === 'backup')?.message ?? '';
+
+      expect(message).toContain('ficaram de fora do zip');
+      expect(message).toContain('Log.EAC.txt');
+    },
+    20_000,
+  );
+});
+
+// ------------------------------------------------------------
+//  §5  O zip cobre o que o FULL WIPE apaga
+// ------------------------------------------------------------
+
+describe('o backup guarda o que o full wipe leva de fora da pasta do save', () => {
+  /** A carteira: o arquivo que uma restauração precisa devolver. */
+  const CARTEIRA = 'oxide/data/OrigemZStore.json';
+  const CONTEUDO = '{"saldo":{"76561198000000001":4200}}';
+
+  it('a carteira apagada pelo full wipe volta do zip, byte a byte', async () => {
+    // ####  O DESFECHO QUE ESTE TESTE IMPEDE  ####
+    //
+    // MEDIDO: full wipe com backup LIGADO e a carteira marcada.
+    // Depois, ela não estava em disco NEM no zip de 23 entradas, e
+    // nenhuma linha da tela avisou — `BACKUP_DISABLED` só sai
+    // quando o backup está DESLIGADO. O par `.db`/`-wal` do mesmo
+    // wipe voltava, porque mora na pasta do save.
+    const s = await cenario();
+    const carteira = join(s.installDir, 'oxide', 'data', 'OrigemZStore.json');
+
+    await writeFile(carteira, CONTEUDO);
+
+    s.runs.saveExecSettings(SERVER, {
+      ...s.runs.getExecSettings(SERVER),
+      pluginData: { enabled: true, patterns: [CARTEIRA, 'server/pvp1/clans.287.db'] },
+    });
+
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep', fullWipe: true });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    // O full wipe fez o que prometeu: os dois sumiram do disco.
+    await expect(stat(carteira)).rejects.toThrow();
+    await expect(stat(join(s.saveDir, 'clans.287.db'))).rejects.toThrow();
+
+    const zips = await zipsDe(s.backupsDir);
+    const archive = await readFile(join(s.backupsDir, zips[0] as string));
+    const entries = readZipEntries(archive);
+    const guardada = entries.find((entry) => entry.path === CARTEIRA);
+
+    expect(guardada).not.toBeUndefined();
+    expect(readZipEntryData(archive, guardada as (typeof entries)[number]).toString('utf8')).toBe(
+      CONTEUDO,
+    );
+    // O `.db` da pasta do save entra pelo nome solto, como sempre:
+    // nome com barra = relativo à pasta do servidor.
+    expect(entries.map((entry) => entry.path)).toContain('clans.287.db');
+
+    // E a frase do passo separa os dois números — o admin lê "24
+    // arquivos" e precisa saber que um deles não é do save.
+    const message = finished.steps.find((step) => step.step === 'backup')?.message ?? '';
+
+    expect(message).toContain('(1 de dado de plugin)');
+  });
+
+  it('sem full wipe o zip é o de sempre: só a pasta do save', async () => {
+    // O recorte não pode alargar sozinho: um zip com mais coisa
+    // dentro prometeria restaurar o que ele não guarda.
+    const s = await cenario();
+
+    await writeFile(join(s.installDir, 'oxide', 'data', 'OrigemZStore.json'), CONTEUDO);
+
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
+
+    await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    const zips = await zipsDe(s.backupsDir);
+    const entries = readZipEntries(await readFile(join(s.backupsDir, zips[0] as string)));
+
+    expect(entries.map((entry) => entry.path).sort()).toEqual([...SAVE_FILES].sort());
   });
 });

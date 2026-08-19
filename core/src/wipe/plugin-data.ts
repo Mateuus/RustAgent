@@ -113,6 +113,27 @@ export interface PluginDataFile {
   readonly companions: readonly string[];
   /** O admin marcou este padrão. */
   readonly selected: boolean;
+  /**
+   * Os padrões DA LISTA SALVA que marcam esta linha.
+   *
+   * ####  SEM ELES A TELA NÃO TEM COMO DESMARCAR  ####
+   *
+   * A linha é um arquivo; a lista salva é de PADRÕES. Enquanto a
+   * tela tirava `file.path` da lista, ela só sabia desmarcar o que
+   * tivesse sido marcado por um padrão IGUAL ao caminho — e a
+   * marca também vem do satélite (`...db-wal`, salvo antes de o par
+   * andar junto) e de um glob.
+   *
+   * MEDIDO com a lista `['server/server01/clans.287.db-wal']`: a
+   * tela abria com a linha do BANCO marcada, o clique de desmarcar
+   * devolvia a lista idêntica, a tela recarregava marcada, e o
+   * purge levava o par. A única caixa que removia aquele padrão —
+   * a do próprio `-wal` — tinha deixado de existir.
+   *
+   * Com isto, o clique tira da lista exatamente o que marcou a
+   * linha, e a tela pode DIZER o que vai remover antes do clique.
+   */
+  readonly selectedBy: readonly string[];
 }
 
 /** O que o full wipe levaria, e o que ele não acha mais. */
@@ -127,11 +148,27 @@ export interface PluginDataListing {
    */
   readonly files: readonly PluginDataFile[];
   /**
-   * Padrões marcados que hoje não casam com arquivo nenhum.
+   * Padrões marcados que hoje não casam com arquivo nenhum, E que
+   * a varredura teria visto se existissem.
    *
    * Eles CONTINUAM na lista salva. Ver o cabeçalho.
+   *
+   * O "teria visto" é a metade que faltava: sem ele, um padrão
+   * apontando para dentro de uma pasta funda demais entrava aqui, e
+   * a tela dizia que o arquivo não existe mais em disco. Ele
+   * existe, e continua existindo depois do wipe. Ver `maybeTooDeep`.
    */
   readonly missing: readonly string[];
+  /**
+   * Padrões marcados que não casaram com nada VISTO, e que podem
+   * estar dentro de uma pasta que a varredura não desceu.
+   *
+   * Não é `missing` e não é achado: é "não olhei". O full wipe não
+   * vai levar o que estiver ali, e é isso que a tela precisa dizer
+   * — o contrário, "apagar num arquivo que não está lá é sucesso",
+   * é um tranquilizador sobre um arquivo que está lá.
+   */
+  readonly maybeTooDeep: readonly string[];
   /** Quantas linhas existem de verdade, antes do corte da tela. */
   readonly total: number;
   /** `true` quando `files` é um pedaço de `total`. A tela precisa DIZER. */
@@ -211,13 +248,23 @@ export async function listPluginData(options: PluginDataOptions): Promise<Plugin
 
   // Um padrão que só casa com o satélite de alguém NÃO está
   // faltando: a linha dele existe, com o nome do banco.
-  const missing = selected.filter(
+  const unmatched = selected.filter(
     (pattern) => !files.some((file) => matchesFile(file, [pattern])),
+  );
+
+  // ####  "NÃO ACHEI" E "NÃO OLHEI" NÃO SÃO A MESMA COISA  ####
+  //
+  // O que pode estar dentro de uma pasta funda demais sai de
+  // `missing`: dizer que ele "não existe mais em disco" é o oposto
+  // da verdade. Ver `couldMatchUnder`.
+  const maybeTooDeep = unmatched.filter((pattern) =>
+    scan.notScanned.some((dir) => couldMatchUnder(dir, pattern)),
   );
 
   return {
     files: shown,
-    missing,
+    missing: unmatched.filter((pattern) => !maybeTooDeep.includes(pattern)),
+    maybeTooDeep,
     total: files.length,
     truncated: files.length > shown.length,
     notScanned: scan.notScanned,
@@ -361,7 +408,10 @@ async function scanPluginData(options: PluginDataOptions): Promise<PluginDataSca
 }
 
 /** O padrão do admin casa com esta linha — ou com um satélite dela. */
-function matchesFile(file: Omit<PluginDataFile, 'selected'>, patterns: readonly string[]): boolean {
+function matchesFile(
+  file: Omit<PluginDataFile, 'selected' | 'selectedBy'>,
+  patterns: readonly string[],
+): boolean {
   return (
     matchesAny(file.path, patterns) ||
     file.companions.some((companion) => matchesAny(companion, patterns))
@@ -376,10 +426,12 @@ function matchesFile(file: Omit<PluginDataFile, 'selected'>, patterns: readonly 
  * satélite — ou, pior, nada, com o item indo parar em `missing`.
  */
 function withSelection(
-  file: Omit<PluginDataFile, 'selected'>,
+  file: Omit<PluginDataFile, 'selected' | 'selectedBy'>,
   patterns: readonly string[],
 ): PluginDataFile {
-  return { ...file, selected: matchesFile(file, patterns) };
+  const selectedBy = patterns.filter((pattern) => matchesFile(file, [pattern]));
+
+  return { ...file, selected: selectedBy.length > 0, selectedBy };
 }
 
 /**
@@ -474,6 +526,95 @@ export function matches(path: string, pattern: string): boolean {
   }
 
   return new RegExp(`^${expression}$`, 'i').test(normalize(path));
+}
+
+/**
+ * Este padrão PODERIA casar com alguma coisa DENTRO desta pasta?
+ *
+ * ####  A PERGUNTA QUE SEPARA "NÃO EXISTE" DE "NÃO OLHEI"  ####
+ *
+ * `MAX_OXIDE_DEPTH` faz a varredura parar, e o que está mais fundo
+ * não entra em `files`. Um padrão marcado apontando para lá não
+ * casava com nada e ia parar em `missing` — que a tela lê como
+ * "não existe mais em disco, e apagar num arquivo ausente é
+ * sucesso". MEDIDO: o arquivo estava lá, a prévia nomeava a pasta
+ * em `PLUGIN_DATA_TOO_DEEP` logo acima, e o tranquilizador era o
+ * último aviso da lista.
+ *
+ * A resposta é por SEGMENTO, e é a única que dá para dar sem
+ * descer a árvore que a varredura recusou descer: se as pastas
+ * casam com o COMEÇO do padrão e ainda SOBRA padrão para casar o
+ * que está dentro, pode haver algo ali. É um "pode", e a frase da
+ * tela diz "pode".
+ *
+ * `oxide/data/n1/n2/n3/n4` com `oxide/data/**\/*.json` responde
+ * `true`; com `oxide/data/OrigemZStore.json`, `false` — aquele
+ * padrão é um caminho exato, e ele não está lá dentro.
+ */
+export function couldMatchUnder(dir: string, pattern: string): boolean {
+  const folders = normalize(dir).split('/');
+  const segments = normalize(pattern).split('/');
+
+  // Os índices do padrão em que a leitura pode estar. Começa no
+  // primeiro, já com o `**` que casa zero pasta empurrado adiante.
+  let states = withEmptyGlobstars(new Set([0]), segments);
+
+  for (const folder of folders) {
+    const next = new Set<number>();
+
+    for (const index of states) {
+      const segment = segments[index];
+
+      if (segment === undefined) {
+        continue;
+      }
+
+      if (isGlobstar(segment)) {
+        // Ele engole esta pasta e continua valendo para a próxima.
+        next.add(index);
+        continue;
+      }
+
+      if (segmentMatches(segment, folder)) {
+        next.add(index + 1);
+      }
+    }
+
+    states = withEmptyGlobstars(next, segments);
+
+    if (states.size === 0) {
+      return false;
+    }
+  }
+
+  // Sobrou padrão depois da pasta? É ele que casaria com o que está
+  // DENTRO dela. Sem sobra, o padrão termina na própria pasta — e
+  // pasta não é arquivo.
+  return [...states].some((index) => index < segments.length);
+}
+
+/** `**` casa ZERO pasta: o índice anda sem consumir nada. */
+function withEmptyGlobstars(
+  states: ReadonlySet<number>,
+  segments: readonly string[],
+): Set<number> {
+  const reachable = new Set(states);
+
+  // O `for..of` de um `Set` enxerga o que for acrescentado durante
+  // a volta, e aqui só se acrescenta para a frente: uma fila de
+  // `**` seguidos anda até o fim sozinha.
+  for (const index of reachable) {
+    if (isGlobstar(segments[index] ?? '')) {
+      reachable.add(index + 1);
+    }
+  }
+
+  return reachable;
+}
+
+/** Um segmento do padrão contra UM nome de pasta. */
+function segmentMatches(segment: string, name: string): boolean {
+  return new RegExp(`^${segmentExpression(segment)}$`, 'i').test(name);
 }
 
 /**
@@ -597,7 +738,7 @@ async function describe(
   absolute: string,
   installDir: string,
   area: PluginDataArea,
-): Promise<Omit<PluginDataFile, 'selected' | 'companions'> | null> {
+): Promise<Omit<PluginDataFile, 'selected' | 'selectedBy' | 'companions'> | null> {
   try {
     const info = await stat(absolute);
 

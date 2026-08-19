@@ -179,7 +179,7 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
         selected: exec.pluginData.patterns,
         bpPolicy,
       })
-    : { files: [], missing: [], total: 0, truncated: false, notScanned: [] };
+    : { files: [], missing: [], maybeTooDeep: [], total: 0, truncated: false, notScanned: [] };
 
   const backup = await checkBackupSpace(saveFolder, deps.backupsDir);
 
@@ -365,13 +365,28 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
     });
   }
 
+  // ####  E O QUE ELA NÃO OLHOU NÃO PODE VIRAR "NÃO EXISTE"  ####
+  //
+  // Os dois avisos se contradiziam sobre o MESMO caminho: este
+  // nomeava a pasta funda demais, e o `MISSING` logo abaixo dizia
+  // que o arquivo marcado "não existe mais em disco" e que "apagar
+  // num arquivo que não está lá é sucesso". O arquivo estava lá, e
+  // continuava lá depois do wipe — e o tranquilizador era o último
+  // da lista, que é o que fica. Ver `couldMatchUnder`.
   if (pluginData.notScanned.length > 0) {
+    const marcados =
+      pluginData.maybeTooDeep.length === 0
+        ? ''
+        : ` E ${String(pluginData.maybeTooDeep.length)} item(ns) marcado(s) pode(m) estar aí ` +
+          `dentro: ${pluginData.maybeTooDeep.join(', ')}. O agente não olhou — eles não estão ` +
+          'apagados nem ausentes, vão continuar em disco depois deste wipe.';
+
     warnings.push({
       code: 'PLUGIN_DATA_TOO_DEEP',
       message:
         `A varredura de oxide\\data não desceu ${String(pluginData.notScanned.length)} pasta(s) ` +
         `por serem fundas demais: ${pluginData.notScanned.slice(0, 5).join(', ')}. O que está ` +
-        'dentro delas não aparece na lista e o full wipe não vai levar.',
+        `dentro delas não aparece na lista e o full wipe não vai levar.${marcados}`,
     });
   }
 

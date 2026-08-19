@@ -3088,13 +3088,25 @@ export interface WipePluginDataFile {
    */
   readonly companions: readonly string[];
   readonly selected: boolean;
+  /**
+   * Os padrões DA LISTA SALVA que marcam esta linha.
+   *
+   * A linha é um arquivo; a lista salva é de PADRÕES, e a marca
+   * também vem do satélite (`...db-wal`) ou de um glob. Sem saber
+   * QUEM marcou, a tela não tinha como desmarcar: tirar
+   * `file.path` de uma lista que não o continha devolvia a mesma
+   * lista, e a caixa voltava marcada.
+   */
+  readonly selectedBy: readonly string[];
 }
 
 /** A lista do full wipe: o que a tela mostra, e o que ela não mostra. */
 export interface WipePluginDataListing {
   readonly files: readonly WipePluginDataFile[];
-  /** Marcados que hoje não casam com nada. A escolha CONTINUA salva. */
+  /** Marcados que hoje não casam com nada VISTO. A escolha CONTINUA salva. */
   readonly missing: readonly string[];
+  /** Marcados que podem estar numa pasta que a varredura não desceu. */
+  readonly maybeTooDeep: readonly string[];
   /** Quantas linhas existem de verdade, antes do corte da tela. */
   readonly total: number;
   /** `true` quando `files` é um pedaço. O que o wipe apaga não é cortado. */

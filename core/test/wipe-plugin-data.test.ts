@@ -24,7 +24,12 @@
 //       marcou some do disco inteiro, não só os 500 primeiros;
 //    8. o par `.db`/`-wal` anda junto NOS DOIS SENTIDOS;
 //    9. `**` inclui a PRÓPRIA pasta;
-//   10. a varredura DIZ onde parou de descer.
+//   10. a varredura DIZ onde parou de descer;
+//   11. a linha diz QUEM a marcou (`selectedBy`) — sem isso a tela
+//       não tem como desmarcar o que um satélite ou um glob
+//       marcou;
+//   12. "não olhei" não vira "não existe": o marcado que pode
+//       estar numa pasta funda demais sai de `missing`.
 // ============================================================
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -33,7 +38,12 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { listPluginData, matches, resolvePluginDataTargets } from '../src/wipe/plugin-data.js';
+import {
+  couldMatchUnder,
+  listPluginData,
+  matches,
+  resolvePluginDataTargets,
+} from '../src/wipe/plugin-data.js';
 
 const IDENTITY = 'server01';
 const temporary: string[] = [];
@@ -448,5 +458,202 @@ describe('o que vai para a tela e para o JSON', () => {
     for (const file of listing.files) {
       expect(Number.isInteger(file.modifiedAt)).toBe(true);
     }
+  });
+});
+
+// ------------------------------------------------------------
+//  §11  QUEM marcou a linha
+// ------------------------------------------------------------
+
+describe('a linha diz qual padrão salvo a marcou', () => {
+  const BANCO = `server/${IDENTITY}/player.states.287.db`;
+  const WAL = `server/${IDENTITY}/player.states.287.db-wal`;
+
+  it('marcada pelo próprio caminho, `selectedBy` é ele', async () => {
+    const root = await installDir();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      bpPolicy: 'keep',
+      selected: [BANCO],
+    });
+
+    expect(listing.files.find((file) => file.path === BANCO)?.selectedBy).toEqual([BANCO]);
+  });
+
+  it('marcada pelo SATÉLITE, `selectedBy` é o padrão do satélite', async () => {
+    // ####  O DESFECHO QUE ESTE TESTE IMPEDE  ####
+    //
+    // MEDIDO com a lista salva `['...clans.287.db-wal']`, plausível
+    // porque a ordenação por tamanho punha o `-wal` onze posições
+    // acima do banco: a tela abria com a linha do BANCO marcada, o
+    // clique tirava `file.path` — que não está na lista —, a lista
+    // saía IDÊNTICA, a tela recarregava marcada e o purge levava o
+    // par. E não há campo livre de padrão na tela.
+    const root = await installDir();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      bpPolicy: 'keep',
+      selected: [WAL],
+    });
+
+    const banco = listing.files.find((file) => file.path === BANCO);
+
+    expect(banco?.selected).toBe(true);
+    // É ISTO que a tela remove quando o admin desmarca a linha.
+    expect(banco?.selectedBy).toEqual([WAL]);
+    expect(banco?.selectedBy).not.toContain(BANCO);
+  });
+
+  it('marcada por um glob, `selectedBy` é o glob — nas TRÊS linhas', async () => {
+    const root = await installDir();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      selected: ['oxide/data/**/*.json'],
+    });
+
+    const marcadas = listing.files.filter((file) => file.selected);
+
+    expect(marcadas.length).toBeGreaterThan(1);
+
+    for (const file of marcadas) {
+      expect(file.selectedBy).toEqual(['oxide/data/**/*.json']);
+    }
+  });
+
+  it('linha não marcada tem `selectedBy` vazio, e não `null`', async () => {
+    const root = await installDir();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      selected: ['oxide/data/Economics.json'],
+    });
+
+    const vip = listing.files.find((file) => file.path.endsWith('OrigemZVip.json'));
+
+    expect(vip?.selected).toBe(false);
+    expect(vip?.selectedBy).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------------
+//  §12  "não olhei" não é "não existe"
+// ------------------------------------------------------------
+
+describe('o marcado que pode estar fundo demais', () => {
+  /** A árvore do cenário: um `.json` de verdade no 4º nível. */
+  async function comFundo(): Promise<string> {
+    const root = await installDir();
+    const data = join(root, 'oxide', 'data');
+
+    await mkdir(join(data, 'n1', 'n2', 'n3', 'n4'), { recursive: true });
+    await writeFile(join(data, 'n1', 'n2', 'n3', 'n4', 'fundo.json'), '{"vip":true}');
+
+    return root;
+  }
+
+  it('ele sai de `missing` e vai para `maybeTooDeep`', async () => {
+    // ####  O DESFECHO QUE ESTE TESTE IMPEDE  ####
+    //
+    // O arquivo EXISTE, e continua existindo depois do wipe. Cair
+    // em `missing` fazia a prévia dizer que ele "não existe mais em
+    // disco" e que "apagar num arquivo que não está lá é sucesso" —
+    // logo abaixo do aviso que nomeava a pasta não varrida, e como
+    // ÚLTIMO aviso da lista.
+    const root = await comFundo();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      selected: ['oxide/data/n1/n2/n3/n4/fundo.json'],
+    });
+
+    expect(listing.missing).toHaveLength(0);
+    expect(listing.maybeTooDeep).toEqual(['oxide/data/n1/n2/n3/n4/fundo.json']);
+    expect(listing.notScanned).toContain('oxide/data/n1/n2/n3/n4');
+  });
+
+  it('o glob que alcança lá dentro também sai de `missing`', async () => {
+    const root = await comFundo();
+
+    // Um glob que casa com os `.json` das subpastas e com nada da
+    // parte varrida: o que ele mira está todo abaixo do teto.
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      selected: ['oxide/data/n1/**/*.json'],
+    });
+
+    expect(listing.missing).toHaveLength(0);
+    expect(listing.maybeTooDeep).toEqual(['oxide/data/n1/**/*.json']);
+  });
+
+  it('o plugin desinstalado CONTINUA em `missing`: ele não está lá mesmo', async () => {
+    // A distinção só vale se os dois lados continuarem separados: um
+    // "pode estar em algum lugar" para todo marcado ausente seria a
+    // mesma mentira, na direção contrária.
+    const root = await comFundo();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      selected: ['oxide/data/PluginQueFoiDesinstalado.json'],
+    });
+
+    expect(listing.missing).toEqual(['oxide/data/PluginQueFoiDesinstalado.json']);
+    expect(listing.maybeTooDeep).toHaveLength(0);
+  });
+
+  it('sem pasta funda nenhuma, `maybeTooDeep` é vazio', async () => {
+    const root = await installDir();
+
+    const listing = await listPluginData({
+      installDir: root,
+      identity: IDENTITY,
+      selected: ['oxide/data/NaoExiste.json'],
+    });
+
+    expect(listing.maybeTooDeep).toHaveLength(0);
+    expect(listing.missing).toEqual(['oxide/data/NaoExiste.json']);
+  });
+});
+
+describe('`couldMatchUnder`: pode haver algo do padrão dentro desta pasta?', () => {
+  const FUNDO = 'oxide/data/n1/n2/n3/n4';
+
+  it('o globstar alcança qualquer profundidade', () => {
+    expect(couldMatchUnder(FUNDO, 'oxide/data/**/*.json')).toBe(true);
+    expect(couldMatchUnder(FUNDO, 'oxide/data/*/**/*.json')).toBe(true);
+    expect(couldMatchUnder(FUNDO, '**/*.json')).toBe(true);
+  });
+
+  it('o caminho exato de outra pasta não alcança', () => {
+    expect(couldMatchUnder(FUNDO, 'oxide/data/OrigemZStore.json')).toBe(false);
+    expect(couldMatchUnder(FUNDO, 'oxide/data/Kits/kits_data.json')).toBe(false);
+    expect(couldMatchUnder(FUNDO, 'server/server01/clans.287.db')).toBe(false);
+  });
+
+  it('o `*` de um segmento só não atravessa pasta', () => {
+    // `oxide/data/*.json` mira os `.json` DA pasta `data`, e nada
+    // dentro de `n1` — a pergunta é sobre `n1/n2/n3/n4`.
+    expect(couldMatchUnder(FUNDO, 'oxide/data/*.json')).toBe(false);
+    expect(couldMatchUnder('oxide/data/n1', 'oxide/data/*/*.json')).toBe(true);
+  });
+
+  it('o padrão que termina NA pasta não é "algo dentro dela"', () => {
+    // Pasta não é arquivo: um padrão que acaba aqui não descreve
+    // nada que a varredura tenha deixado de ver.
+    expect(couldMatchUnder(FUNDO, 'oxide/data/n1/n2/n3/n4')).toBe(false);
+    expect(couldMatchUnder(FUNDO, 'oxide/data/n1/n2/n3/n4/**')).toBe(true);
+  });
+
+  it('a comparação ignora maiúsculas, como o resto do casador', () => {
+    expect(couldMatchUnder('OXIDE/DATA/N1', 'oxide/data/n1/*.json')).toBe(true);
   });
 });

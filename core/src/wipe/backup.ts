@@ -19,7 +19,7 @@
 //  não pode ser abandonada nem concluída.
 //
 //  ------------------------------------------------------------
-//  ####  ARQUIVO QUE NÃO SE DEIXA LER DERRUBA O WIPE  ####
+//  ####  O QUE DERRUBA O WIPE É O RISCO, E NÃO A LEITURA  ####
 //
 //  Um arquivo que SUMIU entre a listagem e a leitura é inofensivo:
 //  ele não existe mais, e o zip sem ele guarda tudo o que havia.
@@ -27,6 +27,51 @@
 //  incompleto e o passo SEGUINTE apaga o original, então o
 //  conteúdo não fica no zip nem no disco. Os dois casos chegam
 //  aqui como uma exceção do `readFile`, e só o `code` os separa.
+//
+//  Só que "o passo seguinte apaga" não vale para a pasta inteira.
+//  MEDIDO na pasta de verdade: 12 dos 23 arquivos são `keep` por
+//  save-files.ts — `Log.EAC.txt`, `companion.id`, os `player.*`,
+//  os `clans.*`, os `relationship.*` e os `-wal`/`-shm` deles —, e
+//  o passo `apagar` não encosta em nenhum. Um deles fora do zip
+//  NÃO é conteúdo em risco: ele continua inteiro em disco depois
+//  do wipe.
+//
+//  E o caso não é hipotético. O EAC segura o próprio `Log.EAC.txt`
+//  depois de um RustDedicated morto à força — que é exatamente o
+//  caminho "o servidor travou, force o wipe". Enquanto QUALQUER
+//  leitura recusada era fatal, esse log travado parava o wipe da
+//  madrugada com o servidor FORA DO AR e sem mapa novo, para
+//  proteger um arquivo que ninguém ia apagar.
+//
+//  Quem decide a fatalidade, então, é `deletes`: o passo `apagar`
+//  vai levar ESTE arquivo? Vai, e o wipe para aqui; não vai, e ele
+//  segue com o aviso — que sobe para a tela em `skipped`, e não só
+//  para o log. Quem não informa nada é tratado como se apagasse
+//  tudo: a recusa é o padrão seguro.
+//
+//  ------------------------------------------------------------
+//  ####  E O ZIP COBRE TAMBÉM O QUE O FULL WIPE LEVA  ####
+//
+//  Este cabeçalho dizia "o que o backup guarda é exatamente o que
+//  o wipe pode apagar", e era verdade só para o wipe de mapa/BP.
+//  O FULL WIPE leva os `.json` de `oxide\data` — a carteira, o
+//  VIP, a economia —, e eles não moram na pasta do save.
+//
+//  MEDIDO: full wipe com backup LIGADO e `OrigemZStore.json`
+//  marcado. Depois, o arquivo não estava em disco NEM no zip de 23
+//  entradas, e nenhuma linha da tela avisou — `BACKUP_DISABLED` só
+//  aparece quando o backup está DESLIGADO. O par `.db`/`-wal` do
+//  mesmo wipe voltava do zip, porque mora na pasta do save; a
+//  carteira não voltava de lugar nenhum.
+//
+//  Por isso `extras`: o passo `backup` resolve os alvos do full
+//  wipe pela MESMA função que o `apagar` consome, e o que estiver
+//  fora da pasta do save entra no zip com o caminho relativo à
+//  pasta do servidor.
+//
+//  Nome SOLTO dentro do zip = pasta do save; nome COM BARRA =
+//  relativo à pasta do servidor. É a regra inteira, e ela cabe
+//  numa linha porque o backup do save não tem subpasta.
 //
 //  ------------------------------------------------------------
 //  ####  ZIP ESCRITO À MÃO, E POR QUÊ  ####
@@ -140,8 +185,46 @@ export interface BackupResult {
    */
   readonly rawBytes: number;
   readonly files: number;
+  /** Quantas entradas vieram de FORA da pasta do save. Ver `extras`. */
+  readonly extras: number;
+  /**
+   * Os arquivos que não se deixaram ler e ficaram de fora do zip.
+   *
+   * Só entra aqui o que o passo `apagar` NÃO vai levar: o que ele
+   * leva não fica de fora, derruba o backup. Existe para a tela —
+   * uma linha que sumiu do zip em silêncio é a diferença entre um
+   * backup completo e um que alguém ACHA que é.
+   */
+  readonly skipped: readonly string[];
   /** Os zips antigos que a poda removeu. */
   readonly pruned: readonly string[];
+}
+
+/**
+ * Um arquivo de fora da pasta do save que entra no zip.
+ *
+ * São os alvos do full wipe que moram em `oxide\data`. Quem os
+ * resolve é o passo `backup` (ver run.ts), pela MESMA
+ * `resolvePluginDataTargets` que o `apagar` consome — duas contas
+ * diferentes sobre o que vai sumir seriam duas verdades, e a
+ * divergência só apareceria no dia da restauração.
+ */
+export interface BackupExtra {
+  /** Onde ele está em disco, caminho absoluto. */
+  readonly absolute: string;
+  /** O nome da entrada no zip: relativo à pasta do servidor, com `/`. */
+  readonly name: string;
+}
+
+/** Um arquivo que entra no zip, e o que se perde sem ele. */
+interface BackupItem {
+  readonly absolute: string;
+  /** O nome da entrada no zip. Ver o cabeçalho. */
+  readonly name: string;
+  /** O passo `apagar` vai levar este arquivo? Ver o cabeçalho. */
+  readonly atRisk: boolean;
+  /** Veio de fora da pasta do save. */
+  readonly extra: boolean;
 }
 
 /**
@@ -176,6 +259,14 @@ export async function saveFolderBytes(path: string): Promise<number> {
  * conferência existe para evitar UM desfecho específico — não para
  * ser um segundo dono da decisão. Sem o número, passa, e o campo
  * `freeBytes: null` diz na tela que ninguém mediu.
+ *
+ * ####  A RÉGUA É A PASTA DO SAVE, E SÓ ELA  ####
+ *
+ * Os `extras` do full wipe não entram na conta: são os `.json` de
+ * `oxide\data`, e a pasta inteira deles cabe muitas vezes dentro
+ * da folga de meio giga que esta conferência exige por cima. Somar
+ * um número irrelevante custaria uma varredura do disco na rota
+ * que a tela chama a cada recarregada.
  */
 export async function checkBackupSpace(
   saveDir: string,
@@ -205,18 +296,22 @@ export async function checkBackupSpace(
 }
 
 /**
- * Zipa a pasta do save.
+ * Zipa a pasta do save, mais o que o full wipe leva de fora dela.
  *
  * ####  SÓ ARQUIVO, SÓ O NÍVEL DE CIMA  ####
  *
- * O mesmo recorte de save-files.ts, e de propósito: o que o backup
- * guarda é exatamente o que o wipe pode apagar. Um zip com mais
- * coisa dentro prometeria restaurar o que ele não é responsável
- * por preservar.
+ * Da pasta do save, o mesmo recorte de save-files.ts, e de
+ * propósito: `cfg\` e `command_history\` não são o save, e um zip
+ * com mais coisa dentro prometeria restaurar o que ele não é
+ * responsável por preservar.
  *
- * Pasta inexistente devolve `null`: é o servidor que nunca subiu,
- * e o passo `backup` trata isso como `skipped` — não há o que
- * copiar, e isso não é falha.
+ * O que vem por `extras` não obedece a esse recorte porque não
+ * precisa: cada um deles é um arquivo que o `apagar` VAI remover.
+ * Ver o cabeçalho.
+ *
+ * Pasta inexistente e sem extras devolve `null`: é o servidor que
+ * nunca subiu, e o passo `backup` trata isso como `skipped` — não
+ * há o que copiar, e isso não é falha.
  */
 export async function backupSaveFolder(options: {
   readonly saveDir: string;
@@ -232,20 +327,49 @@ export async function backupSaveFolder(options: {
    * quatro segundos de relógio de verdade.
    */
   readonly readRetryDelaysMs?: readonly number[];
+  /**
+   * O passo `apagar` vai levar este nome da pasta do save?
+   *
+   * É ela que decide o que é FATAL não conseguir ler. Ausente, tudo
+   * é tratado como em risco — quem não sabe o que o wipe apaga não
+   * pode decidir seguir sem um arquivo. Ver o cabeçalho.
+   */
+  readonly deletes?: (name: string) => boolean;
+  /** O que o full wipe leva de FORA da pasta do save. Ver o cabeçalho. */
+  readonly extras?: readonly BackupExtra[];
 }): Promise<BackupResult | null> {
   const names = await filesIn(options.saveDir);
+  const extras = options.extras ?? [];
 
-  if (names.length === 0) {
+  if (names.length === 0 && extras.length === 0) {
     return null;
   }
+
+  const deletes = options.deletes;
+
+  const items: readonly BackupItem[] = [
+    ...names.map((name) => ({
+      absolute: join(options.saveDir, name),
+      name,
+      atRisk: deletes === undefined || deletes(name),
+      extra: false,
+    })),
+    // O que vem de fora da pasta do save é, por construção, alvo do
+    // purge: não conseguir lê-lo é sempre fatal.
+    ...extras.map((extra) => ({
+      absolute: extra.absolute,
+      name: extra.name,
+      atRisk: true,
+      extra: true,
+    })),
+  ];
 
   await mkdir(options.backupsDir, { recursive: true });
 
   const opened = await openFreshZip(options.backupsDir, options.at ?? Date.now());
 
   const written = await writeZip({
-    dir: options.saveDir,
-    names,
+    items,
     output: opened.output,
     target: opened.path,
     onLine: options.onLine,
@@ -319,17 +443,18 @@ interface CentralEntry {
 }
 
 async function writeZip(input: {
-  readonly dir: string;
-  readonly names: readonly string[];
+  readonly items: readonly BackupItem[];
   readonly output: WriteStream;
   readonly target: string;
   readonly onLine?: (line: string) => void;
   readonly retryDelaysMs: readonly number[];
 }): Promise<Omit<BackupResult, 'pruned'>> {
-  const { dir, names, output, target, onLine } = input;
+  const { items, output, target, onLine } = input;
   const entries: CentralEntry[] = [];
+  const skipped: string[] = [];
   let offset = 0;
   let rawBytes = 0;
+  let extras = 0;
 
   const put = async (chunk: Buffer): Promise<void> => {
     if (!output.write(chunk)) {
@@ -340,15 +465,23 @@ async function writeZip(input: {
   };
 
   try {
-    for (const name of names) {
-      const read = await readForBackup(join(dir, name), input.retryDelaysMs, onLine);
+    for (const item of items) {
+      const name = item.name;
+      const read = await readForBackup(item, input.retryDelaysMs, onLine);
 
-      if (read === null) {
-        // `ENOENT`, e SÓ `ENOENT`: o arquivo sumiu entre a listagem
-        // e a leitura. Um a menos no zip é melhor que um backup que
-        // não termina — e não há conteúdo perdido, porque não há
-        // mais conteúdo. Qualquer outro erro já lançou lá dentro.
+      if (read.kind === 'gone') {
+        // `ENOENT`: o arquivo sumiu entre a listagem e a leitura. Um
+        // a menos no zip é melhor que um backup que não termina — e
+        // não há conteúdo perdido, porque não há mais conteúdo.
         onLine?.(`[backup] ${name} sumiu antes de ser copiado — segui sem ele.`);
+        continue;
+      }
+
+      if (read.kind === 'locked') {
+        // Travado, e o `apagar` NÃO leva este arquivo: ele continua
+        // em disco depois do wipe, e não há conteúdo em risco. A
+        // linha já foi para o log; a lista sobe para a tela.
+        skipped.push(name);
         continue;
       }
 
@@ -377,6 +510,10 @@ async function writeZip(input: {
       });
 
       rawBytes += raw.length;
+
+      if (item.extra) {
+        extras += 1;
+      }
 
       await put(localHeader(name, crc, compressed.length, raw.length, dosTime, dosDate));
       await put(compressed);
@@ -417,7 +554,7 @@ async function writeZip(input: {
     throw error;
   }
 
-  return { path: target, bytes: offset, rawBytes, files: entries.length };
+  return { path: target, bytes: offset, rawBytes, files: entries.length, extras, skipped };
 }
 
 /**
@@ -461,9 +598,16 @@ async function openFreshZip(
   );
 }
 
+/** O desfecho de uma leitura para o zip. Ver `readForBackup`. */
+type BackupRead =
+  | { readonly kind: 'read'; readonly raw: Buffer; readonly modified: Date }
+  /** Não existe mais: não há conteúdo a perder. */
+  | { readonly kind: 'gone' }
+  /** Existe, não se deixou ler — e este wipe não vai apagá-lo. */
+  | { readonly kind: 'locked' };
+
 /**
- * Os bytes de um arquivo do save, ou `null` quando ele NÃO EXISTE
- * MAIS.
+ * Os bytes de um arquivo que vai para o zip.
  *
  * ####  "SUMIU" E "NÃO CONSEGUI LER" SÃO OPOSTOS  ####
  *
@@ -474,19 +618,26 @@ async function openFreshZip(
  * disco — restaurar aquele backup devolveria o terreno sem as
  * construções.
  *
- * Então `ENOENT` passa (não há conteúdo a perder) e QUALQUER outro
- * erro lança. Lançar aqui derruba o passo `backup`, que é fatal:
- * o wipe para antes do `apagar`, com o servidor parado e o mundo
- * inteiro em disco.
+ * Então `ENOENT` passa: não há conteúdo a perder.
  *
- * Antes de desistir, porém, ele insiste: ver
+ * ####  E "NÃO CONSEGUI LER" TEM DOIS DESFECHOS  ####
+ *
+ * Quem separa os dois é `item.atRisk`, e não o `code`. O arquivo
+ * que o `apagar` VAI levar lança — o wipe para antes do `apagar`,
+ * com o servidor parado e o mundo inteiro em disco. O arquivo que
+ * o `apagar` NÃO leva volta `locked`: ele fica de fora do zip,
+ * continua em disco, e a única coisa que faltava era a tela dizer
+ * isso. Ver o cabeçalho.
+ *
+ * Antes de qualquer um dos dois, porém, ele insiste: ver
  * `BACKUP_READ_RETRY_DELAYS_MS`.
  */
 async function readForBackup(
-  full: string,
+  item: BackupItem,
   delaysMs: readonly number[],
   onLine?: (line: string) => void,
-): Promise<{ readonly raw: Buffer; readonly modified: Date } | null> {
+): Promise<BackupRead> {
+  const full = item.absolute;
   const name = basename(full);
 
   for (let attempt = 0; ; attempt += 1) {
@@ -499,27 +650,36 @@ async function readForBackup(
         );
       }
 
-      return { raw, modified: await mtimeOf(full) };
+      return { kind: 'read', raw, modified: await mtimeOf(full) };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
 
       if (code === 'ENOENT') {
-        return null;
+        return { kind: 'gone' };
       }
 
       const wait = LOCKED_CODES.has(code ?? '') ? delaysMs[attempt] : undefined;
 
       if (wait === undefined) {
+        if (!item.atRisk) {
+          onLine?.(
+            `[backup] ${name} não se deixou ler (${code ?? '?'}) e ficou de fora do zip — este ` +
+              'wipe NÃO apaga esse arquivo, e ele continua inteiro em disco.',
+          );
+
+          return { kind: 'locked' };
+        }
+
         throw new Error(
           `não consegui ler ${name} para o backup: ${(error as Error).message}. ` +
             (attempt === 0
               ? ''
               : `Tentei ${String(attempt + 1)} vezes. `) +
-            'Um arquivo do save que não entra no zip é conteúdo que a restauração não devolve, e ' +
-            'o passo seguinte APAGA esta pasta — então este wipe para aqui. O servidor está ' +
-            'parado e o mundo continua inteiro em disco. Antivírus e backup em nuvem são a causa ' +
-            'comum e soltam o arquivo sozinhos: espere um pouco e retome a execução. Se você ' +
-            'aceita ficar sem volta atrás, desligue o backup na Configuração antes de retomar.',
+            'Este arquivo é um dos que o passo seguinte APAGA, e o que não entra no zip a ' +
+            'restauração não devolve — então este wipe para aqui. O servidor está parado e o ' +
+            'mundo continua inteiro em disco. Antivírus e backup em nuvem são a causa comum e ' +
+            'soltam o arquivo sozinhos: espere um pouco e retome a execução. Se você aceita ' +
+            'ficar sem volta atrás, desligue o backup na Configuração antes de retomar.',
           { cause: error },
         );
       }

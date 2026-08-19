@@ -475,3 +475,68 @@ describe('a prévia conta o que a lista do full wipe NÃO mostrou', () => {
     expect(codes).not.toContain('PLUGIN_DATA_TOO_DEEP');
   });
 });
+
+// ------------------------------------------------------------
+//  Dois avisos sobre o mesmo caminho não podem se contradizer
+// ------------------------------------------------------------
+
+describe('o marcado que está fundo demais não é chamado de ausente', () => {
+  /** A árvore: um `.json` de verdade no 4º nível, e nada mais. */
+  async function comFundo(): Promise<Bancada> {
+    const b = await bancada();
+    const fundo = join(b.installDir, 'oxide', 'data', 'n1', 'n2', 'n3', 'n4');
+
+    await mkdir(fundo, { recursive: true });
+    await writeFile(join(fundo, 'fundo.json'), '{"vip":true}');
+
+    return b;
+  }
+
+  it('o PLUGIN_DATA_MISSING não sai por causa dele', async () => {
+    // ####  O DESFECHO QUE ESTE TESTE IMPEDE  ####
+    //
+    // A prévia emitia `PLUGIN_DATA_TOO_DEEP` nomeando a pasta E,
+    // logo abaixo, o `MISSING` dizendo sobre o MESMO caminho que o
+    // arquivo "não existe mais em disco" e que "apagar num arquivo
+    // que não está lá é sucesso". O arquivo está lá, e continua lá
+    // depois do wipe — e o tranquilizador era o ÚLTIMO da lista.
+    const b = await comFundo();
+
+    fullWipe(b, ['oxide/data/n1/n2/n3/n4/fundo.json']);
+
+    const preview = await b.previa();
+
+    expect(codigos(preview)).not.toContain('PLUGIN_DATA_MISSING');
+    expect(preview.pluginData.missing).toHaveLength(0);
+  });
+
+  it('e o aviso da pasta funda NOMEIA o marcado que pode estar lá', async () => {
+    const b = await comFundo();
+
+    fullWipe(b, ['oxide/data/n1/n2/n3/n4/fundo.json']);
+
+    const aviso = (await b.previa()).warnings.find(
+      (notice) => notice.code === 'PLUGIN_DATA_TOO_DEEP',
+    );
+
+    expect(aviso?.message).toContain('oxide/data/n1/n2/n3/n4/fundo.json');
+    expect(aviso?.message).toContain('continuar em disco depois deste wipe');
+  });
+
+  it('o plugin desinstalado continua saindo em PLUGIN_DATA_MISSING', async () => {
+    // Os dois avisos continuam existindo, e cada um sobre o que ele
+    // é: o conserto separa os casos, não apaga um deles.
+    const b = await comFundo();
+
+    fullWipe(b, [
+      'oxide/data/n1/n2/n3/n4/fundo.json',
+      'oxide/data/PluginQueFoiDesinstalado.json',
+    ]);
+
+    const preview = await b.previa();
+    const ausente = preview.warnings.find((notice) => notice.code === 'PLUGIN_DATA_MISSING');
+
+    expect(ausente?.message).toContain('oxide/data/PluginQueFoiDesinstalado.json');
+    expect(ausente?.message).not.toContain('fundo.json');
+  });
+});

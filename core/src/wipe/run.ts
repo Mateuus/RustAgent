@@ -43,7 +43,7 @@
 // ============================================================
 
 import { rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
 
 import type { ServerConfig } from '../config.js';
 import type { MapPoolRepository } from '../db/map-pool-repository.js';
@@ -61,7 +61,7 @@ import type { Logger } from '../logger.js';
 import type { Operation } from '../ops/operations.js';
 import type { BpPolicy, WipePlan, WipePlanKind, WipeRunStep } from '../types/wipe.js';
 import { toError } from '../util.js';
-import { backupSaveFolder, checkBackupSpace } from './backup.js';
+import { backupSaveFolder, checkBackupSpace, type BackupExtra } from './backup.js';
 import { KEEP_CUSTOM_IN_FORCED_REASON, pinnedRejection } from './map-pool.js';
 import {
   currentWorldReader,
@@ -73,7 +73,7 @@ import {
   type WipeMapChoice,
 } from './next-wipe.js';
 import { resolvePluginDataTargets } from './plugin-data.js';
-import { classifySaveFolder, saveFolderPath } from './save-files.js';
+import { classifyFile, classifySaveFolder, saveFolderPath } from './save-files.js';
 
 // ------------------------------------------------------------
 //  §1  O QUE A MÁQUINA PRECISA DE FORA
@@ -300,7 +300,7 @@ export class WipeRunner implements WipeExecutor {
       { name: 'avisar', fatal: false, go: () => this.#avisar(request, run as WipeRunRecord, exec) },
       { name: 'esvaziar', fatal: false, go: () => this.#esvaziar(request, exec) },
       { name: 'parar', fatal: true, go: () => this.#parar(request, exec) },
-      { name: 'backup', fatal: true, go: () => this.#backup(request, config, exec) },
+      { name: 'backup', fatal: true, go: () => this.#backup(request, config, run as WipeRunRecord, exec) },
       { name: 'apagar', fatal: true, go: () => this.#apagar(request, config, run as WipeRunRecord, exec) },
       { name: 'configurar', fatal: true, go: () => this.#configurar(request, run as WipeRunRecord) },
       { name: 'subir', fatal: true, go: () => this.#subir(request) },
@@ -563,10 +563,14 @@ export class WipeRunner implements WipeExecutor {
       : 'quit pelo RCON — o mundo foi salvo antes de sair.';
   }
 
-  /** O zip do save. É a única volta atrás que existe. */
+  /**
+   * O zip do save, e do que o full wipe leva de fora dele. É a
+   * única volta atrás que existe.
+   */
   async #backup(
     request: WipeRunRequest,
     config: ServerConfig,
+    run: WipeRunRecord,
     exec: WipeExecSettings,
   ): Promise<string> {
     if (!exec.backup.enabled) {
@@ -584,11 +588,50 @@ export class WipeRunner implements WipeExecutor {
       throw new Error(space.reason);
     }
 
+    // ####  O QUE O `apagar` VAI LEVAR, RESOLVIDO AQUI  ####
+    //
+    // Pela MESMA `resolvePluginDataTargets` do passo seguinte, e
+    // com a MESMA política. Ela responde duas perguntas de uma vez:
+    // o que o backup precisa guardar de FORA da pasta do save (a
+    // carteira, o VIP, a economia — ver backup.ts), e o que é FATAL
+    // não conseguir ler.
+    const purge =
+      run.fullWipe && exec.pluginData.patterns.length > 0
+        ? await resolvePluginDataTargets({
+            installDir: config.paths.installDir,
+            identity: config.identity,
+            selected: exec.pluginData.patterns,
+            bpPolicy: run.bpPolicy,
+          })
+        : [];
+
+    const inSave = new Set<string>();
+    const extras: BackupExtra[] = [];
+
+    for (const target of purge) {
+      const name = nameInside(saveDir, target);
+
+      if (name === null) {
+        extras.push({ absolute: target, name: normalizePath(relative(config.paths.installDir, target)) });
+        continue;
+      }
+
+      // O que já está na pasta do save o backup copia de qualquer
+      // jeito; o que ele precisa saber é que ESTE arquivo vai sumir.
+      inSave.add(name.toLowerCase());
+    }
+
     const result = await backupSaveFolder({
       saveDir,
       backupsDir: config.paths.backupsDir,
       keep: exec.backup.keep,
       onLine: (line) => request.operation.log(line),
+      extras,
+      // A peneira do que é FATAL não conseguir ler: a política diz o
+      // que some da pasta do save, e o full wipe acrescenta o que o
+      // admin marcou. Ver backup.ts.
+      deletes: (name) =>
+        classifyFile(name, run.bpPolicy).fate === 'delete' || inSave.has(name.toLowerCase()),
     });
 
     if (result === null) {
@@ -599,6 +642,24 @@ export class WipeRunner implements WipeExecutor {
 
     const podados = result.pruned.length === 0 ? '' : ` ${String(result.pruned.length)} antigo(s) podado(s).`;
 
+    // Os dados de plugin vêm rotulados: eles não estão na pasta do
+    // save, e sem o rótulo o número do backup não bateria com o
+    // número de arquivos que o `apagar` diz ter removido.
+    const dePlugin =
+      result.extras === 0 ? '' : ` (${String(result.extras)} de dado de plugin)`;
+
+    // ####  O QUE FICOU DE FORA PRECISA APARECER NA TELA  ####
+    //
+    // São arquivos travados que este wipe NÃO apaga — eles ficam
+    // inteiros em disco, e por isso o backup seguiu. Mas um zip com
+    // menos coisa dentro do que a pasta tem é exatamente o que
+    // ninguém pode descobrir no dia da restauração.
+    const fora =
+      result.skipped.length === 0
+        ? ''
+        : ` ${String(result.skipped.length)} arquivo(s) travado(s) ficaram de fora do zip, e ` +
+          `este wipe não apaga nenhum deles: ${result.skipped.slice(0, 5).join(', ')}.`;
+
     // ####  OS DOIS NÚMEROS, E O QUE CADA UM É  ####
     //
     // Esta linha dizia só o tamanho do ZIP e o passo `apagar` diz o
@@ -607,8 +668,8 @@ export class WipeRunner implements WipeExecutor {
     // diferença era a compressão. Agora o cru vem primeiro — é o
     // que se compara com o `apagar` — e o do zip vem rotulado.
     return (
-      `${String(result.files)} arquivo(s), ${mb(result.rawBytes)} do save em ${mb(result.bytes)} ` +
-      `de zip -> ${result.path}.${podados}`
+      `${String(result.files)} arquivo(s)${dePlugin}, ${mb(result.rawBytes)} do save em ` +
+      `${mb(result.bytes)} de zip -> ${result.path}.${podados}${fora}`
     );
   }
 
@@ -671,6 +732,7 @@ export class WipeRunner implements WipeExecutor {
     }
 
     let plugins = 0;
+    const presos: string[] = [];
 
     if (run.fullWipe && exec.pluginData.patterns.length > 0) {
       const targets = await resolvePluginDataTargets({
@@ -694,6 +756,16 @@ export class WipeRunner implements WipeExecutor {
           // permissão) é um problema de plugin. O mundo já foi
           // apagado; parar aqui deixaria o servidor sem mundo e
           // sem subir.
+          //
+          // ####  MAS ELE NÃO PODE SUMIR DA FRASE DO PASSO  ####
+          //
+          // Enquanto o contador somava só os sucessos, a aba
+          // Execução dizia "+ 4 de plugin" para 5 marcados e o
+          // passo ficava `done`: o `jogador3.json` continuava em
+          // disco e a única pista era uma linha no log da operação,
+          // que ninguém abre quando o wipe terminou verde.
+          presos.push(basename(target));
+
           request.operation.log(
             `[wipe] dado de plugin não apagado: ${target} (${toError(error).message})`,
           );
@@ -703,9 +775,20 @@ export class WipeRunner implements WipeExecutor {
 
     const extra = plugins === 0 ? '' : ` + ${String(plugins)} de plugin`;
 
-    return removed === 0
-      ? 'nada a apagar: a pasta já estava limpa.'
-      : `${String(removed)} arquivo(s)${extra}, ${mb(bytes)} liberados.`;
+    const ficaram =
+      presos.length === 0
+        ? ''
+        : ` ${String(presos.length)} dado(s) de plugin NÃO saiu(íram) e continua(m) em disco: ` +
+          `${presos.slice(0, 5).join(', ')}.`;
+
+    const feito =
+      removed === 0 && plugins === 0
+        ? presos.length === 0
+          ? 'nada a apagar: a pasta já estava limpa.'
+          : 'nada foi apagado.'
+        : `${String(removed)} arquivo(s)${extra}, ${mb(bytes)} liberados.`;
+
+    return `${feito}${ficaram}`;
   }
 
   /**
@@ -1363,6 +1446,30 @@ function describeWorld(world: WipeWorld): string {
   const seed = world.seed === null ? '' : ` · seed ${world.seed}`;
 
   return `${world.level ?? 'Procedural Map'}${size}${seed}`;
+}
+
+/**
+ * O nome deste arquivo DENTRO da pasta, ou `null` se ele não está
+ * nela.
+ *
+ * É o que separa os alvos do full wipe em dois: os que a cópia da
+ * pasta do save já leva (e que só precisam ser marcados como "vão
+ * sumir") e os de `oxide\data`, que precisam entrar no zip por
+ * conta própria. Subpasta conta como fora: o backup do save não
+ * desce um nível sequer, e um arquivo de `cfg\` que casasse aqui
+ * viraria uma entrada solta com o nome errado.
+ */
+function nameInside(dir: string, absolute: string): string | null {
+  const rest = relative(dir, absolute);
+
+  return rest === '' || rest.startsWith('..') || isAbsolute(rest) || rest.includes(sep)
+    ? null
+    : rest;
+}
+
+/** Contrabarra vira barra: é assim que o nome entra no zip. */
+function normalizePath(value: string): string {
+  return value.split(sep).join('/').split('\\').join('/');
 }
 
 async function sizeOf(path: string): Promise<number> {

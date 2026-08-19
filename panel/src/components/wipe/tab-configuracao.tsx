@@ -21,6 +21,16 @@
 //  admin continua salva — ela reaparece marcada no dia em que o
 //  plugin voltar. Apagar a escolha porque o arquivo não estava lá
 //  naquele dia é como se perde uma configuração em silêncio.
+//
+//  ####  MAS A CAIXA TEM DE OBEDECER AO CLIQUE  ####
+//
+//  A linha é um arquivo e a lista salva é de PADRÕES: a marca pode
+//  vir do caminho exato, de um satélite (`...db-wal`) ou de um
+//  glob. Enquanto o clique tirava `file.path` da lista, desmarcar
+//  uma linha marcada por outro padrão devolvia a lista IDÊNTICA e
+//  a caixa voltava marcada — sem campo livre de padrão na tela,
+//  não sobrava saída nenhuma. Quem conserta isso é
+//  `patternsAfterToggle`, com o `selectedBy` que o agente manda.
 // ============================================================
 
 import { AlertTriangle, MessageSquare, Plus, Save, X } from 'lucide-react';
@@ -32,6 +42,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
+import { patternsAfterToggle, selectionNote } from '@/components/wipe/labels';
 import {
   agent,
   type WipeExecSettings,
@@ -160,11 +171,13 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
   }
 
   const toggleFile = (file: WipePluginDataFile): void => {
-    const patterns = file.selected
-      ? settings.pluginData.patterns.filter((pattern) => pattern !== file.path)
-      : [...settings.pluginData.patterns, file.path];
-
-    void save({ ...settings, pluginData: { ...settings.pluginData, patterns } });
+    void save({
+      ...settings,
+      pluginData: {
+        ...settings.pluginData,
+        patterns: patternsAfterToggle(settings.pluginData.patterns, file),
+      },
+    });
   };
 
   return (
@@ -481,36 +494,44 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
             />
           ) : (
             <ul className="max-h-80 space-y-1 overflow-auto">
-              {disk.files.map((file) => (
-                <li key={file.path}>
-                  <label className="flex cursor-pointer items-baseline gap-2 border-b border-border py-1 last:border-0">
-                    <input
-                      type="checkbox"
-                      checked={file.selected}
-                      disabled={busy}
-                      onChange={() => toggleFile(file)}
-                      className="mt-1 shrink-0"
-                    />
-                    <span
-                      className={cn(
-                        'min-w-0 break-all font-mono text-2xs',
-                        file.selected ? 'text-foreground' : 'text-muted',
-                      )}
-                    >
-                      {file.path}
-                      {/* O satélite não é uma escolha à parte: marcar
-                          o banco leva o `-wal` junto, e é isso que
-                          impede um banco pela metade. */}
-                      {file.companions.length > 0 && (
-                        <span className="text-muted"> + {file.companions.length} satélite(s)</span>
-                      )}
-                    </span>
-                    <span className="ml-auto shrink-0 text-2xs text-muted">
-                      {kb(file.bytes)} · {stamp(file.modifiedAt)}
-                    </span>
-                  </label>
-                </li>
-              ))}
+              {disk.files.map((file) => {
+                // Quem segura a marca desta linha, quando não é o
+                // caminho dela. O admin precisa ler isso ANTES de
+                // clicar: é o que o clique vai remover da lista.
+                const nota = selectionNote(file, disk.files);
+
+                return (
+                  <li key={file.path}>
+                    <label className="flex cursor-pointer items-baseline gap-2 border-b border-border py-1 last:border-0">
+                      <input
+                        type="checkbox"
+                        checked={file.selected}
+                        disabled={busy}
+                        onChange={() => toggleFile(file)}
+                        className="mt-1 shrink-0"
+                      />
+                      <span
+                        className={cn(
+                          'min-w-0 break-all font-mono text-2xs',
+                          file.selected ? 'text-foreground' : 'text-muted',
+                        )}
+                      >
+                        {file.path}
+                        {/* O satélite não é uma escolha à parte: marcar
+                            o banco leva o `-wal` junto, e é isso que
+                            impede um banco pela metade. */}
+                        {file.companions.length > 0 && (
+                          <span className="text-muted"> + {file.companions.length} satélite(s)</span>
+                        )}
+                        {nota !== null && <span className="block text-muted">{nota}</span>}
+                      </span>
+                      <span className="ml-auto shrink-0 text-2xs text-muted">
+                        {kb(file.bytes)} · {stamp(file.modifiedAt)}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
             </ul>
           )}
 
@@ -531,6 +552,17 @@ export function TabConfiguracao({ serverId }: { readonly serverId: string }) {
                 <>
                   {disk.notScanned.join(', ')}. O que está dentro delas não aparece nesta lista, e o
                   full wipe não vai levar.
+                  {/* "Não olhei" não é "não existe": estes marcados
+                      ficam FORA do bloco de ausentes, que diz o
+                      contrário sobre o mesmo caminho. */}
+                  {disk.maybeTooDeep.length > 0 && (
+                    <>
+                      {' '}
+                      E há {disk.maybeTooDeep.length} item(ns) marcado(s) que pode(m) estar aí
+                      dentro: {disk.maybeTooDeep.join(', ')}. Eles não estão ausentes — vão
+                      continuar em disco depois do wipe.
+                    </>
+                  )}
                 </>
               }
             />
