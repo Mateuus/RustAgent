@@ -52,7 +52,7 @@ import { UiSync } from '../src/game/ui-sync.js';
 import { registerWipeRoutes } from '../src/http/routes/wipe.js';
 import { createLogger } from '../src/logger.js';
 import type { ServerSupervisor } from '../src/servers/supervisor.js';
-import { walkElements, type UiScreen } from '../src/types/ui-document.js';
+import { walkElements, type UiElement, type UiScreen } from '../src/types/ui-document.js';
 import { UI_REQUEST_MARKER } from '../src/types/ui-transport.js';
 import type { MapPoolEntry, WipePlan, WipeSettings } from '../src/types/wipe.js';
 import type { VipTierLevel } from '../src/vip/tiers.js';
@@ -233,9 +233,46 @@ const LEVELS: readonly VipTierLevel[] = [
 
 /** Todo o texto que a tela desenha, numa string só. */
 function textOf(screen: UiScreen): string {
+  return textOfElements(screen.elements);
+}
+
+/**
+ * O texto de UM cartão só, pelo id do painel dele.
+ *
+ * ####  A TELA INTEIRA FAZ O TESTE PASSAR POR ACIDENTE  ####
+ *
+ * O cartão da ESQUERDA escreve `MAPA          sorteado na hora`, e
+ * o da direita é outro assunto. Um teste que procura a frase na
+ * tela inteira encontra a linha da esquerda e passa mesmo quando o
+ * cartão do MUNDO está dizendo outra coisa — foi assim que "o
+ * cartão diz que o mundo é sorteado na hora" ficou verde enquanto
+ * o cartão dizia "a imagem deste mundo ainda não ficou pronta".
+ */
+function cardTextOf(screen: UiScreen, id: string): string {
+  for (const { element } of walkElements(screen.elements)) {
+    if (element.id === id) {
+      return textOfElements(element.children);
+    }
+  }
+
+  throw new Error(`a tela não tem o cartão ${id}`);
+}
+
+/** O texto de UM rótulo, pelo id — o que aquele widget diz, e nada mais. */
+function labelOf(screen: UiScreen, id: string): string {
+  for (const { element } of walkElements(screen.elements)) {
+    if (element.id === id && element.type === 'label') {
+      return element.text;
+    }
+  }
+
+  throw new Error(`a tela não tem o rótulo ${id}`);
+}
+
+function textOfElements(elements: readonly UiElement[]): string {
   const parts: string[] = [];
 
-  for (const { element } of walkElements(screen.elements)) {
+  for (const { element } of walkElements(elements)) {
     if (element.type === 'label') {
       parts.push(element.text);
     }
@@ -270,6 +307,9 @@ function nextOf(over: Partial<CalendarNextWipeView> = {}): CalendarNextWipeView 
     running: false,
     map: null,
     image: null,
+    // O padrão é o de quem NÃO alcança a régua, como `map` e
+    // `image`: quem quiser outro caso diz qual é.
+    mapFrom: null,
     ...over,
   };
 }
@@ -601,7 +641,19 @@ describe('o mapa do próximo wipe', () => {
     // A MESMA frase de `{wipe.mapa}` no chat.
     expect(calendar.next?.map).toBe('o mesmo mapa de agora');
     expect(calendar.next?.image).toBeNull();
-    expect(textOf(buildCalendarScreen({ calendar }))).not.toContain('4000');
+
+    // ####  A ASSERÇÃO É SOBRE O QUE O CARTÃO ANUNCIA  ####
+    //
+    // Ela já foi `not.toContain('4000')` sobre a tela inteira, e
+    // isso dizia duas coisas de uma vez: que a cabeça da fila não é
+    // o mundo do próximo wipe (verdade, e é o que este teste
+    // guarda) e que ela some da tela (falso — nada dela foi
+    // consumido, e a régua do nível a lista como FILA, numerada a
+    // partir do #1; ver §1d).
+    const screen = buildCalendarScreen({ calendar });
+
+    expect(labelOf(screen, 'cal-mapa-t')).toBe('O MESMO MAPA DE AGORA');
+    expect(cardTextOf(screen, 'cal-mapa')).not.toContain('PROCEDURAL 4000');
   });
 
   it('com `fixed`, é a entrada apontada, esteja onde estiver na fila', () => {
@@ -627,11 +679,22 @@ describe('o mapa do próximo wipe', () => {
     expect(textOf(buildCalendarScreen({ calendar }))).not.toContain('Ilha');
   });
 
-  it('sem fila, o cartão diz que o mundo é sorteado na hora', () => {
+  it('sem fila, o cartão do MUNDO diz que ele é sorteado na hora', () => {
     const calendar = calendarFor([plan()], []);
 
     expect(calendar.next?.map).toBe('sorteado na hora');
-    expect(textOf(buildCalendarScreen({ calendar }))).toContain('sorteado na hora');
+    expect(calendar.next?.mapFrom).toBe('undecided');
+
+    // A asserção é sobre o cartão da DIREITA. Sobre a tela inteira
+    // ela ficava verde por acidente: quem tinha a frase era a linha
+    // `MAPA          sorteado na hora` do cartão da ESQUERDA,
+    // enquanto o cartão do mundo dizia "a imagem deste mundo ainda
+    // não ficou pronta" — sobre um mundo que ninguém escolheu.
+    const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+
+    expect(card).toContain('SORTEADO NA HORA');
+    expect(card).toContain('o mundo ainda não foi escolhido');
+    expect(card).not.toContain('ainda não ficou pronta');
   });
 
   it('sem o nível, a frase do mundo NEM CHEGA a existir', () => {
@@ -650,6 +713,219 @@ describe('o mapa do próximo wipe', () => {
     expect(calendar.next?.map).toBeNull();
     expect(calendar.next?.image).toBeNull();
     expect(JSON.stringify(calendar)).not.toContain('4000');
+  });
+});
+
+// ============================================================
+//  §1d  A RÉGUA CONTA MUNDOS, E NÃO POSIÇÕES DA FILA
+//
+//  ####  O DEFEITO QUE ESTA SEÇÃO PRENDE  ####
+//
+//  Quando o mundo do próximo wipe passou a sair do PLANO
+//  (`mapOfPlan`), o recorte continuou descontando uma vaga da régua
+//  como se a fila tivesse sido consumida SEMPRE. Com `mapSource:
+//  'keep'` nada é consumido — `next.image` é null —, e o OURO, que
+//  a régua manda ver três mundos, via dois. A numeração seguia a
+//  mesma suposição: o primeiro da fila aparecia como "#2".
+//
+//  A regra que as duas obedecem é uma só: a vaga sai, e a numeração
+//  pula, quando o mundo anunciado SAIU DA FILA.
+// ============================================================
+
+describe('a régua quando o mundo do wipe não sai da fila', () => {
+  /** Três procedurais prontos, cada um com a sua seed. */
+  const ready = [
+    mapEntry({ id: 1, position: 0, worldSize: 4000, seed: SECRET_SEED }),
+    mapEntry({ id: 2, position: 1, worldSize: 3500, seed: '111' }),
+    mapEntry({ id: 3, position: 2, worldSize: 3000, seed: '222' }),
+  ];
+
+  /**
+   * Os mesmos três, custom e sem marca de versão.
+   *
+   * Num wipe FORÇADO o `next` da fila pula todos — o `.map` de
+   * ontem não sobe na versão de amanhã —, e a decisão sai
+   * `undecided` com a fila CHEIA. É o único jeito de ter o quarto
+   * `mapSource` com mundos para listar atrás.
+   */
+  const customs = ready.map((entry, index) =>
+    mapEntry({
+      id: entry.id,
+      position: index,
+      kind: 'custom',
+      seed: null,
+      level: `Ilha ${String(index + 1)}`,
+      worldSize: null,
+      previewUrl: null,
+    }),
+  );
+
+  function calendarFor(
+    plans: readonly WipePlan[],
+    queue: readonly MapPoolEntry[],
+    tiers: readonly string[],
+  ): PlayerCalendar {
+    return buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ plans, queue }),
+      plans,
+      queue,
+      tiers,
+      levels: LEVELS,
+    });
+  }
+
+  /** As quatro origens de mundo, com fila para as quatro. */
+  const SOURCES = [
+    { name: 'pool', plans: [plan()], queue: ready },
+    { name: 'keep', plans: [plan({ mapSource: 'keep' })], queue: ready },
+    { name: 'fixed', plans: [plan({ mapSource: 'fixed', mapPoolId: 2 })], queue: ready },
+    { name: 'undecided', plans: [plan({ kind: 'forced', bpPolicy: 'wipe' })], queue: customs },
+  ] as const;
+
+  it('a prata vê UM mundo e o ouro TRÊS, venha ele do plano ou da fila', () => {
+    for (const source of SOURCES) {
+      const seen = (tiers: readonly string[]): number => {
+        const calendar = calendarFor(source.plans, source.queue, tiers);
+
+        // Sem wipe à vista a conta daria zero por outro motivo, e o
+        // teste não veria a diferença.
+        expect(calendar.next).not.toBeNull();
+
+        // O mundo do cartão conta como um: ele é `next.image`, e não
+        // `maps[0]`.
+        return (calendar.next?.image ? 1 : 0) + calendar.maps.length;
+      };
+
+      expect({ origem: source.name, prata: seen(['silver']), ouro: seen(['gold']) }).toEqual({
+        origem: source.name,
+        prata: 1,
+        ouro: 3,
+      });
+    }
+  });
+
+  it('e a seed continua fora do pacote nas quatro origens', () => {
+    for (const source of SOURCES) {
+      const gold = calendarFor(source.plans, source.queue, ['gold']);
+
+      // Com `keep` a cabeça da fila passou a ser LISTADA, e é ela
+      // que carrega a `SECRET_SEED`: o mundo a mais que o ouro
+      // ganhou não pode vir com a seed junto.
+      expect(JSON.stringify(gold)).not.toContain(SECRET_SEED);
+
+      for (const world of [gold.next?.image ?? null, ...gold.maps]) {
+        expect(Object.keys(world ?? {})).not.toContain('seed');
+      }
+    }
+  });
+
+  it('com `keep`, a fila listada começa no #1 — nada dela foi consumido', () => {
+    const calendar = calendarFor([plan({ mapSource: 'keep' })], ready, ['gold']);
+    const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+
+    expect(card).toContain('#1 na fila · procedural 4000');
+    expect(card).toContain('#2 na fila · procedural 3500');
+    expect(card).toContain('#3 na fila · procedural 3000');
+  });
+
+  it('com o mundo saindo da fila, o cartão é o #1 e a lista começa no #2', () => {
+    for (const source of [SOURCES[0], SOURCES[2]]) {
+      const calendar = calendarFor(source.plans, source.queue, ['gold']);
+      const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+
+      expect(card).not.toContain('#1 na fila');
+      expect(card).toContain('#2 na fila');
+      expect(card).toContain('#3 na fila');
+    }
+  });
+
+  it('a prata com `keep` vê o primeiro da fila, e só ele', () => {
+    const calendar = calendarFor([plan({ mapSource: 'keep' })], ready, ['silver']);
+    const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+
+    expect(calendar.maps.map((world) => world.worldSize)).toEqual([4000]);
+    expect(card).toContain('#1 na fila · procedural 4000');
+    expect(card).not.toContain('3500');
+  });
+});
+
+// ============================================================
+//  §1e  O RETÂNGULO SEM IMAGEM DIZ POR QUE NÃO HÁ IMAGEM
+//
+//  Ele tinha uma frase só — "a imagem deste mundo ainda não ficou
+//  pronta" —, e ela só é verdade quando o mundo É uma entrada da
+//  fila cujo desenho o RustMaps ainda não devolveu. Nos outros não
+//  há prévia pendente nenhuma, e a frase punha o jogador para
+//  esperar uma imagem que ninguém está desenhando.
+// ============================================================
+
+describe('o cartão do mundo sem imagem', () => {
+  function cardFor(input: DecideInput, tiers: readonly string[] = ['silver']): string {
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide(input),
+      plans: input.plans ?? [],
+      queue: input.queue ?? [],
+      tiers,
+      levels: LEVELS,
+    });
+
+    return cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+  }
+
+  it('com `keep`, diz que o mundo é o mesmo de agora', () => {
+    const card = cardFor({ plans: [plan({ mapSource: 'keep' })], queue: [mapEntry()] });
+
+    expect(card).toContain('o mundo do próximo wipe é o mesmo de agora');
+    expect(card).not.toContain('ainda não ficou pronta');
+  });
+
+  it('com o mundo já gravado na execução, diz que ele não saiu da fila', () => {
+    // Passado o `configurar`, o mundo novo está no `map_after` — e
+    // não na fila. Não existe prévia dele para ficar pronta.
+    const card = cardFor({
+      runs: [
+        run({
+          mapAfter: { level: 'Procedural Map', seed: SECRET_SEED, worldSize: 4500 },
+        }),
+      ],
+      queue: [mapEntry()],
+    });
+
+    expect(card).toContain('PROCEDURAL 4500');
+    expect(card).toContain('não saiu da fila');
+    expect(card).not.toContain('ainda não ficou pronta');
+    // O mundo da execução também carrega seed, e ela também para
+    // antes do desenho.
+    expect(card).not.toContain(SECRET_SEED);
+  });
+
+  it('sem ninguém ter escolhido, diz que o mundo ainda não foi escolhido', () => {
+    const card = cardFor({ plans: [plan()], queue: [] });
+
+    expect(card).toContain('o mundo ainda não foi escolhido');
+    expect(card).not.toContain('ainda não ficou pronta');
+  });
+
+  it('com a entrada da fila sem prévia, aí sim ela ainda não ficou pronta', () => {
+    const card = cardFor({
+      plans: [plan()],
+      queue: [mapEntry({ previewUrl: null, thumbUrl: null })],
+    });
+
+    expect(card).toContain('a imagem deste mundo ainda não ficou pronta');
+  });
+
+  it('com a prévia anulada pela seed na URL, a frase continua sendo a do rastro', () => {
+    const card = cardFor({
+      plans: [plan()],
+      queue: [mapEntry({ previewUrl: `https://rustmaps.com/map/4000_${SECRET_SEED}` })],
+    });
+
+    expect(card).toContain('a prévia foi escondida: o endereço dela carrega a seed');
   });
 });
 
@@ -744,18 +1020,21 @@ describe('a tela do calendário', () => {
     expect(text).not.toContain(SECRET_SEED);
   });
 
-  it('com a fila vazia, diz que o mundo é sorteado na hora', () => {
-    const text = textOf(
-      buildCalendarScreen({
-        calendar: calendarOf({
-          mapsAllowed: 1,
-          tier: 'silver',
-          next: nextOf({ map: 'sorteado na hora' }),
-        }),
+  it('com a fila vazia, o cartão do mundo explica o sorteio na hora', () => {
+    const screen = buildCalendarScreen({
+      calendar: calendarOf({
+        mapsAllowed: 1,
+        tier: 'silver',
+        next: nextOf({ map: 'sorteado na hora', mapFrom: 'undecided' }),
       }),
-    );
+    });
 
-    expect(text).toContain('sorteado na hora');
+    // De novo o cartão da direita, e não a tela toda: a linha `MAPA`
+    // do cartão da esquerda faria esta asserção passar sozinha.
+    const card = cardTextOf(screen, 'cal-mapa');
+
+    expect(card).toContain('SORTEADO NA HORA');
+    expect(card).toContain('o mundo ainda não foi escolhido');
   });
 
   it('sem wipe marcado, a coluna do mapa não promete mundo nenhum', () => {
@@ -795,6 +1074,9 @@ interface Harness {
   readonly sync: UiSync;
   readonly vips: VipsRepository;
   readonly runs: WipeRunsRepository;
+  /** Para o teste que troca a origem do mapa do plano já agendado. */
+  readonly schedule: WipeScheduleRepository;
+  readonly planId: number;
 }
 
 let harness: Harness;
@@ -820,7 +1102,11 @@ beforeEach(() => {
   const vips = new VipsRepository(db);
   const runs = new WipeRunsRepository(db);
 
-  schedule.createPlan(SERVER, { scheduledAt: NOW + 6 * DAY + 4 * HOUR, bpPolicy: 'keep' }, NOW);
+  const scheduled = schedule.createPlan(
+    SERVER,
+    { scheduledAt: NOW + 6 * DAY + 4 * HOUR, bpPolicy: 'keep' },
+    NOW,
+  );
 
   const first = mapPool.add(SERVER, { seed: SECRET_SEED, worldSize: 4000 }, NOW).entry;
 
@@ -875,7 +1161,7 @@ beforeEach(() => {
     }),
   });
 
-  harness = { db, server, sync, vips, runs };
+  harness = { db, server, sync, vips, runs, schedule, planId: scheduled.id };
 });
 
 /** Pede a tela como o plugin pede, e devolve o JSON que saiu. */
@@ -935,6 +1221,31 @@ describe('o comando que chega ao servidor', () => {
 
     expect(json).toContain('#2 na fila');
     expect(json).toContain('3500');
+    expect(json).not.toContain(SECRET_SEED);
+    expect(json).not.toContain('24680135');
+  });
+
+  it('com `keep`, o OURO ganha o mundo a mais — e nenhuma seed junto', async () => {
+    // ####  O CAMINHO INTEIRO, E NÃO SÓ O RECORTE  ####
+    //
+    // Com o plano `keep` nada é consumido da fila, e a régua do ouro
+    // passa a caber inteira nela: a CABEÇA — a entrada que carrega a
+    // `SECRET_SEED` — vira a #1 da lista. É o mundo que o conserto
+    // devolveu ao ouro, e é justamente o que precisa ser conferido
+    // no comando enviado: o recorte continua acontecendo ANTES do
+    // documento, e a seed não atravessa nem assim.
+    harness.schedule.updatePlan(SERVER, harness.planId, { mapSource: 'keep' }, NOW);
+
+    harness.vips.grant(
+      { steamId: PLAYER, tier: 'gold', expiresAt: null, origin: 'painel', createdBy: 'teste' },
+      NOW,
+    );
+
+    const json = await askCalendar(PLAYER);
+
+    expect(json).toContain('o mesmo mapa de agora');
+    expect(json).toContain('#1 na fila');
+    expect(json).toContain('#2 na fila');
     expect(json).not.toContain(SECRET_SEED);
     expect(json).not.toContain('24680135');
   });

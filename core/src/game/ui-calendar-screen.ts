@@ -44,8 +44,13 @@
 //  ####  A RÉGUA DO VIP, E POR QUE ELA VEM DE GRAÇA  ####
 //
 //    sem VIP / bronze   a data e a política de blueprint
-//    silver             + o mundo DO PRÓXIMO WIPE (tamanho e imagem)
-//    gold               + os dois seguintes da fila
+//    silver             + 1 mundo do futuro (tamanho e imagem)
+//    gold               + 3 mundos do futuro
+//
+//  A régua conta MUNDOS, e não posições da fila: o do próximo wipe
+//  é o primeiro deles QUANDO ele sai da fila. Com um plano `keep`
+//  ele não sai — o mundo do próximo wipe é o que já está no ar —, e
+//  aí os três do ouro são os três primeiros da fila.
 //
 //  O dado já existe: a fila de mapas é do admin e o RustMaps já
 //  preencheu as imagens. "VIP vê o futuro" é produto que não custa
@@ -90,6 +95,7 @@ import type { VipTierLevel } from '../vip/tiers.js';
 import {
   nextWipe,
   type NextWipe,
+  type NextWipeMap,
   type WipeMapPoolReader,
   type WipeRunsReader,
 } from '../wipe/next-wipe.js';
@@ -200,6 +206,25 @@ export interface CalendarNextWipeView {
   readonly map: string | null;
   /** A imagem daquele mundo, quando ele é uma entrada da fila. */
   readonly image: CalendarMapView | null;
+  /**
+   * DE ONDE aquele mundo saiu, na união de `nextWipe`.
+   *
+   * ####  ELE É O QUE DIZ SE A FILA FOI CONSUMIDA  ####
+   *
+   * Sem este campo o desenho só tinha `image === null` para se
+   * guiar, e ele responde "não há imagem" — que é a mesma coisa
+   * para quatro situações diferentes: o mundo é o mesmo de agora
+   * (`keep`), ele já está gravado na execução (`world`), ninguém o
+   * escolheu (`undecided`), ou ele é uma entrada da fila cuja
+   * prévia o RustMaps ainda não devolveu. Só a última é uma prévia
+   * PENDENTE, e só ela consome uma vaga da régua e uma posição da
+   * numeração.
+   *
+   * `null` = o nível deste jogador não alcança o mapa, como em
+   * `map`: o que ele não pode ver não atravessa o RCON, nem como
+   * rótulo.
+   */
+  readonly mapFrom: NextWipeMap['source'] | null;
 }
 
 /**
@@ -255,7 +280,9 @@ export interface PlayerCalendar {
    *
    * O mundo do próximo wipe não está aqui: ele é `next.image`, e
    * pode nem sair da fila (um plano `keep` não consome nenhuma
-   * entrada).
+   * entrada). Quando ele não sai, a régua inteira sobra para esta
+   * lista — é o que mantém o total de mundos vistos igual ao do
+   * nível, venha o mundo do plano ou da fila.
    */
   readonly maps: readonly CalendarMapView[];
 }
@@ -379,10 +406,20 @@ export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar 
     (entry) => entry.status === 'ready' && (chosen === null || entry.id !== chosen.id),
   );
 
-  // O nível já paga pelo mundo do próximo wipe: o que sobra da
-  // régua é o que ele vê ATRÁS dele. Prata fica com zero; ouro,
-  // com dois.
-  const behind = Math.max(0, allowance.maps - 1);
+  // ####  A VAGA SÓ SAI SE A FILA FOI MESMO CONSUMIDA  ####
+  //
+  // O mundo do próximo wipe custa uma vaga da régua QUANDO ele é
+  // uma entrada da fila: aí ele já é `next.image`, e a fila mostra
+  // o que vem atrás. Prata fica com zero; ouro, com dois.
+  //
+  // Mas ele nem sempre sai da fila: `keep` mantém o mundo que já
+  // está no ar, uma execução passada do `configurar` já tem o mundo
+  // dela gravado, e `undecided` é ninguém ter escolhido. Nesses
+  // três nada é consumido — `chosen` é null e `next.image` também —
+  // e descontar a vaga assim mesmo cobrava do jogador um mundo que
+  // ele não viu. Medido: VIP OURO, plano `keep` e três procedurais
+  // prontos na fila; a régua dá três mundos e a tela mostrava dois.
+  const behind = Math.max(0, allowance.maps - (chosen === null ? 0 : 1));
 
   return {
     now: input.now,
@@ -407,6 +444,7 @@ export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar 
                 ? null
                 : (describeNextWipeMap(next.map) ?? MAP_DRAWN_ON_THE_SPOT),
             image: allowance.maps === 0 || chosen === null ? null : toMapView(chosen),
+            mapFrom: allowance.maps === 0 ? null : next.map.source,
           },
     wipes,
     maps: ready.slice(0, behind).map(toMapView),
@@ -798,15 +836,22 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
         'cal-mapa-x',
         next === null
           ? 'Quando o próximo wipe for marcado, o mundo dele aparece aqui.'
-          : `O mundo do próximo wipe é ${MAP_DRAWN_ON_THE_SPOT}.`,
+          : // Sem a FRASE do mundo e com a régua alcançando o mapa:
+            // `buildPlayerCalendar` não produz isso — ele só apaga a
+            // frase de quem não alcança, e esse caso já saiu no
+            // cadeado acima. Quem não escolheu mundo nenhum chega
+            // aqui COM frase (`sorteado na hora`), e é o cartão de
+            // baixo que a explica. Fica dizendo só o que se pode
+            // afirmar sem inventar.
+            'O mundo do próximo wipe ainda não foi anunciado.',
         line(PAD + 30, 22),
         { size: 12, align: 'MiddleLeft', color: C.textMuted },
       ),
     ];
   }
 
-  const first = next.image;
-  const image = first?.previewUrl ?? first?.thumbUrl ?? null;
+  const entry = next.image;
+  const image = entry?.previewUrl ?? entry?.thumbUrl ?? null;
 
   const imageRect: Rect = {
     anchorMin: { x: 0.5, y: 1 },
@@ -816,24 +861,17 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
   };
 
   const elements: UiElement[] = [
-    // Sem imagem ainda, um retângulo vazio é honesto: ele não finge
-    // ser um mundo que ninguém desenhou. A mesma escolha do card de
-    // kit sem catálogo lido.
-    //
-    // E quando a imagem foi RETIRADA por carregar a seed, a frase
-    // diz isso: um "ainda não ficou pronta" sobre uma prévia que
-    // está pronta no banco manda o admin procurar no lugar errado.
+    // Sem imagem, um retângulo vazio é honesto: ele não finge ser um
+    // mundo que ninguém desenhou. A mesma escolha do card de kit sem
+    // catálogo lido. O que ele DIZ depende do caso — ver
+    // `missingImageNote`.
     isDrawableUrl(image)
       ? urlImage('cal-mapa-i', image, imageRect)
       : panel('cal-mapa-i', imageRect, C.surface2, [
-          label(
-            'cal-mapa-in',
-            first?.imageHiddenBy === 'seed-na-url'
-              ? 'a prévia foi escondida: o endereço dela carrega a seed'
-              : 'a imagem deste mundo ainda não ficou pronta',
-            fill(8, 8, 8, 8),
-            { size: 11, color: C.textMuted },
-          ),
+          label('cal-mapa-in', missingImageNote(next), fill(8, 8, 8, 8), {
+            size: 11,
+            color: C.textMuted,
+          }),
         ]),
 
     label('cal-mapa-t', next.map.toUpperCase(), line(PAD + MAP_IMAGE + 10, 24), {
@@ -850,14 +888,29 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
   if (rest.length > 0) {
     const top = PAD + MAP_IMAGE + 40;
 
+    // ####  O #1 É O MUNDO DO CARTÃO, QUANDO ELE SAIU DA FILA  ####
+    //
+    // A numeração conta os mundos que ainda vão subir. Com uma
+    // entrada consumida pelo cartão, ela é o #1 e a lista começa no
+    // #2 — vale para `pool` e para `fixed`, que consome a entrada
+    // apontada e deixa as outras na ordem em que serão usadas.
+    //
+    // Quando NADA foi consumido — `keep`, o mundo já gravado na
+    // execução, ou ninguém ter escolhido —, o mundo do cartão não
+    // está na fila, e o primeiro desta lista é o #1 dela. O `#2`
+    // fixo dava ao VIP que paga pela fila um ordinal que não
+    // existe: com `keep` e a fila 4000/3500/3000, a tela chamava o
+    // 4000 de "#2 na fila" sendo ele o primeiro.
+    const place = next.mapFrom === 'entry' ? 2 : 1;
+
     elements.push(
       panel(
         'cal-mapa-l',
         fill(PAD, top, PAD, PAD),
         C.none,
         itemRows(
-          rest.map((entry, index) => ({
-            text: `#${String(index + 2)} na fila · ${describeMapEntry(entry)}`,
+          rest.map((world, index) => ({
+            text: `#${String(index + place)} na fila · ${describeMapEntry(world)}`,
             item: null,
           })),
           MAP_CARD_HEIGHT - top - PAD,
@@ -868,6 +921,48 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
   }
 
   return elements;
+}
+
+/**
+ * Por que não há imagem — a verdade de CADA caso.
+ *
+ * ####  UMA FRASE SÓ MENTIA EM TRÊS DOS QUATRO  ####
+ *
+ * O retângulo cinza dizia sempre "a imagem deste mundo ainda não
+ * ficou pronta", e isso só é verdade quando o mundo É uma entrada
+ * da fila cuja prévia o RustMaps ainda está desenhando. Nos outros
+ * não há prévia pendente NENHUMA:
+ *
+ *   · `keep`       o mundo é o que já está no ar — só a seed muda;
+ *   · `world`      ele já está gravado na execução, e não veio da
+ *                  fila: não existe prévia dele para ficar pronta;
+ *   · `undecided`  não há mundo escolhido do qual ter prévia.
+ *
+ * Prometer "ainda não ficou pronta" nesses três põe o jogador para
+ * esperar uma imagem que ninguém está desenhando, e manda o admin
+ * procurar defeito no RustMaps.
+ */
+function missingImageNote(next: CalendarNextWipeView): string {
+  // A anulação por seed vem primeiro: ela é sobre uma prévia que
+  // ESTÁ pronta no banco, e um "ainda não ficou pronta" por cima
+  // dela manda o admin procurar no lugar errado.
+  if (next.image?.imageHiddenBy === 'seed-na-url') {
+    return 'a prévia foi escondida: o endereço dela carrega a seed';
+  }
+
+  switch (next.mapFrom) {
+    case 'keep':
+      return 'sem prévia nova: o mundo do próximo wipe é o mesmo de agora';
+
+    case 'world':
+      return 'este mundo não saiu da fila, e não há prévia dele';
+
+    case 'undecided':
+      return 'o mundo ainda não foi escolhido: ele é sorteado na hora';
+
+    default:
+      return 'a imagem deste mundo ainda não ficou pronta';
+  }
 }
 
 /**
