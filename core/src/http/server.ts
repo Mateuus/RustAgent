@@ -75,6 +75,9 @@ import { registerUiRoutes } from './routes/ui.js';
 import { registerVipRoutes } from './routes/vips.js';
 // ---- a loja e a carteira ----
 import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
+// ---- wipe, calendário e mensagens ----
+import type { WipeScheduleRepository } from '../db/wipe-schedule-repository.js';
+import { registerWipeRoutes } from './routes/wipe.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -150,6 +153,18 @@ export interface BuildServerOptions {
    * dinheiro, e é ela que precisa de débito, estorno e extrato.
    */
   readonly store: Omit<StoreRoutesDeps, 'supervisor'>;
+
+  // ---- wipe, calendário e mensagens ----------------------
+  //
+  // Ver Docs\16-PLANO-WIPE-CALENDARIO-MENSAGENS.md.
+
+  /**
+   * A AGENDA do wipe: quando o servidor zera, e o que o wipe leva.
+   *
+   * Só o calendário — nada aqui executa wipe. Quem apaga arquivo é
+   * a operação `wipe-run`, e ela chega depois.
+   */
+  readonly wipeSchedule: WipeScheduleRepository;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -321,6 +336,16 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // A loja depois dos kits porque ela DEPENDE do VIP: uma oferta
       // de VIP concede pelo `VipList`, e não por um segundo caminho.
       registerStoreRoutes(api, { ...options.store, supervisor: options.supervisor });
+
+      // ---- o wipe -----------------------------------------
+      //
+      // A AGENDA, e só ela: settings, plans e upcoming. Nenhuma
+      // destas rotas para servidor nem apaga arquivo — quando a
+      // execução entrar, ela vem como operação, com trava e log.
+      registerWipeRoutes(api, {
+        repository: options.wipeSchedule,
+        supervisor: options.supervisor,
+      });
     },
     { prefix: '/api' },
   );

@@ -1575,6 +1575,114 @@ CREATE TABLE spawn_status (
 );
 `;
 
+// ------------------------------------------------------------
+//  023 — a agenda do wipe
+//
+//  ####  DUAS TABELAS, E ELAS RESPONDEM PERGUNTAS DIFERENTES ####
+//
+//      wipe_settings   de quanto em quanto tempo este servidor
+//                      zera, em que horário e o que o wipe leva
+//      wipe_plans      o calendário MATERIALIZADO: cada wipe que
+//                      vai acontecer, um por linha
+//
+//  ####  POR QUE A AGENDA É MATERIALIZADA  ####
+//
+//  Porque um wipe agendado é algo que se EDITA — adiar, pular,
+//  trocar a política de blueprint, escolher o mapa — e não dá para
+//  editar o resultado de uma função. O agente materializa ~90 dias
+//  e reconcilia quando a configuração muda, preservando o que foi
+//  editado à mão e nunca tocando no passado. Ver
+//  db/wipe-schedule-repository.ts e Docs\16 §7.
+//
+//  ####  E POR QUE NÃO HÁ TABELA DE DATAS DE FORCE WIPE  ####
+//
+//  "Primeira quinta do mês, 19:00 UTC" são dez linhas de código e
+//  valem para sempre (wipe/schedule.ts). Um array de datas
+//  chumbadas envelhece em silêncio: no dia em que ele acaba, o
+//  agente para de agendar e ninguém percebe até o wipe não
+//  acontecer.
+//
+//  ####  A CONFIGURAÇÃO É CHAVE/VALOR, POR SERVIDOR  ####
+//
+//  As frentes seguintes gravam AQUI as chaves delas — os avisos, o
+//  backup, a lista do full wipe — sem migração nova. E chave a
+//  chave, e não um JSON só: assim um valor corrompido não leva os
+//  outros nove junto, e a leitura cai no padrão daquela chave.
+// ------------------------------------------------------------
+const WIPE_SCHEDULE_SCHEMA = `
+CREATE TABLE wipe_settings (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- 'cadence.everyDays', 'collision.policy', 'forced.bpPolicy'…
+  -- Prefixo do bloco a que a chave pertence.
+  key   TEXT NOT NULL,
+  value TEXT NOT NULL,
+
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (server_id, key)
+);
+
+CREATE TABLE wipe_plans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- Epoch ms UTC, como toda data deste banco. O horário local do
+  -- admin (16:00) mora em wipe_settings como texto MAIS o fuso
+  -- IANA, e vira instante no cálculo — nunca antes.
+  scheduled_at INTEGER NOT NULL,
+
+  -- De onde este wipe veio. 'manual' é o que um humano marcou, e é
+  -- o único que a reconciliação nunca recria.
+  kind TEXT NOT NULL CHECK (kind IN ('cadence', 'forced', 'manual')),
+
+  -- O que ele faz com o que o jogador APRENDEU.
+  bp_policy TEXT NOT NULL CHECK (bp_policy IN ('keep', 'wipe', 'wipe_except_vip')),
+
+  -- De onde sai o mundo que entra no lugar. A fila de mapas é da
+  -- migração 24 (Frente C) — por isso map_pool_id NÃO tem chave
+  -- estrangeira aqui: a tabela dela ainda não existe neste passo, e
+  -- uma FK para tabela ausente faz o SQLite recusar a inserção
+  -- inteira quando o pragma está ligado.
+  map_source TEXT NOT NULL DEFAULT 'pool'
+    CHECK (map_source IN ('pool', 'random', 'fixed', 'keep')),
+  map_pool_id INTEGER,
+
+  status TEXT NOT NULL DEFAULT 'planned'
+    CHECK (status IN ('planned', 'running', 'done', 'skipped', 'failed', 'absorbed')),
+
+  -- O forçado que cancelou este (política 'absorb'). O absorvido
+  -- CONTINUA na agenda, marcado: uma lista com um buraco não
+  -- explica por que terça não vai ter wipe.
+  absorbed_by INTEGER REFERENCES wipe_plans(id) ON DELETE SET NULL,
+
+  -- ####  O CAMPO QUE FAZ *ADIAR* SER ADIAR  ####
+  --
+  -- O instante que a REGRA gerou para esta linha. Sem ele, mover um
+  -- wipe de quinta para sexta deixaria a quinta vaga, a
+  -- reconciliação a recriaria, e o servidor teria DOIS wipes
+  -- naquela semana. NULL = ninguém gerou, foi marcado à mão.
+  generated_for INTEGER,
+
+  -- Um humano mexeu: a reconciliação não toca mais nesta linha.
+  pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+
+  note TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+
+  -- Dois wipes no mesmo instante são a mesma parada de servidor
+  -- contada duas vezes.
+  UNIQUE (server_id, scheduled_at)
+);
+
+-- A pergunta de toda tela: "o que vem depois de agora, neste
+-- servidor?". O UNIQUE acima já cobriria (server_id, scheduled_at),
+-- mas ele é único e este é o índice que a varredura por faixa usa.
+CREATE INDEX idx_wipe_plans_agenda ON wipe_plans (server_id, scheduled_at, status);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -1600,6 +1708,10 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 20, name: 'kit-wipe-delay', sql: KIT_WIPE_DELAY_SCHEMA },
   { id: 21, name: 'store-audit', sql: STORE_AUDIT_SCHEMA },
   { id: 22, name: 'spawn-status', sql: SPAWN_STATUS_SCHEMA },
+  // 023 em diante: wipe, calendário e mensagens. Os números estão
+  // reservados por frente (Docs\17 §0.1) — duas frentes escrevendo
+  // o mesmo número dão merge limpo e banco quebrado.
+  { id: 23, name: 'wipe-schedule', sql: WIPE_SCHEDULE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

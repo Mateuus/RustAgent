@@ -74,6 +74,8 @@ import { PlayerDirectory } from './players/service.js';
 import { ServerSupervisor } from './servers/supervisor.js';
 import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
+// ---- wipe, calendário e mensagens ----
+import { WipeScheduleRepository } from './db/wipe-schedule-repository.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -643,6 +645,38 @@ async function main(): Promise<void> {
 
   steamWatcher.start();
 
+  // ---- a agenda do wipe -------------------------------------
+  //
+  // ####  ELA É MATERIALIZADA, E O BOOT É QUEM MATERIALIZA  ####
+  //
+  // A agenda não é calculada na hora da pergunta: ela é uma tabela,
+  // porque um wipe agendado é algo que se edita (adiar, pular,
+  // trocar a política). O cálculo vira linha aqui e a cada
+  // gravação da configuração pelo painel.
+  //
+  // Reconciliar NÃO regera: o que o admin editou fica, o passado
+  // não é tocado, e os ids não mudam. Um servidor que falhe não
+  // derruba os outros nem a subida — a agenda é informação, e a
+  // porta da API vale mais que ela.
+  //
+  // Nada disto EXECUTA wipe: quem apaga arquivo é a operação
+  // `wipe-run`, que ainda não existe. Ver Docs\16 §6.
+  const wipeSchedule = new WipeScheduleRepository(db);
+
+  for (const [serverId, result] of wipeSchedule.reconcileAll(supervisor.ids())) {
+    if (result instanceof Error) {
+      logger.error(
+        { server: serverId, err: result },
+        'não deu para materializar a agenda de wipe deste servidor',
+      );
+      continue;
+    }
+
+    if (result.created + result.updated + result.removed > 0) {
+      logger.info({ server: serverId, ...result }, 'agenda de wipe materializada');
+    }
+  }
+
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
@@ -691,6 +725,7 @@ async function main(): Promise<void> {
         enabled: server.enabled,
         rcon: server.rcon,
       })),
+    wipeSchedule,
   });
 
   await app.listen({ host: agent.host, port: agent.port });
