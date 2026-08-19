@@ -324,6 +324,58 @@ export function blockedInForced(
   return forced && entry.kind === 'custom' && !entry.versionOk;
 }
 
+/** O `.ini` aponta um `.map` de fora? Vazio e `null` são procedural. */
+export function isCustomWorld(levelUrl: string | null | undefined): boolean {
+  return typeof levelUrl === 'string' && levelUrl.trim() !== '';
+}
+
+/**
+ * A frase que explica por que o mundo QUE JÁ ESTÁ NO AR não pode
+ * ficar num wipe FORÇADO.
+ *
+ * Ela mora ao lado do `CUSTOM_IN_FORCED_REASON` porque é a mesma
+ * trava, do outro lado: lá é o `.map` que a fila não deixa entrar,
+ * aqui é o `.map` que já entrou e não pode ficar.
+ */
+export const KEEP_CUSTOM_IN_FORCED_REASON =
+  'o mundo de agora é um mapa custom e ninguém marcou o .map dele como "compatível com a versão ' +
+  'nova": o forçado troca o binário do jogo, e o arquivo gerado na versão de ontem pode não ' +
+  'carregar na de hoje';
+
+/**
+ * O mundo de agora sobrevive a um wipe FORÇADO?
+ *
+ * ####  `keep` NÃO É UMA ESCOLHA ACIMA DA TRAVA  ####
+ *
+ * `blockedInForced` existe para um desfecho só: o servidor que
+ * sobe, na primeira quinta do mês, com um `.map` gerado na versão
+ * velha do binário. A fila respeita isso desde sempre — e o
+ * `keep`, que nem olha a fila, entregava exatamente esse desfecho
+ * mantendo o arquivo que já estava no `.ini`. O mundo PROCEDURAL
+ * continua podendo ser mantido: quem o gera é o próprio servidor,
+ * no boot, já na versão nova.
+ *
+ * A marca é a MESMA do `version_ok` da fila: quem garantiu na mão
+ * que aquele `.map` serve para a versão nova garantiu para os dois
+ * lados, e o admin destrava marcando a entrada do `.map` que está
+ * no ar.
+ *
+ * `world` nulo = não deu para saber em que mundo o servidor está.
+ * Aí o `keep` VALE, como antes: "não consegui ler o `.ini`" não
+ * pode virar motivo para trocar um mundo que ninguém mandou
+ * trocar.
+ */
+export function keepBlockedInForced(
+  world: { readonly levelUrl: string | null; readonly versionOk: boolean } | null,
+  forced: boolean,
+): boolean {
+  if (!forced || world === null) {
+    return false;
+  }
+
+  return isCustomWorld(world.levelUrl) && !world.versionOk;
+}
+
 /**
  * Esta entrada pode ser o mundo de um wipe que começa agora?
  *

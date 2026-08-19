@@ -3108,6 +3108,11 @@ export interface WipePreviewResponse {
    * `null` nos dois mundos que não saem da fila, e o aviso que
    * acompanha diz qual é: `MAP_KEPT` (o plano manda manter o mapa
    * de agora) e `EMPTY_MAP_POOL` (o agente sorteia a seed).
+   *
+   * `KEEP_REFUSED_IN_FORCED` é o contrário dos dois: o plano manda
+   * manter, o wipe é o FORÇADO e o mundo de agora é um `.map`
+   * custom sem a marca de compatibilidade — o mundo sai da fila, e
+   * `nextMap` traz a entrada que vai subir.
    */
   readonly nextMap: WipeMap | null;
   readonly server: {

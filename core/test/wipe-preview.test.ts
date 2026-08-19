@@ -55,8 +55,15 @@ afterEach(async () => {
 interface Bancada {
   readonly schedule: WipeScheduleRepository;
   readonly mapPool: MapPoolRepository;
+  /** As execuções: é delas que sai o wipe EM CURSO. */
+  readonly runs: WipeRunsRepository;
   /** A prévia de agora, com o plano e a fila que já foram montados. */
-  previa(): Promise<WipePreview>;
+  previa(options?: {
+    /** O `.map` de fora que o servidor está rodando agora. */
+    readonly levelUrl?: string;
+    /** O relógio da prévia, para andar para depois da hora do wipe. */
+    readonly now?: number;
+  }): Promise<WipePreview>;
 }
 
 async function bancada(): Promise<Bancada> {
@@ -92,16 +99,26 @@ async function bancada(): Promise<Bancada> {
   return {
     schedule,
     mapPool,
-    previa: () =>
+    runs,
+    previa: (options = {}) =>
       buildWipePreview({
         serverId: SERVER,
         identity: IDENTITY,
         installDir,
         backupsDir: join(root, 'backups'),
-        current: { level: 'Procedural Map', seed: '12345', worldSize: 4000 },
+        current: {
+          level: 'Procedural Map',
+          seed: '12345',
+          worldSize: 4000,
+          levelUrl: options.levelUrl ?? null,
+        },
         schedule,
+        // A MESMA ligação que a rota faz: a prévia enxerga a
+        // execução em curso, como o chat e a tela do jogo enxergam.
+        runs,
         mapPool,
         exec: runs.getExecSettings(SERVER),
+        ...(options.now === undefined ? {} : { now: options.now }),
       }),
   };
 }
@@ -210,6 +227,20 @@ describe('a prévia responde o MESMO mundo que o executor vai subir', () => {
     expect(codigos(preview)).not.toContain('MAP_KEPT');
   });
 
+  it('com `random`, ela mostra a CABEÇA da fila — e não um sorteio', async () => {
+    // `random` segue a fila como o `pool`: a etiqueta diz o que o
+    // admin quis, e não o que o agente faz.
+    const b = await bancada();
+    const { primeira } = fila(b);
+
+    plano(b, 'random');
+
+    const preview = await b.previa();
+
+    expect(preview.nextMap?.id).toBe(primeira);
+    expect(codigos(preview)).not.toContain('EMPTY_MAP_POOL');
+  });
+
   it('sem plano nenhum e sem fila, o aviso do sorteio é VERDADE', async () => {
     // O "WIPAR AGORA": não há plano a respeitar, a fila é a
     // resposta, e uma fila sem nada utilizável sorteia mesmo.
@@ -219,5 +250,153 @@ describe('a prévia responde o MESMO mundo que o executor vai subir', () => {
     expect(preview.nextMap).toBeNull();
     expect(codigos(preview)).toContain('EMPTY_MAP_POOL');
     expect(codigos(preview)).not.toContain('MAP_KEPT');
+  });
+});
+
+// ============================================================
+//  A PRÉVIA DESCREVE O WIPE EM CURSO, E NÃO O SEGUINTE
+//
+//  ####  O DEFEITO QUE ESTA SEÇÃO PRENDE  ####
+//
+//  `buildWipePreview` descobria o plano por `schedule.nextPlan`,
+//  que exige `status = 'planned' AND scheduled_at > now`. O
+//  relógio marca o plano `running` ao CRIAR a execução, com a
+//  antecedência do maior offset de aviso — 1440 minutos, no
+//  padrão. Nas 24 h que antecedem TODO wipe agendado a prévia
+//  perdia o plano em curso e respondia o da SEMANA QUE VEM:
+//  mundo errado, `bpPolicy` errada — e, com ela, a lista de
+//  arquivos classificada pela política de outro wipe — e o aviso
+//  MAP_KEPT sumindo da última tela que o admin lê antes do botão.
+//
+//  É a mesma classe do defeito lá de cima, deslocada no tempo: o
+//  chat, a tela do jogo e o executor já leem a execução em curso
+//  ANTES da agenda (`mapOfRun` -> `mapOfPlan`).
+// ============================================================
+
+const HORA = 60 * 60 * 1000;
+
+describe('a prévia descreve o wipe EM CURSO', () => {
+  it('nas 24 h do wipe de hoje, ela não responde o da semana que vem', async () => {
+    const b = await bancada();
+    const { segunda } = fila(b);
+
+    // O de hoje: manter o mundo, blueprints intactos. Ele está
+    // `running` porque a execução já começou — faltam 6 horas.
+    const hoje = b.schedule.createPlan(
+      SERVER,
+      { scheduledAt: Date.now() + 6 * HORA, bpPolicy: 'keep', mapSource: 'keep' },
+      Date.now(),
+    );
+
+    // E o da semana que vem: outro mundo, outra política.
+    b.schedule.createPlan(
+      SERVER,
+      {
+        scheduledAt: Date.now() + SEMANA,
+        bpPolicy: 'wipe',
+        mapSource: 'fixed',
+        mapPoolId: segunda,
+      },
+      Date.now(),
+    );
+
+    b.schedule.markPlanStatus(SERVER, hoje.id, 'running');
+
+    const preview = await b.previa();
+
+    expect(preview.plan?.id).toBe(hoje.id);
+    expect(preview.bpPolicy).toBe('keep');
+    // O mundo é o mantido, e não o `.map` da semana que vem.
+    expect(preview.nextMap).toBeNull();
+    expect(codigos(preview)).toContain('MAP_KEPT');
+    expect(codigos(preview)).not.toContain('BLUEPRINTS_WIPED');
+  });
+
+  it('com a hora do wipe já passada, quem responde é a execução', async () => {
+    // O plano `running` cuja hora chegou sai do recorte da agenda
+    // (`from: now`), e aí só a execução sabe dele. É o instante em
+    // que o admin abre a tela para ver o que está acontecendo.
+    const b = await bancada();
+    const { primeira } = fila(b);
+
+    const hoje = b.schedule.createPlan(
+      SERVER,
+      { scheduledAt: Date.now() + HORA, bpPolicy: 'wipe', mapSource: 'pool' },
+      Date.now(),
+    );
+
+    b.schedule.markPlanStatus(SERVER, hoje.id, 'running');
+    b.runs.create(SERVER, { planId: hoje.id, kind: 'cadence', bpPolicy: 'wipe' });
+
+    const preview = await b.previa({ now: Date.now() + 2 * HORA });
+
+    expect(preview.plan?.id).toBe(hoje.id);
+    expect(preview.bpPolicy).toBe('wipe');
+    expect(preview.nextMap?.id).toBe(primeira);
+    expect(codigos(preview)).toContain('BLUEPRINTS_WIPED');
+  });
+});
+
+describe('`keep` num wipe FORÇADO, na tela que vem antes do botão', () => {
+  const ILHA = 'https://mapas.exemplo/ilha.map';
+
+  /** O forçado da agenda, mandando MANTER o mundo. */
+  function forcadoQueMantem(b: Bancada): void {
+    b.schedule.reconcile(SERVER, Date.now());
+
+    const plan = b.schedule
+      .listPlans(SERVER, { from: Date.now() })
+      .find((candidate) => candidate.kind === 'forced');
+
+    expect(plan).toBeDefined();
+
+    b.schedule.updatePlan(SERVER, plan?.id ?? 0, { mapSource: 'keep' }, Date.now());
+  }
+
+  it('com `.map` custom sem a marca, ela recusa o `keep` e mostra a fila', async () => {
+    const b = await bancada();
+    const { primeira } = fila(b);
+
+    forcadoQueMantem(b);
+
+    const preview = await b.previa({ levelUrl: ILHA });
+    const aviso = preview.warnings.find((notice) => notice.code === 'KEEP_REFUSED_IN_FORCED');
+
+    expect(preview.nextMap?.id).toBe(primeira);
+    expect(codigos(preview)).not.toContain('MAP_KEPT');
+    expect(aviso?.message).toContain('compatível com a versão nova');
+    // E ele NÃO trava o wipe: o forçado acontece de qualquer jeito.
+    expect(preview.blockers).toHaveLength(0);
+  });
+
+  it('com a marca no `.map` de agora, o mundo mantido volta a ser verdade', async () => {
+    const b = await bancada();
+
+    fila(b);
+
+    const custom = b.mapPool.add(SERVER, { kind: 'custom', level: 'Ilha', levelUrl: ILHA }).entry.id;
+
+    b.mapPool.markVersionOk(SERVER, custom, true);
+    b.mapPool.markUsed(SERVER, custom);
+
+    forcadoQueMantem(b);
+
+    const preview = await b.previa({ levelUrl: ILHA });
+
+    expect(preview.nextMap).toBeNull();
+    expect(codigos(preview)).toContain('MAP_KEPT');
+    expect(codigos(preview)).not.toContain('KEEP_REFUSED_IN_FORCED');
+  });
+
+  it('mundo procedural continua sendo mantido no forçado', async () => {
+    const b = await bancada();
+
+    fila(b);
+    forcadoQueMantem(b);
+
+    const preview = await b.previa();
+
+    expect(codigos(preview)).toContain('MAP_KEPT');
+    expect(codigos(preview)).not.toContain('KEEP_REFUSED_IN_FORCED');
   });
 });

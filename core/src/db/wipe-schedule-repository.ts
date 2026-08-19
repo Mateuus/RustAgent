@@ -895,9 +895,24 @@ export class WipeScheduleRepository implements WipeScheduleReader {
   /**
    * Marca um plano como consumido pela execução.
    *
-   * Só sai de `planned` ou `running`: um plano que um humano já
-   * pulou (`skipped`) ou que foi absorvido não volta a ser
-   * `done` porque uma execução atrasada terminou.
+   * Um plano que um humano já pulou (`skipped`), que foi absorvido
+   * ou que já terminou (`done`) não volta atrás porque uma
+   * execução atrasada terminou: a decisão do humano e o wipe que
+   * já aconteceu valem mais do que uma escrita fora de hora.
+   *
+   * ####  `failed` ENTRA, E É O CONSERTO DE UM ESTADO ETERNO  ####
+   *
+   * A execução que falha marca o plano `failed`. Sem ele nesta
+   * lista, a RETOMADA bem-sucedida não pegava linha nenhuma — o
+   * wipe acontecia, o mundo trocava, o run ficava `done`, e a
+   * Agenda continuava dizendo que aquele wipe falhou. Para sempre.
+   * O admin lia isso e podia disparar um "WIPAR AGORA" que
+   * consumiria uma segunda entrada da curadoria.
+   *
+   * E isto NÃO reabre caminho para o wipe acontecer duas vezes:
+   * quem dispara sozinho é o relógio, e `duePlans` só enxerga
+   * `planned` — um plano `failed` que vira `done` sai da fila do
+   * relógio pela mesma porta por onde entrou.
    */
   markPlanStatus(
     serverId: string,
@@ -909,7 +924,7 @@ export class WipeScheduleRepository implements WipeScheduleReader {
       .prepare(
         `UPDATE wipe_plans SET status = @status, updated_at = @now
           WHERE server_id = @server_id AND id = @id
-            AND status IN ('planned', 'running')`,
+            AND status IN ('planned', 'running', 'failed')`,
       )
       .run({ server_id: serverId, id, status, now });
 

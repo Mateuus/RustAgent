@@ -144,6 +144,11 @@ export function registerWipeRunRoutes(app: FastifyInstance, deps: WipeRunRoutesD
       backupsDir: config.paths.backupsDir,
       current: currentWorldOf(config),
       schedule: deps.schedule,
+      // A execução em curso: nas 24 h que antecedem um wipe
+      // agendado o plano dele já está `running`, e é ELE que esta
+      // tela descreve. Sem isto ela volta a descrever o wipe da
+      // semana que vem — outro mundo e outra política de blueprint.
+      runs: deps.runs,
       mapPool: deps.mapPool,
       exec: deps.runs.getExecSettings(id),
       running: context === null ? null : await context.operations.isRunning(),
@@ -334,6 +339,7 @@ export function registerWipeRunRoutes(app: FastifyInstance, deps: WipeRunRoutesD
       backupsDir: config.paths.backupsDir,
       current: currentWorldOf(config),
       schedule: deps.schedule,
+      runs: deps.runs,
       mapPool: deps.mapPool,
       exec,
       bpPolicy,
@@ -598,11 +604,17 @@ function currentWorldOf(config: ServerConfig): {
   readonly level: string | null;
   readonly seed: string | null;
   readonly worldSize: number | null;
+  readonly levelUrl: string | null;
 } {
   return {
     level: config.level,
     seed: String(config.seed),
     worldSize: config.worldSize,
+    // O `.map` de fora, quando há um. É o que decide se um wipe
+    // FORÇADO pode MANTER o mundo de hoje — ver
+    // `keepBlockedInForced`, em wipe/map-pool.ts —, e é por isso
+    // que ele viaja junto do retrato do mundo, e não só na tela.
+    levelUrl: config.levelUrl === '' ? null : config.levelUrl,
   };
 }
 

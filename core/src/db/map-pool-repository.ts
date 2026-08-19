@@ -123,6 +123,18 @@ export interface MapPoolPick {
   readonly skipped: readonly { readonly id: number; readonly reason: string }[];
 }
 
+/**
+ * O mundo que o SORTEIO escolheu, antes de existir linha dele.
+ *
+ * Ele é o par do `MapPoolPick` para a fila vazia: a seed já está
+ * decidida e nada foi gravado ainda. Ver `drawForWipe`.
+ */
+export interface DrawnWorld {
+  readonly seed: string;
+  readonly worldSize: number;
+  readonly level: string;
+}
+
 /** O que a execução do wipe recebe quando pede o próximo mundo. */
 export interface MapPoolTaken {
   readonly entry: MapPoolRecord;
@@ -219,6 +231,40 @@ export class MapPoolRepository {
     const row = this.#db
       .prepare('SELECT * FROM map_pool WHERE server_id = @server_id AND id = @id')
       .get({ server_id: serverId, id }) as MapPoolRow | undefined;
+
+    return row === undefined ? null : toRecord(row);
+  }
+
+  /**
+   * A entrada que tem ESTE `.map`. `null` = nenhuma.
+   *
+   * ####  ELA RESPONDE PELO MUNDO QUE JÁ ESTÁ NO AR  ####
+   *
+   * O `.ini` guarda o endereço do arquivo, e mais nada: a marca de
+   * "compatível com a versão nova" mora AQUI, na linha que virou
+   * aquele mundo. É ela que decide se um wipe FORÇADO pode MANTER
+   * o mapa custom de agora — ver `keepBlockedInForced`, em
+   * wipe/map-pool.ts.
+   *
+   * Com mais de uma linha para o mesmo arquivo (a fila guarda as
+   * usadas), ganha a MARCADA: a marca é do `.map`, e não da linha,
+   * e quem a pôs numa delas garantiu aquele arquivo.
+   */
+  byLevelUrl(serverId: string, levelUrl: string): MapPoolRecord | null {
+    const url = levelUrl.trim();
+
+    if (url === '') {
+      return null;
+    }
+
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM map_pool
+          WHERE server_id = @server_id AND level_url = @url
+          ORDER BY version_ok DESC, id DESC
+          LIMIT 1`,
+      )
+      .get({ server_id: serverId, url }) as MapPoolRow | undefined;
 
     return row === undefined ? null : toRecord(row);
   }
@@ -551,22 +597,66 @@ export class MapPoolRepository {
       };
     }
 
+    const drawn = this.drawForWipe(serverId, options);
+
+    return {
+      entry: this.recordDrawn(serverId, drawn, now),
+      drawn: true,
+      skipped: picked.skipped,
+    };
+  }
+
+  /**
+   * A seed que o sorteio usaria — SEM gravar linha nenhuma.
+   *
+   * ####  ESCOLHER NÃO É QUEIMAR, TAMBÉM NO SORTEIO  ####
+   *
+   * `pickForWipe` já separava os dois tempos para a fila curada, e
+   * o sorteio não: ele inseria a linha e a marcava `used` ANTES do
+   * `.ini`. Um `updateSettings` que lança deixava para trás um
+   * mundo `used` que nunca subiu, e a retomada sorteava outro —
+   * medido, com o `.ini` lançando duas vezes: TRÊS linhas `used`
+   * para um wipe só. Não é só sujeira: `recentSeeds` olha os seis
+   * últimos wipes e alimenta o aviso de seed repetida, e três
+   * fantasmas empurram metade da memória real para fora dessa
+   * janela.
+   *
+   * Quem grava a linha é `recordDrawn`, depois de o mundo estar no
+   * `.ini`.
+   */
+  drawForWipe(
+    serverId: string,
+    options: { readonly worldSize?: number; readonly level?: string } = {},
+  ): DrawnWorld {
     const worldSize = options.worldSize ?? DEFAULT_WORLD_SIZE;
     const size = isValidWorldSize(worldSize) ? worldSize : DEFAULT_WORLD_SIZE;
     const level = (options.level ?? 'Procedural Map').trim() || 'Procedural Map';
 
+    return { seed: this.#drawFreeSeed(serverId, size), worldSize: size, level };
+  }
+
+  /**
+   * A linha do mundo SORTEADO, já nascida consumida.
+   *
+   * Ela nasce `used` porque o mundo dela é o de AGORA: nunca
+   * esteve na fila esperando a vez, e deixá-la `ready` faria o
+   * wipe seguinte prometer o mundo que já está no ar. Registrar o
+   * sorteio é o que permite responder, semanas depois, de onde
+   * veio o mapa daquele wipe.
+   */
+  recordDrawn(serverId: string, world: DrawnWorld, now: number = Date.now()): MapPoolRecord {
     const created = this.#insert(serverId, {
       kind: 'procedural',
-      seed: this.#drawFreeSeed(serverId, size),
-      world_size: size,
-      level,
+      seed: world.seed,
+      world_size: world.worldSize,
+      level: world.level,
       level_url: null,
       version_ok: 0,
       note: 'sorteada pelo agente: a fila estava vazia na hora do wipe',
       now,
     });
 
-    return { entry: this.markUsed(serverId, created.id, now), drawn: true, skipped: picked.skipped };
+    return this.markUsed(serverId, created.id, now);
   }
 
   /**

@@ -36,8 +36,14 @@ import type { WipeExecSettings } from '../db/wipe-runs-repository.js';
 import type { WipeScheduleReader } from '../db/wipe-schedule-repository.js';
 import type { BpPolicy, WipePlan } from '../types/wipe.js';
 import { checkBackupSpace, type BackupSpace } from './backup.js';
-import { pinnedRejection } from './map-pool.js';
-import { mapOfPlan, mapOfPool } from './next-wipe.js';
+import { KEEP_CUSTOM_IN_FORCED_REASON, pinnedRejection } from './map-pool.js';
+import {
+  currentWorldReader,
+  mapOfPlan,
+  mapOfPool,
+  nextPendingPlan,
+  type WipeRunsReader,
+} from './next-wipe.js';
 import { listPluginData, type PluginDataListing } from './plugin-data.js';
 import { classifySaveFolder, saveFolderPath, type SaveFolderSummary } from './save-files.js';
 import { nextForcedWipe } from './schedule.js';
@@ -50,7 +56,11 @@ export interface WipeNotice {
 export interface WipePreview {
   /** O relógio DO AGENTE, como em toda rota de wipe. */
   readonly now: number;
-  /** O próximo wipe marcado. `null` = nada materializado. */
+  /**
+   * O wipe que esta prévia descreve: a execução em curso, se
+   * houver uma, e senão o próximo marcado. `null` = nenhum dos
+   * dois. Ver `planOfPreview`.
+   */
   readonly plan: WipePlan | null;
   /** O forçado da Facepunch, derivado da regra. */
   readonly nextForcedAt: number;
@@ -107,8 +117,32 @@ export interface WipePreviewDeps {
     readonly level: string | null;
     readonly seed: string | null;
     readonly worldSize: number | null;
+    /**
+     * O `server.levelurl` de agora. Vazio = mundo procedural.
+     *
+     * Ele não está aqui para ser mostrado: é o que decide se um
+     * wipe FORÇADO pode MANTER o mundo de hoje. Ver
+     * `keepBlockedInForced`, em wipe/map-pool.ts.
+     */
+    readonly levelUrl?: string | null;
   };
   readonly schedule: WipeScheduleReader;
+  /**
+   * As execuções em curso.
+   *
+   * ####  SEM ELAS, A PRÉVIA PERDE O WIPE DE HOJE  ####
+   *
+   * O relógio marca o plano `running` ao criar a execução, com a
+   * antecedência do maior offset de aviso — 1440 minutos, no
+   * padrão. Nas 24 h que antecedem TODO wipe agendado é ESTE o
+   * plano em curso, e é ele que a prévia tem de descrever, como o
+   * chat, a tela do jogo e o executor descrevem.
+   *
+   * Ausente = a prévia cai só na agenda, e o pior que acontece é
+   * ela voltar a descrever o wipe seguinte durante a execução do
+   * de hoje.
+   */
+  readonly runs?: WipeRunsReader;
   readonly mapPool: MapPoolRepository;
   readonly exec: WipeExecSettings;
   /** `null` quando não deu para perguntar (OPS_ENABLED=0, por exemplo). */
@@ -124,7 +158,7 @@ export interface WipePreviewDeps {
 /** Lê o disco e responde o que este wipe faria. */
 export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePreview> {
   const now = deps.now ?? Date.now();
-  const plan = deps.schedule.nextPlan(deps.serverId, now);
+  const plan = planOfPreview(deps, now);
   const bpPolicy = deps.bpPolicy ?? plan?.bpPolicy ?? 'keep';
   const exec = deps.exec;
   const fullWipe = deps.fullWipe ?? exec.pluginData.enabled;
@@ -185,10 +219,21 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
   // executor. E ele nunca é FORÇADO: a execução sem plano nasce
   // `manual` (ver routes/wipe-runs.ts), e é o forçado que faz a
   // fila pular o mapa custom sem marca de versão.
+  //
+  // O mundo de agora entra na decisão por um caminho só: um wipe
+  // FORÇADO não MANTÉM um `.map` custom sem a marca de
+  // compatibilidade. A leitura é a MESMA do executor
+  // (`currentWorldReader`), montada aqui sobre o `.ini` que a rota
+  // já leu.
+  const world = currentWorldReader({
+    servers: { configOf: () => ({ levelUrl: deps.current.levelUrl ?? '' }) },
+    mapPool: deps.mapPool,
+  });
+
   const decision =
     plan === null
       ? mapOfPool({ mapPool: deps.mapPool }, deps.serverId, false)
-      : mapOfPlan({ mapPool: deps.mapPool }, plan);
+      : mapOfPlan({ mapPool: deps.mapPool, world }, plan);
 
   // `mapOfPlan` fala no contrato mínimo (`MapPoolEntry`); a tela
   // espera o registro inteiro da fila, com nota e `updatedAt`. É a
@@ -211,6 +256,24 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
         'Este wipe NÃO troca o mundo: o plano manda MANTER o mapa de agora — mesma seed, mesmo ' +
         'tamanho, mesmo arquivo. O que zera é o save. A fila de mapas não é tocada, e a próxima ' +
         'entrada dela continua esperando o wipe seguinte.',
+    });
+  }
+
+  // ####  O `keep` QUE O FORÇADO NÃO ACEITA  ####
+  //
+  // A agenda já recusa gravar isto (routes/wipe.ts), e esta linha
+  // é para os planos que foram gravados antes de a trava existir e
+  // para o servidor que virou mapa custom DEPOIS de o plano ser
+  // marcado. O wipe acontece do mesmo jeito — o mundo sai da fila
+  // —, e é aqui, na última tela antes do botão, que o admin
+  // descobre que a ordem dele não vale nesta noite. Ver Docs\16.
+  if (plan !== null && plan.mapSource === 'keep' && decision.source !== 'keep') {
+    warnings.push({
+      code: 'KEEP_REFUSED_IN_FORCED',
+      message:
+        'Este wipe é FORÇADO e o plano manda MANTER o mundo, mas ele NÃO vai ficar: ' +
+        `${KEEP_CUSTOM_IN_FORCED_REASON}. O mundo vem da fila, como em qualquer outro wipe. ` +
+        'Para manter mesmo assim, marque o .map de agora como compatível na sub-aba Mapas.',
     });
   }
 
@@ -325,4 +388,34 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
     blockers,
     warnings,
   };
+}
+
+/**
+ * O plano que ESTA prévia descreve.
+ *
+ * ####  A EXECUÇÃO EM CURSO VEM ANTES DA AGENDA  ####
+ *
+ * É a MESMA ordem do `nextWipe` (wipe/next-wipe.ts), e ela não é
+ * preciosismo: o relógio marca o plano `running` ao criar a
+ * execução, com a antecedência do maior offset de aviso — 1440
+ * minutos, no padrão. Perguntar `nextPlan` (que exige `planned` e
+ * hora futura) nas 24 h que antecedem TODO wipe agendado devolvia
+ * o plano da SEMANA QUE VEM: mundo errado, `bpPolicy` errada — e
+ * com ela o `classifySaveFolder` classificando os arquivos pela
+ * política de outro wipe — e o aviso MAP_KEPT sumindo da tela que
+ * o admin lê antes de apertar o botão.
+ *
+ * Depois da execução em curso vem o primeiro plano PENDENTE à
+ * frente, `planned` ou `running`, pelo mesmo `nextPendingPlan` que
+ * o chat e a tela do jogo usam.
+ */
+function planOfPreview(deps: WipePreviewDeps, now: number): WipePlan | null {
+  const run = deps.runs?.running().find((candidate) => candidate.serverId === deps.serverId);
+
+  const running =
+    run === undefined || run.planId === null
+      ? null
+      : deps.schedule.getPlan(deps.serverId, run.planId);
+
+  return running ?? nextPendingPlan(deps.schedule.listPlans(deps.serverId, { from: now }));
 }

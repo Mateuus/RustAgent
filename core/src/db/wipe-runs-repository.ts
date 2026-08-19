@@ -530,6 +530,44 @@ export class WipeRunsRepository {
   }
 
   /**
+   * O mundo do wipe e a queima da fila: as duas, ou nenhuma.
+   *
+   * ####  DUAS ESCRITAS ADJACENTES QUE PRECISAM SER UMA  ####
+   *
+   * O passo `configurar` grava o mundo em `map_after` — a marca de
+   * idempotência que a retomada lê — e queima a entrada que virou
+   * esse mundo. Entre uma e outra o agente podia cair, e o custo
+   * não era só um mapa repetido: a entrada continuava `ready`,
+   * sem registro nenhum de que já subiu, a retomada pulava o passo
+   * inteiro (o `map_after` já estava lá) e o wipe SEGUINTE
+   * consumia a MESMA entrada — a mesma seed dois wipes em fila. No
+   * intervalo, a régua do VIP anunciava como "o próximo mundo" o
+   * mundo que já estava no ar.
+   *
+   * ####  POR QUE UM CALLBACK, E NÃO O MUNDO PRONTO  ####
+   *
+   * Porque a entrada SORTEADA nasce aqui dentro: o id dela só
+   * existe depois do INSERT, e é ele que vai no `map_after`. O
+   * `escolher` roda dentro da transação, devolve o mundo já
+   * completo, e as escritas dele — que são da fila, e por isso
+   * continuam saindo do `MapPoolRepository` — sobem ou descem
+   * junto com esta. Ele é SÍNCRONO de propósito: uma transação do
+   * better-sqlite3 não sobrevive a um `await` no meio.
+   */
+  commitWorld(
+    serverId: string,
+    id: number,
+    escolher: () => WipeWorld,
+    now: number = Date.now(),
+  ): WipeRunRecord {
+    return this.#db.transaction((): WipeRunRecord => {
+      const world = escolher();
+
+      return this.update(serverId, id, { mapAfter: world }, now);
+    })();
+  }
+
+  /**
    * Marca UM passo.
    *
    * Só grava `started_at` na primeira vez que o passo vira

@@ -80,6 +80,7 @@ import { WipeScheduleRepository } from './db/wipe-schedule-repository.js';
 import { MapPoolRepository } from './db/map-pool-repository.js';
 import { WipeRunsRepository } from './db/wipe-runs-repository.js';
 import { WipesRepository } from './db/wipes-repository.js';
+import { currentWorldReader } from './wipe/next-wipe.js';
 import { WipeRunner, type WipeExecutor } from './wipe/run.js';
 import { WipeScheduler } from './wipe/scheduler.js';
 // ---- as mensagens agendadas ----
@@ -845,6 +846,18 @@ async function main(): Promise<void> {
   // `AgentConfig` como os outros.
   const mapPool = new MapPoolRepository(db);
 
+  // ####  EM QUE MUNDO CADA SERVIDOR ESTÁ, COM A MARCA DELE  ####
+  //
+  // Uma pergunta só depende disto: um wipe FORÇADO pode MANTER o
+  // mundo de hoje? Não pode, quando ele é um `.map` custom sem a
+  // marca de "compatível com a versão nova" — o forçado troca o
+  // binário do jogo. Daqui ela vai para o chat e para a tela
+  // CALENDÁRIO; as rotas do painel montam a delas em
+  // http/server.ts e o executor monta a dele no `WipeRunner` —
+  // todas com esta mesma função, que é o que garante uma resposta
+  // só para "este mundo pode ficar?".
+  const currentWorld = currentWorldReader({ servers: supervisor, mapPool });
+
   const rustmaps = new RustMapsWatcher({
     client: new RustMapsClient({ apiKey: process.env.RUSTMAPS_API_KEY ?? '' }),
     repository: mapPool,
@@ -882,6 +895,7 @@ async function main(): Promise<void> {
     // horas do de hoje.
     runs: wipeRuns,
     mapPool,
+    world: currentWorld,
     vips: vipsRepository,
     logger,
     levelsOf: async (serverId) => {
@@ -1038,6 +1052,7 @@ async function main(): Promise<void> {
     schedule: wipeSchedule,
     runs: wipeRuns,
     mapPool,
+    world: currentWorld,
   });
 
   // O relógio que dispara o plano vencido. Ele acorda de trinta em

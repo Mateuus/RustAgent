@@ -62,8 +62,13 @@ import type { Operation } from '../ops/operations.js';
 import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind, WipeRunStep } from '../types/wipe.js';
 import { toError } from '../util.js';
 import { backupSaveFolder, checkBackupSpace } from './backup.js';
-import { pinnedRejection } from './map-pool.js';
-import { mapOfPlan, mapOfPool } from './next-wipe.js';
+import { KEEP_CUSTOM_IN_FORCED_REASON, pinnedRejection } from './map-pool.js';
+import {
+  currentWorldReader,
+  mapOfPlan,
+  mapOfPool,
+  type WipeCurrentWorldReader,
+} from './next-wipe.js';
 import { resolvePluginDataTargets } from './plugin-data.js';
 import { classifySaveFolder, saveFolderPath } from './save-files.js';
 
@@ -231,8 +236,19 @@ export interface WipeExecutor {
 export class WipeRunner implements WipeExecutor {
   readonly #deps: WipeRunnerDeps;
 
+  /**
+   * O mundo em que cada servidor está agora, com a marca do `.map`.
+   *
+   * Ele é montado UMA vez, e do mesmo jeito que o index.ts monta o
+   * do chat e o da tela do jogo: a pergunta "este mundo pode ficar
+   * num wipe forçado?" precisa ter a mesma resposta aqui, onde o
+   * `.ini` é escrito, e lá, onde o wipe é anunciado.
+   */
+  readonly #world: WipeCurrentWorldReader;
+
   constructor(deps: WipeRunnerDeps) {
     this.#deps = deps;
+    this.#world = currentWorldReader({ servers: deps.servers, mapPool: deps.mapPool });
   }
 
   /**
@@ -725,10 +741,25 @@ export class WipeRunner implements WipeExecutor {
     const decision =
       plan === null
         ? mapOfPool({ mapPool: this.#deps.mapPool }, serverId, forced)
-        : mapOfPlan({ mapPool: this.#deps.mapPool }, plan);
+        : mapOfPlan({ mapPool: this.#deps.mapPool, world: this.#world }, plan);
 
     if (decision.source === 'keep') {
       return this.#manterMundo(request, run);
+    }
+
+    // ####  O `keep` QUE O FORÇADO RECUSOU  ####
+    //
+    // `mapOfPlan` já decidiu — o mundo sai da fila —, e sem esta
+    // linha o log diria só "entrada #7 da fila" para um plano que
+    // manda MANTER: quem lê o histórico não teria como saber que a
+    // ordem do admin foi recusada, nem por quê. A recusa em si o
+    // admin já viu na agenda e na prévia; aqui é o registro de que
+    // ela valeu na madrugada.
+    if (plan?.mapSource === 'keep') {
+      request.operation.log(
+        `[wipe] o plano manda MANTER o mundo, e neste wipe FORÇADO ele não pode ficar: ` +
+          `${KEEP_CUSTOM_IN_FORCED_REASON}. O mundo sai da fila.`,
+      );
     }
 
     // ####  A ENTRADA APONTADA É A QUE O PLANO APONTOU  ####
@@ -775,45 +806,55 @@ export class WipeRunner implements WipeExecutor {
       request.operation.log(`[wipe] pulei a entrada #${String(skipped.id)} da fila: ${skipped.reason}`);
     }
 
-    // A fila sem nada utilizável SORTEIA, e o sorteio é a única
-    // escrita que precede o `.ini` — ele precisa preceder, porque
-    // é a seed dele que vai no patch. E ele pode: o sorteio cria a
-    // própria linha, e não queima entrada nenhuma da curadoria do
-    // admin.
-    const taken =
+    // ####  O SORTEIO TAMBÉM SÓ ESCOLHE  ####
+    //
+    // A fila sem nada utilizável sorteia — e `drawForWipe` NÃO
+    // grava linha nenhuma: ele devolve a seed, e a linha dela
+    // nasce lá embaixo, junto da queima da fila, depois do `.ini`.
+    // Enquanto o sorteio inseria e queimava aqui em cima, um
+    // `updateSettings` que lançava deixava para trás um mundo
+    // `used` que nunca subiu, e a retomada sorteava outro: medido,
+    // com o `.ini` lançando duas vezes, três linhas `used` para um
+    // wipe só — e três seeds fantasmas empurrando a memória de
+    // `recentSeeds` para fora da janela dela.
+    const escolha =
       picked.entry === null
-        ? this.#deps.mapPool.takeForWipe(serverId, { forced })
-        : { entry: picked.entry, drawn: false };
+        ? ({ tipo: 'sorteio', sorteada: this.#deps.mapPool.drawForWipe(serverId) } as const)
+        : ({ tipo: 'fila', entry: picked.entry } as const);
 
-    const entry = taken.entry;
-
-    const world: WipeWorld = {
-      level: entry.level,
-      seed: entry.seed,
-      worldSize: entry.worldSize,
-      levelUrl: entry.levelUrl,
-      mapPoolId: entry.id,
-      drawn: taken.drawn,
-    };
+    const mundo =
+      escolha.tipo === 'fila'
+        ? {
+            level: escolha.entry.level,
+            seed: escolha.entry.seed,
+            worldSize: escolha.entry.worldSize,
+            levelUrl: escolha.entry.levelUrl,
+          }
+        : {
+            level: escolha.sorteada.level,
+            seed: escolha.sorteada.seed,
+            worldSize: escolha.sorteada.worldSize,
+            levelUrl: null,
+          };
 
     const patch: Record<string, string | number> = {};
 
-    if (entry.level !== null) {
-      patch.map = entry.level;
+    if (mundo.level !== null) {
+      patch.map = mundo.level;
     }
 
-    if (entry.seed !== null) {
-      patch.seed = entry.seed;
+    if (mundo.seed !== null) {
+      patch.seed = mundo.seed;
     }
 
-    if (entry.worldSize !== null) {
-      patch.worldSize = entry.worldSize;
+    if (mundo.worldSize !== null) {
+      patch.worldSize = mundo.worldSize;
     }
 
     // Sempre gravada, inclusive VAZIA: um mapa procedural depois
     // de um custom precisa LIMPAR a chave, senão o servidor sobe
     // baixando o `.map` de novo e o wipe não troca mundo nenhum.
-    patch.levelUrl = entry.levelUrl ?? '';
+    patch.levelUrl = mundo.levelUrl ?? '';
 
     // ####  O `.ini` PRIMEIRO, A FILA POR ÚLTIMO  ####
     //
@@ -827,26 +868,42 @@ export class WipeRunner implements WipeExecutor {
     // mundo que o admin explicitamente não queria.
     //
     // Nesta ordem a retomada é o caso normal: um erro do `.ini`
-    // não consome nada, e a volta reencontra a MESMA fila, toma a
-    // MESMA decisão e escreve o MESMO patch. Depois dele só restam
-    // escritas no banco do próprio agente — e o `map_after`, que é
-    // a marca de idempotência, vem antes da queima: uma queda
-    // entre as duas custa um mapa repetido no wipe seguinte, e
-    // nunca um mundo que ninguém escolheu.
+    // não consome nada — nem da curadoria, nem do sorteio —, e a
+    // volta reencontra a MESMA fila, toma a MESMA decisão e
+    // escreve o MESMO patch.
     this.#deps.servers.updateSettings(serverId, patch);
-    this.#deps.runs.update(serverId, request.runId, { mapAfter: world });
 
-    if (taken.drawn) {
-      // A linha sorteada já nasceu `used`, no próprio sorteio: ela
-      // não existia antes deste passo, e não há fila a queimar.
-      return `${describeWorld(world)} — a fila estava vazia, e o agente SORTEOU esta seed.`;
+    // ####  E AS DUAS ESCRITAS DO BANCO SÃO UMA SÓ  ####
+    //
+    // O mundo em `map_after` (a marca de idempotência que a
+    // retomada lê) e a fila queimada sobem juntos ou não sobem.
+    // Entre uma e outra, o agente que caía deixava a entrada
+    // `ready` sem registro de que já tinha subido: a retomada
+    // pulava o passo, e o wipe SEGUINTE consumia a mesma entrada —
+    // a mesma seed dois wipes em fila, com a régua do VIP
+    // anunciando no intervalo, como "o próximo mundo", o mundo que
+    // já estava no ar. Ver `commitWorld`.
+    this.#deps.runs.commitWorld(serverId, request.runId, (): WipeWorld => {
+      if (escolha.tipo === 'fila') {
+        this.#deps.mapPool.markUsed(serverId, escolha.entry.id);
+
+        return { ...mundo, mapPoolId: escolha.entry.id, drawn: false };
+      }
+
+      // A linha do sorteio nasce AQUI, e já consumida: ela não
+      // existia antes deste passo, e não há fila a queimar.
+      const linha = this.#deps.mapPool.recordDrawn(serverId, escolha.sorteada);
+
+      return { ...mundo, mapPoolId: linha.id, drawn: true };
+    });
+
+    if (escolha.tipo === 'sorteio') {
+      return `${describeWorld(mundo)} — a fila estava vazia, e o agente SORTEOU esta seed.`;
     }
 
-    this.#deps.mapPool.markUsed(serverId, entry.id);
-
     return pinned === null
-      ? `${describeWorld(world)} (entrada #${String(entry.id)} da fila).`
-      : `${describeWorld(world)} (entrada #${String(entry.id)}, escolhida a dedo no plano).`;
+      ? `${describeWorld(mundo)} (entrada #${String(escolha.entry.id)} da fila).`
+      : `${describeWorld(mundo)} (entrada #${String(escolha.entry.id)}, escolhida a dedo no plano).`;
   }
 
   /**

@@ -49,9 +49,20 @@ export const COLLISION_HINT: Readonly<Record<CollisionPolicy, string>> = {
     'Nenhum ajuste. Pode dar dois wipes em quatro dias, e o segundo pega bases de dois dias.',
 };
 
+/**
+ * De onde sai o mundo, na frase que a agenda mostra.
+ *
+ * ####  `random` NÃO É "SORTEADO NA HORA"  ####
+ *
+ * Ele segue a MESMA fila do `pool`: consome a cabeça dela, e só
+ * sorteia quando não sobra nada utilizável. A etiqueta antiga
+ * prometia um sorteio que nunca aconteceu com a fila curada — o
+ * admin marcava "sorteia" e o wipe comia a entrada que ele mesmo
+ * tinha posto lá.
+ */
 export const MAP_SOURCE_LABEL: Readonly<Record<MapSource, string>> = {
   pool: 'o primeiro pronto da fila',
-  random: 'sorteado na hora',
+  random: 'da fila; sorteado só se ela esvaziar',
   fixed: 'escolhido a dedo',
   keep: 'o mesmo mapa de novo',
 };

@@ -77,6 +77,7 @@ import { registerVipRoutes } from './routes/vips.js';
 import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
 // ---- wipe, calendário e mensagens ----
 import type { WipeScheduleRepository } from '../db/wipe-schedule-repository.js';
+import { currentWorldReader } from '../wipe/next-wipe.js';
 import { registerWipeRoutes } from './routes/wipe.js';
 // ---- o wipe: a fila de mapas ----
 import type { MapPoolRepository } from '../db/map-pool-repository.js';
@@ -446,6 +447,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         // o wipe que já está executando — e responderia um wipe
         // diferente do que o chat está anunciando.
         runs: options.wipeRuns.runs,
+        // E em que mundo o servidor está agora: é o que faz a
+        // agenda RECUSAR "manter o mapa" num wipe forçado de mapa
+        // custom sem a marca de compatibilidade, na hora em que o
+        // admin marca a caixa — e não na madrugada da execução.
+        world: currentWorldReader({ servers: options.supervisor, mapPool: options.mapPool }),
       });
 
       // A fila de mapas responde em QUE MUNDO o servidor volta

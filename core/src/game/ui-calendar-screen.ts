@@ -98,6 +98,7 @@ import {
   nextWipe,
   type NextWipe,
   type NextWipeMap,
+  type WipeCurrentWorldReader,
   type WipeMapPoolReader,
   type WipeRunsReader,
 } from '../wipe/next-wipe.js';
@@ -1111,6 +1112,16 @@ export interface CalendarScreenProviderOptions {
    */
   readonly runs: WipeRunsReader;
   readonly mapPool: CalendarMapQueueReader;
+  /**
+   * O mundo em que o servidor está AGORA.
+   *
+   * Uma pergunta só, e ela muda o que esta tela promete: um wipe
+   * FORÇADO não MANTÉM um `.map` custom sem a marca de
+   * compatibilidade, e sem esta leitura a tela anunciaria "o mesmo
+   * mapa de agora" para um mundo que o wipe vai trocar. Ver
+   * `NextWipeDeps.world`.
+   */
+  readonly world?: WipeCurrentWorldReader;
   readonly vips: CalendarVipReader;
   /**
    * Os níveis daquele servidor (o `OrigemZVip.json`).

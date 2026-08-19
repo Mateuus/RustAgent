@@ -1148,8 +1148,20 @@ um campo:
   "mapSource": "pool", "mapPoolId": null, "note": "wipe de aniversário" }
 ```
 
-`mapSource` é `pool` (a fila decide), `random` (sorteia na hora), `fixed` (a
-entrada apontada por `mapPoolId`) ou `keep` (não troca o mundo). Um wipe marcado
+`mapSource` é `pool` (a fila decide), `random` (a **mesma** fila — o sorteio só
+acontece quando ela não tem nada utilizável, exatamente como no `pool`), `fixed`
+(a entrada apontada por `mapPoolId`) ou `keep` (não troca o mundo). **`random`
+não pula a curadoria**: com fila cheia ele consome a cabeça dela, e quem marca
+essa etiqueta está dizendo "não me importo com qual mundo vem", e não "ignore a
+fila".
+
+**`keep` num wipe FORÇADO só vale para mundo procedural.** Marcá-lo num servidor
+cujo `.ini` aponta um `.map` custom sem a marca de compatibilidade responde
+`409 WIPE_KEEP_IN_FORCED`: o forçado troca o binário do jogo, e o arquivo gerado
+na versão de ontem pode não carregar na de hoje. Para manter mesmo assim, marque
+o `.map` de agora como compatível (`PATCH /wipe/maps/:mapId` com
+`{ "versionOk": true }`) — a
+marca vale para a fila e para o mundo que já subiu. Um wipe marcado
 à mão nasce `manual` e **`pinned`**: a reconciliação não o apaga, e ele não é
 recalculado quando a cadência muda — e todo `PATCH` liga o `pinned`, senão adiar
 o wipe de sábado duraria até a próxima reconciliação. Marcar para um instante que
@@ -1325,9 +1337,23 @@ backup e duas listas:
 | `warnings` | o que precisa ser dito e não impede nada |
 
 Hoje há **um** impedimento, `NO_DISK_SPACE`, e os avisos `NO_SAVE_FOLDER`,
-`MAP_KEPT`, `EMPTY_MAP_POOL`, `PINNED_MAP_UNUSABLE`, `BACKUP_DISABLED`,
-`BLUEPRINTS_WIPED`, `FULL_WIPE_WITHOUT_LIST`, `PLUGIN_DATA_MISSING` e
-`RCON_DOWN`.
+`MAP_KEPT`, `KEEP_REFUSED_IN_FORCED`, `EMPTY_MAP_POOL`, `PINNED_MAP_UNUSABLE`,
+`BACKUP_DISABLED`, `BLUEPRINTS_WIPED`, `FULL_WIPE_WITHOUT_LIST`,
+`PLUGIN_DATA_MISSING` e `RCON_DOWN`.
+
+**A prévia descreve a execução EM CURSO, quando há uma.** O relógio marca o
+plano `running` ao criar a execução, com a antecedência do maior offset de aviso
+(1440 min, no padrão): nas 24 h que antecedem todo wipe agendado é esse o plano
+que vale, e é ele que sai em `plan` — a mesma ordem do `{wipe.faltam}` do chat e
+da tela CALENDÁRIO. Sem isso a tela descrevia o wipe da semana que vem: outro
+mundo, outra `bpPolicy` e, com ela, outra classificação dos arquivos do save.
+
+`KEEP_REFUSED_IN_FORCED` sai quando o plano manda **manter** o mundo, o wipe é o
+forçado e o mundo de agora é um `.map` custom sem a marca de compatibilidade: o
+wipe acontece, o mundo sai da fila, e a frase diz por que a ordem do admin não
+valeu. A agenda recusa gravar isso (`409 WIPE_KEEP_IN_FORCED`), e este aviso é
+para os planos gravados antes da trava e para o servidor que virou mapa custom
+depois de o plano ser marcado.
 
 **`nextMap` é a MESMA decisão que a execução vai consumir** — o `mapOfPlan` de
 `core/src/wipe/next-wipe.ts` —, e não "a cabeça da fila". Ele é `null` nos dois

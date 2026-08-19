@@ -51,9 +51,20 @@ import {
   type CalendarVipReader,
 } from '../../game/ui-calendar-screen.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
-import { BP_POLICIES, COLLISION_POLICIES, MAP_SOURCES } from '../../types/wipe.js';
+import {
+  BP_POLICIES,
+  COLLISION_POLICIES,
+  MAP_SOURCES,
+  type MapSource,
+  type WipePlanKind,
+} from '../../types/wipe.js';
 import { readVipTiers } from '../../vip/tiers.js';
-import { nextWipe, type WipeRunsReader } from '../../wipe/next-wipe.js';
+import { KEEP_CUSTOM_IN_FORCED_REASON, keepBlockedInForced } from '../../wipe/map-pool.js';
+import {
+  nextWipe,
+  type WipeCurrentWorldReader,
+  type WipeRunsReader,
+} from '../../wipe/next-wipe.js';
 import { isValidTimeZone, nextForcedWipe } from '../../wipe/schedule.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
@@ -84,6 +95,17 @@ export interface WipeRoutesDeps {
    * mesmo jeito. Quem a liga é http/server.ts.
    */
   readonly runs?: WipeRunsReader;
+  /**
+   * O mundo em que cada servidor está AGORA.
+   *
+   * Serve a uma recusa só, e é a que o admin precisa ver na hora
+   * em que ele marca a caixa: um wipe FORÇADO não MANTÉM um `.map`
+   * custom sem a marca de compatibilidade. Descobrir isso só na
+   * madrugada da execução seria descobrir tarde demais.
+   *
+   * Ausente = a agenda grava o que mandarem, como antes.
+   */
+  readonly world?: WipeCurrentWorldReader;
 }
 
 /**
@@ -232,6 +254,45 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
     nextForcedAt: nextForcedWipe(now),
     next: deps.repository.nextPlan(serverId, now),
   });
+
+  /**
+   * O `keep` que um wipe FORÇADO não aceita.
+   *
+   * ####  A RECUSA ACONTECE ONDE O ADMIN VÊ O MOTIVO  ####
+   *
+   * Marcar "manter o mapa" no forçado de um servidor de mapa
+   * custom é pedir que o servidor suba, depois da troca do
+   * binário, com o mesmo `.map` gerado na versão velha. O agente
+   * não obedece a esse pedido (ver `mapOfPlan`) — e um pedido que
+   * não vai ser obedecido não pode ser gravado em silêncio: o
+   * admin fecharia a tela achando que o mundo dele fica.
+   *
+   * Quem a chama é o PATCH, e só ele: um wipe marcado à mão nasce
+   * `manual` (ver `createPlan`), e a trava é do FORÇADO. E ela só
+   * corre quando o PATCH mexe na escolha do mapa — um plano
+   * gravado antes desta trava continua editável no que ele tem de
+   * editável: a nota, a hora, a política de blueprint.
+   *
+   * @throws {ApiError} 409 quando o mundo de agora é um `.map`
+   *   custom sem a marca de compatibilidade.
+   */
+  const assertKeepAllowed = (serverId: string, kind: WipePlanKind, mapSource: MapSource): void => {
+    if (kind !== 'forced' || mapSource !== 'keep') {
+      return;
+    }
+
+    if (!keepBlockedInForced(deps.world?.currentWorld(serverId) ?? null, true)) {
+      return;
+    }
+
+    throw new ApiError(
+      'WIPE_KEEP_IN_FORCED',
+      `Este wipe é o FORÇADO da Facepunch e não dá para manter o mundo de agora: ` +
+        `${KEEP_CUSTOM_IN_FORCED_REASON}. Escolha o mundo pela fila, ou marque o .map de agora ` +
+        'como compatível com a versão nova na sub-aba Mapas — a marca vale para os dois lados.',
+      409,
+    );
+  };
 
   // ==========================================================
   //  A configuração
@@ -390,6 +451,12 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
     const patch = planPatch.parse(request.body);
 
     assertServer(deps, id);
+
+    const atual = deps.repository.getPlan(id, planId);
+
+    if (atual !== null && patch.mapSource !== undefined) {
+      assertKeepAllowed(id, atual.kind, patch.mapSource);
+    }
 
     const plan = deps.repository.updatePlan(id, planId, patch, Date.now());
 

@@ -50,7 +50,7 @@
 import type { WipeRunRecord, WipeWorld } from '../db/wipe-runs-repository.js';
 import type { WipeScheduleReader } from '../db/wipe-schedule-repository.js';
 import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind } from '../types/wipe.js';
-import { usableForWipe } from './map-pool.js';
+import { isCustomWorld, keepBlockedInForced, usableForWipe } from './map-pool.js';
 
 // ------------------------------------------------------------
 //  §1  DE ONDE OS FATOS VÊM
@@ -67,10 +67,81 @@ export interface WipeMapPoolReader {
   get(serverId: string, id: number): MapPoolEntry | null;
 }
 
+/** O mundo em que o servidor está AGORA — o do `.ini` dele. */
+export interface WipeCurrentWorld {
+  /** O `server.levelurl` de agora. Vazio ou `null` = procedural. */
+  readonly levelUrl: string | null;
+  /**
+   * Alguém marcou ESTE `.map` como compatível com a versão nova do
+   * jogo. É a MESMA marca da fila (`version_ok`), lida pelo
+   * endereço do arquivo: quem garantiu que ele serve garantiu para
+   * a fila e para o mundo que já subiu.
+   */
+  readonly versionOk: boolean;
+}
+
+/**
+ * Quem sabe em que mundo o servidor está.
+ *
+ * ####  UMA PERGUNTA SÓ, E ELA É DO WIPE FORÇADO  ####
+ *
+ * Um plano `keep` promete o mundo de agora. Se esse mundo é um
+ * `.map` custom sem a marca de compatibilidade e o wipe é
+ * FORÇADO, a promessa é a de um servidor que não sobe — ver
+ * `keepBlockedInForced`, em wipe/map-pool.ts. Fora desse caso
+ * ninguém aqui lê o `.ini`.
+ */
+export interface WipeCurrentWorldReader {
+  currentWorld(serverId: string): WipeCurrentWorld | null;
+}
+
 export interface NextWipeDeps {
   readonly schedule: WipeScheduleReader;
   readonly runs: WipeRunsReader;
   readonly mapPool: WipeMapPoolReader;
+  /**
+   * O mundo de agora. AUSENTE = o `keep` vale sempre, como valia
+   * antes desta pergunta existir: quem não sabe qual é o mundo não
+   * tem como recusar mantê-lo.
+   */
+  readonly world?: WipeCurrentWorldReader | undefined;
+}
+
+/**
+ * O leitor do mundo de agora, montado do supervisor e da fila.
+ *
+ * Ele existe para que as quatro superfícies — o executor, o chat,
+ * a tela do jogo e a prévia do admin — respondam a MESMA coisa
+ * sobre o `.map` que está no ar. Cada uma monta a sua com esta
+ * função, e nenhuma escreve a conta à mão: duas contas parecidas
+ * seriam duas respostas para "este mundo pode ficar?".
+ */
+export function currentWorldReader(deps: {
+  readonly servers: {
+    configOf(serverId: string): { readonly levelUrl: string } | null;
+  };
+  readonly mapPool: {
+    byLevelUrl(serverId: string, levelUrl: string): { readonly versionOk: boolean } | null;
+  };
+}): WipeCurrentWorldReader {
+  return {
+    currentWorld: (serverId) => {
+      const config = deps.servers.configOf(serverId);
+
+      if (config === null) {
+        return null;
+      }
+
+      if (!isCustomWorld(config.levelUrl)) {
+        return { levelUrl: null, versionOk: false };
+      }
+
+      return {
+        levelUrl: config.levelUrl,
+        versionOk: deps.mapPool.byLevelUrl(serverId, config.levelUrl)?.versionOk ?? false,
+      };
+    },
+  };
 }
 
 // ------------------------------------------------------------
@@ -228,7 +299,9 @@ export function mapOfRun(deps: NextWipeDeps, run: WipeRunRecord): NextWipeMap {
  *
  * As quatro origens do `mapSource`, e não "a cabeça da fila
  * sempre": um plano `keep` não consome a fila, e um `fixed` aponta
- * para uma entrada que pode estar em qualquer posição.
+ * para uma entrada que pode estar em qualquer posição. `pool` e
+ * `random` consomem a mesma cabeça — a diferença entre eles é o
+ * que o admin quis dizer, e não o que o agente faz.
  *
  * ####  ESTA FUNÇÃO É A ÚNICA DECISÃO QUE EXISTE  ####
  *
@@ -238,30 +311,64 @@ export function mapOfRun(deps: NextWipeDeps, run: WipeRunRecord): NextWipeMap {
  * novo. Uma segunda escolha, por mais parecida que fosse, é como
  * o agente passou a prometer um mundo na tela e a subir outro.
  */
-export function mapOfPlan(deps: Pick<NextWipeDeps, 'mapPool'>, plan: WipePlan): NextWipeMap {
+export function mapOfPlan(
+  deps: Pick<NextWipeDeps, 'mapPool' | 'world'>,
+  plan: WipePlan,
+): NextWipeMap {
   const forced = plan.kind === 'forced';
+  const daFila = (): NextWipeMap => mapOfPool(deps, plan.serverId, forced);
 
-  if (plan.mapSource === 'keep') {
-    return { source: 'keep' };
-  }
+  // ####  AS QUATRO ORIGENS, ESCRITAS  ####
+  //
+  // Sem `default:`, e de propósito: um `mapSource` novo passa a
+  // QUEBRAR A COMPILAÇÃO aqui em vez de escorregar em silêncio
+  // para a fila. Foi assim que o `random` viveu meses sendo uma
+  // etiqueta que ninguém lia — e ninguém percebeu, porque cair na
+  // fila é justamente o que ele faz.
+  switch (plan.mapSource) {
+    case 'keep':
+      // ####  O FORÇADO NÃO MANTÉM UM `.map` SEM MARCA  ####
+      //
+      // Manter é a única origem que não olha a fila, e era por
+      // isso que ela passava por cima da trava do mapa custom: o
+      // servidor subia, na primeira quinta do mês, com o mesmo
+      // arquivo gerado na versão velha do binário — o desfecho que
+      // `blockedInForced` existe para impedir, na noite em que
+      // impedir importa. Mundo procedural continua sendo mantido
+      // sem atrito. Ver `keepBlockedInForced`.
+      return keepBlockedInForced(deps.world?.currentWorld(plan.serverId) ?? null, forced)
+        ? daFila()
+        : { source: 'keep' };
 
-  if (plan.mapSource === 'fixed' && plan.mapPoolId !== null) {
-    const chosen = deps.mapPool.get(plan.serverId, plan.mapPoolId);
+    case 'fixed': {
+      const chosen =
+        plan.mapPoolId === null ? null : deps.mapPool.get(plan.serverId, plan.mapPoolId);
 
-    // ####  A ENTRADA APONTADA PODE NÃO SERVIR MAIS  ####
-    //
-    // Ela some da fila, é consumida por um wipe anterior, fica
-    // presa em `generating`, ou é um `.map` custom sem a marca de
-    // compatibilidade num wipe FORÇADO — e este último é o que
-    // deixa o servidor sem subir na madrugada. Em qualquer um dos
-    // casos o plano cai para a fila, e a fila vazia sorteia: um
-    // ponteiro velho não pode ser motivo para o servidor não zerar.
-    if (chosen !== null && usableForWipe(chosen, forced)) {
-      return { source: 'entry', entry: chosen };
+      // ####  A ENTRADA APONTADA PODE NÃO SERVIR MAIS  ####
+      //
+      // Ela some da fila, é consumida por um wipe anterior, fica
+      // presa em `generating`, ou é um `.map` custom sem a marca de
+      // compatibilidade num wipe FORÇADO — e este último é o que
+      // deixa o servidor sem subir na madrugada. Em qualquer um dos
+      // casos o plano cai para a fila, e a fila vazia sorteia: um
+      // ponteiro velho não pode ser motivo para o servidor não zerar.
+      return chosen !== null && usableForWipe(chosen, forced)
+        ? { source: 'entry', entry: chosen }
+        : daFila();
     }
-  }
 
-  return mapOfPool(deps, plan.serverId, forced);
+    // ####  `random` SEGUE A FILA, IGUAL AO `pool`  ####
+    //
+    // Ele NÃO sorteia na hora com a fila curada: consome a cabeça
+    // dela e só sorteia quando não sobra nada utilizável — e quem
+    // sorteia é o executor (`takeForWipe`), no instante de gravar
+    // o `.ini`, e não esta função. A etiqueta diz ao admin "não me
+    // importo com qual mundo vem"; ela não pula a curadoria que
+    // ele mesmo fez.
+    case 'random':
+    case 'pool':
+      return daFila();
+  }
 }
 
 /**

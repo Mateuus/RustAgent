@@ -127,10 +127,27 @@ export interface WipeSettings {
  * De onde sai o mapa do próximo wipe.
  *
  *   pool    a primeira entrada pronta da fila de mapas
- *   random  o agente sorteia — é o que impede um wipe de ficar
- *           travado esperando curadoria
+ *   random  a MESMA fila, e o sorteio só quando ela não tem nada
+ *           utilizável — ver abaixo
  *   fixed   uma entrada escolhida a dedo (`mapPoolId`)
- *   keep    o mesmo mapa de novo: mesma seed, mundo novo
+ *   keep    o mesmo mapa de novo: mesma seed, mundo novo. Num wipe
+ *           FORÇADO ele não vale para um `.map` custom sem a marca
+ *           de compatibilidade (ver `keepBlockedInForced`)
+ *
+ * ####  `random` NÃO SORTEIA POR CIMA DA FILA  ####
+ *
+ * Ele se comporta como o `pool`: consome a cabeça da fila e só
+ * sorteia quando não sobra entrada utilizável — que é o mesmo
+ * sorteio que o `pool` faz, e é o que impede um wipe de ficar
+ * travado esperando curadoria. A diferença entre os dois é o que o
+ * admin quis dizer ("não me importo com qual mundo vem"), e não o
+ * que o agente faz.
+ *
+ * Isto está escrito porque a frase anterior — "o agente sorteia" —
+ * descrevia um comportamento que nunca existiu: o admin marcava
+ * "sorteia" e o wipe comia a entrada que ele mesmo tinha curado.
+ * Quem trata cada origem é `mapOfPlan`, em wipe/next-wipe.ts, e
+ * `random` é tratado lá EXPLICITAMENTE.
  */
 export const MAP_SOURCES = ['pool', 'random', 'fixed', 'keep'] as const;
 

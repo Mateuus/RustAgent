@@ -37,6 +37,7 @@ import {
 import { registerWipeRoutes } from '../src/http/routes/wipe.js';
 import type { ServerSupervisor } from '../src/servers/supervisor.js';
 import type { WipePlan, WipeSettings } from '../src/types/wipe.js';
+import type { WipeCurrentWorldReader } from '../src/wipe/next-wipe.js';
 import { forcedWipeOfMonth, zonedTimeToUtc } from '../src/wipe/schedule.js';
 
 const SERVER = 'server01';
@@ -547,7 +548,7 @@ describe('a reconciliação e o passado', () => {
  * do erro (`WIPE_FORCED_CANNOT_BE_SKIPPED`) — sem o handler, o
  * Fastify responderia o genérico dele.
  */
-function makeApp(): FastifyInstance {
+function makeApp(world?: WipeCurrentWorldReader): FastifyInstance {
   const app = Fastify();
 
   app.setErrorHandler(async (error, _request, reply) => {
@@ -570,10 +571,134 @@ function makeApp(): FastifyInstance {
     repository,
     // O supervisor entra só para responder "este servidor existe?".
     supervisor: { ids: (): readonly string[] => [SERVER, OUTRO] } as unknown as ServerSupervisor,
+    // Em que mundo o servidor está agora. Ausente na maioria dos
+    // testes: só a recusa do `keep` no forçado depende dele.
+    ...(world === undefined ? {} : { world }),
   });
 
   return app;
 }
+
+/** O mundo de agora, como o `.ini` e a fila respondem juntos. */
+function mundoDeAgora(levelUrl: string | null, versionOk = false): WipeCurrentWorldReader {
+  return { currentWorld: () => ({ levelUrl, versionOk }) };
+}
+
+/** O forçado de setembro, materializado. */
+function forcadoMaterializado(): WipePlan {
+  repository.reconcile(SERVER, NOW);
+
+  const plan = agenda().find((candidate) => candidate.kind === 'forced');
+
+  expect(plan).toBeDefined();
+
+  return plan as WipePlan;
+}
+
+describe('a agenda RECUSA manter o mundo num wipe forçado', () => {
+  const ILHA = 'https://mapas.exemplo/ilha.map';
+
+  it('com `.map` custom sem a marca, o PATCH responde 409 e não grava', async () => {
+    // ####  A RECUSA ONDE O ADMIN VÊ O MOTIVO  ####
+    //
+    // Gravado em silêncio, este plano faria o servidor subir, na
+    // primeira quinta do mês, com o mesmo `.map` gerado na versão
+    // velha do binário. O admin fecharia a tela achando que o
+    // mundo dele fica — e descobriria na madrugada.
+    const app = makeApp(mundoDeAgora(ILHA));
+    const forcado = forcadoMaterializado();
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/servers/${SERVER}/wipe/plans/${String(forcado.id)}`,
+      payload: { mapSource: 'keep' },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { error: string }).error).toBe('WIPE_KEEP_IN_FORCED');
+    expect((response.json() as { message: string }).message).toContain('compatível com a versão');
+    // E a linha continua como estava.
+    expect(repository.getPlan(SERVER, forcado.id)?.mapSource).toBe('pool');
+
+    await app.close();
+  });
+
+  it('com a marca no `.map` de agora, ela grava: quem garantiu foi o admin', async () => {
+    const app = makeApp(mundoDeAgora(ILHA, true));
+    const forcado = forcadoMaterializado();
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/servers/${SERVER}/wipe/plans/${String(forcado.id)}`,
+      payload: { mapSource: 'keep' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(repository.getPlan(SERVER, forcado.id)?.mapSource).toBe('keep');
+
+    await app.close();
+  });
+
+  it('mundo procedural pode ser mantido no forçado, sem atrito', async () => {
+    const app = makeApp(mundoDeAgora(null));
+    const forcado = forcadoMaterializado();
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/servers/${SERVER}/wipe/plans/${String(forcado.id)}`,
+      payload: { mapSource: 'keep' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(repository.getPlan(SERVER, forcado.id)?.mapSource).toBe('keep');
+
+    await app.close();
+  });
+
+  it('a trava é só do forçado: o wipe da cadência mantém o `.map` de boa', async () => {
+    // A cadência não troca o binário do jogo. O `.map` de ontem
+    // carrega hoje, e manter o mundo é escolha legítima.
+    repository.saveSettings(SERVER, cadencia({}), NOW);
+
+    const app = makeApp(mundoDeAgora(ILHA));
+
+    repository.reconcile(SERVER, NOW);
+
+    const plano = agenda().find((candidate) => candidate.kind === 'cadence');
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/servers/${SERVER}/wipe/plans/${String(plano?.id ?? 0)}`,
+      payload: { mapSource: 'keep' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(repository.getPlan(SERVER, plano?.id ?? 0)?.mapSource).toBe('keep');
+
+    await app.close();
+  });
+
+  it('sem mexer no mapa, o PATCH de um plano antigo continua passando', async () => {
+    // Um plano gravado ANTES da trava não pode virar uma linha
+    // intocável: adiar, anotar e trocar a política de blueprint
+    // continuam valendo.
+    const app = makeApp(mundoDeAgora(ILHA));
+    const forcado = forcadoMaterializado();
+
+    repository.updatePlan(SERVER, forcado.id, { mapSource: 'keep' }, NOW);
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/servers/${SERVER}/wipe/plans/${String(forcado.id)}`,
+      payload: { note: 'o wipe do aniversário' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(repository.getPlan(SERVER, forcado.id)?.note).toBe('o wipe do aniversário');
+
+    await app.close();
+  });
+});
 
 /**
  * O corpo de configuração que a tela manda.

@@ -50,7 +50,7 @@ import { Operation } from '../src/ops/operations.js';
 import type { WipePlan } from '../src/types/wipe.js';
 import { readZipEntries, readZipEntryData } from '../src/util/zip.js';
 import { backupSaveFolder, pruneBackups } from '../src/wipe/backup.js';
-import { nextWipe, type NextWipeMap } from '../src/wipe/next-wipe.js';
+import { currentWorldReader, nextWipe, type NextWipeMap } from '../src/wipe/next-wipe.js';
 import {
   WipeRunner,
   type WipeAnnouncer,
@@ -122,6 +122,14 @@ async function scenario(
   options: {
     readonly announcer?: WipeAnnouncer;
     readonly saveCreatedAfter?: number | null;
+    /**
+     * O `.map` de fora que o servidor está rodando AGORA.
+     *
+     * Vazio = mundo procedural, que é o caso comum. Ele existe
+     * para uma pergunta só: um wipe FORÇADO pode MANTER o mundo de
+     * hoje? Ver `keepBlockedInForced`.
+     */
+    readonly levelUrl?: string;
   } = {},
 ): Promise<Scenario> {
   const root = await mkdtemp(join(tmpdir(), 'rustagent-wipe-'));
@@ -170,7 +178,7 @@ async function scenario(
     level: 'Procedural Map',
     seed: 12_345,
     worldSize: 4000,
-    levelUrl: '',
+    levelUrl: options.levelUrl ?? '',
     maxPlayers: 200,
     saveInterval: 600,
     enabled: true,
@@ -588,11 +596,23 @@ describe('configurar', () => {
 
 const SEMANA = 7 * 24 * 60 * 60 * 1000;
 
-/** O que o chat e a tela do jogo estão anunciando, agora. */
+/**
+ * O que o chat e a tela do jogo estão anunciando, agora.
+ *
+ * O `world` entra aqui porque o index.ts o entrega às três
+ * superfícies que anunciam: sem ele, este teste ficaria verde no
+ * dia em que a tela voltasse a prometer "o mesmo mapa de agora"
+ * para um `.map` custom que o wipe forçado vai trocar.
+ */
 function anunciado(s: Scenario): NextWipeMap | null {
   const next = nextWipe(
     SERVER,
-    { schedule: s.schedule, runs: s.runs, mapPool: s.mapPool },
+    {
+      schedule: s.schedule,
+      runs: s.runs,
+      mapPool: s.mapPool,
+      world: currentWorldReader({ servers: { configOf: () => s.config }, mapPool: s.mapPool }),
+    },
     Date.now(),
   );
 
@@ -1110,6 +1130,324 @@ describe('a fila só é QUEIMADA depois de o `.ini` estar gravado', () => {
     expect(retomado.mapAfter?.seed).toBe('22222');
     expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
     expect(s.mapPool.get(SERVER, segunda)?.status).toBe('used');
+  });
+});
+
+describe('o SORTEIO também escolhe antes de queimar', () => {
+  it('o `.ini` lança duas vezes com a fila VAZIA: UMA linha `used` no fim', async () => {
+    // ####  MEDIDO: TRÊS MUNDOS QUE NUNCA SUBIRAM  ####
+    //
+    // `takeForWipe` inseria a linha e a marcava `used` ANTES do
+    // `updateSettings`. Com o `.ini` lançando duas vezes, o banco
+    // ficava com três linhas `used` para um wipe só — e
+    // `recentSeeds`, que alimenta o aviso "já jogamos esta seed",
+    // olha só os seis últimos wipes: dois fantasmas já empurram um
+    // terço da memória real para fora da janela.
+    const s = await scenario();
+    const run = execucaoDe(s, plano(s, { mapSource: 'pool' }));
+
+    s.settingsErrors.push(new Error('o .ini está aberto em outro programa'));
+    s.settingsErrors.push(new Error('o .ini continua aberto'));
+
+    for (const tentativa of [1, 2]) {
+      await expect(
+        s.runner.run({
+          serverId: SERVER,
+          runId: run.id,
+          operation: operation(),
+          control: s.control,
+          resume: tentativa > 1,
+        }),
+      ).rejects.toThrow('o .ini');
+
+      // Nada gravado: sortear é escolher, e escolher não é queimar.
+      expect(s.mapPool.list(SERVER)).toHaveLength(0);
+      expect(s.runs.get(SERVER, run.id)?.mapAfter ?? null).toBeNull();
+    }
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    const usadas = s.mapPool.list(SERVER).filter((entry) => entry.status === 'used');
+
+    expect(retomado.status).toBe('done');
+    expect(retomado.mapAfter?.drawn).toBe(true);
+    expect(usadas).toHaveLength(1);
+    expect(retomado.mapAfter?.seed).toBe(usadas[0]?.seed);
+    // E a memória do sorteio é a de UM wipe, e não a de três.
+    expect(new Set(s.mapPool.recentSeeds(SERVER)).size).toBe(1);
+  });
+
+  it('a seed sorteada é a que foi para o `.ini`, e não uma segunda', async () => {
+    const s = await scenario();
+    const run = execucaoDe(s, plano(s, { mapSource: 'pool' }));
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    const sorteada = s.mapPool.list(SERVER).find((entry) => entry.status === 'used');
+
+    expect(s.settings[0]).toMatchObject({ seed: sorteada?.seed ?? '' });
+    expect(finished.mapAfter?.mapPoolId).toBe(sorteada?.id);
+  });
+});
+
+describe('as duas escritas do fim de `configurar` são uma só', () => {
+  it('o banco caindo entre elas não deixa mundo gravado com a fila intacta', async () => {
+    // ####  MEDIDO: A MESMA SEED EM DOIS WIPES SEGUIDOS  ####
+    //
+    // O `map_after` era gravado, a entrada continuava `ready`, e a
+    // retomada pulava o passo inteiro (a marca já estava lá): o
+    // wipe SEGUINTE consumia a MESMA entrada. No intervalo, a
+    // régua do VIP anunciava como "o próximo mundo" o mundo que já
+    // estava no ar.
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'pool' }));
+    const update = s.runs.update.bind(s.runs);
+
+    let cair = true;
+
+    s.runs.update = (serverId, id, patch, now) => {
+      if (cair && patch.mapAfter !== undefined) {
+        cair = false;
+
+        throw new Error('o banco caiu entre a fila e o mundo');
+      }
+
+      return update(serverId, id, patch, now);
+    };
+
+    await expect(
+      s.runner.run({ serverId: SERVER, runId: run.id, operation: operation(), control: s.control }),
+    ).rejects.toThrow('o banco caiu');
+
+    s.runs.update = update;
+
+    // Nem uma coisa nem outra: a queima voltou atrás junto com o
+    // mundo que ela acompanha.
+    expect(s.runs.get(SERVER, run.id)?.mapAfter ?? null).toBeNull();
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    expect(retomado.mapAfter?.mapPoolId).toBe(primeira);
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('used');
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('ready');
+  });
+});
+
+describe('`random` segue a fila, e não sorteia por cima dela', () => {
+  it('com a fila curada, ele consome a CABEÇA — igual ao `pool`', async () => {
+    // A etiqueta dizia "o agente sorteia" na tela, na doc e no
+    // tipo, e o agente comia a entrada que o admin tinha curado.
+    // O que muda é a frase; o comportamento é este, e continua.
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'random' }));
+
+    const antes = anunciado(s);
+
+    expect(antes?.source === 'entry' ? antes.entry.id : null).toBe(primeira);
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    expect(finished.mapAfter?.drawn).toBe(false);
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('ready');
+  });
+
+  it('com a fila vazia, aí sim ele sorteia', async () => {
+    const s = await scenario();
+    const run = execucaoDe(s, plano(s, { mapSource: 'random' }));
+
+    expect(anunciado(s)).toEqual({ source: 'undecided' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.drawn).toBe(true);
+  });
+});
+
+describe('`keep` num wipe FORÇADO', () => {
+  const ILHA = 'https://mapas.exemplo/ilha.map';
+
+  /** O primeiro forçado da agenda, já mandando MANTER o mundo. */
+  function forcadoQueMantem(s: Scenario): WipePlan {
+    s.schedule.reconcile(SERVER, Date.now());
+
+    const plan = s.schedule
+      .listPlans(SERVER, { from: Date.now() })
+      .find((candidate) => candidate.kind === 'forced');
+
+    expect(plan).toBeDefined();
+
+    // Direto no repositório: a ROTA recusa gravar isto, e é esse o
+    // outro lado desta mesma decisão (ver wipe-plans.test.ts). O
+    // que se prende aqui é o plano que já estava gravado quando a
+    // trava chegou — e o servidor que virou mapa custom depois.
+    return s.schedule.updatePlan(SERVER, (plan as WipePlan).id, { mapSource: 'keep' }, Date.now());
+  }
+
+  it('não mantém um `.map` custom sem a marca: o mundo sai da fila', async () => {
+    // ####  O DESFECHO QUE `blockedInForced` EXISTE PARA IMPEDIR  ####
+    //
+    // O forçado troca o binário do jogo. Mantendo o `.map` gerado
+    // na versão de ontem, o servidor sobe — ou não sobe — com o
+    // arquivo velho, na primeira quinta do mês.
+    const s = await scenario({ levelUrl: ILHA });
+    const { primeira } = fila(s);
+    const plan = forcadoQueMantem(s);
+    const op = operation();
+
+    const run = s.runs.create(SERVER, {
+      planId: plan.id,
+      kind: 'forced',
+      bpPolicy: plan.bpPolicy,
+    });
+
+    // O chat e a tela do jogo já anunciam a troca, e não "o mesmo
+    // mapa de agora".
+    const antes = anunciado(s);
+
+    expect(antes?.source === 'entry' ? antes.entry.id : null).toBe(primeira);
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: op,
+      control: s.control,
+    });
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    // A chave do `.map` é LIMPA: sem isso o servidor sobe baixando
+    // o arquivo velho de novo, e o wipe não troca mundo nenhum.
+    expect(s.settings[0]).toMatchObject({ levelUrl: '' });
+    expect(logDe(op)).toContain('não pode ficar');
+  });
+
+  it('COM a marca no `.map` de agora, o mundo fica', async () => {
+    const s = await scenario({ levelUrl: ILHA });
+
+    fila(s);
+
+    // A entrada que virou o mundo de hoje: já consumida, e marcada
+    // à mão como compatível com a versão nova.
+    const custom = s.mapPool.add(SERVER, { kind: 'custom', level: 'Ilha', levelUrl: ILHA }).entry.id;
+
+    s.mapPool.markVersionOk(SERVER, custom, true);
+    s.mapPool.markUsed(SERVER, custom);
+
+    const plan = forcadoQueMantem(s);
+
+    expect(anunciado(s)).toEqual({ source: 'keep' });
+
+    const run = s.runs.create(SERVER, {
+      planId: plan.id,
+      kind: 'forced',
+      bpPolicy: plan.bpPolicy,
+    });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(s.settings).toHaveLength(0);
+    expect(finished.mapAfter?.levelUrl).toBe(ILHA);
+  });
+
+  it('mundo procedural continua sendo mantido no forçado, sem atrito', async () => {
+    const s = await scenario();
+    const { primeira } = fila(s);
+    const plan = forcadoQueMantem(s);
+
+    expect(anunciado(s)).toEqual({ source: 'keep' });
+
+    const run = s.runs.create(SERVER, {
+      planId: plan.id,
+      kind: 'forced',
+      bpPolicy: plan.bpPolicy,
+    });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(s.settings).toHaveLength(0);
+    expect(finished.mapAfter?.seed).toBe(String(s.config.seed));
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+  });
+});
+
+describe('a agenda depois de uma retomada', () => {
+  it('o plano que falhou volta a `done` quando a retomada conclui', async () => {
+    // ####  MEDIDO: A AGENDA DIZENDO QUE O WIPE DE ONTEM FALHOU  ####
+    //
+    // O `UPDATE` do `markPlanStatus` não aceitava sair de
+    // `failed`: o wipe acontecia, o mundo trocava, o run ficava
+    // `done` — e o plano ficava `failed` para sempre. O admin lê
+    // isso e pode disparar um "WIPAR AGORA" que consumiria uma
+    // segunda entrada da curadoria.
+    const s = await scenario();
+    const { primeira } = fila(s);
+    const plan = plano(s, { mapSource: 'pool' });
+    const run = execucaoDe(s, plan);
+
+    s.settingsErrors.push(new Error('o .ini está aberto em outro programa'));
+
+    await expect(
+      s.runner.run({ serverId: SERVER, runId: run.id, operation: operation(), control: s.control }),
+    ).rejects.toThrow('o .ini');
+
+    expect(s.schedule.getPlan(SERVER, plan.id)?.status).toBe('failed');
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    expect(retomado.status).toBe('done');
+    expect(s.schedule.getPlan(SERVER, plan.id)?.status).toBe('done');
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('used');
+
+    // E o conserto NÃO reabre caminho para o wipe acontecer duas
+    // vezes: quem dispara sozinho é o relógio, e ele só enxerga
+    // `planned`.
+    expect(s.schedule.duePlans(SERVER, Date.now() + 2 * SEMANA)).toHaveLength(0);
   });
 });
 
