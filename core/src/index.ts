@@ -93,6 +93,9 @@ import { RustMapsClient } from './wipe/rustmaps.js';
 // ---- o wipe: os blueprints que sobrevivem ----
 import { BpRepository } from './db/bp-repository.js';
 import { BlueprintService } from './wipe/blueprints.js';
+// ---- a ponte: os avisos de wipe são mensagens (Docs\16 §11) ----
+import { registerWipeVariables } from './messages/providers/wipe.js';
+import { WipeBroadcastAnnouncer } from './wipe/announce.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -889,14 +892,17 @@ async function main(): Promise<void> {
     // acima: três maneiras de mandar texto ao jogo dariam três
     // formatos de aviso e três lugares para consertar.
     broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
-    // ####  O LOCUTOR DOS AVISOS AINDA NÃO EXISTE  ####
+    // ####  O LOCUTOR DOS AVISOS  ####
     //
-    // As falas de "faltam 15 min" são da Frente F, e o ponto de
-    // chamada está pronto em wipe/run.ts, no passo `avisar`. Sem
-    // ele, aquele passo apenas ESPERA a hora — o que é o
-    // comportamento certo, e não uma falta: o wipe acontece na hora
-    // marcada de qualquer jeito.
-    announcer: undefined,
+    // As falas de "faltam 15 min". O relógio, a ordem dos offsets e
+    // a marca do que já saiu continuam sendo do passo `avisar` (em
+    // wipe/run.ts): o locutor só transforma UM offset numa fala, e
+    // é isso que faz um aviso perdido não ter como derrubar o wipe.
+    announcer: new WipeBroadcastAnnouncer({
+      broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
+      variables: messageVariables,
+      logger,
+    }),
     // O mundo novo sobe sem plugin sabendo de nada: o cache do
     // OrigemZ vive na memória do plugin, e o wipe derruba o RCON.
     // Isto repassa os estados completos — e é o mesmo caminho do
@@ -937,6 +943,25 @@ async function main(): Promise<void> {
         'oferece retomar',
     );
   }
+
+  // ---- a ponte: `{wipe.*}` nas mensagens ---------------------
+  //
+  // ####  É AQUI QUE OS DOIS MÓDULOS SE ENCOSTAM, E SÓ AQUI  ####
+  //
+  // O módulo de mensagens não sabe o que é um wipe, e o módulo de
+  // wipe não sabe mandar texto ao chat (Docs\16 §11). O que os liga
+  // são duas interfaces pequenas: o `Broadcaster`, logo acima, e
+  // este provedor. Nada em `messages/` importa `wipe/`.
+  //
+  // Depois desta linha, os DOIS caminhos que o pedido descreve
+  // funcionam com a mesma conta: o aviso automático do passo
+  // `avisar` e a mensagem editorial que o admin escreveu com
+  // `{wipe.faltam}` dentro.
+  registerWipeVariables(messageVariables, {
+    schedule: wipeSchedule,
+    runs: wipeRuns,
+    mapPool,
+  });
 
   // O relógio que dispara o plano vencido. Ele acorda de trinta em
   // trinta segundos e NUNCA lança: uma exceção sem dono mataria o
