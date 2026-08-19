@@ -51,6 +51,15 @@ Leia nesta ordem na primeira vez:
 | 09 | [Roadmap](09-ROADMAP.md) | as fases seguintes, em ordem de dependência |
 | — | [Progresso](PROGRESSO.md) | checklist vivo: o que já foi feito, o que está em curso |
 
+Os documentos de **fase**, escritos quando cada frente começa (10 a 15 já foram
+executadas):
+
+| # | Documento | O que responde |
+|---|---|---|
+| 16 | [Plano: wipe, calendário e mensagens](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md) | o agente mandando no ciclo de vida do mundo, o calendário no painel e no jogo, e o agendador de falas do servidor |
+| 17 | [As frentes de wipe e mensagens](17-FRENTES-WIPE-E-MENSAGENS.md) | como vários agentes constroem o 16 ao mesmo tempo sem se atropelar |
+| 18 | [Os prompts das frentes](18-PROMPTS-DAS-FRENTES.md) | os dez blocos prontos para abrir cada agente, e em que ondas eles rodam |
+
 ---
 
 ## O caminho curto

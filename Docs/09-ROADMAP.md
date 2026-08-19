@@ -68,6 +68,9 @@ a que mais merece ser reescrita com calma.
 
 ## Fase 6 — Wipe
 
+**Planejada em detalhe:** [16-PLANO-WIPE-CALENDARIO-MENSAGENS.md](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md),
+com as frentes paralelas em [17-FRENTES-WIPE-E-MENSAGENS.md](17-FRENTES-WIPE-E-MENSAGENS.md).
+
 - calendário (primeira quinta às 19:00 UTC, e o wipe semanal);
 - fila de mapas com seed/tamanho por rodada;
 - prévia do que será apagado, e o backup antes;
@@ -81,7 +84,9 @@ a que mais merece ser reescrita com calma.
 
 Em ordem de valor, não de dependência:
 
-- avisos automáticos de chat
+- avisos automáticos de chat → virou o **agendador de mensagens** do
+  [16-PLANO-WIPE-CALENDARIO-MENSAGENS.md](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md) §10,
+  e sobe junto com o wipe (é ele quem avisa)
 - propagandas (overlay CUI) e o editor de UI
 - webhooks e clientes de API com escopo
 - OpenAPI de volta, com o teste que reprova rota sem documentação
