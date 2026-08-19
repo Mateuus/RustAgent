@@ -3001,7 +3001,15 @@ export interface WipeRunStepView {
   readonly step: WipeRunStep;
   readonly position: number;
   readonly status: WipeStepStatus;
+  /** A PRIMEIRA vez que o passo rodou. Uma retomada não o move. */
   readonly startedAt: number | null;
+  /**
+   * O começo da tentativa que está na tela — igual a `startedAt`
+   * enquanto o passo não roda de novo. A DURAÇÃO sai daqui: com
+   * `startedAt` ela contaria o tempo em que o agente esteve morto
+   * entre o crash e a retomada.
+   */
+  readonly attemptStartedAt: number | null;
   readonly finishedAt: number | null;
   /** O que aquele passo fez, ou por que não fez. Vai ao lado do ✔. */
   readonly message: string | null;

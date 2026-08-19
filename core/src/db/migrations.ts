@@ -2485,6 +2485,55 @@ function addWipeAtIfMissing(db: AgentDatabase): void {
   `);
 }
 
+// ------------------------------------------------------------
+//  031 — o começo da TENTATIVA de cada passo do wipe
+//
+//  ####  UMA COLUNA SÓ RESPONDIA A DUAS PERGUNTAS  ####
+//
+//  `wipe_run_steps.started_at` responde "a que horas este passo
+//  começou pela primeira vez", e por isso a retomada o PRESERVA
+//  (ver `markStep` em db/wipe-runs-repository.ts). Só que o par
+//  `started_at`/`finished_at` também é a única conta de duração
+//  que existe — e numa retomada os dois carimbos passam a ser de
+//  execuções DIFERENTES: o começo da tentativa que morreu, e o
+//  fim da tentativa que concluiu.
+//
+//  MEDIDO na simulação (cenário D, o `process.exit` no meio do
+//  `apagar`): o passo apagou 8 arquivos em ~10 ms e o banco
+//  marcou 20.901 ms — os 20 s em que o agente esteve MORTO entre
+//  o crash e a retomada. Retomar na manhã seguinte daria um
+//  `apagar` de dez horas.
+//
+//  ####  POR QUE UMA COLUNA NOVA, E NÃO REDEFINIR `started_at`  ####
+//
+//  As duas perguntas são legítimas e não cabem num carimbo só:
+//  "quando este passo foi atacado pela primeira vez" é histórico
+//  (e é o que a auditoria de um wipe de semanas atrás pede), e
+//  "quanto a tentativa que terminou levou" é a duração. Reescrever
+//  `started_at` a cada retomada apagaria a primeira; deixar como
+//  estava mente na segunda.
+//
+//  `attempt_started_at` é o começo da tentativa ATUAL: ele nasce
+//  igual a `started_at` e só se afasta dele quando um passo roda
+//  de novo. A duração é sempre `finished_at - attempt_started_at`.
+//
+//  ####  O BACKFILL É `started_at`  ####
+//
+//  Numa linha gravada antes desta coluna não há outro carimbo, e
+//  não existe outro para inventar: quem nunca foi retomado tem os
+//  dois iguais de qualquer jeito, e quem foi já estava com a
+//  duração errada — o backfill não a piora.
+//
+//  Anulável de propósito: um passo `skipped` que nunca chegou a
+//  rodar não tem começo de tentativa, exatamente como já não tem
+//  `started_at`.
+// ------------------------------------------------------------
+const WIPE_RUN_STEP_ATTEMPT_SCHEMA = `
+ALTER TABLE wipe_run_steps ADD COLUMN attempt_started_at INTEGER;
+
+UPDATE wipe_run_steps SET attempt_started_at = started_at;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2528,6 +2577,11 @@ export const MIGRATIONS: readonly Migration[] = [
   // A 30 não acrescenta schema: ela ACERTA o banco que aplicou a
   // 025 antes de a coluna `wipe_at` existir nela. Ver o cabeçalho.
   { id: 30, name: 'wipe-run-wipe-at', run: addWipeAtIfMissing },
+  // A 31 também é da frente do wipe: o começo da TENTATIVA de
+  // cada passo, que é o que a duração de um passo retomado
+  // precisa e o `started_at` (preservado de propósito) não pode
+  // dar. Ver o cabeçalho.
+  { id: 31, name: 'wipe-run-step-attempt', sql: WIPE_RUN_STEP_ATTEMPT_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
