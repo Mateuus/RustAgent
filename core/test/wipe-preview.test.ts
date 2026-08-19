@@ -57,6 +57,8 @@ interface Bancada {
   readonly mapPool: MapPoolRepository;
   /** As execuções: é delas que sai o wipe EM CURSO. */
   readonly runs: WipeRunsRepository;
+  /** A pasta do servidor, para plantar o que o full wipe varre. */
+  readonly installDir: string;
   /** A prévia de agora, com o plano e a fila que já foram montados. */
   previa(options?: {
     /** O `.map` de fora que o servidor está rodando agora. */
@@ -100,6 +102,7 @@ async function bancada(): Promise<Bancada> {
     schedule,
     mapPool,
     runs,
+    installDir,
     previa: (options = {}) =>
       buildWipePreview({
         serverId: SERVER,
@@ -398,5 +401,77 @@ describe('`keep` num wipe FORÇADO, na tela que vem antes do botão', () => {
 
     expect(codigos(preview)).toContain('MAP_KEPT');
     expect(codigos(preview)).not.toContain('KEEP_REFUSED_IN_FORCED');
+  });
+});
+
+// ============================================================
+//  ####  O QUE A LISTA DO FULL WIPE NÃO ESTÁ MOSTRANDO  ####
+//
+//  A prévia é a ÚLTIMA tela antes do botão. Uma lista de 500
+//  linhas que na verdade tem 600 arquivos, ou uma pasta funda que
+//  a varredura nem abriu, precisam sair escritos aqui — senão o
+//  admin decide achando que aquilo é tudo o que existe.
+// ============================================================
+
+/** Liga o full wipe com os padrões que o admin marcou. */
+function fullWipe(b: Bancada, patterns: readonly string[]): void {
+  const base = b.runs.getExecSettings(SERVER);
+
+  b.runs.saveExecSettings(
+    SERVER,
+    { ...base, pluginData: { enabled: true, patterns: [...patterns] } },
+    Date.now(),
+  );
+}
+
+describe('a prévia conta o que a lista do full wipe NÃO mostrou', () => {
+  it('lista cortada vira aviso, com o total de verdade', async () => {
+    const b = await bancada();
+    const pasta = join(b.installDir, 'oxide', 'data', 'PlayerDatabase');
+
+    await mkdir(pasta, { recursive: true });
+
+    for (let i = 0; i < 600; i += 1) {
+      await writeFile(join(pasta, `7656119800000${String(i).padStart(4, '0')}.json`), '{}');
+    }
+
+    fullWipe(b, ['oxide/data/PlayerDatabase/*.json']);
+
+    const preview = await b.previa();
+    const aviso = preview.warnings.find((notice) => notice.code === 'PLUGIN_DATA_TRUNCATED');
+
+    expect(preview.pluginData.truncated).toBe(true);
+    expect(preview.pluginData.total).toBe(600);
+    expect(aviso?.message).toContain('600');
+  });
+
+  it('pasta funda demais vira aviso, com o caminho que ficou de fora', async () => {
+    const b = await bancada();
+    const fundo = join(b.installDir, 'oxide', 'data', 'n1', 'n2', 'n3', 'n4');
+
+    await mkdir(fundo, { recursive: true });
+    await writeFile(join(fundo, 'nivel4.json'), '{}');
+
+    fullWipe(b, ['oxide/data/**/*.json']);
+
+    const preview = await b.previa();
+    const aviso = preview.warnings.find((notice) => notice.code === 'PLUGIN_DATA_TOO_DEEP');
+
+    expect(preview.pluginData.notScanned).toContain('oxide/data/n1/n2/n3/n4');
+    expect(aviso?.message).toContain('oxide/data/n1/n2/n3/n4');
+  });
+
+  it('sem nada escondido, nenhum dos dois avisos sai', async () => {
+    const b = await bancada();
+
+    await mkdir(join(b.installDir, 'oxide', 'data'), { recursive: true });
+    await writeFile(join(b.installDir, 'oxide', 'data', 'Economics.json'), '{}');
+
+    fullWipe(b, ['oxide/data/**/*.json']);
+
+    const codes = codigos(await b.previa());
+
+    expect(codes).not.toContain('PLUGIN_DATA_TRUNCATED');
+    expect(codes).not.toContain('PLUGIN_DATA_TOO_DEEP');
   });
 });

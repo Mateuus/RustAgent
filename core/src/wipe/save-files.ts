@@ -230,12 +230,30 @@ const OTHER: Rule = {
  */
 const SIDECAR = /-(wal|shm|journal)$/i;
 
-/** Classifica UM nome. Puro: não toca em disco e não decide sozinho. */
-export function classifyFile(name: string, bpPolicy: BpPolicy, bytes = 0): ClassifiedFile {
+/**
+ * O banco de que este arquivo é satélite, ou `null` se ele não for
+ * satélite de ninguém.
+ *
+ * `player.states.287.db-wal` -> `player.states.287.db`.
+ *
+ * Está exportado porque o par `.db`/`-wal` precisa andar junto em
+ * DOIS lugares: aqui, na classificação por política, e na lista do
+ * full wipe (plugin-data.ts), onde o admin escolhe item a item.
+ * Duas cópias da regra é como um dos dois lados deixa de herdar o
+ * destino do outro — e foi exatamente assim que a lista do full
+ * wipe passou a oferecer o banco e o WAL como duas linhas soltas.
+ */
+export function sidecarOwner(name: string): string | null {
   const sidecar = SIDECAR.exec(name);
 
-  if (sidecar !== null) {
-    const base = name.slice(0, sidecar.index);
+  return sidecar === null ? null : name.slice(0, sidecar.index);
+}
+
+/** Classifica UM nome. Puro: não toca em disco e não decide sozinho. */
+export function classifyFile(name: string, bpPolicy: BpPolicy, bytes = 0): ClassifiedFile {
+  const base = sidecarOwner(name);
+
+  if (base !== null) {
     const parent = classifyFile(base, bpPolicy);
 
     return {
