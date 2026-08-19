@@ -599,7 +599,17 @@ export class WipeRunner implements WipeExecutor {
 
     const podados = result.pruned.length === 0 ? '' : ` ${String(result.pruned.length)} antigo(s) podado(s).`;
 
-    return `${String(result.files)} arquivo(s), ${mb(result.bytes)} -> ${result.path}.${podados}`;
+    // ####  OS DOIS NÚMEROS, E O QUE CADA UM É  ####
+    //
+    // Esta linha dizia só o tamanho do ZIP e o passo `apagar` diz o
+    // tamanho CRU do que removeu. Eram "44 MB" e "68 MB" sobre a
+    // MESMA pasta, no mesmo histórico, sem nada dizendo que a
+    // diferença era a compressão. Agora o cru vem primeiro — é o
+    // que se compara com o `apagar` — e o do zip vem rotulado.
+    return (
+      `${String(result.files)} arquivo(s), ${mb(result.rawBytes)} do save em ${mb(result.bytes)} ` +
+      `de zip -> ${result.path}.${podados}`
+    );
   }
 
   /**

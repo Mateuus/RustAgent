@@ -536,8 +536,10 @@ describe('o backup', () => {
     const s = await scenario();
 
     // O carimbo do nome vem do `at`, e por isso ele é injetado aqui:
-    // três backups no mesmo segundo seriam o MESMO arquivo, e a poda
-    // não teria o que podar.
+    // com três datas fixas os nomes são conhecidos, e a ordem que a
+    // poda usa não depende do relógio da máquina que roda o teste.
+    // (Que dois backups do mesmo instante NÃO se sobrescrevem é o
+    // que wipe-backup.test.ts mede.)
     for (const at of [
       new Date(2026, 7, 16, 16, 0, 0).getTime(),
       new Date(2026, 7, 17, 16, 0, 0).getTime(),

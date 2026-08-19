@@ -19,6 +19,16 @@
 //  não pode ser abandonada nem concluída.
 //
 //  ------------------------------------------------------------
+//  ####  ARQUIVO QUE NÃO SE DEIXA LER DERRUBA O WIPE  ####
+//
+//  Um arquivo que SUMIU entre a listagem e a leitura é inofensivo:
+//  ele não existe mais, e o zip sem ele guarda tudo o que havia.
+//  Um arquivo que EXISTE e não se deixa ler é o oposto — o zip sai
+//  incompleto e o passo SEGUINTE apaga o original, então o
+//  conteúdo não fica no zip nem no disco. Os dois casos chegam
+//  aqui como uma exceção do `readFile`, e só o `code` os separa.
+//
+//  ------------------------------------------------------------
 //  ####  ZIP ESCRITO À MÃO, E POR QUÊ  ####
 //
 //  O agente não tem dependência de compactação, e util/zip.ts só
@@ -33,9 +43,11 @@
 //  zip que não abre é pior que não escrever nenhum.
 // ============================================================
 
-import { createWriteStream } from 'node:fs';
+import { once } from 'node:events';
+import { createWriteStream, type WriteStream } from 'node:fs';
 import { mkdir, readdir, rm, stat, statfs, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { setTimeout as esperar } from 'node:timers/promises';
 import { deflateRawSync } from 'node:zlib';
 
 import { crc32 } from '../util/zip.js';
@@ -71,6 +83,38 @@ const ZIP32_LIMIT = 0xffffffff;
  */
 const DEFLATE_LEVEL = 1;
 
+/**
+ * As esperas entre as tentativas de ler um arquivo travado.
+ *
+ * ####  A TRAVA DO ANTIVÍRUS É PASSAGEIRA  ####
+ *
+ * O caso medido é o antivírus escaneando o `.sav` que o servidor
+ * acabou de fechar: o handle dele impede a leitura por um ou dois
+ * segundos e some sozinho. Desistir na primeira negativa
+ * transformaria essa espera num wipe abortado — e insistir para
+ * sempre deixaria o servidor fora do ar sem fim.
+ *
+ * Quatro esperas, ~3,7 s no total por arquivo, e só no caminho da
+ * falha: a leitura que dá certo de primeira não espera nada.
+ */
+export const BACKUP_READ_RETRY_DELAYS_MS: readonly number[] = [200, 500, 1000, 2000];
+
+/**
+ * Os erros de "o arquivo existe, mas agora não dá".
+ *
+ * No Windows é o que sai de um handle sem `FILE_SHARE_READ`
+ * (antivírus, backup em nuvem, um RustDedicated que não morreu de
+ * verdade). Nenhum deles significa que o conteúdo acabou — só que
+ * ele não está disponível NESTE instante.
+ */
+const LOCKED_CODES: ReadonlySet<string> = new Set([
+  'EBUSY',
+  'EACCES',
+  'EPERM',
+  'EMFILE',
+  'ENFILE',
+]);
+
 export interface BackupSpace {
   /** O que a pasta do save ocupa hoje, em bytes. */
   readonly needBytes: number;
@@ -84,7 +128,17 @@ export interface BackupSpace {
 
 export interface BackupResult {
   readonly path: string;
+  /** O tamanho do zip. */
   readonly bytes: number;
+  /**
+   * O tamanho CRU do que entrou no zip.
+   *
+   * Existe para a frase do histórico: o passo `apagar` conta bytes
+   * crus, e um `backup` que só soubesse dizer o tamanho comprimido
+   * deixava duas medidas da MESMA pasta se contradizendo na tela,
+   * sem nada explicando que a diferença era a compressão.
+   */
+  readonly rawBytes: number;
   readonly files: number;
   /** Os zips antigos que a poda removeu. */
   readonly pruned: readonly string[];
@@ -170,6 +224,14 @@ export async function backupSaveFolder(options: {
   readonly at?: number;
   readonly keep?: number;
   readonly onLine?: (line: string) => void;
+  /**
+   * As esperas entre as tentativas de ler um arquivo travado.
+   *
+   * O padrão é `BACKUP_READ_RETRY_DELAYS_MS`. Quem passa outra
+   * coisa é o teste, que precisa provar a desistência sem gastar
+   * quatro segundos de relógio de verdade.
+   */
+  readonly readRetryDelaysMs?: readonly number[];
 }): Promise<BackupResult | null> {
   const names = await filesIn(options.saveDir);
 
@@ -177,12 +239,19 @@ export async function backupSaveFolder(options: {
     return null;
   }
 
-  const at = options.at ?? Date.now();
-  const target = join(options.backupsDir, `wipe-${stamp(at)}.zip`);
-
   await mkdir(options.backupsDir, { recursive: true });
 
-  const written = await writeZip(options.saveDir, names, target, options.onLine);
+  const opened = await openFreshZip(options.backupsDir, options.at ?? Date.now());
+
+  const written = await writeZip({
+    dir: options.saveDir,
+    names,
+    output: opened.output,
+    target: opened.path,
+    onLine: options.onLine,
+    retryDelaysMs: options.readRetryDelaysMs ?? BACKUP_READ_RETRY_DELAYS_MS,
+  });
+
   const pruned = await pruneBackups(options.backupsDir, options.keep ?? DEFAULT_BACKUP_KEEP);
 
   return { ...written, pruned };
@@ -249,15 +318,18 @@ interface CentralEntry {
   readonly dosDate: number;
 }
 
-async function writeZip(
-  dir: string,
-  names: readonly string[],
-  target: string,
-  onLine?: (line: string) => void,
-): Promise<Omit<BackupResult, 'pruned'>> {
-  const output = createWriteStream(target);
+async function writeZip(input: {
+  readonly dir: string;
+  readonly names: readonly string[];
+  readonly output: WriteStream;
+  readonly target: string;
+  readonly onLine?: (line: string) => void;
+  readonly retryDelaysMs: readonly number[];
+}): Promise<Omit<BackupResult, 'pruned'>> {
+  const { dir, names, output, target, onLine } = input;
   const entries: CentralEntry[] = [];
   let offset = 0;
+  let rawBytes = 0;
 
   const put = async (chunk: Buffer): Promise<void> => {
     if (!output.write(chunk)) {
@@ -269,21 +341,18 @@ async function writeZip(
 
   try {
     for (const name of names) {
-      let raw: Buffer;
-      let modified: Date;
+      const read = await readForBackup(join(dir, name), input.retryDelaysMs, onLine);
 
-      try {
-        const full = join(dir, name);
-
-        raw = await readFile(full);
-        modified = (await stat(full)).mtime;
-      } catch {
-        // O arquivo sumiu entre a listagem e a leitura. Um a menos
-        // no zip é melhor que um backup que não termina.
+      if (read === null) {
+        // `ENOENT`, e SÓ `ENOENT`: o arquivo sumiu entre a listagem
+        // e a leitura. Um a menos no zip é melhor que um backup que
+        // não termina — e não há conteúdo perdido, porque não há
+        // mais conteúdo. Qualquer outro erro já lançou lá dentro.
         onLine?.(`[backup] ${name} sumiu antes de ser copiado — segui sem ele.`);
         continue;
       }
 
+      const { raw, modified } = read;
       const compressed = deflateRawSync(raw, { level: DEFLATE_LEVEL });
       const crc = crc32(raw);
       const dosTime = toDosTime(modified);
@@ -306,6 +375,8 @@ async function writeZip(
         dosTime,
         dosDate,
       });
+
+      rawBytes += raw.length;
 
       await put(localHeader(name, crc, compressed.length, raw.length, dosTime, dosDate));
       await put(compressed);
@@ -331,6 +402,13 @@ async function writeZip(
   } catch (error) {
     output.destroy();
 
+    // Esperar o `close` antes de apagar: no Windows o `unlink` de um
+    // arquivo cujo handle ainda não fechou volta `EBUSY`, e o zip
+    // pela metade sobreviveria à limpeza.
+    if (!output.closed) {
+      await once(output, 'close').catch(() => undefined);
+    }
+
     // O zip pela metade é removido: um arquivo com o nome certo e
     // o conteúdo incompleto é o que faria alguém confiar nele no
     // dia em que precisasse restaurar.
@@ -339,7 +417,136 @@ async function writeZip(
     throw error;
   }
 
-  return { path: target, bytes: offset, files: entries.length };
+  return { path: target, bytes: offset, rawBytes, files: entries.length };
+}
+
+/**
+ * O zip novo, num caminho que NUNCA é o de um zip que já existe.
+ *
+ * ####  `wx`, E NÃO `w`  ####
+ *
+ * Enquanto o carimbo tinha resolução de segundo, dois backups no
+ * mesmo segundo escreviam no MESMO caminho e o segundo comia o
+ * primeiro sem uma linha de log. O milissegundo torna o encontro
+ * improvável; a flag `wx` torna o estrago impossível — o sistema
+ * recusa abrir um arquivo que existe, e aqui a recusa vira o
+ * próximo nome livre em vez de uma sobrescrita silenciosa.
+ */
+async function openFreshZip(
+  dir: string,
+  at: number,
+): Promise<{ readonly output: WriteStream; readonly path: string }> {
+  const base = `wipe-${stamp(at)}`;
+
+  for (let attempt = 1; attempt <= 100; attempt += 1) {
+    const path = join(dir, attempt === 1 ? `${base}.zip` : `${base}-${String(attempt)}.zip`);
+    const output = createWriteStream(path, { flags: 'wx' });
+
+    try {
+      await once(output, 'open');
+
+      return { output, path };
+    } catch (error) {
+      output.destroy();
+
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    `não consegui um nome livre para o backup em ${dir}: cem tentativas a partir de ${base}.zip, ` +
+      'e todas já existiam.',
+  );
+}
+
+/**
+ * Os bytes de um arquivo do save, ou `null` quando ele NÃO EXISTE
+ * MAIS.
+ *
+ * ####  "SUMIU" E "NÃO CONSEGUI LER" SÃO OPOSTOS  ####
+ *
+ * Enquanto os dois caíam no mesmo `catch`, um `.sav` travado pelo
+ * antivírus virava a linha "sumiu antes de ser copiado", o passo
+ * `backup` terminava `done` com 22 dos 23 arquivos dentro, e o
+ * `apagar` levava o original. O mundo não ficava no zip nem no
+ * disco — restaurar aquele backup devolveria o terreno sem as
+ * construções.
+ *
+ * Então `ENOENT` passa (não há conteúdo a perder) e QUALQUER outro
+ * erro lança. Lançar aqui derruba o passo `backup`, que é fatal:
+ * o wipe para antes do `apagar`, com o servidor parado e o mundo
+ * inteiro em disco.
+ *
+ * Antes de desistir, porém, ele insiste: ver
+ * `BACKUP_READ_RETRY_DELAYS_MS`.
+ */
+async function readForBackup(
+  full: string,
+  delaysMs: readonly number[],
+  onLine?: (line: string) => void,
+): Promise<{ readonly raw: Buffer; readonly modified: Date } | null> {
+  const name = basename(full);
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const raw = await readFile(full);
+
+      if (attempt > 0) {
+        onLine?.(
+          `[backup] ${name} liberou na tentativa ${String(attempt + 1)} — está dentro do zip.`,
+        );
+      }
+
+      return { raw, modified: await mtimeOf(full) };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+
+      if (code === 'ENOENT') {
+        return null;
+      }
+
+      const wait = LOCKED_CODES.has(code ?? '') ? delaysMs[attempt] : undefined;
+
+      if (wait === undefined) {
+        throw new Error(
+          `não consegui ler ${name} para o backup: ${(error as Error).message}. ` +
+            (attempt === 0
+              ? ''
+              : `Tentei ${String(attempt + 1)} vezes. `) +
+            'Um arquivo do save que não entra no zip é conteúdo que a restauração não devolve, e ' +
+            'o passo seguinte APAGA esta pasta — então este wipe para aqui. O servidor está ' +
+            'parado e o mundo continua inteiro em disco. Antivírus e backup em nuvem são a causa ' +
+            'comum e soltam o arquivo sozinhos: espere um pouco e retome a execução. Se você ' +
+            'aceita ficar sem volta atrás, desligue o backup na Configuração antes de retomar.',
+          { cause: error },
+        );
+      }
+
+      onLine?.(
+        `[backup] ${name} está travado por outro processo (${code ?? '?'}) — espero ` +
+          `${String(wait)} ms e tento de novo.`,
+      );
+
+      await esperar(wait);
+    }
+  }
+}
+
+/**
+ * O `mtime`, e `agora` quando não deu para perguntar.
+ *
+ * A data só alimenta o carimbo da entrada no zip, que é cosmético.
+ * Descartar um arquivo JÁ LIDO por causa dela seria trocar
+ * conteúdo por enfeite.
+ */
+async function mtimeOf(full: string): Promise<Date> {
+  try {
+    return (await stat(full)).mtime;
+  } catch {
+    return new Date();
+  }
 }
 
 function localHeader(
@@ -457,14 +664,24 @@ async function freeSpaceOf(dir: string): Promise<number | null> {
   return null;
 }
 
-/** `2026-08-18_16-00-03`. Ordenável, e legível por quem lê a pasta. */
+/**
+ * `2026-08-18_16-00-03-472`. Ordenável, e legível por quem lê a
+ * pasta.
+ *
+ * O milissegundo no fim não é enfeite: com resolução de segundo,
+ * dois backups do mesmo segundo montavam o MESMO nome e o segundo
+ * sobrescrevia o primeiro sem erro nenhum. Quem garante que isso
+ * não acontece é o `wx` do `openFreshZip`; o milissegundo é o que
+ * faz o segundo nome sair na primeira tentativa.
+ */
 function stamp(at: number): string {
   const date = new Date(at);
   const pad = (value: number): string => String(value).padStart(2, '0');
 
   return (
     `${String(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`
+    `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}` +
+    `-${String(date.getMilliseconds()).padStart(3, '0')}`
   );
 }
 
