@@ -345,3 +345,54 @@ export function usableForWipe(
 ): boolean {
   return entry.status === 'ready' && !blockedInForced(entry, forced);
 }
+
+/**
+ * Por que a entrada APONTADA por um plano `fixed` não serve para
+ * este wipe. `null` = ela serve.
+ *
+ * ####  ELA NÃO DECIDE NADA: SÓ DÁ NOME À DECISÃO  ####
+ *
+ * Quem decide continua sendo `usableForWipe`, e é a ela que esta
+ * função pergunta antes de qualquer outra coisa. Uma segunda
+ * condição escrita aqui poderia discordar da primeira, e o log
+ * passaria a explicar uma escolha que ninguém fez.
+ *
+ * O motivo não é enfeite. Sem ele o admin escolhe a dedo, o wipe
+ * sobe outro mundo, e a entrada dele fica `ready` para sempre —
+ * sem registro de que falta a marca de compatibilidade. É
+ * exatamente para o admin ficar sabendo que a trava do mapa custom
+ * existe (Docs\16 §9.1).
+ */
+export function pinnedRejection(
+  entry: Pick<MapPoolEntry, 'kind' | 'versionOk' | 'status'> | null,
+  forced: boolean,
+): string | null {
+  if (entry === null) {
+    return 'ela não está mais na fila';
+  }
+
+  if (usableForWipe(entry, forced)) {
+    return null;
+  }
+
+  if (blockedInForced(entry, forced)) {
+    return CUSTOM_IN_FORCED_REASON;
+  }
+
+  switch (entry.status) {
+    case 'used':
+      return 'ela já foi consumida por um wipe anterior';
+
+    case 'generating':
+      return 'ela ainda está sendo gerada no RustMaps';
+
+    case 'draft':
+      return 'ela ainda é rascunho';
+
+    case 'failed':
+      return 'a geração dela falhou';
+
+    default:
+      return 'ela não está pronta';
+  }
+}

@@ -1325,8 +1325,18 @@ backup e duas listas:
 | `warnings` | o que precisa ser dito e não impede nada |
 
 Hoje há **um** impedimento, `NO_DISK_SPACE`, e os avisos `NO_SAVE_FOLDER`,
-`EMPTY_MAP_POOL`, `BACKUP_DISABLED`, `BLUEPRINTS_WIPED`,
-`FULL_WIPE_WITHOUT_LIST`, `PLUGIN_DATA_MISSING` e `RCON_DOWN`.
+`MAP_KEPT`, `EMPTY_MAP_POOL`, `PINNED_MAP_UNUSABLE`, `BACKUP_DISABLED`,
+`BLUEPRINTS_WIPED`, `FULL_WIPE_WITHOUT_LIST`, `PLUGIN_DATA_MISSING` e
+`RCON_DOWN`.
+
+**`nextMap` é a MESMA decisão que a execução vai consumir** — o `mapOfPlan` de
+`core/src/wipe/next-wipe.ts` —, e não "a cabeça da fila". Ele é `null` nos dois
+mundos que não saem da fila, e o aviso que acompanha diz qual é: `MAP_KEPT`, o
+plano `keep`, que mantém o mapa de agora sem tocar na fila, e `EMPTY_MAP_POOL`,
+a seed que o agente sorteia porque nada na fila serve. `PINNED_MAP_UNUSABLE` sai
+quando o plano é `fixed` e a entrada apontada não vai subir (sumiu, já foi
+consumida, ainda está gerando, ou é `.map` custom sem a marca de versão num wipe
+forçado): o wipe acontece com a fila, e a frase diz por quê.
 
 **O espaço é conferido aqui porque aqui o servidor ainda está no ar.** Descobrir
 o disco cheio no passo `backup` seria descobrir com o servidor já parado, os

@@ -107,6 +107,14 @@ interface Scenario {
   readonly backupsDir: string;
   readonly control: WipeServerControl & { running: boolean; readonly stops: number[] };
   readonly settings: Record<string, string | number | boolean>[];
+  /**
+   * Erros que o `updateSettings` vai lançar, um por chamada.
+   *
+   * É o supervisor gravando o `.ini`: ele escreve em disco, confere
+   * as portas e relê o arquivo, e está declarado `@throws`. Um
+   * teste de atomicidade sem ele não existe.
+   */
+  readonly settingsErrors: Error[];
   readonly announced: number[];
 }
 
@@ -183,10 +191,19 @@ async function scenario(
 
   const settings: Record<string, string | number | boolean>[] = [];
 
+  const settingsErrors: Error[] = [];
+
   const servers: WipeServers = {
     configOf: () => config,
     updateSettings: (_id, patch) => {
+      const boom = settingsErrors.shift();
+
+      if (boom !== undefined) {
+        throw boom;
+      }
+
       settings.push({ ...patch });
+
       return [];
     },
   };
@@ -256,12 +273,21 @@ async function scenario(
     backupsDir,
     control,
     settings,
+    settingsErrors,
     announced,
   };
 }
 
 function operation(): Operation {
   return new Operation('wipe-run', SERVER);
+}
+
+/** Tudo o que a operação escreveu, numa string só. */
+function logDe(op: Operation): string {
+  return op
+    .logFrom(0)
+    .map((line) => line.text)
+    .join('\n');
 }
 
 async function names(dir: string): Promise<readonly string[]> {
@@ -890,6 +916,200 @@ describe('o wipe FORÇADO e o mapa custom apontado a dedo', () => {
 
     expect(finished.mapAfter?.mapPoolId).toBe(custom);
     expect(s.settings[0]).toMatchObject({ levelUrl: 'https://mapas.exemplo/ilha.map' });
+  });
+
+  it('o pulo do custom sai no log com `fixed`, como já saía com `pool`', async () => {
+    // ####  DOIS CENÁRIOS IDÊNTICOS, LADO A LADO  ####
+    //
+    // Mesma fila, mesmo wipe forçado, mesmo mundo no fim. O
+    // `fixed` deixava de rodar o `pickForWipe` — que é quem monta
+    // a lista de puladas — e NENHUMA linha de pulo saía: a entrada
+    // ficava `ready` para sempre, sem registro de por que não
+    // subiu, e o admin não descobria que falta marcar a
+    // compatibilidade dela. A trava do Docs\16 §9.1 existe
+    // exatamente para ele ficar sabendo.
+    const logs: string[] = [];
+
+    for (const aDedo of [false, true]) {
+      const s = await scenario();
+
+      // O custom sem marca é a CABEÇA da fila: é ele que o wipe
+      // forçado tem de pular para chegar no procedural.
+      const custom = s.mapPool.add(SERVER, {
+        kind: 'custom',
+        level: 'Ilha',
+        levelUrl: 'https://mapas.exemplo/ilha.map',
+      }).entry.id;
+
+      const procedural = s.mapPool.add(SERVER, { seed: '33333', worldSize: 4000 }).entry.id;
+      const plan = forcado(s);
+
+      if (aDedo) {
+        s.schedule.updatePlan(
+          SERVER,
+          plan.id,
+          { mapSource: 'fixed', mapPoolId: custom },
+          Date.now(),
+        );
+      }
+
+      const op = operation();
+
+      const run = s.runs.create(SERVER, {
+        planId: plan.id,
+        kind: 'forced',
+        bpPolicy: plan.bpPolicy,
+      });
+
+      const finished = await s.runner.run({
+        serverId: SERVER,
+        runId: run.id,
+        operation: op,
+        control: s.control,
+      });
+
+      // O mundo é o mesmo nos dois, e a entrada recusada continua
+      // na fila esperando a marca.
+      expect(finished.mapAfter?.mapPoolId).toBe(procedural);
+      expect(s.mapPool.get(SERVER, custom)?.status).toBe('ready');
+
+      logs.push(logDe(op));
+    }
+
+    for (const texto of logs) {
+      expect(texto).toContain('pulei a entrada #1 da fila');
+      expect(texto).toContain('mapa custom sem a marca');
+    }
+
+    // E o `fixed` diz também o que houve com a escolha a dedo.
+    expect(logs[1]).toContain('NÃO vai subir');
+  });
+});
+
+describe('o log diz QUEM escolheu o mundo', () => {
+  it('a queda para a fila não passa por escolha a dedo', async () => {
+    // ####  A QUEDA TEM O MESMO FORMATO DA ESCOLHA  ####
+    //
+    // Quando o ponteiro não serve, `mapOfPlan` devolve a cabeça da
+    // fila — também como `source: 'entry'`. Sem comparar o id, o
+    // `wipe_run_steps.message` e o log da operação diziam
+    // "escolhida a dedo no plano" de uma entrada que ninguém
+    // escolheu.
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const op = operation();
+
+    s.mapPool.remove(SERVER, segunda);
+
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: op,
+      control: s.control,
+    });
+
+    const message = finished.steps.find((step) => step.step === 'configurar')?.message ?? '';
+
+    expect(finished.mapAfter?.mapPoolId).toBe(primeira);
+    expect(message).toContain(`entrada #${String(primeira)} da fila`);
+    expect(message).not.toContain('escolhida a dedo');
+
+    // E o admin fica sabendo o que houve com a escolha DELE.
+    expect(logDe(op)).toContain(`a entrada #${String(segunda)}`);
+    expect(logDe(op)).toContain('ela não está mais na fila');
+  });
+
+  it('a entrada realmente apontada continua dizendo que foi a dedo', async () => {
+    const s = await scenario();
+    const { segunda } = fila(s);
+    const op = operation();
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: op,
+      control: s.control,
+    });
+
+    expect(finished.steps.find((step) => step.step === 'configurar')?.message).toContain(
+      'escolhida a dedo no plano',
+    );
+    expect(logDe(op)).not.toContain('NÃO vai subir');
+  });
+});
+
+describe('a fila só é QUEIMADA depois de o `.ini` estar gravado', () => {
+  it('o `.ini` falha, e o wipe inteiro consome UMA entrada só', async () => {
+    // ####  MEDIDO: DUAS ENTRADAS POR UM WIPE SÓ  ####
+    //
+    // A entrada era queimada antes do `updateSettings`, e o
+    // `map_after` — a única marca de idempotência do passo — só
+    // era gravado depois dele. Um erro no meio deixava a #1 `used`
+    // sem nunca ter subido, e a retomada, sem marca nenhuma,
+    // queimava a #2.
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'pool' }));
+
+    s.settingsErrors.push(new Error('o .ini está aberto em outro programa'));
+
+    await expect(
+      s.runner.run({ serverId: SERVER, runId: run.id, operation: operation(), control: s.control }),
+    ).rejects.toThrow('o .ini');
+
+    // Nada consumido, e nenhuma marca: a volta reencontra a MESMA
+    // fila e toma a MESMA decisão.
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+    expect(s.runs.get(SERVER, run.id)?.mapAfter ?? null).toBeNull();
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    expect(retomado.status).toBe('done');
+    expect(retomado.mapAfter?.mapPoolId).toBe(primeira);
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('used');
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('ready');
+    expect(s.settings).toHaveLength(1);
+  });
+
+  it('com `fixed`, a retomada sobe a entrada APONTADA — e não a cabeça', async () => {
+    // ####  O PIOR DOS DOIS  ####
+    //
+    // A #2 ficava `used` sem ter subido; na volta o `mapOfPlan` a
+    // via consumida, caía para a cabeça da fila e o wipe subia o
+    // mundo que o plano explicitamente não queria.
+    const s = await scenario();
+    const { primeira, segunda } = fila(s);
+    const run = execucaoDe(s, plano(s, { mapSource: 'fixed', mapPoolId: segunda }));
+
+    s.settingsErrors.push(new Error('o .ini está aberto em outro programa'));
+
+    await expect(
+      s.runner.run({ serverId: SERVER, runId: run.id, operation: operation(), control: s.control }),
+    ).rejects.toThrow('o .ini');
+
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('ready');
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    expect(retomado.mapAfter?.mapPoolId).toBe(segunda);
+    expect(retomado.mapAfter?.seed).toBe('22222');
+    expect(s.mapPool.get(SERVER, primeira)?.status).toBe('ready');
+    expect(s.mapPool.get(SERVER, segunda)?.status).toBe('used');
   });
 });
 

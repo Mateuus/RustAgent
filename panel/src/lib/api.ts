@@ -3101,6 +3101,14 @@ export interface WipePreviewResponse {
   readonly nextForcedAt: number;
   readonly bpPolicy: BpPolicy;
   readonly fullWipe: boolean;
+  /**
+   * A entrada da fila que ESTE wipe vai consumir — a mesma decisão
+   * que a execução consome, e não a cabeça da fila.
+   *
+   * `null` nos dois mundos que não saem da fila, e o aviso que
+   * acompanha diz qual é: `MAP_KEPT` (o plano manda manter o mapa
+   * de agora) e `EMPTY_MAP_POOL` (o agente sorteia a seed).
+   */
   readonly nextMap: WipeMap | null;
   readonly server: {
     readonly id: string;

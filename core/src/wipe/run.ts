@@ -46,7 +46,7 @@ import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ServerConfig } from '../config.js';
-import type { MapPoolRepository } from '../db/map-pool-repository.js';
+import type { MapPoolPick, MapPoolRepository } from '../db/map-pool-repository.js';
 import type {
   WipeAnnounceSettings,
   WipeExecSettings,
@@ -59,10 +59,11 @@ import type { WipesRepository } from '../db/wipes-repository.js';
 import type { Broadcaster } from '../game/broadcast.js';
 import type { Logger } from '../logger.js';
 import type { Operation } from '../ops/operations.js';
-import type { BpPolicy, WipePlanKind, WipeRunStep } from '../types/wipe.js';
+import type { BpPolicy, MapPoolEntry, WipePlan, WipePlanKind, WipeRunStep } from '../types/wipe.js';
 import { toError } from '../util.js';
 import { backupSaveFolder, checkBackupSpace } from './backup.js';
-import { mapOfPlan } from './next-wipe.js';
+import { pinnedRejection } from './map-pool.js';
+import { mapOfPlan, mapOfPool } from './next-wipe.js';
 import { resolvePluginDataTargets } from './plugin-data.js';
 import { classifySaveFolder, saveFolderPath } from './save-files.js';
 
@@ -715,33 +716,74 @@ export class WipeRunner implements WipeExecutor {
     }
 
     const plan = run.planId === null ? null : this.#deps.schedule.getPlan(serverId, run.planId);
-    const decision = plan === null ? null : mapOfPlan({ mapPool: this.#deps.mapPool }, plan);
 
-    // A MESMA `kind` que `mapOfPlan` acabou de olhar. Num wipe
-    // forçado a fila pula o mapa custom sem marca de versão, e as
-    // duas contas precisam concordar sobre qual wipe é este.
+    // A MESMA `kind` que a decisão olha. Num wipe forçado a fila
+    // pula o mapa custom sem marca de versão, e as duas contas
+    // precisam concordar sobre qual wipe é este.
     const forced = (plan ?? run).kind === 'forced';
 
-    if (decision?.source === 'keep') {
+    const decision =
+      plan === null
+        ? mapOfPool({ mapPool: this.#deps.mapPool }, serverId, forced)
+        : mapOfPlan({ mapPool: this.#deps.mapPool }, plan);
+
+    if (decision.source === 'keep') {
       return this.#manterMundo(request, run);
     }
 
-    // `fixed` consome A ENTRADA APONTADA, esteja ela onde estiver
-    // na fila. Quando o ponteiro não serve mais — sumiu, já foi
-    // usada, ainda está `generating`, ou é um `.map` custom sem a
-    // marca de compatibilidade num wipe forçado —, `mapOfPlan` já
-    // caiu para a fila, e o `takeForWipe` abaixo é o caminho.
+    // ####  A ENTRADA APONTADA É A QUE O PLANO APONTOU  ####
+    //
+    // E não a que a decisão devolveu. `fixed` consome a entrada do
+    // `mapPoolId`, esteja ela onde estiver na fila; quando esse
+    // ponteiro não serve mais — sumiu, já foi usada, ainda está
+    // `generating`, ou é um `.map` custom sem a marca de
+    // compatibilidade num wipe forçado —, `mapOfPlan` CAI para a
+    // fila e devolve a cabeça dela, também como `source: 'entry'`.
+    //
+    // Sem comparar o id, a queda passava por escolha: o log e o
+    // `wipe_run_steps.message` diziam "escolhida a dedo no plano"
+    // de uma entrada que ninguém escolheu, e o `pickForWipe` — que
+    // é quem monta a lista de puladas — não rodava, então o aviso
+    // de mapa custom recusado sumia do log.
     const pinned =
-      plan?.mapSource === 'fixed' && decision?.source === 'entry' ? decision.entry : null;
+      plan?.mapSource === 'fixed' &&
+      plan.mapPoolId !== null &&
+      decision.source === 'entry' &&
+      decision.entry.id === plan.mapPoolId
+        ? decision.entry
+        : null;
 
-    const taken =
+    if (plan?.mapSource === 'fixed' && pinned === null) {
+      this.#avisarPonteiroRecusado(request, plan, forced);
+    }
+
+    // ####  ESCOLHER NÃO É QUEIMAR  ####
+    //
+    // `pickForWipe` só LÊ: ele diz qual entrada seria consumida e
+    // quais ficaram pelo caminho. Quem a marca `used` é o fim
+    // deste passo, depois de o `.ini` estar gravado.
+    //
+    // `MapPoolEntry` e não `MapPoolRecord`: daqui para baixo só o
+    // contrato mínimo é lido — nome, seed, tamanho, `levelUrl` e o
+    // id —, e é ele que a decisão devolve.
+    const picked: { readonly entry: MapPoolEntry | null; readonly skipped: MapPoolPick['skipped'] } =
       pinned === null
-        ? this.#deps.mapPool.takeForWipe(serverId, { forced })
-        : { entry: this.#deps.mapPool.markUsed(serverId, pinned.id), drawn: false, skipped: [] };
+        ? this.#deps.mapPool.pickForWipe(serverId, { forced })
+        : { entry: pinned, skipped: [] };
 
-    for (const skipped of taken.skipped) {
+    for (const skipped of picked.skipped) {
       request.operation.log(`[wipe] pulei a entrada #${String(skipped.id)} da fila: ${skipped.reason}`);
     }
+
+    // A fila sem nada utilizável SORTEIA, e o sorteio é a única
+    // escrita que precede o `.ini` — ele precisa preceder, porque
+    // é a seed dele que vai no patch. E ele pode: o sorteio cria a
+    // própria linha, e não queima entrada nenhuma da curadoria do
+    // admin.
+    const taken =
+      picked.entry === null
+        ? this.#deps.mapPool.takeForWipe(serverId, { forced })
+        : { entry: picked.entry, drawn: false };
 
     const entry = taken.entry;
 
@@ -773,16 +815,73 @@ export class WipeRunner implements WipeExecutor {
     // baixando o `.map` de novo e o wipe não troca mundo nenhum.
     patch.levelUrl = entry.levelUrl ?? '';
 
+    // ####  O `.ini` PRIMEIRO, A FILA POR ÚLTIMO  ####
+    //
+    // `updateSettings` escreve em disco, confere as portas e relê
+    // o arquivo — é o único passo daqui que falha por conta
+    // própria, e ele LANÇA (ver servers/supervisor.ts). Queimando
+    // a entrada antes dele, um erro deixava a fila consumida e o
+    // `map_after` nulo: a retomada rodava o passo inteiro de novo
+    // e queimava a SEGUNDA entrada, e num plano `fixed` via a
+    // apontada já `used`, caía para a cabeça da fila e subia o
+    // mundo que o admin explicitamente não queria.
+    //
+    // Nesta ordem a retomada é o caso normal: um erro do `.ini`
+    // não consome nada, e a volta reencontra a MESMA fila, toma a
+    // MESMA decisão e escreve o MESMO patch. Depois dele só restam
+    // escritas no banco do próprio agente — e o `map_after`, que é
+    // a marca de idempotência, vem antes da queima: uma queda
+    // entre as duas custa um mapa repetido no wipe seguinte, e
+    // nunca um mundo que ninguém escolheu.
     this.#deps.servers.updateSettings(serverId, patch);
     this.#deps.runs.update(serverId, request.runId, { mapAfter: world });
 
     if (taken.drawn) {
+      // A linha sorteada já nasceu `used`, no próprio sorteio: ela
+      // não existia antes deste passo, e não há fila a queimar.
       return `${describeWorld(world)} — a fila estava vazia, e o agente SORTEOU esta seed.`;
     }
+
+    this.#deps.mapPool.markUsed(serverId, entry.id);
 
     return pinned === null
       ? `${describeWorld(world)} (entrada #${String(entry.id)} da fila).`
       : `${describeWorld(world)} (entrada #${String(entry.id)}, escolhida a dedo no plano).`;
+  }
+
+  /**
+   * O mapa escolhido a dedo NÃO vai subir — e por quê.
+   *
+   * ####  SEM ESTA LINHA A TRAVA NÃO AVISA NINGUÉM  ####
+   *
+   * O wipe acontece do mesmo jeito: cair para a fila é de
+   * propósito, e um ponteiro velho não pode ser motivo para o
+   * servidor não zerar. Mas a entrada apontada continua na fila,
+   * `ready`, e sem nenhum registro de por que não foi ela — o
+   * admin marcaria a compatibilidade do `.map` se soubesse que é
+   * isso que falta. É para ele saber que a trava existe
+   * (Docs\16 §9.1).
+   *
+   * O motivo vem de `pinnedRejection`, escrito em cima do MESMO
+   * `usableForWipe` que recusou a entrada: o log não pode explicar
+   * uma decisão diferente da que foi tomada.
+   */
+  #avisarPonteiroRecusado(request: WipeRunRequest, plan: WipePlan, forced: boolean): void {
+    if (plan.mapPoolId === null) {
+      request.operation.log(
+        '[wipe] o plano diz "mapa escolhido a dedo" e não aponta entrada nenhuma: o mundo sai da fila.',
+      );
+
+      return;
+    }
+
+    const alvo = this.#deps.mapPool.get(request.serverId, plan.mapPoolId);
+    const motivo = pinnedRejection(alvo, forced) ?? 'ela não serve para este wipe';
+
+    request.operation.log(
+      `[wipe] a entrada #${String(plan.mapPoolId)}, escolhida a dedo no plano, NÃO vai subir: ` +
+        `${motivo}. O mundo sai da fila, e a entrada continua lá.`,
+    );
   }
 
   /**

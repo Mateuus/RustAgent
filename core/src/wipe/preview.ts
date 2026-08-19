@@ -36,6 +36,8 @@ import type { WipeExecSettings } from '../db/wipe-runs-repository.js';
 import type { WipeScheduleReader } from '../db/wipe-schedule-repository.js';
 import type { BpPolicy, WipePlan } from '../types/wipe.js';
 import { checkBackupSpace, type BackupSpace } from './backup.js';
+import { pinnedRejection } from './map-pool.js';
+import { mapOfPlan, mapOfPool } from './next-wipe.js';
 import { listPluginData, type PluginDataListing } from './plugin-data.js';
 import { classifySaveFolder, saveFolderPath, type SaveFolderSummary } from './save-files.js';
 import { nextForcedWipe } from './schedule.js';
@@ -61,7 +63,14 @@ export interface WipePreview {
   readonly bpPolicy: BpPolicy;
   /** Este wipe leva também a lista de dados de plugin. */
   readonly fullWipe: boolean;
-  /** O mundo que entra. `null` = fila vazia, e o agente sorteia. */
+  /**
+   * A entrada da fila que ESTE wipe vai consumir.
+   *
+   * `null` nos dois mundos que não saem da fila, e o aviso que
+   * acompanha diz qual é: `MAP_KEPT`, o plano que manda manter o
+   * mapa de agora, e `EMPTY_MAP_POOL`, a seed que o agente sorteia
+   * porque nada na fila serve.
+   */
   readonly nextMap: MapPoolRecord | null;
   readonly server: {
     readonly id: string;
@@ -158,16 +167,89 @@ export async function buildWipePreview(deps: WipePreviewDeps): Promise<WipePrevi
     });
   }
 
-  // ---- os avisos --------------------------------------------
-  const nextMap = deps.mapPool.next(deps.serverId, plan?.kind === 'forced');
+  // ---- o mundo que entra ------------------------------------
+  //
+  // ####  A MESMA DECISÃO DO EXECUTOR, E NÃO UMA PARECIDA  ####
+  //
+  // Quem escolhe o mundo é `mapOfPlan`, de wipe/next-wipe.ts — a
+  // mesma função que o passo `configurar` consome, que o chat
+  // responde em `{wipe.mapa}` e que a tela CALENDÁRIO desenha.
+  // Perguntar aqui "qual é a cabeça da fila?" acertava enquanto o
+  // executor perguntava o mesmo; desde que ele passou a respeitar
+  // o `mapSource`, ESTA tela — a última que o admin lê antes de
+  // apertar o botão que zera o servidor — passou a prometer outra
+  // coisa. Medido: plano `keep` prometendo a cabeça da fila que
+  // ele não toca, e `fixed` apontando a #2 prometendo a #1.
+  //
+  // Sem plano — o "WIPAR AGORA" —, a fila é a resposta, como no
+  // executor. E ele nunca é FORÇADO: a execução sem plano nasce
+  // `manual` (ver routes/wipe-runs.ts), e é o forçado que faz a
+  // fila pular o mapa custom sem marca de versão.
+  const decision =
+    plan === null
+      ? mapOfPool({ mapPool: deps.mapPool }, deps.serverId, false)
+      : mapOfPlan({ mapPool: deps.mapPool }, plan);
 
-  if (nextMap === null) {
+  // `mapOfPlan` fala no contrato mínimo (`MapPoolEntry`); a tela
+  // espera o registro inteiro da fila, com nota e `updatedAt`. É a
+  // MESMA linha, relida pelo id — e não uma segunda escolha.
+  const nextMap =
+    decision.source === 'entry' ? deps.mapPool.get(deps.serverId, decision.entry.id) : null;
+
+  // ---- os avisos --------------------------------------------
+  //
+  // ####  UM AVISO QUE DESCREVE O QUE NÃO VAI ACONTECER  ####
+  //
+  // É pior do que aviso nenhum: o admin decide com base nele. Cada
+  // um dos três avisos de MUNDO — o mantido, o sorteado e o
+  // escolhido a dedo que não serve — sai do caso em que ele é
+  // VERDADE, e de nenhum outro.
+  if (decision.source === 'keep') {
+    warnings.push({
+      code: 'MAP_KEPT',
+      message:
+        'Este wipe NÃO troca o mundo: o plano manda MANTER o mapa de agora — mesma seed, mesmo ' +
+        'tamanho, mesmo arquivo. O que zera é o save. A fila de mapas não é tocada, e a próxima ' +
+        'entrada dela continua esperando o wipe seguinte.',
+    });
+  }
+
+  if (decision.source === 'undecided') {
     warnings.push({
       code: 'EMPTY_MAP_POOL',
       message:
-        'A fila de mapas está vazia. Isso NÃO trava o wipe: o agente sorteia uma seed, registra ' +
-        'que sorteou e segue. Só significa que ninguém escolheu o mundo que vem.',
+        'Nenhuma entrada da fila serve para este wipe: ou ela está vazia, ou o que sobrou é mapa ' +
+        'custom sem a marca de compatibilidade num wipe forçado. Isso NÃO trava o wipe: o agente ' +
+        'sorteia uma seed, registra que sorteou e segue. Só significa que ninguém escolheu o ' +
+        'mundo que vem.',
     });
+  }
+
+  // ####  O PONTEIRO DO PLANO PODE TER MORRIDO  ####
+  //
+  // `fixed` aponta uma entrada, e ela some da fila, é consumida
+  // por um wipe anterior, fica presa em `generating` ou é um
+  // `.map` custom sem a marca de versão num wipe forçado. O wipe
+  // acontece do mesmo jeito — cair para a fila é de propósito —,
+  // mas quem escolheu a dedo precisa saber ANTES que o mundo dele
+  // não é o que vai subir, e por quê. Ver Docs\16 §9.1.
+  if (plan !== null && plan.mapSource === 'fixed') {
+    const reason = pinnedRejection(
+      plan.mapPoolId === null ? null : deps.mapPool.get(deps.serverId, plan.mapPoolId),
+      plan.kind === 'forced',
+    );
+
+    if (reason !== null) {
+      warnings.push({
+        code: 'PINNED_MAP_UNUSABLE',
+        message:
+          plan.mapPoolId === null
+            ? 'Este wipe está marcado como "mapa escolhido a dedo" e não aponta entrada nenhuma: ' +
+              'o mundo vai sair da fila, como em qualquer outro wipe.'
+            : `A entrada #${String(plan.mapPoolId)}, escolhida a dedo neste wipe, não vai subir: ` +
+              `${reason}. O mundo sai da fila, e a escolha continua gravada no plano.`,
+      });
+    }
   }
 
   if (!exec.backup.enabled) {

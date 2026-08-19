@@ -76,6 +76,42 @@ import type { AgentDatabase } from './database.js';
 export const DEFAULT_WIPE_HORIZON_DAYS = 90;
 
 /**
+ * `fixed` sem entrada apontada não é meio-caminho: é `pool` com a
+ * etiqueta errada.
+ *
+ * ####  A LINHA GRAVADA NÃO PODE MENTIR  ####
+ *
+ * `fixed` quer dizer "ESTA entrada da fila, esta mesma", e o
+ * `mapPoolId` É a escolha. Sem ele o painel mostra "escolhido a
+ * dedo" num wipe em que ninguém escolheu nada, e a execução pega a
+ * cabeça da fila como em qualquer outro — o admin lê uma coisa na
+ * agenda e o servidor sobe outra.
+ *
+ * Isto NÃO é a mesma coisa que um ponteiro que morreu depois: uma
+ * entrada apagada, consumida ou sem a marca de versão é uma
+ * escolha que existiu, e para ela a queda para a fila é de
+ * propósito (ver `mapOfPlan`, em wipe/next-wipe.ts). Aqui não
+ * houve escolha nenhuma para respeitar.
+ *
+ * A conta é feita sobre o estado FINAL da linha, e não sobre o que
+ * veio no corpo: mandar só `mapSource: 'fixed'` num plano que já
+ * aponta a entrada #7 continua valendo.
+ *
+ * @throws {ApiError} 400
+ */
+function assertMapChoice(mapSource: MapSource, mapPoolId: number | null): void {
+  if (mapSource === 'fixed' && mapPoolId === null) {
+    throw new ApiError(
+      'WIPE_FIXED_MAP_WITHOUT_ENTRY',
+      'Este wipe está marcado como "mapa escolhido a dedo" e não aponta entrada nenhuma da fila. ' +
+        'Mande o `mapPoolId` da entrada que deve subir, ou `mapSource: "pool"` para o wipe pegar ' +
+        'a primeira pronta da fila.',
+      400,
+    );
+  }
+}
+
+/**
  * Os status que a reconciliação pode reescrever.
  *
  * Fora deles a linha é fato consumado — um wipe que rodou, que
@@ -388,8 +424,8 @@ export class WipeScheduleRepository implements WipeScheduleReader {
    * reconciliação não pode desfazer isso na próxima vez que a
    * cadência mudar.
    *
-   * @throws {ApiError} 400 no passado, 409 se já houver outro no
-   *   mesmo instante.
+   * @throws {ApiError} 400 no passado ou em `fixed` sem entrada
+   *   apontada, 409 se já houver outro no mesmo instante.
    */
   createPlan(serverId: string, input: WipePlanInput, now: number = Date.now()): WipePlan {
     if (input.scheduledAt <= now) {
@@ -401,6 +437,7 @@ export class WipeScheduleRepository implements WipeScheduleReader {
     }
 
     this.#assertFree(serverId, input.scheduledAt, null);
+    assertMapChoice(input.mapSource ?? 'pool', input.mapPoolId ?? null);
 
     const result = this.#db
       .prepare(
@@ -442,7 +479,8 @@ export class WipeScheduleRepository implements WipeScheduleReader {
    * sozinho para sábado sem ninguém ter mexido.
    *
    * @throws {ApiError} 404 desconhecido, 409 já consumado ou data
-   *   de forçado, 400 no passado.
+   *   de forçado, 400 no passado ou em `fixed` sem entrada
+   *   apontada.
    */
   updatePlan(
     serverId: string,
@@ -477,6 +515,11 @@ export class WipeScheduleRepository implements WipeScheduleReader {
       this.#assertFree(serverId, scheduledAt, id);
     }
 
+    const mapSource = patch.mapSource ?? current.mapSource;
+    const mapPoolId = patch.mapPoolId === undefined ? current.mapPoolId : patch.mapPoolId;
+
+    assertMapChoice(mapSource, mapPoolId);
+
     this.#db
       .prepare(
         `UPDATE wipe_plans
@@ -494,8 +537,8 @@ export class WipeScheduleRepository implements WipeScheduleReader {
         id,
         at: scheduledAt,
         bp: patch.bpPolicy ?? current.bpPolicy,
-        map_source: patch.mapSource ?? current.mapSource,
-        map_pool_id: patch.mapPoolId === undefined ? current.mapPoolId : patch.mapPoolId,
+        map_source: mapSource,
+        map_pool_id: mapPoolId,
         note: patch.note === undefined ? current.note : patch.note,
         now,
       });

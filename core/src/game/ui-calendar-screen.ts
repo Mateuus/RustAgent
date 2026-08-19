@@ -952,17 +952,25 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
 
   // ####  O #1 É O MUNDO DO CARTÃO, QUANDO ELE SAIU DA FILA  ####
   //
-  // A numeração é a POSIÇÃO NA FILA de hoje. Com uma entrada ainda
-  // por consumir no cartão, ela é o #1 e a lista começa no #2 —
-  // vale para `pool` e para `fixed`, que consome a entrada apontada
-  // e deixa as outras na ordem em que serão usadas.
+  // A numeração é a ORDEM EM QUE A FILA VAI SER CONSUMIDA, e não a
+  // `position` gravada em cada linha — é a mesma conta do cabeçalho
+  // deste arquivo, que conta MUNDOS. Com uma entrada ainda por
+  // consumir no cartão, ela é o #1 e a lista começa no #2.
+  //
+  // É em `fixed` que as duas leituras se separam, e a certa é esta:
+  // com o plano apontando a entrada da posição 1, ela sobe primeiro
+  // e a cabeça da fila sobe depois — a cabeça é o "#2 na fila"
+  // porque é o segundo mundo a entrar, ainda que hoje ela seja a
+  // primeira linha da lista. Numerar pela posição prometeria ao VIP
+  // que o próximo mundo é um que só vem no wipe seguinte.
   //
   // Quando o cartão não segura entrada nenhuma — `keep`, ninguém
   // ter escolhido, ou o mundo JÁ consumido pelo `configurar`, que
-  // saiu da fila e virou `used` —, o primeiro desta lista é o #1
-  // dela. O `#2` fixo dava ao VIP que paga pela fila um ordinal que
-  // não existe: com `keep` e a fila 4000/3500/3000, a tela chamava
-  // o 4000 de "#2 na fila" sendo ele o primeiro.
+  // saiu da fila e virou `used` —, o primeiro desta lista é o
+  // próximo a ser consumido, e aí ele é o #1. O `#2` fixo dava ao
+  // VIP que paga pela fila um ordinal que não existe: com `keep` e
+  // a fila 4000/3500/3000, a tela chamava o 4000 de "#2 na fila"
+  // sendo ele o primeiro a entrar.
   elements.push(...queueRows(calendar, PAD + MAP_IMAGE + 40, next.mapFrom === 'entry' ? 2 : 1));
 
   return elements;

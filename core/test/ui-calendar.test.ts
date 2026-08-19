@@ -843,6 +843,23 @@ describe('a régua quando o mundo do wipe não sai da fila', () => {
     }
   });
 
+  it('a numeração é a ORDEM DE CONSUMO, e não a `position` gravada', () => {
+    // ####  É EM `fixed` QUE AS DUAS LEITURAS SE SEPARAM  ####
+    //
+    // O plano aponta a entrada da posição 1: ela sobe primeiro, e
+    // a CABEÇA da fila (posição 0, procedural 4000) só sobe no
+    // wipe seguinte. Ela é o "#2 na fila" porque é o segundo mundo
+    // a entrar — numerar pela `position` prometeria ao VIP que o
+    // próximo mundo é um que só vem depois.
+    const calendar = calendarFor([plan({ mapSource: 'fixed', mapPoolId: 2 })], ready, ['gold']);
+    const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+
+    // O cartão é a entrada apontada, que está na posição 1.
+    expect(calendar.next?.map).toBe('procedural 3500');
+    expect(card).toContain('#2 na fila · procedural 4000');
+    expect(card).toContain('#3 na fila · procedural 3000');
+  });
+
   it('com o mundo JÁ GRAVADO na execução, o cartão custa a vaga do nível', () => {
     // ####  A JANELA É CURTA, E O MUNDO A MAIS É REAL  ####
     //

@@ -449,6 +449,52 @@ describe('o wipe marcado à mão', () => {
       expect(isApiError(error) && error.code).toBe('WIPE_SCHEDULE_CONFLICT');
     }
   });
+
+  it('recusa `fixed` sem entrada apontada — a linha não pode mentir', () => {
+    // ####  `fixed` SEM `mapPoolId` É `pool` COM ETIQUETA ERRADA  ####
+    //
+    // A agenda mostraria "escolhido a dedo" num wipe em que
+    // ninguém escolheu nada, e a execução pegaria a cabeça da
+    // fila como em qualquer outro. Isto NÃO é o ponteiro que
+    // morreu depois — esse existiu, e para ele a queda para a fila
+    // é de propósito. Aqui não houve escolha nenhuma.
+    try {
+      repository.createPlan(
+        SERVER,
+        { scheduledAt: emSaoPaulo(8, 26), bpPolicy: 'keep', mapSource: 'fixed' },
+        NOW,
+      );
+      expect.unreachable('`fixed` sem entrada devia ter sido recusado');
+    } catch (error) {
+      expect(isApiError(error) && error.code).toBe('WIPE_FIXED_MAP_WITHOUT_ENTRY');
+      expect(isApiError(error) && error.status).toBe(400);
+    }
+
+    const plano = repository.createPlan(
+      SERVER,
+      { scheduledAt: emSaoPaulo(8, 26), bpPolicy: 'keep', mapSource: 'fixed', mapPoolId: 7 },
+      NOW,
+    );
+
+    // A conta é sobre o estado FINAL da linha: mandar só o
+    // `mapSource` num plano que já aponta continua valendo...
+    expect(repository.updatePlan(SERVER, plano.id, { mapSource: 'fixed' }, NOW).mapPoolId).toBe(7);
+
+    // ...e tirar a entrada de um plano `fixed` é o mesmo estado
+    // mentiroso, por outro caminho.
+    try {
+      repository.updatePlan(SERVER, plano.id, { mapPoolId: null }, NOW);
+      expect.unreachable('apagar a entrada de um plano `fixed` devia ter sido recusado');
+    } catch (error) {
+      expect(isApiError(error) && error.code).toBe('WIPE_FIXED_MAP_WITHOUT_ENTRY');
+    }
+
+    // Trocando a origem junto, some o motivo da recusa.
+    expect(
+      repository.updatePlan(SERVER, plano.id, { mapSource: 'pool', mapPoolId: null }, NOW)
+        .mapSource,
+    ).toBe('pool');
+  });
 });
 
 describe('a reconciliação e o passado', () => {

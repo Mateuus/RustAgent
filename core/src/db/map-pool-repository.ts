@@ -107,6 +107,22 @@ export interface MapPoolCreated {
   readonly drawn: boolean;
 }
 
+/**
+ * A entrada que o wipe VAI consumir, e as que ele pula no caminho
+ * — antes de consumir coisa nenhuma.
+ *
+ * `entry: null` = a fila não tem nada utilizável, e quem sorteia é
+ * o `takeForWipe`.
+ */
+export interface MapPoolPick {
+  readonly entry: MapPoolRecord | null;
+  /**
+   * As entradas que estavam na frente e foram puladas, com o
+   * motivo. Vazio no caso comum.
+   */
+  readonly skipped: readonly { readonly id: number; readonly reason: string }[];
+}
+
 /** O que a execução do wipe recebe quando pede o próximo mundo. */
 export interface MapPoolTaken {
   readonly entry: MapPoolRecord;
@@ -118,11 +134,7 @@ export interface MapPoolTaken {
    * detalhe.
    */
   readonly drawn: boolean;
-  /**
-   * As entradas que estavam na frente e foram puladas, com o
-   * motivo. Vazio no caso comum.
-   */
-  readonly skipped: readonly { readonly id: number; readonly reason: string }[];
+  readonly skipped: MapPoolPick['skipped'];
 }
 
 /** Erro de regra da fila, com código e status já escolhidos. */
@@ -529,6 +541,49 @@ export class MapPoolRepository {
     } = {},
     now: number = Date.now(),
   ): MapPoolTaken {
+    const picked = this.pickForWipe(serverId, options);
+
+    if (picked.entry !== null) {
+      return {
+        entry: this.markUsed(serverId, picked.entry.id, now),
+        drawn: false,
+        skipped: picked.skipped,
+      };
+    }
+
+    const worldSize = options.worldSize ?? DEFAULT_WORLD_SIZE;
+    const size = isValidWorldSize(worldSize) ? worldSize : DEFAULT_WORLD_SIZE;
+    const level = (options.level ?? 'Procedural Map').trim() || 'Procedural Map';
+
+    const created = this.#insert(serverId, {
+      kind: 'procedural',
+      seed: this.#drawFreeSeed(serverId, size),
+      world_size: size,
+      level,
+      level_url: null,
+      version_ok: 0,
+      note: 'sorteada pelo agente: a fila estava vazia na hora do wipe',
+      now,
+    });
+
+    return { entry: this.markUsed(serverId, created.id, now), drawn: true, skipped: picked.skipped };
+  }
+
+  /**
+   * QUAL entrada este wipe consumiria — sem consumir nada.
+   *
+   * ####  ESCOLHER E QUEIMAR SÃO DOIS TEMPOS  ####
+   *
+   * Quem executa o wipe precisa do mundo ANTES de gravar o `.ini`,
+   * e só pode marcar a entrada como jogada DEPOIS de o `.ini` ter
+   * sido gravado — senão um erro no arquivo deixa uma entrada
+   * `used` por um wipe que não trocou mundo nenhum, e a retomada
+   * queima a seguinte. Ver `#configurar`, em wipe/run.ts.
+   *
+   * A regra de quem serve é a MESMA do `takeForWipe`, porque é
+   * este método que ele chama.
+   */
+  pickForWipe(serverId: string, options: { readonly forced?: boolean } = {}): MapPoolPick {
     const forced = options.forced ?? false;
     const skipped: { id: number; reason: string }[] = [];
 
@@ -548,25 +603,10 @@ export class MapPoolRepository {
         continue;
       }
 
-      return { entry: this.markUsed(serverId, entry.id, now), drawn: false, skipped };
+      return { entry, skipped };
     }
 
-    const worldSize = options.worldSize ?? DEFAULT_WORLD_SIZE;
-    const size = isValidWorldSize(worldSize) ? worldSize : DEFAULT_WORLD_SIZE;
-    const level = (options.level ?? 'Procedural Map').trim() || 'Procedural Map';
-
-    const created = this.#insert(serverId, {
-      kind: 'procedural',
-      seed: this.#drawFreeSeed(serverId, size),
-      world_size: size,
-      level,
-      level_url: null,
-      version_ok: 0,
-      note: 'sorteada pelo agente: a fila estava vazia na hora do wipe',
-      now,
-    });
-
-    return { entry: this.markUsed(serverId, created.id, now), drawn: true, skipped };
+    return { entry: null, skipped };
   }
 
   // ------------------------------------------------------

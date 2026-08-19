@@ -190,7 +190,12 @@ const planBody = z
     scheduledAt: z.number().int().positive(),
     bpPolicy: z.enum(BP_POLICIES),
     mapSource: z.enum(MAP_SOURCES).default('pool'),
-    /** A entrada da fila de mapas (Frente C). `null` = decidir na hora. */
+    /**
+     * A entrada da fila de mapas (Frente C). `null` = decidir na
+     * hora — e é o repositório que recusa `fixed` sem ela, porque
+     * lá o estado FINAL da linha é conhecido e aqui não: um PATCH
+     * pode mandar só `mapSource` para um plano que já aponta.
+     */
     mapPoolId: z.number().int().positive().nullable().default(null),
     note: noteSchema.default(null),
   })
