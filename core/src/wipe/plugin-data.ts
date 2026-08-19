@@ -405,6 +405,38 @@ function withSelection(
  * MEDIDO: com a barra literal, `OrigemZStore.json` — a carteira —
  * ficava de fora de um full wipe que o admin achou ter marcado, e
  * em silêncio, porque o padrão casava com os OUTROS arquivos.
+ *
+ * ####  E `a**b` ATRAVESSA PASTA, COMO SEMPRE ATRAVESSOU  ####
+ *
+ * Colado a texto, `**` não tem segmento próprio para representar,
+ * e continua sendo o "qualquer coisa, barra inclusive" de sempre.
+ * Encolhê-lo para `[^/]*` seria a mesma reinterpretação, só que
+ * na outra direção: `oxide/data/***\/*.json` — um `*` a mais, erro
+ * de digitação plausível — deixaria de casar
+ * `oxide/data/a/b/c.json` sem entrar em `missing`, porque o padrão
+ * continua casando com outra coisa. A ordem do admin encolheria
+ * calada.
+ *
+ * ####  E NADA DISTO VALE PARA TRÁS  ####
+ *
+ * O conserto do globstar mudou, RETROATIVAMENTE e em silêncio, o
+ * que uma lista JÁ GRAVADA quer dizer — e na direção que apaga
+ * mais. `['oxide/data/**\/*.json']`, salvo num dia em que aquilo
+ * queria dizer "os json das subpastas", passou a levar
+ * `OrigemZStore.json` e `OrigemZVip.json`: a carteira e o VIP que
+ * alguém pagou.
+ *
+ * MEDIDO com o WipeRunner de verdade, mesma árvore e mesma lista
+ * salva: "apagar: 9 arquivo(s) + 1 de plugin" virou "+ 3 de
+ * plugin". Um wipe de cadência roda de madrugada — não existe tela
+ * aberta para alguém ver a marca nova.
+ *
+ * Por isso a regra desta função é maior que ela: NENHUMA mudança
+ * no casamento pode alargar o que uma lista já salva apaga. Quem
+ * segura isso é `rewriteLegacyPattern`, que reescreve as listas
+ * gravadas antes desta linha para padrões que dizem o que elas
+ * sempre quiseram dizer (migração 032), e o teste que compara os
+ * dois dialetos par a par.
  */
 export function matches(path: string, pattern: string): boolean {
   const normalized = normalize(pattern);
@@ -422,7 +454,7 @@ export function matches(path: string, pattern: string): boolean {
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index] ?? '';
 
-    if (segment === '**') {
+    if (isGlobstar(segment)) {
       expression +=
         index === segments.length - 1
           ? // `a/**`: a pasta e tudo o que está abaixo dela.
@@ -444,6 +476,78 @@ export function matches(path: string, pattern: string): boolean {
   return new RegExp(`^${expression}$`, 'i').test(normalize(path));
 }
 
+/**
+ * O segmento é SÓ estrelas, duas ou mais: o globstar de verdade.
+ *
+ * `***` entra junto de propósito. Ele nunca quis dizer outra coisa
+ * — no casador antigo `**` e `***` davam o mesmo `.*` —, e
+ * tratá-lo como segmento comum transformaria um `*` digitado a
+ * mais num padrão que casa MENOS, sem uma linha de aviso.
+ */
+function isGlobstar(segment: string): boolean {
+  return /^\*{2,}$/.test(segment);
+}
+
+/**
+ * O mesmo padrão, escrito de um jeito que `matches` responde HOJE
+ * o que ele respondia ANTES do conserto do globstar.
+ *
+ * ####  QUAL É A ÚNICA DIFERENÇA ENTRE OS DOIS  ####
+ *
+ * O casador de antes era textual: `**` virava `.*` e a barra ao
+ * lado ficava literal. O de hoje é por segmento. Fora do caso do
+ * `**` que OCUPA um segmento inteiro os dois dão a mesma resposta
+ * — e nesse caso a diferença é exatamente uma: hoje ele casa
+ * também com NENHUMA pasta.
+ *
+ * Então a reescrita é uma só: devolver a pasta que o padrão antigo
+ * exigia, pondo um segmento `*` na frente do globstar.
+ *
+ *     oxide/data/**\/*.json   ->   oxide/data/*\/**\/*.json
+ *     oxide/data/**           ->   oxide/data/*\/**
+ *     **\/*.json              ->   *\/**\/*.json
+ *
+ * O padrão reescrito NÃO casa `oxide/data/OrigemZVip.json`, casa
+ * `oxide/data/OrigemZ/historico.json` e casa
+ * `oxide/data/n1/n2/fundo.json` — os três desfechos do dia em que
+ * o admin marcou aquilo.
+ *
+ * ####  E QUANDO NÃO HÁ NADA A REESCREVER  ####
+ *
+ * Padrão sem globstar de segmento inteiro volta INTACTO, byte a
+ * byte. É o caso de toda linha que a tela grava — elas são
+ * caminhos exatos —, e reescrever o que não mudou de sentido só
+ * faria a tela mostrar um texto que o admin não digitou.
+ *
+ * `**` sozinho também volta intacto: "tudo" era o que ele queria
+ * dizer, e é o que ele quer dizer.
+ *
+ * ####  ELA RODA UMA VEZ, E NÃO PODE SER IDEMPOTENTE  ####
+ *
+ * Isto é uma TRADUÇÃO de dialeto, não uma normalização: aplicar de
+ * novo é traduzir de novo, e o resultado encolhe.
+ *
+ * Não é descuido, é obrigação. `oxide/data/*\/**\/*.json` é um
+ * padrão legado LEGÍTIMO — alguém pode tê-lo digitado —, e no
+ * dialeto antigo ele exige DUAS pastas. MEDIDO: ele casa
+ * `oxide/data/a/b/x.json` e não casa `oxide/data/a/x.json`. Uma
+ * reescrita que reconhecesse o próprio resultado e o deixasse
+ * passar faria aquele padrão passar a exigir UMA pasta — o mesmo
+ * alargamento que esta função existe para impedir.
+ *
+ * Quem garante a vez única é `schema_migrations`, e é só isso que
+ * precisa garantir: `runMigrations` num banco em dia não faz nada.
+ */
+export function rewriteLegacyPattern(pattern: string): string {
+  const segments = normalize(pattern).split('/');
+
+  if (segments.length < 2 || !segments.some((segment) => isGlobstar(segment))) {
+    return pattern;
+  }
+
+  return segments.flatMap((segment) => (isGlobstar(segment) ? ['*', '**'] : [segment])).join('/');
+}
+
 /** Um segmento traduzido: `*` fica DENTRO dele, e o resto é literal. */
 function segmentExpression(segment: string): string {
   let expression = '';
@@ -453,13 +557,17 @@ function segmentExpression(segment: string): string {
     const character = segment[at] ?? '';
 
     if (character === '*') {
-      // Uma sequência de `*` dentro de um segmento é um `*` só:
-      // sem a barra ao lado, `**` não tem pasta para atravessar.
+      // Um `*` sozinho fica dentro do segmento; dois ou mais
+      // atravessam pasta. Colado a texto o `**` não tem segmento
+      // próprio para virar globstar, mas encolhê-lo mudaria de
+      // sentido uma lista já salva. Ver `matches`.
+      const start = at;
+
       while (segment[at] === '*') {
         at += 1;
       }
 
-      expression += '[^/]*';
+      expression += at - start >= 2 ? '.*' : '[^/]*';
       continue;
     }
 

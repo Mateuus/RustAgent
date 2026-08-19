@@ -32,6 +32,7 @@
 //      `servers(id)` com `ON DELETE CASCADE`.
 // ============================================================
 
+import { rewriteLegacyPattern } from '../wipe/plugin-data.js';
 import type { Logger } from '../logger.js';
 import type { AgentDatabase } from './database.js';
 
@@ -63,7 +64,15 @@ export interface SqlMigration extends MigrationBase {
  * `schema_migrations`.
  */
 export interface RunMigration extends MigrationBase {
-  readonly run: (db: AgentDatabase) => void;
+  /**
+   * O `logger` é opcional porque o teste aplica passos sem um.
+   *
+   * Ele existe para as migrações que MEXEM em escolha do admin: um
+   * `ALTER TABLE` não precisa contar nada a ninguém, mas reescrever
+   * uma linha que o admin gravou precisa deixar dito o que virou o
+   * quê. Ver a 032.
+   */
+  readonly run: (db: AgentDatabase, logger?: Logger) => void;
 }
 
 export type Migration = SqlMigration | RunMigration;
@@ -75,13 +84,13 @@ export type Migration = SqlMigration | RunMigration;
  * avulsa para montar um banco parado num id — e ter DOIS lugares
  * decidindo como um passo roda é o começo de eles discordarem.
  */
-export function applyMigration(db: AgentDatabase, migration: Migration): void {
+export function applyMigration(db: AgentDatabase, migration: Migration, logger?: Logger): void {
   if ('sql' in migration) {
     db.exec(migration.sql);
     return;
   }
 
-  migration.run(db);
+  migration.run(db, logger);
 }
 
 // ------------------------------------------------------------
@@ -2534,6 +2543,115 @@ ALTER TABLE wipe_run_steps ADD COLUMN attempt_started_at INTEGER;
 UPDATE wipe_run_steps SET attempt_started_at = started_at;
 `;
 
+// ------------------------------------------------------------
+//  032 — a lista do full wipe continua querendo dizer o que dizia
+//
+//  ####  CONSERTAR UM CASADOR DE PADRÕES MUDA UM CONTRATO  ####
+//
+//  `wipe_settings` guarda o full wipe como uma lista de PADRÕES, e
+//  não de arquivos (ver wipe/plugin-data.ts): o admin marca num
+//  dia, e o wipe de cadência relê aquilo meses depois, de
+//  madrugada, sozinho.
+//
+//  O conserto do globstar — `oxide/data/**\/*.json` passando a
+//  alcançar a RAIZ de `oxide\data`, e não só as subpastas — é o
+//  comportamento certo do `**`. Só que ele valeu PARA TRÁS: a
+//  mesma linha, gravada meses antes com o outro sentido, passou a
+//  marcar `OrigemZStore.json` e `OrigemZVip.json` — a carteira e o
+//  VIP que alguém pagou.
+//
+//  MEDIDO com o WipeRunner de verdade, mesma árvore de origem e a
+//  lista salva `['oxide/data/**\/*.json']`:
+//
+//      antes    apagar: 9 arquivo(s) + 1 de plugin
+//               oxide\data mantém OrigemZStore.json e OrigemZVip.json
+//      depois   apagar: 9 arquivo(s) + 3 de plugin
+//               os dois somem
+//
+//  Não houve migração, não houve aviso, e `missing` não ajuda: o
+//  padrão sempre casou com alguma coisa. A prévia marca a linha
+//  nova com [X] — e ninguém abre a prévia às quatro da manhã.
+//
+//  ####  O QUE ESTA MIGRAÇÃO FAZ  ####
+//
+//  Reescreve cada padrão salvo para o padrão que diz, no dialeto
+//  de hoje, o que ele queria dizer no dia em que foi gravado:
+//
+//      oxide/data/**\/*.json   ->   oxide/data/*\/**\/*.json
+//
+//  O conjunto de arquivos que a lista apaga é o MESMO, par a par —
+//  o teste compara os dois dialetos sobre mais de meio milhão de
+//  pares padrão × caminho. E quem nunca teve globstar na lista
+//  (todo mundo que só clicou na tela, porque a tela grava caminho
+//  exato) sai daqui com a lista byte a byte igual.
+//
+//  ####  POR QUE REESCREVER, E NÃO GUARDAR UM "DIALETO"  ####
+//
+//  Um campo de versão ao lado da lista deixaria dois casadores
+//  vivos para sempre, e o dia em que o admin acrescentasse UMA
+//  linha jogaria as outras para o dialeto novo — o mesmo
+//  alargamento, só que adiado. O padrão reescrito, em vez disso,
+//  diz o que faz na própria tela: `*\/**\/` é "pelo menos uma
+//  pasta no meio".
+//
+//  ####  `updated_at` NÃO MUDA  ####
+//
+//  A escolha é a mesma escolha, do mesmo dia. Carimbar hoje
+//  contaria que o admin mexeu nisso hoje, e ele não mexeu.
+// ------------------------------------------------------------
+
+/** Uma linha de `wipe_settings` com a lista do full wipe. */
+interface PluginDataPatternsRow {
+  readonly server_id: string;
+  readonly value: string;
+}
+
+function rewriteLegacyPluginDataPatterns(db: AgentDatabase, logger?: Logger): void {
+  const rows = db
+    .prepare(`SELECT server_id, value FROM wipe_settings WHERE key = 'pluginData.patterns'`)
+    .all() as readonly PluginDataPatternsRow[];
+
+  const update = db.prepare(
+    `UPDATE wipe_settings SET value = @value
+      WHERE server_id = @server_id AND key = 'pluginData.patterns'`,
+  );
+
+  for (const row of rows) {
+    let saved: unknown;
+
+    try {
+      saved = JSON.parse(row.value);
+    } catch {
+      // Valor que não é JSON já era lido como lista vazia por
+      // `parsePatterns`. Reescrever o que ninguém consegue ler
+      // seria inventar uma escolha que o admin não fez.
+      continue;
+    }
+
+    if (!Array.isArray(saved)) {
+      continue;
+    }
+
+    // O que não é texto passa INTACTO: quem tira lixo da lista é a
+    // leitura, e uma migração que aproveita a passagem para limpar
+    // outra coisa é uma migração que ninguém consegue revisar.
+    const rewritten = saved.map((item: unknown) =>
+      typeof item === 'string' ? rewriteLegacyPattern(item) : item,
+    );
+
+    if (rewritten.every((item, index) => item === saved[index])) {
+      continue;
+    }
+
+    update.run({ server_id: row.server_id, value: JSON.stringify(rewritten) });
+
+    logger?.warn(
+      { server: row.server_id, before: row.value, after: JSON.stringify(rewritten) },
+      'full wipe patterns rewritten to keep their original meaning',
+    );
+  }
+}
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2582,6 +2700,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // precisa e o `started_at` (preservado de propósito) não pode
   // dar. Ver o cabeçalho.
   { id: 31, name: 'wipe-run-step-attempt', sql: WIPE_RUN_STEP_ATTEMPT_SCHEMA },
+  // A 32 não acrescenta schema nenhum: ela reescreve a ESCOLHA que
+  // o admin já tinha gravado, para que o conserto do globstar não
+  // valha para trás. Ver o cabeçalho.
+  { id: 32, name: 'wipe-plugin-data-globstar', run: rewriteLegacyPluginDataPatterns },
 ];
 
 /** Linha da tabela de controle. */
@@ -2626,7 +2748,7 @@ export function runMigrations(db: AgentDatabase, logger?: Logger): readonly Migr
     // DDL dentro de transação é suportado pelo SQLite (não é o
     // caso de todo banco).
     const apply = db.transaction((): void => {
-      applyMigration(db, migration);
+      applyMigration(db, migration, logger);
       db.prepare(
         'INSERT INTO schema_migrations (id, name, applied_at) VALUES (@id, @name, @applied_at)',
       ).run({ id: migration.id, name: migration.name, applied_at: Date.now() });
