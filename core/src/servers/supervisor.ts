@@ -484,6 +484,11 @@ export class ServerSupervisor {
     'steamAppId',
     'steamLogin',
     'steamBranch',
+    // Convar de mundo só é lida no BOOT: não existe trocar de
+    // mapa a quente. Trocar o link do .map com o servidor no ar
+    // não muda nada até ele parar e voltar — e é justamente isso
+    // que a lista serve para dizer na tela.
+    'levelUrl',
   ]);
 
   /**
@@ -524,6 +529,10 @@ export class ServerSupervisor {
       steamAppId: 'STEAM_APPID',
       steamLogin: 'STEAM_LOGIN',
       steamBranch: 'STEAM_BRANCH',
+      // O mapa custom. Gravar vazio aqui é o jeito de VOLTAR ao
+      // mundo procedural — a chave fica no arquivo, sem valor, e
+      // a linha de comando volta a não ter `+server.levelurl`.
+      levelUrl: 'SERVER_LEVELURL',
     };
 
     const values: Record<string, string> = {};

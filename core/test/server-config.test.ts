@@ -36,6 +36,11 @@ function config(over: Partial<ServerConfig> = {}): ServerConfig {
     level: 'Procedural Map',
     seed: 12_345,
     worldSize: 4000,
+    // Vazio = mundo procedural, e a linha de comando sai sem
+    // `+server.levelurl`. O `as ServerConfig` lá embaixo deixaria
+    // este campo faltar em silêncio, e a fixture passaria
+    // `undefined` para o jogo. Ver wipe-map-pool.test.ts.
+    levelUrl: '',
     maxPlayers: 200,
     saveInterval: 600,
     enabled: true,

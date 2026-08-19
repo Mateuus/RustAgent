@@ -78,6 +78,9 @@ import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
 // ---- wipe, calendário e mensagens ----
 import type { WipeScheduleRepository } from '../db/wipe-schedule-repository.js';
 import { registerWipeRoutes } from './routes/wipe.js';
+// ---- o wipe: a fila de mapas ----
+import type { MapPoolRepository } from '../db/map-pool-repository.js';
+import { registerWipeMapsRoutes } from './routes/wipe-maps.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -165,6 +168,12 @@ export interface BuildServerOptions {
    * a operação `wipe-run`, e ela chega depois.
    */
   readonly wipeSchedule: WipeScheduleRepository;
+
+  /**
+   * A FILA DE MAPAS de cada servidor: qual mundo entra no próximo
+   * wipe. Ver db/map-pool-repository.ts.
+   */
+  readonly mapPool: MapPoolRepository;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -344,6 +353,15 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // execução entrar, ela vem como operação, com trava e log.
       registerWipeRoutes(api, {
         repository: options.wipeSchedule,
+        supervisor: options.supervisor,
+      });
+
+      // A fila de mapas responde em QUE MUNDO o servidor volta
+      // depois de zerar. Ela é lida do banco, então continua de
+      // pé com o servidor parado — que é exatamente quando se
+      // escolhe o mapa do próximo wipe.
+      registerWipeMapsRoutes(api, {
+        repository: options.mapPool,
         supervisor: options.supervisor,
       });
     },

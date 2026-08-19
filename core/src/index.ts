@@ -76,6 +76,8 @@ import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
 // ---- wipe, calendário e mensagens ----
 import { WipeScheduleRepository } from './db/wipe-schedule-repository.js';
+// ---- o wipe: a fila de mapas ----
+import { MapPoolRepository } from './db/map-pool-repository.js';
 
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -726,6 +728,11 @@ async function main(): Promise<void> {
         rcon: server.rcon,
       })),
     wipeSchedule,
+
+    // A fila de mapas do wipe. Nasce aqui, sem relógio e sem
+    // laço: ela só responde perguntas do painel até a execução do
+    // wipe passar a consumi-la.
+    mapPool: new MapPoolRepository(db),
   });
 
   await app.listen({ host: agent.host, port: agent.port });
