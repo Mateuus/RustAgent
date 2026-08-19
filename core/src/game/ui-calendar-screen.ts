@@ -47,10 +47,12 @@
 //    silver             + 1 mundo do futuro (tamanho e imagem)
 //    gold               + 3 mundos do futuro
 //
-//  A régua conta MUNDOS, e não posições da fila: o do próximo wipe
-//  é o primeiro deles QUANDO ele sai da fila. Com um plano `keep`
-//  ele não sai — o mundo do próximo wipe é o que já está no ar —, e
-//  aí os três do ouro são os três primeiros da fila.
+//  A régua conta MUNDOS, e não posições da fila: o do cartão é o
+//  primeiro deles QUANDO ele vem descrito por extenso — a entrada
+//  que vai ser consumida, ou o mundo que o `configurar` já gravou
+//  na execução. Com um plano `keep` o cartão responde "o mesmo mapa
+//  de agora" e não descreve mundo nenhum, e aí os três do ouro são
+//  os três primeiros da fila.
 //
 //  O dado já existe: a fila de mapas é do admin e o RustMaps já
 //  preencheu as imagens. "VIP vê o futuro" é produto que não custa
@@ -204,8 +206,31 @@ export interface CalendarNextWipeView {
    * virar um buraco sem explicação.
    */
   readonly map: string | null;
-  /** A imagem daquele mundo, quando ele é uma entrada da fila. */
+  /**
+   * A imagem daquele mundo, quando ele é uma entrada da fila — a
+   * que vai ser consumida, ou a que o `configurar` já consumiu.
+   */
   readonly image: CalendarMapView | null;
+  /**
+   * O mundo do cartão É uma entrada da fila de mapas.
+   *
+   * ####  E CONTINUA SENDO DEPOIS DE CONSUMIDA  ####
+   *
+   * Passado o `configurar`, o mundo está gravado na execução
+   * (`mapFrom: 'world'`) e a entrada que virou ele está `used` — mas
+   * a linha continua no banco, com a `preview_url` que o RustMaps
+   * devolveu. É a MESMA imagem que o VIP prata via ontem, e ela não
+   * deixa de existir porque a entrada saiu da fila.
+   *
+   * `false` nos dois mundos que nunca estiveram na fila: o `keep`, e
+   * a seed que o agente SORTEOU porque a fila estava vazia. É o que
+   * separa "a imagem ainda não veio do RustMaps" de "não existe
+   * imagem deste mundo em lugar nenhum" — ver `missingImageNote`.
+   *
+   * `false` também para quem não alcança o mapa, como `map` e
+   * `image`: o que ele não pode ver não atravessa o RCON.
+   */
+  readonly mapFromQueue: boolean;
   /**
    * DE ONDE aquele mundo saiu, na união de `nextWipe`.
    *
@@ -280,9 +305,10 @@ export interface PlayerCalendar {
    *
    * O mundo do próximo wipe não está aqui: ele é `next.image`, e
    * pode nem sair da fila (um plano `keep` não consome nenhuma
-   * entrada). Quando ele não sai, a régua inteira sobra para esta
-   * lista — é o que mantém o total de mundos vistos igual ao do
-   * nível, venha o mundo do plano ou da fila.
+   * entrada). Quando o cartão não descreve mundo nenhum — `keep`,
+   * `undecided`, ou não haver wipe à vista —, a régua inteira sobra
+   * para esta lista: é o que mantém o total de mundos vistos igual
+   * ao do nível, venha o mundo do plano ou da fila.
    */
   readonly maps: readonly CalendarMapView[];
 }
@@ -402,24 +428,56 @@ export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar 
   // por ser custom sem marca de versão.
   const chosen = next?.map.source === 'entry' ? next.map.entry : null;
 
+  // ####  O MUNDO JÁ GRAVADO NA EXECUÇÃO TAMBÉM TEM PRÉVIA  ####
+  //
+  // Passado o `configurar`, o mundo do wipe está em `map_after`, e o
+  // `mapPoolId` dele diz QUAL entrada virou ele. Essa linha continua
+  // no banco — `used`, e com a `preview_url` de sempre. Tratar
+  // `world` como "não há imagem" apagava, no dia do wipe, a prévia
+  // que o VIP prata via na véspera.
+  //
+  // As duas exceções estão no próprio mundo: `drawn` é a seed que o
+  // agente sorteou com a fila vazia (a linha nasce sem prévia), e
+  // `mapPoolId` nulo é o `keep`, que não toca a fila.
+  const world = next?.map.source === 'world' ? next.map.world : null;
+
+  const worldFromQueue =
+    world !== null && world.drawn !== true && (world.mapPoolId ?? null) !== null;
+
+  // A entrada que o cartão mostra: a que vai ser consumida, ou a que
+  // já foi. `undefined` quando a linha sumiu do banco.
+  const card =
+    chosen ??
+    (worldFromQueue
+      ? (input.queue.find((entry) => entry.id === world?.mapPoolId) ?? null)
+      : null);
+
   const ready = input.queue.filter(
-    (entry) => entry.status === 'ready' && (chosen === null || entry.id !== chosen.id),
+    (entry) => entry.status === 'ready' && (card === null || entry.id !== card.id),
   );
 
-  // ####  A VAGA SÓ SAI SE A FILA FOI MESMO CONSUMIDA  ####
+  // ####  A VAGA SAI QUANDO O CARTÃO DIZ UM MUNDO  ####
   //
-  // O mundo do próximo wipe custa uma vaga da régua QUANDO ele é
-  // uma entrada da fila: aí ele já é `next.image`, e a fila mostra
-  // o que vem atrás. Prata fica com zero; ouro, com dois.
+  // A régua conta MUNDOS DO FUTURO, e o do cartão é um deles sempre
+  // que ele vem descrito por extenso — tamanho e nome. São dois
+  // casos: a entrada da fila que vai ser consumida (`entry`) e o
+  // mundo que o `configurar` já gravou na execução (`world`).
+  // Prata fica com zero atrás; ouro, com dois.
   //
-  // Mas ele nem sempre sai da fila: `keep` mantém o mundo que já
-  // está no ar, uma execução passada do `configurar` já tem o mundo
-  // dela gravado, e `undecided` é ninguém ter escolhido. Nesses
-  // três nada é consumido — `chosen` é null e `next.image` também —
-  // e descontar a vaga assim mesmo cobrava do jogador um mundo que
-  // ele não viu. Medido: VIP OURO, plano `keep` e três procedurais
-  // prontos na fila; a régua dá três mundos e a tela mostrava dois.
-  const behind = Math.max(0, allowance.maps - (chosen === null ? 0 : 1));
+  // `keep` ("o mesmo mapa de agora") e `undecided` ("sorteado na
+  // hora") não dizem mundo nenhum, e aí a régua inteira sobra para a
+  // fila — descontar a vaga cobrava do jogador um mundo que ele não
+  // viu. Medido: VIP OURO, plano `keep` e três procedurais prontos
+  // na fila; a régua dá três mundos e a tela mostrava dois.
+  //
+  // O `world` faltava desta conta, e ele é o pior dos dois: durante
+  // a execução a PRATA lia o cartão PROCEDURAL 4000 mais "#1 na fila
+  // · procedural 3500" — dois mundos do futuro num nível que compra
+  // um, e o segundo é faixa do OURO.
+  const cardShowsWorld =
+    next !== null && (next.map.source === 'entry' || next.map.source === 'world');
+
+  const behind = Math.max(0, allowance.maps - (cardShowsWorld ? 1 : 0));
 
   return {
     now: input.now,
@@ -443,7 +501,8 @@ export function buildPlayerCalendar(input: PlayerCalendarInput): PlayerCalendar 
               allowance.maps === 0
                 ? null
                 : (describeNextWipeMap(next.map) ?? MAP_DRAWN_ON_THE_SPOT),
-            image: allowance.maps === 0 || chosen === null ? null : toMapView(chosen),
+            image: allowance.maps === 0 || card === null ? null : toMapView(card),
+            mapFromQueue: allowance.maps !== 0 && (chosen !== null || worldFromQueue),
             mapFrom: allowance.maps === 0 ? null : next.map.source,
           },
     wipes,
@@ -847,6 +906,16 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
         line(PAD + 30, 22),
         { size: 12, align: 'MiddleLeft', color: C.textMuted },
       ),
+
+      // ####  A FILA CONTINUA SENDO O QUE O NÍVEL COMPROU  ####
+      //
+      // Sem wipe à vista nada é consumido, e `buildPlayerCalendar`
+      // entrega a régua inteira em `maps` — é literalmente o corpo
+      // do `GET /wipe/upcoming/me`. Voltar aqui sem listar nada
+      // fazia a ROTA responder três mundos ao ouro e a TELA, zero,
+      // com o Docs\06-API prometendo que as duas dizem a mesma
+      // coisa. Nada foi consumido, então a numeração começa no #1.
+      ...queueRows(calendar, PAD + 62, 1),
     ];
   }
 
@@ -881,46 +950,53 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
     }),
   ];
 
-  // O OURO vê a fila; a PRATA vê só o próximo. A lista aparece
-  // quando há o que listar, e não como um retângulo vazio.
-  const rest = calendar.maps;
-
-  if (rest.length > 0) {
-    const top = PAD + MAP_IMAGE + 40;
-
-    // ####  O #1 É O MUNDO DO CARTÃO, QUANDO ELE SAIU DA FILA  ####
-    //
-    // A numeração conta os mundos que ainda vão subir. Com uma
-    // entrada consumida pelo cartão, ela é o #1 e a lista começa no
-    // #2 — vale para `pool` e para `fixed`, que consome a entrada
-    // apontada e deixa as outras na ordem em que serão usadas.
-    //
-    // Quando NADA foi consumido — `keep`, o mundo já gravado na
-    // execução, ou ninguém ter escolhido —, o mundo do cartão não
-    // está na fila, e o primeiro desta lista é o #1 dela. O `#2`
-    // fixo dava ao VIP que paga pela fila um ordinal que não
-    // existe: com `keep` e a fila 4000/3500/3000, a tela chamava o
-    // 4000 de "#2 na fila" sendo ele o primeiro.
-    const place = next.mapFrom === 'entry' ? 2 : 1;
-
-    elements.push(
-      panel(
-        'cal-mapa-l',
-        fill(PAD, top, PAD, PAD),
-        C.none,
-        itemRows(
-          rest.map((world, index) => ({
-            text: `#${String(index + place)} na fila · ${describeMapEntry(world)}`,
-            item: null,
-          })),
-          MAP_CARD_HEIGHT - top - PAD,
-          'calq',
-        ),
-      ),
-    );
-  }
+  // ####  O #1 É O MUNDO DO CARTÃO, QUANDO ELE SAIU DA FILA  ####
+  //
+  // A numeração é a POSIÇÃO NA FILA de hoje. Com uma entrada ainda
+  // por consumir no cartão, ela é o #1 e a lista começa no #2 —
+  // vale para `pool` e para `fixed`, que consome a entrada apontada
+  // e deixa as outras na ordem em que serão usadas.
+  //
+  // Quando o cartão não segura entrada nenhuma — `keep`, ninguém
+  // ter escolhido, ou o mundo JÁ consumido pelo `configurar`, que
+  // saiu da fila e virou `used` —, o primeiro desta lista é o #1
+  // dela. O `#2` fixo dava ao VIP que paga pela fila um ordinal que
+  // não existe: com `keep` e a fila 4000/3500/3000, a tela chamava
+  // o 4000 de "#2 na fila" sendo ele o primeiro.
+  elements.push(...queueRows(calendar, PAD + MAP_IMAGE + 40, next.mapFrom === 'entry' ? 2 : 1));
 
   return elements;
+}
+
+/**
+ * A fila atrás do cartão, numerada.
+ *
+ * O OURO vê a fila; a PRATA vê só o próximo. A lista aparece quando
+ * há o que listar, e não como um retângulo vazio — e ela é a MESMA
+ * nos dois desenhos do cartão, com wipe à vista e sem.
+ */
+function queueRows(calendar: PlayerCalendar, top: number, place: number): readonly UiElement[] {
+  const rest = calendar.maps;
+
+  if (rest.length === 0) {
+    return [];
+  }
+
+  return [
+    panel(
+      'cal-mapa-l',
+      fill(PAD, top, PAD, PAD),
+      C.none,
+      itemRows(
+        rest.map((world, index) => ({
+          text: `#${String(index + place)} na fila · ${describeMapEntry(world)}`,
+          item: null,
+        })),
+        MAP_CARD_HEIGHT - top - PAD,
+        'calq',
+      ),
+    ),
+  ];
 }
 
 /**
@@ -934,13 +1010,22 @@ function mapBody(calendar: PlayerCalendar): readonly UiElement[] {
  * não há prévia pendente NENHUMA:
  *
  *   · `keep`       o mundo é o que já está no ar — só a seed muda;
- *   · `world`      ele já está gravado na execução, e não veio da
- *                  fila: não existe prévia dele para ficar pronta;
+ *   · `world`      ele já está gravado na execução, e aí DEPENDE:
+ *                  ver abaixo;
  *   · `undecided`  não há mundo escolhido do qual ter prévia.
  *
- * Prometer "ainda não ficou pronta" nesses três põe o jogador para
+ * Prometer "ainda não ficou pronta" nesses põe o jogador para
  * esperar uma imagem que ninguém está desenhando, e manda o admin
  * procurar defeito no RustMaps.
+ *
+ * ####  E O `world` MENTIA NO CAMINHO CONTRÁRIO  ####
+ *
+ * "este mundo não saiu da fila" é falso no caso NORMAL: o
+ * `configurar` grava em `map_after` o `mapPoolId` da entrada que
+ * virou o mundo, e ela saiu da fila sim — está `used`, com a prévia
+ * dela no mesmo lugar de sempre. O `mapFromQueue` separa esse caso
+ * dos dois em que a frase é verdade: a seed SORTEADA com a fila
+ * vazia, e o `keep` gravado pelo `#manterMundo`.
  */
 function missingImageNote(next: CalendarNextWipeView): string {
   // A anulação por seed vem primeiro: ela é sobre uma prévia que
@@ -955,7 +1040,13 @@ function missingImageNote(next: CalendarNextWipeView): string {
       return 'sem prévia nova: o mundo do próximo wipe é o mesmo de agora';
 
     case 'world':
-      return 'este mundo não saiu da fila, e não há prévia dele';
+      // Ele saiu da fila no caso normal, e aí a prévia dele é a da
+      // entrada `used` — se não há imagem aqui, é porque o RustMaps
+      // não a devolveu, como em qualquer outra entrada. Só o
+      // sorteio da fila vazia e o `keep` nunca estiveram lá.
+      return next.mapFromQueue
+        ? 'a imagem deste mundo ainda não ficou pronta'
+        : 'este mundo não saiu da fila, e não há prévia dele';
 
     case 'undecided':
       return 'o mundo ainda não foi escolhido: ele é sorteado na hora';

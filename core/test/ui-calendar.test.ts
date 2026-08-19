@@ -310,6 +310,7 @@ function nextOf(over: Partial<CalendarNextWipeView> = {}): CalendarNextWipeView 
     image: null,
     // O padrão é o de quem NÃO alcança a régua, como `map` e
     // `image`: quem quiser outro caso diz qual é.
+    mapFromQueue: false,
     mapFrom: null,
     ...over,
   };
@@ -842,6 +843,59 @@ describe('a régua quando o mundo do wipe não sai da fila', () => {
     }
   });
 
+  it('com o mundo JÁ GRAVADO na execução, o cartão custa a vaga do nível', () => {
+    // ####  A JANELA É CURTA, E O MUNDO A MAIS É REAL  ####
+    //
+    // Do `subir` até o fim do `pos-wipe` o mundo está em `map_after`,
+    // com o servidor no ar e jogadores entrando. O cartão descreve
+    // esse mundo POR EXTENSO — nome e tamanho —, e ele é um mundo do
+    // futuro como qualquer entrada da fila. Sem descontar a vaga, a
+    // PRATA lia o cartão PROCEDURAL 4000 mais "#1 na fila ·
+    // procedural 3500": dois mundos num nível que compra um, e o
+    // segundo é faixa do OURO.
+    const consumed = [
+      mapEntry({ id: 1, position: 0, worldSize: 4000, status: 'used', usedAt: NOW }),
+      ready[1] as MapPoolEntry,
+      ready[2] as MapPoolEntry,
+    ];
+
+    const runs = [
+      run({
+        mapAfter: {
+          level: 'Procedural Map',
+          seed: SECRET_SEED,
+          worldSize: 4000,
+          mapPoolId: 1,
+          drawn: false,
+        },
+      }),
+    ];
+
+    const seenBy = (tiers: readonly string[]): PlayerCalendar =>
+      buildPlayerCalendar({
+        now: NOW,
+        timeZone: 'UTC',
+        next: decide({ runs, queue: consumed }),
+        plans: [],
+        queue: consumed,
+        tiers,
+        levels: LEVELS,
+      });
+
+    const silver = seenBy(['silver']);
+    const card = cardTextOf(buildCalendarScreen({ calendar: silver }), 'cal-mapa');
+
+    expect(silver.next?.map).toBe('procedural 4000');
+    expect(silver.maps).toEqual([]);
+    expect(card).toContain('PROCEDURAL 4000');
+    expect(card).not.toContain('#1 na fila');
+    expect(card).not.toContain('3500');
+    expect(card).not.toContain(SECRET_SEED);
+
+    // O ouro compra três: o do cartão e os dois que sobraram na fila.
+    expect(seenBy(['gold']).maps.map((world) => world.worldSize)).toEqual([3500, 3000]);
+  });
+
   it('a prata com `keep` vê o primeiro da fila, e só ele', () => {
     const calendar = calendarFor([plan({ mapSource: 'keep' })], ready, ['silver']);
     const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
@@ -884,24 +938,87 @@ describe('o cartão do mundo sem imagem', () => {
     expect(card).not.toContain('ainda não ficou pronta');
   });
 
-  it('com o mundo já gravado na execução, diz que ele não saiu da fila', () => {
-    // Passado o `configurar`, o mundo novo está no `map_after` — e
-    // não na fila. Não existe prévia dele para ficar pronta.
+  it('com o mundo SORTEADO na hora, ou mantido, diz que ele não saiu da fila', () => {
+    // ####  OS DOIS MUNDOS QUE NUNCA ESTIVERAM NA FILA  ####
+    //
+    // A seed que o agente SORTEOU porque a fila estava vazia
+    // (`drawn`), e o `keep`, que o `#manterMundo` grava sem
+    // `mapPoolId`. Desses dois não existe prévia em lugar nenhum, e
+    // aí a frase é verdade. O caso NORMAL — a entrada da fila que
+    // virou o mundo — é o teste de baixo.
+    const worlds = [
+      { level: 'Procedural Map', seed: SECRET_SEED, worldSize: 4500, mapPoolId: 9, drawn: true },
+      {
+        level: 'Procedural Map',
+        seed: SECRET_SEED,
+        worldSize: 4500,
+        mapPoolId: null,
+        drawn: false,
+      },
+    ];
+
+    for (const mapAfter of worlds) {
+      const card = cardFor({ runs: [run({ mapAfter })], queue: [mapEntry()] });
+
+      expect(card).toContain('PROCEDURAL 4500');
+      expect(card).toContain('não saiu da fila');
+      expect(card).not.toContain('ainda não ficou pronta');
+      // O mundo da execução também carrega seed, e ela também para
+      // antes do desenho.
+      expect(card).not.toContain(SECRET_SEED);
+    }
+  });
+
+  it('com o mundo que SAIU da fila, mostra a prévia da entrada consumida', () => {
+    // ####  A ENTRADA `used` NÃO PERDE A IMAGEM  ####
+    //
+    // O `configurar` grava em `map_after` o `mapPoolId` da entrada
+    // que virou o mundo, e a linha continua no banco com a
+    // `preview_url` que o RustMaps devolveu. "Este mundo não saiu da
+    // fila" é falso aqui — ele saiu —, e a frase apagava, no dia do
+    // wipe, a imagem que o VIP prata via na véspera.
     const card = cardFor({
       runs: [
         run({
-          mapAfter: { level: 'Procedural Map', seed: SECRET_SEED, worldSize: 4500 },
+          mapAfter: {
+            level: 'Procedural Map',
+            seed: SECRET_SEED,
+            worldSize: 4000,
+            mapPoolId: 7,
+            drawn: false,
+          },
         }),
       ],
-      queue: [mapEntry()],
+      queue: [mapEntry({ id: 7, status: 'used', usedAt: NOW })],
     });
 
-    expect(card).toContain('PROCEDURAL 4500');
-    expect(card).toContain('não saiu da fila');
-    expect(card).not.toContain('ainda não ficou pronta');
-    // O mundo da execução também carrega seed, e ela também para
-    // antes do desenho.
+    expect(card).toContain('PROCEDURAL 4000');
+    expect(card).toContain('https://files.rustmaps.com/img/287/b3c1f0a2/map.png');
+    expect(card).not.toContain('não saiu da fila');
+    // A prévia atravessa; a seed continua parando antes do desenho.
     expect(card).not.toContain(SECRET_SEED);
+  });
+
+  it('com a entrada consumida sem prévia, aí sim ela ainda não ficou pronta', () => {
+    // Mesmo caso do de cima, com a linha `used` sem imagem: a prévia
+    // é a que o RustMaps não devolveu, e não uma que não existe.
+    const card = cardFor({
+      runs: [
+        run({
+          mapAfter: {
+            level: 'Procedural Map',
+            seed: SECRET_SEED,
+            worldSize: 4000,
+            mapPoolId: 7,
+            drawn: false,
+          },
+        }),
+      ],
+      queue: [mapEntry({ id: 7, status: 'used', usedAt: NOW, previewUrl: null, thumbUrl: null })],
+    });
+
+    expect(card).toContain('a imagem deste mundo ainda não ficou pronta');
+    expect(card).not.toContain('não saiu da fila');
   });
 
   it('sem ninguém ter escolhido, diz que o mundo ainda não foi escolhido', () => {
@@ -1045,6 +1162,44 @@ describe('a tela do calendário', () => {
 
     expect(text).toContain('SEM MUNDO ESCOLHIDO');
     expect(text).toContain('Quando o próximo wipe for marcado');
+  });
+
+  it('sem wipe marcado, a fila que a ROTA devolve continua desenhada', () => {
+    // ####  AS DUAS SUPERFÍCIES RESPONDEM A MESMA COISA  ####
+    //
+    // `buildPlayerCalendar` é literalmente o corpo do
+    // `GET /wipe/upcoming/me`, e sem wipe à vista nada é consumido:
+    // a régua inteira sobra para a fila. O desenho voltava ANTES de
+    // listar, e o OURO lia três mundos na rota e nenhum no menu do
+    // jogo — com o Docs\06-API prometendo que as duas dizem a mesma
+    // coisa.
+    const queue = [
+      mapEntry({ id: 1, position: 0, worldSize: 4000 }),
+      mapEntry({ id: 2, position: 1, seed: '111', worldSize: 3500 }),
+      mapEntry({ id: 3, position: 2, seed: '222', worldSize: 3000 }),
+    ];
+
+    const calendar = buildPlayerCalendar({
+      now: NOW,
+      timeZone: 'UTC',
+      next: decide({ queue }),
+      plans: [],
+      queue,
+      tiers: ['gold'],
+      levels: LEVELS,
+    });
+
+    const card = cardTextOf(buildCalendarScreen({ calendar }), 'cal-mapa');
+
+    expect(calendar.next).toBeNull();
+    expect(calendar.maps).toHaveLength(3);
+
+    expect(card).toContain('SEM MUNDO ESCOLHIDO');
+    expect(card).toContain('#1 na fila · procedural 4000');
+    expect(card).toContain('#2 na fila · procedural 3500');
+    expect(card).toContain('#3 na fila · procedural 3000');
+    // E a régua não afrouxa por não haver wipe: a seed continua fora.
+    expect(card).not.toContain(SECRET_SEED);
   });
 
   it('o id volta IDÊNTICO ao pedido', () => {
