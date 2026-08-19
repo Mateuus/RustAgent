@@ -2447,6 +2447,73 @@ export const agent = {
       '/api/chat/broadcast',
       { method: 'POST', body: input },
     ),
+
+  // ---- O WIPE: a agenda ------------------------------------
+
+  /** A configuração de QUANDO este servidor zera. */
+  wipeSettings: (serverId: string) =>
+    api<WipeSettingsResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/settings`),
+
+  /**
+   * Grava a cadência, a política do forçado e a da colisão.
+   *
+   * O agente reconcilia a agenda depois de gravar: recalcula o que
+   * a regra prevê, preserva o que foi mexido à mão e não toca no
+   * passado. Por isso a tela relê as datas em seguida.
+   */
+  saveWipeSettings: (serverId: string, settings: WipeSettings) =>
+    api<WipeSettingsResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/settings`, {
+      method: 'PUT',
+      body: settings,
+    }),
+
+  /** As datas materializadas na faixa pedida, em epoch ms. */
+  wipePlans: (serverId: string, range: { from?: number; to?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (range.from !== undefined) query.set('from', String(range.from));
+    if (range.to !== undefined) query.set('to', String(range.to));
+
+    const search = query.toString();
+
+    return api<WipePlansResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans${search === '' ? '' : `?${search}`}`,
+    );
+  },
+
+  /** Marca um wipe fora da cadência. Ele nasce `manual` e `pinned`. */
+  createWipePlan: (
+    serverId: string,
+    input: { scheduledAt: number; bpPolicy: BpPolicy; note: string | null },
+  ) =>
+    api<WipePlanResponse>(`/api/servers/${encodeURIComponent(serverId)}/wipe/plans`, {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Adia (`scheduledAt`) ou troca a política de UM wipe marcado. */
+  updateWipePlan: (
+    serverId: string,
+    planId: number,
+    patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null },
+  ) =>
+    api<WipePlanResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}`,
+      { method: 'PATCH', body: patch },
+    ),
+
+  /**
+   * Pula um wipe marcado.
+   *
+   * O agente RECUSA num plano forçado, com explicação: sem zerar,
+   * o servidor não sobe com o mundo antigo depois da atualização
+   * mensal. A tela nem oferece o botão nesse caso.
+   */
+  removeWipePlan: (serverId: string, planId: number) =>
+    api<WipePlanResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}`,
+      { method: 'DELETE' },
+    ),
 };
 
 // ------------------------------------------------------------
@@ -2505,4 +2572,128 @@ export interface WipeMapInput {
 export interface WipeMapWarning {
   code: 'SEED_ALREADY_PLAYED';
   message: string;
+}
+
+
+// ------------------------------------------------------------
+//  O WIPE  -  os tipos.
+//
+//  ####  ESTES TIPOS ESPELHAM core/src/types/wipe.ts  ####
+//
+//  Espelham, e não importam: o painel é um pacote separado, sem
+//  dependência do core — a mesma disciplina de `ServerSpawnStatus`
+//  e das outras telas. Campo trocado aqui é campo que some da
+//  tela sem o typecheck dizer nada, então a regra é copiar
+//  fielmente, e nunca acrescentar um campo que o contrato não
+//  tem.
+//
+//  Toda data é epoch ms em UTC. Horário local é texto `HH:MM`
+//  MAIS a zona IANA — nunca um instante com fuso embutido.
+// ------------------------------------------------------------
+
+/**
+ * O que acontece com o que o jogador APRENDEU quando o mundo
+ * zera.
+ */
+export const BP_POLICIES = ['keep', 'wipe', 'wipe_except_vip'] as const;
+
+export type BpPolicy = (typeof BP_POLICIES)[number];
+
+/** O que fazer quando o wipe da casa e o da Facepunch caem juntos. */
+export const COLLISION_POLICIES = ['reanchor', 'absorb', 'ignore'] as const;
+
+export type CollisionPolicy = (typeof COLLISION_POLICIES)[number];
+
+/** De onde sai o mapa do próximo wipe. */
+export const MAP_SOURCES = ['pool', 'random', 'fixed', 'keep'] as const;
+
+export type MapSource = (typeof MAP_SOURCES)[number];
+
+/** Quem pediu este wipe: a cadência, a Facepunch ou uma pessoa. */
+export const WIPE_PLAN_KINDS = ['cadence', 'forced', 'manual'] as const;
+
+export type WipePlanKind = (typeof WIPE_PLAN_KINDS)[number];
+
+/** Em que pé está um wipe marcado. */
+export const WIPE_PLAN_STATUSES = [
+  'planned',
+  'running',
+  'done',
+  'skipped',
+  'failed',
+  'absorbed',
+] as const;
+
+export type WipePlanStatus = (typeof WIPE_PLAN_STATUSES)[number];
+
+/** De quanto em quanto tempo este servidor zera por vontade própria. */
+export interface WipeCadenceSettings {
+  readonly enabled: boolean;
+  /** A cada quantos dias de CALENDÁRIO. 7 = semanal. */
+  readonly everyDays: number;
+  /** O marco zero da contagem, epoch ms. Só o dia dele importa. */
+  readonly anchorAt: number;
+  /** A hora local do wipe, `HH:MM`, lida no fuso abaixo. */
+  readonly timeOfDay: string;
+  /** A zona IANA em que aquele `HH:MM` é lido. */
+  readonly timeZone: string;
+  readonly bpPolicy: BpPolicy;
+}
+
+export interface WipeSettings {
+  readonly cadence: WipeCadenceSettings;
+  /** O forçado não tem `enabled`: ele acontece com ou sem nós. */
+  readonly forced: { readonly bpPolicy: BpPolicy };
+  readonly collision: {
+    readonly policy: CollisionPolicy;
+    /** A janela do `absorb`, em horas. Ignorada nas outras duas. */
+    readonly windowHours: number;
+  };
+}
+
+/** Um wipe MARCADO: a linha da agenda que o admin vê e edita. */
+export interface WipePlan {
+  readonly id: number;
+  readonly serverId: string;
+  readonly scheduledAt: number;
+  readonly kind: WipePlanKind;
+  readonly bpPolicy: BpPolicy;
+  readonly mapSource: MapSource;
+  readonly mapPoolId: number | null;
+  readonly status: WipePlanStatus;
+  readonly absorbedBy: number | null;
+  /** O instante que a REGRA teria gerado. É o que faz adiar ser adiar. */
+  readonly generatedFor: number | null;
+  /** Um humano mexeu, e a reconciliação não deve tocar. */
+  readonly pinned: boolean;
+  readonly note: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/**
+ * ####  `now` VEM EM TODA RESPOSTA DO WIPE  ####
+ *
+ * É o relógio do AGENTE, e é dele que sai a contagem regressiva.
+ * Um navegador adiantado em dez minutos mostraria "faltam 3 min"
+ * para um wipe que ainda tem uma hora.
+ */
+export interface WipeSettingsResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly settings: WipeSettings;
+  readonly message?: string;
+}
+
+export interface WipePlansResponse {
+  readonly ok: true;
+  readonly now: number;
+  readonly plans: readonly WipePlan[];
+}
+
+/** O desfecho de mexer em UM wipe marcado. */
+export interface WipePlanResponse {
+  readonly ok: true;
+  readonly message?: string;
+  readonly plan?: WipePlan;
 }

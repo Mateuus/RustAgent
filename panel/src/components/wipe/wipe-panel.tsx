@@ -1,114 +1,324 @@
 'use client';
 
 // ============================================================
-//  wipe-panel.tsx  -  a casca da aba WIPE, com as seis sub-abas.
+//  wipe-panel.tsx  -  a aba WIPE da página do servidor.
 //
-//  Cada uma responde uma pergunta diferente, e é por isso que são
-//  seis e não uma tela só (ver Docs\16 §9.1):
+//  ####  SEIS SUB-ABAS, E CADA UMA RESPONDE UMA PERGUNTA  ####
 //
-//      Geral        quando é o próximo, e o que ele leva?
-//      Agenda       com que frequência, e o que já está marcado?
-//      Mapas        qual mundo entra no lugar, e como ele é?
-//      Blueprints   quem recomeça sabendo o quê?
-//      Configuração como o agente executa — avisa, espera, apaga?
-//      Execução     o que aconteceu, passo a passo?
+//    Geral         quando é o próximo, e o que ele leva?
+//    Agenda        com que frequência, e o que já está marcado?
+//    Mapas         qual mundo entra no lugar, e como ele é?
+//    Blueprints    quem recomeça sabendo o quê?
+//    Configuração  como o agente executa: avisa, espera, apaga o quê?
+//    Execução      o que aconteceu, passo a passo?
 //
-//  ------------------------------------------------------------
-//  ####  AS QUE AINDA NÃO EXISTEM DIZEM QUE NÃO EXISTEM  ####
+//  As duas primeiras estão montadas. As outras quatro têm o ponto
+//  de montagem pronto e, enquanto vazias, mostram um bloco dizendo
+//  que aquela parte está sendo construída — trocar cada uma é
+//  substituir UMA linha lá embaixo.
 //
-//  A regra da casa é que aba nova não abre vazia: uma tela em
-//  branco promete o que não há, e quem clica fica esperando um
-//  carregamento que nunca vem. Enquanto a frente de cada sub-aba
-//  não entra, ela mostra o que vai ser e por que ainda não é.
+//  ####  ELA CARREGA OS DADOS, AS SUB-ABAS SÓ DESENHAM  ####
 //
-//  A alternativa — esconder as abas não prontas — foi descartada
-//  de propósito: o mapa da tela mudaria a cada semana, e ninguém
-//  conseguiria dizer onde uma coisa vai estar.
+//  A configuração e a agenda são as mesmas para Geral e Agenda.
+//  Buscá-las duas vezes daria duas verdades na mesma tela — a
+//  contagem regressiva de um quadro discordando da lista do outro
+//  ao lado.
+//
+//  ####  POR QUE NÃO HÁ POLLING AQUI  ####
+//
+//  A agenda mora no banco do agente e só muda quando alguém a
+//  muda: salvar a cadência, adiar, pular. Cada uma dessas ações já
+//  recarrega. O que precisa andar de segundo em segundo é a
+//  contagem regressiva, e ela anda com o relógio projetado (ver
+//  use-agent-clock.ts) sem custar uma requisição por segundo.
 // ============================================================
 
-import {
-  CalendarDays,
-  ClipboardList,
-  Gauge,
-  Map,
-  PlayCircle,
-  SlidersHorizontal,
-} from 'lucide-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { StateBlock } from '@/components/state-block';
+import { TabAgenda } from '@/components/wipe/tab-agenda';
+import { TabGeral } from '@/components/wipe/tab-geral';
 import { TabMapas } from '@/components/wipe/tab-mapas';
-
-type SubTab = 'geral' | 'agenda' | 'mapas' | 'blueprints' | 'configuracao' | 'execucao';
+import { useAgentClock } from '@/components/wipe/use-agent-clock';
+import {
+  agent,
+  type BpPolicy,
+  type ServerView,
+  type WipePlan,
+  type WipeSettings,
+} from '@/lib/api';
+import { toast } from '@/lib/toast';
+import { cn } from '@/lib/utils';
 
 /**
- * A ordem é a do uso, e não a da construção: quem abre a aba
- * quer primeiro saber quando é o próximo wipe, e só depois mexer
- * em como ele acontece.
+ * Os ids são o contrato entre as frentes que constroem as
+ * sub-abas. Sem acento e sem espaço: eles viajam em `data-`,
+ * em chave de reação e (um dia) em query string.
  */
-const SUB_TABS = [
-  { key: 'geral', label: 'Geral', Icon: Gauge },
-  { key: 'agenda', label: 'Agenda', Icon: CalendarDays },
-  { key: 'mapas', label: 'Mapas', Icon: Map },
-  { key: 'blueprints', label: 'Blueprints', Icon: ClipboardList },
-  { key: 'configuracao', label: 'Configuração', Icon: SlidersHorizontal },
-  { key: 'execucao', label: 'Execução', Icon: PlayCircle },
-] as const;
+export type WipeTab = 'geral' | 'agenda' | 'mapas' | 'blueprints' | 'configuracao' | 'execucao';
 
-/** O que cada sub-aba ainda não construída vai responder. */
-const EM_CONSTRUCAO: Readonly<Record<Exclude<SubTab, 'mapas'>, string>> = {
-  geral:
-    'Aqui vai ficar a contagem regressiva para o próximo wipe, com o que ele leva (mapa, tela ' +
-    'de morte, blueprints) lido do disco — e não um texto fixo dizendo o que deveria estar lá.',
-  agenda:
-    'Aqui vai ficar a cadência (a cada N dias, no horário e no fuso que o dono escolher), o ' +
-    'wipe forçado da Facepunch e o calendário dos próximos 90 dias.',
-  blueprints:
-    'Aqui vai ficar o que acontece com o que o jogador aprendeu: manter, apagar, ou devolver a ' +
-    'quem tem VIP — com a régua por nível e o atraso em horas.',
-  configuracao:
-    'Aqui vai ficar como o agente executa o wipe: os avisos antes, o tempo de esvaziar, o ' +
-    'backup, e a lista explícita de dados de plugin do full wipe.',
-  execucao:
-    'Aqui vai ficar o passo a passo de cada wipe — avisar, esvaziar, parar, backup, apagar, ' +
-    'configurar, subir, pós-wipe — com o log e o botão de retomar do passo que falhou.',
-};
+const TABS: readonly { readonly id: WipeTab; readonly label: string }[] = [
+  { id: 'geral', label: 'Geral' },
+  { id: 'agenda', label: 'Agenda' },
+  { id: 'mapas', label: 'Mapas' },
+  { id: 'blueprints', label: 'Blueprints' },
+  { id: 'configuracao', label: 'Configuração' },
+  { id: 'execucao', label: 'Execução' },
+];
 
-export function WipePanel({ serverId }: { readonly serverId: string }) {
-  const [tab, setTab] = useState<SubTab>('geral');
+/**
+ * A janela da agenda que a tela lê.
+ *
+ * Trinta dias para trás para o histórico recente aparecer na grade
+ * do mês, e cento e oitenta para a frente porque o agente
+ * materializa cerca de noventa — a janela cobre tudo o que existe,
+ * com folga, numa requisição só.
+ */
+const PAST_MS = 30 * 24 * 60 * 60 * 1_000;
+const FUTURE_MS = 180 * 24 * 60 * 60 * 1_000;
+
+export function WipePanel({ server }: { readonly server: ServerView }) {
+  const [tab, setTab] = useState<WipeTab>('geral');
+
+  const [settings, setSettings] = useState<WipeSettings | null>(null);
+  const [plans, setPlans] = useState<readonly WipePlan[]>([]);
+  /** O `now` da última resposta do agente. Alimenta o relógio. */
+  const [sample, setSample] = useState<number | null>(null);
+
+  const [error, setError] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const clock = useAgentClock(sample);
+  const serverId = server.id;
+
+  const load = useCallback(async () => {
+    // A faixa é calculada com o relógio local de propósito: aqui
+    // ela é só um recorte de busca, e não a hora de um wipe. Quem
+    // não pode sair do relógio do agente é a contagem regressiva.
+    const from = Date.now() - PAST_MS;
+    const to = Date.now() + FUTURE_MS;
+
+    try {
+      const response = await agent.wipeSettings(serverId);
+
+      setSettings(response.settings);
+      setSample(response.now);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+
+    try {
+      const response = await agent.wipePlans(serverId, { from, to });
+
+      setPlans(response.plans);
+      setSample(response.now);
+      setPlanError(null);
+    } catch (cause) {
+      // A agenda é o segundo pedido: sem ela a configuração ainda
+      // vale, e a tela diz que não conseguiu ler as datas em vez
+      // de mostrar uma agenda vazia que pareceria "não há wipes".
+      setPlanError(cause instanceof Error ? cause.message : String(cause));
+      setPlans([]);
+    }
+
+    setLoading(false);
+  }, [serverId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /** Toda ação segue o mesmo caminho: agir, avisar, reler. */
+  const run = useCallback(
+    async (what: string, action: () => Promise<{ readonly ok: true; readonly message?: string }>) => {
+      setBusy(true);
+
+      try {
+        const response = await action();
+
+        toast.success(what, { description: response.message });
+        await load();
+      } catch (cause) {
+        toast.error(`Não deu: ${what.toLowerCase()}`, {
+          description: cause instanceof Error ? cause.message : String(cause),
+        });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [load],
+  );
+
+  const saveSettings = useCallback(
+    (next: WipeSettings) => {
+      void run('Calendário salvo', () => agent.saveWipeSettings(serverId, next));
+    },
+    [run, serverId],
+  );
+
+  const postpone = useCallback(
+    (plan: WipePlan, hours: number) => {
+      void run(`Wipe adiado ${String(hours)} h`, () =>
+        agent.updateWipePlan(serverId, plan.id, {
+          scheduledAt: plan.scheduledAt + hours * 60 * 60 * 1_000,
+        }),
+      );
+    },
+    [run, serverId],
+  );
+
+  const skip = useCallback(
+    (plan: WipePlan) => {
+      void run('Wipe pulado', () => agent.removeWipePlan(serverId, plan.id));
+    },
+    [run, serverId],
+  );
+
+  const create = useCallback(
+    (input: { scheduledAt: number; bpPolicy: BpPolicy; note: string | null }) => {
+      void run('Wipe manual marcado', () => agent.createWipePlan(serverId, input));
+    },
+    [run, serverId],
+  );
 
   return (
     <div className="space-y-4">
-      {/* A mesma faixa de abas da página do servidor, um nível
-          abaixo: divisória vertical entre os alvos de clique, e o
-          sublinhado marcando o ativo. */}
-      <nav className="flex overflow-x-auto border-b border-border">
-        {SUB_TABS.map(({ key, label, Icon }, index) => (
-          <div key={key} className="flex shrink-0 items-stretch">
-            {index > 0 && <span aria-hidden className="my-2 w-px bg-border" />}
+      {/* Pílulas, e não a barra sublinhada das abas de cima: dois
+          níveis com o mesmo desenho fazem a pessoa perder de vista
+          onde está. É o mesmo padrão das sub-abas de Configurações. */}
+      <div
+        role="tablist"
+        aria-label="Seções do wipe"
+        className="flex flex-wrap items-stretch border border-border bg-surface"
+      >
+        {TABS.map((item, index) => (
+          // `presentation` na divisória: sem ele, o <div> ficaria
+          // entre o tablist e os tabs na árvore de acessibilidade,
+          // e o leitor de tela deixaria de anunciar "aba 3 de 6".
+          <div key={item.id} role="presentation" className="flex items-stretch">
+            {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
 
             <button
               type="button"
-              onClick={() => setTab(key)}
-              className={
-                'flex items-center gap-2 px-4 py-2 text-sm ' +
-                (tab === key
-                  ? 'border-b-2 border-rust text-foreground'
-                  : 'border-b-2 border-transparent text-muted hover:text-foreground')
-              }
+              role="tab"
+              id={`wipe-tab-${item.id}`}
+              aria-selected={tab === item.id}
+              onClick={() => {
+                setTab(item.id);
+              }}
+              className={cn(
+                'px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
+                tab === item.id ? 'bg-surface-2 text-foreground' : 'text-muted hover:text-foreground',
+              )}
             >
-              <Icon aria-hidden="true" className={'h-4 w-4' + (tab === key ? ' text-rust' : '')} />
-              {label}
+              {item.label}
             </button>
           </div>
         ))}
-      </nav>
+      </div>
 
-      {tab === 'mapas' ? (
-        <TabMapas serverId={serverId} />
-      ) : (
-        <StateBlock variant="empty" title="Ainda em construção" detail={EM_CONSTRUCAO[tab]} />
-      )}
+      <div role="tabpanel" aria-labelledby={`wipe-tab-${tab}`} className="space-y-4">
+        {loading && settings === null && error === null && (
+          <StateBlock variant="loading" title="Consultando o agente…" />
+        )}
+
+        {error !== null && (
+          <StateBlock
+            variant="error"
+            title="Não consegui ler o calendário deste servidor."
+            detail={error}
+          />
+        )}
+
+        {planError !== null && settings !== null && (
+          <StateBlock
+            variant="error"
+            title="Não consegui ler as datas marcadas."
+            detail={
+              <>
+                {planError} A configuração abaixo continua valendo — o que está faltando é a lista
+                do que já foi materializado.
+              </>
+            }
+          />
+        )}
+
+        {settings !== null && tab === 'geral' && (
+          <TabGeral
+            server={server}
+            settings={settings}
+            plans={plans}
+            clock={clock}
+            busy={busy}
+            onPostpone={postpone}
+            onSkip={skip}
+          />
+        )}
+
+        {settings !== null && tab === 'agenda' && (
+          <TabAgenda
+            settings={settings}
+            plans={plans}
+            clock={clock}
+            busy={busy}
+            onSave={saveSettings}
+            onPostpone={postpone}
+            onSkip={skip}
+            onCreate={create}
+          />
+        )}
+
+        {/* ####  OS PONTOS DE MONTAGEM DAS OUTRAS FRENTES  ####
+
+            Cada linha abaixo é de outra frente, e cada uma é UMA
+            linha de propósito: quem construir a sub-aba troca o
+            <EmConstrucao/> pelo componente dela e não encosta em
+            mais nada deste arquivo. Mapas já entrou assim. */}
+
+        {tab === 'mapas' && <TabMapas serverId={serverId} />}
+        {tab === 'blueprints' && <EmConstrucao tab="blueprints" />}
+        {tab === 'configuracao' && <EmConstrucao tab="configuracao" />}
+        {tab === 'execucao' && <EmConstrucao tab="execucao" />}
+      </div>
     </div>
   );
+}
+
+/**
+ * O que uma sub-aba ainda não montada diz.
+ *
+ * Ela não fica em branco e não some da barra: sumir esconderia
+ * que o assunto existe, e o branco pareceria defeito. Cada uma diz
+ * o que vai responder e o que fazer enquanto isso.
+ */
+const EM_CONSTRUCAO: Readonly<
+  Record<
+    Exclude<WipeTab, 'geral' | 'agenda' | 'mapas'>,
+    { readonly title: string; readonly detail: string }
+  >
+> = {
+  blueprints: {
+    title: 'A régua de blueprints ainda está sendo construída.',
+    detail:
+      'Ela vai responder quem recomeça sabendo o quê: quanto cada nível de VIP leva de volta, com quanto atraso, e o snapshot tirado antes do wipe. A política de cada wipe (manter, zerar, ou zerar menos para VIP) já se escolhe na sub-aba Agenda.',
+  },
+  configuracao: {
+    title: 'A configuração da execução ainda está sendo construída.',
+    detail:
+      'Ela vai responder como o agente executa: em quanto tempo antes ele avisa no chat, quanto espera o servidor esvaziar, se copia o save antes de apagar e quais dados de plugin o full wipe leva.',
+  },
+  execucao: {
+    title: 'A execução ainda está sendo construída.',
+    detail:
+      'Ela vai responder o que aconteceu, passo a passo — avisar, esvaziar, parar, backup, apagar, configurar, subir — e permitir retomar do passo que falhou. Até ela entrar, esta tela mantém o calendário e o wipe é feito à mão.',
+  },
+};
+
+function EmConstrucao({ tab }: { readonly tab: keyof typeof EM_CONSTRUCAO }) {
+  const parte = EM_CONSTRUCAO[tab];
+
+  return <StateBlock variant="empty" title={parte.title} detail={parte.detail} />;
 }
