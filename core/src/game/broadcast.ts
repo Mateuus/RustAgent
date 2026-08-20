@@ -36,6 +36,7 @@ import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
 import { toError } from '../util.js';
+import { stripChatMarkup } from './chat-markup.js';
 import { firstJsonLine } from './plugin-contract.js';
 
 export type { BroadcastInput, BroadcastResult, BroadcastVia };
@@ -105,6 +106,16 @@ export interface Broadcaster {
 
 /** O comando do `OrigemZChat`. Uma constante, e não texto solto. */
 export const CHAT_BROADCAST_COMMAND = 'origemz.chat.broadcast';
+
+/**
+ * Como o Oxide prefixa o log do plugin: `[OrigemZChat] …`.
+ *
+ * É a prova de que o comando CHEGOU ao plugin mesmo quando a
+ * resposta que voltou não foi o JSON do contrato. Ver o uso em
+ * `#sendByPlugin` — sem isso, o agente repete a fala pelo `say`
+ * num servidor onde ela já saiu.
+ */
+export const CHAT_PLUGIN_LOG_SIGNATURE = '[OrigemZChat]';
 
 /** O que o transporte precisa saber dos servidores. */
 export interface BroadcastServers {
@@ -224,6 +235,37 @@ export class PluginBroadcaster implements Broadcaster {
     const line = firstJsonLine(raw);
 
     if (line === null || typeof line !== 'object') {
+      // ####  ANTES DE DESISTIR, PROCURE A ASSINATURA DELE  ####
+      //
+      // MEDIDO no servidor real, e é a origem do `SERVER "[AVISO]
+      // …"` duplicado que apareceu no chat: um `Puts` de dentro de
+      // um comando de console HERDA o Identifier do pedido (o
+      // mesmo fenômeno documentado em rcon/frames.ts para
+      // PrintWarning). O `RconClient` casa o PRIMEIRO frame com
+      // aquele número, e um plugin que registra o anúncio antes de
+      // responder entrega o log no lugar do JSON — que chega
+      // depois, sem ninguém esperando.
+      //
+      // O plugin novo responde antes de logar (ver
+      // `CmdBroadcastHandler`, em Plugins/OrigemZChat.cs) e este
+      // ramo não acontece. Ele existe para o servidor que ainda
+      // roda o `.cs` antigo: ali a fala JÁ SAIU, e cair no `say`
+      // seria dizer tudo duas vezes — a segunda sem cor e com
+      // aspas, porque o `say` do Rust mostra o argumento como veio.
+      //
+      // Repetir para o servidor inteiro é pior que não contar
+      // quantos receberam.
+      if (raw.includes(CHAT_PLUGIN_LOG_SIGNATURE)) {
+        this.#deps.logger?.warn(
+          { server: input.serverId },
+          'o OrigemZChat entregou a fala mas respondeu o log no lugar do JSON: ' +
+            'o plugin deste servidor está desatualizado. Atualize o OrigemZChat.cs — ' +
+            'até lá o agente não sabe para quantos a fala foi.',
+        );
+
+        return { sent: 0, via: 'plugin' };
+      }
+
       // Plugin não carregado: o console devolve o eco do comando
       // desconhecido, e não JSON. É o caso mais comum do fallback.
       return null;
@@ -263,8 +305,12 @@ export class PluginBroadcaster implements Broadcaster {
       );
     }
 
+    // A marcação de cor sai ANTES da faxina: sem isto o jogador
+    // leria "Agora tem [verde]3[/]/300" — os marcadores viram cor
+    // no plugin, e aqui não há plugin nenhum. Ver game/chat-markup.ts.
+    const plain = stripChatMarkup(text);
     const tag = (input.tag ?? '').trim();
-    const clean = sanitizeForSay(tag === '' ? text : `${tag} ${text}`);
+    const clean = sanitizeForSay(tag === '' ? plain : `${tag} ${plain}`);
 
     if (clean === '') {
       throw new ApiError(

@@ -1487,6 +1487,29 @@ A lista traz junto `variables.names` e `variables.namespaces`, e eles vêm do
 é outra parte do código, e uma lista escrita à mão no painel ficaria mentindo no
 dia em que ela mudasse.
 
+**A cor de um TRECHO vai dentro do `text`.** O campo `color` pinta a fala
+inteira; para destacar um pedaço existe a marcação, com nome da paleta ou
+hexadecimal:
+
+```
+"text": "Agora tem [verde]{online}[/]/{max}"
+"text": "Wipe [#ff0000]HOJE[/] às 16h"
+```
+
+A paleta é `branco`, `preto`, `cinza`, `vermelho`, `laranja`, `amarelo`,
+`dourado`, `verde`, `ciano`, `azul`, `roxo` e `rosa`. `[/]` fecha, e **abrir a
+mesma cor de novo também fecha** — `Agora tem [azul]{online}[azul]/{max}` sai
+como se espera, que é como quase todo mundo escreve na primeira tentativa. Cor
+aberta e não fechada vale até o fim daquela fala, e nunca além dela.
+
+Colchete que **não é cor** — `[AVISO]`, `[BR]`, `[1x]` — sai literal, pela mesma
+razão da variável desconhecida: comê-lo apagaria em silêncio a tag que o admin
+digitou. Rich text (`<color=…>`) no `text` continua sendo **removido**: quem
+converte a marcação é o `OrigemZChat`, depois da faxina, e só depois de
+reconhecer a cor. Sem o plugin no servidor a fala sai pelo `say` do jogo, e aí
+os marcadores são retirados — o `say` não tem cor nenhuma, e `[verde]` na tela
+seria pior que a frase sem destaque.
+
 ```json
 { "name": "Discord", "text": "Entre no nosso Discord!",
   "enabled": true, "scheduleKind": "interval", "everySeconds": 1800,

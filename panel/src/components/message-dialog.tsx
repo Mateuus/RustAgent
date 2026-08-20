@@ -30,13 +30,14 @@
 //  botão "testar agora" existe para o resto.
 // ============================================================
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
+import { CHAT_COLORS, parseChatMarkup } from '@/lib/chat-markup';
 import {
   agent,
   type Message,
@@ -143,6 +144,72 @@ export function MessageDialog({
   const [size, setSize] = useState(String(message?.size ?? 15));
 
   const [busy, setBusy] = useState(false);
+
+  /**
+   * O campo de texto de verdade, e não uma cópia do valor.
+   *
+   * A cor é aplicada NA SELEÇÃO, e seleção é estado do DOM: sem a
+   * referência, o botão de cor só saberia grudar o marcador no fim
+   * da frase — que é justamente o que ninguém quer, porque a cor
+   * quase sempre é de uma palavra do meio.
+   */
+  const textArea = useRef<HTMLTextAreaElement>(null);
+
+  /**
+   * Onde o cursor esteve pela última vez. `null` = ainda não esteve.
+   *
+   * Um textarea sem foco responde `selectionStart: 0`, e confiar
+   * nisso faria a primeira cor cair no COMEÇO da frase — no lugar
+   * mais errado possível, já que quem clica numa cor sem ter tocado
+   * no texto está escrevendo do fim para a frente.
+   */
+  const selection = useRef<{ start: number; end: number } | null>(null);
+
+  /** A última cor livre escolhida no seletor. */
+  const [customColor, setCustomColor] = useState('#ff0000');
+
+  /**
+   * Envolve o que estiver selecionado em `[cor]…[/]`.
+   *
+   * Sem seleção, deixa o par vazio com o cursor DENTRO: quem clicou
+   * na cor antes de escrever continua digitando e já sai colorido.
+   *
+   * Escrever o par por aqui, e não deixar o admin decorar a sintaxe,
+   * é o ponto: `[/]` esquecido pinta o resto da frase, e a fileira
+   * de cores nunca esquece.
+   */
+  function applyColor(marker: string): void {
+    const field = textArea.current;
+    const at = selection.current ?? { start: text.length, end: text.length };
+    const start = Math.min(at.start, text.length);
+    const end = Math.min(at.end, text.length);
+    const inner = text.slice(start, end);
+    const open = `[${marker}]`;
+    const next = `${text.slice(0, start)}${open}${inner}[/]${text.slice(end)}`;
+
+    // O teto é do agente, e ele recusaria a gravação inteira. Cortar
+    // aqui seria pior: o admin perderia o texto sem entender por quê.
+    if (next.length > MAX_TEXT) {
+      toast.error(`A marcação não cabe: o texto passaria de ${String(MAX_TEXT)} caracteres.`);
+      return;
+    }
+
+    setText(next);
+
+    // Sem seleção o cursor fica DENTRO do par; com seleção, logo
+    // depois do fechamento — nos dois casos onde a pessoa ia
+    // continuar digitando.
+    const cursor = inner === '' ? start + open.length : start + open.length + inner.length + 3;
+
+    selection.current = { start: cursor, end: cursor };
+
+    // O React só reescreve o campo no próximo quadro; mexer no
+    // cursor antes disso seria mexer no texto antigo.
+    requestAnimationFrame(() => {
+      field?.focus();
+      field?.setSelectionRange(cursor, cursor);
+    });
+  }
 
   useEffect(() => {
     void (async () => {
@@ -277,11 +344,26 @@ export function MessageDialog({
         <div>
           <Label>Texto</Label>
           <textarea
+            ref={textArea}
             value={text}
             rows={2}
             maxLength={MAX_TEXT}
             disabled={busy}
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => {
+              setText(event.target.value);
+              selection.current = {
+                start: event.target.selectionStart,
+                end: event.target.selectionEnd,
+              };
+            }}
+            // Clique, seta, arrastar: é aqui que o botão de cor
+            // descobre em cima de QUE pedaço ele deve agir.
+            onSelect={(event) => {
+              selection.current = {
+                start: event.currentTarget.selectionStart,
+                end: event.currentTarget.selectionEnd,
+              };
+            }}
             className="w-full border border-border bg-surface-2 px-3 py-2 text-sm text-foreground"
           />
           <p className="mt-1 flex flex-wrap items-center gap-x-2 text-2xs text-muted">
@@ -309,6 +391,63 @@ export function MessageDialog({
           <p className="mt-1 text-2xs leading-relaxed text-muted">
             Uma variável que o agente não conhece sai <strong>literal</strong> no chat — feio, e
             visível. Uma frase que perde metade em silêncio ninguém descobre.
+          </p>
+
+          {/* ---- A COR DE UM PEDAÇO SÓ ----
+
+              A `Cor do texto`, lá embaixo, pinta a fala INTEIRA.
+              Aqui é o outro caso, e é o mais pedido: destacar o
+              número, a data, a palavra que importa.
+
+              Os botões escrevem o PAR (`[verde]…[/]`) em volta do
+              que estiver selecionado. Deixar o admin decorar a
+              sintaxe seria deixá-lo esquecer o fechamento — e uma
+              cor que não fecha pinta o resto da frase. */}
+          <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-2xs text-muted">
+            <span className="mr-0.5">cor de um trecho:</span>
+
+            {Object.entries(CHAT_COLORS).map(([nome, hex]) => (
+              <button
+                key={nome}
+                type="button"
+                disabled={busy}
+                title={`${nome} — pinta o trecho selecionado`}
+                aria-label={`Pintar de ${nome}`}
+                onClick={() => applyColor(nome)}
+                className="h-4 w-4 border border-border hover:scale-110 disabled:opacity-40"
+                style={{ backgroundColor: hex }}
+              />
+            ))}
+
+            <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+
+            <input
+              type="color"
+              value={customColor}
+              disabled={busy}
+              aria-label="Escolher outra cor"
+              onChange={(event) => setCustomColor(event.target.value)}
+              className="h-4 w-7 cursor-pointer border border-border bg-transparent p-0"
+            />
+
+            <button
+              type="button"
+              disabled={busy}
+              title="Pinta o trecho selecionado com este código"
+              onClick={() => applyColor(customColor)}
+              className="border border-border px-1 font-mono hover:text-foreground disabled:opacity-40"
+            >
+              {customColor}
+            </button>
+          </div>
+
+          <p className="mt-1 text-2xs leading-relaxed text-muted">
+            Selecione um pedaço e clique numa cor: o texto vira{' '}
+            <code className="font-mono">
+              Agora tem [verde]{'{online}'}[/]/{'{max}'}
+            </code>
+            . Só o trecho marcado muda — o resto segue a <strong>Cor do texto</strong>. Colchete que
+            não é cor (<code className="font-mono">[AVISO]</code>) sai como está.
           </p>
         </div>
 
@@ -646,13 +785,26 @@ export function MessageDialog({
               {tag.trim() !== '' && (
                 <span style={{ color: safeColor(tagColor, '#ffcc00') }}>{tag.trim()} </span>
               )}
-              <span style={{ color: safeColor(color, '#ffffff') }}>
-                {text.trim() === '' ? 'o texto aparece aqui' : text.trim()}
-              </span>
+              {text.trim() === '' ? (
+                <span style={{ color: safeColor(color, '#ffffff') }}>o texto aparece aqui</span>
+              ) : (
+                // A prévia lê a marcação com a MESMA regra do agente
+                // (lib/chat-markup.ts é o espelho de
+                // core/src/game/chat-markup.ts). Uma prévia que
+                // adivinha diferente é pior que prévia nenhuma.
+                parseChatMarkup(text.trim()).map((span, index) => (
+                  <span
+                    key={index}
+                    style={{ color: span.color ?? safeColor(color, '#ffffff') }}
+                  >
+                    {span.text}
+                  </span>
+                ))
+              )}
             </p>
             <p className="mt-1 text-2xs text-muted">
               Sem o plugin OrigemZChat no servidor, a fala sai pelo <code>say</code> do jogo — sem
-              cor, e sem tamanho. Melhor que silêncio.
+              cor, sem tamanho e sem os marcadores. Melhor que silêncio.
             </p>
           </div>
         </div>
