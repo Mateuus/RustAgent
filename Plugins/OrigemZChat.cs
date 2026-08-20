@@ -72,6 +72,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Text.RegularExpressions;
 
 using ConVar;
@@ -81,7 +82,7 @@ using Oxide.Core.Plugins;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZChat", "OrigemZ", "0.1.0")]
+    [Info("OrigemZChat", "OrigemZ", "0.2.0")]
     [Description("Chat com tag, cor e formato por grupo do Oxide, com hook para os outros plugins mudarem ou cancelarem a mensagem")]
     public class OrigemZChat : RustPlugin
     {
@@ -720,6 +721,241 @@ namespace Oxide.Plugins
         }
 
         // ========================================================
+        //  A COR DE UM PEDACO SO DA FRASE
+        //
+        //      Agora tem [verde]{online}[/]/{max}
+        //      Wipe [#ff0000]HOJE[/] as 16h
+        //
+        //  #### POR QUE UMA MARCACAO, E NAO RICH TEXT DIRETO ####
+        //
+        //  Porque o texto vem de um FORMULARIO, e o que sai dele vai
+        //  para o chat de todo mundo. Rich text solto ali e a porta
+        //  de `</color><size=90>` - uma linha que empurra o chat
+        //  inteiro para fora da tela - e de um `<color>` sem fechar
+        //  que pinta as mensagens SEGUINTES, que nao sao do admin.
+        //
+        //  Por isso o StripRichText continua tirando TUDO, e a
+        //  marcacao passa por ele intacta: colchete nao e rich text.
+        //  Depois da faxina, o unico `<color=>` do texto final e o
+        //  que ESTE codigo escreveu, com uma cor que ele reconheceu
+        //  - nome da paleta ou hexadecimal - e com o fechamento que
+        //  ele mesmo produziu.
+        //
+        //  #### O QUE NAO E COR SAI LITERAL ####
+        //
+        //  `[AVISO]`, `[BR]` e `[1x]` continuam sendo o que sao.
+        //  Comer todo colchete faria a tag que o admin digitou no
+        //  meio da frase sumir sem ele entender por que.
+        //
+        //  A mesma leitura existe do lado do agente, em
+        //  core/src/game/chat-markup.ts - ela e quem tira os
+        //  marcadores quando a fala sai pelo `say` do jogo, que nao
+        //  tem cor nenhuma. As duas pontas precisam concordar.
+        // ========================================================
+
+        /// <summary>
+        /// As cores com nome. Os mesmos valores de
+        /// core/src/game/chat-markup.ts e do painel: mudar um deles
+        /// exige mudar os tres, ou a previa passa a mentir.
+        /// </summary>
+        private static readonly Dictionary<string, string> ChatColors =
+            new Dictionary<string, string>
+            {
+                { "branco", "#ffffff" },
+                { "preto", "#000000" },
+                { "cinza", "#9ca3af" },
+                { "vermelho", "#ef4444" },
+                { "laranja", "#f97316" },
+                { "amarelo", "#facc15" },
+                { "dourado", "#ffcc00" },
+                { "verde", "#22c55e" },
+                { "ciano", "#22d3ee" },
+                { "azul", "#3b82f6" },
+                { "roxo", "#a855f7" },
+                { "rosa", "#ec4899" }
+            };
+
+        /// <summary>`#rgb`, `#rrggbb` ou `#rrggbbaa`, como o jogo aceita.</summary>
+        private static readonly Regex HexColorPattern = new Regex(
+            "^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// Um marcador: `[verde]`, `[#ff0000]`, `[/]`, `[/verde]`.
+        ///
+        /// Sem espaco e sem colchete no miolo, e no maximo 20
+        /// caracteres: e o que impede `[a cada 30 min]` de ser lido
+        /// como marcador quebrado no meio de uma frase.
+        /// </summary>
+        private static readonly Regex MarkupPattern = new Regex(
+            @"\[(/?)([^\[\]\s]{0,20})\]",
+            RegexOptions.Compiled);
+
+        /// <summary>
+        /// `verde` ou `#22C55E` -> `#22c55e`. `null` quando o token
+        /// nao e uma cor que este plugin reconhece.
+        /// </summary>
+        private static string ResolveChatColor(string token)
+        {
+            if (string.IsNullOrEmpty(token))
+            {
+                return null;
+            }
+
+            string limpo = token.Trim().ToLowerInvariant();
+
+            if (limpo.Length == 0)
+            {
+                return null;
+            }
+
+            if (HexColorPattern.IsMatch(limpo))
+            {
+                return limpo;
+            }
+
+            string cor;
+
+            return ChatColors.TryGetValue(limpo, out cor) ? cor : null;
+        }
+
+        /// <summary>
+        /// Troca a marcacao por rich text. <paramref name="colorido"/>
+        /// volta verdadeiro quando algum marcador virou cor - e ai o
+        /// texto JA esta pintado inteiro, inclusive os pedacos sem
+        /// marcacao, e quem chamou nao deve pedir cor ao Wrap.
+        /// </summary>
+        /// <remarks>
+        /// As tres regras:
+        ///
+        ///   1. `[cor]` liga a cor dai em diante.
+        ///   2. `[/]` (ou `[/cor]`) desliga e volta a anterior.
+        ///   3. Abrir A MESMA cor que ja esta ligada DESLIGA.
+        ///
+        /// A regra 3 nao e enfeite: e como a maioria escreve na
+        /// primeira tentativa - `[azul]{online}[azul]/{max}` - e sem
+        /// ela essa frase sairia azul ate o fim, calada.
+        ///
+        /// Cor aberta e nao fechada vale ATE O FIM da frase. Nunca
+        /// vaza para a mensagem seguinte: cada pedaco sai com o seu
+        /// `</color>` proprio.
+        /// </remarks>
+        private static string ApplyChatMarkup(string texto, string corPadrao, out bool colorido)
+        {
+            colorido = false;
+
+            if (string.IsNullOrEmpty(texto) || texto.IndexOf('[') < 0)
+            {
+                return texto;
+            }
+
+            MatchCollection marcadores = MarkupPattern.Matches(texto);
+
+            if (marcadores.Count == 0)
+            {
+                return texto;
+            }
+
+            StringBuilder saida = new StringBuilder();
+            StringBuilder pedaco = new StringBuilder();
+            List<string> abertas = new List<string>();
+            int cursor = 0;
+
+            for (int i = 0; i < marcadores.Count; i++)
+            {
+                Match marcador = marcadores[i];
+                string nome = marcador.Groups[2].Value;
+                string cor = ResolveChatColor(nome);
+                bool fechando = marcador.Groups[1].Value == "/";
+
+                pedaco.Append(texto, cursor, marcador.Index - cursor);
+                cursor = marcador.Index + marcador.Length;
+
+                if (fechando)
+                {
+                    // `[/]` sem nada aberto NAO e fechamento: e um
+                    // marcador sobrando, e ele sai literal para o
+                    // admin ver que sobrou.
+                    if (abertas.Count == 0 || (nome.Length > 0 && cor == null))
+                    {
+                        pedaco.Append(marcador.Value);
+                    }
+                    else
+                    {
+                        FlushMarkup(saida, pedaco, abertas, corPadrao);
+                        abertas.RemoveAt(abertas.Count - 1);
+                        colorido = true;
+                    }
+
+                    continue;
+                }
+
+                if (cor == null)
+                {
+                    // `[AVISO]`, `[BR]`, `[1x]`: nao e cor, e texto.
+                    pedaco.Append(marcador.Value);
+                    continue;
+                }
+
+                FlushMarkup(saida, pedaco, abertas, corPadrao);
+
+                if (abertas.Count > 0 && abertas[abertas.Count - 1] == cor)
+                {
+                    abertas.RemoveAt(abertas.Count - 1);
+                }
+                else
+                {
+                    abertas.Add(cor);
+                }
+
+                colorido = true;
+            }
+
+            pedaco.Append(texto, cursor, texto.Length - cursor);
+            FlushMarkup(saida, pedaco, abertas, corPadrao);
+
+            // Nenhum marcador virou cor: devolve o texto COMO VEIO.
+            // Reconstruido, ele seria igual - e devolver o original
+            // deixa isso obvio para quem le.
+            return colorido ? saida.ToString() : texto;
+        }
+
+        /// <summary>
+        /// Fecha o pedaco atual com a cor que estiver valendo.
+        /// </summary>
+        private static void FlushMarkup(
+            StringBuilder saida,
+            StringBuilder pedaco,
+            List<string> abertas,
+            string corPadrao)
+        {
+            if (pedaco.Length == 0)
+            {
+                return;
+            }
+
+            string cor = abertas.Count > 0 ? abertas[abertas.Count - 1] : corPadrao;
+
+            // `pedaco.ToString()` e nao `Append(pedaco)`: a sobrecarga
+            // que recebe StringBuilder nao existe no perfil de .NET
+            // do Mono que o servidor usa, e a que sobraria seria
+            // `Append(object)` - que faz a mesma coisa por um caminho
+            // que ninguem le.
+            string conteudo = pedaco.ToString();
+
+            if (string.IsNullOrEmpty(cor))
+            {
+                saida.Append(conteudo);
+            }
+            else
+            {
+                saida.Append("<color=").Append(cor).Append('>').Append(conteudo).Append("</color>");
+            }
+
+            pedaco.Length = 0;
+        }
+
+        // ========================================================
         //  GRUPOS
         // ========================================================
 
@@ -1186,8 +1422,41 @@ namespace Oxide.Plugins
 
             try
             {
-                int recebidos = SendServerMessage(payload);
+                string logLine;
+                int recebidos = SendServerMessage(payload, out logLine);
+
                 arg.ReplyWith("{\"ok\":true,\"sent\":" + recebidos + "}");
+
+                // #### O LOG SAI DEPOIS DA RESPOSTA, E ISSO E O ####
+                // ####    CONSERTO DE UM BUG DE VERDADE        ####
+                //
+                // MEDIDO neste projeto, e ja documentado no
+                // OrigemZAgent (CommandVipSync): um Puts de dentro de
+                // um comando de console sai como frame de log com o
+                // MESMO Identifier do pedido. O agente casa a
+                // primeira linha nao-diagnostica com aquele numero
+                // (rcon/frames.ts, matchPendingIdentifier), entao o
+                // log CHEGA NO LUGAR DA RESPOSTA.
+                //
+                // Aqui o estrago era visivel para os JOGADORES, e nao
+                // so no log: sem o JSON, o agente concluia que o
+                // plugin nao respondeu e caia no `say` do jogo. Cada
+                // aviso saia DUAS VEZES no chat - uma colorida, do
+                // plugin, e outra crua logo abaixo:
+                //
+                //     [AVISO] Agora tem 2/300
+                //     SERVER "[AVISO] Agora tem 2/300"
+                //
+                // (as aspas aparecem porque o `say` do Rust mostra o
+                // argumento como ele veio da linha de comando).
+                //
+                // O timer.Once(0f) empurra o log para o frame
+                // seguinte, com a resposta ja transmitida.
+                if (logLine != null)
+                {
+                    string line = logLine;
+                    timer.Once(0f, delegate { Puts(line); });
+                }
             }
             catch (Exception ex)
             {
@@ -1198,10 +1467,14 @@ namespace Oxide.Plugins
 
         /// <summary>
         /// Monta e entrega a mensagem do servidor. Devolve para
-        /// quantos jogadores ela foi.
+        /// quantos jogadores ela foi, e em <paramref name="logLine"/>
+        /// a linha para o console - que quem chamou registra DEPOIS
+        /// de responder (ver CmdBroadcastHandler).
         /// </summary>
-        private int SendServerMessage(BroadcastPayload payload)
+        private int SendServerMessage(BroadcastPayload payload, out string logLine)
         {
+            logLine = null;
+
             // O texto vem de FORA (agente, painel, site). Ele passa
             // pela mesma faxina do texto de jogador: um `</color>`
             // vindo de um campo de formulario quebra o chat de todo
@@ -1219,6 +1492,18 @@ namespace Oxide.Plugins
             string corDaMensagem = string.IsNullOrEmpty(payload.Color) ? "white" : payload.Color;
             string corDaTag = string.IsNullOrEmpty(payload.TagColor) ? "#ffcc00" : payload.TagColor;
             int tamanho = payload.Size > 0 ? payload.Size : 15;
+
+            // #### A COR DE UM PEDACO SO DA FRASE ####
+            //
+            // `Agora tem [verde]{online}[/]/{max}` - o numero em
+            // destaque, o resto na cor do campo. A faxina acima
+            // acontece ANTES desta linha de proposito: colchete nao
+            // e rich text, entao a marcacao atravessa o
+            // StripRichText inteira e o unico `<color=>` que existe
+            // no texto final e o que ESTE metodo escreveu, a partir
+            // de uma cor que ele reconheceu. Ver ApplyChatMarkup.
+            bool jaColorido;
+            texto = ApplyChatMarkup(texto, corDaMensagem, out jaColorido);
 
             List<string> tags = new List<string>();
 
@@ -1241,7 +1526,21 @@ namespace Oxide.Plugins
             dados[KeyCancelled] = false;
             dados[KeyUsernameColor] = corDaMensagem;
             dados[KeyUsernameSize] = tamanho;
-            dados[KeyMessageColor] = corDaMensagem;
+
+            // #### COR VAZIA QUANDO O TEXTO JA VEM PINTADO ####
+            //
+            // O Wrap envolve a mensagem INTEIRA em <color=...>. Com
+            // a marcacao ja resolvida, isso deixaria um <color>
+            // dentro de outro - e cor aninhada depende do parser de
+            // rich text manter uma PILHA, que e coisa que nem toda
+            // versao do jogo garante. O ApplyChatMarkup ja pintou
+            // cada pedaco, inclusive os sem marcacao, com a cor do
+            // campo; pedir a cor de novo aqui seria a segunda opiniao
+            // que quebra.
+            //
+            // O <size> continua vindo do Wrap: tamanho nao aninha
+            // porque a marcacao nao mexe nele.
+            dados[KeyMessageColor] = jaColorido ? string.Empty : corDaMensagem;
             dados[KeyMessageSize] = tamanho;
 
             // Sem {Username}: nao ha jogador falando. Um formato com
@@ -1280,7 +1579,7 @@ namespace Oxide.Plugins
                 }
 
                 alvo.SendConsoleCommand("chat.add", (int)Chat.ChatChannel.Global, 0UL, textoChat);
-                Puts("[privado -> " + payload.SteamId + "] " + textoConsole);
+                logLine = "[privado -> " + payload.SteamId + "] " + textoConsole;
 
                 return 1;
             }
@@ -1298,7 +1597,7 @@ namespace Oxide.Plugins
                 enviados++;
             }
 
-            Puts("[anuncio] " + textoConsole);
+            logLine = "[anuncio] " + textoConsole;
 
             // O registro no historico do servidor, como no chat de
             // jogador: sem ele o aviso nao existiria para o console

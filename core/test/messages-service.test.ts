@@ -44,6 +44,14 @@ interface FakeServer {
   connected: boolean;
   /** O `OrigemZChat` está carregado? Sem ele, o caminho é o `say`. */
   hasChatPlugin: boolean;
+  /**
+   * O plugin ESTÁ lá, mas responde a linha de log no lugar do JSON.
+   *
+   * É o servidor com o `.cs` antigo: o `Puts` de dentro do comando
+   * herda o Identifier do pedido e chega antes da resposta. Ver o
+   * comentário em `#sendByPlugin`.
+   */
+  pluginRespondeLog: boolean;
   /** O RCON estoura ao mandar qualquer coisa. */
   broken: boolean;
   /** Quantos online. `null` = não deu para perguntar. */
@@ -83,6 +91,10 @@ function fakeRcon(server: FakeServer): OpsRcon {
           return Promise.resolve(`Command 'origemz.chat.broadcast' not found`);
         }
 
+        if (server.pluginRespondeLog) {
+          return Promise.resolve('[OrigemZChat] [anuncio] [AVISO] Agora tem 2/300');
+        }
+
         return Promise.resolve(JSON.stringify({ ok: true, sent: 7 }));
       }
 
@@ -116,6 +128,7 @@ beforeEach(() => {
     commands: [],
     connected: true,
     hasChatPlugin: true,
+    pluginRespondeLog: false,
     broken: false,
     online: 3,
   };
@@ -391,6 +404,47 @@ describe('o transporte', () => {
     expect(harness.server.commands.at(-1)).toBe('say "[AVISO] Entre no Discord bagora/b"');
     // Zero aqui quer dizer DESCONHECIDO: o jogo não devolve quantos
     // receberam, e é o `via` que avisa.
+    expect(result.sent).toBe(0);
+  });
+
+  it('o `say` não mostra os marcadores de cor', async () => {
+    harness.server.hasChatPlugin = false;
+
+    const result = await harness.service.speak({
+      serverId: SERVER,
+      text: 'Agora tem [verde]3[/]/300',
+    });
+
+    // O `say` do jogo não tem cor nenhuma. Sem tirar a marcação,
+    // o jogador leria `[verde]3[/]` na tela — pior que a fala sem
+    // destaque nenhum.
+    expect(result.via).toBe('say');
+    expect(harness.server.commands.at(-1)).toBe('say "Agora tem 3/300"');
+  });
+
+  it('o plugin que responde o log no lugar do JSON NÃO faz a fala sair duas vezes', async () => {
+    // A duplicata que apareceu no chat de verdade:
+    //
+    //     [AVISO] Agora tem 2/300
+    //     SERVER "[AVISO] Agora tem 2/300"
+    //
+    // O plugin tinha entregue a fala; o que não chegou foi o JSON,
+    // porque o `Puts` dele saiu com o Identifier do pedido e o
+    // agente casou o log como resposta. Concluir "o plugin não
+    // está lá" e falar de novo pelo `say` é o pior desfecho:
+    // repete para o servidor inteiro.
+    harness.server.pluginRespondeLog = true;
+
+    const result = await harness.service.speak({
+      serverId: SERVER,
+      text: 'Agora tem 2/300',
+      tag: '[AVISO]',
+    });
+
+    expect(result.via).toBe('plugin');
+    expect(harness.server.commands.some((command) => command.startsWith('say '))).toBe(false);
+    // Zero porque o plugin antigo não contou, e não porque ninguém
+    // recebeu. O log do agente é quem pede a atualização do `.cs`.
     expect(result.sent).toBe(0);
   });
 
