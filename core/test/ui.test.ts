@@ -813,6 +813,108 @@ describe('a página de kits', () => {
     expect(json).toContain('"itemid":1545779598');
   });
 
+  it('a aba ITENS pagina o kit comprido, em vez de parar em "e mais 7..."', () => {
+    // ####  VISTO NO JOGO  ####
+    //
+    // Um kit de treze itens mostrava seis e "- e mais 7...", e ali
+    // acabava: o jogador ficava sabendo que existiam mais sete e sem
+    // nenhuma forma de ver QUAIS — dentro da aba a que ele foi
+    // exatamente para isso.
+    const many = Array.from({ length: 13 }, (_unused, index) => ({
+      slot: 'belt',
+      shortname: `item-${String(index)}`,
+      amount: 1,
+      skinId: '0',
+      position: index,
+    })) as KitOfferView['items'];
+
+    const nomes = (shortname: string): { itemId: number; displayName: string } => ({
+      itemId: 100 + Number(shortname.split('-')[1] ?? '0'),
+      displayName: `Item ${shortname.split('-')[1] ?? ''}`,
+    });
+
+    const primeira = buildKitsScreen({
+      offers: [offer({ items: many })],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens' },
+      itemOf: nomes,
+    });
+
+    const jsonPrimeira = JSON.stringify(screenContentToCui(buildMainMenu(), primeira));
+
+    expect(jsonPrimeira).not.toContain('e mais');
+    expect(jsonPrimeira).toContain('1 / 2');
+    expect(jsonPrimeira).toContain('Item 0');
+    // A sétima linha é um ITEM, e não uma contagem no lugar dele.
+    expect(jsonPrimeira).toContain('Item 6');
+
+    // A seta é um ENDEREÇO, como as abas: `modal.open` no mesmo modal
+    // com o número no fim.
+    expect(Object.values(collectScreenActions(primeira))).toContainEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:itens:1',
+    });
+
+    const segunda = buildKitsScreen({
+      offers: [offer({ items: many })],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens', page: 1 },
+      itemOf: nomes,
+    });
+
+    // ####  O ID QUE VOLTA É O ID QUE FOI PEDIDO  ####
+    //
+    // O plugin descarta a tela cujo id não bate com o que ele pediu,
+    // e o "carregando" fica preso até o timeout: a seta pareceria
+    // não funcionar.
+    expect(segunda.id).toBe('ozkit:kit-inicial:itens:1');
+
+    const jsonSegunda = JSON.stringify(screenContentToCui(buildMainMenu(), segunda));
+
+    // E o décimo terceiro item, que antes não existia para o jogador,
+    // está na tela.
+    expect(jsonSegunda).toContain('Item 12');
+    expect(jsonSegunda).toContain('2 / 2');
+    // A volta também: ninguém entra numa página sem saída.
+    expect(Object.values(collectScreenActions(segunda))).toContainEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:itens',
+    });
+  });
+
+  it('a aba GERAL pagina do mesmo jeito, e não corta a última linha', () => {
+    const info = buildKitsScreen({
+      offers: [
+        offer({
+          kind: 'cooldown',
+          cooldownSeconds: 86_400,
+          description: 'Um kit de reposição para quem acabou de morrer.',
+          requiredTier: 'gold',
+          myClaims: 4,
+          lastClaimedAt: '2026-08-10T15:30:00.000Z',
+          nextAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      ],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'geral' },
+    });
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), info));
+
+    // Cinco linhas cabem nas sete da área: a aba não pagina por
+    // paginar. O que ela NÃO faz é sumir com a última em silêncio.
+    expect(json).not.toContain('e mais');
+    expect(json).toContain('Você pode pegar de novo em 1 h');
+  });
+
+  it('uma página que não existe mais mostra a última, e não uma tela vazia', () => {
+    // O admin tirou itens do kit depois que o jogador abriu o menu.
+    const info = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens', page: 9 },
+      itemOf,
+    });
+
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), info))).toContain('Assault Rifle');
+  });
+
   it('sem catálogo lido, a lista mostra o shortname e NÃO finge um ícone', () => {
     const info = buildKitsScreen({
       offers: [offer()],

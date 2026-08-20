@@ -55,7 +55,9 @@ import {
   label,
   modalFrame,
   modalHeader,
+  paginateRows,
   panel,
+  rowsPager,
   tabsRow,
   type ContentRow,
   type Rect,
@@ -97,8 +99,19 @@ const CARD = {
   buttonTop: 34,
 } as const;
 
+/** Onde a área da lista começa, no modal — logo abaixo das abas. */
+const LIST_TOP = 84;
+
 /** A altura da área da lista, no modal. */
 const LIST_VIEWPORT = 168;
+
+/**
+ * A faixa do "‹ 1 / 2 ›", entre a lista e o rodapé do modal.
+ *
+ * Ela cabe no vão que já existia: a lista acaba em 252 e os botões
+ * começam em 286 (16 do fundo de um modal de 330).
+ */
+const LIST_PAGER = { top: LIST_TOP + LIST_VIEWPORT + 2, height: 22 } as const;
 
 // ------------------------------------------------------------
 //  O ENDEREÇO
@@ -118,16 +131,23 @@ export const NO_CATEGORY = '-';
 
 export type KitScreenTarget =
   | { readonly kind: 'grid'; readonly category: string | null; readonly page: number }
-  | { readonly kind: 'info'; readonly slug: string; readonly tab: KitTab };
+  | {
+      readonly kind: 'info';
+      readonly slug: string;
+      readonly tab: KitTab;
+      /** A página DA LISTA daquela aba. Ausente = a primeira. */
+      readonly page?: number;
+    };
 
 /**
  * Lê o id da tela. `null` = não é uma tela de kits.
  *
- *     tela-kits          a primeira categoria, primeira página
- *     tela-kits:vip      aquela categoria
- *     tela-kits:vip:1    a segunda página dela
- *     ozkit:kit-x        o modal daquele kit
- *     ozkit:kit-x:itens  a aba de itens dele
+ *     tela-kits            a primeira categoria, primeira página
+ *     tela-kits:vip        aquela categoria
+ *     tela-kits:vip:1      a segunda página dela
+ *     ozkit:kit-x          o modal daquele kit
+ *     ozkit:kit-x:itens    a aba de itens dele
+ *     ozkit:kit-x:itens:1  a segunda página da lista dela
  *
  * Tudo o que vier fora do esperado é APARADO para algo válido em vez
  * de recusado: o pedido veio do plugin, e o jogador está com um aviso
@@ -160,14 +180,25 @@ export function parseKitScreenId(screenId: string): KitScreenTarget | null {
       kind: 'info',
       slug,
       tab: tab === 'itens' || tab === 'confirmar' ? tab : 'geral',
+      page: Math.max(0, Number.parseInt(parts[3] ?? '0', 10) || 0),
     };
   }
 
   return null;
 }
 
-/** O endereço do modal daquele kit. */
-export function kitInfoScreenId(slug: string, tab: KitTab = 'geral'): string {
+/**
+ * O endereço do modal daquele kit.
+ *
+ * A primeira página não vai no id: `ozkit:kit-x:itens` continua sendo
+ * o mesmo endereço de sempre, e só quem virou a página carrega o
+ * número.
+ */
+export function kitInfoScreenId(slug: string, tab: KitTab = 'geral', page = 0): string {
+  if (page > 0) {
+    return `${KIT_INFO_PREFIX}:${slug}:${tab}:${String(page)}`;
+  }
+
   return tab === 'geral' ? `${KIT_INFO_PREFIX}:${slug}` : `${KIT_INFO_PREFIX}:${slug}:${tab}`;
 }
 
@@ -602,7 +633,13 @@ function buildInfo(
   target: Extract<KitScreenTarget, { kind: 'info' }>,
   itemOf: ItemLookup,
 ): UiScreen {
-  const id = kitInfoScreenId(target.slug, target.tab);
+  // ####  A PÁGINA ENTRA NO ID QUE VOLTA  ####
+  //
+  // O plugin compara o que pediu com o que chega e DESCARTA o que
+  // não bate. Devolver `ozkit:x:itens` para quem pediu
+  // `ozkit:x:itens:1` deixaria o "carregando" preso na tela até o
+  // timeout — a seta pareceria não funcionar.
+  const id = kitInfoScreenId(target.slug, target.tab, target.page ?? 0);
   const kit = offers.find((offer) => offer.slug === target.slug);
 
   if (kit === undefined) {
@@ -657,7 +694,9 @@ function buildInfo(
       52,
     ),
 
-    ...(target.tab === 'geral' ? generalTab(kit) : itemsTab(kit, itemOf)),
+    ...(target.tab === 'geral'
+      ? generalTab(kit, target.page ?? 0)
+      : itemsTab(kit, itemOf, target.page ?? 0)),
 
     closeButton('FECHAR'),
   ];
@@ -807,7 +846,7 @@ function confirmBody(kit: KitOfferView, itemOf: ItemLookup): UiElement[] {
  * kit de cooldown, a única forma de descobrir era clicar e ser
  * recusado.
  */
-function generalTab(kit: KitOfferView): UiElement[] {
+function generalTab(kit: KitOfferView, page: number): UiElement[] {
   const lines: ContentRow[] = [];
 
   if (kit.description !== null && kit.description.trim() !== '') {
@@ -847,23 +886,11 @@ function generalTab(kit: KitOfferView): UiElement[] {
     lines.push({ text: 'Disponível agora', item: null });
   }
 
-  return [
-    panel(
-      'kgeral',
-      {
-        anchorMin: { x: 0, y: 1 },
-        anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 22, y: -(84 + LIST_VIEWPORT) },
-        offsetMax: { x: -22, y: -84 },
-      },
-      C.none,
-      itemRows(lines, LIST_VIEWPORT, 'kg'),
-    ),
-  ];
+  return listBody(kit, 'geral', lines, page, 'kgeral', 'kg');
 }
 
 /** A aba ITENS: o que vem dentro, com o ícone de cada um. */
-function itemsTab(kit: KitOfferView, itemOf: ItemLookup): UiElement[] {
+function itemsTab(kit: KitOfferView, itemOf: ItemLookup, page: number): UiElement[] {
   const lines: ContentRow[] = kit.items.map((item) => {
     const known = itemOf(item.shortname);
     const name = known?.displayName ?? item.shortname;
@@ -878,19 +905,78 @@ function itemsTab(kit: KitOfferView, itemOf: ItemLookup): UiElement[] {
     lines.push({ text: 'Este kit está vazio.', item: null });
   }
 
-  return [
+  return listBody(kit, 'itens', lines, page, 'kitens', 'ki');
+}
+
+/**
+ * A área da lista de uma aba, com as setas quando ela não cabe.
+ *
+ * ####  A ABA INTEIRA É ALCANÇÁVEL, E ISSO É O PONTO  ####
+ *
+ * Antes esta lista era `itemRows` direto: o que passava dos sete
+ * primeiros virava "e mais 7..." e ACABAVA ali. Num kit de treze
+ * itens o jogador ficava sabendo que existiam mais seis e sem
+ * nenhuma forma de ver QUAIS — e é justamente na aba ITENS que ele
+ * foi procurar exatamente isso.
+ *
+ * Sem `ScrollView` (ele derruba o cliente — ver types/ui-document.ts),
+ * virar a página é o jeito de chegar ao último item.
+ */
+function listBody(
+  kit: KitOfferView,
+  tab: KitTab,
+  lines: readonly ContentRow[],
+  page: number,
+  id: string,
+  prefix: string,
+): UiElement[] {
+  const slice = paginateRows(lines, LIST_VIEWPORT, page);
+
+  const elements: UiElement[] = [
     panel(
-      'kitens',
+      id,
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 22, y: -(84 + LIST_VIEWPORT) },
-        offsetMax: { x: -22, y: -84 },
+        offsetMin: { x: 22, y: -(LIST_TOP + LIST_VIEWPORT) },
+        offsetMax: { x: -22, y: -LIST_TOP },
       },
       C.none,
-      itemRows(lines, LIST_VIEWPORT, 'ki'),
+      itemRows(slice.rows, LIST_VIEWPORT, prefix),
     ),
   ];
+
+  if (slice.pages > 1) {
+    elements.push(listPager(kit.slug, tab, slice.page, slice.pages));
+  }
+
+  return elements;
+}
+
+/**
+ * O "‹ 1 / 2 ›" da lista do modal.
+ *
+ * Ele navega como as ABAS navegam — `modal.open` para o mesmo modal
+ * com outro sufixo. Virar a página não é um evento que alguém
+ * precise lembrar: é um endereço.
+ */
+function listPager(slug: string, tab: KitTab, page: number, pages: number): UiElement {
+  return rowsPager({
+    // Uma aba por vez está na tela: o id não precisa dizer qual.
+    prefix: 'k',
+    rect: {
+      anchorMin: { x: 0, y: 1 },
+      anchorMax: { x: 1, y: 1 },
+      offsetMin: { x: 22, y: -(LIST_PAGER.top + LIST_PAGER.height) },
+      offsetMax: { x: -22, y: -LIST_PAGER.top },
+    },
+    page,
+    pages,
+    screenIdOf: (next) => kitInfoScreenId(slug, tab, next),
+    // `navigate` fecharia o modal; as abas usam `modal.open` pelo
+    // mesmo motivo.
+    kind: 'modal.open',
+  });
 }
 
 function closeButton(text = 'FECHAR'): UiElement {
