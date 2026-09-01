@@ -634,7 +634,11 @@ const panelHashSchema = z
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoadedConfig {
   const root = projectRoot();
 
-  loadDotenv({ path: join(root, '.env') });
+  // `quiet` é do dotenv 17: sem ele o pacote escreve no stdout um
+  // resumo do que carregou, ANTES de o logger existir. Isso sujaria
+  // a primeira linha do log com um texto que não é JSON — e quem
+  // consome o log do agente por pipe espera uma linha por evento.
+  loadDotenv({ path: join(root, '.env'), quiet: true });
 
   const merged = { ...process.env, ...env };
 
