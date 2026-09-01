@@ -654,10 +654,10 @@ function Row({
 }
 
 /**
- * Um campo que grava no `blur` e no Enter.
+ * Um campo que grava no `blur-sm` e no Enter.
  *
  * Gravar a cada tecla mandaria uma requisição por caractere; um
- * botão "salvar" por campo encheria a tela de botões. O `blur` é o
+ * botão "salvar" por campo encheria a tela de botões. O `blur-sm` é o
  * meio-termo que o resto do painel já usa.
  */
 function TextField({
