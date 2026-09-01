@@ -13,6 +13,25 @@ import { defineConfig } from 'vitest/config';
 //  se comporta igual nos dois pacotes.
 // ============================================================
 export default defineConfig({
+  // ####  NÃO REMOVA SEM LER  ####
+  //
+  // O tsconfig.json manda `jsx: "preserve"` porque quem compila
+  // JSX aqui é o Next. A partir do Vite 7 (vitest 4) o transform
+  // OBEDECE esse campo: ao importar um .tsx ele deixa o JSX
+  // intacto, e o Vite tropeça em "invalid JS syntax".
+  //
+  // Os testes importam funções puras que moram em arquivos .tsx
+  // — buildMonthGrid, projectNow — e o arquivo inteiro precisa
+  // ser transformado para chegar até elas. Este `jsx` vale só
+  // para o vitest e não muda nada do build do Next.
+  //
+  // É `oxc` e não `esbuild`: o Vite 7 trocou o transformador, e
+  // com os dois presentes ele ignora o bloco `esbuild` em
+  // silêncio.
+  oxc: {
+    jsx: { runtime: 'automatic' },
+  },
+
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
