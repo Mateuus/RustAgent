@@ -618,11 +618,41 @@ describe('o modal', () => {
     expect(texts).toContain('O QUE VEM NO KIT');
     expect(texts).toContain('Nome de item0');
 
-    // ####  O QUE NÃO CABE É CONTADO, NUNCA CORTADO EM SILÊNCIO  ####
+    // ####  O QUE NÃO CABE VAI PARA A PÁGINA SEGUINTE  ####
     //
-    // Sem rolagem no CUI, o excedente ficaria escondido — e o jogador
-    // compraria achando que o kit tem menos do que tem.
-    expect(texts.some((text) => text.includes('e mais'))).toBe(true);
+    // Sem rolagem no CUI, o excedente ficaria escondido. Contá-lo
+    // ("e mais 8...") avisava e não resolvia: o jogador sabia que
+    // existiam mais oito itens e não tinha como ver QUAIS, dentro do
+    // modal em que foi conferir o que estava comprando.
+    expect(texts.some((text) => text.includes('e mais'))).toBe(false);
+    expect(texts).toContain('1 / 3');
+
+    const ultima = buildStoreScreen({
+      catalog: harness.service.catalog(),
+      target: { kind: 'item', offerId: 'kit', quantity: 1, tab: 'geral', page: 2 },
+      balance: 10_000,
+      nameOf: (shortname) => `Nome de ${shortname}`,
+    });
+
+    // O décimo segundo item, que antes não existia para o jogador.
+    expect(textsOf(ultima)).toContain('Nome de item11');
+
+    // E o id VOLTA com a página: o plugin compara com o que pediu e
+    // descarta o que não bate — o "carregando" ficaria preso.
+    expect(ultima.id).toBe('ozitem:kit:1:geral:2');
+
+    // A seta é um ENDEREÇO, e `modal.open`: `navigate` fecharia o
+    // modal em vez de virar a página dentro dele.
+    const avanca = collect(screen.elements).find((element) => element.id === 'ozpgx');
+
+    expect(avanca?.type).toBe('button');
+
+    if (avanca?.type === 'button') {
+      expect(avanca.action).toMatchObject({
+        kind: 'modal.open',
+        screenId: 'ozitem:kit:1:geral:1',
+      });
+    }
   });
 
   it('kit NÃO tem seletor de quantidade; item solto tem', () => {

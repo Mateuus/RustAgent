@@ -49,10 +49,13 @@
 //  O `ScrollView` do CUI derrubou o cliente do jogo — ver o
 //  cabeçalho de types/ui-document.ts. Sem ele, o que passa da área
 //  fica ESCONDIDO: não cortado, não avisado, some. Por isso a grade
-//  PAGINA e a lista de um pacote tem teto com uma linha final que
-//  CONTA o que sobrou. Perder conteúdo em silêncio é o pior
-//  desfecho: o jogador compra achando que o kit tem menos do que
-//  tem.
+//  PAGINA, e a lista de um pacote também: quando ela não cabe, a
+//  última linha vira "‹ 1 / 2 ›" e o resto está a um clique.
+//
+//  Contar o que sobrou ("e mais 7...") não bastava aqui. O jogador
+//  ficava sabendo que existiam mais sete itens e sem nenhuma forma
+//  de ver QUAIS — dentro do modal em que ele foi justamente conferir
+//  o que estava comprando.
 // ============================================================
 
 import type { OfferBadge, StoreOffer } from '../db/store-repository.js';
@@ -60,7 +63,14 @@ import type { StoreCatalogEntry } from '../store/service.js';
 import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
 import { SLOTS, fillTemplate } from './ui-store-template.js';
-import { itemRows, tabsRow, type ContentRow } from './ui-widgets.js';
+import {
+  itemRows,
+  LIST_LINE,
+  paginateRows,
+  rowsPager,
+  tabsRow,
+  type ContentRow,
+} from './ui-widgets.js';
 
 // ------------------------------------------------------------
 //  Os mesmos tokens do painel (globals.css) e do preset do menu.
@@ -176,8 +186,8 @@ export const MAX_QUANTITY = 100;
 /**
  * A altura da área da lista, no modal de um pacote.
  *
- * Sem rolagem (ver o cabeçalho), ela é um teto: o que passa vira uma
- * linha final que CONTA o que sobrou.
+ * Sem rolagem (ver o cabeçalho), o que passa dela vai para a página
+ * seguinte — ver `listChildren`.
  */
 const LIST_VIEWPORT = 132;
 
@@ -204,6 +214,8 @@ export type StoreScreenTarget =
       readonly offerId: string;
       readonly quantity: number;
       readonly tab: StoreTab;
+      /** A página DA LISTA daquela aba. Ausente = a primeira. */
+      readonly page?: number;
     };
 
 /**
@@ -242,6 +254,7 @@ export function parseStoreScreenId(screenId: string): StoreScreenTarget | null {
       offerId,
       quantity: clamp(Number.isFinite(parsed) ? parsed : 1, 1, MAX_QUANTITY),
       tab: parts[3] === 'itens' ? 'itens' : 'geral',
+      page: Math.max(0, Number.parseInt(parts[4] ?? '0', 10) || 0),
     };
   }
 
@@ -637,8 +650,19 @@ function offerCard(offer: StoreOffer, column: number, row: number): UiElement {
 //  O MODAL DO ITEM
 // ============================================================
 
-export function itemScreenId(offerId: string, quantity: number, tab: StoreTab = 'geral'): string {
+export function itemScreenId(
+  offerId: string,
+  quantity: number,
+  tab: StoreTab = 'geral',
+  page = 0,
+): string {
   const base = `${STORE_ITEM_PREFIX}:${offerId}:${String(quantity)}`;
+
+  // A primeira página fica de fora pelo mesmo motivo da aba padrão:
+  // só quem virou a página carrega o número.
+  if (page > 0) {
+    return `${base}:${tab}:${String(page)}`;
+  }
 
   // A aba padrão fica FORA do id: assim o endereço de um item solto
   // (que não tem abas) continua o mesmo de antes, e o plugin, que
@@ -655,7 +679,10 @@ function buildItemScreen(
   vehicleSpace: boolean | null,
   bundleTemplate: UiScreen | null,
 ): UiScreen {
-  const id = itemScreenId(target.offerId, target.quantity, target.tab);
+  // A página entra no id que VOLTA: o plugin compara com o que
+  // pediu e descarta o que não bate — ver `screenId` em
+  // BuildStoreScreenOptions.
+  const id = itemScreenId(target.offerId, target.quantity, target.tab, target.page ?? 0);
   const offer = findOffer(catalog, target.offerId);
 
   // A oferta saiu do ar entre a grade e o clique. Dizer isso é
@@ -708,6 +735,7 @@ function buildItemScreen(
   // que é onde comprar dez de uma vez faz sentido.
   const stacks = offer.kind === 'item';
   const lines = contentRows(offer, nameOf);
+  const page = target.page ?? 0;
 
   // ####  O MODELO DE ITEM VALE SÓ PARA ITEM SOLTO  ####
   //
@@ -773,8 +801,13 @@ function buildItemScreen(
         lines.length === 0
           ? { hide: true }
           : { text: offer.kind === 'vip' ? 'O QUE VOCÊ GANHA' : 'O QUE VEM NO KIT' },
-      // A lista entra no elemento que o admin posicionou.
-      [SLOTS.pacoteLista]: lines.length === 0 ? { hide: true } : { children: itemRows(lines, LIST_VIEWPORT, 'oz') },
+      // A lista entra no elemento que o admin posicionou — e as setas
+      // vão DENTRO dele, que é o único lugar cujo tamanho este
+      // arquivo conhece num layout desenhado por outra pessoa.
+      [SLOTS.pacoteLista]:
+        lines.length === 0
+          ? { hide: true }
+          : { children: listChildren(lines, offer.id, quantity, target.tab, page) },
       [SLOTS.pacoteTotal]: { text: formatNumber(total), color: canBuy ? C.amber : C.rust },
       [SLOTS.pacoteSaldo]: noSpace
         ? { text: 'Sem espaço aqui — vá para um lugar aberto', color: C.rust }
@@ -963,7 +996,7 @@ function buildItemScreen(
             offsetMax: { x: -22, y: -(listTop + 30) },
           },
           C.none,
-          itemRows(rows, LIST_VIEWPORT, 'oz'),
+          listChildren(rows, offer.id, quantity, target.tab, page),
         ),
       );
     } else {
@@ -988,7 +1021,7 @@ function buildItemScreen(
             offsetMax: { x: -22, y: -(listTop + 20) },
           },
           C.none,
-          itemRows(lines, LIST_VIEWPORT, 'oz'),
+          listChildren(lines, offer.id, quantity, target.tab, page),
         ),
       );
     }
@@ -1194,6 +1227,57 @@ function contentRows(offer: StoreOffer, nameOf: NameResolver): readonly ContentR
   }
 
   return offer.kind === 'item' ? [] : itemLines(offer, nameOf);
+}
+
+/**
+ * A lista de um pacote, com o "‹ 1 / 2 ›" quando ela não cabe.
+ *
+ * ####  A ÚLTIMA LINHA CEDE O LUGAR PARA AS SETAS  ####
+ *
+ * Aqui não há vão sobrando como no modal de kits: logo abaixo da
+ * lista vêm o total e o saldo, colados na base da caixa. Então
+ * quando a lista passa da área, a última linha vira o controle — uma
+ * linha a menos por página, e o último item ALCANÇÁVEL.
+ *
+ * É o que faltava: um kit de treze itens dizia "e mais 7..." e
+ * acabava ali, dentro do modal em que o jogador foi justamente ver o
+ * que estava comprando.
+ */
+function listChildren(
+  rows: readonly ContentRow[],
+  offerId: string,
+  quantity: number,
+  tab: StoreTab,
+  page: number,
+): UiElement[] {
+  // Cabendo inteira, ela ocupa a área inteira: nada de gastar uma
+  // linha com um "1 / 1".
+  const whole = paginateRows(rows, LIST_VIEWPORT, page);
+
+  if (whole.pages === 1) {
+    return itemRows(whole.rows, LIST_VIEWPORT, 'oz');
+  }
+
+  const viewport = LIST_VIEWPORT - LIST_LINE;
+  const slice = paginateRows(rows, viewport, page);
+
+  return [
+    ...itemRows(slice.rows, viewport, 'oz'),
+    rowsPager({
+      prefix: 'oz',
+      rect: {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 0, y: -LIST_VIEWPORT },
+        offsetMax: { x: 0, y: -viewport },
+      },
+      page: slice.page,
+      pages: slice.pages,
+      screenIdOf: (next) => itemScreenId(offerId, quantity, tab, next),
+      // `navigate` fecharia o modal — ver as abas.
+      kind: 'modal.open',
+    }),
+  ];
 }
 
 /** Só os ITENS, com o ícone de cada um. */

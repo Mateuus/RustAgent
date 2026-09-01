@@ -416,6 +416,114 @@ export function itemRows(rows: readonly ContentRow[], viewport: number, prefix =
   return output;
 }
 
+/** Uma fatia da lista: as linhas daquela página, e quantas páginas há. */
+export interface RowsPage {
+  readonly rows: readonly ContentRow[];
+  /** A página que REALMENTE saiu — já aparada para o que existe. */
+  readonly page: number;
+  readonly pages: number;
+}
+
+/**
+ * A lista partida em páginas do tamanho da área.
+ *
+ * ####  PÁGINAS PORQUE NÃO HÁ ROLAGEM  ####
+ *
+ * O `ScrollView` do CUI derrubou o cliente (ver types/ui-document.ts),
+ * então uma lista que não cabe tem duas saídas: CONTAR o que sobrou
+ * ("e mais 7...", o que `itemRows` faz) ou PAGINAR.
+ *
+ * Contar serve onde a lista é lembrete e o inteiro está a um clique —
+ * a confirmação do resgate. Onde ela É o conteúdo, como o que vem
+ * dentro do kit, contar deixa o jogador sabendo que existem sete
+ * itens e sem nenhuma forma de descobrir QUAIS.
+ */
+export function paginateRows(rows: readonly ContentRow[], viewport: number, page: number): RowsPage {
+  // Nunca zero: uma área baixa demais mostra uma linha e pagina o
+  // resto, em vez de devolver páginas vazias para sempre.
+  const fits = Math.max(1, Math.floor(viewport / LIST_LINE));
+  const pages = Math.max(1, Math.ceil(rows.length / fits));
+  // O endereço pode apontar para uma página que não existe mais — o
+  // admin tirou itens do kit depois que o jogador abriu o menu. A
+  // última é a resposta certa; uma tela vazia parece defeito.
+  const current = clamp(page, 0, pages - 1);
+
+  return { rows: rows.slice(current * fits, current * fits + fits), page: current, pages };
+}
+
+export interface PagerSpec {
+  /** O começo dos ids, para não colidir com outra faixa na tela. */
+  readonly prefix: string;
+  /** A faixa inteira do controle. Os três pedaços se arrumam dentro. */
+  readonly rect: Rect;
+  readonly page: number;
+  readonly pages: number;
+  /** Para onde cada página leva. */
+  readonly screenIdOf: (page: number) => string;
+  /**
+   * `navigate` numa página, `modal.open` num modal.
+   *
+   * Virar a página de uma lista DENTRO de um modal com `navigate`
+   * fecharia o modal — o mesmo motivo pelo qual as abas usam
+   * `modal.open`.
+   */
+  readonly kind: 'navigate' | 'modal.open';
+}
+
+/**
+ * O "‹ 1 / 2 ›" de uma lista paginada.
+ *
+ * ####  UM DESENHO SÓ, EM TRÊS TELAS  ####
+ *
+ * A grade da loja, a de kits e as listas dos modais têm todas este
+ * controle. Enquanto ele era copiado, cada cópia foi ficando com um
+ * tamanho de fonte e um espaçamento — e o jogador vê três coisas
+ * diferentes que fazem a mesma coisa.
+ */
+export function rowsPager(spec: PagerSpec): UiElement {
+  const slot = (left: number, right: number): Rect => ({
+    anchorMin: { x: 0.5, y: 0 },
+    anchorMax: { x: 0.5, y: 1 },
+    offsetMin: { x: left, y: 0 },
+    offsetMax: { x: right, y: 0 },
+  });
+
+  const children: UiElement[] = [
+    label(`${spec.prefix}pgn`, `${String(spec.page + 1)} / ${String(spec.pages)}`, slot(-30, 30), {
+      size: 11,
+      color: C.textMuted,
+    }),
+  ];
+
+  // Nas pontas a seta SOME, em vez de ficar apagada: um botão visível
+  // que não faz nada é indistinguível de um menu travado.
+  if (spec.page > 0) {
+    children.push(
+      button(
+        `${spec.prefix}pgp`,
+        '‹',
+        slot(-64, -34),
+        { id: `a${spec.prefix}pgp`, kind: spec.kind, screenId: spec.screenIdOf(spec.page - 1) },
+        { color: C.surface2, textColor: C.text, hoverColor: C.rust, fontSize: 14 },
+      ),
+    );
+  }
+
+  if (spec.page < spec.pages - 1) {
+    children.push(
+      button(
+        `${spec.prefix}pgx`,
+        '›',
+        slot(34, 64),
+        { id: `a${spec.prefix}pgx`, kind: spec.kind, screenId: spec.screenIdOf(spec.page + 1) },
+        { color: C.surface2, textColor: C.text, hoverColor: C.rust, fontSize: 14 },
+      ),
+    );
+  }
+
+  return panel(`${spec.prefix}pg`, spec.rect, C.none, children);
+}
+
 // ============================================================
 //  UTILIDADES
 // ============================================================
