@@ -33,7 +33,7 @@ export interface OperationRoutesDeps {
 const startSchema = z
   .object({
     kind: z.enum(OPERATION_KINDS, {
-      errorMap: () => ({ message: `kind precisa ser um destes: ${OPERATION_KINDS.join(', ')}` }),
+      error: `kind precisa ser um destes: ${OPERATION_KINDS.join(', ')}`,
     }),
     /** Só no stop/update: mata o processo quando o RCON não responde. */
     force: z.boolean().optional(),

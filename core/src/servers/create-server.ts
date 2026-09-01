@@ -105,6 +105,24 @@ export const FORBIDDEN_RCON_PASSWORD_CHARS = /[/\\?#\s]/;
 export const SERVER_INI_TEMPLATE_FILE = 'server.example.ini';
 
 /**
+ * A mensagem de TIPO ERRADO, e só dele.
+ *
+ * O `invalid_type_error` do zod 3 tinha exatamente este alcance:
+ * valor presente, tipo errado. A v4 juntou tudo num `error` só,
+ * que também pega o campo AUSENTE — e responder "worldSize
+ * precisa ser número (não string)" a quem não mandou worldSize
+ * aponta o problema errado.
+ *
+ * Devolver `undefined` é o combinado da v4 para "não tenho
+ * mensagem para este caso": o zod cai na dele, que para campo
+ * ausente já diz o certo.
+ */
+function wrongType(message: string) {
+  return (issue: { readonly input?: unknown }): string | undefined =>
+    issue.input === undefined ? undefined : message;
+}
+
+/**
  * Texto que vai virar `CHAVE=valor` num `.ini`.
  *
  * O `\p{Cc}` (caractere de controle) é o ponto: uma quebra de linha
@@ -114,7 +132,7 @@ export const SERVER_INI_TEMPLATE_FILE = 'server.example.ini';
  */
 export function iniText(label: string, max: number) {
   return z
-    .string({ invalid_type_error: `${label} precisa ser texto` })
+    .string({ error: wrongType(`${label} precisa ser texto`) })
     .trim()
     .min(1, `${label} não pode ser vazio`)
     .max(max, `${label} não pode passar de ${String(max)} caracteres`)
@@ -135,7 +153,7 @@ export function iniText(label: string, max: number) {
 export const createServerBodySchema = z
   .object({
     id: z
-      .string({ invalid_type_error: 'id precisa ser texto' })
+      .string({ error: wrongType('id precisa ser texto') })
       .trim()
       .regex(
         NEW_SERVER_ID_PATTERN,
@@ -154,7 +172,7 @@ export const createServerBodySchema = z
      * também vira nome de pasta.
      */
     identity: z
-      .string({ invalid_type_error: 'identity precisa ser texto' })
+      .string({ error: wrongType('identity precisa ser texto') })
       .trim()
       .regex(
         NEW_SERVER_ID_PATTERN,
@@ -167,7 +185,7 @@ export const createServerBodySchema = z
     hostname: iniText('hostname', 120),
 
     maxPlayers: z
-      .number({ invalid_type_error: 'maxPlayers precisa ser número (não string)' })
+      .number({ error: wrongType('maxPlayers precisa ser número (não string)') })
       .int('maxPlayers precisa ser inteiro')
       .min(1, 'maxPlayers precisa ser pelo menos 1')
       .max(1_000, 'maxPlayers não pode passar de 1000'),
@@ -182,27 +200,25 @@ export const createServerBodySchema = z
      * boot.
      */
     map: z.enum(MAP_LEVELS, {
-      errorMap: () => ({
-        message: `map precisa ser um destes: ${MAP_LEVELS.join(', ')}`,
-      }),
+      error: `map precisa ser um destes: ${MAP_LEVELS.join(', ')}`,
     }),
 
     worldSize: z
-      .number({ invalid_type_error: 'worldSize precisa ser número (não string)' })
+      .number({ error: wrongType('worldSize precisa ser número (não string)') })
       .int('worldSize precisa ser inteiro')
       .min(MIN_WORLD_SIZE, `worldSize não pode ser menor que ${String(MIN_WORLD_SIZE)}`)
       .max(MAX_WORLD_SIZE, `worldSize não pode passar de ${String(MAX_WORLD_SIZE)}`),
 
     /** Ausente = a seed que o modelo já traz. */
     seed: z
-      .number({ invalid_type_error: 'seed precisa ser número (não string)' })
+      .number({ error: wrongType('seed precisa ser número (não string)') })
       .int('seed precisa ser inteiro')
       .min(0, 'seed não pode ser negativa')
       .max(MAX_SEED, `seed não pode passar de ${String(MAX_SEED)}`)
       .optional(),
 
     rconPassword: z
-      .string({ invalid_type_error: 'rconPassword precisa ser texto' })
+      .string({ error: wrongType('rconPassword precisa ser texto') })
       .min(1, 'rconPassword é obrigatória: sem ela o agente não tem como falar com o servidor')
       .max(200, 'rconPassword não pode passar de 200 caracteres')
       .refine(
@@ -213,7 +229,7 @@ export const createServerBodySchema = z
 
     /** Ausente = o primeiro bloco livre. Ver `suggestPortBlock`. */
     portBlock: z
-      .number({ invalid_type_error: 'portBlock precisa ser número (não string)' })
+      .number({ error: wrongType('portBlock precisa ser número (não string)') })
       .int('portBlock precisa ser inteiro')
       .min(0, 'portBlock não pode ser negativo')
       .max(MAX_PORT_BLOCK, `portBlock não pode passar de ${String(MAX_PORT_BLOCK)}`)

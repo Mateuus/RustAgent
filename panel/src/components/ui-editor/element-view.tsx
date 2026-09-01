@@ -92,8 +92,8 @@ export function ElementView({ element, selectedId, onSelect, scale }: ElementVie
   ));
 
   const outline = selected
-    ? 'outline outline-1 outline-offset-0 outline-rust'
-    : 'hover:outline hover:outline-1 hover:outline-dashed hover:outline-muted';
+    ? 'outline-solid outline-1 outline-offset-0 outline-rust'
+    : 'hover:outline-1 hover:outline-dashed hover:outline-muted';
 
   const select = (event: MouseEvent): void => {
     // Sem isto, clicar num filho selecionaria o pai junto — o

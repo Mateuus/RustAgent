@@ -225,7 +225,7 @@ export function ConsolePanel({ serverId }: { serverId: string }) {
           stickToBottom.current =
             element.scrollHeight - element.scrollTop - element.clientHeight < 40;
         }}
-        className="h-[28rem] overflow-y-auto border border-border bg-background p-3 font-mono text-2xs leading-relaxed"
+        className="h-112 overflow-y-auto border border-border bg-background p-3 font-mono text-2xs leading-relaxed"
       >
         {lines.length === 0 ? (
           <p className="text-muted">

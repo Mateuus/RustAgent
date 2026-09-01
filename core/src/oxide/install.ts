@@ -233,6 +233,7 @@ async function downloadRelease(
       `não consegui baixar o Oxide de ${assetUrl} ` +
         `(${error instanceof Error ? error.message : String(error)}). ` +
         'Confira a conexão desta máquina com a internet.',
+      { cause: error },
     );
   }
 }

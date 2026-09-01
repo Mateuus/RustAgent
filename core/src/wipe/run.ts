@@ -727,6 +727,7 @@ export class WipeRunner implements WipeExecutor {
         throw new Error(
           `não consegui apagar ${path}: ${toError(error).message}. Com o mundo pela metade, o ` +
             'servidor pode subir num estado que ninguém escolheu — resolva e retome.',
+          { cause: error },
         );
       }
     }

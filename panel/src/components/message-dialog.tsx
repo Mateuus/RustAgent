@@ -781,7 +781,7 @@ export function MessageDialog({
               confere antes de mil pessoas a verem. */}
           <div className="mt-2 border border-border bg-background px-3 py-2">
             <span className="text-2xs uppercase tracking-wide text-muted">prévia</span>
-            <p className="mt-1 break-words" style={{ fontSize: `${clampSize(size)}px` }}>
+            <p className="mt-1 wrap-break-word" style={{ fontSize: `${clampSize(size)}px` }}>
               {tag.trim() !== '' && (
                 <span style={{ color: safeColor(tagColor, '#ffcc00') }}>{tag.trim()} </span>
               )}

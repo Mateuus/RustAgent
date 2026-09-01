@@ -46,11 +46,11 @@ const nextConfig = {
   // build quebra ao encontrar o primeiro <Image>.
   images: { unoptimized: true },
 
-  // O lint roda por "pnpm lint" (eslint flat config, igual ao
-  // core). Deixar o `next build` disparar a versão dele do
-  // ESLint só duplicaria a checagem — e com uma configuração
-  // diferente da que o resto do monorepo usa.
-  eslint: { ignoreDuringBuilds: true },
+  // Não existe chave `eslint` aqui, e não é esquecimento: o Next
+  // 16 removeu o `next lint` junto com a opção que o desligava, e
+  // recusa a chave com "Unrecognized key(s)". O lint continua
+  // onde sempre esteve — "npm run lint", eslint flat config, o
+  // mesmo do core.
 };
 
 export default nextConfig;

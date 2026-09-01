@@ -499,7 +499,7 @@ function PlayersSection({ server }: { server: ServerView }) {
 
             {mode !== 'lista' && (
               <div className="space-y-2">
-                <div className="h-[38rem] min-h-64">
+                <div className="h-152 min-h-64">
                   <MapView
                     players={players}
                     world={snapshot.world}
@@ -839,7 +839,7 @@ function PlayersFilters({
                     // do painel sem reimplementar o controle — e o
                     // nativo traz foco por teclado e leitor de tela
                     // de graça.
-                    className="h-4 w-4 shrink-0 accent-[color:var(--rust-red)]"
+                    className="h-4 w-4 shrink-0 accent-(--rust-red)"
                   />
                 </label>
               </div>
@@ -1030,7 +1030,7 @@ function PlayerList({
   }
 
   return (
-    <section className="max-h-[38rem] overflow-y-auto border border-border bg-surface">
+    <section className="max-h-152 overflow-y-auto border border-border bg-surface">
       <ul className="divide-y divide-border">
         {players.map((player) => {
           const isSelected = selected === player.steamId;
@@ -1227,7 +1227,7 @@ function ChatSection({ serverId }: { serverId: string }) {
           stickToBottom.current =
             element.scrollHeight - element.scrollTop - element.clientHeight < 40;
         }}
-        className="h-[24rem] space-y-1 overflow-y-auto border border-border bg-background p-3 text-sm"
+        className="h-96 space-y-1 overflow-y-auto border border-border bg-background p-3 text-sm"
       >
         {lines.length === 0 ? (
           <p className="text-2xs text-muted">
@@ -1279,7 +1279,7 @@ function ChatSection({ serverId }: { serverId: string }) {
                 {line.name}
               </span>
 
-              <span className="min-w-0 break-words text-muted">{line.text}</span>
+              <span className="min-w-0 wrap-break-word text-muted">{line.text}</span>
             </div>
           ))
         )}

@@ -326,7 +326,7 @@ function Row({ label, value }: { readonly label: string; readonly value: string 
   return (
     <div className="flex items-baseline justify-between gap-3 border-b border-border py-1 last:border-b-0">
       <dt className="shrink-0 text-2xs uppercase tracking-wide text-muted">{label}</dt>
-      <dd className="min-w-0 break-words text-right text-foreground">{value}</dd>
+      <dd className="min-w-0 wrap-break-word text-right text-foreground">{value}</dd>
     </div>
   );
 }

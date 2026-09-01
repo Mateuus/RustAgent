@@ -1,10 +1,10 @@
 // ============================================================
-//  Flat config do ESLint 9.
+//  Flat config do ESLint 10.
 //
 //  Fica dentro de core/ (e não na raiz do workspace) porque as
 //  dependências do lint estão declaradas no package.json de
-//  core/. Assim "pnpm -r lint" na raiz funciona sem duplicar
-//  eslint em dois pacotes.
+//  core/. Assim "npm run lint --workspaces" na raiz funciona sem
+//  duplicar eslint em dois pacotes.
 // ============================================================
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';

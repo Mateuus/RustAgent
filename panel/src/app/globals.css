@@ -1,11 +1,85 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+/* ============================================================
+ *  Design system do painel — os NOMES.
+ *
+ *  Desde o Tailwind 4 é aqui que eles moram; o tailwind.config.ts
+ *  deixou de existir. As cores continuam no `:root` mais abaixo,
+ *  e este bloco só dá nome de utilitário a cada variável — assim
+ *  existe UM lugar para conferir o token, em vez de dois que
+ *  podem divergir.
+ *
+ *  MUDOU desde a v3: o modificador de opacidade agora funciona.
+ *  O Tailwind 4 resolve `bg-surface/50` por `color-mix`, então o
+ *  token ser um `var()` com hex dentro deixou de importar. Antes
+ *  isso saía como cor inválida, em silêncio, e a saída era criar
+ *  um token de meio-tom só para esse caso.
+ * ============================================================ */
+@theme {
+  --color-background: var(--bg);
+
+  --color-surface-2: var(--surface-2);
+  --color-surface: var(--surface);
+
+  --color-border: var(--border);
+  --color-foreground: var(--text);
+  --color-muted: var(--text-muted);
+  --color-rust: var(--rust-red);
+  --color-olive: var(--olive);
+  --color-amber: var(--amber);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-condensed: 'Roboto Condensed', Inter, system-ui, sans-serif;
+
+  /* Cantos retos é regra do design system, não preferência.
+   * Redefinir a ESCALA inteira, e não só o padrão, é o que
+   * impede um `rounded-full` copiado de algum exemplo de shadcn
+   * de virar pílula no meio da tela. */
+  --radius-none: 0px;
+  --radius-sm: 2px;
+  --radius: 2px;
+  --radius-md: 4px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
+  --radius-full: 4px;
+
+  /* Rótulo de KPI e cabeçalho de tabela. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
+  /* Entrada dos toasts. Curta e sem elástico: a pilha fica no
+   * canto inferior direito e cresce para baixo, então o
+   * movimento acompanha a direção em que o item chega.
+   *
+   * Quem usa `animate-toast-in` acrescenta
+   * `motion-reduce:animate-none` — o painel fica aberto o dia
+   * todo, e movimento repetido é justamente o que a preferência
+   * de movimento reduzido pede para cortar. */
+  --animate-toast-in: toast-in 160ms ease-out;
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 0.5rem, 0);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+}
 
 /* ============================================================
  *  TOKENS — fonte única do design system.
  *
- *  O tailwind.config.ts só dá nome de utilitário a estas
+ *  O `@theme` lá em cima só dá nome de utilitário a estas
  *  variáveis. Mudou a estética, muda AQUI e o resto acompanha.
  *
  *  Estética: superfícies quase pretas, cantos retos, bordas de
