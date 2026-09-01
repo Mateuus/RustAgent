@@ -320,7 +320,7 @@ export async function classifySaveFolder(
   const files: ClassifiedFile[] = [];
 
   for (const name of names) {
-    let bytes = 0;
+    let bytes: number;
 
     try {
       bytes = (await stat(join(path, name))).size;

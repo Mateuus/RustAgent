@@ -75,6 +75,7 @@ export async function ensureSteamCmd(options: SteamCmdOptions): Promise<string> 
         `não consegui baixar o SteamCMD de ${STEAMCMD_ZIP_URL} ` +
           `(${error instanceof Error ? error.message : String(error)}). ` +
           'Confira a conexão desta máquina com a internet.',
+        { cause: error },
       );
     }
 

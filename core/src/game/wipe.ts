@@ -90,7 +90,7 @@ export class WipeClock {
       return cached?.at ?? null;
     }
 
-    let at: number | null = null;
+    let at: number | null;
 
     try {
       at = parseSaveCreatedTime(await rcon.send('serverinfo'));
