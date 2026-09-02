@@ -35,6 +35,7 @@ import { ActionMenu } from '@/components/ui/action-menu';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { PostponeDialog } from '@/components/wipe/postpone-dialog';
+import { PurgeWipeDialog } from '@/components/wipe/purge-wipe-dialog';
 import { RemoveWipeDialog } from '@/components/wipe/remove-wipe-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -164,6 +165,8 @@ export interface TabAgendaProps {
    * manual" no agente: é um POST por data.
    */
   readonly onSwitchToManual: (herdar: readonly WipePlan[]) => void;
+  /** Apaga a linha de vez. A data volta a ficar livre. */
+  readonly onPurge: (plan: WipePlan) => void;
   /** Desfaz o pular. Sem isto, a linha riscada é um beco sem saída. */
   readonly onRestore: (plan: WipePlan) => void;
   /**
@@ -191,6 +194,7 @@ export function TabAgenda({
   busy,
   onSave,
   onSkip,
+  onPurge,
   onRestore,
   onEdit,
   onCreate,
@@ -696,6 +700,8 @@ export function TabAgenda({
           busy={busy}
           clock={clock}
           onSkip={onSkip}
+          onPurge={onPurge}
+          cadenceEnabled={cadence.enabled}
           onEdit={onEdit}
           onDone={() => {
             setAction(null);
@@ -719,6 +725,8 @@ function PlanDialogs({
   busy,
   clock,
   onSkip,
+  onPurge,
+  cadenceEnabled,
   onEdit,
   onDone,
 }: {
@@ -727,6 +735,8 @@ function PlanDialogs({
   readonly busy: boolean;
   readonly clock: AgentClock;
   readonly onSkip: (plan: WipePlan) => void;
+  readonly onPurge: (plan: WipePlan) => void;
+  readonly cadenceEnabled: boolean;
   readonly onEdit: TabAgendaProps['onEdit'];
   readonly onDone: () => void;
 }) {
@@ -750,6 +760,18 @@ function PlanDialogs({
         busy={busy}
         onConfirm={() => {
           onSkip(plan);
+          onDone();
+        }}
+        onClose={onDone}
+      />
+
+      <PurgeWipeDialog
+        plan={plan}
+        open={kind === 'purge'}
+        busy={busy}
+        cadenceEnabled={cadenceEnabled}
+        onConfirm={() => {
+          onPurge(plan);
           onDone();
         }}
         onClose={onDone}
@@ -840,6 +862,15 @@ function PlanRow({
                 hint: 'Devolve este wipe à agenda, na mesma data.',
                 onSelect: () => {
                   onRestore(plan);
+                },
+              },
+              {
+                label: 'Apagar de vez',
+                icon: <Trash2 aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Some com a linha. A data fica livre de novo.',
+                danger: true,
+                onSelect: () => {
+                  onAction(plan, 'purge');
                 },
               },
             ]}

@@ -483,6 +483,38 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
   });
 
   /**
+   * APAGA de vez um wipe já deletado.
+   *
+   * O `DELETE` acima guarda a linha para a cadência não recriar a
+   * data. Esta rota solta a data — e por isso a resposta DIZ o que
+   * vem depois: com a cadência ligada, a reconciliação vai marcar
+   * um wipe novo ali, e quem apagou precisa saber disso antes de
+   * achar que o agente ressuscitou o que ele mandou sumir.
+   */
+  app.delete('/servers/:id/wipe/plans/:planId/purge', async (request) => {
+    const { id, planId } = planParams.parse(request.params);
+
+    assertServer(deps, id);
+
+    deps.repository.purgePlan(id, planId);
+
+    const settings = deps.repository.getSettings(id);
+
+    request.log.warn(
+      { server: id, plan: planId, by: operatorOf(request) },
+      'wipe pulado apagado de vez pelo painel',
+    );
+
+    return {
+      ok: true,
+      message: settings.cadence.enabled
+        ? 'Wipe apagado. A data ficou livre e a cadência vai marcar um wipe novo nela na ' +
+          'próxima volta — desligue a cadência se a intenção era não ter wipe nesse dia.'
+        : 'Wipe apagado de vez.',
+    };
+  });
+
+  /**
    * DESFAZ o pular.
    *
    * Existe porque a linha pulada continua ocupando o instante: sem

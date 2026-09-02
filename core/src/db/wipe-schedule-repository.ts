@@ -887,6 +887,46 @@ export class WipeScheduleRepository implements WipeScheduleReader {
     return this.getPlan(serverId, id) as WipePlan;
   }
 
+  /**
+   * Apaga a linha de um wipe pulado, de vez.
+   *
+   * ####  ISTO NÃO É O `skipPlan`, E A DIFERENÇA IMPORTA  ####
+   *
+   * Pular guarda a linha justamente para a cadência não recriar a
+   * data. Apagar solta a data de volta — e com a cadência LIGADA a
+   * reconciliação seguinte marca um wipe novo ali, o que da tela
+   * parece um wipe que ressuscitou.
+   *
+   * Ainda assim existe, porque com a cadência DESLIGADA nada
+   * recria coisa nenhuma e a linha vira lixo permanente na
+   * agenda. Quem chama é que sabe em qual dos dois casos está;
+   * este método só se recusa a apagar o que ainda vai acontecer.
+   */
+  purgePlan(serverId: string, id: number): void {
+    const current = this.getPlan(serverId, id);
+
+    if (current === null) {
+      throw new ApiError(
+        'WIPE_PLAN_NOT_FOUND',
+        `Não existe wipe agendado com o id ${String(id)} em "${serverId}".`,
+        404,
+      );
+    }
+
+    if (current.status !== 'skipped') {
+      throw new ApiError(
+        'WIPE_PLAN_NOT_SKIPPED',
+        `Este wipe está em "${current.status}". Apagar de vez só vale para o que já foi ` +
+          'deletado da agenda.',
+        409,
+      );
+    }
+
+    this.#db
+      .prepare('DELETE FROM wipe_plans WHERE server_id = @server_id AND id = @id')
+      .run({ server_id: serverId, id });
+  }
+
   #editable(serverId: string, id: number, verb: string): WipePlan {
     const current = this.getPlan(serverId, id);
 

@@ -2558,6 +2558,19 @@ export const agent = {
     ),
 
   /**
+   * APAGA de vez um wipe já deletado.
+   *
+   * Solta a data: com a cadência LIGADA, a reconciliação marca um
+   * wipe novo ali na volta seguinte. A mensagem da resposta diz isso
+   * quando for o caso.
+   */
+  purgeWipePlan: (serverId: string, planId: number) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}/purge`,
+      { method: 'DELETE' },
+    ),
+
+  /**
    * DESFAZ o pular.
    *
    * A linha pulada continua ocupando o instante, então sem isto um

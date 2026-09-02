@@ -47,7 +47,7 @@ import type { WipePlan } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /** O que dá para fazer com um wipe, e que tem caixa própria. */
-export type PlanActionKind = 'edit' | 'move' | 'remove';
+export type PlanActionKind = 'edit' | 'move' | 'remove' | 'purge';
 
 export interface WipeDayDialogProps {
   readonly open: boolean;

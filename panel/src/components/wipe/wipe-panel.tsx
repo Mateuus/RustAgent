@@ -209,6 +209,16 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
   // Desfazer o pular. A linha pulada continua ocupando o instante,
   // então sem esta volta um clique errado apagava a data para
   // sempre — nem marcar outra no lugar resolvia.
+  // Apagar a linha de vez. A mensagem do agente muda conforme a
+  // cadência esteja ligada — ela é quem sabe se a data volta a ser
+  // marcada sozinha.
+  const purge = useCallback(
+    (plan: WipePlan) => {
+      void run('Wipe apagado', () => agent.purgeWipePlan(serverId, plan.id));
+    },
+    [run, serverId],
+  );
+
   const restore = useCallback(
     (plan: WipePlan) => {
       void run('Wipe de volta à agenda', () => agent.restoreWipePlan(serverId, plan.id));
@@ -375,6 +385,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             busy={busy}
             onSave={saveSettings}
             onSkip={skip}
+            onPurge={purge}
             onRestore={restore}
             onSwitchToManual={switchToManual}
             onEdit={edit}
