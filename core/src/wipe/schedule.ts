@@ -340,11 +340,18 @@ export function isValidTimeZone(timeZone: string): boolean {
  * o servidor de ninguém. Só o forçado aparece — e ele apareceria
  * de qualquer jeito.
  *
- * O forçado nasce com `keep` pela mesma disciplina: o force wipe
- * da Facepunch apaga o MAPA, e só leva blueprint quando eles mexem
- * no sistema de itens (uma ou duas vezes por ano). Nascer com
- * `wipe` faria o agente endurecer o jogo além do que o próprio
- * jogo faz.
+ * ####  O FORÇADO NASCE FULL  ####
+ *
+ * Aqui o padrão é do DONO, e não do jogo. A Facepunch só zera
+ * blueprint quando mexe no sistema de itens — uma ou duas vezes
+ * por ano —, então `keep` seria o espelho do que o jogo faz
+ * sozinho. Só que a rede que este agente serve trata o force wipe
+ * mensal como começo de temporada, e temporada nova começa do
+ * zero.
+ *
+ * É o padrão de um servidor NOVO, e nada mais: quem já tem
+ * configuração salva continua com a dele, e cada wipe da agenda
+ * pode ser editado um a um na sub-aba Agenda.
  */
 export const DEFAULT_WIPE_SETTINGS: WipeSettings = {
   cadence: {
@@ -356,7 +363,7 @@ export const DEFAULT_WIPE_SETTINGS: WipeSettings = {
     bpPolicy: 'keep',
   },
   forced: {
-    bpPolicy: 'keep',
+    bpPolicy: 'wipe',
   },
   collision: {
     policy: 'reanchor',
@@ -484,7 +491,21 @@ function cadenceWipes(
   // pergunta, e o wipe reapareceria sozinho na tela.
   const absorptionCandidates = [lastForcedWipeBefore(from), ...forced];
 
-  let cursor = anchor;
+  // ####  O SALTO ANDA EM DIAS, E O WIPE TEM HORA  ####
+  //
+  // O salto lá em cima avança em dias INTEIROS e não conhece o
+  // horário. Ligar a cadência às 22:32 com o wipe marcado para as
+  // 22:38 deixava o marco exatamente em hoje — e o laço abaixo soma
+  // ANTES de testar, então o wipe de hoje, seis minutos à frente,
+  // nunca era gerado: o primeiro caía só no dia seguinte, sem que
+  // nada na tela explicasse a ausência.
+  //
+  // Recuar um passo devolve esse candidato ao laço. Não custa nada
+  // quando ele já passou: o `scheduledAt <= from` mais abaixo o
+  // descarta. E o `anchorInstant` fica como estava, porque é ele
+  // que a política `reanchor` usa como régua — mexer nele mudaria
+  // quais forçados contam como "posteriores ao marco".
+  let cursor = anchorInstant > from ? addDays(anchor, -cadence.everyDays) : anchor;
 
   for (let guard = 0; guard < MAX_CADENCE_ENTRIES; guard += 1) {
     cursor = addDays(cursor, cadence.everyDays);

@@ -47,6 +47,7 @@ import {
   formatShortMoment,
   fromDateField,
   fromDateTimeFields,
+  toDateTimeFields,
   isPending,
   sortByDate,
   toCalendarMarks,
@@ -64,7 +65,52 @@ import { cn } from '@/lib/utils';
  * Existem porque estes são os intervalos que servidor de Rust usa
  * de verdade, e clicar em "7" é mais rápido que digitá-lo.
  */
-const CADENCE_SHORTCUTS: readonly number[] = [1, 2, 3, 4, 6, 8, 12, 15, 30];
+/**
+ * ####  7 E 14 SÃO OS QUE A REDE USA  ####
+ *
+ * A lista nasceu com divisores de 24 e de 30 — boa para quem pensa
+ * em "duas vezes por dia" ou "uma vez por mês". Só que o wipe de
+ * Rust se organiza por SEMANA: "toda quinta", "de duas em duas
+ * quintas". Sem o 7 ali, o padrão mais comum de todos era o único
+ * que a tela não oferecia — e chegar nele exigia digitar no campo
+ * ao lado, que ninguém encontra.
+ */
+const CADENCE_SHORTCUTS: readonly number[] = [1, 2, 3, 4, 6, 7, 8, 12, 14, 15, 30];
+
+/** Os dias da semana, para dizer em qual deles a cadência cai. */
+const WEEKDAYS: readonly string[] = [
+  'domingo',
+  'segunda-feira',
+  'terça-feira',
+  'quarta-feira',
+  'quinta-feira',
+  'sexta-feira',
+  'sábado',
+];
+
+/**
+ * Em que dia da semana esta cadência cai — quando cai sempre no
+ * mesmo.
+ *
+ * ####  POR QUE ISTO PRECISA APARECER  ####
+ *
+ * A cadência é "a cada N dias a partir de um marco". Com N múltiplo
+ * de 7 isso é a mesma coisa que "toda quinta" — mas só se o marco
+ * cair numa quinta, e o campo do marco é uma data solta que não diz
+ * nada sobre isso. Sem esta frase, escolher 7 com o marco num
+ * sábado produzia wipes de sábado enquanto o admin lia "semanal" e
+ * entendia "quinta".
+ *
+ * `null` quando N não é múltiplo de 7: aí o dia anda a cada wipe, e
+ * não há um dia da semana para prometer.
+ */
+function weekdayOfCadence(anchorAt: number, everyDays: number): string | null {
+  if (everyDays % 7 !== 0) {
+    return null;
+  }
+
+  return WEEKDAYS[new Date(anchorAt).getDay()] ?? null;
+}
 
 /**
  * Sugestões de fuso, e só sugestões: o campo aceita qualquer nome
@@ -102,6 +148,17 @@ export interface TabAgendaProps {
   readonly onSave: (settings: WipeSettings) => void;
   readonly onPostpone: (plan: WipePlan, hours: number) => void;
   readonly onSkip: (plan: WipePlan) => void;
+  /**
+   * Muda UM wipe já marcado.
+   *
+   * É por aqui que a política de blueprints deixa de ser uma regra
+   * só para a cadência inteira: a quinta que vem mantém, a de daqui
+   * a duas zera, e quem decide é quem abre a agenda.
+   */
+  readonly onEdit: (
+    plan: WipePlan,
+    patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null },
+  ) => void;
   readonly onCreate: (input: {
     scheduledAt: number;
     bpPolicy: BpPolicy;
@@ -117,6 +174,7 @@ export function TabAgenda({
   onSave,
   onPostpone,
   onSkip,
+  onEdit,
   onCreate,
 }: TabAgendaProps) {
   const [draft, setDraft] = useState<WipeSettings>(settings);
@@ -281,6 +339,23 @@ export function TabAgenda({
               <p className="mt-1 text-2xs leading-relaxed text-muted">
                 O marco zero da contagem. Só o dia importa — a hora vem do campo acima.
               </p>
+
+              {/* A tradução da aritmética para o calendário de quem lê. */}
+              {weekdayOfCadence(cadence.anchorAt, cadence.everyDays) !== null && (
+                <p className="mt-1 text-2xs leading-relaxed text-foreground">
+                  Com esta conta, o wipe cai{' '}
+                  <strong>
+                    {cadence.everyDays === 7
+                      ? `toda ${String(weekdayOfCadence(cadence.anchorAt, cadence.everyDays))}`
+                      : `de ${String(cadence.everyDays / 7)} em ${String(
+                          cadence.everyDays / 7,
+                        )} semanas, sempre numa ${String(
+                          weekdayOfCadence(cadence.anchorAt, cadence.everyDays),
+                        )}`}
+                  </strong>
+                  , às {cadence.timeOfDay}.
+                </p>
+              )}
             </div>
 
             <PolicyPicker
@@ -396,6 +471,8 @@ export function TabAgenda({
                 busy={busy}
                 onPostpone={onPostpone}
                 onSkip={onSkip}
+                onEdit={onEdit}
+                clock={clock}
               />
             ))}
           </ul>
@@ -411,15 +488,20 @@ function PlanRow({
   plan,
   now,
   busy,
+  clock,
   onPostpone,
   onSkip,
+  onEdit,
 }: {
   readonly plan: WipePlan;
   readonly now: number | null;
   readonly busy: boolean;
+  readonly clock: AgentClock;
   readonly onPostpone: (plan: WipePlan, hours: number) => void;
   readonly onSkip: (plan: WipePlan) => void;
+  readonly onEdit: TabAgendaProps['onEdit'];
 }) {
+  const [editing, setEditing] = useState(false);
   const pending = isPending(plan);
   const remaining = now === null ? null : plan.scheduledAt - now;
   const future = pending && remaining !== null && remaining > 0;
@@ -454,6 +536,18 @@ function PlanRow({
               size="sm"
               variant="ghost"
               disabled={busy}
+              title="Muda a política de blueprints, a data e a anotação DESTE wipe."
+              onClick={() => {
+                setEditing((current) => !current);
+              }}
+            >
+              {editing ? 'fechar' : 'editar'}
+            </Button>
+
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
               title="Empurra este wipe 24 horas para a frente."
               onClick={() => {
                 onPostpone(plan, 24);
@@ -480,8 +574,181 @@ function PlanRow({
         )}
       </span>
 
-      {plan.note !== null && <span className="w-full text-2xs text-muted">{plan.note}</span>}
+      {plan.note !== null && !editing && (
+        <span className="w-full text-2xs text-muted">{plan.note}</span>
+      )}
+
+      {editing && (
+        <PlanEditor
+          plan={plan}
+          busy={busy}
+          clock={clock}
+          onSave={(patch) => {
+            onEdit(plan, patch);
+            setEditing(false);
+          }}
+          onCancel={() => {
+            setEditing(false);
+          }}
+        />
+      )}
     </li>
+  );
+}
+
+/**
+ * A edição de UM wipe da agenda.
+ *
+ * ####  O QUE ESTA TELA MUDA, E O QUE NÃO  ####
+ *
+ * Blueprints, data e anotação. NÃO muda o mapa: a fila de mundos
+ * tem tela própria (sub-aba Mapas), e um seletor solto aqui daria
+ * duas verdades sobre qual mundo entra.
+ *
+ * A data do FORÇADO não se edita — ela é da Facepunch, e o servidor
+ * não sobe com o mundo antigo depois da atualização mensal. Os
+ * blueprints dele, sim: essa parte é escolha da casa.
+ *
+ * ####  SÓ VAI O QUE MUDOU  ####
+ *
+ * O patch é montado por diferença. Mandar os três campos sempre
+ * marcaria o wipe como "mexido à mão" por causa de uma visita, e a
+ * reconciliação deixaria de recalcular um wipe que ninguém quis
+ * congelar.
+ */
+function PlanEditor({
+  plan,
+  busy,
+  clock,
+  onSave,
+  onCancel,
+}: {
+  readonly plan: WipePlan;
+  readonly busy: boolean;
+  readonly clock: AgentClock;
+  readonly onSave: (patch: {
+    scheduledAt?: number;
+    bpPolicy?: BpPolicy;
+    note?: string | null;
+  }) => void;
+  readonly onCancel: () => void;
+}) {
+  const inicial = toDateTimeFields(plan.scheduledAt);
+  const [date, setDate] = useState(inicial.date);
+  const [time, setTime] = useState(inicial.time);
+  const [bpPolicy, setBpPolicy] = useState<BpPolicy>(plan.bpPolicy);
+  const [note, setNote] = useState(plan.note ?? '');
+
+  const forced = plan.kind === 'forced';
+  const at = fromDateTimeFields(date, time);
+  const past = at !== null && clock.now !== null && at <= clock.now;
+  const dataInvalida = !forced && (at === null || past);
+
+  const patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null } = {};
+
+  if (!forced && at !== null && at !== plan.scheduledAt) {
+    patch.scheduledAt = at;
+  }
+
+  if (bpPolicy !== plan.bpPolicy) {
+    patch.bpPolicy = bpPolicy;
+  }
+
+  const noteLimpa = note.trim() === '' ? null : note.trim();
+
+  if (noteLimpa !== plan.note) {
+    patch.note = noteLimpa;
+  }
+
+  const mudou = Object.keys(patch).length > 0;
+
+  return (
+    <div className="mt-2 w-full space-y-3 border-l-2 border-border pl-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <Label htmlFor={`plan-${String(plan.id)}-date`}>Dia</Label>
+          <Input
+            id={`plan-${String(plan.id)}-date`}
+            type="date"
+            value={date}
+            disabled={forced}
+            onChange={(event) => {
+              setDate(event.target.value);
+            }}
+            className="mt-1"
+          />
+        </div>
+
+        <div>
+          <Label htmlFor={`plan-${String(plan.id)}-time`}>Hora</Label>
+          <Input
+            id={`plan-${String(plan.id)}-time`}
+            type="time"
+            value={time}
+            disabled={forced}
+            onChange={(event) => {
+              setTime(event.target.value);
+            }}
+            className="mt-1"
+          />
+        </div>
+      </div>
+
+      {forced && (
+        <p className="text-2xs leading-relaxed text-muted">
+          A data do wipe forçado é da Facepunch, e por isso não se edita: depois da
+          atualização mensal o servidor não sobe com o mundo antigo. Os blueprints dele,
+          abaixo, continuam sendo escolha da casa.
+        </p>
+      )}
+
+      <PolicyPicker
+        name={`bp-plan-${String(plan.id)}`}
+        legend="Blueprints neste wipe"
+        value={bpPolicy}
+        onChange={setBpPolicy}
+      />
+
+      <div>
+        <Label htmlFor={`plan-${String(plan.id)}-note`}>Anotação</Label>
+        <Input
+          id={`plan-${String(plan.id)}-note`}
+          value={note}
+          placeholder="para quem for ler a agenda depois"
+          onChange={(event) => {
+            setNote(event.target.value);
+          }}
+          className="mt-1"
+        />
+      </div>
+
+      {dataInvalida && (
+        <StateBlock
+          variant="error"
+          title={past ? 'Essa data já passou.' : 'Data ou hora incompleta.'}
+          detail="O agente não mexe no passado: escolha um instante à frente do relógio dele."
+        />
+      )}
+
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="ghost" onClick={onCancel}>
+          Cancelar
+        </Button>
+
+        <Button
+          size="sm"
+          variant="confirm"
+          disabled={busy || dataInvalida || !mudou}
+          title={mudou ? undefined : 'Nada mudou ainda.'}
+          onClick={() => {
+            onSave(patch);
+          }}
+        >
+          <Save aria-hidden="true" className="h-4 w-4" />
+          Salvar este wipe
+        </Button>
+      </div>
+    </div>
   );
 }
 

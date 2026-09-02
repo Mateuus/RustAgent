@@ -40,6 +40,7 @@ import { TabAgenda } from '@/components/wipe/tab-agenda';
 import { TabBlueprints } from '@/components/wipe/tab-blueprints';
 import { TabConfiguracao } from '@/components/wipe/tab-configuracao';
 import { TabExecucao } from '@/components/wipe/tab-execucao';
+import { TabHistorico } from '@/components/wipe/tab-historico';
 import { TabGeral } from '@/components/wipe/tab-geral';
 import { TabMapas } from '@/components/wipe/tab-mapas';
 import { useAgentClock } from '@/components/wipe/use-agent-clock';
@@ -58,7 +59,14 @@ import { cn } from '@/lib/utils';
  * sub-abas. Sem acento e sem espaço: eles viajam em `data-`,
  * em chave de reação e (um dia) em query string.
  */
-export type WipeTab = 'geral' | 'agenda' | 'mapas' | 'blueprints' | 'configuracao' | 'execucao';
+export type WipeTab =
+  | 'geral'
+  | 'agenda'
+  | 'mapas'
+  | 'blueprints'
+  | 'configuracao'
+  | 'execucao'
+  | 'historico';
 
 const TABS: readonly { readonly id: WipeTab; readonly label: string }[] = [
   { id: 'geral', label: 'Geral' },
@@ -67,6 +75,7 @@ const TABS: readonly { readonly id: WipeTab; readonly label: string }[] = [
   { id: 'blueprints', label: 'Blueprints' },
   { id: 'configuracao', label: 'Configuração' },
   { id: 'execucao', label: 'Execução' },
+  { id: 'historico', label: 'Histórico' },
 ];
 
 /**
@@ -173,6 +182,24 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
     [run, serverId],
   );
 
+  // ####  UM WIPE, E NÃO A REGRA INTEIRA  ####
+  //
+  // A cadência diz o que vale para todos; isto diz o que vale para
+  // ESTE. É o que permite a quinta que vem manter os blueprints e a
+  // de daqui a duas zerar, sem inventar um segundo tipo de cadência.
+  //
+  // O agente marca o plano como `pinned` ao receber o PATCH: quem
+  // mexeu à mão não quer que a próxima reconciliação desfaça.
+  const edit = useCallback(
+    (
+      plan: WipePlan,
+      patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null },
+    ) => {
+      void run('Wipe alterado', () => agent.updateWipePlan(serverId, plan.id, patch));
+    },
+    [run, serverId],
+  );
+
   const skip = useCallback(
     (plan: WipePlan) => {
       void run('Wipe pulado', () => agent.removeWipePlan(serverId, plan.id));
@@ -270,6 +297,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             onSave={saveSettings}
             onPostpone={postpone}
             onSkip={skip}
+            onEdit={edit}
             onCreate={create}
           />
         )}
@@ -292,6 +320,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
         {tab === 'blueprints' && <TabBlueprints serverId={serverId} />}
         {tab === 'configuracao' && <TabConfiguracao serverId={serverId} />}
         {tab === 'execucao' && <TabExecucao serverId={serverId} />}
+        {tab === 'historico' && <TabHistorico serverId={serverId} />}
       </div>
     </div>
   );

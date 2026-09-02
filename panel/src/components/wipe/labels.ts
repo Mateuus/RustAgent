@@ -293,6 +293,26 @@ export function fromDateField(value: string): number | null {
 }
 
 /**
+ * O caminho de volta: um instante vira os dois campos do formulário.
+ *
+ * ####  O PAR TEM QUE FECHAR  ####
+ *
+ * É o inverso exato de `fromDateTimeFields`, e no MESMO fuso — o do
+ * navegador. Formatar aqui em UTC abriria a edição de um wipe das
+ * 16:00 mostrando 19:00, e quem salvasse sem tocar no campo estaria
+ * movendo o wipe três horas sem querer.
+ */
+export function toDateTimeFields(epochMs: number): { date: string; time: string } {
+  const at = new Date(epochMs);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+
+  return {
+    date: `${String(at.getFullYear())}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`,
+    time: `${pad(at.getHours())}:${pad(at.getMinutes())}`,
+  };
+}
+
+/**
  * `YYYY-MM-DD` + `HH:MM` -> epoch ms, no fuso do NAVEGADOR.
  *
  * É o que o wipe manual usa: quem digita a data está olhando o
