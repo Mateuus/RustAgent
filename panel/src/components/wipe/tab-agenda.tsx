@@ -32,6 +32,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
+import { PostponeDialog } from '@/components/wipe/postpone-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
@@ -76,6 +77,7 @@ import { cn } from '@/lib/utils';
  * ao lado, que ninguém encontra.
  */
 const CADENCE_SHORTCUTS: readonly number[] = [1, 2, 3, 4, 6, 7, 8, 12, 14, 15, 30];
+
 
 /** Os dias da semana, para dizer em qual deles a cadência cai. */
 const WEEKDAYS: readonly string[] = [
@@ -146,7 +148,8 @@ export interface TabAgendaProps {
   readonly clock: AgentClock;
   readonly busy: boolean;
   readonly onSave: (settings: WipeSettings) => void;
-  readonly onPostpone: (plan: WipePlan, hours: number) => void;
+  // Adiar deixou de ser uma prop: a caixa de adiar escolhe a data
+  // nova e a manda pelo mesmo caminho de qualquer outra edição.
   readonly onSkip: (plan: WipePlan) => void;
   /**
    * Muda UM wipe já marcado.
@@ -172,7 +175,6 @@ export function TabAgenda({
   clock,
   busy,
   onSave,
-  onPostpone,
   onSkip,
   onEdit,
   onCreate,
@@ -469,7 +471,6 @@ export function TabAgenda({
                 plan={plan}
                 now={clock.now}
                 busy={busy}
-                onPostpone={onPostpone}
                 onSkip={onSkip}
                 onEdit={onEdit}
                 clock={clock}
@@ -489,7 +490,6 @@ function PlanRow({
   now,
   busy,
   clock,
-  onPostpone,
   onSkip,
   onEdit,
 }: {
@@ -497,11 +497,11 @@ function PlanRow({
   readonly now: number | null;
   readonly busy: boolean;
   readonly clock: AgentClock;
-  readonly onPostpone: (plan: WipePlan, hours: number) => void;
   readonly onSkip: (plan: WipePlan) => void;
   readonly onEdit: TabAgendaProps['onEdit'];
 }) {
   const [editing, setEditing] = useState(false);
+  const [postponing, setPostponing] = useState(false);
   const pending = isPending(plan);
   const remaining = now === null ? null : plan.scheduledAt - now;
   const future = pending && remaining !== null && remaining > 0;
@@ -548,9 +548,9 @@ function PlanRow({
               size="sm"
               variant="ghost"
               disabled={busy}
-              title="Empurra este wipe 24 horas para a frente."
+              title="Escolhe uma data nova para este wipe."
               onClick={() => {
-                onPostpone(plan, 24);
+                setPostponing(true);
               }}
             >
               adiar
@@ -577,6 +577,20 @@ function PlanRow({
       {plan.note !== null && !editing && (
         <span className="w-full text-2xs text-muted">{plan.note}</span>
       )}
+
+      <PostponeDialog
+        plan={plan}
+        open={postponing}
+        busy={busy}
+        clock={clock}
+        onConfirm={(scheduledAt) => {
+          onEdit(plan, { scheduledAt });
+          setPostponing(false);
+        }}
+        onClose={() => {
+          setPostponing(false);
+        }}
+      />
 
       {editing && (
         <PlanEditor

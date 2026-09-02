@@ -25,7 +25,7 @@
 // ============================================================
 
 import { AlertTriangle, Check, Minus, ShieldCheck, X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
@@ -40,6 +40,7 @@ import {
   nextForcedWipe,
   nextWipe,
 } from '@/components/wipe/labels';
+import { PostponeDialog } from '@/components/wipe/postpone-dialog';
 import { describeSkew, formatCountdown, type AgentClock } from '@/components/wipe/use-agent-clock';
 import type { ServerView, WipePlan, WipeSettings } from '@/lib/api';
 import { EM_DASH } from '@/lib/format';
@@ -50,7 +51,13 @@ export interface TabGeralProps {
   readonly plans: readonly WipePlan[];
   readonly clock: AgentClock;
   readonly busy: boolean;
-  readonly onPostpone: (plan: WipePlan, hours: number) => void;
+  /**
+   * Adiar: recebe o instante NOVO, e não um deslocamento.
+   *
+   * A caixa de adiar mostra a data resultante antes de valer, então
+   * quem decide o quanto empurrar é ela — aqui só chega o resultado.
+   */
+  readonly onPostpone: (plan: WipePlan, scheduledAt: number) => void;
   readonly onSkip: (plan: WipePlan) => void;
 }
 
@@ -63,6 +70,8 @@ export function TabGeral({
   onPostpone,
   onSkip,
 }: TabGeralProps) {
+  const [postponing, setPostponing] = useState(false);
+
   const now = clock.now;
   const next = now === null ? null : nextWipe(plans, now);
   const forced = now === null ? null : nextForcedWipe(plans, now);
@@ -79,6 +88,24 @@ export function TabGeral({
 
   return (
     <div className="space-y-4">
+      {/* A caixa de adiar é a MESMA da Agenda: uma regra só para um
+          gesto só. Ver postpone-dialog.tsx. */}
+      {next !== null && (
+        <PostponeDialog
+          plan={next}
+          open={postponing}
+          busy={busy}
+          clock={clock}
+          onConfirm={(scheduledAt) => {
+            onPostpone(next, scheduledAt);
+            setPostponing(false);
+          }}
+          onClose={() => {
+            setPostponing(false);
+          }}
+        />
+      )}
+
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="Próximo wipe">
           {next === null ? (
@@ -115,12 +142,12 @@ export function TabGeral({
                   size="sm"
                   variant="outline"
                   disabled={busy}
-                  title="Empurra este wipe 24 horas para a frente. A data original não volta sozinha: o agente respeita o que foi mexido à mão."
+                  title="Escolhe uma data nova. A original não volta sozinha: o agente respeita o que foi mexido à mão."
                   onClick={() => {
-                    onPostpone(next, 24);
+                    setPostponing(true);
                   }}
                 >
-                  Adiar 24 h
+                  Adiar
                 </Button>
 
                 {/* ####  O FORÇADO NÃO TEM BOTÃO DE PULAR  ####

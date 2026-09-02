@@ -171,13 +171,11 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
     [run, serverId],
   );
 
+  // A caixa de adiar já escolheu o instante e o mostrou por extenso
+  // antes de valer; aqui só se grava o que ela decidiu.
   const postpone = useCallback(
-    (plan: WipePlan, hours: number) => {
-      void run(`Wipe adiado ${String(hours)} h`, () =>
-        agent.updateWipePlan(serverId, plan.id, {
-          scheduledAt: plan.scheduledAt + hours * 60 * 60 * 1_000,
-        }),
-      );
+    (plan: WipePlan, scheduledAt: number) => {
+      void run('Wipe adiado', () => agent.updateWipePlan(serverId, plan.id, { scheduledAt }));
     },
     [run, serverId],
   );
@@ -295,7 +293,6 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             clock={clock}
             busy={busy}
             onSave={saveSettings}
-            onPostpone={postpone}
             onSkip={skip}
             onEdit={edit}
             onCreate={create}
