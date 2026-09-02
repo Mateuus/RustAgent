@@ -157,7 +157,7 @@ export interface AppUpdateResult {
  *
  * Boa parte desses erros é conteúdo parcial estragado em
  * `steamapps\downloading` e some na execução seguinte. Então são
- * três tentativas, apagando o download parcial entre elas. O que
+ * três tentativas, apagando o `downloading` INTEIRO entre elas. O que
  * NÃO se apaga é o `appmanifest` nem os arquivos do jogo: isso
  * transformaria uma atualização de 300 MB numa reinstalação de
  * 25 GB sem ninguém pedir.
@@ -254,9 +254,21 @@ export async function appUpdate(options: AppUpdateOptions): Promise<AppUpdateRes
  * Apagar isto é seguro: são pedaços do próximo build, não o jogo
  * instalado. Falha em apagar não interrompe nada — a tentativa
  * seguinte pode dar certo mesmo assim.
+ *
+ * ####  A PASTA INTEIRA, NÃO SÓ A DO APP  ####
+ *
+ * O conteúdo baixado fica na subpasta `downloading/<appId>`, mas a
+ * contabilidade de quanto já foi estagiado fica UM NÍVEL ACIMA,
+ * solta na raiz do `downloading`: os `.delta` e os `state_<appId>*`.
+ * Apagar só a subpasta do app deixava esse par desencontrado — o
+ * Steam retomava de "já estagiei 572 MB" com o conteúdo apagado,
+ * lia as regiões pré-alocadas como zeros e reprovava a validação
+ * com um número de arquivos faltando que CRESCIA a cada tentativa
+ * (28, depois 257). A retentativa piorava o estado em vez de
+ * consertá-lo. Some tudo, para o Steam recomeçar do zero.
  */
 async function clearPartialDownload(options: AppUpdateOptions): Promise<void> {
-  const partial = join(options.installDir, 'steamapps', 'downloading', options.appId);
+  const partial = join(options.installDir, 'steamapps', 'downloading');
 
   if (!existsSync(partial)) {
     return;

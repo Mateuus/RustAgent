@@ -38,6 +38,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
   agent,
+  type InstalledOxide,
   type OxideFrameworkConfig,
   type OxideGroup,
   type OxideLoadedPlugin,
@@ -50,6 +51,8 @@ interface OxideStatus {
   connected: boolean;
   version: string | null;
   branch: string | null;
+  /** O carimbo do disco: vale mesmo com o servidor parado. */
+  installed: InstalledOxide | null;
   plugins: OxideLoadedPlugin[];
   config: OxideFrameworkConfig | null;
   message?: string | undefined;
@@ -77,6 +80,7 @@ export function OxidePanel({ serverId }: { serverId: string }) {
         connected: info.connected,
         version: info.oxide.version,
         branch: info.oxide.branch,
+        installed: info.installed,
         plugins: info.plugins,
         config: info.config,
         message: info.message,
@@ -281,9 +285,22 @@ function Framework({ status }: { status: OxideStatus }) {
           </p>
         </div>
 
-        <span className="font-mono text-2xs text-muted">
-          {status.version ?? EM_DASH}
-          {status.branch === null ? '' : ` · ${status.branch}`}
+        {/* ####  DUAS VERSÕES, E ELAS RESPONDEM COISAS DIFERENTES  ####
+
+            A de cima é a que o SERVIDOR está rodando agora — só existe
+            com ele no ar, porque vem do console. A de baixo é a que o
+            AGENTE instalou em disco, e é a única que aparece com o
+            servidor parado: exatamente o estado em que se aperta
+            "Atualizar o Oxide". */}
+        <span className="text-right font-mono text-2xs text-muted">
+          <span className="block">
+            {status.version ?? EM_DASH}
+            {status.branch === null ? '' : ` · ${status.branch}`}
+          </span>
+
+          {status.installed !== null && (
+            <span className="block text-3xs">em disco: {status.installed.tag}</span>
+          )}
         </span>
       </header>
 

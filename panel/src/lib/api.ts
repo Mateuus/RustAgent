@@ -27,6 +27,28 @@ export function setCsrfToken(token: string | null): void {
 }
 
 /**
+ * Quem avisar aqui é chamado quando o agente responde 401.
+ *
+ * ####  POR QUE ISTO EXISTE  ####
+ *
+ * A sessão mora na MEMÓRIA do agente: um `pm2 restart` — ou um
+ * `tsx watch` recarregando no desenvolvimento — derruba todas as
+ * sessões abertas. Sem este aviso, cada tela recebia o 401 por
+ * conta própria, mostrava o texto de erro num canto e seguia
+ * achando que continuava logada. A tela de Operações era a pior:
+ * ela ficava batendo de segundo em segundo numa operação que não
+ * podia mais ler, presa em "running" para sempre.
+ *
+ * Quem escuta é o `SessionProvider`, que derruba a sessão e manda
+ * para `/entrar`.
+ */
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+/**
  * Erro vindo do agente, com o código de contrato junto.
  *
  * A `message` é a frase do CORE, em português — a tela mostra ela
@@ -104,6 +126,12 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 
   if (!response.ok) {
     const body = payload as { error?: string; message?: string };
+
+    // A sessão caiu no meio do uso. Avisa UMA vez, e quem escuta
+    // decide — este arquivo não conhece rota nem componente.
+    if (response.status === 401) {
+      onUnauthorized?.();
+    }
 
     throw new ApiError(
       body.error ?? 'UNKNOWN',
@@ -524,6 +552,18 @@ export interface OxideGroup {
   parents: string[];
   /** O que ele ganha de cada pai. */
   inherited: { group: string; permissions: string[] }[];
+}
+
+/**
+ * A versão do Oxide que o agente instalou, carimbada no disco.
+ *
+ * O console do jogo só responde com o servidor NO AR, e atualizar o
+ * Oxide exige ele PARADO — sem este carimbo a tela ficava sem saber
+ * o que tinha justamente na hora de trocar.
+ */
+export interface InstalledOxide {
+  tag: string;
+  installedAt: string;
 }
 
 /** Um plugin que o Oxide diz estar rodando AGORA. */
@@ -1570,6 +1610,8 @@ export const agent = {
       ok: true;
       connected: boolean;
       oxide: { version: string | null; branch: string | null };
+      /** O que o AGENTE instalou, lido do disco. Vale com o servidor parado. */
+      installed: InstalledOxide | null;
       plugins: OxideLoadedPlugin[];
       config: OxideFrameworkConfig;
       message?: string;

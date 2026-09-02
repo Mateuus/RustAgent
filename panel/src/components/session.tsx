@@ -22,7 +22,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import { agent, setCsrfToken } from '@/lib/api';
+import { agent, setCsrfToken, setUnauthorizedHandler } from '@/lib/api';
 
 interface SessionState {
   readonly user: string | null;
@@ -65,6 +65,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // ####  A SESSÃO PODE CAIR NO MEIO DO USO  ####
+  //
+  // Ela vive na memória do agente: um `pm2 restart` derruba todas
+  // as sessões abertas, e o painel continuaria desenhado como se
+  // nada tivesse acontecido — cada tela recebendo 401 por conta
+  // própria e mostrando um erro que não explica a causa. Aqui a
+  // conferência do mount vira contínua: o primeiro 401 de qualquer
+  // chamada derruba a sessão, e o portão abaixo manda para /entrar.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setCsrfToken(null);
+      setUser(null);
+    });
+
+    return () => {
+      setUnauthorizedHandler(null);
     };
   }, []);
 

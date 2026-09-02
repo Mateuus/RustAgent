@@ -43,7 +43,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { assertSteamId } from '../../bans/service.js';
-import { readOxideFrameworkConfig } from '../../oxide/install.js';
+import { readInstalledOxide, readOxideFrameworkConfig } from '../../oxide/install.js';
 import {
   createGroup,
   grantToGroup,
@@ -178,6 +178,11 @@ export function registerOxideRoutes(app: FastifyInstance, deps: OxideRoutesDeps)
     // servidor parado — que é quando alguém abre esta aba para
     // conferir a configuração antes de subir.
     const framework = await readOxideFrameworkConfig(config.paths.installDir);
+
+    // Do DISCO, e não do console: é o único jeito de a tela saber o
+    // que está instalado com o servidor parado — que é justamente o
+    // estado em que se troca a versão do Oxide.
+    const installed = await readInstalledOxide(config.paths.installDir);
     const context = deps.supervisor.contextOf(id);
 
     if (context === null || !context.rcon.isConnected) {
@@ -185,6 +190,7 @@ export function registerOxideRoutes(app: FastifyInstance, deps: OxideRoutesDeps)
         ok: true,
         connected: false,
         oxide: { version: null, branch: null },
+        installed,
         plugins: [],
         config: framework,
         message:
@@ -198,6 +204,7 @@ export function registerOxideRoutes(app: FastifyInstance, deps: OxideRoutesDeps)
       ok: true,
       connected: true,
       ...(await readOxideStatus(context.rcon)),
+      installed,
       config: framework,
     };
   });

@@ -26,7 +26,7 @@
 // ============================================================
 
 import { existsSync } from 'node:fs';
-import { cp, mkdir, readFile, stat } from 'node:fs/promises';
+import { cp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { extractZip } from '../util/zip.js';
@@ -51,6 +51,52 @@ const REQUIRED_ASSEMBLIES = [
 
 /** As pastas que o Oxide usa, criadas antecipadamente. */
 const OXIDE_DIRS = ['plugins', 'config', 'data', 'lang', 'logs'];
+
+/**
+ * O carimbo da versão instalada, dentro de `oxide\`.
+ *
+ * ####  POR QUE NÃO PERGUNTAR AO SERVIDOR  ####
+ *
+ * A versão do Oxide vem do console do jogo — e o console só
+ * responde com o servidor NO AR. Só que atualizar o Oxide exige
+ * o servidor PARADO. Nas duas pontas o painel ficava sem saber o
+ * que já estava em disco justamente na hora de decidir trocar.
+ *
+ * O ponto seguro para gravar isso é aqui, onde a release acabou
+ * de ser baixada e o número é conhecido de primeira mão.
+ */
+const VERSION_STAMP = '.rustagent-oxide.json';
+
+/** O que o carimbo guarda. */
+export interface InstalledOxide {
+  readonly tag: string;
+  readonly installedAt: string;
+}
+
+/**
+ * A versão que ESTE agente instalou, lida do disco.
+ *
+ * `null` quando o carimbo não existe: ou o Oxide não está
+ * instalado, ou entrou por fora (uma cópia à mão, um zip baixado
+ * direto). Nos dois casos a tela diz que não sabe, em vez de
+ * inventar um número.
+ */
+export async function readInstalledOxide(installDir: string): Promise<InstalledOxide | null> {
+  const path = join(installDir, 'oxide', VERSION_STAMP);
+
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+    const stamp = parsed as Partial<InstalledOxide>;
+
+    if (typeof stamp.tag !== 'string' || typeof stamp.installedAt !== 'string') {
+      return null;
+    }
+
+    return { tag: stamp.tag, installedAt: stamp.installedAt };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * O `oxide.config.json` daquele servidor, como está em disco.
@@ -164,6 +210,26 @@ export async function installOxide(options: InstallOxideOptions): Promise<Instal
 
   for (const dir of OXIDE_DIRS) {
     await mkdir(join(oxideDir, dir), { recursive: true });
+  }
+
+  // O carimbo é o ÚLTIMO passo: gravado antes das conferências
+  // acima, ele diria "2.0.7638 instalado" sobre uma instalação que
+  // não ficou de pé.
+  const stamp: InstalledOxide = {
+    tag,
+    installedAt: (options.now?.() ?? new Date()).toISOString(),
+  };
+
+  try {
+    await writeFile(join(oxideDir, VERSION_STAMP), `${JSON.stringify(stamp, null, 2)}\n`);
+  } catch (error) {
+    // Não falha a instalação por causa do carimbo: o Oxide está
+    // aplicado e funcionando. O painel só vai dizer que não sabe
+    // a versão.
+    options.onLine(
+      `[Oxide] instalado, mas não consegui gravar o carimbo da versão: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   options.onLine('[Oxide] instalado. Os plugins carregam no próximo start do servidor.');
