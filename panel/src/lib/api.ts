@@ -2558,6 +2558,19 @@ export const agent = {
     ),
 
   /**
+   * DESFAZ o pular.
+   *
+   * A linha pulada continua ocupando o instante, então sem isto um
+   * clique errado apagava a data para sempre: nem marcar outro no
+   * lugar resolvia, porque o POST recusa por conflito de horário.
+   */
+  restoreWipePlan: (serverId: string, planId: number) =>
+    api<WipePlanResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}/restore`,
+      { method: 'POST' },
+    ),
+
+  /**
    * Pula um wipe marcado.
    *
    * O agente RECUSA num plano forçado, com explicação: sem zerar,

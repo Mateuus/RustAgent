@@ -483,6 +483,33 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
   });
 
   /**
+   * DESFAZ o pular.
+   *
+   * Existe porque a linha pulada continua ocupando o instante: sem
+   * esta rota, um clique errado no botão de pular apagava a data
+   * para sempre — e nem marcar outro no lugar resolvia, porque o
+   * `POST` recusa com 409 por conflito de horário.
+   */
+  app.post('/servers/:id/wipe/plans/:planId/restore', async (request) => {
+    const { id, planId } = planParams.parse(request.params);
+
+    assertServer(deps, id);
+
+    const plan = deps.repository.restorePlan(id, planId, Date.now());
+
+    request.log.info(
+      { server: id, plan: plan.id, at: plan.scheduledAt, by: operatorOf(request) },
+      'wipe pulado restaurado pelo painel',
+    );
+
+    return {
+      ok: true,
+      plan,
+      message: 'Wipe de volta à agenda.',
+    };
+  });
+
+  /**
    * PULA este wipe.
    *
    * ####  O FORÇADO RECUSA, COM EXPLICAÇÃO  ####

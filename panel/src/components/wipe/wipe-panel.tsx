@@ -205,6 +205,16 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
     [run, serverId],
   );
 
+  // Desfazer o pular. A linha pulada continua ocupando o instante,
+  // então sem esta volta um clique errado apagava a data para
+  // sempre — nem marcar outra no lugar resolvia.
+  const restore = useCallback(
+    (plan: WipePlan) => {
+      void run('Wipe de volta à agenda', () => agent.restoreWipePlan(serverId, plan.id));
+    },
+    [run, serverId],
+  );
+
   const create = useCallback(
     (input: { scheduledAt: number; bpPolicy: BpPolicy; note: string | null }) => {
       void run('Wipe manual marcado', () => agent.createWipePlan(serverId, input));
@@ -294,6 +304,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             busy={busy}
             onSave={saveSettings}
             onSkip={skip}
+            onRestore={restore}
             onEdit={edit}
             onCreate={create}
           />

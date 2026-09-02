@@ -49,13 +49,13 @@ export function RemoveWipeDialog({
   return (
     <Dialog
       open={open}
-      title={manual ? 'Deletar este wipe' : 'Pular este wipe'}
+      title="Deletar este wipe"
       busy={busy}
       onClose={onClose}
     >
       <div className="space-y-4">
         <p className="text-sm text-muted">
-          {manual ? 'Deletar' : 'Pular'} o wipe de{' '}
+          Tirar da agenda o wipe de{' '}
           <strong className="text-foreground">{formatShortMoment(plan.scheduledAt)}</strong>.
         </p>
 
@@ -75,7 +75,7 @@ export function RemoveWipeDialog({
           </Button>
 
           <Button variant="danger" disabled={busy} onClick={onConfirm}>
-            {manual ? 'Deletar' : 'Pular'}
+            Deletar
           </Button>
         </div>
       </div>

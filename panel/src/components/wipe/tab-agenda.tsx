@@ -26,11 +26,12 @@
 //  zona, e não um instante com fuso embutido.
 // ============================================================
 
-import { CalendarPlus, Save } from 'lucide-react';
+import { CalendarClock, CalendarPlus, Pencil, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
+import { ActionMenu } from '@/components/ui/action-menu';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { PostponeDialog } from '@/components/wipe/postpone-dialog';
@@ -153,6 +154,8 @@ export interface TabAgendaProps {
   // Adiar deixou de ser uma prop: a caixa de adiar escolhe a data
   // nova e a manda pelo mesmo caminho de qualquer outra edição.
   readonly onSkip: (plan: WipePlan) => void;
+  /** Desfaz o pular. Sem isto, a linha riscada é um beco sem saída. */
+  readonly onRestore: (plan: WipePlan) => void;
   /**
    * Muda UM wipe já marcado.
    *
@@ -178,6 +181,7 @@ export function TabAgenda({
   busy,
   onSave,
   onSkip,
+  onRestore,
   onEdit,
   onCreate,
 }: TabAgendaProps) {
@@ -196,7 +200,20 @@ export function TabAgenda({
   );
 
   const marks = useMemo(() => toCalendarMarks(plans), [plans]);
-  const ordered = useMemo(() => sortByDate(plans), [plans]);
+  /**
+   * ####  A AGENDA É SOBRE O QUE VEM  ####
+   *
+   * O que já rodou tem tela própria, com passos, log e duração —
+   * aqui ele só empurrava para baixo o que ainda dá para decidir,
+   * e a lista crescia para sempre sem nunca ficar mais útil.
+   *
+   * O PULADO fica: ele é um buraco no calendário que alguém abriu
+   * de propósito, e é dali que se desfaz o engano.
+   */
+  const ordered = useMemo(
+    () => sortByDate(plans).filter((plan) => plan.status !== 'done' && plan.status !== 'failed'),
+    [plans],
+  );
 
   const cadence = draft.cadence;
 
@@ -474,6 +491,7 @@ export function TabAgenda({
                 now={clock.now}
                 busy={busy}
                 onSkip={onSkip}
+                onRestore={onRestore}
                 onEdit={onEdit}
                 clock={clock}
               />
@@ -493,6 +511,7 @@ function PlanRow({
   busy,
   clock,
   onSkip,
+  onRestore,
   onEdit,
 }: {
   readonly plan: WipePlan;
@@ -500,6 +519,7 @@ function PlanRow({
   readonly busy: boolean;
   readonly clock: AgentClock;
   readonly onSkip: (plan: WipePlan) => void;
+  readonly onRestore: (plan: WipePlan) => void;
   readonly onEdit: TabAgendaProps['onEdit'];
 }) {
   const [editing, setEditing] = useState(false);
@@ -533,53 +553,79 @@ function PlanRow({
           {future && remaining !== null ? `em ${formatCountdown(remaining)}` : STATUS_LABEL[plan.status]}
         </span>
 
+        {/* ####  AS AÇÕES MORAM ATRÁS DE UM BOTÃO  ####
+
+            Três botões por linha e catorze linhas davam quarenta e
+            dois alvos de clique numa tela cuja função é ser LIDA. A
+            data, os blueprints e a anotação perdiam a atenção para a
+            coluna da direita.
+
+            "Deletar" aparece para todo wipe que dá para tirar da
+            frente, inclusive os da cadência — o que muda entre eles
+            não é o gesto, é o que o agente faz depois, e quem conta
+            isso é a caixa de confirmação.
+
+            O forçado fica só com editar e mover: ele acontece com ou
+            sem nós, e o core recusa apagá-lo com 409. */}
+        {/* O pulado tem menu próprio: uma linha riscada sem ação
+            nenhuma é um beco — foi o que aconteceu com quem clicou
+            em pular por engano. */}
+        {!pending && plan.status === 'skipped' && (
+          <ActionMenu
+            label={`Ações do wipe pulado de ${formatShortMoment(plan.scheduledAt)}`}
+            disabled={busy}
+            items={[
+              {
+                label: 'Restaurar',
+                icon: <RotateCcw aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Devolve este wipe à agenda, na mesma data.',
+                onSelect: () => {
+                  onRestore(plan);
+                },
+              },
+            ]}
+          />
+        )}
+
         {future && (
-          <>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              title="Muda a política de blueprints, a data e a anotação DESTE wipe."
-              onClick={() => {
-                setEditing(true);
-              }}
-            >
-              editar
-            </Button>
-
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              title="Escolhe uma data nova para este wipe — para frente ou para trás."
-              onClick={() => {
-                setPostponing(true);
-              }}
-            >
-              mover
-            </Button>
-
-            {/* Deletar e pular são o MESMO `DELETE` e coisas
-                diferentes: um some, o outro fica riscado porque a
-                cadência o recriaria. Qual dos dois é, quem explica é
-                a caixa — ver remove-wipe-dialog.tsx.
-
-                O forçado não aparece aqui: ele acontece com ou sem
-                nós, e o core recusa com 409. */}
-            {plan.kind !== 'forced' && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                title={plan.kind === 'manual' ? 'Apaga este wipe da agenda.' : 'Este wipe não acontece.'}
-                onClick={() => {
-                  setRemoving(true);
-                }}
-              >
-                {plan.kind === 'manual' ? 'deletar' : 'pular'}
-              </Button>
-            )}
-          </>
+          <ActionMenu
+            label={`Ações do wipe de ${formatShortMoment(plan.scheduledAt)}`}
+            disabled={busy}
+            items={[
+              {
+                label: 'Editar',
+                icon: <Pencil aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Muda a política de blueprints, a data e a anotação deste wipe.',
+                onSelect: () => {
+                  setEditing(true);
+                },
+              },
+              {
+                label: 'Mover',
+                icon: <CalendarClock aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Escolhe uma data nova — para frente ou para trás.',
+                onSelect: () => {
+                  setPostponing(true);
+                },
+              },
+              ...(plan.kind === 'forced'
+                ? []
+                : [
+                    {
+                      label: 'Deletar',
+                      icon: <Trash2 aria-hidden className="h-3.5 w-3.5" />,
+                      hint:
+                        plan.kind === 'manual'
+                          ? 'Apaga este wipe da agenda. Nada o recria.'
+                          : 'Tira este wipe da agenda. Ele fica na lista, riscado.',
+                      danger: true,
+                      onSelect: () => {
+                        setRemoving(true);
+                      },
+                    },
+                  ]),
+            ]}
+          />
         )}
       </span>
 
