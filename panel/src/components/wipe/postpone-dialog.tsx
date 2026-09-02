@@ -22,20 +22,27 @@ import { formatCountdown, type AgentClock } from '@/components/wipe/use-agent-cl
 import type { WipePlan } from '@/lib/api';
 
 /**
- * De quanto em quanto se costuma empurrar um wipe.
+ * De quanto em quanto se costuma mover um wipe.
  *
- * Uma semana está aqui porque é o pulo que mantém o wipe no MESMO
- * dia da semana — adiar a quinta para a quinta seguinte é o caso
- * mais comum de todos, e com 24 h ele exigia sete cliques.
+ * ####  PARA TRÁS TAMBÉM  ####
+ *
+ * A caixa nasceu só para adiar, e antecipar é tão legítimo quanto:
+ * o mapa novo ficou pronto antes, o fim de semana pede o servidor
+ * zerado na sexta. Sem os saltos negativos, antecipar exigia abrir
+ * o calendário e contar os dias na mão.
+ *
+ * Uma semana está nos dois sentidos porque é o pulo que mantém o
+ * wipe no MESMO dia da semana.
  */
-const POSTPONE_SHORTCUTS: readonly { readonly hours: number; readonly label: string }[] = [
+const MOVE_SHORTCUTS: readonly { readonly hours: number; readonly label: string }[] = [
+  { hours: -168, label: '− 1 semana' },
+  { hours: -24, label: '− 1 dia' },
   { hours: 24, label: '+ 1 dia' },
   { hours: 48, label: '+ 2 dias' },
-  { hours: 72, label: '+ 3 dias' },
   { hours: 168, label: '+ 1 semana' },
 ];
 /**
- * Adiar, com a data à vista antes de valer.
+ * Mover um wipe, com a data à vista antes de valer.
  *
  * ####  ADIAR MEXE NA AGENDA, E AGENDA É COMBINADO  ####
  *
@@ -83,7 +90,7 @@ export function PostponeDialog({
   const at = fromDateTimeFields(date, time);
   const past = at !== null && clock.now !== null && at <= clock.now;
   const igual = at === plan.scheduledAt;
-  const podeAdiar = at !== null && !past && !igual;
+  const podeMover = at !== null && !past && !igual;
 
   /** Os atalhos escrevem nos campos: o resultado fica visível. */
   const empurrar = (hours: number): void => {
@@ -94,7 +101,7 @@ export function PostponeDialog({
   };
 
   return (
-    <Dialog open={open} title="Adiar este wipe" busy={busy} onClose={onClose}>
+    <Dialog open={open} title="Mover este wipe" busy={busy} onClose={onClose}>
       <div className="space-y-4">
         <p className="text-sm text-muted">
           Hoje ele está marcado para{' '}
@@ -103,11 +110,11 @@ export function PostponeDialog({
 
         <div>
           <span className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
-            Empurrar
+            Mover
           </span>
 
           <div className="mt-1 flex flex-wrap gap-2">
-            {POSTPONE_SHORTCUTS.map((item) => (
+            {MOVE_SHORTCUTS.map((item) => (
               <Button
                 key={item.hours}
                 size="sm"
@@ -185,14 +192,14 @@ export function PostponeDialog({
 
           <Button
             variant="confirm"
-            disabled={busy || !podeAdiar}
+            disabled={busy || !podeMover}
             onClick={() => {
               if (at !== null) {
                 onConfirm(at);
               }
             }}
           >
-            Adiar o wipe
+            Mover o wipe
           </Button>
         </div>
       </div>

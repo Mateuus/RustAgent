@@ -26,12 +26,14 @@
 //  zona, e não um instante com fuso embutido.
 // ============================================================
 
-import { CalendarPlus, Save } from 'lucide-react';
+import { CalendarPlus, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ui/confirm-button';
+import { Dialog } from '@/components/ui/dialog';
 import { PostponeDialog } from '@/components/wipe/postpone-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -538,45 +540,62 @@ function PlanRow({
               disabled={busy}
               title="Muda a política de blueprints, a data e a anotação DESTE wipe."
               onClick={() => {
-                setEditing((current) => !current);
+                setEditing(true);
               }}
             >
-              {editing ? 'fechar' : 'editar'}
+              editar
             </Button>
 
             <Button
               size="sm"
               variant="ghost"
               disabled={busy}
-              title="Escolhe uma data nova para este wipe."
+              title="Escolhe uma data nova para este wipe — para frente ou para trás."
               onClick={() => {
                 setPostponing(true);
               }}
             >
-              adiar
+              mover
             </Button>
 
-            {/* O forçado não aceita ser pulado — ver tab-geral.tsx. */}
+            {/* ####  DELETAR E PULAR SÃO A MESMA CHAMADA, E COISAS
+                DIFERENTES  ####
+
+                O `DELETE` some com o que foi marcado à mão e apenas
+                MARCA como pulado o que a cadência gerou — porque a
+                regra o recriaria na próxima reconciliação, e um wipe
+                que volta sozinho depois de "apagado" é pior que um
+                riscado na lista.
+
+                O botão dizia "pular" nos dois casos. Agora ele diz o
+                que vai acontecer de verdade.
+
+                O forçado não aparece aqui: ele acontece com ou sem
+                nós, e o core recusa com 409. */}
             {plan.kind !== 'forced' && (
-              <Button
-                size="sm"
-                variant="ghost"
+              <ConfirmButton
+                variant="danger"
                 disabled={busy}
-                title="Este wipe não acontece."
-                onClick={() => {
+                icon={<Trash2 aria-hidden className="h-3 w-3" />}
+                label={plan.kind === 'manual' ? 'deletar' : 'pular'}
+                confirmLabel={
+                  plan.kind === 'manual' ? 'Deletar este wipe' : 'Pular este wipe'
+                }
+                hint={
+                  plan.kind === 'manual'
+                    ? 'Apaga este wipe da agenda. Nada o recria.'
+                    : 'Este wipe não acontece. Ele fica na lista, riscado.'
+                }
+                onConfirm={() => {
                   onSkip(plan);
                 }}
-              >
-                pular
-              </Button>
+              />
             )}
           </>
         )}
       </span>
 
-      {plan.note !== null && !editing && (
-        <span className="w-full text-2xs text-muted">{plan.note}</span>
-      )}
+      {plan.note !== null && <span className="w-full text-2xs text-muted">{plan.note}</span>}
 
       <PostponeDialog
         plan={plan}
@@ -592,20 +611,19 @@ function PlanRow({
         }}
       />
 
-      {editing && (
-        <PlanEditor
-          plan={plan}
-          busy={busy}
-          clock={clock}
-          onSave={(patch) => {
-            onEdit(plan, patch);
-            setEditing(false);
-          }}
-          onCancel={() => {
-            setEditing(false);
-          }}
-        />
-      )}
+      <PlanEditor
+        plan={plan}
+        open={editing}
+        busy={busy}
+        clock={clock}
+        onSave={(patch) => {
+          onEdit(plan, patch);
+          setEditing(false);
+        }}
+        onClose={() => {
+          setEditing(false);
+        }}
+      />
     </li>
   );
 }
@@ -632,12 +650,14 @@ function PlanRow({
  */
 function PlanEditor({
   plan,
+  open,
   busy,
   clock,
   onSave,
-  onCancel,
+  onClose,
 }: {
   readonly plan: WipePlan;
+  readonly open: boolean;
   readonly busy: boolean;
   readonly clock: AgentClock;
   readonly onSave: (patch: {
@@ -645,13 +665,27 @@ function PlanEditor({
     bpPolicy?: BpPolicy;
     note?: string | null;
   }) => void;
-  readonly onCancel: () => void;
+  readonly onClose: () => void;
 }) {
   const inicial = toDateTimeFields(plan.scheduledAt);
   const [date, setDate] = useState(inicial.date);
   const [time, setTime] = useState(inicial.time);
   const [bpPolicy, setBpPolicy] = useState<BpPolicy>(plan.bpPolicy);
   const [note, setNote] = useState(plan.note ?? '');
+
+  // Abrir a caixa de novo mostra o wipe como ele está AGORA, e não
+  // como estava na primeira vez que alguém a abriu — salvar, fechar
+  // e reabrir mostrava os valores velhos.
+  useEffect(() => {
+    if (open) {
+      const campos = toDateTimeFields(plan.scheduledAt);
+
+      setDate(campos.date);
+      setTime(campos.time);
+      setBpPolicy(plan.bpPolicy);
+      setNote(plan.note ?? '');
+    }
+  }, [open, plan.scheduledAt, plan.bpPolicy, plan.note]);
 
   const forced = plan.kind === 'forced';
   const at = fromDateTimeFields(date, time);
@@ -677,7 +711,8 @@ function PlanEditor({
   const mudou = Object.keys(patch).length > 0;
 
   return (
-    <div className="mt-2 w-full space-y-3 border-l-2 border-border pl-3">
+    <Dialog open={open} title="Editar este wipe" busy={busy} onClose={onClose}>
+      <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <Label htmlFor={`plan-${String(plan.id)}-date`}>Dia</Label>
@@ -745,7 +780,7 @@ function PlanEditor({
       )}
 
       <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onCancel}>
+        <Button size="sm" variant="ghost" onClick={onClose}>
           Cancelar
         </Button>
 
@@ -761,8 +796,9 @@ function PlanEditor({
           <Save aria-hidden="true" className="h-4 w-4" />
           Salvar este wipe
         </Button>
+        </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
