@@ -26,15 +26,15 @@
 //  zona, e não um instante com fuso embutido.
 // ============================================================
 
-import { CalendarPlus, Save, Trash2 } from 'lucide-react';
+import { CalendarPlus, Save } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
-import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Dialog } from '@/components/ui/dialog';
 import { PostponeDialog } from '@/components/wipe/postpone-dialog';
+import { RemoveWipeDialog } from '@/components/wipe/remove-wipe-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
@@ -504,6 +504,7 @@ function PlanRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [postponing, setPostponing] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const pending = isPending(plan);
   const remaining = now === null ? null : plan.scheduledAt - now;
   const future = pending && remaining !== null && remaining > 0;
@@ -558,38 +559,25 @@ function PlanRow({
               mover
             </Button>
 
-            {/* ####  DELETAR E PULAR SÃO A MESMA CHAMADA, E COISAS
-                DIFERENTES  ####
-
-                O `DELETE` some com o que foi marcado à mão e apenas
-                MARCA como pulado o que a cadência gerou — porque a
-                regra o recriaria na próxima reconciliação, e um wipe
-                que volta sozinho depois de "apagado" é pior que um
-                riscado na lista.
-
-                O botão dizia "pular" nos dois casos. Agora ele diz o
-                que vai acontecer de verdade.
+            {/* Deletar e pular são o MESMO `DELETE` e coisas
+                diferentes: um some, o outro fica riscado porque a
+                cadência o recriaria. Qual dos dois é, quem explica é
+                a caixa — ver remove-wipe-dialog.tsx.
 
                 O forçado não aparece aqui: ele acontece com ou sem
                 nós, e o core recusa com 409. */}
             {plan.kind !== 'forced' && (
-              <ConfirmButton
-                variant="danger"
+              <Button
+                size="sm"
+                variant="ghost"
                 disabled={busy}
-                icon={<Trash2 aria-hidden className="h-3 w-3" />}
-                label={plan.kind === 'manual' ? 'deletar' : 'pular'}
-                confirmLabel={
-                  plan.kind === 'manual' ? 'Deletar este wipe' : 'Pular este wipe'
-                }
-                hint={
-                  plan.kind === 'manual'
-                    ? 'Apaga este wipe da agenda. Nada o recria.'
-                    : 'Este wipe não acontece. Ele fica na lista, riscado.'
-                }
-                onConfirm={() => {
-                  onSkip(plan);
+                title={plan.kind === 'manual' ? 'Apaga este wipe da agenda.' : 'Este wipe não acontece.'}
+                onClick={() => {
+                  setRemoving(true);
                 }}
-              />
+              >
+                {plan.kind === 'manual' ? 'deletar' : 'pular'}
+              </Button>
             )}
           </>
         )}
@@ -608,6 +596,19 @@ function PlanRow({
         }}
         onClose={() => {
           setPostponing(false);
+        }}
+      />
+
+      <RemoveWipeDialog
+        plan={plan}
+        open={removing}
+        busy={busy}
+        onConfirm={() => {
+          onSkip(plan);
+          setRemoving(false);
+        }}
+        onClose={() => {
+          setRemoving(false);
         }}
       />
 

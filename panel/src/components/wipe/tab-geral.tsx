@@ -41,6 +41,7 @@ import {
   nextWipe,
 } from '@/components/wipe/labels';
 import { PostponeDialog } from '@/components/wipe/postpone-dialog';
+import { RemoveWipeDialog } from '@/components/wipe/remove-wipe-dialog';
 import { describeSkew, formatCountdown, type AgentClock } from '@/components/wipe/use-agent-clock';
 import type { ServerView, WipePlan, WipeSettings } from '@/lib/api';
 import { EM_DASH } from '@/lib/format';
@@ -71,6 +72,7 @@ export function TabGeral({
   onSkip,
 }: TabGeralProps) {
   const [postponing, setPostponing] = useState(false);
+  const [removing, setRemoving] = useState(false);
 
   const now = clock.now;
   const next = now === null ? null : nextWipe(plans, now);
@@ -91,19 +93,34 @@ export function TabGeral({
       {/* A caixa de adiar é a MESMA da Agenda: uma regra só para um
           gesto só. Ver postpone-dialog.tsx. */}
       {next !== null && (
-        <PostponeDialog
-          plan={next}
-          open={postponing}
-          busy={busy}
-          clock={clock}
-          onConfirm={(scheduledAt) => {
-            onPostpone(next, scheduledAt);
-            setPostponing(false);
-          }}
-          onClose={() => {
-            setPostponing(false);
-          }}
-        />
+        <>
+          <RemoveWipeDialog
+            plan={next}
+            open={removing}
+            busy={busy}
+            onConfirm={() => {
+              onSkip(next);
+              setRemoving(false);
+            }}
+            onClose={() => {
+              setRemoving(false);
+            }}
+          />
+
+          <PostponeDialog
+            plan={next}
+            open={postponing}
+            busy={busy}
+            clock={clock}
+            onConfirm={(scheduledAt) => {
+              onPostpone(next, scheduledAt);
+              setPostponing(false);
+            }}
+            onClose={() => {
+              setPostponing(false);
+            }}
+          />
+        </>
       )}
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -162,7 +179,7 @@ export function TabGeral({
                     disabled={busy}
                     title="Este wipe não acontece. A cadência continua valendo para os seguintes."
                     onClick={() => {
-                      onSkip(next);
+                      setRemoving(true);
                     }}
                   >
                     Pular este
@@ -207,7 +224,10 @@ export function TabGeral({
 
               {next.bpPolicy === 'wipe_except_vip' && (
                 <p className="flex items-start gap-2 border border-border bg-surface-2 px-3 py-2 text-2xs leading-relaxed text-muted">
-                  <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-amber" />
+                  <AlertTriangle
+                    aria-hidden="true"
+                    className="mt-0.5 h-4 w-4 shrink-0 text-amber"
+                  />
                   <span>
                     Guardar e devolver blueprint de VIP depende da sub-aba{' '}
                     <strong>Blueprints</strong>, que ainda está sendo construída. Até ela entrar,
@@ -226,8 +246,8 @@ export function TabGeral({
                   vez de fingir que conferiu a pasta. */}
               <p className="text-2xs leading-relaxed text-muted">
                 Isto é o que a <strong>política</strong> deste wipe determina. A conferência contra
-                a pasta <code>{server.paths.installDir}</code> — nome de arquivo e tamanho, lidos
-                do disco antes de qualquer coisa ser apagada — entra com a sub-aba{' '}
+                a pasta <code>{server.paths.installDir}</code> — nome de arquivo e tamanho, lidos do
+                disco antes de qualquer coisa ser apagada — entra com a sub-aba{' '}
                 <strong>Execução</strong>.
               </p>
             </div>
@@ -327,9 +347,7 @@ export function TabGeral({
  */
 function Countdown({ target, now }: { readonly target: number; readonly now: number | null }) {
   if (now === null) {
-    return (
-      <p className="font-condensed text-3xl font-bold tabular-nums text-muted">{EM_DASH}</p>
-    );
+    return <p className="font-condensed text-3xl font-bold tabular-nums text-muted">{EM_DASH}</p>;
   }
 
   const remaining = target - now;
