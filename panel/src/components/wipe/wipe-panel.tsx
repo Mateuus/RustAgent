@@ -46,6 +46,7 @@ import { TabMapas } from '@/components/wipe/tab-mapas';
 import { useAgentClock } from '@/components/wipe/use-agent-clock';
 import {
   agent,
+  ApiError,
   type BpPolicy,
   type ServerView,
   type WipePlan,
@@ -215,6 +216,76 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
     [run, serverId],
   );
 
+  /**
+   * Passa para o modo manual, herdando (ou não) o que a cadência
+   * tinha marcado.
+   *
+   * ####  A ORDEM IMPORTA  ####
+   *
+   * Primeiro DESLIGA, depois copia. Ao contrário, cada POST cairia
+   * em cima de um wipe de cadência que ainda existe naquele
+   * instante e voltaria 409 por conflito de horário.
+   *
+   * O 409 continua possível na segunda fase — um wipe fixado à mão
+   * na mesma data sobrevive ao desligamento — e ali ele significa
+   * "esta data já está guardada", que é o desfecho desejado. Por
+   * isso ele é contado, e não tratado como falha.
+   */
+  const switchToManual = useCallback(
+    (herdar: readonly WipePlan[]) => {
+      void run(
+        herdar.length === 0 ? 'Modo manual' : `Modo manual · ${String(herdar.length)} herdados`,
+        async () => {
+          const atual = await agent.wipeSettings(serverId);
+          const resposta = await agent.saveWipeSettings(serverId, {
+            ...atual.settings,
+            cadence: { ...atual.settings.cadence, enabled: false },
+          });
+
+          let entraram = 0;
+          let jaExistiam = 0;
+
+          for (const plan of herdar) {
+            try {
+              await agent.createWipePlan(serverId, {
+                scheduledAt: plan.scheduledAt,
+                bpPolicy: plan.bpPolicy,
+                note: plan.note,
+              });
+              entraram += 1;
+            } catch (cause) {
+              if (cause instanceof ApiError && cause.code === 'WIPE_SCHEDULE_CONFLICT') {
+                jaExistiam += 1;
+                continue;
+              }
+
+              throw new Error(
+                `Passei para manual, mas parei de copiar no wipe de ` +
+                  `${new Date(plan.scheduledAt).toLocaleString()}: ` +
+                  `${cause instanceof Error ? cause.message : String(cause)}. ` +
+                  `${String(entraram)} de ${String(herdar.length)} entraram.`,
+                { cause },
+              );
+            }
+          }
+
+          // O número precisa bater, e quando não bate a tela diz por
+          // quê: um "pronto" mudo sobre uma cópia parcial é pior que
+          // um erro.
+          return {
+            ...resposta,
+            message:
+              herdar.length === 0
+                ? 'O agente parou de marcar wipes sozinho. A agenda agora é sua.'
+                : `${String(entraram)} wipe(s) herdados` +
+                  `${jaExistiam === 0 ? '' : `, ${String(jaExistiam)} já estavam na agenda`}.`,
+          };
+        },
+      );
+    },
+    [run, serverId],
+  );
+
   const create = useCallback(
     (input: { scheduledAt: number; bpPolicy: BpPolicy; note: string | null }) => {
       void run('Wipe manual marcado', () => agent.createWipePlan(serverId, input));
@@ -305,6 +376,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             onSave={saveSettings}
             onSkip={skip}
             onRestore={restore}
+            onSwitchToManual={switchToManual}
             onEdit={edit}
             onCreate={create}
           />

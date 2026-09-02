@@ -39,7 +39,9 @@ import { RemoveWipeDialog } from '@/components/wipe/remove-wipe-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
-import { CalendarMonth } from '@/components/wipe/calendar-month';
+import { CalendarMonth, dayKey } from '@/components/wipe/calendar-month';
+import { WipeDayDialog, type PlanActionKind } from '@/components/wipe/day-dialog';
+import { ModeDialog } from '@/components/wipe/mode-dialog';
 import {
   BP_POLICY_LABEL,
   BP_POLICY_SHORT,
@@ -154,6 +156,14 @@ export interface TabAgendaProps {
   // Adiar deixou de ser uma prop: a caixa de adiar escolhe a data
   // nova e a manda pelo mesmo caminho de qualquer outra edição.
   readonly onSkip: (plan: WipePlan) => void;
+  /**
+   * Passa o servidor para o modo manual.
+   *
+   * Recebe os wipes a HERDAR — vazio quando o admin escolheu
+   * limpar. Quem copia é o painel, porque não existe "converter em
+   * manual" no agente: é um POST por data.
+   */
+  readonly onSwitchToManual: (herdar: readonly WipePlan[]) => void;
   /** Desfaz o pular. Sem isto, a linha riscada é um beco sem saída. */
   readonly onRestore: (plan: WipePlan) => void;
   /**
@@ -184,6 +194,7 @@ export function TabAgenda({
   onRestore,
   onEdit,
   onCreate,
+  onSwitchToManual,
 }: TabAgendaProps) {
   const [draft, setDraft] = useState<WipeSettings>(settings);
 
@@ -215,7 +226,64 @@ export function TabAgenda({
     [plans],
   );
 
+  /**
+   * O dia que a grade abriu, como `YYYY-MM-DD`.
+   *
+   * A CHAVE, e não a lista de wipes daquele dia: guardar os planos
+   * congelaria a caixa no que estava na tela quando ela abriu, e
+   * mover um wipe de dentro dela deixaria a caixa mostrando a data
+   * velha até alguém fechá-la.
+   */
+  const [openDay, setOpenDay] = useState<string | null>(null);
+
+  /**
+   * O wipe que está numa caixa de ação, e qual delas.
+   *
+   * Isto morava dentro de cada linha da lista. Subiu porque agora
+   * há DOIS lugares que pedem a mesma ação — a linha e a caixa do
+   * dia —, e duas cópias do mesmo `useState` dariam duas caixas de
+   * "mover" capazes de abrir ao mesmo tempo.
+   */
+  const [action, setAction] = useState<{ plan: WipePlan; kind: PlanActionKind } | null>(null);
+
+  /** A troca para manual está esperando a resposta da caixa. */
+  const [switchingToManual, setSwitchingToManual] = useState(false);
+
+  const dayPlans = useMemo(
+    () =>
+      openDay === null
+        ? []
+        : sortByDate(plans).filter((plan) => dayKey(plan.scheduledAt) === openDay),
+    [plans, openDay],
+  );
+
+  /** A caixa do dia sai da frente antes da caixa da ação entrar. */
+  function startAction(plan: WipePlan, kind: PlanActionKind): void {
+    setOpenDay(null);
+    setAction({ plan, kind });
+  }
+
   const cadence = draft.cadence;
+
+  /**
+   * O que se perde ao passar para manual.
+   *
+   * Só o que a REGRA gerou e ninguém fixou: o forçado não é nosso
+   * e o que foi mexido à mão a reconciliação já não toca. Os
+   * passados também ficam de fora — herdar um wipe de ontem
+   * marcaria uma parada que não acontece.
+   */
+  const perdiveis = useMemo(
+    () =>
+      plans.filter(
+        (plan) =>
+          plan.kind === 'cadence' &&
+          plan.status === 'planned' &&
+          !plan.pinned &&
+          (clock.now === null || plan.scheduledAt > clock.now),
+      ),
+    [plans, clock.now],
+  );
 
   function patchCadence(patch: Partial<WipeSettings['cadence']>): void {
     setDraft((current) => ({ ...current, cadence: { ...current.cadence, ...patch } }));
@@ -240,25 +308,46 @@ export function TabAgenda({
         }
       >
         <div className="space-y-4">
+          {/* ####  O MODO É UMA COISA SÓ, E JÁ EXISTIA  ####
+
+              Cadência ligada É o modo automático, e desligada É o
+              manual — o campo do agente é o mesmo. Guardar um
+              segundo campo "modo" daria duas respostas para "este
+              servidor zera sozinho?", e elas divergiriam no dia em
+              que alguém mexesse só numa.
+
+              O que muda aqui é o que a tela DIZ: o toggle
+              "ligada/desligada" descrevia um detalhe da regra, e a
+              pergunta que o admin faz é outra — quem marca os
+              wipes deste servidor, o agente ou eu? */}
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <p className="font-condensed text-sm font-bold uppercase tracking-wide">
-                O servidor zera por vontade própria
+                Quem marca os wipes
               </p>
               <p className="mt-1 text-sm text-muted">
                 {cadence.enabled
-                  ? 'Além do forçado mensal, o agente marca os wipes da casa.'
-                  : 'Desligada: só o wipe forçado da Facepunch aparece na agenda.'}
+                  ? 'AUTOMÁTICO: o agente marca sozinho, na cadência abaixo. Você continua editando um a um.'
+                  : 'MANUAL: só entra na agenda o que você marcar — e o forçado da Facepunch, que acontece de todo jeito.'}
               </p>
             </div>
 
             <Toggle
               on={cadence.enabled}
               busy={busy}
-              label="Cadência própria"
-              labels={['Ligada', 'Desligada']}
+              label="Modo da agenda"
+              labels={['Automático', 'Manual']}
               onChange={(value) => {
-                patchCadence({ enabled: value });
+                // Ligar é inócuo: a cadência volta a gerar e nada se
+                // perde. DESLIGAR apaga o que ela já tinha gerado, e
+                // por isso passa pela caixa.
+                if (value) {
+                  patchCadence({ enabled: true });
+
+                  return;
+                }
+
+                setSwitchingToManual(true);
               }}
             />
           </div>
@@ -469,7 +558,14 @@ export function TabAgenda({
           detail="A grade do mês marca o dia de hoje pelo relógio do agente, e não pelo do navegador."
         />
       ) : (
-        <CalendarMonth marks={marks} today={clock.now} legend={LEGEND} />
+        <CalendarMonth
+          marks={marks}
+          today={clock.now}
+          legend={LEGEND}
+          onSelectDay={(day) => {
+            setOpenDay(day.key);
+          }}
+        />
       )}
 
       <Section
@@ -490,18 +586,130 @@ export function TabAgenda({
                 plan={plan}
                 now={clock.now}
                 busy={busy}
-                onSkip={onSkip}
                 onRestore={onRestore}
-                onEdit={onEdit}
-                clock={clock}
+                onAction={startAction}
               />
             ))}
           </ul>
         )}
       </Section>
 
+      <ModeDialog
+        open={switchingToManual}
+        busy={busy}
+        cadencePlans={perdiveis}
+        onKeep={() => {
+          setSwitchingToManual(false);
+          onSwitchToManual(perdiveis);
+        }}
+        onDiscard={() => {
+          setSwitchingToManual(false);
+          onSwitchToManual([]);
+        }}
+        onClose={() => {
+          setSwitchingToManual(false);
+        }}
+      />
+
       <ManualWipe busy={busy} clock={clock} onCreate={onCreate} />
+
+      <WipeDayDialog
+        open={openDay !== null && dayPlans.length > 0}
+        plans={dayPlans}
+        clock={clock}
+        busy={busy}
+        onAction={startAction}
+        onRestore={(plan) => {
+          onRestore(plan);
+          setOpenDay(null);
+        }}
+        onClose={() => {
+          setOpenDay(null);
+        }}
+      />
+
+      {/* Montadas só enquanto há uma ação em curso, e com `key` no
+          wipe: assim a caixa de editar nasce com os valores do wipe
+          que foi escolhido AGORA, e não com os do anterior. */}
+      {action !== null && (
+        <PlanDialogs
+          key={action.plan.id}
+          plan={action.plan}
+          kind={action.kind}
+          busy={busy}
+          clock={clock}
+          onSkip={onSkip}
+          onEdit={onEdit}
+          onDone={() => {
+            setAction(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * As três caixas que mexem num wipe, num lugar só.
+ *
+ * Quem as abre é a lista ou a caixa do dia — as duas mandam o
+ * mesmo `{ plan, kind }`, e é isto que impede a agenda de ter dois
+ * formulários de edição que aos poucos deixam de concordar.
+ */
+function PlanDialogs({
+  plan,
+  kind,
+  busy,
+  clock,
+  onSkip,
+  onEdit,
+  onDone,
+}: {
+  readonly plan: WipePlan;
+  readonly kind: PlanActionKind;
+  readonly busy: boolean;
+  readonly clock: AgentClock;
+  readonly onSkip: (plan: WipePlan) => void;
+  readonly onEdit: TabAgendaProps['onEdit'];
+  readonly onDone: () => void;
+}) {
+  return (
+    <>
+      <PostponeDialog
+        plan={plan}
+        open={kind === 'move'}
+        busy={busy}
+        clock={clock}
+        onConfirm={(scheduledAt) => {
+          onEdit(plan, { scheduledAt });
+          onDone();
+        }}
+        onClose={onDone}
+      />
+
+      <RemoveWipeDialog
+        plan={plan}
+        open={kind === 'remove'}
+        busy={busy}
+        onConfirm={() => {
+          onSkip(plan);
+          onDone();
+        }}
+        onClose={onDone}
+      />
+
+      <PlanEditor
+        plan={plan}
+        open={kind === 'edit'}
+        busy={busy}
+        clock={clock}
+        onSave={(patch) => {
+          onEdit(plan, patch);
+          onDone();
+        }}
+        onClose={onDone}
+      />
+    </>
   );
 }
 
@@ -509,22 +717,16 @@ function PlanRow({
   plan,
   now,
   busy,
-  clock,
-  onSkip,
   onRestore,
-  onEdit,
+  onAction,
 }: {
   readonly plan: WipePlan;
   readonly now: number | null;
   readonly busy: boolean;
-  readonly clock: AgentClock;
-  readonly onSkip: (plan: WipePlan) => void;
   readonly onRestore: (plan: WipePlan) => void;
-  readonly onEdit: TabAgendaProps['onEdit'];
+  /** Pede a caixa da ação ao pai, que é quem a monta. */
+  readonly onAction: (plan: WipePlan, kind: PlanActionKind) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [postponing, setPostponing] = useState(false);
-  const [removing, setRemoving] = useState(false);
   const pending = isPending(plan);
   const remaining = now === null ? null : plan.scheduledAt - now;
   const future = pending && remaining !== null && remaining > 0;
@@ -597,7 +799,7 @@ function PlanRow({
                 icon: <Pencil aria-hidden className="h-3.5 w-3.5" />,
                 hint: 'Muda a política de blueprints, a data e a anotação deste wipe.',
                 onSelect: () => {
-                  setEditing(true);
+                  onAction(plan, 'edit');
                 },
               },
               {
@@ -605,7 +807,7 @@ function PlanRow({
                 icon: <CalendarClock aria-hidden className="h-3.5 w-3.5" />,
                 hint: 'Escolhe uma data nova — para frente ou para trás.',
                 onSelect: () => {
-                  setPostponing(true);
+                  onAction(plan, 'move');
                 },
               },
               ...(plan.kind === 'forced'
@@ -620,7 +822,7 @@ function PlanRow({
                           : 'Tira este wipe da agenda. Ele fica na lista, riscado.',
                       danger: true,
                       onSelect: () => {
-                        setRemoving(true);
+                        onAction(plan, 'remove');
                       },
                     },
                   ]),
@@ -630,47 +832,6 @@ function PlanRow({
       </span>
 
       {plan.note !== null && <span className="w-full text-2xs text-muted">{plan.note}</span>}
-
-      <PostponeDialog
-        plan={plan}
-        open={postponing}
-        busy={busy}
-        clock={clock}
-        onConfirm={(scheduledAt) => {
-          onEdit(plan, { scheduledAt });
-          setPostponing(false);
-        }}
-        onClose={() => {
-          setPostponing(false);
-        }}
-      />
-
-      <RemoveWipeDialog
-        plan={plan}
-        open={removing}
-        busy={busy}
-        onConfirm={() => {
-          onSkip(plan);
-          setRemoving(false);
-        }}
-        onClose={() => {
-          setRemoving(false);
-        }}
-      />
-
-      <PlanEditor
-        plan={plan}
-        open={editing}
-        busy={busy}
-        clock={clock}
-        onSave={(patch) => {
-          onEdit(plan, patch);
-          setEditing(false);
-        }}
-        onClose={() => {
-          setEditing(false);
-        }}
-      />
     </li>
   );
 }
