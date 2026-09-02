@@ -61,11 +61,12 @@ export function RemoveWipeDialog({
 
         <StateBlock
           variant="empty"
-          title={manual ? 'Ele some da agenda.' : 'Ele fica na lista, riscado.'}
+          title="Ele sai da agenda."
           detail={
             manual
               ? 'Foi marcado à mão, então nada o recria. Para tê-lo de volta é preciso marcar outro.'
-              : 'A cadência o recriaria se ele apenas sumisse, então o agente o guarda como pulado. Os wipes seguintes continuam valendo.'
+              : 'A cadência recriaria a data se ela ficasse livre, então o agente a guarda ocupada nos ' +
+                'bastidores. Dá para trazer o wipe de volta em "mostrar os deletados", no fim da lista.'
           }
         />
 

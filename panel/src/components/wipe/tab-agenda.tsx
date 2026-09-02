@@ -221,8 +221,33 @@ export function TabAgenda({
    * O PULADO fica: ele é um buraco no calendário que alguém abriu
    * de propósito, e é dali que se desfaz o engano.
    */
+  /** Mostrar os que foram deletados, para poder trazer um de volta. */
+  const [showDeleted, setShowDeleted] = useState(false);
+
+  /**
+   * ####  DELETOU, SUMIU  ####
+   *
+   * O agente não APAGA a linha de um wipe de cadência: ele a marca
+   * como pulada, porque a regra recriaria a data na reconciliação
+   * seguinte e o wipe voltaria sozinho — pior que qualquer
+   * alternativa. Só que isso é assunto do agente, e a tela estava
+   * repassando o problema: quem clicava em "deletar" via a linha
+   * continuar ali, riscada, como se o clique não tivesse pegado.
+   *
+   * Agora ela some. A linha continua no banco segurando a data, e
+   * quem quiser desfazer abre "os deletados" no fim da lista.
+   */
+  const deletados = useMemo(
+    () => sortByDate(plans).filter((plan) => plan.status === 'skipped'),
+    [plans],
+  );
+
   const ordered = useMemo(
-    () => sortByDate(plans).filter((plan) => plan.status !== 'done' && plan.status !== 'failed'),
+    () =>
+      sortByDate(plans).filter(
+        (plan) =>
+          plan.status !== 'done' && plan.status !== 'failed' && plan.status !== 'skipped',
+      ),
     [plans],
   );
 
@@ -593,6 +618,38 @@ export function TabAgenda({
           </ul>
         )}
       </Section>
+
+      {deletados.length > 0 && (
+        <div className="border border-border bg-surface">
+          <button
+            type="button"
+            onClick={() => {
+              setShowDeleted((current) => !current);
+            }}
+            className="flex w-full items-center justify-between px-4 py-2 text-left transition hover:bg-border"
+          >
+            <span className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+              {showDeleted ? 'esconder' : 'mostrar'} os deletados
+            </span>
+            <span className="text-2xs tabular-nums text-muted">{deletados.length}</span>
+          </button>
+
+          {showDeleted && (
+            <ul className="divide-y divide-border border-t border-border px-4">
+              {deletados.map((plan) => (
+                <PlanRow
+                  key={plan.id}
+                  plan={plan}
+                  now={clock.now}
+                  busy={busy}
+                  onRestore={onRestore}
+                  onAction={startAction}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       <ModeDialog
         open={switchingToManual}
