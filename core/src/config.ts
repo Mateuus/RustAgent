@@ -42,6 +42,7 @@ import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
 import { FORBIDDEN_RCON_PASSWORD_CHARS } from './servers/create-server.js';
+import { VERSION } from './version.js';
 
 /**
  * A raiz do projeto: a pasta que tem `core\`, `panel\`, o `.env`
@@ -154,6 +155,41 @@ function intFromEnv(raw: string | undefined, fallback: number, label: string): n
 
   return value;
 }
+/**
+ * Prende um número entre dois limites.
+ *
+ * O `SITE_BEACON_INTERVAL_MS` precisa dele por dois motivos com
+ * número: acima de 5 min o site considera o agente OFFLINE entre uma
+ * batida e outra, e abaixo de 5 s o canal do agente — que não tem
+ * rate-limit do lado de lá — vira carga.
+ */
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * `STORE_MAX_OZ_PER_PURCHASE` precisa de leitura PRÓPRIA.
+ *
+ * `intFromEnv` recusa `0` ("precisa ser um inteiro positivo"), e `0`
+ * é documentado como SEM TETO. Passar por ele derrubaria o boot de
+ * quem escreveu a linha que o próprio `.env.example` sugere.
+ */
+function limitFromEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
+  }
+
+  const value = Number(raw);
+
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `STORE_MAX_OZ_PER_PURCHASE precisa ser 0 ou um inteiro positivo (recebi "${raw}")`,
+    );
+  }
+
+  return value;
+}
+
 
 /**
  * Um caminho do `.env`: vazio = o padrão dentro do projeto.
@@ -243,6 +279,120 @@ export interface AgentConfig {
     /** Base da API do site, sem barra no fim. Vazio = local. */
     readonly walletUrl: string;
     readonly walletToken: string;
+    /**
+     * Teto de OZ por compra, aplicado NO AGENTE.
+     *
+     * O site não impõe teto nenhum: ele só recusa o que passa do
+     * saldo. Quem impõe é quem tem o teto — e num painel irmão a
+     * falta desta linha debitou 60 milhões de OZ numa requisição.
+     *
+     * `0` = sem teto.
+     */
+    readonly maxOzPerPurchase: number;
+  };
+  /**
+   * A integração com o site OrigemZ.
+   *
+   * ####  `baseUrl` VAZIA DESLIGA TUDO  ####
+   *
+   * Sem ela: carteira LOCAL, sem beacon, sem fila de entregas, sem
+   * espelho de catálogo. É o interruptor único da virada, e o botão
+   * de rollback.
+   *
+   * ####  O QUE É GLOBAL E O QUE É DE CADA SERVIDOR  ####
+   *
+   * Aqui mora o que vale para o AGENTE inteiro: qual site, com que
+   * cadência, com que timeout. Quem é cada servidor LÁ — o
+   * `SITE_SERVER_ID` e o bearer — mora em `Configs\<id>.ini`, junto
+   * da senha de RCON, porque o site modela um `Server` por linha de
+   * `agents` e um RustAgent administra N servidores.
+   *
+   * Ver Docs\20-INTEGRACAO-OZCOIN-AGENT.md.
+   */
+  readonly site: {
+    /** A ORIGEM do site, sem caminho e sem barra no fim. */
+    readonly baseUrl: string;
+    /**
+     * O bearer padrão.
+     *
+     * Só é usado por um servidor cujo `.ini` não traga o próprio, e
+     * com UM servidor em `Configs\` — que é o caso de quem segue o
+     * `.env.example` à risca. Com dois ou mais, cada um traz o seu.
+     */
+    readonly token: string;
+    /** O `SITE_SERVER_ID` padrão. Mesma regra do `token`. */
+    readonly serverId: string;
+    readonly timeoutMs: number;
+    readonly beaconIntervalMs: number;
+    readonly deliveryPollMs: number;
+    readonly settleIntervalMs: number;
+    /**
+     * A cadência do retrato de servidor (`site/status.ts`).
+     *
+     * 30 s é o que o contrato pede. O piso de 10 s é do canal — o
+     * retrato é telemetria, e telemetria não disputa o rate limit
+     * com a fila de entregas.
+     */
+    readonly statusIntervalMs: number;
+    /** `false` desliga o retrato periódico, e só ele. */
+    readonly statusPushEnabled: boolean;
+    readonly catalogPushEnabled: boolean;
+    /**
+     * A cadência da fila de comandos (`site/commands.ts`).
+     *
+     * 10 s é o teto do critério de aceite — "de enfileirado a
+     * executando em ≤10 s". Mais rápido gasta cota por nada; mais
+     * devagar faz o admin clicar duas vezes.
+     */
+    readonly commandPollMs: number;
+    /**
+     * `false` desliga a fila de comandos, e só ela.
+     *
+     * O painel LOCAL continua mandando em tudo: o que some é o botão
+     * do site, não o daqui.
+     */
+    readonly commandsEnabled: boolean;
+    /** A cadência da config desejada (`site/config.ts`). */
+    readonly configIntervalMs: number;
+    /** `false` desliga a convergência de config, e só ela. */
+    readonly configPullEnabled: boolean;
+    /**
+     * A cadência da config de REDE — loja, kits e VIP
+     * (`site/domains.ts`).
+     *
+     * Um minuto, e não os 30 s da config de servidor: catálogo muda
+     * muito menos que hostname.
+     */
+    readonly domainIntervalMs: number;
+    /**
+     * `false` desliga a loja/kits/VIP vindos do site, e só isso.
+     *
+     * ####  ELE É O INTERRUPTOR DE "QUEM MANDA NA LOJA"  ####
+     *
+     * Ligado, o snapshot do site SUBSTITUI o catálogo local a cada
+     * versão nova — inclusive apagando o que foi criado no painel
+     * daqui. Desligado, o site continua VENDO a loja pelo espelho e
+     * não escreve nada.
+     */
+    readonly domainPullEnabled: boolean;
+    /**
+     * Quais assuntos o site pode escrever.
+     *
+     * Vazio = todos os que este agente conhece. Serve para adotar um
+     * de cada vez: `SITE_DOMAINS=store` deixa o site mandar na loja
+     * e nos kits continua mandando o painel local.
+     */
+    readonly domains: readonly string[];
+    readonly userAgent: string;
+    /**
+     * Fecha uma compra indeterminada REPETINDO o débito, quando a
+     * rota de prova do site não existe.
+     *
+     * É seguro para o dinheiro NA CHAVE e CARO para o jogador: se
+     * nada tinha sido cobrado, cobra agora — possivelmente de quem
+     * já fechou o jogo e desistiu. Deixe `false`.
+     */
+    readonly settleFallbackRedebit: boolean;
   };
   readonly paths: AgentPaths;
 }
@@ -363,6 +513,28 @@ export interface ServerConfig {
     /** Já normalizado: `public` quando o `.ini` não diz nada. */
     readonly branch: string;
   };
+  /**
+   * O pareamento DESTE servidor com o site OrigemZ.
+   *
+   * `null` = este servidor não está pareado, e a loja dele continua
+   * cobrando na carteira LOCAL. Um agente pode ter uns pareados e
+   * outros não — e isso é uma configuração legítima, não um erro:
+   * derrubar o agente inteiro porque um servidor novo ainda não foi
+   * cadastrado no site tiraria do ar os que já funcionavam.
+   *
+   * O bearer mora aqui, e não no `.env`, pela mesma razão da senha
+   * de RCON: ele é segredo DAQUELE servidor. `Configs\*.ini` já está
+   * no `.gitignore` por causa disso.
+   */
+  readonly site: {
+    /**
+     * O id NO SITE. Casa por string EXATA, maiúsculas incluídas:
+     * `rust01` e `RUST01` são dois servidores diferentes para ele.
+     */
+    readonly serverId: string;
+    /** O bearer que o site gerou ao ativar o agente. */
+    readonly token: string;
+  } | null;
   readonly paths: ServerPaths;
 }
 
@@ -497,6 +669,18 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
     );
   }
 
+  // O pareamento com o site mora aqui, junto da senha de RCON,
+  // porque ele é segredo DAQUELE servidor: o site modela um
+  // `Server` por linha de `agents`, com um bearer cada.
+  const siteServerId = (values.SITE_SERVER_ID ?? '').trim();
+  const siteToken = (values.SITE_TOKEN ?? '').trim();
+
+  if (siteServerId.length > 50) {
+    throw new Error(
+      `Configs\${id}.ini: SITE_SERVER_ID passa de 50 chars, que é o limite do site.`,
+    );
+  }
+
   const hostname = (values.SERVER_HOSTNAME ?? '').trim() || id;
   const rconPort = requiredInt(values, 'RCON_PORT', id, 1, 65_535);
   const gamePort = requiredInt(values, 'SERVER_PORT', id, 1, 65_535);
@@ -548,6 +732,18 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
       // `-beta staging` -> `staging`; vazio -> `public`.
       branch: branchRaw === '' ? 'public' : (branchRaw.split(/\s+/).pop() ?? 'public'),
     },
+    /**
+     * O pareamento com o site, quando ele existe no `.ini`.
+     *
+     * Vazio aqui não é erro: quem tem UM servidor põe tudo no `.env`,
+     * e `resolveSitePairings` completa depois — ela precisa da LISTA
+     * inteira para saber se o padrão do `.env` é atribuível a alguém
+     * sem ambiguidade.
+     */
+    site:
+      siteServerId === '' && siteToken === ''
+        ? null
+        : { serverId: siteServerId, token: siteToken },
     paths: serverPaths,
   };
 }
@@ -702,7 +898,109 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoadedConfig {
         // depura uma barra dupla no meio de um endereço.
         walletUrl: (merged.STORE_WALLET_URL ?? '').trim().replace(/\/+$/, ''),
         walletToken: (merged.STORE_WALLET_TOKEN ?? '').trim(),
+        maxOzPerPurchase: limitFromEnv(merged.STORE_MAX_OZ_PER_PURCHASE, 100_000),
       },
+      site: (() => {
+        // A barra final sai AQUI, e não em quem monta a URL — a mesma
+        // razão do bloco `store` logo acima.
+        const legacy = (merged.STORE_WALLET_URL ?? '').trim().replace(/\/+$/, '');
+        const baseUrl = ((merged.SITE_BASE_URL ?? '').trim() || legacy).replace(/\/+$/, '');
+
+        // ####  O VALOR ANTIGO TINHA OUTRA SEMÂNTICA  ####
+        //
+        // `STORE_WALLET_URL` era a base à qual a carteira antiga
+        // acrescentava `/wallet/...`, e quem a preencheu com um
+        // `/api` no fim montaria agora `.../api/api/agent/...`. O
+        // sintoma seria 404 em tudo, quer dizer, "a loja parou" — e
+        // ninguém procura uma barra a mais quando a loja para.
+        if (baseUrl !== '' && /\/api\/?$/i.test(baseUrl)) {
+          throw new Error(
+            'SITE_BASE_URL é a ORIGEM do site (https://exemplo.com), sem o /api no fim — ' +
+              'o agente acrescenta /api/agent/... sozinho.',
+          );
+        }
+
+        const serverId = (merged.SITE_SERVER_ID ?? '').trim();
+
+        if (serverId.length > 50) {
+          throw new Error('SITE_SERVER_ID passa de 50 chars, que é o limite do site');
+        }
+
+        return {
+          baseUrl,
+          token: (merged.SITE_TOKEN ?? '').trim() || (merged.STORE_WALLET_TOKEN ?? '').trim(),
+          serverId,
+          timeoutMs: intFromEnv(merged.SITE_TIMEOUT_MS, 5_000, 'SITE_TIMEOUT_MS'),
+          // O teto de 5 min é do site: acima dele o agente parece
+          // morto entre uma batida e outra. O piso de 5 s é do canal.
+          beaconIntervalMs: clamp(
+            intFromEnv(merged.SITE_BEACON_INTERVAL_MS, 10_000, 'SITE_BEACON_INTERVAL_MS'),
+            5_000,
+            300_000,
+          ),
+          deliveryPollMs: Math.max(
+            5_000,
+            intFromEnv(merged.SITE_DELIVERY_POLL_MS, 15_000, 'SITE_DELIVERY_POLL_MS'),
+          ),
+          settleIntervalMs: intFromEnv(
+            merged.SITE_SETTLE_INTERVAL_MS,
+            60_000,
+            'SITE_SETTLE_INTERVAL_MS',
+          ),
+          // O piso e o teto são os mesmos do beacon, e pela mesma
+          // razão: abaixo de 10 s o retrato vira ruído no rate
+          // limit do site; acima de 5 min ele deixa de ser retrato.
+          statusIntervalMs: clamp(
+            intFromEnv(merged.SITE_STATUS_INTERVAL_MS, 30_000, 'SITE_STATUS_INTERVAL_MS'),
+            10_000,
+            300_000,
+          ),
+          statusPushEnabled: boolFromEnv(merged.SITE_STATUS_PUSH_ENABLED, true),
+          catalogPushEnabled: boolFromEnv(merged.SITE_CATALOG_PUSH_ENABLED, true),
+          // O piso de 5 s é o do canal, o mesmo da fila de entregas.
+          // O teto de 60 s é o ponto em que o botão do site deixa de
+          // parecer um botão: acima disso o admin clica de novo.
+          commandPollMs: clamp(
+            intFromEnv(merged.SITE_COMMAND_POLL_MS, 10_000, 'SITE_COMMAND_POLL_MS'),
+            5_000,
+            60_000,
+          ),
+          commandsEnabled: boolFromEnv(merged.SITE_COMMANDS_ENABLED, true),
+          // Os mesmos piso e teto do retrato, e pela mesma razão:
+          // abaixo de 10 s vira ruído no rate limit; acima de 5 min
+          // a config do site demora demais a valer.
+          configIntervalMs: clamp(
+            intFromEnv(merged.SITE_CONFIG_INTERVAL_MS, 30_000, 'SITE_CONFIG_INTERVAL_MS'),
+            10_000,
+            300_000,
+          ),
+          configPullEnabled: boolFromEnv(merged.SITE_CONFIG_PULL_ENABLED, true),
+          // O piso de 15 s e o teto de 10 min são maiores que os da
+          // config de servidor: catálogo é o corpo mais pesado que
+          // atravessa este canal, e ninguém está esperando na frente
+          // da tela por ele.
+          domainIntervalMs: clamp(
+            intFromEnv(merged.SITE_DOMAIN_INTERVAL_MS, 60_000, 'SITE_DOMAIN_INTERVAL_MS'),
+            15_000,
+            600_000,
+          ),
+          // ####  ELE NASCE DESLIGADO, E É O ÚNICO ASSIM  ####
+          //
+          // Todo o resto da integração ADICIONA coisa; este canal
+          // SUBSTITUI o que já existe: ligá-lo por padrão faria a
+          // primeira versão do site apagar a loja de quem atualizou
+          // o agente sem ler nada.
+          domainPullEnabled: boolFromEnv(merged.SITE_DOMAIN_PULL_ENABLED, false),
+          domains: (merged.SITE_DOMAINS ?? '')
+            .split(',')
+            .map((domain) => domain.trim())
+            .filter((domain) => domain !== ''),
+          // A borda do site recusa famílias genéricas de cliente HTTP
+          // com um 403 que se parece com um ban e não é.
+          userAgent: (merged.SITE_USER_AGENT ?? '').trim() || `OrigemZ-Rust-Agent/${VERSION}`,
+          settleFallbackRedebit: boolFromEnv(merged.SITE_SETTLE_FALLBACK_REDEBIT, false),
+        };
+      })(),
       paths,
     };
   } catch (error) {
@@ -715,7 +1013,73 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoadedConfig {
 
   const { servers, rejected } = loadServers(paths);
 
+  // A ordem importa: ela precisa da LISTA de servidores, e a
+  // lista só existe a partir daqui.
+  resolveSitePairings(agent, servers);
+
   return { agent, servers, rejected };
+}
+
+/**
+ * Fecha o pareamento de cada servidor com o site.
+ *
+ * ####  O QUE ELA COMPLETA  ####
+ *
+ * Com UM servidor em `Configs\`, o `SITE_SERVER_ID` e o `SITE_TOKEN`
+ * do `.env` valem para ele — é o caminho que o `.env.example` ensina,
+ * e obrigar a duplicá-los no `.ini` seria cerimônia sem ganho. Com
+ * dois ou mais, o padrão do `.env` NÃO é atribuído a ninguém: não há
+ * como escolher por conta própria de quem é aquele bearer.
+ *
+ * ####  O QUE ELA RECUSA, E POR QUÊ ELA DERRUBA O BOOT  ####
+ *
+ * Dois servidores com o MESMO `SITE_SERVER_ID`. Eles mandariam as
+ * duas lojas para o mesmo `Server` do site, e — pior — as duas filas
+ * de entrega puxariam as MESMAS tarefas: o item que o jogador
+ * resgatou para o PVP nasceria no PVE, ou nos dois. Não há desfecho
+ * bom, e nenhum log deixaria isso óbvio depois.
+ *
+ * ####  O QUE ELA NÃO RECUSA  ####
+ *
+ * Servidor sem pareamento nenhum. Ele fica com a carteira LOCAL, e o
+ * agente sobe: derrubar tudo porque um servidor novo ainda não foi
+ * cadastrado no site tiraria do ar os que já funcionavam.
+ */
+function resolveSitePairings(agent: AgentConfig, servers: ServerConfig[]): void {
+  if (agent.site.baseUrl === '') {
+    return;
+  }
+
+  // O padrão do `.env` só é atribuível quando não há dúvida de quem
+  // é o dono dele.
+  if (servers.length === 1 && servers[0] !== undefined && servers[0].site === null) {
+    const only = servers[0];
+
+    if (agent.site.serverId !== '') {
+      servers[0] = { ...only, site: { serverId: agent.site.serverId, token: agent.site.token } };
+    }
+  }
+
+  const seen = new Map<string, string>();
+
+  for (const server of servers) {
+    if (server.site === null) {
+      continue;
+    }
+
+    const holder = seen.get(server.site.serverId);
+
+    if (holder !== undefined) {
+      throw new ConfigError(
+        `SITE_SERVER_ID="${server.site.serverId}" está em dois servidores: ` +
+          `"${holder}" e "${server.id}". Cada servidor de Rust é um Server diferente no site, ` +
+          'com bearer próprio — dois apontando para o mesmo id fariam as duas filas de entrega ' +
+          'puxarem as mesmas tarefas, e o item resgatado num servidor nasceria no outro.',
+      );
+    }
+
+    seen.set(server.site.serverId, server.id);
+  }
 }
 
 /**

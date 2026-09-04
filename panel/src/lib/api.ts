@@ -148,6 +148,15 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 // ------------------------------------------------------------
 
 export interface ServerView {
+  /**
+   * O pareamento com o site OrigemZ.
+   *
+   * `hasToken` responde SE há bearer, nunca QUAL — a mesma
+   * disciplina da senha de RCON. O `serverId` volta porque não é
+   * segredo, e é a primeira coisa que alguém confere quando o
+   * pareamento não sobe.
+   */
+  site: { serverId: string; hasToken: boolean };
   id: string;
   name: string;
   identity: string;
@@ -1066,7 +1075,13 @@ export interface StoreStats {
 
 export interface WalletView {
   steamId: string;
-  balance: number;
+  /**
+   * `null` = a carteira não respondeu. NÃO é zero.
+   *
+   * Zero é uma afirmação sobre o dinheiro de alguém, e a tela
+   * mostra travessão — a regra da casa: ausente vira traço, nunca 0.
+   */
+  balance: number | null;
   /**
    * De onde o saldo veio.
    *
@@ -1341,6 +1356,31 @@ export const agent = {
    * multiplicaria a mesma chamada por vinte, e a tela de
    * configuração grava vários de uma vez.
    */
+  // ---- o site OrigemZ -------------------------------------
+  siteConfig: () => api<SiteConfig>('/api/site/config'),
+  saveSiteConfig: (baseUrl: string) =>
+    api<{ ok: true; baseUrl: string; message: string }>('/api/site/config', {
+      method: 'PUT',
+      body: { baseUrl },
+    }),
+  siteStatus: () => api<SiteStatus>('/api/site/status'),
+  /**
+   * Gera o bearer DESTE servidor.
+   *
+   * A resposta é o ÚNICO lugar onde ele aparece em claro: nenhum
+   * GET o devolve, nem agora nem depois.
+   */
+  generateSiteToken: (id: string) =>
+    api<{ ok: true; token: string; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/site/token`,
+      { method: 'POST' },
+    ),
+  forceSiteBeacon: (serverId: string) =>
+    api<{ ok: true; servers: { serverId: string; status: string; message: string | null }[] }>(
+      `/api/site/beacon?serverId=${encodeURIComponent(serverId)}`,
+      { method: 'POST' },
+    ),
+
   patchServer: (id: string, patch: Record<string, unknown>) =>
     api<{ ok: true; server: ServerView; requiresRestart?: string[]; message?: string }>(
       `/api/servers/${encodeURIComponent(id)}`,
@@ -3406,4 +3446,57 @@ export interface WipeBlueprintsRestoreResponse {
   readonly tier: string | null;
   readonly counters: BpCounters;
   readonly message: string;
+}
+
+/** `GET /api/site/config` — a URL do site, e de onde ela veio. */
+export interface SiteConfig {
+  ok: true;
+  /** A GRAVADA: o que vale no próximo restart. É a que a tela edita. */
+  baseUrl: string;
+  /** A EM USO: a que os clientes já construídos estão usando. */
+  activeBaseUrl: string;
+  /** `true` = gravado e ainda não aplicado. Falta reiniciar. */
+  restartPending: boolean;
+  /** `env` = o padrão da instalação; `painel` = alguém digitou. */
+  source: 'env' | 'painel';
+  envBaseUrl: string | null;
+}
+
+/** O pareamento de UM servidor, como a tela de estado o lê. */
+export interface SitePairedServerView {
+  serverId: string;
+  siteServerId: string;
+  hasToken: boolean;
+  /**
+   * `restart-pending` NÃO vem do site: é o pareamento que a tela
+   * gravou e o boot ainda não carregou. Sem ele, a tela dizia
+   * "não pareado" com o id gravado e visível logo acima.
+   */
+  status: 'unknown' | 'pending' | 'active' | 'banned' | 'orphan' | 'restart-pending';
+  message: string | null;
+  lastBeaconAt: string | null;
+  lastBeaconError: string | null;
+  /** Separa as sete causas do mesmo sintoma. Ver Docs §9.6. */
+  lastBeaconErrorCode: string | null;
+  serverExists: boolean | null;
+  currentServerId: string | null;
+  wallet: {
+    source: 'local' | 'remote';
+    lastOkAt: string | null;
+    lastError: string | null;
+  };
+}
+
+/** `GET /api/site/status` — a primeira tela de "a loja parou". */
+export interface SiteStatus {
+  ok: true;
+  paired: boolean;
+  baseUrl: string | null;
+  servers: SitePairedServerView[];
+  purchases: {
+    pendingOrphan: number;
+    chargeUnknown: number;
+    unprovable: number;
+    refundRejected: number;
+  };
 }

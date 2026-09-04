@@ -59,6 +59,11 @@ executadas):
 | 16 | [Plano: wipe, calendário e mensagens](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md) | o agente mandando no ciclo de vida do mundo, o calendário no painel e no jogo, e o agendador de falas do servidor |
 | 17 | [As frentes de wipe e mensagens](17-FRENTES-WIPE-E-MENSAGENS.md) | como vários agentes constroem o 16 ao mesmo tempo sem se atropelar |
 | 18 | [Os prompts das frentes](18-PROMPTS-DAS-FRENTES.md) | os dez blocos prontos para abrir cada agente, e em que ondas eles rodam |
+| 19 | [Pesquisa: ranking](19-PESQUISA-RANKING.md) | de onde vem cada número do leaderboard, e como guardá-lo |
+| 20 | [Integração OzCoin: o agente e o site](20-INTEGRACAO-OZCOIN-AGENT.md) | o saldo passa a morar no site, a loja in-game cobra lá, e o que o jogador compra no site é entregue no jogo |
+| 21 | [Status da integração, para o agente do site](21-STATUS-PARA-O-AGENTE-DO-SITE.md) | o que já está pronto deste lado, o que o site precisa entregar, e o que o agente manda no fio |
+| 22 | [Comandos e config vindos do site](22-COMANDOS-E-CONFIG-DO-SITE.md) | as duas pontas que faltam aqui: a fila de comandos (start/stop/restart) e a config desejada — contrato, regras e critérios de aceite. **Nada disso existe ainda** |
+| 23 | [Configurar pelo site: o `.ini` inteiro, a loja, os kits e o VIP](23-CONFIG-PELO-SITE.md) | a config de servidor cresceu de 7 para 22 campos, e nasceu um canal de **config de rede** (`store`, `kits`, `vips`) — contrato, regras e o que o snapshot substitui |
 
 ---
 

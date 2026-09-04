@@ -74,6 +74,7 @@ import { registerUiRoutes } from './routes/ui.js';
 // ---- VIP, loadouts e kits ----
 import { registerVipRoutes } from './routes/vips.js';
 // ---- a loja e a carteira ----
+import { registerSiteRoutes, type SiteRoutesDeps } from './routes/site.js';
 import { registerStoreRoutes, type StoreRoutesDeps } from './routes/store.js';
 // ---- wipe, calendário e mensagens ----
 import type { WipeScheduleRepository } from '../db/wipe-schedule-repository.js';
@@ -173,6 +174,8 @@ export interface BuildServerOptions {
    * dinheiro, e é ela que precisa de débito, estorno e extrato.
    */
   readonly store: Omit<StoreRoutesDeps, 'supervisor'>;
+  /** O pareamento com o site OrigemZ. Ver Docs §9.6. */
+  readonly site: SiteRoutesDeps;
 
   // ---- wipe, calendário e mensagens ----------------------
   //
@@ -427,6 +430,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // A loja depois dos kits porque ela DEPENDE do VIP: uma oferta
       // de VIP concede pelo `VipList`, e não por um segundo caminho.
       registerStoreRoutes(api, { ...options.store, supervisor: options.supervisor });
+      registerSiteRoutes(api, options.site);
 
       // ---- o wipe -----------------------------------------
       //

@@ -18,7 +18,6 @@
 //  de mentir um zero.
 // ============================================================
 
-import { statfs } from 'node:fs/promises';
 import {
   arch,
   cpus,
@@ -35,35 +34,14 @@ import type { FastifyInstance } from 'fastify';
 
 import type { AgentPaths } from '../../config.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
+import { diskUsage } from '../../util/disk.js';
+import { load1Of } from '../../util/machine.js';
 
 export interface SystemRoutesDeps {
   readonly paths: AgentPaths;
   readonly supervisor: ServerSupervisor;
   readonly version: string;
   readonly startedAt: number;
-}
-
-/**
- * Espaço no disco onde as instalações moram.
- *
- * `null` quando o sistema não responde — o que acontece em disco
- * de rede e em alguns contêineres. Um `0` ali seria lido como
- * "disco cheio" e assustaria à toa.
- */
-async function diskOf(path: string): Promise<{ total: number; free: number } | null> {
-  try {
-    const stats = await statfs(path);
-
-    return {
-      total: Number(stats.blocks) * Number(stats.bsize),
-      // `bavail` (disponível para quem NÃO é root), e não `bfree`:
-      // é o número que corresponde ao que o download vai conseguir
-      // usar de fato.
-      free: Number(stats.bavail) * Number(stats.bsize),
-    };
-  } catch {
-    return null;
-  }
 }
 
 export function registerSystemRoutes(app: FastifyInstance, deps: SystemRoutesDeps): void {
@@ -77,7 +55,8 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRoutesDep
     // A pasta pode ainda não existir (máquina nova, nenhum
     // servidor instalado). Aí a pergunta certa é sobre a raiz do
     // projeto, que existe sempre.
-    const disk = (await diskOf(deps.paths.serversDir)) ?? (await diskOf(deps.paths.root));
+    const disk =
+      (await diskUsage(deps.paths.serversDir)) ?? (await diskUsage(deps.paths.root));
 
     const load = loadavg();
 
@@ -95,8 +74,9 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRoutesDep
           speedMhz: processors[0]?.speed ?? null,
         },
         // No Windows o `loadavg` é sempre [0,0,0] — devolver isso
-        // seria inventar uma medida. Ver o cabeçalho.
-        load1: load[0] === 0 && load[1] === 0 && load[2] === 0 ? null : (load[0] ?? null),
+        // seria inventar uma medida. Ver o cabeçalho, e a regra em
+        // `util/machine.ts`: ela é a MESMA que sobe para o site.
+        load1: load1Of(load),
         memory: { total: totalmem(), free: freemem() },
         disk,
         uptimeSeconds: Math.floor(uptime()),

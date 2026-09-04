@@ -544,10 +544,23 @@ function DayCell({
 
   const inner = 'flex h-full w-full flex-col gap-1 p-1 text-left';
 
+  // O balão é da GRADE, e quem o abre é a casa: `onPeek` no
+  // `<td>` inteiro cobre o mouse, e o `onFocus` do botão cobre
+  // quem chega pelo Tab.
+  function show(event: { readonly currentTarget: HTMLElement }): void {
+    onPeek(cell, event.currentTarget);
+  }
+
+  function hide(): void {
+    onPeek(cell, null);
+  }
+
   return (
     <td
+      onMouseEnter={show}
+      onMouseLeave={hide}
       className={cn(
-        'group relative h-24 border border-border p-0 align-top',
+        'h-24 border border-border p-0 align-top',
         cell.inMonth ? 'bg-surface' : 'bg-background',
       )}
     >
@@ -555,6 +568,8 @@ function DayCell({
         <button
           type="button"
           aria-label={`Dia ${String(cell.day)}: ${spoken}`}
+          onFocus={show}
+          onBlur={hide}
           onClick={() => {
             onSelect(cell);
           }}
@@ -569,60 +584,99 @@ function DayCell({
       ) : (
         <div className={inner}>{body}</div>
       )}
-
-      {has && (
-        <MarkBalloon
-          marks={cell.marks}
-          clickable={clickable}
-          nearRightEdge={nearRightEdge}
-          nearBottom={nearBottom}
-        />
-      )}
     </td>
   );
 }
 
+/** Onde a casa está na janela, no instante em que o mouse chegou. */
+interface Box {
+  readonly top: number;
+  readonly bottom: number;
+  readonly left: number;
+  readonly width: number;
+}
+
+/** Largura fixa do balão, em px. É a conta que decide se ele cabe. */
+const BALLOON_WIDTH = 300;
+
+/** O respiro entre o balão e a casa que o abriu. */
+const BALLOON_GAP = 6;
+
 /**
- * O que não coube na casa.
+ * A altura que se ASSUME para decidir o lado da abertura.
  *
- * `pointer-events-none` de propósito: o balão nasce por cima das
- * casas vizinhas, e um balão que intercepta o clique roubaria
- * justamente o clique de quem quer abrir o dia debaixo dele.
+ * Assumir, e não medir: medir exigiria renderizar o balão, ler a
+ * altura e renderizar de novo — dois quadros, com um piscada no
+ * meio. Errar aqui custa um balão que abre para baixo tendo espaço
+ * de sobra em cima; errar para o outro lado cortaria o conteúdo.
+ */
+const BALLOON_GUESS = 220;
+
+/**
+ * O retângulo com o dia inteiro, flutuando sobre a página.
  *
- * A abertura é por CSS (`group-hover`), e não por estado: um
- * `useState` por casa daria 35 re-renders a cada varredura do
- * mouse pela grade.
+ * ####  POR QUE FIXO, E POR QUE NUM PORTAL  ####
+ *
+ * Ancorado no `<td>` ele herdava a largura da coluna e o
+ * empilhamento da tabela: vazava pela direita nas colunas de
+ * sexta e sábado, e subia por cima do próprio wipe nas últimas
+ * semanas. Em `position: fixed`, dentro de um portal no `<body>`,
+ * ele existe em coordenadas de janela — e aí "não passar da borda"
+ * vira uma conta de duas linhas.
+ *
+ * `pointer-events-none`: ele nasce por cima das casas vizinhas, e
+ * um balão que intercepta o clique roubaria o clique de quem quer
+ * abrir o dia debaixo dele.
  */
 function MarkBalloon({
-  marks,
+  cell,
+  box,
   clickable,
-  nearRightEdge,
-  nearBottom,
 }: {
-  readonly marks: readonly CalendarMark[];
+  readonly cell: CalendarDay;
+  readonly box: Box;
   readonly clickable: boolean;
-  readonly nearRightEdge: boolean;
-  readonly nearBottom: boolean;
 }) {
-  return (
+  // A grade só pinta o balão depois de uma interação do mouse ou
+  // do teclado, então aqui já é o navegador — mas o guarda fica,
+  // porque o componente é pré-renderizado no servidor.
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+
+  // Alinhado pela esquerda da casa, recuando o quanto precisar
+  // para não atravessar a borda direita da janela.
+  const left = Math.max(8, Math.min(box.left, viewport.width - BALLOON_WIDTH - 8));
+
+  // Para cima quando não sobra altura embaixo. `bottom` em vez de
+  // `top` neste caso é o que dispensa saber a altura do balão.
+  const up = box.bottom + BALLOON_GUESS > viewport.height;
+
+  const style: CSSProperties = up
+    ? { left, bottom: viewport.height - box.top + BALLOON_GAP, width: BALLOON_WIDTH }
+    : { left, top: box.bottom + BALLOON_GAP, width: BALLOON_WIDTH };
+
+  return createPortal(
     <div
       aria-hidden="true"
-      className={cn(
-        'pointer-events-none absolute z-30 hidden w-64 border border-border bg-surface-2 p-2 shadow-lg',
-        'group-hover:block group-focus-within:block',
-        nearRightEdge ? 'right-0' : 'left-0',
-        nearBottom ? 'bottom-full mb-1' : 'top-full mt-1',
-      )}
+      style={style}
+      className="pointer-events-none fixed z-50 border border-border bg-surface-2 shadow-lg"
     >
-      <ul className="space-y-2">
-        {marks.map((mark, index) => (
-          <li key={`${mark.kind}-${String(mark.at)}-${String(index)}`} className="flex gap-2">
-            <span className={cn('mt-0.5 w-[3px] shrink-0', BAR_CLASS[mark.tone])} />
+      <p className="border-b border-border px-2 py-1 font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+        {dayLabel(cell)}
+      </p>
+
+      <ul className="divide-y divide-border">
+        {cell.marks.map((mark, index) => (
+          <li key={`${mark.kind}-${String(mark.at)}-${String(index)}`} className="flex gap-2 p-2">
+            <span className={cn('w-[3px] shrink-0', BAR_CLASS[mark.tone])} />
 
             <div className="min-w-0">
               <p
                 className={cn(
-                  'font-condensed text-xs font-bold uppercase tracking-wide',
+                  'font-condensed text-sm font-bold uppercase tracking-wide',
                   mark.struck ? 'text-muted line-through' : 'text-foreground',
                 )}
               >
@@ -630,7 +684,7 @@ function MarkBalloon({
               </p>
 
               {(mark.detail ?? []).map((line) => (
-                <p key={line} className="text-2xs leading-relaxed text-muted">
+                <p key={line} className="mt-0.5 text-2xs leading-relaxed text-muted">
                   {line}
                 </p>
               ))}
@@ -640,10 +694,32 @@ function MarkBalloon({
       </ul>
 
       {clickable && (
-        <p className="mt-2 border-t border-border pt-1 text-2xs text-muted">
-          Clique no dia para ver tudo.
+        <p className="border-t border-border px-2 py-1 text-2xs text-muted">
+          Clique no dia para abrir tudo — e para editar, mover ou deletar.
         </p>
       )}
-    </div>
+    </div>,
+    document.body,
   );
+}
+
+/**
+ * `qui, 24/09` — o cabeçalho do balão.
+ *
+ * A data sai da marcação, e não da chave do dia: a chave é texto
+ * cru (`2026-09-24`), e `new Date('2026-09-24')` seria lido em UTC
+ * — o que devolve o dia 23 para quem está no Brasil.
+ */
+function dayLabel(cell: CalendarDay): string {
+  const first = cell.marks[0];
+
+  if (first === undefined) {
+    return String(cell.day);
+  }
+
+  return new Date(first.at).toLocaleDateString('pt-BR', {
+    weekday: 'short',
+    day: '2-digit',
+    month: '2-digit',
+  });
 }

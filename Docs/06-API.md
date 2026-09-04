@@ -129,24 +129,51 @@ existe.
 
 ### `GET /api/servers`
 
+Cada item é um `ServerView` (`core/src/servers/supervisor.ts:90`), e é exatamente
+isto — nada é acrescentado pela rota:
+
 ```json
 { "ok": true,
   "servers": [{
     "id": "pvp1", "name": "PVP 1", "identity": "pvp1",
-    "enabled": true, "installed": true, "running": true,
+    "site": { "serverId": "RUST01", "hasToken": true },
+    "enabled": true, "installed": true, "consoleWindow": false,
+    "running": true, "pid": 4812,
     "hostname": "OrigemZ | PVP x5", "map": "Procedural Map",
     "worldSize": 4000, "seed": 1337, "maxPlayers": 200,
+    "saveInterval": 600, "description": "…", "url": "…", "headerImage": "…",
+    "steam": { "appId": "258550", "login": "anonymous", "branch": "public" },
     "ports": { "game": 28015, "rcon": 28016, "query": 28017, "app": 28082 },
-    "portBlock": 0,
     "rcon": { "connected": true, "state": "connected" },
-    "players": { "online": 42, "max": 200, "at": "2026-08-14T18:20:00.000Z" },
-    "build": { "installed": "24253458", "published": "24253458", "updateAvailable": false }
+    "paths": { "installDir": "…", "configPath": "…", "logsDir": "…" }
   }],
   "suggestedPortBlock": { "index": 1, "game": 28115, "rcon": 28116, "query": 28117, "app": 28182 } }
 ```
 
 `suggestedPortBlock` existe para o formulário mostrar as portas **enquanto** a
 pessoa digita o nome, antes de qualquer criação.
+
+####  ESTA SEÇÃO DIZIA QUE A ROTA DEVOLVIA `players` E `build`. NÃO DEVOLVE.  ####
+
+O exemplo antigo trazia `players: {online,max,at}`, `build: {installed,published,updateAvailable}`
+e um `portBlock` de primeiro nível. **Nenhum dos três existe no `ServerView`**, e
+`GET /api/servers` devolve `supervisor.list()` cru
+(`core/src/http/routes/servers.ts:145-158`) — não há mapeamento que os acrescente.
+O erro já custou retrabalho: quem escreve tela ou cliente a partir deste documento
+espera o número de jogadores aqui e o encontra `undefined`.
+
+**Onde esses dados moram de verdade:**
+
+| Dado | Onde está |
+|---|---|
+| jogadores online | `GET /api/servers/:id/players` (e, para o site, o `players` do retrato — §23.8 de `20-INTEGRACAO-OZCOIN-AGENT.md`) |
+| build instalado × publicado | o vigia de update da Steam (e o `build` do mesmo retrato). **O agente nunca força consulta à Steam** para responder |
+
+Duas coisas que valem para ler o resto do exemplo: **`running` é `boolean \| null`**
+(`null` = a varredura de processos ainda não rodou — "não sei" e "não está rodando"
+são respostas diferentes), e **`rcon` pode ser `null`** (servidor desligado não tem
+contexto de RCON — `null` não é "desconectado"). O bearer do site **nunca** volta:
+`site.hasToken` responde SE há, jamais QUAL.
 
 ### `POST /api/servers`
 
@@ -196,6 +223,20 @@ Corpo do POST:
 
 `kinds` na resposta do GET é o que a tela usa para desenhar os botões — um
 servidor sem jogo em disco devolve `["server-install"]`, e mais nada.
+
+**⚠️ Os exemplos acima mostram TRÊS dos OITO `kinds`.** A lista fechada é
+`OPERATION_KINDS` (`core/src/ops/operations.ts:20-42`), e ela é a fonte:
+
+| `kind` | Nota |
+|---|---|
+| `server-install` · `server-update` · `oxide-install` | as três que baixam coisa |
+| `server-start` · `server-stop` · `server-restart` | ciclo do processo; `server-stop` aceita `force` |
+| `server-auto-update` | aceita `countdownMinutes` |
+| **`wipe-run`** | **NÃO se dispara por `POST /operations`.** A rota genérica não tem como exigir a confirmação por `identity` nem a `Idempotency-Key`, e a pré-condição do serviço recusa a chamada. Quem a dispara é `POST /wipe/runs` — é a única operação que **apaga arquivo** |
+
+Esta é também a lista que sobe para o site no campo `kinds` do retrato do servidor
+(§23.8 de `20-INTEGRACAO-OZCOIN-AGENT.md`). Lá o site valida **forma**, não valor,
+justamente porque a lista é daqui e vai crescer.
 
 Resposta do log:
 
@@ -1620,8 +1661,26 @@ fazer isso.
 ## O que **não** existe nesta API
 
 Ditas em voz alta, para ninguém procurar: entrega de item (`give`), **ranking**,
-kills e mortes (ver o `sample` acima), VIP, loja, propagandas (o overlay CUI),
-webhooks, auto-update do agente. Ver [09-ROADMAP.md](09-ROADMAP.md).
+kills e mortes (ver o `sample` acima), propagandas (o overlay CUI), webhooks,
+auto-update do agente. Ver [09-ROADMAP.md](09-ROADMAP.md).
+
+> **A loja e o VIP EXISTEM** — esta lista os dava como inexistentes e estava
+> desatualizada. As rotas de loja estão em `core/src/http/routes/store.ts`, e as
+> da integração com o site OrigemZ são estas:
+
+| Rota | |
+|---|---|
+| `GET /api/site/status` | o pareamento visto pelo agente: um bloco por servidor, com o beacon, a carteira e as compras presas. **A primeira tela de "a loja parou"** — ela separa "o agente está pending", "o token foi rotacionado" e "o site caiu", que produzem o mesmo sintoma |
+| `POST /api/site/beacon` | força uma batida agora, sem esperar os 10 s. `?serverId=` limita a um |
+
+O `GET /api/site/status` traz também `domains[]`: os assuntos de **rede** (`store`, `kits`, `vips`) que o site está escrevendo, com a última versão aplicada e o erro do laço. Lista vazia = ninguém do outro lado manda em nada. Enquanto um assunto aparece ali, o snapshot do site **substitui** o que o painel local editar — ver [`Docs/23`](23-CONFIG-PELO-SITE.md).
+| `POST /api/servers/:id/store/purchases/:purchaseId/settle` | fecha uma compra presa, **com prova**. É o botão que o relógio de 60 s tem no braço, e chama a mesma função |
+
+E `POST /api/servers/:id/store/buy` ganhou um status: **202**, para o desfecho
+`CHARGE_UNKNOWN` — a compra que PODE ter sido cobrada e não fechou. Nem 200
+(metade dos clientes leria como sucesso) nem 5xx (que convida a repetir, e
+repetir ali é cobrar de novo quem talvez já tenha pago). Ver
+[20-INTEGRACAO-OZCOIN-AGENT.md](20-INTEGRACAO-OZCOIN-AGENT.md).
 
 > **Wipe, calendário e mensagens saíram desta lista na Fase 6** — as rotas estão
 > nas duas seções acima. A **idempotência** também: o `POST /wipe/runs` a exige.

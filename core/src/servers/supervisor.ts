@@ -89,6 +89,21 @@ export interface SupervisorDeps {
 /** O retrato de um servidor para a API. Ver Docs\06-API.md. */
 export interface ServerView {
   readonly id: string;
+  /**
+   * O pareamento com o site OrigemZ.
+   *
+   * ####  O TOKEN NÃO ESTÁ AQUI, E É DE PROPÓSITO  ####
+   *
+   * `hasToken` responde SE há bearer, nunca QUAL — a mesma
+   * disciplina da senha de RCON, que também nunca volta ao
+   * painel. Um segredo que a tela sabe desenhar é um segredo que
+   * vaza no primeiro screenshot de suporte.
+   *
+   * O `siteServerId` volta porque ele NÃO é segredo: ele é a
+   * primeira coisa que alguém confere quando o pareamento não
+   * sobe, e escondê-lo obrigaria a abrir o `.ini` na máquina.
+   */
+  readonly site: { readonly serverId: string; readonly hasToken: boolean };
   readonly name: string;
   readonly identity: string;
   readonly hostname: string;
@@ -420,6 +435,11 @@ export class ServerSupervisor {
         configPath: config.paths.configPath,
         logsDir: config.paths.logsDir,
       },
+      site: {
+        serverId: config.site?.serverId ?? '',
+        // SE há token, nunca QUAL.
+        hasToken: (config.site?.token ?? '') !== '',
+      },
     };
   }
 
@@ -498,6 +518,17 @@ export class ServerSupervisor {
     // não muda nada até ele parar e voltar — e é justamente isso
     // que a lista serve para dizer na tela.
     'levelUrl',
+    // ####  O PAREAMENTO COM O SITE NÃO É CONVAR DO JOGO  ####
+    //
+    // Estes dois não vão para a linha de comando do Rust e não
+    // pedem restart DO JOGO — mas pedem restart do AGENTE, que é
+    // quem lê o pareamento no boot para montar o cliente, o
+    // beacon e a fila daquele servidor. Por isso eles estão nesta
+    // lista: é ela que faz a tela dizer "só vale depois de
+    // reiniciar", e sem a frase a pessoa cola o token e conclui
+    // que não funcionou.
+    'siteServerId',
+    'siteToken',
   ]);
 
   /**
@@ -542,6 +573,12 @@ export class ServerSupervisor {
       // mundo procedural — a chave fica no arquivo, sem valor, e
       // a linha de comando volta a não ter `+server.levelurl`.
       levelUrl: 'SERVER_LEVELURL',
+      // O pareamento com o site OrigemZ. Ele mora aqui, e não no
+      // `.env`, pela mesma razão da senha de RCON: é segredo
+      // DAQUELE servidor, e o site modela um `Server` por
+      // servidor de jogo, com um bearer cada.
+      siteServerId: 'SITE_SERVER_ID',
+      siteToken: 'SITE_TOKEN',
     };
 
     const values: Record<string, string> = {};

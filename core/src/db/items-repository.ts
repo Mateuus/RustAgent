@@ -36,6 +36,7 @@
 // ============================================================
 
 import type { AgentDatabase } from './database.js';
+import { MetaRepository } from './meta-repository.js';
 
 /** Chaves em `meta`. Ver o cabeçalho da migração 007. */
 const PROTOCOL_KEY = 'items.protocol';
@@ -161,9 +162,14 @@ ON CONFLICT (shortname) DO UPDATE SET
 
 export class ItemsRepository {
   readonly #db: AgentDatabase;
+  // A tabela `meta` tem UM dono: as duas consultas moram no
+  // MetaRepository, e este arquivo delega. Duas cópias delas
+  // divergiriam no dia em que uma esquecesse o `updated_at`.
+  readonly #meta: MetaRepository;
 
   constructor(db: AgentDatabase) {
     this.#db = db;
+    this.#meta = new MetaRepository(db);
   }
 
   // ------------------------------------------------------
@@ -172,7 +178,7 @@ export class ItemsRepository {
 
   state(): ItemCatalogState {
     return {
-      protocol: this.#readMeta(PROTOCOL_KEY),
+      protocol: this.#meta.read(PROTOCOL_KEY),
       scannedAt: this.#scannedAt(),
       total: (this.#db.prepare('SELECT count(*) AS total FROM items').get() as { total: number })
         .total,
@@ -344,7 +350,7 @@ export class ItemsRepository {
         }
       ).total;
 
-      this.#writeMeta(SCANNED_AT_KEY, String(at), at);
+      this.#meta.write(SCANNED_AT_KEY, String(at), at);
 
       if (scan.protocol === null) {
         // Protocolo desconhecido: apagar a chave é melhor que
@@ -353,7 +359,7 @@ export class ItemsRepository {
         // lado certo de errar.
         this.#db.prepare('DELETE FROM meta WHERE key = @key').run({ key: PROTOCOL_KEY });
       } else {
-        this.#writeMeta(PROTOCOL_KEY, scan.protocol, at);
+        this.#meta.write(PROTOCOL_KEY, scan.protocol, at);
       }
 
       return {
@@ -369,7 +375,7 @@ export class ItemsRepository {
   }
 
   #scannedAt(): number | null {
-    const raw = this.#readMeta(SCANNED_AT_KEY);
+    const raw = this.#meta.read(SCANNED_AT_KEY);
 
     if (raw === null) {
       return null;
@@ -381,26 +387,6 @@ export class ItemsRepository {
     // que é o mesmo que não ter a informação — e melhor que
     // devolver NaN adiante, onde toda comparação daria falso.
     return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  #readMeta(key: string): string | null {
-    const row = this.#db.prepare('SELECT value FROM meta WHERE key = @key').get({ key }) as
-      | { readonly value: string }
-      | undefined;
-
-    return row === undefined ? null : row.value;
-  }
-
-  #writeMeta(key: string, value: string, updatedAt: number): void {
-    this.#db
-      .prepare(
-        `INSERT INTO meta (key, value, updated_at)
-              VALUES (@key, @value, @updated_at)
-         ON CONFLICT (key) DO UPDATE SET
-              value      = excluded.value,
-              updated_at = excluded.updated_at`,
-      )
-      .run({ key, value, updated_at: updatedAt });
   }
 }
 

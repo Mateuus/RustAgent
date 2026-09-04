@@ -3,25 +3,23 @@
 //
 //  ####  DUAS FONTES, UMA INTERFACE  ####
 //
-//  Hoje o saldo mora no banco do agente. Amanhã ele mora no site
-//  externo, e o agente passa a consultar e debitar LÁ.
-//
-//  Quem chama não sabe qual das duas está no ar: as duas
-//  implementam `Wallet`, e a escolha acontece uma vez, na
-//  inicialização, olhando a configuração. Sem isso, cada ponto que
-//  mexe em saldo precisaria de um `if` — e o dia da virada seria
-//  uma caçada a todos eles.
+//  O saldo mora no banco do agente ou no site externo, e quem chama
+//  não sabe qual das duas está no ar: as duas implementam `Wallet`,
+//  e a escolha acontece uma vez, na inicialização, olhando a
+//  configuração. Sem isso, cada ponto que mexe em saldo precisaria
+//  de um `if` — e o dia da virada seria uma caçada a todos eles.
 //
 //  ####  QUAL DELAS ESTÁ VALENDO  ####
 //
-//  `STORE_WALLET_URL` no `.env` decide (ver config.ts):
+//  `SITE_BASE_URL` no `.env` mais o `SITE_SERVER_ID` de cada
+//  `Configs\<id>.ini` decidem, POR SERVIDOR (ver config.ts):
 //
-//      vazio      -> carteira LOCAL (banco do agente)
-//      preenchido -> carteira REMOTA (o site é o dono)
+//      sem pareamento -> carteira LOCAL (banco do agente)
+//      com pareamento -> carteira do SITE (o site é o dono)
 //
-//  A virada é ligar a variável e reiniciar. O saldo local NÃO é
-//  migrado automaticamente: são carteiras diferentes, e somar uma
-//  na outra sem alguém mandar seria inventar dinheiro.
+//  A virada é preencher e reiniciar. O saldo local NÃO é migrado:
+//  são carteiras diferentes, e somar uma na outra sem alguém mandar
+//  seria inventar dinheiro.
 //
 //  ------------------------------------------------------------
 //  ####  "NÃO TEM" E "NÃO CONSEGUI PERGUNTAR" SÃO DIFERENTES  ####
@@ -31,6 +29,18 @@
 //  tratá-las igual faria a loja dizer "saldo insuficiente" a quem
 //  tem dinheiro só porque o site demorou a responder.
 //
+//  Por isso `WalletBalance.balance` é `number | null`: `null` é
+//  "não perguntei", e ZERO é uma afirmação sobre o dinheiro de
+//  alguém.
+//
+//  ####  CINCO DESFECHOS, E NÃO TRÊS  ####
+//
+//  O site tem cinco famílias de resposta, e colapsá-las produz erro
+//  caro. `insufficient` é resposta ao jogador; `rejected` é defeito
+//  nosso; `unavailable` é retentável; e `unknown` é o único que NÃO
+//  fecha a compra — ele significa "pode ter cobrado", e só a prova
+//  do `ChargeProver` o resolve.
+//
 //  ####  INTEIRO, SEMPRE  ####
 //
 //  OZCoin não tem centavo. Saldo em float é como um débito de 10
@@ -38,14 +48,58 @@
 //  arredonda para zero.
 // ============================================================
 
-import type { Logger } from '../logger.js';
-import { toError } from '../util.js';
-
 export interface WalletBalance {
   readonly steamId: string;
-  readonly balance: number;
+  /**
+   * `null` = NÃO CONSEGUI PERGUNTAR, e isso é diferente de zero.
+   *
+   * O modal já sabe lidar com `null`: `affordable = balance === null
+   * || balance >= total` (ui-store-screens.ts:718) deixa o botão de
+   * comprar no lugar. Com zero ele o esconde e diz SALDO
+   * INSUFICIENTE a quem tem dinheiro — que é o oposto do que
+   * ui-store-bridge.ts:110-118 mandou fazer.
+   */
+  readonly balance: number | null;
   /** De onde veio, para a tela poder dizer. */
   readonly source: 'local' | 'remote';
+}
+
+/**
+ * A entrada de um movimento de saldo.
+ *
+ * ####  OBJETO, E NÃO UM QUINTO PARÂMETRO POSICIONAL  ####
+ *
+ * O débito passa a carregar `productId`, e
+ * `debit(steamId, total, reference, reason, offer.id)` é uma chamada
+ * que ninguém lê. A casa já prefere objeto quando a chamada tem mais
+ * de três coisas — `createPurchase({...}, now)`, `vips.grant({...})`,
+ * `recordAction({...})`.
+ *
+ * A alternativa descartada foi manter os quatro posicionais e
+ * acrescentar um quinto opcional: custa menos hoje e cobra depois,
+ * no dia em que aparecer o sexto.
+ */
+export interface WalletMoveInput {
+  readonly steamId: string;
+  /** Sempre POSITIVO. O sentido é do MÉTODO, nunca do sinal. */
+  readonly amount: number;
+  /** A referência da compra, já no formato de `reference.ts`. */
+  readonly reference: string;
+  /**
+   * O texto que o JOGADOR lê no extrato. Português, sem jargão.
+   *
+   * Na carteira do site ele vira `observacao` na fronteira — o nome
+   * é do contrato deles.
+   */
+  readonly reason: string;
+  /**
+   * O que foi comprado. Ausente = não é venda de catálogo.
+   *
+   * Ele é o que faz o site conseguir dizer O QUE aquele débito
+   * pagou, e o que habilita o guard de replay por produto. O estorno
+   * NÃO manda.
+   */
+  readonly productId?: string | undefined;
 }
 
 /**
@@ -55,9 +109,55 @@ export interface WalletBalance {
  * tentou comprar sem ter. Ver o cabeçalho.
  */
 export type WalletChange =
-  | { readonly status: 'ok'; readonly balance: number }
-  | { readonly status: 'insufficient'; readonly balance: number }
-  | { readonly status: 'unavailable'; readonly reason: string };
+  /** Cobrou (ou já tinha cobrado, no replay). `balance` é o saldo DEPOIS. */
+  | {
+      readonly status: 'ok';
+      readonly balance: number;
+      /** O id da linha no ledger do site. `null` na carteira local e no replay. */
+      readonly transactionId: string | null;
+      /**
+       * `true` quando o dono do saldo respondeu "já tinha cobrado".
+       *
+       * Significa **já foi cobrado**, NUNCA "já foi entregue" — o
+       * site não tem como saber da entrega.
+       */
+      readonly replayed: boolean;
+    }
+  /** Não tem. NADA foi cobrado. `message` é a frase do DONO DO SALDO. */
+  | {
+      readonly status: 'insufficient';
+      /** `null` quando o dono do saldo não disse quanto era. NUNCA zero. */
+      readonly balance: number | null;
+      readonly message: string;
+    }
+  /**
+   * O dono do saldo recusou o PEDIDO. Nada foi cobrado AGORA — mas
+   * se `charged` vier preenchido, o dinheiro saiu numa cobrança
+   * anterior com esta mesma referência.
+   *
+   * NUNCA repetir com o mesmo corpo, e NUNCA gerar id novo.
+   */
+  | {
+      readonly status: 'rejected';
+      readonly code: string;
+      readonly reason: string;
+      readonly charged: number | null;
+    }
+  /** Não deu para falar com o dono do saldo. NADA foi cobrado. */
+  | {
+      readonly status: 'unavailable';
+      readonly reason: string;
+      /** `pairing` para de tentar e volta a beaconar. */
+      readonly cause: 'pairing' | 'throttled' | 'network';
+    }
+  /**
+   * PODE TER COBRADO. Não entrega, não estorna, não fecha.
+   *
+   * Nasce de timeout, de erro de rede, de 5xx e de um 200 que não
+   * deu para entender. Sem ele, uma resposta perdida no caminho
+   * deixa o jogador cobrado e sem item, e nada volta a conferir.
+   */
+  | { readonly status: 'unknown'; readonly reason: string };
 
 export interface Wallet {
   readonly source: 'local' | 'remote';
@@ -66,11 +166,53 @@ export interface Wallet {
    * Tira do saldo.
    *
    * `reference` identifica a compra, e é o que torna o débito
-   * rastreável e — na carteira remota — idempotente.
+   * rastreável e — na carteira do site — idempotente.
    */
-  debit(steamId: string, amount: number, reference: string, reason: string): Promise<WalletChange>;
+  debit(input: WalletMoveInput): Promise<WalletChange>;
   /** Devolve ao saldo. Usado no estorno e pelo admin. */
-  credit(steamId: string, amount: number, reference: string, reason: string): Promise<WalletChange>;
+  credit(input: WalletMoveInput): Promise<WalletChange>;
+}
+
+// ============================================================
+//  A PROVA DE QUE UMA COBRANÇA ACONTECEU
+//
+//  ####  ELA MORA AQUI, E NÃO NA CARTEIRA DO SITE  ####
+//
+//  `StoreService` precisa DESTE TIPO para declarar a dependência da
+//  reconciliação. Se ele morasse em `site-wallet.ts`, `service.ts`
+//  teria de importar o arquivo do site — e a loja passaria a saber
+//  que existe um site, que é justamente o que esta fronteira evita.
+//
+//  Interface própria, e não um método a mais em `Wallet`, porque a
+//  `LocalWallet` não tem o que provar: ela É o ledger.
+// ============================================================
+
+export type ChargeProofResult =
+  /** A transação existe: o dinheiro SAIU. */
+  | {
+      readonly status: 'charged';
+      readonly amount: number;
+      readonly transactionId: string | null;
+      readonly productId: string | null;
+    }
+  /** Prova de que NADA foi cobrado. */
+  | { readonly status: 'not-charged' }
+  /**
+   * A pergunta é inválida PARA SEMPRE, ou a linha não é desta
+   * identidade. Sai do laço e vai para gente.
+   *
+   * Não é `unknown`: `unknown` volta no minuto seguinte, e isto
+   * poria o relógio batendo para sempre num pedido que nunca passa.
+   */
+  | { readonly status: 'unprovable'; readonly reason: string }
+  /** Não deu para perguntar. NÃO decide nada — "na dúvida, preserva". */
+  | { readonly status: 'unknown'; readonly reason: string };
+
+export interface ChargeProver {
+  proveCharge(input: {
+    readonly reference: string;
+    readonly steamId: string;
+  }): Promise<ChargeProofResult>;
 }
 
 // ============================================================
@@ -110,6 +252,7 @@ export class LocalWallet implements Wallet {
   }
 
   getBalance(steamId: string): Promise<WalletBalance> {
+    // O banco local sempre responde: aqui `null` não acontece.
     return Promise.resolve({
       steamId,
       balance: this.#store.getBalance(steamId),
@@ -117,195 +260,47 @@ export class LocalWallet implements Wallet {
     });
   }
 
-  debit(steamId: string, amount: number, reference: string, reason: string): Promise<WalletChange> {
-    const balance = this.#store.change(steamId, -Math.abs(amount), reference, reason);
+  debit(input: WalletMoveInput): Promise<WalletChange> {
+    const amount = Math.abs(Math.trunc(input.amount));
+    const balance = this.#store.change(input.steamId, -amount, input.reference, input.reason);
 
-    return Promise.resolve(
-      balance === null
-        ? { status: 'insufficient', balance: this.#store.getBalance(steamId) }
-        : { status: 'ok', balance },
-    );
+    if (balance !== null) {
+      // A carteira local É o ledger: não há id de transação para
+      // dar, e nunca há replay.
+      return Promise.resolve({ status: 'ok', balance, transactionId: null, replayed: false });
+    }
+
+    const current = this.#store.getBalance(input.steamId);
+
+    // A MESMA frase do site, no MESMO formato — inclusive o "Voce"
+    // sem acento, que é como o site a escreve. Assim quem monta o
+    // texto do jogador não precisa de um `if` para saber quem é o
+    // dono do saldo, e o suporte não lê duas versões da mesma
+    // história.
+    return Promise.resolve({
+      status: 'insufficient',
+      balance: current,
+      message:
+        `Saldo insuficiente. Voce tem ${String(current)} OZ, o item custa ` +
+        `${String(amount)} OZ (faltam ${String(amount - current)}).`,
+    });
   }
 
-  credit(steamId: string, amount: number, reference: string, reason: string): Promise<WalletChange> {
-    const balance = this.#store.change(steamId, Math.abs(amount), reference, reason);
+  credit(input: WalletMoveInput): Promise<WalletChange> {
+    const balance = this.#store.change(
+      input.steamId,
+      Math.abs(Math.trunc(input.amount)),
+      input.reference,
+      input.reason,
+    );
 
     // Crédito não tem como faltar saldo; `null` aqui seria um
     // defeito nosso, e devolver "indisponível" é mais honesto do que
     // dizer que creditou.
     return Promise.resolve(
       balance === null
-        ? { status: 'unavailable', reason: 'a carteira local recusou um crédito' }
-        : { status: 'ok', balance },
+        ? { status: 'unavailable', reason: 'a carteira local recusou um crédito', cause: 'network' }
+        : { status: 'ok', balance, transactionId: null, replayed: false },
     );
-  }
-}
-
-// ============================================================
-//  A CARTEIRA REMOTA — o site externo é o dono
-// ============================================================
-
-export interface RemoteWalletOptions {
-  /** Base da API do site, sem barra no fim. */
-  readonly baseUrl: string;
-  readonly token: string;
-  readonly logger?: Logger | undefined;
-  /**
-   * Teto de espera por resposta.
-   *
-   * Existe porque isto roda no caminho de um jogador que clicou e
-   * está olhando a tela: sem timeout, o site lento vira menu
-   * travado.
-   */
-  readonly timeoutMs?: number;
-}
-
-const DEFAULT_TIMEOUT_MS = 5_000;
-
-/**
- * O contrato que o site externo precisa cumprir.
- *
- *     GET  {base}/wallet/{steamId}          -> { balance }
- *     POST {base}/wallet/{steamId}/debit    -> { ok, balance }
- *     POST {base}/wallet/{steamId}/credit   -> { ok, balance }
- *
- * Com `Idempotency-Key` nos dois POST. Saldo insuficiente é
- * **409**, e não 200 com um campo — o agente precisa distinguir
- * "recusado" (não insista) de "não consegui falar" (tente de novo),
- * e o código de status é onde essa diferença cabe.
- */
-export class RemoteWallet implements Wallet {
-  readonly source = 'remote' as const;
-  readonly #baseUrl: string;
-  readonly #token: string;
-  readonly #logger: Logger | undefined;
-  readonly #timeoutMs: number;
-
-  constructor(options: RemoteWalletOptions) {
-    this.#baseUrl = options.baseUrl.replace(/\/+$/, '');
-    this.#token = options.token;
-    this.#logger = options.logger;
-    this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  }
-
-  async getBalance(steamId: string): Promise<WalletBalance> {
-    const response = await this.#request('GET', `/wallet/${steamId}`);
-
-    if (response === null || typeof response.balance !== 'number') {
-      // Saldo desconhecido vira ZERO, e não um erro: a loja continua
-      // abrindo, e o que falha é a COMPRA — com uma mensagem que diz
-      // o que houve. Derrubar a vitrine porque o site piscou seria
-      // punir quem só queria olhar.
-      this.#logger?.warn({ steamId }, 'a carteira remota não respondeu o saldo');
-
-      return { steamId, balance: 0, source: this.source };
-    }
-
-    return { steamId, balance: Math.trunc(response.balance), source: this.source };
-  }
-
-  debit(steamId: string, amount: number, reference: string, reason: string): Promise<WalletChange> {
-    return this.#move('debit', steamId, amount, reference, reason);
-  }
-
-  credit(steamId: string, amount: number, reference: string, reason: string): Promise<WalletChange> {
-    // Chave DERIVADA no crédito: usando a mesma do débito, o site
-    // trataria o estorno como repetição do débito e o ignoraria — o
-    // jogador ficaria sem o item e sem o dinheiro.
-    return this.#move('credit', steamId, amount, `${reference}:credit`, reason);
-  }
-
-  async #move(
-    kind: 'debit' | 'credit',
-    steamId: string,
-    amount: number,
-    reference: string,
-    reason: string,
-  ): Promise<WalletChange> {
-    let response: Response;
-
-    try {
-      response = await this.#fetch(`/wallet/${steamId}/${kind}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.#token}`,
-          'Idempotency-Key': reference,
-        },
-        body: JSON.stringify({ amount: Math.abs(Math.trunc(amount)), reason }),
-      });
-    } catch (error) {
-      const err = toError(error);
-
-      this.#logger?.warn({ err, steamId, kind }, 'a carteira remota não respondeu');
-
-      return { status: 'unavailable', reason: err.message };
-    }
-
-    if (response.status === 409) {
-      const body = (await this.#json(response)) ?? {};
-
-      return {
-        status: 'insufficient',
-        balance: typeof body.balance === 'number' ? Math.trunc(body.balance) : 0,
-      };
-    }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-
-      this.#logger?.warn(
-        { steamId, kind, status: response.status },
-        'a carteira remota recusou o movimento',
-      );
-
-      return {
-        status: 'unavailable',
-        reason: `o site respondeu ${String(response.status)} ${text}`,
-      };
-    }
-
-    const body = (await this.#json(response)) ?? {};
-
-    return {
-      status: 'ok',
-      balance: typeof body.balance === 'number' ? Math.trunc(body.balance) : 0,
-    };
-  }
-
-  async #request(method: string, path: string): Promise<Record<string, unknown> | null> {
-    try {
-      const response = await this.#fetch(path, {
-        method,
-        headers: { Authorization: `Bearer ${this.#token}` },
-      });
-
-      return response.ok ? await this.#json(response) : null;
-    } catch (error) {
-      this.#logger?.warn({ err: toError(error), path }, 'a consulta à carteira remota falhou');
-
-      return null;
-    }
-  }
-
-  async #fetch(path: string, init: RequestInit): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort();
-    }, this.#timeoutMs);
-
-    try {
-      return await fetch(`${this.#baseUrl}${path}`, { ...init, signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async #json(response: Response): Promise<Record<string, unknown> | null> {
-    try {
-      return (await response.json()) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
   }
 }

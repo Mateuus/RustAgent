@@ -48,7 +48,7 @@ import { VipExpiryWatcher } from './vip/expiry-watcher.js';
 import { VipList } from './vip/service.js';
 import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
-import { PlayersReader } from './game/players.js';
+import { PlayersReader, type PlayersSnapshot } from './game/players.js';
 import { loadUiImages } from './game/ui-images.js';
 import { buildKitsScreen, KITS_SCREEN_ID, parseKitScreenId } from './game/ui-kits-screen.js';
 import { buildMainMenu } from './game/ui-preset-main-menu.js';
@@ -63,7 +63,34 @@ import { WipeClock } from './game/wipe.js';
 import { StoreRepository } from './db/store-repository.js';
 import { WalletsRepository } from './db/wallets-repository.js';
 import { StoreService } from './store/service.js';
-import { LocalWallet, RemoteWallet, type Wallet } from './store/wallet.js';
+import { LocalWallet, type Wallet } from './store/wallet.js';
+import { SiteWallet } from './store/site-wallet.js';
+import { SiteClient } from './site/client.js';
+import { SiteBeacon } from './site/beacon.js';
+import { PurchaseSettler } from './store/settle.js';
+import { SiteDeliveries } from './site/deliveries.js';
+import { SiteCommands } from './site/commands.js';
+import { SiteConfig } from './site/config.js';
+import {
+  SiteDomainConfig,
+  SITE_DOMAINS,
+  type DomainApplier,
+  type SiteDomainLoop,
+} from './site/domains.js';
+import { storeApplier } from './site/appliers/store.js';
+import { kitsApplier } from './site/appliers/kits.js';
+import { vipsApplier } from './site/appliers/vips.js';
+import { SiteStatus } from './site/status.js';
+import { CatalogMirror } from './store/catalog-mirror.js';
+import { MetaRepository } from './db/meta-repository.js';
+import { normalizeSiteBaseUrl, SITE_BASE_URL_KEY } from './site/settings.js';
+import { SiteDeliveriesRepository } from './db/site-deliveries-repository.js';
+import { SiteCommandsRepository } from './db/site-commands-repository.js';
+import { diskUsage } from './util/disk.js';
+import type { SitePairedServer } from './http/routes/site.js';
+import { primaryMac } from './site/mac.js';
+import { buildReference } from './store/reference.js';
+import { VERSION } from './version.js';
 import { toGeneratedScreenBundle } from './types/ui-transport.js';
 import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
@@ -109,7 +136,6 @@ import { readVipTiers } from './vip/tiers.js';
 /** Orçamento do desligamento limpo. Ver o kill_timeout do PM2 (25 s). */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
-const VERSION = '1.0.0';
 
 async function main(): Promise<void> {
   const startedAt = Date.now();
@@ -392,7 +418,20 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const presenceWatcher = new PresenceWatcher({ tracker: presence, logger });
+  // As filas de entrega, uma por servidor pareado. O mapa nasce
+  // aqui, VAZIO, porque o gancho de presença abaixo precisa dele —
+  // e a fila só pode ser construída depois da loja, que é quem
+  // entrega. O gancho consulta o mapa em tempo de execução.
+  const siteDeliveries = new Map<string, SiteDeliveries>();
+  const presenceWatcher = new PresenceWatcher({
+    tracker: presence,
+    logger,
+    // O item pago é entregue no minuto em que o jogador abre o
+    // inventário, e não até 15 s depois: a cabeça da fila é onde
+    // moram as tarefas adiadas com PLAYER_OFFLINE, e acabou de
+    // entrar uma das pessoas que faltavam.
+    onJoined: (serverId) => siteDeliveries.get(serverId)?.wake(),
+  });
 
   presenceWatcher.start();
 
@@ -481,20 +520,120 @@ async function main(): Promise<void> {
   const storeRepository = new StoreRepository(db);
   const walletsRepository = new WalletsRepository(db);
 
-  const wallet: Wallet =
-    agent.store.walletUrl === ''
-      ? new LocalWallet(walletsRepository)
-      : new RemoteWallet({
-          baseUrl: agent.store.walletUrl,
-          token: agent.store.walletToken,
+  // ####  OS BEACONS NASCEM ANTES DAS CARTEIRAS  ####
+  //
+  // A carteira precisa avisá-los quando um débito volta com
+  // `cause: 'pairing'`, e a ordem inversa deixaria o
+  // `onPairingSuspect` sem ninguém para chamar. O mapa é declarado
+  // aqui e preenchido logo abaixo, no mesmo laço que cria os
+  // clientes: um pareamento, um cliente, um beacon.
+  const siteBeacons = new Map<string, SiteBeacon>();
+  // ####  A INTEGRAÇÃO COM O SITE É UM INTERRUPTOR SÓ  ####
+  //
+  // `SITE_BASE_URL` vazia: nada disto nasce, e o agente é o mesmo de
+  // antes. Preenchida: cada servidor PAREADO ganha um cliente e uma
+  // carteira próprios — o site modela um `Server` por linha de
+  // `agents`, com um bearer cada, e um RustAgent administra N.
+  //
+  // Servidor sem pareamento continua na carteira LOCAL, e isso é uma
+  // configuração legítima: um servidor novo entra no ar antes de
+  // alguém cadastrá-lo lá.
+  // ####  A URL DO SITE PODE VIR DO PAINEL  ####
+  //
+  // O `.env` é o padrão da instalação; a tela pode sobrescrevê-la,
+  // e o valor vive na tabela `meta`. Ela NÃO reescreve o `.env` de
+  // propósito: é lá que moram os segredos que trancam o operador
+  // do lado de fora (`AGENT_API_TOKEN`, a senha do painel), e um
+  // writer com defeito ali custa o acesso ao painel. Errar a URL
+  // do site só deixa a loja indisponível.
+  const meta = new MetaRepository(db);
+  const siteBaseUrl = normalizeSiteBaseUrl(meta.read(SITE_BASE_URL_KEY) ?? agent.site.baseUrl);
+
+  const siteClients = new Map<string, SiteClient>();
+  const siteWallets = new Map<string, SiteWallet>();
+
+  if (siteBaseUrl !== '') {
+    for (const server of servers) {
+      if (server.site === null) {
+        logger.warn(
+          { server: server.id },
+          'server has no SITE_SERVER_ID: its store keeps using the LOCAL wallet',
+        );
+        continue;
+      }
+
+      const client = new SiteClient({
+        baseUrl: siteBaseUrl,
+        token: server.site.token,
+        serverId: server.site.serverId,
+        userAgent: agent.site.userAgent,
+        timeoutMs: agent.site.timeoutMs,
+        logger,
+      });
+
+      siteClients.set(server.id, client);
+      siteBeacons.set(
+        server.id,
+        new SiteBeacon({
+          client,
+          token: server.site.token,
+          port: agent.port,
+          version: VERSION,
+          mac: primaryMac(),
           logger,
-        });
+          intervalMs: agent.site.beaconIntervalMs,
+        }),
+      );
+
+      // ####  SEM TOKEN, O CLIENTE EXISTE E A CARTEIRA NÃO  ####
+      //
+      // É o primeiro degrau da virada, e ele PRECISA desta condição:
+      // com o servidor cadastrado e o bearer ainda vazio, o cliente
+      // existe (o beacon precisa dele, e é a única rota sem bearer),
+      // mas a CARTEIRA continua local. Sem isso, todo débito sairia
+      // sem `Authorization`, tomaria 401 `MISSING_BEARER` e a loja
+      // in-game ficaria morta para todos os jogadores durante um
+      // passo que existe justamente para não custar nada.
+      if (!client.authenticated) {
+        logger.warn(
+          { server: server.id, siteServerId: server.site.serverId },
+          'server is paired but SITE_TOKEN is empty: beaconing only, wallet stays LOCAL',
+        );
+        continue;
+      }
+
+      siteWallets.set(
+        server.id,
+        new SiteWallet({
+          client,
+          logger,
+          // O beacon precisa saber AGORA que o pareamento quebrou: é
+          // assim que o agente descobre em segundos, e não em
+          // minutos, que o token foi rotacionado.
+          onPairingSuspect: (reason) => siteBeacons.get(server.id)?.suspect(reason),
+        }),
+      );
+    }
+  }
+
+  const localWallet = new LocalWallet(walletsRepository);
+  /** A carteira DAQUELE servidor. Sem pareamento, a local. */
+  const walletFor = (serverId: string): Wallet => siteWallets.get(serverId) ?? localWallet;
+  // A carteira "principal" é só para as rotas que não têm servidor —
+  // o extrato de um jogador, por exemplo. O saldo do site é global
+  // por steamId, então qualquer pareamento responde o mesmo número;
+  // o que muda é qual bearer pergunta.
+  const wallet: Wallet = siteWallets.values().next().value ?? localWallet;
 
   logger.info(
-    { source: wallet.source, url: agent.store.walletUrl === '' ? null : agent.store.walletUrl },
+    {
+      source: wallet.source,
+      site: siteBaseUrl === '' ? null : siteBaseUrl,
+      paired: [...siteWallets.keys()],
+    },
     wallet.source === 'local'
       ? 'a carteira é a LOCAL (o banco do agente)'
-      : 'a carteira é a REMOTA (o site externo é o dono do saldo)',
+      : 'a carteira é a do SITE (o site externo é o dono do saldo)',
   );
 
   const store = new StoreService({
@@ -507,7 +646,159 @@ async function main(): Promise<void> {
     vips,
     logger,
     history: directory,
+    // A carteira DAQUELE servidor: o débito precisa sair com o
+    // `X-Server-Id` de quem vendeu, ou o ledger do site atribui a
+    // venda ao vizinho.
+    walletFor,
+    maxOzPerPurchase: agent.store.maxOzPerPurchase,
+    // Sem pareamento a referência é o `purchaseId` cru — que é o
+    // que a carteira LOCAL sempre gravou em `wallet_entries`.
+    newReference: (serverId, purchaseId) => {
+      const paired = servers.find((server) => server.id === serverId)?.site ?? null;
+
+      return paired === null
+        ? purchaseId
+        : buildReference(paired.serverId, 'loja', purchaseId);
+    },
+    // ####  A LOJA SÓ COBRA COM O PAREAMENTO ATIVO  ####
+    //
+    // Servidor SEM pareamento está sempre pronto: ele usa a
+    // carteira local, e a loja dele funciona como sempre. Quem
+    // tem pareamento espera o beacon dizer `active` — enquanto
+    // isso a loja responde INDISPONÍVEL, nunca "saldo 0".
+    ready: (serverId) => siteBeacons.get(serverId)?.ready ?? true,
+    proofFor: (serverId) => siteWallets.get(serverId) ?? null,
   });
+
+  for (const beacon of siteBeacons.values()) {
+    beacon.start();
+  }
+
+  // ####  O SETTLER NASCE ANTES DA VIRADA, E É DE PROPÓSITO  ####
+  //
+  // `charge-unknown` passa a ser produzido assim que a carteira do
+  // site entra, e ele é o único desfecho que NÃO fecha a compra.
+  // Sem o relógio, um timeout deixaria o jogador cobrado, sem
+  // item, com a compra aberta e sem ninguém para resolvê-la.
+  //
+  // Ele não custa nada antes da virada: com a carteira local,
+  // `unknown` nunca acontece, e a varredura roda sobre zero
+  // linhas.
+  const siteSettler =
+    siteWallets.size === 0
+      ? null
+      : new PurchaseSettler({
+          service: store,
+          repository: storeRepository,
+          logger,
+          intervalMs: agent.site.settleIntervalMs,
+        });
+
+  siteSettler?.start();
+
+  /**
+   * Quem está conectado NAQUELE servidor.
+   *
+   * ####  `null` NÃO É LISTA VAZIA  ####
+   *
+   * `null` = não deu para PERGUNTAR (RCON fora, lista ilegível), e
+   * lista vazia = perguntei e não tem ninguém. A fila de entregas
+   * adia com motivos diferentes nos dois casos, e nada é tentado às
+   * cegas.
+   *
+   * Ele NÃO é o `onlinePlayersOf` das mensagens: aquele devolve uma
+   * CONTAGEM, e dois nomes parecidos com tipos diferentes no mesmo
+   * arquivo é o começo de um bug de leitura.
+   */
+  const onlineSteamIdsOf = async (serverId: string): Promise<readonly string[] | null> => {
+    const context = supervisor.contextOf(serverId);
+
+    if (context === null || !context.rcon.isConnected) {
+      return null;
+    }
+
+    try {
+      const worldSize = supervisor.configOf(serverId)?.worldSize ?? 0;
+      const snapshot = await players.list(serverId, context.rcon, worldSize);
+
+      return snapshot.players.map((player) => player.steamId);
+    } catch {
+      return null;
+    }
+  };
+
+  // ####  A FILA DE ENTREGAS, UMA POR PAREAMENTO  ####
+  //
+  // Cada fila é escopada pelo `X-Server-Id` do bearer dela, então
+  // ela já sabe onde entregar: no servidor local daquele
+  // pareamento. É por isso que não existe uma variável dizendo
+  // "qual servidor recebe" — a pergunta não existe com N
+  // pareamentos.
+  const siteDeliveriesRepository = new SiteDeliveriesRepository(db);
+
+  for (const [id, client] of siteClients) {
+    if (!siteWallets.has(id)) {
+      // Sem token não há como puxar fila: a rota é autenticada.
+      continue;
+    }
+
+    siteDeliveries.set(
+      id,
+      new SiteDeliveries({
+        client,
+        repository: siteDeliveriesRepository,
+        serverId: id,
+        presence: onlineSteamIdsOf,
+        // O MESMO caminho da compra in-game, e não um segundo: um
+        // ajuste que só um dos dois recebesse apareceria como
+        // "às vezes o item vem sem skin".
+        deliver: (input) => store.deliverPlan(input.serverId, input.steamId, input.plan),
+        logger,
+        pollMs: agent.site.deliveryPollMs,
+      }),
+    );
+  }
+
+  for (const queue of siteDeliveries.values()) {
+    queue.start();
+  }
+
+  // ####  UM CATÁLOGO, N DESTINOS  ####
+  //
+  // As tabelas da loja não têm `server_id`: a loja é UMA, e todos
+  // os servidores mostram a mesma. O mesmo snapshot vai para cada
+  // `Server` pareado, e cada um guarda a própria versão
+  // confirmada.
+  const catalogMirror =
+    !agent.site.catalogPushEnabled || siteWallets.size === 0
+      ? null
+      : new CatalogMirror({
+          clients: new Map(
+            [...siteClients].filter(([id]) => siteWallets.has(id)),
+          ),
+          repository: storeRepository,
+          meta,
+          logger,
+        });
+
+  catalogMirror?.start();
+
+  // O que a tela de diagnóstico lê. Um mapa por servidor PAREADO:
+  // "a loja parou" quase sempre é um servidor só, e uma resposta
+  // agregada esconderia qual.
+  const sitePairedServers = new Map<string, SitePairedServer>();
+
+  for (const [id, beacon] of siteBeacons) {
+    const paired = servers.find((server) => server.id === id)?.site ?? null;
+    const siteWallet = siteWallets.get(id) ?? null;
+
+    sitePairedServers.set(id, {
+      beacon,
+      siteServerId: paired?.serverId ?? '',
+      hasToken: (paired?.token ?? '') !== '',
+      walletHealth: siteWallet === null ? null : () => siteWallet.health,
+    });
+  }
 
   /**
    * A vitrine e os modais, montados do catálogo de AGORA.
@@ -684,24 +975,7 @@ async function main(): Promise<void> {
     repository: kitsRepository,
     vips: vipsRepository,
     servers: supervisor,
-    presence: {
-      online: async (serverId) => {
-        const context = supervisor.contextOf(serverId);
-
-        if (context === null || !context.rcon.isConnected) {
-          return null;
-        }
-
-        try {
-          const worldSize = supervisor.configOf(serverId)?.worldSize ?? 0;
-          const snapshot = await players.list(serverId, context.rcon, worldSize);
-
-          return snapshot.players.map((player) => player.steamId);
-        } catch {
-          return null;
-        }
-      },
-    },
+    presence: { online: onlineSteamIdsOf },
     logger,
     history: directory,
     // Quem responde "já passaram 2 h do wipe?". Sem resposta, o kit
@@ -726,6 +1000,274 @@ async function main(): Promise<void> {
   });
 
   steamWatcher.start();
+
+  // ####  O RETRATO PERIÓDICO, UM POR PAREAMENTO  ####
+  //
+  // O terceiro relógio do site, no mesmo molde do beacon e da fila:
+  // 30 s, uma batida no boot, e um erro de rede que não derruba
+  // nada. Ele nasce AQUI, e não junto dos outros dois, por uma
+  // razão de ordem: o retrato leva o build da Steam, e o
+  // `steamWatcher` só existe a partir desta linha.
+  //
+  // ####  ELE É TELEMETRIA  ####
+  //
+  // Nenhum desfecho dele mexe em loja, carteira ou entrega. O único
+  // efeito colateral é acordar o beacon quando o site responde que
+  // o pareamento não vale — diagnóstico, não dinheiro.
+  const siteStatuses = new Map<string, SiteStatus>();
+
+  if (agent.site.statusPushEnabled) {
+    for (const [id, client] of siteClients) {
+      if (!siteWallets.has(id)) {
+        // Sem token não há rota autenticada: o beacon continua, e o
+        // retrato espera a ativação no admin do site.
+        continue;
+      }
+
+      siteStatuses.set(
+        id,
+        new SiteStatus({
+          client,
+          serverId: id,
+          version: VERSION,
+          startedAt,
+          logger,
+          intervalMs: agent.site.statusIntervalMs,
+          // A pasta pode ainda não existir (máquina nova, nenhum
+          // servidor instalado). Aí a pergunta certa é sobre a raiz
+          // do projeto, que existe sempre — igual à tela de sistema.
+          disk: async () =>
+            (await diskUsage(agent.paths.serversDir)) ?? (await diskUsage(agent.paths.root)),
+          onPairingSuspect: (reason) => siteBeacons.get(id)?.suspect(reason),
+          collect: async () => {
+            // A varredura de processos tem cache de 3 s: chamá-la
+            // aqui é o que faz `running` vir booleano em vez de
+            // "ainda não sei".
+            await supervisor.scanProcesses();
+
+            const view = supervisor.view(id);
+
+            if (view === null) {
+              return null;
+            }
+
+            const context = supervisor.contextOf(id);
+            let snapshot: PlayersSnapshot | null = null;
+
+            if (context !== null && context.rcon.isConnected) {
+              try {
+                snapshot = await players.list(id, context.rcon, view.worldSize);
+              } catch {
+                // `null` = não deu para PERGUNTAR, e o retrato diz
+                // isso com `source: 'unavailable'`. Uma lista vazia
+                // aqui mostraria um servidor cheio como vazio.
+                snapshot = null;
+              }
+            }
+
+            const running =
+              operations.list(id).find((operation) => operation.status === 'running') ?? null;
+
+            return {
+              server: view,
+              players: snapshot,
+              // O ÚLTIMO retrato guardado: `stateOf` NÃO fala com a
+              // Steam. Um `check()` a cada 30 s disputaria o lock do
+              // SteamCMD com um download de 6 GB.
+              build: steamWatcher.stateOf(id),
+              operation: running?.view() ?? null,
+              kinds: supervisor.operationsOf(id).kinds(),
+            };
+          },
+        }),
+      );
+    }
+  }
+
+  if (siteStatuses.size === 0 && siteWallets.size > 0) {
+    // Com pareamento ativo e nenhum retrato, a pergunta "por que o
+    // site não mostra meu servidor?" tem uma resposta só, e ela
+    // precisa estar no log da subida.
+    logger.warn(
+      { paired: [...siteWallets.keys()] },
+      'SITE_STATUS_PUSH_ENABLED=0: the site will not receive the periodic server status',
+    );
+  }
+
+  for (const reporter of siteStatuses.values()) {
+    reporter.start();
+  }
+
+  // ####  A FILA DE COMANDOS E A CONFIG DESEJADA  ####
+  //
+  // Os dois últimos relógios do site, e os únicos que MUDAM a
+  // máquina: o admin clica "Reiniciar" no painel do site e o
+  // servidor reinicia; ele grava o mapa lá e o `.ini` daqui passa a
+  // ter esse valor.
+  //
+  // ####  NENHUM DOS DOIS ABRE CAMINHO NOVO  ####
+  //
+  // O comando vira uma `operation` normal, com a mesma trava por
+  // recurso, o mesmo log e o mesmo `operationId` do painel local. A
+  // config é gravada pelo MESMO `updateSettings` que o
+  // `PATCH /api/servers/:id` usa. Uma segunda maneira de executar ou
+  // de escrever o `.ini` é a última coisa que este canal pode criar.
+  //
+  // Eles nascem aqui, e não junto do beacon, pela mesma razão de
+  // ordem do retrato: precisam do supervisor já montado.
+  const siteCommandsRepository = new SiteCommandsRepository(db);
+  const siteCommands = new Map<string, SiteCommands>();
+  const siteConfigs = new Map<string, SiteConfig>();
+
+  for (const [id, client] of siteClients) {
+    if (!siteWallets.has(id)) {
+      // Sem token não há rota autenticada: as duas são.
+      continue;
+    }
+
+    if (agent.site.commandsEnabled) {
+      siteCommands.set(
+        id,
+        new SiteCommands({
+          client,
+          repository: siteCommandsRepository,
+          serverId: id,
+          // `false` também quando o servidor sumiu do supervisor: o
+          // agente não cuida dele, e é isso que o site precisa ouvir.
+          enabled: () => supervisor.view(id)?.enabled === true,
+          installed: () => supervisor.view(id)?.installed === true,
+          execute: async (kind) => {
+            // A varredura de processos antes do disparo: é ela que
+            // faz as pré-condições saberem se o servidor está no ar.
+            // Sem isso, um `server-start` num servidor já no ar
+            // passaria pela recusa e subiria um segundo processo.
+            await supervisor.scanProcesses();
+
+            const operation = await supervisor.operationsOf(id).start({ kind });
+
+            return {
+              operationId: operation.id,
+              done: operation.done.then((finished) => ({
+                status: finished.status,
+                message: finished.message,
+              })),
+            };
+          },
+          logger,
+          pollMs: agent.site.commandPollMs,
+        }),
+      );
+    }
+
+    if (agent.site.configPullEnabled) {
+      siteConfigs.set(
+        id,
+        new SiteConfig({
+          client,
+          meta,
+          serverId: id,
+          apply: (patch) => supervisor.updateSettings(id, patch),
+          // Ligar/desligar não é gravar uma linha: é montar ou
+          // desmontar o contexto e o RCON daquele servidor, e por
+          // isso não cabe no `updateSettings`.
+          //
+          // O laço de config nasce do PAREAMENTO, e não do `enabled`:
+          // um servidor desligado continua puxando config, e é isso
+          // que permite ao site religá-lo depois.
+          setEnabled: async (value) => {
+            if (value) {
+              supervisor.enable(id);
+              return;
+            }
+
+            await supervisor.disable(id);
+          },
+          logger,
+          intervalMs: agent.site.configIntervalMs,
+        }),
+      );
+    }
+  }
+
+  for (const queue of siteCommands.values()) {
+    queue.start();
+  }
+
+  for (const desired of siteConfigs.values()) {
+    desired.start();
+  }
+
+  // ---- a config de REDE que vem do site ---------------------
+  //
+  // ####  UM LAÇO POR ASSUNTO, E UM CLIENTE SÓ  ####
+  //
+  // A loja não tem `server_id`: ela é UMA, e todos os servidores
+  // mostram a mesma. Os kits são da rede, e o VIP é da conta do
+  // jogador. Se este laço rodasse por pareamento, dois `Server` do
+  // site poderiam mandar catálogos diferentes para o MESMO banco, e
+  // o último a chegar ganharia — uma loja que muda sozinha a cada
+  // minuto.
+  //
+  // Por isso ele fala por UM pareamento, escolhido de forma estável
+  // (o primeiro id local em ordem). O site precisa responder o mesmo
+  // conteúdo em qualquer `Server` deste agente.
+  const siteDomainLoops: SiteDomainLoop[] = [];
+  const domainOwner = [...siteClients]
+    .filter(([id]) => siteWallets.has(id))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))[0];
+
+  if (agent.site.domainPullEnabled && domainOwner !== undefined) {
+    const [ownerId, ownerClient] = domainOwner;
+    const wanted =
+      agent.site.domains.length === 0 ? [...SITE_DOMAINS] : agent.site.domains;
+    // A fábrica existe pelo genérico: cada assunto tem uma forma de
+    // `desired` própria, e é aqui que ela deixa de importar.
+    const loopOf = <W,>(applier: DomainApplier<W>): SiteDomainLoop =>
+      new SiteDomainConfig({
+        client: ownerClient,
+        meta,
+        applier,
+        logger,
+        intervalMs: agent.site.domainIntervalMs,
+      });
+    const candidates: readonly SiteDomainLoop[] = [
+      loopOf(
+        storeApplier({
+          repository: storeRepository,
+          // O espelho precisa saber: sem isto, o catálogo que o
+          // próprio site mandou só apareceria no painel dele na
+          // volta seguinte do relógio.
+          ...(catalogMirror === null ? {} : { onChanged: () => catalogMirror.notifyChanged() }),
+        }),
+      ),
+      loopOf(
+        kitsApplier({
+          repository: kitsRepository,
+          // O site conhece cada servidor pelo `SITE_SERVER_ID`, e o
+          // retrato não manda o id local. A tradução mora na
+          // fronteira, num lugar só.
+          localServerId: (siteServerId) =>
+            servers.find((server) => server.site?.serverId === siteServerId)?.id ?? null,
+        }),
+      ),
+      loopOf(vipsApplier({ vips })),
+    ];
+
+    for (const loop of candidates) {
+      if (wanted.includes(loop.domain)) {
+        siteDomainLoops.push(loop);
+      }
+    }
+
+    logger.warn(
+      { server: ownerId, domains: siteDomainLoops.map((loop) => loop.domain) },
+      'the site OWNS these subjects: its snapshot replaces what the local panel has',
+    );
+  }
+
+  for (const loop of siteDomainLoops) {
+    loop.start();
+  }
 
   // ---- a agenda do wipe -------------------------------------
   //
@@ -1149,7 +1691,43 @@ async function main(): Promise<void> {
       statusSync: spawnStatusSync,
     },
     kits: { store: kits, repository: kitsRepository },
-    store: { repository: storeRepository, wallets: walletsRepository, service: store, wallet },
+    store: {
+      repository: storeRepository,
+      wallets: walletsRepository,
+      service: store,
+      wallet,
+      // Uma edição de catálogo avisa o espelho. Sem site,
+      // `undefined`, e as rotas não mudam de comportamento.
+      ...(catalogMirror === null ? {} : { onCatalogChanged: () => catalogMirror.notifyChanged() }),
+    },
+    site: {
+      baseUrl: siteBaseUrl,
+      servers: sitePairedServers,
+      // Lidos na HORA: é o estado do laço, e ele muda a cada volta.
+      domains: () => siteDomainLoops.map((loop) => loop.health),
+      wallet,
+      purchases: storeRepository,
+      // De onde a URL veio, para a tela dizer se o que ela mostra é
+      // o padrão da instalação ou algo que alguém digitou.
+      // Lida na HORA, e não no boot: é ela que a tela edita.
+      readSavedBaseUrl: () => meta.read(SITE_BASE_URL_KEY),
+      envBaseUrl: agent.site.baseUrl,
+      // O `.ini` de AGORA, e não o do boot: é a diferença entre os
+      // dois que a tela precisa dizer em voz alta.
+      savedPairings: () =>
+        supervisor.ids().map((id) => {
+          const paired = supervisor.configOf(id)?.site ?? null;
+
+          return {
+            serverId: id,
+            siteServerId: paired?.serverId ?? '',
+            hasToken: (paired?.token ?? '') !== '',
+          };
+        }),
+      saveBaseUrl: (baseUrl) => {
+        meta.write(SITE_BASE_URL_KEY, baseUrl);
+      },
+    },
     wipeRuns: {
       runs: wipeRuns,
       wipes: detectedWipes,
@@ -1255,6 +1833,40 @@ async function main(): Promise<void> {
         // rodada que começasse agora falaria com um RCON que já
         // não existe, e marcaria como entregue o que não saiu.
         blueprints.stop();
+        // E os relógios do site, pela MESMA razão: uma batida ou
+        // uma varredura que começasse agora falaria com um
+        // supervisor já parado, e uma entrega decidida nesse
+        // instante não teria por onde sair.
+        for (const beacon of siteBeacons.values()) {
+          beacon.stop();
+        }
+
+        siteSettler?.stop();
+
+        for (const queue of siteDeliveries.values()) {
+          queue.stop();
+        }
+
+        for (const reporter of siteStatuses.values()) {
+          reporter.stop();
+        }
+
+        // Uma rodada de comandos que começasse agora disparia uma
+        // operação sobre um supervisor a caminho do fim — e o
+        // desfecho dela nunca chegaria ao site.
+        for (const queue of siteCommands.values()) {
+          queue.stop();
+        }
+
+        for (const desired of siteConfigs.values()) {
+          desired.stop();
+        }
+
+        for (const loop of siteDomainLoops) {
+          loop.stop();
+        }
+
+        catalogMirror?.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de
