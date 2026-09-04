@@ -1,6 +1,6 @@
 {
   "$comment": "As fixtures do canal agent↔site. Ver contracts/README.md antes de editar.",
-  "contract": "oz-rust/6",
+  "contract": "oz-rust/7",
   "fixturesVersion": 1,
   "generatedAt": "2026-09-04",
   "probe": {

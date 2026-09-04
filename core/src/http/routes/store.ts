@@ -583,7 +583,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
   //  Ela COBRA. Usá-la para entregar o que o site já vendeu
   //  cobraria o jogador DUAS VEZES: o site debita no checkout, e
   //  o que ele vendeu chega pela fila de entregas, que não move
-  //  dinheiro. Ver Docs §10.
+  //  dinheiro. Ver Docs\20 §10.
   //
   //  Dentro do jogo o caminho é outro: o clique vira uma linha de
   //  console autenticada por segredo (ver game/ui-sync.ts). Esta

@@ -376,6 +376,28 @@ describe('um VIP ativo por (jogador, nível)', () => {
     ).toThrow();
   });
 
+  it('revogar um nível que ele NÃO tem não encosta no que ele tem', async () => {
+    // É o contrato com a fila do site (`vip_revoke`): o site manda
+    // tirar o nível que ele estornou, e nunca "seja lá qual VIP
+    // estiver ativo". Sem este filtro, um estorno de bronze
+    // apagaria o gold que o jogador comprou in-game.
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'admin',
+    });
+
+    await expect(harness.vips.revoke(STEAM_ID, 'bronze', 'site')).rejects.toThrow(
+      /VIP_NOT_FOUND|bronze/,
+    );
+
+    const ativos = harness.repository.activeOf(STEAM_ID);
+
+    expect(ativos.map((vip) => vip.tier)).toEqual(['gold']);
+  });
+
   it('mas aceita conceder de novo depois de revogar, e o histórico fica', async () => {
     await harness.vips.grant({
       steamId: STEAM_ID,

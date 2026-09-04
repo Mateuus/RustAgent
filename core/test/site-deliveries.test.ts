@@ -9,7 +9,9 @@
 //    - `RCON_UNAVAILABLE` vem do CÓDIGO, não da mensagem;
 //    - a rodada PAGINA: sem isso a tarefa nº 51 nunca é vista;
 //    - `INVALID_CURSOR` joga o cursor fora, e não vira laço;
-//    - `unknown` no ACK não significa "não aconteceu".
+//    - `unknown` no ACK não significa "não aconteceu";
+//    - as duas tarefas de VIP não esperam o jogador entrar, e não
+//      ter o que tirar é sucesso.
 //
 //  Nada aqui sai da máquina: o `fetch` é um dublê.
 // ============================================================
@@ -74,17 +76,26 @@ interface Delivered {
   readonly plan: DeliveryPlan;
 }
 
+interface Revoked {
+  readonly steamId: string;
+  readonly tier: string;
+}
+
 function harness(
   responses: readonly Canned[],
   options: {
     readonly online?: readonly string[] | null;
     readonly deliver?: () => Promise<void>;
+    readonly revoke?: () => Promise<void>;
+    /** O agente sem concessor de VIP ligado. */
+    readonly withoutVips?: boolean;
   } = {},
 ): {
   readonly queue: SiteDeliveries;
   readonly repository: SiteDeliveriesRepository;
   readonly calls: Call[];
   readonly delivered: Delivered[];
+  readonly revoked: Revoked[];
 } {
   const db = openDatabase({ file: MEMORY_DATABASE });
 
@@ -93,6 +104,7 @@ function harness(
   const repository = new SiteDeliveriesRepository(db);
   const fetch = fakeFetch(responses);
   const delivered: Delivered[] = [];
+  const revoked: Revoked[] = [];
 
   const queue = new SiteDeliveries({
     client: new SiteClient({
@@ -114,11 +126,21 @@ function harness(
 
       delivered.push({ steamId: input.steamId, plan: input.plan });
     },
+    revokeVip:
+      options.withoutVips === true
+        ? undefined
+        : async (input): Promise<void> => {
+            if (options.revoke !== undefined) {
+              await options.revoke();
+            }
+
+            revoked.push({ steamId: input.steamId, tier: input.tier });
+          },
     logger: silent,
     now: () => NOW,
   });
 
-  return { queue, repository, calls: fetch.calls, delivered };
+  return { queue, repository, calls: fetch.calls, delivered, revoked };
 }
 
 /** Uma tarefa de item, como o site a manda. */
@@ -130,6 +152,18 @@ function task(over: Record<string, unknown> = {}): Record<string, unknown> {
     payload: { items: [{ shortname: 'metal.refined', amount: 100, skinId: '0' }] },
     sourceRef: 'ITM-4b81c9e2a017',
     attempts: 0,
+    ...over,
+  };
+}
+
+/** Uma tarefa de revogação, como o sweep do site a manda. */
+function revokeTask(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'DLV-0aa1bb2cc3d4',
+    steamId: STEAM_ID,
+    kind: 'vip_revoke',
+    payload: { tier: 'gold' },
+    sourceRef: 'ITM-4b81c9e2a017',
     ...over,
   };
 }
@@ -525,5 +559,196 @@ describe('a classificação do desfecho', () => {
     // O default é `failed` de propósito: ele devolve o item e o
     // jogador resgata de novo — ruim, mas visível.
     expect(ackOf(new Error('COISA_NOVA')).status).toBe('failed');
+  });
+});
+
+describe('a revogação de VIP vinda da fila', () => {
+  it('tira o VIP SEM esperar o jogador entrar', async () => {
+    // O caso mais comum de uma revogação é justamente quem parou de
+    // jogar. Com o portão de presença, ela ficaria adiada por 30
+    // dias enquanto o VIP estornado continuava valendo.
+    const { queue, repository, calls, revoked } = harness(
+      [page([revokeTask()]), ACK_OK],
+      { online: [] },
+    );
+
+    await queue.poll();
+
+    expect(revoked).toEqual([{ steamId: STEAM_ID, tier: 'gold' }]);
+    expect(repository.get('DLV-0aa1bb2cc3d4')?.state).toBe('delivered');
+    expect(acksOf(calls)).toEqual([{ id: 'DLV-0aa1bb2cc3d4', status: 'delivered' }]);
+  });
+
+  it('nem pergunta quem está online', async () => {
+    // Nem sequer o `PRESENCE_UNAVAILABLE`: a resposta da presença
+    // não muda nada aqui.
+    const { queue, calls, revoked } = harness([page([revokeTask()]), ACK_OK], {
+      online: null,
+    });
+
+    await queue.poll();
+
+    expect(revoked).toHaveLength(1);
+    expect(acksOf(calls)[0]?.status).toBe('delivered');
+  });
+
+  it('o tier vem normalizado, e sem ele o payload não passa', async () => {
+    const { queue, calls, revoked } = harness([page([revokeTask({ payload: { tier: ' GOLD ' } })]), ACK_OK]);
+
+    await queue.poll();
+
+    expect(revoked[0]?.tier).toBe('gold');
+
+    const semTier = harness([page([revokeTask({ payload: {} })]), ACK_OK]);
+
+    await semTier.queue.poll();
+
+    expect(semTier.revoked).toHaveLength(0);
+    expect(acksOf(semTier.calls)).toEqual([
+      { id: 'DLV-0aa1bb2cc3d4', status: 'failed', reason: 'PAYLOAD_INVALID' },
+    ]);
+    // `calls` do primeiro caso já foi conferido pelo ACK acima.
+    expect(acksOf(calls)[0]?.status).toBe('delivered');
+  });
+
+  it('VIP que não existe mais é delivered, e não failed', async () => {
+    // O relógio DAQUI expira o VIP sozinho, quase sempre antes de a
+    // varredura do site chegar. `failed` aqui geraria alarme no
+    // funcionamento normal — e alarme que toca todo dia ninguém lê.
+    const { queue, repository, calls } = harness([page([revokeTask()]), ACK_OK], {
+      revoke: () =>
+        Promise.reject(new ApiError('VIP_NOT_FOUND', 'não tem VIP "gold" ativo', 404)),
+    });
+
+    await queue.poll();
+
+    expect(repository.get('DLV-0aa1bb2cc3d4')?.state).toBe('delivered');
+    // Sem `reason`: a lista do fio é fechada, e VIP_NOT_FOUND não
+    // está nela — ele apareceria cru para quem está de plantão.
+    expect(acksOf(calls)).toEqual([{ id: 'DLV-0aa1bb2cc3d4', status: 'delivered' }]);
+  });
+
+  it('sem o concessor ligado, falha com o MESMO código da concessão', async () => {
+    const { queue, repository, calls } = harness([page([revokeTask()]), ACK_OK], {
+      withoutVips: true,
+    });
+
+    await queue.poll();
+
+    expect(repository.get('DLV-0aa1bb2cc3d4')?.reason).toBe('VIP_GRANTER_UNAVAILABLE');
+    expect(acksOf(calls)).toEqual([
+      { id: 'DLV-0aa1bb2cc3d4', status: 'failed', reason: 'VIP_GRANTER_UNAVAILABLE' },
+    ]);
+  });
+
+  it('a linha órfã REEXECUTA, em vez de virar indeterminada', async () => {
+    // É a única tarefa que reexecuta: tirar o VIP duas vezes não
+    // tira nada na segunda. Mandá-la para conferência humana
+    // deixaria de pé, até alguém olhar, um VIP já estornado.
+    const { queue, repository, calls, revoked } = harness([page([revokeTask()]), ACK_OK]);
+
+    repository.reserve(
+      {
+        id: 'DLV-0aa1bb2cc3d4',
+        serverId: SERVER,
+        steamId: STEAM_ID,
+        kind: 'vip_revoke',
+        payload: '{"tier":"gold"}',
+        sourceRef: null,
+      },
+      NOW - 60_000,
+    );
+
+    await queue.poll();
+
+    expect(revoked).toEqual([{ steamId: STEAM_ID, tier: 'gold' }]);
+    expect(repository.get('DLV-0aa1bb2cc3d4')?.state).toBe('delivered');
+    expect(acksOf(calls)).toEqual([{ id: 'DLV-0aa1bb2cc3d4', status: 'delivered' }]);
+  });
+
+  it('mas a ENTREGA órfã continua indo para conferência humana', async () => {
+    // O contraste é o ponto: lá o comando pode ter saído, e repetir
+    // entregaria duas vezes.
+    const { queue, repository, calls, delivered } = harness([page([task()]), ACK_OK]);
+
+    repository.reserve(
+      {
+        id: 'DLV-9f3a1c2b7e04',
+        serverId: SERVER,
+        steamId: STEAM_ID,
+        kind: 'item',
+        payload: '{}',
+        sourceRef: null,
+      },
+      NOW - 60_000,
+    );
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(0);
+    expect(repository.get('DLV-9f3a1c2b7e04')?.state).toBe('indeterminate');
+    expect(acksOf(calls)).toEqual([
+      { id: 'DLV-9f3a1c2b7e04', status: 'deferred', reason: 'AGENT_INDETERMINATE' },
+    ]);
+  });
+
+  it('o RCON fora ADIA a revogação, e a reserva sai da frente', async () => {
+    const { queue, repository, calls } = harness([page([revokeTask()]), ACK_OK], {
+      revoke: () =>
+        Promise.reject(new ApiError('RCON_UNAVAILABLE', 'o agente não fala com o RCON', 503)),
+    });
+
+    await queue.poll();
+
+    expect(repository.get('DLV-0aa1bb2cc3d4')).toBeNull();
+    expect(acksOf(calls)).toEqual([
+      { id: 'DLV-0aa1bb2cc3d4', status: 'deferred', reason: 'RCON_UNAVAILABLE' },
+    ]);
+  });
+});
+
+describe('a concessão de VIP vinda da fila', () => {
+  it('concede com o jogador OFFLINE: a linha é do agente, o grupo é reflexo dela', async () => {
+    // Era o defeito que aparecia na tela de VIPs vazia: o VIP
+    // comprado ficava preso na fila do site, invisível no painel,
+    // até o jogador entrar — e o prazo do grant de lá já corria.
+    // Quem põe o grupo em quem estava fora é o `OnPlayerConnected`
+    // do OrigemZVip.
+    const { queue, repository, calls, delivered } = harness(
+      [page([task({ id: 'DLV-82d44653f2be', kind: 'vip', payload: { tier: 'gold', days: 30 } })]), ACK_OK],
+      { online: [] },
+    );
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.plan.vip).toEqual({ tier: 'gold', days: 30 });
+    expect(repository.get('DLV-82d44653f2be')?.state).toBe('delivered');
+    expect(acksOf(calls)).toEqual([{ id: 'DLV-82d44653f2be', status: 'delivered' }]);
+  });
+
+  it('nem pergunta quem está online', async () => {
+    const { queue, calls, delivered } = harness(
+      [page([task({ kind: 'vip', payload: { tier: 'gold', days: 30 } })]), ACK_OK],
+      { online: null },
+    );
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(1);
+    expect(acksOf(calls)[0]?.status).toBe('delivered');
+  });
+
+  it('mas o ITEM continua esperando: ele nasce ao lado de um corpo', async () => {
+    // O contraste é o ponto. Sem o portão, o `origemz.give` sairia
+    // para um jogador que não está lá.
+    const { queue, calls, delivered } = harness([page([task()]), ACK_OK], { online: [] });
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(0);
+    expect(acksOf(calls)).toEqual([
+      { id: 'DLV-9f3a1c2b7e04', status: 'deferred', reason: 'PLAYER_OFFLINE' },
+    ]);
   });
 });

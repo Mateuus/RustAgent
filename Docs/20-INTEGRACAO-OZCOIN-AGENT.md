@@ -24,6 +24,12 @@
 > assim, e renomeá-las quebraria a integração. Elas atravessam a fronteira do
 > RustAgent num ponto só — `core/src/store/site-client.ts` — e daí para dentro o
 > nome é nosso.
+>
+> **Etiqueta do contrato em uso: `oz-rust/7`** (04/09/2026). Ela está aqui, no
+> alto, de propósito: é a PRIMEIRA ocorrência da string neste arquivo, e é ela
+> que o `grep -Eom1 'oz-rust/[0-9]+'` da §23 devolve quando alguém compara os
+> dois manuais. As menções a `oz-rust/6` e anteriores, mais abaixo, são
+> **histórico** — o que mudou em cada etiqueta, e não onde estamos.
 
 ---
 
@@ -248,7 +254,7 @@ troca de dialeto é a troca de UMA classe.
 | [D17](#d17--um-middleware-global-do-site-mata-o-request) | `validateBalanceChange` mata o request | armadilha | 403 sem `error_code` que ninguém entende |
 | [D18](#d18--reason-não-existe-no-site) | `reason` não existe no site | média | extrato do jogador sem texto |
 | [D19](#d19--a-carteira-remota-não-tem-fetchimpl-nem-teste) | Sem `fetchImpl`, sem teste | alta | protocolo de dinheiro sem cobertura |
-| [D20](#d20--exists-é-sempre-true) | `exists` é sempre `true` | armadilha | ramificação por campo que nunca é falso |
+| [D20](#d20--exists-saiu-do-contrato) | `exists` **saiu do contrato** (era sempre `true`) | ✅ resolvida em `oz-rust/6` | ramificação por campo que nunca era falso |
 
 ### D1 — O caminho das rotas
 
@@ -423,7 +429,8 @@ entender pode ter cobrado.
 (`wallet.ts:192-204`).
 
 **O que o site faz.** `GET /api/agent/ozcoins/balance?steamId=<17 dígitos>` e
-responde `{ steamid, moedas, exists }` (`agent-ozcoins.controller.ts:40-63`).
+responde `{ steamid, moedas }` (`agent-ozcoins.controller.ts:40-63`). Havia um
+terceiro campo, `exists`; ele saiu do contrato em `oz-rust/6` — ver D20.
 
 **Efeito prático se ficar como está.** `getBalance` cai no ramo de erro
 (`wallet.ts:194-202`) e devolve `balance: 0` para todo mundo, **em silêncio** —
@@ -645,24 +652,38 @@ justamente o que decide se um jogador perde dinheiro — ficaria sem cobertura.
 `RustMapsClient` (`core/src/wipe/rustmaps.ts:181` e `:210`), e §19 lista os
 casos que precisam existir.
 
-### D20 — `exists` é sempre `true`
+### D20 — `exists` saiu do contrato
 
-**O que o agent assume.** Nada hoje; a armadilha é para quem escrever a tela
+**O que o agent assume.** Nada; a armadilha era para quem escrevesse a tela
 depois.
 
-**O que o site faz.** `GET /ozcoins/balance` faz `User.findOrCreate` com
+**O que o site fazia.** `GET /ozcoins/balance` faz `User.findOrCreate` com
 `username: 'Player_' + steamId.slice(-4)` e `ozBalance: 0`
-(`agent-ozcoins.controller.ts:48-55`) e **depois** responde `exists: true`
-(`:61`) — literal, não calculado. A conta é criada pela própria consulta.
+(`agent-ozcoins.controller.ts:48-55`) e **depois** respondia `exists: true` —
+literal, não calculado. A conta é criada pela própria consulta.
 
-**Efeito prático se ficar como está.** Qualquer lógica do tipo "se não existe
+**Efeito prático se tivesse ficado.** Qualquer lógica do tipo "se não existe
 conta, convide a se cadastrar" ramificaria por um campo que nunca é falso. E, de
 quebra, abrir a loja povoa `users` com contas-fantasma de saldo zero — é o
 comportamento existente do DayZ, mas o volume do Rust é outro.
 
-**Resolução.** **Nunca ramifique por `exists`.** O `SiteWallet` nem o lê. Quem
-não tem OZ cai em 422 com a frase pronta do site, e é essa frase que o jogador
-lê. Ver §7.
+✅ **RESOLVIDA em 04/09/2026, sob a etiqueta `oz-rust/6`.** O dono escolheu a
+saída mais barata da H58 do backlog do site: **remover o campo**. A resposta de
+`GET /ozcoins/balance` tem hoje **duas chaves**, `{ steamid, moedas }`.
+
+**O que muda deste lado: NADA.** `SiteClient.balance()` nunca leu
+`result.body.exists` — ele **sintetiza** o campo
+(`core/src/site/client.ts:177` devolve `{ balance: toInteger(body.moedas),
+exists: true }`), e o `SiteWallet` nem olha para ele. Foi essa a razão de a
+remoção ser barata. ⚠️ Se um dia o `BalanceBody` deste repositório perder o campo
+sintético, o `expect` do caso `ozcoins-balance` em
+`contracts/oz-rust-fixtures.json` cai junto.
+
+⚠️ **O `findOrCreate` FICA.** Ele é o caminho de carteira compartilhado com o
+**DayZ em produção**, que conta com o stub para creditar quem nunca logou no
+site. A leitura continua escrevendo em duas tabelas, e isso segue registrado como
+dívida aberta (H58) no `docs/BACKLOG.md` do site. Quem não tem OZ continua caindo
+em 422 com a frase pronta, e é essa frase que o jogador lê. Ver §7.
 
 ---
 
@@ -1052,7 +1073,12 @@ e **a entrega de inventário do DayZ para de funcionar**.
 |---|---|---|
 | `steamid` | string | minúsculo, e é o mesmo que foi enviado |
 | `moedas` | **string** | o saldo, inteiro serializado como texto |
-| `exists` | boolean | **sempre `true`**. Nunca ramifique por ele — §7.2 |
+
+⚠️ **SÃO DUAS CHAVES, e eram três.** O campo `exists` **saiu do contrato em
+`oz-rust/6`** (04/09/2026). Ele era o literal `true`, nunca calculado, e só podia
+ser verdade porque o `findOrCreate` da própria consulta acabava de criar a conta —
+ver §7.2. **Nada quebrou deste lado:** o `SiteClient` nunca leu o campo do site,
+ele o **sintetiza** (`core/src/site/client.ts:177`).
 
 **Erros:** `400 { error: 'steamId inválido (esperado 17 dígitos)' }` — **sem
 `error_code`** (`:42-44`). Os erros de pareamento vêm do middleware, com código.
@@ -1067,7 +1093,7 @@ curl -sS "$SITE_BASE_URL/api/agent/ozcoins/balance?steamId=$STEAM_ID" \
   -H "X-Server-Id: $SITE_SERVER_ID" \
   -H 'Accept: application/json' \
   -H 'User-Agent: OrigemZ-Rust-Agent/1.0'
-# 200 {"steamid":"76561198000000000","moedas":"500","exists":true}
+# 200 {"steamid":"76561198000000000","moedas":"500"}
 ```
 
 **Efeito colateral que o agente precisa conhecer:** esta consulta **cria** a
@@ -1438,7 +1464,7 @@ prazo não vencido — e **ordenada por `id ASC`**, do mais antigo para o mais n
 **O vocabulário do `payload`, por `kind`.** Este é o contrato de entrega do Rust,
 e ele existe porque o site **não tem** um: `services/deliveryTypes.ts` conhece
 DayZ, SCUM e Conan, e `getGamePlugin` faz **fallback silencioso para DayZ**. O
-site precisa aprender estes quatro formatos — **três ativos e um reservado**,
+site precisa aprender estes cinco formatos — **todos ativos desde 04/09/2026**,
 ver a caixa logo abaixo —, e o agente precisa recusar tudo o que não for
 exatamente um deles.
 
@@ -1448,10 +1474,41 @@ exatamente um deles.
 | `kit` | `{ items: [{ shortname, amount, skinId }] }`, 1..40 itens | um `origemz.give` por item, em sequência |
 | `vip` | `{ tier: string, days: number \| null }` | `vips.grant({ steamId, tier, expiresAt, origin:'loja', createdBy:'site' })` |
 | `vehicle` | `{ prefab: string, fuel: number }` | `origemz.vehicle.spawn <steamId> <prefab> <fuel>` |
+| `vip_revoke` | `{ tier: string }` | `vips.revoke(steamId, tier, 'site')` — e **nenhum comando de console**: quem sai do grupo sai pelo `apply` do `vips`, ou na reconciliação da próxima conexão |
 
-####  `kind: 'vip'` É RESERVA DE CONTRATO: NADA O PRODUZ NA FASE 1  ####
+**`vip_revoke` é o único que não entrega nada, e ele difere em três pontos**
+(`core/src/site/deliveries.ts`, `#revokeVip`):
 
-**Os quatro `kind` não são igualmente ativos, e este documento tratava-os como
+| Ponto | Entrega | `vip_revoke` |
+|---|---|---|
+| portão de presença | exige o jogador online (§10.3) | **não exige** — e o `kind: 'vip'` também não, desde 04/09/2026: quem manda no VIP é a tabela do agente. O caso mais comum de uma revogação é justamente quem parou de jogar; com o portão, ela ficaria `deferred` até o TTL de 30 dias enquanto o VIP estornado continuava valendo |
+| linha órfã em `reserved` | vira `indeterminate` e **não reexecuta** (§10.4) | **reexecuta**: o medo do indeterminado é entregar duas vezes, e tirar o VIP duas vezes não tira nada na segunda |
+| alvo que não existe | `failed` | **`delivered`**, sem `reason`: o estado que o site pediu já vale — ver §5.8 e a §3 do `Docs\27` |
+
+####  A FASE 2 CHEGOU EM 04/09/2026: `kind: 'vip'` É OPERAÇÃO NORMAL  ####
+
+**O site ligou o resgate de VIP de Rust** (`Docs\25` e `Docs\26` §3): ele
+registrou o reconciliador, e as tarefas `kind: 'vip'` passaram a nascer de
+resgate de jogador. A partir daí:
+
+- **`kind: 'vip'` na fila não é mais defeito**, e o oitavo alarme do §18.4 está
+  DESARMADO. Ele existia porque um `vip` só podia chegar por engano de cadastro;
+  agora ele chega porque alguém comprou;
+- **`kind: 'vip_revoke'` nasceu junto**, e é o que fecha o ciclo: estorno,
+  chargeback, ban e o vencimento que a varredura do site percorre a cada minuto.
+  Sem ele, revogar do lado de lá não tinha caminho até aqui — o VIP só sumia
+  quando o relógio DESTE agente o expirasse;
+- **`days: null` continua no contrato e nada no site o produz**: VIP vitalício
+  não é vendável por lá nesta fase (o `expires_at` de lá é `NOT NULL`). O `null`
+  continua saindo daqui, no espelho, e é lá que a divergência
+  "vitalício aqui, com prazo lá" aparece.
+
+O parágrafo abaixo é o estado ANTERIOR, guardado porque explica por que o
+`CHECK`, o ramo do `planOfPayload` e a régua de `tier` já existiam antes de
+qualquer tarefa chegar — e porque nada disso precisou nascer às pressas no dia
+em que o site ligou a venda.
+
+**Os quatro `kind` não eram igualmente ativos, e este documento tratava-os como
 se fossem.** O manual do site decidiu por escrito (§11.4 e §23.3 de lá) que
 `rust_vip` fica **fora** de `DELIVERY_TYPES_BY_GAME`, de
 `DELIVERY_BY_KIND_BY_GAME` e de `DELIVERY_HANDLER`, e que `vip` fica fora de
@@ -1472,12 +1529,11 @@ saberia que ele tem VIP, nem quando vence.
 | o ramo `vip` do `planOfPayload` (§14.6) e o `vips.grant` do `#deliver` | o caminho é o **mesmo** da compra in-game (§14.6), que está viva hoje e vende VIP pela loja local |
 | a régua de `tier` e `days`, e o `UNKNOWN_VIP_TIER` | idem — a loja local os usa todo dia |
 
-**O que muda é só o que você deve ESPERAR:** um `kind: 'vip'` chegando pela fila
-na fase 1 é **sinal de defeito do lado do site**, não operação normal. O agente
-não o recusa por isso — executá-lo é o comportamento certo se ele chegar, e o
-caminho está testado —, mas **é alarme** (§18.4, o oitavo): a primeira tarefa
-`vip` vinda da fila é motivo para alguém olhar no mesmo dia, porque significa que
-um dos quatro mapas de lá foi mexido **sem** o reconciliador junto.
+**O que mudava era só o que se devia ESPERAR:** um `kind: 'vip'` chegando pela
+fila na fase 1 era **sinal de defeito do lado do site**, não operação normal. O
+agente não o recusava por isso — executá-lo é o comportamento certo, e o caminho
+estava testado —, mas era alarme, e o alarme foi desarmado em 04/09/2026, quando
+o reconciliador do site subiu (§18.4).
 
 **Se o dono decidir vender VIP de Rust pelo site**, o preço está escrito na §11.3
 do manual do site: registrar um reconciliador de VIP de Rust, preencher
@@ -2157,7 +2213,7 @@ O `steamId` **nunca vem de argumento** no caminho do jogo: no clique ele sai da
 conexão do jogador, e o `serverId` sai da conexão RCON por onde a linha chegou.
 Isso não muda, e é o que impede alguém de comprar no saldo de outro.
 
-### 7.2 O stub criado por `findOrCreate`, e por que `exists` é sempre `true`
+### 7.2 O stub criado por `findOrCreate`, e por que `exists` saiu do contrato
 
 Um jogador de Rust que nunca abriu o site é o caso **mais comum**, e o site já o
 resolve — de um jeito que precisa ser **entendido, não consertado**.
@@ -2172,15 +2228,22 @@ const [user] = await User.findOrCreate({
 });
 ```
 
-A conta nasce **na própria consulta**. Por isso `exists: true` está escrito
-literalmente na resposta (`agent-ozcoins.controller.ts:61`) — não é calculado, e
-nunca será `false`.
+A conta nasce **na própria consulta**. Era por isso que `exists: true` estava
+escrito literalmente na resposta — não era calculado, e nunca seria `false`.
+
+✅ **E foi por isso que o campo SAIU, em `oz-rust/6` (04/09/2026).** A resposta
+tem hoje **duas chaves**: `{ steamid, moedas }`. Um campo constante convida o
+próximo cliente a ramificar por algo que nunca é falso, e o dono preferiu removê-lo
+a fazê-lo mentir menos. **O `findOrCreate` continua** — o DayZ em produção depende
+dele.
 
 **Consequências para o agente, e as três são regras:**
 
-1. **Nunca ramifique por `exists`.** O `SiteWallet` nem lê o campo. Uma tela do
-   tipo "você ainda não tem conta, cadastre-se" ramificaria por algo que nunca
-   acontece.
+1. **Não existe `exists` para ramificar.** O `SiteWallet` nunca leu o campo, e o
+   `SiteClient` o **sintetiza** (`core/src/site/client.ts:177`) — foi essa
+   indireção que fez a remoção no site não custar nada aqui. Uma tela do tipo
+   "você ainda não tem conta, cadastre-se" ramificaria por algo que nunca
+   acontece, e agora nem chega no fio.
 2. **Todo débito de quem nunca comprou OZ cai em 422.** `ozBalance: 0` menos
    qualquer preço dá `after < 0`, e `ozCoinsMutation.ts:164-169` lança 422 com a
    frase pronta. Isso é o desenho, não um defeito: **OZ se compra no site**.
@@ -2458,6 +2521,13 @@ export class SiteWallet implements Wallet, ChargeProver {
    * `true`, porque o `findOrCreate` do site cria a conta na própria
    * consulta (agent-ozcoins.controller.ts:48-61).
    */
+
+> ⚠️ **ESTE COMENTÁRIO ESTÁ DEFASADO NO CÓDIGO, e a listagem acima é cópia fiel
+> dele.** Desde `oz-rust/6` (04/09/2026) **a resposta do site não traz `exists`
+> nenhum** — não há o que ignorar. O `SiteWallet` continua correto porque nunca
+> leu o campo; quem o produz é o `SiteClient`, que o sintetiza. **Pendência do
+> lado do agent:** reescrever o comentário de `core/src/store/site-wallet.ts:104`
+> e decidir se `BalanceBody.exists` continua existindo como campo sintético.
   async getBalance(steamId: string): Promise<WalletBalance> {
     const result = await this.#client.balance(steamId);
 
@@ -3204,7 +3274,21 @@ este.
 pico do canal sai de ~60 para ~91 req/min por servidor, e o piso recomendado de
 `AGENT_RATE_LIMIT_PER_SERVER` sobe de 120 para **180** (§13.1 do manual do site).
 
-### 10.3 A presença, e por que ela vem antes
+### 10.3 A presença, e por que ela vem antes — e para quem ela NÃO vem
+
+> **Ela vale para `item`, `kit` e `vehicle`, e para mais nenhum.** As duas
+> tarefas de VIP (`vip` e `vip_revoke`) pulam este portão inteiro desde
+> 04/09/2026. VIP não é inventário: é uma linha na tabela do agente, e o grupo
+> do Oxide é o **reflexo** dela — quem o aplica em quem estava fora é o
+> `OnPlayerConnected` do OrigemZVip (`Plugins/OrigemZVip.cs:191`), comparando o
+> jogador com o estado que o agente já empurrou.
+>
+> Esperar ali custava caro e calado: o VIP comprado ficava `deferred` no site e
+> **invisível na tela de VIPs do painel** até o jogador entrar; se ele demorasse
+> mais que o TTL de 30 dias, o site devolvia ao inventário um VIP pago. E o
+> prazo do `UserVipGrant` de lá corria o tempo todo — os dois lados divergiam
+> desde o primeiro dia. Conceder na hora é o que **alinha os prazos**: os 30
+> dias contam do resgate nos dois bancos.
 
 Item, kit e veículo entram em **inventário**, e inventário só existe para quem
 está conectado. O agente já tem essa resposta, e já tem a distinção certa: o
@@ -4357,6 +4441,17 @@ export interface BalanceBody {
   /** Sempre `true` no site. Nunca ramifique por ele — §7.2. */
   readonly exists: boolean;
 }
+```
+
+> ⚠️ **`exists` AQUI É SINTÉTICO desde `oz-rust/6`.** O site parou de mandá-lo
+> (04/09/2026); quem o carimba é `client.balance()`, que devolve `exists: true`
+> fixo. O tipo continua honesto sobre o que o `SiteClient` entrega — e desonesto
+> sobre o que o fio traz. **Pendência do lado do agent:** ou o campo sai do
+> `BalanceBody` (e o `expect` do caso `ozcoins-balance` em
+> `contracts/oz-rust-fixtures.json` sai junto), ou o comentário passa a dizer que
+> ele é carimbado aqui e não recebido.
+
+```ts
 
 /** `POST /ozcoins/debit|credit` — JÁ TRADUZIDO. */
 export interface MutationBody {
@@ -7229,7 +7324,7 @@ Em ordem de custo, do mais barato ao mais caro:
 7. **`catalog.mirroredVersion === catalog.version`** — iguais, o painel do site
    mostra a loja de agora.
 
-### 18.4 Os oito alarmes que valem a pena
+### 18.4 Os alarmes que valem a pena (eram oito; sete seguem de pé)
 
 | Alarme | Condição | Por quê |
 |---|---|---|
@@ -7240,7 +7335,7 @@ Em ordem de custo, do mais barato ao mais caro:
 | **entrega indeterminada** | `deliveries.indeterminate > 0` | precisa de gente, e não some sozinha |
 | **pareamento caído** | `status !== 'active'` por mais de 5 min | a loja está indisponível e o jogador não sabe por quê. `lastBeaconErrorCode` diz **qual** das sete causas |
 | **defeito de contrato** | o site respondeu `INVALID_ACK_STATUS`, `INVALID_ACK_BODY` ou `SHOP_GAME_NOT_SUPPORTED`, **ou** um `INVALID_CURSOR` apareceu duas vezes na mesma rodada | nenhum destes se conserta esperando, e todos são silenciosos: o `INVALID_ACK_STATUS` derruba **50 desfechos de uma vez** e as tarefas simplesmente continuam `pending` do outro lado, como se o agente nunca as tivesse visto (§5.8) |
-| **`kind: 'vip'` veio da fila** | qualquer tarefa de `/deliveries/pending` com `kind === 'vip'`, **uma vez** | na fase 1 nada no site cria esse `kind` (§5.7, e §11.4 do manual do site): `rust_vip` está fora dos quatro mapas de entrega de lá. Se um chegou, alguém reabriu um mapa **sem** o reconciliador junto — e o desfecho é o jogador com VIP no jogo e o site sem `UserVipGrant`, que é exatamente o que a lei escrita de lá existe para impedir. O agente **entrega** assim mesmo (recusar seria pior: o jogador pagou); o alarme é para alguém olhar o cadastro no mesmo dia |
+| ~~**`kind: 'vip'` veio da fila**~~ | — | **DESARMADO em 04/09/2026.** Ele valia enquanto `rust_vip` estava fora dos quatro mapas de entrega do site: um `vip` na fila só podia ser cadastro mexido **sem** o reconciliador junto. O site registrou o reconciliador e ligou o resgate (§5.7, `Docs\25` e `Docs\26` §3) — a tarefa `vip` virou operação normal, e mantê-lo tocaria todo dia. Alarme que toca todo dia é o que ninguém mais lê |
 
 O contador `stats.stuck` (`core/src/db/store-repository.ts`) passa a somar
 `failed` **e** `charge-unknown` (§14.12). Uma indisponibilidade prolongada da
@@ -8083,7 +8178,7 @@ sem opinião.
       ```
 
       **As duas linhas têm de imprimir a mesma string.** Hoje imprimem
-      `oz-rust/3`. O critério antigo — *"as duas citam a mesma versão"* — não era
+      `oz-rust/5`. O critério antigo — *"as duas citam a mesma versão"* — não era
       verificável: um lado dizia `CONTRATO v1` e o outro `oz-rust/1`, e nenhum
       `grep` casa as duas.
 
@@ -8217,13 +8312,15 @@ site — trabalho que não está neste documento.
 **Este documento suporta (b) parcialmente:** o `kind: 'vip'` da fila de entregas
 (§5.7) já existe e funciona. O que falta é do lado do site.
 
-**O site já respondeu (a), e por escrito.** A §11.4 do manual dele deixa
-`rust_vip` fora de `DELIVERY_TYPES_BY_GAME`, de `DELIVERY_BY_KIND_BY_GAME`, de
-`DELIVERY_HANDLER` e de `ITEM_KINDS_BY_GAME.rust` — quer dizer, **nada lá cria
-tarefa desse `kind` na fase 1**. Enquanto o dono não disser (b), o ramo `vip` da
-fila é **código morto**: fica escrito, fica testado, e não é exercitado em
-produção. Está dito assim no §5.7 e no §14.6, e o oitavo alarme do §18.4 avisa se
-um dia chegar um.
+**O site respondeu (a) em 2026 e virou para (b) em 04/09/2026.** A §11.4 do
+manual dele deixava `rust_vip` fora de `DELIVERY_TYPES_BY_GAME`, de
+`DELIVERY_BY_KIND_BY_GAME`, de `DELIVERY_HANDLER` e de `ITEM_KINDS_BY_GAME.rust`
+— nada lá criava tarefa desse `kind`, e o ramo `vip` da fila era código morto
+escrito e testado. **Isso acabou:** o reconciliador subiu, o resgate foi ligado
+(`Docs\25`, `Docs\26` §3) e a revogação ganhou caminho próprio
+(`kind: 'vip_revoke'`, §5.7). A pergunta está **fechada em (b)**, o oitavo
+alarme do §18.4 foi desarmado, e o que restou de decisão de produto é o preço e
+o catálogo — não o transporte.
 
 ### 22.6 Sufixo do estorno: `:credit` ou `:refund`?
 
@@ -8422,14 +8519,14 @@ ninguém sabe se o item saiu.
 
 ## 23 — Ponto de sincronia com o manual do site
 
-> ## Contrato `oz-rust/3`
+> ## Contrato `oz-rust/7`
 >
 > Esta seção precisa ser **idêntica, campo a campo**, à seção equivalente de
 > `F:/Projects/OrigemZSite/docs/mateuus/rust/docs/INTEGRACAO-OZCOIN-RUST.md` (o manual do site).
 > **Se um campo divergir entre os dois documentos, os dois estão errados até
 > alguém reconciliar** — não existe "o meu está certo".
 >
-> **A etiqueta de versão do contrato é `oz-rust/3`**, e os dois documentos a
+> **A etiqueta de versão do contrato é `oz-rust/7`**, e os dois documentos a
 > citam com essa string exata. Quem mudar qualquer coisa desta seção sobe a
 > etiqueta **nos dois arquivos, no mesmo commit**. Sem a etiqueta não há como
 > olhar um lado só e saber se ele está em dia — foi por essa fresta que `skinId`
@@ -8442,6 +8539,79 @@ ninguém sabe se o item saiu.
 > dois lados**, então toda mudança desta seção sobe a etiqueta nos dois arquivos,
 > no mesmo commit.
 >
+> **O que mudou em `oz-rust/7`:** duas coisas, e as duas são **aditivas** — quem
+> fala a `/6` continua entendido. (a) O espelho de VIP passou a levar **`tiers[]`**
+> junto dos `vips[]`, DENTRO do hash da `version`, para o cadastro de produto do
+> site escolher o nível em vez de digitá-lo. (b) Nasceu o **`kind: 'vip_revoke'`**
+> na fila de entregas, com `payload: { tier }` — o caminho do estorno, do
+> chargeback, do ban e do vencimento que o site varre a cada minuto. A etiqueta
+> subiu apesar de nada quebrar porque **um `kind` novo na fila é exatamente o
+> tipo de coisa que alguém precisa conseguir datar depois**. Detalhe nos
+> `Docs/26`, `Docs/27` e `Docs/28`, e nas §5.7 e §10.3.
+>
+> **O que mudou em `oz-rust/6`:** o campo **`exists` SAIU** da resposta de
+> `GET /ozcoins/balance` (rota 2). Ela agora tem **duas chaves**: `{ steamid, moedas }`. É a
+> decisão do dono sobre a **H58** do backlog do site — a mais barata das três saídas. O campo
+> era o literal `true`, nunca calculado, e só podia ser verdade porque o `findOrCreate` da
+> própria consulta acabava de criar a conta; a sonda de 04/09/2026 o mediu perguntando o saldo
+> de um SteamID inexistente. Detalhe em **D20** e na **§7.2**.
+>
+> ⚠️ **Esta é a primeira etiqueta que REMOVE algo do fio**, e por isso ela subiu apesar de
+> nenhum código deste lado ler o campo: o `SiteClient` o **sintetiza**
+> (`core/src/site/client.ts:177` devolve `{ balance, exists: true }` traduzido de `moedas`) e
+> nunca o leu da resposta. Foi essa indireção que fez a remoção não custar nada aqui.
+>
+> ⚠️ **Duas pendências ficaram DESTE lado, e nenhuma é urgente:** o comentário de
+> `core/src/store/site-wallet.ts:104` ainda diz que o campo *"é ignorado de propósito"* (não há
+> mais o que ignorar), e `BalanceBody.exists` continua no tipo como campo **sintético** —
+> honesto sobre o que o `SiteClient` entrega, desonesto sobre o que o fio traz. Decidir se ele
+> sai leva junto o `expect` do caso `ozcoins-balance` em `contracts/oz-rust-fixtures.json`.
+>
+> ⚠️ **O `findOrCreate` do site NÃO saiu, e a H58 continua aberta.** A leitura ainda escreve em
+> duas tabelas, e o DayZ em produção depende disso para creditar quem nunca logou no site.
+> **Nada mais mudou no fio:** os três valores de ACK de entrega, o vocabulário de `reason`, o
+> payload de entrega, os `error_code` e a convenção de `referenceId` continuam byte a byte como
+> estavam.
+>
+> ⚠️ **A reserva de etiquetas se moveu uma casa.** As `/6`, `/7` e `/8` estavam reservadas para
+> as quatro áreas de config avançada; a `/6` foi gasta aqui, e as reservadas passam a ser
+> **`/7`, `/8` e `/9`**. Reserva é conveniência de planejamento; a etiqueta é o que diz se o fio
+> mudou, e quando os dois conflitam quem cede é a reserva.
+>
+> **O que mudou em `oz-rust/5`:** a **reconciliação** do que estava fora dos manuais — o
+> `desired` da rota 13 passou de oito para **23 campos** (a tela de configuração inteira), e
+> nasceram as **rotas 15 e 16**, o canal de config de rede (`store`, `kits`, `vips`). O corpo
+> está na subseção **"A tela inteira e a config de rede (Lote 4)"**, idêntico nos dois
+> manuais. Nada do que já atravessava o fio foi alterado: os três valores de ACK de entrega, o
+> vocabulário de `reason`, o payload de entrega, os `error_code` e a convenção de
+> `referenceId` continuam byte a byte como estavam.
+>
+> ✅ **E esta é a primeira etiqueta com o canal MEDIDO.** Em 04/09/2026 o cliente real do
+> agent falou com o dev pela primeira vez (`npm run site:probe -w core`), e o que ele achou
+> está em `F:/Projects/RustAgent/contracts/oz-rust-fixtures.json` — o arquivo de fixtures que
+> os dois lados pediam, agora consumido pelos testes do agent. **Três divergências
+> apareceram na primeira rodada**, e nenhuma delas teria sido pega por teste nenhum dos dois
+> lados: `version: 0` como sentinela de "não há config" (o ACK dela volta
+> `400 CONFIG_INVALID_VERSION`); o ACK de comando respondendo `results[]` onde o manual
+> descrevia `unknown[]`; e o **304 que nunca acontece** — o dev responde 200 com
+> `Cache-Control: no-store` mesmo com `If-None-Match` idêntico. As três estão em
+> `F:/Projects/RustAgent/Docs/21-STATUS-PARA-O-AGENTE-DO-SITE.md` §9, com o que cada lado faz
+> a respeito.
+>
+> **O que mudou em `oz-rust/4`:** o `desired` da rota 13 ganhou o **oitavo campo — `autoUpdate`**, e
+> ele é o único que **não** é do `.ini`. Nenhuma rota nova, nenhuma `version` nova, nenhum ACK novo:
+> ele viaja no **mesmo** `desired`, na **mesma** `version`, e é ACKado com ela. É **tri-estado**
+> (chave ausente · `false` · `true`), **não** entra em `RESTART_KEYS` e **não** é risco de wipe.
+> ⚠️ **Quem o aplica do lado do agent NÃO é o `updateSettings` do `.ini` — é o caminho de
+> `/steam-update`**; quem procurar o valor no `.ini` e não achar vai concluir que a gravação se
+> perdeu. Nada do que já atravessava o fio foi alterado.
+>
+> ✅ **A reivindicação concorrente do `Docs/23-CONFIG-PELO-SITE.md` foi RESOLVIDA em
+> 04/09/2026:** o conteúdo dele (os campos da rota 13 e as rotas 15/16) está reconciliado nos
+> dois manuais, na subseção do Lote 4, e a etiqueta subiu para `oz-rust/5` nos dois no mesmo
+> commit. O cabeçalho daquele documento foi corrigido junto. A etiqueta é dos manuais, não de
+> quem a reivindica primeiro — é isso que a torna verificável por `grep`.
+>
 > **O que mudou em `oz-rust/3`:** nasceram as **rotas 11 a 14** — a **fila de
 > comandos** (`/commands/claim` + `/commands/ack`) e a **config desejada**
 > (`/server/config` + `/server/config/ack`), o Lote 3 (§23.10) — e a tabela de
@@ -8453,12 +8623,16 @@ ninguém sabe se o item saiu.
 > `status` e dez `reason` próprios —, e confundir os dois é o primeiro erro que
 > este lote pode produzir.
 >
-> ⚠️ **As rotas 11-14 não existem em nenhum dos dois lados.** O backend do site
-> está sendo escrito agora; este agent não tem nenhuma das duas pontas
-> (`core/src/site/` tem `status.ts` e `deliveries.ts`, e nada que puxe comando ou
-> config). A etiqueta subiu porque **o contrato é anterior às duas
-> implementações**, que é a única forma de elas nascerem casadas. O manual de
-> implementação deste lado é o **`Docs/22-COMANDOS-E-CONFIG-DO-SITE.md`**.
+> ✅ **As rotas 11-14 existem hoje nos DOIS lados** — quando `oz-rust/3` foi carimbada, não existiam
+> em nenhum, e a etiqueta subiu porque **o contrato é anterior às duas implementações**, que é a
+> única forma de elas nascerem casadas. Em 04/09/2026 o estado é: no **site**,
+> `agent-commands.controller.ts` e `agent-server-config.controller.ts`, com os models
+> `RustAgentCommand` e `RustServerConfig` e as migrations `migrate_rust_agent_commands.ts` e
+> `migrate_rust_server_configs.ts`; no **agent**, `core/src/site/commands.ts` e
+> `core/src/site/config.ts`. ⚠️ **Nenhuma linha de uma ponta falou com a outra ainda** — os testes
+> dos dois lados falam com dublês, e é esse o risco número um que continua de pé.
+>
+> O manual de implementação deste lado é o **`Docs/22-COMANDOS-E-CONFIG-DO-SITE.md`**.
 >
 > **O que mudou em `oz-rust/2`:** nasceu a **décima rota** —
 > `POST /api/agent/server/status`, o retrato do servidor que este agent empurra a
@@ -8942,7 +9116,7 @@ acessório.
 | # | Método · caminho | Estado | Request | Response 200 |
 |---|---|---|---|---|
 | 1 | `POST /beacon` | existe | `{ serverId, port, version, mac, capabilities[] }` + (se ativo) `X-Agent-Timestamp`, `X-Agent-Signature` | `{ ok, registered, status, serverExists, resolvedViaAlias, currentServerId, message }` |
-| 2 | `GET /ozcoins/balance?steamId=` | existe | query `steamId` (17 dígitos) | `{ steamid, moedas, exists }` |
+| 2 | `GET /ozcoins/balance?steamId=` | existe | query `steamId` (17 dígitos) | `{ steamid, moedas }` — **duas chaves**; o `exists` saiu em `oz-rust/6` (D20) |
 | 3 | `POST /ozcoins/debit` | existe | `{ steamId, amount, referenceId, observacao?, productId? }` | fresco: `{ success, steamid, moedas, before, after, amount, direction:'debit', transactionId }` · replay: `{ success, idempotent:true, steamid, moedas, before, after, amount, direction }` |
 | 4 | `POST /ozcoins/credit` | existe | `{ steamId, amount, referenceId, observacao? }` | igual ao 3, com `direction:'credit'` |
 | 5 | `GET /ozcoins/transaction?referenceId=&steamId=` | existe | query, ambos obrigatórios | `{ found:true, transactionId, steamid, serverId, direction, amount, before, after, productId, observacao, createdAt }` |
@@ -8951,27 +9125,56 @@ acessório.
 | 8 | `POST /shop/mirror` | existe | `{ version, generatedAt, currency, categories[], offers[] }` (≤2 MiB) | `{ ok:true, accepted:true, version, storedAt }` |
 | 9 | `GET /shop/mirror/version` | existe | — | `{ ok:true, version, updatedAt }` |
 | 10 | `POST /server/status` | existe (Lote 2) | o retrato inteiro — `{ at, agent, server, players, build, machine, operation, kinds }`; 8 KB + 200 B por jogador, teto 64 KB | `{ ok:true, accepted:true, receivedAt }` · retrato velho: `{ ok:true, accepted:false, reason:'STALE_SNAPSHOT', receivedAt }` |
-| **11** | `POST /commands/claim` | **NENHUM DOS DOIS LADOS** (Lote 3) | `{ limit? }` (1..10) | `{ ok:true, commands:[{ id, kind, params, issuedAt, expiresAt, ttlMs, leaseToken }] }` |
-| **12** | `POST /commands/ack` | **NENHUM DOS DOIS LADOS** (Lote 3) | `{ commands:[{ id, leaseToken, status, reason?, operationId?, at }] }` (1..10) | `{ ok:true, applied, unknown:[…] }` |
-| **13** | `GET /server/config` | **NENHUM DOS DOIS LADOS** (Lote 3) | — (`If-None-Match` opcional) | `{ ok:true, version, desired:{…} }` · **304** sem corpo |
-| **14** | `POST /server/config/ack` | **NENHUM DOS DOIS LADOS** (Lote 3) | `{ version, applied, requiresRestart:[], errors:[{field, code}] }` | `{ ok:true, accepted:true }` |
+| **11** | `POST /commands/claim` | **medido 04/09** | `{ limit? }` (aceito e **clampado em 1**) | `{ ok:true, commands:[{ id, kind, params, issuedAt, expiresAt, ttlMs, leaseToken }], maxPerClaim }` |
+| **12** | `POST /commands/ack` | **medido 04/09** | `{ commands:[{ id, leaseToken, status, reason?, operationId?, at }] }` (1..10) | `{ ok:true, results:[{ commandId, applied, status, outcome }] }` — **uma linha por entrada, NÃO `{applied, unknown[]}`** (ver a ERRATA abaixo) |
+| **13** | `GET /server/config` | **medido 04/09** | — (`If-None-Match` opcional) | `{ ok:true, version, desired:{…}\|null, restartRequiring:[…] }` · **304** sem corpo. `version:0` + `desired:null` = nada declarado; `Cache-Control: no-store` |
+| **14** | `POST /server/config/ack` | **medido 04/09** | `{ version, applied, requiresRestart:[], errors:[{field, code}] }` — `version` inteiro **≥ 1** | `{ ok:true, recorded, currentVersion }` · `version:0` ⇒ **400 `CONFIG_INVALID_VERSION`** |
+
+> ####  ERRATA DE 04/09/2026 — AS LINHAS 11 A 14 FORAM CORRIGIDAS CONTRA O CÓDIGO  ####
+>
+> A linha 12 dizia `{ ok:true, applied, unknown:[…] }` — que é a resposta do ACK de **ENTREGA**
+> (linha 7), copiada para cá quando o Lote 3 foi escrito, antes de existir código dos dois lados.
+> **O site nunca respondeu isso nesta rota.** A linha 14 dizia `{ ok:true, accepted:true }` e o que
+> atravessa é `{ ok:true, recorded, currentVersion }`. A primeira sonda real
+> (`npm run site:probe -w core`, 04/09/2026) mediu as duas, e o **código é o árbitro**.
+>
+> **A etiqueta NÃO subiu, e é decisão:** ela marca mudança **no fio**, e aqui nenhum byte mudou — o
+> que mudou foi o manual parar de mentir. Subi-la mandaria os dois lados procurarem uma alteração de
+> comportamento que não existe, e as etiquetas `/7`, `/8` e `/9` estão reservadas para as quatro
+> áreas de config avançada. **Quem precisa saber se a sua cópia destas quatro linhas está em dia não
+> olha a etiqueta — olha `contracts/oz-rust-fixtures.json`**, que carrega os corpos `observed` e é o
+> árbitro destas células desde esta data.
+>
+> As três divergências, com a decisão de cada uma, estão por extenso no **§23.10 do manual do site**
+> (`docs/mateuus/rust/docs/INTEGRACAO-OZCOIN-RUST.md`) e resumidas no `Docs/21` §9.
+>
+> ⚠️ **Duas consequências práticas para este repositório:**
+> 1. **`leaseToken` é `/^[0-9a-f]{32}$/`** — 32 hex, gerados pelo site
+>    (`rustCommandQueue.newLeaseToken`). A fixture `manual` do claim traz `"b7c1cafe"` (8 chars); um
+>    ACK com um token desse formato volta `outcome: 'invalid_lease'` e **a linha não fecha**. O
+>    formato do `leaseToken` é do **site** pela regra de desempate do §23.1 — regere aquela fixture.
+> 2. **O `outcome` de `results[]` é vocabulário fechado:** `applied` · `invalid_lease` · `stale` ·
+>    `not_found` · `invalid_id` · `invalid_status` · `invalid_entry`. No `invalid_entry` o
+>    `commandId` vem **`null`** — quem consumir `results[]` precisa tolerar.
 
 > **A rota 10 é TELEMETRIA e tem limitador PRÓPRIO (30/min), separado dos 240/min das rotas 3-9.**
 > Contador separado é o ponto: um laço de status mal escrito não pode gastar a cota da fila de
 > entregas, que carrega item que o jogador já pagou. Campo a campo na seção do **retrato do
 > servidor**, nos dois manuais.
 
-> **As rotas 11-14 são do Lote 3 e NÃO EXISTEM em nenhum dos dois lados em 03/09/2026** — o
-> backend do site está sendo escrito agora, e o agent não tem nenhuma das duas pontas
-> (`core/src/site/` tem `status.ts` e `deliveries.ts`, e nada que puxe comando ou config). Elas
-> estão no contrato porque as duas implementações vão nascer contra ele, e é essa a única defesa
-> contra o que já aconteceu com `skinId` e `prefab`.
+> **As rotas 11-14 são do Lote 3 e EXISTEM nos dois lados desde 04/09/2026** — no site,
+> `agent-commands.controller.ts` e `agent-server-config.controller.ts`; no agent,
+> `core/src/site/commands.ts` e `core/src/site/config.ts`. ⚠️ **As duas pontas nunca falaram uma com
+> a outra**: os testes dos dois lados falam com dublês. Elas nasceram contra este contrato, escrito
+> antes das duas, e é essa a única defesa contra o que já aconteceu com `skinId` e `prefab`.
 
 ### 23.10 Comandos e config vindos do site (Lote 3)
 
-> **NADA DISTO EXISTE, DOS DOIS LADOS.** O backend do site está sendo escrito em paralelo a esta
-> seção; o agent não tem nenhuma das duas pontas. O contrato está aqui **antes** do código de
-> propósito — é a única defesa que sobrou depois de `skinId` e `prefab`. **O manual do agent é
+> **AS DUAS PONTAS EXISTEM, E NUNCA FALARAM UMA COM A OUTRA.** Em 04/09/2026 o site tem as quatro
+> rotas e o agent tem os dois laços — mas **todo teste dos dois lados fala com um dublê**. O
+> contrato foi escrito **antes** do código de propósito, e é a única defesa que sobrou depois de
+> `skinId` e `prefab`: se as duas implementações divergirem, os testes dos dois lados passam e a
+> integração falha. **O manual do agent é
 > `F:/Projects/RustAgent/Docs/22-COMANDOS-E-CONFIG-DO-SITE.md`**, e é lá que mora o porquê
 > estendido de cada regra abaixo.
 
@@ -9006,7 +9209,8 @@ POST /api/agent/commands/ack          { "commands": [ { id, leaseToken, status, 
                   RCON_TIMEOUT, NOT_INSTALLED, SERVER_DISABLED, COMMAND_EXPIRED, AGENT_BUSY, UNKNOWN_KIND
 
 GET  /api/agent/server/config         → { ok, version: 7, desired: { name, hostname, description,
-                                          maxPlayers, map, worldSize, seed } }   (ETag/304)
+                                          maxPlayers, map, worldSize, seed,
+                                          autoUpdate } }                          (ETag/304)
 POST /api/agent/server/config/ack     { version, applied, requiresRestart: [], errors: [{field, code}] }
 ```
 
@@ -9023,7 +9227,8 @@ POST /api/agent/server/config/ack     { version, applied, requiresRestart: [], e
 | `reason` | string? | **obrigatório** em `refused`, opcional em `failed`. Fora da lista fechada é **400** |
 | `operationId` | string? | o id da `operation` local do agent — é o que liga a linha do site ao log de lá |
 | `version` | number | inteiro que só cresce, por servidor. Igual à última aplicada ⇒ nada a fazer |
-| `desired` | object | **campo ausente = "o site não opina sobre ele"**. Não é `null`, não é "apague" |
+| `desired` | object | **campo ausente = "o site não opina sobre ele"**. Não é `null`, não é "apague". **Oito chaves** desde a onda 1 — ver o quadro do `autoUpdate` |
+| `desired.autoUpdate` | boolean? | **ausente ≠ `false`.** Ausente = o site não gerencia (mantenha o seu); `false` = **desligue**. Único campo de `desired` que **não** vai pelo `updateSettings` |
 | `applied` | boolean | `true` se a gravação aconteceu, mesmo com algum campo em `errors[]` |
 | `requiresRestart` | string[] | **exatamente o que o `updateSettings` do agent devolveu**, nunca uma lista escrita à mão |
 | `errors` | `{field, code}[]` | um por campo que não entrou. O resto entrou |
@@ -9071,11 +9276,62 @@ acende nada na tela e não acorda o beacon.
 
 > ####  `requiresRestart` NÃO É COSMÉTICO  ####
 >
-> Dos sete campos de `desired`, **seis** estão na `RESTART_KEYS` do agent (`hostname`,
-> `description`, `map`, `seed`, `worldSize`, `maxPlayers`); só `name` não está. Quase toda gravação
-> vinda do site volta com `requiresRestart` não-vazio, e a tela do site precisa dizer **"gravado,
-> vale no próximo start"** — senão o admin lê "salvo", olha o servidor no ar com o mapa antigo, e
-> conclui que não funcionou.
+> Dos oito campos de `desired`, **seis** estão na `RESTART_KEYS` do agent (`hostname`,
+> `description`, `map`, `seed`, `worldSize`, `maxPlayers`); ficam de fora `name` e `autoUpdate`.
+> Quase toda gravação vinda do site volta com `requiresRestart` não-vazio, e a tela do site precisa
+> dizer **"gravado, vale no próximo start"** — senão o admin lê "salvo", olha o servidor no ar com o
+> mapa antigo, e conclui que não funcionou.
+
+#### `autoUpdate` — o oitavo campo, e o único que não é do `.ini` (onda 1, 04/09/2026)
+
+Primeira das quatro áreas que o dono escolheu ampliar, e a mais barata — ela é o **molde** das
+próximas (wipe, plugins/oxide, admins/bans/mensagens).
+
+> ####  ELE NÃO ESTÁ NO `.ini`, E QUEM PROCURAR LÁ VAI CONCLUIR QUE QUEBROU  ####
+>
+> Os outros sete campos de `desired` são gravados pelo `updateSettings` do agent
+> (`PATCH /api/servers/:id`). **`autoUpdate` não.** Do lado do agent quem o aplica é o caminho de
+> **`/steam-update`** — ligar ou desligar a atualização automática do servidor. Abrir o `.ini`
+> procurando o valor e não achar **não** é sintoma de gravação perdida: ele mora noutro lugar.
+>
+> **Para o contrato do site a diferença é INDIFERENTE, e isso é decisão, não descuido.** O campo
+> viaja no **mesmo `desired`**, na **mesma `version`**, e o agent **ACKa a mesma `version`** — sem
+> rota nova, sem segundo versionamento, sem segundo ACK. Um canal separado só porque o destino do
+> valor é outro arquivo criaria **duas verdades** sobre "em que versão este servidor está", que é
+> exatamente o que o versionamento único existe para evitar.
+
+**Ausente, `false` e `true` são TRÊS estados, e num booleano dois deles se parecem:**
+
+| No `desired` | Quer dizer | O agent faz |
+|---|---|---|
+| chave **ausente** | o site **não gerencia** este campo | mantém o que já tem |
+| `false` | o site gerencia, e manda **DESLIGAR** | desliga a atualização automática |
+| `true` | o site gerencia, e manda ligar | liga |
+
+🔴 **Colapsar ausente e `false` é o defeito específico deste tipo**, porque `false` parece ausência
+em quase toda checagem escrita às pressas (`if (v)`, `v || x`, um `filter(Boolean)`). Se isso
+acontecer, **declarar a config de um servidor desliga o auto-update de quem só queria acertar o
+`hostname`** — e o sintoma chega semanas depois, com o servidor numa versão velha do Rust e os
+jogadores sem conseguir entrar, sem ninguém ligar o defeito a uma edição de nome. Do lado do site a
+distinção está travada em `tests/rustServerConfigAutoUpdate.test.ts`; **o agent precisa da mesma
+disciplina na leitura.**
+
+Ele **não exige restart** (não entra na `RESTART_KEYS`: o valor novo vale na próxima checagem de
+atualização) e **não é risco de wipe** (não pede `confirmWipe`).
+
+**A validação recusa coerção, e o motivo cabe numa linha:** passam só `true`/`false` (booleano) e as
+strings **exatas** `'true'`/`'false'`. `0`, `1`, `'0'`, `'1'`, `'sim'`, `'on'` e `'yes'` são
+recusados com `NOT_A_BOOLEAN`, porque **`Boolean('false') === true`** — coagir **inverteria a ordem
+do admin**, e a inversão é silenciosa. Para **parar de gerenciar** o campo, mande `null`, `''` ou
+omita a chave: os três significam ausência; **`false` não**.
+
+**O bloco `fields` da config no painel ganhou a chave `types`** — `string` | `integer` | `enum` |
+`boolean`. Ela nasceu com este campo e não é decoração: até aqui dava para inferir o controle da
+tela pelo `limits` (`maxChars` ⇒ texto, `min`/`max` ⇒ número, `map` ⇒ `<select>`). **Um booleano não
+tem faixa e não aparece em `limits`** — a inferência antiga o desenharia como caixa de texto, o
+admin digitaria "sim", e levaria `NOT_A_BOOLEAN`.
+
+**Este campo é o que a etiqueta `oz-rust/4` carimba**, nos dois manuais, no mesmo commit.
 
 #### A allowlist tem TRÊS kinds, e o agent conhece OITO
 
@@ -9131,6 +9387,306 @@ dizendo por quê.
 - **Os `error_code` específicos das rotas 11-14.** As famílias de autenticação e o 429 valem aqui
   como em todas as outras; os códigos próprios nascem com a implementação e, até lá, caem na regra
   de ouro: **4xx com código desconhecido é `unavailable`, não `rejected`**.
+
+### 23.11 A tela inteira e a config de rede (Lote 4)
+
+**Lote 4.** Duas coisas nasceram em 04/09/2026: (1) o `desired` da **rota 13** deixou de
+ter oito campos e passou a ter **a tela de configuração inteira** — 23 campos; (2) nasceu
+um canal de **config de rede**, com as **rotas 15 e 16**, por onde a **loja**, os **kits**
+e o **VIP** vêm do site.
+
+O manual de implementação do lado do agent é o
+`F:/Projects/RustAgent/Docs/23-CONFIG-PELO-SITE.md`; o que está aqui é o **contrato**, e
+onde os dois discordarem, este manda.
+
+⚠️ **Nenhuma linha de uma ponta falou com a outra nestas duas frentes.** Em 04/09/2026 uma
+sonda do cliente real contra o dev respondeu **404 nas rotas 15 e 16** (elas não existem lá
+ainda) e `version: 0, desired: null` na rota 13 — o site ainda não tem config gravada para
+o servidor pareado. As fixtures do que foi medido estão em
+`F:/Projects/RustAgent/contracts/oz-rust-fixtures.json`.
+
+#### As duas rotas novas
+
+| # | Rota | Quem chama | Cadência |
+|---|---|---|---|
+| 15 | `GET /api/agent/config/:domain` | agent | 60 s |
+| 16 | `POST /api/agent/config/:domain/ack` | agent | por versão aplicada |
+
+`:domain` é um de **`store`**, **`kits`**, **`vips`**. Os headers são os mesmos de toda
+rota autenticada. A tabela das rotas 1–14 não muda: estas duas se somam a ela, e a próxima
+rota nova é a **17**.
+
+#### Rota 13 — os 23 campos do `desired`
+
+Campo **ausente** = "o site não opina sobre ele". Não é `null` e não é "apague": um
+`desired` que venha só com `hostname` muda `hostname` e mais nada.
+
+| Campo | Tipo | Régua | Restart? |
+|---|---|---|---|
+| `name` | string | 1–80, sem quebra de linha | **não** — é só o rótulo do painel |
+| `hostname` | string | 1–120 | sim |
+| `description` | string | 0–500 (`""` tira) | sim |
+| `url` | string | 0–300 (`""` não envia nada ao jogo) | sim |
+| `headerImage` | string | 0–300 (`""` idem) | sim |
+| `map` | enum | `Procedural Map` · `Barren` · `HapisIsland` · `Craggy Island` | sim |
+| `worldSize` | int | 1000–6000 | sim |
+| `seed` | int | 0–2147483647 | sim |
+| `levelUrl` | string | 0–500. Preenchido = mapa custom; `""` volta ao procedural | sim |
+| `maxPlayers` | int | 1–1000 | sim |
+| `saveInterval` | int | 30–86400 (segundos) | sim |
+| `identity` | string | `^[a-z][a-z0-9-]{1,30}$` | sim — **e é mundo novo** |
+| `gamePort` | int | 1–65535 | sim |
+| `queryPort` | int | 1–65535 | sim |
+| `appPort` | int | 1–65535 | sim |
+| `rconPort` | int | 1–65535 | sim |
+| `rconPassword` | string | 8–200, **sem** `/` `\` `?` `#` nem espaço | sim |
+| `steamAppId` | string | `^\d{1,10}$` (`258550` é o dedicado do Rust) | sim |
+| `steamLogin` | string | `^[A-Za-z0-9_.-]{1,64}$` (`anonymous`) | sim |
+| `steamBranch` | string | 0–64 (`""` = pública; `-beta staging`) | sim |
+| `consoleWindow` | boolean | — | sim |
+| `enabled` | boolean | — | **não** — vale na hora |
+| `autoUpdate` | boolean | — | **não** — vale na rodada seguinte do vigia |
+
+**Vinte dos vinte e três pedem restart**, e isso é **informação, não falha**: é o que faz o
+painel do site dizer "gravado, vale no próximo start" em vez de "salvo". O
+`requiresRestart` do ACK é o **retorno real** da gravação, nunca uma lista escrita à mão —
+e é por isso que ele é do **jogo**, e não do agent: não existe campo para dizer "reinicie o
+agente", e nenhum destes 23 precisa disso.
+
+#### Os cinco avisos da rota 13
+
+> ####  `identity` É MUNDO NOVO  ####
+>
+> Ela é a pasta dos saves. Trocá-la faz o próximo start carregar um **mundo vazio** — o
+> antigo continua em disco, sem ninguém dentro. Não é `wipe-run` (nada é apagado), mas o
+> jogador não distingue os dois. **A tela do site precisa perguntar duas vezes antes de
+> gravar este campo.**
+
+> ####  `rconPassword` É SEGREDO DE EXECUÇÃO  ####
+>
+> Com `RCON_WEB=1`, quem tem esta senha executa **qualquer** comando naquele servidor. Ela
+> atravessa por decisão do dono, e o canal é TLS até a borda do site — mas o valor fica
+> **gravado lá**. Duas consequências: (a) ela merece o mesmo tratamento do bearer no
+> cadastro; (b) o agent **nunca devolve** a senha gravada, então uma rotação feita no
+> painel local invalida em silêncio a que o site tem.
+
+> ####  `enabled: false` DESLIGA O CUIDADO, NÃO O CANAL  ####
+>
+> `false` faz o agent parar de cuidar daquele servidor: sem RCON, sem vigia, fora da
+> conferência de portas. **Tem volta pelo site**: o laço de config nasce do *pareamento*,
+> não do `enabled`. `true` num servidor sem o jogo em disco falha com
+> `SERVER_NOT_INSTALLED` em `errors[]`.
+
+> ####  `autoUpdate` É TRI-ESTADO, E COLAPSAR DOIS DELES CUSTA O SERVIDOR  ####
+>
+> | Valor | Significa |
+> |---|---|
+> | campo **ausente** | o site **não gerencia** — vale o padrão da máquina (`STEAM_AUTO_UPDATE`) |
+> | `false` | gerenciado e **desligado** |
+> | `true` | gerenciado e **ligado** |
+>
+> Uma coluna que nasça `NOT NULL DEFAULT false` do lado do site colapsa os dois primeiros:
+> o admin abre a tela para acertar o **hostname**, grava, e o `desired` sai carregando um
+> `autoUpdate: false` que ninguém escolheu. **E o sintoma não aparece na hora** — ele
+> aparece semanas depois, quando a Facepunch publica e o servidor passa a recusar todo
+> mundo com "versão incompatível". A coluna é **nullable**, e `null` **não entra** no
+> `desired`.
+>
+> Só `boolean` passa: a string `"false"` volta como `INVALID_VALUE`, e nunca é coagida —
+> `Boolean("false")` é `true`.
+>
+> ⚠️ **Quem o aplica do lado do agent NÃO é o `updateSettings` do `.ini`** — ele não é
+> campo do `.ini` e não está em `RESTART_KEYS`. Quem o aplica é o caminho de
+> `/steam-update`: a opinião é gravada **por servidor**, sobrevive ao restart do agent e
+> vale na rodada seguinte do vigia. Quem procurar o valor no `.ini` e não achar vai concluir
+> que a gravação se perdeu.
+>
+> A confirmação de que a opinião pegou já viaja: `build.autoUpdate` no retrato de 30 s
+> (rota 10). **Não nasça uma rota para ler o build** — seriam duas fontes para o mesmo
+> número, e elas divergiriam na primeira vez que uma delas falhasse.
+
+> ####  O PAREAMENTO NÃO ATRAVESSA, E NUNCA VAI  ####
+>
+> `siteServerId` e `siteToken` mandados no `desired` voltam em `errors[]` com
+> **`FIELD_NOT_REMOTELY_WRITABLE`** — diferente de `UNKNOWN_FIELD` de propósito: o site
+> precisa distinguir "agente velho, campo novo" de "o agente conhece e recusa por desenho".
+> Eles são o que faz o agent falar com o site, e um valor errado gravado por este canal
+> derrubaria o canal que o gravou. O conserto seria presencial.
+
+#### Os códigos de `errors[]` da rota 13
+
+| `code` | Quando |
+|---|---|
+| `UNKNOWN_FIELD` | o agent não conhece o campo — **site novo contra agent velho** |
+| `INVALID_VALUE` | o campo existe e o valor não passa na régua |
+| `FIELD_NOT_REMOTELY_WRITABLE` | o agent conhece e recusa por esta via |
+| *(o código cru do agent)* | a **gravação** falhou: `PORT_BLOCK_TAKEN`, `SERVER_NOT_INSTALLED`, `UNKNOWN_SERVER`, `WRITE_FAILED` |
+
+#### Rotas 15 e 16 — o corpo
+
+```json
+GET /api/agent/config/store
+{ "ok": true, "version": 12, "desired": { "categories": [ … ], "offers": [ … ] } }
+
+POST /api/agent/config/store/ack
+{ "version": 12,
+  "applied": true,
+  "errors": [ { "field": "offers[capacete]", "code": "UNKNOWN_REFERENCE" } ],
+  "stats": { "categories": 4, "offers": 37, "categoriesRemoved": 1, "offersRemoved": 2 } }
+```
+
+| Campo | Tipo | Regra |
+|---|---|---|
+| `version` | number | inteiro que **só cresce**, por assunto. Igual à última aplicada ⇒ nada a fazer |
+| `desired` | object | a forma é de cada assunto |
+| `applied` | boolean | `true` = alguma coisa entrou, mesmo com linha em `errors[]` |
+| `errors` | `{field, code}[]` | uma por linha que não entrou. O resto entrou |
+| `stats` | `Record<string, number>` | contagens do assunto — **é o que separa "entrou" de "entrou tudo"** |
+
+`ETag`/`304` como na rota 13: recomendado, não obrigatório.
+
+Códigos de `errors[]` deste canal: `INVALID_SHAPE` (o corpo não tem a forma do assunto — e
+aí **nada** é aplicado), `INVALID_VALUE`, `UNKNOWN_REFERENCE` (a linha aponta para outra que
+não veio no snapshot), `WRITE_FAILED`, e os crus do assunto `vips` (`VIP_UNKNOWN_TIER`,
+`VIP_ALREADY_EXPIRED`, `INVALID_STEAM_ID`).
+
+> ####  O CANAL DE REDE É DO AGENT, NÃO DO SERVIDOR  ####
+>
+> As tabelas da loja **não têm `server_id`**: a loja é UMA, e todos os servidores daquele
+> agent mostram a mesma vitrine. O mesmo vale para os kits da rede e para o VIP, que é da
+> conta do jogador. Por isso o agent puxa os três assuntos **uma vez só**, pelo bearer de
+> **um** dos servidores pareados. **O site precisa responder o mesmo conteúdo em qualquer
+> `Server` daquele agent.** Dois `Server` com catálogos diferentes = uma loja que muda
+> sozinha a cada minuto.
+
+#### Assunto `store` — a loja
+
+`{ "categories": [...], "offers": [...] }`. As duas chaves vêm **sempre**: um `desired` em
+que falte uma delas é recusado **inteiro** com `INVALID_SHAPE`, e nada é gravado — com
+snapshot substitutivo, um `categories: []` mandado por engano apagaria a loja de todo mundo.
+
+**Categoria:** `id` (1–64, **do site**) · `name` (1–48) · `position` (0–999) · `enabled`.
+
+**Oferta:** `id` (1–64, do site) · `categoryId` (**precisa existir em `categories` do MESMO
+snapshot**, senão `UNKNOWN_REFERENCE`) · `kind` (`item`·`bundle`·`vip`·`vehicle`) · `name`
+(1–64) · `price` (0–100000000, OZCoin **inteiro**) · `oldPrice` (int·null, **maior** que
+`price`) · `position` · `enabled` · `badge` (`promo`·`novo`·`destaque`·null) · `icon`
+(`{shortname, itemId, skinId}`) · `items` (até 40 `{shortname, itemId, skinId, amount}`,
+`amount` 1–1000000) · `perks` (até 20, 120 chars cada) · `vip` (`{tier, days}`, `days: null`
+= vitalício) · `vehicle` (`{prefab, fuel}`).
+
+**`skinId` é STRING de dígitos** e **`prefab` usa `/^[a-z0-9._-]{1,64}$/`, com o ponto
+legal** — as duas réguas de sempre, e as duas que já divergiram uma vez.
+
+As quatro coerências: `kind: "vip"` **exige** `vip`; `kind: "vehicle"` exige `vehicle`;
+`bundle` exige **um** item no mínimo; `item` exige **exatamente um**.
+
+> ####  LINHA DE FORA ⇒ NADA É APAGADO NAQUELA VERSÃO  ####
+>
+> Se **qualquer** linha do snapshot cair na régua, o agent grava o que passou e **não
+> remove nada** — `categoriesRemoved` e `offersRemoved` voltam `0`. A versão seguinte, já
+> corrigida, é que limpa. O caso que isto mata é o pior deste canal: um defeito de
+> serialização do outro lado invalida as quarenta ofertas de uma vez e **a loja inteira
+> some**, com um ACK dizendo `applied: true`.
+
+`stats`: `categories` · `offers` · `categoriesRemoved` · `offersRemoved`. Remover uma
+categoria leva as ofertas dela junto, em cascata.
+
+#### Assunto `kits` — os kits da rede
+
+`{ "kits": [...] }`. Ausente ⇒ `INVALID_SHAPE`; `kits: []` **apaga todos**.
+
+`slug` (`^[a-z0-9][a-z0-9-]*$`, 1–48 — **é a chave**, e não um id: o id é AUTOINCREMENT
+daquela máquina) · `name` (1–64) · `description` (≤400·null) · `category` (≤32·null) ·
+`kind` (`compra`·`resgate`·`cooldown`) · `priceCents` (int·null, **centavos**, obrigatório
+e > 0 em `compra`) · `cooldownSeconds` (1–31536000, obrigatório em `cooldown`) ·
+`wipeDelaySeconds` (1–2592000) · `requiredTier` (string·null) · `items` (até 60
+`{slot, shortname, amount, skinId, position}`; `slot` é `wear`·`belt`·`main`, `position`
+0–47, `shortname` em `[A-Za-z0-9._-]`) · `enabled` · `servers` (**os `SITE_SERVER_ID`**).
+
+Dois kits com o mesmo `slug` no mesmo snapshot: o segundo vira `INVALID_VALUE`. Um
+`servers[]` que não casa com pareamento nenhum vira `UNKNOWN_REFERENCE` em
+`kits[<slug>].servers[<id>]` — **o kit entra sem aquele servidor**, e o snapshot continua
+íntegro (é erro de linha, não de lista).
+
+`stats`: `created` · `updated` · `removed`.
+
+#### Assunto `vips` — e ele **não** é snapshot
+
+```json
+{ "grants":      [ { "steamId": "76561198123456789", "tier": "gold", "expiresAt": "2026-10-01T00:00:00.000Z" } ],
+  "revocations": [ { "steamId": "76561198987654321", "tier": "silver" } ] }
+```
+
+> ####  O QUE NÃO ESTÁ NAS DUAS LISTAS NÃO É TOCADO  ####
+>
+> A loja e os kits são catálogo. **VIP não é** — é um benefício de uma conta, concedido de
+> três lugares: a compra in-game, a mão de um admin no painel local, e a reconciliação que
+> **adota** quem já estava no grupo do plugin. Um snapshot revogaria os dois últimos toda
+> vez que o site montasse a lista sem eles, e ninguém repara num benefício que some. Por
+> isso o `desired` traz **verbos**.
+
+As duas chaves são **opcionais** (lista ausente = "nada a fazer"); uma delas presente e não
+sendo array ⇒ `INVALID_SHAPE` no assunto inteiro.
+
+- `steamId`: **SteamID64, 17 dígitos, sempre TEXTO**. Um número JSON aqui passa de 2^53 e o
+  VIP vai para a conta errada, sem erro no caminho.
+- `tier`: 1–32, comparado em minúsculas, precisa existir num `OrigemZVip.json` daquele
+  agent — senão `VIP_UNKNOWN_TIER`.
+- `expiresAt`: **obrigatório em `grants`**; `null` é como se diz "vitalício", de propósito.
+  Ausente ⇒ `INVALID_SHAPE` naquela linha — um campo esquecido viraria VIP eterno de graça.
+
+`grants` renova (estende) e aplica na hora em quem estiver no ar; `revocations` revoga e a
+linha **fica** no banco com `revoked_at`. Revogar o que já venceu **não é falha**: conta em
+`stats.alreadyRevoked` e não vai para `errors[]`.
+
+`stats`: `granted` · `revoked` · `alreadyRevoked`.
+
+#### As nove regras que o site precisa cumprir
+
+1. **`version` é inteiro, ≥ 1, e só cresce — por assunto.** `store`, `kits`, `vips` e a
+   config de servidor têm contadores **independentes**. Versão ≤ à última aplicada ⇒ o agent
+   não faz nada. *(O agent trata `version < 1` como "não há config": é o sentinela que o
+   próprio site usa hoje, e o ACK de uma versão zero volta
+   `400 CONFIG_INVALID_VERSION`.)*
+2. **Um snapshot com erro é um snapshot que não limpa.** ACK com `errors[]` e `…Removed: 0`
+   é exatamente isso, de propósito.
+3. **Uma versão nova por edição, e não por montagem.** Não gere `version` de um relógio nem
+   de um `updated_at` que muda sozinho: o catálogo inteiro atravessaria a internet a cada
+   minuto, e o agent reescreveria a loja a cada volta.
+4. **O ACK é a fonte da verdade sobre o que entrou.** `applied: true` com `errors: []` é o
+   único desfecho em que **tudo** entrou; com `errors[]`, use o `stats`.
+5. **Não deduza o `desired` a partir do espelho que o agent empurra.** O espelho é
+   **retrato**, não intenção: montar o próximo `desired` a partir dele e bumpar a versão põe
+   os dois lados num ping-pong que reescreve a loja para sempre.
+6. **Responda o mesmo conteúdo em todos os `Server` de um agent.**
+7. **`UNKNOWN_FIELD` é sinal de versão, não de bug** — site novo contra agent velho. Mostre
+   a versão do agent ao lado: ela já viaja no `User-Agent` e no retrato periódico.
+8. **Nunca mande `siteServerId` nem `siteToken` no `desired`.**
+9. **Trate `rconPassword` como segredo de execução.** Ela não volta em `GET` nenhum do
+   agent — nem agora, nem depois.
+
+#### Os três critérios de aceite
+
+1. **A tela inteira atravessa.** Gravar `hostname`, `worldSize`, `saveInterval`, `gamePort`
+   e `enabled` no site e ver, em ≤30 s, o `.ini` com os cinco valores e um ACK com
+   `applied: true` e `requiresRestart` com os quatro que pedem restart.
+2. **O snapshot da loja substitui.** Publicar 3 categorias e 10 ofertas, ver a vitrine
+   in-game com exatamente isso; publicar de novo sem uma oferta e vê-la sumir, com
+   `stats.offersRemoved: 1`.
+3. **O VIP não dobra.** Mandar um `grant` de 30 dias, derrubar o agent **antes** do ACK,
+   subir de novo, e conferir que o vencimento continua 30 dias — e que o site recebe o ACK
+   daquela versão sem uma segunda concessão.
+
+#### O que continua fora, e por quê
+
+`wipe-run` e o RCON cru (execução remota arbitrária com outro nome), a **agenda de wipe**,
+os **loadouts** (não têm chave estável exposta ao site), `siteServerId`/`siteToken`, e os
+**plugins**/Oxide (reescrevem arquivos com o servidor parado). As quatro áreas que o dono
+aprovou trazer para dentro estão no
+`F:/Projects/RustAgent/Docs/23-CONFIG-AVANCADA-DO-SITE.md`, com as etiquetas `/6`, `/7` e
+`/9` reservadas para elas (a `/6` foi gasta em 04/09/2026 com a remoção do campo
+`exists` do saldo, onde um byte mudou no fio de verdade).
 
 ---
 

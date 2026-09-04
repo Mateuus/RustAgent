@@ -26,6 +26,19 @@
 //  30 dias, e a tarefa nº 51 nunca é vista. Quem comprou hoje espera
 //  o prazo inteiro dos que vieram antes, e o log não acusa nada.
 //
+//  ####  DUAS TAREFAS NÃO MEXEM NO INVENTÁRIO, E NENHUMA ESPERA  ####
+//
+//  O portão de presença existe porque item, kit e veículo nascem no
+//  MUNDO, ao lado de um corpo. As duas tarefas de VIP não: elas são
+//  uma linha na tabela do agente, e o grupo do Oxide é o reflexo
+//  dela — aplicado na conexão pelo próprio OrigemZVip. Por isso
+//  `vip` e `vip_revoke` pulam a presença (ver `#handle`).
+//
+//  `vip_revoke` — o estorno, o chargeback, o ban e o vencimento que
+//  o site varre a cada minuto — difere ainda numa segunda coisa:
+//  ele REEXECUTA depois de uma linha órfã, porque tirar duas vezes
+//  não tira nada na segunda (`#handle`, o bloco (a)).
+//
 //  ####  NADA AQUI LANÇA  ####
 //
 //  Roda num relógio. Um `throw` para a fila em silêncio.
@@ -157,6 +170,18 @@ const payloadSchemas = {
     // Dez anos é o teto que separa "vitalício" de dedo escorregado.
     days: z.number().int().min(1).max(3650).nullable(),
   }),
+  /**
+   * TIRAR o VIP. Não entrega nada, e por isso não vira `DeliveryPlan`.
+   *
+   * ####  O `tier` É OBRIGATÓRIO, E ISSO É O CONTRATO  ####
+   *
+   * "Revogue o VIP dele", sem dizer qual, apagaria um VIP PAGO no
+   * dia em que o jogador tivesse dois: o site manda tirar o
+   * `bronze` que ele estornou, e o agente tiraria o `gold` que ele
+   * comprou in-game. Tier que o jogador não tem é no-op — ver
+   * `#revokeVip`.
+   */
+  vip_revoke: z.object({ tier: z.string().trim().min(1).max(32) }),
   vehicle: z.object({
     /**
      * O nome curto (`minicopter`) OU o exato (`sedantest.entity`).
@@ -193,6 +218,29 @@ export interface DeliveryTask {
 }
 
 /**
+ * Os kinds que ENTREGAM alguma coisa.
+ *
+ * `vip_revoke` fica de fora de propósito: quem o tratasse como
+ * plano acabaria montando um `DeliveryPlan` sem `days`, e o
+ * compilador não teria como avisar. Deixando-o fora, esquecer o
+ * ramo da revogação vira erro de tipo em vez de VIP concedido no
+ * lugar de revogado.
+ */
+export type DeliveredKind = Exclude<SiteDeliveryKind, 'vip_revoke'>;
+
+/**
+ * O payload de uma revogação. `null` = não passou na régua.
+ *
+ * O `tier` sai daqui JÁ normalizado, que é a única grafia que
+ * existe no resto da cadeia — site, banco, agente e plugin.
+ */
+export function revokeOfPayload(payload: unknown): { readonly tier: string } | null {
+  const parsed = payloadSchemas.vip_revoke.safeParse(payload);
+
+  return parsed.success ? { tier: parsed.data.tier.toLowerCase() } : null;
+}
+
+/**
  * O vocabulário da fila vira o PLANO da entrega.
  *
  * ####  `units` É SEMPRE 1  ####
@@ -206,7 +254,7 @@ export interface DeliveryTask {
  * `null` = o payload não passou na régua. Quem chama ACKa `failed`
  * com `PAYLOAD_INVALID`.
  */
-export function planOfPayload(kind: SiteDeliveryKind, payload: unknown): DeliveryPlan | null {
+export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPlan | null {
   const parsed = payloadSchemas[kind].safeParse(payload);
 
   if (!parsed.success) {
@@ -257,6 +305,20 @@ export interface SiteDeliveriesOptions {
     readonly steamId: string;
     readonly plan: DeliveryPlan;
   }) => Promise<void>;
+  /**
+   * Quem sabe TIRAR o VIP.
+   *
+   * Ausente = este agente não tem o concessor ligado, e a
+   * revogação falha com o MESMO `VIP_GRANTER_UNAVAILABLE` que a
+   * concessão usaria: é configuração faltando, e o site precisa
+   * saber que não foi feito.
+   *
+   * Ela não recebe `serverId` porque o VIP não tem um: a tabela é
+   * do AGENTE e vale em todos os servidores dele.
+   */
+  readonly revokeVip?:
+    | ((input: { readonly steamId: string; readonly tier: string }) => Promise<void>)
+    | undefined;
   readonly logger: Logger;
   readonly pollMs?: number;
   readonly now?: () => number;
@@ -456,21 +518,37 @@ export class SiteDeliveries {
         return { id, status: known.state, ...(known.reason === null ? {} : { reason: known.reason }), at };
       }
 
-      if (known.state === 'reserved') {
-        // O processo morreu entre a reserva e o desfecho: o comando
-        // PODE ter saído. Reexecutar entregaria duas vezes.
-        this.#options.repository.finish(id, 'indeterminate', 'AGENT_INDETERMINATE', this.#now());
+      if (known.state === 'expired') {
+        // A tarefa não é mais nossa.
+        return null;
       }
 
-      if (known.state === 'reserved' || known.state === 'indeterminate') {
+      // `reserved` | `indeterminate`
+      //
+      // ####  A REVOGAÇÃO É A ÚNICA QUE REEXECUTA  ####
+      //
+      // O medo do indeterminado é ENTREGAR DUAS VEZES. Tirar o VIP
+      // duas vezes não tira nada na segunda: ou o estado desejado
+      // ("ele não tem mais") já vale, ou não valia — e repetir
+      // chega nele nos dois casos. Mandar esta para conferência
+      // humana deixaria de pé, até alguém olhar, um VIP que o site
+      // já estornou.
+      if (kind !== 'vip_revoke') {
+        if (known.state === 'reserved') {
+          // O processo morreu entre a reserva e o desfecho: o comando
+          // PODE ter saído. Reexecutar entregaria duas vezes.
+          this.#options.repository.finish(id, 'indeterminate', 'AGENT_INDETERMINATE', this.#now());
+        }
+
         return { id, status: 'deferred', reason: 'AGENT_INDETERMINATE', at };
       }
-
-      // `expired`: a tarefa não é mais nossa.
-      return null;
     }
 
     // ---- (b) o payload passa na régua? ----
+    if (kind === 'vip_revoke') {
+      return await this.#revokeVip({ id, steamId, raw, reopen: known !== null, at });
+    }
+
     const plan = planOfPayload(kind, raw.payload);
 
     if (plan === null) {
@@ -478,16 +556,38 @@ export class SiteDeliveries {
     }
 
     // ---- (c) e (d) o RCON e a presença ----
-    const online = await this.#options.presence(this.#options.serverId);
+    //
+    // ####  SÓ QUEM TOCA O INVENTÁRIO ESPERA O JOGADOR  ####
+    //
+    // Item, kit e veículo nascem NO MUNDO, ao lado de um corpo que
+    // precisa estar lá. VIP não: ele é uma linha na tabela do
+    // agente, e o grupo do Oxide é o REFLEXO dela. Quem aplica o
+    // grupo de quem estava fora é o `OnPlayerConnected` do
+    // OrigemZVip (`Plugins/OrigemZVip.cs:191`), que compara o
+    // jogador com o estado que o agente já empurrou.
+    //
+    // Esperar aqui custava caro e calado: o VIP comprado ficava
+    // `deferred` no site, invisível na tela de VIPs do painel, até
+    // o jogador entrar — e se ele demorasse mais que o TTL de 30
+    // dias, o site devolvia ao inventário um VIP pago. Enquanto
+    // isso o prazo do grant de lá corria, e os dois lados
+    // divergiam desde o primeiro dia.
+    //
+    // Conceder na hora também é o que ALINHA os prazos: o
+    // `expires_at` do site nasce no resgate, e é de lá que os 30
+    // dias contam nos dois bancos.
+    if (kind !== 'vip') {
+      const online = await this.#options.presence(this.#options.serverId);
 
-    if (online === null) {
-      // NADA é tentado às cegas: "não deu para perguntar" é diferente
-      // de "ele não está aqui".
-      return { id, status: 'deferred', reason: 'PRESENCE_UNAVAILABLE', at };
-    }
+      if (online === null) {
+        // NADA é tentado às cegas: "não deu para perguntar" é
+        // diferente de "ele não está aqui".
+        return { id, status: 'deferred', reason: 'PRESENCE_UNAVAILABLE', at };
+      }
 
-    if (!online.includes(steamId)) {
-      return { id, status: 'deferred', reason: 'PLAYER_OFFLINE', at };
+      if (!online.includes(steamId)) {
+        return { id, status: 'deferred', reason: 'PLAYER_OFFLINE', at };
+      }
     }
 
     // ---- (e) a RESERVA, antes de qualquer comando ----
@@ -540,6 +640,121 @@ export class SiteDeliveries {
 
       return { id, status, reason, at };
     }
+  }
+
+  /**
+   * Tirar o VIP. É a tarefa que NÃO entrega nada.
+   *
+   * ####  ELA NÃO PASSA PELO PORTÃO DE PRESENÇA  ####
+   *
+   * Entregar exige o jogador online e vivo — é o inventário dele
+   * que recebe. Revogar não: quem manda no VIP é a tabela do
+   * agente, e o grupo do Oxide sai quando o jogador voltar (a
+   * reconciliação da conexão cuida, `vip/service.ts`). Exigir
+   * presença aqui seria pior que inútil: o caso mais comum de uma
+   * revogação é justamente quem parou de jogar, e a tarefa ficaria
+   * `deferred` até o TTL de 30 dias enquanto o VIP estornado
+   * continuava valendo.
+   *
+   * ####  NÃO TER O QUE TIRAR É SUCESSO  ####
+   *
+   * `VIP_NOT_FOUND` vira `delivered`, e não `failed`: o estado que
+   * o site pediu já vale. E é o caso MAIS COMUM de todos — o
+   * relógio daqui expira o VIP sozinho, quase sempre antes de a
+   * varredura de lá chegar. `failed` aqui geraria alarme no
+   * funcionamento normal, e o alarme que toca todo dia é o que
+   * ninguém mais lê.
+   *
+   * Vale igual para o tier que ele não tem: `gold` ativo e
+   * `bronze` revogado é NADA acontecendo, com ACK `delivered`.
+   */
+  async #revokeVip(input: {
+    readonly id: string;
+    readonly steamId: string;
+    readonly raw: { readonly payload?: unknown; readonly sourceRef?: string | null };
+    /** A linha já existe: é uma tentativa anterior que ficou órfã. */
+    readonly reopen: boolean;
+    readonly at: string;
+  }): Promise<DeliveryAck | null> {
+    const { id, steamId, raw, at } = input;
+    const wanted = revokeOfPayload(raw.payload);
+
+    if (wanted === null) {
+      return { id, status: 'failed', reason: 'PAYLOAD_INVALID', at };
+    }
+
+    if (input.reopen) {
+      // Reabre a linha da tentativa anterior. O `attempts` sobe, e é
+      // por ele que se enxerga uma revogação que precisou voltar.
+      this.#options.repository.finish(id, 'reserved', null, this.#now());
+    } else {
+      const reserved = this.#options.repository.reserve(
+        {
+          id,
+          serverId: this.#options.serverId,
+          steamId,
+          kind: 'vip_revoke',
+          payload: JSON.stringify(raw.payload),
+          sourceRef: typeof raw.sourceRef === 'string' ? raw.sourceRef : null,
+        },
+        this.#now(),
+      );
+
+      if (!reserved) {
+        // Alguém reservou entre o `get` e o `reserve`.
+        return null;
+      }
+    }
+
+    const revoke = this.#options.revokeVip;
+
+    if (revoke === undefined) {
+      this.#options.repository.finish(id, 'failed', 'VIP_GRANTER_UNAVAILABLE', this.#now());
+
+      return { id, status: 'failed', reason: 'VIP_GRANTER_UNAVAILABLE', at };
+    }
+
+    try {
+      await revoke({ steamId, tier: wanted.tier });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'VIP_NOT_FOUND') {
+        // O `reason` NÃO viaja: a lista do fio é fechada (Docs\20
+        // §5.8), e um código fora dela apareceria cru para quem
+        // está de plantão no site. Quem precisa saber que não havia
+        // o que tirar lê o log.
+        this.#options.repository.finish(id, 'delivered', null, this.#now());
+        this.#options.logger.info(
+          { deliveryId: id, steamId, serverId: this.#options.serverId, tier: wanted.tier },
+          'the site asked to revoke a vip that was not active here',
+        );
+
+        return { id, status: 'delivered', at };
+      }
+
+      const { status, reason } = ackOf(error);
+
+      if (status === 'deferred') {
+        this.#options.repository.release(id);
+      } else {
+        this.#options.repository.finish(id, status, reason, this.#now());
+      }
+
+      return { id, status, reason, at };
+    }
+
+    this.#options.repository.finish(id, 'delivered', null, this.#now());
+    this.#options.logger.info(
+      {
+        deliveryId: id,
+        steamId,
+        serverId: this.#options.serverId,
+        tier: wanted.tier,
+        sourceRef: raw.sourceRef ?? null,
+      },
+      'vip revoked by the site',
+    );
+
+    return { id, status: 'delivered', at };
   }
 
   /** O lote da página. Um ACK perdido custa uma volta de 15 s. */

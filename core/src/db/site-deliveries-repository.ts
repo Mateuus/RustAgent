@@ -42,7 +42,14 @@ export type SiteDeliveryState =
   /** O site devolveu o id em `unknown` e a linha NÃO era terminal. */
   | 'expired';
 
-export type SiteDeliveryKind = 'item' | 'kit' | 'vip' | 'vehicle';
+/**
+ * O que a tarefa da fila pede.
+ *
+ * `vip_revoke` é o único que NÃO entrega nada: ele TIRA. Ver o
+ * cabeçalho de `site/deliveries.ts` — a diferença muda o portão de
+ * presença e muda o que fazer com uma linha órfã.
+ */
+export type SiteDeliveryKind = 'item' | 'kit' | 'vip' | 'vehicle' | 'vip_revoke';
 
 export interface SiteDeliveryRow {
   readonly id: string;

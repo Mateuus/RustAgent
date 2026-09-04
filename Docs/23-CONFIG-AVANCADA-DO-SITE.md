@@ -109,13 +109,13 @@ sem nada dizendo por quê.
 Regra do `Docs/20` §23: um `grep -Eom1 'oz-rust/[0-9]+'` nos dois manuais tem de devolver o mesmo
 número.
 
-> ####  A ETIQUETA EM USO É `oz-rust/6`, E ELA JÁ FOI RECONCILIADA  ####
+> ####  A ETIQUETA EM USO É `oz-rust/7` DESDE 04/09/2026  ####
 >
 > Medido em **04/09/2026**, depois da remoção do campo `exists` do saldo:
 >
 > ```
-> grep -Eom1 'oz-rust/[0-9]+' Docs/20-INTEGRACAO-OZCOIN-AGENT.md                     → oz-rust/6
-> grep -Eom1 'oz-rust/[0-9]+' <site>/docs/mateuus/rust/docs/INTEGRACAO-OZCOIN-RUST.md → oz-rust/6
+> grep -Eom1 'oz-rust/[0-9]+' Docs/20-INTEGRACAO-OZCOIN-AGENT.md                     → oz-rust/7
+> grep -Eom1 'oz-rust/[0-9]+' <site>/docs/mateuus/rust/docs/INTEGRACAO-OZCOIN-RUST.md → oz-rust/7 (o site sobe junto)
 > ```
 >
 > **`oz-rust/4` foi do `autoUpdate`** — a área 1 desta lista, então o oitavo campo do `desired`.

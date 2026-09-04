@@ -183,7 +183,7 @@ export type PurchaseState =
    *
    * Nada foi entregue e nada foi estornado: não sabemos se o
    * dinheiro saiu. Quem decide é o relógio da reconciliação, com
-   * PROVA. Ver Docs §4 e §11.
+   * PROVA. Ver Docs\20 §4 e §11.
    */
   | 'charge-unknown';
 

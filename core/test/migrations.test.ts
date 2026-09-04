@@ -225,3 +225,83 @@ describe('003 — o plugin custom', () => {
     db.close();
   });
 });
+
+describe('038 — a fila que também revoga VIP', () => {
+  /** Um banco parado na 037, com uma entrega já ACKada dentro. */
+  function comEntregaAntiga(): AgentDatabase {
+    const db = databaseAt(37);
+
+    db.prepare(
+      `INSERT INTO site_deliveries
+         (id, server_id, steam_id, kind, payload, source_ref, state, reason,
+          attempts, reserved_at, acked_at, updated_at)
+       VALUES
+         ('DLV-antiga', 'pvp1', '76561198000000001', 'item', '{}', 'ITM-1',
+          'delivered', NULL, 1, 10, 20, 20)`,
+    ).run();
+
+    return db;
+  }
+
+  it('preserva o comprovante das entregas que já existiam', () => {
+    // A tabela é RECRIADA para trocar o CHECK, e recriar tabela com
+    // INSERT ... SELECT é onde se perde dado em silêncio. Estas
+    // linhas são a resposta de "o site diz que entregou; entregou
+    // mesmo?", que chega meses depois.
+    const db = comEntregaAntiga();
+
+    runMigrations(db);
+
+    expect(
+      db.prepare("SELECT state, acked_at FROM site_deliveries WHERE id = 'DLV-antiga'").get(),
+    ).toEqual({ state: 'delivered', acked_at: 20 });
+
+    db.close();
+  });
+
+  it('passa a aceitar vip_revoke — e continua recusando o que não existe', () => {
+    const db = comEntregaAntiga();
+
+    runMigrations(db);
+
+    const insert = (kind: string): void => {
+      db.prepare(
+        `INSERT INTO site_deliveries
+           (id, server_id, steam_id, kind, payload, source_ref, state, reason,
+            attempts, reserved_at, acked_at, updated_at)
+         VALUES
+           (@kind, 'pvp1', '76561198000000001', @kind, '{}', NULL,
+            'reserved', NULL, 0, 30, NULL, 30)`,
+      ).run({ kind });
+    };
+
+    expect(() => {
+      insert('vip_revoke');
+    }).not.toThrow();
+    // O CHECK continua sendo um vocabulário fechado: um kind
+    // inventado do outro lado não vira linha aqui.
+    expect(() => {
+      insert('vip_transfer');
+    }).toThrow();
+
+    db.close();
+  });
+
+  it('os dois índices voltam com a tabela nova', () => {
+    // Eles acompanham a tabela no RENAME e morrem com ela no DROP.
+    // Sem recriá-los, a pergunta do laço ("o que falta ACKar?")
+    // passaria a varrer a tabela inteira, calada.
+    const db = comEntregaAntiga();
+
+    runMigrations(db);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'site_deliveries'")
+      .all() as { readonly name: string }[];
+
+    expect(indexes.map((index) => index.name).sort()).toContain('idx_site_deliveries_open');
+    expect(indexes.map((index) => index.name).sort()).toContain('idx_site_deliveries_player');
+
+    db.close();
+  });
+});

@@ -2959,6 +2959,72 @@ CREATE INDEX idx_site_commands_open ON site_commands (updated_at ASC)
   WHERE acked_at IS NULL;
 `;
 
+// ------------------------------------------------------------
+//  038 — a fila também REVOGA VIP
+//
+//  ####  O CHECK DA 036 NÃO CONHECIA `vip_revoke`  ####
+//
+//  O site passou a mandar tarefas que TIRAM o VIP — estorno,
+//  chargeback, ban, e o vencimento que o relógio de lá varre a cada
+//  minuto. Sem esta migração a reserva dessas tarefas falharia no
+//  CHECK, e a fila responderia com um `false` que significa "alguém
+//  já reservou": a revogação sumiria em silêncio, e o VIP estornado
+//  continuaria valendo no jogo.
+//
+//  ####  POR QUE A TABELA É RECRIADA  ####
+//
+//  Um CHECK de coluna não se altera no SQLite. O caminho é o
+//  oficial: renomear, criar a nova, copiar, dropar a velha. As
+//  linhas ANTIGAS passam inteiras — elas são o comprovante de
+//  entregas já ACKadas, e "o site diz que entregou; entregou
+//  mesmo?" é uma pergunta que chega meses depois.
+//
+//  Os dois índices morrem com a tabela velha (eles a acompanham no
+//  RENAME) e nascem de novo aqui, com os mesmos nomes.
+// ------------------------------------------------------------
+const SITE_DELIVERIES_VIP_REVOKE_SCHEMA = `
+ALTER TABLE site_deliveries RENAME TO site_deliveries_old;
+
+CREATE TABLE site_deliveries (
+  id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  -- 'vip_revoke' é o único que não entrega nada: ele TIRA.
+  kind TEXT NOT NULL
+    CHECK (kind IN ('item', 'kit', 'vip', 'vehicle', 'vip_revoke')),
+
+  payload TEXT NOT NULL,
+  source_ref TEXT,
+
+  state TEXT NOT NULL
+    CHECK (state IN ('reserved', 'delivered', 'failed', 'indeterminate', 'expired')),
+
+  reason TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+
+  reserved_at INTEGER NOT NULL,
+  acked_at    INTEGER,
+  updated_at  INTEGER NOT NULL
+);
+
+INSERT INTO site_deliveries
+  (id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at)
+SELECT
+   id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at
+  FROM site_deliveries_old;
+
+DROP TABLE site_deliveries_old;
+
+CREATE INDEX idx_site_deliveries_open ON site_deliveries (updated_at DESC)
+  WHERE acked_at IS NULL;
+
+CREATE INDEX idx_site_deliveries_player ON site_deliveries (steam_id, reserved_at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -3012,7 +3078,7 @@ export const MIGRATIONS: readonly Migration[] = [
   // valha para trás. Ver o cabeçalho.
   { id: 32, name: 'wipe-plugin-data-globstar', run: rewriteLegacyPluginDataPatterns },
   // 035 e 036 sao da frente da integracao com o site OrigemZ
-  // (Docs). A 033 e a 034 sao do ranking (Docs9), e o numero
+  // (Docs\20). A 033 e a 034 sao do ranking (Docs\19), e o numero
   // reservado esta escrito nos DOIS documentos: duas frentes que
   // escrevam 33 dao merge limpo e banco quebrado, porque o SQLite
   // aplica a primeira e ignora a segunda para sempre.
@@ -3026,6 +3092,7 @@ export const MIGRATIONS: readonly Migration[] = [
   // do Docs\20 §15.0 e no Docs\22 —, que é o que a regra do
   // Docs\17 §0.1 exige para uma reserva valer.
   { id: 37, name: 'site-commands', sql: SITE_COMMANDS_SCHEMA },
+  { id: 38, name: 'site-deliveries-vip-revoke', sql: SITE_DELIVERIES_VIP_REVOKE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

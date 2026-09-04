@@ -46,6 +46,7 @@ import { SpawnStatusSync } from './loadouts/status.js';
 import { LoadoutSync } from './loadouts/sync.js';
 import { VipExpiryWatcher } from './vip/expiry-watcher.js';
 import { VipList } from './vip/service.js';
+import { VipSiteMirror } from './vip/site-mirror.js';
 import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader, type PlayersSnapshot } from './game/players.js';
@@ -96,6 +97,7 @@ import { buildServer } from './http/server.js';
 import { createLogger } from './logger.js';
 import { OperationLock, OperationStore } from './ops/operations.js';
 import { PluginLibrary } from './oxide/library.js';
+import { OxideRuntimeMonitor } from './oxide/runtime.js';
 import { PresenceTracker, PresenceWatcher } from './players/presence.js';
 import { PlayerDirectory } from './players/service.js';
 import { ServerSupervisor } from './servers/supervisor.js';
@@ -340,14 +342,28 @@ async function main(): Promise<void> {
   // Ela não segura a subida: `void` de propósito, com o erro
   // tratado dentro. Um `.cs` ilegível num servidor não pode adiar a
   // abertura da porta da API.
+  // ####  "LIGADO" NÃO É "RODANDO"  ####
+  //
+  // O acervo sabe que o `.cs` está na pasta; só o Oxide sabe se
+  // ele carregou. Este monitor pergunta — e é o que faz o agente
+  // perceber sozinho um plugin que parou de compilar depois de um
+  // update do Rust, em vez de descobrir horas depois pela tela de
+  // Jogadores em branco. Ver `oxide/runtime.ts`.
+  const oxideRuntime = new OxideRuntimeMonitor({ servers: supervisor, logger });
+
   const library = new PluginLibrary({
     libraryDir: agent.paths.pluginLibraryDir,
     repository: new PluginsRepository(db),
     servers: supervisor,
     logger,
+    runtime: oxideRuntime,
   });
 
   void library.adoptAll();
+
+  // Depois da biblioteca, e não antes: a primeira varredura dele
+  // fala com o RCON, e nada nesta subida depende do resultado.
+  oxideRuntime.start();
 
   // ---- a lista de banidos -----------------------------------
   //
@@ -391,6 +407,11 @@ async function main(): Promise<void> {
         return { id: found?.id ?? null, enabled: found?.enabled === true };
       },
     },
+    // E quem sabe se o Oxide CARREGOU o plugin. É o que separa
+    // "ele não compila" de "o servidor estava ocupado" quando o
+    // comando não responde — duas coisas que se parecem na tela e
+    // pedem o oposto uma da outra.
+    runtime: oxideRuntime,
   });
 
   // Os monumentos do mundo, para o mapa. Nativo do jogo e guardado
@@ -478,6 +499,13 @@ async function main(): Promise<void> {
   const spawnStatusRepository = new SpawnStatusRepository(db);
   const kitsRepository = new KitsRepository(db);
 
+  // Ele só nasce lá embaixo, junto com os clientes do site — e a
+  // `VipList` precisa existir ANTES deles. O closure resolve a
+  // ordem: quem chama lê a variável na hora da chamada, e enquanto
+  // ela for `null` o gancho não faz nada (o relógio do espelho
+  // cobre, ver `VipListDeps.onChanged`).
+  let vipSiteMirror: VipSiteMirror | null = null;
+
   vips = new VipList({
     repository: vipsRepository,
     servers: supervisor,
@@ -485,6 +513,7 @@ async function main(): Promise<void> {
     // "Ganhou VIP" vira uma linha na ficha do jogador — ver a
     // migração 014.
     history: directory,
+    onChanged: () => vipSiteMirror?.notifyChanged(),
   });
 
   void vips.reconcileAll();
@@ -753,6 +782,19 @@ async function main(): Promise<void> {
         // ajuste que só um dos dois recebesse apareceria como
         // "às vezes o item vem sem skin".
         deliver: (input) => store.deliverPlan(input.serverId, input.steamId, input.plan),
+        // Tirar VIP não é entregar, e por isso não passa pelo
+        // `deliverPlan`: quem manda no VIP é a `VipList`, e é ela
+        // que grava a revogação, tira o grupo de quem está no ar e
+        // deixa a reconciliação cuidar de quem não está.
+        revokeVip:
+          vips === null
+            ? undefined
+            : async ({ steamId, tier }): Promise<void> => {
+                // `revoked_by` é quem mandou tirar, e a ficha do
+                // jogador mostra isso: aqui não foi um operador, foi
+                // o site (estorno, chargeback, ban ou o prazo dele).
+                await vips.revoke(steamId, tier, 'site');
+              },
         logger,
         pollMs: agent.site.deliveryPollMs,
       }),
@@ -782,6 +824,33 @@ async function main(): Promise<void> {
         });
 
   catalogMirror?.start();
+
+  // ####  UM RETRATO DE VIP, N DESTINOS  ####
+  //
+  // Mesma forma do catálogo, e pelo mesmo motivo: a tabela `vips`
+  // também não tem `server_id` — o VIP é do AGENTE e vale em todos
+  // os servidores dele.
+  //
+  // O que muda é a direção do que se conta. O catálogo é uma
+  // decisão nossa que o site exibe; o VIP é um estado com PRAZO que
+  // o site vendeu e não tem como conferir. Ver vip/site-mirror.ts.
+  vipSiteMirror =
+    siteWallets.size === 0
+      ? null
+      : new VipSiteMirror({
+          clients: new Map([...siteClients].filter(([id]) => siteWallets.has(id))),
+          repository: vipsRepository,
+          meta,
+          // Quais níveis existem no jogo, para o cadastro do site
+          // ESCOLHER em vez de digitar. A união dos servidores, que
+          // é o que o `knownTiers` já monta: o VIP é do agente, e um
+          // nível declarado em qualquer servidor dele é concedível.
+          tiers: async (): Promise<readonly string[]> =>
+            vips === null ? [] : [...(await vips.knownTiers()).keys()],
+          logger,
+        });
+
+  vipSiteMirror?.start();
 
   // O que a tela de diagnóstico lê. Um mapa por servidor PAREADO:
   // "a loja parou" quase sempre é um servidor só, e uma resposta
@@ -996,7 +1065,11 @@ async function main(): Promise<void> {
     lock,
     logger,
     intervalMs: agent.steam.checkIntervalMs,
+    // O padrão da máquina. A opinião POR SERVIDOR — a que o site
+    // grava — mora na tabela `meta`, e é por isso que o vigia
+    // precisa dela: sem persistir, o override sumiria no restart.
     autoUpdate: agent.steam.autoUpdate,
+    meta,
   });
 
   steamWatcher.start();
@@ -1181,6 +1254,13 @@ async function main(): Promise<void> {
             }
 
             await supervisor.disable(id);
+          },
+          // A atualização automática não é campo do `.ini`: quem a
+          // aplica é o vigia da Steam, e ele grava a escolha para
+          // ela sobreviver ao restart. Passá-la no patch faria o
+          // `updateSettings` ignorá-la em silêncio.
+          setAutoUpdate: (value) => {
+            steamWatcher.setAutoUpdate(id, value);
           },
           logger,
           intervalMs: agent.site.configIntervalMs,
@@ -1713,6 +1793,11 @@ async function main(): Promise<void> {
         enabled: agent.site.catalogPushEnabled,
         status: catalogMirror?.status ?? null,
       }),
+      // O espelho de VIP não tem chave de ligar/desligar: ele existe
+      // sempre que há pareamento, porque o que ele conta é um estado
+      // com PRAZO — desligá-lo seria deixar o site dizendo que gente
+      // sem VIP tem VIP. Ver vip/site-mirror.ts.
+      vipMirror: () => vipSiteMirror?.status ?? null,
       wallet,
       purchases: storeRepository,
       // De onde a URL veio, para a tela dizer se o que ela mostra é
@@ -1816,6 +1901,9 @@ async function main(): Promise<void> {
         steamWatcher.stop();
         banWatcher.stop();
         presenceWatcher.stop();
+        // O do estado dos plugins junto: uma leitura que começasse
+        // agora falaria com um RCON que já não existe.
+        oxideRuntime.stop();
         uiSync.stop();
         // O dos VIPs junto dos outros: um relógio esquecido aqui é
         // uma rodada que começa depois de o supervisor já ter
@@ -1875,6 +1963,7 @@ async function main(): Promise<void> {
         }
 
         catalogMirror?.stop();
+        vipSiteMirror?.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de
