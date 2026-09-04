@@ -36,7 +36,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 // O interruptor mora em ui\ porque a lista de plugins também o usa.
 import { Toggle } from '@/components/ui/toggle';
-import { agent, type ServerView, type SiteConfig, type SiteStatus } from '@/lib/api';
+import {
+  agent,
+  type ServerView,
+  type SiteConfig,
+  type SiteStatus,
+  type SiteVipMirrorView,
+} from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -890,6 +896,22 @@ function SitePanel({ server, onChanged }: { server: ServerView; onChanged: () =>
                 status.purchases.chargeUnknown + status.purchases.unprovable > 0 ? 'warn' : 'ok'
               }
             />
+            <StatusRow
+              label="Espelho de VIP"
+              value={vipMirrorLabel(status.vipMirror, serverId)}
+              // `routeMissing` fica em AMARELO, e não em vermelho: o
+              // trabalho está na fila do site, e pintar de defeito
+              // faria alguém procurar conserto aqui.
+              tone={
+                status.vipMirror.inSync === true
+                  ? 'ok'
+                  : status.vipMirror.routeMissing || !status.vipMirror.running
+                    ? 'warn'
+                    : status.vipMirror.lastPushError === null
+                      ? 'warn'
+                      : 'bad'
+              }
+            />
           </dl>
           </>
         )}
@@ -915,6 +937,42 @@ function SitePanel({ server, onChanged }: { server: ServerView; onChanged: () =>
       </Card>
     </div>
   );
+}
+
+/**
+ * O espelho de VIP em uma frase.
+ *
+ * ####  A CONTAGEM VEM ANTES DO RESTO  ####
+ *
+ * "12 VIPs" é a única parte que alguém consegue conferir olhando a
+ * lista de VIPs ao lado. Um hash e um horário não se conferem contra
+ * nada — eles servem para o depois, quando já se desconfia de algo.
+ *
+ * A data é a do ESTE servidor (`mirrored`), e não a do último push
+ * global: com N pareamentos, o push que saiu há um minuto pode ter
+ * sido para outro, e mostrar o global diria "em dia" para um destino
+ * que está dias atrás.
+ */
+function vipMirrorLabel(mirror: SiteVipMirrorView, serverId: string): string {
+  if (!mirror.running) {
+    return 'não construído — o site não sabe quem tem VIP no jogo';
+  }
+
+  const count = `${String(mirror.count ?? 0)} VIP(s)`;
+
+  if (mirror.routeMissing) {
+    return `${count} — o site ainda não tem a rota; nada a fazer aqui`;
+  }
+
+  const at = mirror.mirrored.find((entry) => entry.serverId === serverId)?.at ?? null;
+
+  if (mirror.inSync === true) {
+    return at === null
+      ? `${count}, em dia`
+      : `${count}, confirmado em ${new Date(at).toLocaleString('pt-BR')}`;
+  }
+
+  return `${count} — ${mirror.reason ?? 'ainda não confirmado pelo site'}`;
 }
 
 /** O que cada estado de pareamento quer dizer, em português. */

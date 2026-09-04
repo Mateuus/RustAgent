@@ -51,6 +51,9 @@ Formato único. Programe contra `error`; `message` pode mudar sem aviso.
 | `PORT_IN_USE` | 409 | a porta já está ocupada na máquina |
 | `RCON_UNAVAILABLE` | 503 | sem conexão com aquele servidor de Rust |
 | `RCON_TIMEOUT` | 504 | comando enviado, resposta não voltou |
+| `RCON_NOT_CONNECTED` / `RCON_DISCONNECTED` / `RCON_CLOSED` | 503 | não havia conexão, ela caiu no meio, ou o agente está desligando |
+| `RCON_SEND_FAILED` | 502 | o frame não saiu pelo socket |
+| `RCON_INVALID_COMMAND` | 400 | comando vazio, ou com mais de uma linha |
 | `INVALID_STEAM_ID` | 400 | não é um SteamID64 de 17 dígitos |
 | `PLAYER_NOT_FOUND` | 404 | este agente nunca viu esse SteamID |
 | `BAN_ALREADY_ACTIVE` | 409 | já há banimento ativo para aquele SteamID |
@@ -349,7 +352,7 @@ servidores" obrigaria a ir procurar quem são.
 
 | Rota | |
 |---|---|
-| `GET /api/servers/:id/plugins` | a biblioteca + os customs dele, com `enabled`, `updateAvailable` e `blockedBy` |
+| `GET /api/servers/:id/plugins` | a biblioteca + os customs dele, com `enabled`, `updateAvailable`, `blockedBy` e `runtime` |
 | `POST /api/servers/:id/plugins` | envia um `.cs` **custom** deste servidor (multipart, campo `file`) |
 | `PUT /api/servers/:id/plugins/:pluginId` | `{ "enabled": true \| false }` — liga, desliga e aplica |
 | `POST /api/servers/:id/plugins/:pluginId/reload` | só recarrega, sem recopiar |
@@ -525,6 +528,35 @@ mostrar, dias depois, o erro de um arquivo já corrigido.
 linha do plugin. Antes, isso só existia dentro do `reload.output` da resposta de
 quem clicou — e quem não clicou nunca via.
 
+### O plugin que quebrou sozinho
+
+O `lastReload` acima só conta o que aconteceu quando **alguém recarregou**. O
+plugin, porém, não quebra na hora em que se clica em algo: ele quebra quando o
+Rust atualiza, de madrugada, e o agente sobe o servidor de volta sem ninguém
+olhando. Foi o que houve em 04/09/2026 — um update mudou a assinatura de
+`ItemContainer.CanAcceptItem`, o `OrigemZAgent` deixou de compilar e levou junto
+os três plugins que dependem dele. Ninguém tinha recarregado nada, então não
+havia `lastReload` a mostrar.
+
+Por isso cada plugin ligado traz também o que o Oxide respondeu **agora há
+pouco**, lido por um relógio que roda `oxide.plugins` de minuto em minuto:
+
+```json
+"runtime": { "loaded": false,
+             "failure": "Failed to compile: … | Line: 1858, Pos: 30" }
+```
+
+| Valor | Significado |
+| --- | --- |
+| `{ "loaded": true, "failure": null }` | o Oxide carregou |
+| `{ "loaded": false, "failure": "…" }` | está na pasta e **não** rodando; `failure` é a prosa do Oxide, com a linha do erro |
+| `null` | não deu para perguntar (servidor parado, ou o agente acabou de subir) |
+
+O `null` é **"não sei"**, e não "está tudo bem": supor a segunda coisa é
+exatamente o defeito que este campo existe para não repetir. Cada falha nova
+também sai no log do agente, uma vez — repetir a cada minuto faria dele uma
+parede que ninguém lê.
+
 ### A configuração de cada plugin
 
 `oxide\config\<Nome>.json`, o arquivo que o **plugin** cria no primeiro
@@ -612,7 +644,7 @@ nativo — que não tem posição nem estado. A resposta diz qual foi usada:
 
 ```json
 { "ok": true, "source": "plugin", "total": 42,
-  "plugin": { "name": "OrigemZAgent", "id": 7, "enabled": true },
+  "plugin": { "name": "OrigemZAgent", "id": 7, "enabled": true, "fallback": null },
   "missing": [],
   "world": { "size": 4000, "cellSize": 146.3, "cols": 28, "rows": 28 },
   "players": [
@@ -648,6 +680,27 @@ sair da aba; `null` significa que ele nem está no acervo daquele servidor.
 linha; vindo outra coisa é `502 PLUGIN_INVALID_RESPONSE`, e não um `catch`
 silencioso que devolve lista vazia. "Zero jogadores" e "não consegui perguntar"
 são respostas diferentes, e a segunda não pode se disfarçar da primeira.
+
+**`plugin.fallback` diz por que a lista não veio do plugin**, mesmo ele ligado.
+"Ligado" é sobre o **arquivo** estar na pasta daquele servidor; o Oxide é quem
+diz se conseguiu **carregar**. Entre as duas coisas cabe um plugin que não
+compila — e os comandos dele somem do console, que não reclama de comando
+desconhecido: ele se cala até o timeout.
+
+| Valor | O que houve | O que resolve |
+| --- | --- | --- |
+| `null` | a lista veio do plugin, ou ele está desligado | nada |
+| `not-loaded` | o Oxide **confirmou** que não carregou o plugin | corrigir o `.cs` — a aba Plugins mostra a mensagem do compilador |
+| `no-answer` | o comando não voltou a tempo, com o plugin de pé | esperar: é o servidor ocupado, comum nos primeiros minutos depois de subir |
+
+Nos dois casos de falha a lista **continua vindo**, pelo `playerlist` nativo:
+expulsar e banir seguem funcionando enquanto o plugin não volta. O que se perde
+é o que só ele sabe, e isso sai em `missing`.
+
+Distinguir os dois motivos não é preciosismo — eles pedem o oposto um do outro.
+Acusar de "não compila" um plugin que apenas demorou mandaria consertar o que
+está certo, e um alarme desses depois de todo boot ensina a ignorar o alarme
+verdadeiro. Ver `POST /api/servers/:id/plugins` para o estado de cada plugin.
 
 O `kick` age sobre quem está **conectado** — expulsar é tirar da partida agora,
 não impedir de voltar. Para impedir, o caminho é a BanList.

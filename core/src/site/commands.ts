@@ -50,6 +50,7 @@ import type { SiteCommandsRepository, SiteCommandState } from '../db/site-comman
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import { toError } from '../util.js';
+import { unknownAcks } from './client.js';
 import type { ClaimedCommandBody, CommandAck, SiteClient } from './client.js';
 
 /**
@@ -718,7 +719,7 @@ export class SiteCommands {
     }
 
     const now = this.#now();
-    const unknown = new Set(result.body.unknown ?? []);
+    const unknown = unknownAcks(result.body);
 
     for (const ack of acks) {
       if (ack.status === 'accepted') {

@@ -119,6 +119,21 @@ export interface VipListDeps {
   readonly servers: VipServers;
   readonly logger: Logger;
   readonly history?: VipHistory | undefined;
+  /**
+   * A tabela mudou: o espelho do site tem o que contar.
+   *
+   * ####  ELE É LATÊNCIA, E NUNCA CORRETUDE  ####
+   *
+   * O `VipSiteMirror` recalcula o estado a cada volta do relógio e
+   * só empurra quando o hash muda — ou seja, ele descobre TUDO
+   * sozinho, inclusive um caminho novo que esqueça de avisar aqui.
+   * Este gancho existe para o site saber em dois segundos, e não em
+   * um minuto, que alguém concedeu VIP pelo painel.
+   *
+   * Por isso ele não lança e ninguém o espera: uma falha de push
+   * não pode desfazer uma concessão já gravada.
+   */
+  readonly onChanged?: (() => void) | undefined;
 }
 
 /** Uma concessão como a API a mostra. Datas em ISO. */
@@ -293,6 +308,7 @@ export class VipList {
     );
 
     this.#record(vip, outcome === 'created' ? 'ganhou' : 'renovou');
+    this.#deps.onChanged?.();
 
     return {
       vip: toVipView(vip, Date.now()),
@@ -331,6 +347,7 @@ export class VipList {
 
     this.#deps.logger.warn({ steamId, tier: normalized, by: revokedBy }, 'VIP revogado');
     this.#record(vip, 'perdeu');
+    this.#deps.onChanged?.();
 
     return { vip: toVipView(vip, Date.now()), results: await this.syncAll(steamId) };
   }
@@ -366,6 +383,8 @@ export class VipList {
 
       this.#record(vip, 'venceu');
     }
+
+    this.#deps.onChanged?.();
 
     // O estado inteiro vai de novo para CADA servidor, e depois
     // cada jogador afetado é reaplicado: o payload tira o VIP do
@@ -592,6 +611,13 @@ export class VipList {
         { server: serverId, added, removed, adopted },
         'VIP reconciliado com os grupos do Oxide',
       );
+    }
+
+    // Só a ADOÇÃO muda a tabela — `added` e `removed` mexem no grupo
+    // do Oxide para casar com o que a tabela já dizia, e o retrato
+    // do site sairia idêntico.
+    if (adopted.length > 0) {
+      this.#deps.onChanged?.();
     }
 
     return {

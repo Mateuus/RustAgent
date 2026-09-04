@@ -28,6 +28,7 @@ import type { StoreRepository } from '../../db/store-repository.js';
 import type { SiteBeacon } from '../../site/beacon.js';
 import type { SiteDomainHealth } from '../../site/domains.js';
 import type { CatalogMirrorStatus } from '../../store/catalog-mirror.js';
+import type { VipMirrorStatus } from '../../vip/site-mirror.js';
 import type { Wallet } from '../../store/wallet.js';
 import { z } from 'zod';
 
@@ -130,6 +131,21 @@ export interface SiteRoutesDeps {
     /** `null` = o espelho não foi construído. */
     readonly status: CatalogMirrorStatus | null;
   };
+  /**
+   * O espelho de VIP: quem tem VIP no jogo, contado ao site.
+   *
+   * ####  AQUI A AUSÊNCIA É DE UM TIPO SÓ  ####
+   *
+   * Diferente do catálogo, ele não tem chave de ligar/desligar —
+   * `null` significa exatamente uma coisa: nenhum pareamento com
+   * carteira. Por isso o tipo é o status cru, e não um objeto que
+   * precisa explicar qual das duas ausências é.
+   *
+   * A leitura recalcula o hash do estado atual, então ela custa uma
+   * varredura dos VIPs ativos. É por isso que ela é uma FUNÇÃO: a
+   * tela paga isso quando abre, e não a cada montagem das deps.
+   */
+  readonly vipMirror?: () => VipMirrorStatus | null;
 }
 
 export function registerSiteRoutes(app: FastifyInstance, deps: SiteRoutesDeps): void {
@@ -258,6 +274,7 @@ export function registerSiteRoutes(app: FastifyInstance, deps: SiteRoutesDeps): 
         ackPending: health.ackPending,
       })),
       catalog: catalogStatus(deps),
+      vipMirror: vipMirrorStatus(deps),
       purchases: {
         // A compra que morreu antes do débito — e o dinheiro pode ter
         // saído. Ela não some sozinha.
@@ -327,6 +344,77 @@ export function registerSiteRoutes(app: FastifyInstance, deps: SiteRoutesDeps): 
 /** Epoch ms vira ISO para a tela. `null` continua `null`. */
 function iso(at: number | null): string | null {
   return at === null ? null : new Date(at).toISOString();
+}
+
+/**
+ * O espelho de VIP, traduzido para a tela.
+ *
+ * ####  "A ROTA NÃO EXISTE" NÃO É DEFEITO DAQUI  ####
+ *
+ * Enquanto o site não subir `/api/agent/vip/mirror`, este é o estado
+ * NORMAL — e uma tela que só mostrasse `lastPushError` faria quem
+ * opera abrir chamado contra o agente por um trabalho que está na
+ * fila do outro lado. Por isso `routeMissing` vem separado, e o
+ * `reason` diz de quem é a vez.
+ */
+function vipMirrorStatus(deps: SiteRoutesDeps): {
+  readonly running: boolean;
+  readonly reason: string | null;
+  readonly version: string | null;
+  /** Quantos VIPs o retrato representa. `null` = não há espelho. */
+  readonly count: number | null;
+  readonly inSync: boolean | null;
+  readonly routeMissing: boolean;
+  readonly lastPushAt: string | null;
+  readonly lastPushError: string | null;
+  readonly mirrored: readonly {
+    readonly serverId: string;
+    readonly version: string | null;
+    readonly at: string | null;
+  }[];
+} {
+  const status = deps.vipMirror?.() ?? null;
+
+  if (status === null) {
+    return {
+      running: false,
+      // Ausência de um tipo só, diferente do catálogo: o espelho de
+      // VIP não tem chave de ligar/desligar.
+      reason:
+        'Nenhum servidor pareado tem carteira no site, então o espelho de VIP não foi ' +
+        'construído. O site NÃO fica sabendo quem tem VIP no jogo.',
+      version: null,
+      count: null,
+      inSync: null,
+      routeMissing: false,
+      lastPushAt: null,
+      lastPushError: null,
+      mirrored: [],
+    };
+  }
+
+  return {
+    running: true,
+    reason: status.routeMissing
+      ? 'O site ainda não tem a rota /api/agent/vip/mirror. O agente tenta de novo a cada ' +
+        '10 min — não há nada a consertar deste lado. Ver Docs/24.'
+      : status.inSync
+        ? null
+        : status.lastPushError === null
+          ? 'Há mudança de VIP ainda não confirmada pelo site. A próxima rodada sai em até 60 s.'
+          : `O site recusou o espelho de VIP: ${status.lastPushError}`,
+    version: status.version,
+    count: status.count,
+    inSync: status.inSync,
+    routeMissing: status.routeMissing,
+    lastPushAt: iso(status.lastPushAt),
+    lastPushError: status.lastPushError,
+    mirrored: status.mirrored.map((entry) => ({
+      serverId: entry.serverId,
+      version: entry.version,
+      at: iso(entry.at),
+    })),
+  };
 }
 
 /**

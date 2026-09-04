@@ -7,11 +7,16 @@
 > build limpos. Este documento existe para responder três perguntas suas: *o contrato
 > mudou?*, *o que eu preciso entregar?* e *o que exatamente o agente manda no fio?*
 >
-> **O que ele NÃO é.** Não é relato de coisa testada contra o site. **Nenhuma linha deste
-> código falou com o servidor de vocês** — todo teste daqui fala com um dublê que devolve
-> o que o manual `Docs/20` diz que o site responde. É o risco número um, e ele continua
-> de pé: se as rotas novas nascerem com outro contrato, meus testes passam e a integração
-> falha.
+> **⚠️ Atualização de 04/09/2026 — o §9 é o que mudou.** Este documento nasceu dizendo
+> *"nenhuma linha deste código falou com o servidor de vocês"*. **Falou.** A §9 conta o que
+> a primeira sonda do cliente real contra o dev encontrou: o canal funciona, e **três
+> divergências** apareceram na primeira rodada. O resto deste documento é de 02/09/2026 e
+> continua valendo — leia o §9 primeiro.
+>
+> **O que ele NÃO era.** Todo teste daqui falava com um dublê que devolve o que o manual
+> `Docs/20` diz que o site responde. Era o risco número um. Hoje existe
+> `contracts/oz-rust-fixtures.json`, com os corpos **medidos**, consumido pelos testes deste
+> repositório — e ainda por nenhum dos de vocês.
 >
 > **Onde estão as três frentes, em 02/09/2026.** O RustAgent está **pronto e verde**
 > (890 testes). O painel do site, pelo relato de quem o fez, também (595 testes). O
@@ -22,7 +27,7 @@
 > **Dois dos três lados estão prontos e parados no mesmo lugar.** O que falta é uma
 > coisa só, e ela é o gargalo de tudo.
 >
-> **Data:** 02/09/2026. **Contrato:** `oz-rust/1`.
+> **Data:** 02/09/2026; §9 e o cabeçalho, 04/09/2026. **Contrato:** `oz-rust/5`.
 
 ---
 
@@ -135,7 +140,15 @@ Em ordem de gravidade. **Os três primeiros quebram a fase 1 inteira**; o resto 
 | 2 | **`skinId` como string de dígitos** no payload de entrega | **toda** entrega de item e kit vira `PAYLOAD_INVALID`. Meu schema recusa `number`, e o teste guarda isso |
 | 3 | **`prefab` no alfabeto `/^[a-z0-9._-]{1,64}$/`** — o **ponto é legal** | o resgate recusa o **nome exato** de um veículo ambíguo, e o `sedan` certo fica incadastrável (`sedan` resolve para `sedanrail.entity`, o vagão de trilho) |
 
-### As cinco rotas que não existem
+### As cinco rotas que não existiam
+
+> ####  ✅ ELAS EXISTEM — MEDIDO EM 04/09/2026  ####
+>
+> Esta tabela é de 02/09/2026 e ficou vencida. A sonda da §9 falou com quatro das cinco e
+> todas responderam (`/ozcoins/transaction`, `/deliveries/pending`, `/shop/mirror/version`,
+> e o `/shop/mirror` está provado pelo espelho já gravado do lado de vocês). A única não
+> exercitada é `/deliveries/ack`, e de propósito: uma sonda que ACKa fecha entrega de gente
+> de verdade. A tabela fica como registro do que faltava.
 
 Sem elas, o que já está escrito aqui não roda. A loja in-game **funciona sem as cinco** —
 o que morre é reconciliação, fila e espelho.
@@ -332,11 +345,18 @@ teste deste repositório fala com a internet.
    entrega é meu (as réguas já existem no código do agente); `error_code` é seu;
    vocabulário de `reason` é meu.
 
-**O artefato que fecharia o buraco de verdade** — e que nenhum dos dois tem — é um arquivo
-de **fixtures compartilhado**: os corpos de requisição e resposta das nove rotas,
-versionado num lugar só, consumido pelos testes dos dois repositórios. Enquanto ele não
-existir, `skinId` string × number e o alfabeto de `prefab` continuam podendo divergir sem
-que nenhum teste acuse. Se você topar, eu gero a primeira versão a partir dos meus dublês.
+**O artefato que fecharia o buraco de verdade** — e que nenhum dos dois tinha — é um
+arquivo de **fixtures compartilhado**: os corpos de requisição e resposta das rotas,
+versionado num lugar só, consumido pelos testes dos dois repositórios.
+
+✅ **Ele existe desde 04/09/2026:** `F:/Projects/RustAgent/contracts/oz-rust-fixtures.json`,
+com o `README.md` ao lado explicando o pacto. Cada resposta traz um `origin`, e ele é a
+coisa mais importante do arquivo: `observed` é **copiado de uma resposta real do dev**;
+`manual` é o que a prosa descreve e **ninguém confirmou**. Os testes deste repositório já o
+consomem (`core/test/site-fixtures.test.ts`, 13 casos que alimentam o `SiteClient` de
+verdade com os corpos do arquivo). **Falta o lado de vocês consumi-lo.**
+
+E os passos 1 e 2 acima aconteceram: **a §9 conta o que a primeira sonda achou.**
 
 ---
 
@@ -355,3 +375,62 @@ só as rotas **novas**. O `/ozcoins/debit` é antigo e fica de fora. Numa troca 
 residencial, o agente **continua cobrando** e para de conferir — a fila e a reconciliação
 morrem em silêncio. Cobrar sem conferir é a pior metade das duas. Ou o guard vale para
 todas as rotas do agente, ou não vale para nenhuma na fase 1.
+
+---
+
+## 9 — O que a PRIMEIRA sonda contra o dev mostrou (04/09/2026)
+
+O passo 1 da §7 aconteceu: em **04/09/2026** o cliente real deste agente — o mesmo
+`SiteClient` de produção, com os mesmos headers, o mesmo timeout e o mesmo parsing — falou
+com `https://devsite2.origemz.com`, pareado como `RUST01`. A ferramenta é
+`npm run site:probe -w core`; ela grava os dois lados do fio e **nunca** debita, credita,
+ACKa entrega alheia nem sobrescreve o espelho.
+
+**Dezessete idas à rede. O canal funciona.** Beacon, retrato, fila de comandos, fila de
+entregas, versão do espelho, saldo e prova de transação: todos responderam, e o que voltou
+casa com o contrato. Os corpos estão em `contracts/oz-rust-fixtures.json`, marcados como
+`observed`.
+
+### 9.1 As três divergências
+
+Nenhuma delas teria sido pega por teste nenhum dos dois lados. É exatamente o risco número
+um, medido.
+
+| # | O que o manual dizia | O que atravessa | Quem desempata (§23.1) | O que eu fiz |
+|---|---|---|---|---|
+| 1 | `version` é um inteiro que só cresce | **`version: 0` com `desired: null`** para servidor sem config — e o ACK dessa versão volta **`400 CONFIG_INVALID_VERSION`, "version precisa ser um inteiro ≥ 1"** | **você**: a régua da versão é do site | o agente passou a ler `version < 1` como **ausência**, e a ficar em silêncio no caso "sem config" |
+| 2 | o ACK de comando responde `{ ok, applied, unknown[] }` | **`{ ok, results: [{ commandId, applied, status, outcome }] }`** | **você**: o formato da sua resposta é seu | o agente lê **as duas formas**; até ontem, uma recusa sua chegava aqui como sucesso, e o desfecho do comando sumia sem uma linha de log |
+| 3 | `GET /server/config` responde **304** ao `If-None-Match` | **200 sempre**, com `Cache-Control: no-store`, mesmo com o `ETag` idêntico | **você** | nada: o ramo do 304 existe, está correto e é barato. O que não acontece é a economia — hoje o corpo inteiro atravessa a cada 30 s, por servidor |
+
+**A nº 1 é a que quase custou caro.** Se um dia vier `version: 0` com um `desired`
+preenchido, o agente de ontem aplicaria, gravaria a versão zero e o ACK dela tomaria 400 a
+cada 30 segundos, para sempre — um laço que só pararia com alguém lendo log.
+
+### 9.2 As duas ausências, e elas não são divergência
+
+- **`GET /api/agent/config/:domain` e o ACK dele (rotas 15 e 16) não existem aí**: 404 HTML
+  nos três assuntos (`store`, `kits`, `vips`). Deste lado está pronto e **desligado por
+  padrão** (`SITE_DOMAIN_PULL_ENABLED=0`) — ver o §23.11 do `Docs/20`.
+- **`GET /server/config` devolve `desired: null`** porque ninguém configurou o `RUST01` no
+  site ainda. **O `desired` de verdade, com os 23 campos, continua sem ter sido visto por
+  nenhum dos dois lados** — é a próxima coisa a sondar, e basta você gravar uma config lá.
+
+### 9.3 Duas curiosidades que anotei sem mexer em nada
+
+- **`restartRequiring`** vem no corpo de `GET /server/config`, com 20 campos. Ele é
+  informativo e não é lido aqui: quem **mede** o `requiresRestart` é o agente, no retorno da
+  gravação. Duas fontes para o mesmo fato divergem na primeira vez que uma delas errar.
+- **`GET /ozcoins/balance` de um SteamID que não existe** devolve `{"moedas":"0","exists":true}`.
+  O agente **ignora `exists` de propósito** desde sempre (`store/site-wallet.ts`), então não
+  muda nada aqui — mas se alguma tela sua contar com esse campo para saber se a conta
+  existe, ela está contando com um `true` constante.
+
+### 9.4 O que fica combinado
+
+1. As respostas marcadas `observed` no `contracts/oz-rust-fixtures.json` são **fato**, com
+   data. As marcadas `manual` são o que a prosa diz e **ninguém confirmou** — cada uma é uma
+   divergência esperando acontecer. Quem sondar e confirmar, troca o `origin`.
+2. **Consuma o arquivo nos seus testes.** Enquanto ele for lido por um lado só, ele é
+   documentação — não trava nada.
+3. Grave uma config de servidor no dev e me avise: a próxima sonda compara o `desired` real,
+   campo a campo, com a tabela do §23.11.

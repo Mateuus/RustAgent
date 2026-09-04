@@ -361,6 +361,33 @@ sabia por quê. Agora ela conta a tentativa em curso, o motivo da última falha 
 quando sai a próxima; esgotadas as três, troca a promessa pelo pedido de
 intervenção.
 
+#### `deferred` — adiada não é falha
+
+Uma tentativa pode terminar `failed` sem que nada tenha acontecido: é a recusa
+pelo Oxide atrasado, lá de cima. O retrato separa os dois casos:
+
+```json
+"lastAttempt": { "operationId": "op_5d740ad5", "status": "failed", "deferred": true,
+                 "finishedAt": "2026-09-04T18:50:22.000Z",
+                 "message": "o Oxide ainda não lançou a versão do build 25129933 do Rust…" }
+```
+
+O status continua `failed` de propósito — a atualização **não** aconteceu e o
+build em disco ainda é o velho, o que a tela precisa mostrar. O que `deferred`
+acrescenta é que ninguém foi derrubado, nada foi tocado em disco e a tentativa
+**foi devolvida**: o vigia tenta de novo na rodada seguinte, quinze minutos
+depois, em vez de gastar uma das três (`update-watcher.ts`, `#watchAttempt`).
+
+A tela lê os dois campos juntos. A operação aparece como **adiada**, em âmbar e
+não em vermelho; o aviso do fim é um alerta que some sozinho, e não um erro que
+fica até alguém fechar; e a faixa para de mandar forçar por **Atualizar
+avisando** — que é a mesma conferência e recusa igual. No log da operação, a
+linha do desfecho vem com `[espera]` no lugar de `[erro]`.
+
+> Sem essa distinção a tela gritava três vezes — faixa, etiqueta e aviso — por
+> uma espera de meia hora que o agente resolve sozinho, e o conselho que ela
+> dava levava a derrubar o servidor atrás de um defeito que não existe.
+
 ### Como o agente sabe que a atualização deu certo
 
 Nem pelo código de saída do SteamCMD (ele sai 7/8 em execuções boas), nem pelo

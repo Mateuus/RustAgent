@@ -427,16 +427,18 @@ function PlayersSection({ server }: { server: ServerView }) {
                   Com ele no acervo e desligado, o botão resolve
                   aqui mesmo — em vez de mandar a pessoa para outra
                   aba descobrir sozinha o que fazer. */}
-              {snapshot.source === 'nativo' && snapshot.plugin.id !== null && (
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={busy !== null}
-                  onClick={() => void enablePlugin(snapshot.plugin.id ?? 0)}
-                >
-                  {busy === 'plugin' ? 'Ligando…' : `Ligar o ${snapshot.plugin.name}`}
-                </Button>
-              )}
+              {snapshot.source === 'nativo' &&
+                snapshot.plugin.id !== null &&
+                snapshot.plugin.fallback === null && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={busy !== null}
+                    onClick={() => void enablePlugin(snapshot.plugin.id ?? 0)}
+                  >
+                    {busy === 'plugin' ? 'Ligando…' : `Ligar o ${snapshot.plugin.name}`}
+                  </Button>
+                )}
 
               <Button size="sm" variant="outline" onClick={() => setFullscreen(true)}>
                 <Maximize2 aria-hidden="true" className="h-4 w-4" />
@@ -457,12 +459,52 @@ function PlayersSection({ server }: { server: ServerView }) {
             totalMonumentos={monumentos.length}
           />
 
+          {/* ####  QUATRO MOTIVOS, QUATRO SAÍDAS  ####
+
+              A lista veio do nativo por um destes: o plugin não
+              está no acervo, está desligado, o Oxide não o
+              carregou, ou ele não respondeu a tempo. Os dois
+              últimos são os que enganam — na aba Plugins tudo
+              parece certo — e nenhum dos dois se resolve com o
+              interruptor.
+
+              E eles não se resolvem UM COM O OUTRO: o que não
+              compila espera conserto; o que demorou espera o
+              servidor desafogar. Dizer os dois com a mesma frase
+              mandaria consertar um plugin que está de pé, e um
+              alarme desses depois de todo boot ensina a ignorar o
+              alarme verdadeiro. */}
           {snapshot.source === 'nativo' && (
-            <p className="border border-amber bg-surface-2 px-4 py-3 text-2xs leading-relaxed">
-              O <strong>{snapshot.plugin.name}</strong>{' '}
-              {snapshot.plugin.id === null
-                ? 'não está no acervo deste servidor — envie o .cs na aba Plugins para ter posição, mapa e estado.'
-                : 'está desligado aqui. Sem ele o playerlist do Rust não informa posição, nem se o jogador está vivo ou dormindo — e o mapa fica sem pontos.'}
+            <p
+              className={cn(
+                'border bg-surface-2 px-4 py-3 text-2xs leading-relaxed',
+                // O que passa sozinho não merece a moldura de alarme.
+                snapshot.plugin.fallback === 'no-answer' ? 'border-border' : 'border-amber',
+              )}
+            >
+              {snapshot.plugin.fallback === 'not-loaded' ? (
+                <>
+                  O <strong>{snapshot.plugin.name}</strong> está ligado aqui, mas o Oxide{' '}
+                  <strong>não conseguiu carregá-lo</strong>. Costuma ser erro de compilação depois
+                  de uma atualização do Rust: a aba <strong>Plugins</strong> mostra a mensagem do
+                  compilador, com a linha. Até lá esta lista vem do playerlist nativo, sem posição
+                  nem estado — expulsar e banir continuam funcionando.
+                </>
+              ) : snapshot.plugin.fallback === 'no-answer' ? (
+                <>
+                  O <strong>{snapshot.plugin.name}</strong> está no ar, mas não respondeu a tempo —
+                  o servidor deve estar ocupado, o que é comum nos primeiros minutos depois de
+                  subir. Esta lista veio do playerlist nativo, sem posição nem estado. Nada a
+                  fazer: a próxima atualização já volta pelo plugin.
+                </>
+              ) : (
+                <>
+                  O <strong>{snapshot.plugin.name}</strong>{' '}
+                  {snapshot.plugin.id === null
+                    ? 'não está no acervo deste servidor — envie o .cs na aba Plugins para ter posição, mapa e estado.'
+                    : 'está desligado aqui. Sem ele o playerlist do Rust não informa posição, nem se o jogador está vivo ou dormindo — e o mapa fica sem pontos.'}
+                </>
+              )}
             </p>
           )}
 

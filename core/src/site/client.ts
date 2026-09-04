@@ -293,6 +293,32 @@ export class SiteClient {
     return this.#call('POST', '/api/agent/shop/mirror', payload);
   }
 
+  // ---- VIP -------------------------------------------------
+
+  /**
+   * O espelho dos VIPs ATIVOS. Mesmo desenho do catálogo, e pelo
+   * mesmo motivo: o site não tem como perguntar, então o agente
+   * conta.
+   *
+   * ####  A DIREÇÃO É O CONTRÁRIO DA DO CATÁLOGO  ####
+   *
+   * A loja nasce no agente e o site a exibe. O VIP nasce nos DOIS
+   * (o site vende, o jogador compra in-game, o admin dá à mão) e
+   * quem executa o vencimento é o agente. Este espelho é o que
+   * conta ao site o que de fato está valendo no jogo — sem ele o
+   * `UserVipGrant` de lá é uma promessa que ninguém confere.
+   *
+   * Enquanto o outro lado não existir, isto responde 404 e o
+   * `VipSiteMirror` recua sozinho. Ver Docs\24.
+   */
+  vipMirrorVersion(): Promise<SiteResult<MirrorVersionBody>> {
+    return this.#call('GET', '/api/agent/vip/mirror/version');
+  }
+
+  pushVipMirror(payload: unknown): Promise<SiteResult<MirrorBody>> {
+    return this.#call('POST', '/api/agent/vip/mirror', payload);
+  }
+
   // ---- comandos --------------------------------------------
 
   /**
@@ -347,23 +373,7 @@ export class SiteClient {
         : result;
     }
 
-    const version = result.body.version;
-    const desired = result.body.desired;
-
-    return {
-      ...result,
-      body: {
-        notModified: false,
-        // `null` = o site não mandou um inteiro, e quem lê recua.
-        // Nunca zero: zero é uma versão, e ela compararia igual à
-        // primeira que já foi aplicada.
-        version: typeof version === 'number' && Number.isSafeInteger(version) ? version : null,
-        desired:
-          typeof desired === 'object' && desired !== null && !Array.isArray(desired)
-            ? (desired as Record<string, unknown>)
-            : null,
-      },
-    };
+    return { ...result, body: readDesired(result.body) };
   }
 
   /** O que foi feito com AQUELA versão. Ver `site/config.ts`. */
@@ -401,20 +411,7 @@ export class SiteClient {
         : result;
     }
 
-    const version = result.body.version;
-    const desired = result.body.desired;
-
-    return {
-      ...result,
-      body: {
-        notModified: false,
-        version: typeof version === 'number' && Number.isSafeInteger(version) ? version : null,
-        desired:
-          typeof desired === 'object' && desired !== null && !Array.isArray(desired)
-            ? (desired as Record<string, unknown>)
-            : null,
-      },
-    };
+    return { ...result, body: readDesired(result.body) };
   }
 
   /**
@@ -527,6 +524,45 @@ export class SiteClient {
       body: parsed,
     };
   }
+}
+
+/**
+ * A `version` e o `desired` de qualquer canal de config.
+ *
+ * ####  `version: 0` É "NÃO HÁ CONFIG", E FOI MEDIDO  ####
+ *
+ * O dev respondeu `{"ok":true,"version":0,"desired":null}` para um
+ * servidor pareado que ninguém configurou, e recusou o ACK daquela
+ * mesma versão com **400 `CONFIG_INVALID_VERSION` — "version precisa
+ * ser um inteiro ≥ 1"**. Ou seja: do lado de lá, zero é o sentinela
+ * de vazio; se este lado o tratasse como versão, um `desired`
+ * qualquer que viesse com ela seria aplicado, gravado, e o ACK dele
+ * tomaria 400 a cada 30 s, para sempre.
+ *
+ * A régua da versão é do SITE (`Docs/21` §7 / `Docs/20` §23.1), e
+ * ela diz ≥ 1. Abaixo disso, aqui, é ausência.
+ *
+ * `desired` só passa se for objeto: lista e escalar não são config.
+ */
+function readDesired(body: Record<string, unknown>): {
+  readonly notModified: false;
+  readonly version: number | null;
+  readonly desired: Record<string, unknown> | null;
+} {
+  const version = body.version;
+  const desired = body.desired;
+
+  return {
+    notModified: false,
+    version:
+      typeof version === 'number' && Number.isSafeInteger(version) && version >= 1
+        ? version
+        : null,
+    desired:
+      typeof desired === 'object' && desired !== null && !Array.isArray(desired)
+        ? (desired as Record<string, unknown>)
+        : null,
+  };
 }
 
 function safeJson(text: string): Record<string, unknown> | null {
@@ -723,11 +759,57 @@ export interface CommandAck {
 }
 
 /** `POST /commands/ack`. */
+/**
+ * Uma linha da resposta do ACK, do jeito que o dev responde.
+ *
+ * Medido em 04/09/2026:
+ *
+ * ```json
+ * {"ok":true,"results":[
+ *   {"commandId":"CMD-…","applied":false,"status":"unknown","outcome":"invalid_lease"}]}
+ * ```
+ */
+export interface CommandAckResult {
+  readonly commandId?: string;
+  readonly applied?: boolean;
+  readonly status?: string;
+  readonly outcome?: string;
+}
+
 export interface CommandAckBody {
   readonly ok?: boolean;
   readonly applied?: number;
-  /** Token velho, id desconhecido, linha já fechada. */
+  /**
+   * Token velho, id desconhecido, linha já fechada.
+   *
+   * ####  O SITE NÃO MANDA ESTA LISTA — ELE MANDA `results[]`  ####
+   *
+   * A forma do manual continua aceita (é a que os dublês usam), mas
+   * a que atravessa o fio hoje é `results[]`, com um `applied: false`
+   * por linha. Quem junta as duas é `unknownAcks`: ler só `unknown`
+   * fazia toda recusa do site chegar aqui como sucesso, e o desfecho
+   * do comando sumia sem nenhuma linha de log.
+   */
   readonly unknown?: readonly string[];
+  readonly results?: readonly CommandAckResult[];
+}
+
+/**
+ * Os ids que o site NÃO aplicou, venham eles como vierem.
+ *
+ * A forma do manual (`unknown: string[]`) e a medida contra o dev
+ * (`results[].applied === false`) descrevem o mesmo fato.
+ */
+export function unknownAcks(body: CommandAckBody): ReadonlySet<string> {
+  const ids = new Set<string>(body.unknown ?? []);
+
+  for (const result of body.results ?? []) {
+    if (result.applied === false && typeof result.commandId === 'string') {
+      ids.add(result.commandId);
+    }
+  }
+
+  return ids;
 }
 
 /** `GET /server/config` — JÁ TRADUZIDO. */

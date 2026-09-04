@@ -1788,10 +1788,10 @@ namespace Oxide.Plugins
 
             try
             {
-                long room = CountFreeSlotRoom(inventory.containerMain, probe, maxStack)
-                          + CountFreeSlotRoom(inventory.containerBelt, probe, maxStack)
-                          + CountStackRoom(inventory.containerMain, probe, maxStack)
-                          + CountStackRoom(inventory.containerBelt, probe, maxStack);
+                long room = CountFreeSlotRoom(player, inventory.containerMain, probe, maxStack)
+                          + CountFreeSlotRoom(player, inventory.containerBelt, probe, maxStack)
+                          + CountStackRoom(player, inventory.containerMain, probe, maxStack)
+                          + CountStackRoom(player, inventory.containerBelt, probe, maxStack);
 
                 return room >= amount;
             }
@@ -1803,9 +1803,9 @@ namespace Oxide.Plugins
 
         // Slot vazio cabe uma pilha cheia - nem mais (o fatiamento
         // nunca cria pedaco maior) nem menos.
-        private static long CountFreeSlotRoom(ItemContainer container, Item item, int maxStack)
+        private static long CountFreeSlotRoom(BasePlayer player, ItemContainer container, Item item, int maxStack)
         {
-            if (!Accepts(container, item))
+            if (!Accepts(player, container, item))
             {
                 return 0;
             }
@@ -1819,9 +1819,9 @@ namespace Oxide.Plugins
             return (long)freeSlots * maxStack;
         }
 
-        private static long CountStackRoom(ItemContainer container, Item item, int maxStack)
+        private static long CountStackRoom(BasePlayer player, ItemContainer container, Item item, int maxStack)
         {
-            if (!Accepts(container, item))
+            if (!Accepts(player, container, item))
             {
                 return 0;
             }
@@ -1848,14 +1848,14 @@ namespace Oxide.Plugins
         // CanAcceptItem cobre o que a aritmetica nao ve: container
         // travado, slot que so aceita roupa, hook de outro plugin
         // recusando o item.
-        private static bool Accepts(ItemContainer container, Item item)
+        private static bool Accepts(BasePlayer player, ItemContainer container, Item item)
         {
             if (container == null || container.itemList == null)
             {
                 return false;
             }
 
-            return container.CanAcceptItem(item, -1) == ItemContainer.CanAcceptResult.CanAccept;
+            return container.CanAcceptItem(player, item, -1) == ItemContainer.CanAcceptResult.CanAccept;
         }
 
         // Mesma regra que o jogo usa para empilhar: mesmo item,

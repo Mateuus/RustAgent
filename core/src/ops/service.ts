@@ -384,7 +384,10 @@ export class OperationsService {
         // três tentativas do build esperando o OxideMod publicar.
         operation.deferred = error instanceof OxideBehindRustError;
 
-        operation.log(`[erro] ${message}`);
+        // O prefixo também: quem abre o log de uma operação
+        // adiada não está lendo um erro, e chamá-lo assim manda
+        // procurar defeito onde não há nenhum.
+        operation.log(`${operation.deferred ? '[espera]' : '[erro]'} ${message}`);
         operation.finish(operation.cancelled ? 'cancelled' : 'failed', message);
 
         if (operation.deferred) {

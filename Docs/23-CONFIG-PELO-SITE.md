@@ -16,7 +16,14 @@
 > falha. É o mesmo risco número um do `Docs/21` e do `Docs/22`, e ele continua de pé.
 >
 > **Data:** 04/09/2026.
-> **Contrato:** `oz-rust/4` — a rota **13 ampliada**, mais as rotas **15 e 16**.
+> **Contrato:** `oz-rust/5` — a rota **13 ampliada** (23 campos, com o `autoUpdate`), mais as rotas
+> **15 e 16**.
+> ✅ **Reconciliado em 04/09/2026.** O conteúdo deste documento — os campos da rota 13 e o canal de
+> config de rede — foi levado para o §23 dos **dois** manuais, com o corpo idêntico byte a byte
+> (`Docs/20` §23.11 e a §23.9 do manual do site), e a etiqueta subiu para `oz-rust/5` nos dois no
+> mesmo commit. Confere-se com `grep -Eom1 'oz-rust/[0-9]+'` nos dois arquivos. **A etiqueta é dos
+> manuais, não de quem a reivindica primeiro** — daqui em diante, quem mudar qualquer coisa deste
+> assunto muda lá, e este documento continua sendo o manual de implementação do lado do agent.
 > **Pré-requisito:** o `Docs/20` (o canal, o bearer, o `X-Server-Id`) e o `Docs/22` (a config de
 > servidor, a `version`, o `ETag`, o ACK). Este documento não os repete.
 
@@ -45,7 +52,7 @@
 
 | # | O quê | Rota | Cadência | Onde mora aqui |
 |---|---|---|---|---|
-| 1 | **Config de servidor ampliada** — de 7 para **21 campos**, mais `enabled` | `GET /api/agent/server/config` (a mesma) | 30 s | `core/src/site/config.ts` |
+| 1 | **Config de servidor ampliada** — de 7 para **21 campos do `.ini`**, mais `enabled` e `autoUpdate` | `GET /api/agent/server/config` (a mesma) | 30 s | `core/src/site/config.ts` |
 | 2 | **Config de rede** — loja, kits e VIP | `GET /api/agent/config/:domain` + `POST /api/agent/config/:domain/ack` | 60 s | `core/src/site/domains.ts` |
 
 Continua valendo tudo do `Docs/22`: **quem puxa é o agente**, o site não chama esta máquina e não
@@ -119,13 +126,14 @@ venha só com `hostname` muda `hostname` e mais nada.
 | `steamBranch` | string | 0–64 (`""` = pública; `-beta staging`) | sim |
 | `consoleWindow` | boolean | — | sim |
 | `enabled` | boolean | — | **não** — vale na hora |
+| `autoUpdate` | boolean | — | **não** — vale na rodada seguinte do vigia |
 
-**Vinte e dois campos, e vinte deles pedem restart.** Isso é **informação, não falha**: é o que faz
+**Vinte e três campos, e vinte deles pedem restart.** Isso é **informação, não falha**: é o que faz
 o painel do site dizer "gravado, vale no próximo start" em vez de "salvo" — com o admin concluindo
 que não funcionou porque o mapa não mudou. O `requiresRestart` do ACK é o **retorno real** do
 `updateSettings`, nunca uma lista escrita à mão.
 
-### 2.2 Os quatro avisos
+### 2.2 Os cinco avisos
 
 > ####  `identity` É MUNDO NOVO  ####
 >
@@ -147,6 +155,22 @@ que não funcionou porque o mapa não mudou. O `requiresRestart` do ACK é o **r
 > de portas. **Tem volta pelo site**: o laço de config nasce do *pareamento*, não do `enabled`, e
 > um servidor desligado continua puxando config. `true` num servidor sem o jogo em disco falha com
 > `SERVER_NOT_INSTALLED` em `errors[]`.
+
+> ####  `autoUpdate` É TRI-ESTADO, E NÃO É CAMPO DO `.ini`  ####
+>
+> Chave **ausente** = o site não gerencia (vale o `STEAM_AUTO_UPDATE` da máquina); `false` =
+> gerenciado e desligado; `true` = gerenciado e ligado. Colapsar os dois primeiros — uma coluna
+> `NOT NULL DEFAULT false` do lado de lá — faz uma gravação de `hostname` desligar a atualização
+> automática de quem não pediu, e o sintoma só aparece semanas depois, quando a Facepunch publica e
+> o servidor passa a recusar todo mundo.
+>
+> Só `boolean` passa: a string `"false"` é `INVALID_VALUE`, e nunca coagida (`Boolean('false')` é
+> `true`).
+>
+> **Quem o aplica aqui não é o `updateSettings`** — ele não é campo do `.ini` e não está em
+> `RESTART_KEYS`. Quem aplica é o vigia da Steam (`core/src/steam/update-watcher.ts`), que grava a
+> opinião **por servidor** na tabela `meta`; ela vale na rodada seguinte, sem reiniciar o agente, e
+> sobrevive ao restart. A confirmação de que pegou é o `build.autoUpdate` do retrato de 30 s.
 
 > ####  O PAREAMENTO NÃO ATRAVESSA, E NUNCA VAI  ####
 >
@@ -576,7 +600,7 @@ Três, verificáveis, e nenhum deles depende de olhar código:
 
 | Arquivo | O quê |
 |---|---|
-| `core/src/site/config.ts` | os 22 campos, a régua de cada um, o `enabled` pelo caminho próprio e os dois campos recusados |
+| `core/src/site/config.ts` | os 23 campos, a régua de cada um, o `enabled` e o `autoUpdate` pelos caminhos próprios, e os dois campos recusados |
 | `core/src/site/domains.ts` | o laço genérico: `version`, `ETag`, ACK em disco, um relógio por assunto |
 | `core/src/site/appliers/store.ts` | o snapshot da loja, com a régua da rota local |
 | `core/src/site/appliers/kits.ts` | o snapshot dos kits, casado por `slug`, com a tradução de `servers[]` |
@@ -586,8 +610,9 @@ Três, verificáveis, e nenhum deles depende de olhar código:
 | `core/src/index.ts` | um laço por assunto, por **um** pareamento; desligado por padrão |
 | `.env.example` | `SITE_DOMAIN_PULL_ENABLED`, `SITE_DOMAIN_INTERVAL_MS`, `SITE_DOMAINS` |
 
-**986 testes verdes** (15 novos em `core/test/site-domains.test.ts`, 8 novos em
-`core/test/site-config.test.ts`), typecheck e lint limpos.
+**1055 testes verdes** (15 em `core/test/site-domains.test.ts`, 12 em
+`core/test/site-config.test.ts`, 6 em `core/test/steam-auto-update.test.ts` e 13 em
+`core/test/site-fixtures.test.ts`), typecheck e lint limpos.
 
 ### 9.1 As decisões que valem discussão
 

@@ -566,7 +566,22 @@ function ActiveRow({
 }) {
   const { hard, soft } = plugin.dependents;
   const arrastaOutros = hard.length > 0 || soft.length > 0;
-  const naoCompilou = plugin.lastReload?.failed === true;
+  // ####  DUAS TESTEMUNHAS DO MESMO FATO  ####
+  //
+  // `runtime` é o que o Oxide respondeu agora há pouco, de minuto
+  // em minuto; `lastReload` é o que ele disse no último reload
+  // desta sessão. A primeira é a que pega o plugin que quebrou
+  // sozinho — um update do Rust muda a assinatura de um método do
+  // jogo, o plugin deixa de compilar, e ninguém recarregou nada
+  // para o segundo ter o que contar.
+  //
+  // Aconteceu em 04/09/2026 com o OrigemZAgent, e levou junto os
+  // três plugins que dependem dele.
+  const foraDoAr = plugin.runtime?.loaded === false;
+  const naoCompilou = foraDoAr || plugin.lastReload?.failed === true;
+  // O motivo VIVO ganha do motivo velho: se o Oxide está dizendo
+  // agora por que recusou o plugin, é essa a frase que resolve.
+  const motivo = plugin.runtime?.failure ?? plugin.lastReload?.output ?? null;
 
   return (
     <div className="px-4 py-3">
@@ -638,9 +653,9 @@ function ActiveRow({
             </span>
           </p>
 
-          {plugin.lastReload?.output !== null && plugin.lastReload !== null && (
+          {motivo !== null && (
             <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-3xs leading-relaxed text-muted">
-              {plugin.lastReload.output}
+              {motivo}
             </pre>
           )}
         </div>

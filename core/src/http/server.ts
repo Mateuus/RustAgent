@@ -52,6 +52,8 @@ import {
   apiErrorToResponse,
   internalErrorResponse,
   isApiError,
+  isRconError,
+  rconErrorToResponse,
   zodErrorToResponse,
 } from './error-response.js';
 import { registerAdminRoutes } from './routes/admin.js';
@@ -174,7 +176,7 @@ export interface BuildServerOptions {
    * dinheiro, e é ela que precisa de débito, estorno e extrato.
    */
   readonly store: Omit<StoreRoutesDeps, 'supervisor'>;
-  /** O pareamento com o site OrigemZ. Ver Docs §9.6. */
+  /** O pareamento com o site OrigemZ. Ver Docs\20 §9.6. */
   readonly site: SiteRoutesDeps;
 
   // ---- wipe, calendário e mensagens ----------------------
@@ -297,6 +299,21 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
     if (error instanceof ZodError) {
       const response = zodErrorToResponse(error);
+      return reply.status(response.statusCode).send(response.body);
+    }
+
+    // Falha do RCON tem code estável e causa conhecida — ver
+    // `rconErrorToResponse`. Deixá-la cair no 500 genérico era
+    // mandar quem olha a tela procurar no log do processo uma
+    // explicação que o agente já tinha na mão.
+    if (isRconError(error)) {
+      const response = rconErrorToResponse(error);
+
+      request.log.warn(
+        { err: error, code: error.code },
+        'comando de RCON não completou; respondendo com a causa',
+      );
+
       return reply.status(response.statusCode).send(response.body);
     }
 

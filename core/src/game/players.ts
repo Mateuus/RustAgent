@@ -45,6 +45,7 @@
 import { sanitizeArgument } from '../bans/rust-bans.js';
 import { ApiError } from '../http/error-response.js';
 import type { OpsRcon } from '../ops/service.js';
+import { RconError } from '../rcon/errors.js';
 import { gridLabel, worldGrid, type WorldGrid } from './grid.js';
 import {
   buildPlayersCommand,
@@ -138,6 +139,33 @@ export interface PlayersSnapshot {
     readonly name: string;
     readonly id: number | null;
     readonly enabled: boolean;
+    /**
+     * Por que a lista NÃO veio do plugin, mesmo ele ligado.
+     *
+     * `null` = veio dele, ou ele está desligado — e aí `enabled`
+     * já conta a história inteira.
+     *
+     * ####  DUAS FALHAS QUE SE PARECEM E NÃO SÃO A MESMA  ####
+     *
+     * `not-loaded`  o Oxide CONFIRMOU que não carregou o plugin.
+     *               O arquivo está na pasta e não compila — foi o
+     *               que aconteceu em 04/09/2026, depois de um
+     *               update do Rust mudar a assinatura de
+     *               `ItemContainer.CanAcceptItem`. Isso não passa
+     *               sozinho: alguém precisa corrigir o `.cs`.
+     *
+     * `no-answer`   o comando saiu e a resposta não voltou a
+     *               tempo, com o plugin de pé (ou sem dar para
+     *               confirmar). É o servidor ocupado — comum nos
+     *               primeiros minutos depois de subir, quando o
+     *               console leva segundos para responder qualquer
+     *               coisa. Isso passa sozinho.
+     *
+     * Confundir os dois é o defeito caro: mandar consertar um
+     * plugin que está ótimo gasta a atenção que o alarme
+     * verdadeiro precisa ter.
+     */
+    readonly fallback: 'not-loaded' | 'no-answer' | null;
   };
   /**
    * Os campos que a fonte atual NÃO fornece.
@@ -151,20 +179,48 @@ export interface PlayersSnapshot {
 /** Quanto tempo a resposta do acervo vale. */
 const PLUGIN_STATE_TTL_MS = 5_000;
 
+/**
+ * Com o plugin dado como fora do ar, de quanto em quanto tempo
+ * conferir se ele voltou.
+ *
+ * Mais curto que a volta do relógio (60 s) porque a pergunta aqui
+ * é outra: o relógio existe para DESCOBRIR a queda, e este número
+ * para perceber a VOLTA — que acontece logo depois de alguém
+ * consertar o `.cs`, olhando a tela.
+ */
+const RUNTIME_MAX_AGE_MS = 10_000;
+
 /** Teto de páginas por consulta. 500 × 10 = 5000 jogadores. */
 const MAX_PAGES = 10;
 
+/**
+ * Quem sabe se o Oxide carregou aquele plugin.
+ *
+ * Interface mínima, satisfeita por estrutura pelo
+ * `OxideRuntimeMonitor`. Opcional no reader: sem ela a queda para
+ * o nativo continua acontecendo, só que sem conseguir dizer qual
+ * das duas falhas foi — e o motivo mais fraco é o que se assume.
+ */
+export interface PlayersPluginRuntime {
+  pluginOf(serverId: string, name: string): { readonly loaded: boolean } | null;
+  refresh(serverId: string): Promise<unknown>;
+  refreshIfStale(serverId: string, maxAgeMs: number): void;
+}
+
 export interface PlayersReaderDeps {
   readonly plugins: PluginPresence;
+  readonly runtime?: PlayersPluginRuntime | undefined;
 }
 
 export class PlayersReader {
   readonly #plugins: PluginPresence;
+  readonly #runtime: PlayersPluginRuntime | undefined;
   /** id -> o último estado lido do acervo, com a hora. */
   readonly #cache = new Map<string, { at: number; state: PluginState }>();
 
   constructor(deps: PlayersReaderDeps) {
     this.#plugins = deps.plugins;
+    this.#runtime = deps.runtime;
   }
 
   /**
@@ -183,9 +239,98 @@ export class PlayersReader {
     const plugin = await this.#stateOf(serverId);
     const world = worldGrid(worldSize);
 
-    const read = plugin.enabled ? await readFromPlugin(rcon, world) : await readNative(rcon);
+    if (!plugin.enabled) {
+      const read = await readNative(rcon);
 
-    return { ...read, world, plugin: { name: PLAYERS_PLUGIN, ...plugin } };
+      return { ...read, world, plugin: { name: PLAYERS_PLUGIN, ...plugin, fallback: null } };
+    }
+
+    // ####  NÃO BATER NUMA PORTA QUE SE SABE FECHADA  ####
+    //
+    // Se o Oxide JÁ disse que não carregou este plugin, mandar o
+    // comando é comprar 5 s de timeout — e não é uma vez: esta
+    // lista é relida a cada poucos segundos pela tela e a cada 15 s
+    // pelo relógio da presença. Medido nesta máquina com o plugin
+    // fora do ar, uma única leitura chegou a 20 s, porque o RCON
+    // serializa um comando por vez e as chamadas entraram na fila
+    // umas das outras. O console inteiro fica lento — o Console, as
+    // operações, tudo passa por ali.
+    //
+    // Aqui a resposta sai do CACHE do relógio, que já custou o
+    // comando dele. Quando o plugin voltar, a leitura seguinte do
+    // relógio derruba este atalho sozinha.
+    if (this.#runtime?.pluginOf(serverId, PLAYERS_PLUGIN)?.loaded === false) {
+      // E confere de novo, em segundo plano, se a última olhada já
+      // está velha: sem isto, quem acabou de consertar o plugin
+      // ficaria até um minuto — a volta do relógio — vendo a tela
+      // insistir que ele está fora do ar. É o momento exato em que
+      // alguém mexe de novo no que já estava certo.
+      this.#runtime.refreshIfStale(serverId, RUNTIME_MAX_AGE_MS);
+
+      const read = await readNative(rcon);
+
+      return { ...read, world, plugin: { name: PLAYERS_PLUGIN, ...plugin, fallback: 'not-loaded' } };
+    }
+
+    // ####  O PLUGIN LIGADO QUE NÃO RESPONDE  ####
+    //
+    // Ligado é sobre o ARQUIVO estar na pasta; respondendo é sobre
+    // o Oxide o ter carregado. Entre os dois cabe um plugin que não
+    // compila — e aí `origemz.players` não existe no console, que
+    // não reclama: ele se cala até o timeout.
+    //
+    // Antes disto, a aba Jogadores inteira morria nesse silêncio.
+    // O `playerlist` nativo continua ali, sabe quem está online, e
+    // é o que sustenta expulsar e banir enquanto o plugin não
+    // volta. O que ele não sabe — posição, vivo, dormindo — sai em
+    // `missing`, e o `silent` abaixo diz POR QUE a fonte mudou.
+    const fromPlugin = await readFromPlugin(rcon, world);
+
+    if (fromPlugin !== null) {
+      return { ...fromPlugin, world, plugin: { name: PLAYERS_PLUGIN, ...plugin, fallback: null } };
+    }
+
+    const read = await readNative(rcon);
+
+    return {
+      ...read,
+      world,
+      plugin: { name: PLAYERS_PLUGIN, ...plugin, fallback: await this.#whyNoAnswer(serverId) },
+    };
+  }
+
+  /**
+   * O plugin está fora do ar, ou só demorou?
+   *
+   * ####  POR QUE PERGUNTAR DE NOVO, JUSTO AGORA  ####
+   *
+   * Porque as duas causas pedem coisas opostas — uma pede conserto
+   * no `.cs`, a outra pede esperar — e porque a diferença entre
+   * elas se mede com um comando de console.
+   *
+   * O alarme errado aqui sai caro nos dois sentidos. Um servidor
+   * que acabou de subir leva segundos para responder qualquer
+   * coisa: nos primeiros minutos o `origemz.players` estoura os 5 s
+   * do timeout com o plugin perfeitamente de pé. Dizer "não
+   * carregou" ali mandaria consertar o que não está quebrado — e
+   * um alarme desses, repetido depois de todo boot, ensina a
+   * ignorar o alarme que importa.
+   *
+   * `no-answer` é o palpite quando não dá para confirmar: é o mais
+   * fraco dos dois, e o que não acusa ninguém sem prova.
+   */
+  async #whyNoAnswer(serverId: string): Promise<'not-loaded' | 'no-answer'> {
+    if (this.#runtime === undefined) {
+      return 'no-answer';
+    }
+
+    // Sob demanda, e não pelo cache do relógio: a leitura de um
+    // minuto atrás pode ser de antes de o plugin cair.
+    await this.#runtime.refresh(serverId);
+
+    return this.#runtime.pluginOf(serverId, PLAYERS_PLUGIN)?.loaded === false
+      ? 'not-loaded'
+      : 'no-answer';
   }
 
   /**
@@ -322,23 +467,69 @@ export async function teleportPlayer(
 // ------------------------------------------------------------
 
 /**
+ * O comando saiu e ninguém respondeu a tempo?
+ *
+ * Reconhecido pelo `code`, e nunca pelo texto da mensagem — é o
+ * que `rcon/errors.ts` promete e o que sobrevive a alguém
+ * reescrever a frase.
+ */
+function isRconTimeout(error: unknown): boolean {
+  return error instanceof RconError && error.code === 'RCON_TIMEOUT';
+}
+
+/**
  * `origemz.players`, página por página.
  *
  * O laço existe porque a resposta é paginada: o frame do WebRCON
  * não negocia tamanho, e um servidor cheio numa resposta só é
  * exatamente o caminho que o trunca. `count` é o total, e é por
  * ele que se sabe quando parar.
+ *
+ * ####  `null` = O PLUGIN NEM RESPONDEU  ####
+ *
+ * E isso é diferente de "respondeu errado", que continua sendo
+ * 502. Silêncio na PRIMEIRA página é o sintoma do plugin que o
+ * Oxide não carregou: o comando não existe no console, e um
+ * comando que não existe não produz erro — produz nada. Quem
+ * chama trata esse `null` caindo para o `playerlist` nativo.
+ *
+ * Só a primeira página vale como silêncio. Sumir no meio da
+ * paginação é outra coisa — ali JÁ HÁ jogadores lidos, e trocar de
+ * fonte no meio devolveria uma lista costurada de duas leituras
+ * diferentes. Esse caso continua subindo como falha.
  */
 async function readFromPlugin(
   rcon: OpsRcon,
   world: WorldGrid,
-): Promise<Omit<PlayersSnapshot, 'plugin' | 'world'>> {
+): Promise<Omit<PlayersSnapshot, 'plugin' | 'world'> | null> {
   const players: PlayerView[] = [];
   let offset = 0;
   let total = 0;
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const raw = await rcon.send(buildPlayersCommand({ offset, limit: PLAYERS_DEFAULT_LIMIT }));
+    let raw: string;
+
+    try {
+      raw = await rcon.send(buildPlayersCommand({ offset, limit: PLAYERS_DEFAULT_LIMIT }));
+    } catch (error) {
+      // O timeout na primeira página É o silêncio: o comando saiu e
+      // ninguém do outro lado respondeu. Qualquer outra falha do
+      // RCON (a conexão caiu, o agente está fechando) não é sobre o
+      // plugin, e mascará-la com o nativo esconderia o que houve.
+      if (page === 0 && isRconTimeout(error)) {
+        return null;
+      }
+
+      throw error;
+    }
+
+    if (page === 0 && raw.trim() === '') {
+      // Resposta VAZIA é o mesmo silêncio por outro caminho: o
+      // console respondeu o frame, sem conteúdo, porque o comando
+      // não existe ali.
+      return null;
+    }
+
     const parsed = playersResponseSchema.safeParse(firstJsonLine(raw));
 
     if (!parsed.success) {

@@ -252,6 +252,13 @@ export class SiteDomainConfig<W> implements SiteDomainLoop {
 
       const { version, desired } = result.body;
 
+      if (version === null && desired === null) {
+        // Assunto sem nada gravado do outro lado — `version: 0`,
+        // `desired: null`. É o normal, e não vai para o log: ver a
+        // mesma passagem em `site/config.ts`.
+        return;
+      }
+
       if (version === null || desired === null) {
         this.#log('warn', { domain: this.domain }, 'the site sent a domain config we cannot read');
 

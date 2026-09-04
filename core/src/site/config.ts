@@ -201,6 +201,44 @@ const FIELD_SCHEMAS = {
 const ENABLED_FIELD = 'enabled';
 
 /**
+ * `autoUpdate` também não é campo do `.ini`, e procurá-lo lá é
+ * perder o dia.
+ *
+ * Ele não existe em `RESTART_KEYS`, não existe em `KEY_OF` e o
+ * `updateSettings` não o conhece — e o `updateSettings` IGNORA EM
+ * SILÊNCIO o que não conhece (`supervisor.ts:591`). Mandá-lo no
+ * patch devolveria `applied: true`, `errors: []`, e o site
+ * concluiria que a atualização automática está desligada enquanto
+ * ela continua ligada. É a armadilha do cabeçalho deste arquivo,
+ * inteira.
+ *
+ * ####  QUEM APLICA É O VIGIA DA STEAM  ####
+ *
+ * `SteamUpdateWatcher.setAutoUpdate(serverId, valor)`, que grava a
+ * opinião na tabela `meta` e vale já na rodada seguinte — sem
+ * reiniciar o agente. Isso importa: o `requiresRestart` do contrato
+ * é do JOGO, e enfiar "reinicie o agente" nele quebraria o
+ * significado da lista para todo mundo.
+ *
+ * ####  TRÊS ESTADOS, E O SITE PRECISA DOS TRÊS  ####
+ *
+ *   campo ausente  o site não gerencia → o agente segue o padrão
+ *                  da máquina (`STEAM_AUTO_UPDATE`)
+ *   `false`        gerenciado e DESLIGADO
+ *   `true`         gerenciado e ligado
+ *
+ * Colapsar os dois primeiros é o defeito caro: uma gravação de
+ * `hostname` sairia carregando um `autoUpdate: false` que ninguém
+ * escolheu, e o servidor pararia de se atualizar. O sintoma não
+ * aparece na hora — ele aparece semanas depois, quando a Facepunch
+ * publica e o servidor passa a recusar todo mundo.
+ *
+ * Por isso, aqui, só `boolean` passa: `'false'` é `INVALID_VALUE`,
+ * e nunca `Boolean('false')`, que é `true`.
+ */
+const AUTO_UPDATE_FIELD = 'autoUpdate';
+
+/**
  * O que este canal NÃO grava, e nunca vai gravar.
  *
  * ####  DEIXAR O SITE REESCREVER O PRÓPRIO PAREAMENTO É SEM VOLTA
@@ -217,6 +255,7 @@ const BLOCKED_FIELDS: ReadonlySet<string> = new Set(['siteServerId', 'siteToken'
 export const CONFIG_FIELDS = [
   ...Object.keys(FIELD_SCHEMAS),
   ENABLED_FIELD,
+  AUTO_UPDATE_FIELD,
 ] as readonly string[];
 
 /**
@@ -242,6 +281,8 @@ export interface ConfigPlan {
   readonly patch: Record<string, string | number | boolean>;
   /** `null` = o site não opinou sobre `enabled`. */
   readonly enabled: boolean | null;
+  /** `null` = o site NÃO GERENCIA a atualização automática. */
+  readonly autoUpdate: boolean | null;
   readonly errors: readonly ConfigFieldError[];
 }
 
@@ -255,6 +296,7 @@ export function planOfDesired(desired: Record<string, unknown>): ConfigPlan {
   const patch: Record<string, string | number | boolean> = {};
   const errors: ConfigFieldError[] = [];
   let enabled: boolean | null = null;
+  let autoUpdate: boolean | null = null;
 
   for (const [field, value] of Object.entries(desired)) {
     if (BLOCKED_FIELDS.has(field)) {
@@ -265,6 +307,18 @@ export function planOfDesired(desired: Record<string, unknown>): ConfigPlan {
     if (field === ENABLED_FIELD) {
       if (typeof value === 'boolean') {
         enabled = value;
+      } else {
+        errors.push({ field, code: CONFIG_ERROR_CODES.invalidValue });
+      }
+
+      continue;
+    }
+
+    if (field === AUTO_UPDATE_FIELD) {
+      // Só `boolean`. Ver o comentário do campo: coagir `'false'`
+      // aqui LIGARIA a atualização que o site pediu para desligar.
+      if (typeof value === 'boolean') {
+        autoUpdate = value;
       } else {
         errors.push({ field, code: CONFIG_ERROR_CODES.invalidValue });
       }
@@ -289,7 +343,7 @@ export function planOfDesired(desired: Record<string, unknown>): ConfigPlan {
     patch[field] = parsed.data as string | number | boolean;
   }
 
-  return { patch, enabled, errors };
+  return { patch, enabled, autoUpdate, errors };
 }
 
 /** O ACK, do jeito que ele é guardado até o site confirmar. */
@@ -326,6 +380,19 @@ export interface SiteConfigOptions {
    * @throws {ApiError} 409 quando o jogo não está em disco.
    */
   readonly setEnabled?: (value: boolean) => Promise<void>;
+  /**
+   * Liga ou desliga a atualização automática DESTE servidor.
+   *
+   * É o `SteamUpdateWatcher.setAutoUpdate`, e ele grava a opinião na
+   * tabela `meta` — vale na rodada seguinte do vigia, sem reiniciar o
+   * agente. Ver `AUTO_UPDATE_FIELD`.
+   *
+   * Ausente = este agente não tem por onde aplicar, e o campo volta
+   * em `errors[]` como `FIELD_NOT_REMOTELY_WRITABLE`. Aceitá-lo em
+   * silêncio seria dizer `applied: true` por uma escrita que não
+   * aconteceu.
+   */
+  readonly setAutoUpdate?: (value: boolean) => void;
   readonly logger: Logger;
   readonly intervalMs?: number;
   readonly now?: () => number;
@@ -427,10 +494,22 @@ export class SiteConfig {
 
       const { version, desired } = result.body;
 
+      if (version === null && desired === null) {
+        // ####  ISTO É O NORMAL, E NÃO UM DEFEITO  ####
+        //
+        // É o que o dev responde para um servidor pareado que
+        // ninguém configurou ainda: `version: 0, desired: null`.
+        // Logar warn a cada 30 s, por servidor, faria o log de um
+        // canal SAUDÁVEL parecer quebrado — e é nele que se procura
+        // outra coisa.
+        return;
+      }
+
       if (version === null || desired === null) {
-        // Sem `version` não dá para dizer o que este ACK fecha, e
-        // sem `desired` não há o que aplicar. Recuar é o certo: a
-        // volta seguinte tenta de novo.
+        // Um dos dois, e não os dois: aí sim é resposta que não dá
+        // para ler. Sem `version` não dá para dizer o que este ACK
+        // fecha, e sem `desired` não há o que aplicar. Recuar é o
+        // certo: a volta seguinte tenta de novo.
         this.#log(
           'warn',
           { serverId: this.#options.serverId },
@@ -477,7 +556,7 @@ export class SiteConfig {
     desired: Record<string, unknown>,
     etag: string | null,
   ): Promise<void> {
-    const { patch, enabled, errors } = planOfDesired(desired);
+    const { patch, enabled, autoUpdate, errors } = planOfDesired(desired);
     const fields = Object.keys(patch);
 
     // ####  `applied` É "ALGUMA COISA ENTROU", NÃO "DEU TUDO CERTO"
@@ -509,6 +588,37 @@ export class SiteConfig {
           { serverId: this.#options.serverId, version, fields, err: toError(error) },
           'could not write the desired server config',
         );
+      }
+    }
+
+    // A atualização automática ANTES do `enabled` e DEPOIS do
+    // patch: ela não toca no `.ini` e não depende de nada que o
+    // patch escreva, mas um servidor que suba na mesma rodada já
+    // sobe com a opinião do site valendo.
+    if (autoUpdate !== null) {
+      const setAutoUpdate = this.#options.setAutoUpdate;
+
+      if (setAutoUpdate === undefined) {
+        failures.push({
+          field: AUTO_UPDATE_FIELD,
+          code: CONFIG_ERROR_CODES.notRemotelyWritable,
+        });
+      } else {
+        try {
+          setAutoUpdate(autoUpdate);
+          wrote = true;
+        } catch (error) {
+          failures.push({
+            field: AUTO_UPDATE_FIELD,
+            code: error instanceof ApiError ? error.code : 'WRITE_FAILED',
+          });
+
+          this.#log(
+            'error',
+            { serverId: this.#options.serverId, version, autoUpdate, err: toError(error) },
+            'could not apply the desired auto-update flag',
+          );
+        }
       }
     }
 
@@ -549,7 +659,8 @@ export class SiteConfig {
     // também está aplicada: não havia o que fazer, e o site precisa
     // ver a versão fechada em vez de tentá-la para sempre.
     const applied =
-      wrote || (errors.length === 0 && fields.length === 0 && enabled === null);
+      wrote ||
+      (errors.length === 0 && fields.length === 0 && enabled === null && autoUpdate === null);
     const ack: PendingAck = { version, applied, requiresRestart, errors: failures };
 
     this.#options.meta.writeMany(
@@ -563,13 +674,14 @@ export class SiteConfig {
       this.#now(),
     );
 
-    if (applied && (fields.length > 0 || enabled !== null)) {
+    if (applied && (fields.length > 0 || enabled !== null || autoUpdate !== null)) {
       this.#options.logger.info(
         {
           serverId: this.#options.serverId,
           version,
           fields,
           enabled,
+          autoUpdate,
           requiresRestart,
           errors: failures.length,
         },

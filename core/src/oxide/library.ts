@@ -60,6 +60,7 @@ import {
   type PluginConfigInfo,
 } from './plugin-config.js';
 import { readPluginMetadata, sha256Of } from './plugin-metadata.js';
+import type { OxidePluginRuntime } from './runtime.js';
 import {
   assertPluginContent,
   listPlugins,
@@ -102,6 +103,19 @@ export interface PluginLibraryDeps {
   readonly repository: PluginsRepository;
   readonly servers: PluginServers;
   readonly logger: Logger;
+  /**
+   * Quem sabe o que o Oxide REALMENTE carregou naquele servidor.
+   *
+   * Opcional: sem ele a tela continua funcionando e o campo
+   * `runtime` de cada linha vem `null` — que é honesto, e diferente
+   * de dizer que está tudo bem. Ver `oxide/runtime.ts`.
+   */
+  readonly runtime?: OxideRuntimeSource | undefined;
+}
+
+/** O mínimo que o acervo precisa do monitor. Ver `OxideRuntimeMonitor`. */
+export interface OxideRuntimeSource {
+  pluginOf(serverId: string, name: string): OxidePluginRuntime | null;
 }
 
 /** Um plugin do acervo, como as telas o mostram. */
@@ -170,6 +184,27 @@ export interface ServerPluginView extends PluginView {
    * o erro num texto que rolou para fora.
    */
   readonly lastReload: LastReload | null;
+  /**
+   * O que o Oxide RESPONDEU sobre este plugin, agora há pouco.
+   *
+   * ####  "LIGADO" NÃO É "RODANDO"  ####
+   *
+   * `enabled` fala do arquivo: o `.cs` está na pasta daquele
+   * servidor. Este campo fala do Oxide: ele conseguiu carregar.
+   * Entre os dois cabe um plugin que não compila — e foi
+   * exatamente aí que a rede ficou em 04/09/2026, com o
+   * OrigemZAgent fora do ar e três plugins caídos junto, enquanto
+   * a tela mostrava os quatro ligados e verdes.
+   *
+   * `null` = ninguém conseguiu perguntar (servidor parado, ou o
+   * agente acabou de subir). É "não sei", e a tela precisa dizer
+   * isso em vez de supor que está tudo bem.
+   */
+  readonly runtime: {
+    readonly loaded: boolean;
+    /** A prosa do Oxide, com a linha do erro. `null` = carregou. */
+    readonly failure: string | null;
+  } | null;
   /** O sha256 do que está em disco naquele servidor. */
   readonly appliedSha: string | null;
   readonly appliedAt: string | null;
@@ -328,6 +363,23 @@ function dependentsOf(
   return { hard, soft };
 }
 
+/**
+ * O estado real daquele plugin, no formato da view.
+ *
+ * Sem monitor, ou com um plugin que o Oxide não listou, a resposta
+ * é `null` — "não sei". Assumir `loaded: true` aqui seria inventar
+ * a única informação que esta view existe para trazer.
+ */
+function runtimeOf(
+  source: OxideRuntimeSource | undefined,
+  serverId: string,
+  name: string,
+): { readonly loaded: boolean; readonly failure: string | null } | null {
+  const state = source?.pluginOf(serverId, name) ?? null;
+
+  return state === null ? null : { loaded: state.loaded, failure: state.failure };
+}
+
 export class PluginLibrary {
   readonly #deps: PluginLibraryDeps;
 
@@ -456,6 +508,12 @@ export class PluginLibrary {
         // reload a comentar, e mostrar o erro de quando ele esteve no
         // ar mandaria consertar o que já foi tirado.
         lastReload: enabled ? (this.#lastReload.get(`${serverId}::${plugin.name}`) ?? null) : null,
+        // Só para quem está ligado, pelo mesmo motivo do
+        // `lastReload` acima: um plugin desligado NÃO está na pasta
+        // do servidor, e o Oxide não teria como o listar. Um
+        // "não carregado" ali seria alarme sobre o que ninguém
+        // pediu para carregar.
+        runtime: enabled ? runtimeOf(this.#deps.runtime, serverId, plugin.name) : null,
       };
     });
 

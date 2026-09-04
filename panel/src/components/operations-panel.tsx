@@ -132,11 +132,47 @@ function labelOf(kind: OperationKind): string {
   return LABEL_OF.get(kind) ?? kind;
 }
 
+const STATUS_LABEL: Record<string, string> = {
+  running: 'rodando',
+  succeeded: 'concluída',
+  failed: 'falhou',
+  cancelled: 'cancelada',
+};
+
+/**
+ * O desfecho, como a tela o chama.
+ *
+ * ####  "ADIADA" NÃO É UM STATUS DO CORE  ####
+ *
+ * É `failed` mais `deferred` (ver api.ts): a operação desistiu
+ * ANTES de tocar em qualquer coisa, porque o Oxide ainda não
+ * lançou a versão do build novo do Rust. Contar as duas como a
+ * mesma coisa é o que fazia a tela pedir socorro — badge em
+ * vermelho, aviso permanente — por uma espera de meia hora que o
+ * agente resolve sozinho.
+ */
+function statusLabel(status: string, deferred?: boolean): string {
+  if (status === 'failed' && deferred === true) {
+    return 'adiada';
+  }
+
+  return STATUS_LABEL[status] ?? status;
+}
+
+/** Vermelho é para o que quebrou; a espera é âmbar, como o que corre. */
+function statusTone(status: string, deferred?: boolean): string {
+  if (status === 'failed') {
+    return deferred === true ? 'text-amber' : 'text-rust';
+  }
+
+  return status === 'running' ? 'text-amber' : 'text-muted';
+}
+
 export function OperationsPanel({ server }: { server: ServerView }) {
   const [group, setGroup] = useState<Group>('ciclo');
   const [kinds, setKinds] = useState<OperationKind[]>([]);
   const [history, setHistory] = useState<
-    { id: string; kind: OperationKind; status: string; startedAt: string }[]
+    { id: string; kind: OperationKind; status: string; startedAt: string; deferred?: boolean }[]
   >([]);
   const [operation, setOperation] = useState<OperationDetail | null>(null);
   const [lines, setLines] = useState<{ n: number; text: string }[]>([]);
@@ -233,6 +269,7 @@ export function OperationsPanel({ server }: { server: ServerView }) {
           kind: item.kind,
           status: item.status,
           startedAt: item.startedAt,
+          deferred: item.deferred,
         })),
       );
 
@@ -274,6 +311,7 @@ export function OperationsPanel({ server }: { server: ServerView }) {
 
   const status = operation?.status;
   const finished = operation?.message ?? undefined;
+  const deferred = operation?.deferred === true;
 
   useEffect(() => {
     if (status === undefined || status === 'running') {
@@ -285,11 +323,19 @@ export function OperationsPanel({ server }: { server: ServerView }) {
     if (status === 'succeeded') {
       toast.success('Operação concluída');
     } else if (status === 'failed') {
-      toast.error('A operação falhou', { description: finished, duration: null });
+      // O adiamento não é um erro, e o aviso que não some sozinho
+      // (`duration: null`) é para o que exige alguém agir. Aqui
+      // ninguém precisa agir: o agente tenta de novo na próxima
+      // rodada do vigia.
+      if (deferred) {
+        toast.warning('Atualização adiada', { description: finished, duration: 12_000 });
+      } else {
+        toast.error('A operação falhou', { description: finished, duration: null });
+      }
     } else {
       toast.warning('Operação cancelada');
     }
-  }, [status, finished, load]);
+  }, [status, finished, deferred, load]);
 
   useEffect(() => {
     if (stickToBottom.current && logRef.current !== null) {
@@ -438,14 +484,10 @@ export function OperationsPanel({ server }: { server: ServerView }) {
                     <span
                       className={cn(
                         'shrink-0 text-2xs uppercase tracking-wider',
-                        item.status === 'failed'
-                          ? 'text-rust'
-                          : item.status === 'running'
-                            ? 'text-amber'
-                            : 'text-muted',
+                        statusTone(item.status, item.deferred),
                       )}
                     >
-                      {item.status}
+                      {statusLabel(item.status, item.deferred)}
                     </span>
                   </button>
                 </li>
@@ -469,7 +511,9 @@ export function OperationsPanel({ server }: { server: ServerView }) {
             {operation === null
               ? 'Console da operação'
               : `${labelOf(operation.kind)} — ${
-                  lost === null ? operation.status : 'acompanhamento perdido'
+                  lost === null
+                    ? statusLabel(operation.status, operation.deferred)
+                    : 'acompanhamento perdido'
                 }${operation.progress === null ? '' : ` · ${operation.progress.toFixed(1)}%`}`}
           </span>
 

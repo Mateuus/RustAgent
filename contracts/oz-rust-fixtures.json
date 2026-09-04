@@ -1,0 +1,654 @@
+{
+  "$comment": "As fixtures do canal agent↔site. Ver contracts/README.md antes de editar.",
+  "contract": "oz-rust/6",
+  "fixturesVersion": 1,
+  "generatedAt": "2026-09-04",
+  "probe": {
+    "host": "https://devsite2.origemz.com",
+    "at": "2026-09-04T12:41:27Z",
+    "serverId": "RUST01",
+    "tool": "npm run site:probe -w core"
+  },
+  "legend": {
+    "observed": "corpo COPIADO de uma resposta real do dev, na data acima",
+    "manual": "corpo que o manual (Docs/20, Docs/22, Docs/23) descreve; NÃO verificado contra o site",
+    "agent": "o que o SiteClient deste repositório conclui daquela resposta; é o que core/test/site-fixtures.test.ts confere"
+  },
+  "headers": {
+    "authenticated": {
+      "Authorization": "Bearer <o bearer daquele servidor>",
+      "X-Server-Id": "<o SITE_SERVER_ID daquele servidor>",
+      "Accept": "application/json",
+      "User-Agent": "OrigemZ-Rust-Agent/1.0.0",
+      "Content-Type": "application/json (só nos POST)"
+    },
+    "note": "Idempotency-Key NÃO é enviado: a idempotência viaja no corpo, como referenceId."
+  },
+  "routes": {
+    "beacon": {
+      "route": 1,
+      "method": "POST",
+      "path": "/api/agent/beacon",
+      "auth": "none",
+      "note": "A única rota sem Authorization e sem X-Server-Id: o serverId vai no corpo. Com token, leva X-Agent-Timestamp (epoch em SEGUNDOS) e X-Agent-Signature = HMAC-SHA256(bearer, \"<serverId>|<timestamp>\") em hex.",
+      "request": {
+        "serverId": "RUST01",
+        "port": 8787,
+        "version": "1.0.0",
+        "mac": "a4:bb:6d:11:22:33",
+        "capabilities": ["ozcoins", "shop", "deliver_item", "players_online", "pull_delivery"]
+      },
+      "responses": [
+        {
+          "case": "pareamento ativo",
+          "origin": "observed",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "registered": false,
+            "status": "active",
+            "serverExists": true,
+            "resolvedViaAlias": false,
+            "currentServerId": "RUST01",
+            "message": "Beacon recebido. status=active"
+          }
+        },
+        {
+          "case": "ban de verdade — o agente PARA de beaconar",
+          "origin": "manual",
+          "status": 403,
+          "body": { "banId": "BAN-1", "error": "agente banido" }
+        },
+        {
+          "case": "a borda recusou o User-Agent — NÃO é ban, e o agente continua",
+          "origin": "manual",
+          "status": 403,
+          "body": "error code: 1010"
+        }
+      ]
+    },
+
+    "ozcoins-balance": {
+      "route": 2,
+      "method": "GET",
+      "path": "/api/agent/ozcoins/balance?steamId=<steamId>",
+      "auth": "bearer",
+      "responses": [
+        {
+          "case": "conta sem saldo",
+          "origin": "manual",
+          "status": 200,
+          "body": { "steamid": "76561190000000000", "moedas": "0" },
+          "note": "`moedas` chega como STRING e é o cliente quem a converte. ⚠️ ESTE CASO DEIXOU DE SER `observed` EM 04/09/2026, e o rebaixamento é deliberado: o corpo medido trazia um terceiro campo, `exists: true`, e o SITE MUDOU DEPOIS DA SONDA — o campo saiu do contrato (`oz-rust/6`, decisão do dono sobre a H58). Um corpo `observed` que ninguém mediu nesta forma seria a mentira que o arquivo inteiro existe para impedir. Volta a `observed` na próxima sonda real.",
+          "previouslyObserved": {
+            "at": "2026-09-04T12:41:27Z",
+            "body": { "steamid": "76561190000000000", "moedas": "0", "exists": true },
+            "why": "`exists` era o literal `true`, nunca calculado: o `findOrCreate` da própria consulta criava a conta e só então o campo podia ser verdade. Ele foi REMOVIDO da resposta (o `findOrCreate` FICA — o DayZ em produção depende dele)."
+          },
+          "agent": { "call": "balance", "args": ["76561190000000000"], "expect": { "ok": true, "body": { "balance": 0, "exists": true } } },
+          "agentNote": "⚠️ O `expect.body.exists` continua `true` DE PROPÓSITO, e não é defasagem: quem o produz é o `SiteClient` do agent (`core/src/site/client.ts:177`), que o SINTETIZA e nunca leu o campo do site. Foi por isso que a remoção no fio não quebrou nada do lado dele. Se um dia o `BalanceBody` do agent perder o campo, este `expect` cai junto."
+        }
+      ]
+    },
+
+    "ozcoins-debit": {
+      "route": 3,
+      "method": "POST",
+      "path": "/api/agent/ozcoins/debit",
+      "auth": "bearer",
+      "note": "NÃO sondado: é dinheiro de gente de verdade. `amount` é inteiro positivo sempre — o sentido é da rota. O corpo nunca carrega balance/ozBalance/epBalance.",
+      "request": {
+        "steamId": "76561198000000000",
+        "amount": 250,
+        "referenceId": "rust:RUST01:loja:p2n8x4q9zk1a",
+        "observacao": "Loja in-game: Kit Metal x1",
+        "productId": "kit-metal"
+      },
+      "responses": [
+        {
+          "case": "debitado",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "success": true,
+            "idempotent": false,
+            "moedas": "1250",
+            "before": "1500",
+            "after": "1250",
+            "amount": "250",
+            "transactionId": "TX-1"
+          }
+        },
+        {
+          "case": "saldo insuficiente — a frase vai CRUA para o jogador",
+          "origin": "manual",
+          "status": 422,
+          "body": {
+            "error": "Saldo insuficiente.",
+            "error_code": "INSUFFICIENT_BALANCE",
+            "balance": 100,
+            "required": 250,
+            "missing": 150
+          }
+        },
+        {
+          "case": "reuso de referência — `charged` preenchido significa que o dinheiro SAIU",
+          "origin": "manual",
+          "status": 409,
+          "body": { "error": "referenceId já usado", "error_code": "REFERENCE_REUSED", "charged": true }
+        }
+      ]
+    },
+
+    "ozcoins-credit": {
+      "route": 4,
+      "method": "POST",
+      "path": "/api/agent/ozcoins/credit",
+      "auth": "bearer",
+      "note": "Idêntico ao débito, com referenceId = <referência da compra>:refund e SEM productId. Repetir com a mesma chave é seguro, e o agente conta com isso.",
+      "request": {
+        "steamId": "76561198000000000",
+        "amount": 250,
+        "referenceId": "rust:RUST01:loja:p2n8x4q9zk1a:refund",
+        "observacao": "Estorno: Kit Metal x1"
+      },
+      "responses": [
+        {
+          "case": "creditado",
+          "origin": "manual",
+          "status": 200,
+          "body": { "success": true, "idempotent": false, "moedas": "1500", "transactionId": "TX-2" }
+        }
+      ]
+    },
+
+    "ozcoins-transaction": {
+      "route": 5,
+      "method": "GET",
+      "path": "/api/agent/ozcoins/transaction?referenceId=<ref>&steamId=<steamId>",
+      "auth": "bearer",
+      "note": "400 (INVALID_STEAM_ID / INVALID_REFERENCE_ID) é TERMINAL; 500 (TRANSACTION_LOOKUP_FAILED) é RETENTÁVEL. Trocar os dois custa dinheiro.",
+      "responses": [
+        {
+          "case": "referência que não existe",
+          "origin": "observed",
+          "status": 404,
+          "body": {
+            "found": false,
+            "error": "Nenhuma transação com esse referenceId neste servidor.",
+            "error_code": "REFERENCE_NOT_FOUND"
+          },
+          "agent": {
+            "call": "transaction",
+            "args": ["rust:SONDA:loja:naoexiste", "76561190000000000"],
+            "expect": { "ok": false, "status": 404, "code": "REFERENCE_NOT_FOUND" }
+          }
+        },
+        {
+          "case": "a referência é de outro servidor — terminal, sai do laço",
+          "origin": "manual",
+          "status": 404,
+          "body": { "found": false, "error": "não é sua", "error_code": "REFERENCE_NOT_MINE" }
+        },
+        {
+          "case": "achou: a prova de que o débito aconteceu",
+          "origin": "manual",
+          "status": 200,
+          "body": { "found": true, "transactionId": "TX-1", "amount": "250", "productId": "kit-metal" }
+        }
+      ]
+    },
+
+    "deliveries-pending": {
+      "route": 6,
+      "method": "GET",
+      "path": "/api/agent/deliveries/pending?limit=50&cursor=<opaco>",
+      "auth": "bearer",
+      "note": "Até 5 páginas por rodada, 4 rodadas por minuto. O cursor é OPACO dos dois lados.",
+      "responses": [
+        {
+          "case": "fila vazia",
+          "origin": "observed",
+          "status": 200,
+          "body": { "ok": true, "deliveries": [], "next": null },
+          "agent": { "call": "pendingDeliveries", "args": [1], "expect": { "ok": true, "body": { "deliveries": [], "next": null } } }
+        },
+        {
+          "case": "cursor inválido — QUEM O TRATA É O LAÇO: joga fora e recomeça do topo",
+          "origin": "observed",
+          "status": 400,
+          "body": { "error": "Cursor inválido para este servidor.", "error_code": "INVALID_CURSOR" },
+          "agent": {
+            "call": "pendingDeliveries",
+            "args": [1, "sonda-de-contrato"],
+            "expect": { "ok": false, "status": 400, "code": "INVALID_CURSOR" }
+          }
+        },
+        {
+          "case": "uma entrega de item",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "deliveries": [
+              {
+                "id": "DLV-9f3a1c2b7e04",
+                "steamId": "76561198000000000",
+                "kind": "item",
+                "payload": { "items": [{ "shortname": "metal.refined", "amount": 100, "skinId": "0" }] },
+                "sourceRef": "rust:RUST01:loja:p2n8x4q9zk1a",
+                "attempts": 0,
+                "createdAt": "2026-09-04T14:00:00.000Z",
+                "expiresAt": null
+              }
+            ],
+            "next": null
+          },
+          "reguas": {
+            "skinId": "STRING de dígitos. `number` é PAYLOAD_INVALID, e o teste guarda isso",
+            "prefab": "/^[a-z0-9._-]{1,64}$/ — o PONTO é legal",
+            "amount": "1..100000",
+            "steamId": "string sempre: 17 dígitos passam de 2^53"
+          }
+        },
+        {
+          "case": "uma revogação de VIP — a única tarefa que NÃO entrega nada",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "deliveries": [
+              {
+                "id": "DLV-0aa1bb2cc3d4",
+                "steamId": "76561198000000000",
+                "kind": "vip_revoke",
+                "payload": { "tier": "gold" },
+                "sourceRef": "rust:RUST01:loja:p2n8x4q9zk1a",
+                "attempts": 0,
+                "createdAt": "2026-09-04T14:00:00.000Z",
+                "expiresAt": null
+              }
+            ],
+            "next": null
+          },
+          "reguas": {
+            "tier": "1..32 chars, normalizado para minúsculo. Ausente é PAYLOAD_INVALID",
+            "presenca": "NÃO se aplica: revogar não espera o jogador entrar (Docs/27 §2.4)",
+            "alvo ausente": "revogar VIP que o jogador não tem ACKa `delivered`, SEM `reason` (Docs/27 §2.3)",
+            "linha órfã": "reexecuta, em vez de virar AGENT_INDETERMINATE: tirar duas vezes não tira nada na segunda"
+          }
+        }
+      ]
+    },
+
+    "deliveries-ack": {
+      "route": 7,
+      "method": "POST",
+      "path": "/api/agent/deliveries/ack",
+      "auth": "bearer",
+      "note": "Até 50 por lote. TRÊS status, e não há um quarto. `reason` é vocabulário FECHADO do agente.",
+      "request": {
+        "deliveries": [
+          { "id": "DLV-9f3a1c2b7e04", "status": "delivered", "at": "2026-09-04T14:00:00.000Z" },
+          { "id": "DLV-1c77a0b93de5", "status": "deferred", "reason": "PLAYER_SLEEPING", "at": "2026-09-04T14:00:00.000Z" },
+          { "id": "DLV-04e9c5183ba6", "status": "deferred", "reason": "AGENT_INDETERMINATE", "at": "2026-09-04T14:00:00.000Z" }
+        ]
+      },
+      "vocabulario": {
+        "deferred": [
+          "PLAYER_NOT_FOUND", "PLAYER_DEAD", "PLAYER_SLEEPING", "INVENTORY_FULL", "DROP_FAILED",
+          "PLAYER_OFFLINE", "PRESENCE_UNAVAILABLE", "RCON_UNAVAILABLE", "VEHICLE_NO_SPACE",
+          "AGENT_INDETERMINATE"
+        ],
+        "failed": [
+          "ITEM_NOT_FOUND", "TOO_MANY_STACKS", "INVALID_AMOUNT", "PAYLOAD_INVALID",
+          "UNKNOWN_VIP_TIER", "GIVE_UNREADABLE", "VIP_GRANTER_UNAVAILABLE", "VEHICLE_*"
+        ]
+      },
+      "responses": [
+        { "case": "aplicado", "origin": "manual", "status": 200, "body": { "ok": true, "applied": 3, "unknown": [] } }
+      ]
+    },
+
+    "shop-mirror": {
+      "route": 8,
+      "method": "POST",
+      "path": "/api/agent/shop/mirror",
+      "auth": "bearer",
+      "note": "Snapshot inteiro, recusado NO AGENTE acima de 2 MiB. `version` é sha256 do corpo canônico SEM version e SEM generatedAt. offer.items[], vip e vehicle NÃO viajam: no lugar vai itemCount.",
+      "responses": [
+        { "case": "espelhado", "origin": "manual", "status": 200, "body": { "ok": true, "version": "<sha256>" } }
+      ]
+    },
+
+    "shop-mirror-version": {
+      "route": 9,
+      "method": "GET",
+      "path": "/api/agent/shop/mirror/version",
+      "auth": "bearer",
+      "responses": [
+        {
+          "case": "o site já tem um espelho",
+          "origin": "observed",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "version": "69c54621b9b8642af155dd1367490a6b0f9503404bc1f0a3fc1bf70b6679c1b7",
+            "updatedAt": "2026-09-04T12:36:47.133Z"
+          },
+          "agent": { "call": "mirrorVersion", "args": [], "expect": { "ok": true } }
+        }
+      ]
+    },
+
+    "server-status": {
+      "route": 10,
+      "method": "POST",
+      "path": "/api/agent/server/status",
+      "auth": "bearer",
+      "note": "O retrato de 30 s. Teto de 8 KiB sem lista e 64 KiB com ela; position e grid do jogador NUNCA saem da máquina.",
+      "request": {
+        "at": "2026-09-04T12:41:27.040Z",
+        "agent": { "version": "1.0.0", "uptimeSeconds": 1, "health": "ok" },
+        "server": {
+          "running": false,
+          "pid": null,
+          "installed": true,
+          "hostname": "OrigemZ PvP",
+          "map": "Procedural Map",
+          "worldSize": 3500,
+          "seed": 1,
+          "maxPlayers": 100,
+          "rcon": null
+        },
+        "players": { "online": 0, "max": 100, "source": "unavailable" },
+        "build": {
+          "installed": null,
+          "published": null,
+          "updateAvailable": false,
+          "checkedAt": null,
+          "autoUpdate": false
+        },
+        "machine": { "cpu": null, "memory": null, "disk": null },
+        "operation": null,
+        "kinds": []
+      },
+      "responses": [
+        {
+          "case": "aceito",
+          "origin": "observed",
+          "status": 200,
+          "body": { "ok": true, "accepted": true, "receivedAt": "2026-09-04T12:41:27.062Z" }
+        }
+      ]
+    },
+
+    "commands-claim": {
+      "route": 11,
+      "method": "POST",
+      "path": "/api/agent/commands/claim",
+      "auth": "bearer",
+      "note": "POST porque a linha SAI da fila no próprio pull, com o leaseToken carimbado. `commands: []` é a resposta NORMAL.",
+      "request": { "limit": 1 },
+      "responses": [
+        {
+          "case": "fila vazia",
+          "origin": "observed",
+          "status": 200,
+          "body": { "ok": true, "commands": [], "maxPerClaim": 1 },
+          "agent": { "call": "claimCommands", "args": [1], "expect": { "ok": true, "body": { "commands": [] } } }
+        },
+        {
+          "case": "um comando",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "commands": [
+              {
+                "id": "CMD-9f3a1c2b7e04",
+                "kind": "server-restart",
+                "params": {},
+                "issuedAt": "2026-09-04T14:00:00.000Z",
+                "expiresAt": "2026-09-04T14:02:00.000Z",
+                "ttlMs": 120000,
+                "leaseToken": "b7c1cafe"
+              }
+            ],
+            "maxPerClaim": 1
+          },
+          "reguas": {
+            "id": "/^CMD-[0-9a-f]{12}$/ — o formato é do SITE",
+            "kind": "a allowlist do agente tem TRÊS: server-start, server-stop, server-restart",
+            "prazo": "vale o MENOR entre expiresAt, ttlMs e o teto local de 60 s"
+          }
+        }
+      ]
+    },
+
+    "commands-ack": {
+      "route": 12,
+      "method": "POST",
+      "path": "/api/agent/commands/ack",
+      "auth": "bearer",
+      "note": "Lote de 1 a 10. `accepted` sai ANTES da operação; o desfecho, depois. `refused` é o único status que EXIGE reason, e o vocabulário é fechado em dez.",
+      "request": {
+        "commands": [
+          { "id": "CMD-9f3a1c2b7e04", "leaseToken": "b7c1cafe", "status": "accepted", "at": "2026-09-04T14:00:00.000Z" }
+        ]
+      },
+      "vocabulario": {
+        "status": ["accepted", "executed", "failed", "refused"],
+        "reason": [
+          "OPERATION_NOT_ALLOWED", "SERVER_RUNNING", "SERVER_NOT_RUNNING", "RCON_UNAVAILABLE",
+          "RCON_TIMEOUT", "NOT_INSTALLED", "SERVER_DISABLED", "COMMAND_EXPIRED", "AGENT_BUSY",
+          "UNKNOWN_KIND"
+        ]
+      },
+      "responses": [
+        {
+          "case": "o site NÃO aplicou — lease velho ou id que ele não conhece",
+          "origin": "observed",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "results": [
+              { "commandId": "CMD-000000000000", "applied": false, "status": "unknown", "outcome": "invalid_lease" }
+            ]
+          },
+          "note": "DIVERGÊNCIA: o manual descreve `unknown: string[]`; o que atravessa é `results[]`. O agente lê as duas formas (unknownAcks).",
+          "agent": {
+            "call": "ackCommands",
+            "args": [[{ "id": "CMD-000000000000", "leaseToken": "sonda", "status": "refused", "reason": "AGENT_BUSY", "at": "2026-09-04T12:41:26.808Z" }]],
+            "expectUnknown": ["CMD-000000000000"]
+          }
+        },
+        {
+          "case": "aplicado (a forma do manual)",
+          "origin": "manual",
+          "status": 200,
+          "body": { "ok": true, "applied": 1, "unknown": [] },
+          "agent": {
+            "call": "ackCommands",
+            "args": [[{ "id": "CMD-9f3a1c2b7e04", "leaseToken": "b7c1cafe", "status": "executed", "at": "2026-09-04T14:00:00.000Z" }]],
+            "expectUnknown": []
+          }
+        }
+      ]
+    },
+
+    "server-config": {
+      "route": 13,
+      "method": "GET",
+      "path": "/api/agent/server/config",
+      "auth": "bearer",
+      "note": "Campo AUSENTE do desired = 'o site não opina sobre ele'. Não é null e não é 'apague'.",
+      "campos": [
+        "name", "hostname", "description", "url", "headerImage",
+        "map", "worldSize", "seed", "levelUrl", "maxPlayers", "saveInterval", "identity",
+        "gamePort", "queryPort", "appPort", "rconPort",
+        "rconPassword",
+        "steamAppId", "steamLogin", "steamBranch",
+        "consoleWindow",
+        "enabled",
+        "autoUpdate"
+      ],
+      "bloqueados": {
+        "siteServerId": "FIELD_NOT_REMOTELY_WRITABLE",
+        "siteToken": "FIELD_NOT_REMOTELY_WRITABLE"
+      },
+      "responses": [
+        {
+          "case": "servidor pareado que ninguém configurou ainda",
+          "origin": "observed",
+          "status": 200,
+          "headers": { "ETag": "\"rc-f343a9e4-0\"", "Cache-Control": "no-store" },
+          "body": {
+            "ok": true,
+            "version": 0,
+            "desired": null,
+            "restartRequiring": [
+              "hostname", "description", "url", "headerImage", "map", "worldSize", "seed",
+              "levelUrl", "maxPlayers", "saveInterval", "identity", "gamePort", "queryPort",
+              "appPort", "rconPort", "rconPassword", "steamAppId", "steamLogin", "steamBranch",
+              "consoleWindow"
+            ]
+          },
+          "note": "`version: 0` é o SENTINELA de 'não há config' — o ACK da mesma versão volta 400 CONFIG_INVALID_VERSION. O agente traduz version < 1 para null e fica em silêncio. `restartRequiring` é informativo: quem MEDE o requiresRestart é o agente.",
+          "agent": {
+            "call": "serverConfig",
+            "args": [null],
+            "expect": { "ok": true, "body": { "notModified": false, "version": null, "desired": null } }
+          }
+        },
+        {
+          "case": "com config",
+          "origin": "manual",
+          "status": 200,
+          "headers": { "ETag": "W/\"v7\"" },
+          "body": {
+            "ok": true,
+            "version": 7,
+            "desired": { "map": "Barren", "worldSize": 3500, "seed": 1234567, "autoUpdate": false }
+          },
+          "agent": {
+            "call": "serverConfig",
+            "args": [null],
+            "expect": { "ok": true, "body": { "version": 7, "desired": { "map": "Barren", "autoUpdate": false } } }
+          }
+        },
+        {
+          "case": "nada mudou desde o ETag que mandamos",
+          "origin": "manual",
+          "status": 304,
+          "body": null,
+          "note": "NÃO OBSERVADO: o dev responde 200 com Cache-Control: no-store mesmo com If-None-Match idêntico. O ramo existe e está correto; a economia é que não acontece ainda.",
+          "agent": {
+            "call": "serverConfig",
+            "args": ["W/\"v7\""],
+            "expect": { "ok": true, "status": 304, "body": { "notModified": true } }
+          }
+        }
+      ]
+    },
+
+    "server-config-ack": {
+      "route": 14,
+      "method": "POST",
+      "path": "/api/agent/server/config/ack",
+      "auth": "bearer",
+      "note": "SEMPRE a versão que veio no GET, nunca a 'atual'. `applied: true` é 'alguma coisa entrou', não 'deu tudo certo'.",
+      "request": {
+        "version": 7,
+        "applied": true,
+        "requiresRestart": ["map", "worldSize", "seed"],
+        "errors": [{ "field": "pvpMode", "code": "UNKNOWN_FIELD" }]
+      },
+      "codigosDeErro": {
+        "UNKNOWN_FIELD": "o agente não conhece este campo",
+        "INVALID_VALUE": "o campo existe e o valor não passa na régua",
+        "FIELD_NOT_REMOTELY_WRITABLE": "o agente conhece e recusa gravar POR ESTA VIA",
+        "<código do ApiError>": "a gravação é que falhou (PORT_IN_USE, PORT_BLOCK_TAKEN, SERVER_NOT_INSTALLED…)"
+      },
+      "responses": [
+        {
+          "case": "versão que o site não reconhece — ele NÃO grava, e diz qual é a dele",
+          "origin": "observed",
+          "status": 200,
+          "body": { "ok": true, "recorded": false, "currentVersion": 0 },
+          "note": "O agente hoje apaga o ACK pendente mesmo com recorded: false — e é o certo: reenviar a MESMA versão daria o mesmo resultado para sempre."
+        },
+        {
+          "case": "version 0 — recusada",
+          "origin": "observed",
+          "status": 400,
+          "body": { "error": "version precisa ser um inteiro ≥ 1.", "error_code": "CONFIG_INVALID_VERSION" }
+        },
+        {
+          "case": "gravado",
+          "origin": "manual",
+          "status": 200,
+          "body": { "ok": true, "recorded": true, "currentVersion": 7 }
+        }
+      ]
+    },
+
+    "domain-config": {
+      "route": 15,
+      "method": "GET",
+      "path": "/api/agent/config/:domain",
+      "auth": "bearer",
+      "dominios": ["store", "kits", "vips"],
+      "note": "NÃO EXISTE no site em 04/09/2026: a sonda tomou 404 HTML nos três. O lado do agente está pronto (core/src/site/domains.ts + appliers/).",
+      "responses": [
+        {
+          "case": "a rota ainda não existe",
+          "origin": "observed",
+          "status": 404,
+          "body": "<!DOCTYPE html>… Cannot GET /api/agent/config/store",
+          "agent": { "call": "domainConfig", "args": ["store", null], "expect": { "ok": false, "status": 404 } }
+        },
+        {
+          "case": "a loja inteira, como snapshot que SUBSTITUI",
+          "origin": "manual",
+          "status": 200,
+          "headers": { "ETag": "W/\"store-3\"" },
+          "body": {
+            "ok": true,
+            "version": 3,
+            "desired": {
+              "categories": [{ "id": "kits", "name": "Kits", "order": 1 }],
+              "offers": [
+                {
+                  "id": "kit-metal",
+                  "categoryId": "kits",
+                  "name": "Kit Metal",
+                  "price": 250,
+                  "enabled": true,
+                  "items": [{ "shortname": "metal.refined", "amount": 100, "skinId": "0" }]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+
+    "domain-config-ack": {
+      "route": 16,
+      "method": "POST",
+      "path": "/api/agent/config/:domain/ack",
+      "auth": "bearer",
+      "note": "NÃO EXISTE no site em 04/09/2026. `stats` não é enfeite: um snapshot que entra inteiro e um que entra pela metade produzem o mesmo applied: true.",
+      "request": {
+        "version": 3,
+        "applied": true,
+        "errors": [],
+        "stats": { "categories": 1, "offers": 1, "removed": 0 }
+      },
+      "responses": [
+        { "case": "gravado", "origin": "manual", "status": 200, "body": { "ok": true, "recorded": true, "currentVersion": 3 } }
+      ]
+    }
+  }
+}

@@ -97,6 +97,8 @@ interface Harness {
   readonly patches: Record<string, unknown>[];
   /** O que chegou ao `enable`/`disable`, na ordem. */
   readonly enabling: boolean[];
+  /** O que chegou ao vigia da Steam, na ordem. */
+  readonly autoUpdating: boolean[];
   readonly acks: () => readonly Record<string, unknown>[];
 }
 
@@ -106,6 +108,8 @@ function harness(
     readonly apply?: (patch: Record<string, string | number | boolean>) => readonly string[];
     /** Ausente = o caminho do `enabled` NÃO está montado. */
     readonly setEnabled?: ((value: boolean) => void) | null;
+    /** `null` = o caminho da atualização automática NÃO está montado. */
+    readonly setAutoUpdate?: ((value: boolean) => void) | null;
   } = {},
 ): Harness {
   const db = openDatabase({ file: MEMORY_DATABASE });
@@ -116,6 +120,7 @@ function harness(
   const fetch = fakeFetch(routes);
   const patches: Record<string, unknown>[] = [];
   const enabling: boolean[] = [];
+  const autoUpdating: boolean[] = [];
 
   const config = new SiteConfig({
     client: new SiteClient({
@@ -144,6 +149,14 @@ function harness(
             return Promise.resolve();
           },
         }),
+    ...(options.setAutoUpdate === null
+      ? {}
+      : {
+          setAutoUpdate: (value: boolean): void => {
+            autoUpdating.push(value);
+            options.setAutoUpdate?.(value);
+          },
+        }),
     logger: silent,
     now: () => NOW,
   });
@@ -154,6 +167,7 @@ function harness(
     calls: fetch.calls,
     patches,
     enabling,
+    autoUpdating,
     acks: () =>
       fetch.calls
         .filter((call) => call.url.endsWith('/server/config/ack'))
@@ -192,6 +206,7 @@ describe('planOfDesired', () => {
     expect(planOfDesired({ description: '' })).toEqual({
       patch: { description: '' },
       enabled: null,
+      autoUpdate: null,
       errors: [],
     });
   });
@@ -541,6 +556,79 @@ describe('SiteConfig', () => {
 
     expect(test.patches).toEqual([]);
     expect(test.acks()).toEqual([]);
+  });
+
+  it('autoUpdate desligado pelo site chega ao vigia, e NÃO vira patch do .ini', async () => {
+    // ####  QUEM APLICA NÃO É O `updateSettings`  ####
+    //
+    // `autoUpdate` não existe em `KEY_OF`, e o `updateSettings`
+    // ignora em silêncio o que não conhece. Se ele entrasse no
+    // patch, o ACK diria `applied: true` e o site concluiria que a
+    // atualização automática está desligada enquanto ela continua
+    // ligada — e o sintoma só apareceria semanas depois, no dia em
+    // que a Facepunch publicasse.
+    const test = harness({
+      get: [
+        {
+          status: 200,
+          body: { ok: true, version: 12, desired: { hostname: 'OrigemZ #1', autoUpdate: false } },
+        },
+      ],
+    });
+
+    await test.config.pull();
+
+    expect(test.patches).toEqual([{ hostname: 'OrigemZ #1' }]);
+    expect(test.autoUpdating).toEqual([false]);
+    expect(test.acks()[0]).toMatchObject({ version: 12, applied: true, errors: [] });
+  });
+
+  it('autoUpdate ausente NÃO é `false`: o site simplesmente não opina', async () => {
+    // A armadilha da coluna `NOT NULL DEFAULT false` do outro lado:
+    // o admin abre a tela para acertar o hostname, grava, e o
+    // `desired` sai carregando um `autoUpdate: false` que ninguém
+    // escolheu. Ausente tem de chegar aqui como ausência.
+    const test = harness({
+      get: [{ status: 200, body: { ok: true, version: 13, desired: { hostname: 'OrigemZ #2' } } }],
+    });
+
+    await test.config.pull();
+
+    expect(test.autoUpdating).toEqual([]);
+  });
+
+  it('a string "false" é INVALID_VALUE — coagi-la ligaria o que o site desligou', async () => {
+    // `Boolean('false') === true`: coagir aqui LIGARIA a atualização
+    // automática que o site pediu para desligar.
+    const test = harness({
+      get: [{ status: 200, body: { ok: true, version: 14, desired: { autoUpdate: 'false' } } }],
+    });
+
+    await test.config.pull();
+
+    expect(test.autoUpdating).toEqual([]);
+    expect(test.acks()[0]).toMatchObject({
+      version: 14,
+      applied: false,
+      errors: [{ field: 'autoUpdate', code: 'INVALID_VALUE' }],
+    });
+  });
+
+  it('sem o vigia montado, autoUpdate volta em errors[] — nunca applied em silêncio', async () => {
+    const test = harness(
+      {
+        get: [{ status: 200, body: { ok: true, version: 15, desired: { autoUpdate: true } } }],
+      },
+      { setAutoUpdate: null },
+    );
+
+    await test.config.pull();
+
+    expect(test.acks()[0]).toMatchObject({
+      version: 15,
+      applied: false,
+      errors: [{ field: 'autoUpdate', code: 'FIELD_NOT_REMOTELY_WRITABLE' }],
+    });
   });
 
   it('erro do canal não derruba o laço, e a volta seguinte tenta de novo', async () => {

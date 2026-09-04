@@ -50,8 +50,9 @@
 import { existsSync } from 'node:fs';
 
 import type { AgentPaths } from '../config.js';
+import type { MetaRepository } from '../db/meta-repository.js';
 import type { Logger } from '../logger.js';
-import type { Operation, OperationLock } from '../ops/operations.js';
+import type { Operation, OperationLock, OperationView } from '../ops/operations.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import { toError } from '../util.js';
 import { pickBranch, queryRemoteBuilds, readInstalledBuild } from './builds.js';
@@ -82,6 +83,42 @@ export interface AutoUpdateAttempt {
   readonly status: 'running' | 'succeeded' | 'failed' | 'cancelled';
   /** O motivo, quando falhou. */
   readonly message: string | null;
+  /**
+   * `failed`, mas por ESPERA — nada foi tocado no servidor.
+   *
+   * ####  POR QUE O CAMPO PRECISA CHEGAR À TELA  ####
+   *
+   * O vigia já distingue as duas coisas: a espera pelo Oxide
+   * devolve a tentativa e o agente tenta de novo na rodada
+   * seguinte (ver `#watchAttempt`). A tela não distinguia — o
+   * mesmo adiamento aparecia como "a última tentativa FALHOU", em
+   * vermelho, junto de um conselho pior ainda: usar "Atualizar
+   * avisando", que cai na MESMA recusa porque é a mesma
+   * conferência. Quem seguia o conselho derrubava a tela três
+   * vezes atrás de um erro que não existia.
+   *
+   * Hoje só o Oxide que ainda não lançou a versão do build novo
+   * (ver oxide/compat.ts).
+   */
+  readonly deferred: boolean;
+}
+
+/**
+ * O desfecho da operação, do jeito que o retrato o guarda.
+ *
+ * Existe para que os dois pontos que montam a tentativa — o
+ * disparo e o fim — não divirjam num campo: era assim que o
+ * `deferred` se perderia de novo no caminho.
+ */
+export function attemptFrom(operation: OperationView): AutoUpdateAttempt {
+  return {
+    operationId: operation.id,
+    startedAt: operation.startedAt,
+    finishedAt: operation.finishedAt,
+    status: operation.status,
+    message: operation.message,
+    deferred: operation.deferred === true,
+  };
 }
 
 export interface SteamUpdateState {
@@ -125,10 +162,31 @@ export interface UpdateWatcherOptions {
   readonly lock: OperationLock;
   readonly logger: Logger;
   readonly intervalMs: number;
+  /**
+   * O padrão da MÁQUINA: `STEAM_AUTO_UPDATE`, lido do env no boot.
+   *
+   * Ele vale para quem não tem opinião gravada. Ver `autoUpdateFor`.
+   */
   readonly autoUpdate: boolean;
+  /**
+   * Onde mora a opinião POR SERVIDOR.
+   *
+   * Ela não é opcional: um override que só vivesse na memória
+   * sumiria no `pm2 restart`, e o site continuaria mostrando
+   * "desligado" para um agente que voltou a atualizar sozinho.
+   */
+  readonly meta: MetaRepository;
   /** Quanto esperar, depois do boot, pela PRIMEIRA conferência. */
   readonly firstCheckDelayMs?: number;
 }
+
+/**
+ * O prefixo da opinião por servidor na tabela `meta`.
+ *
+ * A chave inteira é `steam.auto_update.<serverId>` — prefixo por
+ * assunto, como as outras.
+ */
+export const AUTO_UPDATE_KEY = 'steam.auto_update';
 
 /**
  * Quanto o vigia espera antes da primeira conferência.
@@ -182,8 +240,10 @@ export class SteamUpdateWatcher {
         autoUpdate: this.#options.autoUpdate,
       },
       this.#options.autoUpdate
-        ? 'vigia da Steam ligado — build novo derruba, atualiza e sobe sozinho'
-        : 'vigia da Steam ligado — só avisa (STEAM_AUTO_UPDATE=0)',
+        ? 'vigia da Steam ligado — build novo derruba, atualiza e sobe sozinho ' +
+            'nos servidores sem opinião própria'
+        : 'vigia da Steam ligado — só avisa (STEAM_AUTO_UPDATE=0) ' +
+            'nos servidores sem opinião própria',
     );
   }
 
@@ -228,6 +288,57 @@ export class SteamUpdateWatcher {
     return this.stateOf(serverId);
   }
 
+  /**
+   * A atualização automática vale para ESTE servidor?
+   *
+   * ####  TRÊS ESTADOS, E COLAPSAR DOIS CUSTA O SERVIDOR  ####
+   *
+   * A chave AUSENTE é "ninguém opinou" — e a resposta é o padrão da
+   * máquina (`STEAM_AUTO_UPDATE`). Ela só existe quando alguém
+   * escolheu, e aí o valor gravado vence o env. `null` e `false` são
+   * coisas diferentes: quem os junta desliga a atualização de quem
+   * nunca pediu isso, e o sintoma aparece semanas depois — a
+   * Facepunch publica e o servidor passa a recusar todo mundo.
+   *
+   * ####  E ELA É POR SERVIDOR, PORQUE O `desired` É  ####
+   *
+   * A flag do env é da máquina inteira; a opinião do site chega com
+   * um `X-Server-Id`. Casar as duas sem separar faria dois
+   * servidores do mesmo agente brigarem, e o último a chegar
+   * ganharia — em silêncio, a cada 30 segundos.
+   */
+  autoUpdateFor(serverId: string): boolean {
+    const stored = this.#options.meta.read(`${AUTO_UPDATE_KEY}.${serverId}`);
+
+    if (stored === null) {
+      return this.#options.autoUpdate;
+    }
+
+    return stored === '1';
+  }
+
+  /**
+   * Grava (ou tira) a opinião sobre ESTE servidor.
+   *
+   * `null` devolve o servidor ao padrão da máquina — não é "desligue",
+   * é "não tenho opinião". Vale em runtime: a rodada seguinte do
+   * vigia já lê o valor novo, e nenhum reinício é preciso.
+   */
+  setAutoUpdate(serverId: string, value: boolean | null): void {
+    const key = `${AUTO_UPDATE_KEY}.${serverId}`;
+
+    if (value === null) {
+      this.#options.meta.clear(key);
+    } else {
+      this.#options.meta.write(key, value ? '1' : '0');
+    }
+
+    this.#options.logger.info(
+      { server: serverId, autoUpdate: value, effective: this.autoUpdateFor(serverId) },
+      'a atualização automática deste servidor mudou',
+    );
+  }
+
   /** O último retrato. NÃO lê disco nem consulta a Steam. */
   stateOf(serverId: string): SteamUpdateState {
     const config = this.#options.supervisor.configOf(serverId);
@@ -246,7 +357,7 @@ export class SteamUpdateWatcher {
       updateAvailable: installed !== null && published !== null && installed !== published,
       checkedAt: state?.checkedAt ?? null,
       lastError: state?.lastError ?? null,
-      autoUpdate: this.#options.autoUpdate,
+      autoUpdate: this.autoUpdateFor(serverId),
       attempts: state?.attempts ?? 0,
       maxAttempts: MAX_ATTEMPTS_PER_BUILD,
       lastAttempt: state?.lastAttempt ?? null,
@@ -344,7 +455,7 @@ export class SteamUpdateWatcher {
         'ATUALIZAÇÃO do Rust disponível',
       );
 
-      if (this.#options.autoUpdate) {
+      if (this.autoUpdateFor(serverId)) {
         await this.#tryAutoUpdate(serverId, state, snapshot);
       }
     }
@@ -392,13 +503,7 @@ export class SteamUpdateWatcher {
           expectedBuildPublishedAt: state.publishedAt ?? undefined,
         });
 
-      state.lastAttempt = {
-        operationId: operation.id,
-        startedAt: operation.startedAt,
-        finishedAt: null,
-        status: 'running',
-        message: null,
-      };
+      state.lastAttempt = attemptFrom(operation.view());
 
       this.#options.logger.info(
         { server: serverId, operation: operation.id },
@@ -437,13 +542,7 @@ export class SteamUpdateWatcher {
   async #watchAttempt(serverId: string, state: MutableState, operation: Operation): Promise<void> {
     const finished = await operation.done;
 
-    state.lastAttempt = {
-      operationId: finished.id,
-      startedAt: finished.startedAt,
-      finishedAt: finished.finishedAt,
-      status: finished.status === 'running' ? 'running' : finished.status,
-      message: finished.message,
-    };
+    state.lastAttempt = attemptFrom(finished.view());
 
     if (finished.status !== 'succeeded') {
       // ####  ADIADA NÃO GASTA TENTATIVA  ####

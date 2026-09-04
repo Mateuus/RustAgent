@@ -295,6 +295,19 @@ export interface LastReload {
 export interface ServerPlugin extends LibraryPlugin {
   /** `null` = nenhum reload desde que o agente subiu. */
   lastReload: LastReload | null;
+  /**
+   * O que o Oxide respondeu sobre este plugin agora há pouco.
+   *
+   * É a diferença entre "ligado" (o arquivo está na pasta) e
+   * "rodando" (o Oxide carregou). O agente confere sozinho, de
+   * minuto em minuto — é o que faz aparecer aqui um plugin que
+   * parou de compilar sem ninguém ter mexido nele, depois de uma
+   * atualização do Rust.
+   *
+   * `null` = não deu para perguntar (servidor parado, ou o agente
+   * acabou de subir). É "não sei", e não "está tudo bem".
+   */
+  runtime: { loaded: boolean; failure: string | null } | null;
   enabled: boolean;
   appliedSha: string | null;
   appliedAt: string | null;
@@ -387,6 +400,15 @@ export interface AutoUpdateAttempt {
   status: 'running' | 'succeeded' | 'failed' | 'cancelled';
   /** O motivo, quando falhou. */
   message: string | null;
+  /**
+   * Falhou por ESPERA: nada foi tocado e o agente tenta sozinho.
+   *
+   * Hoje só o Oxide que ainda não lançou a versão do build novo do
+   * Rust. Forçar pelo botão cai na mesma recusa — é a mesma
+   * conferência —, e por isso a faixa muda de conselho quando isto
+   * é verdade. Ver `core/src/oxide/compat.ts`.
+   */
+  deferred?: boolean;
 }
 
 export interface SteamUpdate {
@@ -508,7 +530,24 @@ export interface PlayersSnapshot {
    * caminho é a aba Plugins. Com id e desligado, a tela oferece
    * ligar sem sair daqui.
    */
-  plugin: { name: string; id: number | null; enabled: boolean };
+  plugin: {
+    name: string;
+    id: number | null;
+    enabled: boolean;
+    /**
+     * Por que a lista não veio do plugin, mesmo ele ligado.
+     *
+     * `not-loaded`  o Oxide não carregou o plugin — quase sempre
+     *               erro de compilação depois de um update do
+     *               Rust. NÃO passa sozinho, e o que resolve não
+     *               é o interruptor: é a aba Plugins.
+     * `no-answer`   o comando não voltou a tempo com o plugin de
+     *               pé. É o servidor ocupado, comum nos primeiros
+     *               minutos depois de subir. Passa sozinho.
+     * `null`        a lista veio do plugin, ou ele está desligado.
+     */
+    fallback: 'not-loaded' | 'no-answer' | null;
+  };
   /** Os campos que a fonte atual não fornece. */
   missing: string[];
   /** O tamanho do mundo e a grade — o que o Map View desenha. */
@@ -3476,7 +3515,7 @@ export interface SitePairedServerView {
   message: string | null;
   lastBeaconAt: string | null;
   lastBeaconError: string | null;
-  /** Separa as sete causas do mesmo sintoma. Ver Docs §9.6. */
+  /** Separa as sete causas do mesmo sintoma. Ver Docs\20 §9.6. */
   lastBeaconErrorCode: string | null;
   serverExists: boolean | null;
   currentServerId: string | null;
@@ -3509,6 +3548,36 @@ export interface SiteCatalogView {
   mirrored: { serverId: string; version: string | null; at: string | null }[];
 }
 
+/**
+ * O espelho de VIP, dentro do `GET /api/site/status`.
+ *
+ * ####  ELE RESPONDE UMA PERGUNTA QUE O CATÁLOGO NÃO TEM  ####
+ *
+ * A loja em dia é o normal e o silêncio é bom sinal. O VIP não: ele
+ * tem PRAZO, e o retrato muda sozinho quando alguém vence. Espelho
+ * parado aqui não é "nada mudou" — é o site dizendo que gente sem
+ * VIP tem VIP.
+ *
+ * `routeMissing` é o estado esperado enquanto o site não subir a
+ * rota, e vem separado de `lastPushError` de propósito: ele não é
+ * defeito do agente, e a tela não pode fazer parecer que é.
+ */
+export interface SiteVipMirrorView {
+  /** O espelho foi construído? Precisa de pareamento com carteira. */
+  running: boolean;
+  /** Só preenchido quando algo está parado. Em regime, `null`. */
+  reason: string | null;
+  version: string | null;
+  /** Quantos VIPs o retrato representa. `null` = não há espelho. */
+  count: number | null;
+  inSync: boolean | null;
+  /** O site ainda não tem `/api/agent/vip/mirror`. Ver Docs/24. */
+  routeMissing: boolean;
+  lastPushAt: string | null;
+  lastPushError: string | null;
+  mirrored: { serverId: string; version: string | null; at: string | null }[];
+}
+
 /** `GET /api/site/status` — a primeira tela de "a loja parou". */
 export interface SiteStatus {
   ok: true;
@@ -3516,6 +3585,7 @@ export interface SiteStatus {
   baseUrl: string | null;
   servers: SitePairedServerView[];
   catalog: SiteCatalogView;
+  vipMirror: SiteVipMirrorView;
   purchases: {
     pendingOrphan: number;
     chargeUnknown: number;
