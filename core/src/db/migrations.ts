@@ -3025,6 +3025,39 @@ CREATE INDEX idx_site_deliveries_open ON site_deliveries (updated_at DESC)
 CREATE INDEX idx_site_deliveries_player ON site_deliveries (steam_id, reserved_at DESC);
 `;
 
+// ------------------------------------------------------------
+//  039 — o status de nascimento vira FAIXA
+//
+//  ####  UM NÚMERO SÓ FAZ TODO MUNDO NASCER IGUAL  ####
+//
+//  Com `health = 130`, os trinta jogadores de bronze acordam com os
+//  mesmos 130 — e o benefício, que era para ser uma vantagem, vira
+//  um número que aparece igual na tela de todo mundo. Uma faixa
+//  ("entre 25% e 35% a mais") dá a mesma vantagem sem o carimbo.
+//
+//  ####  POR QUE O TETO É COLUNA NOVA, E NÃO OUTRA TABELA  ####
+//
+//  Porque a faixa não é uma entidade: é o MESMO atributo com dois
+//  extremos. `health` continua sendo o que ele sempre foi — o
+//  valor, e agora o PISO da faixa —, e `health_max` nulo continua
+//  querendo dizer "valor exato". Um banco que já rodou a 022 sobe
+//  para cá sem tocar em linha nenhuma, e o que estava configurado
+//  segue valendo com o mesmo significado.
+//
+//  ####  QUEM SORTEIA É O PLUGIN, E TINHA DE SER  ####
+//
+//  O sorteio precisa acontecer A CADA NASCIMENTO. Se o agente
+//  sorteasse ao empurrar o payload, o número ficaria congelado até
+//  o push seguinte e todo mundo nasceria igual de novo — só que com
+//  um valor diferente por dia. O agente manda os dois extremos; o
+//  `OrigemZPlayer` tira o número no respawn.
+// ------------------------------------------------------------
+const SPAWN_STATUS_RANGE_SCHEMA = `
+ALTER TABLE spawn_status ADD COLUMN health_max    REAL;
+ALTER TABLE spawn_status ADD COLUMN calories_max  REAL;
+ALTER TABLE spawn_status ADD COLUMN hydration_max REAL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -3093,6 +3126,7 @@ export const MIGRATIONS: readonly Migration[] = [
   // Docs\17 §0.1 exige para uma reserva valer.
   { id: 37, name: 'site-commands', sql: SITE_COMMANDS_SCHEMA },
   { id: 38, name: 'site-deliveries-vip-revoke', sql: SITE_DELIVERIES_VIP_REVOKE_SCHEMA },
+  { id: 39, name: 'spawn-status-range', sql: SPAWN_STATUS_RANGE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

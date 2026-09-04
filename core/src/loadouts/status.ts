@@ -28,6 +28,19 @@
 //  jogador. Por isso os campos nulos são OMITIDOS do JSON, em vez
 //  de irem como 0.
 //
+//  ####  UM VALOR, OU UMA FAIXA  ####
+//
+//  Cada atributo viaja como um número (`health`) e, quando é
+//  faixa, com o teto ao lado (`healthMax`). Quem SORTEIA é o
+//  plugin, a cada nascimento: sortear aqui congelaria o número até
+//  o próximo push, e trinta pessoas do mesmo nível nasceriam com o
+//  mesmo valor — que é exatamente o que a faixa existe para
+//  evitar.
+//
+//  O campo do teto é ADITIVO de propósito. Um plugin antigo, que
+//  não o conhece, lê só o `health` e aplica o piso: perde o
+//  sorteio e não perde o benefício.
+//
 //  ####  O QUE ISTO NÃO É  ####
 //
 //  Não é teto permanente. O plugin aplica UMA VEZ, no nascimento —
@@ -101,8 +114,123 @@ export const spawnStatusValuesSchema = z
       .min(SPAWN_LIMITS.hydration.min)
       .max(SPAWN_LIMITS.hydration.max)
       .nullable(),
+    /**
+     * O teto da faixa. Ausente e `null` dizem a mesma coisa aqui —
+     * "valor exato" —, e o default deixa quem já mandava três
+     * campos continuar mandando três.
+     */
+    healthMax: z
+      .number()
+      .finite()
+      .min(SPAWN_LIMITS.health.min)
+      .max(SPAWN_LIMITS.health.max)
+      .nullable()
+      .default(null),
+    caloriesMax: z
+      .number()
+      .finite()
+      .min(SPAWN_LIMITS.calories.min)
+      .max(SPAWN_LIMITS.calories.max)
+      .nullable()
+      .default(null),
+    hydrationMax: z
+      .number()
+      .finite()
+      .min(SPAWN_LIMITS.hydration.min)
+      .max(SPAWN_LIMITS.hydration.max)
+      .nullable()
+      .default(null),
   })
   .strict();
+
+/** Os três atributos, na ordem em que a tela os mostra. */
+export const SPAWN_ATTRIBUTES = ['health', 'calories', 'hydration'] as const;
+
+export type SpawnAttribute = (typeof SPAWN_ATTRIBUTES)[number];
+
+/** O nome do campo do teto daquele atributo. */
+export const maxFieldOf = {
+  health: 'healthMax',
+  calories: 'caloriesMax',
+  hydration: 'hydrationMax',
+} as const;
+
+/** Como a tela e as mensagens chamam cada atributo. */
+export const SPAWN_ATTRIBUTE_LABEL: Record<SpawnAttribute, string> = {
+  health: 'vida',
+  calories: 'comida',
+  hydration: 'água',
+};
+
+/**
+ * O que impede uma faixa impossível de existir no banco.
+ *
+ * Duas recusas, e as duas são configuração que não quer dizer
+ * nada:
+ *
+ *   - **teto sem piso**: "sorteie entre nada e 135". O atributo
+ *     nulo é "o jogo decide", e o jogo não decide metade;
+ *   - **teto abaixo do piso**: o sorteio não teria de onde tirar
+ *     número, e o plugin acabaria aplicando o piso calado.
+ *
+ * Teto IGUAL ao piso é legítimo e vira `null` no
+ * `normalizeSpawnRanges`: é o mesmo que valor exato, e guardar a
+ * faixa degenerada faria a tela mostrar "de 130 a 130".
+ *
+ * @returns a frase do problema, ou `null` quando está tudo de pé.
+ */
+export function spawnRangeProblem(values: {
+  readonly [K in SpawnAttribute]: number | null;
+} & {
+  readonly [K in keyof typeof maxFieldOf as (typeof maxFieldOf)[K]]: number | null;
+}): string | null {
+  for (const attribute of SPAWN_ATTRIBUTES) {
+    const from = values[attribute];
+    const to = values[maxFieldOf[attribute]];
+
+    if (to === null) {
+      continue;
+    }
+
+    const label = SPAWN_ATTRIBUTE_LABEL[attribute];
+
+    if (from === null) {
+      return (
+        `A faixa de ${label} tem o teto (${String(to)}) e não tem o piso. Um atributo vazio é ` +
+        '"o jogo decide", e o jogo não decide metade: preencha os dois, ou nenhum.'
+      );
+    }
+
+    if (to < from) {
+      return (
+        `A faixa de ${label} vai de ${String(from)} a ${String(to)} — o teto é MENOR que o piso. ` +
+        'O sorteio não teria de onde tirar um número, e quem nascesse levaria o piso calado.'
+      );
+    }
+  }
+
+  return null;
+}
+
+/**
+ * O teto igual ao piso vira `null`.
+ *
+ * "De 130 a 130" é valor exato escrito de um jeito confuso — e a
+ * tela mostraria uma faixa que não sorteia nada.
+ */
+export function normalizeSpawnRanges<T extends Record<string, unknown>>(values: T): T {
+  const normalized = { ...values };
+
+  for (const attribute of SPAWN_ATTRIBUTES) {
+    const field = maxFieldOf[attribute];
+
+    if (normalized[field] !== null && normalized[field] === normalized[attribute]) {
+      (normalized as Record<string, unknown>)[field] = null;
+    }
+  }
+
+  return normalized;
+}
 
 export interface SpawnStatusSyncDeps {
   readonly repository: SpawnStatusRepository;
@@ -125,6 +253,10 @@ export interface SpawnStatusEntry {
   readonly health?: number;
   readonly calories?: number;
   readonly hydration?: number;
+  /** Só viaja quando o atributo é FAIXA. Ver o cabeçalho. */
+  readonly healthMax?: number;
+  readonly caloriesMax?: number;
+  readonly hydrationMax?: number;
 }
 
 /** O payload, no formato do `SpawnStatusSyncPayload` do plugin. */
@@ -140,18 +272,26 @@ export interface SpawnStatusSyncPayload {
  * bytes.
  */
 function entryOf(status: SpawnStatusRecord): SpawnStatusEntry {
-  const entry: { health?: number; calories?: number; hydration?: number } = {};
+  const entry: Record<string, number> = {};
 
-  if (status.health !== null) {
-    entry.health = status.health;
-  }
+  for (const attribute of SPAWN_ATTRIBUTES) {
+    const from = status[attribute];
 
-  if (status.calories !== null) {
-    entry.calories = status.calories;
-  }
+    if (from === null) {
+      continue;
+    }
 
-  if (status.hydration !== null) {
-    entry.hydration = status.hydration;
+    entry[attribute] = from;
+
+    const to = status[maxFieldOf[attribute]];
+
+    // O teto só viaja quando existe E é maior: um teto igual ao
+    // piso faria o plugin sortear entre 130 e 130 a cada
+    // nascimento, gastando bytes do comando para chegar no mesmo
+    // número.
+    if (to !== null && to > from) {
+      entry[maxFieldOf[attribute]] = to;
+    }
   }
 
   return entry;
@@ -171,8 +311,8 @@ export function buildSpawnStatusPayload(
 ): SpawnStatusSyncPayload {
   const tiers: Record<string, SpawnStatusEntry> = {};
 
-  const usable = records.filter(
-    (status) => status.health !== null || status.calories !== null || status.hydration !== null,
+  const usable = records.filter((status) =>
+    SPAWN_ATTRIBUTES.some((attribute) => status[attribute] !== null),
   );
 
   // Os grupos primeiro: o nome deles é a identidade da

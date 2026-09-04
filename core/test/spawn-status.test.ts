@@ -15,7 +15,10 @@
 //       fome é nascer morrendo, e o plugin distingue os dois casos
 //       (`float?` no `SpawnStatusPayload`);
 //    5. linha com os três nulos não entra no payload: ela não tem
-//       nada a aplicar.
+//       nada a aplicar;
+//    6. o atributo pode ser uma FAIXA — e é o plugin quem sorteia,
+//       a cada nascimento. Daqui saem os dois extremos, e o teto
+//       igual ao piso não viaja.
 // ============================================================
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -29,7 +32,12 @@ import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { SpawnStatusRepository } from '../src/db/spawn-status-repository.js';
 import { decodePushPayload } from '../src/game/plugin-push.js';
-import { SpawnStatusSync, type SpawnStatusEntry } from '../src/loadouts/status.js';
+import {
+  SpawnStatusSync,
+  normalizeSpawnRanges,
+  spawnRangeProblem,
+  type SpawnStatusEntry,
+} from '../src/loadouts/status.js';
 import { createLogger } from '../src/logger.js';
 import type { OpsRcon } from '../src/ops/service.js';
 
@@ -142,6 +150,9 @@ describe('o payload é o estado COMPLETO', () => {
       health: 100,
       calories: 500,
       hydration: 250,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: true,
       updatedBy: 'admin',
     });
@@ -152,6 +163,9 @@ describe('o payload é o estado COMPLETO', () => {
       health: 100,
       calories: null,
       hydration: null,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: true,
       updatedBy: 'admin',
     });
@@ -186,6 +200,9 @@ describe('o payload é o estado COMPLETO', () => {
       health: 150,
       calories: null,
       hydration: null,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: false,
       updatedBy: 'admin',
     });
@@ -205,6 +222,9 @@ describe('o apelido do nível', () => {
       health: 100,
       calories: 500,
       hydration: 250,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: true,
       updatedBy: 'admin',
     });
@@ -226,6 +246,9 @@ describe('null é "o jogo decide", e não zero', () => {
       health: 100,
       calories: null,
       hydration: 62.5,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: true,
       updatedBy: 'admin',
     });
@@ -249,6 +272,9 @@ describe('null é "o jogo decide", e não zero', () => {
       health: null,
       calories: null,
       hydration: null,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: true,
       updatedBy: 'admin',
     });
@@ -272,6 +298,9 @@ describe('o servidor fora do ar', () => {
       health: 100,
       calories: null,
       hydration: null,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
       enabled: true,
       updatedBy: 'admin',
     });
@@ -282,5 +311,113 @@ describe('o servidor fora do ar', () => {
     expect(harness.server.commands).toHaveLength(0);
     // A configuração ficou pronta e chega na próxima conexão.
     expect(harness.repository.enabled('pvp1')).toHaveLength(1);
+  });
+});
+
+describe('o atributo que é uma FAIXA', () => {
+  it('os dois extremos viajam, e quem sorteia é o plugin', async () => {
+    // Sortear aqui congelaria o número até o próximo push: trinta
+    // jogadores do mesmo nível nasceriam com o MESMO valor, que é o
+    // que a faixa existe para evitar.
+    harness.repository.save({
+      serverId: 'pvp1',
+      groupName: 'origemz.vip.bronze',
+      health: 125,
+      calories: 625,
+      hydration: 312.5,
+      healthMax: 135,
+      caloriesMax: 675,
+      hydrationMax: 337.5,
+      enabled: true,
+      updatedBy: 'admin',
+    });
+
+    await harness.sync.push('pvp1', 'teste');
+
+    expect(harness.server.lastPayload?.tiers.bronze).toEqual({
+      health: 125,
+      calories: 625,
+      hydration: 312.5,
+      healthMax: 135,
+      caloriesMax: 675,
+      hydrationMax: 337.5,
+    });
+  });
+
+  it('o teto IGUAL ao piso não viaja: seria sortear entre 130 e 130', async () => {
+    harness.repository.save({
+      serverId: 'pvp1',
+      groupName: 'origemz.vip.gold',
+      health: 130,
+      calories: null,
+      hydration: null,
+      healthMax: 130,
+      caloriesMax: null,
+      hydrationMax: null,
+      enabled: true,
+      updatedBy: 'admin',
+    });
+
+    await harness.sync.push('pvp1', 'teste');
+
+    expect(harness.server.lastPayload?.tiers.gold).toEqual({ health: 130 });
+  });
+
+  it('a linha antiga, sem teto nenhum, continua sendo valor exato', async () => {
+    // É o que a migração 039 preserva: quem já tinha status
+    // configurado não vira faixa por acidente.
+    harness.repository.save({
+      serverId: 'pvp1',
+      groupName: 'origemz.vip.gold',
+      health: 200,
+      calories: 1000,
+      hydration: 500,
+      healthMax: null,
+      caloriesMax: null,
+      hydrationMax: null,
+      enabled: true,
+      updatedBy: 'admin',
+    });
+
+    await harness.sync.push('pvp1', 'teste');
+
+    expect(harness.server.lastPayload?.tiers.gold).toEqual({
+      health: 200,
+      calories: 1000,
+      hydration: 500,
+    });
+  });
+});
+
+describe('a faixa impossível morre antes do banco', () => {
+  const values = {
+    health: null as number | null,
+    calories: null as number | null,
+    hydration: null as number | null,
+    healthMax: null as number | null,
+    caloriesMax: null as number | null,
+    hydrationMax: null as number | null,
+  };
+
+  it('teto sem piso é recusado: o jogo não decide metade', () => {
+    const problem = spawnRangeProblem({ ...values, healthMax: 135 });
+
+    expect(problem).toContain('não tem o piso');
+  });
+
+  it('teto ABAIXO do piso é recusado, e a frase diz os dois números', () => {
+    // Sem esta recusa, o plugin aplicaria o piso em silêncio e quem
+    // configurou nunca saberia que o sorteio não acontecia.
+    const problem = spawnRangeProblem({ ...values, hydration: 400, hydrationMax: 300 });
+
+    expect(problem).toContain('400');
+    expect(problem).toContain('300');
+  });
+
+  it('a faixa de pé passa, e o teto igual ao piso vira valor exato', () => {
+    expect(spawnRangeProblem({ ...values, health: 125, healthMax: 135 })).toBeNull();
+
+    expect(normalizeSpawnRanges({ ...values, health: 130, healthMax: 130 }).healthMax).toBeNull();
+    expect(normalizeSpawnRanges({ ...values, health: 125, healthMax: 135 }).healthMax).toBe(135);
   });
 });

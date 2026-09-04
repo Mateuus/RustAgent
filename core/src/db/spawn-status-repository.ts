@@ -17,6 +17,16 @@
 //  substitui a linha inteira, e desligar não é apagar.
 //
 //  ------------------------------------------------------------
+//  ####  CADA ATRIBUTO É UM VALOR OU UMA FAIXA  ####
+//
+//  `health` é o valor; `healthMax` nulo quer dizer que ele é
+//  EXATO. Com os dois preenchidos, o par vira uma faixa e quem
+//  sorteia é o plugin, a cada nascimento — ver a migração 039.
+//
+//  A faixa existe porque um número só faz todo mundo do nível
+//  nascer igual: a vantagem vira um carimbo que aparece idêntico
+//  na tela de trinta pessoas.
+//
 //  ####  NULL É "O JOGO DECIDE"  ####
 //
 //  E não zero. Zero de fome é nascer morrendo; `null` é não
@@ -41,12 +51,24 @@ import type { AgentDatabase } from './database.js';
  * `origemz.status.sync` descarta a entrada.
  */
 export interface SpawnStatusValues {
-  /** Vida ao nascer. O padrão do Rust é 100. */
+  /** Vida ao nascer, ou o PISO da faixa. O padrão do Rust é 100. */
   readonly health: number | null;
   /** Comida. O máximo padrão do Rust é 500. */
   readonly calories: number | null;
   /** Água. O máximo padrão do Rust é 250. */
   readonly hydration: number | null;
+  /**
+   * O teto da faixa de vida. `null` = `health` é valor exato.
+   *
+   * Teto sem piso não existe: um `healthMax` com `health` nulo
+   * seria "sorteie entre nada e 135", e a rota o recusa antes de
+   * chegar aqui.
+   */
+  readonly healthMax: number | null;
+  /** Idem para a comida. */
+  readonly caloriesMax: number | null;
+  /** Idem para a água. */
+  readonly hydrationMax: number | null;
 }
 
 export interface SpawnStatusRecord extends SpawnStatusValues {
@@ -81,6 +103,9 @@ interface SpawnStatusRow {
   readonly health: number | null;
   readonly calories: number | null;
   readonly hydration: number | null;
+  readonly health_max: number | null;
+  readonly calories_max: number | null;
+  readonly hydration_max: number | null;
   readonly enabled: number;
   readonly updated_at: number;
   readonly updated_by: string | null;
@@ -146,17 +171,22 @@ export class SpawnStatusRepository {
     this.#db
       .prepare(
         `INSERT INTO spawn_status
-              (server_id, group_name, health, calories, hydration, enabled, updated_at, updated_by)
+              (server_id, group_name, health, calories, hydration,
+               health_max, calories_max, hydration_max, enabled, updated_at, updated_by)
               VALUES
-              (@server_id, @group_name, @health, @calories, @hydration, @enabled, @updated_at,
+              (@server_id, @group_name, @health, @calories, @hydration,
+               @health_max, @calories_max, @hydration_max, @enabled, @updated_at,
                @updated_by)
          ON CONFLICT (server_id, group_name) DO UPDATE SET
-              health     = @health,
-              calories   = @calories,
-              hydration  = @hydration,
-              enabled    = @enabled,
-              updated_at = @updated_at,
-              updated_by = @updated_by`,
+              health        = @health,
+              calories      = @calories,
+              hydration     = @hydration,
+              health_max    = @health_max,
+              calories_max  = @calories_max,
+              hydration_max = @hydration_max,
+              enabled       = @enabled,
+              updated_at    = @updated_at,
+              updated_by    = @updated_by`,
       )
       .run({
         server_id: input.serverId,
@@ -164,6 +194,9 @@ export class SpawnStatusRepository {
         health: input.health,
         calories: input.calories,
         hydration: input.hydration,
+        health_max: input.healthMax,
+        calories_max: input.caloriesMax,
+        hydration_max: input.hydrationMax,
         // 0/1: o better-sqlite3 recusa boolean como parâmetro.
         enabled: input.enabled ? 1 : 0,
         updated_at: now,
@@ -207,6 +240,9 @@ function toRecord(row: SpawnStatusRow): SpawnStatusRecord {
     health: row.health,
     calories: row.calories,
     hydration: row.hydration,
+    healthMax: row.health_max,
+    caloriesMax: row.calories_max,
+    hydrationMax: row.hydration_max,
     enabled: row.enabled === 1,
     updatedAt: row.updated_at,
     updatedBy: row.updated_by,

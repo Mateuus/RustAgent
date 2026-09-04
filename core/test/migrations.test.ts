@@ -305,3 +305,44 @@ describe('038 — a fila que também revoga VIP', () => {
     db.close();
   });
 });
+
+describe('039 — o status de nascimento vira faixa', () => {
+  it('o que já estava configurado continua sendo valor EXATO', () => {
+    // Uma migração que transformasse o valor antigo em piso de uma
+    // faixa mudaria, calada, o que trinta jogadores recebem.
+    const db = databaseAt(38);
+
+    db.prepare(
+      `INSERT INTO servers
+         (id, name, identity, enabled, game_port, rcon_port, query_port, app_port,
+          install_dir, created_at, updated_at)
+       VALUES ('pvp1', 'PVP', 'pvp1', 1, 28015, 28016, 28017, 28082, 'C:/x', 1, 1)`,
+    ).run();
+
+    db.prepare(
+      `INSERT INTO spawn_status
+         (server_id, group_name, health, calories, hydration, enabled, updated_at, updated_by)
+       VALUES ('pvp1', 'origemz.vip.gold', 200, 1000, 500, 1, 10, 'admin')`,
+    ).run();
+
+    runMigrations(db);
+
+    expect(
+      db
+        .prepare(
+          `SELECT health, calories, hydration, health_max, calories_max, hydration_max
+             FROM spawn_status WHERE group_name = 'origemz.vip.gold'`,
+        )
+        .get(),
+    ).toEqual({
+      health: 200,
+      calories: 1000,
+      hydration: 500,
+      health_max: null,
+      calories_max: null,
+      hydration_max: null,
+    });
+
+    db.close();
+  });
+});
