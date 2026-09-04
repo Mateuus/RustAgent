@@ -199,6 +199,15 @@ export interface OperationView {
   startedAt: string;
   finishedAt: string | null;
   message: string | null;
+  /**
+   * A operação parou porque AINDA NÃO DAVA, e não porque quebrou.
+   *
+   * Hoje só o `server-auto-update` que desiste porque o Oxide não
+   * lançou a versão do build novo do Rust. Nada foi tocado e
+   * ninguém foi desconectado — o agente tenta de novo sozinho.
+   * Conta como `failed`, porque a atualização não aconteceu.
+   */
+  deferred?: boolean;
 }
 
 export interface OperationDetail extends OperationView {

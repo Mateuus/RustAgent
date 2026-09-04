@@ -32,6 +32,11 @@ import { existsSync } from 'node:fs';
 import { readServerConfig, type AgentPaths, type ServerConfig } from '../config.js';
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
+import {
+  fetchLatestOxideRelease,
+  OxideBehindRustError,
+  oxideServesRustBuild,
+} from '../oxide/compat.js';
 import { installOxide } from '../oxide/install.js';
 import {
   appManifestPath,
@@ -39,6 +44,7 @@ import {
   queryRemoteBuild,
   readInstalledBuild,
   type InstalledBuild,
+  type RemoteBuild,
 } from '../steam/builds.js';
 import { appUpdate, steamCmdExe } from '../steam/steamcmd.js';
 import { toError } from '../util.js';
@@ -49,6 +55,7 @@ import {
   type OperationLock,
   type OperationStore,
 } from './operations.js';
+import { BootLogWatcher } from './boot-watch.js';
 import { findServerProcess, killServerProcess, startServer } from './server-process.js';
 import type { WipeExecutor, WipeServerControl } from '../wipe/run.js';
 
@@ -93,6 +100,15 @@ export interface StartOperationInput {
    * Steam na hora — o vigia passa porque acabou de perguntar.
    */
   readonly expectedBuild?: string;
+  /**
+   * Quando a Facepunch publicou aquele build. Epoch ms.
+   *
+   * Anda junto com `expectedBuild` e serve a outra conferência: é
+   * a régua que diz se a release do Oxide pode conhecer este build
+   * (ver oxide/compat.ts). Sem ela, o agente teria de perguntar de
+   * novo à Steam o que o vigia acabou de perguntar.
+   */
+  readonly expectedBuildPublishedAt?: number;
   /**
    * A execução de wipe que esta operação vai tocar.
    *
@@ -164,6 +180,9 @@ export interface OperationsServiceOptions {
 
 /** Os marcos do aviso de atualização, em segundos. */
 const COUNTDOWN_MARKS = [900, 600, 300, 180, 120, 60, 30, 10];
+
+/** Quebra de linha nomeada: o log da operação é uma linha por vez. */
+const NEWLINE = '\n';
 
 export const DEFAULT_COUNTDOWN_MINUTES = 15;
 export const MAX_COUNTDOWN_MINUTES = 120;
@@ -360,8 +379,22 @@ export class OperationsService {
       .catch((error: unknown) => {
         const message = toError(error).message;
 
+        // "Ainda não dá" não é "quebrou". A distinção não é
+        // cosmética: é o que impede o vigia da Steam de gastar as
+        // três tentativas do build esperando o OxideMod publicar.
+        operation.deferred = error instanceof OxideBehindRustError;
+
         operation.log(`[erro] ${message}`);
         operation.finish(operation.cancelled ? 'cancelled' : 'failed', message);
+
+        if (operation.deferred) {
+          this.#options.logger.warn(
+            { server: this.serverId, operation: operation.id, kind },
+            'atualização adiada: o Oxide ainda não lançou a versão deste build do Rust',
+          );
+
+          return;
+        }
 
         this.#options.logger.error(
           { server: this.serverId, operation: operation.id, kind, err: toError(error) },
@@ -383,11 +416,15 @@ export class OperationsService {
     switch (operation.kind) {
       case 'server-install':
       case 'server-update':
-        await this.#install(operation);
+        await this.#install(operation, input);
         return;
 
       case 'oxide-install':
-        await this.#oxide(operation);
+        // O `oxide-install` avulso também confere: é a operação
+        // que alguém roda JUSTAMENTE depois de um update do Rust,
+        // e aplicar a release velha aqui daria no mesmo servidor
+        // travado no boot.
+        await this.#oxide(operation, await this.#remoteBuild(operation, input));
         return;
 
       case 'server-start':
@@ -463,10 +500,11 @@ export class OperationsService {
   }
 
   /** SteamCMD + Oxide. É a operação que INSTALA e a que ATUALIZA. */
-  async #install(operation: Operation, expectedBuild?: string | null): Promise<void> {
+  async #install(operation: Operation, input: StartOperationInput = { kind: 'server-install' }) {
     const { server, paths } = this.#options;
 
     const before = await readInstalledBuild(server.paths.installDir, server.steam.appId);
+    const published = await this.#remoteBuild(operation, input);
 
     await appUpdate({
       dir: paths.steamCmdDir,
@@ -481,12 +519,12 @@ export class OperationsService {
       signal: operation.signal,
     });
 
-    await this.#verifyInstall(operation, before, expectedBuild ?? null);
+    await this.#verifyInstall(operation, before, published);
 
     operation.progress = 100;
     operation.log('[agente] jogo instalado. Aplicando o Oxide por cima...');
 
-    await this.#oxide(operation);
+    await this.#oxide(operation, published);
 
     // A partir daqui o servidor TEM jogo em disco, e o motivo de o
     // agente não cuidar dele deixou de existir. Ver `onInstalled`.
@@ -534,7 +572,7 @@ export class OperationsService {
   async #verifyInstall(
     operation: Operation,
     before: InstalledBuild | null,
-    expected: string | null,
+    published: RemoteBuild | null,
   ): Promise<void> {
     const { server } = this.#options;
 
@@ -562,13 +600,12 @@ export class OperationsService {
       );
     }
 
-    const published = expected ?? (await this.#publishedBuild(operation));
-
-    if (published !== null && after.buildId !== published) {
+    if (published !== null && after.buildId !== published.buildId) {
       throw new Error(
         `o SteamCMD terminou, mas o build em disco continua ${after.buildId} e o publicado é ` +
-          `${published}. A ATUALIZAÇÃO NÃO FOI APLICADA — um servidor de build velho recusa ` +
-          'todos os jogadores, então isto é falha e não aviso. Veja as linhas do SteamCMD acima.',
+          `${published.buildId}. A ATUALIZAÇÃO NÃO FOI APLICADA — um servidor de build velho ` +
+          'recusa todos os jogadores, então isto é falha e não aviso. Veja as linhas do ' +
+          'SteamCMD acima.',
       );
     }
 
@@ -581,12 +618,20 @@ export class OperationsService {
     );
   }
 
-  /** O build publicado, para conferir. `null` quando não deu para perguntar. */
-  async #publishedBuild(operation: Operation): Promise<string | null> {
+  /**
+   * O que a Steam publicou naquele branch. `null` quando não deu
+   * para perguntar.
+   *
+   * Devolve o `RemoteBuild` inteiro, e não só o `buildId`, porque
+   * a conferência do Oxide precisa do `updatedAt` — QUANDO a
+   * Facepunch publicou é a régua com que se decide se uma release
+   * do Oxide pode conhecer aquele build (ver oxide/compat.ts).
+   */
+  async #publishedBuild(operation: Operation): Promise<RemoteBuild | null> {
     const { server, paths } = this.#options;
 
     try {
-      const build = await queryRemoteBuild({
+      return await queryRemoteBuild({
         steamCmdExe: steamCmdExe(paths.steamCmdDir),
         appId: server.steam.appId,
         login: server.steam.login,
@@ -594,8 +639,6 @@ export class OperationsService {
         timeoutMs: 60_000,
         logger: this.#options.logger,
       });
-
-      return build.buildId;
     } catch (error) {
       operation.log(
         `[agente] não deu para confirmar o build publicado (${toError(error).message}) — ` +
@@ -606,7 +649,17 @@ export class OperationsService {
     }
   }
 
-  async #oxide(operation: Operation): Promise<void> {
+  /**
+   * O Oxide por cima do jogo, conferindo antes se ele SERVE.
+   *
+   * `published` é o build que a Steam publicou. Com ele na mão, a
+   * instalação recusa uma release do Oxide anterior a esse build —
+   * que é o defeito descrito em oxide/compat.ts. Sem ele (`null`,
+   * quando não deu para perguntar à Steam), o Oxide entra do jeito
+   * antigo: recusar por não ter conseguido perguntar pararia toda
+   * instalação sempre que a Steam piscasse.
+   */
+  async #oxide(operation: Operation, published: RemoteBuild | null): Promise<void> {
     const { server } = this.#options;
 
     const result = await installOxide({
@@ -614,9 +667,37 @@ export class OperationsService {
       backupsDir: server.paths.backupsDir,
       onLine: (line) => operation.log(line),
       signal: operation.signal,
+      rustBuild:
+        published === null
+          ? undefined
+          : { buildId: published.buildId, publishedAt: published.updatedAt },
     });
 
     operation.log(`[agente] Oxide ${result.tag} pronto.`);
+  }
+
+  /**
+   * O build publicado desta operação, consultado uma vez só.
+   *
+   * Quem já sabe passa em `expectedBuild` — o vigia da Steam
+   * acabou de perguntar, e repetir a consulta custaria ~4 s por
+   * operação. Mas só vale pular quando vem TAMBÉM a data: sem
+   * ela, a conferência do Oxide ficaria cega justamente na
+   * operação em que ela mais importa, que é a automática.
+   */
+  async #remoteBuild(
+    operation: Operation,
+    input: StartOperationInput,
+  ): Promise<RemoteBuild | null> {
+    if (input.expectedBuild !== undefined && input.expectedBuildPublishedAt !== undefined) {
+      return {
+        branch: this.#options.server.steam.branch,
+        buildId: input.expectedBuild,
+        updatedAt: input.expectedBuildPublishedAt,
+      };
+    }
+
+    return this.#publishedBuild(operation);
   }
 
   /** Sobe o processo e espera o RCON responder. */
@@ -650,6 +731,13 @@ export class OperationsService {
 
     operation.log(`[agente] processo no ar (PID ${String(started.pid)}). Esperando o RCON...`);
 
+    // ####  ESPERAR NÃO É SÓ OLHAR O RCON  ####
+    //
+    // Um boot que morre deixa o processo VIVO e o RCON mudo — os
+    // dois sinais que a espera consultava diziam "ainda subindo",
+    // para sempre. Quem sabe a verdade é o log do jogo, e ele está
+    // em disco o tempo todo. Ver ops/boot-watch.ts.
+    const bootLog = new BootLogWatcher(started.logFile);
     const deadline = Date.now() + this.#options.startTimeoutMs;
 
     while (Date.now() < deadline) {
@@ -665,17 +753,49 @@ export class OperationsService {
         return;
       }
 
+      const fatal = await bootLog.findFatal();
+
+      if (fatal !== null) {
+        // Falha NA HORA, e com a linha do jogo junto: esperar o
+        // resto dos quinze minutos não mudaria o desfecho, e a
+        // linha é a única coisa que diz o que consertar.
+        //
+        // O processo fica de pé de propósito — ele é a prova, e
+        // matá-lo apagaria a janela de console que a pessoa pode
+        // estar olhando.
+        operation.log(`[jogo] ${fatal.line}`);
+
+        throw new Error(
+          `o boot do servidor MORREU: ${fatal.what}. O processo (PID ${String(started.pid)}) ` +
+            'continua vivo, mas nunca vai abrir o RCON — não adianta esperar. A linha do jogo ' +
+            `foi: "${fatal.line}". A causa mais comum é o Oxide não combinar com o build do ` +
+            'Rust em disco: rode a operação Oxide (oxide-install) e inicie de novo. Log ' +
+            `completo em ${bootLog.path}.`,
+        );
+      }
+
       await delay(3_000, operation.signal);
     }
 
     // O tempo esgotar NÃO derruba o servidor: gerar um mapa
     // grande pode passar do orçamento, e matar o processo aqui
     // jogaria fora minutos de trabalho por causa de um relógio.
+    //
+    // As últimas linhas vão junto porque é o que separa os dois
+    // desfechos que cabem aqui: um mapa ainda gerando termina em
+    // `Height Map`/`Lakes`, e um boot parado termina onde parou.
+    // Sem elas a mensagem só sabia chutar "pode ser um mapa
+    // grande" — e mandava procurar no lugar errado.
+    const tail = bootLog.tail();
+
     throw new Error(
       'o processo subiu, mas o RCON não respondeu em ' +
         `${String(Math.round(this.#options.startTimeoutMs / 60_000))} min. O servidor CONTINUA ` +
-        'no ar — pode ser um mapa grande ainda gerando. Veja o log do jogo em ' +
-        `${this.#options.server.paths.logsDir}.`,
+        `no ar. Últimas linhas do log do jogo (${bootLog.path}):` +
+        NEWLINE +
+        (tail.length === 0
+          ? '(o log não cresceu — o processo pode estar travado)'
+          : tail.join(NEWLINE)),
     );
   }
 
@@ -747,6 +867,20 @@ export class OperationsService {
    * Facepunch publica um build novo (Etapa 6).
    */
   async #autoUpdate(operation: Operation, input: StartOperationInput): Promise<void> {
+    // ####  CONFERIR O OXIDE ANTES DE DERRUBAR NINGUÉM  ####
+    //
+    // Esta conferência tem que vir aqui, antes da contagem e antes
+    // do stop, e não lá dentro do `#install`: descobrir que o
+    // Oxide está defasado DEPOIS de desconectar todo mundo trocaria
+    // um servidor desatualizado por um servidor fora do ar — e o
+    // segundo é pior (ver o bloco sobre isso mais abaixo).
+    //
+    // Falhar aqui não custa nada a ninguém: o servidor segue no ar
+    // com o build velho, e o vigia da Steam reconfere a cada
+    // rodada. Quando o OxideMod publicar, a atualização acontece
+    // sozinha.
+    await this.#requireOxideForBuild(operation, input);
+
     const running = (await this.#processInfo()) !== null;
 
     if (running && this.#options.rcon.isConnected) {
@@ -770,7 +904,7 @@ export class OperationsService {
     }
 
     try {
-      await this.#install(operation, input.expectedBuild ?? null);
+      await this.#install(operation, input);
     } catch (error) {
       // ####  FALHOU ATUALIZANDO ≠ FICAR FORA DO AR  ####
       //
@@ -797,6 +931,51 @@ export class OperationsService {
     }
 
     await this.#start(operation);
+  }
+
+  /**
+   * Recusa a atualização enquanto o Oxide não lançar a versão do
+   * build novo.
+   *
+   * Ver oxide/compat.ts para o porquê: aplicar a release anterior
+   * deixa o servidor subindo e travando no boot, com o processo
+   * vivo e o RCON mudo — a pior forma de falhar que este agente
+   * conhece.
+   *
+   * Não confere quando não deu para perguntar (Steam ou GitHub
+   * fora do ar): recusar por ignorância pararia a atualização de
+   * um servidor que talvez estivesse recusando jogadores.
+   */
+  async #requireOxideForBuild(
+    operation: Operation,
+    input: StartOperationInput,
+  ): Promise<void> {
+    const published = await this.#remoteBuild(operation, input);
+
+    if (published === null || published.updatedAt === null) {
+      return;
+    }
+
+    const release = await fetchLatestOxideRelease({
+      signal: operation.signal,
+      onLine: (line) => {
+        operation.log(line);
+      },
+    });
+
+    if (oxideServesRustBuild(release.publishedAt, published.updatedAt)) {
+      operation.log(
+        `[agente] Oxide ${release.tag} serve para o build ${published.buildId}. Seguindo.`,
+      );
+      return;
+    }
+
+    throw new OxideBehindRustError({
+      tag: release.tag,
+      oxidePublishedAt: release.publishedAt,
+      rustBuildId: published.buildId,
+      rustBuildPublishedAt: published.updatedAt,
+    });
   }
 
   /**

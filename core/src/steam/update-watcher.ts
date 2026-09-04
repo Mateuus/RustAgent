@@ -108,6 +108,8 @@ export interface SteamUpdateState {
 interface MutableState {
   installed: string | null;
   published: string | null;
+  /** `timeupdated` do branch para `published`. Epoch ms. */
+  publishedAt: number | null;
   checkedAt: number | null;
   lastError: string | null;
   /** O build para o qual as tentativas abaixo foram gastas. */
@@ -318,6 +320,10 @@ export class SteamUpdateWatcher {
 
       if ('buildId' in picked) {
         state.published = picked.buildId;
+        // QUANDO a Facepunch publicou anda junto com o quê: é a
+        // régua da conferência do Oxide, e perguntá-la de novo
+        // dentro da operação custaria outra rodada de SteamCMD.
+        state.publishedAt = picked.updatedAt;
         state.lastError = null;
       } else {
         state.lastError = picked.message;
@@ -380,7 +386,11 @@ export class SteamUpdateWatcher {
         // O build publicado vai junto: é a régua com que a
         // operação confere, no fim, se o SteamCMD realmente
         // trocou o que está em disco.
-        .start({ kind: 'server-auto-update', expectedBuild: snapshot.published ?? undefined });
+        .start({
+          kind: 'server-auto-update',
+          expectedBuild: snapshot.published ?? undefined,
+          expectedBuildPublishedAt: state.publishedAt ?? undefined,
+        });
 
       state.lastAttempt = {
         operationId: operation.id,
@@ -436,6 +446,31 @@ export class SteamUpdateWatcher {
     };
 
     if (finished.status !== 'succeeded') {
+      // ####  ADIADA NÃO GASTA TENTATIVA  ####
+      //
+      // São três por build, com uma hora entre elas. Se a espera
+      // pelo Oxide as consumisse, o agente desistiria em ~2 h de
+      // um build cuja versão do Oxide costuma sair depois disso —
+      // e o servidor ficaria desatualizado, recusando jogadores,
+      // até alguém reparar.
+      //
+      // Devolver a tentativa faz o vigia reconferir a cada rodada
+      // (quinze minutos) e atualizar sozinho no minuto em que o
+      // OxideMod publicar. Nada foi tocado no servidor: a operação
+      // desistiu antes de derrubar quem estava jogando.
+      if (finished.deferred) {
+        state.attempts = Math.max(0, state.attempts - 1);
+        state.lastAttemptAt = null;
+
+        this.#options.logger.info(
+          { server: serverId, operation: finished.id, build: state.published },
+          'atualização adiada — o Oxide ainda não lançou a versão deste build; ' +
+            'o agente tenta de novo na próxima rodada',
+        );
+
+        return;
+      }
+
       this.#options.logger.warn(
         { server: serverId, operation: finished.id, status: finished.status },
         'a atualização automática não terminou bem',
@@ -468,6 +503,7 @@ export class SteamUpdateWatcher {
       state = {
         installed: null,
         published: null,
+        publishedAt: null,
         checkedAt: null,
         lastError: null,
         attemptsFor: null,

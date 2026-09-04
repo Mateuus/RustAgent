@@ -90,6 +90,8 @@ export interface OperationView {
   readonly finishedAt: number | null;
   /** A frase do desfecho: o que deu errado, ou o que foi feito. */
   readonly message: string | null;
+  /** Parou porque ainda não dava, e não porque quebrou. */
+  readonly deferred?: boolean;
 }
 
 /**
@@ -109,6 +111,22 @@ export class Operation {
   progress: number | null = null;
   finishedAt: number | null = null;
   message: string | null = null;
+
+  /**
+   * A operação parou porque AINDA NÃO DAVA, e não porque algo
+   * quebrou.
+   *
+   * O caso que a criou: o `server-auto-update` que desiste porque
+   * o Oxide ainda não lançou a versão do build novo (ver
+   * oxide/compat.ts). Nada foi tocado, ninguém foi desconectado, e
+   * tentar de novo daqui a quinze minutos é exatamente o certo.
+   *
+   * Continua contando como `failed` — a tela precisa mostrar que a
+   * atualização não aconteceu. O que muda é quem lê isto: o vigia
+   * da Steam não gasta uma das três tentativas do build com uma
+   * espera (ver steam/update-watcher.ts).
+   */
+  deferred = false;
 
   /** As últimas linhas. A primeira delas é a de número `#dropped`. */
   readonly #lines: OperationLogLine[] = [];
@@ -234,6 +252,7 @@ export class Operation {
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
       message: this.message,
+      deferred: this.deferred,
     };
   }
 }
