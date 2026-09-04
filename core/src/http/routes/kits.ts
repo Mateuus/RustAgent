@@ -73,7 +73,7 @@ const claimBody = z.object({ steamId: z.string().min(1) }).strict();
  * pedidos que o banco aceitaria (as colunas são anuláveis) e que o
  * jogador descobriria como "clico e não acontece nada".
  */
-const kitBody = z
+export const kitBody = z
   .object({
     slug: z
       .string()

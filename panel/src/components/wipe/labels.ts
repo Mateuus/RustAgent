@@ -157,18 +157,64 @@ export function toneOfPlan(plan: WipePlan): CalendarMark['tone'] {
  * A agenda vira marcações genéricas de calendário.
  *
  * É aqui que o wipe para de existir: da grade para baixo, só
- * existem `{ at, kind, label, tone }` — e é o que permite a tela
- * de eventos usar a MESMA grade depois.
+ * existem `{ at, kind, label, detail, tone, struck }` — e é o que
+ * permite a tela de eventos usar a MESMA grade depois.
+ *
+ * ####  O RÓTULO É CURTO, E O RESTO É `detail`  ####
+ *
+ * A casa da grade tem um sétimo da largura da tela: uma linha com
+ * hora, tipo, blueprints E situação nunca coube ali, e o que
+ * sobrava era cortado no meio. Agora a tarja leva a HORA e o TIPO
+ * — o que se lê varrendo o mês —, e o balão leva o resto, uma
+ * frase por linha.
  */
 export function toCalendarMarks(plans: readonly WipePlan[]): readonly CalendarMark[] {
   return plans.map((plan) => ({
     at: plan.scheduledAt,
     kind: plan.kind,
-    label: `${formatTime(plan.scheduledAt)} · ${KIND_LABEL[plan.kind]} · ${
-      BP_POLICY_SHORT[plan.bpPolicy]
-    }${isPending(plan) ? '' : ` · ${STATUS_LABEL[plan.status]}`}`,
+    label: `${formatTime(plan.scheduledAt)} · ${KIND_LABEL[plan.kind]}`,
+    detail: describePlan(plan),
     tone: toneOfPlan(plan),
+    struck: !isPending(plan),
   }));
+}
+
+/**
+ * O wipe em frases soltas — o que o balão da grade mostra, e o
+ * que o leitor de tela lê de uma vez só.
+ *
+ * A ordem é a de quem confere a agenda: primeiro o que o wipe FAZ
+ * (blueprints, mapa), depois o que fizeram COM ele (movido,
+ * congelado, cancelado), e a anotação por último — ela é a única
+ * linha escrita por um humano, e é a que o olho procura já
+ * embaixo.
+ */
+export function describePlan(plan: WipePlan): readonly string[] {
+  const lines: string[] = [
+    BP_POLICY_LABEL[plan.bpPolicy],
+    `Mapa: ${MAP_SOURCE_LABEL[plan.mapSource]}`,
+  ];
+
+  // Adiar não apaga o que a regra queria: `generatedFor` é o que
+  // faz "a quinta que vem, só que às 20h" ser diferente de "um
+  // wipe qualquer numa quinta".
+  if (plan.generatedFor !== null && plan.generatedFor !== plan.scheduledAt) {
+    lines.push(`Movido: a cadência previa ${formatShortMoment(plan.generatedFor)}.`);
+  }
+
+  if (plan.pinned) {
+    lines.push('Mexido à mão — a reconciliação não toca nele.');
+  }
+
+  if (!isPending(plan)) {
+    lines.push(`Situação: ${STATUS_LABEL[plan.status]}.`);
+  }
+
+  if (plan.note !== null && plan.note.trim() !== '') {
+    lines.push(`"${plan.note.trim()}"`);
+  }
+
+  return lines;
 }
 
 /**
@@ -189,6 +235,25 @@ export function formatMoment(epochMs: number): string {
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+  });
+}
+
+/**
+ * `quinta-feira, 10 de setembro de 2026` — o título de um DIA.
+ *
+ * Sem hora de propósito: é o cabeçalho da caixa que abre um dia da
+ * grade, e lá dentro cada wipe já diz a sua.
+ */
+export function formatFullDay(epochMs: number): string {
+  if (!Number.isFinite(epochMs) || epochMs <= 0) {
+    return EM_DASH;
+  }
+
+  return new Date(epochMs).toLocaleDateString('pt-BR', {
+    weekday: 'long',
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
   });
 }
 
@@ -290,6 +355,26 @@ export function fromDateField(value: string): number | null {
   const parsed = new Date(Number(year), Number(month) - 1, Number(day), 12, 0, 0, 0);
 
   return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+/**
+ * O caminho de volta: um instante vira os dois campos do formulário.
+ *
+ * ####  O PAR TEM QUE FECHAR  ####
+ *
+ * É o inverso exato de `fromDateTimeFields`, e no MESMO fuso — o do
+ * navegador. Formatar aqui em UTC abriria a edição de um wipe das
+ * 16:00 mostrando 19:00, e quem salvasse sem tocar no campo estaria
+ * movendo o wipe três horas sem querer.
+ */
+export function toDateTimeFields(epochMs: number): { date: string; time: string } {
+  const at = new Date(epochMs);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+
+  return {
+    date: `${String(at.getFullYear())}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`,
+    time: `${pad(at.getHours())}:${pad(at.getMinutes())}`,
+  };
 }
 
 /**

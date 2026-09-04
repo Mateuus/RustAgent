@@ -247,9 +247,10 @@ describe('a agenda inteira', () => {
 
     expect(plans.map((plan) => plan.scheduledAt)).toEqual(FORCED);
     expect(plans.every((plan) => plan.kind === 'forced')).toBe(true);
-    // O forçado nasce mantendo blueprint: ele apaga o MAPA, e só
-    // leva BP quando a Facepunch mexe no sistema de itens.
-    expect(plans.every((plan) => plan.bpPolicy === 'keep')).toBe(true);
+    // O forçado nasce FULL: a Facepunch só zera blueprint uma ou
+    // duas vezes por ano, mas a rede trata o force wipe mensal como
+    // começo de temporada — e temporada nova começa do zero.
+    expect(plans.every((plan) => plan.bpPolicy === 'wipe')).toBe(true);
   });
 
   it('a cadência sai no horário local escolhido, de N em N dias', () => {
@@ -279,6 +280,60 @@ describe('a agenda inteira', () => {
     expect(cadence[0]!.scheduledAt).toBe(
       zonedTimeToUtc({ year: 2026, month: 8, day: 22 }, 16, 0, SAO_PAULO),
     );
+  });
+
+  // ####  O WIPE DE HOJE NÃO PODE SUMIR  ####
+  //
+  // O salto que leva o marco zero até a janela anda em dias
+  // INTEIROS. Quando ele para exatamente no dia de hoje e o horário
+  // ainda não chegou, o wipe de hoje é um candidato legítimo — e
+  // sumia, porque o laço soma um período antes de testar.
+  it('gera o wipe de HOJE quando o horário dele ainda não passou', () => {
+    // Marco zero ontem, 21/08. Cadência diária às 16:00. O relógio
+    // está em 22/08 às 12:00 locais: faltam quatro horas.
+    const settings = settingsOf({
+      cadence: {
+        enabled: true,
+        everyDays: 1,
+        anchorAt: Date.UTC(2026, 7, 21, 12, 0, 0),
+        timeOfDay: '16:00',
+        timeZone: SAO_PAULO,
+      },
+      collision: { policy: 'ignore' },
+    });
+
+    const agora = zonedTimeToUtc({ year: 2026, month: 8, day: 22 }, 12, 0, SAO_PAULO);
+    const hoje = zonedTimeToUtc({ year: 2026, month: 8, day: 22 }, 16, 0, SAO_PAULO);
+
+    const cadence = buildSchedule(settings, agora, agora + 5 * 86_400_000).filter(
+      (plan) => plan.kind === 'cadence',
+    );
+
+    expect(cadence[0]?.scheduledAt).toBe(hoje);
+  });
+
+  // A outra ponta da mesma conta: passado é passado.
+  it('não ressuscita o wipe de hoje depois que a hora passou', () => {
+    const settings = settingsOf({
+      cadence: {
+        enabled: true,
+        everyDays: 1,
+        anchorAt: Date.UTC(2026, 7, 21, 12, 0, 0),
+        timeOfDay: '16:00',
+        timeZone: SAO_PAULO,
+      },
+      collision: { policy: 'ignore' },
+    });
+
+    // Uma hora DEPOIS do wipe de hoje: o próximo é o de amanhã.
+    const agora = zonedTimeToUtc({ year: 2026, month: 8, day: 22 }, 17, 0, SAO_PAULO);
+    const amanha = zonedTimeToUtc({ year: 2026, month: 8, day: 23 }, 16, 0, SAO_PAULO);
+
+    const cadence = buildSchedule(settings, agora, agora + 5 * 86_400_000).filter(
+      (plan) => plan.kind === 'cadence',
+    );
+
+    expect(cadence[0]?.scheduledAt).toBe(amanha);
   });
 
   it('num fuso que muda de offset, ela continua às 16:00 LOCAIS', () => {

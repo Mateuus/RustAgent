@@ -224,9 +224,53 @@ describe('a leitura da agenda', () => {
     const marks = toCalendarMarks(agenda);
 
     expect(marks).toHaveLength(agenda.length);
-    expect(Object.keys(marks[0] ?? {}).sort()).toEqual(['at', 'kind', 'label', 'tone']);
-    // O cancelado diz na etiqueta por que está apagado.
-    expect(marks[2]?.label).toContain('cancelado');
+    expect(Object.keys(marks[0] ?? {}).sort()).toEqual([
+      'at',
+      'detail',
+      'kind',
+      'label',
+      'struck',
+      'tone',
+    ]);
+  });
+
+  it('o rótulo da casa é curto: só a hora e o tipo', () => {
+    const marks = toCalendarMarks([plan({ id: 1, scheduledAt: at(2026, 9, 3, 16) })]);
+
+    // O que sobra ("BP mantidos", o mapa, a anotação) desceu para o
+    // balão: uma casa de um sétimo da tela cortava a frase no meio.
+    expect(marks[0]?.label).toContain('Cadência');
+    expect(marks[0]?.label).not.toContain('BP');
+  });
+
+  it('o balão diz a política, o mapa e por que o wipe está apagado', () => {
+    const marks = toCalendarMarks(agenda);
+
+    expect(marks[1]?.detail?.[0]).toBe('Mantém os blueprints');
+    expect(marks[1]?.detail?.[1]).toContain('Mapa:');
+    expect((marks[2]?.detail ?? []).join(' ')).toContain('cancelado');
+    // Riscado é o que separa "não vai acontecer" de "só é menos
+    // importante" — cinza sozinho não diz isso.
+    expect(marks[2]?.struck).toBe(true);
+    expect(marks[1]?.struck).toBe(false);
+  });
+
+  it('conta o que mexeram no wipe: movido, congelado, anotado', () => {
+    const [mark] = toCalendarMarks([
+      plan({
+        id: 7,
+        scheduledAt: at(2026, 9, 5, 16),
+        generatedFor: at(2026, 9, 3, 16),
+        pinned: true,
+        note: 'esperando o evento',
+      }),
+    ]);
+
+    const detail = (mark?.detail ?? []).join(' | ');
+
+    expect(detail).toContain('a cadência previa');
+    expect(detail).toContain('Mexido à mão');
+    expect(detail).toContain('esperando o evento');
   });
 });
 

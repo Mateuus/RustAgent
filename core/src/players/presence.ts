@@ -367,6 +367,9 @@ export class PresenceWatcher {
   readonly #tracker: PresenceTracker;
   readonly #logger: Logger;
   readonly #intervalMs: number;
+  readonly #onJoined:
+    | ((serverId: string, steamIds: readonly string[]) => void)
+    | undefined;
 
   #timer: NodeJS.Timeout | null = null;
   /** Uma rodada por vez. Ver o cabeçalho. */
@@ -376,10 +379,20 @@ export class PresenceWatcher {
     readonly tracker: PresenceTracker;
     readonly logger: Logger;
     readonly intervalMs?: number;
+    /**
+     * Alguém CONECTOU nesta varredura.
+     *
+     * Existe para a fila de entregas acordar na hora certa: o
+     * item pago é entregue no minuto em que o jogador abre o
+     * inventário, e não até 15 s depois. Opcional — sem a
+     * integração com o site, ninguém o passa.
+     */
+    readonly onJoined?: ((serverId: string, steamIds: readonly string[]) => void) | undefined;
   }) {
     this.#tracker = options.tracker;
     this.#logger = options.logger;
     this.#intervalMs = options.intervalMs ?? DEFAULT_PRESENCE_INTERVAL_MS;
+    this.#onJoined = options.onJoined;
   }
 
   start(): void {
@@ -424,7 +437,22 @@ export class PresenceWatcher {
     this.#running = true;
 
     try {
-      await this.#tracker.syncAll();
+      const results = await this.#tracker.syncAll();
+
+      for (const result of results) {
+        if (result.joined.length === 0) {
+          continue;
+        }
+
+        try {
+          this.#onJoined?.(result.serverId, result.joined);
+        } catch (error) {
+          // O gancho é conveniência. Um erro nele NÃO pode
+          // derrubar a varredura de presença, que é quem conta
+          // tempo de jogo.
+          this.#logger.warn({ err: toError(error) }, 'presence onJoined hook failed');
+        }
+      }
     } catch (error) {
       this.#logger.warn(
         { err: toError(error) },

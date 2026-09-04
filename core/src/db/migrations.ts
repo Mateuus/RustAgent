@@ -2652,6 +2652,412 @@ function rewriteLegacyPluginDataPatterns(db: AgentDatabase, logger?: Logger): vo
   }
 }
 
+// ------------------------------------------------------------
+//  035 — a compra que PODE ter sido cobrada
+//
+//  ####  TRÊS ESTADOS NÃO COBREM CINCO DESFECHOS  ####
+//
+//  Quando o site cobra e a resposta se perde no caminho, a compra
+//  de hoje fecha como `failed` — o mesmo estado de "não tinha
+//  saldo" e de "o estorno falhou". O jogador pagou, não recebeu, e
+//  nada no sistema volta para conferir.
+//
+//  `charge-unknown` é o único estado NÃO TERMINAL da tabela: ele
+//  significa "não sei se cobrou", nada foi entregue e nada foi
+//  estornado, e é o relógio da reconciliação que o resolve — com
+//  PROVA, consultando o site pela referência. Ver Docs\20 §4 e §11.
+//
+//  ####  A REFERÊNCIA PRECISA FICAR GRAVADA  ####
+//
+//  Ela é a única chave que liga esta linha ao ledger do site. Ela é
+//  DERIVADA do id da compra; no dia em que a convenção mudar, todo
+//  o histórico anterior deixa de ser reconciliável — e a pergunta
+//  "eu paguei e não recebi" chega meses depois.
+//
+//  ####  O QUE IA SER ENTREGUE FICA CONGELADO NA LINHA  ####
+//
+//  A reconciliação pode entregar horas depois. Se ela relesse
+//  `store_offers`, uma oferta editada no meio entregaria OUTRA
+//  COISA, cobrada com o preço de ontem — e uma oferta apagada não
+//  entregaria nada. O plano gravado é o que a compra prometeu.
+//
+//  ####  O SQLite NÃO ALTERA UM CHECK NO LUGAR  ####
+//
+//  Por isso a tabela é recriada, com o `id` copiado EXPLICITAMENTE:
+//  ele é a chave que o extrato, o log e o site já conhecem, e
+//  renumerar aqui reescreveria o comprovante de compras antigas.
+// ------------------------------------------------------------
+const STORE_PURCHASE_CHARGE_UNKNOWN_SCHEMA = `
+ALTER TABLE store_purchases RENAME TO store_purchases_015;
+
+CREATE TABLE store_purchases (
+  id        TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  offer_id    TEXT NOT NULL,
+  offer_name  TEXT NOT NULL,
+  shortname   TEXT NOT NULL,
+  skin_id     TEXT NOT NULL DEFAULT '0',
+  amount      INTEGER NOT NULL,
+  unit_price  INTEGER NOT NULL,
+  total_price INTEGER NOT NULL,
+
+  --   'pending'         nasceu, e nada de dinheiro aconteceu ainda
+  --   'debited'         o dinheiro SAIU; falta entregar
+  --   'delivered'       acabou bem
+  --   'refunded'        a entrega falhou e o valor voltou
+  --   'failed'          precisa de gente
+  --   'charge-unknown'  PODE TER COBRADO — o único não terminal
+  state TEXT NOT NULL
+    CHECK (state IN ('pending', 'debited', 'delivered', 'refunded', 'failed', 'charge-unknown')),
+  error TEXT,
+
+  -- O referenceId mandado ao site. NULL nas compras anteriores a
+  -- esta migração, e nas de quem usa a carteira LOCAL.
+  reference TEXT,
+
+  -- O id da linha no ledger do site. TEXTO, e não INTEGER: lá ele é
+  -- BIGINT, e ninguém faz conta com ele deste lado.
+  site_transaction_id TEXT,
+
+  -- O que esta compra prometeu entregar, em JSON.
+  --
+  -- NULL é resposta legítima em dois casos: compra anterior a esta
+  -- migração (o INSERT ... SELECT abaixo grava NULL) e compra feita
+  -- com a carteira LOCAL. NULL não é "entregue o que der".
+  delivery TEXT,
+
+  -- Quantas rodadas de reconciliação esta compra já custou.
+  --
+  -- Coluna, e não contador em memória: um restart do agente não pode
+  -- zerar o teto, ou o laço volta a ser eterno na primeira queda.
+  settle_attempts INTEGER NOT NULL DEFAULT 0,
+
+  -- Quem está olhando esta linha AGORA, em epoch ms. NULL = ninguém.
+  --
+  -- O relógio da reconciliação e o botão chamam a mesma função, e
+  -- nada impede que os dois estejam sobre a MESMA compra: o
+  -- #running protege contra duas rodadas do relógio, não contra o
+  -- relógio e um humano clicando. Duas execuções concorrentes
+  -- produziriam duas entregas para uma cobrança.
+  --
+  -- Coluna, e NÃO um sétimo valor no CHECK: "estou olhando isto
+  -- agora" é um cadeado, não um desfecho de compra, e um estado a
+  -- mais mudaria o enum público de GET /api/store/purchases.
+  settling_at INTEGER,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- O id vai EXPLÍCITO na lista: ele é o comprovante.
+INSERT INTO store_purchases
+  (id, server_id, steam_id, offer_id, offer_name, shortname, skin_id, amount,
+   unit_price, total_price, state, error, reference, site_transaction_id, delivery,
+   settle_attempts, settling_at, created_at, updated_at)
+SELECT
+   id, server_id, steam_id, offer_id, offer_name, shortname, skin_id, amount,
+   unit_price, total_price, state, error, NULL, NULL, NULL,
+   0, NULL, created_at, updated_at
+  FROM store_purchases_015;
+
+DROP TABLE store_purchases_015;
+
+CREATE INDEX idx_store_purchases_player ON store_purchases (steam_id, created_at DESC);
+
+-- "O que travou?" — a tela das compras presas. charge-unknown entra
+-- aqui: ela é dinheiro que pode ter saído sem item, e é a pergunta
+-- mais urgente que esta tabela responde.
+CREATE INDEX idx_store_purchases_stuck ON store_purchases (created_at DESC)
+  WHERE state IN ('pending', 'debited', 'failed', 'charge-unknown');
+
+CREATE INDEX idx_store_purchases_server ON store_purchases (server_id, created_at DESC);
+
+-- "Este jogador já tem compra aberta?" — a trava consultada em TODA
+-- compra, antes de qualquer cobrança. PARCIAL pelos três estados
+-- abertos: as fechadas são a maioria e não interessam a esta
+-- pergunta.
+CREATE INDEX idx_store_purchases_open ON store_purchases (server_id, steam_id, created_at DESC)
+  WHERE state IN ('pending', 'debited', 'charge-unknown');
+
+-- A referência é ÚNICA do lado do site; ela tem de ser única aqui
+-- também, ou duas compras locais mandariam a mesma chave e a segunda
+-- levaria o item de graça. PARCIAL porque NULL é o normal de quem
+-- usa a carteira local — e no SQLite dois NULL são DISTINTOS, então
+-- sem o WHERE o índice não impediria nada e ainda cresceria à toa.
+CREATE UNIQUE INDEX idx_store_purchases_reference ON store_purchases (reference)
+  WHERE reference IS NOT NULL;
+`;
+
+// ------------------------------------------------------------
+//  036 — a idempotência da entrega puxada do site
+//
+//  ####  A RESERVA ACONTECE ANTES DO COMANDO  ####
+//
+//  Um agente que caia entre o origemz.give e o ACK reencontra a
+//  tarefa na próxima página do site. Sem esta tabela ele entregaria
+//  DE NOVO — item duplicado, uma cobrança. Com ela, a linha órfã em
+//  `reserved` diz "o comando pode ter saído", e a tarefa vai para
+//  conferência humana em vez de ser reexecutada.
+//
+//  ####  SEM CHAVE ESTRANGEIRA PARA `servers`  ####
+//
+//  Mesma razão de `store_purchases`: apagar um servidor não pode
+//  apagar o comprovante de uma entrega. A pergunta "o site diz que
+//  entregou; entregou mesmo?" chega meses depois, às vezes de um
+//  servidor que já não existe.
+//
+//  ####  `indeterminate` É UM ESTADO, E NÃO UM ERRO  ####
+//
+//  Reexecutar entrega duas vezes; ACKar `failed` devolve ao site um
+//  item que talvez esteja no chão do jogador. Na dúvida, PRESERVA —
+//  e preservar é ACKar `deferred` com reason AGENT_INDETERMINATE,
+//  para o site tirar a tarefa de `pending`, pô-la em `review` e a
+//  expiração de 30 dias não a alcançar.
+//
+//  ####  O NOME É `indeterminate` PORQUE `review` É DO SITE  ####
+//
+//  Lá, `review` é o estado para onde o site move a tarefa ao ler
+//  esse reason. Duas máquinas de estado, dois bancos, e duas telas
+//  mostrando as duas contagens: o mesmo nome faria alguém concluir
+//  que uma está errada. A palavra do FIO não é nem `review` nem
+//  `indeterminate`: é `deferred` + AGENT_INDETERMINATE.
+// ------------------------------------------------------------
+const SITE_DELIVERIES_SCHEMA = `
+CREATE TABLE site_deliveries (
+  -- O deliveryId que o site mandou. É ele que torna a entrega
+  -- idempotente, e é por isso que ele é a chave primária.
+  id TEXT PRIMARY KEY,
+
+  -- O servidor LOCAL que recebe. Com N pareamentos cada fila já sabe
+  -- onde entregar: ela veio do bearer daquele servidor.
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  kind TEXT NOT NULL CHECK (kind IN ('item', 'kit', 'vip', 'vehicle')),
+
+  -- O payload como veio do site, em JSON, DEPOIS de validado. Ele
+  -- fica guardado para que uma conferência humana consiga dizer o
+  -- que era para ter saído, sem depender de o site ainda ter a fila.
+  payload TEXT NOT NULL,
+
+  -- O itemRef do site, para o suporte cruzar os dois lados.
+  source_ref TEXT,
+
+  --   'reserved'       o comando vai sair, ou saiu e não sabemos
+  --   'delivered'      o plugin respondeu ok
+  --   'failed'         falha DEFINITIVA, com o código cru
+  --   'indeterminate'  o agente caiu no meio; ACKa 'deferred'
+  --                    com reason 'AGENT_INDETERMINATE'
+  --   'expired'        o site devolveu o id em unknown no ACK,
+  --                    e a linha NÃO era terminal
+  state TEXT NOT NULL
+    CHECK (state IN ('reserved', 'delivered', 'failed', 'indeterminate', 'expired')),
+
+  -- O código CRU do plugin (PLAYER_DEAD, INVENTORY_FULL...), não a
+  -- frase: é o que o suporte procura no log.
+  reason TEXT,
+
+  attempts INTEGER NOT NULL DEFAULT 0,
+
+  reserved_at INTEGER NOT NULL,
+  -- NULL = o site ainda não recebeu o desfecho desta linha.
+  acked_at    INTEGER,
+  updated_at  INTEGER NOT NULL
+);
+
+-- "O que ainda não foi confirmado ao site?" — a pergunta do laço.
+-- PARCIAL: as confirmadas são a esmagadora maioria e não interessam.
+CREATE INDEX idx_site_deliveries_open ON site_deliveries (updated_at DESC)
+  WHERE acked_at IS NULL;
+
+-- "O que este jogador recebeu do site?" — o suporte e a ficha.
+CREATE INDEX idx_site_deliveries_player ON site_deliveries (steam_id, reserved_at DESC);
+`;
+
+// ------------------------------------------------------------
+//  037 — o dedup do COMANDO vindo do site
+//
+//  ####  ELA É O QUE FAZ O at-most-once SOBREVIVER A UM RESTART  ####
+//
+//  Sem esta tabela o desenho inteiro tem um buraco: o agente puxa
+//  `CMD-…`, executa o `server-restart`, e o processo do agente cai
+//  JUNTO — antes do ACK. Ele volta, o site não recebeu ACK nenhum, e
+//  o que acontece depois depende de uma decisão do site que o agente
+//  não controla. Com o id em disco, o agente sabe que já executou
+//  aquilo e ACKa, em vez de repetir.
+//
+//  Memória não serve: `pm2 restart` apaga. Ver Docs\22 §3 regra 7.
+//
+//  ####  O `lease_token` MORA AQUI PORQUE O ACK O EXIGE  ####
+//
+//  ACK sem `leaseToken` — ou com um de uma reivindicação anterior —
+//  é descartado como `unknown` pelo site, e a linha lá NÃO muda de
+//  estado. Guardar só o id deixaria o desfecho de um comando que o
+//  agente executou antes de cair sem como ser fechado.
+//
+//  ####  SEM CHAVE ESTRANGEIRA PARA `servers`  ####
+//
+//  Mesma razão de `site_deliveries`: apagar um servidor não pode
+//  apagar o registro de quem mandou reiniciá-lo.
+// ------------------------------------------------------------
+const SITE_COMMANDS_SCHEMA = `
+CREATE TABLE site_commands (
+  -- O CMD-… que o site gerou. É ele que torna o comando
+  -- at-most-once, e é por isso que ele é a chave primária.
+  id TEXT PRIMARY KEY,
+
+  -- O servidor LOCAL que executa. O comando veio pelo bearer dele.
+  server_id TEXT NOT NULL,
+
+  -- Um dos TRÊS da allowlist: server-start, server-stop,
+  -- server-restart. Sem CHECK aqui de propósito: a lista fechada
+  -- mora em site/commands.ts, e um kind que chegue por engano é
+  -- recusado ANTES de virar linha.
+  kind TEXT NOT NULL,
+
+  -- Os params como vieram, em JSON. Ficam guardados para uma
+  -- conferência humana conseguir dizer o que era para ter sido
+  -- feito, sem depender de o site ainda ter a linha.
+  params TEXT NOT NULL,
+
+  -- A prova de que quem ACKa é quem puxou. Ver o cabeçalho.
+  lease_token TEXT NOT NULL,
+
+  --   'claimed'        a operação vai começar, ou começou e não
+  --                    sabemos como acabou
+  --   'executed'       a operação terminou bem
+  --   'failed'         a operação terminou mal
+  --   'refused'        nem começou: pré-condição, prazo ou trava
+  --   'indeterminate'  o agente caiu no meio. NUNCA re-executa
+  --
+  -- Os quatro terminais são os MESMOS nomes dos status do ACK, e é
+  -- de propósito: um ACK que se perca é reenviado a partir DESTA
+  -- coluna, e um estado local que não fosse um status do contrato
+  -- viraria um segundo desfecho, diferente do primeiro.
+  state TEXT NOT NULL
+    CHECK (state IN ('claimed', 'executed', 'failed', 'refused', 'indeterminate')),
+
+  -- O reason do VOCABULÁRIO FECHADO do contrato, nunca o código
+  -- interno do agente e nunca a frase. Ver o Docs 22, na seção 7.
+  reason TEXT,
+
+  -- O id da operação local. É o que liga a linha do site ao log
+  -- daqui, em GET /api/operations/<id>.
+  operation_id TEXT,
+
+  claimed_at INTEGER NOT NULL,
+  -- NULL = o site ainda não confirmou o DESFECHO desta linha.
+  acked_at   INTEGER,
+  updated_at INTEGER NOT NULL
+);
+
+-- "Que desfecho o site ainda não confirmou?" — a pergunta do laço.
+-- PARCIAL: as confirmadas são a maioria e não interessam.
+CREATE INDEX idx_site_commands_open ON site_commands (updated_at ASC)
+  WHERE acked_at IS NULL;
+`;
+
+// ------------------------------------------------------------
+//  038 — a fila também REVOGA VIP
+//
+//  ####  O CHECK DA 036 NÃO CONHECIA `vip_revoke`  ####
+//
+//  O site passou a mandar tarefas que TIRAM o VIP — estorno,
+//  chargeback, ban, e o vencimento que o relógio de lá varre a cada
+//  minuto. Sem esta migração a reserva dessas tarefas falharia no
+//  CHECK, e a fila responderia com um `false` que significa "alguém
+//  já reservou": a revogação sumiria em silêncio, e o VIP estornado
+//  continuaria valendo no jogo.
+//
+//  ####  POR QUE A TABELA É RECRIADA  ####
+//
+//  Um CHECK de coluna não se altera no SQLite. O caminho é o
+//  oficial: renomear, criar a nova, copiar, dropar a velha. As
+//  linhas ANTIGAS passam inteiras — elas são o comprovante de
+//  entregas já ACKadas, e "o site diz que entregou; entregou
+//  mesmo?" é uma pergunta que chega meses depois.
+//
+//  Os dois índices morrem com a tabela velha (eles a acompanham no
+//  RENAME) e nascem de novo aqui, com os mesmos nomes.
+// ------------------------------------------------------------
+const SITE_DELIVERIES_VIP_REVOKE_SCHEMA = `
+ALTER TABLE site_deliveries RENAME TO site_deliveries_old;
+
+CREATE TABLE site_deliveries (
+  id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  -- 'vip_revoke' é o único que não entrega nada: ele TIRA.
+  kind TEXT NOT NULL
+    CHECK (kind IN ('item', 'kit', 'vip', 'vehicle', 'vip_revoke')),
+
+  payload TEXT NOT NULL,
+  source_ref TEXT,
+
+  state TEXT NOT NULL
+    CHECK (state IN ('reserved', 'delivered', 'failed', 'indeterminate', 'expired')),
+
+  reason TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+
+  reserved_at INTEGER NOT NULL,
+  acked_at    INTEGER,
+  updated_at  INTEGER NOT NULL
+);
+
+INSERT INTO site_deliveries
+  (id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at)
+SELECT
+   id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at
+  FROM site_deliveries_old;
+
+DROP TABLE site_deliveries_old;
+
+CREATE INDEX idx_site_deliveries_open ON site_deliveries (updated_at DESC)
+  WHERE acked_at IS NULL;
+
+CREATE INDEX idx_site_deliveries_player ON site_deliveries (steam_id, reserved_at DESC);
+`;
+
+// ------------------------------------------------------------
+//  039 — o status de nascimento vira FAIXA
+//
+//  ####  UM NÚMERO SÓ FAZ TODO MUNDO NASCER IGUAL  ####
+//
+//  Com `health = 130`, os trinta jogadores de bronze acordam com os
+//  mesmos 130 — e o benefício, que era para ser uma vantagem, vira
+//  um número que aparece igual na tela de todo mundo. Uma faixa
+//  ("entre 25% e 35% a mais") dá a mesma vantagem sem o carimbo.
+//
+//  ####  POR QUE O TETO É COLUNA NOVA, E NÃO OUTRA TABELA  ####
+//
+//  Porque a faixa não é uma entidade: é o MESMO atributo com dois
+//  extremos. `health` continua sendo o que ele sempre foi — o
+//  valor, e agora o PISO da faixa —, e `health_max` nulo continua
+//  querendo dizer "valor exato". Um banco que já rodou a 022 sobe
+//  para cá sem tocar em linha nenhuma, e o que estava configurado
+//  segue valendo com o mesmo significado.
+//
+//  ####  QUEM SORTEIA É O PLUGIN, E TINHA DE SER  ####
+//
+//  O sorteio precisa acontecer A CADA NASCIMENTO. Se o agente
+//  sorteasse ao empurrar o payload, o número ficaria congelado até
+//  o push seguinte e todo mundo nasceria igual de novo — só que com
+//  um valor diferente por dia. O agente manda os dois extremos; o
+//  `OrigemZPlayer` tira o número no respawn.
+// ------------------------------------------------------------
+const SPAWN_STATUS_RANGE_SCHEMA = `
+ALTER TABLE spawn_status ADD COLUMN health_max    REAL;
+ALTER TABLE spawn_status ADD COLUMN calories_max  REAL;
+ALTER TABLE spawn_status ADD COLUMN hydration_max REAL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -2704,6 +3110,23 @@ export const MIGRATIONS: readonly Migration[] = [
   // o admin já tinha gravado, para que o conserto do globstar não
   // valha para trás. Ver o cabeçalho.
   { id: 32, name: 'wipe-plugin-data-globstar', run: rewriteLegacyPluginDataPatterns },
+  // 035 e 036 sao da frente da integracao com o site OrigemZ
+  // (Docs\20). A 033 e a 034 sao do ranking (Docs\19), e o numero
+  // reservado esta escrito nos DOIS documentos: duas frentes que
+  // escrevam 33 dao merge limpo e banco quebrado, porque o SQLite
+  // aplica a primeira e ignora a segunda para sempre.
+  //
+  // A 035 RECRIA store_purchases: ela precisa rodar depois de toda
+  // migracao que toque essa tabela.
+  { id: 35, name: 'store-purchase-charge-unknown', sql: STORE_PURCHASE_CHARGE_UNKNOWN_SCHEMA },
+  { id: 36, name: 'site-deliveries', sql: SITE_DELIVERIES_SCHEMA },
+  // A 037 é da mesma frente: o dedup do COMANDO que o site
+  // enfileira. Ela está reservada nos DOIS documentos — na tabela
+  // do Docs\20 §15.0 e no Docs\22 —, que é o que a regra do
+  // Docs\17 §0.1 exige para uma reserva valer.
+  { id: 37, name: 'site-commands', sql: SITE_COMMANDS_SCHEMA },
+  { id: 38, name: 'site-deliveries-vip-revoke', sql: SITE_DELIVERIES_VIP_REVOKE_SCHEMA },
+  { id: 39, name: 'spawn-status-range', sql: SPAWN_STATUS_RANGE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

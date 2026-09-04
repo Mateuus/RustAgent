@@ -66,6 +66,11 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
   /** Vazia = a do modelo. Ver o campo. */
   const [seed, setSeed] = useState('');
   const [rconPassword, setRconPassword] = useState(() => randomPassword());
+  // O pareamento com o site. Os dois são opcionais na criação: o
+  // bearer nasce no painel do SITE, e isso costuma acontecer
+  // depois de o servidor existir aqui.
+  const [siteServerId, setSiteServerId] = useState('');
+  const [siteToken, setSiteToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -86,6 +91,10 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
         // A seed só viaja quando preenchida: vazia mantém a do
         // modelo, e não vira 0 — que é um mundo válido e específico.
         ...(seed.trim() === '' ? {} : { seed: Number(seed) }),
+        // Idem para o pareamento: campo vazio não vira linha em
+        // branco no `.ini`.
+        ...(siteServerId.trim() === '' ? {} : { siteServerId: siteServerId.trim() }),
+        ...(siteToken.trim() === '' ? {} : { siteToken: siteToken.trim() }),
       });
 
       toast.success(`Servidor "${id.trim()}" criado.`, {
@@ -236,6 +245,40 @@ export function CreateServerDialog({ suggested, onClose, onCreated }: CreateServ
             <p className="mt-1 text-2xs leading-relaxed text-muted">
               Quem a tem executa <strong>qualquer comando</strong> neste servidor. Ela não tranca a
               porta para o jogador — o Rust não tem senha de entrada.
+            </p>
+          </div>
+
+          <div className="sm:col-span-2 border-t border-border pt-4">
+            <Label htmlFor="site-server-id">ID no site OrigemZ (opcional)</Label>
+            <Input
+              id="site-server-id"
+              value={siteServerId}
+              placeholder="RUST01"
+              onChange={(event) => setSiteServerId(event.target.value)}
+              className="font-mono"
+            />
+            <p className="mt-1 text-2xs leading-relaxed text-muted">
+              O id que este servidor tem <strong>no site</strong>, e não o daqui. Ele casa por texto
+              exato, maiúsculas incluídas: <code>rust01</code> e <code>RUST01</code> são dois
+              servidores diferentes para ele.
+            </p>
+          </div>
+
+          <div className="sm:col-span-2">
+            <Label htmlFor="site-token">Token do site (opcional)</Label>
+            <Input
+              id="site-token"
+              type="password"
+              value={siteToken}
+              placeholder="cole aqui, ou deixe para depois"
+              onChange={(event) => setSiteToken(event.target.value)}
+              className="font-mono"
+            />
+            <p className="mt-1 text-2xs leading-relaxed text-muted">
+              O bearer que o painel do site gera ao ativar o agente lá. Ele{' '}
+              <strong>quase sempre não existe ainda</strong> na hora de criar o servidor — deixe em
+              branco e cole depois em <strong>Configuração → Site OrigemZ</strong>. Sem ele, a loja
+              deste servidor usa a carteira local, que é o comportamento de sempre.
             </p>
           </div>
         </div>

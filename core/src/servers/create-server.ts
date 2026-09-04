@@ -227,6 +227,34 @@ export const createServerBodySchema = z
           'a senha no caminho da URL e esses caracteres a corrompem',
       ),
 
+    /**
+     * O pareamento com o site OrigemZ, opcional na criação.
+     *
+     * ####  ELE PODE ESPERAR, E QUASE SEMPRE ESPERA  ####
+     *
+     * O bearer nasce no painel do SITE, quando alguém ativa o
+     * agente lá — e isso costuma acontecer depois de o servidor
+     * existir aqui. Por isso os dois são opcionais: quem já tem
+     * o token cola na criação e não volta na tela; quem não tem
+     * cria o servidor e preenche depois, na aba Configuração.
+     *
+     * Sem eles, a loja daquele servidor usa a carteira LOCAL — que
+     * é o comportamento de sempre.
+     */
+    siteServerId: z
+      .string({ error: wrongType('siteServerId precisa ser texto') })
+      .trim()
+      // 50 é o limite do site, e ele casa por texto EXATO:
+      // "rust01" e "RUST01" são dois servidores para ele.
+      .max(50, 'siteServerId não pode passar de 50 caracteres (é o limite do site)')
+      .optional(),
+
+    siteToken: z
+      .string({ error: wrongType('siteToken precisa ser texto') })
+      .trim()
+      .max(500, 'siteToken não pode passar de 500 caracteres')
+      .optional(),
+
     /** Ausente = o primeiro bloco livre. Ver `suggestPortBlock`. */
     portBlock: z
       .number({ error: wrongType('portBlock precisa ser número (não string)') })
@@ -422,6 +450,18 @@ export function createServer(options: CreateServerOptions): CreatedServer {
   // formulário não é um pedido para jogá-lo.
   if (input.seed !== undefined) {
     values.SERVER_SEED = String(input.seed);
+  }
+
+  // O pareamento com o site, quando veio. Vazio NÃO é gravado: a
+  // chave ausente e a chave vazia dizem a mesma coisa ao boot
+  // ("este servidor não está pareado"), e escrever duas linhas
+  // em branco num arquivo que o admin vai abrir só o polui.
+  if (input.siteServerId !== undefined && input.siteServerId !== '') {
+    values.SITE_SERVER_ID = input.siteServerId;
+  }
+
+  if (input.siteToken !== undefined && input.siteToken !== '') {
+    values.SITE_TOKEN = input.siteToken;
   }
 
   writeConfigFile(configPath, id, renderServerIni(template, id, values));

@@ -76,66 +76,131 @@ const ATTRIBUTES = [
 
 type AttributeKey = (typeof ATTRIBUTES)[number]['key'];
 
-/** O rascunho guarda TEXTO: só assim "em branco" existe. */
-type Draft = Record<AttributeKey, string>;
+/** O campo do teto daquele atributo, do lado do agente. */
+const MAX_KEY = {
+  health: 'healthMax',
+  calories: 'caloriesMax',
+  hydration: 'hydrationMax',
+} as const;
 
-const EMPTY_DRAFT: Draft = { health: '', calories: '', hydration: '' };
+/**
+ * O rascunho guarda TEXTO: só assim "em branco" existe.
+ *
+ * `to` vazio é o caso comum e quer dizer valor EXATO — não é campo
+ * obrigatório que ficou faltando.
+ */
+type Draft = Record<AttributeKey, { from: string; to: string }>;
+
+const EMPTY_FIELD = { from: '', to: '' };
+const EMPTY_DRAFT: Draft = {
+  health: EMPTY_FIELD,
+  calories: EMPTY_FIELD,
+  hydration: EMPTY_FIELD,
+};
 
 function draftOf(group: ServerSpawnStatus): Draft {
-  return {
-    health: group.health === null ? '' : String(group.health),
-    calories: group.calories === null ? '' : String(group.calories),
-    hydration: group.hydration === null ? '' : String(group.hydration),
-  };
+  const fieldOf = (key: AttributeKey): { from: string; to: string } => ({
+    from: group[key] === null ? '' : String(group[key]),
+    to: group[MAX_KEY[key]] === null ? '' : String(group[MAX_KEY[key]]),
+  });
+
+  return { health: fieldOf('health'), calories: fieldOf('calories'), hydration: fieldOf('hydration') };
 }
 
 /** O resumo que aparece na linha fechada. */
 function summaryOf(group: ServerSpawnStatus): string {
-  const parts = ATTRIBUTES.filter((attribute) => group[attribute.key] !== null).map(
-    (attribute) => `${attribute.label.toLowerCase()} ${String(group[attribute.key])}`,
-  );
+  const parts = ATTRIBUTES.filter((attribute) => group[attribute.key] !== null).map((attribute) => {
+    const from = String(group[attribute.key]);
+    const to = group[MAX_KEY[attribute.key]];
+
+    // A faixa aparece como faixa: quem lê a linha fechada precisa
+    // saber que o número muda a cada nascimento.
+    return `${attribute.label.toLowerCase()} ${to === null ? from : `${from}–${String(to)}`}`;
+  });
 
   return parts.length === 0 ? 'sem status — o jogo decide' : parts.join(' · ');
 }
 
-type ParsedDraft =
-  | { readonly values: Record<AttributeKey, number | null> }
-  | { readonly error: string };
+type SpawnValues = Record<AttributeKey, number | null> &
+  Record<(typeof MAX_KEY)[AttributeKey], number | null>;
+
+type ParsedDraft = { readonly values: SpawnValues } | { readonly error: string };
 
 /**
  * O que vai para o agente, ou a frase do problema.
  *
- * Em branco vira `null`, que é justamente o "o jogo decide".
+ * Em branco vira `null`, que é justamente o "o jogo decide". O
+ * agente valida tudo isto de novo — esta cópia existe para a pessoa
+ * ver o problema ANTES de gravar.
  */
 function parseDraft(draft: Draft): ParsedDraft {
-  const values: Record<AttributeKey, number | null> = {
+  const values: SpawnValues = {
     health: null,
     calories: null,
     hydration: null,
+    healthMax: null,
+    caloriesMax: null,
+    hydrationMax: null,
   };
 
   for (const attribute of ATTRIBUTES) {
-    const raw = draft[attribute.key].trim().replace(',', '.');
+    const field = draft[attribute.key];
 
-    if (raw === '') {
-      continue;
+    const numberOf = (raw: string, what: string): number | null | string => {
+      const clean = raw.trim().replace(',', '.');
+
+      if (clean === '') {
+        return null;
+      }
+
+      const value = Number(clean);
+
+      if (!Number.isFinite(value)) {
+        return `"${clean}" não é um número — ${what} de ${attribute.label} não aceita isso.`;
+      }
+
+      if (value < attribute.min || value > attribute.max) {
+        return (
+          `${attribute.label} precisa ficar entre ${String(attribute.min)} e ` +
+          `${String(attribute.max)}.`
+        );
+      }
+
+      return value;
+    };
+
+    const from = numberOf(field.from, 'o valor');
+
+    if (typeof from === 'string') {
+      return { error: from };
     }
 
-    const value = Number(raw);
+    const to = numberOf(field.to, 'o "até"');
 
-    if (!Number.isFinite(value)) {
-      return { error: `"${raw}" não é um número — o campo ${attribute.label} não aceita isso.` };
+    if (typeof to === 'string') {
+      return { error: to };
     }
 
-    if (value < attribute.min || value > attribute.max) {
+    if (to !== null && from === null) {
       return {
         error:
-          `${attribute.label} precisa ficar entre ${String(attribute.min)} e ` +
-          `${String(attribute.max)}.`,
+          `A faixa de ${attribute.label.toLowerCase()} tem o "até" e não tem o valor. Um atributo ` +
+          'vazio é "o jogo decide", e o jogo não decide metade.',
       };
     }
 
-    values[attribute.key] = value;
+    if (to !== null && from !== null && to < from) {
+      return {
+        error:
+          `Em ${attribute.label.toLowerCase()}, o "até" (${String(to)}) é menor que o valor ` +
+          `(${String(from)}). O sorteio não teria de onde tirar um número.`,
+      };
+    }
+
+    values[attribute.key] = from;
+    // Teto igual ao valor é o mesmo que valor exato — e "de 130 a
+    // 130" na tela é uma faixa que não sorteia nada.
+    values[MAX_KEY[attribute.key]] = to === from ? null : to;
   }
 
   return { values };
@@ -255,9 +320,37 @@ export function SpawnStatusPanel({ serverId }: { readonly serverId: string }) {
   /** Preenche os três com o padrão do Rust — o "nasce cheio". */
   function fillFull(): void {
     setDraft({
-      health: String(ATTRIBUTES[0].gameDefault),
-      calories: String(ATTRIBUTES[1].gameDefault),
-      hydration: String(ATTRIBUTES[2].gameDefault),
+      health: { from: String(ATTRIBUTES[0].gameDefault), to: '' },
+      calories: { from: String(ATTRIBUTES[1].gameDefault), to: '' },
+      hydration: { from: String(ATTRIBUTES[2].gameDefault), to: '' },
+    });
+  }
+
+  /**
+   * Preenche os três como uma FAIXA em cima do padrão do Rust.
+   *
+   * É o formato dos níveis de VIP: "entre 25% e 35% a mais que o
+   * normal" vira 125–135 de vida sem ninguém fazer conta na mão. O
+   * arredondamento é de uma casa porque o jogo trabalha em float e
+   * 337.5 de água é valor legítimo.
+   */
+  function fillRange(fromPercent: number, toPercent: number): void {
+    const scaled = (base: number, percent: number): string =>
+      String(Math.round(base * (1 + percent / 100) * 10) / 10);
+
+    setDraft({
+      health: {
+        from: scaled(ATTRIBUTES[0].gameDefault, fromPercent),
+        to: scaled(ATTRIBUTES[0].gameDefault, toPercent),
+      },
+      calories: {
+        from: scaled(ATTRIBUTES[1].gameDefault, fromPercent),
+        to: scaled(ATTRIBUTES[1].gameDefault, toPercent),
+      },
+      hydration: {
+        from: scaled(ATTRIBUTES[2].gameDefault, fromPercent),
+        to: scaled(ATTRIBUTES[2].gameDefault, toPercent),
+      },
     });
   }
 
@@ -353,32 +446,79 @@ export function SpawnStatusPanel({ serverId }: { readonly serverId: string }) {
               <div className="space-y-3 p-3">
                 <div className="grid gap-3 sm:grid-cols-3">
                   {ATTRIBUTES.map((attribute) => (
-                    <label key={attribute.key} className="block">
+                    <div key={attribute.key}>
                       <span className="font-condensed text-2xs font-bold uppercase tracking-wide">
                         {attribute.label}
                       </span>
 
-                      <Input
-                        inputMode="decimal"
-                        value={draft[attribute.key]}
-                        disabled={busy}
-                        placeholder={`o jogo decide (${String(attribute.gameDefault)})`}
-                        onChange={(event) =>
-                          setDraft({ ...draft, [attribute.key]: event.target.value })
-                        }
-                        className="mt-1 font-mono"
-                      />
+                      <div className="mt-1 flex items-center gap-2">
+                        <Input
+                          inputMode="decimal"
+                          aria-label={`${attribute.label}: valor`}
+                          value={draft[attribute.key].from}
+                          disabled={busy}
+                          placeholder={`o jogo decide (${String(attribute.gameDefault)})`}
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              [attribute.key]: { ...draft[attribute.key], from: event.target.value },
+                            })
+                          }
+                          className="font-mono"
+                        />
+
+                        <span className="shrink-0 text-2xs text-muted">até</span>
+
+                        <Input
+                          inputMode="decimal"
+                          aria-label={`${attribute.label}: até`}
+                          value={draft[attribute.key].to}
+                          disabled={busy}
+                          placeholder="exato"
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              [attribute.key]: { ...draft[attribute.key], to: event.target.value },
+                            })
+                          }
+                          className="font-mono"
+                        />
+                      </div>
 
                       <span className="mt-1 block text-2xs leading-relaxed text-muted">
                         {attribute.hint}
                       </span>
-                    </label>
+                    </div>
                   ))}
                 </div>
+
+                <p className="text-2xs leading-relaxed text-muted">
+                  O <strong>até</strong> em branco é valor exato. Com os dois, o número é{' '}
+                  <strong>sorteado a cada nascimento</strong> dentro da faixa — é o que impede
+                  trinta pessoas do mesmo nível de acordarem com o mesmo número na tela.
+                </p>
 
                 <div className="flex flex-wrap items-center gap-2">
                   <Button variant="outline" size="sm" disabled={busy} onClick={fillFull}>
                     Nasce cheio
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => fillRange(25, 35)}
+                  >
+                    +25 a 35%
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => fillRange(55, 65)}
+                  >
+                    +55 a 65%
                   </Button>
 
                   <Button

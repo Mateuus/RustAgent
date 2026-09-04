@@ -25,7 +25,7 @@
 //  uma precisa mover coisa em disco.
 // ============================================================
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { OxidePanel } from '@/components/oxide-panel';
 import { PlayerPanel } from '@/components/player-panel';
@@ -36,7 +36,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 // O interruptor mora em ui\ porque a lista de plugins também o usa.
 import { Toggle } from '@/components/ui/toggle';
-import { agent, type ServerView } from '@/lib/api';
+import {
+  agent,
+  type ServerView,
+  type SiteConfig,
+  type SiteStatus,
+  type SiteVipMirrorView,
+} from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -47,6 +53,7 @@ type Section =
   | 'mundo'
   | 'rede'
   | 'rcon'
+  | 'site'
   | 'steam'
   | 'plugins'
   | 'oxide'
@@ -59,6 +66,7 @@ const SECTIONS: readonly { key: Section; label: string }[] = [
   { key: 'mundo', label: 'Mundo' },
   { key: 'rede', label: 'Rede' },
   { key: 'rcon', label: 'RCON' },
+  { key: 'site', label: 'Site OrigemZ' },
   { key: 'steam', label: 'SteamCMD' },
   // ####  A CONFIGURAÇÃO DOS PLUGINS MORA AQUI, E NÃO NA ABA
   //       PLUGINS  ####
@@ -162,7 +170,13 @@ function Card({
   busy: boolean;
   disabled?: boolean;
   saveLabel?: string;
-  onSave: () => void;
+  /**
+   * Ausente = cartão só de LEITURA, e o rodapé some junto.
+   *
+   * Um botão "Gravar" num cartão que não grava nada é pior que
+   * nenhum botão: ele convida a clicar e não faz nada.
+   */
+  onSave?: () => void;
 }) {
   return (
     <div className="border border-border bg-surface">
@@ -178,11 +192,13 @@ function Card({
         {children}
       </div>
 
-      <div className="flex justify-end border-t border-border px-4 py-3">
-        <Button variant="primary" disabled={busy || disabled === true} onClick={onSave}>
-          {busy ? 'Gravando…' : saveLabel}
-        </Button>
-      </div>
+      {onSave !== undefined && (
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <Button variant="primary" disabled={busy || disabled === true} onClick={onSave}>
+            {busy ? 'Gravando…' : saveLabel}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -481,6 +497,8 @@ export function ServerSettings({
         </Card>
       )}
 
+      {section === 'site' && <SitePanel server={server} onChanged={onChanged} />}
+
       {section === 'steam' && (
         <Card
           title="SteamCMD"
@@ -612,6 +630,382 @@ export function ServerSettings({
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * O painel do site OrigemZ, dentro da aba Configuração.
+ *
+ * Três coisas em ordem de dependência, e a ordem é o ensino:
+ *
+ *   1. o ENDEREÇO do site — global do agente, um só para todos;
+ *   2. o PAREAMENTO deste servidor — id lá, e o bearer;
+ *   3. o ESTADO — está conectado? desde quando? o que falhou?
+ *
+ * Sem (1) nada acontece; sem (2) este servidor não cobra; e (3) é a
+ * primeira tela de "a loja parou", porque "o agente está pending",
+ * "o token foi rotacionado" e "o site caiu" produzem o MESMO sintoma
+ * para o jogador.
+ */
+function SitePanel({ server, onChanged }: { server: ServerView; onChanged: () => void }) {
+  const [config, setConfig] = useState<SiteConfig | null>(null);
+  const [status, setStatus] = useState<SiteStatus | null>(null);
+  const [baseUrl, setBaseUrl] = useState('');
+  const [siteServerId, setSiteServerId] = useState(server.site.serverId);
+  const [siteToken, setSiteToken] = useState('');
+  /** O token recém-gerado. Ele aparece UMA vez, e some ao sair. */
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const serverId = server.id;
+
+  const load = useCallback((): void => {
+    void agent.siteConfig().then((value) => {
+      setConfig(value);
+      setBaseUrl(value.baseUrl);
+    });
+    void agent.siteStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  useEffect(() => {
+    load();
+    setSiteToken('');
+    setFresh(null);
+    setSiteServerId(server.site.serverId);
+    // `server.site` fora das deps: o polling traz o servidor a cada
+    // 5 s, e relê-lo aqui apagaria o que a pessoa está digitando.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverId, load]);
+
+  const mine = status?.servers.find((item) => item.serverId === serverId) ?? null;
+
+  async function run(what: string, action: () => Promise<{ message?: string }>): Promise<void> {
+    setBusy(true);
+
+    try {
+      const response = await action();
+
+      toast.success(`${what} gravado`, { description: response.message });
+      load();
+      onChanged();
+    } catch (cause) {
+      toast.error(`Não consegui gravar: ${what.toLowerCase()}`, {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card
+        title="Endereço do site"
+        busy={busy}
+        saveLabel="Gravar endereço"
+        onSave={() => void run('O endereço do site', () => agent.saveSiteConfig(baseUrl))}
+      >
+        <Field
+          label="URL do site"
+          hint={
+            <>
+              Só o endereço, <strong>sem o /api no fim</strong> — o agente acrescenta{' '}
+              <code>/api/agent/…</code> sozinho. Vale para <strong>todos</strong> os servidores
+              deste agente: o site é um só. Vazio desliga a integração inteira.
+              {config?.source === 'env' && config.envBaseUrl !== null && (
+                <> Hoje ele vem do <code>.env</code> da instalação.</>
+              )}
+            </>
+          }
+        >
+          <Input
+            type="text"
+            value={baseUrl}
+            placeholder="https://origemznetwork.com"
+            onChange={(event) => setBaseUrl(event.target.value)}
+            className="font-mono"
+          />
+        </Field>
+
+        {config?.restartPending === true && (
+          <p className="border border-amber bg-surface-2 p-3 text-2xs leading-relaxed">
+            <strong>Gravado, e ainda não em uso.</strong> O agente está falando com{' '}
+            <code>{config.activeBaseUrl === '' ? '(nenhum site)' : config.activeBaseUrl}</code>{' '}
+            até o próximo restart — o cliente, o beacon e a fila de cada servidor são
+            montados no boot, a partir deste valor.
+          </p>
+        )}
+      </Card>
+
+      <Card
+        title="Pareamento deste servidor"
+        busy={busy}
+        warning="Este bearer move o saldo de QUALQUER jogador no site — trate-o como segredo de dinheiro, não de configuração. Colar, gerar ou trocar vale a partir do próximo restart do AGENTE."
+        saveLabel="Gravar pareamento"
+        disabled={siteServerId.trim() === '' && siteToken.trim() === ''}
+        onSave={() =>
+          void run('O pareamento', () =>
+            agent.patchServer(server.id, {
+              siteServerId: siteServerId.trim(),
+              // Campo vazio = manter o que está lá. Só um valor
+              // digitado substitui o bearer — senão, salvar o id
+              // apagaria o token sem ninguém pedir.
+              ...(siteToken.trim() === '' ? {} : { siteToken: siteToken.trim() }),
+            }),
+          ).then(() => setSiteToken(''))
+        }
+      >
+        <Field
+          label="ID do servidor no site"
+          hint={
+            <>
+              O id que <strong>este</strong> servidor tem no site, e não o daqui (
+              <code>{server.id}</code>). Ele casa por texto exato, maiúsculas incluídas.
+            </>
+          }
+        >
+          <Input
+            type="text"
+            value={siteServerId}
+            placeholder="RUST01"
+            onChange={(event) => setSiteServerId(event.target.value)}
+            className="font-mono"
+          />
+        </Field>
+
+        <Field
+          label="Bearer"
+          hint={
+            <>
+              Gere aqui e <strong>cole no cadastro deste servidor no site</strong> — é o mesmo
+              caminho que o painel do Conan usa. Ele{' '}
+              <strong>nunca volta</strong> para esta tela: quem perder a janela gera outro, e o
+              anterior deixa de valer assim que o site aceitar o novo.{' '}
+              {server.site.hasToken
+                ? 'Há um token gravado; deixe em branco para mantê-lo.'
+                : 'Ainda NÃO há token: a loja deste servidor continua na carteira local.'}
+            </>
+          }
+        >
+          <div className="flex gap-2">
+            <Input
+              type="password"
+              value={siteToken}
+              placeholder={
+                server.site.hasToken ? 'deixe em branco para manter o atual' : 'cole ou gere'
+              }
+              onChange={(event) => setSiteToken(event.target.value)}
+              className="font-mono"
+            />
+            <Button
+              disabled={busy}
+              onClick={() =>
+                void run('O token novo', async () => {
+                  const created = await agent.generateSiteToken(server.id);
+
+                  setFresh(created.token);
+                  setSiteToken('');
+
+                  return created;
+                })
+              }
+            >
+              Gerar
+            </Button>
+          </div>
+        </Field>
+
+        {fresh !== null && (
+          <div className="mx-4 mb-4 border border-rust bg-surface-2 p-3">
+            <p className="mb-2 text-2xs font-bold uppercase tracking-wide text-rust">
+              Copie agora — ele não aparece de novo
+            </p>
+            <code className="block break-all font-mono text-sm">{fresh}</code>
+            <p className="mt-2 text-2xs leading-relaxed text-muted">
+              Já está gravado aqui. Cole-o no cadastro deste servidor no site e reinicie o agente.
+            </p>
+          </div>
+        )}
+      </Card>
+
+      <Card title="Estado" busy={false}>
+        {status === null ? (
+          <p className="px-4 pb-4 text-sm text-muted">Não consegui ler o estado da integração.</p>
+        ) : mine === null ? (
+          <p className="px-4 pb-4 text-sm text-muted">
+            Este servidor não está pareado: sem <code>SITE_SERVER_ID</code>, o agente não fala com o
+            site por ele, e a loja usa a carteira local.
+          </p>
+        ) : (
+          <>
+            {mine.status === 'restart-pending' && (
+              <p className="mx-4 mb-4 border border-amber bg-surface-2 p-3 text-2xs leading-relaxed">
+                <strong>O pareamento está gravado e ainda não está em uso.</strong> O beacon, a
+                carteira e a fila deste servidor são montados no <strong>boot</strong> do
+                agente — reinicie-o para ele começar a falar com o site. Até lá, a loja
+                continua na carteira local.
+              </p>
+            )}
+          <dl className="pb-2 text-sm">
+            <StatusRow
+              label="Pareamento"
+              value={PAIRING_LABEL[mine.status] ?? mine.status}
+              tone={mine.status === 'active' ? 'ok' : 'warn'}
+            />
+            <StatusRow label="ID no site" value={mine.siteServerId || '—'} />
+            <StatusRow
+              label="Token"
+              value={mine.hasToken ? 'gravado' : 'ausente'}
+              tone={mine.hasToken ? 'ok' : 'warn'}
+            />
+            <StatusRow
+              label="Último beacon"
+              value={mine.lastBeaconAt === null ? 'nunca' : new Date(mine.lastBeaconAt).toLocaleString('pt-BR')}
+              tone={mine.lastBeaconAt === null ? 'warn' : 'ok'}
+            />
+            {mine.lastBeaconError !== null && (
+              <StatusRow
+                label="Erro do beacon"
+                value={`${mine.lastBeaconErrorCode ?? ''} ${mine.lastBeaconError}`.trim()}
+                tone="bad"
+              />
+            )}
+            <StatusRow
+              label="Carteira"
+              value={
+                mine.wallet.source === 'local'
+                  ? 'local (o saldo é do banco deste agente)'
+                  : mine.wallet.lastOkAt === null
+                    ? 'do site, ainda sem resposta'
+                    : `do site, última resposta em ${new Date(mine.wallet.lastOkAt).toLocaleString('pt-BR')}`
+              }
+              tone={mine.wallet.source === 'remote' && mine.wallet.lastError !== null ? 'warn' : 'ok'}
+            />
+            {mine.wallet.lastError !== null && (
+              <StatusRow label="Erro da carteira" value={mine.wallet.lastError} tone="bad" />
+            )}
+            <StatusRow
+              label="Compras presas"
+              value={
+                `${String(status.purchases.chargeUnknown)} indeterminada(s) · ` +
+                `${String(status.purchases.pendingOrphan)} órfã(s) · ` +
+                `${String(status.purchases.unprovable)} sem prova`
+              }
+              tone={
+                status.purchases.chargeUnknown + status.purchases.unprovable > 0 ? 'warn' : 'ok'
+              }
+            />
+            <StatusRow
+              label="Espelho de VIP"
+              value={vipMirrorLabel(status.vipMirror, serverId)}
+              // `routeMissing` fica em AMARELO, e não em vermelho: o
+              // trabalho está na fila do site, e pintar de defeito
+              // faria alguém procurar conserto aqui.
+              tone={
+                status.vipMirror.inSync === true
+                  ? 'ok'
+                  : status.vipMirror.routeMissing || !status.vipMirror.running
+                    ? 'warn'
+                    : status.vipMirror.lastPushError === null
+                      ? 'warn'
+                      : 'bad'
+              }
+            />
+          </dl>
+          </>
+        )}
+
+        <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+          <Button onClick={() => load()}>Atualizar</Button>
+          <Button
+            // Sem pareamento carregado não há beacon para forçar:
+            // o botão diria "não pareado" num servidor que está
+            // gravado e só esperando restart.
+            disabled={busy || mine === null || mine.status === 'restart-pending'}
+            onClick={() =>
+              void run('O beacon', async () => {
+                await agent.forceSiteBeacon(server.id);
+
+                return { message: 'Batida enviada.' };
+              })
+            }
+          >
+            Beaconar agora
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/**
+ * O espelho de VIP em uma frase.
+ *
+ * ####  A CONTAGEM VEM ANTES DO RESTO  ####
+ *
+ * "12 VIPs" é a única parte que alguém consegue conferir olhando a
+ * lista de VIPs ao lado. Um hash e um horário não se conferem contra
+ * nada — eles servem para o depois, quando já se desconfia de algo.
+ *
+ * A data é a do ESTE servidor (`mirrored`), e não a do último push
+ * global: com N pareamentos, o push que saiu há um minuto pode ter
+ * sido para outro, e mostrar o global diria "em dia" para um destino
+ * que está dias atrás.
+ */
+function vipMirrorLabel(mirror: SiteVipMirrorView, serverId: string): string {
+  if (!mirror.running) {
+    return 'não construído — o site não sabe quem tem VIP no jogo';
+  }
+
+  const count = `${String(mirror.count ?? 0)} VIP(s)`;
+
+  if (mirror.routeMissing) {
+    return `${count} — o site ainda não tem a rota; nada a fazer aqui`;
+  }
+
+  const at = mirror.mirrored.find((entry) => entry.serverId === serverId)?.at ?? null;
+
+  if (mirror.inSync === true) {
+    return at === null
+      ? `${count}, em dia`
+      : `${count}, confirmado em ${new Date(at).toLocaleString('pt-BR')}`;
+  }
+
+  return `${count} — ${mirror.reason ?? 'ainda não confirmado pelo site'}`;
+}
+
+/** O que cada estado de pareamento quer dizer, em português. */
+const PAIRING_LABEL: Readonly<Record<string, string>> = {
+  active: 'ativo — a loja cobra no site',
+  'restart-pending': 'gravado — falta reiniciar o agente',
+  pending: 'pendente — falta ativar este agente no site',
+  banned: 'banido — o site recusou este agente',
+  orphan: 'órfão — o site não conhece este ID',
+  unknown: 'desconhecido — ainda não houve batida',
+};
+
+function StatusRow({
+  label,
+  value,
+  tone = 'ok',
+}: {
+  label: string;
+  value: string;
+  tone?: 'ok' | 'warn' | 'bad';
+}) {
+  return (
+    <div className="flex gap-4 px-4 py-1.5">
+      <dt className="w-40 shrink-0 text-muted">{label}</dt>
+      <dd
+        className={cn(
+          'min-w-0 break-all',
+          tone === 'warn' && 'text-amber',
+          tone === 'bad' && 'text-rust',
+        )}
+      >
+        {value}
+      </dd>
     </div>
   );
 }

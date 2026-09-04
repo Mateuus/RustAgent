@@ -171,8 +171,21 @@ export interface StoreOfferInput {
   readonly oldPrice: number | null;
 }
 
-/** Ver o CHECK da migração 015 para o que cada estado significa. */
-export type PurchaseState = 'pending' | 'debited' | 'delivered' | 'refunded' | 'failed';
+/** Ver o CHECK da migração 035 para o que cada estado significa. */
+export type PurchaseState =
+  | 'pending'
+  | 'debited'
+  | 'delivered'
+  | 'refunded'
+  | 'failed'
+  /**
+   * PODE TER COBRADO. O único que não é terminal.
+   *
+   * Nada foi entregue e nada foi estornado: não sabemos se o
+   * dinheiro saiu. Quem decide é o relógio da reconciliação, com
+   * PROVA. Ver Docs\20 §4 e §11.
+   */
+  | 'charge-unknown';
 
 export interface StorePurchase {
   readonly id: string;
@@ -188,6 +201,28 @@ export interface StorePurchase {
   readonly totalPrice: number;
   readonly state: PurchaseState;
   readonly error: string | null;
+  /**
+   * O `referenceId` mandado ao site.
+   *
+   * `null` = compra anterior à migração 035, ou feita com a
+   * carteira LOCAL. É a única chave que liga esta linha ao ledger
+   * do site — sem ela a conciliação vira busca por horário.
+   */
+  readonly reference: string | null;
+  /** O id da linha no ledger do site. TEXTO: o BIGINT dele passa de 2^53. */
+  readonly siteTransactionId: string | null;
+  /**
+   * O que esta compra prometeu entregar, em JSON.
+   *
+   * Congelado na criação: a reconciliação pode entregar horas
+   * depois, e reler a oferta entregaria OUTRA COISA se alguém a
+   * editou no meio.
+   */
+  readonly delivery: string | null;
+  /** Quantas rodadas de reconciliação esta compra já custou. */
+  readonly settleAttempts: number;
+  /** Quem está reconciliando esta linha AGORA. `null` = ninguém. */
+  readonly settlingAt: number | null;
   /** Epoch ms. */
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -253,6 +288,11 @@ interface PurchaseRow {
   readonly total_price: number;
   readonly state: string;
   readonly error: string | null;
+  readonly reference: string | null;
+  readonly site_transaction_id: string | null;
+  readonly delivery: string | null;
+  readonly settle_attempts: number;
+  readonly settling_at: number | null;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -326,6 +366,11 @@ function toPurchase(row: PurchaseRow): StorePurchase {
     totalPrice: row.total_price,
     state: row.state as PurchaseState,
     error: row.error,
+    reference: row.reference,
+    siteTransactionId: row.site_transaction_id,
+    delivery: row.delivery,
+    settleAttempts: row.settle_attempts,
+    settlingAt: row.settling_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -643,10 +688,12 @@ export class StoreRepository {
       .prepare(
         `INSERT INTO store_purchases
            (id, server_id, steam_id, offer_id, offer_name, shortname, skin_id, amount,
-            unit_price, total_price, state, error, created_at, updated_at)
+            unit_price, total_price, state, error, reference, site_transaction_id,
+            delivery, settle_attempts, settling_at, created_at, updated_at)
          VALUES
            (@id, @serverId, @steamId, @offerId, @offerName, @shortname, @skinId, @amount,
-            @unitPrice, @totalPrice, @state, @error, @now, @now)`,
+            @unitPrice, @totalPrice, @state, @error, @reference, @siteTransactionId,
+            @delivery, @settleAttempts, @settlingAt, @now, @now)`,
       )
       .run({
         id: purchase.id,
@@ -661,6 +708,11 @@ export class StoreRepository {
         totalPrice: purchase.totalPrice,
         state: purchase.state,
         error: purchase.error,
+        reference: purchase.reference,
+        siteTransactionId: purchase.siteTransactionId,
+        delivery: purchase.delivery,
+        settleAttempts: purchase.settleAttempts,
+        settlingAt: purchase.settlingAt,
         now,
       });
 
@@ -679,15 +731,166 @@ export class StoreRepository {
     state: PurchaseState,
     error: string | null = null,
     now = Date.now(),
+    /** Só na transição para `debited`. Ver o COALESCE abaixo. */
+    siteTransactionId: string | null = null,
   ): void {
     this.#db
       .prepare(
         `UPDATE store_purchases
-            SET state = @state, error = @error, updated_at = @now
+            SET state = @state,
+                error = @error,
+                updated_at = @now,
+                -- ####  COALESCE, E NÃO ATRIBUIÇÃO DIRETA  ####
+                --
+                -- A transição para debited grava o id; a SEGUINTE
+                -- (delivered) não o tem, e um = @siteTransactionId
+                -- cru APAGARIA a prova que acabou de ser gravada —
+                -- justamente a chave que liga esta compra ao ledger
+                -- do site, e a única coisa que responde "eu paguei e
+                -- não recebi" meses depois.
+                site_transaction_id = COALESCE(@siteTransactionId, site_transaction_id)
           WHERE server_id = @serverId AND id = @id`,
       )
-      .run({ serverId, id, state, error, now });
+      .run({ serverId, id, state, error, now, siteTransactionId });
   }
+  /**
+   * A varredura da reconciliação.
+   *
+   * ####  TRÊS CUTOFFS, E NÃO UM  ####
+   *
+   * `charge-unknown` entra com 90 s; `debited` e o `pending` órfão,
+   * com 5 min. Com um cutoff só, um `debited` de 91 s entraria — e o
+   * settler mandaria para conferência humana uma compra que ainda
+   * está sendo entregue.
+   *
+   * O `failed` só entra com o prefixo `REFUND_RETRYABLE`: sem esse
+   * filtro, toda compra recusada por saldo voltaria para o laço.
+   */
+  listStuck(input: {
+    readonly unknownCutoff: number;
+    readonly debitedCutoff: number;
+    readonly orphanCutoff: number;
+    readonly limit: number;
+  }): readonly StorePurchase[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM store_purchases
+          WHERE (state = 'pending'        AND updated_at <= @orphanCutoff)
+             OR (state = 'charge-unknown' AND updated_at <= @unknownCutoff)
+             OR (state = 'debited'        AND updated_at <= @debitedCutoff)
+             OR (state = 'failed'
+                 AND error LIKE 'REFUND_RETRYABLE%'
+                 AND updated_at <= @unknownCutoff)
+          ORDER BY updated_at ASC
+          LIMIT @limit`,
+      )
+      .all(input) as PurchaseRow[];
+
+    return rows.map(toPurchase);
+  }
+
+  /**
+   * Há compra aberta deste jogador neste servidor?
+   *
+   * ####  O `referenceId` NÃO PROTEGE DISTO  ####
+   *
+   * Ele responde "esta MESMA tentativa já saiu?". Cada clique gera um
+   * `purchaseId` novo e, portanto, uma chave nova: duas tentativas do
+   * mesmo jogador pelo mesmo item são duas cobranças perfeitamente
+   * idempotentes, cada uma na própria chave. A única barreira era o
+   * `PendingBuyId` do plugin, e o timeout dele a solta com a compra
+   * ainda em voo (OrigemZUI.cs:2075).
+   */
+  findOpenPurchase(serverId: string, steamId: string, since: number): StorePurchase | null {
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM store_purchases
+          WHERE server_id = @serverId
+            AND steam_id  = @steamId
+            AND state IN ('pending', 'debited', 'charge-unknown')
+            AND created_at >= @since
+          ORDER BY created_at DESC
+          LIMIT 1`,
+      )
+      .get({ serverId, steamId, since }) as PurchaseRow | undefined;
+
+    return row === undefined ? null : toPurchase(row);
+  }
+
+  /** Para a tela de estado da integração. `olderThan` em epoch ms. */
+  countPurchasesByState(state: PurchaseState, olderThan?: number): number {
+    const row = this.#db
+      .prepare(
+        olderThan === undefined
+          ? `SELECT count(*) AS value FROM store_purchases WHERE state = @state`
+          : `SELECT count(*) AS value FROM store_purchases
+              WHERE state = @state AND updated_at <= @olderThan`,
+      )
+      .get({ state, olderThan }) as { readonly value: number } | undefined;
+
+    return row?.value ?? 0;
+  }
+
+  /** Quantas compras esperam gente: `failed` com um prefixo de `error`. */
+  countPurchasesByErrorPrefix(prefix: string): number {
+    const row = this.#db
+      .prepare(
+        `SELECT count(*) AS value FROM store_purchases
+          WHERE state = 'failed' AND error LIKE @prefix`,
+      )
+      .get({ prefix: `${prefix}%` }) as { readonly value: number } | undefined;
+
+    return row?.value ?? 0;
+  }
+
+  /**
+   * Reivindica uma compra para reconciliar. `false` = outro já pegou.
+   *
+   * ####  O RELÓGIO E O BOTÃO PODEM CAIR NA MESMA LINHA  ####
+   *
+   * O `#running` do relógio protege contra duas rodadas dele, não
+   * contra o relógio e um humano clicando ao mesmo tempo. Duas
+   * execuções concorrentes produziriam duas provas 200, duas
+   * gravações de `debited` e DUAS ENTREGAS — item duplicado, uma
+   * cobrança.
+   *
+   * O `staleClaim` existe para um agente que morra no meio do settle
+   * não deixar a compra reivindicada para sempre.
+   */
+  claimForSettle(
+    serverId: string,
+    id: string,
+    expected: PurchaseState,
+    now: number,
+    staleClaim: number,
+  ): boolean {
+    const result = this.#db
+      .prepare(
+        `UPDATE store_purchases
+            SET settling_at     = @now,
+                settle_attempts = settle_attempts + 1,
+                updated_at      = @now
+          WHERE server_id = @serverId
+            AND id        = @id
+            AND state     = @expected
+            AND (settling_at IS NULL OR settling_at <= @staleClaim)`,
+      )
+      .run({ serverId, id, expected, now, staleClaim });
+
+    return result.changes > 0;
+  }
+
+  /** Solta a reivindicação sem mexer no estado. */
+  releaseSettleClaim(serverId: string, id: string, now = Date.now()): void {
+    this.#db
+      .prepare(
+        `UPDATE store_purchases
+            SET settling_at = NULL, updated_at = @now
+          WHERE server_id = @serverId AND id = @id`,
+      )
+      .run({ serverId, id, now });
+  }
+
 
   getPurchase(serverId: string, id: string): StorePurchase | null {
     const row = this.#db
@@ -798,7 +1001,13 @@ export class StoreRepository {
       ),
       // As presas NÃO são filtradas por data: uma compra que travou
       // há um mês continua sendo alguém que pagou e não recebeu.
-      stuck: one(`SELECT count(*) AS value FROM store_purchases WHERE state = 'failed'`),
+      // `charge-unknown` conta como presa: é dinheiro que pode ter
+      // saído sem item. E ela some sozinha quando o settle a
+      // resolve — ao contrário de `failed`, que fica.
+      stuck: one(
+        `SELECT count(*) AS value FROM store_purchases
+          WHERE state IN ('failed', 'charge-unknown')`,
+      ),
       buyers: one(
         `SELECT count(DISTINCT steam_id) AS value FROM store_purchases
           WHERE state = 'delivered' AND created_at >= @since`,

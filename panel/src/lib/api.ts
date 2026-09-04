@@ -27,6 +27,28 @@ export function setCsrfToken(token: string | null): void {
 }
 
 /**
+ * Quem avisar aqui é chamado quando o agente responde 401.
+ *
+ * ####  POR QUE ISTO EXISTE  ####
+ *
+ * A sessão mora na MEMÓRIA do agente: um `pm2 restart` — ou um
+ * `tsx watch` recarregando no desenvolvimento — derruba todas as
+ * sessões abertas. Sem este aviso, cada tela recebia o 401 por
+ * conta própria, mostrava o texto de erro num canto e seguia
+ * achando que continuava logada. A tela de Operações era a pior:
+ * ela ficava batendo de segundo em segundo numa operação que não
+ * podia mais ler, presa em "running" para sempre.
+ *
+ * Quem escuta é o `SessionProvider`, que derruba a sessão e manda
+ * para `/entrar`.
+ */
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+/**
  * Erro vindo do agente, com o código de contrato junto.
  *
  * A `message` é a frase do CORE, em português — a tela mostra ela
@@ -105,6 +127,12 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   if (!response.ok) {
     const body = payload as { error?: string; message?: string };
 
+    // A sessão caiu no meio do uso. Avisa UMA vez, e quem escuta
+    // decide — este arquivo não conhece rota nem componente.
+    if (response.status === 401) {
+      onUnauthorized?.();
+    }
+
     throw new ApiError(
       body.error ?? 'UNKNOWN',
       body.message ?? `O agente respondeu ${String(response.status)}.`,
@@ -120,6 +148,15 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 // ------------------------------------------------------------
 
 export interface ServerView {
+  /**
+   * O pareamento com o site OrigemZ.
+   *
+   * `hasToken` responde SE há bearer, nunca QUAL — a mesma
+   * disciplina da senha de RCON. O `serverId` volta porque não é
+   * segredo, e é a primeira coisa que alguém confere quando o
+   * pareamento não sobe.
+   */
+  site: { serverId: string; hasToken: boolean };
   id: string;
   name: string;
   identity: string;
@@ -171,6 +208,15 @@ export interface OperationView {
   startedAt: string;
   finishedAt: string | null;
   message: string | null;
+  /**
+   * A operação parou porque AINDA NÃO DAVA, e não porque quebrou.
+   *
+   * Hoje só o `server-auto-update` que desiste porque o Oxide não
+   * lançou a versão do build novo do Rust. Nada foi tocado e
+   * ninguém foi desconectado — o agente tenta de novo sozinho.
+   * Conta como `failed`, porque a atualização não aconteceu.
+   */
+  deferred?: boolean;
 }
 
 export interface OperationDetail extends OperationView {
@@ -249,6 +295,19 @@ export interface LastReload {
 export interface ServerPlugin extends LibraryPlugin {
   /** `null` = nenhum reload desde que o agente subiu. */
   lastReload: LastReload | null;
+  /**
+   * O que o Oxide respondeu sobre este plugin agora há pouco.
+   *
+   * É a diferença entre "ligado" (o arquivo está na pasta) e
+   * "rodando" (o Oxide carregou). O agente confere sozinho, de
+   * minuto em minuto — é o que faz aparecer aqui um plugin que
+   * parou de compilar sem ninguém ter mexido nele, depois de uma
+   * atualização do Rust.
+   *
+   * `null` = não deu para perguntar (servidor parado, ou o agente
+   * acabou de subir). É "não sei", e não "está tudo bem".
+   */
+  runtime: { loaded: boolean; failure: string | null } | null;
   enabled: boolean;
   appliedSha: string | null;
   appliedAt: string | null;
@@ -341,6 +400,15 @@ export interface AutoUpdateAttempt {
   status: 'running' | 'succeeded' | 'failed' | 'cancelled';
   /** O motivo, quando falhou. */
   message: string | null;
+  /**
+   * Falhou por ESPERA: nada foi tocado e o agente tenta sozinho.
+   *
+   * Hoje só o Oxide que ainda não lançou a versão do build novo do
+   * Rust. Forçar pelo botão cai na mesma recusa — é a mesma
+   * conferência —, e por isso a faixa muda de conselho quando isto
+   * é verdade. Ver `core/src/oxide/compat.ts`.
+   */
+  deferred?: boolean;
 }
 
 export interface SteamUpdate {
@@ -462,7 +530,24 @@ export interface PlayersSnapshot {
    * caminho é a aba Plugins. Com id e desligado, a tela oferece
    * ligar sem sair daqui.
    */
-  plugin: { name: string; id: number | null; enabled: boolean };
+  plugin: {
+    name: string;
+    id: number | null;
+    enabled: boolean;
+    /**
+     * Por que a lista não veio do plugin, mesmo ele ligado.
+     *
+     * `not-loaded`  o Oxide não carregou o plugin — quase sempre
+     *               erro de compilação depois de um update do
+     *               Rust. NÃO passa sozinho, e o que resolve não
+     *               é o interruptor: é a aba Plugins.
+     * `no-answer`   o comando não voltou a tempo com o plugin de
+     *               pé. É o servidor ocupado, comum nos primeiros
+     *               minutos depois de subir. Passa sozinho.
+     * `null`        a lista veio do plugin, ou ele está desligado.
+     */
+    fallback: 'not-loaded' | 'no-answer' | null;
+  };
   /** Os campos que a fonte atual não fornece. */
   missing: string[];
   /** O tamanho do mundo e a grade — o que o Map View desenha. */
@@ -524,6 +609,18 @@ export interface OxideGroup {
   parents: string[];
   /** O que ele ganha de cada pai. */
   inherited: { group: string; permissions: string[] }[];
+}
+
+/**
+ * A versão do Oxide que o agente instalou, carimbada no disco.
+ *
+ * O console do jogo só responde com o servidor NO AR, e atualizar o
+ * Oxide exige ele PARADO — sem este carimbo a tela ficava sem saber
+ * o que tinha justamente na hora de trocar.
+ */
+export interface InstalledOxide {
+  tag: string;
+  installedAt: string;
 }
 
 /** Um plugin que o Oxide diz estar rodando AGORA. */
@@ -805,6 +902,15 @@ export interface ServerSpawnStatus {
   health: number | null;
   calories: number | null;
   hydration: number | null;
+  /**
+   * O TETO da faixa. `null` = o valor acima é exato.
+   *
+   * Com os dois preenchidos, quem sorteia é o plugin, a cada
+   * nascimento — ver core/src/loadouts/status.ts.
+   */
+  healthMax: number | null;
+  caloriesMax: number | null;
+  hydrationMax: number | null;
   enabled: boolean;
   updatedAt: string | null;
   updatedBy: string | null;
@@ -822,6 +928,9 @@ export interface SpawnStatusInput {
   health: number | null;
   calories: number | null;
   hydration: number | null;
+  healthMax: number | null;
+  caloriesMax: number | null;
+  hydrationMax: number | null;
   enabled: boolean;
 }
 
@@ -1017,7 +1126,13 @@ export interface StoreStats {
 
 export interface WalletView {
   steamId: string;
-  balance: number;
+  /**
+   * `null` = a carteira não respondeu. NÃO é zero.
+   *
+   * Zero é uma afirmação sobre o dinheiro de alguém, e a tela
+   * mostra travessão — a regra da casa: ausente vira traço, nunca 0.
+   */
+  balance: number | null;
   /**
    * De onde o saldo veio.
    *
@@ -1292,6 +1407,31 @@ export const agent = {
    * multiplicaria a mesma chamada por vinte, e a tela de
    * configuração grava vários de uma vez.
    */
+  // ---- o site OrigemZ -------------------------------------
+  siteConfig: () => api<SiteConfig>('/api/site/config'),
+  saveSiteConfig: (baseUrl: string) =>
+    api<{ ok: true; baseUrl: string; message: string }>('/api/site/config', {
+      method: 'PUT',
+      body: { baseUrl },
+    }),
+  siteStatus: () => api<SiteStatus>('/api/site/status'),
+  /**
+   * Gera o bearer DESTE servidor.
+   *
+   * A resposta é o ÚNICO lugar onde ele aparece em claro: nenhum
+   * GET o devolve, nem agora nem depois.
+   */
+  generateSiteToken: (id: string) =>
+    api<{ ok: true; token: string; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/site/token`,
+      { method: 'POST' },
+    ),
+  forceSiteBeacon: (serverId: string) =>
+    api<{ ok: true; servers: { serverId: string; status: string; message: string | null }[] }>(
+      `/api/site/beacon?serverId=${encodeURIComponent(serverId)}`,
+      { method: 'POST' },
+    ),
+
   patchServer: (id: string, patch: Record<string, unknown>) =>
     api<{ ok: true; server: ServerView; requiresRestart?: string[]; message?: string }>(
       `/api/servers/${encodeURIComponent(id)}`,
@@ -1570,6 +1710,8 @@ export const agent = {
       ok: true;
       connected: boolean;
       oxide: { version: string | null; branch: string | null };
+      /** O que o AGENTE instalou, lido do disco. Vale com o servidor parado. */
+      installed: InstalledOxide | null;
       plugins: OxideLoadedPlugin[];
       config: OxideFrameworkConfig;
       message?: string;
@@ -2516,6 +2658,32 @@ export const agent = {
     ),
 
   /**
+   * APAGA de vez um wipe já deletado.
+   *
+   * Solta a data: com a cadência LIGADA, a reconciliação marca um
+   * wipe novo ali na volta seguinte. A mensagem da resposta diz isso
+   * quando for o caso.
+   */
+  purgeWipePlan: (serverId: string, planId: number) =>
+    api<{ ok: true; message: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}/purge`,
+      { method: 'DELETE' },
+    ),
+
+  /**
+   * DESFAZ o pular.
+   *
+   * A linha pulada continua ocupando o instante, então sem isto um
+   * clique errado apagava a data para sempre: nem marcar outro no
+   * lugar resolvia, porque o POST recusa por conflito de horário.
+   */
+  restoreWipePlan: (serverId: string, planId: number) =>
+    api<WipePlanResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/wipe/plans/${String(planId)}/restore`,
+      { method: 'POST' },
+    ),
+
+  /**
    * Pula um wipe marcado.
    *
    * O agente RECUSA num plano forçado, com explicação: sem zerar,
@@ -3329,4 +3497,111 @@ export interface WipeBlueprintsRestoreResponse {
   readonly tier: string | null;
   readonly counters: BpCounters;
   readonly message: string;
+}
+
+/** `GET /api/site/config` — a URL do site, e de onde ela veio. */
+export interface SiteConfig {
+  ok: true;
+  /** A GRAVADA: o que vale no próximo restart. É a que a tela edita. */
+  baseUrl: string;
+  /** A EM USO: a que os clientes já construídos estão usando. */
+  activeBaseUrl: string;
+  /** `true` = gravado e ainda não aplicado. Falta reiniciar. */
+  restartPending: boolean;
+  /** `env` = o padrão da instalação; `painel` = alguém digitou. */
+  source: 'env' | 'painel';
+  envBaseUrl: string | null;
+}
+
+/** O pareamento de UM servidor, como a tela de estado o lê. */
+export interface SitePairedServerView {
+  serverId: string;
+  siteServerId: string;
+  hasToken: boolean;
+  /**
+   * `restart-pending` NÃO vem do site: é o pareamento que a tela
+   * gravou e o boot ainda não carregou. Sem ele, a tela dizia
+   * "não pareado" com o id gravado e visível logo acima.
+   */
+  status: 'unknown' | 'pending' | 'active' | 'banned' | 'orphan' | 'restart-pending';
+  message: string | null;
+  lastBeaconAt: string | null;
+  lastBeaconError: string | null;
+  /** Separa as sete causas do mesmo sintoma. Ver Docs\20 §9.6. */
+  lastBeaconErrorCode: string | null;
+  serverExists: boolean | null;
+  currentServerId: string | null;
+  wallet: {
+    source: 'local' | 'remote';
+    lastOkAt: string | null;
+    lastError: string | null;
+  };
+}
+
+/**
+ * O espelho do catálogo, dentro do `GET /api/site/status`.
+ *
+ * `inSync` é o campo que responde "o catálogo não sai há horas; é
+ * defeito?". Verdadeiro = ninguém mexeu na loja, e o silêncio é o
+ * certo: o push só sai quando o conteúdo muda. Falso = há mudança
+ * presa, e `reason` diz por quê.
+ */
+export interface SiteCatalogView {
+  /** O `SITE_CATALOG_PUSH_ENABLED` do agente. */
+  enabled: boolean;
+  /** O espelho foi construído? Precisa de `enabled` E de carteira. */
+  running: boolean;
+  /** Só preenchido quando algo está parado. Em regime, `null`. */
+  reason: string | null;
+  version: string | null;
+  inSync: boolean | null;
+  lastPushAt: string | null;
+  lastPushError: string | null;
+  mirrored: { serverId: string; version: string | null; at: string | null }[];
+}
+
+/**
+ * O espelho de VIP, dentro do `GET /api/site/status`.
+ *
+ * ####  ELE RESPONDE UMA PERGUNTA QUE O CATÁLOGO NÃO TEM  ####
+ *
+ * A loja em dia é o normal e o silêncio é bom sinal. O VIP não: ele
+ * tem PRAZO, e o retrato muda sozinho quando alguém vence. Espelho
+ * parado aqui não é "nada mudou" — é o site dizendo que gente sem
+ * VIP tem VIP.
+ *
+ * `routeMissing` é o estado esperado enquanto o site não subir a
+ * rota, e vem separado de `lastPushError` de propósito: ele não é
+ * defeito do agente, e a tela não pode fazer parecer que é.
+ */
+export interface SiteVipMirrorView {
+  /** O espelho foi construído? Precisa de pareamento com carteira. */
+  running: boolean;
+  /** Só preenchido quando algo está parado. Em regime, `null`. */
+  reason: string | null;
+  version: string | null;
+  /** Quantos VIPs o retrato representa. `null` = não há espelho. */
+  count: number | null;
+  inSync: boolean | null;
+  /** O site ainda não tem `/api/agent/vip/mirror`. Ver Docs/24. */
+  routeMissing: boolean;
+  lastPushAt: string | null;
+  lastPushError: string | null;
+  mirrored: { serverId: string; version: string | null; at: string | null }[];
+}
+
+/** `GET /api/site/status` — a primeira tela de "a loja parou". */
+export interface SiteStatus {
+  ok: true;
+  paired: boolean;
+  baseUrl: string | null;
+  servers: SitePairedServerView[];
+  catalog: SiteCatalogView;
+  vipMirror: SiteVipMirrorView;
+  purchases: {
+    pendingOrphan: number;
+    chargeUnknown: number;
+    unprovable: number;
+    refundRejected: number;
+  };
 }

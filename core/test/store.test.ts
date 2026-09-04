@@ -305,9 +305,10 @@ describe('quando a entrega falha', () => {
     const brokenWallet: Wallet = {
       source: 'local',
       getBalance: (steamId) => Promise.resolve({ steamId, balance: 1000, source: 'local' }),
-      debit: (): Promise<WalletChange> => Promise.resolve({ status: 'ok', balance: 500 }),
+      debit: (): Promise<WalletChange> =>
+        Promise.resolve({ status: 'ok', balance: 500, transactionId: null, replayed: false }),
       credit: (): Promise<WalletChange> =>
-        Promise.resolve({ status: 'unavailable', reason: 'a carteira sumiu' }),
+        Promise.resolve({ status: 'unavailable', reason: 'a carteira sumiu', cause: 'network' }),
     };
 
     const harness = setup({ wallet: brokenWallet });

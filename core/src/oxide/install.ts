@@ -26,14 +26,16 @@
 // ============================================================
 
 import { existsSync } from 'node:fs';
-import { cp, mkdir, readFile, stat } from 'node:fs/promises';
+import { cp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { extractZip } from '../util/zip.js';
-
-const RELEASE_API = 'https://api.github.com/repos/OxideMod/Oxide.Rust/releases/latest';
-const FALLBACK_ZIP =
-  'https://github.com/OxideMod/Oxide.Rust/releases/latest/download/Oxide.Rust.zip';
+import {
+  fetchLatestOxideRelease,
+  OxideBehindRustError,
+  oxideServesRustBuild,
+  type OxideRelease,
+} from './compat.js';
 
 /**
  * Os quatro assemblies que provam que a instalação funcionou.
@@ -51,6 +53,71 @@ const REQUIRED_ASSEMBLIES = [
 
 /** As pastas que o Oxide usa, criadas antecipadamente. */
 const OXIDE_DIRS = ['plugins', 'config', 'data', 'lang', 'logs'];
+
+/**
+ * O carimbo da versão instalada, dentro de `oxide\`.
+ *
+ * ####  POR QUE NÃO PERGUNTAR AO SERVIDOR  ####
+ *
+ * A versão do Oxide vem do console do jogo — e o console só
+ * responde com o servidor NO AR. Só que atualizar o Oxide exige
+ * o servidor PARADO. Nas duas pontas o painel ficava sem saber o
+ * que já estava em disco justamente na hora de decidir trocar.
+ *
+ * O ponto seguro para gravar isso é aqui, onde a release acabou
+ * de ser baixada e o número é conhecido de primeira mão.
+ */
+const VERSION_STAMP = '.rustagent-oxide.json';
+
+/** O que o carimbo guarda. */
+export interface InstalledOxide {
+  readonly tag: string;
+  readonly installedAt: string;
+  /**
+   * Quando o OxideMod publicou a release, e o build do Rust que
+   * estava em disco na hora.
+   *
+   * São o que responde "esta instalação era compatível?" DEPOIS,
+   * olhando só o disco — sem isso, um servidor que não sobe
+   * obriga a reconstruir a linha do tempo pelo log das operações,
+   * que guarda só as 20 últimas.
+   *
+   * Opcionais porque carimbo gravado por versão anterior do
+   * agente não os tem.
+   */
+  readonly publishedAt?: string | null;
+  readonly rustBuildId?: string | null;
+}
+
+/**
+ * A versão que ESTE agente instalou, lida do disco.
+ *
+ * `null` quando o carimbo não existe: ou o Oxide não está
+ * instalado, ou entrou por fora (uma cópia à mão, um zip baixado
+ * direto). Nos dois casos a tela diz que não sabe, em vez de
+ * inventar um número.
+ */
+export async function readInstalledOxide(installDir: string): Promise<InstalledOxide | null> {
+  const path = join(installDir, 'oxide', VERSION_STAMP);
+
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+    const stamp = parsed as Partial<InstalledOxide>;
+
+    if (typeof stamp.tag !== 'string' || typeof stamp.installedAt !== 'string') {
+      return null;
+    }
+
+    return {
+      tag: stamp.tag,
+      installedAt: stamp.installedAt,
+      publishedAt: typeof stamp.publishedAt === 'string' ? stamp.publishedAt : null,
+      rustBuildId: typeof stamp.rustBuildId === 'string' ? stamp.rustBuildId : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * O `oxide.config.json` daquele servidor, como está em disco.
@@ -96,6 +163,28 @@ export interface InstallOxideOptions {
   readonly signal?: AbortSignal;
   /** Carimbo do backup. Injetável para o teste não depender do relógio. */
   readonly now?: () => Date;
+  /**
+   * O build do Rust que está em disco, para conferir se a release
+   * do Oxide o conhece. Ver compat.ts.
+   *
+   * Omitido = sem conferência. É o que faz o `oxide-install`
+   * avulso continuar funcionando num servidor cujo manifest não dá
+   * para ler, e o que mantém os testes de extração longe da rede.
+   */
+  readonly rustBuild?: {
+    readonly buildId: string;
+    /** `timeupdated` do branch. Epoch ms. */
+    readonly publishedAt: number | null;
+  };
+  /**
+   * Aplica a release mesmo defasada.
+   *
+   * Existe para o caso em que o OxideMod some por dias e o dono
+   * decide subir assim mesmo — e para nada mais. O padrão recusa.
+   */
+  readonly allowBehind?: boolean;
+  /** A release já escolhida, quando quem chama acabou de consultá-la. */
+  readonly release?: OxideRelease;
 }
 
 export interface InstallOxideResult {
@@ -121,6 +210,28 @@ export async function installOxide(options: InstallOxideOptions): Promise<Instal
     );
   }
 
+  // ####  A CONFERÊNCIA VEM ANTES DE TUDO  ####
+  //
+  // Antes do backup e antes dos 13 MB de download, porque uma
+  // release defasada não deve nem chegar perto do disco. E porque
+  // desistir aqui deixa a instalação EXATAMENTE como estava — o
+  // `oxide\` intacto, sem um backup órfão em `Backups\` para
+  // alguém decifrar depois.
+  const release = options.release ?? (await fetchLatestOxideRelease(options));
+
+  if (
+    options.rustBuild !== undefined &&
+    options.allowBehind !== true &&
+    !oxideServesRustBuild(release.publishedAt, options.rustBuild.publishedAt)
+  ) {
+    throw new OxideBehindRustError({
+      tag: release.tag,
+      oxidePublishedAt: release.publishedAt,
+      rustBuildId: options.rustBuild.buildId,
+      rustBuildPublishedAt: options.rustBuild.publishedAt,
+    });
+  }
+
   const oxideDir = join(options.installDir, 'oxide');
   let backup: string | null = null;
 
@@ -141,7 +252,8 @@ export async function installOxide(options: InstallOxideOptions): Promise<Instal
     await cp(oxideDir, backup, { recursive: true });
   }
 
-  const { tag, archive } = await downloadRelease(options);
+  const archive = await downloadArchive(release, options);
+  const tag = release.tag;
 
   options.onLine(`[Oxide] release ${tag} baixada (${String(archive.length)} bytes) — extraindo...`);
 
@@ -166,58 +278,47 @@ export async function installOxide(options: InstallOxideOptions): Promise<Instal
     await mkdir(join(oxideDir, dir), { recursive: true });
   }
 
+  // O carimbo é o ÚLTIMO passo: gravado antes das conferências
+  // acima, ele diria "2.0.7638 instalado" sobre uma instalação que
+  // não ficou de pé.
+  const stamp: InstalledOxide = {
+    tag,
+    installedAt: (options.now?.() ?? new Date()).toISOString(),
+    publishedAt: release.publishedAt === null ? null : new Date(release.publishedAt).toISOString(),
+    rustBuildId: options.rustBuild?.buildId ?? null,
+  };
+
+  try {
+    await writeFile(join(oxideDir, VERSION_STAMP), `${JSON.stringify(stamp, null, 2)}\n`);
+  } catch (error) {
+    // Não falha a instalação por causa do carimbo: o Oxide está
+    // aplicado e funcionando. O painel só vai dizer que não sabe
+    // a versão.
+    options.onLine(
+      `[Oxide] instalado, mas não consegui gravar o carimbo da versão: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   options.onLine('[Oxide] instalado. Os plugins carregam no próximo start do servidor.');
 
   return { tag, backup };
 }
 
 /**
- * A última release, pela API do GitHub — e a URL direta como
- * plano B.
+ * Baixa o `Oxide.Rust.zip` da release já escolhida.
  *
- * A API dá o número da versão, que é o que aparece no log e no
- * painel. Ela também é o que estoura o limite de 60 requisições
- * por hora por IP quando alguém reinstala muito — daí o plano B,
- * que não passa pela API e sempre entrega a mais recente.
+ * Escolher qual release é assunto de `compat.ts`, e a separação
+ * não é estética: a escolha precisa acontecer ANTES do backup e
+ * do download, para que uma release defasada não deixe rastro em
+ * disco.
  */
-async function downloadRelease(
+async function downloadArchive(
+  release: OxideRelease,
   options: InstallOxideOptions,
-): Promise<{ tag: string; archive: Buffer }> {
-  let assetUrl = FALLBACK_ZIP;
-  let tag = 'latest';
-
+): Promise<Buffer> {
   try {
-    const response = await fetch(RELEASE_API, {
-      signal: options.signal,
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'RustAgent' },
-    });
-
-    if (response.ok) {
-      const release = (await response.json()) as {
-        tag_name?: string;
-        assets?: { name?: string; browser_download_url?: string }[];
-      };
-
-      const asset = release.assets?.find((candidate) => candidate.name === 'Oxide.Rust.zip');
-
-      if (asset?.browser_download_url !== undefined) {
-        assetUrl = asset.browser_download_url;
-        tag = release.tag_name ?? 'latest';
-      }
-    } else {
-      options.onLine(
-        `[Oxide] a API do GitHub respondeu ${String(response.status)} — usando a URL direta.`,
-      );
-    }
-  } catch (error) {
-    options.onLine(
-      '[Oxide] não consegui consultar a API do GitHub ' +
-        `(${error instanceof Error ? error.message : String(error)}) — usando a URL direta.`,
-    );
-  }
-
-  try {
-    const response = await fetch(assetUrl, {
+    const response = await fetch(release.zipUrl, {
       signal: options.signal,
       headers: { 'User-Agent': 'RustAgent' },
       redirect: 'follow',
@@ -227,10 +328,10 @@ async function downloadRelease(
       throw new Error(`HTTP ${String(response.status)}`);
     }
 
-    return { tag, archive: Buffer.from(await response.arrayBuffer()) };
+    return Buffer.from(await response.arrayBuffer());
   } catch (error) {
     throw new Error(
-      `não consegui baixar o Oxide de ${assetUrl} ` +
+      `não consegui baixar o Oxide de ${release.zipUrl} ` +
         `(${error instanceof Error ? error.message : String(error)}). ` +
         'Confira a conexão desta máquina com a internet.',
       { cause: error },

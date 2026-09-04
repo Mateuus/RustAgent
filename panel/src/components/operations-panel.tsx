@@ -29,11 +29,26 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
-import { agent, type OperationDetail, type OperationKind, type ServerView } from '@/lib/api';
+import {
+  agent,
+  ApiError,
+  type OperationDetail,
+  type OperationKind,
+  type ServerView,
+} from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
 const POLL_MS = 1_000;
+
+/**
+ * Quantas falhas seguidas do poll antes de desistir de acompanhar.
+ *
+ * Cinco segundos de silêncio. Menos que isso e um soluço de rede
+ * derrubaria o acompanhamento de uma instalação boa; muito mais e
+ * a tela volta a mentir por tempo demais.
+ */
+const MAX_POLL_FAILURES = 5;
 
 type Group = 'ciclo' | 'instalacao' | 'historico';
 
@@ -101,8 +116,10 @@ const ACTIONS: readonly Action[] = [
   },
   {
     kind: 'oxide-install',
-    label: 'Reinstalar o Oxide',
-    hint: 'Só os assemblies do Oxide. Os plugins e as configurações deles ficam.',
+    label: 'Atualizar o Oxide',
+    hint:
+      'Baixa a ÚLTIMA release do Oxide e aplica por cima — é assim que se atualiza. Só os ' +
+      'assemblies: os plugins e as configurações deles ficam, e a pasta oxide é copiada para Backups antes.',
     group: 'instalacao',
     variant: 'outline',
     needs: 'parado',
@@ -115,17 +132,68 @@ function labelOf(kind: OperationKind): string {
   return LABEL_OF.get(kind) ?? kind;
 }
 
+const STATUS_LABEL: Record<string, string> = {
+  running: 'rodando',
+  succeeded: 'concluída',
+  failed: 'falhou',
+  cancelled: 'cancelada',
+};
+
+/**
+ * O desfecho, como a tela o chama.
+ *
+ * ####  "ADIADA" NÃO É UM STATUS DO CORE  ####
+ *
+ * É `failed` mais `deferred` (ver api.ts): a operação desistiu
+ * ANTES de tocar em qualquer coisa, porque o Oxide ainda não
+ * lançou a versão do build novo do Rust. Contar as duas como a
+ * mesma coisa é o que fazia a tela pedir socorro — badge em
+ * vermelho, aviso permanente — por uma espera de meia hora que o
+ * agente resolve sozinho.
+ */
+function statusLabel(status: string, deferred?: boolean): string {
+  if (status === 'failed' && deferred === true) {
+    return 'adiada';
+  }
+
+  return STATUS_LABEL[status] ?? status;
+}
+
+/** Vermelho é para o que quebrou; a espera é âmbar, como o que corre. */
+function statusTone(status: string, deferred?: boolean): string {
+  if (status === 'failed') {
+    return deferred === true ? 'text-amber' : 'text-rust';
+  }
+
+  return status === 'running' ? 'text-amber' : 'text-muted';
+}
+
 export function OperationsPanel({ server }: { server: ServerView }) {
   const [group, setGroup] = useState<Group>('ciclo');
   const [kinds, setKinds] = useState<OperationKind[]>([]);
   const [history, setHistory] = useState<
-    { id: string; kind: OperationKind; status: string; startedAt: string }[]
+    { id: string; kind: OperationKind; status: string; startedAt: string; deferred?: boolean }[]
   >([]);
   const [operation, setOperation] = useState<OperationDetail | null>(null);
   const [lines, setLines] = useState<{ n: number; text: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // ####  QUANDO O ACOMPANHAMENTO MORRE  ####
+  //
+  // Não é a operação que falhou: é a LEITURA dela que parou de
+  // funcionar. O agente reiniciou e perdeu o histórico (ele mora
+  // em memória), ou a sessão caiu junto. O que estava em curso
+  // pode muito bem ter continuado — o servidor de Rust não é
+  // filho do agente e segue subindo sozinho.
+  //
+  // Guardar isso à parte é o que impede a tela de ficar presa em
+  // "running" para sempre, batendo de segundo em segundo numa
+  // operação que ela não pode mais ler.
+  const [lost, setLost] = useState<string | null>(null);
+
   const cursor = useRef(0);
+  /** Falhas seguidas do poll. Uma sozinha pode ser só um soluço. */
+  const failures = useRef(0);
   const logRef = useRef<HTMLDivElement | null>(null);
   const stickToBottom = useRef(true);
   const serverId = server.id;
@@ -141,8 +209,52 @@ export function OperationsPanel({ server }: { server: ServerView }) {
         ...response.operation.lines.map(({ n, text }) => ({ n, text })),
       ]);
       setError(null);
+      failures.current = 0;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const code = cause instanceof ApiError ? cause.code : null;
+      const status = cause instanceof ApiError ? cause.status : null;
+
+      failures.current += 1;
+
+      // O agente reiniciou: a operação não existe mais para ele.
+      if (code === 'UNKNOWN_OPERATION' || status === 404) {
+        setLost(
+          'O agente reiniciou e perdeu o registro desta operação — o histórico dele mora ' +
+            'em memória. O que estava em curso PODE ter continuado: confira a situação do ' +
+            'servidor antes de disparar de novo.',
+        );
+        setError(null);
+
+        return;
+      }
+
+      // A sessão caiu. O `api.ts` já avisou o SessionProvider, que
+      // manda para /entrar; aqui só se desliga o relógio para não
+      // bater mais uma vez por segundo até a tela trocar.
+      if (status === 401) {
+        setLost(
+          'A sessão caiu (o agente reiniciou). Entre de novo para voltar a acompanhar.',
+        );
+        setError(null);
+
+        return;
+      }
+
+      // Rede instável, agente fora do ar por um instante. Insiste um
+      // pouco antes de desistir — mas DESISTE, em vez de bater para
+      // sempre numa porta que não abre.
+      if (failures.current >= MAX_POLL_FAILURES) {
+        setLost(
+          `Perdi o contato com o agente (${String(MAX_POLL_FAILURES)} tentativas seguidas): ` +
+            `${message}. A operação pode ter continuado.`,
+        );
+        setError(null);
+
+        return;
+      }
+
+      setError(message);
     }
   }, []);
 
@@ -157,6 +269,7 @@ export function OperationsPanel({ server }: { server: ServerView }) {
           kind: item.kind,
           status: item.status,
           startedAt: item.startedAt,
+          deferred: item.deferred,
         })),
       );
 
@@ -170,6 +283,8 @@ export function OperationsPanel({ server }: { server: ServerView }) {
         }
 
         cursor.current = 0;
+        failures.current = 0;
+        setLost(null);
         setLines([]);
         void follow(running.id);
 
@@ -185,17 +300,18 @@ export function OperationsPanel({ server }: { server: ServerView }) {
   }, [load]);
 
   useEffect(() => {
-    if (operation === null || operation.status !== 'running') {
+    if (operation === null || operation.status !== 'running' || lost !== null) {
       return;
     }
 
     const timer = setInterval(() => void follow(operation.id), POLL_MS);
 
     return () => clearInterval(timer);
-  }, [operation, follow]);
+  }, [operation, follow, lost]);
 
   const status = operation?.status;
   const finished = operation?.message ?? undefined;
+  const deferred = operation?.deferred === true;
 
   useEffect(() => {
     if (status === undefined || status === 'running') {
@@ -207,11 +323,19 @@ export function OperationsPanel({ server }: { server: ServerView }) {
     if (status === 'succeeded') {
       toast.success('Operação concluída');
     } else if (status === 'failed') {
-      toast.error('A operação falhou', { description: finished, duration: null });
+      // O adiamento não é um erro, e o aviso que não some sozinho
+      // (`duration: null`) é para o que exige alguém agir. Aqui
+      // ninguém precisa agir: o agente tenta de novo na próxima
+      // rodada do vigia.
+      if (deferred) {
+        toast.warning('Atualização adiada', { description: finished, duration: 12_000 });
+      } else {
+        toast.error('A operação falhou', { description: finished, duration: null });
+      }
     } else {
       toast.warning('Operação cancelada');
     }
-  }, [status, finished, load]);
+  }, [status, finished, deferred, load]);
 
   useEffect(() => {
     if (stickToBottom.current && logRef.current !== null) {
@@ -226,6 +350,8 @@ export function OperationsPanel({ server }: { server: ServerView }) {
       const response = await agent.startOperation(serverId, kind);
 
       cursor.current = 0;
+      failures.current = 0;
+      setLost(null);
       setLines([]);
       await follow(response.operationId);
     } catch (cause) {
@@ -236,7 +362,9 @@ export function OperationsPanel({ server }: { server: ServerView }) {
     }
   }
 
-  const running = operation?.status === 'running';
+  // Perdido o acompanhamento, a tela NÃO pode continuar tratando a
+  // operação como viva: era isso que deixava os botões travados.
+  const running = operation?.status === 'running' && lost === null;
   const up = server.running === true;
 
   // As duas peneiras: o que o core aceita, e o que o estado do
@@ -356,14 +484,10 @@ export function OperationsPanel({ server }: { server: ServerView }) {
                     <span
                       className={cn(
                         'shrink-0 text-2xs uppercase tracking-wider',
-                        item.status === 'failed'
-                          ? 'text-rust'
-                          : item.status === 'running'
-                            ? 'text-amber'
-                            : 'text-muted',
+                        statusTone(item.status, item.deferred),
                       )}
                     >
-                      {item.status}
+                      {statusLabel(item.status, item.deferred)}
                     </span>
                   </button>
                 </li>
@@ -371,6 +495,10 @@ export function OperationsPanel({ server }: { server: ServerView }) {
             </ul>
           )}
         </div>
+      )}
+
+      {lost !== null && (
+        <StateBlock variant="offline" title="Perdi o acompanhamento" detail={lost} />
       )}
 
       {error !== null && <StateBlock variant="error" title="Não deu" detail={error} />}
@@ -382,9 +510,11 @@ export function OperationsPanel({ server }: { server: ServerView }) {
           <span className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
             {operation === null
               ? 'Console da operação'
-              : `${labelOf(operation.kind)} — ${operation.status}${
-                  operation.progress === null ? '' : ` · ${operation.progress.toFixed(1)}%`
-                }`}
+              : `${labelOf(operation.kind)} — ${
+                  lost === null
+                    ? statusLabel(operation.status, operation.deferred)
+                    : 'acompanhamento perdido'
+                }${operation.progress === null ? '' : ` · ${operation.progress.toFixed(1)}%`}`}
           </span>
 
           {running && operation !== null && (

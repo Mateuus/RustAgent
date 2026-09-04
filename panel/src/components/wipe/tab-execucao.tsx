@@ -30,13 +30,10 @@
 // ============================================================
 
 import {
-  AlertTriangle,
   Check,
   CircleDashed,
   Loader2,
   Play,
-  RotateCcw,
-  Trash2,
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -112,26 +109,6 @@ export function TabExecucao({ serverId }: { readonly serverId: string }) {
     [load, serverId],
   );
 
-  const resume = useCallback(
-    async (runId: number) => {
-      setBusy(true);
-
-      try {
-        const response = await agent.resumeWipeRun(serverId, runId);
-
-        toast.success('Retomando', { description: response.message });
-        await load();
-      } catch (cause) {
-        toast.error('Não deu para retomar', {
-          description: cause instanceof Error ? cause.message : String(cause),
-        });
-      } finally {
-        setBusy(false);
-      }
-    },
-    [load, serverId],
-  );
-
   const cancel = useCallback(
     async (runId: number) => {
       setBusy(true);
@@ -187,7 +164,9 @@ export function TabExecucao({ serverId }: { readonly serverId: string }) {
         <StartWipe preview={preview} busy={busy} onStart={start} />
       )}
 
-      <History runs={runs} busy={busy} onResume={(id) => void resume(id)} />
+      {/* O histórico saiu daqui: ele agora tem sub-aba própria. Consultar
+          o que já rodou não pode exigir rolar por cima do botão que apaga
+          o servidor. Ver tab-historico.tsx. */}
     </div>
   );
 }
@@ -508,100 +487,6 @@ function FileList({ files }: { readonly files: readonly WipeClassifiedFile[] }) 
 }
 
 // ------------------------------------------------------------
-//  HISTÓRICO
-// ------------------------------------------------------------
-
-function History({
-  runs,
-  busy,
-  onResume,
-}: {
-  readonly runs: readonly WipeRun[];
-  readonly busy: boolean;
-  readonly onResume: (runId: number) => void;
-}) {
-  const past = runs.filter((run) => run.status !== 'running');
-
-  return (
-    <Section title="Histórico">
-      {past.length === 0 ? (
-        <StateBlock
-          variant="empty"
-          title="Este servidor ainda não zerou pelo agente."
-          detail="Quando o primeiro wipe rodar, ele fica aqui — com os passos, o log e o mundo que nasceu."
-        />
-      ) : (
-        <ul className="space-y-2">
-          {past.map((run) => (
-            <li
-              key={run.id}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border pb-2 text-sm last:border-0"
-            >
-              <span className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
-                #{run.id}
-              </span>
-              <span className="text-xs text-muted">{stamp(run.startedAt)}</span>
-              <span className="text-xs text-muted">{describeKind(run)}</span>
-              <RunStatus run={run} />
-              {run.mapAfter !== null && (
-                <span className="text-xs text-muted">
-                  {run.mapAfter.level ?? 'Procedural Map'}
-                  {run.mapAfter.seed === null ? '' : ` · seed ${run.mapAfter.seed}`}
-                </span>
-              )}
-              <span className="text-xs text-muted">BP {describePolicy(run.bpPolicy)}</span>
-
-              {run.status === 'failed' && (
-                <Button size="sm" disabled={busy} onClick={() => onResume(run.id)}>
-                  <RotateCcw aria-hidden className="mr-1 h-3 w-3" />
-                  retomar
-                </Button>
-              )}
-
-              {run.message !== null && (
-                <span className="w-full text-2xs text-muted">{run.message}</span>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </Section>
-  );
-}
-
-function RunStatus({ run }: { readonly run: WipeRun }) {
-  if (run.status === 'done') {
-    const minutes =
-      run.finishedAt === null ? null : Math.max(1, Math.round((run.finishedAt - run.startedAt) / 60_000));
-
-    return (
-      <span className="flex items-center gap-1 text-xs text-olive">
-        <Check aria-hidden className="h-3 w-3" />
-        {minutes === null ? 'concluído' : `${String(minutes)} min`}
-      </span>
-    );
-  }
-
-  if (run.status === 'failed') {
-    const stopped = run.steps.find((step) => step.status === 'failed');
-
-    return (
-      <span className="flex items-center gap-1 text-xs text-rust">
-        <AlertTriangle aria-hidden className="h-3 w-3" />
-        falhou{stopped === undefined ? '' : ` em "${stopped.step}"`}
-      </span>
-    );
-  }
-
-  return (
-    <span className="flex items-center gap-1 text-xs text-muted">
-      <Trash2 aria-hidden className="h-3 w-3" />
-      cancelado
-    </span>
-  );
-}
-
-// ------------------------------------------------------------
 //  Formatação
 // ------------------------------------------------------------
 
@@ -623,15 +508,6 @@ function clock(at: number): string {
   return new Date(at).toLocaleTimeString('pt-BR', { hour12: false });
 }
 
-function stamp(at: number): string {
-  return new Date(at).toLocaleString('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-}
 
 function mb(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) {

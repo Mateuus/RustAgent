@@ -52,7 +52,12 @@ import {
   type SpawnStatusRepository,
 } from '../../db/spawn-status-repository.js';
 import { loadoutItemsSchema } from '../../loadouts/items.js';
-import { spawnStatusValuesSchema, type SpawnStatusSync } from '../../loadouts/status.js';
+import {
+  normalizeSpawnRanges,
+  spawnRangeProblem,
+  spawnStatusValuesSchema,
+  type SpawnStatusSync,
+} from '../../loadouts/status.js';
 import type { LoadoutSync } from '../../loadouts/sync.js';
 import { assertOxideName, readPermissions } from '../../oxide/permissions.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
@@ -358,6 +363,9 @@ export function registerLoadoutRoutes(app: FastifyInstance, deps: LoadoutRoutesD
           health: status?.health ?? null,
           calories: status?.calories ?? null,
           hydration: status?.hydration ?? null,
+          healthMax: status?.healthMax ?? null,
+          caloriesMax: status?.caloriesMax ?? null,
+          hydrationMax: status?.hydrationMax ?? null,
           enabled: status?.enabled ?? true,
           updatedAt: status === undefined ? null : new Date(status.updatedAt).toISOString(),
           updatedBy: status?.updatedBy ?? null,
@@ -405,13 +413,27 @@ export function registerLoadoutRoutes(app: FastifyInstance, deps: LoadoutRoutesD
       );
     }
 
+    // A faixa impossível morre AQUI, e não no plugin: lá ela viraria
+    // o piso aplicado em silêncio, e quem configurou nunca saberia
+    // que o sorteio não estava acontecendo.
+    const problem = spawnRangeProblem(body);
+
+    if (problem !== null) {
+      throw new ApiError('INVALID_SPAWN_RANGE', problem, 400);
+    }
+
+    const values = normalizeSpawnRanges(body);
+
     const status = deps.statusRepository.save({
       serverId: id,
       groupName: group,
-      health: body.health,
-      calories: body.calories,
-      hydration: body.hydration,
-      enabled: body.enabled,
+      health: values.health,
+      calories: values.calories,
+      hydration: values.hydration,
+      healthMax: values.healthMax,
+      caloriesMax: values.caloriesMax,
+      hydrationMax: values.hydrationMax,
+      enabled: values.enabled,
       updatedBy: operatorOf(request),
     });
 
@@ -429,6 +451,9 @@ export function registerLoadoutRoutes(app: FastifyInstance, deps: LoadoutRoutesD
         health: status.health,
         calories: status.calories,
         hydration: status.hydration,
+        healthMax: status.healthMax,
+        caloriesMax: status.caloriesMax,
+        hydrationMax: status.hydrationMax,
         enabled: status.enabled,
         updatedAt: new Date(status.updatedAt).toISOString(),
         updatedBy: status.updatedBy,

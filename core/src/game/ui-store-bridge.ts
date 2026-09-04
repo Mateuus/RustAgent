@@ -312,7 +312,13 @@ export function createHeaderProvider(
     try {
       const balance = (await options.wallet.getBalance(input.steamId)).balance;
 
-      values[BALANCE_ELEMENT_SUFFIX] = balance.toLocaleString('pt-BR');
+      // Sem saldo, o traço do cabeçalho continua: melhor não dizer
+      // nada do que dizer ZERO a quem tem dinheiro. É a mesma
+      // razão do `catch` abaixo — "não consegui perguntar" não é
+      // "você não tem".
+      if (balance !== null) {
+        values[BALANCE_ELEMENT_SUFFIX] = balance.toLocaleString('pt-BR');
+      }
     } catch (error) {
       // Sem saldo, o traço continua. Melhor não dizer nada do que
       // dizer zero para quem tem dinheiro.

@@ -136,7 +136,11 @@ describe('a configuração da agenda', () => {
     // Um agente recém-instalado não tem opinião sobre quando zerar
     // o servidor de ninguém.
     expect(settings.cadence.enabled).toBe(false);
-    expect(settings.forced.bpPolicy).toBe('keep');
+
+    // O forçado, porém, nasce FULL: a rede trata o force wipe
+    // mensal como começo de temporada. É só o padrão de um servidor
+    // novo — cada wipe da agenda pode ser editado um a um.
+    expect(settings.forced.bpPolicy).toBe('wipe');
     expect(settings.collision.policy).toBe('reanchor');
   });
 

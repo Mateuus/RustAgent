@@ -18,7 +18,8 @@
     "lint": "eslint src test",
     "panel:senha": "tsx scripts/panel-password.ts",
     "rcon": "tsx scripts/rcon.ts",
-    "steam:probe": "tsx scripts/steam-probe.ts"
+    "steam:probe": "tsx scripts/steam-probe.ts",
+    "site:probe": "tsx scripts/site-probe.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

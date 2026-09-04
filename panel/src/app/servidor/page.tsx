@@ -343,6 +343,32 @@ function AutoUpdateStatus({ steam }: { steam: SteamUpdate }): React.JSX.Element 
     );
   }
 
+  // ####  ESPERAR NÃO É TER FALHADO  ####
+  //
+  // O Oxide sai MINUTOS ou HORAS depois do Rust, e a atualização
+  // que sobe antes disso deixa o servidor travando no boot com o
+  // RCON mudo (ver core/src/oxide/compat.ts). Então a operação
+  // desiste ANTES de derrubar quem está jogando, o vigia devolve a
+  // tentativa e tenta de novo a cada rodada.
+  //
+  // Isto aparecia aqui como "a última tentativa FALHOU", com o
+  // conselho de forçar por "Atualizar avisando" — que é a MESMA
+  // conferência e recusa igual. Três cliques atrás de um defeito
+  // que não existe, e a essa altura já se está mexendo no que
+  // estava certo.
+  if (attempt?.deferred === true) {
+    return (
+      <>
+        A atualização está <strong>em espera</strong>
+        {attempt.finishedAt !== null && <> desde as {new Date(attempt.finishedAt).toLocaleTimeString()}</>}
+        : {attempt.message ?? 'sem motivo registrado'} <strong>Não adianta</strong> usar Atualizar
+        avisando: é a mesma conferência, e ela recusa igual. Até lá o servidor segue no build
+        antigo, recusando quem já atualizou o cliente — e é o menor dos males, porque aplicar a
+        versão errada do Oxide o deixaria sem subir. O log está em Operações → Histórico.
+      </>
+    );
+  }
+
   const desistiu = steam.attempts >= steam.maxAttempts;
 
   return (

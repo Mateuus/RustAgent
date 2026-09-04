@@ -68,6 +68,8 @@ Tudo em [`Docs/`](Docs/README.md):
 | [07 — Painel](Docs/07-PAINEL.md) | as telas |
 | [08 — Execução e deploy](Docs/08-EXECUCAO-E-DEPLOY.md) | npm, PM2, git |
 | [09 — Roadmap](Docs/09-ROADMAP.md) | o que vem depois |
+| [19 — Pesquisa: Ranking](Docs/19-PESQUISA-RANKING.md) | de onde vem cada número do leaderboard, e como guardá-lo |
+| [20 — Integração OzCoin](Docs/20-INTEGRACAO-OZCOIN-AGENT.md) | o site vira o dono do saldo, e o que se compra lá chega no jogo |
 | [Progresso](Docs/PROGRESSO.md) | onde estamos |
 
 ---

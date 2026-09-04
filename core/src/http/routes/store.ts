@@ -57,6 +57,7 @@ import {
 } from '../../db/store-repository.js';
 import type { WalletsRepository } from '../../db/wallets-repository.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
+import type { SettleOutcome } from '../../store/settle.js';
 import { describePurchase, type StoreService } from '../../store/service.js';
 import type { Wallet } from '../../store/wallet.js';
 import { ApiError } from '../error-response.js';
@@ -68,6 +69,30 @@ export interface StoreRoutesDeps {
   readonly service: StoreService;
   readonly wallet: Wallet;
   readonly supervisor: ServerSupervisor;
+  /**
+   * Alguém editou o catálogo.
+   *
+   * Chamado SEM `await` e dentro de try/catch: uma falha de push
+   * não pode desfazer uma edição que já foi gravada. Ausente sem
+   * a integração com o site.
+   */
+  readonly onCatalogChanged?: (() => void) | undefined;
+}
+
+/**
+ * Avisa o espelho do catálogo, e NUNCA derruba a rota.
+ *
+ * As seis rotas que mudam categoria ou oferta chamam isto depois
+ * de gravar. O painel do site mostrar a loja de ontem é um
+ * problema; a edição não salvar é outro, bem maior.
+ */
+function notifyCatalog(deps: StoreRoutesDeps): void {
+  try {
+    deps.onCatalogChanged?.();
+  } catch {
+    // De propósito: o espelho é conveniência, e a edição já
+    // aconteceu.
+  }
 }
 
 /** Tamanho de página do histórico e do extrato. */
@@ -78,7 +103,7 @@ const idParams = z.object({ id: z.string().min(1).max(64) });
 const serverParams = z.object({ id: z.string().min(1) });
 const steamParams = z.object({ steamId: z.string().min(1) });
 
-const categoryBody = z
+export const storeCategoryBody = z
   .object({
     name: z.string().trim().min(1).max(48),
     position: z.number().int().min(0).max(999).default(0),
@@ -109,7 +134,7 @@ const offerItemSchema = z
  * aceitaria (as colunas são anuláveis) e que o jogador descobriria
  * como "paguei e não recebi".
  */
-const offerBody = z
+export const storeOfferBody = z
   .object({
     categoryId: z.string().min(1).max(64),
     kind: z.enum(OFFER_KINDS),
@@ -205,7 +230,9 @@ const offerBody = z
 const purchaseQuery = z.object({
   serverId: z.string().min(1).optional(),
   steamId: z.string().min(1).optional(),
-  state: z.enum(['pending', 'debited', 'delivered', 'refunded', 'failed']).optional(),
+  state: z
+    .enum(['pending', 'debited', 'delivered', 'refunded', 'failed', 'charge-unknown'])
+    .optional(),
   limit: z.coerce.number().int().min(1).max(MAX_HISTORY_LIMIT).optional(),
 });
 
@@ -216,6 +243,11 @@ const walletBody = z
     reason: z.string().trim().min(1).max(120),
   })
   .strict();
+
+const settleParams = z.object({
+  id: z.string().min(1),
+  purchaseId: z.string().min(1).max(64),
+});
 
 const buyBody = z
   .object({
@@ -236,7 +268,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
   }));
 
   app.post('/store/categories', async (request, reply) => {
-    const body = categoryBody.parse(request.body);
+    const body = storeCategoryBody.parse(request.body);
     const category = deps.repository.saveCategory(randomUUID(), body);
 
     deps.repository.audit({
@@ -244,6 +276,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       action: 'category.create',
       target: category.name,
     });
+
+    // O painel do site precisa ver a loja de AGORA. Sem await e
+    // sem poder derrubar a rota: a edição já foi gravada.
+    notifyCatalog(deps);
 
     request.log.info(
       { category: category.id, name: category.name, by: operatorOf(request) },
@@ -255,7 +291,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
 
   app.put('/store/categories/:id', async (request) => {
     const { id } = idParams.parse(request.params);
-    const body = categoryBody.parse(request.body);
+    const body = storeCategoryBody.parse(request.body);
 
     const before = assertCategory(deps, id);
     const saved = deps.repository.saveCategory(id, body);
@@ -266,6 +302,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       target: saved.name,
       detail: describeCategoryChange(before, saved),
     });
+
+    // O painel do site precisa ver a loja de AGORA. Sem await e
+    // sem poder derrubar a rota: a edição já foi gravada.
+    notifyCatalog(deps);
 
     return { ok: true, category: toCategoryView(saved) };
   });
@@ -283,6 +323,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       target: category.name,
       detail: offers === 0 ? null : `levou ${String(offers)} oferta(s) junto`,
     });
+
+    // O painel do site precisa ver a loja de AGORA. Sem await e
+    // sem poder derrubar a rota: a edição já foi gravada.
+    notifyCatalog(deps);
 
     request.log.warn({ category: id, offers, by: operatorOf(request) }, 'categoria da loja removida');
 
@@ -311,7 +355,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
   });
 
   app.post('/store/offers', async (request, reply) => {
-    const body = offerBody.parse(request.body);
+    const body = storeOfferBody.parse(request.body);
 
     assertCategory(deps, body.categoryId);
 
@@ -324,6 +368,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       detail: `${offer.kind}, ${String(offer.price)} OZ`,
     });
 
+    // O painel do site precisa ver a loja de AGORA. Sem await e
+    // sem poder derrubar a rota: a edição já foi gravada.
+    notifyCatalog(deps);
+
     request.log.info(
       { offer: offer.id, name: offer.name, kind: offer.kind, by: operatorOf(request) },
       'oferta da loja criada',
@@ -334,7 +382,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
 
   app.put('/store/offers/:id', async (request) => {
     const { id } = idParams.parse(request.params);
-    const body = offerBody.parse(request.body);
+    const body = storeOfferBody.parse(request.body);
 
     const before = deps.repository.getOffer(id);
 
@@ -352,6 +400,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       target: saved.name,
       detail: describeOfferChange(before, saved),
     });
+
+    // O painel do site precisa ver a loja de AGORA. Sem await e
+    // sem poder derrubar a rota: a edição já foi gravada.
+    notifyCatalog(deps);
 
     return { ok: true, offer: toOfferView(saved) };
   });
@@ -372,6 +424,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       target: offer.name,
       detail: `${offer.kind}, ${String(offer.price)} OZ`,
     });
+
+    // O painel do site precisa ver a loja de AGORA. Sem await e
+    // sem poder derrubar a rota: a edição já foi gravada.
+    notifyCatalog(deps);
 
     request.log.warn({ offer: id, name: offer.name, by: operatorOf(request) }, 'oferta removida');
 
@@ -455,7 +511,10 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       balance: balance.balance,
       // De ONDE veio. A tela precisa dizer isso: com a carteira
       // remota no ar, o extrato local é história, não o saldo de
-      // hoje.
+      // hoje — e `entries` NÃO tem as compras feitas no site.
+      //
+      // `balance` pode vir `null`: é "não consegui perguntar", e
+      // não zero. A tela mostra travessão, nunca 0.
       source: balance.source,
       entries: deps.wallets.listEntries(steamId).map((entry) => ({
         ...entry,
@@ -483,8 +542,9 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     if (deps.wallet.source === 'remote') {
       throw new ApiError(
         'WALLET_IS_REMOTE',
-        'O saldo deste agente vem do site externo (STORE_WALLET_URL). Lançamentos à mão precisam ' +
-          'ser feitos lá — um crédito daqui criaria um número que o site não conhece.',
+        'O saldo deste agente vem do site OrigemZ (SITE_BASE_URL). Lançamentos à mão precisam ' +
+          'ser feitos no painel do site — um crédito daqui criaria um número que ele não ' +
+          'conhece, e o extrato local já é histórico.',
         409,
       );
     }
@@ -518,15 +578,22 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
   // ==========================================================
   //  A compra fora do jogo
   //
-  //  ####  ELA EXISTE PARA O SITE  ####
+  //  ####  ELA NÃO É O CAMINHO DA COMPRA FEITA NO SITE  ####
+  //
+  //  Ela COBRA. Usá-la para entregar o que o site já vendeu
+  //  cobraria o jogador DUAS VEZES: o site debita no checkout, e
+  //  o que ele vendeu chega pela fila de entregas, que não move
+  //  dinheiro. Ver Docs\20 §10.
   //
   //  Dentro do jogo o caminho é outro: o clique vira uma linha de
   //  console autenticada por segredo (ver game/ui-sync.ts). Esta
-  //  rota é para quem compra pelo site e para o teste manual — e ela
-  //  cobra do MESMO jeito, pelo mesmo serviço.
+  //  rota existe para o teste manual e para uma venda que o
+  //  AGENTE deve cobrar — e ela passa pelo mesmo `StoreService`,
+  //  portanto pela trava de compra em voo, pelo teto de OZ e pelo
+  //  pareamento.
   // ==========================================================
 
-  app.post('/servers/:id/store/buy', async (request) => {
+  app.post('/servers/:id/store/buy', async (request, reply) => {
     const { id } = serverParams.parse(request.params);
     const body = buyBody.parse(request.body);
 
@@ -562,12 +629,75 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
       };
     }
 
+    if (outcome.status === 'charge-unknown') {
+      // ####  202: ACEITO E NÃO TERMINADO  ####
+      //
+      // O `ApiError` abaixo não serve aqui: ele fecha o assunto, e
+      // este desfecho é o único que deixa a compra ABERTA. O corpo
+      // é o mesmo formato de erro do resto da casa — `ok`, `error`,
+      // `message`, nesta ordem — mais o `purchase`, para quem
+      // chamou poder acompanhar. Duas formas de erro na mesma rota
+      // é o começo de um cliente com dois parsers.
+      return reply.code(202).send({
+        ok: false,
+        error: 'CHARGE_UNKNOWN',
+        message,
+        purchase: toPurchaseView(outcome.purchase),
+      });
+    }
+
     // ####  O DESFECHO RUIM É UM ERRO HTTP, E NÃO UM 200  ####
     //
     // Quem chama isto é um site, e um `200 {ok:false}` seria tratado
     // como sucesso por metade dos clientes HTTP que existem.
     throw new ApiError(errorCodeOf(outcome.status), message, httpStatusOf(outcome.status));
   });
+
+  /**
+   * Força a reconciliação de UMA compra presa.
+   *
+   * É o botão que o relógio de 60 s tem no braço, e ele chama a
+   * MESMA função — `StoreService.settle`. Dois códigos que
+   * decidissem isto discordariam no primeiro ajuste.
+   *
+   * Responde 200 mesmo sem desfecho: quem clica aqui está tentando
+   * ENTENDER o estado, e um 500 diria "quebrou" onde o certo é
+   * "ainda não dá para saber".
+   */
+  app.post('/servers/:id/store/purchases/:purchaseId/settle', async (request) => {
+    const { id, purchaseId } = settleParams.parse(request.params);
+
+    assertServer(deps, id);
+
+    const outcome = await deps.service.settle({ serverId: id, purchaseId });
+
+    return { ok: true, outcome, message: describeSettle(outcome) };
+  });
+}
+
+/** O que a rota de settle responde, em português. */
+function describeSettle(outcome: SettleOutcome): string {
+  switch (outcome) {
+    case 'delivered':
+      return 'A cobrança existia; o item foi entregue.';
+
+    case 'refunded':
+      return 'A cobrança existia, a entrega falhou, e o valor voltou.';
+
+    case 'cancelled':
+      return 'Nada foi cobrado: a compra foi fechada sem cobrar ninguém.';
+
+    case 'review':
+      return 'Esta compra saiu do laço automático e precisa de conferência humana.';
+
+    case null:
+      // Nem erro nem sucesso: é a invariante "na dúvida,
+      // preserva" dita em voz alta.
+      return (
+        'Sem desfecho: o site não respondeu, é cedo demais para decidir, ' +
+        'ou a integração está desligada.'
+      );
+  }
 }
 
 // ------------------------------------------------------------
@@ -706,6 +836,16 @@ function errorCodeOf(status: string): string {
       return 'WALLET_UNAVAILABLE';
     case 'no-space':
       return 'NO_SPACE';
+    case 'over-limit':
+      return 'OVER_PURCHASE_LIMIT';
+    case 'charge-rejected':
+      return 'CHARGE_REJECTED';
+    case 'charge-unknown':
+      return 'CHARGE_UNKNOWN';
+    case 'store-unavailable':
+      return 'STORE_UNAVAILABLE';
+    case 'already-in-flight':
+      return 'PURCHASE_IN_FLIGHT';
     default:
       return 'DELIVERY_FAILED';
   }
@@ -728,6 +868,35 @@ function httpStatusOf(status: string): number {
     case 'no-space':
       return 409;
     case 'wallet-unavailable':
+      return 503;
+
+    // 409: o pedido estava certo, o estado é que não permite —
+    // como `insufficient` e `no-space` logo acima. Vale para os
+    // dois, por razões diferentes: um passou do teto, e o outro é
+    // o jogador clicando duas vezes.
+    case 'over-limit':
+      return 409;
+
+    case 'already-in-flight':
+      return 409;
+
+    // 502: o pedido do CHAMADOR estava certo; quem recusou foi o
+    // dono do saldo, por um defeito do contrato entre nós e ele.
+    case 'charge-rejected':
+      return 502;
+
+    // ####  202: ACEITO E NÃO TERMINADO  ####
+    //
+    // Nem 200 (metade dos clientes HTTP leria como sucesso) nem
+    // 5xx (que convida a repetir — e repetir aqui é cobrar de
+    // novo quem talvez já tenha pago).
+    case 'charge-unknown':
+      return 202;
+
+    // 503: a loja existe e não está pronta. O mesmo status de
+    // `wallet-unavailable`, e pela mesma razão — "tente de novo
+    // em instantes" é a verdade nos dois.
+    case 'store-unavailable':
       return 503;
     default:
       return 502;

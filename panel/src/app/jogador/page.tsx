@@ -951,7 +951,7 @@ function CarteiraDoJogador({ steamId }: { readonly steamId: string }) {
             </p>
 
             <p className="mt-1 font-mono text-3xl text-amber">
-              {wallet.balance.toLocaleString('pt-BR')} OZ
+              {wallet.balance === null ? '—' : `${wallet.balance.toLocaleString('pt-BR')} OZ`}
             </p>
 
             <p className="mt-1 text-2xs leading-relaxed text-muted">

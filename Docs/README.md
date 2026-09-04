@@ -59,6 +59,27 @@ executadas):
 | 16 | [Plano: wipe, calendário e mensagens](16-PLANO-WIPE-CALENDARIO-MENSAGENS.md) | o agente mandando no ciclo de vida do mundo, o calendário no painel e no jogo, e o agendador de falas do servidor |
 | 17 | [As frentes de wipe e mensagens](17-FRENTES-WIPE-E-MENSAGENS.md) | como vários agentes constroem o 16 ao mesmo tempo sem se atropelar |
 | 18 | [Os prompts das frentes](18-PROMPTS-DAS-FRENTES.md) | os dez blocos prontos para abrir cada agente, e em que ondas eles rodam |
+| 19 | [Pesquisa: ranking](19-PESQUISA-RANKING.md) | de onde vem cada número do leaderboard, e como guardá-lo |
+| 20 | [Integração OzCoin: o agente e o site](20-INTEGRACAO-OZCOIN-AGENT.md) | o saldo passa a morar no site, a loja in-game cobra lá, e o que o jogador compra no site é entregue no jogo |
+| 21 | [Status da integração, para o agente do site](21-STATUS-PARA-O-AGENTE-DO-SITE.md) | o que já está pronto deste lado, o que o site precisa entregar, e o que o agente manda no fio |
+| 22 | [Comandos e config vindos do site](22-COMANDOS-E-CONFIG-DO-SITE.md) | as duas pontas que faltam aqui: a fila de comandos (start/stop/restart) e a config desejada — contrato, regras e critérios de aceite. **Nada disso existe ainda** |
+| 23 | [Configurar pelo site: o `.ini` inteiro, a loja, os kits e o VIP](23-CONFIG-PELO-SITE.md) | a config de servidor cresceu de 7 para 23 campos, e nasceu um canal de **config de rede** (`store`, `kits`, `vips`) — contrato, regras e o que o snapshot substitui. Reconciliado no §23 dos dois manuais como `oz-rust/5` |
+| 23b | [Configuração avançada pelo site: as quatro áreas aprovadas](23-CONFIG-AVANCADA-DO-SITE.md) | o pedido formal das **quatro áreas** que o dono aprovou trazer para o painel do site. A **área 1 (auto-update) foi feita** em 04/09/2026 (§3.5); as outras três — wipe, plugins/Oxide, admins/bans/mensagens — **não existem em lugar nenhum** |
+| 24 | [VIP de Rust: o pedido ao agente do site](24-PROMPT-VIP-DE-RUST-PARA-O-AGENTE-DO-SITE.md) | o que falta do lado do site para o VIP de Rust ser vendável: o reconciliador, as duas rotas do espelho (`/vip/mirror`) e a régua do `tier` |
+| 25 | [VIP de Rust: a resposta do agente do site](25-RESPOSTA-VIP-DE-RUST-DO-AGENTE-DO-SITE.md) | o que eles construíram, o que decidiram e o que devolveram como pergunta |
+| 26 | [Tiers no espelho e `vip_revoke` na fila: o pedido deles](26-PEDIDO-TIERS-E-REVOKE.md) | os dois buracos que sobraram, com arquivo e linha DESTE repositório — e três perguntas de semântica cuja resposta vira contrato |
+| 27 | [A resposta: os dois pedidos estão de pé](27-RESPOSTA-TIERS-E-REVOKE.md) | `tiers[]` viaja dentro do hash do espelho e `vip_revoke` fecha o ciclo da revogação; as três perguntas respondidas, e o oitavo alarme do §18.4 desarmado |
+
+E fora da pasta `Docs`:
+
+| Onde | O que responde |
+|---|---|
+| [`contracts/`](../contracts/README.md) | as **fixtures compartilhadas** do canal agent↔site: os corpos de requisição e resposta, com `origin` dizendo quais foram **medidos** contra o dev e quais são só o que o manual descreve. Lido pelos testes deste repositório (`core/test/site-fixtures.test.ts`) |
+
+> **O número 23 está ocupado por dois arquivos.** `23-CONFIG-PELO-SITE.md` descreve o que **já foi
+> construído** deste lado; `23-CONFIG-AVANCADA-DO-SITE.md` descreve o que **ainda não existe em
+> lugar nenhum**. São documentos diferentes, e nenhum é rascunho do outro. Renomear o segundo para
+> `24-` é uma linha de `git mv` — ninguém decidiu ainda, e até lá ele é o **23b**.
 
 ---
 

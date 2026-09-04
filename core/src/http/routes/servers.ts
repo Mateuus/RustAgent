@@ -7,10 +7,13 @@
 //  inteiras — assim a frase é a mesma pela API e pelo painel.
 // ============================================================
 
+import { randomBytes } from 'node:crypto';
+
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { readServerConfig, type AgentPaths } from '../../config.js';
+import { operatorOf } from './admin.js';
 import type { ServersRepository } from '../../db/servers-repository.js';
 import {
   createServer,
@@ -87,6 +90,32 @@ const patchSchema = z
       .regex(/^[A-Za-z0-9_.-]{1,64}$/, 'login inválido para o SteamCMD')
       .optional(),
     steamBranch: z.string().max(64).optional().or(z.literal('')),
+
+    // ####  O PAREAMENTO COM O SITE OrigemZ  ####
+    //
+    // O admin gera o bearer no painel do site e cola aqui. Ele
+    // mora no `.ini` daquele servidor, junto da senha de RCON,
+    // porque é segredo DELE: o site modela um `Server` por
+    // servidor de jogo, com um bearer cada.
+    //
+    // Vazio nos dois é o jeito de DESPAREAR: a loja daquele
+    // servidor volta para a carteira local no próximo boot.
+    siteServerId: z
+      .string()
+      .trim()
+      // 50 é o limite do site. Ele casa por texto EXATO,
+      // maiúsculas incluídas: "rust01" e "RUST01" são dois
+      // servidores diferentes para ele, e o 404 que isso produz
+      // não diz que a diferença é de caixa.
+      .max(50, 'o id do servidor no site tem no máximo 50 caracteres')
+      .optional()
+      .or(z.literal('')),
+    siteToken: z
+      .string()
+      .trim()
+      .max(500)
+      .optional()
+      .or(z.literal('')),
   })
   .strict();
 
@@ -266,6 +295,60 @@ export function registerServerRoutes(app: FastifyInstance, deps: ServerRoutesDep
   // Ele NÃO é "comando arbitrário na máquina": o comando vai para
   // o servidor de Rust, exatamente como o console web faz — e
   // quem tem a senha do RCON já podia fazer isso.
+  // ==========================================================
+  //  O bearer do site
+  //
+  //  ####  QUEM GERA É O PAINEL, E O SITE CONFIRMA  ####
+  //
+  //  O admin clica aqui, o agente sorteia o segredo, grava no `.ini`
+  //  daquele servidor e o devolve UMA VEZ. Dali ele vai para o
+  //  cadastro do servidor no site, que passa a aceitá-lo.
+  //
+  //  É o mesmo caminho que o DayZ já usa (o admin cola o segredo do
+  //  agente no site), e ele tem uma vantagem sobre o inverso: o
+  //  segredo nasce onde vai ser usado, e não viaja de volta.
+  //
+  //  ####  ELE APARECE UMA VEZ, E SÓ  ####
+  //
+  //  A resposta desta rota é o único momento em que o token existe em
+  //  claro fora do `.ini`. Nenhum `GET` o devolve, nem agora nem
+  //  depois — quem perder a janela gera outro, que invalida o
+  //  anterior no site. Guardar um segredo que a tela sabe desenhar é
+  //  guardá-lo no histórico do navegador, no print do suporte e no
+  //  log do proxy.
+  // ==========================================================
+
+  app.post('/servers/:id/site/token', async (request) => {
+    const { id } = paramsSchema.parse(request.params);
+
+    if (deps.supervisor.configOf(id) === null) {
+      throw unknownServer(id, deps);
+    }
+
+    // 256 bits, no mesmo molde do id de sessão do painel
+    // (auth/operator.ts). `base64url` porque ele viaja num header
+    // `Authorization: Bearer <token>` e num arquivo `.ini` lido por
+    // um `for /f` do cmd.exe — nenhum dos dois gosta de `+`, `/` ou
+    // `=`.
+    const token = randomBytes(32).toString('base64url');
+
+    deps.supervisor.updateSettings(id, { siteToken: token });
+
+    request.log.warn(
+      { server: id, by: operatorOf(request) },
+      'a new site bearer was generated for this server',
+    );
+
+    return {
+      ok: true,
+      // ÚNICA vez. Ver o cabeçalho.
+      token,
+      message:
+        'Copie o token agora: ele não volta a aparecer. Cole-o no cadastro deste servidor no ' +
+        'site OrigemZ, e reinicie o agente para ele passar a usá-lo.',
+    };
+  });
+
   app.post('/servers/:id/rcon', async (request) => {
     const { id } = paramsSchema.parse(request.params);
     const body = rconSchema.parse(request.body);

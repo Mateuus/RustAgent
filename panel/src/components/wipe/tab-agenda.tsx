@@ -26,16 +26,23 @@
 //  zona, e não um instante com fuso embutido.
 // ============================================================
 
-import { CalendarPlus, Save } from 'lucide-react';
+import { CalendarClock, CalendarPlus, Pencil, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
+import { ActionMenu } from '@/components/ui/action-menu';
 import { Button } from '@/components/ui/button';
+import { Dialog } from '@/components/ui/dialog';
+import { PostponeDialog } from '@/components/wipe/postpone-dialog';
+import { PurgeWipeDialog } from '@/components/wipe/purge-wipe-dialog';
+import { RemoveWipeDialog } from '@/components/wipe/remove-wipe-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
-import { CalendarMonth } from '@/components/wipe/calendar-month';
+import { CalendarMonth, dayKey } from '@/components/wipe/calendar-month';
+import { WipeDayDialog, type PlanActionKind } from '@/components/wipe/day-dialog';
+import { ModeDialog } from '@/components/wipe/mode-dialog';
 import {
   BP_POLICY_LABEL,
   BP_POLICY_SHORT,
@@ -47,6 +54,7 @@ import {
   formatShortMoment,
   fromDateField,
   fromDateTimeFields,
+  toDateTimeFields,
   isPending,
   sortByDate,
   toCalendarMarks,
@@ -64,7 +72,53 @@ import { cn } from '@/lib/utils';
  * Existem porque estes são os intervalos que servidor de Rust usa
  * de verdade, e clicar em "7" é mais rápido que digitá-lo.
  */
-const CADENCE_SHORTCUTS: readonly number[] = [1, 2, 3, 4, 6, 8, 12, 15, 30];
+/**
+ * ####  7 E 14 SÃO OS QUE A REDE USA  ####
+ *
+ * A lista nasceu com divisores de 24 e de 30 — boa para quem pensa
+ * em "duas vezes por dia" ou "uma vez por mês". Só que o wipe de
+ * Rust se organiza por SEMANA: "toda quinta", "de duas em duas
+ * quintas". Sem o 7 ali, o padrão mais comum de todos era o único
+ * que a tela não oferecia — e chegar nele exigia digitar no campo
+ * ao lado, que ninguém encontra.
+ */
+const CADENCE_SHORTCUTS: readonly number[] = [1, 2, 3, 4, 6, 7, 8, 12, 14, 15, 30];
+
+
+/** Os dias da semana, para dizer em qual deles a cadência cai. */
+const WEEKDAYS: readonly string[] = [
+  'domingo',
+  'segunda-feira',
+  'terça-feira',
+  'quarta-feira',
+  'quinta-feira',
+  'sexta-feira',
+  'sábado',
+];
+
+/**
+ * Em que dia da semana esta cadência cai — quando cai sempre no
+ * mesmo.
+ *
+ * ####  POR QUE ISTO PRECISA APARECER  ####
+ *
+ * A cadência é "a cada N dias a partir de um marco". Com N múltiplo
+ * de 7 isso é a mesma coisa que "toda quinta" — mas só se o marco
+ * cair numa quinta, e o campo do marco é uma data solta que não diz
+ * nada sobre isso. Sem esta frase, escolher 7 com o marco num
+ * sábado produzia wipes de sábado enquanto o admin lia "semanal" e
+ * entendia "quinta".
+ *
+ * `null` quando N não é múltiplo de 7: aí o dia anda a cada wipe, e
+ * não há um dia da semana para prometer.
+ */
+function weekdayOfCadence(anchorAt: number, everyDays: number): string | null {
+  if (everyDays % 7 !== 0) {
+    return null;
+  }
+
+  return WEEKDAYS[new Date(anchorAt).getDay()] ?? null;
+}
 
 /**
  * Sugestões de fuso, e só sugestões: o campo aceita qualquer nome
@@ -100,8 +154,32 @@ export interface TabAgendaProps {
   readonly clock: AgentClock;
   readonly busy: boolean;
   readonly onSave: (settings: WipeSettings) => void;
-  readonly onPostpone: (plan: WipePlan, hours: number) => void;
+  // Adiar deixou de ser uma prop: a caixa de adiar escolhe a data
+  // nova e a manda pelo mesmo caminho de qualquer outra edição.
   readonly onSkip: (plan: WipePlan) => void;
+  /**
+   * Passa o servidor para o modo manual.
+   *
+   * Recebe os wipes a HERDAR — vazio quando o admin escolheu
+   * limpar. Quem copia é o painel, porque não existe "converter em
+   * manual" no agente: é um POST por data.
+   */
+  readonly onSwitchToManual: (herdar: readonly WipePlan[]) => void;
+  /** Apaga a linha de vez. A data volta a ficar livre. */
+  readonly onPurge: (plan: WipePlan) => void;
+  /** Desfaz o pular. Sem isto, a linha riscada é um beco sem saída. */
+  readonly onRestore: (plan: WipePlan) => void;
+  /**
+   * Muda UM wipe já marcado.
+   *
+   * É por aqui que a política de blueprints deixa de ser uma regra
+   * só para a cadência inteira: a quinta que vem mantém, a de daqui
+   * a duas zera, e quem decide é quem abre a agenda.
+   */
+  readonly onEdit: (
+    plan: WipePlan,
+    patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null },
+  ) => void;
   readonly onCreate: (input: {
     scheduledAt: number;
     bpPolicy: BpPolicy;
@@ -115,9 +193,12 @@ export function TabAgenda({
   clock,
   busy,
   onSave,
-  onPostpone,
   onSkip,
+  onPurge,
+  onRestore,
+  onEdit,
   onCreate,
+  onSwitchToManual,
 }: TabAgendaProps) {
   const [draft, setDraft] = useState<WipeSettings>(settings);
 
@@ -134,9 +215,104 @@ export function TabAgenda({
   );
 
   const marks = useMemo(() => toCalendarMarks(plans), [plans]);
-  const ordered = useMemo(() => sortByDate(plans), [plans]);
+  /**
+   * ####  A AGENDA É SOBRE O QUE VEM  ####
+   *
+   * O que já rodou tem tela própria, com passos, log e duração —
+   * aqui ele só empurrava para baixo o que ainda dá para decidir,
+   * e a lista crescia para sempre sem nunca ficar mais útil.
+   *
+   * O PULADO fica: ele é um buraco no calendário que alguém abriu
+   * de propósito, e é dali que se desfaz o engano.
+   */
+  /** Mostrar os que foram deletados, para poder trazer um de volta. */
+  const [showDeleted, setShowDeleted] = useState(false);
+
+  /**
+   * ####  DELETOU, SUMIU  ####
+   *
+   * O agente não APAGA a linha de um wipe de cadência: ele a marca
+   * como pulada, porque a regra recriaria a data na reconciliação
+   * seguinte e o wipe voltaria sozinho — pior que qualquer
+   * alternativa. Só que isso é assunto do agente, e a tela estava
+   * repassando o problema: quem clicava em "deletar" via a linha
+   * continuar ali, riscada, como se o clique não tivesse pegado.
+   *
+   * Agora ela some. A linha continua no banco segurando a data, e
+   * quem quiser desfazer abre "os deletados" no fim da lista.
+   */
+  const deletados = useMemo(
+    () => sortByDate(plans).filter((plan) => plan.status === 'skipped'),
+    [plans],
+  );
+
+  const ordered = useMemo(
+    () =>
+      sortByDate(plans).filter(
+        (plan) =>
+          plan.status !== 'done' && plan.status !== 'failed' && plan.status !== 'skipped',
+      ),
+    [plans],
+  );
+
+  /**
+   * O dia que a grade abriu, como `YYYY-MM-DD`.
+   *
+   * A CHAVE, e não a lista de wipes daquele dia: guardar os planos
+   * congelaria a caixa no que estava na tela quando ela abriu, e
+   * mover um wipe de dentro dela deixaria a caixa mostrando a data
+   * velha até alguém fechá-la.
+   */
+  const [openDay, setOpenDay] = useState<string | null>(null);
+
+  /**
+   * O wipe que está numa caixa de ação, e qual delas.
+   *
+   * Isto morava dentro de cada linha da lista. Subiu porque agora
+   * há DOIS lugares que pedem a mesma ação — a linha e a caixa do
+   * dia —, e duas cópias do mesmo `useState` dariam duas caixas de
+   * "mover" capazes de abrir ao mesmo tempo.
+   */
+  const [action, setAction] = useState<{ plan: WipePlan; kind: PlanActionKind } | null>(null);
+
+  /** A troca para manual está esperando a resposta da caixa. */
+  const [switchingToManual, setSwitchingToManual] = useState(false);
+
+  const dayPlans = useMemo(
+    () =>
+      openDay === null
+        ? []
+        : sortByDate(plans).filter((plan) => dayKey(plan.scheduledAt) === openDay),
+    [plans, openDay],
+  );
+
+  /** A caixa do dia sai da frente antes da caixa da ação entrar. */
+  function startAction(plan: WipePlan, kind: PlanActionKind): void {
+    setOpenDay(null);
+    setAction({ plan, kind });
+  }
 
   const cadence = draft.cadence;
+
+  /**
+   * O que se perde ao passar para manual.
+   *
+   * Só o que a REGRA gerou e ninguém fixou: o forçado não é nosso
+   * e o que foi mexido à mão a reconciliação já não toca. Os
+   * passados também ficam de fora — herdar um wipe de ontem
+   * marcaria uma parada que não acontece.
+   */
+  const perdiveis = useMemo(
+    () =>
+      plans.filter(
+        (plan) =>
+          plan.kind === 'cadence' &&
+          plan.status === 'planned' &&
+          !plan.pinned &&
+          (clock.now === null || plan.scheduledAt > clock.now),
+      ),
+    [plans, clock.now],
+  );
 
   function patchCadence(patch: Partial<WipeSettings['cadence']>): void {
     setDraft((current) => ({ ...current, cadence: { ...current.cadence, ...patch } }));
@@ -161,25 +337,46 @@ export function TabAgenda({
         }
       >
         <div className="space-y-4">
+          {/* ####  O MODO É UMA COISA SÓ, E JÁ EXISTIA  ####
+
+              Cadência ligada É o modo automático, e desligada É o
+              manual — o campo do agente é o mesmo. Guardar um
+              segundo campo "modo" daria duas respostas para "este
+              servidor zera sozinho?", e elas divergiriam no dia em
+              que alguém mexesse só numa.
+
+              O que muda aqui é o que a tela DIZ: o toggle
+              "ligada/desligada" descrevia um detalhe da regra, e a
+              pergunta que o admin faz é outra — quem marca os
+              wipes deste servidor, o agente ou eu? */}
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <p className="font-condensed text-sm font-bold uppercase tracking-wide">
-                O servidor zera por vontade própria
+                Quem marca os wipes
               </p>
               <p className="mt-1 text-sm text-muted">
                 {cadence.enabled
-                  ? 'Além do forçado mensal, o agente marca os wipes da casa.'
-                  : 'Desligada: só o wipe forçado da Facepunch aparece na agenda.'}
+                  ? 'AUTOMÁTICO: o agente marca sozinho, na cadência abaixo. Você continua editando um a um.'
+                  : 'MANUAL: só entra na agenda o que você marcar — e o forçado da Facepunch, que acontece de todo jeito.'}
               </p>
             </div>
 
             <Toggle
               on={cadence.enabled}
               busy={busy}
-              label="Cadência própria"
-              labels={['Ligada', 'Desligada']}
+              label="Modo da agenda"
+              labels={['Automático', 'Manual']}
               onChange={(value) => {
-                patchCadence({ enabled: value });
+                // Ligar é inócuo: a cadência volta a gerar e nada se
+                // perde. DESLIGAR apaga o que ela já tinha gerado, e
+                // por isso passa pela caixa.
+                if (value) {
+                  patchCadence({ enabled: true });
+
+                  return;
+                }
+
+                setSwitchingToManual(true);
               }}
             />
           </div>
@@ -281,6 +478,23 @@ export function TabAgenda({
               <p className="mt-1 text-2xs leading-relaxed text-muted">
                 O marco zero da contagem. Só o dia importa — a hora vem do campo acima.
               </p>
+
+              {/* A tradução da aritmética para o calendário de quem lê. */}
+              {weekdayOfCadence(cadence.anchorAt, cadence.everyDays) !== null && (
+                <p className="mt-1 text-2xs leading-relaxed text-foreground">
+                  Com esta conta, o wipe cai{' '}
+                  <strong>
+                    {cadence.everyDays === 7
+                      ? `toda ${String(weekdayOfCadence(cadence.anchorAt, cadence.everyDays))}`
+                      : `de ${String(cadence.everyDays / 7)} em ${String(
+                          cadence.everyDays / 7,
+                        )} semanas, sempre numa ${String(
+                          weekdayOfCadence(cadence.anchorAt, cadence.everyDays),
+                        )}`}
+                  </strong>
+                  , às {cadence.timeOfDay}.
+                </p>
+              )}
             </div>
 
             <PolicyPicker
@@ -373,7 +587,14 @@ export function TabAgenda({
           detail="A grade do mês marca o dia de hoje pelo relógio do agente, e não pelo do navegador."
         />
       ) : (
-        <CalendarMonth marks={marks} today={clock.now} legend={LEGEND} />
+        <CalendarMonth
+          marks={marks}
+          today={clock.now}
+          legend={LEGEND}
+          onSelectDay={(day) => {
+            setOpenDay(day.key);
+          }}
+        />
       )}
 
       <Section
@@ -394,16 +615,180 @@ export function TabAgenda({
                 plan={plan}
                 now={clock.now}
                 busy={busy}
-                onPostpone={onPostpone}
-                onSkip={onSkip}
+                onRestore={onRestore}
+                onAction={startAction}
               />
             ))}
           </ul>
         )}
       </Section>
 
+      {deletados.length > 0 && (
+        <div className="border border-border bg-surface">
+          <button
+            type="button"
+            onClick={() => {
+              setShowDeleted((current) => !current);
+            }}
+            className="flex w-full items-center justify-between px-4 py-2 text-left transition hover:bg-border"
+          >
+            <span className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+              {showDeleted ? 'esconder' : 'mostrar'} os deletados
+            </span>
+            <span className="text-2xs tabular-nums text-muted">{deletados.length}</span>
+          </button>
+
+          {showDeleted && (
+            <ul className="divide-y divide-border border-t border-border px-4">
+              {deletados.map((plan) => (
+                <PlanRow
+                  key={plan.id}
+                  plan={plan}
+                  now={clock.now}
+                  busy={busy}
+                  onRestore={onRestore}
+                  onAction={startAction}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <ModeDialog
+        open={switchingToManual}
+        busy={busy}
+        cadencePlans={perdiveis}
+        onKeep={() => {
+          setSwitchingToManual(false);
+          onSwitchToManual(perdiveis);
+        }}
+        onDiscard={() => {
+          setSwitchingToManual(false);
+          onSwitchToManual([]);
+        }}
+        onClose={() => {
+          setSwitchingToManual(false);
+        }}
+      />
+
       <ManualWipe busy={busy} clock={clock} onCreate={onCreate} />
+
+      <WipeDayDialog
+        open={openDay !== null && dayPlans.length > 0}
+        plans={dayPlans}
+        clock={clock}
+        busy={busy}
+        onAction={startAction}
+        onRestore={(plan) => {
+          onRestore(plan);
+          setOpenDay(null);
+        }}
+        onClose={() => {
+          setOpenDay(null);
+        }}
+      />
+
+      {/* Montadas só enquanto há uma ação em curso, e com `key` no
+          wipe: assim a caixa de editar nasce com os valores do wipe
+          que foi escolhido AGORA, e não com os do anterior. */}
+      {action !== null && (
+        <PlanDialogs
+          key={action.plan.id}
+          plan={action.plan}
+          kind={action.kind}
+          busy={busy}
+          clock={clock}
+          onSkip={onSkip}
+          onPurge={onPurge}
+          cadenceEnabled={cadence.enabled}
+          onEdit={onEdit}
+          onDone={() => {
+            setAction(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * As três caixas que mexem num wipe, num lugar só.
+ *
+ * Quem as abre é a lista ou a caixa do dia — as duas mandam o
+ * mesmo `{ plan, kind }`, e é isto que impede a agenda de ter dois
+ * formulários de edição que aos poucos deixam de concordar.
+ */
+function PlanDialogs({
+  plan,
+  kind,
+  busy,
+  clock,
+  onSkip,
+  onPurge,
+  cadenceEnabled,
+  onEdit,
+  onDone,
+}: {
+  readonly plan: WipePlan;
+  readonly kind: PlanActionKind;
+  readonly busy: boolean;
+  readonly clock: AgentClock;
+  readonly onSkip: (plan: WipePlan) => void;
+  readonly onPurge: (plan: WipePlan) => void;
+  readonly cadenceEnabled: boolean;
+  readonly onEdit: TabAgendaProps['onEdit'];
+  readonly onDone: () => void;
+}) {
+  return (
+    <>
+      <PostponeDialog
+        plan={plan}
+        open={kind === 'move'}
+        busy={busy}
+        clock={clock}
+        onConfirm={(scheduledAt) => {
+          onEdit(plan, { scheduledAt });
+          onDone();
+        }}
+        onClose={onDone}
+      />
+
+      <RemoveWipeDialog
+        plan={plan}
+        open={kind === 'remove'}
+        busy={busy}
+        onConfirm={() => {
+          onSkip(plan);
+          onDone();
+        }}
+        onClose={onDone}
+      />
+
+      <PurgeWipeDialog
+        plan={plan}
+        open={kind === 'purge'}
+        busy={busy}
+        cadenceEnabled={cadenceEnabled}
+        onConfirm={() => {
+          onPurge(plan);
+          onDone();
+        }}
+        onClose={onDone}
+      />
+
+      <PlanEditor
+        plan={plan}
+        open={kind === 'edit'}
+        busy={busy}
+        clock={clock}
+        onSave={(patch) => {
+          onEdit(plan, patch);
+          onDone();
+        }}
+        onClose={onDone}
+      />
+    </>
   );
 }
 
@@ -411,14 +796,15 @@ function PlanRow({
   plan,
   now,
   busy,
-  onPostpone,
-  onSkip,
+  onRestore,
+  onAction,
 }: {
   readonly plan: WipePlan;
   readonly now: number | null;
   readonly busy: boolean;
-  readonly onPostpone: (plan: WipePlan, hours: number) => void;
-  readonly onSkip: (plan: WipePlan) => void;
+  readonly onRestore: (plan: WipePlan) => void;
+  /** Pede a caixa da ação ao pai, que é quem a monta. */
+  readonly onAction: (plan: WipePlan, kind: PlanActionKind) => void;
 }) {
   const pending = isPending(plan);
   const remaining = now === null ? null : plan.scheduledAt - now;
@@ -448,40 +834,267 @@ function PlanRow({
           {future && remaining !== null ? `em ${formatCountdown(remaining)}` : STATUS_LABEL[plan.status]}
         </span>
 
-        {future && (
-          <>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              title="Empurra este wipe 24 horas para a frente."
-              onClick={() => {
-                onPostpone(plan, 24);
-              }}
-            >
-              adiar
-            </Button>
+        {/* ####  AS AÇÕES MORAM ATRÁS DE UM BOTÃO  ####
 
-            {/* O forçado não aceita ser pulado — ver tab-geral.tsx. */}
-            {plan.kind !== 'forced' && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                title="Este wipe não acontece."
-                onClick={() => {
-                  onSkip(plan);
-                }}
-              >
-                pular
-              </Button>
-            )}
-          </>
+            Três botões por linha e catorze linhas davam quarenta e
+            dois alvos de clique numa tela cuja função é ser LIDA. A
+            data, os blueprints e a anotação perdiam a atenção para a
+            coluna da direita.
+
+            "Deletar" aparece para todo wipe que dá para tirar da
+            frente, inclusive os da cadência — o que muda entre eles
+            não é o gesto, é o que o agente faz depois, e quem conta
+            isso é a caixa de confirmação.
+
+            O forçado fica só com editar e mover: ele acontece com ou
+            sem nós, e o core recusa apagá-lo com 409. */}
+        {/* O pulado tem menu próprio: uma linha riscada sem ação
+            nenhuma é um beco — foi o que aconteceu com quem clicou
+            em pular por engano. */}
+        {!pending && plan.status === 'skipped' && (
+          <ActionMenu
+            label={`Ações do wipe pulado de ${formatShortMoment(plan.scheduledAt)}`}
+            disabled={busy}
+            items={[
+              {
+                label: 'Restaurar',
+                icon: <RotateCcw aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Devolve este wipe à agenda, na mesma data.',
+                onSelect: () => {
+                  onRestore(plan);
+                },
+              },
+              {
+                label: 'Apagar de vez',
+                icon: <Trash2 aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Some com a linha. A data fica livre de novo.',
+                danger: true,
+                onSelect: () => {
+                  onAction(plan, 'purge');
+                },
+              },
+            ]}
+          />
+        )}
+
+        {future && (
+          <ActionMenu
+            label={`Ações do wipe de ${formatShortMoment(plan.scheduledAt)}`}
+            disabled={busy}
+            items={[
+              {
+                label: 'Editar',
+                icon: <Pencil aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Muda a política de blueprints, a data e a anotação deste wipe.',
+                onSelect: () => {
+                  onAction(plan, 'edit');
+                },
+              },
+              {
+                label: 'Mover',
+                icon: <CalendarClock aria-hidden className="h-3.5 w-3.5" />,
+                hint: 'Escolhe uma data nova — para frente ou para trás.',
+                onSelect: () => {
+                  onAction(plan, 'move');
+                },
+              },
+              ...(plan.kind === 'forced'
+                ? []
+                : [
+                    {
+                      label: 'Deletar',
+                      icon: <Trash2 aria-hidden className="h-3.5 w-3.5" />,
+                      hint:
+                        plan.kind === 'manual'
+                          ? 'Apaga este wipe da agenda. Nada o recria.'
+                          : 'Tira este wipe da agenda. Ele fica na lista, riscado.',
+                      danger: true,
+                      onSelect: () => {
+                        onAction(plan, 'remove');
+                      },
+                    },
+                  ]),
+            ]}
+          />
         )}
       </span>
 
       {plan.note !== null && <span className="w-full text-2xs text-muted">{plan.note}</span>}
     </li>
+  );
+}
+
+/**
+ * A edição de UM wipe da agenda.
+ *
+ * ####  O QUE ESTA TELA MUDA, E O QUE NÃO  ####
+ *
+ * Blueprints, data e anotação. NÃO muda o mapa: a fila de mundos
+ * tem tela própria (sub-aba Mapas), e um seletor solto aqui daria
+ * duas verdades sobre qual mundo entra.
+ *
+ * A data do FORÇADO não se edita — ela é da Facepunch, e o servidor
+ * não sobe com o mundo antigo depois da atualização mensal. Os
+ * blueprints dele, sim: essa parte é escolha da casa.
+ *
+ * ####  SÓ VAI O QUE MUDOU  ####
+ *
+ * O patch é montado por diferença. Mandar os três campos sempre
+ * marcaria o wipe como "mexido à mão" por causa de uma visita, e a
+ * reconciliação deixaria de recalcular um wipe que ninguém quis
+ * congelar.
+ */
+function PlanEditor({
+  plan,
+  open,
+  busy,
+  clock,
+  onSave,
+  onClose,
+}: {
+  readonly plan: WipePlan;
+  readonly open: boolean;
+  readonly busy: boolean;
+  readonly clock: AgentClock;
+  readonly onSave: (patch: {
+    scheduledAt?: number;
+    bpPolicy?: BpPolicy;
+    note?: string | null;
+  }) => void;
+  readonly onClose: () => void;
+}) {
+  const inicial = toDateTimeFields(plan.scheduledAt);
+  const [date, setDate] = useState(inicial.date);
+  const [time, setTime] = useState(inicial.time);
+  const [bpPolicy, setBpPolicy] = useState<BpPolicy>(plan.bpPolicy);
+  const [note, setNote] = useState(plan.note ?? '');
+
+  // Abrir a caixa de novo mostra o wipe como ele está AGORA, e não
+  // como estava na primeira vez que alguém a abriu — salvar, fechar
+  // e reabrir mostrava os valores velhos.
+  useEffect(() => {
+    if (open) {
+      const campos = toDateTimeFields(plan.scheduledAt);
+
+      setDate(campos.date);
+      setTime(campos.time);
+      setBpPolicy(plan.bpPolicy);
+      setNote(plan.note ?? '');
+    }
+  }, [open, plan.scheduledAt, plan.bpPolicy, plan.note]);
+
+  const forced = plan.kind === 'forced';
+  const at = fromDateTimeFields(date, time);
+  const past = at !== null && clock.now !== null && at <= clock.now;
+  const dataInvalida = !forced && (at === null || past);
+
+  const patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null } = {};
+
+  if (!forced && at !== null && at !== plan.scheduledAt) {
+    patch.scheduledAt = at;
+  }
+
+  if (bpPolicy !== plan.bpPolicy) {
+    patch.bpPolicy = bpPolicy;
+  }
+
+  const noteLimpa = note.trim() === '' ? null : note.trim();
+
+  if (noteLimpa !== plan.note) {
+    patch.note = noteLimpa;
+  }
+
+  const mudou = Object.keys(patch).length > 0;
+
+  return (
+    <Dialog open={open} title="Editar este wipe" busy={busy} onClose={onClose}>
+      <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <Label htmlFor={`plan-${String(plan.id)}-date`}>Dia</Label>
+          <Input
+            id={`plan-${String(plan.id)}-date`}
+            type="date"
+            value={date}
+            disabled={forced}
+            onChange={(event) => {
+              setDate(event.target.value);
+            }}
+            className="mt-1"
+          />
+        </div>
+
+        <div>
+          <Label htmlFor={`plan-${String(plan.id)}-time`}>Hora</Label>
+          <Input
+            id={`plan-${String(plan.id)}-time`}
+            type="time"
+            value={time}
+            disabled={forced}
+            onChange={(event) => {
+              setTime(event.target.value);
+            }}
+            className="mt-1"
+          />
+        </div>
+      </div>
+
+      {forced && (
+        <p className="text-2xs leading-relaxed text-muted">
+          A data do wipe forçado é da Facepunch, e por isso não se edita: depois da
+          atualização mensal o servidor não sobe com o mundo antigo. Os blueprints dele,
+          abaixo, continuam sendo escolha da casa.
+        </p>
+      )}
+
+      <PolicyPicker
+        name={`bp-plan-${String(plan.id)}`}
+        legend="Blueprints neste wipe"
+        value={bpPolicy}
+        onChange={setBpPolicy}
+      />
+
+      <div>
+        <Label htmlFor={`plan-${String(plan.id)}-note`}>Anotação</Label>
+        <Input
+          id={`plan-${String(plan.id)}-note`}
+          value={note}
+          placeholder="para quem for ler a agenda depois"
+          onChange={(event) => {
+            setNote(event.target.value);
+          }}
+          className="mt-1"
+        />
+      </div>
+
+      {dataInvalida && (
+        <StateBlock
+          variant="error"
+          title={past ? 'Essa data já passou.' : 'Data ou hora incompleta.'}
+          detail="O agente não mexe no passado: escolha um instante à frente do relógio dele."
+        />
+      )}
+
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="ghost" onClick={onClose}>
+          Cancelar
+        </Button>
+
+        <Button
+          size="sm"
+          variant="confirm"
+          disabled={busy || dataInvalida || !mudou}
+          title={mudou ? undefined : 'Nada mudou ainda.'}
+          onClick={() => {
+            onSave(patch);
+          }}
+        >
+          <Save aria-hidden="true" className="h-4 w-4" />
+          Salvar este wipe
+        </Button>
+        </div>
+      </div>
+    </Dialog>
   );
 }
 

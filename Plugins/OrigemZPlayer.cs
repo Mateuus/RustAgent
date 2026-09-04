@@ -769,6 +769,14 @@ namespace Oxide.Plugins
         //  e o primeiro lugar onde isso vaza e um jogador com a
         //  barra de vida mudando no meio de um tiroteio.
         //
+        //  #### UM VALOR, OU UMA FAIXA ####
+        //
+        //  Quando o agente manda `health` e `healthMax`, o numero e
+        //  SORTEADO aqui, neste nascimento - e no proximo sai outro.
+        //  Um numero fixo faz todo mundo do nivel acordar igual, e a
+        //  vantagem vira um carimbo identico na tela de trinta
+        //  pessoas. Ver Sortear().
+        //
         //  #### O MAXIMO SOBE JUNTO, QUANDO PRECISA ####
         //
         //  Pedir 150 de vida num jogador cujo maximo e 100 daria 100
@@ -804,7 +812,7 @@ namespace Oxide.Plugins
 
                 if (status.Health.HasValue)
                 {
-                    float health = status.Health.Value;
+                    float health = Sortear(status.Health.Value, status.HealthMax);
 
                     // MaxHealth() e o teto efetivo (inclui
                     // modificadores). Subir so quando precisa evita
@@ -824,12 +832,16 @@ namespace Oxide.Plugins
                 {
                     if (status.Calories.HasValue)
                     {
-                        AplicarAtributo(metabolism.calories, status.Calories.Value);
+                        AplicarAtributo(
+                            metabolism.calories,
+                            Sortear(status.Calories.Value, status.CaloriesMax));
                     }
 
                     if (status.Hydration.HasValue)
                     {
-                        AplicarAtributo(metabolism.hydration, status.Hydration.Value);
+                        AplicarAtributo(
+                            metabolism.hydration,
+                            Sortear(status.Hydration.Value, status.HydrationMax));
                     }
                 }
 
@@ -858,6 +870,32 @@ namespace Oxide.Plugins
         // (Assets\Scripts\Entity\MetaBolism\MetabolismAttribute.cs),
         // e nao um tipo aninhado em PlayerMetabolism - escrever
         // PlayerMetabolism.MetabolismAttribute e CS0426.
+        // O numero daquele nascimento.
+        //
+        //  ####  POR QUE O SORTEIO E AQUI, E NAO NO AGENTE  ####
+        //
+        //  Ele precisa acontecer A CADA NASCIMENTO. Se o agente
+        //  sorteasse ao montar o payload, o numero ficaria congelado
+        //  ate o push seguinte: trinta jogadores do mesmo nivel
+        //  nasceriam com o MESMO valor, que e o que a faixa existe
+        //  para evitar.
+        //
+        //  Teto ausente, menor ou igual ao piso devolve o piso: o
+        //  agente ja recusa faixa invertida na gravacao, e aqui a
+        //  resposta segura e o valor que o admin escreveu primeiro.
+        private static float Sortear(float from, float? to)
+        {
+            if (!to.HasValue || to.Value <= from)
+            {
+                return from;
+            }
+
+            // Random.Range(float, float) inclui os dois extremos, que
+            // e o que "entre 125 e 135" quer dizer para quem
+            // configurou.
+            return UnityEngine.Random.Range(from, to.Value);
+        }
+
         private static void AplicarAtributo(MetabolismAttribute attribute, float value)
         {
             if (attribute == null)
@@ -1722,6 +1760,21 @@ namespace Oxide.Plugins
 
             [JsonProperty("hydration")]
             public float? Hydration { get; set; }
+
+            // O TETO da faixa. Ausente quer dizer que o valor acima e
+            // exato - foi assim que o payload sempre veio, e um
+            // config antigo continua valendo sem nenhum ajuste.
+            //
+            // Com os dois, o numero e SORTEADO a cada nascimento. Ver
+            // Sortear() e o cabecalho de AplicarStatus.
+            [JsonProperty("healthMax")]
+            public float? HealthMax { get; set; }
+
+            [JsonProperty("caloriesMax")]
+            public float? CaloriesMax { get; set; }
+
+            [JsonProperty("hydrationMax")]
+            public float? HydrationMax { get; set; }
         }
 
         // O que SAI no evento de sessao. Nomes curtos de proposito:

@@ -90,16 +90,17 @@ os assemblies do loader.
 
 ```
   1. recusar se o RustDedicated.exe estiver rodando
-  2. backup de Servers\<id>\oxide\  ->  Backups\<id>\oxide-<carimbo>\
-  3. descobrir a release:
+  2. descobrir a release:
        GET api.github.com/repos/OxideMod/Oxide.Rust/releases/latest
        asset "Oxide.Rust.zip"
        (falhou? URL direta: /releases/latest/download/Oxide.Rust.zip)
-  4. baixar para um temporário, extrair
-  5. copiar a árvore por cima de Servers\<id>\  (sobrescrevendo)
-  6. conferir os quatro assemblies em RustDedicated_Data\Managed:
+  3. recusar se a release for ANTERIOR ao build do Rust em disco
+  4. backup de Servers\<id>\oxide\  ->  Backups\<id>\oxide-<carimbo>\
+  5. baixar para um temporário, extrair
+  6. copiar a árvore por cima de Servers\<id>\  (sobrescrevendo)
+  7. conferir os quatro assemblies em RustDedicated_Data\Managed:
        Oxide.Core.dll  Oxide.Rust.dll  Oxide.CSharp.dll  Oxide.Common.dll
-  7. criar oxide\{plugins,config,data,lang,logs} se não existirem
+  8. criar oxide\{plugins,config,data,lang,logs} se não existirem
 ```
 
 > **A pasta `oxide\` não vem no zip.** Quem a cria é o próprio Oxide, no
@@ -107,7 +108,50 @@ os assemblies do loader.
 > normal, nunca um erro. Criamos a árvore para que dê para largar um plugin em
 > `oxide\plugins` **antes** de subir o servidor pela primeira vez.
 
-O passo 6 é o que decide se a instalação deu certo. Só ele.
+O passo 7 é o que decide se a instalação deu certo. Só ele.
+
+### O passo 3, e por que ele vem antes do backup
+
+**A `latest` do Oxide nem sempre é a do build do Rust que está em disco.** Entre
+a Facepunch publicar um build e o OxideMod publicar a versão correspondente
+passam de minutos a horas — e o `server-auto-update` dispara *no instante* em
+que a Steam anuncia o build, que é justamente a janela em que a `latest` ainda é
+a do build anterior. É onde ele **sempre** cai.
+
+Aconteceu em 03/09/2026, com esta margem:
+
+```
+  17:29:23   a Facepunch publica o build 25083359
+  17:32:32   o SteamCMD do agente termina de baixá-lo
+  17:32:33   o agente baixa o Oxide "latest" — 2.0.7638, de 28/08
+  17:32:41   o OxideMod publica a 2.0.7676, a do build novo
+```
+
+Nove segundos. O `Assembly-CSharp.dll` que a 2.0.7638 traz é o do Rust de
+agosto e chama um método que a Facepunch removeu em setembro
+(`Facepunch.ExceptionReporter.InitializeFromUrl`). O boot morre com
+`MissingMethodException` — e o processo fica **vivo**, com o RCON mudo. O
+servidor passou a noite subindo e travando, quinze minutos por tentativa.
+
+A régua é a **data**, e não o número: a tag do Oxide (`2.0.7676`) não diz nada
+sobre o build do Rust, e o corpo da release é texto livre — a 2.0.7638 veio com
+o corpo vazio. O que sempre existe são o `timeupdated` (do branch, na Steam) e o
+`published_at` (da API do GitHub). Uma release publicada **antes** do build não
+pode conhecê-lo.
+
+> **Não saber deixa passar.** Sem uma das duas datas — GitHub ou Steam fora do
+> ar — a conferência não recusa. Recusar por ignorância transformaria uma
+> piscada de serviço externo num servidor que não sobe.
+
+A recusa vem **antes** do backup por dois motivos: um backup órfão a cada rodada
+do vigia viraria dezenas de pastas em `Backups\` numa noite, e extrair antes de
+conferir já teria posto os assemblies errados em `Managed\` — que é exatamente
+o estado que isto existe para evitar.
+
+Quem opera pode passar por cima (`allowBehind`), para o caso raro de o OxideMod
+atrasar dias. O padrão recusa.
+
+O código está em `core/src/oxide/compat.ts`.
 
 ---
 
@@ -136,7 +180,8 @@ O passo 6 é o que decide se a instalação deu certo. Só ele.
          [+app.port <SERVER_APPPORT>]  [+server.url ...]  [+server.headerimage ...]
          -logfile "Logs\<id>\server-<identity>.log"
        cwd = Servers\<id>       detached = true      stdio = ignore
-  6. esperar o RCON responder (até SERVER_START_TIMEOUT_MS, padrão 15 min)
+  6. esperar o RCON responder (até SERVER_START_TIMEOUT_MS, padrão 15 min),
+     LENDO o log do jogo a cada volta em busca de boot morto
 ```
 
 Três coisas que a lista acima esconde e importam:
@@ -154,6 +199,38 @@ com o executável ali na pasta.
 processo existe durante todo esse tempo sem aceitar ninguém. Enquanto o RCON
 não responde, o estado na tela é *iniciando*, com o tempo decorrido — não
 *no ar*, e não *erro*.
+
+**Mas esperar não é só olhar o RCON.** Um boot que morre deixa o processo
+**vivo** e o RCON mudo — os dois sinais que a espera consultava diziam "ainda
+subindo", para sempre. Foi o que aconteceu na noite de 03/09/2026: quinze
+minutos de silêncio para então dizer *"pode ser um mapa grande ainda gerando"*,
+enquanto a causa estava em disco desde o segundo 40.
+
+Por isso a espera agora lê o `-logfile` a cada volta, por offset, procurando as
+exceções de **carga de assembly**:
+
+```
+  MissingMethodException      MissingFieldException
+  TypeLoadException           ReflectionTypeLoadException
+  BadImageFormatException     Could not load file or assembly
+```
+
+Achou uma, a operação falha **na hora**, com a linha do jogo junto — 14 segundos
+em vez de 15 minutos, medido. O processo fica de pé de propósito: ele é a prova,
+e matá-lo apagaria a janela de console que alguém pode estar olhando.
+
+> **A lista é curta de propósito.** Um boot saudável do Rust está cheio de linha
+> assustadora: `SocketException`, `Missing shader`, `not found`,
+> `NullReferenceException`. Nenhuma delas impede nada, e um falso positivo aqui
+> mataria a operação de um servidor que ia subir. A régua é "o boot não se
+> recupera nunca", e não "parece grave" — só as exceções que provam
+> `Managed\` inconsistente entram.
+
+E quando o tempo esgota sem exceção nenhuma, a mensagem leva as **últimas linhas
+do log** em vez de um chute. É o que separa os dois desfechos: um mapa ainda
+gerando termina em `Height Map`/`Lakes`; um boot parado termina onde parou.
+
+O código está em `core/src/ops/boot-watch.ts`.
 
 **O `rcon.web` é sempre 1.** O agente fala WebRCON; o RCON binário antigo não
 serve. O `.ini` traz `RCON_WEB=1` e o agente recusa subir um servidor com 0.
@@ -184,6 +261,7 @@ quando o servidor travou, e a tela diz isso com essas palavras.
 dispara **sozinho** quando a Facepunch publica um build novo:
 
 ```
+  0. confere se o Oxide JÁ lançou a versão do build novo
   1. avisa no chat  (abertura + marcos em 15/10/5/3/2/1 min, 30 s, 10 s)
   2. server.save
   3. quit  (encerramento limpo)
@@ -201,6 +279,25 @@ dispara **sozinho** quando a Facepunch publica um build novo:
 - **a atualização falhar não deixa o servidor fora do ar.** Quem o derrubou fomos
   nós; ele volta com o build antigo, a operação consta como **falhou** e o painel
   mostra o motivo. "Desatualizado" é ruim, "sumiu da lista" é pior.
+
+#### O passo 0 — esperar o Oxide, sem derrubar ninguém
+
+O passo 0 é a mesma conferência do `server-install` (ver *O passo 3*, acima),
+mas **antes da contagem e antes do stop**. A ordem é a razão de ele existir
+separado: descobrir que o Oxide está defasado lá no passo 4 já teria
+desconectado todo mundo, e trocaria um servidor desatualizado por um servidor
+fora do ar.
+
+Adiar aqui não custa nada a ninguém — o servidor segue no ar com o build velho,
+e o vigia da Steam reconfere na rodada seguinte (15 min). Quando o OxideMod
+publicar, a atualização acontece sozinha.
+
+> **Adiada não gasta tentativa.** São três por build, com uma hora entre elas
+> (ver *Como o agente sabe que há atualização*). Se a espera pelo Oxide as
+> consumisse, o agente desistiria em ~2 h de um build cuja versão do Oxide
+> costuma sair depois disso — e o servidor ficaria recusando jogadores até
+> alguém reparar. A operação é marcada como `deferred` e o vigia devolve a
+> tentativa.
 
 `STEAM_AUTO_UPDATE=1` (o padrão) é o que faz o passo 1 começar sozinho. Com `0`,
 o build novo só aparece no painel e a operação espera um clique.
@@ -263,6 +360,33 @@ que o agente resolve, enquanto o build em disco continuava o velho e ninguém
 sabia por quê. Agora ela conta a tentativa em curso, o motivo da última falha e
 quando sai a próxima; esgotadas as três, troca a promessa pelo pedido de
 intervenção.
+
+#### `deferred` — adiada não é falha
+
+Uma tentativa pode terminar `failed` sem que nada tenha acontecido: é a recusa
+pelo Oxide atrasado, lá de cima. O retrato separa os dois casos:
+
+```json
+"lastAttempt": { "operationId": "op_5d740ad5", "status": "failed", "deferred": true,
+                 "finishedAt": "2026-09-04T18:50:22.000Z",
+                 "message": "o Oxide ainda não lançou a versão do build 25129933 do Rust…" }
+```
+
+O status continua `failed` de propósito — a atualização **não** aconteceu e o
+build em disco ainda é o velho, o que a tela precisa mostrar. O que `deferred`
+acrescenta é que ninguém foi derrubado, nada foi tocado em disco e a tentativa
+**foi devolvida**: o vigia tenta de novo na rodada seguinte, quinze minutos
+depois, em vez de gastar uma das três (`update-watcher.ts`, `#watchAttempt`).
+
+A tela lê os dois campos juntos. A operação aparece como **adiada**, em âmbar e
+não em vermelho; o aviso do fim é um alerta que some sozinho, e não um erro que
+fica até alguém fechar; e a faixa para de mandar forçar por **Atualizar
+avisando** — que é a mesma conferência e recusa igual. No log da operação, a
+linha do desfecho vem com `[espera]` no lugar de `[erro]`.
+
+> Sem essa distinção a tela gritava três vezes — faixa, etiqueta e aviso — por
+> uma espera de meia hora que o agente resolve sozinho, e o conselho que ela
+> dava levava a derrubar o servidor atrás de um defeito que não existe.
 
 ### Como o agente sabe que a atualização deu certo
 

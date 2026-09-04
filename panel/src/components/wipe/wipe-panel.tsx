@@ -40,11 +40,13 @@ import { TabAgenda } from '@/components/wipe/tab-agenda';
 import { TabBlueprints } from '@/components/wipe/tab-blueprints';
 import { TabConfiguracao } from '@/components/wipe/tab-configuracao';
 import { TabExecucao } from '@/components/wipe/tab-execucao';
+import { TabHistorico } from '@/components/wipe/tab-historico';
 import { TabGeral } from '@/components/wipe/tab-geral';
 import { TabMapas } from '@/components/wipe/tab-mapas';
 import { useAgentClock } from '@/components/wipe/use-agent-clock';
 import {
   agent,
+  ApiError,
   type BpPolicy,
   type ServerView,
   type WipePlan,
@@ -58,7 +60,14 @@ import { cn } from '@/lib/utils';
  * sub-abas. Sem acento e sem espaço: eles viajam em `data-`,
  * em chave de reação e (um dia) em query string.
  */
-export type WipeTab = 'geral' | 'agenda' | 'mapas' | 'blueprints' | 'configuracao' | 'execucao';
+export type WipeTab =
+  | 'geral'
+  | 'agenda'
+  | 'mapas'
+  | 'blueprints'
+  | 'configuracao'
+  | 'execucao'
+  | 'historico';
 
 const TABS: readonly { readonly id: WipeTab; readonly label: string }[] = [
   { id: 'geral', label: 'Geral' },
@@ -67,6 +76,7 @@ const TABS: readonly { readonly id: WipeTab; readonly label: string }[] = [
   { id: 'blueprints', label: 'Blueprints' },
   { id: 'configuracao', label: 'Configuração' },
   { id: 'execucao', label: 'Execução' },
+  { id: 'historico', label: 'Histórico' },
 ];
 
 /**
@@ -162,13 +172,29 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
     [run, serverId],
   );
 
+  // A caixa de adiar já escolheu o instante e o mostrou por extenso
+  // antes de valer; aqui só se grava o que ela decidiu.
   const postpone = useCallback(
-    (plan: WipePlan, hours: number) => {
-      void run(`Wipe adiado ${String(hours)} h`, () =>
-        agent.updateWipePlan(serverId, plan.id, {
-          scheduledAt: plan.scheduledAt + hours * 60 * 60 * 1_000,
-        }),
-      );
+    (plan: WipePlan, scheduledAt: number) => {
+      void run('Wipe adiado', () => agent.updateWipePlan(serverId, plan.id, { scheduledAt }));
+    },
+    [run, serverId],
+  );
+
+  // ####  UM WIPE, E NÃO A REGRA INTEIRA  ####
+  //
+  // A cadência diz o que vale para todos; isto diz o que vale para
+  // ESTE. É o que permite a quinta que vem manter os blueprints e a
+  // de daqui a duas zerar, sem inventar um segundo tipo de cadência.
+  //
+  // O agente marca o plano como `pinned` ao receber o PATCH: quem
+  // mexeu à mão não quer que a próxima reconciliação desfaça.
+  const edit = useCallback(
+    (
+      plan: WipePlan,
+      patch: { scheduledAt?: number; bpPolicy?: BpPolicy; note?: string | null },
+    ) => {
+      void run('Wipe alterado', () => agent.updateWipePlan(serverId, plan.id, patch));
     },
     [run, serverId],
   );
@@ -176,6 +202,96 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
   const skip = useCallback(
     (plan: WipePlan) => {
       void run('Wipe pulado', () => agent.removeWipePlan(serverId, plan.id));
+    },
+    [run, serverId],
+  );
+
+  // Desfazer o pular. A linha pulada continua ocupando o instante,
+  // então sem esta volta um clique errado apagava a data para
+  // sempre — nem marcar outra no lugar resolvia.
+  // Apagar a linha de vez. A mensagem do agente muda conforme a
+  // cadência esteja ligada — ela é quem sabe se a data volta a ser
+  // marcada sozinha.
+  const purge = useCallback(
+    (plan: WipePlan) => {
+      void run('Wipe apagado', () => agent.purgeWipePlan(serverId, plan.id));
+    },
+    [run, serverId],
+  );
+
+  const restore = useCallback(
+    (plan: WipePlan) => {
+      void run('Wipe de volta à agenda', () => agent.restoreWipePlan(serverId, plan.id));
+    },
+    [run, serverId],
+  );
+
+  /**
+   * Passa para o modo manual, herdando (ou não) o que a cadência
+   * tinha marcado.
+   *
+   * ####  A ORDEM IMPORTA  ####
+   *
+   * Primeiro DESLIGA, depois copia. Ao contrário, cada POST cairia
+   * em cima de um wipe de cadência que ainda existe naquele
+   * instante e voltaria 409 por conflito de horário.
+   *
+   * O 409 continua possível na segunda fase — um wipe fixado à mão
+   * na mesma data sobrevive ao desligamento — e ali ele significa
+   * "esta data já está guardada", que é o desfecho desejado. Por
+   * isso ele é contado, e não tratado como falha.
+   */
+  const switchToManual = useCallback(
+    (herdar: readonly WipePlan[]) => {
+      void run(
+        herdar.length === 0 ? 'Modo manual' : `Modo manual · ${String(herdar.length)} herdados`,
+        async () => {
+          const atual = await agent.wipeSettings(serverId);
+          const resposta = await agent.saveWipeSettings(serverId, {
+            ...atual.settings,
+            cadence: { ...atual.settings.cadence, enabled: false },
+          });
+
+          let entraram = 0;
+          let jaExistiam = 0;
+
+          for (const plan of herdar) {
+            try {
+              await agent.createWipePlan(serverId, {
+                scheduledAt: plan.scheduledAt,
+                bpPolicy: plan.bpPolicy,
+                note: plan.note,
+              });
+              entraram += 1;
+            } catch (cause) {
+              if (cause instanceof ApiError && cause.code === 'WIPE_SCHEDULE_CONFLICT') {
+                jaExistiam += 1;
+                continue;
+              }
+
+              throw new Error(
+                `Passei para manual, mas parei de copiar no wipe de ` +
+                  `${new Date(plan.scheduledAt).toLocaleString()}: ` +
+                  `${cause instanceof Error ? cause.message : String(cause)}. ` +
+                  `${String(entraram)} de ${String(herdar.length)} entraram.`,
+                { cause },
+              );
+            }
+          }
+
+          // O número precisa bater, e quando não bate a tela diz por
+          // quê: um "pronto" mudo sobre uma cópia parcial é pior que
+          // um erro.
+          return {
+            ...resposta,
+            message:
+              herdar.length === 0
+                ? 'O agente parou de marcar wipes sozinho. A agenda agora é sua.'
+                : `${String(entraram)} wipe(s) herdados` +
+                  `${jaExistiam === 0 ? '' : `, ${String(jaExistiam)} já estavam na agenda`}.`,
+          };
+        },
+      );
     },
     [run, serverId],
   );
@@ -268,8 +384,11 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
             clock={clock}
             busy={busy}
             onSave={saveSettings}
-            onPostpone={postpone}
             onSkip={skip}
+            onPurge={purge}
+            onRestore={restore}
+            onSwitchToManual={switchToManual}
+            onEdit={edit}
             onCreate={create}
           />
         )}
@@ -292,6 +411,7 @@ export function WipePanel({ server }: { readonly server: ServerView }) {
         {tab === 'blueprints' && <TabBlueprints serverId={serverId} />}
         {tab === 'configuracao' && <TabConfiguracao serverId={serverId} />}
         {tab === 'execucao' && <TabExecucao serverId={serverId} />}
+        {tab === 'historico' && <TabHistorico serverId={serverId} />}
       </div>
     </div>
   );
