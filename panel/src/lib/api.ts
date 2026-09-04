@@ -902,6 +902,15 @@ export interface ServerSpawnStatus {
   health: number | null;
   calories: number | null;
   hydration: number | null;
+  /**
+   * O TETO da faixa. `null` = o valor acima é exato.
+   *
+   * Com os dois preenchidos, quem sorteia é o plugin, a cada
+   * nascimento — ver core/src/loadouts/status.ts.
+   */
+  healthMax: number | null;
+  caloriesMax: number | null;
+  hydrationMax: number | null;
   enabled: boolean;
   updatedAt: string | null;
   updatedBy: string | null;
@@ -919,6 +928,9 @@ export interface SpawnStatusInput {
   health: number | null;
   calories: number | null;
   hydration: number | null;
+  healthMax: number | null;
+  caloriesMax: number | null;
+  hydrationMax: number | null;
   enabled: boolean;
 }
 
