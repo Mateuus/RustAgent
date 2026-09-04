@@ -27,6 +27,7 @@ import type { FastifyInstance } from 'fastify';
 import type { StoreRepository } from '../../db/store-repository.js';
 import type { SiteBeacon } from '../../site/beacon.js';
 import type { SiteDomainHealth } from '../../site/domains.js';
+import type { CatalogMirrorStatus } from '../../store/catalog-mirror.js';
 import type { Wallet } from '../../store/wallet.js';
 import { z } from 'zod';
 
@@ -106,6 +107,29 @@ export interface SiteRoutesDeps {
    * salvar. Vazio = ninguém do outro lado manda em nada.
    */
   readonly domains?: () => readonly SiteDomainHealth[];
+  /**
+   * O espelho do catálogo, para a tela poder responder "por que o
+   * site está com a loja velha?".
+   *
+   * ####  A AUSÊNCIA PRECISA DIZER QUAL AUSÊNCIA  ####
+   *
+   * O espelho não nasce em dois casos diferentes, e confundi-los
+   * custou meio expediente uma vez: `SITE_CATALOG_PUSH_ENABLED=0`
+   * (alguém desligou) e NENHUMA CARTEIRA REMOTA (o espelho é
+   * construído só quando há pareamento com carteira — ver
+   * index.ts). O segundo é invisível: a integração parece ligada,
+   * o beacon responde `active`, e o catálogo simplesmente nunca
+   * viaja.
+   *
+   * Por isso não é `CatalogMirrorStatus | null`: é um objeto que
+   * sempre existe e sabe dizer por que está parado.
+   */
+  readonly catalog?: () => {
+    /** O `SITE_CATALOG_PUSH_ENABLED`, como o boot o leu. */
+    readonly enabled: boolean;
+    /** `null` = o espelho não foi construído. */
+    readonly status: CatalogMirrorStatus | null;
+  };
 }
 
 export function registerSiteRoutes(app: FastifyInstance, deps: SiteRoutesDeps): void {
@@ -233,6 +257,7 @@ export function registerSiteRoutes(app: FastifyInstance, deps: SiteRoutesDeps): 
         lastError: health.lastError,
         ackPending: health.ackPending,
       })),
+      catalog: catalogStatus(deps),
       purchases: {
         // A compra que morreu antes do débito — e o dinheiro pode ter
         // saído. Ela não some sozinha.
@@ -302,4 +327,96 @@ export function registerSiteRoutes(app: FastifyInstance, deps: SiteRoutesDeps): 
 /** Epoch ms vira ISO para a tela. `null` continua `null`. */
 function iso(at: number | null): string | null {
   return at === null ? null : new Date(at).toISOString();
+}
+
+/**
+ * O espelho do catálogo, traduzido para a tela.
+ *
+ * ####  A PERGUNTA QUE ISTO RESPONDE  ####
+ *
+ * "O agente está online mas não envia o catálogo há 22 h." Sem este
+ * bloco, a única saída era abrir o `.env` e o banco à mão — e a
+ * suspeita caía na configuração, que era justamente onde não
+ * estava: a loja não tinha mudado, e o push só sai quando a
+ * `version` muda.
+ *
+ * `reason` existe para que a resposta nunca precise ser deduzida.
+ * Ela sai preenchida SÓ quando algo está de fato parado; em regime
+ * é `null`, e `inSync` conta o resto.
+ */
+function catalogStatus(deps: SiteRoutesDeps): {
+  readonly enabled: boolean;
+  readonly running: boolean;
+  readonly reason: string | null;
+  readonly version: string | null;
+  readonly inSync: boolean | null;
+  readonly lastPushAt: string | null;
+  readonly lastPushError: string | null;
+  readonly mirrored: readonly {
+    readonly serverId: string;
+    readonly version: string | null;
+    readonly at: string | null;
+  }[];
+} {
+  const catalog = deps.catalog?.() ?? null;
+
+  // Sem a dependência montada não dá para afirmar nada. É o caso
+  // dos testes de rota e de um agente que subiu sem a integração.
+  if (catalog === null) {
+    return {
+      enabled: false,
+      running: false,
+      reason: 'A integração com o site não está montada neste agente.',
+      version: null,
+      inSync: null,
+      lastPushAt: null,
+      lastPushError: null,
+      mirrored: [],
+    };
+  }
+
+  if (catalog.status === null) {
+    return {
+      enabled: catalog.enabled,
+      running: false,
+      // As duas ausências, com nomes diferentes. Ver o comentário
+      // de `SiteRoutesDeps.catalog`.
+      reason: catalog.enabled
+        ? 'Nenhum servidor pareado tem carteira no site, então o espelho não foi construído. ' +
+          'O catálogo NÃO viaja. Pareie um servidor e reinicie o agente.'
+        : 'SITE_CATALOG_PUSH_ENABLED=0 no .env: o espelho está desligado e o catálogo NÃO ' +
+          'viaja. O site fica com a loja que recebeu por último.',
+      version: null,
+      inSync: null,
+      lastPushAt: null,
+      lastPushError: null,
+      mirrored: [],
+    };
+  }
+
+  const { status } = catalog;
+
+  return {
+    enabled: catalog.enabled,
+    running: true,
+    // ####  SILÊNCIO EM DIA NÃO É MOTIVO  ####
+    //
+    // Com tudo confirmado, `lastPushAt` de dias atrás é o normal —
+    // e dizer qualquer coisa aqui faria a tela inventar um problema
+    // que não existe. O motivo só aparece quando há mudança presa.
+    reason: status.inSync
+      ? null
+      : status.lastPushError === null
+        ? 'Há mudança na loja ainda não confirmada pelo site. A próxima rodada sai em até 60 s.'
+        : `O site recusou o espelho: ${status.lastPushError}`,
+    version: status.version,
+    inSync: status.inSync,
+    lastPushAt: iso(status.lastPushAt),
+    lastPushError: status.lastPushError,
+    mirrored: status.mirrored.map((entry) => ({
+      serverId: entry.serverId,
+      version: entry.version,
+      at: iso(entry.at),
+    })),
+  };
 }

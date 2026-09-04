@@ -149,6 +149,24 @@ export function buildMirror(
   return { payload: { ...body, version, generatedAt: new Date(now).toISOString() }, version };
 }
 
+/** O estado do espelho, para a tela de diagnóstico. */
+export interface CatalogMirrorStatus {
+  /** O hash do catálogo COMO ELE ESTÁ AGORA. */
+  readonly version: string;
+  /** Todos os destinos já confirmaram a `version` acima? */
+  readonly inSync: boolean;
+  readonly mirrored: readonly {
+    readonly serverId: string;
+    /** A que aquele destino confirmou. `null` = nunca recebeu. */
+    readonly version: string | null;
+    /** Quando ele confirmou. Epoch ms. */
+    readonly at: number | null;
+  }[];
+  /** O último push que SAIU — e não a última rodada do relógio. */
+  readonly lastPushAt: number | null;
+  readonly lastPushError: string | null;
+}
+
 export interface CatalogMirrorOptions {
   /** Um por servidor pareado, na chave do id LOCAL. */
   readonly clients: ReadonlyMap<string, SiteClient>;
@@ -204,19 +222,41 @@ export class CatalogMirror {
     }
   }
 
-  /** O que a tela de estado mostra. */
-  get status(): {
-    readonly version: string;
-    readonly mirrored: readonly { readonly serverId: string; readonly version: string | null }[];
-    readonly lastPushAt: number | null;
-    readonly lastPushError: string | null;
-  } {
+  /**
+   * O que a tela de estado mostra.
+   *
+   * ####  `inSync` É A RESPOSTA, E OS OUTROS SÃO A PROVA  ####
+   *
+   * A pergunta que alguém faz olhando isto é sempre a mesma — "o
+   * catálogo não sai há horas; é defeito?" — e ela tem duas
+   * respostas opostas que os campos crus não distinguem:
+   *
+   *   inSync=true   ninguém mexeu na loja. O silêncio é o certo:
+   *                 o push só sai quando a `version` MUDA, e ela é
+   *                 o hash do conteúdo (ver o topo do arquivo).
+   *   inSync=false  há mudança esperando e ela NÃO está saindo.
+   *                 Aí `lastPushError` diz por quê.
+   *
+   * Sem este campo, `lastPushAt` de ontem parece defeito nos dois
+   * casos — e foi exatamente o que aconteceu: 22 h de silêncio
+   * legítimo viraram suspeita de configuração errada.
+   */
+  get status(): CatalogMirrorStatus {
+    const version = buildMirror(this.#options.repository, this.#now()).version;
+
+    const mirrored = [...this.#options.clients.keys()].map((serverId) => ({
+      serverId,
+      version: this.#options.meta.read(versionKey(serverId)),
+      at: toEpoch(this.#options.meta.read(mirroredAtKey(serverId))),
+    }));
+
     return {
-      version: buildMirror(this.#options.repository, this.#now()).version,
-      mirrored: [...this.#options.clients.keys()].map((serverId) => ({
-        serverId,
-        version: this.#options.meta.read(versionKey(serverId)),
-      })),
+      version,
+      // Um destino atrasado já derruba: com N pareamentos, "quase
+      // todos em dia" é o estado que faz um painel mostrar preço
+      // velho enquanto os outros mostram o novo.
+      inSync: mirrored.every((entry) => entry.version === version),
+      mirrored,
       lastPushAt: this.#lastPushAt,
       lastPushError: this.#lastPushError,
     };
@@ -337,4 +377,26 @@ export class CatalogMirror {
 
 function versionKey(serverId: string): string {
   return `site.catalog.mirrored_version.${serverId}`;
+}
+
+function mirroredAtKey(serverId: string): string {
+  return `site.catalog.mirrored_at.${serverId}`;
+}
+
+/**
+ * O carimbo gravado por `#remember`, de volta a número.
+ *
+ * Ele é gravado como texto (o `meta` guarda strings), e um valor
+ * ilegível — banco editado à mão, versão anterior do agente — vira
+ * `null` em vez de `NaN`: a tela sabe dizer "não sei quando", e não
+ * sabe desenhar um NaN.
+ */
+function toEpoch(raw: string | null): number | null {
+  if (raw === null) {
+    return null;
+  }
+
+  const parsed = Number(raw);
+
+  return Number.isFinite(parsed) ? parsed : null;
 }

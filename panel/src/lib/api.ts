@@ -3487,12 +3487,35 @@ export interface SitePairedServerView {
   };
 }
 
+/**
+ * O espelho do catálogo, dentro do `GET /api/site/status`.
+ *
+ * `inSync` é o campo que responde "o catálogo não sai há horas; é
+ * defeito?". Verdadeiro = ninguém mexeu na loja, e o silêncio é o
+ * certo: o push só sai quando o conteúdo muda. Falso = há mudança
+ * presa, e `reason` diz por quê.
+ */
+export interface SiteCatalogView {
+  /** O `SITE_CATALOG_PUSH_ENABLED` do agente. */
+  enabled: boolean;
+  /** O espelho foi construído? Precisa de `enabled` E de carteira. */
+  running: boolean;
+  /** Só preenchido quando algo está parado. Em regime, `null`. */
+  reason: string | null;
+  version: string | null;
+  inSync: boolean | null;
+  lastPushAt: string | null;
+  lastPushError: string | null;
+  mirrored: { serverId: string; version: string | null; at: string | null }[];
+}
+
 /** `GET /api/site/status` — a primeira tela de "a loja parou". */
 export interface SiteStatus {
   ok: true;
   paired: boolean;
   baseUrl: string | null;
   servers: SitePairedServerView[];
+  catalog: SiteCatalogView;
   purchases: {
     pendingOrphan: number;
     chargeUnknown: number;

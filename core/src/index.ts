@@ -1705,6 +1705,14 @@ async function main(): Promise<void> {
       servers: sitePairedServers,
       // Lidos na HORA: é o estado do laço, e ele muda a cada volta.
       domains: () => siteDomainLoops.map((loop) => loop.health),
+      // O `enabled` vem da configuração e o `status` do objeto: com
+      // um só, a tela não separa "desligado" de "ligado mas sem
+      // carteira nenhuma" — e as duas ausências pedem conserto
+      // diferente.
+      catalog: () => ({
+        enabled: agent.site.catalogPushEnabled,
+        status: catalogMirror?.status ?? null,
+      }),
       wallet,
       purchases: storeRepository,
       // De onde a URL veio, para a tela dizer se o que ela mostra é

@@ -1674,6 +1674,45 @@ auto-update do agente. Ver [09-ROADMAP.md](09-ROADMAP.md).
 | `POST /api/site/beacon` | força uma batida agora, sem esperar os 10 s. `?serverId=` limita a um |
 
 O `GET /api/site/status` traz também `domains[]`: os assuntos de **rede** (`store`, `kits`, `vips`) que o site está escrevendo, com a última versão aplicada e o erro do laço. Lista vazia = ninguém do outro lado manda em nada. Enquanto um assunto aparece ali, o snapshot do site **substitui** o que o painel local editar — ver [`Docs/23`](23-CONFIG-PELO-SITE.md).
+
+### `catalog`: "o catálogo não sai há horas — é defeito?"
+
+A mesma resposta traz `catalog`, e o campo que importa é **`inSync`**:
+
+| `inSync` | O que significa |
+|---|---|
+| `true` | ninguém mexeu na loja. O silêncio é o **certo**, por mais longo que seja |
+| `false` | há mudança presa que não está saindo. `reason` diz por quê |
+
+A distinção existe porque o push **só sai quando o catálogo muda**: a `version`
+é o hash do conteúdo, e o `generatedAt` fica de fora dele de propósito — se
+entrasse, o catálogo inteiro atravessaria a internet a cada volta do relógio de
+60 s. Um `lastPushAt` de ontem, portanto, é o estado normal de uma loja que
+ninguém edita.
+
+> **Isto nasceu de um chamado.** *"O agent está online mas não envia o catálogo
+> há 22 h — confira `SITE_CATALOG_PUSH_ENABLED` e a tela de status."* A flag
+> estava ligada, a tela não falava de catálogo, e a resposta só saiu abrindo o
+> banco à mão para comparar dois hashes. Eram iguais: ninguém tinha mexido na
+> loja. O que faltava não era conserto, era este campo.
+
+Os outros:
+
+| Campo | |
+|---|---|
+| `enabled` | o `SITE_CATALOG_PUSH_ENABLED` do agente |
+| `running` | o espelho foi construído. Precisa de `enabled` **e** de pelo menos um servidor pareado com carteira |
+| `reason` | preenchido só quando algo está parado; `null` em regime |
+| `version` | o hash do catálogo **como ele está agora** |
+| `lastPushAt` | o último push que SAIU — não a última rodada do relógio. Zera no restart do agente; use o `at` de `mirrored[]`, que é persistido |
+| `lastPushError` | o `error_code` cru do site ([`Docs/20` §5.9](20-INTEGRACAO-OZCOIN-AGENT.md)) |
+| `mirrored[]` | por servidor: a versão que aquele destino **confirmou** e quando |
+
+`running: false` tem duas causas, e o `reason` as separa porque o conserto é
+diferente: `SITE_CATALOG_PUSH_ENABLED=0` (alguém desligou) e **nenhuma carteira
+remota** (não há para quem mandar). A segunda é a traiçoeira — a integração
+parece ligada, o beacon responde `active`, e o catálogo simplesmente nunca
+viaja.
 | `POST /api/servers/:id/store/purchases/:purchaseId/settle` | fecha uma compra presa, **com prova**. É o botão que o relógio de 60 s tem no braço, e chama a mesma função |
 
 E `POST /api/servers/:id/store/buy` ganhou um status: **202**, para o desfecho
