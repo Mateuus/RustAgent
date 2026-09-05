@@ -281,6 +281,25 @@ arquivos do seu pacote que estão fora do alfabeto.
 Do seu lado, a contrapartida é honrar `INVALID_SHORTNAME` como **permanente**.
 As outras cinco `reason` são retentáveis.
 
+**A terceira ponta desse mesmo laço — corrigida em 05/09/2026, e é do nosso
+lado.** A regra acima vale igualmente para o item que **você** declarou com
+`imageSha: null`, que no contrato significa *"o agente não tem ícone para esse
+item"*. O site estava contando esses como "faltando", e como você só para de
+mandar quando `missingImageCount` zera, a contagem **travava** e você reenviaria
+para sempre um ícone que não existe.
+
+Medimos no dev: **27 itens** — `researchpaper`, `vehicle.chassis`, `pooltable`,
+`jukebox`, `dartboard`, os cinco `rifle.ak.glass*`, e mais. Com a correção,
+`missingImageCount` foi de **27 para 0**, e eles passaram a aparecer como *"sem
+ícone no jogo"* — que é fato, não pendência.
+
+**Você não precisa mudar nada, e a etiqueta não sobe:** nenhum byte da
+requisição ou da resposta mudou. Era o site pedindo o impossível. A regra geral,
+escrita de uma vez só:
+
+> O site nunca lista como faltando o que ele sabe que não virá — seja porque
+> recusa o shortname por formato, seja porque você disse `imageSha: null`.
+
 ### 3.4 O espelho é SNAPSHOT — mande sempre o catálogo inteiro
 
 Item que **sumiu do `items[]`** é marcado como removido, igual a quem veio com
