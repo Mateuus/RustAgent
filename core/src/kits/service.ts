@@ -50,7 +50,7 @@ import { assertSteamId } from '../bans/service.js';
 import type { KitRecord, KitsRepository } from '../db/kits-repository.js';
 import type { PlayerEventInput } from '../db/players-repository.js';
 import type { VipsRepository } from '../db/vips-repository.js';
-import { firstJsonLine } from '../game/plugin-contract.js';
+import { describeGiveError, firstJsonLine } from '../game/plugin-contract.js';
 import { ApiError } from '../http/error-response.js';
 import type { LoadoutItem } from '../loadouts/items.js';
 import type { Logger } from '../logger.js';
@@ -626,43 +626,6 @@ export class KitStore {
         'não consegui registrar o kit na ficha do jogador',
       );
     }
-  }
-}
-
-/**
- * O código do plugin vira uma frase que diz o que fazer.
- *
- * ####  "PLAYER_DEAD" NÃO É UMA EXPLICAÇÃO  ####
- *
- * MEDIDO no `server01`: um jogador CONECTADO mas morto faz o
- * `origemz.give` responder `{"ok":false,"error":"PLAYER_DEAD"}`.
- * Ou seja, "está online" não basta — e quem lê o histórico do
- * resgate precisa saber que basta renascer, em vez de abrir um
- * chamado.
- *
- * O código cru continua no log do agente; o que fica gravado no
- * claim (e o que a tela mostra) é a frase.
- */
-function describeGiveError(code: string): string {
-  switch (code) {
-    case 'PLAYER_NOT_FOUND':
-      return 'o jogador saiu do servidor antes da entrega';
-    case 'PLAYER_DEAD':
-      return 'o jogador está morto — ele precisa renascer para receber';
-    case 'PLAYER_SLEEPING':
-      return 'o jogador está dormindo';
-    case 'ITEM_NOT_FOUND':
-      return 'o jogo não conhece este shortname';
-    case 'INVENTORY_FULL':
-      return 'o inventário está cheio e não deu para largar no chão';
-    case 'DROP_FAILED':
-      return 'não deu para largar o item no chão';
-    case 'TOO_MANY_STACKS':
-      return 'a quantidade pedida daria pilhas demais';
-    case 'INVALID_AMOUNT':
-      return 'a quantidade está fora da faixa que o jogo aceita';
-    default:
-      return code;
   }
 }
 

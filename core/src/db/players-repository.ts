@@ -78,7 +78,15 @@ export interface PlayerServerRecord {
  * tabela. Acrescentar um valor aqui SEM a migração faria o `INSERT`
  * estourar no banco — e só na máquina de quem já está de pé.
  */
-export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'vip' | 'kit' | 'compra';
+export type PlayerEventKind =
+  | 'join'
+  | 'leave'
+  | 'kick'
+  | 'teleport'
+  | 'vip'
+  | 'kit'
+  | 'compra'
+  | 'item';
 
 export interface PlayerEventRecord {
   readonly id: number;
@@ -568,8 +576,27 @@ function toEvent(row: PlayerEventRow): PlayerEventRecord {
   };
 }
 
-/** Os mesmos valores do `CHECK` da tabela. Ver `PlayerEventKind`. */
-const EVENT_KINDS: readonly string[] = ['join', 'leave', 'kick', 'teleport', 'vip', 'kit'];
+/**
+ * Os mesmos valores do `CHECK` da tabela. Ver `PlayerEventKind`.
+ *
+ * ####  ESQUECER UM AQUI NÃO QUEBRA NADA — E ESSE É O PROBLEMA  ####
+ *
+ * `compra` entrou na tabela na 017 e não entrou nesta lista: cada
+ * compra lida de volta virava `join` silenciosamente, e a ficha
+ * mostrava uma entrada onde houve uma venda. Nenhum erro, nenhum
+ * log — só a linha errada. Migração que mexe no `CHECK` mexe aqui
+ * junto.
+ */
+const EVENT_KINDS: readonly string[] = [
+  'join',
+  'leave',
+  'kick',
+  'teleport',
+  'vip',
+  'kit',
+  'compra',
+  'item',
+];
 
 function isEventKind(value: string): value is PlayerEventKind {
   return EVENT_KINDS.includes(value);

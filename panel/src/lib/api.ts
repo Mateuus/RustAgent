@@ -555,6 +555,31 @@ export interface PlayersSnapshot {
 }
 
 /**
+ * Onde o item entregue deve parar.
+ *
+ * `auto` é o que a loja e os kits usam: tenta o inventário e larga
+ * no chão o que não couber. `inventory` prefere NÃO entregar a ver
+ * o item no chão de uma base cheia de gente — ele recusa com
+ * `INVENTORY_FULL`. `drop` larga direto, que é o modo de entregar
+ * um veículo... e de entregar uma armadilha.
+ */
+export type GiveMode = 'auto' | 'inventory' | 'drop';
+
+/** O teto por chamada do `origemz.give`. Igual ao do plugin. */
+export const MAX_GIVE_AMOUNT = 100_000;
+
+/**
+ * Quantas pilhas uma entrega pode criar, no plugin.
+ *
+ * O limite real por chamada é `min(MAX_GIVE_AMOUNT, 100 × pilha
+ * máxima do item)`: flecha (pilha 64) para em 6400, AK (pilha 1)
+ * para em 100. O catálogo sabe a pilha máxima, então a tela avisa
+ * ANTES de gastar um comando de RCON — quem recusa de verdade
+ * continua sendo o plugin, com `TOO_MANY_STACKS`.
+ */
+export const MAX_GIVE_STACK_PIECES = 100;
+
+/**
  * Uma mensagem do histórico de chat do SERVIDOR.
  *
  * Não é um buffer do agente: vem do `chat.tail`, que o jogo mantém
@@ -708,7 +733,12 @@ export type PlayerEventKind =
   // Os dois entraram com a migração 014: ganhar VIP e resgatar kit
   // são acontecimentos, e a ficha mostra UMA linha do tempo.
   | 'vip'
-  | 'kit';
+  | 'kit'
+  // A compra veio com a 017 e demorou a chegar aqui; o item, com a
+  // 040. Os dois são o que o suporte procura quando alguém aparece
+  // com o que não devia ter.
+  | 'compra'
+  | 'item';
 
 export interface PlayerEvent {
   at: string;
@@ -1576,6 +1606,34 @@ export const agent = {
       `/api/servers/${encodeURIComponent(id)}/players/${encodeURIComponent(steamId)}/kick`,
       { method: 'POST', body: reason === undefined ? {} : { reason } },
     ),
+
+  /**
+   * Põe um item na mão de um jogador CONECTADO.
+   *
+   * `skinId` é string de dígitos, e não número: um id de skin passa
+   * de 2^53 e não sobrevive a um `number` — o mesmo motivo do
+   * SteamID. `"0"` é sem skin.
+   *
+   * A resposta separa `given` de `dropped` porque a diferença
+   * importa: o que não coube foi para o CHÃO, onde qualquer um
+   * pega, e quem entregou precisa saber disso na hora.
+   */
+  givePlayerItem: (
+    id: string,
+    steamId: string,
+    item: { shortname: string; amount: number; skinId: string; mode: GiveMode },
+  ) =>
+    api<{
+      ok: true;
+      steamId: string;
+      delivered: 'inventory' | 'drop' | 'mixed';
+      given: number;
+      dropped: number;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/players/${encodeURIComponent(steamId)}/give`, {
+      method: 'POST',
+      body: item,
+    }),
 
   /**
    * As últimas mensagens do histórico do servidor.

@@ -636,6 +636,8 @@ que resolve cada uma é outra coisa.
 |---|---|
 | `GET /api/servers/:id/players` | a lista, com a fonte declarada |
 | `POST /api/servers/:id/players/:steamId/kick` | `{ "reason": "…" }` (opcional) |
+| `POST /api/servers/:id/players/:steamId/teleport` | `{ "x": …, "z": …, "y": … }` — o `y` é opcional |
+| `POST /api/servers/:id/players/:steamId/give` | `{ "shortname": "…", "amount": …, "skinId": "0", "mode": "auto" }` |
 
 **A fonte não é escolha de quem chama.** Com o `OrigemZAgent` ligado naquele
 servidor, o agente usa `origemz.players`, que dá posição, vida, ping, tempo de
@@ -704,6 +706,50 @@ verdadeiro. Ver `POST /api/servers/:id/plugins` para o estado de cada plugin.
 
 O `kick` age sobre quem está **conectado** — expulsar é tirar da partida agora,
 não impedir de voltar. Para impedir, o caminho é a BanList.
+
+### Dar um item
+
+`POST /api/servers/:id/players/:steamId/give` põe um item na mão de quem está
+**conectado**. Só `shortname` e `amount` são obrigatórios; `skinId` vem `"0"` e
+`mode` vem `"auto"`.
+
+```json
+{ "ok": true, "steamId": "76561198000000000",
+  "delivered": "mixed", "given": 497, "dropped": 3,
+  "message": "Entregue: 497 no inventário e 3 no chão — …" }
+```
+
+**Pelo mesmo caminho do kit e da loja**, o `origemz.give` do `OrigemZAgent`, e
+não o `inventory.give` nativo. O nativo cria **uma** pilha com o total pedido —
+MEDIDO: 3500 de madeira viram um slot com 3500, e cinco AKs viram uma pilha de
+cinco. O plugin fatia em pilhas de verdade. Dois caminhos entregariam diferente,
+e a diferença só apareceria no inventário do jogador.
+
+`given` e `dropped` vêm separados porque a diferença importa: o que não coube foi
+para o **chão**, onde qualquer um pega. `mode` decide o que fazer nessa hora —
+`auto` larga o resto no chão (é o modo da loja), `inventory` recusa com `409
+INVENTORY_FULL` sem largar nada, `drop` larga tudo aos pés dele.
+
+`skinId` é **string de dígitos**, e não número: um id de skin passa de 2^53 e não
+sobrevive a um `number` de JavaScript — o mesmo motivo do SteamID. O `shortname`
+vai para a linha de comando do console, então espaço e aspa são recusados na
+borda (`400`): eles fatiariam o comando e a entrega faria outra coisa, em
+silêncio.
+
+As recusas do plugin viram status com significado — `400` é "conserte o pedido"
+(`ITEM_NOT_FOUND`, `INVALID_AMOUNT`, `TOO_MANY_STACKS`), `409` é "tente daqui a
+pouco" (`PLAYER_DEAD`, `PLAYER_SLEEPING`, `INVENTORY_FULL`, `DROP_FAILED`) e
+`404` é `PLAYER_NOT_FOUND`. Responder tudo como `400` mandaria conferir a
+quantidade quando o problema é que o jogador está dormindo.
+
+**O teto de pilhas é do plugin.** Ele recusa acima de 100 pedaços, então o
+máximo real por chamada é `min(100000, 100 × pilha máxima do item)`: flecha
+(pilha 64) para em 6400, AK (pilha 1) para em 100. Quem conhece a pilha máxima é
+o catálogo de itens, e é o painel que avisa antes de gastar o comando.
+
+Toda entrega fica na ficha do jogador (`kind: "item"`) com quem pediu. Dar item é
+o poder mais fácil de abusar que este painel tem: não derruba ninguém, não
+aparece no log do jogo, e o que ele cria vale dinheiro no servidor.
 
 ### A imagem do mapa
 
@@ -1121,10 +1167,16 @@ número. Um jogador dormindo continua conectado no Rust e continua online aqui:
               "events": [ { "at": "…", "kind": "kill", "…": "…" } ] } }
 ```
 
-`kind` é `join`, `leave`, `kick`, `teleport`, `ban` ou `unban`. Os dois últimos
-**não são gravados**: eles são lidos da tabela `bans` na hora da resposta, com
-quem aplicou e quem revogou. Um ban de rede vem com `serverId: null` — ele não é
-de servidor nenhum.
+`kind` é `join`, `leave`, `kick`, `teleport`, `vip`, `kit`, `compra`, `item`,
+`ban` ou `unban`. Os dois últimos **não são gravados**: eles são lidos da tabela
+`bans` na hora da resposta, com quem aplicou e quem revogou. Um ban de rede vem
+com `serverId: null` — ele não é de servidor nenhum.
+
+Os quatro do meio são acontecimentos da vida dele no servidor: ganhou ou perdeu
+VIP, resgatou um kit, comprou na loja, recebeu um item das mãos de um admin. A
+lista é fechada no banco (`CHECK`), então acrescentar um `kind` é uma migração —
+e a lista do repositório precisa crescer junto, ou o valor novo é lido de volta
+como `join` sem erro nenhum.
 
 **`sample` é a estrutura do que ainda não é medido**, e vem num campo separado
 de propósito. Kill e morte não existem hoje: perguntamos ao servidor

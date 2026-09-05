@@ -48,14 +48,19 @@ import type { OpsRcon } from '../ops/service.js';
 import { RconError } from '../rcon/errors.js';
 import { gridLabel, worldGrid, type WorldGrid } from './grid.js';
 import {
+  buildGiveCommand,
   buildPlayersCommand,
   buildTeleportCommand,
+  describeGiveError,
   firstJsonLine,
+  giveResponseSchema,
   PLAYER_ACTIONS_PLUGIN,
   PLAYERS_DEFAULT_LIMIT,
   PLAYERS_PLUGIN,
+  PLUGIN_COMMANDS,
   playersResponseSchema,
   teleportResponseSchema,
+  type GiveMode,
   type Position,
 } from './plugin-contract.js';
 
@@ -460,6 +465,108 @@ export async function teleportPlayer(
   }
 
   return { position: parsed.data.position, heightAdjusted: parsed.data.heightAdjusted };
+}
+
+/**
+ * Põe um item na mão de um jogador CONECTADO.
+ *
+ * ####  É O MESMO COMANDO DO KIT E DA LOJA  ####
+ *
+ * `origemz.give`, com os mesmos cinco argumentos e a mesma
+ * tradução de erro. Um caminho próprio para a mão do admin
+ * (`inventory.give` nativo, por exemplo) entregaria DIFERENTE do
+ * que a loja entrega — o nativo cria uma pilha só com o total
+ * pedido, e é justamente esse o defeito que o fatiamento do plugin
+ * existe para consertar.
+ *
+ * ####  QUEM NÃO ESTÁ CONECTADO NÃO RECEBE  ####
+ *
+ * E isso não é limitação do agente: o item nasce no inventário de
+ * um `BasePlayer`, que só existe com o jogador no servidor. Dizer
+ * "entregue" para quem está offline seria prometer o que não
+ * aconteceu — o plugin responde `PLAYER_NOT_FOUND` e a recusa sobe
+ * como 404, com a frase.
+ *
+ * @throws {ApiError} 503 sem RCON, 404 jogador fora, 400 pedido
+ * impossível, 409 estado do jogo impede agora, 502 fora do
+ * contrato.
+ */
+export async function givePlayerItem(
+  serverId: string,
+  rcon: OpsRcon,
+  steamId: string,
+  input: {
+    readonly shortname: string;
+    readonly amount: number;
+    readonly skinId: string;
+    readonly mode: GiveMode;
+  },
+): Promise<{
+  readonly delivered: 'inventory' | 'drop' | 'mixed';
+  readonly given: number;
+  readonly dropped: number;
+}> {
+  assertConnected(serverId, rcon);
+
+  const raw = await rcon.send(buildGiveCommand({ steamId, ...input }));
+  const parsed = giveResponseSchema.safeParse(firstJsonLine(raw));
+
+  if (!parsed.success) {
+    // Resposta vazia é o sintoma de comando inexistente: o console
+    // do Rust não reclama de um comando que não conhece, ele
+    // apenas se cala. Ver `players-fonte.test.ts` — foi assim que
+    // a aba inteira morreu em 04/09/2026.
+    throw new ApiError(
+      'PLUGIN_INVALID_RESPONSE',
+      raw.trim() === ''
+        ? `O ${PLAYERS_PLUGIN} não respondeu ao ${PLUGIN_COMMANDS.give}. Ele está carregado ` +
+          'neste servidor? O comando vem desse plugin — a aba Plugins mostra se o Oxide ' +
+          'conseguiu compilá-lo.'
+        : `O ${PLAYERS_PLUGIN} respondeu à entrega fora do contrato: ${raw.trim().slice(0, 300)}`,
+      502,
+    );
+  }
+
+  if (!parsed.data.ok) {
+    const { error } = parsed.data;
+
+    throw new ApiError(
+      error,
+      `Não deu para entregar: ${describeGiveError(error)}.`,
+      giveStatus(error),
+    );
+  }
+
+  return parsed.data;
+}
+
+/**
+ * O status HTTP de cada recusa do `origemz.give`.
+ *
+ * A separação não é decorativa: 400 é "conserte o pedido", 409 é
+ * "tente de novo daqui a pouco" e 404 é "essa pessoa não está
+ * aqui". Responder tudo como 400 mandaria o admin conferir a
+ * quantidade quando o problema é que o jogador está dormindo.
+ */
+function giveStatus(code: string): number {
+  switch (code) {
+    case 'PLAYER_NOT_FOUND':
+      return 404;
+    case 'ITEM_NOT_FOUND':
+    case 'INVALID_AMOUNT':
+    case 'INVALID_ARGS':
+    case 'TOO_MANY_STACKS':
+      return 400;
+    case 'PLAYER_DEAD':
+    case 'PLAYER_SLEEPING':
+    case 'INVENTORY_FULL':
+    case 'DROP_FAILED':
+      return 409;
+    default:
+      // `ITEM_CREATE_FAILED`, `INTERNAL_ERROR` e o que o plugin
+      // vier a criar: defeito do outro lado, não do pedido.
+      return 502;
+  }
 }
 
 // ------------------------------------------------------------

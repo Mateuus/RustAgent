@@ -143,7 +143,7 @@ function snapshot(count: number, over: Partial<PlayersSnapshot> = {}): PlayersSn
     total: count,
     players: list,
     world: { size: 4000, cellSize: 146.3, cols: 28, rows: 28 },
-    plugin: { name: 'OrigemZAgent', id: 1, enabled: true },
+    plugin: { name: 'OrigemZAgent', id: 1, enabled: true, fallback: null },
     missing: [],
     ...over,
   };

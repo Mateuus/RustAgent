@@ -3058,6 +3058,62 @@ ALTER TABLE spawn_status ADD COLUMN calories_max  REAL;
 ALTER TABLE spawn_status ADD COLUMN hydration_max REAL;
 `;
 
+// ------------------------------------------------------------
+//  040 — a ficha aceita "recebeu um item do admin"
+//
+//  ####  O CHECK DA 017 ESQUECEU DE CRESCER  ####
+//
+//  `kind` é uma lista fechada no banco, e a lista da 017 termina em
+//  `compra`. Gravar `item` ali levanta CHECK constraint failed — o
+//  INSERT da ficha morre, e com ele a rota que acabou de entregar
+//  um item que JÁ ESTÁ no inventário do jogador. Ou seja: sem esta
+//  migração, a entrega acontece e a resposta é 500.
+//
+//  ####  POR QUE UM TIPO PRÓPRIO, E NÃO 'kit'  ####
+//
+//  Kit é uma coisa que o JOGADOR resgatou, dentro de uma regra que
+//  o admin escreveu antes. Item dado pelo painel é uma coisa que um
+//  ADMIN fez, agora, sem regra nenhuma — e é a segunda que alguém
+//  vai auditar. Empilhar as duas no mesmo `kind` esconderia
+//  exatamente a linha que se procura.
+//
+//  A recriação da tabela é o preço de um CHECK no SQLite: não
+//  existe ALTER que o troque. O `INSERT ... SELECT` leva tudo, e o
+//  `id` vai junto para a linha do tempo não se reordenar.
+// ------------------------------------------------------------
+const PLAYER_EVENTS_ITEM_SCHEMA = `
+ALTER TABLE player_events RENAME TO player_events_039;
+
+CREATE TABLE player_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  steam_id  TEXT NOT NULL,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  --   'join'      entrou (a varredura o viu chegar)
+  --   'leave'     saiu   (a varredura o viu sumir)
+  --   'kick'      expulso pelo painel
+  --   'teleport'  movido pelo painel
+  --   'vip'       ganhou, renovou ou perdeu um nível
+  --   'kit'       resgatou (ou tentou resgatar) um kit
+  --   'compra'    comprou algo na loja
+  --   'item'      recebeu um item das mãos de um admin
+  kind TEXT NOT NULL
+    CHECK (kind IN ('join', 'leave', 'kick', 'teleport', 'vip', 'kit', 'compra', 'item')),
+
+  at INTEGER NOT NULL,
+  actor TEXT,
+  detail TEXT
+);
+
+INSERT INTO player_events (id, steam_id, server_id, kind, at, actor, detail)
+SELECT id, steam_id, server_id, kind, at, actor, detail FROM player_events_039;
+
+DROP TABLE player_events_039;
+
+CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -3127,6 +3183,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 37, name: 'site-commands', sql: SITE_COMMANDS_SCHEMA },
   { id: 38, name: 'site-deliveries-vip-revoke', sql: SITE_DELIVERIES_VIP_REVOKE_SCHEMA },
   { id: 39, name: 'spawn-status-range', sql: SPAWN_STATUS_RANGE_SCHEMA },
+  // A 040 recria player_events: como a 017, ela precisa rodar
+  // depois de toda migração que toque essa tabela.
+  { id: 40, name: 'player-events-item', sql: PLAYER_EVENTS_ITEM_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

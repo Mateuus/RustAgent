@@ -111,7 +111,7 @@ beforeEach(() => {
   repository = new ItemsRepository(db);
   meta = new MetaRepository(db);
 
-  repository.replace({ items: SCAN, protocol: '2633.288.1', source: 'rcon', at: NOW });
+  repository.replace({ items: SCAN, protocol: '2633.288.1', at: NOW });
 });
 
 afterEach(() => {

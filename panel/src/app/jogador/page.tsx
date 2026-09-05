@@ -556,6 +556,10 @@ const EVENT_LABEL: Record<PlayerEvent['kind'], string> = {
   // detalhe do evento já diz qual nível e qual kit.
   vip: 'VIP',
   kit: 'kit',
+  compra: 'compra',
+  // "recebeu" e não "item": o que se procura na ficha é o VERBO —
+  // alguém deu isso a ele, não foi ele que pegou.
+  item: 'recebeu item',
 };
 
 function Historico({ steamId }: { steamId: string }) {
