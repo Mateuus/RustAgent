@@ -23,6 +23,7 @@
 // ============================================================
 
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 
 import { OperatorAuth } from './auth/operator.js';
 import { BanExpiryWatcher } from './bans/expiry-watcher.js';
@@ -47,6 +48,7 @@ import { LoadoutSync } from './loadouts/sync.js';
 import { VipExpiryWatcher } from './vip/expiry-watcher.js';
 import { VipList } from './vip/service.js';
 import { VipSiteMirror } from './vip/site-mirror.js';
+import { ItemsSiteMirror } from './game/items-mirror.js';
 import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader, type PlayersSnapshot } from './game/players.js';
@@ -851,6 +853,36 @@ async function main(): Promise<void> {
         });
 
   vipSiteMirror?.start();
+
+  // ####  O CATÁLOGO DE ITENS, E AS IMAGENS COM ELE  ####
+  //
+  // Diferente dos outros dois espelhos, este não conta decisão
+  // nossa: conta o que a Facepunch pôs no jogo, para o admin do
+  // site cadastrar produto escolhendo numa lista em vez de digitar
+  // `rifle.ak` na mão.
+  //
+  // E é o único que carrega imagem. Os ícones não existem no
+  // servidor dedicado — só na instalação do CLIENTE do Rust —,
+  // então o pacote gerado do painel é a única fonte que o site tem.
+  // Ver game/items-mirror.ts e Docs9.
+  const itemsSiteMirror =
+    siteWallets.size === 0
+      ? null
+      : new ItemsSiteMirror({
+          clients: new Map([...siteClients].filter(([id]) => siteWallets.has(id))),
+          repository: itemsRepository,
+          meta,
+          // `panel/out` é o build que este processo serve; o
+          // `panel/public` é a fonte, e só existe na máquina de
+          // quem desenvolve. O primeiro que responder vale.
+          iconDirs: [
+            join(agent.paths.root, 'panel', 'out', 'item-icons'),
+            join(agent.paths.root, 'panel', 'public', 'item-icons'),
+          ],
+          logger,
+        });
+
+  itemsSiteMirror?.start();
 
   // O que a tela de diagnóstico lê. Um mapa por servidor PAREADO:
   // "a loja parou" quase sempre é um servidor só, e uma resposta

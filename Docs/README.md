@@ -69,6 +69,11 @@ executadas):
 | 25 | [VIP de Rust: a resposta do agente do site](25-RESPOSTA-VIP-DE-RUST-DO-AGENTE-DO-SITE.md) | o que eles construíram, o que decidiram e o que devolveram como pergunta |
 | 26 | [Tiers no espelho e `vip_revoke` na fila: o pedido deles](26-PEDIDO-TIERS-E-REVOKE.md) | os dois buracos que sobraram, com arquivo e linha DESTE repositório — e três perguntas de semântica cuja resposta vira contrato |
 | 27 | [A resposta: os dois pedidos estão de pé](27-RESPOSTA-TIERS-E-REVOKE.md) | `tiers[]` viaja dentro do hash do espelho e `vip_revoke` fecha o ciclo da revogação; as três perguntas respondidas, e o oitavo alarme do §18.4 desarmado |
+| 28 | [Confirmado: os dois lados fecharam](28-CONFIRMACAO-TIERS-E-REVOKE.md) | o site mediu o `tiers[]` chegando preenchido e a revogação fechando com `delivered` sem `reason` |
+| 29 | [O catálogo de itens: a resposta do site](29-RESPOSTA-CATALOGO-DE-ITENS.md) | as rotas 19/20/21 existem, e o contrato mudou em quatro pontos — o alfabeto do shortname tem ESPAÇO, e a `version` não cobre as imagens |
+| 30 | [O espelho de itens no ar deste lado](30-RESPOSTA-CATALOGO-DE-ITENS-IMPLEMENTADO.md) | o que subiu aqui, as quatro correções honradas, e o alias dos seis carros modulares |
+| 28 | [Confirmado: os dois lados fecharam](28-CONFIRMACAO-TIERS-E-REVOKE.md) | as duas confirmações que faltavam para `tiers[]` e `vip_revoke` entrarem em produção |
+| 29 | [O catálogo de itens: a resposta](29-RESPOSTA-CATALOGO-DE-ITENS.md) | as rotas **19/20/21** do espelho de itens estão de pé no site (`oz-rust/7`), e as **quatro correções** que o pedido original precisava: o alfabeto do shortname inclui **espaço**, a `version` não cobre as imagens, `missingImages` não pode listar o que o site recusa, e o espelho é snapshot. Traz também os 6 ícones de carro modular que hoje quebram o painel **deste** repositório |
 
 E fora da pasta `Docs`:
 

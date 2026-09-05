@@ -8539,8 +8539,13 @@ ninguém sabe se o item saiu.
 > dois lados**, então toda mudança desta seção sobe a etiqueta nos dois arquivos,
 > no mesmo commit.
 >
-> **O que mudou em `oz-rust/7`:** duas coisas, e as duas são **aditivas** — quem
-> fala a `/6` continua entendido. (a) O espelho de VIP passou a levar **`tiers[]`**
+> **O que mudou em `oz-rust/7`:** três coisas, e as três são **aditivas** — quem
+> fala a `/6` continua entendido. (c) Nasceu o **espelho do catálogo de itens do
+> jogo**: `POST /api/agent/items/mirror`, `GET /api/agent/items/mirror/version` e
+> `POST /api/agent/items/images` (as rotas 19, 20 e 21). É o único espelho que
+> carrega IMAGEM — os ícones não existem no servidor dedicado, só na instalação
+> do cliente do Rust, e o agente é a única ponta que pode entregá-los. Detalhe no
+> `Docs/29` e em `core/src/game/items-mirror.ts`. (a) O espelho de VIP passou a levar **`tiers[]`**
 > junto dos `vips[]`, DENTRO do hash da `version`, para o cadastro de produto do
 > site escolher o nível em vez de digitá-lo. (b) Nasceu o **`kind: 'vip_revoke'`**
 > na fila de entregas, com `payload: { tier }` — o caminho do estorno, do

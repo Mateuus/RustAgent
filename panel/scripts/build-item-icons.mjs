@@ -42,7 +42,7 @@
 // ============================================================
 
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -227,6 +227,27 @@ async function main() {
     const shortname = name.slice(0, -'.png'.length);
     try {
       await convert(join(itemsDir, name), join(OUT_DIR, `${shortname}.webp`));
+
+      // ####  O ALIAS DOS SEIS  ####
+      //
+      // O nome do arquivo do cliente NÃO é sempre o shortname. O
+      // dump do jogo traz as duas grafias para o mesmo `itemid` —
+      // `2module car.json` e `2module.car.json`, ambos -866121090 —
+      // e o `ItemManager` devolve a do PONTO, que é a que entra no
+      // catálogo do agente.
+      //
+      // Sem esta cópia, os seis carros modulares caem no
+      // placeholder do painel e o site os pede para sempre em
+      // `missingImages`. Renomear em vez de copiar não serve: se
+      // um wipe fizer o jogo devolver a grafia com espaço, quebra
+      // do outro lado. Custa 6 arquivos de ~1,7 KB.
+      if (shortname.includes(' ')) {
+        const alias = shortname.replaceAll(' ', '.');
+
+        if (alias !== shortname) {
+          await copyFile(join(OUT_DIR, `${shortname}.webp`), join(OUT_DIR, `${alias}.webp`));
+        }
+      }
     } catch (caught) {
       failures.push({ shortname, reason: caught instanceof Error ? caught.message : String(caught) });
     }

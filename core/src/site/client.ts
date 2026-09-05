@@ -319,6 +319,31 @@ export class SiteClient {
     return this.#call('POST', '/api/agent/vip/mirror', payload);
   }
 
+  // ---- catálogo de itens do JOGO ---------------------------
+
+  /**
+   * O que o jogo tem, contado ao site.
+   *
+   * ####  ELE É O ÚNICO QUE CARREGA IMAGEM  ####
+   *
+   * Os ícones não existem no servidor dedicado — só na instalação
+   * do CLIENTE do Rust. O agente carrega um pacote gerado offline
+   * e é a única ponta que pode entregá-los ao site, que por sua vez
+   * não tem CDN de onde buscar. Ver `game/items-mirror.ts` e
+   * Docs\29.
+   */
+  itemsMirrorVersion(): Promise<SiteResult<ItemsMirrorVersionBody>> {
+    return this.#call('GET', '/api/agent/items/mirror/version');
+  }
+
+  pushItemsMirror(payload: unknown): Promise<SiteResult<ItemsMirrorBody>> {
+    return this.#call('POST', '/api/agent/items/mirror', payload);
+  }
+
+  pushItemImages(images: readonly ItemImageUpload[]): Promise<SiteResult<ItemImagesBody>> {
+    return this.#call('POST', '/api/agent/items/images', { images });
+  }
+
   // ---- comandos --------------------------------------------
 
   /**
@@ -715,6 +740,61 @@ export interface MirrorBody {
   readonly accepted?: boolean;
   readonly version?: string;
   readonly storedAt?: string;
+}
+
+/**
+ * `GET /items/mirror/version`.
+ *
+ * ####  A CONTAGEM DE IMAGENS VEM JUNTO, E É POR ISSO QUE ELA EXISTE  ####
+ *
+ * A `version` cobre o catálogo, não os ícones. Um bootstrap de
+ * imagens que morra no meio deixa a version JÁ gravada do outro
+ * lado: sem `missingImageCount`, a rodada seguinte veria as duas
+ * versions batendo e as imagens que faltam nunca seriam pedidas.
+ * Ver Docs\29 §3.2.
+ */
+export interface ItemsMirrorVersionBody {
+  readonly ok?: boolean;
+  readonly version?: string | null;
+  readonly missingImageCount?: number;
+  readonly updatedAt?: string | null;
+}
+
+/** `POST /items/mirror`. */
+export interface ItemsMirrorBody {
+  readonly ok?: boolean;
+  readonly accepted?: boolean;
+  readonly version?: string;
+  readonly count?: number;
+  readonly removed?: number;
+  /** Os shortnames cujo ícone o site quer. Até 200 por resposta. */
+  readonly missingImages?: readonly string[];
+  /** Quantos faltam NO TOTAL, sem o teto de 200. */
+  readonly missingImageCount?: number;
+  readonly storedAt?: string;
+}
+
+/** Uma recusa do lote de imagens. Ela não derruba o lote. */
+export interface RejectedImageBody {
+  readonly shortname?: string;
+  readonly reason?: string;
+}
+
+/** `POST /items/images`. */
+export interface ItemImagesBody {
+  readonly ok?: boolean;
+  readonly stored?: number;
+  readonly urls?: Record<string, string>;
+  readonly rejected?: readonly RejectedImageBody[];
+}
+
+/** Uma imagem, como ela viaja. Ver `ItemsMirror`. */
+export interface ItemImageUpload {
+  readonly shortname: string;
+  readonly sha256: string;
+  readonly contentType: string;
+  /** O binário em base64. */
+  readonly data: string;
 }
 
 /** Um comando, como o site o manda. Tudo opcional: ver o bloco acima. */
