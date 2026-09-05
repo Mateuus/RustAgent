@@ -91,3 +91,21 @@ Configs/*.ini
 #  Ferramentas
 # ------------------------------------------------------------
 .pm2/
+
+# ------------------------------------------------------------
+#  .claude/  -  estado da FERRAMENTA, nao do projeto
+#
+#  ####  A ARMADILHA AQUI E O `git add -A`  ####
+#
+#  settings.local.json e preferencia DESTA maquina (quais hooks
+#  rodam aqui), e as worktrees dos subagentes nascem dentro do
+#  repositorio: um `git add -A` no meio de uma sessao levaria uma
+#  copia da arvore inteira junto, sem ninguem notar.
+#
+#  Configuracao que for do PROJETO mora em .claude/settings.json
+#  (sem o `local`), e essa e desfeita da regra - e o mesmo desenho
+#  dos OrigemZ*.cs la em cima: a pasta fica de fora, o que e nosso
+#  volta pela excecao.
+# ------------------------------------------------------------
+/.claude/*
+!/.claude/settings.json
