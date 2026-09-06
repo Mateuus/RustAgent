@@ -96,6 +96,25 @@ Os do **wipe** e das **mensagens** (Fase 6), no mesmo formato:
 | `MESSAGE_INVALID_SCHEDULE` / `MESSAGE_INVALID_TIMEZONE` | 422 | ritmo incoerente, ou fuso desconhecido neste runtime |
 | `SERVER_NOT_FOUND` | 404 | id desconhecido em `targets` ou no `broadcast` |
 
+Os do **ranking**, no mesmo formato. As rotas estão em
+`Docs/Ranking/20-PLANO-E-CONTRATOS.md` §9.1:
+
+| Código | HTTP | Significado |
+|---|---|---|
+| `RANKING_NOT_FOUND` | 404 | não existe ranking (a definição) com aquele id |
+| `RANKING_METRIC_UNKNOWN` | 400 | métrica fora do catálogo — a recusa é sobre a **pergunta**, e por isso não é lista vazia |
+| `RANKING_METRIC_TAKEN` | 409 | o id, ou a métrica, já são de outro ranking |
+| `RANKING_BUILTIN_LOCKED` | 409 | apagar um ranking `builtin`, ou trocar a métrica dele |
+| `RANKING_IN_USE` | 409 | apagar um ranking para o qual um item custom dá pontos |
+| `RANKING_PERIOD_NOT_FOUND` | 404 | período inexistente, de outro servidor, ou janela que não está aberta |
+| `RANKING_PERIOD_CLOSED` | 409 | fechar um período já fechado — a idempotência é por **período**, não por requisição, e a segunda chamada **não** abre um terceiro |
+| `RANKING_PERIOD_LIFETIME` | 409 | o "de sempre" não vira: ele existe para o ranking sobreviver ao wipe |
+| `RANKING_NOT_MEASURED` | 409 | o escopo pedido nunca teve coleta ativa ("sem dados" ≠ "zero") |
+| `RANKING_SCOPE_INVALID` | 400 | `scope=global` numa métrica com `global_eligible = 0`, ou escopo de servidor sem dizer qual |
+| `RANKING_COLLECTOR_OFF` | 503 | forçar um ciclo de coleta num agente que não tem coleta ligada |
+
+`PLUGIN_INVALID_RESPONSE` (502) já existe e cobre o lote fora do contrato.
+
 ---
 
 ## `GET /health` — sem autenticação
