@@ -182,6 +182,28 @@ export interface WipeBlueprints {
   }): number;
 }
 
+/**
+ * Quem vira as janelas do ranking quando o mundo troca.
+ *
+ * ####  UMA PORTA, E NÃO O REPOSITÓRIO INTEIRO  ####
+ *
+ * A máquina de passos do wipe não precisa saber o que é período,
+ * temporada ou pódio — ela precisa avisar que um mundo novo
+ * nasceu. Quem sabe o resto é `rankings/collector.ts`, que faz o
+ * MESMO trabalho quando o wipe é feito à mão.
+ *
+ * A implementação é `StatsCollector.rollOnWipe`.
+ */
+export interface WipeRankings {
+  onWipeDetected(input: {
+    readonly serverId: string;
+    /** A linha de `wipes` daquele mundo. */
+    readonly wipeId: number | null;
+    /** A execução que o criou — é ela que carrega a decisão do §3.4. */
+    readonly wipeRunId: number | null;
+  }): void;
+}
+
 export interface WipeRunnerDeps {
   readonly runs: WipeRunsRepository;
   readonly wipes: WipesRepository;
@@ -197,6 +219,11 @@ export interface WipeRunnerDeps {
   readonly resync?: ((serverId: string) => Promise<void>) | undefined;
   /** A Frente I. Sem ela, `wipe_except_vip` se comporta como `wipe`. */
   readonly blueprints?: WipeBlueprints | undefined;
+  /**
+   * A F3. Sem ela, o wipe executado pelo painel não vira a
+   * temporada — e a caixa de três estados da tela não faria nada.
+   */
+  readonly rankings?: WipeRankings | undefined;
   readonly logger?: Logger | undefined;
 }
 
@@ -1194,13 +1221,41 @@ export class WipeRunner implements WipeExecutor {
 
       const world = this.#deps.runs.get(serverId, request.runId)?.mapAfter ?? run.mapAfter;
 
-      this.#deps.wipes.record(serverId, {
+      const detected = this.#deps.wipes.record(serverId, {
         saveCreatedAt: saveCreatedAfter,
         level: world?.level ?? null,
         seed: world?.seed ?? null,
         worldSize: world?.worldSize ?? null,
         wipeRunId: request.runId,
       });
+
+      // ####  E AS JANELAS DO RANKING VIRAM AQUI  ####
+      //
+      // Depois do `record`, e não antes: é a linha de `wipes` que
+      // ancora o período novo, e sem o id dele a virada não teria
+      // como dizer a que mundo ela pertence.
+      //
+      // O `runId` vai junto porque é ele que carrega a decisão de
+      // três estados de `wipe_runs.open_ranking_season` — a caixa
+      // da tela de wipe. O coletor, que faz o mesmo trabalho para o
+      // wipe feito à mão, nunca a veria.
+      //
+      // E o try/catch é a regra de ouro deste passo: o mundo já
+      // nasceu, e nada aqui pode desfazê-lo. Uma virada que falha é
+      // uma pendência — a próxima rodada do coletor a refaz, porque
+      // ele compara o mesmo `SaveCreatedTime`.
+      if (this.#deps.rankings !== undefined) {
+        try {
+          this.#deps.rankings.onWipeDetected({
+            serverId,
+            wipeId: detected.id,
+            wipeRunId: request.runId,
+          });
+          notes.push('as janelas do ranking foram reavaliadas');
+        } catch (error) {
+          notes.push(`a virada do ranking não aconteceu (${toError(error).message})`);
+        }
+      }
 
       if (run.saveCreatedBefore !== null && run.saveCreatedBefore === saveCreatedAfter) {
         // A conferência independente, e a razão de a tabela `wipes`
