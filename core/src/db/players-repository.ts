@@ -345,6 +345,37 @@ export class PlayersRepository {
     return rows.map(toPlayerServer);
   }
 
+  /**
+   * O tempo acumulado de cada jogador NAQUELE servidor.
+   *
+   * ####  PARA QUE UMA LEITURA CRUA, SE `presenceOf` JÁ EXISTE  ####
+   *
+   * Porque a pergunta é outra. `presenceOf` responde sobre uma
+   * lista de jogadores conhecida; esta responde sobre o servidor
+   * inteiro, e quem a faz é o coletor do ranking — a cada 60 s, sem
+   * saber de antemão quem jogou.
+   *
+   * Ele guarda a marca d'água da rodada anterior em memória e soma
+   * a DIFERENÇA na métrica `time.played`. `played_seconds` é
+   * acumulado desde sempre e não sabe o que é período: copiá-lo
+   * daria o total de sempre em toda temporada. Ver
+   * `Docs/Ranking/20-PLANO-E-CONTRATOS.md` §8.4.
+   *
+   * A linha com zero VEM JUNTO, e não é desperdício: é ela que
+   * semeia a marca de quem acabou de chegar. Sem a semente, a
+   * primeira sessão dele inteira apareceria de uma vez como delta
+   * — e cairia toda no período em que ele desconectou.
+   */
+  playedSecondsOf(serverId: string): ReadonlyMap<string, number> {
+    const rows = this.#db
+      .prepare(
+        `SELECT steam_id, played_seconds FROM player_servers WHERE server_id = @server_id`,
+      )
+      .all({ server_id: serverId }) as { steam_id: string; played_seconds: number }[];
+
+    return new Map(rows.map((row) => [row.steam_id, row.played_seconds]));
+  }
+
   /** Os N últimos eventos daquele jogador, do mais novo ao mais velho. */
   events(steamId: string, limit: number): readonly PlayerEventRecord[] {
     const rows = this.#db

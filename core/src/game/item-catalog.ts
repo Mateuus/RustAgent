@@ -70,7 +70,7 @@ import { firstJsonLine, PLAYERS_PLUGIN as AGENT_PLUGIN } from './plugin-contract
 //      {"ok":true,"count":1252,"offset":0,"limit":250,"items":[
 //        {"shortname":"hat.wolf","displayName":"Wolf Headdress",
 //         "itemId":-1478212975,"category":"Attire","maxStack":1,
-//         "hasCondition":false}, …]}
+//         "hasCondition":false,"consumable":false}, …]}
 //
 //  `count` é o TOTAL do catálogo, e não o tamanho da página;
 //  `offset` e `limit` voltam JÁ NORMALIZADOS, então quem pede 5000
@@ -102,6 +102,21 @@ export const rustItemSchema = z.object({
   category: z.string(),
   maxStack: z.number().int(),
   hasCondition: z.boolean(),
+  /**
+   * A definição tem `ItemModConsumable`?
+   *
+   * ####  OPCIONAL, E É ISSO QUE SEGURA O PLUGIN VELHO  ####
+   *
+   * O campo nasceu em 06/09/2026, no `origemz.items`. Um servidor
+   * que ainda rode o plugin de antes responde sem ele — e exigi-lo
+   * aqui reprovaria a rodada INTEIRA (a leitura é tudo-ou-nada) e
+   * deixaria a rede sem catálogo nenhum por causa de um campo que
+   * só o cadastro de item custom usa.
+   *
+   * Ausente vira `NULL` na tabela: "ninguém perguntou", que é
+   * diferente de "não é consumível". Ver a migração 045.
+   */
+  consumable: z.boolean().optional(),
 });
 
 export const itemsOkSchema = z.object({

@@ -52,10 +52,30 @@ export interface ItemInput {
   readonly category: string;
   readonly maxStack: number;
   readonly hasCondition: boolean;
+  /**
+   * A `ItemDefinition` tem `ItemModConsumable`?
+   *
+   * ####  É O QUE DIZ SE "USAR" EXISTE NESTE ITEM  ####
+   *
+   * O `OnItemUse` do Oxide só dispara em quem tem esse mod, e o
+   * menu de contexto do item é montado pelo CLIENTE a partir da
+   * definição — não há como criar uma opção nova nele. Um item
+   * custom configurado para converter "só ao usar" em cima de um
+   * `trophy` fica INERTE, em silêncio.
+   *
+   * Ausente (ou `null`) = a varredura que gravou a linha é
+   * anterior a este campo (plugin velho, catálogo de antes da
+   * migração 045). É diferente de `false`, e a diferença é o que
+   * separa "o jogo disse que não" de "ninguém perguntou". Ver a
+   * migração 045.
+   */
+  readonly consumable?: boolean | null | undefined;
 }
 
 /** Um item guardado, com o que só a tabela sabe. */
 export interface ItemRecord extends ItemInput {
+  /** `null` = ninguém perguntou ainda. Ver `ItemInput.consumable`. */
+  readonly consumable: boolean | null;
   /** Epoch ms. Nunca muda depois da inserção. */
   readonly firstSeen: number;
   readonly lastSeen: number;
@@ -128,6 +148,8 @@ interface ItemRow {
   readonly category: string;
   readonly max_stack: number;
   readonly has_condition: number;
+  /** 1/0, ou NULL quando a varredura não trouxe o campo. */
+  readonly consumable: number | null;
   readonly first_seen: number;
   readonly last_seen: number;
 }
@@ -147,16 +169,27 @@ interface ItemRow {
  */
 const UPSERT_ITEM = `
 INSERT INTO items
-     (shortname, display_name, item_id, category, max_stack, has_condition,
+     (shortname, display_name, item_id, category, max_stack, has_condition, consumable,
       first_seen, last_seen)
      VALUES (@shortname, @display_name, @item_id, @category, @max_stack, @has_condition,
-             @at, @at)
+             @consumable, @at, @at)
 ON CONFLICT (shortname) DO UPDATE SET
      display_name  = excluded.display_name,
      item_id       = excluded.item_id,
      category      = excluded.category,
      max_stack     = excluded.max_stack,
      has_condition = excluded.has_condition,
+     -- ####  O NULO DA RODADA NOVA NÃO APAGA O QUE JÁ SE SABIA  ####
+     --
+     -- Um plugin velho (anterior ao campo consumable) devolve o
+     -- catálogo sem ele. Gravar o nulo por cima faria a rede
+     -- ESQUECER quais itens são consumíveis toda vez que um
+     -- servidor com plugin desatualizado fosse o primeiro a subir —
+     -- e o cadastro voltaria a aceitar a combinação inerte.
+     --
+     -- O coalesce mantém a resposta que alguém já deu; quem
+     -- responde de novo, sobrescreve.
+     consumable    = coalesce(excluded.consumable, items.consumable),
      last_seen     = excluded.last_seen
 `;
 
@@ -334,6 +367,14 @@ export class ItemsRepository {
           // 1/0: o better-sqlite3 não aceita boolean como
           // parâmetro, e o SQLite não tem tipo booleano.
           has_condition: item.hasCondition ? 1 : 0,
+          // `undefined` vira NULL, que é "ninguém perguntou" — e o
+          // `coalesce` do UPSERT preserva o que já se sabia.
+          consumable:
+            item.consumable === undefined || item.consumable === null
+              ? null
+              : item.consumable
+                ? 1
+                : 0,
           at,
         });
       }
@@ -398,6 +439,10 @@ function toItem(row: ItemRow, scannedAt: number | null): ItemRecord {
     category: row.category,
     maxStack: row.max_stack,
     hasCondition: row.has_condition === 1,
+    // `null` é "ninguém perguntou", e NÃO "não é consumível" — ver
+    // `ItemInput.consumable`. Quem decide o que fazer com o "não
+    // sei" é quem lê: a rota de custom-items só recusa o `false`.
+    consumable: row.consumable === null ? null : row.consumable === 1,
     firstSeen: row.first_seen,
     lastSeen: row.last_seen,
     // Sem carimbo de varredura não dá para afirmar que sumiu, e

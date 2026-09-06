@@ -476,3 +476,57 @@ describe('GET /api/items', () => {
     expect((response.json() as { error: string }).error).toBe('ITEM_NOT_FOUND');
   });
 });
+
+
+// ------------------------------------------------------------
+//  O campo `consumable`, e o nulo que NÃO apaga
+// ------------------------------------------------------------
+//
+//  Ele nasceu em 06/09/2026 para o cadastro de item custom poder
+//  recusar "converte só ao usar" em cima de um item que não tem
+//  como ser usado. Ver a migração 045.
+
+describe('o `consumable` do catálogo', () => {
+  it('atravessa a leitura do jogo até a resposta da API', async () => {
+    harness.game.catalog = [
+      { ...AK, consumable: false },
+      { ...item('bandage', 'Bandage', 'Medical'), consumable: true },
+    ];
+
+    await harness.catalog.sync('pvp1');
+
+    const response = await harness.app.inject({ method: 'GET', url: '/api/items?q=bandage' });
+    const body = response.json() as { items: { shortname: string; consumable: boolean | null }[] };
+
+    expect(body.items[0]?.consumable).toBe(true);
+    expect(harness.repository.get('rifle.ak')?.consumable).toBe(false);
+  });
+
+  it('o plugin que ainda não reporta o campo deixa "não sei", e NÃO "não"', async () => {
+    // `null` e `false` respondem coisas diferentes, e o cadastro
+    // depende da diferença: só o `false` recusa. Um plugin velho
+    // que virasse `false` travaria o cadastro de metade do
+    // catálogo.
+    await harness.catalog.sync('pvp1');
+
+    expect(harness.repository.get('rifle.ak')?.consumable).toBeNull();
+  });
+
+  it('uma rodada sem o campo NÃO apaga o que a rodada anterior soube', async () => {
+    harness.game.catalog = [{ ...AK, consumable: true }];
+
+    await harness.catalog.sync('pvp1');
+    expect(harness.repository.get('rifle.ak')?.consumable).toBe(true);
+
+    // O servidor com o plugin desatualizado sobe primeiro e é ele
+    // quem relê o catálogo. Sem o `coalesce` do UPSERT, a rede
+    // ESQUECERIA quais itens são consumíveis — e o cadastro
+    // voltaria a aceitar a combinação inerte.
+    harness.game.catalog = [AK];
+    harness.game.protocol = '2999.999.9';
+
+    await harness.catalog.sync('pvp1');
+
+    expect(harness.repository.get('rifle.ak')?.consumable).toBe(true);
+  });
+});

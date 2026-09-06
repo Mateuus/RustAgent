@@ -34,12 +34,22 @@ import { openDatabase } from './db/database.js';
 import { KitsRepository } from './db/kits-repository.js';
 import { LoadoutsRepository } from './db/loadouts-repository.js';
 import { runMigrations } from './db/migrations.js';
+import { CustomItemsRepository } from './db/custom-items-repository.js';
 import { ItemsRepository } from './db/items-repository.js';
+import { RankingsRepository } from './db/rankings-repository.js';
+import { StatEventsConsumer } from './rankings/stat-events.js';
+import { StatsCollector } from './rankings/collector.js';
+import {
+  coverageStatusOf,
+  RankingsService,
+  type CoverageStatus,
+} from './rankings/service.js';
 import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
+import { CustomItemsSync } from './game/custom-items-sync.js';
 import { ItemCatalog } from './game/item-catalog.js';
 import { VipsRepository } from './db/vips-repository.js';
 import { KitStore } from './kits/service.js';
@@ -52,8 +62,13 @@ import { ItemsSiteMirror } from './game/items-mirror.js';
 import { MapImageKeeper } from './game/map-image.js';
 import { MonumentReader } from './game/monuments.js';
 import { PlayersReader, type PlayersSnapshot } from './game/players.js';
+// O nome do `.cs` que serve o `origemz.players` E o lote de stats:
+// é o mesmo arquivo, e o `coverage` do ranking pergunta por ele.
+import { PLAYERS_PLUGIN } from './game/plugin-contract.js';
 import { loadUiImages } from './game/ui-images.js';
 import { buildKitsScreen, KITS_SCREEN_ID, parseKitScreenId } from './game/ui-kits-screen.js';
+// A página RANKING do menu do jogo (Docs/Ranking/20 §11).
+import { createRankingScreenProvider } from './game/ui-ranking-screen.js';
 import { buildMainMenu } from './game/ui-preset-main-menu.js';
 import {
   buildResult,
@@ -229,6 +244,11 @@ async function main(): Promise<void> {
   // deles. Ver o bloco de montagem, mais abaixo.
   let vips: VipList | null = null;
   let loadoutSync: LoadoutSync | null = null;
+  let customItemsSync: CustomItemsSync | null = null;
+  // O consumidor do `#OZSTAT#`, pela MESMA razão dos de cima: ele
+  // precisa do supervisor (para achar o RCON de cada servidor) e o
+  // gancho de console precisa dele.
+  let statEvents: StatEventsConsumer | null = null;
   let spawnStatusSync: SpawnStatusSync | null = null;
   // A página CALENDÁRIO do menu do jogo, pela mesma razão: ela lê a
   // agenda e a fila de mapas, que nascem bem abaixo, e quem a chama
@@ -298,6 +318,19 @@ async function main(): Promise<void> {
       // O status de nascimento é o terceiro cache do plugin, e ele
       // esvazia junto com os outros dois.
       void spawnStatusSync?.push(serverId, 'rcon-connected');
+      // E o cadastro de itens custom, pelo mesmo motivo: o cache
+      // do plugin esvazia junto com os outros.
+      void customItemsSync?.push(serverId, 'rcon-connected');
+
+      // ####  E A FILA DE PONTOS, QUE É O CONTRÁRIO DOS DE CIMA ####
+      //
+      // Os outros EMPURRAM um cache que o plugin esqueceu. Este
+      // BUSCA o que o plugin guardou enquanto ninguém escutava: um
+      // troféu convertido com o RCON fora já teve o item destruído,
+      // e o ponto só existe na fila em disco do `OrigemZItems`. É
+      // esta chamada que o traz de volta — ver rankings/stat-events.ts
+      // e Docs\Ranking\20 §8.3.
+      void statEvents?.sweep(serverId, 'rcon-connected');
     },
     // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
     //
@@ -318,6 +351,15 @@ async function main(): Promise<void> {
     // que não é um pedido do plugin de interface.
     onConsoleLine: (serverId, line) => {
       uiSync?.handleLine(serverId, line);
+      // O plugin de itens custom grita `#OZAREQ#items` quando um
+      // `oxide.reload` esvazia o cache dele. Recusa na primeira
+      // comparação de string, como o de cima.
+      customItemsSync?.handleLine(serverId, line);
+      // E o `#OZSTAT#`, que é o troféu virando ponto. Ele APLICA
+      // aqui (escrita em SQLite, que não fala com o jogo) e confirma
+      // ao plugin por um relógio — mandar o `ack` daqui seria o laço
+      // descrito logo acima.
+      statEvents?.handleLine(serverId, line);
     },
     // Ver o comentário do `let wipeRunner`, logo acima.
     wipeRunner: {
@@ -479,6 +521,11 @@ async function main(): Promise<void> {
   // próprio plugin faz.
   const itemsRepository = new ItemsRepository(db);
 
+  // Os itens que NÓS criamos, que são o oposto do espelho acima: a
+  // `items` é reescrita a cada varredura do catálogo; esta aqui
+  // nada apaga sozinho. Ver db/custom-items-repository.ts.
+  const customItemsRepository = new CustomItemsRepository(db);
+
   itemCatalog = new ItemCatalog({
     repository: itemsRepository,
     servers: supervisor,
@@ -526,6 +573,165 @@ async function main(): Promise<void> {
   const vipWatcher = new VipExpiryWatcher({ vips, logger });
 
   vipWatcher.start();
+
+  // ####  O SEGREDO DO CANAL `#OZSTAT#`, SORTEADO UMA VEZ POR SUBIDA  ####
+  //
+  // Ele fecha o caminho de VOLTA: os plugins gritam `#OZSTAT#{…}` no
+  // console — o `OrigemZItems` quando converte um item em ponto, o
+  // `OrigemZAgent` quando alguém bate o tiro mais longo —, e o
+  // agente lê TODA linha do console, o chat inclusive. Sem um
+  // segredo no payload, um jogador que digitasse o marcador
+  // concederia pontos a si mesmo, e o primeiro lugar do ranking
+  // ganha prêmio real.
+  //
+  // A fonte é a MESMA do segredo da loja (o `uiSync`, mais abaixo):
+  // `randomUUID()` a cada subida, nunca em disco — um segredo
+  // guardado vazaria junto com qualquer backup, e não há nada aqui
+  // que precise sobreviver a um restart.
+  //
+  // O VALOR, porém, é próprio: dois canais, dois segredos. Um
+  // vazamento do segredo do menu não entrega o do ranking junto, e
+  // cada um roda seu ciclo sem depender do outro.
+  //
+  // ####  E É UM VALOR SÓ PARA OS TRÊS LADOS  ####
+  //
+  // Quem EMPURRA são dois — o `customItemsSync` (no
+  // `origemz.item.clear`) e o `statsCollector` (no
+  // `origemz.stats.flush`) —, e quem CONFERE é um: o `statEvents`,
+  // na linha do console. O canal é o mesmo, então o segredo tem de
+  // ser o mesmo: dois sorteios fariam o agente descartar tudo o que
+  // os plugins emitissem, e o sintoma seria "os pontos só chegam de
+  // cinco em cinco minutos" — pela varredura da fila, que é a rede
+  // e não o caminho.
+  const statChannelSecret = randomUUID();
+
+  // Ele nasce ANTES do `customItemsSync` porque este o usa: a
+  // definição que sobe ao plugin leva o RÓTULO do ranking junto,
+  // para o `{ranking}` da mensagem do chat virar "Troféu Bleik
+  // Store" em vez de `trophy.bleik`. Ver `RankingLabels`.
+  const rankingsRepository = new RankingsRepository(db);
+
+  customItemsSync = new CustomItemsSync({
+    repository: customItemsRepository,
+    servers: supervisor,
+    rankings: rankingsRepository,
+    logger,
+    secret: statChannelSecret,
+  });
+
+  // ####  A OUTRA METADE DO ITEM CUSTOM: O PONTO  ####
+  //
+  // O `customItemsSync` acima leva o CADASTRO até o plugin; este
+  // traz de volta a CONVERSÃO. Sem ele, o `OrigemZItems` converte o
+  // troféu, destrói o item e grita `#OZSTAT#` para ninguém — o
+  // jogador vê o prêmio sumir e o número não mexer.
+
+  statEvents = new StatEventsConsumer({
+    repository: rankingsRepository,
+    servers: supervisor,
+    logger,
+    // O MESMO valor que o `customItemsSync` acabou de empurrar ao
+    // plugin. Sem ele, nenhuma linha de console é aceita — e o
+    // ponto ainda chega, pela varredura da fila, com atraso.
+    secret: statChannelSecret,
+  });
+
+  // ####  O `coverage`: "ZERO" E "NÃO PERGUNTEI" SÃO DIFERENTES  ####
+  //
+  // O serviço de ranking sabe somar e ordenar. O que ele não tem
+  // como saber é se a coleta estava VIVA naquele servidor — e uma
+  // lista vazia sem essa resposta afirma que ninguém pontuou, que
+  // é uma acusação aos JOGADORES quando a verdade é sobre o
+  // plugin. Quem tem o tripé na mão é este arquivo:
+  //
+  //   oxideRuntime.pluginOf()    o Oxide conseguiu carregar?
+  //   library.serverList()       o `.cs` está sequer ligado ali?
+  //   repository.lastBatchAt()   quando chegou o último lote?
+  //
+  // O vocabulário é o de game/players.ts:327-339, e é reusado de
+  // propósito: duas telas que dizem "não carregou" com palavras
+  // diferentes viram duas explicações para o mesmo defeito.
+  //
+  // O acervo varre PASTAS para responder, e a tela de ranking
+  // recarrega sozinha — daí o cache curto, na mesma régua do
+  // `PlayersReader` (game/players.ts:341-352).
+  const COVERAGE_PLUGIN_TTL_MS = 15_000;
+
+  const pluginEnabledCache = new Map<string, { at: number; enabled: boolean }>();
+
+  /** O `.cs` está ligado naquele servidor? `null` = não deu para ler. */
+  const statsPluginEnabled = async (serverId: string): Promise<boolean | null> => {
+    const cached = pluginEnabledCache.get(serverId);
+    const now = Date.now();
+
+    if (cached !== undefined && now - cached.at < COVERAGE_PLUGIN_TTL_MS) {
+      return cached.enabled;
+    }
+
+    try {
+      const { plugins } = await library.serverList(serverId);
+      const enabled = plugins.some((plugin) => plugin.name === PLAYERS_PLUGIN && plugin.enabled);
+
+      pluginEnabledCache.set(serverId, { at: now, enabled });
+
+      return enabled;
+    } catch {
+      // Não conseguir ler o acervo não é "o plugin está fora": é
+      // não saber. Acusar aqui mandaria consertar o que talvez não
+      // esteja quebrado — ver a mesma escolha em `#whyNoAnswer`.
+      return null;
+    }
+  };
+
+  /**
+   * As três testemunhas, juntas. Quem JULGA é `rankings/service`.
+   *
+   * A decisão (`ok`, `never`, `no-answer`, `not-loaded`) é regra de
+   * ranking, e mora com as outras; aqui fica só a coleta das
+   * provas, que é o que este arquivo tem em mãos. Foi essa
+   * separação que permitiu testar o defeito do "não responde há um
+   * tempo" num ranking que nunca coletou.
+   */
+  const coverageStatusOfServer = async (
+    serverId: string,
+    lastBatchAt: number | null,
+  ): Promise<CoverageStatus> => {
+    // 1. o Oxide é a testemunha mais forte, e a mais barata: o
+    //    estado dele já está em memória.
+    const loaded = oxideRuntime.pluginOf(serverId, PLAYERS_PLUGIN)?.loaded ?? null;
+
+    // 2. o acervo varre pastas, e por isso só é consultado quando
+    //    o Oxide não soube responder (servidor parado, agente
+    //    recém-subido). Um `.cs` desligado é um fato.
+    const pluginEnabled = loaded === null ? await statsPluginEnabled(serverId) : null;
+
+    return coverageStatusOf({ pluginLoaded: loaded, pluginEnabled, lastBatchAt });
+  };
+
+  const rankingsService = new RankingsService({
+    repository: rankingsRepository,
+    // Os servidores que este agente cuida: é o escopo da rede.
+    servers: { ids: () => supervisor.ids() },
+    coverage: {
+      coverageOf: async (serverIds) => ({
+        servers: await Promise.all(
+          serverIds.map(async (serverId) => {
+            // Uma leitura só do último lote: ela responde o campo
+            // da resposta E entra na decisão do `status`.
+            const lastBatchAt = rankingsRepository.lastBatchAt([serverId]);
+
+            return {
+              serverId,
+              status: await coverageStatusOfServer(serverId, lastBatchAt),
+              lastBatchAt,
+            };
+          }),
+        ),
+      }),
+    },
+    // Sem `timeZone`: vale a da máquina do agente, que é a régua
+    // do resto do processo (ver rankings/periods.ts:30-41).
+  });
 
   loadoutSync = new LoadoutSync({
     repository: loadoutsRepository,
@@ -936,6 +1142,20 @@ async function main(): Promise<void> {
     );
   }
 
+  // ####  A PÁGINA RANKING DO MENU DO JOGO  ####
+  //
+  // Ela nasce AQUI, e não lá embaixo junto do calendário, porque o
+  // que ela precisa já existe: o `rankingsService` foi montado bem
+  // antes deste ponto. O calendário depende da agenda e da fila de
+  // mapas, que só são construídas depois — daí a variável dele
+  // nascer `null` e a tela vazia que existe para o pedido que
+  // chegasse cedo demais. Esta não tem essa janela: quando o
+  // `generatedScreens` puder ser chamado, o provedor já existe.
+  const rankingScreens = createRankingScreenProvider({
+    rankings: rankingsService,
+    logger,
+  });
+
   uiSync = new UiSync({
     repository: uiDocuments,
     servers: supervisor,
@@ -961,6 +1181,24 @@ async function main(): Promise<void> {
       const kitTarget = parseKitScreenId(input.screenId);
 
       if (kitTarget === null) {
+        // ####  O RANKING TAMBÉM É UMA FAMÍLIA, E VEM ANTES  ####
+        //
+        // `tela-ranking`, `tela-ranking:pvp.kills:2:1` — o prefixo é
+        // dele, e por isso ele é perguntado antes de quem casa um
+        // id exato, pelo mesmo motivo que a loja é perguntada
+        // antes dos kits.
+        //
+        // Ele devolve `null` só para o que não é dele: qualquer
+        // falha da leitura já virou, lá dentro, a tela com o
+        // aviso. Se um dia devolver `null` para um endereço seu, o
+        // caminho normal segue e serve a tela de repouso do
+        // documento — nunca um "carregando" preso.
+        const fromRanking = await rankingScreens(input);
+
+        if (fromRanking !== null) {
+          return fromRanking;
+        }
+
         // ####  E, POR ÚLTIMO, O CALENDÁRIO  ####
         //
         // Ele reconhece um id EXATO (`tela-calendario`) e devolve
@@ -1063,7 +1301,20 @@ async function main(): Promise<void> {
   uiSync.start();
 
   void loadoutSync.pushAll('boot');
+  // Os itens custom sobem no boot pelo mesmo motivo dos loadouts:
+  // sem isso, o plugin só os conheceria na próxima reconexão.
+  void customItemsSync.pushAll('boot');
   void spawnStatusSync.pushAll('boot');
+
+  // ####  E A FILA DE PONTOS É RECOLHIDA NO BOOT  ####
+  //
+  // O agente pode ter ficado fora por horas — atualização, queda,
+  // restart. Cada conversão desse período está na fila em disco do
+  // `OrigemZItems`, com o item já destruído. O `start()` arma a
+  // varredura periódica; a primeira rodada é esta, e ela não espera
+  // os cinco minutos do relógio.
+  statEvents.start();
+  void statEvents.sweepAll('boot');
 
   // A loja. Ela pergunta ao `PlayersReader` quem está online —
   // entrega exige o jogador dentro do servidor, porque item entra
@@ -1620,9 +1871,82 @@ async function main(): Promise<void> {
   // CALENDÁRIO precisa dele para saber que há um wipe executando.)
   const detectedWipes = new WipesRepository(db);
 
+  // ---- o RANKING: a coleta (o caminho PULL) ------------------
+  //
+  // ####  ELE NASCE AQUI POR CAUSA DE UMA DEPENDÊNCIA SÓ  ####
+  //
+  // O coletor precisa do `detectedWipes`, e o `detectedWipes` nasce
+  // nesta linha acima porque é aqui que a metade que APAGA ARQUIVO
+  // começa. Tudo o mais que ele usa — repositório, supervisor,
+  // relógio do mundo, estado do Oxide — já existe há muitas linhas.
+  //
+  // ####  E ELE É O SEGUNDO CHAMADOR DE `wipes.record()`  ####
+  //
+  // Até hoje havia um só: o passo `pos-wipe` da execução. Um wipe
+  // feito à MÃO, com o agente rodando, não virava linha em `wipes` —
+  // e o histórico de mundos ficava com um buraco que só a próxima
+  // execução tapava. O sweep de 60 s compara o `SaveCreatedTime` com
+  // a última linha conhecida e grava a diferença. Ver
+  // rankings/collector.ts.
+  const statsCollector = new StatsCollector({
+    repository: rankingsRepository,
+    wipes: detectedWipes,
+    players: playersRepository,
+    servers: {
+      ids: () => supervisor.ids(),
+      rconOf: (serverId) => supervisor.contextOf(serverId)?.rcon ?? null,
+    },
+    // `null` = o Oxide ainda não foi lido neste servidor, e aí a
+    // rodada TENTA assim mesmo: tratar "não sei" como "não está
+    // carregado" faria o primeiro minuto de cada boot não contar
+    // para ninguém.
+    pluginLoaded: (serverId) => oxideRuntime.pluginOf(serverId, PLAYERS_PLUGIN)?.loaded ?? null,
+    // A MESMA fonte do resto do agente: o `SaveCreatedTime` do
+    // `serverinfo`, cacheado até o RCON reconectar.
+    worldAt: (serverId) => wipeClock.at(serverId, supervisor.contextOf(serverId)?.rcon ?? null),
+    // O mundo do `.ini` — é o que o agente configurou, e é dele que
+    // a fila de mapas lê as seeds recentes. Num wipe feito à mão
+    // fora do painel ele pode estar atrás; melhor isso do que uma
+    // linha de `wipes` sem mundo nenhum.
+    worldOf: (serverId) => {
+      const world = supervisor.configOf(serverId);
+
+      return world === null
+        ? null
+        : { level: world.level, seed: String(world.seed), worldSize: world.worldSize };
+    },
+    // A ponte que congela o pódio do K/D quando um período fecha.
+    // Sem ela o ranking derivado ficaria de fora do histórico — e a
+    // tela mostraria um buraco que ninguém sabe explicar.
+    computed: rankingsService.computedPodium,
+    // ####  O MESMO SEGREDO QUE O `statEvents` CONFERE  ####
+    //
+    // O `OrigemZAgent` empurra o tiro recorde no console assim que
+    // ele acontece, para o jogador ver o número mudar AGORA. Quem
+    // confere a linha é o `StatEventsConsumer` logo acima, e o valor
+    // tem de ser o mesmo dos dois lados — dois sorteios fariam o
+    // agente descartar tudo o que o plugin emitisse, e o sintoma
+    // seria "o recorde só aparece de minuto em minuto".
+    //
+    // Ele viaja no `origemz.stats.flush`, que já sai a cada rodada:
+    // ver `game/stats-contract.ts`.
+    secret: statChannelSecret,
+    logger,
+  });
+
+  statsCollector.start();
+
   wipeRunner = new WipeRunner({
     runs: wipeRuns,
     wipes: detectedWipes,
+    // O wipe EXECUTADO avisa o ranking pelo mesmo caminho do wipe
+    // feito à mão — a diferença é que este carrega o `runId`, e com
+    // ele a decisão de três estados de `wipe_runs.open_ranking_season`.
+    rankings: {
+      onWipeDetected: (input) => {
+        statsCollector.rollOnWipe(input);
+      },
+    },
     schedule: wipeSchedule,
     mapPool,
     servers: supervisor,
@@ -1792,6 +2116,8 @@ async function main(): Promise<void> {
     directory,
     monuments,
     items: itemsRepository,
+    customItems: customItemsRepository,
+    customItemsSync,
     itemCatalog,
     uiDocuments,
     uiSync,
@@ -1891,6 +2217,25 @@ async function main(): Promise<void> {
     // (quantos jogadores, quantos itens, quantos já receberam) sem
     // falar com o jogo.
     blueprints: { repository: bpRepository, service: blueprints },
+
+    // O ranking. Só o SERVIÇO atravessa: ele é a única porta da
+    // regra (o K/D é calculado lá, e a rota nem sabe), e já vem
+    // com o `coverage` montado acima — que é a peça que só este
+    // arquivo tem como montar.
+    //
+    // `customItems` vai junto por uma pergunta só: apagar um
+    // ranking para o qual um item dá pontos é `RANKING_IN_USE`, e
+    // quem conhece o cadastro de itens é a rota.
+    //
+    // Sem `collector`: a coleta é outra frente, e enquanto ela não
+    // chega o "forçar ciclo agora" recusa com nome em vez de
+    // prometer uma rodada que não vem. As listas respondem
+    // normalmente o que já foi medido.
+    rankings: {
+      service: rankingsService,
+      servers: { ids: () => supervisor.ids() },
+      customItems: customItemsRepository,
+    },
   });
 
   await app.listen({ host: agent.host, port: agent.port });
@@ -1937,6 +2282,25 @@ async function main(): Promise<void> {
         // agora falaria com um RCON que já não existe.
         oxideRuntime.stop();
         uiSync.stop();
+        // O do cadastro de itens custom pela mesma razão: um
+        // `invalidate` armado agora mandaria `origemz.item.clear` a
+        // um servidor que já está sendo desligado — e o plugin
+        // ficaria sem lista sem nunca receber a de volta.
+        customItemsSync.stop();
+        // E o da fila de pontos junto, por dois motivos: a varredura
+        // que começasse agora falaria com um RCON que já não existe,
+        // e o `ack` armado sairia para um servidor sendo desligado.
+        //
+        // Nada se perde nisso: o que estava esperando confirmação já
+        // está no banco, e o plugin reoferece a fila dele na próxima
+        // subida — é para isso que ela grava em disco.
+        statEvents.stop();
+        // E o coletor do ranking pela MESMA razão: uma rodada que
+        // começasse agora pediria um `flush` ao servidor sendo
+        // desligado, e o lote congelado do outro lado ficaria sem
+        // `ack`. Nada se perde: o plugin segura o pendente até a
+        // próxima subida, e ele sobrevive ao reload no data file.
+        statsCollector.stop();
         // O dos VIPs junto dos outros: um relógio esquecido aqui é
         // uma rodada que começa depois de o supervisor já ter
         // parado, falando com um RCON que não existe mais.

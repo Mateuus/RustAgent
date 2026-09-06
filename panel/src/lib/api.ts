@@ -1194,6 +1194,15 @@ export interface CatalogItem {
   category: string;
   maxStack: number;
   hasCondition: boolean;
+  /**
+   * O item tem `ItemModConsumable` — ou seja, dá para USÁ-LO.
+   *
+   * `null` é "ninguém perguntou ainda": o catálogo foi lido por um
+   * agente anterior a este campo. É diferente de `false`, e a
+   * diferença importa — o cadastro de item custom só desabilita a
+   * conversão "ao usar" quando o jogo respondeu que NÃO.
+   */
+  consumable: boolean | null;
   firstSeen: string;
   lastSeen: string;
   /**
@@ -1228,6 +1237,131 @@ export interface ItemsPage {
   total: number;
   items: CatalogItem[];
   catalog: ItemCatalogInfo;
+}
+
+// ----------------------------------------------------------
+//  OS ITENS QUE NÓS CRIAMOS
+//
+//  Eles são o oposto do `CatalogItem` acima: aquele é o que o jogo
+//  tem, lido e espelhado; este é o que nós decidimos, e nada o
+//  apaga sozinho.
+//
+//  ####  UM ITEM CUSTOM NÃO É UM ITEM NOVO  ####
+//
+//  É um item do jogo com uma MARCA nossa — o par
+//  `(baseShortname, skinId)`. Foi medido no binário que um itemid
+//  que o cliente não conhece é descartado; a skin, não. Ver
+//  Docs\CustomItem\01-PESQUISA-ITEM-CUSTOM.md §3.
+// ----------------------------------------------------------
+
+/** Os oito tipos de efeito, e são os do JOGO. */
+export const EFFECT_TYPES = [
+  'Health',
+  'HealthOverTime',
+  'Bleeding',
+  'Calories',
+  'Hydration',
+  'Poison',
+  'Radiation',
+  'Heartrate',
+] as const;
+
+export type EffectType = (typeof EFFECT_TYPES)[number];
+
+export interface CustomItemEffect {
+  type: EffectType;
+  amount: number;
+  /** Só age abaixo desta vida. Ausente = sempre. */
+  onlyIfHealthBelow?: number;
+}
+
+export type CustomItemAction =
+  | { kind: 'none' }
+  | {
+      kind: 'consume';
+      /** O gesto que dispara: `use`, `drop`, `unwrap`… */
+      trigger: string;
+      consumes: number;
+      effects: CustomItemEffect[];
+    }
+  | {
+      /**
+       * O item vira ponto de ranking.
+       *
+       * É o desenho do Troféu Bleik: o item não é para guardar, é
+       * um RECIBO — nasce, é visto e morre, deixando um número que
+       * só cresce.
+       */
+      kind: 'points';
+      /** Qual ranking recebe. A lista vem de `GET /api/rankings/metrics`. */
+      metric: string;
+      perUnit: number;
+      /**
+       * Converter assim que o item cai no inventário?
+       *
+       * `true` é o padrão do troféu: some na hora, e com isso as
+       * três proibições do briefing (guardar, dropar, transferir)
+       * se resolvem sozinhas — não há o que dropar.
+       */
+      onPickup: boolean;
+    };
+
+export interface CustomItem {
+  /** Gerado do nome (`trofeu-bleik-store`), e não muda depois. */
+  id: string;
+  displayName: string;
+  /** O item do jogo que empresta o corpo. */
+  baseShortname: string;
+  /** Do catálogo. `null` quando o item base sumiu do jogo. */
+  baseItemId: number | null;
+  /** O item base não existe mais nesta versão do Rust. */
+  baseMissing: boolean;
+  /** UInt64 em texto. Nunca `'0'`. */
+  skinId: string;
+  category: string;
+  description: string | null;
+  iconFile: string | null;
+  /** `null` herda o do item base. Só sabe DIMINUIR. */
+  maxStack: number | null;
+  deployable: boolean;
+  /** O item se gasta assim que cai no inventario, e a acao roda. */
+  consumeOnPickup: boolean;
+  action: CustomItemAction;
+  message: string | null;
+  enabled: boolean;
+  /** Vazio = em nenhum servidor, e o item não é entregue. */
+  servers: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O corpo que cria ou reescreve um item custom. */
+/**
+ * A URL do PNG de um icone, para a tela poder mostra-lo.
+ *
+ * O arquivo mora em `Assets/items/` na maquina do agente, e o que o
+ * jogo tem e um CRC dentro do servidor de Rust — sem esta rota, a
+ * tela mostraria o nome do arquivo e pediria fe.
+ */
+export function iconUrl(name: string): string {
+  return agentUrl('/api/custom-items/icons/' + encodeURIComponent(name));
+}
+
+export interface CustomItemInput {
+  displayName: string;
+  baseShortname: string;
+  skinId: string;
+  category: string;
+  description: string | null;
+  iconFile: string | null;
+  maxStack: number | null;
+  deployable: boolean;
+  /** O item se gasta assim que cai no inventario, e a acao roda. */
+  consumeOnPickup: boolean;
+  action: CustomItemAction;
+  message: string | null;
+  enabled: boolean;
+  servers: string[];
 }
 
 /** O que um servidor faz com uma interface. */
@@ -1395,6 +1529,263 @@ export interface MessageSendReport {
 export interface MessageVariables {
   names: string[];
   namespaces: string[];
+}
+
+// ----------------------------------------------------------
+//  O RANKING
+//
+//  ####  ELES ESPELHAM `core/src/http/routes/rankings.ts`  ####
+//
+//  O painel duplica à mão os tipos do core, de propósito — não há
+//  pacote compartilhado. O que atravessa a borda é o que as funções
+//  `toRankingBody`, `toPeriodBody`, `toPeriodViewBody`,
+//  `toCoverageBody`, `toEntryBody` e `toSnapshotBody` de lá
+//  produzem: instante em ISO, e `null` sobrevivendo como `null`.
+//
+//  Ver Docs\Ranking\20-PLANO-E-CONTRATOS.md §9.
+// ----------------------------------------------------------
+
+/** De onde o número vem. */
+export type RankingSource = 'plugin' | 'agent' | 'item' | 'computed';
+
+/** Como o valor se forma: soma, melhor marca, ou divisão. */
+export type RankingValueKind = 'counter' | 'record' | 'ratio';
+
+export type RankingDirection = 'desc' | 'asc';
+
+/** O papel de uma janela — e, num ranking, a janela em que ele disputa. */
+export type RankingPeriodKind = 'wipe' | 'season' | 'lifetime';
+
+export type RankingScope = 'server' | 'global';
+
+export type RankingSeasonMode = 'wipe' | 'biweekly' | 'monthly' | 'quarterly' | 'days' | 'manual';
+
+/**
+ * Como a coleta daquele servidor estava.
+ *
+ * NÃO é um booleano, e é essa a razão de o campo existir: um
+ * servidor em `not-loaded` que virasse lista vazia diria que
+ * ninguém pontuou ali — uma afirmação sobre os jogadores, quando a
+ * verdade é sobre a coleta.
+ */
+export type RankingCoverageStatus = 'ok' | 'never' | 'not-loaded' | 'no-answer';
+
+/** A definição de um ranking. Fixo e dinâmico são a mesma linha. */
+export interface RankingDefinition {
+  /** Slug estável: é o que a URL do painel e o site guardam. */
+  id: string;
+  /** A chave em `player_stats`. Única entre os rankings. */
+  metric: string;
+  label: string;
+  /**
+   * O nome que cabe na aba do JOGO, onde a coluna é estreita.
+   *
+   * `null` = não tem, e vale o `label`. Quem resolve isso é o
+   * `gameLabelOf` do core, num lugar só — o painel edita o campo
+   * e mostra o `label` como espelho.
+   */
+  shortLabel: string | null;
+  /** "abates", "troféus", "metros". `null` quando o número não tem unidade. */
+  unit: string | null;
+  description: string | null;
+  source: RankingSource;
+  valueKind: RankingValueKind;
+  direction: RankingDirection;
+  /** Em que janela ele DISPUTA — a que a tela abre, e a única cuja virada o zera. */
+  window: RankingPeriodKind;
+  /** Entra na soma da rede? `false` para minério e explosivo. */
+  globalEligible: boolean;
+  /** Veio semeado com o agente: o painel some com o botão de apagar. */
+  builtin: boolean;
+  enabled: boolean;
+  /**
+   * Aparece no menu do jogo? NÃO é o mesmo que `enabled`.
+   *
+   * Desligado, o ranking some de todo lugar; com isto em `false`
+   * ele sai só do menu do jogo e continua no painel, no site e na
+   * contagem.
+   */
+  showInGame: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O corpo que cria ou reescreve um ranking. `builtin` não se digita. */
+export interface RankingDefinitionInput {
+  id: string;
+  metric: string;
+  label: string;
+  /** Vazio vira `null` na escrita, e a API recusa acima de 24. */
+  shortLabel: string | null;
+  unit: string | null;
+  description: string | null;
+  source: RankingSource;
+  valueKind: RankingValueKind;
+  direction: RankingDirection;
+  window: RankingPeriodKind;
+  globalEligible: boolean;
+  enabled: boolean;
+  showInGame: boolean;
+  /**
+   * Opcional, e sem valor padrão na tela.
+   *
+   * A ordem se muda arrastando (`reorderRankings`). Mandá-la num
+   * PUT de edição desfaria um arrasto feito entre o carregamento
+   * do formulário e o clique em salvar. Ausente na criação = o
+   * agente põe no fim da lista.
+   */
+  sortOrder?: number;
+}
+
+/** Uma janela do banco: (servidor, papel, começo). */
+export interface RankingPeriod {
+  id: number;
+  serverId: string;
+  kind: RankingPeriodKind;
+  /** A linha de `wipes` que abriu esta janela, quando houve uma. */
+  wipeId: number | null;
+  label: string | null;
+  /** Como o modo estava configurado QUANDO ela abriu. */
+  seasonMode: RankingSeasonMode | null;
+  startedAt: string;
+  /** `null` = ainda aberta. */
+  endedAt: string | null;
+}
+
+/**
+ * A janela em que a lista foi lida.
+ *
+ * No escopo de rede ela não tem `id`: são várias janelas somadas, e
+ * eleger uma delas como "a" janela seria mentira.
+ */
+export interface RankingPeriodView {
+  id: number | null;
+  kind: RankingPeriodKind;
+  serverId: string | null;
+  label: string | null;
+  seasonMode: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** Quando ela vira, se ninguém mexer. `null` = não tem data. */
+  turnsAt: string | null;
+}
+
+export interface RankingCoverageServer {
+  serverId: string;
+  status: RankingCoverageStatus;
+  /**
+   * O aviso pronto, do MESMO módulo que a tela do jogo lê.
+   *
+   * O painel não escreve a sua versão: as duas divergiriam no
+   * primeiro ajuste de texto, e o admin e o jogador passariam a
+   * ler histórias diferentes sobre o mesmo defeito. `null` em
+   * `ok` — não há aviso quando não há o que avisar.
+   */
+  message: string | null;
+  lastBatchAt: string | null;
+}
+
+export interface RankingCoverage {
+  servers: RankingCoverageServer[];
+}
+
+/** Uma linha da lista, com a colocação já calculada. */
+export interface RankingEntry {
+  position: number;
+  steamId: string;
+  /** `null` quando o jogador saiu da base. */
+  name: string | null;
+  value: number;
+  updatedAt: string;
+}
+
+/** Uma linha do pódio CONGELADO: ela não muda mais. */
+export interface RankingSnapshotEntry {
+  position: number;
+  steamId: string;
+  /** O nome de quando ele ganhou, copiado no fechamento. */
+  name: string | null;
+  value: number;
+  frozenAt: string;
+}
+
+/** A janela configurada de um servidor. */
+export interface RankingSettings {
+  seasonMode: RankingSeasonMode;
+  seasonDays: number | null;
+  seasonAnchorAt: string | null;
+  /** A temporada TAMBÉM vira quando o mundo vira? */
+  seasonOnWipe: boolean;
+  /** Quantas posições o pódio congela ao fechar. */
+  snapshotSize: number;
+  /** `null` = o servidor nunca foi configurado; valem os padrões. */
+  updatedAt: string | null;
+}
+
+export interface RankingSettingsInput {
+  seasonMode: RankingSeasonMode;
+  seasonDays: number | null;
+  /** ISO, ou epoch em ms. `null` = a abertura do período serve de âncora. */
+  seasonAnchorAt: string | null;
+  seasonOnWipe: boolean;
+  snapshotSize: number;
+}
+
+export interface RankingMetricsResponse {
+  ok: true;
+  count: number;
+  rankings: RankingDefinition[];
+}
+
+export interface RankingListResponse {
+  ok: true;
+  /** O que veio nesta página. */
+  count: number;
+  /** A lista inteira, antes da paginação. */
+  total: number;
+  limit: number;
+  offset: number;
+  ranking: RankingDefinition;
+  scope: RankingScope;
+  period: RankingPeriodView;
+  /** Veio do pódio congelado? Aí ela não muda mais. */
+  frozen: boolean;
+  measuredSince: string | null;
+  updatedAt: string | null;
+  coverage: RankingCoverage;
+  entries: RankingEntry[];
+}
+
+export interface RankingPeriodsResponse {
+  ok: true;
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+  periods: RankingPeriod[];
+}
+
+export interface RankingPeriodDetailResponse {
+  ok: true;
+  period: RankingPeriod;
+  podium: { metric: string; label: string; entries: RankingSnapshotEntry[] }[];
+}
+
+export interface RankingSettingsResponse {
+  ok: true;
+  serverId: string;
+  settings: RankingSettings;
+  /** A temporada mais recente daquele servidor. `null` = nenhuma ainda. */
+  season: RankingPeriod | null;
+}
+
+/** O que a virada devolve: a que fechou, a que abriu, e quantas linhas congelaram. */
+export interface RankingSeasonTurnResponse {
+  ok: true;
+  closed: RankingPeriod;
+  opened: RankingPeriod;
+  frozen: number;
 }
 
 export const agent = {
@@ -2091,6 +2482,17 @@ export const agent = {
     });
   },
 
+  /**
+   * Um item do catálogo do jogo, pelo shortname.
+   *
+   * Existe para a tela mostrar o nome e o empilhamento de um item
+   * base que ela carregou de um cadastro — e não de um clique.
+   */
+  item: (shortname: string) =>
+    api<{ ok: true; item: CatalogItem; catalog: ItemCatalogInfo }>(
+      `/api/items/${encodeURIComponent(shortname)}`,
+    ),
+
   itemCategories: () =>
     api<{ ok: true; categories: { category: string; total: number }[]; catalog: ItemCatalogInfo }>(
       '/api/items/categories',
@@ -2103,6 +2505,60 @@ export const agent = {
       scan: { added: number; present: number; removed: number; protocol: string | null };
       catalog: ItemCatalogInfo;
     }>('/api/items/refresh', { method: 'POST' }),
+
+  // ----------------------------------------------------------
+  //  OS ITENS QUE NÓS CRIAMOS
+  //
+  //  Todas respondem com os servidores parados, como as de cima e
+  //  pelo mesmo motivo: cadastrar item é trabalho de madrugada.
+  //  Quem leva o cadastro ao jogo é a sincronização, quando o
+  //  servidor sobe.
+  // ----------------------------------------------------------
+
+  customItems: () => api<{ ok: true; count: number; items: CustomItem[] }>('/api/custom-items'),
+
+  customItemCategories: () =>
+    api<{ ok: true; categories: { category: string; total: number }[] }>(
+      '/api/custom-items/categories',
+    ),
+
+  createCustomItem: (input: CustomItemInput) =>
+    api<{ ok: true; item: CustomItem }>('/api/custom-items', {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Reescreve o item INTEIRO. Não é PATCH — ver a rota. */
+  updateCustomItem: (id: string, input: CustomItemInput) =>
+    api<{ ok: true; item: CustomItem }>(`/api/custom-items/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  removeCustomItem: (id: string) =>
+    api<{ ok: true }>(`/api/custom-items/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** Os PNGs que já estão em `Assets\items\`. */
+  customItemIcons: () =>
+    api<{ ok: true; icons: { name: string; bytes: number }[] }>('/api/custom-items/icons'),
+
+  /**
+   * Envia um PNG e devolve o NOME dele.
+   *
+   * O nome é o que vai para o cadastro; os bytes só chegam ao jogo
+   * depois, pela sincronização. O teto é ~33 KB — acima disso o PNG
+   * não cabe na linha de console que o leva até o servidor.
+   */
+  uploadCustomItemIcon: (file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/custom-items/icons', {
+      method: 'POST',
+      form,
+    });
+  },
 
   // ----------------------------------------------------------
   //  INTERFACE
@@ -2851,6 +3307,16 @@ export const agent = {
       fullWipe?: boolean;
       /** Epoch ms. Ausente = agora. Com hora futura, os avisos saem antes. */
       at?: number;
+      /**
+       * A temporada do ranking vira NESTE wipe?
+       *
+       * Três estados: `true` força abrir, `false` força não abrir, e
+       * ausente (ou `null`) é "não decidi" — aí vale a configuração
+       * do servidor. Um booleano de dois estados transformaria toda
+       * execução em que ninguém tocou na caixa numa decisão explícita
+       * de NÃO virar. Ver Docs\Ranking\20 §3.4.
+       */
+      openRankingSeason?: boolean | null;
     },
   ) => {
     const { idempotencyKey, ...body } = input;
@@ -2935,6 +3401,129 @@ export const agent = {
   restoreWipeBlueprints: (serverId: string, input: { steamId: string; force?: boolean }) =>
     api<WipeBlueprintsRestoreResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/wipe/blueprints/restore`,
+      { method: 'POST', body: input },
+    ),
+
+  // ---- O RANKING -------------------------------------------
+  //
+  // A leitura responde com os servidores parados: a definição é do
+  // AGENTE, e o número já está no banco dele. O que precisa do jogo
+  // no ar é só o ciclo de coleta, que roda sozinho a cada 60 s.
+
+  /** O catálogo: o que existe, e como cada um se comporta. */
+  rankingMetrics: (options: { enabledOnly?: boolean } = {}) =>
+    api<RankingMetricsResponse>(
+      `/api/rankings/metrics${options.enabledOnly === true ? '?enabled=1' : ''}`,
+    ),
+
+  /**
+   * A lista, paginada.
+   *
+   * `periodId` sobrepõe `period` e é como se lê uma temporada
+   * FECHADA — aí a fonte é o pódio congelado, e a resposta vem com
+   * `frozen: true`.
+   */
+  ranking: (options: {
+    metric: string;
+    scope?: RankingScope;
+    serverId?: string | undefined;
+    period?: RankingPeriodKind;
+    periodId?: number | undefined;
+    limit: number;
+    offset: number;
+  }) => {
+    const params = new URLSearchParams();
+
+    params.set('metric', options.metric);
+
+    if (options.scope !== undefined) params.set('scope', options.scope);
+    if (options.serverId !== undefined) params.set('serverId', options.serverId);
+    if (options.period !== undefined) params.set('period', options.period);
+    if (options.periodId !== undefined) params.set('periodId', String(options.periodId));
+
+    params.set('limit', String(options.limit));
+    params.set('offset', String(options.offset));
+
+    return api<RankingListResponse>(`/api/rankings?${params.toString()}`);
+  },
+
+  /** O histórico: as janelas, da mais nova para a mais velha. */
+  rankingPeriods: (options: {
+    serverId?: string | undefined;
+    kind?: RankingPeriodKind;
+    limit: number;
+    offset: number;
+  }) => {
+    const params = new URLSearchParams();
+
+    if (options.serverId !== undefined) params.set('serverId', options.serverId);
+    if (options.kind !== undefined) params.set('kind', options.kind);
+
+    params.set('limit', String(options.limit));
+    params.set('offset', String(options.offset));
+
+    return api<RankingPeriodsResponse>(`/api/rankings/periods?${params.toString()}`);
+  },
+
+  /** Uma janela, e o pódio congelado dela. O valor de lá não muda mais. */
+  rankingPeriod: (periodId: number) =>
+    api<RankingPeriodDetailResponse>(`/api/rankings/periods/${String(periodId)}`),
+
+  /** A janela configurada de um servidor, com a temporada de agora junto. */
+  rankingSettings: (serverId: string) =>
+    api<RankingSettingsResponse>(
+      `/api/rankings/settings?serverId=${encodeURIComponent(serverId)}`,
+    ),
+
+  saveRankingSettings: (serverId: string, input: RankingSettingsInput) =>
+    api<{ ok: true; serverId: string; settings: RankingSettings }>(
+      `/api/rankings/settings/${encodeURIComponent(serverId)}`,
+      { method: 'PUT', body: input },
+    ),
+
+  createRanking: (input: RankingDefinitionInput) =>
+    api<{ ok: true; ranking: RankingDefinition }>('/api/rankings/metrics', {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Reescreve o ranking INTEIRO. Não é PATCH — ver a rota. */
+  updateRanking: (id: string, input: RankingDefinitionInput) =>
+    api<{ ok: true; ranking: RankingDefinition }>(
+      `/api/rankings/metrics/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: input },
+    ),
+
+  /** Só os dinâmicos saem. O `builtin` é recusado pelo agente. */
+  removeRanking: (id: string) =>
+    api<{ ok: true }>(`/api/rankings/metrics/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /**
+   * A ordem do catálogo INTEIRO, de uma vez.
+   *
+   * A lista tem de trazer todos os rankings que existem: sem os
+   * ausentes a posição deles ficaria indefinida, e por isso a rota
+   * recusa uma lista parcial (ou com id repetido, ou desconhecido)
+   * com `RANKING_ORDER_MISMATCH` — a frase dela diz quais.
+   */
+  reorderRankings: (ids: readonly string[]) =>
+    api<{ ok: true; count: number; rankings: RankingDefinition[] }>(
+      '/api/rankings/metrics/order',
+      { method: 'PUT', body: { ids } },
+    ),
+
+  /**
+   * Fecha a temporada aberta e abre a seguinte, numa transação só.
+   *
+   * O `periodId` é a temporada que quem clicou estava vendo: com
+   * ele, o segundo clique recusa em vez de abrir uma terceira.
+   */
+  openRankingSeason: (
+    serverId: string,
+    input: { label: string | null; periodId?: number; reason: string },
+  ) =>
+    api<RankingSeasonTurnResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/rankings/season`,
       { method: 'POST', body: input },
     ),
 };

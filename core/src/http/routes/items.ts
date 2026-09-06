@@ -210,6 +210,7 @@ function toItemBody(item: ItemRecord): {
   readonly category: string;
   readonly maxStack: number;
   readonly hasCondition: boolean;
+  readonly consumable: boolean | null;
   readonly firstSeen: string;
   readonly lastSeen: string;
   readonly removed: boolean;
@@ -221,6 +222,13 @@ function toItemBody(item: ItemRecord): {
     category: item.category,
     maxStack: item.maxStack,
     hasCondition: item.hasCondition,
+    // ####  A TELA PRECISA DELE PARA DESABILITAR UMA OPÇÃO  ####
+    //
+    // O cadastro de item custom oferece "converter só quando o
+    // jogador usar", e isso não existe em item sem
+    // `ItemModConsumable`. `null` é "ninguém perguntou" — a tela
+    // deixa a opção aberta e avisa o motivo. Ver a migração 045.
+    consumable: item.consumable,
     firstSeen: new Date(item.firstSeen).toISOString(),
     lastSeen: new Date(item.lastSeen).toISOString(),
     // O jogo não lista mais este item. A linha continua aqui de

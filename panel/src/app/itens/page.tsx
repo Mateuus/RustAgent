@@ -27,6 +27,7 @@
 import { Package, RefreshCw, Search } from 'lucide-react';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
+import { CustomItemsPanel } from '@/components/custom-items-panel';
 import { ItemIcon } from '@/components/item-icon';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
@@ -49,6 +50,82 @@ export default function ItensPage() {
   );
 }
 
+/**
+ * As duas naturezas, e por que elas dividem a mesma tela.
+ *
+ * ####  SÃO PERGUNTAS DIFERENTES  ####
+ *
+ * "quais itens o jogo tem?" é CONSULTA. "quais itens nós criamos?"
+ * é ADMINISTRAÇÃO. Por isso o corte entre elas vem antes do filtro
+ * de categoria na hierarquia da tela.
+ *
+ * ####  E POR QUE NÃO DUAS TELAS  ####
+ *
+ * Porque quem cadastra um item nosso acabou de procurar o item base
+ * — e o corpo emprestado é escolhido no mesmo catálogo que a outra
+ * aba mostra. Separar obrigaria a ir e voltar para cadastrar um
+ * item.
+ *
+ * ####  E POR QUE NÃO UM FILTRO  ####
+ *
+ * Porque as colunas divergem: item do jogo tem "empilha" e "tem
+ * condição"; item nosso tem "base", "marca", "ação" e "servidores".
+ * Um filtro numa tabela só deixaria metade das colunas vazias em
+ * metade das linhas.
+ */
+function Itens() {
+  const [aba, setAba] = useState<'jogo' | 'nossos'>('jogo');
+  const [totalNossos, setTotalNossos] = useState<number | null>(null);
+
+  return (
+    <div>
+      <PageHeader
+        title="Itens"
+        description="O catálogo do jogo e os itens que nós criamos. A tela responde com os servidores parados."
+      />
+
+      <div className="mt-4 flex border-b border-border">
+        <TabButton active={aba === 'jogo'} onClick={() => setAba('jogo')}>
+          Do jogo
+        </TabButton>
+        <TabButton active={aba === 'nossos'} onClick={() => setAba('nossos')}>
+          Nossos {totalNossos === null ? '' : `(${String(totalNossos)})`}
+        </TabButton>
+      </div>
+
+      <div className="mt-4">
+        {aba === 'jogo' ? <CatalogoDoJogo /> : <CustomItemsPanel onCount={setTotalNossos} />}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        '-mb-px border-b-2 px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
+        active
+          ? 'border-rust text-foreground'
+          : 'border-transparent text-muted hover:text-foreground',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 function HeaderCell({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <th
@@ -63,7 +140,7 @@ function HeaderCell({ children, className }: { children: ReactNode; className?: 
   );
 }
 
-function Itens() {
+function CatalogoDoJogo() {
   const [items, setItems] = useState<CatalogItem[] | null>(null);
   const [total, setTotal] = useState(0);
   const [catalog, setCatalog] = useState<ItemCatalogInfo | null>(null);
@@ -150,16 +227,10 @@ function Itens() {
 
   return (
     <div>
-      <PageHeader
-        title="Itens"
-        description="O catálogo do jogo, guardado no agente. Ele responde com os servidores parados."
-        aside={
-          <span className="flex items-center gap-2 text-2xs uppercase tracking-wider text-muted">
-            <Package aria-hidden="true" className="h-4 w-4" />
-            {total === 0 ? 'nenhum' : `${formatInteger(total)} no total`}
-          </span>
-        }
-      />
+      <div className="mb-3 flex items-center justify-end gap-2 text-2xs uppercase tracking-wider text-muted">
+        <Package aria-hidden="true" className="h-4 w-4" />
+        {total === 0 ? 'nenhum' : `${formatInteger(total)} no total`}
+      </div>
 
       <div className="mt-4 space-y-4">
         {/* De quando é o catálogo, e de onde ele veio. */}

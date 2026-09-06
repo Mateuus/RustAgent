@@ -26,6 +26,7 @@ import { ZodError } from 'zod';
 import type { OperatorAuth } from '../auth/operator.js';
 import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
+import type { CustomItemsRepository } from '../db/custom-items-repository.js';
 import type { ItemsRepository } from '../db/items-repository.js';
 import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
@@ -71,6 +72,7 @@ import { registerServerRoutes } from './routes/servers.js';
 import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
 import { registerSystemRoutes } from './routes/system.js';
 // ---- itens e interface ----
+import { registerCustomItemRoutes } from './routes/custom-items.js';
 import { registerItemRoutes } from './routes/items.js';
 import { registerUiRoutes } from './routes/ui.js';
 // ---- VIP, loadouts e kits ----
@@ -101,6 +103,8 @@ import { registerRustMapsRoutes } from './routes/rustmaps.js';
 import type { BpRepository } from '../db/bp-repository.js';
 import type { BlueprintService } from '../wipe/blueprints.js';
 import { registerWipeBlueprintRoutes } from './routes/wipe-blueprints.js';
+// ---- o ranking ----
+import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -137,6 +141,16 @@ export interface BuildServerOptions {
   readonly items: ItemsRepository;
   /** Quem relê o catálogo do jogo. Ver game/item-catalog.ts. */
   readonly itemCatalog: ItemCatalog;
+  /**
+   * Os itens que NÓS criamos. Ver db/custom-items-repository.ts.
+   *
+   * Separado do `items` de propósito: aquele é um espelho do jogo,
+   * reescrito a cada varredura; este guarda decisões nossas, e nada
+   * o apaga sozinho.
+   */
+  readonly customItems: CustomItemsRepository;
+  /** Quem leva o cadastro de itens custom ao jogo. */
+  readonly customItemsSync?: { pushAll(trigger: string): Promise<unknown> };
   /** As interfaces. Ver db/ui-documents-repository.ts. */
   readonly uiDocuments: UiDocumentsRepository;
   /** O transporte até o jogo. Ver game/ui-sync.ts. */
@@ -261,6 +275,25 @@ export interface BuildServerOptions {
     readonly repository: BpRepository;
     readonly service: BlueprintService;
   };
+
+  /**
+   * O RANKING: o catálogo, as listas, o histórico e as janelas.
+   *
+   * ####  ELE CHEGA MONTADO, E NÃO EM PEDAÇOS  ####
+   *
+   * Diferente dos vizinhos, aqui não há um repositório solto: o
+   * `RankingsService` é a única porta da regra (o K/D é calculado
+   * lá, e a rota nem sabe), e ele já nasce no `index.ts` com a
+   * dependência que só o `index.ts` tem — o `coverage`, que sabe
+   * se o plugin daquele servidor estava carregado. Passar o
+   * repositório aqui abriria um segundo caminho para a mesma
+   * pergunta, sem a regra no meio.
+   *
+   * O `collector` é opcional de propósito: sem coleta ligada, as
+   * listas continuam respondendo o que já foi medido, e só o
+   * "forçar ciclo agora" recusa. Ver Docs/Ranking/20 §9.
+   */
+  readonly rankings: RankingRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -408,10 +441,28 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // registrado por `registerAdminRoutes`.
       registerPlayerRoutes(api, { directory: options.directory });
 
+      // O ranking, junto do jogador porque é dele que ele fala — e
+      // porque `/players/:steamId/rankings` é a ficha dele vista
+      // pelo outro lado. As rotas respondem do BANCO: elas
+      // continuam de pé com os servidores parados, e é o
+      // `coverage` de cada lista que diz quem estava coletando.
+      registerRankingRoutes(api, options.rankings);
+
       // O catálogo de itens. Ele responde do BANCO, e por isso
       // continua de pé com todos os servidores parados — que é
       // justamente quando se monta um kit.
       registerItemRoutes(api, { repository: options.items, catalog: options.itemCatalog });
+
+      // Os itens que nós criamos. Mesma tela do catálogo, outra
+      // natureza: "quais itens o jogo tem?" é consulta; "quais
+      // itens nós criamos?" é administração. Ver
+      // Docs\CustomItem\01-PESQUISA-ITEM-CUSTOM.md §8.
+      registerCustomItemRoutes(api, {
+        repository: options.customItems,
+        items: options.items,
+        servers: options.repository,
+        ...(options.customItemsSync === undefined ? {} : { sync: options.customItemsSync }),
+      });
 
       // As interfaces do jogo. O desenho é da rede; o que cada
       // servidor mostra dele é dado da ligação — daí as rotas

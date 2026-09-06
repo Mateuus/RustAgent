@@ -3114,6 +3114,1029 @@ DROP TABLE player_events_039;
 CREATE INDEX idx_player_events_player ON player_events (steam_id, at DESC);
 `;
 
+// ------------------------------------------------------------
+//  041 — os itens que NÓS criamos
+//
+//  ####  ITEM DO JOGO É LEITURA; ITEM NOSSO É ESCRITA  ####
+//
+//  É a razão de esta tabela existir separada da `items` da 007.
+//  Aquela é um ESPELHO: ela é reescrita a cada varredura do
+//  catálogo, e um item nosso dentro dela sumiria no primeiro update
+//  do Rust que ninguém acompanhasse. Esta aqui nada apaga sozinho.
+//
+//  ####  O ITEM CUSTOM NÃO É UM ITEM NOVO  ####
+//
+//  MEDIDO no binário do jogo: um `itemid` que o cliente não conhece
+//  é DESCARTADO — "Load invalid item id {0} from item {1} (no
+//  ItemDefinition found)". Não existe criar item sem modificar o
+//  cliente de cada jogador.
+//
+//  O que existe é MARCAR um item do jogo. A marca é o par
+//  `(base_shortname, skin_id)`, e ela é a única coisa que o próprio
+//  Rust carrega por nós: sobrevive a drop, a wipe, a restart e a
+//  `oxide.reload`, porque quem a guarda é o item.
+//
+//  ####  A MARCA NUNCA É ZERO  ####
+//
+//  Dois motivos independentes, e o segundo derruba jogador:
+//
+//   1. skin 0 é indistinguível de item comum. Um troféu com skin 0
+//      faria o servidor premiar o troféu do Twitch que o jogador já
+//      tinha no baú;
+//   2. skin 0 num item SEM skins estoura o cliente pelo caminho do
+//      CUI — ver ui-cui.ts:309-330 e Docs\TrofeuBleik §2.6.
+//
+//  Daí o CHECK: ele pega o caminho que esquecer de validar.
+//
+//  ####  MEDIDO EM 05/09/2026, NO SERVIDOR RODANDO  ####
+//
+//  A dúvida que decidia este desenho era se o `skin_id` sobrevive
+//  num item cuja definição NÃO aceita skins (104 dos 1266 aceitam,
+//  e nenhum troféu está entre eles). O `origemz.item.diag` do
+//  Plugins\OrigemZItems.cs respondeu no server01:
+//
+//      trophy (definitionHasSkins: false) + skin 3000000001
+//        -> skinSurvived: true
+//
+//  Sobrevive. Ver Docs\CustomItem\01-PESQUISA-ITEM-CUSTOM.md §13 Q3.
+// ------------------------------------------------------------
+const CUSTOM_ITEMS_SCHEMA = `
+CREATE TABLE custom_items (
+  -- Nosso, e estável. É o que a loja, o kit e o site guardam.
+  id            TEXT PRIMARY KEY,
+
+  -- O que o jogador lê. Sobrescreve o nome do item base pelo campo
+  -- \`name\` do protocolo, que é da INSTÂNCIA — e por isso não
+  -- afeta nenhum outro item igual no servidor.
+  display_name  TEXT NOT NULL,
+
+  -- Ver o cabeçalho: a marca.
+  --
+  -- \`skin_id\` é TEXT e não INTEGER: é um UInt64 na rede, e ele
+  -- não cabe no inteiro com sinal do SQLite. Mesma escolha que
+  -- store_offer_items.skin_id já fez.
+  base_shortname TEXT NOT NULL REFERENCES items(shortname),
+  skin_id        TEXT NOT NULL CHECK (skin_id <> '0' AND skin_id <> ''),
+
+  -- Nossa, e livre. As 14 categorias do jogo não têm "Troféu", e
+  -- empurrar este item para dentro de \`Misc\` esconderia dele a
+  -- única coisa que o descreve.
+  category      TEXT NOT NULL,
+
+  -- Vai para o painel do item no jogo, no bloco de procedência —
+  -- porque NÃO EXISTE campo de descrição no protocolo. A descrição
+  -- do item base continua aparecendo acima; a nossa entra abaixo.
+  -- Ver OrigemZItems.cs, ApplyDescription.
+  description   TEXT,
+
+  -- O nome do arquivo em Assets\\items\\, ou NULL para "usa o ícone
+  -- do item base" — que é um padrão BOM: o jogador já reconhece o
+  -- ícone do item do jogo.
+  --
+  -- Não é o PNG: é o NOME. Os bytes vão pelo canal que já existe
+  -- (\`origemz.item.icon\`), e o plugin os guarda no FileStorage do
+  -- servidor, que devolve um CRC. O CRC NÃO é gravado aqui de
+  -- propósito: ele nasce do outro lado, muda quando o PNG muda, e
+  -- guardá-lo seria uma segunda verdade sobre a mesma imagem.
+  icon_file     TEXT,
+
+  -- NULL = herda o do item base.
+  --
+  -- ####  ELE SÓ SABE DIMINUIR  ####
+  --
+  -- O teto vive no \`stackable\` da ItemDefinition, que é do JOGO.
+  -- Baixar é fácil: o jogo tenta empilhar e o plugin recusa. SUBIR
+  -- é impossível — a recusa vem antes, dentro do próprio jogo.
+  -- Um \`trophy\` empilha 1: pedir 5 aqui não faz nada.
+  max_stack     INTEGER CHECK (max_stack IS NULL OR max_stack > 0),
+
+  -- O corpo emprestado traz os hábitos junto: o \`trophy\` é
+  -- deployable no jogo, e um troféu nosso nasce colocável no chão
+  -- sem ninguém ter pedido. 0 = o plugin recusa a colocação.
+  deployable    INTEGER NOT NULL DEFAULT 1 CHECK (deployable IN (0, 1)),
+
+  -- ####  A AÇÃO  ####
+  --
+  -- JSON, e não colunas. Mesma razão da \`ui_documents\` (008): a
+  -- forma da ação MUDA com o tipo dela, e uma coluna por efeito
+  -- possível daria uma tabela larga cheia de NULL que ninguém
+  -- consulta.
+  --
+  --   {"kind":"none"}
+  --   {"kind":"consume","trigger":"use","consumes":1,
+  --    "effects":[{"type":"Health","amount":40}]}
+  --
+  -- Os oito tipos de efeito são do JOGO, medidos no enum
+  -- MetabolismAttribute.Type: Calories, Hydration, Heartrate,
+  -- Poison, Radiation, Bleeding, Health e HealthOverTime.
+  --
+  -- Quem valida é o zod na borda HTTP, e não o banco: a regra é
+  -- longa demais para um CHECK, e um CHECK que entende metade dela
+  -- é pior que nenhum.
+  action        TEXT NOT NULL DEFAULT '{"kind":"none"}',
+
+  -- Frase no chat ao usar. Opcional.
+  message       TEXT,
+
+  -- Desligado NÃO é apagado. Um item desligado não é entregue, mas
+  -- continua sendo RECONHECIDO pelo plugin — senão o troféu que o
+  -- jogador já tem viraria lixo por causa de um clique no painel.
+  enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+-- Duas definições com a mesma marca deixariam o plugin sem critério
+-- para escolher qual dos dois itens ele está vendo.
+CREATE UNIQUE INDEX idx_custom_items_mark
+  ON custom_items (base_shortname, skin_id);
+
+CREATE INDEX idx_custom_items_category ON custom_items (category);
+
+-- Em quais servidores este item existe. Cópia do \`kit_servers\`
+-- (012), inclusive o índice: a chave primária começa por
+-- \`item_id\`, e a pergunta da tela do servidor é a OUTRA — "quais
+-- itens este servidor tem?" —, que sem o índice varreria a tabela.
+--
+-- Sem linha nenhuma = em nenhum servidor. Um item recém-cadastrado
+-- que já valesse em tudo entraria em produção sem ninguém mandar.
+CREATE TABLE custom_item_servers (
+  item_id   TEXT NOT NULL REFERENCES custom_items(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (item_id, server_id)
+);
+
+CREATE INDEX idx_custom_item_servers_server
+  ON custom_item_servers (server_id);
+`;
+
+// ------------------------------------------------------------
+//  042 — o item que se gasta ao ser recebido
+//
+//  ####  ELE É UM RECIBO, E NÃO UMA COISA  ####
+//
+//  O Troféu Bleik nasce, é visto por alguns segundos e morre,
+//  deixando atrás de si um número que só cresce. É o desenho do
+//  briefing: "o item físico serve apenas para representar a
+//  conquista antes de ser convertido automaticamente em pontuação".
+//
+//  ####  POR QUE UMA COLUNA, E NÃO UM CAMPO DA AÇÃO  ####
+//
+//  Porque "quando" e "o quê" são perguntas independentes. A ação
+//  diz o QUE acontece (somar ponto, curar); esta coluna diz QUANDO
+//  — e um item de cura que age ao ser recebido é tão legítimo
+//  quanto um de pontos que espera o jogador clicar.
+//
+//  Enfiar isto dentro do JSON da ação obrigaria a repetir o mesmo
+//  campo em cada tipo novo de ação, e a esquecê-lo em um deles.
+//
+//  ####  ELA RESOLVE AS TRÊS PROIBIÇÕES DE GRAÇA  ####
+//
+//  O briefing proíbe guardar, dropar e transferir o troféu. Com a
+//  conversão na entrada, as três se resolvem sozinhas: não há o que
+//  dropar, porque o item já não existe. Ver
+//  Docs\TrofeuBleik\TROFEU_BLEIK_STORE.md §3.4.
+//
+//  ####  E ELA TEM UMA JANELA QUE PODE PERDER PONTO  ####
+//
+//  Entre destruir o item e o agente somar, o ponto não existe em
+//  lugar nenhum. Se o RCON estiver fora nesse instante, o jogador
+//  perdeu a conquista e não há como saber. Por isso o plugin
+//  REGISTRA antes de destruir, e reenvia no boot — §3.5 do mesmo
+//  documento. A coluna aqui é só a intenção; a fila é lá.
+// ------------------------------------------------------------
+const CUSTOM_ITEMS_PICKUP_SCHEMA = `
+ALTER TABLE custom_items
+  ADD COLUMN consume_on_pickup INTEGER NOT NULL DEFAULT 0
+  CHECK (consume_on_pickup IN (0, 1));
+`;
+
+// ------------------------------------------------------------
+//  033 — o núcleo do ranking
+//
+//  ####  RANKING É LINHA, E NÃO CÓDIGO  ####
+//
+//  A estatística é guardada como (metric TEXT, value INTEGER), e
+//  não como uma coluna por métrica, porque a lista de métricas
+//  CRESCE — e agora cresce em runtime: o admin cria um ranking
+//  novo pelo painel e ele precisa funcionar sem migração. Coluna
+//  por métrica tornaria isso impossível, não só caro.
+//
+//  O plano inteiro, com o porquê de cada coluna, está em
+//  Docs/Ranking/20-PLANO-E-CONTRATOS.md §2. A pesquisa que decidiu
+//  O QUE medir está em Docs/Ranking/19-PESQUISA-RANKING.md.
+//
+//  ####  AS DUAS UNIDADES DE TEMPO QUE CONVIVEM AQUI  ####
+//
+//  A convenção da casa é epoch em MILISSEGUNDOS, e ela vale para
+//  tudo o que o AGENTE carimba (started_at, ended_at, applied_at,
+//  updated_at, frozen_at).
+//
+//  A exceção é o instante que vem do SERVIDOR DE JOGO —
+//  `stat_events.at` e `player_records.at` —, que chega em SEGUNDOS
+//  no contrato do plugin (§6.1 e §7.2) e é gravado como chegou.
+//  Convertê-lo na entrada faria o agente reescrever um fato alheio
+//  para caber num hábito nosso, e a auditoria do §2.4 compara essa
+//  coluna com o que o log do servidor de jogo mostra.
+//
+//  Consequência prática: a "janela de perda" (§8.3) é
+//  `applied_at / 1000 - at`, e não uma subtração direta.
+// ------------------------------------------------------------
+const RANKINGS_CORE_SCHEMA = `
+-- ----------------------------------------------------------
+--  stat_periods — a JANELA de um ranking.
+--
+--  Um período é (servidor, tipo, começo). O tipo 'wipe' aponta
+--  para a linha de 'wipes' que o criou: é assim que o ranking
+--  sabe que aquele mundo acabou sem depender de relógio.
+--
+--  'lifetime' é UM período por servidor, sem fim — o que
+--  responde à promessa do 09-ROADMAP: o ranking sobrevive ao
+--  wipe porque o JOGADOR sobrevive ao wipe.
+--
+--  ####  POR QUE SÓ TRÊS TIPOS, SE O DONO PEDIU QUATRO  ####
+--
+--  O dono pediu wipe, 15 dias, mês e temporada. Isso NÃO são
+--  quatro tipos de período: são quatro maneiras de FATIAR o
+--  mesmo tipo. O 'kind' diz o PAPEL da janela; o
+--  ranking_settings.season_mode (034) diz o TAMANHO dela.
+--
+--  Fazer 'biweekly' e 'monthly' virarem 'kind' daria dois
+--  períodos abertos ao mesmo tempo no mesmo servidor, cada um
+--  com um pódio diferente, e a tela teria de explicar qual é
+--  "o" ranking. Com um 'season' configurável, a resposta é
+--  sempre uma.
+-- ----------------------------------------------------------
+CREATE TABLE stat_periods (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('wipe','season','lifetime')),
+
+  -- A linha de 'wipes' que abriu este período. NULL em 'lifetime'
+  -- e em 'season' que não acompanha wipe.
+  wipe_id INTEGER REFERENCES wipes(id) ON DELETE SET NULL,
+
+  started_at INTEGER NOT NULL,
+
+  -- NULL = ainda aberto. É a coluna que a consulta do "agora" usa.
+  ended_at INTEGER,
+
+  -- Como o modo estava configurado QUANDO o período abriu. Mudar
+  -- a configuração não reescreve o passado: a temporada de março
+  -- continua dizendo que foi mensal, mesmo depois de virar
+  -- trimestral em abril.
+  season_mode TEXT,
+
+  -- "Temporada de março", "Wipe de 05/09". Para a tela e para o
+  -- histórico; nunca é chave.
+  label TEXT
+);
+
+-- Um período aberto por (servidor, tipo), e o banco garante isso.
+CREATE UNIQUE INDEX idx_stat_periods_open
+  ON stat_periods (server_id, kind) WHERE ended_at IS NULL;
+
+-- A consulta do histórico: "as temporadas deste servidor, da mais
+-- nova para a mais velha".
+CREATE INDEX idx_stat_periods_history
+  ON stat_periods (server_id, kind, started_at DESC);
+
+-- ----------------------------------------------------------
+--  player_stats — o contador.
+--
+--  ####  POR QUE (metric TEXT, value INTEGER) E NÃO UMA COLUNA
+--        POR MÉTRICA  ####
+--
+--  Porque a lista de métricas CRESCE, e agora cresce em runtime:
+--  o admin cria um ranking novo pelo painel (034) e ele precisa
+--  funcionar sem migração. Coluna por métrica tornaria o pedido
+--  do dono impossível, não só caro.
+--
+--  O custo é conhecido: não dá para somar duas métricas numa
+--  expressão SQL simples, e o índice precisa começar por
+--  (period_id, metric). As consultas do ranking são exatamente
+--  essas — "top N de UMA métrica num período".
+-- ----------------------------------------------------------
+CREATE TABLE player_stats (
+  period_id INTEGER NOT NULL REFERENCES stat_periods(id) ON DELETE CASCADE,
+  steam_id  TEXT NOT NULL REFERENCES players(steam_id) ON DELETE CASCADE,
+
+  -- 'ore.sulfur', 'explosive.seq', 'pvp.kills', 'trophy.bleik', …
+  -- Formato: familia.nome, minúsculas. É o MESMO formato que o
+  -- zod do item custom já exige em
+  -- core/src/http/routes/custom-items.ts.
+  metric TEXT NOT NULL,
+
+  -- Sempre INTEIRO e sempre MONOTÔNICO: só cresce, e cresce por
+  -- soma de lote. Guardar float aqui abriria a porta para
+  -- arredondamento acumulado em milhões de somas.
+  --
+  -- Medida que não é inteira (distância de tiro) NÃO mora aqui:
+  -- mora em player_records, que é o fato com testemunho.
+  value INTEGER NOT NULL DEFAULT 0,
+
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (period_id, steam_id, metric)
+);
+
+-- A consulta do ranking: top N de uma métrica num período.
+CREATE INDEX idx_player_stats_rank
+  ON player_stats (period_id, metric, value DESC);
+
+-- A consulta da ficha: tudo daquele jogador.
+CREATE INDEX idx_player_stats_player ON player_stats (steam_id, metric);
+
+-- ----------------------------------------------------------
+--  player_records — o FATO, com testemunho.
+--
+--  O tiro longo mora aqui. Um contador diria "412"; esta tabela
+--  diz com que arma, em quem, onde e quando — que é o que se
+--  mostra quando alguém contesta o recorde.
+-- ----------------------------------------------------------
+CREATE TABLE player_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period_id INTEGER NOT NULL REFERENCES stat_periods(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL REFERENCES players(steam_id) ON DELETE CASCADE,
+
+  -- 'shot.distance' hoje; 'raid.biggest' amanhã.
+  metric TEXT NOT NULL,
+
+  -- REAL aqui, ao contrário de player_stats: distância é medida,
+  -- não contagem, e 412.73 é a informação.
+  value REAL NOT NULL,
+
+  -- Epoch em SEGUNDOS, relógio do servidor de jogo. Ver o
+  -- cabeçalho desta migração.
+  at INTEGER NOT NULL,
+
+  -- O testemunho, em JSON: arma, munição, headshot, vítima, grid,
+  -- posições, ratio de validação. É para LER, não para filtrar —
+  -- por isso uma coluna, e não dez.
+  detail TEXT,
+
+  -- 'ok' | 'suspect' | 'void'. Suspeito é GRAVADO e não entra no
+  -- pódio; apagar seria perder o rastro da fraude.
+  status TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','suspect','void'))
+);
+
+CREATE INDEX idx_player_records_rank
+  ON player_records (period_id, metric, value DESC) WHERE status = 'ok';
+
+CREATE INDEX idx_player_records_player ON player_records (steam_id, metric);
+
+-- ----------------------------------------------------------
+--  stat_batches — a idempotência do LOTE.
+--
+--  Sem ela, um 'ack' perdido faria o mesmo lote entrar duas
+--  vezes, e o contador de alguém dobraria sem nada no log.
+-- ----------------------------------------------------------
+CREATE TABLE stat_batches (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  batch_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  applied_at INTEGER NOT NULL,
+  players INTEGER NOT NULL,
+  events INTEGER NOT NULL,
+  PRIMARY KEY (server_id, batch_id)
+);
+
+CREATE INDEX idx_stat_batches_recent ON stat_batches (server_id, applied_at DESC);
+
+-- ----------------------------------------------------------
+--  stat_events — a idempotência do EVENTO, e a auditoria.
+--
+--  ####  POR QUE ELA EXISTE, SE JÁ HÁ stat_batches  ####
+--
+--  Porque o troféu viaja pelos DOIS caminhos de propósito: o
+--  push dá o "agora" (o recibo no chat tem que ser na hora), o
+--  lote dá o "garantido". O mesmo ponto chega duas vezes, e o
+--  batchId não ajuda — as duas chegadas estão em lotes
+--  diferentes. Quem desempata é o eventId.
+--
+--  ####  E ELA PAGA UM SEGUNDO ALUGUEL  ####
+--
+--  Ela é a auditoria do documento do troféu: emitidos ×
+--  convertidos, por dia, por fonte. Sem esta tabela, "o jogador
+--  diz que ganhou 3 troféus e só contou 1" não tem resposta —
+--  só a palavra de um contra a do outro.
+-- ----------------------------------------------------------
+CREATE TABLE stat_events (
+  -- Gerado pelo PLUGIN: steamId-epochSegundos-contador. Nunca
+  -- pelo agente: o agente não sabe o que ele não recebeu.
+  event_id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+
+  -- Quantos pontos este evento valeu. Já multiplicado: 3 troféus
+  -- de 5 pontos chegam como 15, e não como 3 com um peso junto.
+  -- O peso é configuração do ITEM e pode mudar amanhã; o ponto
+  -- concedido é fato e não muda.
+  amount INTEGER NOT NULL,
+
+  -- De onde veio: 'item:trofeu-bleik', 'dungeon', 'admin'.
+  -- Conjunto ABERTO no banco e FECHADO no zod da borda.
+  source TEXT,
+
+  -- Relógio do SERVIDOR DE JOGO, epoch em segundos.
+  at INTEGER NOT NULL,
+
+  -- Relógio do AGENTE, epoch em MILISSEGUNDOS. Os dois existem
+  -- porque a diferença entre eles é o tamanho da janela de perda;
+  -- as unidades são diferentes de propósito, e o cabeçalho desta
+  -- migração explica por quê.
+  applied_at INTEGER NOT NULL,
+
+  -- Por qual dos dois caminhos ele chegou PRIMEIRO.
+  via TEXT NOT NULL CHECK (via IN ('push','flush'))
+);
+
+CREATE INDEX idx_stat_events_audit ON stat_events (server_id, metric, at DESC);
+CREATE INDEX idx_stat_events_player ON stat_events (steam_id, at DESC);
+
+-- ----------------------------------------------------------
+--  stat_adjustments — quem mexeu no número, e por quê.
+--
+--  Zerar a estatística de um suspeito é AÇÃO ADMINISTRATIVA, e
+--  ação administrativa sem autor é o que não se consegue
+--  explicar depois. Mesma razão da store_audit (migração 021).
+-- ----------------------------------------------------------
+CREATE TABLE stat_adjustments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period_id INTEGER NOT NULL REFERENCES stat_periods(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL,
+  metric TEXT,
+  action TEXT NOT NULL CHECK (action IN ('reset','set','void_record','grant')),
+  old_value INTEGER,
+  new_value INTEGER,
+  actor TEXT NOT NULL,
+  reason TEXT,
+  at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_stat_adjustments_player ON stat_adjustments (steam_id, at DESC);
+`;
+
+// ------------------------------------------------------------
+//  034 — o catálogo de rankings, e o pódio congelado
+//
+//  ####  A LINHA SEMEADA É O PRODUTO DESTA MIGRAÇÃO  ####
+//
+//  Ela não cria só tabela: ela SEMEIA os onze rankings fixos. É o
+//  que faz "abates" existir num banco novo sem ninguém cadastrar
+//  nada — e é o que prova que o dinâmico não é um segundo sistema,
+//  porque o Troféu Bleik vai ser uma linha igual a estas, criada
+//  pelo painel.
+//
+//  ####  E ELA CARREGA A ESCOLHA DO DONO SOBRE O QUE ZERA  ####
+//
+//  Três colunas nascem aqui só por causa dela:
+//
+//    rankings.window                  em que janela aquele ranking
+//                                     disputa — e, portanto, qual
+//                                     virada o zera aos olhos de
+//                                     quem joga;
+//    ranking_settings.season_on_wipe  a temporada também vira
+//                                     quando o mundo vira?
+//    wipe_runs.open_ranking_season    a exceção DAQUELA execução,
+//                                     com três estados.
+//
+//  Nenhuma delas muda a ESCRITA: todo evento continua somando nos
+//  três períodos abertos. Elas mudam o que a tela abre e o que a
+//  virada fecha. Ver Docs/Ranking/20-PLANO-E-CONTRATOS.md §3 a §5.
+//
+//  ####  O ALTER EM wipe_runs É SEGURO AQUI, E A ORDEM É O
+//        PORQUÊ  ####
+//
+//  `wipe_runs` nasce na 025 e nenhuma migração posterior a
+//  RECRIA — as três que a alteram (029, 030, 031) são todas
+//  anteriores a esta. Como o runner aplica por ordem de id, a
+//  coluna existe tanto no banco velho quanto no novo.
+// ------------------------------------------------------------
+const RANKINGS_CATALOG_SCHEMA = `
+-- ----------------------------------------------------------
+--  rankings — a DEFINIÇÃO de um ranking.
+--
+--  ####  FIXO E DINÂMICO SÃO A MESMA LINHA  ####
+--
+--  Um ranking "fixo" (abates, tempo online) e um "dinâmico"
+--  (Troféu Bleik) diferem em UMA coluna: 'builtin'. Ela só
+--  decide se o botão de apagar aparece no painel.
+--
+--  A alternativa — uma lista fixa em TypeScript e uma tabela só
+--  para os do admin — daria duas fontes para a mesma pergunta
+--  ("quais rankings existem?"), e a tela teria de concatenar as
+--  duas em toda consulta. É a segunda fonte que o
+--  02-ARQUITETURA já proíbe.
+-- ----------------------------------------------------------
+CREATE TABLE rankings (
+  -- Slug estável. É o que a URL do painel e o site guardam.
+  id TEXT PRIMARY KEY,
+
+  -- A chave em player_stats. Única: dois rankings sobre a mesma
+  -- métrica seriam a mesma lista com dois nomes.
+  metric TEXT NOT NULL UNIQUE,
+
+  label TEXT NOT NULL,
+
+  -- "abates", "troféus", "metros". Vai na coluna da tela; NULL
+  -- quando o número não tem unidade (K/D).
+  unit TEXT,
+
+  -- A frase que explica ao jogador o que ele precisa fazer para
+  -- pontuar. Aparece na tela do jogo e no site.
+  description TEXT,
+
+  -- ####  DE ONDE O NÚMERO VEM  ####
+  --   'plugin'   — hook do jogo, chega por flush/push
+  --   'agent'    — o agente calcula e soma (tempo online)
+  --   'item'     — a ação 'points' de um item custom
+  --   'computed' — não tem linha em player_stats; é derivado
+  --                na leitura de outras métricas (K/D)
+  source TEXT NOT NULL CHECK (source IN ('plugin','agent','item','computed')),
+
+  -- 'counter' soma em player_stats; 'record' mora em
+  -- player_records; 'ratio' é calculado.
+  value_kind TEXT NOT NULL CHECK (value_kind IN ('counter','record','ratio')),
+
+  direction TEXT NOT NULL DEFAULT 'desc' CHECK (direction IN ('desc','asc')),
+
+  -- ####  EM QUE JANELA ESTE RANKING DISPUTA  ####
+  --
+  -- Decidido pelo dono em 05/09/2026, e é o que responde a
+  -- "quero manter o ranking de abates e zerar o de minério".
+  --
+  -- Todo evento continua somando nas TRÊS janelas abertas — a
+  -- escrita não muda. Esta coluna diz qual delas é a disputa
+  -- daquele ranking: a que a tela abre por padrão, e a única
+  -- cuja virada o zera aos olhos de quem joga.
+  --
+  --   'wipe'     — zera quando o mundo zera. É o farm: o minério
+  --                daquele mapa não faz sentido no mapa seguinte
+  --   'season'   — atravessa os wipes e só zera quando a
+  --                temporada fecha. É onde mora a premiação
+  --   'lifetime' — nunca zera
+  --
+  -- ####  POR QUE UMA COLUNA, E NÃO UMA TEMPORADA POR RANKING  ####
+  --
+  -- Porque uma temporada por ranking significaria calendários
+  -- concorrentes no mesmo servidor — o troféu virando em março,
+  -- os abates em abril — e a pergunta "em que temporada estamos?"
+  -- deixaria de ter resposta. Com uma temporada só e esta coluna,
+  -- cada ranking escolhe se ela o afeta, e a data é uma só.
+  window TEXT NOT NULL DEFAULT 'season'
+    CHECK (window IN ('wipe','season','lifetime')),
+
+  -- ####  ENTRA NA SOMA DA REDE?  ####
+  --
+  -- 0 para minério e explosivo. Somar um servidor 1x com um 5x
+  -- produz uma lista ordenada por EM QUE SERVIDOR a pessoa
+  -- jogou — ver 19-PESQUISA §12.4. Abate, tempo, tiro e troféu
+  -- não têm esse defeito.
+  global_eligible INTEGER NOT NULL DEFAULT 1
+    CHECK (global_eligible IN (0, 1)),
+
+  -- 1 = veio semeado, o admin não apaga. 0 = o admin criou.
+  builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+
+  -- Desligado NÃO é apagado: o número continua lá, só sai das
+  -- telas. Mesma regra do custom_items.enabled.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- A ordem das abas na tela do jogo e das linhas no painel.
+  sort_order INTEGER NOT NULL DEFAULT 100,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_rankings_visible ON rankings (enabled, sort_order);
+
+-- ----------------------------------------------------------
+--  ranking_settings — o tamanho da temporada, POR SERVIDOR.
+--
+--  Decidido pelo dono em 05/09/2026: cada servidor tem a sua
+--  janela. É o padrão que kits (012), VIP e itens custom (041)
+--  já seguem — o que vale num servidor não vale nos outros por
+--  padrão.
+--
+--  Sem linha = os padrões do código (season_mode 'monthly').
+--  Não semeamos uma linha por servidor: um servidor criado
+--  depois desta migração ficaria sem ela, e o código teria de
+--  saber o padrão de qualquer jeito. Então o padrão mora num
+--  lugar só, no código — DEFAULT_RANKING_SETTINGS, em
+--  db/rankings-repository.ts.
+-- ----------------------------------------------------------
+CREATE TABLE ranking_settings (
+  server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+
+  --   'wipe'      — a temporada acompanha o mundo
+  --   'biweekly'  — 15 dias corridos a partir da âncora
+  --   'monthly'   — vira no dia 1
+  --   'quarterly' — vira em 1/jan, 1/abr, 1/jul, 1/out
+  --   'days'      — N dias corridos (season_days)
+  --   'manual'    — só fecha pela rota, com autor
+  season_mode TEXT NOT NULL DEFAULT 'monthly'
+    CHECK (season_mode IN ('wipe','biweekly','monthly','quarterly','days','manual')),
+
+  -- Só faz sentido em 'days', e o CHECK obriga que exista lá.
+  season_days INTEGER CHECK (season_days IS NULL OR season_days > 0),
+
+  -- Quando a contagem de 'biweekly'/'days' começou. NULL = a
+  -- abertura do período atual serve de âncora.
+  season_anchor_at INTEGER,
+
+  -- ####  O WIPE ABRE TEMPORADA NOVA?  ####
+  --
+  -- Pedido do dono em 05/09/2026, e ele vale para os DOIS tipos
+  -- de wipe: o que o agente executa e o que alguém fez à mão com
+  -- o servidor na unha. A âncora é a mesma nos dois casos — um
+  -- mundo novo apareceu (§5.2) —, e é justamente por isso que
+  -- amarrar a temporada ao wipe funciona sem depender de o wipe
+  -- ter passado pelo painel.
+  --
+  -- Isto NÃO é o mesmo que season_mode = 'wipe'. O modo diz
+  -- que a temporada É o wipe (uma por mundo). Esta coluna diz que
+  -- a temporada, seja ela mensal ou de 15 dias, TAMBÉM vira
+  -- quando o mundo vira — o que é o que se quer quando a
+  -- premiação acompanha o mapa sem ser semanal.
+  season_on_wipe INTEGER NOT NULL DEFAULT 0
+    CHECK (season_on_wipe IN (0, 1)),
+
+  -- Quantas posições o pódio congela ao fechar (§5.4).
+  snapshot_size INTEGER NOT NULL DEFAULT 50 CHECK (snapshot_size > 0),
+
+  updated_at INTEGER NOT NULL,
+
+  CHECK (season_mode <> 'days' OR season_days IS NOT NULL)
+);
+
+-- ----------------------------------------------------------
+--  ranking_snapshots — o HISTÓRICO.
+--
+--  ####  POR QUE CONGELAR, SE OS DADOS CONTINUAM NO BANCO  ####
+--
+--  Porque o pódio de março precisa continuar sendo o pódio de
+--  março. Três coisas o mudariam depois:
+--
+--   1. um estorno de fraude aplicado ao período fechado;
+--   2. um peso de índice que muda (o SEQ do explosivo, o
+--      encolhimento do K/D);
+--   3. um jogador apagado da base, que levaria a linha junto
+--      pelo ON DELETE CASCADE.
+--
+--  Congelar não é otimização — é a única maneira de a tela
+--  "campeões da temporada passada" responder a mesma coisa
+--  amanhã. Ver 19-PESQUISA §12.2 e §12.5.
+--
+--  E é por isso que 'display_name' é COPIADO aqui: o jogador
+--  troca de nome, e o campeão de março tem que continuar
+--  aparecendo com o nome que ele tinha quando ganhou.
+-- ----------------------------------------------------------
+CREATE TABLE ranking_snapshots (
+  period_id INTEGER NOT NULL REFERENCES stat_periods(id) ON DELETE CASCADE,
+  metric TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  steam_id TEXT NOT NULL,
+
+  -- Congelado de propósito. Não é FK: o snapshot sobrevive ao
+  -- jogador sair da base.
+  display_name TEXT,
+
+  -- REAL, e não INTEGER como em player_stats, porque aqui cabem
+  -- as três formas: contador (inteiro exato até 2^53), recorde
+  -- (412.73) e razão (K/D 1.42). Não há soma acontecendo nesta
+  -- tabela — o valor entra uma vez e nunca mais muda —, então o
+  -- motivo que proibiu float lá não vale aqui.
+  value REAL NOT NULL,
+
+  frozen_at INTEGER NOT NULL,
+  PRIMARY KEY (period_id, metric, position)
+);
+
+-- "em quantas temporadas o Fulano ficou no pódio?"
+CREATE INDEX idx_ranking_snapshots_player ON ranking_snapshots (steam_id, metric);
+
+-- ----------------------------------------------------------
+--  wipe_runs ganha a decisão sobre a temporada.
+--
+--  NULL  = herda ranking_settings.season_on_wipe
+--  1     = esta execução abre temporada nova, mesmo que a
+--          configuração diga que não
+--  0     = esta execução NÃO abre, mesmo que a configuração
+--          diga que sim
+--
+--  ####  POR QUE TRÊS ESTADOS, E NÃO UM BOOLEANO  ####
+--
+--  Porque "não decidi" e "decidi que não" são respostas
+--  diferentes, e um booleano com default 0 transformaria toda
+--  execução antiga — e toda execução em que ninguém tocou na
+--  caixa — numa decisão explícita de NÃO virar a temporada. A
+--  configuração do servidor deixaria de valer sem que ninguém
+--  a tivesse mudado.
+--
+--  É a mesma distinção que wipes.wipe_run_id já faz na migração
+--  025: NULL ali significa "wipe feito à mão", e não "wipe da
+--  execução número zero".
+-- ----------------------------------------------------------
+ALTER TABLE wipe_runs
+  ADD COLUMN open_ranking_season INTEGER
+  CHECK (open_ranking_season IS NULL OR open_ranking_season IN (0, 1));
+
+-- ----------------------------------------------------------
+--  Os onze rankings fixos (§4).
+--
+--  ####  POR QUE strftime, E NÃO UM NÚMERO FIXO  ####
+--
+--  A migração é DDL estática — ela não tem como receber o
+--  Date.now() do processo. Um instante fixo escrito aqui diria
+--  que todo servidor criou o catálogo no mesmo dia de 2026, e a
+--  coluna 'created_at' deixaria de responder a única pergunta
+--  que ela existe para responder.
+--
+--  O '* 1000' é a convenção da casa: epoch em milissegundos.
+--
+--  ####  A 'window' SEMEADA É UM PADRÃO, NÃO UMA SENTENÇA  ####
+--
+--  O admin muda cada uma pelo painel. O critério do padrão:
+--  farm zera com o mundo (o minério daquele mapa não significa
+--  nada no seguinte); PvP atravessa o wipe (a perícia não zerou
+--  porque o mapa zerou, e é aí que mora a premiação); tempo
+--  online é de sempre; e o tiro mais longo é do mapa, porque o
+--  recorde é uma história com lugar — "412 m no G12 daquele
+--  mapa" — e carregá-lo adiante tira dele o que o torna
+--  interessante.
+--
+--  ####  O TROFÉU BLEIK NÃO ESTÁ AQUI, E ISSO É O TESTE  ####
+--
+--  Ele é o primeiro ranking dinâmico, e o dono o cria pelo
+--  painel. Semeá-lo aqui esconderia justamente a demonstração de
+--  que o sistema funciona sem código novo.
+-- ----------------------------------------------------------
+INSERT INTO rankings
+  (id, metric, label, unit, description, source, value_kind, direction, window,
+   global_eligible, builtin, enabled, sort_order, created_at, updated_at)
+VALUES
+  ('abates', 'pvp.kills', 'Abates', 'abates',
+   'Cada jogador que voce abate conta um ponto.',
+   'plugin', 'counter', 'desc', 'season', 1, 1, 1, 10,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('mortes', 'pvp.deaths', 'Mortes', 'mortes',
+   'Quantas vezes voce morreu para outro jogador.',
+   'plugin', 'counter', 'desc', 'season', 1, 1, 1, 20,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('kd', 'pvp.kd', 'K/D', NULL,
+   'Abates divididos por mortes, com correcao para quem jogou pouco.',
+   'computed', 'ratio', 'desc', 'season', 1, 1, 1, 30,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('tempo-online', 'time.played', 'Tempo online', 'segundos',
+   'Tempo que voce passou dentro do servidor.',
+   'agent', 'counter', 'desc', 'lifetime', 1, 1, 1, 40,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('tiro-longo', 'shot.distance', 'Tiro mais longo', 'metros',
+   'O abate mais distante que voce conseguiu neste mapa.',
+   'plugin', 'record', 'desc', 'wipe', 1, 1, 1, 50,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('minerio', 'ore.total', 'Minério', 'unidades',
+   'Tudo o que voce minerou neste mapa, somado.',
+   'plugin', 'counter', 'desc', 'wipe', 0, 1, 1, 60,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('minerio-enxofre', 'ore.sulfur', 'Enxofre', 'unidades',
+   'Enxofre minerado neste mapa.',
+   'plugin', 'counter', 'desc', 'wipe', 0, 1, 1, 61,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('minerio-metal', 'ore.metal', 'Metal', 'unidades',
+   'Minério de metal minerado neste mapa.',
+   'plugin', 'counter', 'desc', 'wipe', 0, 1, 1, 62,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('minerio-pedra', 'ore.stone', 'Pedra', 'unidades',
+   'Pedra minerada neste mapa.',
+   'plugin', 'counter', 'desc', 'wipe', 0, 1, 1, 63,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('minerio-hqm', 'ore.hqm', 'Metal puro', 'unidades',
+   'Minério de metal puro minerado neste mapa.',
+   'plugin', 'counter', 'desc', 'wipe', 0, 1, 1, 64,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000),
+
+  ('explosivo', 'explosive.seq', 'Poder de raid', 'enxofre eq.',
+   'O que voce detonou neste mapa, convertido em enxofre equivalente.',
+   'plugin', 'counter', 'desc', 'wipe', 0, 1, 1, 70,
+   CAST(strftime('%s','now') AS INTEGER) * 1000,
+   CAST(strftime('%s','now') AS INTEGER) * 1000);
+`;
+
+// ------------------------------------------------------------
+//  043 — as três colunas que a 034 ganhou DEPOIS de já ter rodado
+//
+//  ####  O ERRO QUE ESTA MIGRAÇÃO CONSERTA  ####
+//
+//  A 034 nasceu sem `rankings.window`, sem
+//  `ranking_settings.season_on_wipe` e sem
+//  `wipe_runs.open_ranking_season`. As três entraram no pedido do
+//  dono de 05/09/2026 — cada ranking escolhe se a virada da
+//  temporada o zera, e o wipe pode abrir temporada nova — e foram
+//  acrescentadas ao SQL da 034 quando ela JÁ ESTAVA APLICADA.
+//
+//  O runner aplica cada id UMA vez. Em banco novo o SQL editado
+//  roda inteiro e tudo funciona; no banco de quem já migrou, a
+//  034 é pulada e as colunas nunca aparecem. O sintoma é o agente
+//  não subir: `rankings-repository.ts` consulta `window` num
+//  esquema que não a tem.
+//
+//  É exatamente o que o comentário da 042 já avisava, três linhas
+//  abaixo desta. A lição não é nova; o que faltou foi aplicá-la.
+//
+//  ####  POR QUE `run` E NÃO `sql`  ####
+//
+//  Porque ela roda nos dois mundos. Em banco novo as colunas já
+//  vieram da 034 e um ALTER cru estouraria com "duplicate column
+//  name"; aqui cada uma é conferida antes. É o mesmo desenho de
+//  `addWipeAtIfMissing` (030), pela mesma razão.
+// ------------------------------------------------------------
+function addRankingScopeColumnsIfMissing(db: AgentDatabase): void {
+  const hasColumn = (table: string, column: string): boolean =>
+    db
+      .prepare(`SELECT 1 AS ok FROM pragma_table_info(?) WHERE name = ?`)
+      .get(table, column) !== undefined;
+
+  if (!hasColumn('rankings', 'window')) {
+    db.exec(`
+      ALTER TABLE rankings ADD COLUMN "window" TEXT NOT NULL DEFAULT 'season'
+        CHECK ("window" IN ('wipe','season','lifetime'));
+    `);
+
+    // O default 'season' já é o certo para os três de PvP e para
+    // todo ranking dinâmico. Os outros oito precisam do critério
+    // do §4 do Docs/Ranking/20: farm zera com o mundo, e tempo
+    // online não zera nunca.
+    //
+    // Só corrige quem nasceu agora com o default — este UPDATE
+    // roda uma vez, dentro do `if`, e por isso não passa por cima
+    // de uma escolha que o admin já tenha feito na tela.
+    db.exec(`
+      UPDATE rankings SET "window" = 'lifetime' WHERE metric = 'time.played';
+
+      UPDATE rankings SET "window" = 'wipe'
+       WHERE metric IN ('shot.distance', 'ore.total', 'ore.sulfur',
+                        'ore.metal', 'ore.stone', 'ore.hqm', 'explosive.seq');
+    `);
+  }
+
+  if (!hasColumn('ranking_settings', 'season_on_wipe')) {
+    db.exec(`
+      ALTER TABLE ranking_settings ADD COLUMN season_on_wipe INTEGER NOT NULL DEFAULT 0
+        CHECK (season_on_wipe IN (0, 1));
+    `);
+  }
+
+  if (!hasColumn('wipe_runs', 'open_ranking_season')) {
+    // Sem NOT NULL e sem default: NULL aqui significa "não decidi,
+    // herde a configuração do servidor", e é diferente de "decidi
+    // que não". Ver o §3.4 do Docs/Ranking/20.
+    db.exec(`
+      ALTER TABLE wipe_runs ADD COLUMN open_ranking_season INTEGER
+        CHECK (open_ranking_season IS NULL OR open_ranking_season IN (0, 1));
+    `);
+  }
+}
+
+// ------------------------------------------------------------
+//  044 — o nome curto do menu, e quem aparece nele
+//
+//  ####  POR QUE UMA MIGRAÇÃO NOVA, E NÃO UM ALTER NA 034  ####
+//
+//  Pela lição que a 043 acabou de pagar, três dezenas de linhas
+//  acima: o runner aplica cada id UMA vez. Editar o `CREATE TABLE`
+//  da 034 daria banco novo certo e banco de produção sem coluna —
+//  o defeito que só aparece na primeira consulta que a pedir. As
+//  colunas nascem aqui, num id que ninguém aplicou ainda, e por
+//  isso este é `sql` puro: não há banco em que elas já existam.
+//
+//  ####  `short_label` NÃO É O `label` ABREVIADO  ####
+//
+//  A coluna de abas da tela do jogo é estreita: "Poder de raid"
+//  não cabe onde "Raid" cabe. Guardar a abreviação no `label`
+//  faria o painel e o site herdarem um nome que só existe por
+//  causa da largura de uma tela — e ninguém entenderia por que o
+//  ranking mudou de nome no site. `NULL` (ou vazio) quer dizer
+//  "não precisa de nome curto": vale o `label`.
+//
+//  ####  `show_in_game` NÃO É O `enabled`  ####
+//
+//  Desligar o ranking (`enabled = 0`) o tira de TODO lugar: do
+//  site, do painel, da tela do jogo. Isto o tira só do menu do
+//  jogo, onde o espaço é caro e cinco minérios seguidos empurram
+//  os rankings que importam para fora da vista. O número continua
+//  sendo contado e continua aparecendo no site — que é justamente
+//  a diferença entre "não quero mostrar aqui" e "não quero mais".
+//
+//  ####  OS DOIS UPDATES SÓ MEXEM NO VALOR ANTIGO  ####
+//
+//  O `WHERE` compara com o texto que a linha tem hoje. Se o admin
+//  já tiver renomeado o ranking pela tela, a condição não casa e a
+//  escolha dele fica de pé: uma migração que corrige um dado
+//  semeado não pode desfazer uma edição feita depois.
+//
+//  O `trofeu-bleik` não é semeado por migração nenhuma (ver o
+//  cabeçalho do catálogo da 034): ele é o primeiro ranking
+//  dinâmico, criado pelo painel. Em banco novo estes UPDATEs não
+//  casam com linha nenhuma, e é isso mesmo.
+// ------------------------------------------------------------
+const RANKING_SHORT_LABEL_SCHEMA = `
+ALTER TABLE rankings ADD COLUMN short_label TEXT;
+
+ALTER TABLE rankings ADD COLUMN show_in_game INTEGER NOT NULL DEFAULT 1
+  CHECK (show_in_game IN (0, 1));
+
+-- O nome inteiro é do site e do painel; o curto é da aba do jogo.
+UPDATE rankings
+   SET label       = 'Troféu Bleik Store',
+       short_label = 'Bleik Store',
+       updated_at  = CAST(strftime('%s','now') AS INTEGER) * 1000
+ WHERE id = 'trofeu-bleik' AND label = 'Bleik Store';
+
+-- "Tiro mais longo" e "Poder de raid" não cabem numa aba.
+UPDATE rankings
+   SET short_label = 'Tiro longo',
+       updated_at  = CAST(strftime('%s','now') AS INTEGER) * 1000
+ WHERE metric = 'shot.distance' AND short_label IS NULL;
+
+UPDATE rankings
+   SET short_label = 'Raid',
+       updated_at  = CAST(strftime('%s','now') AS INTEGER) * 1000
+ WHERE metric = 'explosive.seq' AND short_label IS NULL;
+`;
+
+// ------------------------------------------------------------
+//  045 — o catálogo passa a saber quem é CONSUMÍVEL
+//
+//  ####  A PERGUNTA QUE O CADASTRO NÃO CONSEGUIA FAZER  ####
+//
+//  O item custom ganhou um segundo momento de conversão: em vez de
+//  virar ponto ao cair no inventário, ele pode esperar o jogador
+//  USAR o item. Só que "usar" não existe em item nenhum: o
+//  `OnItemUse` do Oxide só dispara em quem tem `ItemModConsumable`,
+//  e o menu de contexto é montado pelo CLIENTE a partir da
+//  `ItemDefinition` — não há como criar uma opção nova nele.
+//
+//  Ou seja: configurar "só ao usar" em cima de um `trophy`
+//  (decorativo) produz um item INERTE — o jogador pega, nada
+//  acontece, e nada no log explica. É o pior desfecho possível, e
+//  ele é silencioso.
+//
+//  Esta coluna é o que permite recusar essa combinação no
+//  CADASTRO, que é o único momento em que alguém está olhando.
+//
+//  ####  POR QUE ELA ACEITA NULO  ####
+//
+//  `NULL` é "esta linha veio de uma varredura anterior a este
+//  campo, e não dá para afirmar". É diferente de `0` ("o jogo
+//  disse que não é consumível"), e a diferença importa: recusar um
+//  cadastro por FALTA de dado quebraria a promessa de que o
+//  cadastro funciona com todos os servidores parados. Só o `0`
+//  recusa; o `NULL` deixa passar e o plugin avisa no log.
+//
+//  ####  E POR QUE ELA APAGA O PROTOCOLO  ####
+//
+//  Porque senão a coluna ficaria `NULL` PARA SEMPRE. A releitura
+//  do catálogo é invalidada por PROTOCOLO (game/item-catalog.ts):
+//  com o mesmo protocolo guardado, o agente conclui que a cópia
+//  vale e não relê — e a informação nova nunca chegaria, até o
+//  próximo update do Rust.
+//
+//  Apagar a chave é dizer "não sei em que versão o jogo está", que
+//  é exatamente o que o `#isFresh` trata como motivo para reler. O
+//  custo é uma leitura de ~1250 itens na próxima conexão de RCON.
+// ------------------------------------------------------------
+const ITEMS_CONSUMABLE_SCHEMA = `
+ALTER TABLE items
+  ADD COLUMN consumable INTEGER
+  CHECK (consumable IS NULL OR consumable IN (0, 1));
+
+DELETE FROM meta WHERE key = 'items.protocol';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -3166,11 +4189,20 @@ export const MIGRATIONS: readonly Migration[] = [
   // o admin já tinha gravado, para que o conserto do globstar não
   // valha para trás. Ver o cabeçalho.
   { id: 32, name: 'wipe-plugin-data-globstar', run: rewriteLegacyPluginDataPatterns },
+  // A 033 e a 034 sao a fundacao do ranking
+  // (Docs/Ranking/20-PLANO-E-CONTRATOS.md). O numero estava
+  // reservado desde a 035, e elas entram AQUI, na posicao
+  // numerica: a ordem do array e a ordem em que o banco aplica.
+  //
+  // A 033 referencia `wipes`, que nasce na 025, e `players`, que
+  // nasce na 006 - as duas ja rodaram quando ela chega.
+  { id: 33, name: 'rankings-core', sql: RANKINGS_CORE_SCHEMA },
+  { id: 34, name: 'rankings-catalog', sql: RANKINGS_CATALOG_SCHEMA },
   // 035 e 036 sao da frente da integracao com o site OrigemZ
-  // (Docs\20). A 033 e a 034 sao do ranking (Docs\19), e o numero
-  // reservado esta escrito nos DOIS documentos: duas frentes que
-  // escrevam 33 dao merge limpo e banco quebrado, porque o SQLite
-  // aplica a primeira e ignora a segunda para sempre.
+  // (Docs\20). A reserva das 033/034 acima foi honrada: duas
+  // frentes que escrevam o mesmo numero dao merge limpo e banco
+  // quebrado, porque o SQLite aplica a primeira e ignora a segunda
+  // para sempre.
   //
   // A 035 RECRIA store_purchases: ela precisa rodar depois de toda
   // migracao que toque essa tabela.
@@ -3186,6 +4218,31 @@ export const MIGRATIONS: readonly Migration[] = [
   // A 040 recria player_events: como a 017, ela precisa rodar
   // depois de toda migração que toque essa tabela.
   { id: 40, name: 'player-events-item', sql: PLAYER_EVENTS_ITEM_SCHEMA },
+  // A 041 é a frente do item custom (Docs\CustomItem). Ela precisa
+  // rodar depois da 007, que cria a `items` que ela referencia.
+  { id: 41, name: 'custom-items', sql: CUSTOM_ITEMS_SCHEMA },
+  // A 042 acrescenta uma coluna à 041, e é uma migração própria
+  // porque a 041 JÁ RODOU: o SQLite aplica cada número uma vez só,
+  // e editar a de cima deixaria o banco de quem já migrou sem a
+  // coluna, para sempre.
+  { id: 42, name: 'custom-items-pickup', sql: CUSTOM_ITEMS_PICKUP_SCHEMA },
+  // A 043 conserta a 034, que ganhou três colunas depois de já ter
+  // rodado — o mesmo erro que o comentário da 042 descreve. Ela é
+  // `run` porque precisa conferir antes de acrescentar: em banco
+  // novo as colunas já vieram da 034.
+  { id: 43, name: 'ranking-window-and-wipe-season', run: addRankingScopeColumnsIfMissing },
+  // A 44 é da frente do redesenho do ranking: o nome curto da aba
+  // do jogo e o interruptor que decide quem aparece nesse menu.
+  // Ela é `sql` puro, e não `run`, porque nasce com o número: não
+  // existe banco em que estas duas colunas já estejam.
+  { id: 44, name: 'ranking-short-label', sql: RANKING_SHORT_LABEL_SCHEMA },
+  // A 45 é da frente do item custom. Ela acrescenta uma coluna à
+  // `items` da 007 — e é uma migração PRÓPRIA, e não uma edição
+  // daquela, pela mesma razão que a 042 registra e a 043 conserta:
+  // o runner aplica cada id UMA vez, e editar o SQL de uma
+  // migração já aplicada deixa o banco de produção sem a coluna,
+  // para sempre.
+  { id: 45, name: 'items-consumable', sql: ITEMS_CONSUMABLE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
