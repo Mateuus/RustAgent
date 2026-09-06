@@ -36,6 +36,7 @@ import {
   Server,
   Settings,
   ShoppingBag,
+  Trophy,
   Users,
   X,
   Megaphone,
@@ -131,6 +132,16 @@ const NAV: readonly NavItem[] = [
     label: 'Mensagens',
     hint: 'O que o servidor fala sozinho: avisos, convites e lembretes, cada um no seu ritmo',
     Icon: Megaphone,
+  },
+  // O ranking é de REDE, como o VIP e a loja: a lista soma os
+  // servidores elegíveis, e o cadastro vale para todos. O que é de
+  // UM servidor — o tamanho da temporada dele, e quando ela vira —
+  // mora na aba Ranking da página do servidor.
+  {
+    href: '/ranking/',
+    label: 'Ranking',
+    hint: 'Quem está na frente, em que janela, e desde quando aquilo é medido',
+    Icon: Trophy,
   },
   {
     href: '/interface/',

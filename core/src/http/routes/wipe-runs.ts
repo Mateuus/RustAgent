@@ -117,6 +117,23 @@ const startSchema = z
      * a contagem no chat.
      */
     at: z.number().int().min(0).optional(),
+    /**
+     * A temporada do ranking vira neste wipe?
+     *
+     * ####  TRÊS ESTADOS, E O TERCEIRO NÃO É "NÃO"  ####
+     *
+     * `true` força abrir mesmo com a configuração dizendo que não;
+     * `false` força NÃO abrir mesmo com ela dizendo que sim; ausente
+     * (ou `null`) é "não decidi", e aí vale
+     * `ranking_settings.season_on_wipe` daquele servidor.
+     *
+     * Um `default(false)` aqui destruiria o desenho: toda execução em
+     * que ninguém tocasse na caixa viraria uma decisão explícita de
+     * não virar a temporada, e a configuração do servidor deixaria de
+     * valer sem que ninguém a tivesse mudado. Ver
+     * Docs/Ranking/20-PLANO-E-CONTRATOS.md §3.4.
+     */
+    openRankingSeason: z.boolean().nullable().optional(),
   })
   .strict();
 
@@ -378,6 +395,9 @@ export function registerWipeRunRoutes(app: FastifyInstance, deps: WipeRunRoutesD
           wipeAt: body.at ?? Date.now(),
           mapBefore: currentWorldOf(config),
           saveCreatedBefore: await deps.world.saveCreatedAt(id),
+          // Ausente vira `null` na linha, e `null` é "não decidi":
+          // quem decide é `ranking_settings.season_on_wipe`.
+          openRankingSeason: body.openRankingSeason ?? null,
         },
         Date.now(),
       );

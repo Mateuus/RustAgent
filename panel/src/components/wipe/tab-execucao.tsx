@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { WipeSeasonBox } from '@/components/ranking/wipe-season-box';
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -90,11 +91,21 @@ export function TabExecucao({ serverId }: { readonly serverId: string }) {
   const running = runs.find((run) => run.status === 'running') ?? null;
 
   const start = useCallback(
-    async (identity: string, idempotencyKey: string) => {
+    async (
+      identity: string,
+      idempotencyKey: string,
+      // `null` = "não decidi", e aí vale a configuração do servidor.
+      // Ver Docs\Ranking\20 §3.4 e o cabeçalho de WipeSeasonBox.
+      openRankingSeason: boolean | null,
+    ) => {
       setBusy(true);
 
       try {
-        const response = await agent.startWipeRun(serverId, { identity, idempotencyKey });
+        const response = await agent.startWipeRun(serverId, {
+          identity,
+          idempotencyKey,
+          openRankingSeason,
+        });
 
         toast.success('Wipe disparado', { description: response.message });
         await load();
@@ -161,7 +172,7 @@ export function TabExecucao({ serverId }: { readonly serverId: string }) {
       )}
 
       {running === null && preview !== null && (
-        <StartWipe preview={preview} busy={busy} onStart={start} />
+        <StartWipe serverId={serverId} preview={preview} busy={busy} onStart={start} />
       )}
 
       {/* O histórico saiu daqui: ele agora tem sub-aba própria. Consultar
@@ -354,15 +365,23 @@ function StepIcon({ status }: { readonly status: WipeStepStatus }) {
 // ------------------------------------------------------------
 
 function StartWipe({
+  serverId,
   preview,
   busy,
   onStart,
 }: {
+  readonly serverId: string;
   readonly preview: WipePreviewResponse;
   readonly busy: boolean;
-  readonly onStart: (identity: string, idempotencyKey: string) => Promise<void>;
+  readonly onStart: (
+    identity: string,
+    idempotencyKey: string,
+    openRankingSeason: boolean | null,
+  ) => Promise<void>;
 }) {
   const [typed, setTyped] = useState('');
+  /** A decisão de temporada DESTA execução. `null` = herdar. */
+  const [openRankingSeason, setOpenRankingSeason] = useState<boolean | null>(null);
 
   /**
    * A chave da requisição.
@@ -426,6 +445,16 @@ function StartWipe({
             <strong className="text-foreground">{describePolicy(preview.bpPolicy)}</strong>.
           </p>
 
+          {/* ####  O RANKING VEM ANTES DO CAMPO DE CONFIRMAÇÃO  ####
+
+              Pela mesma razão que a lista de arquivos vem antes do
+              botão: o que vai acontecer se lê ANTES de autorizar. */}
+          <WipeSeasonBox
+            serverId={serverId}
+            value={openRankingSeason}
+            onChange={setOpenRankingSeason}
+          />
+
           <div className="max-w-md space-y-1">
             <Label htmlFor="wipe-identity">
               Digite o identity do servidor para confirmar: {preview.server.identity}
@@ -448,7 +477,7 @@ function StartWipe({
             variant="danger"
             disabled={busy || blocked || !matches}
             onClick={() => {
-              void onStart(typed.trim(), key.current);
+              void onStart(typed.trim(), key.current, openRankingSeason);
             }}
           >
             <Play aria-hidden className="mr-1 h-4 w-4" />
