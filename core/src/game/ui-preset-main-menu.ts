@@ -54,6 +54,7 @@
 
 import type { UiAction, UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 
+import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
 import {
   BUNDLE_TEMPLATE_ID,
   BUY_TEMPLATE_ID,
@@ -317,8 +318,14 @@ const NAV: readonly NavEntry[] = [
   { id: 'eventos', label: 'EVENTOS', width: 90, hint: 'Os eventos ativos entram aqui.' },
   { id: 'regras', label: 'REGRAS', width: 84, hint: 'As regras do servidor entram aqui.' },
   { id: 'kits', label: 'KITS', width: 66, hint: 'Os kits disponíveis por nível entram aqui.' },
+  // A dica desta não é desenhada: a página RANKING é montada pelo
+  // agente (ver `buildMainMenu`). Ela fica para o dia em que
+  // alguém apagar a tela e o botão precisar dizer alguma coisa.
   { id: 'ranking', label: 'RANKING', width: 90, hint: 'O ranking de jogadores entra aqui.' },
 ];
+
+/** A entrada cuja página o AGENTE monta. Ver `buildMainMenu`. */
+const RANKING_NAV_ID = 'ranking';
 
 /**
  * O Discord não é uma tela.
@@ -1138,13 +1145,29 @@ export interface MainMenuOptions {
 export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
   const screens: UiScreen[] = [
     { id: SCREEN_ID(HOME.id), name: HOME.label, kind: 'page', elements: buildHome() },
-    ...NAV.map(
-      (entry): UiScreen => ({
-        id: SCREEN_ID(entry.id),
-        name: entry.label,
-        kind: 'page',
-        elements: buildPlaceholder(entry),
-      }),
+    // ####  A PÁGINA RANKING NÃO É UM PLACEHOLDER  ####
+    //
+    // Ela é MONTADA pelo agente a cada clique (ver
+    // game/ui-ranking-screen.ts), e o que fica gravado aqui é a
+    // mesma tela em REPOUSO: o título, e a frase de que ainda não
+    // há nada medido. É a diferença entre um retângulo prometendo
+    // um recurso que já existe ("o ranking entra aqui") e a tela
+    // de verdade sem número nenhum dentro.
+    //
+    // Ela é a única do menu que o agente redesenha e que precisa
+    // caber no `uiDocumentSchema` — e o schema não aceita `:` em
+    // `screenId` de ação. Por isso a versão de repouso nasce SEM
+    // ABA NENHUMA: uma aba levaria a `tela-ranking:pvp.kills`, e o
+    // documento inteiro seria recusado na gravação.
+    ...NAV.map((entry): UiScreen =>
+      entry.id === RANKING_NAV_ID
+        ? buildRankingScreen({ view: emptyRankingView() })
+        : {
+            id: SCREEN_ID(entry.id),
+            name: entry.label,
+            kind: 'page',
+            elements: buildPlaceholder(entry),
+          },
     ),
 
     // ####  OS MODAIS DA LOJA  ####

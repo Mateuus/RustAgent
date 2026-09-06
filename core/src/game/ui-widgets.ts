@@ -127,6 +127,15 @@ export interface ButtonStyle {
   readonly textColor: string;
   readonly hoverColor?: string;
   readonly fontSize?: number;
+  /**
+   * O alinhamento do texto. Centralizado, se ninguém disser nada.
+   *
+   * Numa FILEIRA de botões do mesmo tamanho, centralizar é o
+   * certo. Numa COLUNA de nomes de comprimentos diferentes,
+   * centralizar faz cada linha começar num lugar — e a lista deixa
+   * de se ler de cima para baixo.
+   */
+  readonly align?: Extract<UiElement, { type: 'button' }>['align'];
 }
 
 export function button(
@@ -147,7 +156,7 @@ export function button(
     fontSize: style.fontSize ?? 12,
     font: 'RobotoCondensed-Bold.ttf',
     textColor: style.textColor,
-    align: 'MiddleCenter',
+    align: style.align ?? 'MiddleCenter',
     action,
     hoverColor: style.hoverColor ?? null,
     pressedColor: null,
