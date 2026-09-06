@@ -185,6 +185,26 @@ export interface WipeRunRecord {
   readonly saveCreatedBefore: number | null;
   readonly saveCreatedAfter: number | null;
   readonly message: string | null;
+  /**
+   * O que ESTA execução decidiu sobre a temporada do ranking.
+   *
+   * ####  TRÊS ESTADOS, E O `null` É UM DELES  ####
+   *
+   *   `null`  — não decidiu; vale `ranking_settings.season_on_wipe`
+   *   `true`  — esta execução abre temporada nova, mesmo que a
+   *             configuração diga que não
+   *   `false` — esta execução NÃO abre, mesmo que a configuração
+   *             diga que sim
+   *
+   * Um booleano com padrão `false` transformaria toda execução
+   * antiga — e toda execução em que ninguém tocou na caixa — numa
+   * decisão explícita de não virar a temporada, e a configuração do
+   * servidor deixaria de valer sem que ninguém a tivesse mudado.
+   *
+   * É a mesma distinção que `wipes.wipe_run_id` já faz: `NULL` ali
+   * significa "wipe feito à mão", e não "execução número zero".
+   */
+  readonly openRankingSeason: boolean | null;
   readonly steps: readonly WipeRunStepRecord[];
 }
 
@@ -266,6 +286,12 @@ export interface WipeRunInput {
   readonly wipeAt?: number;
   readonly mapBefore?: WipeWorld | null;
   readonly saveCreatedBefore?: number | null;
+  /**
+   * A decisão de temporada DESTA execução. Ausente = `null`, que é
+   * "não decidi" e vale a configuração do servidor. Ver
+   * `WipeRunRecord.openRankingSeason`.
+   */
+  readonly openRankingSeason?: boolean | null;
 }
 
 export interface WipeRunPatch {
@@ -299,6 +325,7 @@ interface RunRow {
   readonly save_created_before: number | null;
   readonly save_created_after: number | null;
   readonly message: string | null;
+  readonly open_ranking_season: number | null;
 }
 
 interface StepRow {
@@ -314,7 +341,7 @@ interface StepRow {
 
 const RUN_COLUMNS = `id, server_id, plan_id, operation_id, kind, bp_policy, full_wipe,
   started_at, wipe_at, finished_at, status, backup_path, map_before, map_after,
-  map_decision, save_created_before, save_created_after, message`;
+  map_decision, save_created_before, save_created_after, message, open_ranking_season`;
 
 /**
  * ####  CADA SERVIDOR TEM AS SUAS EXECUÇÕES  ####
@@ -456,10 +483,11 @@ export class WipeRunsRepository {
         .prepare(
           `INSERT INTO wipe_runs (server_id, plan_id, operation_id, idempotency_key, kind,
                                   bp_policy, full_wipe, started_at, wipe_at, status,
-                                  map_before, save_created_before, created_at, updated_at)
+                                  map_before, save_created_before, open_ranking_season,
+                                  created_at, updated_at)
                 VALUES (@server_id, @plan_id, @operation_id, @idempotency_key, @kind,
                         @bp_policy, @full_wipe, @now, @wipe_at, 'running', @map_before,
-                        @save_created_before, @now, @now)`,
+                        @save_created_before, @open_ranking_season, @now, @now)`,
         )
         .run({
           server_id: serverId,
@@ -473,6 +501,18 @@ export class WipeRunsRepository {
           wipe_at: input.wipeAt ?? now,
           map_before: input.mapBefore === undefined ? null : JSON.stringify(input.mapBefore),
           save_created_before: input.saveCreatedBefore ?? null,
+          // ####  `null` NÃO É `0`  ####
+          //
+          // O `??` guarda a diferença: `false` é uma decisão e
+          // atravessa, enquanto ausente e `null` viram `NULL` no
+          // banco — que é "não decidi", e deixa a configuração do
+          // servidor valer.
+          open_ranking_season:
+            input.openRankingSeason === undefined || input.openRankingSeason === null
+              ? null
+              : input.openRankingSeason
+                ? 1
+                : 0,
         });
 
       const runId = Number(result.lastInsertRowid);
@@ -767,6 +807,9 @@ export class WipeRunsRepository {
       saveCreatedBefore: row.save_created_before,
       saveCreatedAfter: row.save_created_after,
       message: row.message,
+      // A coluna nasceu na migração 034: linha antiga tem `NULL`, e
+      // `NULL` já é a resposta certa para ela — "não decidi".
+      openRankingSeason: row.open_ranking_season === null ? null : row.open_ranking_season === 1,
       steps: steps
         .filter((step): step is StepRow & { step: WipeRunStep } =>
           (WIPE_RUN_STEPS as readonly string[]).includes(step.step),

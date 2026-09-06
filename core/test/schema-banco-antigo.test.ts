@@ -72,7 +72,28 @@ const SEM_WIPE_AT: BancoAntigo = {
   textos: { 25: comoEra('025-wipe-runs-sem-wipe-at.sql') },
 };
 
-const BANCOS_ANTIGOS: readonly BancoAntigo[] = [SEM_WIPE_AT];
+const SEM_WINDOW: BancoAntigo = {
+  nome: '034 aplicada antes de a janela por ranking existir',
+  ate: 42,
+  textos: { 34: comoEra('034-rankings-catalog-sem-window.sql') },
+};
+
+/**
+ * O banco de quem já rodou tudo até a 043.
+ *
+ * Sem texto diferente nenhum: aqui não houve migração editada
+ * depois de aplicada — este é o caso de sempre, o de um banco em
+ * dia que precisa receber a migração seguinte. Ele entra na lista
+ * pelo mesmo motivo dos outros dois: provar que a 044 leva o banco
+ * que já existe ao schema do banco que nasce agora.
+ */
+const SEM_NOME_CURTO: BancoAntigo = {
+  nome: '043 aplicada antes do nome curto e do "mostrar no jogo"',
+  ate: 43,
+  textos: {},
+};
+
+const BANCOS_ANTIGOS: readonly BancoAntigo[] = [SEM_WIPE_AT, SEM_WINDOW, SEM_NOME_CURTO];
 
 /**
  * Um retrato do schema, feito para COMPARAR dois bancos.
@@ -313,7 +334,7 @@ describe('a coluna wipe_at que faltava', () => {
     }
   });
 
-  it('o preço de acrescentar a coluna depois: DEFAULT 0 e posição no fim', () => {
+  it('o preço de acrescentar a coluna depois: DEFAULT 0 e posição fora do lugar', () => {
     // Esta é a ÚNICA diferença que sobra entre os dois bancos, e
     // ela está aqui escrita para ninguém precisar descobri-la de
     // novo: o SQLite não aceita `ADD COLUMN ... NOT NULL` sem
@@ -329,6 +350,17 @@ describe('a coluna wipe_at que faltava', () => {
     // `wipe_run_steps` referencia `wipe_runs(id)` com ON DELETE
     // CASCADE, e com `foreign_keys = ON` o DROP da tabela pai
     // dispara a cascata.
+    //
+    // ####  A RÉGUA É `updated_at`, E NÃO "A ÚLTIMA COLUNA"  ####
+    //
+    // Ela já foi "a última", e deixou de ser quando a migração 034
+    // acrescentou `open_ranking_season` — outro ALTER, que entra
+    // depois. O que este teste guarda não é a última posição: é
+    // que a coluna acrescentada por ALTER cai FORA do lugar em que
+    // o DDL a declara, ou seja, depois de `updated_at`, que fecha
+    // o CREATE TABLE original. Amarrar a asserção ao fim da tabela
+    // a faria quebrar a cada coluna nova sem que nada tivesse
+    // mudado no que ela mede.
     const velho = montar(antigo);
     runMigrations(velho);
     const novo = bancoNovo();
@@ -347,15 +379,136 @@ describe('a coluna wipe_at que faltava', () => {
       return { cid: coluna.cid, dflt: coluna.dflt };
     };
 
-    const colunas = (db: AgentDatabase): number =>
-      (db.prepare('SELECT name FROM pragma_table_info(?)').all('wipe_runs') as readonly unknown[])
-        .length;
+    const posicaoDe = (db: AgentDatabase, nome: string): number => {
+      const coluna = (
+        db.prepare('SELECT cid, name FROM pragma_table_info(?)').all('wipe_runs') as readonly {
+          cid: number;
+          name: string;
+        }[]
+      ).find((item) => item.name === nome);
 
-    expect(wipeAt(velho)).toEqual({ cid: colunas(velho) - 1, dflt: '0' });
+      if (coluna === undefined) {
+        throw new Error(`${nome} não existe`);
+      }
+
+      return coluna.cid;
+    };
+
+    // No banco velho ela entrou por ALTER, e por isso está depois
+    // de `updated_at` — que é a última coluna do CREATE TABLE.
+    expect(wipeAt(velho).dflt).toBe('0');
+    expect(wipeAt(velho).cid).toBeGreaterThan(posicaoDe(velho, 'updated_at'));
+
+    // No banco novo ela está onde o DDL a declara: no meio.
     expect(wipeAt(novo).dflt).toBeNull();
-    expect(wipeAt(novo).cid).toBeLessThan(colunas(novo) - 1);
+    expect(wipeAt(novo).cid).toBeLessThan(posicaoDe(novo, 'updated_at'));
 
     velho.close();
     novo.close();
+  });
+});
+
+// ------------------------------------------------------------
+//  044 — o nome curto da aba e o "mostrar no jogo"
+// ------------------------------------------------------------
+
+describe('as duas colunas que a 044 acrescenta', () => {
+  const antigo = SEM_NOME_CURTO;
+
+  /** O ranking dinâmico, como o painel o teria criado antes da 044. */
+  function criarTrofeu(db: AgentDatabase, label: string): void {
+    db.prepare(
+      `INSERT INTO rankings
+         (id, metric, label, unit, description, source, value_kind, direction, "window",
+          global_eligible, builtin, enabled, sort_order, created_at, updated_at)
+       VALUES
+         ('trofeu-bleik', 'trophy.bleik', @label, 'troféus', NULL,
+          'item', 'counter', 'desc', 'season', 1, 0, 1, 100, 1760000000000, 1760000000000)`,
+    ).run({ label });
+  }
+
+  it('o banco que já tinha a 034 e a 043 ganha `short_label` e `show_in_game`', () => {
+    const velho = montar(antigo);
+
+    const colunas = (db: AgentDatabase): readonly { name: string; naoNulo: number }[] =>
+      db.prepare('SELECT name, "notnull" AS naoNulo FROM pragma_table_info(?)').all('rankings') as
+        readonly { name: string; naoNulo: number }[];
+
+    // Antes: elas não existem, e é por isso que a migração existe.
+    expect(colunas(velho).map((coluna) => coluna.name)).not.toContain('short_label');
+
+    runMigrations(velho);
+
+    const depois = colunas(velho);
+
+    expect(depois.find((coluna) => coluna.name === 'short_label')).toBeDefined();
+    // `show_in_game` recusa nulo: "não sei se aparece" não é um
+    // estado — o padrão é aparecer.
+    expect(depois.find((coluna) => coluna.name === 'show_in_game')?.naoNulo).toBe(1);
+
+    // E o padrão é 1: um ranking que já existia continua no menu
+    // do jogo, porque nada mudou para ele.
+    criarTrofeu(velho, 'Bleik Store');
+
+    const linha = velho
+      .prepare(`SELECT show_in_game FROM rankings WHERE id = 'abates'`)
+      .get() as { show_in_game: number };
+
+    expect(linha.show_in_game).toBe(1);
+
+    velho.close();
+  });
+
+  it('o troféu ganha o nome inteiro no site e o curto na aba do jogo', () => {
+    const velho = montar(antigo);
+
+    criarTrofeu(velho, 'Bleik Store');
+    runMigrations(velho);
+
+    const linha = velho
+      .prepare(`SELECT label, short_label FROM rankings WHERE id = 'trofeu-bleik'`)
+      .get() as { label: string; short_label: string | null };
+
+    expect(linha.label).toBe('Troféu Bleik Store');
+    expect(linha.short_label).toBe('Bleik Store');
+
+    // E os dois semeados que não cabiam na aba.
+    const curto = (metric: string): string | null =>
+      (
+        velho.prepare('SELECT short_label FROM rankings WHERE metric = ?').get(metric) as {
+          short_label: string | null;
+        }
+      ).short_label;
+
+    expect(curto('shot.distance')).toBe('Tiro longo');
+    expect(curto('explosive.seq')).toBe('Raid');
+    // Quem já cabia não ganha nome curto: `NULL` quer dizer "use o
+    // `label`", e inventar um segundo nome igual ao primeiro só
+    // daria dois lugares para editar a mesma coisa.
+    expect(curto('pvp.kills')).toBeNull();
+
+    velho.close();
+  });
+
+  it('o nome que o admin já tinha trocado NÃO é reescrito', () => {
+    // ####  UMA CORREÇÃO DE DADO NÃO DESFAZ UMA EDIÇÃO  ####
+    //
+    // O `WHERE` da 044 compara com o valor antigo. Se o dono já
+    // renomeou o ranking pela tela, a condição não casa — e é
+    // isso que separa "corrigir o que foi semeado errado" de
+    // "passar por cima da escolha de quem usa".
+    const velho = montar(antigo);
+
+    criarTrofeu(velho, 'Loja do Bleik');
+    runMigrations(velho);
+
+    const linha = velho
+      .prepare(`SELECT label, short_label FROM rankings WHERE id = 'trofeu-bleik'`)
+      .get() as { label: string; short_label: string | null };
+
+    expect(linha.label).toBe('Loja do Bleik');
+    expect(linha.short_label).toBeNull();
+
+    velho.close();
   });
 });
