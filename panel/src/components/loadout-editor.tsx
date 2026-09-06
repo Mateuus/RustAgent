@@ -35,11 +35,14 @@
 import { Plus, Trash2 } from 'lucide-react';
 
 
+import { findOurItem, NO_SKIN } from '@/components/item-choice';
 import { Button } from '@/components/ui/button';
 import { ItemCombobox } from '@/components/item-combobox';
+import { SkinInput } from '@/components/skin-input';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import type { LoadoutItem, LoadoutSlot } from '@/lib/api';
+import { useCustomItems } from '@/lib/hooks/use-custom-items';
 
 /** Os três contêineres do jogador, com o nome que quem monta usa. */
 const SLOTS: readonly { value: LoadoutSlot; label: string }[] = [
@@ -64,6 +67,14 @@ interface LoadoutEditorProps {
    * virá montada.
    */
   readonly slotApplies?: boolean;
+  /**
+   * Em qual servidor este kit vai nascer.
+   *
+   * O loadout de um grupo é DE um servidor e passa o id; o kit da
+   * Loja é da rede e não passa. Sem ele, o seletor mostra os itens
+   * nossos de todos os servidores — e diz isso.
+   */
+  readonly serverId?: string;
 }
 
 export function LoadoutEditor({
@@ -71,7 +82,11 @@ export function LoadoutEditor({
   onChange,
   disabled = false,
   slotApplies = true,
+  serverId,
 }: LoadoutEditorProps) {
+  // Para reconhecer a marca de uma linha já gravada e travar a
+  // skin dela. Ver `findOurItem`.
+  const { items: customItems } = useCustomItems();
 
   function update(index: number, patch: Partial<LoadoutItem>): void {
     onChange(items.map((item, position) => (position === index ? { ...item, ...patch } : item)));
@@ -124,7 +139,16 @@ export function LoadoutEditor({
               <ItemCombobox
                 value={item.shortname}
                 disabled={disabled}
+                {...(serverId === undefined ? {} : { serverId })}
                 onValueChange={(shortname) => update(index, { shortname: shortname.trim() })}
+                onChoiceChange={(choice) => {
+                  // A skin vem JUNTO: um item nosso sem a marca é o
+                  // corpo emprestado cru, e o kit nasceria com uma
+                  // taça de discord no lugar do troféu.
+                  if (choice !== null) {
+                    update(index, { shortname: choice.shortname, skinId: choice.skinId });
+                  }
+                }}
               />
             </div>
 
@@ -159,16 +183,13 @@ export function LoadoutEditor({
 
             <div>
               <Label>Skin</Label>
-              {/* type="text", e não "number": a skin passa de 2^53 e
-                  um campo numérico a devolveria arredondada. */}
-              <Input
-                type="text"
-                inputMode="numeric"
+              <SkinInput
                 value={item.skinId}
-                placeholder="0"
+                label="Skin"
                 disabled={disabled}
-                onChange={(event) => update(index, { skinId: event.target.value.replace(/\D/g, '') })}
-                className="font-mono"
+                showHint={false}
+                lockedBy={findOurItem(customItems, item.shortname, item.skinId)}
+                onChange={(skinId) => update(index, { skinId: skinId || NO_SKIN })}
               />
             </div>
 

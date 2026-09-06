@@ -22,6 +22,19 @@
 //  esteja certo — digitado à mão, o erro só aparece como quadrado
 //  vazio na tela do jogador.
 //
+//  ####  UM ITEM NOSSO TAMBÉM PODE SER VENDIDO  ####
+//
+//  O seletor lista `custom_items` junto com o catálogo do jogo, e
+//  escolher um deles preenche shortname, itemId E skin de uma vez.
+//  Os três importam: o CUI desenha o card por `(itemId, skinId)`,
+//  e a entrega precisa do par para o plugin reconhecer a marca.
+//
+//  A loja é da REDE, e não de um servidor — por isso o seletor
+//  daqui não recebe `serverId` e mostra os itens nossos de TODOS
+//  os servidores. Uma oferta que entrega um item que só vale no
+//  server01 comprada no server02 entrega um item mudo; enquanto a
+//  oferta não souber de servidor, quem escolhe é que sabe.
+//
 //  ####  O PREÇO É EM OZCOIN INTEIRO  ####
 //
 //  A moeda não tem centavo. O campo recusa decimal em vez de
@@ -32,7 +45,9 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
+import { findOurItem, NO_SKIN, type ItemChoice } from '@/components/item-choice';
 import { ItemCombobox } from '@/components/item-combobox';
+import { SkinInput } from '@/components/skin-input';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -40,13 +55,14 @@ import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
 import {
   agent,
-  type CatalogItem,
+  type CustomItem,
   type OfferBadge,
   type OfferItem,
   type OfferKind,
   type StoreCategory,
   type StoreOffer,
 } from '@/lib/api';
+import { useCustomItems } from '@/lib/hooks/use-custom-items';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -108,24 +124,46 @@ export function StoreOfferDialog({
 
   const [busy, setBusy] = useState(false);
 
+  // Os itens nossos, para reconhecer a marca de uma linha já
+  // gravada. A lista é a mesma que o seletor usa, do mesmo cache.
+  const { items: customItems } = useCustomItems();
+
   /**
    * Escolher o ícone também preenche o primeiro item.
    *
    * Numa oferta de ITEM os dois são a mesma coisa em quase todo caso,
    * e fazer o admin escolher a AK duas vezes é o tipo de repetição
    * que termina com os dois campos apontando para coisas diferentes.
+   *
+   * ####  A SKIN VIAJA JUNTO, E É ELA QUE DESENHA  ####
+   *
+   * O CUI monta o ícone a partir de `(itemId, skinId)`. Copiar só o
+   * itemId de um item nosso desenharia na vitrine o CORPO
+   * emprestado — a taça de discord — no lugar da nossa arte.
    */
-  function chooseIcon(item: CatalogItem | null): void {
-    if (item === null) {
+  function chooseIcon(choice: ItemChoice | null): void {
+    if (choice === null) {
       return;
     }
 
-    setIcon({ shortname: item.shortname, itemId: item.itemId, skinId: '0' });
+    const itemId = choice.itemId ?? 0;
+
+    setIcon({ shortname: choice.shortname, itemId, skinId: choice.skinId });
 
     if (kind === 'item' && items.length === 0) {
-      setItems([{ shortname: item.shortname, itemId: item.itemId, skinId: '0', amount: 1 }]);
+      setItems([{ shortname: choice.shortname, itemId, skinId: choice.skinId, amount: 1 }]);
     }
   }
+
+  /**
+   * Qual item nosso está nesta linha, se houver.
+   *
+   * Reconhecido pelo par gravado, e não lembrado da escolha: ver
+   * `findOurItem`. É o que trava o campo Skin ao reabrir uma oferta
+   * que já entrega um item nosso.
+   */
+  const ourItemOf = (shortname: string, skinId: string): CustomItem | null =>
+    findOurItem(customItems, shortname, skinId);
 
   function updateItem(index: number, patch: Partial<OfferItem>): void {
     setItems((current) =>
@@ -262,7 +300,7 @@ export function StoreOfferDialog({
             value={icon.shortname}
             disabled={busy}
             onValueChange={(shortname) => setIcon((current) => ({ ...current, shortname }))}
-            onItemChange={chooseIcon}
+            onChoiceChange={chooseIcon}
           />
 
           <p className="mt-1 text-2xs leading-relaxed text-muted">
@@ -447,13 +485,21 @@ export function StoreOfferDialog({
               {items.map((item, index) => (
                 <li key={index} className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
+                    {/* A escolha traz shortname, itemId e skin, e
+                        os três são aplicados juntos: um item nosso
+                        sem a marca é o corpo emprestado cru, e a
+                        loja entregaria a taça no lugar do troféu. */}
                     <ItemCombobox
                       value={item.shortname}
                       disabled={busy}
                       onValueChange={(shortname) => updateItem(index, { shortname })}
-                      onItemChange={(chosen) => {
+                      onChoiceChange={(chosen) => {
                         if (chosen !== null) {
-                          updateItem(index, { shortname: chosen.shortname, itemId: chosen.itemId });
+                          updateItem(index, {
+                            shortname: chosen.shortname,
+                            itemId: chosen.itemId ?? 0,
+                            skinId: chosen.skinId,
+                          });
                         }
                       }}
                     />
@@ -473,15 +519,18 @@ export function StoreOfferDialog({
                   </div>
 
                   <div className="w-28 shrink-0">
-                    <Input
+                    {/* Sem a frase de explicação: a linha é
+                        estreita, e ela empurraria a lixeira de todas
+                        as outras linhas para baixo. O cadeado e o
+                        `title` dizem a mesma coisa aqui. */}
+                    <SkinInput
                       value={item.skinId}
-                      aria-label="Skin"
-                      placeholder="0"
+                      label="Skin"
                       disabled={busy}
-                      onChange={(event) =>
-                        updateItem(index, { skinId: event.target.value.replace(/\D/g, '') || '0' })
-                      }
-                      className="font-mono text-2xs"
+                      showHint={false}
+                      lockedBy={ourItemOf(item.shortname, item.skinId)}
+                      className="text-2xs"
+                      onChange={(skinId) => updateItem(index, { skinId: skinId || NO_SKIN })}
                     />
                   </div>
 

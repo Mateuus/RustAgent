@@ -27,6 +27,15 @@
 //     renascido no meio do preenchimento. Travar por um estado que
 //     envelhece seria impedir uma entrega que funcionaria.
 //
+//  ------------------------------------------------------------
+//  ####  DÁ PARA ENTREGAR UM ITEM NOSSO POR AQUI  ####
+//
+//  O seletor lista os itens de `custom_items` junto com os do
+//  jogo, e escolher um deles preenche o shortname E a skin. O
+//  `serverId` desce para ele de propósito: um item nosso que não
+//  vale NESTE servidor chega com o nome errado e nunca converte em
+//  ponto, então ele nem aparece na lista.
+//
 //  ####  O QUE NÃO COUBE FOI PARA O CHÃO  ####
 //
 //  E isso precisa ser dito na hora, não descoberto depois: item no
@@ -38,8 +47,10 @@
 
 import { useState } from 'react';
 
+import { NO_SKIN, type ItemChoice } from '@/components/item-choice';
 import { ItemIcon } from '@/components/item-icon';
 import { ItemCombobox } from '@/components/item-combobox';
+import { SkinInput } from '@/components/skin-input';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
@@ -49,7 +60,6 @@ import {
   agent,
   MAX_GIVE_AMOUNT,
   MAX_GIVE_STACK_PIECES,
-  type CatalogItem,
   type GamePlayer,
   type GiveMode,
 } from '@/lib/api';
@@ -90,20 +100,25 @@ export function GiveItemDialog({
   readonly onDone: () => void;
 }) {
   const [shortname, setShortname] = useState('');
-  // O item do catálogo, quando ele veio da lista. `null` = o
-  // shortname foi digitado à mão, e aí a pilha máxima é
-  // desconhecida — a tela não adivinha, e deixa o plugin decidir.
-  const [item, setItem] = useState<CatalogItem | null>(null);
+  // O que veio da lista. `null` = o shortname foi digitado à mão, e
+  // aí a pilha máxima é desconhecida — a tela não adivinha, e deixa
+  // o plugin decidir.
+  const [choice, setChoice] = useState<ItemChoice | null>(null);
   const [amount, setAmount] = useState(1);
   const [skinId, setSkinId] = useState('');
   const [mode, setMode] = useState<GiveMode>('auto');
   const [busy, setBusy] = useState(false);
 
-  // Ver o cabeçalho, recusa 1. `null` = sem catálogo para o item
-  // escolhido, então não há conta a fazer.
-  const pieces = item === null ? null : Math.ceil(amount / Math.max(1, item.maxStack));
+  /** O item NOSSO escolhido, que é quem trava o campo Skin. */
+  const ourItem = choice === null ? null : choice.customItem;
+
+  // Ver o cabeçalho, recusa 1. `null` = ninguém sabe a pilha máxima
+  // (texto digitado à mão, ou item nosso que herda a do corpo), e
+  // então não há conta a fazer.
+  const maxStack = choice === null ? null : choice.maxStack;
+  const pieces = maxStack === null ? null : Math.ceil(amount / Math.max(1, maxStack));
   const stacksExceeded = pieces !== null && pieces > MAX_GIVE_STACK_PIECES;
-  const perCallLimit = item === null ? null : MAX_GIVE_STACK_PIECES * Math.max(1, item.maxStack);
+  const perCallLimit = maxStack === null ? null : MAX_GIVE_STACK_PIECES * Math.max(1, maxStack);
 
   const canSend =
     !busy && shortname.trim() !== '' && amount >= 1 && amount <= MAX_GIVE_AMOUNT && !stacksExceeded;
@@ -121,9 +136,13 @@ export function GiveItemDialog({
         mode,
       });
 
-      toast.success(`${player.name} recebeu ${String(amount)}x ${shortname.trim()}`, {
-        description: response.message,
-      });
+      // O nome do ITEM, e não o shortname, quando a tela o conhece:
+      // "recebeu 1x discord.trophy" não diz a quem lê que o que saiu
+      // foi o Troféu Bleik Store.
+      toast.success(
+        `${player.name} recebeu ${String(amount)}x ${choice?.displayName ?? shortname.trim()}`,
+        { description: response.message },
+      );
       onDone();
       onClose();
     } catch (cause) {
@@ -157,19 +176,37 @@ export function GiveItemDialog({
 
         <div>
           <Label htmlFor="give-item">Item</Label>
+          {/* ####  A ESCOLHA PREENCHE ITEM E SKIN JUNTOS  ####
+
+              O seletor devolve o par, e a tela aplica os dois. Um
+              item nosso sem a skin dele é um `discord.trophy`
+              comum: chega ao inventário, tem o nome errado e nunca
+              vira ponto. Aplicar só metade seria entregar isso. */}
           <ItemCombobox
             inputId="give-item"
             value={shortname}
+            serverId={serverId}
             disabled={busy}
             onValueChange={setShortname}
-            onItemChange={setItem}
+            onChoiceChange={(picked) => {
+              setChoice(picked);
+
+              // Escolher na lista manda na skin, inclusive para
+              // ZERÁ-LA num item do jogo: manter a marca do item
+              // anterior é o caso em que se entrega uma coisa que
+              // não existe. Digitar à mão (picked nulo) não mexe —
+              // aí a skin é de quem digitou.
+              if (picked !== null) {
+                setSkinId(picked.skinId === NO_SKIN ? '' : picked.skinId);
+              }
+            }}
           />
-          {item !== null && (
+          {choice !== null && choice.customItem === null && (
             <p className="mt-2 flex items-center gap-2 text-2xs text-muted">
-              <ItemIcon shortname={item.shortname} size="sm" />
+              <ItemIcon shortname={choice.shortname} size="sm" />
               <span>
-                <strong className="text-foreground">{item.displayName}</strong> · empilha em{' '}
-                {String(item.maxStack)}
+                <strong className="text-foreground">{choice.displayName}</strong>
+                {maxStack === null ? '' : ` · empilha em ${String(maxStack)}`}
                 {perCallLimit === null
                   ? ''
                   : ` · até ${String(Math.min(perCallLimit, MAX_GIVE_AMOUNT))} por entrega`}
@@ -194,17 +231,12 @@ export function GiveItemDialog({
 
           <div>
             <Label htmlFor="give-skin">Skin</Label>
-            {/* type="text", e não "number": a skin passa de 2^53 e
-                um campo numérico a devolveria arredondada. */}
-            <Input
+            <SkinInput
               id="give-skin"
-              type="text"
-              inputMode="numeric"
               value={skinId}
-              placeholder="0"
               disabled={busy}
-              onChange={(event) => setSkinId(event.target.value.replace(/\D/g, ''))}
-              className="font-mono"
+              lockedBy={ourItem}
+              onChange={setSkinId}
             />
           </div>
         </div>

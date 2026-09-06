@@ -230,7 +230,16 @@ export function LoadoutPanel({ serverId }: { readonly serverId: string }) {
 
           {editing === group.name && (
             <div className="space-y-3 p-3">
-              <LoadoutEditor items={draft} onChange={setDraft} disabled={busy} />
+              {/* O `serverId` desce até o seletor de item: o
+                  loadout é DESTE servidor, e um item nosso que não
+                  vale aqui nasceria no inventário sem a marca ser
+                  reconhecida. */}
+              <LoadoutEditor
+                items={draft}
+                onChange={setDraft}
+                disabled={busy}
+                serverId={serverId}
+              />
 
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
                 <div className="flex items-center gap-3">
