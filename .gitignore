@@ -109,3 +109,6 @@ Configs/*.ini
 # ------------------------------------------------------------
 /.claude/*
 !/.claude/settings.json
+
+# Gerado quando alguem roda o Oxide.Compiler.exe a mao, para diagnostico.
+oxide.compiler.log
