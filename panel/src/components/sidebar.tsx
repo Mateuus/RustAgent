@@ -23,6 +23,7 @@
 
 import {
   Ban,
+  Boxes,
   ChevronsLeft,
   ChevronsRight,
   Crown,
@@ -143,6 +144,17 @@ const NAV: readonly NavItem[] = [
     label: 'Ranking',
     hint: 'Quem está na frente, em que janela, e desde quando aquilo é medido',
     Icon: Trophy,
+  },
+  // O loot é de REDE pelo mesmo motivo do kit e do ranking: a
+  // regra é uma linha no agente, e a tela escolhe em quais
+  // servidores ela vale. Ela fica ao lado de Itens de propósito —
+  // o que ela acrescenta às caixas é sempre um item NOSSO, e é lá
+  // que ele é cadastrado.
+  {
+    href: '/loot/',
+    label: 'Loot',
+    hint: 'O que a casa acrescenta às caixas do jogo: onde, com que chance, e com que freio',
+    Icon: Boxes,
   },
   // As missões são de REDE, como o kit e o ranking: a missão é
   // escrita uma vez e vale em todos os servidores. O que conta

@@ -35,6 +35,7 @@ import { KitsRepository } from './db/kits-repository.js';
 import { LoadoutsRepository } from './db/loadouts-repository.js';
 import { runMigrations } from './db/migrations.js';
 import { CustomItemsRepository } from './db/custom-items-repository.js';
+import { LootRulesRepository } from './db/loot-rules-repository.js';
 import { ItemsRepository } from './db/items-repository.js';
 import { RankingsRepository } from './db/rankings-repository.js';
 import { StatEventsConsumer } from './rankings/stat-events.js';
@@ -50,6 +51,7 @@ import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
+import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
 import { VipsRepository } from './db/vips-repository.js';
 import { KitStore } from './kits/service.js';
@@ -263,6 +265,10 @@ async function main(): Promise<void> {
   // precisa do supervisor (para achar o RCON de cada servidor) e o
   // gancho de console precisa dele.
   let statEvents: StatEventsConsumer | null = null;
+  // O relógio que traz de volta a CONTAGEM das regras de loot.
+  // Mesma razão dos de cima: ele precisa do supervisor para achar
+  // o RCON de cada servidor.
+  let lootStats: LootStatsCollector | null = null;
   let spawnStatusSync: SpawnStatusSync | null = null;
   // As MISSÕES, pela mesma razão do calendário: a entrega delas
   // depende do `kits`, que nasce bem abaixo. `null` = ainda não
@@ -353,6 +359,12 @@ async function main(): Promise<void> {
       // esta chamada que o traz de volta — ver rankings/stat-events.ts
       // e Docs\Ranking\20 §8.3.
       void statEvents?.sweep(serverId, 'rcon-connected');
+
+      // E a contagem das regras de loot, pela MESMA razão: o plugin
+      // guarda o acumulado do dia em disco, e uma noite de RCON fora
+      // é uma noite de medição que só volta se alguém pedir. Ler não
+      // consome — ver game/loot-stats.ts.
+      void lootStats?.sweep(serverId, 'rcon-connected');
     },
     // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
     //
@@ -573,6 +585,12 @@ async function main(): Promise<void> {
   // nada apaga sozinho. Ver db/custom-items-repository.ts.
   const customItemsRepository = new CustomItemsRepository(db);
 
+  // E as regras que soltam esses itens nas caixas do jogo. Elas
+  // apontam para o cadastro acima — é dele que sai a MARCA, sem a
+  // qual o item nascido num barril não é o nosso: a tabela de loot
+  // do Rust cria tudo com skin 0. Ver Docs/CustomItem/04 §4.
+  const lootRulesRepository = new LootRulesRepository(db);
+
   itemCatalog = new ItemCatalog({
     repository: itemsRepository,
     servers: supervisor,
@@ -662,6 +680,13 @@ async function main(): Promise<void> {
     repository: customItemsRepository,
     servers: supervisor,
     rankings: rankingsRepository,
+    // ####  AS REGRAS DE LOOT VIAJAM NO MESMO CANAL  ####
+    //
+    // E não num segundo: a regra cita um item custom pelo id, e o
+    // plugin resolve a marca no cadastro que acabou de receber.
+    // Dois canais entregariam os dois fora de ordem no dia em que
+    // um deles atrasasse — e a regra chegaria antes do item.
+    lootRules: lootRulesRepository,
     logger,
     secret: statChannelSecret,
   });
@@ -681,6 +706,27 @@ async function main(): Promise<void> {
     // plugin. Sem ele, nenhuma linha de console é aceita — e o
     // ponto ainda chega, pela varredura da fila, com atraso.
     secret: statChannelSecret,
+  });
+
+  // ####  E A TERCEIRA METADE: A CONTAGEM DAS REGRAS DE LOOT  ####
+  //
+  // Sem ela o modo `measuring` não serve para nada: a regra conta
+  // quantas vezes teria disparado, e essa contagem morre no
+  // primeiro `oxide.reload` se ninguém a buscar. É o número que o
+  // Docs/CustomItem/04 §6.3 não conseguiu medir — quantos
+  // containers nascem por dia neste servidor — e é ele que troca
+  // a chance chutada por chance calibrada.
+  //
+  // Ler NÃO consome: o plugin não zera, e o agente sobrescreve.
+  // Ver o cabeçalho de game/loot-stats.ts para por que isto é um
+  // relógio próprio e não uma carona no coletor do ranking.
+  lootStats = new LootStatsCollector({
+    repository: lootRulesRepository,
+    servers: {
+      ids: () => supervisor.ids(),
+      rconOf: (serverId) => supervisor.contextOf(serverId)?.rcon ?? null,
+    },
+    logger,
   });
 
   // ####  O `coverage`: "ZERO" E "NÃO PERGUNTEI" SÃO DIFERENTES  ####
@@ -1403,6 +1449,13 @@ async function main(): Promise<void> {
   // os cinco minutos do relógio.
   statEvents.start();
   void statEvents.sweepAll('boot');
+
+  // E a contagem das regras de loot pela mesma razão, com uma
+  // diferença: aqui nada se perde se a primeira rodada falhar. O
+  // plugin guarda o acumulado do dia e a volta seguinte o traz
+  // inteiro — ler não consome.
+  lootStats.start();
+  void lootStats.sweepAll('boot');
 
   // A loja. Ela pergunta ao `PlayersReader` quem está online —
   // entrega exige o jogador dentro do servidor, porque item entra
@@ -2440,6 +2493,7 @@ async function main(): Promise<void> {
     items: itemsRepository,
     customItems: customItemsRepository,
     customItemsSync,
+    lootRules: lootRulesRepository,
     itemCatalog,
     uiDocuments,
     uiSync,
@@ -2628,6 +2682,10 @@ async function main(): Promise<void> {
         // um servidor que já está sendo desligado — e o plugin
         // ficaria sem lista sem nunca receber a de volta.
         customItemsSync.stop();
+        // E o relógio da contagem de loot: uma leitura que começasse
+        // agora falaria com um RCON que já não existe. Nada se perde:
+        // o número continua no `oxide/data` do plugin.
+        lootStats.stop();
         // E o da fila de pontos junto, por dois motivos: a varredura
         // que começasse agora falaria com um RCON que já não existe,
         // e o `ack` armado sairia para um servidor sendo desligado.

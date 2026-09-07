@@ -1381,11 +1381,36 @@ export interface UiDocumentSummary {
   slug: string;
   name: string;
   command: string;
+  /**
+   * Os comandos EXTRAS que abrem este menu.
+   *
+   * `/quest` abre o Menu Principal direto nas missões sem ser um
+   * documento à parte. Eles ocupam o mesmo nome global no servidor
+   * que o `command`, e é por isso que a lista os mostra: sem eles,
+   * a recusa "Menu Principal já responde a /quest" apontaria para
+   * uma linha da tabela que diz só `/menu`.
+   */
+  shortcuts: string[];
   revision: number;
   screens: number;
   createdAt: string;
   updatedAt: string;
   servers: ServerUiBinding[];
+}
+
+/**
+ * Um modelo de interface, do jeito que o agente o anuncia.
+ *
+ * `preset` é a chave que volta no POST; `id` é o identificador que
+ * o documento vai NASCER com — e é ele que colide com uma interface
+ * já criada, e não a chave.
+ */
+export interface UiPreset {
+  preset: string;
+  id: string;
+  name: string;
+  command: string;
+  screens: number;
 }
 
 /** O documento inteiro. `document` é o modelo de `lib/ui-doc`. */
@@ -1786,6 +1811,397 @@ export interface RankingSeasonTurnResponse {
   closed: RankingPeriod;
   opened: RankingPeriod;
   frozen: number;
+}
+
+// ------------------------------------------------------------
+//  O LOOT
+//
+//  ####  UMA REGRA ACRESCENTA; ELA NÃO REESCREVE A TABELA  ####
+//
+//  A configuração do jogo continua sendo do jogo — o plugin deixa
+//  o container nascer cheio e SÓ ACRESCENTA por cima. É a decisão
+//  do Docs/CustomItem/05 §4, e ela é o que faz a configuração
+//  sobreviver a um update do Rust: o que ninguém tocou continua
+//  acompanhando a Facepunch.
+//
+//  ####  E O ITEM É SEMPRE NOSSO  ####
+//
+//  Um item do jogo puro nasceria do loot com skin 0 — sem marca,
+//  o plugin não o reconhece e ele não vira ponto (05 §3.4). Por
+//  isso a regra aponta para um `custom_items`, e não para um
+//  shortname.
+// ------------------------------------------------------------
+
+/**
+ * Medindo ou valendo.
+ *
+ * `measuring` NÃO CRIA ITEM NENHUM: a regra é sorteada, o
+ * resultado é contado, e nada cai na caixa. É como se descobre
+ * quantas vezes por dia aquela chance dispararia antes de soltá-la
+ * no servidor — o denominador real (containers populados por dia)
+ * não é medido em lugar nenhum (05 §9.6).
+ */
+export type LootRuleMode = 'measuring' | 'live';
+
+export interface LootRule {
+  /** Nasce do nome e não muda depois: é o que a URL e o stats usam. */
+  id: string;
+  /** O que o admin lê na lista. */
+  label: string;
+  /** O id em `custom_items`. Item nosso, sempre — ver o cabeçalho. */
+  customItemId: string;
+  /** `ShortPrefabName` de cada container em que a regra vale. */
+  containers: string[];
+  /** 0 a 1, por container populado. `0.0001` é uma em dez mil. */
+  chance: number;
+  amountMin: number;
+  amountMax: number;
+  mode: LootRuleMode;
+  /** Teto por servidor e por dia. `null` = sem teto. */
+  dailyCap: number | null;
+  /** O mesmo jogador não acha outro nessas horas. `null` = sem carência. */
+  playerCooldownHours: number | null;
+  enabled: boolean;
+  /** Vazio = em nenhum servidor, como em `custom_item_servers`. */
+  servers: string[];
+}
+
+/** O corpo que cria ou reescreve uma regra. O PUT é total, não PATCH. */
+export type LootRuleInput = LootRule;
+
+/**
+ * Um container que o plugin aceita.
+ *
+ * `label` e `group` são do AGENTE quando ele os manda; o painel
+ * tem os dele para quando não vierem (ver `components/loot/containers.ts`).
+ */
+export interface LootContainerInfo {
+  /** `ShortPrefabName` — é o que o plugin casa, e é a identidade. */
+  name: string;
+  /** Nome que o admin reconhece. `null` = o painel resolve. */
+  label: string | null;
+  /** A natureza (barril, caixa de risco, evento…). `null` = idem. */
+  group: string | null;
+  /**
+   * De quantos em quantos segundos o container refaz o loot.
+   *
+   * `null` é "não sei", e não "nunca": 71 dos 105 têm refresh
+   * finito (05 §2.6), e é ele que faz a regra valer de novo sem
+   * ninguém abrir nada.
+   */
+  refreshSeconds: number | null;
+}
+
+/** Um dia de contagem de uma regra. */
+export interface LootRuleStatsDay {
+  /** `AAAA-MM-DD`, no fuso do agente. */
+  day: string;
+  /** Quantas vezes a regra disparou — ou TERIA disparado, em medição. */
+  rolls: number | null;
+  /** Quantos itens saíram de verdade. Zero enquanto o modo é medição. */
+  emitted: number | null;
+  /** Quantos containers a regra viu naquele dia. `null` = o agente não conta. */
+  containers: number | null;
+}
+
+export interface LootRulesResponse {
+  ok: true;
+  count: number;
+  rules: LootRule[];
+}
+
+export interface LootContainersResponse {
+  ok: true;
+  count: number;
+  containers: LootContainerInfo[];
+}
+
+export interface LootRuleStatsResponse {
+  ok: true;
+  ruleId: string;
+  mode: LootRuleMode;
+  /** Do dia mais velho para o mais novo. Vazio = ainda não contou nada. */
+  days: LootRuleStatsDay[];
+}
+
+// ------------------------------------------------------------
+//  O EDITOR DE LOOT: a configuração do BetterLoot
+//
+//  ####  ESTA FATIA EDITA O ARQUIVO DE UM PLUGIN DE TERCEIRO  ####
+//
+//  A decisão do dono (Docs/CustomItem/06 §0) é que o painel
+//  configura TODO o loot do jogo editando os JSONs do BetterLoot,
+//  em vez de construirmos motor de loot. É o papel que o Looty
+//  cumpre por fora; nós o cumprimos de dentro do servidor.
+//
+//  Isso convive com as `loot_rules` acima, e as duas NÃO são a
+//  mesma coisa: a regra é do nosso plugin e sabe teto por dia,
+//  carência por jogador e medição; a tabela é do BetterLoot e sabe
+//  encher a caixa inteira. O §3.5 daquele documento tem a divisão
+//  linha a linha.
+//
+//  ####  A IDENTIDADE É O CAMINHO INTEIRO DO PREFAB  ####
+//
+//  `assets/bundled/prefabs/radtown/crate_elite.prefab`, e não
+//  `crate_elite`. Ele tem barra e às vezes espaço (`dmloot/dm
+//  ammo.prefab`), e por isso viaja em QUERY STRING, nunca em
+//  pedaço de caminho.
+//
+//  ####  O ARQUIVO NÃO CABE NUMA RESPOSTA  ####
+//
+//  Medido: 2,53 MB, 111 prefabs, 6.824 entradas. A lista devolve
+//  RESUMO por prefab; o conteúdo de uma caixa é uma segunda
+//  chamada. Mandar tudo junto seria uma resposta de megabytes para
+//  uma tela que mostra uma caixa por vez.
+//
+//  ####  SALVAR SUBSTITUI O ARQUIVO INTEIRO  ####
+//
+//  O plugin serializa o dicionário todo — não há merge. Duas telas
+//  abertas na mesma caixa fariam a segunda apagar a primeira em
+//  silêncio, e é por isso que existe a `revision` abaixo.
+// ------------------------------------------------------------
+
+/**
+ * Um item que sai JUNTO com outro (`Bonus Items`).
+ *
+ * Ele não conta como sorteio: quem o traz é a entrada dona. É o
+ * "rifle com munição" que o mercado vende como recurso avançado.
+ */
+export interface BetterLootBonusItem {
+  /** A chave do arquivo, com o sufixo `{n}` quando existe. */
+  key: string;
+  shortname: string;
+  /** `'0'` = a skin do jogo. String porque é `ulong` — ver §818. */
+  skinId: string;
+  /** O nome que o plugin carimba. `null` = nenhum. */
+  customName: string | null;
+  min: number;
+  max: number;
+}
+
+/** Um item que sai SEMPRE, sem sorteio (`Guaranteed Items`). */
+export interface BetterLootGuaranteedEntry {
+  key: string;
+  shortname: string;
+  /** O nome do item no catálogo do agente. `null` = ele não o conhece. */
+  displayName: string | null;
+  skinId: string;
+  customName: string | null;
+  min: number;
+  max: number;
+}
+
+/** Uma entrada de `Ungrouped Items` — o corpo da tabela de uma caixa. */
+export interface BetterLootEntry {
+  /**
+   * A CHAVE do arquivo. É a identidade, e pode ter sufixo `{n}`.
+   *
+   * O plugin remove `{\d+}` antes de resolver o item, o que deixa o
+   * mesmo shortname entrar várias vezes com skins diferentes. É o
+   * que faz um catálogo de itens nossos caber numa caixa só.
+   */
+  key: string;
+  /** A chave sem o sufixo — o item que o jogo conhece. */
+  shortname: string;
+  /** O nome do item no catálogo do agente. `null` = ele não o conhece. */
+  displayName: string | null;
+  skinId: string;
+  customName: string | null;
+  min: number;
+  max: number;
+  allowDuplicates: boolean;
+  /** `null` = o plugin decide sozinho (o item não é pesquisável). */
+  canConvertToBlueprint: boolean | null;
+  /** Em PORCENTAGEM da condição, não em pontos. `null` = o item não tem. */
+  durability: { min: number; max: number } | null;
+  /**
+   * A raridade do item NO JOGO, 0 a 4.
+   *
+   * ####  É ELA QUE DECIDE A CHANCE, E O ARQUIVO NÃO A TEM  ####
+   *
+   * Uma entrada de `Ungrouped Items` não carrega probabilidade: o
+   * plugin lê `ItemDefinition.rarity` do jogo e pesa por ela. Sem
+   * este campo a tela NÃO CONSEGUE mostrar porcentagem nenhuma — e
+   * a saída certa é o travessão, nunca um zero.
+   *
+   * `null` = o agente não soube dizer.
+   */
+  rarity: number | null;
+  bonusItems: BetterLootBonusItem[];
+  /**
+   * O item tem `Item Properties` (munição e acessórios de arma).
+   *
+   * A tela não edita isso e diz que não edita: o plugin reescreve
+   * esse bloco sozinho ao validar, removendo acessório incompatível
+   * (`scanEntry`, BetterLoot.cs:2140). Prometer edição aqui seria
+   * prometer o que o plugin desfaz.
+   */
+  hasWeaponProperties: boolean;
+}
+
+/** Quanto sai de cada coisa numa caixa (`Item Settings`). */
+export interface BetterLootItemSettings {
+  /** O jogo limita o total a 36, e a 1 no piso (BetterLoot.cs:2349). */
+  minItems: number;
+  maxItems: number;
+  minScrap: number;
+  maxScrap: number;
+  minBlueprints: number;
+  maxBlueprints: number;
+  bonusItemsCountToTotal: boolean;
+  guaranteedItemsCountToTotal: boolean;
+}
+
+/** Um grupo de `LootGroups.json` associado a uma caixa (`Loot Profiles`). */
+export interface BetterLootProfileLink {
+  /** Aponta para uma chave de `LootGroups.json`. */
+  name: string;
+  enabled: boolean;
+  /** 1 a 100. É cumulativa entre os perfis, e não absoluta. */
+  probability: number;
+  /** `0` = sem limite. */
+  maxItems: number;
+}
+
+/** A linha da lista de caixas: o que cabe sem abrir a tabela. */
+export interface BetterLootTableSummary {
+  /** O caminho inteiro do prefab. É a identidade — ver o cabeçalho. */
+  prefab: string;
+  /** Desligado devolve a caixa ao loot NATIVO, e não a caixa vazia. */
+  enabled: boolean;
+  itemCount: number;
+  guaranteedCount: number;
+  profileCount: number;
+  itemSettings: BetterLootItemSettings;
+}
+
+/** A tabela de uma caixa, inteira. */
+export interface BetterLootTable extends BetterLootTableSummary {
+  /** Trava o sorteio num perfil só por caixa. */
+  poolLocking: boolean;
+  /** Sorteio uniforme em vez de enviesado por raridade — ver `rarity`. */
+  ignoreRarityBias: boolean;
+  profiles: BetterLootProfileLink[];
+  guaranteed: BetterLootGuaranteedEntry[];
+  items: BetterLootEntry[];
+}
+
+/**
+ * O que vale para o SERVIDOR INTEIRO (`BetterLoot.json`).
+ *
+ * ####  OS MULTIPLICADORES SÃO GLOBAIS E INTEIROS  ####
+ *
+ * Não existe 2x só nos barris, e não existe 1,5x. Quem quer
+ * multiplicar uma caixa só mexe no `Item Minimum`/`Item Maximum`
+ * das entradas dela. E eles multiplicam a QUANTIDADE, não a
+ * chance: 5x não dá cinco vezes mais itens, dá os mesmos itens com
+ * quantidade cinco vezes maior.
+ */
+export interface BetterLootGlobals {
+  lootMultiplier: number;
+  scrapMultiplier: number;
+  /** 0 a 1. Quanto do sorteio vira projeto em vez de item. */
+  blueprintWeight: number;
+  blueprintConversion: boolean;
+  allowDuplicates: boolean;
+  poolLocking: boolean;
+}
+
+/**
+ * O que a tela pode MUDAR nos globais.
+ *
+ * ####  QUATRO CAMPOS, E NÃO OS SEIS QUE SE LEEM  ####
+ *
+ * `allowDuplicates` e `poolLocking` são lidos e mostrados, mas não
+ * são editáveis aqui: eles mudam o SORTEIO (se o mesmo item pode
+ * sair duas vezes, se a caixa trava num perfil), e não a escala do
+ * loot. O pedido é o multiplicador; levar os outros dois de carona
+ * seria mexer no que ninguém pediu.
+ */
+export interface BetterLootGlobalsInput {
+  /** Inteiro ≥ 1 — é `int` no plugin, e zero zeraria o servidor. */
+  lootMultiplier: number;
+  scrapMultiplier: number;
+  /** 0 a 1, como o arquivo guarda. A tela é que fala em %. */
+  blueprintWeight: number;
+  blueprintConversion: boolean;
+}
+
+/** O corpo do PUT dos globais. A revisão é a do `BetterLoot.json`. */
+export interface BetterLootGlobalsSaveInput {
+  baseRevision: string | null;
+  globals: BetterLootGlobalsInput;
+}
+
+/** `PUT /api/servers/:id/betterloot/globals` — a resposta, relida do disco. */
+export interface BetterLootGlobalsResponse {
+  ok: true;
+  serverId: string;
+  /** A revisão NOVA do `BetterLoot.json`. */
+  revision: string;
+  /** `null` = o arquivo ficou ilegível. A tela mostra travessão. */
+  globals: BetterLootGlobals | null;
+  /** Onde ficou a cópia anterior. `null` = não havia arquivo. */
+  backup: string | null;
+  reloaded: boolean;
+  reloadOutput: string | null;
+}
+
+/** `GET /api/servers/:id/betterloot` — a lista, e o estado do plugin ali. */
+export interface BetterLootStatusResponse {
+  ok: true;
+  serverId: string;
+  /** O plugin está carregado naquele servidor? `null` = não deu para perguntar. */
+  loaded: boolean | null;
+  version: string | null;
+  /** Quando o agente leu o disco. `null` = nunca leu. */
+  readAt: string | null;
+  /**
+   * A impressão do `LootTables.json` no disco.
+   *
+   * A tela devolve a mesma no PUT; o agente recusa quando ela não
+   * bate. É o que impede duas telas abertas de uma apagar a outra —
+   * o mesmo papel do `appliedSha` da biblioteca de plugins.
+   */
+  revision: string | null;
+  /**
+   * A impressão do `BetterLoot.json` — a revisão dos GLOBAIS.
+   *
+   * ####  DOIS ARQUIVOS, DUAS REVISÕES  ####
+   *
+   * A `revision` acima é da tabela; esta é da configuração. Uma só
+   * faria gravar o multiplicador recusar o próximo salvamento de
+   * caixa, porque recarregar o plugin reescreve o `LootTables.json`
+   * sozinho.
+   */
+  configRevision: string | null;
+  globals: BetterLootGlobals | null;
+  /** Os shortnames banidos (`Blacklist.json`). É global, não por caixa. */
+  blacklist: string[];
+  count: number;
+  tables: BetterLootTableSummary[];
+}
+
+/** `GET /api/servers/:id/betterloot/table?prefab=…` — uma caixa. */
+export interface BetterLootTableResponse {
+  ok: true;
+  serverId: string;
+  revision: string | null;
+  table: BetterLootTable;
+}
+
+/**
+ * O corpo do PUT de uma caixa.
+ *
+ * A resposta vem RELIDA DO DISCO depois do `oxide.reload`, e não é
+ * o que foi enviado: o plugin preenche durabilidade, propriedades e
+ * "pode virar blueprint" sozinho ao validar (`scanEntry`). O que se
+ * escreve não é o que fica.
+ */
+export interface BetterLootSaveInput {
+  /** A revisão em que a tela abriu. `null` = a tela não viu nenhuma. */
+  baseRevision: string | null;
+  table: BetterLootTable;
 }
 
 // ============================================================
@@ -2949,8 +3365,15 @@ export const agent = {
   uiDocument: (id: number) =>
     api<{ ok: true; document: UiDocumentDetail }>(`/api/ui/documents/${String(id)}`),
 
-  /** Os modelos que o botão "Criar a partir do modelo" oferece. */
-  uiPresets: () => api<{ ok: true; presets: string[] }>('/api/ui/presets'),
+  /**
+   * Os modelos que o botão "Criar a partir do modelo" oferece.
+   *
+   * Vem montado do agente — nome, comando e número de telas do
+   * documento que o modelo DE FATO produz. O painel não inventa
+   * nenhum desses campos, porque quem os inventa erra no dia em que
+   * o modelo ganhar uma tela.
+   */
+  uiPresets: () => api<{ ok: true; presets: UiPreset[] }>('/api/ui/presets'),
 
   /**
    * Cria a partir de um MODELO.
@@ -3901,6 +4324,95 @@ export const agent = {
     api<RankingSeasonTurnResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/rankings/season`,
       { method: 'POST', body: input },
+    ),
+
+  // ---- O LOOT ----------------------------------------------
+  //
+  // A leitura responde com os servidores parados: a regra é
+  // cadastro do AGENTE. O que precisa do jogo no ar é a aplicação
+  // dela, que o plugin faz quando o container nasce.
+
+  /** As regras. Com `serverId`, só as que valem naquele servidor. */
+  lootRules: (options: { serverId?: string | undefined } = {}) =>
+    api<LootRulesResponse>(
+      `/api/loot/rules${
+        options.serverId === undefined || options.serverId === ''
+          ? ''
+          : `?serverId=${encodeURIComponent(options.serverId)}`
+      }`,
+    ),
+
+  /** Os containers que o plugin aceita. É a lista que a tela navega. */
+  lootContainers: () => api<LootContainersResponse>('/api/loot/containers'),
+
+  createLootRule: (input: LootRuleInput) =>
+    api<{ ok: true; rule: LootRule }>('/api/loot/rules', { method: 'POST', body: input }),
+
+  /** Reescreve a regra INTEIRA — é PUT, e não PATCH. */
+  updateLootRule: (id: string, input: LootRuleInput) =>
+    api<{ ok: true; rule: LootRule }>(`/api/loot/rules/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  removeLootRule: (id: string) =>
+    api<{ ok: true }>(`/api/loot/rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /**
+   * O que a regra contou, por dia.
+   *
+   * É o que faz o modo de medição valer a pena: sem ele, uma regra
+   * medindo é uma regra que não faz nada visível.
+   */
+  lootRuleStats: (id: string) =>
+    api<LootRuleStatsResponse>(`/api/loot/rules/${encodeURIComponent(id)}/stats`),
+
+  // ---- O EDITOR DE LOOT (BetterLoot) -----------------------
+  //
+  // Ao contrário das regras acima, isto NÃO responde com o
+  // servidor parado: o que a tela lê é um arquivo no disco daquele
+  // servidor, e quem o lê é o agente que fala com ele.
+  //
+  // O prefab viaja em query string porque tem barra e às vezes
+  // espaço — como pedaço de caminho ele quebraria a rota.
+
+  /** A lista de caixas de um servidor, com o estado do plugin ali. */
+  betterLootStatus: (serverId: string) =>
+    api<BetterLootStatusResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot`,
+    ),
+
+  /** Uma caixa inteira. É a segunda chamada — a lista só traz resumo. */
+  betterLootTable: (serverId: string, prefab: string) =>
+    api<BetterLootTableResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/table?prefab=${encodeURIComponent(prefab)}`,
+    ),
+
+  /**
+   * Grava a caixa e manda o plugin recarregar.
+   *
+   * A resposta vem RELIDA DO DISCO: o plugin reescreve o que
+   * recebeu. Quem ignorar o retorno mostra ao admin o que ele
+   * pediu, e não o que o servidor tem.
+   */
+  saveBetterLootTable: (serverId: string, input: BetterLootSaveInput) =>
+    api<BetterLootTableResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/table`,
+      { method: 'PUT', body: input },
+    ),
+
+  /**
+   * Grava o que vale no SERVIDOR INTEIRO e manda recarregar.
+   *
+   * Outro arquivo e outra revisão que a de tabela: aqui é o
+   * `oxide/config/BetterLoot.json`, e ele é gravado por MERGE — o
+   * agente preserva as 111 chaves de contêiner vigiado que a tela
+   * não vê.
+   */
+  saveBetterLootGlobals: (serverId: string, input: BetterLootGlobalsSaveInput) =>
+    api<BetterLootGlobalsResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/globals`,
+      { method: 'PUT', body: input },
     ),
 };
 

@@ -27,6 +27,7 @@ import type { OperatorAuth } from '../auth/operator.js';
 import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
 import type { CustomItemsRepository } from '../db/custom-items-repository.js';
+import type { LootRulesRepository } from '../db/loot-rules-repository.js';
 import type { ItemsRepository } from '../db/items-repository.js';
 import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
@@ -43,8 +44,9 @@ import type { UiSync } from '../game/ui-sync.js';
 import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
+import { BetterLootEditor, BETTERLOOT_PLUGIN } from '../oxide/betterloot.js';
 import type { PluginLibrary } from '../oxide/library.js';
-import { MAX_PLUGIN_BYTES } from '../oxide/plugins.js';
+import { MAX_PLUGIN_BYTES, reloadPlugin } from '../oxide/plugins.js';
 import type { PlayerDirectory } from '../players/service.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import type { SteamUpdateWatcher } from '../steam/update-watcher.js';
@@ -72,7 +74,9 @@ import { registerServerRoutes } from './routes/servers.js';
 import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
 import { registerSystemRoutes } from './routes/system.js';
 // ---- itens e interface ----
+import { registerBetterLootRoutes } from './routes/betterloot.js';
 import { registerCustomItemRoutes } from './routes/custom-items.js';
+import { registerLootRoutes } from './routes/loot.js';
 import { registerItemRoutes } from './routes/items.js';
 import { registerUiRoutes } from './routes/ui.js';
 // ---- VIP, loadouts e kits ----
@@ -152,6 +156,15 @@ export interface BuildServerOptions {
   readonly customItems: CustomItemsRepository;
   /** Quem leva o cadastro de itens custom ao jogo. */
   readonly customItemsSync?: { pushAll(trigger: string): Promise<unknown> };
+  /**
+   * As regras de loot: o que NÓS acrescentamos ao que o jogo já põe
+   * na caixa. Ver db/loot-rules-repository.ts.
+   *
+   * Elas viajam até o jogo pelo MESMO `customItemsSync`: a regra
+   * aponta para um item custom, e dois canais os entregariam fora
+   * de ordem no dia em que um deles atrasasse.
+   */
+  readonly lootRules: LootRulesRepository;
   /** As interfaces. Ver db/ui-documents-repository.ts. */
   readonly uiDocuments: UiDocumentsRepository;
   /** O transporte até o jogo. Ver game/ui-sync.ts. */
@@ -480,6 +493,53 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         items: options.items,
         servers: options.repository,
         ...(options.customItemsSync === undefined ? {} : { sync: options.customItemsSync }),
+      });
+
+      // A regra de loot. Ela é a terceira PÁGINA, e não uma aba do
+      // item: o objeto que ela edita não é um item, é um container.
+      // O que a regra faz é USAR o item que já está cadastrado ali —
+      // e é dele que sai a MARCA, sem a qual o item nascido na caixa
+      // não é o nosso. Ver Docs/CustomItem/05 §8.1.
+      registerLootRoutes(api, {
+        repository: options.lootRules,
+        customItems: options.customItems,
+        servers: options.repository,
+        supervisor: options.supervisor,
+        ...(options.customItemsSync === undefined ? {} : { sync: options.customItemsSync }),
+      });
+
+      // ####  O EDITOR DE LOOT: A TABELA DO BETTERLOOT  ####
+      //
+      // A quarta página da mesma tela, e a única que NÃO é cadastro
+      // do agente: o que ela edita é um arquivo no disco de um
+      // servidor. Por isso o caminho é `/servers/:id/...`, como as
+      // rotas de operação, e não `/loot/...` como as vizinhas.
+      //
+      // O editor é montado AQUI, e não recebido pronto do
+      // `index.ts`, porque tudo de que ele precisa já está nestas
+      // opções — o supervisor sabe os caminhos e o RCON, e o
+      // catálogo sabe a raridade. Uma dependência a mais no boot
+      // seria um lugar a mais para esquecer de ligar.
+      registerBetterLootRoutes(api, {
+        editor: new BetterLootEditor({
+          servers: options.supervisor,
+          items: options.items,
+          // Servidor parado NÃO é erro: o arquivo está gravado, e o
+          // BetterLoot o lê no próximo load. Recusar aqui obrigaria
+          // a subir o jogo para editar loot — que é justamente o
+          // trabalho que se faz com tudo desligado.
+          reload: async (serverId) => {
+            const context = options.supervisor.contextOf(serverId);
+
+            if (context === null) {
+              return { sent: false, output: null };
+            }
+
+            const result = await reloadPlugin(context.rcon, BETTERLOOT_PLUGIN);
+
+            return { sent: result.sent, output: result.output };
+          },
+        }),
       });
 
       // As interfaces do jogo. O desenho é da rede; o que cada
