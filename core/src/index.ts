@@ -49,6 +49,7 @@ import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
+import { AdsRepository } from './db/ads-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { LootStatsCollector } from './game/loot-stats.js';
@@ -84,6 +85,12 @@ import {
   parseQuestsScreenId,
   type QuestsScreenProvider,
 } from './game/ui-quests-screen.js';
+import {
+  buildEmptyHomeBundle,
+  createHomeScreenProvider,
+  isHomeScreenId,
+  type HomeScreenProvider,
+} from './game/ui-home-screen.js';
 import { createRankingScreenProvider } from './game/ui-ranking-screen.js';
 import { buildMainMenu, MAIN_MENU_SLUG } from './game/ui-preset-main-menu.js';
 import {
@@ -92,6 +99,7 @@ import {
   createStoreBuyHandler,
   createStoreScreenProvider,
 } from './game/ui-store-bridge.js';
+import { AdsSync } from './game/ads-sync.js';
 import { UiSync } from './game/ui-sync.js';
 import { WipeClock } from './game/wipe.js';
 import { StoreRepository } from './db/store-repository.js';
@@ -255,6 +263,9 @@ async function main(): Promise<void> {
   // reconexão do RCON, e a interface é reenviada por ela.
   let itemCatalog: ItemCatalog | null = null;
   let uiSync: UiSync | null = null;
+  // O overlay de propagandas. Como o `uiSync`, ele nasce depois
+  // dos callbacks que o citam — daí o `let` e o `?.`.
+  let adsSync: AdsSync | null = null;
   // Os dois da fase de VIP e kits, pela MESMA razão dos de cima:
   // eles precisam do supervisor, e o gancho de reconexão precisa
   // deles. Ver o bloco de montagem, mais abaixo.
@@ -284,6 +295,12 @@ async function main(): Promise<void> {
   // jogador. `null` = ainda não montada, e aí a tela do documento
   // responde no lugar.
   let calendarScreens: CalendarScreenProvider | null = null;
+  // E a HOME, que lê as quatro coisas de uma vez — ranking, loja,
+  // agenda e missões. Ela nasce com o calendário porque depende da
+  // MESMA agenda, e é a última a ficar de pé. `null` = ainda não
+  // montada, e aí o `generatedScreens` responde a home de repouso
+  // VOLÁTIL, que o clique seguinte refaz.
+  let homeScreens: HomeScreenProvider | null = null;
 
   // ####  A HORA DO WIPE VEM DO SERVIDOR  ####
   //
@@ -333,6 +350,11 @@ async function main(): Promise<void> {
       // plugin: um servidor que subiu agora não tem menu nenhum
       // até alguém mandar.
       uiSync?.pushSoon(serverId, 'rcon-connected');
+      // E o overlay de propagandas, que perdeu MAIS que o cache: o
+      // mapa chave->CRC das imagens vive na memória do plugin, e
+      // sem esquecê-lo aqui a carga desceria apontando para bytes
+      // que o outro lado não tem mais. Ver `handleRconConnected`.
+      adsSync?.handleRconConnected(serverId);
 
       // ####  E O VIP E OS KITS PELO MESMO MOTIVO — MAIS UM  ####
       //
@@ -385,6 +407,10 @@ async function main(): Promise<void> {
     // que não é um pedido do plugin de interface.
     onConsoleLine: (serverId, line) => {
       uiSync?.handleLine(serverId, line);
+      // O overlay grita `#OZADSREQ#` quando o plugin sobe sem a
+      // configuração. Recusa na primeira comparação de string,
+      // como o de cima.
+      adsSync?.handleLine(serverId, line);
       // O plugin de itens custom grita `#OZAREQ#items` quando um
       // `oxide.reload` esvazia o cache dele. Recusa na primeira
       // comparação de string, como o de cima.
@@ -1216,6 +1242,8 @@ async function main(): Promise<void> {
   });
 
   const uiDocuments = new UiDocumentsRepository(db, logger);
+  // O overlay de propagandas: a lista e o ajuste, por servidor.
+  const adsRepository = new AdsRepository(db);
 
   // ####  O MENU PRINCIPAL NASCE NO PRIMEIRO BOOT  ####
   //
@@ -1308,6 +1336,23 @@ async function main(): Promise<void> {
           if (fromQuests !== undefined && fromQuests !== null) {
             return fromQuests;
           }
+        }
+
+        // ####  A HOME, QUE É A TELA DE ENTRADA  ####
+        //
+        // Id exato (`tela-home`), como o calendário. Ela é pedida em
+        // TODA abertura do menu — é a tela de entrada, e vai marcada
+        // com `generated: true` no documento —, então este é o ramo
+        // mais percorrido daqui.
+        //
+        // E ele nunca devolve `null` para o endereço dela: cair no
+        // caminho normal serviria a tela DESENHADA, que não é
+        // volátil e ficaria no cache do plugin por cinco minutos com
+        // o "Carregando…" do repouso dentro. Ver ui-home-screen.ts.
+        if (isHomeScreenId(input.screenId)) {
+          return (
+            (await homeScreens?.(input)) ?? buildEmptyHomeBundle(input.document, input.screenId)
+          );
         }
 
         // ####  E, POR ÚLTIMO, O CALENDÁRIO  ####
@@ -1433,6 +1478,26 @@ async function main(): Promise<void> {
   });
 
   uiSync.start();
+
+  // ####  O OVERLAY DE PROPAGANDAS  ####
+  //
+  // Ele nasce DEPOIS do `uiSync` por uma razão só: os dois falam
+  // com o mesmo plugin (OrigemZUI), e o overlay é o que fica na
+  // tela o tempo todo. Subir o menu primeiro deixa o caminho
+  // quente antes de a primeira imagem descer.
+  //
+  // `servers: supervisor` e não o repositório: aqui o que
+  // interessa é quem tem RCON de pé, e não quem está cadastrado.
+  // Um servidor parado não recebe carga nenhuma — e a rota, que
+  // usa o repositório, continua deixando configurá-lo.
+  adsSync = new AdsSync({
+    ads: adsRepository,
+    servers: supervisor,
+    logger,
+  });
+
+  adsSync.start();
+  adsSync.pushAllSoon('startup');
 
   void loadoutSync.pushAll('boot');
   // Os itens custom sobem no boot pelo mesmo motivo dos loadouts:
@@ -1637,6 +1702,18 @@ async function main(): Promise<void> {
 
         await rcon.send(`origemz.chat.tell ${steamId} ${JSON.stringify(message)}`);
       },
+    },
+    // ####  O PUSH QUE NAO SE SUSTENTA MANDA BUSCAR  ####
+    //
+    // O plugin grita a conclusão, o agente confere com o número
+    // DELE e recusa quando ainda não o tem. Sem isto, o jogador
+    // esperava o lote do relógio — até 60 s de "matei o último e
+    // não aconteceu nada". MEDIDO: 78 s, em 07/09/2026.
+    //
+    // O coletor nasce depois deste bloco, por isso a chamada é
+    // dentro da função: quando o primeiro push chegar, ele existe.
+    flushNow: (serverId) => {
+      void questCollector?.flushNow(serverId);
     },
   });
 
@@ -2165,6 +2242,31 @@ async function main(): Promise<void> {
     },
   });
 
+  // ####  A HOME DO MENU DO JOGO  ####
+  //
+  // Ela nasce AQUI, e não junto do ranking lá em cima, porque é a
+  // única tela que lê as QUATRO fontes: o ranking e a loja já
+  // existiam naquele ponto, mas a agenda de wipes é montada nesta
+  // parte do arquivo — e é ela que responde "faltam 3 dias".
+  //
+  // As missões entram pela variável, que a esta altura já está
+  // preenchida; `null` nela vira a frase daquele cartão, e não uma
+  // home quebrada. Cada uma das quatro leituras tem a sua rede — ver
+  // game/ui-home-screen.ts.
+  homeScreens = createHomeScreenProvider({
+    rankings: rankingsService,
+    store,
+    quests: questsService,
+    // A MESMA agenda do calendário e do `{wipe.faltam}` do chat: as
+    // três superfícies precisam responder o mesmo wipe.
+    wipe: { schedule: wipeSchedule, runs: wipeRuns, mapPool, world: currentWorld },
+    // O nome de quem abriu, para a saudação do banner. Sem nome
+    // conhecido não há saudação — "Olá, 7656119…" seria pior que
+    // nada.
+    nameOf: (steamId) => playersRepository.get(steamId)?.name ?? null,
+    logger,
+  });
+
   // ---- os blueprints que sobrevivem ao wipe -----------------
   //
   // ####  ELE PRECISA NASCER ANTES DA EXECUÇÃO  ####
@@ -2497,6 +2599,8 @@ async function main(): Promise<void> {
     itemCatalog,
     uiDocuments,
     uiSync,
+    ads: adsRepository,
+    adsSync,
     vips,
     loadouts: {
       repository: loadoutsRepository,
@@ -2677,6 +2781,7 @@ async function main(): Promise<void> {
         // agora falaria com um RCON que já não existe.
         oxideRuntime.stop();
         uiSync.stop();
+        adsSync?.stop();
         // O do cadastro de itens custom pela mesma razão: um
         // `invalidate` armado agora mandaria `origemz.item.clear` a
         // um servidor que já está sendo desligado — e o plugin

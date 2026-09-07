@@ -19,16 +19,17 @@
 //  sem precisar perguntar ao plugin.
 // ============================================================
 
-import { LayoutTemplate, Save, Sparkles, Trash2 } from 'lucide-react';
+import { LayoutTemplate, Plus, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
+import { CreateUiDialog } from '@/components/ui-editor/create-ui-dialog';
 import { UiEditor } from '@/components/ui-editor/ui-editor';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
-import { agent, ApiError, type UiDocumentSummary } from '@/lib/api';
+import { agent, ApiError, type UiDocumentSummary, type UiPreset } from '@/lib/api';
 import { formatWhen } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import type { UiDocument } from '@/lib/ui-doc/model';
@@ -51,7 +52,18 @@ function Interface() {
   const [draft, setDraft] = useState<UiDocument | null>(null);
   /** O que está GRAVADO, para saber se há o que salvar. */
   const [saved, setSaved] = useState<string>('');
-  const [salvando, setSalvando] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [creating, setCreating] = useState(false);
+
+  /**
+   * Os modelos que o agente oferece.
+   *
+   * Servem a UMA pergunta nesta tela: este documento veio de um
+   * modelo? Só quem veio pode voltar a ele — e é por isso que a
+   * lista é lida aqui, e não só dentro da caixa de criar.
+   */
+  const [presets, setPresets] = useState<readonly UiPreset[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -66,6 +78,18 @@ function Interface() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        setPresets((await agent.uiPresets()).presets);
+      } catch {
+        // Sem a lista, o botão de restaurar some — e o de criar
+        // continua de pé, com as outras duas origens. Nenhum dos
+        // dois merece um erro na cara de quem só abriu a página.
+      }
+    })();
+  }, []);
+
   const open = async (id: number): Promise<void> => {
     try {
       const response = await agent.uiDocument(id);
@@ -73,18 +97,6 @@ function Interface() {
       setOpenId(id);
       setDraft(response.document.document as UiDocument);
       setSaved(JSON.stringify(response.document.document));
-    } catch (cause) {
-      toast.error(cause instanceof ApiError ? cause.message : String(cause));
-    }
-  };
-
-  const criarDoModelo = async (): Promise<void> => {
-    try {
-      const response = await agent.createUiFromPreset('menu-principal');
-
-      toast.success('Menu Principal criado a partir do modelo.');
-      await load();
-      await open(response.document.id);
     } catch (cause) {
       toast.error(cause instanceof ApiError ? cause.message : String(cause));
     }
@@ -99,10 +111,18 @@ function Interface() {
    * escolhê-lo de novo em Configurações. Isto reescreve o que já
    * existe: o id que o plugin guarda e os vínculos ficam de pé, e o
    * menu chega atualizado no próximo envio.
+   *
+   * ####  O MODELO É O DO PRÓPRIO DOCUMENTO  ####
+   *
+   * `preset` vinha escrito `menu-principal` aqui, e o botão era
+   * desenhado para TODA linha da tabela. Enquanto o Menu Principal
+   * era a única interface, os dois erros se anulavam; com a segunda
+   * — as missões, um `/vip` — apertá-lo devolveria 409, porque o
+   * modelo produz um identificador e o documento tem outro.
    */
-  const restaurarDoModelo = async (id: number): Promise<void> => {
+  const resetFromPreset = async (id: number, preset: string): Promise<void> => {
     try {
-      const response = await agent.resetUiDocument(id, 'menu-principal');
+      const response = await agent.resetUiDocument(id, preset);
 
       toast.success('Interface restaurada', { description: response.message });
       await load();
@@ -115,12 +135,12 @@ function Interface() {
     }
   };
 
-  const salvar = async (): Promise<void> => {
+  const save = async (): Promise<void> => {
     if (openId === null || draft === null) {
       return;
     }
 
-    setSalvando(true);
+    setSaving(true);
 
     try {
       const response = await agent.saveUiDocument(openId, draft);
@@ -130,14 +150,14 @@ function Interface() {
       await load();
     } catch (cause) {
       // A frase vem do CORE: ela conhece a regra (botão para tela
-      // apagada, id repetido) e a nossa não.
+      // apagada, id repetido, comando já usado) e a nossa não.
       toast.error(cause instanceof ApiError ? cause.message : String(cause));
     } finally {
-      setSalvando(false);
+      setSaving(false);
     }
   };
 
-  const remover = async (id: number): Promise<void> => {
+  const removeDocument = async (id: number): Promise<void> => {
     try {
       await agent.deleteUiDocument(id);
 
@@ -153,22 +173,45 @@ function Interface() {
     }
   };
 
-  const sujo = draft !== null && JSON.stringify(draft) !== saved;
+  const dirty = draft !== null && JSON.stringify(draft) !== saved;
 
   return (
     <div>
       <PageHeader
         title="Interface"
-        description="O menu que os jogadores abrem no jogo. O desenho é da rede; o que cada servidor mostra dele fica na página dele."
+        description="Os menus que os jogadores abrem no jogo. O desenho é da rede; o que cada servidor mostra dele fica na página dele."
         aside={
-          <span className="flex items-center gap-2 text-2xs uppercase tracking-wider text-muted">
-            <LayoutTemplate aria-hidden="true" className="h-4 w-4" />
-            {documents === null || documents.length === 0
-              ? 'nenhuma'
-              : `${String(documents.length)} no total`}
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-2 text-2xs uppercase tracking-wider text-muted">
+              <LayoutTemplate aria-hidden="true" className="h-4 w-4" />
+              {documents === null || documents.length === 0
+                ? 'nenhuma'
+                : `${String(documents.length)} no total`}
+            </span>
+
+            <Button variant="primary" onClick={() => setCreating(true)}>
+              <Plus aria-hidden="true" className="h-4 w-4" />
+              Criar interface
+            </Button>
+          </div>
         }
       />
+
+      {creating && (
+        <CreateUiDialog
+          documents={documents ?? []}
+          onClose={() => setCreating(false)}
+          onCreated={(id) => {
+            setCreating(false);
+            toast.success('Interface criada.', {
+              description:
+                'Ela ainda não aparece no jogo: escolha-a na página do servidor, em Configurações → Interface.',
+            });
+            void load();
+            void open(id);
+          }}
+        />
+      )}
 
       <div className="mt-4 space-y-4">
         {error !== null && (
@@ -182,12 +225,12 @@ function Interface() {
             <StateBlock
               variant="empty"
               title="Nenhuma interface ainda"
-              detail="O Menu Principal vem pronto: sete telas, cabeçalho com navegação e o botão de fechar. Ele nasce editável como qualquer outro."
+              detail="O Menu Principal vem pronto: sete telas, cabeçalho com navegação e o botão de fechar. Ele nasce editável como qualquer outro — e é um dos modelos em Criar interface."
             />
 
-            <Button onClick={() => void criarDoModelo()}>
-              <Sparkles aria-hidden="true" className="h-4 w-4" />
-              Criar a partir do modelo
+            <Button variant="primary" onClick={() => setCreating(true)}>
+              <Plus aria-hidden="true" className="h-4 w-4" />
+              Criar interface
             </Button>
           </div>
         )}
@@ -228,7 +271,21 @@ function Interface() {
                       </button>
                     </td>
 
-                    <td className="px-3 py-2 font-mono text-2xs text-muted">/{item.command}</td>
+                    {/* ####  OS ATALHOS APARECEM AQUI  ####
+
+                        `/quest` abre este mesmo menu direto nas
+                        missões. Ele ocupa um nome de comando no
+                        servidor como qualquer outro — e a recusa
+                        por comando repetido pode citá-lo, então a
+                        lista precisa mostrá-lo. */}
+                    <td className="px-3 py-2 font-mono text-2xs text-muted">
+                      /{item.command}
+                      {item.shortcuts.map((shortcut) => (
+                        <span key={shortcut} className="block">
+                          /{shortcut}
+                        </span>
+                      ))}
+                    </td>
                     <td className="px-3 py-2 text-muted">{String(item.screens)}</td>
 
                     <td className="px-3 py-2 text-muted">
@@ -277,16 +334,33 @@ function Interface() {
                             novo — o saldo no cabeçalho, os modais da
                             loja —, este é o caminho de volta, e ele
                             preserva os servidores que já o
-                            escolheram. */}
-                        <ConfirmButton
-                          variant="primary"
-                          disabled={false}
-                          icon={null}
-                          label="Restaurar do modelo"
-                          confirmLabel="Substituir o desenho"
-                          hint="O desenho atual é substituído INTEIRO pelo modelo do agente. Os servidores que usam esta interface continuam com ela, e recebem a versão nova no próximo envio."
-                          onConfirm={() => void restaurarDoModelo(item.id)}
-                        />
+                            escolheram.
+
+                            ####  SÓ APARECE PARA QUEM TEM MODELO  ####
+
+                            O botão casa pelo identificador: o modelo
+                            precisa produzir ESTE documento. Uma
+                            interface feita à mão — ou copiada, que
+                            nasce com id próprio — não tem para onde
+                            voltar, e oferecer o botão ali seria
+                            prometer um 409. */}
+                        {presets.some((preset) => preset.id === item.slug) && (
+                          <ConfirmButton
+                            variant="primary"
+                            disabled={false}
+                            icon={null}
+                            label="Restaurar do modelo"
+                            confirmLabel="Substituir o desenho"
+                            hint="O desenho atual é substituído INTEIRO pelo modelo do agente. Os servidores que usam esta interface continuam com ela, e recebem a versão nova no próximo envio."
+                            onConfirm={() => {
+                              const preset = presets.find((option) => option.id === item.slug);
+
+                              if (preset !== undefined) {
+                                void resetFromPreset(item.id, preset.preset);
+                              }
+                            }}
+                          />
+                        )}
 
                         <ConfirmButton
                           variant="danger"
@@ -299,7 +373,7 @@ function Interface() {
                               ? 'Ela some do agente. Nenhum servidor a usa.'
                               : `${String(item.servers.length)} servidor(es) ficam sem menu no jogo.`
                           }
-                          onConfirm={() => void remover(item.id)}
+                          onConfirm={() => void removeDocument(item.id)}
                         />
                       </div>
                     </td>
@@ -320,7 +394,7 @@ function Interface() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <span className="font-condensed text-sm font-bold uppercase tracking-wide text-foreground">
                 {draft.name}
-                {sujo && <span className="ml-2 text-2xs text-rust">alterações não salvas</span>}
+                {dirty && <span className="ml-2 text-2xs text-rust">alterações não salvas</span>}
               </span>
 
               <div className="flex items-center gap-2">
@@ -334,7 +408,7 @@ function Interface() {
                   Fechar
                 </Button>
 
-                <Button disabled={!sujo || salvando} onClick={() => void salvar()}>
+                <Button disabled={!dirty || saving} onClick={() => void save()}>
                   <Save aria-hidden="true" className="h-4 w-4" />
                   Salvar
                 </Button>

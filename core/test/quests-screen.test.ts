@@ -41,7 +41,12 @@ import {
 import { createLogger } from '../src/logger.js';
 import type { QuestOffer, QuestProgressView } from '../src/quests/service.js';
 import { uiDocumentSchema, type UiElement } from '../src/types/ui-document.js';
-import { toGeneratedScreenBundle, UI_DOC_MAX_BYTES } from '../src/types/ui-transport.js';
+import {
+  encodeUiDocPayload,
+  toDocumentPayload,
+  toGeneratedScreenBundle,
+  UI_DOC_MAX_BYTES,
+} from '../src/types/ui-transport.js';
 
 const logger = createLogger({ log: { level: 'silent', pretty: false } });
 // ####  O DOCUMENTO É O MENU, E SÓ ELE  ####
@@ -181,8 +186,27 @@ describe('o tamanho da tela', () => {
     expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.8);
   });
 
-  it('o documento inteiro cabe na carga inicial', () => {
-    const bytes = Buffer.from(JSON.stringify(DOCUMENT)).toString('base64').length;
+  /**
+   * ####  A CARGA INICIAL NÃO É O DOCUMENTO INTEIRO  ####
+   *
+   * Este teste media `JSON.stringify(DOCUMENT)` — o modelo com as
+   * onze telas dentro — e passava porque o menu ainda era pequeno.
+   * O que vai ao servidor é outra coisa: `toDocumentPayload` manda
+   * o shell, a tela de ENTRADA e um índice de id + nome; o resto é
+   * pedido no clique. É a forma da carga que faz o menu caber, e
+   * está escrito no cabeçalho de ui-preset-main-menu.ts.
+   *
+   * A diferença deixou de ser acadêmica em 07/09/2026, quando a
+   * HOME virou quatro cartões com dado vivo: o documento cru passou
+   * de 46 KB para 53 KB em base64 (acima do teto) enquanto a carga
+   * REAL foi de 29 KB para 37 KB — 75% do frame, com folga.
+   *
+   * Medir o que não trafega dava as duas respostas erradas: acusava
+   * um menu que cabe, e um dia deixaria passar uma tela de entrada
+   * grande demais num documento pequeno.
+   */
+  it('a carga inicial do menu cabe no frame do RCON', () => {
+    const bytes = encodeUiDocPayload({ documents: [toDocumentPayload(DOCUMENT)] }).length;
 
     expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES);
   });

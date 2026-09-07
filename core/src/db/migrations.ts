@@ -4913,6 +4913,220 @@ CREATE TABLE loot_rule_hits (
 CREATE INDEX idx_loot_rule_hits_day ON loot_rule_hits (day);
 `;
 
+// ------------------------------------------------------------
+//  050 — o overlay de propagandas
+//
+//  ####  ELE VEIO DO AGENTE ANTIGO, E CHEGA ACHATADO  ####
+//
+//  Lá foram TRÊS migrações até esta forma: a tabela, depois o logo
+//  com lugar próprio, e por fim a reconstrução que pôs `server_id`
+//  em tudo. Aqui nenhuma das duas tabelas existiu um dia, então
+//  elas nascem no estado final — repetir os passos históricos só
+//  reproduziria uma escada que este banco nunca subiu.
+//
+//  ####  DUAS TABELAS, E ELAS MUDAM POR MOTIVOS DIFERENTES  ####
+//
+//    ads            a LISTA — o que aparece, em que ordem e
+//                   quando. Muda quando alguém cadastra campanha.
+//    ads_settings   o AJUSTE — tamanho, posição, relógio e
+//                   animação. Muda quando alguém mexe no desenho.
+//
+//  A `position` anda de 10 em 10, igual aos avisos do chat:
+//  arrastar uma linha para o meio grava 15 e não reescreve a
+//  lista inteira, que é o que uma numeração 1,2,3 exigiria.
+//
+//  ####  NAO HA LINHA SEMEADA DE AJUSTE, E ISSO E DE PROPOSITO  ####
+//
+//  O ajuste é POR SERVIDOR, e semeá-lo exigiria saber quais
+//  servidores existem no instante da migração — e teria de
+//  acontecer de novo a cada servidor criado depois. Quem responde
+//  por servidor sem linha é o repositório, com o padrão
+//  DESLIGADO; quem grava usa UPSERT. Ver `settings` e
+//  `updateSettings` em db/ads-repository.ts.
+// ------------------------------------------------------------
+const ADS_SCHEMA = `
+CREATE TABLE ads (
+  id          TEXT PRIMARY KEY,
+  server_id   TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+
+  -- Desligada, a propaganda continua cadastrada e sai do rodízio.
+  -- É o que permite guardar a campanha de Natal o ano inteiro.
+  enabled     INTEGER NOT NULL DEFAULT 1,
+
+  image_url   TEXT NOT NULL,
+
+  -- NULL = usa o padrão do ajuste. Guardar o padrão copiado em
+  -- cada linha faria mudá-lo não ter efeito nenhum.
+  display_duration INTEGER,
+
+  position    INTEGER NOT NULL,
+  priority    INTEGER NOT NULL DEFAULT 0,
+  weight      INTEGER NOT NULL DEFAULT 1,
+
+  fit              TEXT NOT NULL DEFAULT 'cover'
+                   CHECK (fit IN ('cover', 'contain')),
+  background_color TEXT NOT NULL DEFAULT '#0A0A0AEB',
+  border_color     TEXT NOT NULL DEFAULT '#FFFFFF26',
+
+  -- A janela de exibição. Tudo NULL = sem restrição.
+  start_date  TEXT,
+  end_date    TEXT,
+  start_time  TEXT,
+  end_time    TEXT,
+  -- CSV de 0 a 6, com 0 = domingo. Vazio = todos os dias.
+  -- CSV e não tabela filha: são no máximo sete números que só
+  -- são lidos junto com a linha, e uma junção para isso seria
+  -- cerimônia sem ganho.
+  days_of_week TEXT NOT NULL DEFAULT '',
+  permission  TEXT,
+
+  -- O cache da imagem, do lado do agente.
+  image_status     TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (image_status IN ('pending', 'ready', 'error')),
+  image_key        TEXT,
+  image_sha        TEXT,
+  image_bytes      INTEGER,
+  image_width      INTEGER,
+  image_height     INTEGER,
+  image_error      TEXT,
+  image_fetched_at INTEGER,
+
+  shown_count   INTEGER NOT NULL DEFAULT 0,
+  last_shown_at INTEGER,
+
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+
+CREATE INDEX idx_ads_position ON ads (server_id, position);
+
+CREATE TABLE ads_settings (
+  server_id   TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  id          INTEGER NOT NULL CHECK (id = 1),
+
+  -- ####  NASCE DESLIGADO, DE PROPÓSITO  ####
+  --
+  -- Um agente recém-instalado não deveria pôr um painel na tela
+  -- de ninguém. Ligar é um clique; descobrir que o servidor está
+  -- mostrando propaganda de exemplo para os jogadores é outra
+  -- coisa.
+  enabled     INTEGER NOT NULL DEFAULT 0,
+
+  -- 'Hud' e não 'Overlay': é a camada que fica visível enquanto
+  -- se joga e que não disputa espaço com o inventário.
+  layer       TEXT NOT NULL DEFAULT 'Hud',
+  permission  TEXT,
+
+  anchor       TEXT NOT NULL DEFAULT 'top-right',
+  margin_top   INTEGER NOT NULL DEFAULT 24,
+  margin_right INTEGER NOT NULL DEFAULT 24,
+
+  logo_enabled     INTEGER NOT NULL DEFAULT 1,
+  logo_image_url   TEXT,
+  logo_width       INTEGER NOT NULL DEFAULT 90,
+  logo_height      INTEGER NOT NULL DEFAULT 90,
+  logo_opacity     REAL NOT NULL DEFAULT 0.95,
+  logo_animation_enabled INTEGER NOT NULL DEFAULT 1,
+  logo_sway_pixels REAL NOT NULL DEFAULT 2,
+  logo_scale_amount REAL NOT NULL DEFAULT 0.02,
+  logo_duration_seconds REAL NOT NULL DEFAULT 3,
+
+  -- 5 quadros por segundo. Ver o comentário do campo em
+  -- types/ads.ts: este número é, literalmente, o custo de rede
+  -- do balanço multiplicado por quantos jogadores estão online.
+  logo_fps INTEGER NOT NULL DEFAULT 5,
+
+  panel_width  INTEGER NOT NULL DEFAULT 360,
+  panel_height INTEGER NOT NULL DEFAULT 120,
+  panel_color  TEXT NOT NULL DEFAULT '#0A0A0AEB',
+  panel_border_color TEXT NOT NULL DEFAULT '#FFFFFF26',
+  panel_border_enabled INTEGER NOT NULL DEFAULT 1,
+
+  interval_seconds INTEGER NOT NULL DEFAULT 300,
+  default_display_duration INTEGER NOT NULL DEFAULT 8,
+  opening_ms   INTEGER NOT NULL DEFAULT 700,
+  closing_ms   INTEGER NOT NULL DEFAULT 600,
+  transition_ms INTEGER NOT NULL DEFAULT 500,
+  order_mode   TEXT NOT NULL DEFAULT 'sequential'
+               CHECK (order_mode IN ('sequential', 'random')),
+  ads_per_cycle INTEGER NOT NULL DEFAULT 3,
+  animation_fps INTEGER NOT NULL DEFAULT 15,
+
+  image_mode  TEXT NOT NULL DEFAULT 'stored'
+              CHECK (image_mode IN ('stored', 'url')),
+
+  -- ####  O LOGO COM LUGAR PRÓPRIO  ####
+  --
+  -- Desligado, o logo mora no mesmo canto do painel: ele é a
+  -- versão recolhida dele. Ligado, ele se solta e ganha âncora e
+  -- deslocamento próprios, em qualquer um dos nove pontos da
+  -- tela — que é o que permite "o logo no alto e ao centro, e o
+  -- painel no canto".
+  logo_detached INTEGER NOT NULL DEFAULT 0,
+  logo_anchor   TEXT NOT NULL DEFAULT 'top-center',
+
+  -- ####  AQUI ELAS SAO DESLOCAMENTO, E NAO MARGEM  ####
+  --
+  -- Num canto, "24" é a distância até a borda. No CENTRO não há
+  -- borda de onde medir, e o mesmo número passa a significar
+  -- "24 px para o lado do centro" — inclusive negativo. É por
+  -- isso que não reaproveitam margin_top/margin_right.
+  logo_margin_x INTEGER NOT NULL DEFAULT 0,
+  logo_margin_y INTEGER NOT NULL DEFAULT 24,
+
+  updated_at  INTEGER NOT NULL,
+
+  PRIMARY KEY (server_id, id)
+);
+`;
+
+// ------------------------------------------------------------
+//  051 — a propaganda que fica parada, e o logo que se solta dela
+//
+//  ####  DUAS PERGUNTAS DIFERENTES, DOIS CAMPOS  ####
+//
+//  "ONDE aparece" já existia e é a `layer`: `Hud` fica sempre na
+//  tela, `Hud.Menu` é a camada onde o Rust põe o inventário — e
+//  pendurar ali faz o overlay aparecer só com o inventário
+//  aberto, sem nenhum hook.
+//
+//  "COMO se comporta" é este campo. Desligado, o painel abre de
+//  tempos em tempos, gira as campanhas e fecha. Ligado, ele é
+//  desenhado UMA vez, com UMA propaganda, e fica.
+//
+//  Manter os dois separados é o que permite as quatro
+//  combinações — inclusive um banner fixo sempre visível, e o
+//  rodízio animado dentro do inventário.
+//
+//  ####  POR QUE UMA SO, E NAO UM RODIZIO SEM ANIMACAO  ####
+//
+//  Uma sessão de inventário dura segundos. Um rodízio de oito
+//  segundos dentro dela quase nunca chegaria à segunda imagem —
+//  e custaria um comando de RCON por troca e por grupo de
+//  jogadores, para nada. O giro entre campanhas acontece entre
+//  uma abertura de inventário e a seguinte.
+// ------------------------------------------------------------
+const ADS_STATIC_SCHEMA = `
+ALTER TABLE ads_settings ADD COLUMN ads_static INTEGER NOT NULL DEFAULT 0;
+
+-- ####  O LOGO GANHA CAMADA PROPRIA  ####
+--
+-- Sem esta coluna, "a propaganda so aparece com o inventario
+-- aberto" levaria o LOGO junto: os dois eram pendurados na mesma
+-- coluna layer (ver o parent do logo em game/ads-timeline.ts), e o
+-- dono ficaria sem a marca do servidor na tela fora do menu.
+--
+-- NULL = herda a camada do painel, que e o que sempre aconteceu.
+-- Um DEFAULT concreto aqui congelaria a escolha de quem ja tem
+-- overlay configurado, e mudar o desenho de quem nao pediu e
+-- pior que nao ter a opcao.
+--
+-- So vale com logo_detached ligado: preso ao painel, o logo e
+-- filho dele e nao tem camada para chamar de sua.
+ALTER TABLE ads_settings ADD COLUMN logo_layer TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -5043,6 +5257,24 @@ export const MIGRATIONS: readonly Migration[] = [
   // mexer no SQL de uma migração já aplicada deixa o banco de
   // produção sem a coluna, para sempre.
   { id: 49, name: 'items-rarity', sql: ITEMS_RARITY_SCHEMA },
+
+  // A 050 traz o OVERLAY DE PROPAGANDAS do agente antigo. O plugin
+  // deste repo já sabia desenhá-lo (ver o bloco do overlay em
+  // Plugins/OrigemZUI.cs); o que faltava era o lado de cá.
+  //
+  // Ela referencia `servers` da 001, que já rodou quando chega. O
+  // ajuste e a lista são POR SERVIDOR desde o nascimento: no agente
+  // antigo isso custou uma reconstrução de tabela inteira, e repetir
+  // o erro barato aqui custaria a mesma reconstrução depois.
+  { id: 50, name: 'ads', sql: ADS_SCHEMA },
+
+  // A 051 é uma coluna a mais na `ads_settings` da 050 — e é uma
+  // migração PRÓPRIA, e não uma edição daquela, pela razão que a
+  // 042 registra e a 043 conserta: o runner aplica cada id UMA
+  // vez, e mexer no SQL de uma migração já aplicada deixa o banco
+  // sem a coluna, para sempre. Isto custou uma tabela em
+  // 07/09/2026, no mesmo dia em que a 050 nasceu.
+  { id: 51, name: 'ads-static-e-camada-do-logo', sql: ADS_STATIC_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

@@ -241,6 +241,33 @@ export class QuestCollector {
   }
 
   /**
+   * Vai buscar o número AGORA, sem esperar a vez daquele servidor.
+   *
+   * ####  O PUSH DE CONCLUSÃO NÃO SE SUSTENTA SOZINHO  ####
+   *
+   * MEDIDO no servidor em 07/09/2026: o jogador matou o terceiro
+   * cientista, o plugin gritou `#OZQUEST#` com a conclusão, e o
+   * agente RECUSOU — corretamente, porque o contador dele ainda
+   * estava em 1. A quest só fechou 78 segundos depois, quando o
+   * lote do relógio trouxe o número.
+   *
+   * Do lado de quem joga, isso é "matei o último e não aconteceu
+   * nada" — que é exatamente o que o canal do "agora" existe para
+   * evitar.
+   *
+   * Aqui o push que não se sustenta deixa de esperar o relógio e
+   * MANDA BUSCAR. A guarda de `flushSeconds` é limpa só para este
+   * servidor: é uma ida a mais ao RCON no instante em que alguém
+   * concluiu uma missão, e não um intervalo menor para todo mundo
+   * o tempo inteiro.
+   */
+  async flushNow(serverId: string): Promise<QuestSweepResult> {
+    this.#lastSweep.delete(serverId);
+
+    return this.#sweepOne(serverId);
+  }
+
+  /**
    * Força o reenvio do catálogo na próxima rodada.
    *
    * É o que a rota de escrita chama depois de gravar uma quest: sem

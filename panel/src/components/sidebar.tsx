@@ -30,6 +30,7 @@ import {
   LayoutDashboard,
   LayoutTemplate,
   LogOut,
+  Image as ImageIcon,
   Menu,
   Package,
   Package2,
@@ -165,6 +166,15 @@ const NAV: readonly NavItem[] = [
     label: 'Missões',
     hint: 'O que os jogadores têm para fazer, o que ganham, e como está o progresso de cada um',
     Icon: ScrollText,
+  },
+  // As duas de baixo desenham na tela de quem joga, e é por isso
+  // que ficam lado a lado. O que as separa é quem pede: o menu o
+  // jogador abre; o overlay aparece sozinho.
+  {
+    href: '/propaganda/',
+    label: 'Propaganda',
+    hint: 'O overlay que aparece sozinho na tela: o logo do servidor e o rodízio de campanhas',
+    Icon: ImageIcon,
   },
   {
     href: '/interface/',

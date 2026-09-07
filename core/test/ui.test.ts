@@ -530,6 +530,116 @@ describe('as rotas de interface', () => {
     expect(response.statusCode).toBe(409);
     expect((response.json() as { error: string }).error).toBe('UI_DOCUMENT_ID_MISMATCH');
   });
+
+  // ----------------------------------------------------------
+  //  A SEGUNDA INTERFACE
+  //
+  //  ####  O COMANDO REPETIDO É O ÚNICO ERRO INVISÍVEL AQUI  ####
+  //
+  //  Identificador repetido já dava 409. Comando repetido não dava
+  //  nada: o documento entrava no banco, subia a revisão, chegava
+  //  ao servidor — e no jogo o `/menu` abria UM dos dois, porque o
+  //  plugin resolve o comando num mapa só. O outro não some da
+  //  lista do painel; ele só nunca abre.
+  // ----------------------------------------------------------
+  it('recusa uma segunda interface com o mesmo comando de chat', async () => {
+    harness.repository.create(buildMainMenu());
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/ui/documents',
+      payload: {
+        document: { ...buildMainMenu(), id: 'menu-vip', name: 'Menu VIP' },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { error: string }).error).toBe('UI_COMMAND_EXISTS');
+  });
+
+  it('aceita a segunda interface quando o comando é outro', async () => {
+    harness.repository.create(buildMainMenu());
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/ui/documents',
+      payload: {
+        document: {
+          ...buildMainMenu(),
+          id: 'menu-vip',
+          name: 'Menu VIP',
+          command: 'vip',
+          // Sem os atalhos: eles ocupam nome global, e a cópia que
+          // os levasse junto colidiria no `/quest` do original. É a
+          // mesma limpeza que o diálogo de copiar faz no painel.
+          shortcuts: [],
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect((response.json() as { document: { slug: string } }).document.slug).toBe('menu-vip');
+  });
+
+  it('não acusa o documento de repetir o próprio comando ao salvar', async () => {
+    harness.repository.create(buildMainMenu());
+
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: '/api/ui/documents/1',
+      payload: { document: { ...buildMainMenu(), name: 'Menu Principal (2)' } },
+    });
+
+    expect(response.statusCode).toBe(200);
+  });
+
+  // ####  O ATALHO OCUPA O MESMO NOME GLOBAL  ####
+  //
+  // `/quest` nao e o `command` de documento nenhum: e um atalho do
+  // Menu Principal, e o plugin o poe no MESMO mapa `_byCommand`.
+  // Uma interface nova pedindo `quest` ficaria inalcancavel do
+  // mesmo jeito, e o resumo da listagem nao mostra atalho.
+  it('recusa um comando que e ATALHO de outra interface', async () => {
+    harness.repository.create(buildMainMenu());
+
+    const atalho = buildMainMenu().shortcuts[0]?.command ?? 'quest';
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/ui/documents',
+      payload: {
+        document: {
+          ...buildMainMenu(),
+          id: 'menu-vip',
+          name: 'Menu VIP',
+          command: atalho,
+          shortcuts: [],
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { error: string }).error).toBe('UI_COMMAND_EXISTS');
+  });
+
+  it('a lista de modelos diz o que cada um produz', async () => {
+    const response = await harness.app.inject({ method: 'GET', url: '/api/ui/presets' });
+
+    expect(response.statusCode).toBe(200);
+
+    const { presets } = response.json() as {
+      presets: { preset: string; id: string; name: string; command: string; screens: number }[];
+    };
+
+    const menu = presets.find((item) => item.preset === MAIN_MENU_SLUG);
+
+    // O painel monta o seletor com isto. Uma lista de slugs o
+    // obrigaria a inventar o nome — e a errá-lo no dia em que o
+    // preset mudar.
+    expect(menu?.id).toBe(MAIN_MENU_SLUG);
+    expect(menu?.command).toBe(buildMainMenu().command);
+    expect(menu?.screens).toBe(buildMainMenu().screens.length);
+  });
 });
 
 // ------------------------------------------------------------

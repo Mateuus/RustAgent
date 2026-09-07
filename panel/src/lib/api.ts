@@ -1438,6 +1438,248 @@ export interface UiPreview {
 }
 
 // ------------------------------------------------------------
+//  O OVERLAY DE PROPAGANDAS (/api/servers/:id/ads)
+//
+//  ####  ELE NAO E UMA INTERFACE, E POR ISSO ESTA A PARTE  ####
+//
+//  Um documento de interface abre por comando, tem sessão e telas
+//  que trocam sob clique. O overlay aparece sozinho, para todo
+//  mundo, e o que ele faz é se MEXER — ver o cabeçalho do bloco
+//  do overlay em Plugins/OrigemZUI.cs.
+//
+//  Ele fica AQUI, ao lado das interfaces, por vizinhança de
+//  assunto: as duas coisas desenham na tela de quem joga.
+// ------------------------------------------------------------
+
+export const AD_FITS = ['cover', 'contain'] as const;
+export type AdFit = (typeof AD_FITS)[number];
+
+export const AD_IMAGE_STATUSES = ['pending', 'ready', 'error'] as const;
+export type AdImageStatus = (typeof AD_IMAGE_STATUSES)[number];
+
+export const AD_IMAGE_MODES = ['stored', 'url'] as const;
+export type AdImageMode = (typeof AD_IMAGE_MODES)[number];
+
+/**
+ * As camadas do jogo onde o overlay pode ser pendurado.
+ *
+ * As cinco primeiras ficam SEMPRE na tela. As três últimas só
+ * existem enquanto aquela tela do jogo está aberta — é assim que
+ * "a propaganda só no inventário" funciona, sem hook nenhum.
+ *
+ * `Hud.Menu` NÃO é uma delas: apesar do nome, ela continua visível
+ * com o inventário fechado (medido no jogo em 07/09/2026).
+ *
+ * Espelha `ADS_LAYERS` de core/src/types/ads.ts.
+ */
+export const AD_ALWAYS_LAYERS = ['Overall', 'Overlay', 'Hud.Menu', 'Hud', 'Under'] as const;
+export const AD_SCREEN_LAYERS = ['Inventory', 'Crafting', 'Map'] as const;
+export const AD_LAYERS = [...AD_ALWAYS_LAYERS, ...AD_SCREEN_LAYERS] as const;
+export type AdLayer = (typeof AD_LAYERS)[number];
+
+export const AD_ANCHORS = ['top-right', 'top-left', 'bottom-right', 'bottom-left'] as const;
+export type AdAnchor = (typeof AD_ANCHORS)[number];
+
+/**
+ * Os nove pontos onde o LOGO pode ficar quando é solto do painel.
+ *
+ * O painel ABRE — e crescer a partir do meio da tela não se lê
+ * como "um painel abrindo". O logo só FICA, então ele pode estar
+ * em qualquer lugar, e "no alto e ao centro" é o pedido comum.
+ */
+export const AD_LOGO_ANCHORS = [
+  'top-left',
+  'top-center',
+  'top-right',
+  'middle-left',
+  'middle-center',
+  'middle-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+] as const;
+export type AdLogoAnchor = (typeof AD_LOGO_ANCHORS)[number];
+
+export interface Advertisement {
+  id: string;
+  name: string;
+  enabled: boolean;
+  imageUrl: string;
+  /** `null` = usa o padrão do ajuste. */
+  displayDuration: number | null;
+  position: number;
+  priority: number;
+  weight: number;
+  fit: AdFit;
+  backgroundColor: string;
+  borderColor: string;
+
+  startDate: string | null;
+  endDate: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  daysOfWeek: number[];
+  permission: string | null;
+
+  imageStatus: AdImageStatus;
+  imageKey: string | null;
+  imageBytes: number | null;
+  imageWidth: number | null;
+  imageHeight: number | null;
+  imageError: string | null;
+  imageFetchedAt: string | null;
+
+  shownCount: number;
+  lastShownAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+
+  // ----------------------------------------------------------
+  //  DERIVADOS — calculados pelo AGENTE, e não aqui.
+  //
+  //  A regra de calendário (janela que vira a meia-noite, fuso
+  //  do servidor) mora no agente. Repeti-la no navegador daria
+  //  duas verdades que divergem no primeiro fuso horário.
+  // ----------------------------------------------------------
+  /** Passa no calendário NESTE instante? */
+  inSchedule: boolean;
+  /** Ligada, com imagem pronta e dentro da janela? */
+  live: boolean;
+  /** O enquadramento que o jogo vai usar. O preview usa o mesmo. */
+  anchors: { min: string; max: string };
+}
+
+export interface AdsSettings {
+  enabled: boolean;
+  layer: AdLayer;
+  permission: string | null;
+
+  /**
+   * O painel fica parado, com UMA propaganda?
+   *
+   * Ligado, não há ciclo: o painel é desenhado junto com o logo e
+   * fica. É independente da `layer` de propósito — dá para ter um
+   * banner fixo sempre visível, e o rodízio animado só dentro do
+   * inventário.
+   */
+  staticMode: boolean;
+
+  anchor: AdAnchor;
+  marginTop: number;
+  marginRight: number;
+
+  logoEnabled: boolean;
+  logoImageUrl: string | null;
+  logoWidth: number;
+  logoHeight: number;
+  logoOpacity: number;
+  logoAnimationEnabled: boolean;
+  logoSwayPixels: number;
+  logoScaleAmount: number;
+  logoDurationSeconds: number;
+  logoFps: number;
+  /** Solta o logo do canto do painel: âncora e posição próprias. */
+  logoDetached: boolean;
+  /**
+   * A camada do LOGO. `null` = a mesma do painel.
+   *
+   * É o campo que separa os dois: sem ele, pôr o painel em
+   * `Hud.Menu` levaria o logo junto, e o servidor ficaria sem
+   * marca na tela fora do inventário. Só vale com `logoDetached`.
+   */
+  logoLayer: AdLayer | null;
+  logoAnchor: AdLogoAnchor;
+  /** Num canto é margem; no centro, deslocamento (pode ser negativo). */
+  logoMarginX: number;
+  logoMarginY: number;
+
+  panelWidth: number;
+  panelHeight: number;
+  panelColor: string;
+  panelBorderColor: string;
+  panelBorderEnabled: boolean;
+
+  intervalSeconds: number;
+  defaultDisplayDuration: number;
+  openingMs: number;
+  closingMs: number;
+  transitionMs: number;
+  orderMode: 'sequential' | 'random';
+  /** 0 = todas as elegíveis. */
+  adsPerCycle: number;
+  animationFps: number;
+
+  imageMode: AdImageMode;
+  updatedAt: string | null;
+}
+
+/**
+ * Um quadro da animação, como o agente o gerou.
+ *
+ * O painel NÃO recalcula nada a partir dele: o preview toca
+ * exatamente os mesmos quadros que descem ao jogo. Duas
+ * renderizações divergiriam no primeiro campo que uma implementa
+ * e a outra não — e a divergência apareceria dentro do jogo, que
+ * é o pior lugar para descobrir.
+ */
+export interface AdsFrame {
+  at: number;
+  /**
+   * O que sai da tela neste quadro.
+   *
+   * ####  OPCIONAL, E O AGENTE REALMENTE O OMITE  ####
+   *
+   * Quando nao ha nada a destruir o campo nao vem — sao bytes que
+   * nao precisam atravessar o RCON. Declara-lo obrigatorio aqui
+   * fez o preview iterar um `undefined` e derrubar a pagina
+   * inteira. Ver `destroy?:` em core/src/game/ads-timeline.ts.
+   */
+  destroy?: string[];
+  /** CUI cru: o preview lê o RectTransform e a cor daqui. */
+  cui?: Record<string, unknown>[];
+}
+
+export interface AdsAnimation {
+  durationMs: number;
+  frames: AdsFrame[];
+}
+
+export interface AdsTimeline {
+  root: Record<string, unknown>[];
+  opening: AdsAnimation;
+  adEnter: AdsAnimation;
+  adExit: AdsAnimation;
+  closing: AdsAnimation;
+}
+
+/** O que `GET /ads` devolve: as três coisas de que a tela precisa. */
+export interface AdsView {
+  ok: true;
+  settings: AdsSettings;
+  ads: Advertisement[];
+  timeline: AdsTimeline;
+}
+
+/** O desfecho de um `POST /ads/sync`. */
+export interface AdsSyncResult {
+  ok: boolean;
+  status: 'sent' | 'skipped' | 'refused' | 'failed';
+  ads?: number;
+  bytes?: number;
+  reason?: string;
+  message?: string;
+}
+
+/** Os grupos e permissões do Oxide daquele servidor. */
+export interface AdsAudience {
+  ok: true;
+  /** `false` = sem RCON ou plugin antigo. A tela cai no campo livre. */
+  available: boolean;
+  groups: string[];
+  permissions: string[];
+}
+
+// ------------------------------------------------------------
 //  AS MENSAGENS
 //
 //  ####  ELAS SÃO DE REDE, COMO VIP, KIT E LOJA  ####
@@ -3388,6 +3630,132 @@ export const agent = {
       method: 'POST',
       body: { preset },
     }),
+
+  // ---- o overlay de propagandas -------------------------
+  //
+  // ####  TUDO AQUI LEVA O SERVIDOR  ####
+  //
+  // O overlay do PVP anuncia o Discord do PVP. Diferente das
+  // interfaces, onde o DESENHO é da rede e só a escolha é do
+  // servidor, aqui não há nada compartilhado: a lista e o ajuste
+  // são daquele mundo.
+
+  /** `GET /ads` — a lista, o ajuste e a prévia, numa chamada só. */
+  ads: (serverId: string, signal?: AbortSignal) =>
+    api<AdsView>(`/api/servers/${encodeURIComponent(serverId)}/ads`, { signal }),
+
+  /** `POST /ads` — cadastra. A imagem é baixada DEPOIS, pelo agente. */
+  createAd: (serverId: string, input: Record<string, unknown>) =>
+    api<{ ok: true; ad: Advertisement }>(`/api/servers/${encodeURIComponent(serverId)}/ads`, {
+      method: 'POST',
+      body: input,
+    }),
+
+  /**
+   * `PUT /ads/:id` — parcial.
+   *
+   * ####  `null` NAO E "NAO MANDEI"  ####
+   *
+   * Apagar a data de fim é mandar `null`; omitir o campo é
+   * mantê-la. Quem monta o corpo aqui precisa saber a diferença —
+   * confundi-las deixaria a campanha de Natal no ar em janeiro.
+   */
+  updateAd: (serverId: string, id: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; ad: Advertisement }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: patch },
+    ),
+
+  deleteAd: (serverId: string, id: string) =>
+    api<{ ok: true; deleted: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** `POST /ads/:id/duplicate` — a cópia nasce DESLIGADA. */
+  duplicateAd: (serverId: string, id: string) =>
+    api<{ ok: true; ad: Advertisement }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}/duplicate`,
+      { method: 'POST' },
+    ),
+
+  /** `PUT /ads/reorder` — a lista inteira, na ordem nova. */
+  reorderAds: (serverId: string, ids: string[]) =>
+    api<{ ok: true; ads: Advertisement[] }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/reorder`,
+      { method: 'PUT', body: { ids } },
+    ),
+
+  /** `PUT /ads/settings` — o ajuste. A prévia volta junto. */
+  saveAdsSettings: (serverId: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; settings: AdsSettings; timeline: AdsTimeline }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/settings`,
+      { method: 'PUT', body: patch },
+    ),
+
+  /**
+   * `POST /ads/preview` — os quadros de um ajuste NÃO salvo.
+   *
+   * Ela não grava nada. Existe para o preview acompanhar os
+   * controles deslizantes sem que o navegador precise de uma
+   * segunda implementação do gerador de animação — que divergiria
+   * da do agente no primeiro campo que uma trata e a outra não.
+   */
+  previewAdsSettings: (serverId: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; settings: AdsSettings; timeline: AdsTimeline }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/preview`,
+      { method: 'POST', body: patch },
+    ),
+
+  /**
+   * `GET /ads/audience` — os grupos e permissões do Oxide.
+   *
+   * Sem RCON responde `available: false`, e a tela volta ao campo
+   * de texto livre. Um nome digitado errado (`vips` em vez de
+   * `vip`) não dá erro nenhum: a propaganda simplesmente não
+   * aparece — e isso é indistinguível de "ainda não é a hora dela".
+   */
+  adsAudience: (serverId: string, signal?: AbortSignal) =>
+    api<AdsAudience>(`/api/servers/${encodeURIComponent(serverId)}/ads/audience`, { signal }),
+
+  /** `POST /ads/refresh` — rebaixa as imagens. `force` refaz as prontas. */
+  refreshAdImages: (serverId: string, force = false) =>
+    api<{ ok: true; ready: number; failed: number; ads: Advertisement[] }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/refresh`,
+      { method: 'POST', body: { force } },
+    ),
+
+  clearAdsCache: (serverId: string) =>
+    api<{ ok: true; cleared: number }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/cache/clear`,
+      { method: 'POST' },
+    ),
+
+  /** `POST /ads/sync` — empurra AGORA e espera o desfecho. */
+  syncAds: (serverId: string) =>
+    api<AdsSyncResult>(`/api/servers/${encodeURIComponent(serverId)}/ads/sync`, {
+      method: 'POST',
+    }),
+
+  /** `POST /ads/show` e `/ads/hide` — sem `steamId`, valem para todos. */
+  showAds: (serverId: string, steamId?: string) =>
+    api<{ ok: true; response: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/show`,
+      { method: 'POST', body: steamId === undefined ? {} : { steamId } },
+    ),
+
+  hideAds: (serverId: string, steamId?: string) =>
+    api<{ ok: true; response: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/hide`,
+      { method: 'POST', body: steamId === undefined ? {} : { steamId } },
+    ),
+
+  /** `POST /ads/:id/test` — mostra SÓ esta, agora, sem mexer no rodízio. */
+  testAd: (serverId: string, id: string, steamId?: string) =>
+    api<{ ok: true; response: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}/test`,
+      { method: 'POST', body: steamId === undefined ? {} : { steamId } },
+    ),
 
   createUiDocument: (document: unknown) =>
     api<{ ok: true; document: UiDocumentDetail }>('/api/ui/documents', {

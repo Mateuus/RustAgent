@@ -65,6 +65,23 @@ export interface QuestEventsDeps {
   readonly secret: string;
   readonly chat?: QuestChat;
   /**
+   * Vai buscar o número quando o push de conclusão não se sustenta.
+   *
+   * ####  SEM ISTO, O "AGORA" VIRA "ATÉ UM MINUTO"  ####
+   *
+   * MEDIDO no servidor em 07/09/2026: o jogador matou o terceiro
+   * cientista, o plugin gritou a conclusão, o agente recusou —
+   * porque o contador dele ainda estava em 1 — e a quest só fechou
+   * 78 segundos depois, no lote do relógio.
+   *
+   * A recusa está certa: quem paga o prêmio confere com o número
+   * próprio. O que estava errado era ESPERAR o relógio depois dela.
+   *
+   * Ausente = o comportamento antigo (o lote resolve), que é o que
+   * os testes usam.
+   */
+  readonly flushNow?: (serverId: string) => void;
+  /**
    * Quanto esperar antes de falar com o jogo.
    *
    * Zero seria dentro do gancho — o laço de console. Ver o
@@ -187,6 +204,18 @@ export class QuestEvents {
       // O agente discorda do plugin, ou o lote já tinha fechado. Os
       // dois são o caso NORMAL deste desenho — sem recibo, e sem
       // linha de alarme.
+      //
+      // Mas o primeiro caso não pode ficar esperando o relógio: o
+      // push chegou porque alguém acabou de concluir, e o número
+      // que falta está no plugin, a uma ida de RCON. Ver `flushNow`.
+      //
+      // Pedir também na segunda chegada (o lote já fechou) custaria
+      // uma ida à toa; por isso a pergunta é feita ao serviço, e
+      // não deduzida daqui.
+      if (this.#deps.service.viewById(event.pq)?.status === 'active') {
+        this.#deps.flushNow?.(serverId);
+      }
+
       return;
     }
 

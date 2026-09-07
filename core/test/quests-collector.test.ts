@@ -487,6 +487,71 @@ describe('o canal do "agora"', () => {
     events.stop();
   });
 
+  // ####  O "AGORA" NAO PODE VIRAR "ATE UM MINUTO"  ####
+  //
+  // MEDIDO no servidor em 07/09/2026: o jogador matou o terceiro
+  // cientista, o plugin gritou a conclusão, o agente recusou —
+  // porque o contador dele ainda estava em 1 — e a quest só fechou
+  // 78 segundos depois, no lote do relógio. Do lado de quem joga,
+  // "matei o último e não aconteceu nada".
+  //
+  // A recusa está certa. O que estava errado era esperar o relógio
+  // depois dela: o número que falta está no plugin, a uma ida de
+  // RCON.
+  it('o push que o agente não sustenta MANDA BUSCAR o número', async () => {
+    h.repository.create('minerador', quest());
+
+    const view = await h.service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+    });
+
+    const asked: string[] = [];
+    const events = new QuestEvents({
+      service: h.service,
+      logger,
+      secret: SECRET,
+      flushNow: (serverId) => asked.push(serverId),
+    });
+
+    events.handleLine('pvp1', push({ pq: view.playerQuestId }));
+
+    expect(asked).toEqual(['pvp1']);
+
+    events.stop();
+  });
+
+  it('a segunda chegada do mesmo fato NÃO manda buscar de novo', async () => {
+    h.repository.create('minerador', quest());
+
+    const view = await h.service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+    });
+
+    // O lote já fechou a tentativa: o push que chega depois é a
+    // segunda cópia do mesmo fato, de propósito. Uma ida ao RCON
+    // aqui seria à toa.
+    h.repository.setProgress(view.playerQuestId, 0, 5000);
+    h.service.reportCompletion({ playerQuestId: view.playerQuestId });
+
+    const asked: string[] = [];
+    const events = new QuestEvents({
+      service: h.service,
+      logger,
+      secret: SECRET,
+      flushNow: (serverId) => asked.push(serverId),
+    });
+
+    events.handleLine('pvp1', push({ pq: view.playerQuestId }));
+
+    expect(asked).toEqual([]);
+
+    events.stop();
+  });
+
   it('o recibo NÃO sai de dentro do gancho', async () => {
     h.repository.create('minerador', quest());
 
@@ -550,6 +615,35 @@ describe('o canal do "agora"', () => {
 // ------------------------------------------------------------
 //  O RITMO
 // ------------------------------------------------------------
+
+describe('o flush sob demanda', () => {
+  it('`flushNow` ignora a vez do servidor, e a rodada seguinte volta ao ritmo', async () => {
+    h.repository.create('minerador', quest());
+
+    const sweeper = collector();
+
+    // A primeira rodada marca a vez dele.
+    await sweeper.sweep();
+    const first = h.sent.length;
+
+    // A segunda, dentro do intervalo, é pulada.
+    await sweeper.sweep();
+    expect(h.sent.length).toBe(first);
+
+    // `flushNow` limpa a guarda DAQUELE servidor e vai.
+    const result = await sweeper.flushNow('pvp1');
+
+    expect(result.status).toBe('applied');
+    expect(h.sent.length).toBeGreaterThan(first);
+
+    // E o relógio volta ao normal: a rodada seguinte é pulada de
+    // novo, senão um push transformaria o intervalo em zero.
+    const after = h.sent.length;
+
+    await sweeper.sweep();
+    expect(h.sent.length).toBe(after);
+  });
+});
 
 describe('o `flushSeconds` de cada servidor', () => {
   it('vale de verdade: a segunda rodada dentro do intervalo é pulada', async () => {

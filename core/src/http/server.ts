@@ -33,6 +33,7 @@ import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
 import type { SpawnStatusRepository } from '../db/spawn-status-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
+import type { AdsRepository } from '../db/ads-repository.js';
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { ItemCatalog } from '../game/item-catalog.js';
 import type { KitStore } from '../kits/service.js';
@@ -40,6 +41,7 @@ import type { SpawnStatusSync } from '../loadouts/status.js';
 import type { LoadoutSync } from '../loadouts/sync.js';
 import type { VipList } from '../vip/service.js';
 import type { MonumentReader } from '../game/monuments.js';
+import type { AdsSync } from '../game/ads-sync.js';
 import type { UiSync } from '../game/ui-sync.js';
 import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
@@ -78,6 +80,7 @@ import { registerBetterLootRoutes } from './routes/betterloot.js';
 import { registerCustomItemRoutes } from './routes/custom-items.js';
 import { registerLootRoutes } from './routes/loot.js';
 import { registerItemRoutes } from './routes/items.js';
+import { registerAdsRoutes } from './routes/ads.js';
 import { registerUiRoutes } from './routes/ui.js';
 // ---- VIP, loadouts e kits ----
 import { registerVipRoutes } from './routes/vips.js';
@@ -169,6 +172,18 @@ export interface BuildServerOptions {
   readonly uiDocuments: UiDocumentsRepository;
   /** O transporte até o jogo. Ver game/ui-sync.ts. */
   readonly uiSync: UiSync;
+  /**
+   * O overlay de propagandas: a lista e o ajuste.
+   *
+   * Ele NÃO é uma interface do editor, e por isso não entra em
+   * `uiDocuments`: um documento abre por comando, tem sessão e
+   * telas que trocam sob clique. O overlay aparece sozinho, para
+   * todo mundo, e o que ele faz é se MEXER — ver o cabeçalho do
+   * bloco do overlay em Plugins/OrigemZUI.cs.
+   */
+  readonly ads: AdsRepository;
+  /** Quem leva o overlay ao jogo. Ver game/ads-sync.ts. */
+  readonly adsSync: AdsSync;
   // ---- o VIP, os loadouts e a loja de kits ----------------
   //
   // Ver Docs\15-BRIEFING-VIP-LOADOUTS-KITS.md. Os três chegam
@@ -549,6 +564,18 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         repository: options.uiDocuments,
         sync: options.uiSync,
         servers: options.supervisor,
+      });
+
+      // O overlay de propagandas. Ele fica ao lado das interfaces
+      // por vizinhança de assunto — as duas desenham na tela de
+      // quem joga —, mas o caminho é `/servers/:id/ads` porque
+      // TUDO nele é por servidor: o overlay do PVP anuncia o
+      // Discord do PVP.
+      registerAdsRoutes(api, {
+        ads: options.ads,
+        sync: options.adsSync,
+        servers: options.repository,
+        supervisor: options.supervisor,
       });
 
       // ---- o VIP, os loadouts e a loja ---------------------

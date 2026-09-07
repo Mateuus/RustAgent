@@ -46,6 +46,7 @@ import {
   type RankingScreenView,
 } from '../src/game/ui-ranking-screen.js';
 import { screenContentToCui } from '../src/game/ui-cui.js';
+import { screenViewport } from '../src/game/ui-geometry.js';
 import { buildMainMenu, MAIN_MENU_SLUG } from '../src/game/ui-preset-main-menu.js';
 import { createLogger } from '../src/logger.js';
 import {
@@ -1168,5 +1169,221 @@ describe('a página RANKING dentro do documento', () => {
     expect(JSON.stringify(buildRankingScreen({ view: emptyRankingView() }))).toBe(
       JSON.stringify(buildRankingScreen({ view: emptyRankingView() })),
     );
+  });
+});
+
+// ------------------------------------------------------------
+//  §7  A TELA DESENHADA — o dado derramado no que o admin fez
+//
+//  Entrou em 06/09/2026, com a frente de tirar as telas de dado
+//  vivo do TypeScript (Docs/Interface/01-…). O que estes testes
+//  guardam:
+//
+//    1. o desenho gravado pelo preset serve de modelo;
+//    2. mover a caixa no editor move as linhas junto;
+//    3. encolher a caixa encolhe a linha, e ela nunca chega a zero;
+//    4. um documento ANTIGO não perde a coluna — a não-regressão
+//       que custou um teste vermelho para aparecer;
+//    5. a ação continua sendo do agente, com `:` e tudo.
+// ------------------------------------------------------------
+
+describe('a tela de ranking desenhada no editor', () => {
+  /**
+   * A `tela-ranking` como o preset a grava.
+   *
+   * Montada DIRETO, e não tirada de `buildMainMenu()`: o preset
+   * importa as telas de missões e de loja, e um teste de ranking que
+   * quebra porque outra frente está no meio de uma edição não diz
+   * nada sobre ranking. A ligação com o preset tem um teste próprio,
+   * logo abaixo — um só, e é o que basta.
+   */
+  const gravada = (): UiScreen =>
+    buildRankingScreen({ view: emptyRankingView(), skeleton: true });
+
+  /**
+   * Onde a tela é desenhada.
+   *
+   * O slot de conteúdo do Menu Principal, MEDIDO em 06/09/2026 —
+   * ver core/test/ui-geometry.test.ts, que é quem guarda a conta. O
+   * número entra fixo aqui pelo mesmo motivo de `gravada`.
+   */
+  const viewport = () => ({ width: 1064.4, height: 493.6 });
+
+  /** Os rótulos de NOME das linhas, na ordem em que foram desenhados. */
+  const linhas = (screen: UiScreen): readonly UiElement[] =>
+    elementsOf(screen).filter((element) => /^rk-r\d+n$/.test(element.id));
+
+  it('o desenho que o preset grava tem os dois slots que estruturam a tela', () => {
+    const ids = elementsOf(gravada()).map((element) => element.id);
+
+    expect(ids).toContain('rk-col');
+    expect(ids).toContain('rk-lista');
+  });
+
+  // ####  A ÚNICA AMARRA COM O PRESET INTEIRO  ####
+  //
+  // O resto do bloco monta a tela direto. Este confere o que
+  // nenhum deles confere: que a tela gravada no MENU é a mesma, e
+  // que o slot medido lá bate com o número fixo daqui.
+  it('é a mesma tela que o Menu Principal grava, no mesmo lugar', () => {
+    const document = buildMainMenu();
+    const noMenu = document.screens.find((screen) => screen.id === RANKING_SCREEN_ID);
+
+    expect(JSON.stringify(noMenu)).toBe(JSON.stringify(gravada()));
+
+    const medido = screenViewport(document, gravada());
+
+    expect(medido.width).toBeCloseTo(viewport().width, 1);
+    expect(medido.height).toBeCloseTo(viewport().height, 1);
+  });
+
+  it('a coluna nasce TRANSPARENTE e vazia: o repouso não pisca uma barra cinza', () => {
+    const column = byId(gravada(), 'rk-col');
+
+    expect(column?.children).toEqual([]);
+    expect(column?.type === 'panel' ? column.color : null).toBe('#00000000');
+  });
+
+  it('preenche o desenho em vez de montar do zero', () => {
+    const screen = buildRankingScreen({
+      view: view({ entries: [entry(1, { name: 'ALVO' })] }),
+      template: gravada(),
+      viewport: viewport(),
+    });
+
+    const nomes = linhas(screen).map((element) => (element.type === 'label' ? element.text : ''));
+
+    expect(nomes).toEqual(['ALVO']);
+  });
+
+  // ####  ESTE É O PONTO DA FRENTE INTEIRA  ####
+  //
+  // O admin arrasta a caixa da lista no editor e as linhas vão
+  // junto, sem ninguém editar TypeScript. Funciona porque as linhas
+  // são FILHAS do slot, e o CUI ancora filho no pai.
+  it('mover a caixa no editor leva as linhas junto', () => {
+    const original = gravada();
+    const movida: UiScreen = {
+      ...original,
+      elements: original.elements.map((element) =>
+        element.id === 'rk-lista'
+          ? {
+              ...element,
+              rect: {
+                ...element.rect,
+                offsetMin: { x: element.rect.offsetMin.x + 120, y: element.rect.offsetMin.y },
+              },
+            }
+          : element,
+      ),
+    };
+
+    const screen = buildRankingScreen({
+      view: view(),
+      template: movida,
+      viewport: viewport(),
+    });
+
+    const caixa = screen.elements.find((element) => element.id === 'rk-lista');
+
+    expect(caixa?.rect.offsetMin.x).toBe(
+      (original.elements.find((element) => element.id === 'rk-lista')?.rect.offsetMin.x ?? 0) + 120,
+    );
+    // E as linhas continuam DENTRO dela, que é o que faz elas se
+    // moverem sem ninguém recalcular nada.
+    expect(linhas(screen).length).toBeGreaterThan(0);
+  });
+
+  it('encolher a caixa encolhe a linha, e nunca até zero', () => {
+    const cheia = buildRankingScreen({
+      view: view({ entries: Array.from({ length: 3 }, (_u, i) => entry(i + 1)) }),
+      template: gravada(),
+      viewport: viewport(),
+    });
+
+    // Uma caixa espremida a 40 px: a conta daria linha negativa.
+    const apertada = buildRankingScreen({
+      view: view({ entries: Array.from({ length: 3 }, (_u, i) => entry(i + 1)) }),
+      template: gravada(),
+      viewport: { width: 1064, height: 40 },
+    });
+
+    const alturaDe = (screen: UiScreen): number => {
+      const primeira = linhas(screen)[0];
+
+      return (primeira?.rect.offsetMax.y ?? 0) - (primeira?.rect.offsetMin.y ?? 0);
+    };
+
+    expect(alturaDe(cheia)).toBeGreaterThan(alturaDe(apertada));
+    expect(alturaDe(apertada)).toBeGreaterThanOrEqual(12);
+  });
+
+  // ####  A NÃO-REGRESSÃO QUE APARECEU VERMELHA  ####
+  //
+  // O documento gravado ANTES desta frente tem a tela de repouso
+  // sem coluna — `emptyRankingView` não traz ranking nenhum. Usá-la
+  // como modelo apagaria a coluna do jogo de quem não restaurar o
+  // menu, e sem erro nenhum: `fillTemplate` preenche o que existe e
+  // não cria o que falta.
+  it('o desenho SEM a coluna cai no layout embutido, com a coluna inteira', () => {
+    const antigo: UiScreen = {
+      ...gravada(),
+      elements: gravada().elements.filter((element) => element.id !== 'rk-col'),
+    };
+
+    const screen = buildRankingScreen({
+      view: view({ rankings: [screenRanking(), screenRanking({ metric: 'pvp.deaths', label: 'Mortes' })] }),
+      template: antigo,
+      viewport: viewport(),
+    });
+
+    const ids = elementsOf(screen).map((element) => element.id);
+
+    expect(ids).toContain('rk-col');
+    expect(JSON.stringify(screen)).toContain('MORTES');
+  });
+
+  it('a ação da coluna é do AGENTE, com o endereço que o documento não pode ter', () => {
+    const screen = buildRankingScreen({
+      view: view({
+        rankings: [screenRanking(), screenRanking({ metric: 'pvp.deaths', label: 'Mortes' })],
+        columnPage: 0,
+      }),
+      template: gravada(),
+      viewport: viewport(),
+    });
+
+    const botao = elementsOf(screen).find(
+      (element) =>
+        element.type === 'button' &&
+        element.action.kind === 'navigate' &&
+        element.action.screenId.includes(':'),
+    );
+
+    // O `:` é justamente o que o `uiDocumentSchema` recusa — por
+    // isso o endereço nunca pode vir do desenho.
+    expect(botao).toBeDefined();
+  });
+
+  it('a tela preenchida continua cabendo no frame do RCON', () => {
+    const screen = buildRankingScreen({
+      view: view({
+        rankings: manyRankings(RANKING_COLUMN_PAGE_SIZE),
+        entries: Array.from({ length: RANKING_PAGE_SIZE }, (_u, i) =>
+          entry(i + 1, { name: 'Çãø☠Çãø☠Çãø☠Çãø☠Çãø☠Çãø☠Çãø☠Çãø☠' }),
+        ),
+        pages: 9,
+        columnPages: 3,
+      }),
+      template: gravada(),
+      viewport: viewport(),
+    });
+
+    const bytes = Buffer.from(
+      JSON.stringify(screenContentToCui(buildMainMenu(), screen)),
+      'utf8',
+    ).toString('base64').length;
+
+    expect(bytes).toBeLessThan(50_000);
   });
 });

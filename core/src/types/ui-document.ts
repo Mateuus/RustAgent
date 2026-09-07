@@ -698,10 +698,22 @@ export function findDocumentProblems(document: UiDocument): readonly DocumentPro
  * jogador com um comando que não faz nada. Ela é preservada mesmo
  * listada, porque "o menu não abre" é pior que "a tela continua aí".
  *
- * Um botão que apontava para uma tela escondida continua existindo:
- * cabe a quem esconde a tela esconder o botão junto. O plugin
- * recusa navegar para uma tela que não conhece, então o clique não
- * faz nada — em vez de derrubar o menu.
+ * ####  O BOTÃO QUE LEVA À TELA ESCONDIDA SOME JUNTO  ####
+ *
+ * Ele já sobrevivia: a regra era "cabe a quem esconde a tela
+ * esconder o botão junto", e o plugin recusa navegar para uma tela
+ * que não conhece — o clique não fazia nada, e o menu não caía.
+ *
+ * Só que "não faz nada" é um defeito do ponto de vista de quem
+ * joga, e a conta de esconder dois ids em vez de um nunca foi
+ * explicada em lugar nenhum da tela de Configurações. Com a HOME
+ * mostrando um cartão por assunto — loja, ranking, wipe, missões —,
+ * o preço subiu: esquecer o segundo id deixa um cartão inteiro
+ * prometendo uma seção que aquele servidor não tem.
+ *
+ * Então a poda passou a ser transitiva: o elemento cuja AÇÃO aponta
+ * para uma tela escondida vai embora com ela, e leva os filhos.
+ * Esconder a tela basta.
  */
 export function applyHidden(document: UiDocument, hidden: readonly string[]): UiDocument {
   if (hidden.length === 0) {
@@ -710,9 +722,23 @@ export function applyHidden(document: UiDocument, hidden: readonly string[]): Ui
 
   const hide = new Set(hidden);
 
+  // A de entrada nunca some (ver acima), então o botão que leva a
+  // ela também não pode sumir.
+  const leadsToHidden = (element: UiElement): boolean => {
+    if (element.type !== 'button') {
+      return false;
+    }
+
+    const action = element.action;
+    const target =
+      action.kind === 'navigate' || action.kind === 'modal.open' ? action.screenId : null;
+
+    return target !== null && target !== document.entryScreenId && hide.has(target);
+  };
+
   const prune = (elements: readonly UiElement[]): UiElement[] =>
     elements
-      .filter((element) => !hide.has(element.id))
+      .filter((element) => !hide.has(element.id) && !leadsToHidden(element))
       .map((element) => ({ ...element, children: prune(element.children) }));
 
   return {

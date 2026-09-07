@@ -54,6 +54,7 @@
 
 import type { UiAction, UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 
+import { buildHomeScreen, emptyHomeView } from './ui-home-screen.js';
 import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
 import {
@@ -142,16 +143,6 @@ function topBar(height: number, offsetFromTop = 0): Rect {
     anchorMax: { x: 1, y: 1 },
     offsetMin: { x: 0, y: -(offsetFromTop + height) },
     offsetMax: { x: 0, y: -offsetFromTop },
-  };
-}
-
-/** Faixa vertical colada à esquerda — a barra de acento. */
-function leftBar(width: number): Rect {
-  return {
-    anchorMin: { x: 0, y: 0 },
-    anchorMax: { x: 0, y: 1 },
-    offsetMin: { x: 0, y: 0 },
-    offsetMax: { x: width, y: 0 },
   };
 }
 
@@ -591,102 +582,6 @@ function buildShell(): UiElement[] {
 // ------------------------------------------------------------
 //  AS TELAS
 // ------------------------------------------------------------
-
-/**
- * A Home: banner + três cartões.
- *
- * Os elementos JÁ nascem dentro do slot do shell, então o
- * retângulo é relativo a ele — não à tela inteira.
- */
-function buildHome(): UiElement[] {
-  const bannerHeight = 150;
-  const gap = 12;
-
-  const cards = [
-    { title: 'WIPE', body: 'O próximo wipe e o que ele leva.' },
-    { title: 'EVENTOS', body: 'O que está acontecendo agora no servidor.' },
-    { title: 'LOJA', body: 'As novidades e promoções da loja.' },
-  ];
-
-  return [
-    borderedPanel('home-banner', 'Banner', topBar(bannerHeight), C.surface, [
-      panel('home-banner-acento', 'Acento', leftBar(3), C.rust),
-      label(
-        'home-banner-titulo',
-        'Título',
-        {
-          anchorMin: { x: 0, y: 1 },
-          anchorMax: { x: 1, y: 1 },
-          offsetMin: { x: 20, y: -70 },
-          offsetMax: { x: -20, y: -34 },
-        },
-        'BEM-VINDO',
-        { size: 26, align: 'MiddleLeft' },
-      ),
-      label(
-        'home-banner-sub',
-        'Subtítulo',
-        {
-          anchorMin: { x: 0, y: 1 },
-          anchorMax: { x: 1, y: 1 },
-          offsetMin: { x: 20, y: -100 },
-          offsetMax: { x: -20, y: -72 },
-        },
-        'Edite este texto no painel, em Interface.',
-        { size: 14, color: C.textMuted, align: 'MiddleLeft', font: 'RobotoCondensed-Regular.ttf' },
-      ),
-    ]),
-
-    // Três cartões lado a lado. A largura vem de FRAÇÃO da largura
-    // disponível, então eles acompanham a tela em vez de ter
-    // tamanho fixo.
-    ...cards.map((card, index) => {
-      const width = 1 / cards.length;
-
-      return borderedPanel(
-        `home-cartao-${String(index + 1)}`,
-        `Cartão ${String(index + 1)}`,
-        {
-          anchorMin: { x: width * index, y: 0 },
-          anchorMax: { x: width * (index + 1), y: 1 },
-          offsetMin: { x: index === 0 ? 0 : gap / 2, y: 0 },
-          offsetMax: {
-            x: index === cards.length - 1 ? 0 : -gap / 2,
-            y: -(bannerHeight + gap),
-          },
-        },
-        C.surface,
-        [
-          panel(`home-cartao-${String(index + 1)}-acento`, 'Acento', topBar(2), C.rust),
-          label(
-            `home-cartao-${String(index + 1)}-titulo`,
-            'Título',
-            {
-              anchorMin: { x: 0, y: 1 },
-              anchorMax: { x: 1, y: 1 },
-              offsetMin: { x: 14, y: -44 },
-              offsetMax: { x: -14, y: -16 },
-            },
-            card.title,
-            { size: 15, align: 'MiddleLeft' },
-          ),
-          label(
-            `home-cartao-${String(index + 1)}-texto`,
-            'Texto',
-            inset(14, 52, 14, 14),
-            card.body,
-            {
-              size: 12,
-              color: C.textMuted,
-              align: 'UpperLeft',
-              font: 'RobotoCondensed-Regular.ttf',
-            },
-          ),
-        ],
-      );
-    }),
-  ];
-}
 
 /**
  * Uma página com título e um bloco vazio.
@@ -1160,7 +1055,20 @@ export interface MainMenuOptions {
  */
 export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
   const screens: UiScreen[] = [
-    { id: SCREEN_ID(HOME.id), name: HOME.label, kind: 'page', elements: buildHome() },
+    // ####  A HOME TAMBÉM É MONTADA PELO AGENTE  ####
+    //
+    // Ela deixou de ser um cartaz de três frases: mostra o pódio do
+    // ranking, a oferta em destaque, o próximo wipe e as missões de
+    // quem abriu. O que fica gravado aqui é o MODELO — as caixas
+    // vazias, com "Carregando…" no lugar de cada dado —, e o agente
+    // derrama o conteúdo a cada abertura. Ver game/ui-home-screen.ts.
+    //
+    // `generated: true` é o que faz o plugin PEDIR a de verdade. Sem
+    // a marca ele desenha o repouso e para — e como esta é a tela de
+    // ENTRADA, o jogador ficaria com "Carregando…" para sempre. Foi
+    // assim que o menu de missões quebrou, MEDIDO no jogo em
+    // 06/09/2026 (ver `generated` em types/ui-transport.ts).
+    { ...buildHomeScreen({ view: emptyHomeView() }), generated: true },
     // ####  A PÁGINA RANKING NÃO É UM PLACEHOLDER  ####
     //
     // Ela é MONTADA pelo agente a cada clique (ver
@@ -1177,7 +1085,14 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     // documento inteiro seria recusado na gravação.
     ...NAV.map((entry): UiScreen => {
       if (entry.id === RANKING_NAV_ID) {
-        return buildRankingScreen({ view: emptyRankingView() });
+        // ####  `skeleton` É O QUE A TORNA EDITÁVEL  ####
+        //
+        // Desde 06/09/2026 esta tela não é só o repouso: ela é o
+        // MODELO que o agente preenche a cada clique. Para isso ela
+        // precisa TER a coluna e a caixa da lista desenhadas —
+        // `fillTemplate` preenche o que existe e não cria o que
+        // falta. Ver `RANKING_SLOTS` em game/ui-ranking-screen.ts.
+        return buildRankingScreen({ view: emptyRankingView(), skeleton: true });
       }
 
       // ####  A PÁGINA MISSÕES TAMBÉM É MONTADA  ####

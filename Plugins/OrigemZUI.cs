@@ -2594,6 +2594,27 @@ namespace Oxide.Plugins
         /// ao lado.
         /// </summary>
         private bool _adsLogoDetached;
+
+        /// <summary>
+        /// O painel fica PARADO, com uma propaganda so?
+        ///
+        /// ####  ELE NAO E "ONDE APARECE"  ####
+        ///
+        /// Onde e a `_adsLayer`: `Hud.Menu` e a camada em que o
+        /// Rust poe o inventario, e pendurar o overlay ali o faz
+        /// aparecer so com o inventario aberto - sem hook nenhum.
+        ///
+        /// Este aqui e COMO ele se comporta. Ligado, nao ha ciclo:
+        /// o painel e desenhado junto com o logo, com a primeira
+        /// propaganda da fila daquele jogador, e fica. Depois do
+        /// primeiro desenho, ZERO trafego.
+        ///
+        /// Os dois sao independentes de proposito: da para ter um
+        /// banner fixo sempre visivel, e da para ter o rodizio
+        /// animado so dentro do inventario.
+        /// </summary>
+        private bool _adsStatic;
+
         private string _adsOrderMode = "sequential";
         private int _adsPerCycle = 3;
 
@@ -2832,6 +2853,9 @@ namespace Oxide.Plugins
 
             JToken detached = payload["logoDetached"];
             _adsLogoDetached = detached != null && (bool)detached;
+
+            JToken estatico = payload["staticMode"];
+            _adsStatic = estatico != null && (bool)estatico;
             _adsPermission = (string)payload["permission"];
             _adsRoot = payload["root"] as JArray;
 
@@ -2908,9 +2932,19 @@ namespace Oxide.Plugins
             // antigo.
             int remaining = (int)Math.Max(0f, _adsNextCycleAt - Time.realtimeSinceStartup);
 
-            Puts("overlay: " + _adsItems.Count + " propaganda(s), ciclo a cada " +
-                 (_adsIntervalMs / 1000) + "s (proximo em " + remaining + "s), logo " +
-                 (_adsLogoDetached ? "em lugar proprio" : "no canto do painel"));
+            if (_adsStatic)
+            {
+                Puts("overlay: " + _adsItems.Count + " propaganda(s), PARADO (sem ciclo), camada " +
+                     _adsLayer + ", logo " +
+                     (_adsLogoDetached ? "em lugar proprio" : "no canto do painel"));
+            }
+            else
+            {
+                Puts("overlay: " + _adsItems.Count + " propaganda(s), ciclo a cada " +
+                     (_adsIntervalMs / 1000) + "s (proximo em " + remaining + "s), camada " +
+                     _adsLayer + ", logo " +
+                     (_adsLogoDetached ? "em lugar proprio" : "no canto do painel"));
+            }
 
             arg.ReplyWith("{\"ok\":true,\"ads\":" + _adsItems.Count + "}");
         }
@@ -3099,6 +3133,68 @@ namespace Oxide.Plugins
             _adsDrawn.Add(player.userID);
 
             AdsPreload(player);
+            AdsDrawStatic(player);
+        }
+
+        /// <summary>
+        /// O painel PARADO deste jogador, com uma propaganda so.
+        ///
+        /// ####  POR QUE ISTO E DO PLUGIN, E NAO DO AGENTE  ####
+        ///
+        /// A fila depende da PERMISSAO de quem esta olhando, e so
+        /// este lado a conhece. O agente manda os mesmos quadros de
+        /// sempre; o que muda e o que se faz com eles.
+        ///
+        /// ####  O ULTIMO QUADRO, E NAO A ANIMACAO  ####
+        ///
+        /// O ultimo quadro de `opening` e o painel JA ABERTO, e o
+        /// de `adEnter` e a imagem JA DENTRO dele. Aplicar so esses
+        /// dois da o estado final sem tocar um unico quadro
+        /// intermediario - que e exatamente o que "fica parada"
+        /// quer dizer.
+        ///
+        /// Quem nao tem propaganda nenhuma para ver fica so com o
+        /// logo. E o mesmo comportamento do rodizio, e nao um
+        /// defeito.
+        /// </summary>
+        private void AdsDrawStatic(BasePlayer player)
+        {
+            if (!_adsStatic || !_adsEnabled || _adsItems.Count == 0)
+            {
+                return;
+            }
+
+            List<int> queue = AdsQueueFor(player);
+
+            if (queue.Count == 0)
+            {
+                return;
+            }
+
+            List<BasePlayer> audience = new List<BasePlayer>();
+            audience.Add(player);
+
+            // A primeira da fila: `AdsQueueFor` ja a devolve na
+            // ordem de prioridade que o agente resolveu.
+            AdItem ad = _adsItems[queue[0]];
+
+            AdsApplyLastFrame(_adsOpening, audience, null);
+            AdsApplyLastFrame(_adsEnter, audience, ad);
+        }
+
+        /// <summary>
+        /// Aplica so o ULTIMO quadro de uma animacao.
+        ///
+        /// Sem timer e sem espera: o estado final, de uma vez.
+        /// </summary>
+        private void AdsApplyLastFrame(AdAnimation animation, List<BasePlayer> audience, AdItem ad)
+        {
+            if (animation == null || animation.Frames.Count == 0)
+            {
+                return;
+            }
+
+            AdsApplyFrame(animation.Frames[animation.Frames.Count - 1] as JObject, audience, ad);
         }
 
         /// <summary>
@@ -3219,6 +3315,17 @@ namespace Oxide.Plugins
         {
             AdsKillTimer(ref _adsCycleTimer);
 
+            if (_adsStatic)
+            {
+                // ####  NO ESTATICO NAO HA RELOGIO  ####
+                //
+                // O painel ja foi desenhado junto com o logo, em
+                // AdsDrawStatic, e fica. Agendar um ciclo aqui o
+                // faria abrir por cima de si mesmo a cada
+                // intervalo - e a "propaganda parada" piscaria.
+                return;
+            }
+
             if (!_adsEnabled || _adsItems.Count == 0)
             {
                 // Sem propaganda nenhuma o overlay fica no logo, e
@@ -3259,7 +3366,9 @@ namespace Oxide.Plugins
         {
             AdsKillTimer(ref _adsCycleTimer);
 
-            if (!_adsEnabled || _adsItems.Count == 0)
+            // Ver AdsScheduleCycle: no estatico nao ha contagem
+            // para retomar.
+            if (_adsStatic || !_adsEnabled || _adsItems.Count == 0)
             {
                 return;
             }

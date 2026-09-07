@@ -67,6 +67,15 @@ export interface UiDocumentSummary {
   readonly slug: string;
   readonly name: string;
   readonly command: string;
+  /**
+   * Os comandos EXTRAS que abrem este menu.
+   *
+   * Só as palavras: a tela para que cada um abre não interessa a
+   * quem lista. Eles ocupam o mesmo nome global no servidor que o
+   * `command` — dois documentos disputando um faz um deles ficar
+   * inalcançável no jogo.
+   */
+  readonly shortcuts: readonly string[];
   readonly revision: number;
   readonly screens: number;
   readonly createdAt: number;
@@ -103,6 +112,8 @@ interface SummaryRow {
   readonly slug: string;
   readonly name: string;
   readonly command: string | null;
+  /** Os atalhos, ainda como JSON cru — ver `list`. */
+  readonly shortcuts: string | null;
   readonly revision: number;
   readonly screens: number | null;
   readonly created_at: number;
@@ -146,8 +157,9 @@ export class UiDocumentsRepository {
     const rows = this.#db
       .prepare(
         `SELECT id, slug, name, revision, created_at, updated_at,
-                json_extract(document, '$.command')      AS command,
-                json_array_length(document, '$.screens') AS screens
+                json_extract(document, '$.command')        AS command,
+                json_extract(document, '$.shortcuts')      AS shortcuts,
+                json_array_length(document, '$.screens')   AS screens
            FROM ui_documents
           ORDER BY name COLLATE NOCASE`,
       )
@@ -173,6 +185,13 @@ export class UiDocumentsRepository {
       // honesto: diz "não consegui ler", e o `get` devolve o erro
       // de verdade.
       command: row.command ?? '',
+      // Os OUTROS comandos que abrem este menu. Eles ocupam o mesmo
+      // nome global no servidor que o `command` — ver `shortcuts`
+      // em types/ui-document.ts —, e é por isso que a listagem
+      // precisa deles: a recusa por comando repetido nomeia um
+      // atalho, e uma lista que só mostrasse `/menu` deixaria a
+      // frase sem sentido.
+      shortcuts: parseShortcuts(row.shortcuts),
       revision: row.revision,
       screens: row.screens ?? 0,
       createdAt: row.created_at,
@@ -448,6 +467,41 @@ function parseHidden(raw: string, logger: Logger | undefined, serverId: string):
     return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
   } catch {
     logger?.warn({ server: serverId }, 'lista de elementos escondidos ilegível; tratada como vazia');
+    return [];
+  }
+}
+
+/**
+ * Os comandos dos atalhos, da coluna JSON.
+ *
+ * Mesma escolha do `parseHidden`: ilegível vira lista vazia. Isto
+ * alimenta uma LISTAGEM, e um documento com o campo torto precisa
+ * continuar aparecendo nela — é justamente ali que alguém vai
+ * apagá-lo ou consertá-lo.
+ *
+ * O `null` é o caso normal do documento gravado antes de os atalhos
+ * existirem, e não um defeito.
+ */
+function parseShortcuts(raw: string | null): readonly string[] {
+  if (raw === null) {
+    return [];
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((item) =>
+        typeof item === 'object' && item !== null && 'command' in item
+          ? (item as { command: unknown }).command
+          : null,
+      )
+      .filter((command): command is string => typeof command === 'string');
+  } catch {
     return [];
   }
 }

@@ -110,6 +110,8 @@ import type { UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transport.js';
 import { toError } from '../util.js';
 
+import { screenViewport, type Size } from './ui-geometry.js';
+import { fillTemplate, findTemplate, measureSlot, type SlotValue } from './ui-template.js';
 import {
   button,
   C,
@@ -133,6 +135,39 @@ import {
  * nav `ranking` de game/ui-preset-main-menu.ts já navega para cá.
  */
 export const RANKING_SCREEN_ID = 'tela-ranking';
+
+/**
+ * Os cinco lugares que o agente preenche na tela DESENHADA.
+ *
+ * ####  A TELA GRAVADA É O MODELO; ELA NÃO É DESCARTADA  ####
+ *
+ * O documento sempre teve uma `tela-ranking` — a de REPOUSO, que o
+ * plugin desenha no instante em que o jogador clica, antes de a
+ * resposta do agente chegar (`OpenScreen`, em Plugins/OrigemZUI.cs).
+ * Até 06/09/2026 ela era só isso: o agente montava a tela real do
+ * zero e o desenho gravado não influía em nada.
+ *
+ * Agora ele é o MODELO. O admin move a caixa da lista, muda a cor
+ * da coluna, reescreve o título — e o agente derrama o dado dentro
+ * do que ele desenhou. Ver `ui-template.ts` para o mecanismo, e
+ * Docs/Interface/01-… para o porquê.
+ *
+ * ####  OS SUFIXOS TÊM O HÍFEN DE PROPÓSITO  ####
+ *
+ * São os ids que o desenho embutido sempre produziu. Escolher
+ * `rktitulo` obrigaria a regerar todo documento já gravado para
+ * ganhar o preenchimento — assim, quem tem o menu de ontem já
+ * ganha, e quem editou a tela continua com o que editou.
+ */
+export const RANKING_SLOTS = {
+  title: 'rk-titulo',
+  subtitle: 'rk-sub',
+  notice: 'rk-aviso',
+  /** A coluna de rankings. O agente derrama os itens dentro. */
+  column: 'rk-col',
+  /** A caixa da lista: linhas, pager e a faixa do jogador. */
+  list: 'rk-lista',
+} as const;
 
 /** Quantos colocados cabem numa página. Ver o cabeçalho. */
 export const RANKING_PAGE_SIZE = 10;
@@ -804,11 +839,28 @@ const LIST_HEIGHT = CONTENT_HEIGHT - Y.body - CONTENT.list;
  * encontrariam sem ninguém perceber — e a décima linha ficaria
  * escondida atrás da faixa do jogador, sem erro nenhum no jogo.
  * Dividindo o que sobra, ela também usa a área INTEIRA em vez de
- * deixar um vão no meio da tela. MEDIDA em 06/09/2026: 29 px.
+ * deixar um vão no meio da tela.
+ *
+ * ####  E POR ISSO ELA ACOMPANHA A CAIXA QUE O ADMIN DESENHOU  ####
+ *
+ * `height` é a altura MEDIDA do slot `rk-lista` quando a tela vem
+ * de um desenho. Sem ela, vale a régua estimada de §3 — que era o
+ * único caminho antes de o agente saber medir (ver
+ * `ui-geometry.ts`) e continua sendo o do layout embutido.
+ *
+ * O mínimo de 12 px não é decoração: uma caixa que o admin encolheu
+ * demais daria linha de altura zero ou negativa, e dez rótulos
+ * empilhados no mesmo pixel não parecem um erro de layout — parecem
+ * a lista não ter carregado.
+ *
+ * MEDIDA na régua estimada, em 06/09/2026: 29 px.
  */
-const ROW = Math.floor(
-  (LIST_HEIGHT - PAD - LIST_HEADER - LIST_GAP - FOOT_HEIGHT) / RANKING_PAGE_SIZE,
-);
+function rowHeightOf(height: number = LIST_HEIGHT): number {
+  return Math.max(
+    12,
+    Math.floor((height - PAD - LIST_HEADER - LIST_GAP - FOOT_HEIGHT) / RANKING_PAGE_SIZE),
+  );
+}
 
 /**
  * Onde cada coluna da lista começa e acaba, dentro de uma linha.
@@ -838,15 +890,59 @@ export interface BuildRankingScreenOptions {
    * tela até o timeout: a seta pareceria não funcionar.
    */
   readonly screenId?: string;
+
+  /**
+   * O desenho gravado, para preencher em vez de montar.
+   *
+   * `null` ou ausente = o layout embutido, que é o que este arquivo
+   * sempre fez. Não é degradação temporária: é o que mantém de pé
+   * todo documento gravado antes desta frente, e o que torna a
+   * conversão reversível — apagar `rk-lista` do desenho devolve o
+   * layout de código.
+   */
+  readonly template?: UiScreen | null;
+
+  /**
+   * O tamanho de onde a tela é desenhada.
+   *
+   * Só importa com `template`: é dele que sai a altura da linha,
+   * porque a caixa da lista pode ter sido movida ou redimensionada
+   * no editor. Ausente = a régua estimada de §3.
+   */
+  readonly viewport?: Size;
+
+  /**
+   * Desenhar o ESQUELETO: a tela que fica gravada no documento.
+   *
+   * ####  A DIFERENÇA É A COLUNA VAZIA  ####
+   *
+   * Sem rankings, o layout normal não desenha coluna nenhuma — uma
+   * barra lateral vazia é ruído com aparência de defeito. Só que a
+   * tela gravada agora é o MODELO, e `fillTemplate` preenche o que
+   * existe: ele não CRIA um elemento que o desenho não tem. Sem a
+   * coluna no esqueleto, ela nunca apareceria no jogo.
+   *
+   * Então ela entra, TRANSPARENTE e vazia — invisível no repouso,
+   * que é quando essa tela é vista —, e o agente a pinta ao
+   * preencher. A lista já nasce à direita dela, no lugar onde ela
+   * vai ficar depois de preenchida.
+   */
+  readonly skeleton?: boolean;
 }
 
 export function buildRankingScreen(options: BuildRankingScreenOptions): UiScreen {
   const { view } = options;
+
+  if (options.template != null && isRankingTemplate(options.template)) {
+    return fillRankingTemplate(options.template, options);
+  }
+
   // Sem ranking nenhum não há coluna, e a frase ocupa a largura
   // toda: uma barra lateral vazia à esquerda de um aviso é ruído
   // com aparência de defeito. É também o caso da tela em REPOUSO,
   // a que fica gravada no documento.
-  const hasColumn = view.rankings.length > 0;
+  const skeleton = options.skeleton ?? false;
+  const hasColumn = view.rankings.length > 0 || skeleton;
   const left = hasColumn ? CONTENT_LEFT : 0;
 
   const elements: UiElement[] = [
@@ -858,7 +954,7 @@ export function buildRankingScreen(options: BuildRankingScreenOptions): UiScreen
   ];
 
   if (hasColumn) {
-    elements.push(...rankingColumn(view));
+    elements.push(...rankingColumn(view, skeleton));
   }
 
   elements.push(
@@ -907,6 +1003,106 @@ export function buildRankingScreen(options: BuildRankingScreenOptions): UiScreen
 }
 
 /**
+ * Este desenho serve de modelo?
+ *
+ * ####  O DOCUMENTO DE ONTEM NÃO TEM A COLUNA  ####
+ *
+ * Até 06/09/2026, a tela gravada era só o REPOUSO, e repouso não
+ * tem coluna — `emptyRankingView` não traz ranking nenhum. Usá-la
+ * como modelo faria a coluna sumir do jogo em todo documento já
+ * gravado, porque `fillTemplate` preenche o que existe e não cria o
+ * que falta. Foi pego por teste, e é o motivo desta função.
+ *
+ * A regra é estrutural, e não uma marca de versão: o desenho vale
+ * como modelo quando tem os DOIS elementos que estruturam a tela — a
+ * coluna e a caixa da lista. Quem não tem cai no layout embutido,
+ * inteiro, que é exatamente o que ele já fazia ontem.
+ *
+ * O preço: apagar a coluna no editor não a remove da tela — devolve
+ * o layout de código. Quem quer a tela sem coluna esvazia a caixa
+ * dela; quem quer os dois caminhos vai precisar de um marcador
+ * explícito no documento, e isso ainda não foi pedido.
+ */
+function isRankingTemplate(template: UiScreen): boolean {
+  const has = (suffix: string): boolean =>
+    walk(template.elements).some((element) => element.id.endsWith(suffix));
+
+  return has(RANKING_SLOTS.column) && has(RANKING_SLOTS.list);
+}
+
+/** A árvore inteira, achatada. Só para procurar por id. */
+function walk(elements: readonly UiElement[]): UiElement[] {
+  return elements.flatMap((element) => [element, ...walk(element.children)]);
+}
+
+/**
+ * O dado, derramado no desenho que o admin fez.
+ *
+ * ####  O QUE É DELE E O QUE É NOSSO  ####
+ *
+ * Dele: onde cada peça fica, que tamanho tem, de que cor é, e o que
+ * está escrito nos rótulos que não dependem de ninguém.
+ *
+ * Nosso: os textos que dependem do jogador, as N linhas, os itens da
+ * coluna — e TODAS as ações. A ação nunca vem do documento porque
+ * ela carrega o endereço com aba e página, e o `uiDocumentSchema`
+ * recusa `:` em `screenId` de ação: um documento com a coluna
+ * navegável dentro SERIA RECUSADO NA GRAVAÇÃO. Ver `ui-template.ts`.
+ *
+ * ####  A COLUNA SOME QUANDO NÃO HÁ RANKING, E A LISTA NÃO ANDA  ####
+ *
+ * No layout embutido, sem coluna a lista escorrega para a esquerda e
+ * ocupa a largura toda. Aqui ela fica onde o admin a pôs: o desenho
+ * é fixo, e essa é a natureza da coisa — quem escolhe a posição é
+ * quem desenhou. O que dá para fazer, e é feito, é ESCONDER a
+ * coluna: uma barra lateral vazia é ruído com aparência de defeito.
+ */
+function fillRankingTemplate(template: UiScreen, options: BuildRankingScreenOptions): UiScreen {
+  const { view } = options;
+  const id = options.screenId ?? RANKING_SCREEN_ID;
+
+  const warning = coverageMessageOf(view.coverage);
+  const hasColumn = view.rankings.length > 0;
+
+  // A caixa que o admin desenhou manda na altura da linha. Sem a
+  // caixa no desenho — alguém a apagou —, vale a régua estimada, e a
+  // lista simplesmente não terá onde ser derramada.
+  const box =
+    options.viewport === undefined
+      ? null
+      : measureSlot(template, RANKING_SLOTS.list, options.viewport);
+
+  const values: Record<string, SlotValue> = {
+    [RANKING_SLOTS.title]: { text: titleOf(view) },
+    [RANKING_SLOTS.subtitle]: { text: subtitleOf(view) },
+    [RANKING_SLOTS.notice]:
+      warning === null ? { hide: true } : { text: warning, color: coverageTone(view.coverage) },
+    // A cor vem daqui porque no esqueleto ela é transparente — ver
+    // `rankingColumn`. Um admin que a tenha recolorido no editor
+    // perde a escolha dele aqui, e é a mesma troca que a loja já
+    // faz: o slot é do agente na hora de preencher.
+    [RANKING_SLOTS.column]: hasColumn
+      ? { color: C.surface2, children: rankingColumnItems(view) }
+      : { hide: true },
+    [RANKING_SLOTS.list]: { children: listBody(view, rowHeightOf(box?.height)) },
+  };
+
+  return { ...fillTemplate(template, id, values), name: 'RANKING' };
+}
+
+/**
+ * O título da tela.
+ *
+ * Fica com o nome do ranking aberto porque, na tela desenhada, ele é
+ * a única peça que diz O QUE se está lendo antes de o olho descer
+ * até o subtítulo — e o admin pode ter movido a coluna para longe
+ * dele.
+ */
+function titleOf(view: RankingScreenView): string {
+  return view.active === null ? 'RANKING' : view.active.label.toUpperCase();
+}
+
+/**
  * A cor do aviso — e é aqui que `never` deixa de parecer defeito.
  *
  * ####  "AINDA NÃO COLETOU" NÃO É "A COLETA QUEBROU"  ####
@@ -943,7 +1139,35 @@ function coverageTone(coverage: CoverageStatus | null): string {
  * usava `navigate`; a fileira de abas usava `modal.open` porque
  * herdava o `tabsRow`, que é o widget dos MODAIS.
  */
-function rankingColumn(view: RankingScreenView): UiElement[] {
+function rankingColumn(view: RankingScreenView, skeleton = false): UiElement[] {
+  // ####  O FUNDO DA COLUNA É A DIVISÓRIA  ####
+  //
+  // Ela já teve um fundo transparente e uma régua de 1 px ao lado.
+  // Pintar a coluna faz o mesmo trabalho com UM elemento a menos —
+  // e num documento cujo teto é o frame do RCON, cada elemento a
+  // menos é espaço para uma linha a mais da lista.
+  //
+  // No esqueleto ela vai TRANSPARENTE e vazia: é a tela de repouso,
+  // e uma barra cinza sem nada dentro piscaria a cada clique em
+  // RANKING. Quem a pinta é o preenchimento. Ver `skeleton`.
+  return [
+    panel(
+      'rk-col',
+      columnRect(),
+      skeleton ? C.none : C.surface2,
+      skeleton ? [] : rankingColumnItems(view),
+    ),
+  ];
+}
+
+/**
+ * Os itens da coluna, sem o painel em volta.
+ *
+ * Separado porque na tela DESENHADA o painel é do admin — é o slot
+ * `rk-col`, com a posição, o tamanho e a cor que ele escolheu — e só
+ * o conteúdo é nosso.
+ */
+function rankingColumnItems(view: RankingScreenView): UiElement[] {
   const active = view.active;
   const items: UiElement[] = [];
 
@@ -1034,13 +1258,7 @@ function rankingColumn(view: RankingScreenView): UiElement[] {
     );
   }
 
-  // ####  O FUNDO DA COLUNA É A DIVISÓRIA  ####
-  //
-  // Ela já teve um fundo transparente e uma régua de 1 px ao lado.
-  // Pintar a coluna faz o mesmo trabalho com UM elemento a menos —
-  // e num documento cujo teto é o frame do RCON, cada elemento a
-  // menos é espaço para uma linha a mais da lista.
-  return [panel('rk-col', columnRect(), C.surface2, items)];
+  return items;
 }
 
 /**
@@ -1113,10 +1331,16 @@ function subtitleOf(view: RankingScreenView): string {
  * uma altura à mão.
  */
 function listBox(view: RankingScreenView, left: number): UiElement {
-  return panel('rk-lista', stretch(left, Y.body + CONTENT.list), C.none, listBody(view));
+  return panel('rk-lista', stretch(left, Y.body + CONTENT.list), C.none, listBody(view, rowHeightOf()));
 }
 
-function listBody(view: RankingScreenView): UiElement[] {
+/**
+ * O conteúdo da caixa. `rowHeight` é a altura de uma linha.
+ *
+ * Ela chega de fora porque, no caminho da tela DESENHADA, quem a
+ * conhece é a caixa que o admin fez — ver `rowHeightOf`.
+ */
+function listBody(view: RankingScreenView, rowHeight: number): UiElement[] {
   const active = view.active;
   const message = emptyMessage(view);
 
@@ -1153,7 +1377,13 @@ function listBody(view: RankingScreenView): UiElement[] {
 
   for (const [index, entry] of view.entries.entries()) {
     elements.push(
-      ...row(`rk-r${String(index)}`, entry, PAD + LIST_HEADER + LIST_GAP + index * ROW, active),
+      ...row(
+        `rk-r${String(index)}`,
+        entry,
+        PAD + LIST_HEADER + LIST_GAP + index * rowHeight,
+        active,
+        rowHeight,
+      ),
     );
   }
 
@@ -1231,24 +1461,30 @@ function row(
   entry: RankingScreenEntry,
   top: number,
   ranking: RankingScreenRanking,
+  height: number,
 ): UiElement[] {
   // A linha dele fica em vermelho no meio das outras: é o que
   // permite achar-se sem ler os dez nomes.
   const color = entry.mine ? C.rust : C.text;
 
   return [
-    label(`${id}p`, positionText(entry.position), cell(CELL.positionLeft, CELL.positionRight, top, ROW), {
-      size: 12,
-      align: 'MiddleRight',
-      color: entry.mine ? C.rust : C.textMuted,
-      font: 'RobotoCondensed-Bold.ttf',
-    }),
-    label(`${id}n`, entry.name ?? 'jogador sem nome', nameCell(top, ROW), {
+    label(
+      `${id}p`,
+      positionText(entry.position),
+      cell(CELL.positionLeft, CELL.positionRight, top, height),
+      {
+        size: 12,
+        align: 'MiddleRight',
+        color: entry.mine ? C.rust : C.textMuted,
+        font: 'RobotoCondensed-Bold.ttf',
+      },
+    ),
+    label(`${id}n`, entry.name ?? 'jogador sem nome', nameCell(top, height), {
       size: 12,
       align: 'MiddleLeft',
       color,
     }),
-    label(`${id}v`, formatRankingValue(entry.value, ranking), valueCell(top, ROW), {
+    label(`${id}v`, formatRankingValue(entry.value, ranking), valueCell(top, height), {
       size: 12,
       align: 'MiddleRight',
       color,
@@ -1486,10 +1722,24 @@ export function createRankingScreenProvider(
       return null;
     }
 
+    // ####  O DESENHO GRAVADO É O MODELO, QUANDO ELE EXISTE  ####
+    //
+    // A `tela-ranking` do documento sempre foi a de REPOUSO — o que
+    // o plugin desenha antes de a resposta chegar. Agora ela também
+    // diz ONDE cada peça vai. Documento sem ela (ou com ela apagada
+    // no editor) cai no layout embutido, que continua completo.
+    const template = findTemplate(input.document.screens, RANKING_SCREEN_ID);
+
+    // O tamanho de onde a tela é desenhada: com shell, o slot de
+    // conteúdo, e não a tela do jogo. É dele que sai a altura da
+    // linha — ver `rowHeightOf`.
+    const viewport: Size | undefined =
+      template === null ? undefined : screenViewport(input.document, template);
+
     const pack = (view: RankingScreenView): UiScreenBundle =>
       toGeneratedScreenBundle(
         input.document,
-        buildRankingScreen({ view, screenId: input.screenId }),
+        buildRankingScreen({ view, screenId: input.screenId, template, viewport }),
         // O SHELL conhece `tela-ranking`: sem isto, o destaque do
         // botão RANKING sumiria justamente ao entrar nele.
         RANKING_SCREEN_ID,
