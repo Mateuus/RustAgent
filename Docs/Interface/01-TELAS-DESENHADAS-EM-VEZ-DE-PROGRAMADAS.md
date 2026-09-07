@@ -300,3 +300,58 @@ passa por cima das cinco:
    aquele servidor não tem. Desde 07/09/2026 a poda é transitiva — `applyHidden`
    leva junto o botão cuja ação aponta para a tela escondida —, e o gerador
    pergunta ao documento PODADO quais cartões existem (`cardsOf`).
+
+---
+
+## §7 — O desenho atravessa de um agente para o outro
+
+**Escrito em 07/09/2026, medido contra o par dev/produção do dono.**
+
+O overlay de propagandas foi desenhado no agente de teste e precisava existir
+igual na produção — que é **outra máquina, com outro banco**, e sem canal nenhum
+com a primeira. O `ozads` de lá estava com uma tela vazia chamada "Início"
+enquanto o daqui já tinha a árvore inteira montada.
+
+Sem transporte, o único caminho é redesenhar tudo à mão do outro lado. E o erro
+que isso produz é o pior tipo: **um número diferente numa âncora não dá erro, dá
+um desenho parecido** — que só se descobre olhando os dois lado a lado.
+
+### O CUI não serve de transporte, e o botão que já existia dizia isso
+
+"Ver o CUI" mostra a **saída compilada**: a lista de elementos que o agente manda
+ao cliente. Ela sai do documento e não volta para ele — não há caminho de
+`CuiElement[]` de volta a telas, shell e slots, e mesmo que houvesse, o que se
+recuperaria seria o resultado e não a intenção.
+
+O que viaja é o **documento**, que é o que o editor sabe abrir. O botão novo fica
+ao lado do outro de propósito: os dois respondem à mesma pergunta — *o que tem
+dentro disto?* — por lados opostos.
+
+### Três decisões, e as três são sobre o que NÃO atravessa
+
+1. **O `id` é sempre o do documento aberto.** Ele é o endereço que o plugin
+   guarda e que todo botão carrega. O agente já recusava um `PUT` que o trocasse;
+   aqui ele é reescrito antes de sair do navegador — e é isso que, de quebra,
+   deixa copiar o desenho de uma interface para **outra**.
+2. **Os atalhos ficam com o destino.** Cada um ocupa uma palavra global no
+   servidor, e duas interfaces disputando a mesma fazem uma delas ficar
+   inalcançável no jogo, sem erro nenhum. É a mesma razão pela qual copiar uma
+   interface no painel nunca os levou junto.
+3. **Colar não grava.** O desenho entra no rascunho e o `SALVAR` continua sendo
+   de quem colou — que é quem precisa ver antes de subir a revisão e empurrar a
+   interface para os servidores que a usam.
+
+### A validação é a do agente, e não uma segunda
+
+O texto colado passa por `POST /ui/documents/:id/preview`, que confere com o
+**mesmo schema do salvar** e não grava nada. Um documento quebrado é recusado com
+a frase do agente antes de o editor tentar desenhá-lo.
+
+Escrever a validação no navegador seria uma régua a mais para divergir da
+primeira — e a que divergisse ficaria com a última palavra sobre o que é um
+documento válido, que é justamente a decisão que já tem dono.
+
+O que fica do lado de cá são duas conferências rasas, em
+`components/ui-editor/document-transfer.ts`: sem `screens` e sem `entryScreenId`
+o editor não teria o que desenhar, e a recusa do agente para esses dois casos
+("esperava um array") é mais fria do que a que se escreve aqui.

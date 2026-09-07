@@ -58,6 +58,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { AdsPreview, type PreviewScene } from '@/components/ads-preview';
+import { AdsTransferDialog } from '@/components/ads-transfer-dialog';
 import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -199,6 +200,9 @@ export function AdsPage({ serverId }: { readonly serverId: string }) {
 
   const [scene, setScene] = useState<PreviewScene>('idle');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  /** A janela de copiar/colar o overlay entre servidores. */
+  const [transferOpen, setTransferOpen] = useState(false);
 
   /**
    * Os grupos e permissões que EXISTEM no servidor.
@@ -378,6 +382,23 @@ export function AdsPage({ serverId }: { readonly serverId: string }) {
           barra e o bloco abaixo são dois deles. */}
       <div className="flex flex-wrap items-center justify-end gap-2">
         <StatusPill enabled={settings.enabled} count={ads.filter((ad) => ad.live).length} />
+
+        {/* ####  ELE FICA NA BARRA, E NAO DENTRO DE UMA ABA  ####
+
+            Copiar leva o ajuste E as propagandas — as duas abas de
+            uma vez. Pendurá-lo em uma delas diria que só aquela
+            metade viaja. */}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            setTransferOpen(true);
+          }}
+        >
+          <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+          Copiar / colar
+        </Button>
 
         <Button
           variant="outline"
@@ -1331,6 +1352,24 @@ export function AdsPage({ serverId }: { readonly serverId: string }) {
           </>
         )}
       </div>
+
+      <AdsTransferDialog
+        open={transferOpen}
+        serverId={serverId}
+        onClose={() => {
+          setTransferOpen(false);
+        }}
+        onImported={(view) => {
+          // A vista volta pronta do agente: aplicá-la aqui evita um
+          // segundo GET e, com ele, a piscada em que a tela ainda
+          // mostra o overlay antigo depois de ele ter sido trocado.
+          setSettings(view.settings);
+          setDraft(view.settings);
+          setTimeline(view.timeline);
+          setAds(view.ads);
+          setSelectedId(null);
+        }}
+      />
     </>
   );
 }

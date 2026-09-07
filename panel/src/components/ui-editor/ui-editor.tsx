@@ -29,7 +29,7 @@
 //  uma segunda coisa para divergir.
 // ============================================================
 
-import { ChevronDown, ChevronUp, Code2, Layers, Plus } from 'lucide-react';
+import { ChevronDown, ChevronUp, Code2, Copy, Layers, Plus } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -56,6 +56,7 @@ import {
 import { findDocumentProblems } from '@/lib/ui-doc/validate';
 import { cn } from '@/lib/utils';
 
+import { DocumentTransferDialog } from './document-transfer-dialog';
 import { ElementView } from './element-view';
 import { Inspector } from './inspector';
 
@@ -73,6 +74,9 @@ export function UiEditor({ documentId, document, onChange }: UiEditorProps) {
   const [screenId, setScreenId] = useState<string>(document.entryScreenId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [preview, setPreview] = useState<UiPreview | null>(null);
+
+  /** A janela de copiar/colar o desenho entre agentes. */
+  const [transferOpen, setTransferOpen] = useState(false);
   const [scale, setScale] = useState(1);
 
   const stage = useRef<HTMLDivElement>(null);
@@ -314,10 +318,23 @@ export function UiEditor({ documentId, document, onChange }: UiEditorProps) {
             {editingShell ? 'Cabeçalho (desenhado uma vez)' : (screen?.name ?? '')}
           </span>
 
-          <Button size="sm" variant="outline" onClick={() => void showCui()}>
-            <Code2 aria-hidden="true" className="h-4 w-4" />
-            Ver o CUI
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* ####  ELE FICA AO LADO DO "VER O CUI", E E O PAR DELE  ####
+
+                O CUI é a saída compilada e só se lê. O documento é o
+                que entra de volta — e é o que atravessa de um agente
+                para o outro. Os dois respondem à mesma pergunta
+                ("o que tem dentro disto?"), por lados opostos. */}
+            <Button size="sm" variant="outline" onClick={() => setTransferOpen(true)}>
+              <Copy aria-hidden="true" className="h-4 w-4" />
+              Copiar / colar
+            </Button>
+
+            <Button size="sm" variant="outline" onClick={() => void showCui()}>
+              <Code2 aria-hidden="true" className="h-4 w-4" />
+              Ver o CUI
+            </Button>
+          </div>
         </div>
 
         {/* O palco. `aspect-video` é 16:9 — a proporção da tela do
@@ -419,6 +436,25 @@ export function UiEditor({ documentId, document, onChange }: UiEditorProps) {
           }}
         />
       </div>
+
+      <DocumentTransferDialog
+        open={transferOpen}
+        documentId={documentId}
+        document={document}
+        onClose={() => {
+          setTransferOpen(false);
+        }}
+        onPasted={(next) => {
+          onChange(next);
+
+          // A tela e o elemento em foco eram do desenho ANTERIOR: os
+          // ids que chegam são outros, e manter a seleção deixaria o
+          // canvas vazio com a árvore apontando para o que não existe.
+          setScreenId(next.entryScreenId);
+          setSelectedId(null);
+          setPreview(null);
+        }}
+      />
     </div>
   );
 }
