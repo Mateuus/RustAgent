@@ -1527,6 +1527,24 @@ async function main(): Promise<void> {
   questScreens = createQuestsScreenProvider({
     quests: questsService,
     npcNameOf: (npcId) => questsRepository.getNpc(npcId)?.name ?? null,
+    // ####  O NOME E O ÍCONE NÃO SAEM DO CADASTRO DA MISSÃO  ####
+    //
+    // Ela guarda `metal.refined` e `trophy.bleik` — a chave que o
+    // admin digitou. Quem sabe que aquilo se chama "High Quality
+    // Metal" e tem qual ícone é o catálogo do JOGO, que muda a cada
+    // update do Rust; e quem sabe que `trophy.bleik` é a "Bleik
+    // Store" é o catálogo de rankings, que o admin edita.
+    //
+    // Lidos AQUI, a cada abertura da tela: gravar o nome junto com
+    // a recompensa deixaria o nome velho no jogo para sempre.
+    catalog: {
+      itemOf: (shortname) => {
+        const item = itemsRepository.get(shortname);
+
+        return item === null ? null : { itemId: item.itemId, displayName: item.displayName };
+      },
+      rankingLabelOf: (metric) => rankingsRepository.getByMetric(metric)?.label ?? null,
+    },
     logger,
   });
 

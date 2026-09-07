@@ -94,7 +94,17 @@ import type { UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transport.js';
 import { toError } from '../util.js';
 
-import { button, C, clamp, fill, label, panel, rowsPager, type Rect } from './ui-widgets.js';
+import {
+  button,
+  C,
+  clamp,
+  fill,
+  itemImage,
+  label,
+  panel,
+  rowsPager,
+  type Rect,
+} from './ui-widgets.js';
 
 /**
  * O id da tela.
@@ -110,6 +120,16 @@ import { button, C, clamp, fill, label, panel, rowsPager, type Rect } from './ui
  * procurar a página errada na tela de Interface.
  */
 export const QUESTS_SCREEN_ID = 'tela-missoes';
+
+/**
+ * A chave do PNG da moeda, entregue ao servidor pelo agente.
+ *
+ * Repetida aqui, e não importada de `ui-store-screens`: aquele
+ * módulo carrega a loja inteira e o modelo dos modais dela, e uma
+ * string de seis letras não paga esse acoplamento. Se ela mudar,
+ * muda em `game/ui-images.ts` — que é quem lê a pasta.
+ */
+const COIN_IMAGE_KEY = 'ozcoin';
 
 /** Quantas quests cabem numa página. Ver o cabeçalho. */
 export const QUESTS_PAGE_SIZE = 6;
@@ -322,13 +342,32 @@ export interface QuestDetailObjective {
   readonly done: boolean;
 }
 
+/**
+ * Uma recompensa na tela de detalhe.
+ *
+ * O ícone é o que o dono pediu em 06/09/2026: "o certo é mostrar o
+ * ícone do item quando é item, e o do OZCoin quando é moeda".
+ *
+ * `null` para kit, VIP e pontos: nenhum dos três é um item do jogo,
+ * e não há imagem a mostrar. Pontos ganham o NOME DO RANKING no
+ * lugar — "2 pontos em Bleik Store" diz o que `trophy.bleik` não
+ * dizia.
+ */
+export interface QuestRewardLine {
+  readonly text: string;
+  readonly icon:
+    | { readonly kind: 'item'; readonly itemId: number; readonly skinId: string }
+    | { readonly kind: 'coin' }
+    | null;
+}
+
 /** O modal de uma quest. */
 export interface QuestDetail {
   readonly title: string;
   readonly description: string;
   readonly objectives: readonly QuestDetailObjective[];
-  /** Uma linha por recompensa, já em português. */
-  readonly rewards: readonly string[];
+  /** Uma linha por recompensa, com o ícone quando houver. */
+  readonly rewards: readonly QuestRewardLine[];
   /** O motivo do bloqueio, ou o aviso de que está pronta. */
   readonly note: string | null;
   /** `quest:accept:<id>` ou `quest:claim:<pq>`. */
@@ -382,6 +421,30 @@ export function emptyQuestsView(): QuestsView {
 //  §3  A LEITURA
 // ------------------------------------------------------------
 
+/**
+ * O que a tela precisa saber sobre o mundo, fora das missoes.
+ *
+ * ####  O CATALOGO NAO MORA NO CADASTRO DA MISSAO  ####
+ *
+ * A recompensa guarda `metal.refined` e `trophy.bleik` — o que o
+ * admin digitou. Quem sabe que aquilo se chama "High Quality Metal"
+ * e desenha com que icone e o catalogo do JOGO, que muda a cada
+ * update do Rust; e quem sabe que `trophy.bleik` se chama "Bleik
+ * Store" e o catalogo de rankings, que o admin edita.
+ *
+ * Gravar essas duas coisas no cadastro deixaria o nome velho na
+ * tela para sempre.
+ */
+export interface QuestsCatalog {
+  /** O item do jogo, pelo shortname. `null` = nao existe (mais). */
+  readonly itemOf?: (shortname: string) => {
+    readonly itemId: number;
+    readonly displayName: string;
+  } | null;
+  /** O nome do ranking daquela metrica. `null` = nao esta no catalogo. */
+  readonly rankingLabelOf?: (metric: string) => string | null;
+}
+
 export interface QuestsScreenReader {
   offersFor(input: {
     readonly serverId: string;
@@ -414,6 +477,8 @@ export async function readQuestsView(input: {
   readonly target: QuestsScreenTarget;
   /** O nome do NPC, quando a tela é dele. */
   readonly npcName?: string | null;
+  /** O nome bonito e o ícone das recompensas. Ver `QuestsCatalog`. */
+  readonly catalog?: QuestsCatalog;
 }): Promise<QuestsView> {
   const base = emptyQuestsView();
 
@@ -427,13 +492,17 @@ export async function readQuestsView(input: {
   }
 
   const { reader, serverId, steamId } = input;
+  const catalog = input.catalog ?? {};
   const npcId = input.target.npcId;
 
   // ------------------------------------------------------------
   //  O DETALHE — a tela vira um MODAL, e a lista nem é montada
   // ------------------------------------------------------------
   if (input.target.detail !== null) {
-    return { ...base, detail: await readDetail({ reader, serverId, steamId, ...input.target.detail }) };
+    return {
+      ...base,
+      detail: await readDetail({ reader, serverId, steamId, catalog, ...input.target.detail }),
+    };
   }
 
   // A tela do NPC só tem uma lista: o que ELE oferece. As listas de
@@ -445,7 +514,7 @@ export async function readQuestsView(input: {
 
     return {
       ...base,
-      ...pageOf(offers.map(offerCard), input.target.page),
+      ...pageOf(offers.map((offer) => offerCard(offer, catalog)), input.target.page),
       tab: 'disponiveis',
       npcId,
       npcName: input.npcName ?? null,
@@ -478,7 +547,7 @@ export async function readQuestsView(input: {
   if (input.target.tab === 'disponiveis') {
     return {
       ...base,
-      ...pageOf(offers.map(offerCard), input.target.page),
+      ...pageOf(offers.map((offer) => offerCard(offer, catalog)), input.target.page),
       tab: 'disponiveis',
       counts,
       emptyMessage: 'Nenhuma missão nova por enquanto. Volte depois.',
@@ -488,7 +557,7 @@ export async function readQuestsView(input: {
   if (input.target.tab === 'feitas') {
     return {
       ...base,
-      ...pageOf(done.map(progressCard), input.target.page),
+      ...pageOf(done.map((item) => progressCard(item, catalog)), input.target.page),
       tab: 'feitas',
       counts,
       emptyMessage: 'Nada para resgatar agora.',
@@ -497,7 +566,7 @@ export async function readQuestsView(input: {
 
   return {
     ...base,
-    ...pageOf(active.map(progressCard), input.target.page),
+    ...pageOf(active.map((item) => progressCard(item, catalog)), input.target.page),
     tab: 'ativas',
     counts,
     emptyMessage: 'Você não está fazendo nenhuma missão. Veja as disponíveis.',
@@ -523,6 +592,7 @@ async function readDetail(input: {
   readonly steamId: string;
   readonly kind: QuestDetailKind;
   readonly id: string;
+  readonly catalog: QuestsCatalog;
 }): Promise<QuestDetail> {
   const gone: QuestDetail = {
     title: 'Missão indisponível',
@@ -557,7 +627,7 @@ async function readDetail(input: {
         need: objective.amount,
         done: false,
       })),
-      rewards: offer.quest.rewards.map(rewardText),
+      rewards: offer.quest.rewards.map((reward) => rewardLineOf(reward, input.catalog)),
       note: offer.block?.reason ?? null,
       actionId: blocked ? null : `quest:accept:${offer.quest.id}`,
       actionLabel: blocked ? null : 'ACEITAR',
@@ -581,7 +651,7 @@ async function readDetail(input: {
       need: objective.need,
       done: objective.done,
     })),
-    rewards: attempt.rewards.map(rewardText),
+    rewards: attempt.rewards.map((reward) => rewardLineOf(reward, input.catalog)),
     note: attempt.complete ? 'Concluída. Toque em RESGATAR para receber.' : null,
     actionId: attempt.complete ? `quest:claim:${String(attempt.playerQuestId)}` : null,
     actionLabel: attempt.complete ? 'RESGATAR' : null,
@@ -610,7 +680,7 @@ function pageOf(
   };
 }
 
-function offerCard(offer: QuestOffer): QuestCard {
+function offerCard(offer: QuestOffer, catalog: QuestsCatalog): QuestCard {
   const blocked = offer.block !== null;
 
   return {
@@ -628,11 +698,11 @@ function offerCard(offer: QuestOffer): QuestCard {
     line: offer.block?.reason ?? offer.quest.description ?? 'Toque em ACEITAR para começar.',
     progress: null,
     detailScreenId: questDetailScreenId('offer', offer.quest.id),
-    reward: rewardLine(offer.quest.rewards),
+    reward: rewardLine(offer.quest.rewards, catalog),
   };
 }
 
-function progressCard(view: QuestProgressView): QuestCard {
+function progressCard(view: QuestProgressView, catalog: QuestsCatalog): QuestCard {
   const done = view.complete;
   const total = view.objectives.reduce((sum, item) => sum + item.need, 0);
   const have = view.objectives.reduce((sum, item) => sum + Math.min(item.have, item.need), 0);
@@ -647,7 +717,7 @@ function progressCard(view: QuestProgressView): QuestCard {
     // encher pela metade e parar.
     progress: total === 0 ? 0 : have / total,
     detailScreenId: questDetailScreenId('live', String(view.playerQuestId)),
-    reward: rewardLine(view.rewards),
+    reward: rewardLine(view.rewards, catalog),
   };
 }
 
@@ -679,41 +749,76 @@ function lineOf(view: QuestProgressView): string {
 }
 
 /**
- * Uma recompensa, em uma frase.
+ * Uma recompensa, com o nome que quem joga entende.
  *
  * ####  ELA É LIDA POR QUEM JOGA, E NÃO POR QUEM CONFIGURA  ####
  *
- * "1 pts" estava na tela até o dono apontar. O plural sai da
- * quantidade, e a palavra é a inteira: quem vê "1 ponto" sabe o
- * que ganhou; "1 pts" parece defeito, e é.
+ * O cadastro guarda `metal.refined` e `trophy.bleik`. Nenhum dos
+ * dois é o nome de nada para quem está no jogo: o primeiro é a
+ * chave do item no Rust, o segundo é a métrica de um ranking. Os
+ * dois viram nome de gente aqui, com o catálogo — e voltam a ser a
+ * chave crua quando o catálogo não conhece, que é melhor que um
+ * espaço em branco.
+ *
+ * "1 pts" também esteve na tela até o dono apontar. O plural sai da
+ * quantidade e a palavra é inteira.
  */
-function rewardText(reward: QuestReward): string {
+function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardLine {
   const plural = (amount: number, one: string, many: string): string =>
     `${amount.toLocaleString('pt-BR')} ${amount === 1 ? one : many}`;
 
   switch (reward.kind) {
     case 'coins':
-      // `null` = o valor sai de uma conta que só o resgate conhece
-      // (a entrega por metro). Prometer um número seria mentir.
-      return reward.amount === null ? 'moedas' : plural(reward.amount, 'moeda', 'moedas');
-    case 'item':
-      return `${String(reward.amount)}x ${reward.shortname}`;
+      return {
+        // `null` = o valor sai de uma conta que só o resgate conhece
+        // (a entrega por metro). Prometer um número seria mentir.
+        text: reward.amount === null ? 'moedas' : plural(reward.amount, 'moeda', 'moedas'),
+        icon: { kind: 'coin' },
+      };
+
+    case 'item': {
+      const item = catalog.itemOf?.(reward.shortname) ?? null;
+
+      return {
+        text: `${String(reward.amount)}x ${item?.displayName ?? reward.shortname}`,
+        // O ícone é resolvido pelo CLIENTE, a partir do `itemId` — o
+        // agente não manda imagem nenhuma. Ver `itemImage`.
+        icon:
+          item === null
+            ? null
+            : { kind: 'item', itemId: item.itemId, skinId: reward.skinId },
+      };
+    }
+
     case 'kit':
-      return `kit ${reward.slug}`;
-    case 'points':
-      return plural(reward.amount, 'ponto', 'pontos');
+      return { text: `kit ${reward.slug}`, icon: null };
+
+    case 'points': {
+      const label = catalog.rankingLabelOf?.(reward.metric) ?? null;
+      const points = plural(reward.amount, 'ponto', 'pontos');
+
+      return { text: label === null ? points : `${points} em ${label}`, icon: null };
+    }
+
     case 'vip':
-      return `VIP ${reward.tier}`;
+      return { text: `VIP ${reward.tier}`, icon: null };
   }
 }
 
-/** O que a quest dá, em uma linha curta. */
-function rewardLine(rewards: readonly QuestReward[]): string {
+/**
+ * O que a quest dá, em uma linha curta — a do card.
+ *
+ * Sem ícone, de propósito: a faixa tem 12 px e divide o bloco com a
+ * barra de progresso. E com duas recompensas, um ícone só diria
+ * respeito a qual? Os ícones ficam no detalhe, onde há uma linha
+ * para cada.
+ */
+function rewardLine(rewards: readonly QuestReward[], catalog: QuestsCatalog): string {
   if (rewards.length === 0) {
     return '';
   }
 
-  const parts = rewards.map(rewardText);
+  const parts = rewards.map((reward) => rewardLineOf(reward, catalog).text);
 
   // Duas, e o resto vira "+N": a linha tem 260 px e o nome de um
   // item já come metade dela.
@@ -1185,8 +1290,35 @@ function cardElements(card: QuestCard, id: string, left: number, top: number): U
 const DETAIL_OBJECTIVES = 5;
 const DETAIL_REWARDS = 4;
 
+/**
+ * A altura de uma linha de recompensa.
+ *
+ * Maior que a de objetivo (18) porque ela carrega um ÍCONE: um
+ * quadrado de 18 px encostaria no da linha de baixo, e abaixo disso
+ * o item deixa de ser reconhecível.
+ */
+const REWARD_ROW = 24;
+
 const DETAIL_WIDTH = 500;
-const DETAIL_HEIGHT = 380;
+
+/**
+ * A caixa CRESCE com o conteúdo.
+ *
+ * ####  A ALTURA FIXA ERRAVA DOS DOIS LADOS  ####
+ *
+ * Uma missão de um objetivo e uma recompensa deixava metade da
+ * caixa vazia; uma de cinco objetivos e quatro recompensas passava
+ * dos 380 px e escrevia POR CIMA dos botões do rodapé. A conta:
+ * 46 do título + 40 da descrição + 20 + 5x18 + 18 + 8 + 20 + 4x24
+ * dá 384, e o rodapé começava em 334.
+ *
+ * Com a altura saindo do `cursor`, os dois casos ficam certos por
+ * construção — e acrescentar uma seção nova não exige refazer
+ * conta nenhuma.
+ */
+const DETAIL_MIN_HEIGHT = 200;
+/** O que o rodapé precisa abaixo do conteúdo: margem + botão + margem. */
+const DETAIL_FOOTER = 62;
 
 /**
  * A caixa do detalhe.
@@ -1290,14 +1422,43 @@ function detailElements(detail: QuestDetail): UiElement[] {
     cursor += 20;
 
     detail.rewards.slice(0, DETAIL_REWARDS).forEach((reward, index) => {
+      const id = `qdr${String(index)}`;
+
+      // ####  O ÍCONE NÃO É DESENHADO PELO AGENTE  ####
+      //
+      // Ele manda o `itemId`, e QUEM RESOLVE a imagem é o cliente —
+      // é o mesmo caminho da loja e dos kits. Um item que o
+      // catálogo não conhece volta sem ícone e a linha cai no
+      // marcador, em vez de ficar com um quadrado vazio.
+      if (reward.icon !== null) {
+        box.push(
+          reward.icon.kind === 'coin'
+            ? {
+                id: `${id}i`,
+                name: `${id}i`,
+                type: 'image',
+                rect: iconRect(cursor),
+                // O PNG vive em `Assets/ui/ozcoin.png` e é o agente
+                // que o entrega ao servidor; aqui vai só a chave.
+                source: { kind: 'stored', key: COIN_IMAGE_KEY },
+                // Branco: `color` numa imagem TINGE.
+                color: C.white,
+                children: [],
+              }
+            : itemImage(`${id}i`, reward.icon, iconRect(cursor)),
+        );
+      }
+
       box.push(
-        label(`qdr${String(index)}`, `•  ${reward}`, boxRect(cursor, cursor + 18, 22), {
-          size: 12,
-          color: C.amber,
-          align: 'MiddleLeft',
-        }),
+        label(
+          id,
+          reward.icon === null ? `•  ${reward.text}` : reward.text,
+          boxRect(cursor, cursor + 18, reward.icon === null ? 22 : 46),
+          { size: 12, color: C.amber, align: 'MiddleLeft' },
+        ),
       );
-      cursor += 18;
+
+      cursor += REWARD_ROW;
     });
   }
 
@@ -1366,6 +1527,11 @@ function detailElements(detail: QuestDetail): UiElement[] {
     );
   }
 
+  // O `cursor` parou onde o conteúdo terminou. A caixa é isso mais
+  // o rodapé — nunca menor que o mínimo, senão uma missão sem
+  // objetivo nem recompensa viraria uma tarja.
+  const height = Math.max(DETAIL_MIN_HEIGHT, cursor + DETAIL_FOOTER);
+
   return [
     // #000000B3 é o véu do preset. Um alfa diferente aqui seria uma
     // cor "quase igual", que é o tipo de diferença que ninguém nota
@@ -1376,8 +1542,8 @@ function detailElements(detail: QuestDetail): UiElement[] {
         {
           anchorMin: { x: 0.5, y: 0.5 },
           anchorMax: { x: 0.5, y: 0.5 },
-          offsetMin: { x: -DETAIL_WIDTH / 2, y: -DETAIL_HEIGHT / 2 },
-          offsetMax: { x: DETAIL_WIDTH / 2, y: DETAIL_HEIGHT / 2 },
+          offsetMin: { x: -DETAIL_WIDTH / 2, y: -height / 2 },
+          offsetMax: { x: DETAIL_WIDTH / 2, y: height / 2 },
         },
         C.surface,
         box,
@@ -1393,6 +1559,22 @@ function boxRect(top: number, bottom: number, left = 22, right = 22): Rect {
     anchorMax: { x: 1, y: 1 },
     offsetMin: { x: left, y: -bottom },
     offsetMax: { x: -right, y: -top },
+  };
+}
+
+/**
+ * O quadrado do ícone, na margem esquerda da caixa.
+ *
+ * Ele é 2 px mais alto que o texto ao lado e sobe 3 px: um ícone
+ * alinhado pelo topo do texto parece estar caindo, porque o
+ * desenho do item não preenche o quadrado inteiro.
+ */
+function iconRect(top: number): Rect {
+  return {
+    anchorMin: { x: 0, y: 1 },
+    anchorMax: { x: 0, y: 1 },
+    offsetMin: { x: 22, y: -(top + 20) },
+    offsetMax: { x: 42, y: -top },
   };
 }
 
@@ -1421,6 +1603,14 @@ export interface QuestsScreenProviderOptions {
   readonly quests: QuestsService;
   /** O nome do NPC, para o título da tela dele. */
   readonly npcNameOf?: (npcId: string) => string | null;
+  /**
+   * O catálogo do jogo e o dos rankings.
+   *
+   * Ausente = a recompensa aparece com a chave crua e sem ícone.
+   * Não é erro: é o que o teste usa, e é o que sobra se alguém
+   * apagar o item do cadastro depois de a missão prometê-lo.
+   */
+  readonly catalog?: QuestsCatalog;
   readonly logger?: Logger;
 }
 
@@ -1461,6 +1651,7 @@ export function createQuestsScreenProvider(
           target,
           npcName:
             target.npcId === null ? null : (options.npcNameOf?.(target.npcId) ?? target.npcId),
+          catalog: options.catalog ?? {},
         }),
       );
     } catch (error) {

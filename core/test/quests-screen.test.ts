@@ -34,6 +34,7 @@ import {
   questsScreenId,
   readQuestsView,
   type QuestCard,
+  type QuestDetail,
   type QuestsScreenReader,
   type QuestsView,
 } from '../src/game/ui-quests-screen.js';
@@ -548,6 +549,13 @@ function offer(id: string, block: QuestOffer['block'] = null): QuestOffer {
   };
 }
 
+/** Uma oferta com as recompensas que o teste quer. */
+function questWith(rewards: QuestOffer['quest']['rewards']): QuestOffer {
+  const base = offer('minerador');
+
+  return { ...base, quest: { ...base.quest, rewards } };
+}
+
 function reader(parts: Partial<QuestsScreenReader> = {}): QuestsScreenReader {
   return {
     offersFor: () => Promise.resolve([]),
@@ -775,8 +783,145 @@ describe('o detalhe', () => {
     expect(result.detail?.objectives).toEqual([
       { text: 'fazer 100', have: null, need: 100, done: false },
     ]);
-    expect(result.detail?.rewards).toEqual(['500 moedas']);
+    // A moeda leva o ícone do OZCoin; o nome do item vem do
+    // catálogo do jogo, e não do cadastro da missão.
+    expect(result.detail?.rewards).toEqual([{ text: '500 moedas', icon: { kind: 'coin' } }]);
     expect(result.detail?.actionId).toBe('quest:accept:minerador');
+  });
+
+  // ####  O NOME E O ÍCONE VÊM DO CATÁLOGO, NÃO DO CADASTRO  ####
+  //
+  // A missão guarda `metal.refined` e `trophy.bleik`. Nenhum dos
+  // dois é nome de nada para quem está no jogo.
+  it('o item ganha o nome do jogo e o ícone; a moeda, o OZCoin', async () => {
+    const offer = questWith([
+      { kind: 'item', shortname: 'metal.refined', amount: 25, skinId: '0' },
+      { kind: 'coins', amount: 500, perMeter: null, min: null, max: null },
+      { kind: 'points', metric: 'trophy.bleik', amount: 2 },
+    ]);
+
+    const result = await readQuestsView({
+      reader: reader({ offersFor: () => Promise.resolve([offer]) }),
+      serverId: 'pvp1',
+      steamId: '76561198000000001',
+      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+      catalog: {
+        itemOf: (shortname) =>
+          shortname === 'metal.refined'
+            ? { itemId: 317_398_316, displayName: 'High Quality Metal' }
+            : null,
+        rankingLabelOf: (metric) => (metric === 'trophy.bleik' ? 'Bleik Store' : null),
+      },
+    });
+
+    expect(result.detail?.rewards).toEqual([
+      { text: '25x High Quality Metal', icon: { kind: 'item', itemId: 317_398_316, skinId: '0' } },
+      { text: '500 moedas', icon: { kind: 'coin' } },
+      // Pontos não são item: não há imagem. O que eles ganham é o
+      // NOME do ranking, que `trophy.bleik` não dizia.
+      { text: '2 pontos em Bleik Store', icon: null },
+    ]);
+  });
+
+  it('sem catálogo, a chave crua aparece — e nunca um vazio', async () => {
+    // O item pode ter saído do cadastro depois de a missão
+    // prometê-lo. Melhor `metal.refined` que um espaço em branco.
+    const offer = questWith([{ kind: 'item', shortname: 'metal.refined', amount: 25, skinId: '0' }]);
+
+    const result = await readQuestsView({
+      reader: reader({ offersFor: () => Promise.resolve([offer]) }),
+      serverId: 'pvp1',
+      steamId: '76561198000000001',
+      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+    });
+
+    expect(result.detail?.rewards).toEqual([{ text: '25x metal.refined', icon: null }]);
+  });
+
+  it('o ícone é desenhado, e o texto abre espaço para ele', () => {
+    const screen = buildQuestsScreen({
+      view: view({
+        detail: {
+          title: 'Minerador',
+          description: '',
+          objectives: [],
+          rewards: [
+            { text: '25x High Quality Metal', icon: { kind: 'item', itemId: 42, skinId: '0' } },
+            { text: '500 moedas', icon: { kind: 'coin' } },
+            { text: '2 pontos em Bleik Store', icon: null },
+          ],
+          note: null,
+          actionId: null,
+          actionLabel: null,
+          abandonId: null,
+        },
+      }),
+      screenId: 'tela-missoes:det:8412',
+    });
+
+    const at = (id: string): UiElement | undefined =>
+      walk(screen.elements).find((element) => element.id === id);
+
+    // O agente manda o `itemId`; quem resolve a imagem é o CLIENTE.
+    expect(at('qdr0i')).toMatchObject({
+      type: 'image',
+      source: { kind: 'item', itemId: 42, skinId: '0' },
+    });
+    // A moeda é o PNG que o agente entrega ao servidor, pela chave.
+    expect(at('qdr1i')).toMatchObject({ type: 'image', source: { kind: 'stored', key: 'ozcoin' } });
+    // Pontos não têm imagem: nenhum elemento, e o marcador volta.
+    expect(at('qdr2i')).toBeUndefined();
+    expect(at('qdr2')).toMatchObject({ text: '•  2 pontos em Bleik Store' });
+
+    // Com ícone, o texto começa DEPOIS dele; sem, na margem da caixa.
+    expect(at('qdr0')?.rect.offsetMin.x).toBe(46);
+    expect(at('qdr2')?.rect.offsetMin.x).toBe(22);
+    // E o ícone cabe no espaço aberto, sem encostar no texto.
+    expect(at('qdr0i')?.rect.offsetMax.x).toBe(42);
+  });
+
+  // ####  A ALTURA FIXA ERRAVA DOS DOIS LADOS  ####
+  //
+  // Uma missão curta deixava metade da caixa vazia; uma cheia
+  // passava dos 380 px e escrevia POR CIMA dos botões do rodapé.
+  it('a caixa do detalhe cresce com o conteúdo', () => {
+    const boxOf = (detail: QuestDetail): number => {
+      const screen = buildQuestsScreen({ view: view({ detail }), screenId: 'tela-missoes:det:1' });
+      const box = walk(screen.elements).find((element) => element.id === 'qdcaixa');
+
+      return (box?.rect.offsetMax.y ?? 0) - (box?.rect.offsetMin.y ?? 0);
+    };
+
+    const base: QuestDetail = {
+      title: 'Curta',
+      description: '',
+      objectives: [],
+      rewards: [],
+      note: null,
+      actionId: null,
+      actionLabel: null,
+      abandonId: null,
+    };
+
+    const cheia: QuestDetail = {
+      ...base,
+      description: 'Uma descrição.',
+      objectives: Array.from({ length: 6 }, (_, i) => ({
+        text: `Objetivo ${String(i)}`,
+        have: 0,
+        need: 10,
+        done: false,
+      })),
+      rewards: Array.from({ length: 4 }, () => ({ text: '500 moedas', icon: { kind: 'coin' } })),
+      note: 'Concluída.',
+    };
+
+    expect(boxOf(base)).toBe(200);
+    expect(boxOf(cheia)).toBeGreaterThan(200);
+
+    // E o conteúdo nunca invade o rodapé: os botões ficam entre 16 e
+    // 46 do fundo, e a caixa reserva isso.
+    expect(boxOf(cheia)).toBeGreaterThanOrEqual(384 + 16);
   });
 
   it('os três botões do rodapé usam os canais certos', () => {
@@ -786,7 +931,7 @@ describe('o detalhe', () => {
           title: 'Minerador',
           description: 'Junte enxofre.',
           objectives: [{ text: 'Coletar 100', have: 20, need: 100, done: false }],
-          rewards: ['500 moedas'],
+          rewards: [{ text: '500 moedas', icon: { kind: 'coin' } }],
           note: null,
           actionId: 'quest:claim:8412',
           actionLabel: 'RESGATAR',
