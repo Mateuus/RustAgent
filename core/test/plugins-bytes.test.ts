@@ -36,6 +36,31 @@ import { describe, expect, it } from 'vitest';
 
 const PLUGINS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'Plugins');
 
+/**
+ * Todo `.cs` da biblioteca, inclusive os das subpastas por
+ * servidor (`Plugins/<id>/`).
+ *
+ * A varredura desce porque o buraco era real: o plugin que mora
+ * em `Plugins/server01/` e o que so aquele servidor carrega -
+ * e era exatamente ele que ficava de fora da rede.
+ */
+function listSources(dir: string, prefix = ''): string[] {
+  const found: string[] = [];
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      found.push(...listSources(join(dir, entry.name), `${prefix}${entry.name}/`));
+      continue;
+    }
+
+    if (entry.name.endsWith('.cs')) {
+      found.push(`${prefix}${entry.name}`);
+    }
+  }
+
+  return found;
+}
+
 /** Tabulação, retorno e nova linha são os únicos controles válidos. */
 function isForbidden(byte: number): boolean {
   return byte < 0x09 || (byte > 0x0d && byte < 0x20) || byte === 0x7f;
@@ -55,7 +80,7 @@ function locate(buffer: Buffer, at: number): string {
 }
 
 describe('os plugins do jogo não têm byte que o Oxide recuse', () => {
-  const files = readdirSync(PLUGINS).filter((name) => name.endsWith('.cs'));
+  const files = listSources(PLUGINS);
 
   // Se a pasta mudar de lugar, o teste passaria vazio e não
   // guardaria nada — esta linha é o que impede isso.
