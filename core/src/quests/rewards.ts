@@ -96,6 +96,25 @@ export interface QuestKits {
 
 /** O caminho do ponto. É o mesmo da ação `points` do item custom. */
 export interface QuestPoints {
+  /**
+   * Aquela métrica é um ranking de verdade?
+   *
+   * ####  SEM ISTO, O PONTO SOME EM SILÊNCIO  ####
+   *
+   * MEDIDO em 06/09/2026: uma quest de teste prometia pontos em
+   * `quest.completed`, que não é ranking nenhum. O `applyEvent`
+   * gravava o evento sem reclamar, o resgate dizia "2 pontos", e o
+   * jogador nunca via aquilo em lugar nenhum — porque não há
+   * lugar.
+   *
+   * O `#item` já recusava um shortname fora do catálogo do jogo
+   * (`ITEM_UNKNOWN`); isto é a mesma regra para o outro catálogo.
+   *
+   * Ausente = o serviço não sabe conferir, e paga como antes. É o
+   * que mantém de pé quem monta o `QuestRewardService` sem os
+   * rankings.
+   */
+  readonly hasMetric?: (metric: string) => boolean;
   applyEvent(input: {
     readonly eventId: string;
     readonly serverId: string;
@@ -325,7 +344,7 @@ export class QuestRewardService {
     index: number,
   ) {
     if (this.#deps.wallet === undefined) {
-      return missing('coins', 'moedas');
+      return missing('coins', 'OZCoin');
     }
 
     const amount = this.#coinAmount(reward, input.distanceMeters);
@@ -343,7 +362,7 @@ export class QuestRewardService {
     }
 
     if (amount === 0) {
-      return { kind: 'coins' as const, ok: true, code: null, message: 'Sem moedas desta vez.' };
+      return { kind: 'coins' as const, ok: true, code: null, message: 'Sem OZCoin desta vez.' };
     }
 
     // ####  A REFERÊNCIA É O QUE TORNA O RETRY SEGURO  ####
@@ -371,7 +390,7 @@ export class QuestRewardService {
         kind: 'coins' as const,
         ok: false,
         code: `WALLET_${result.status.toUpperCase()}`,
-        message: result.message ?? 'Não deu para creditar as moedas agora.',
+        message: result.message ?? 'Não deu para creditar o OZCoin agora.',
       };
     }
 
@@ -379,7 +398,9 @@ export class QuestRewardService {
       kind: 'coins' as const,
       ok: true,
       code: null,
-      message: `${String(amount)} moeda(s) no seu saldo.`,
+      // A moeda da rede se chama OZCoin, e e assim que ela
+      // aparece no cabecalho do menu, na loja e no site.
+      message: `${amount.toLocaleString('pt-BR')} OZCoin no seu saldo.`,
     };
   }
 
@@ -427,6 +448,20 @@ export class QuestRewardService {
   ) {
     if (this.#deps.points === undefined) {
       return missing('points', 'pontos de ranking');
+    }
+
+    // Métrica fora do catálogo: o ponto iria para uma tabela que
+    // nenhuma tela lê. Falhar aqui é o que faz isso virar pendência
+    // no painel, com o nome da métrica — em vez de um número que
+    // some. Ver `hasMetric`.
+    if (this.#deps.points.hasMetric?.(reward.metric) === false) {
+      return {
+        kind: 'points' as const,
+        ok: false,
+        code: 'RANKING_METRIC_UNKNOWN',
+        message:
+          `O ranking "${reward.metric}" não existe. Um administrador foi avisado.`,
+      };
     }
 
     // ####  O `eventId` É NOSSO, E ELE É ESTÁVEL  ####

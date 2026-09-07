@@ -770,9 +770,19 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
   switch (reward.kind) {
     case 'coins':
       return {
-        // `null` = o valor sai de uma conta que só o resgate conhece
-        // (a entrega por metro). Prometer um número seria mentir.
-        text: reward.amount === null ? 'moedas' : plural(reward.amount, 'moeda', 'moedas'),
+        // ####  A MOEDA TEM NOME, E ELE NAO E "MOEDA"  ####
+        //
+        // "750 moedas" podia ser qualquer coisa; a moeda da rede se
+        // chama OZCoin, e e assim que ela aparece no cabecalho do
+        // menu, na loja e no site. Nome proprio nao pluraliza — sao
+        // "750 OZCoin", como "750 reais" nao vira "750 realis".
+        //
+        // `null` = o valor sai de uma conta que so o resgate conhece
+        // (a entrega por metro). Prometer um numero seria mentir.
+        text:
+          reward.amount === null
+            ? 'OZCoin'
+            : `${reward.amount.toLocaleString('pt-BR')} OZCoin`,
         icon: { kind: 'coin' },
       };
 
@@ -794,10 +804,18 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
       return { text: `kit ${reward.slug}`, icon: null };
 
     case 'points': {
-      const label = catalog.rankingLabelOf?.(reward.metric) ?? null;
-      const points = plural(reward.amount, 'ponto', 'pontos');
+      // ####  "2 PONTOS" SOZINHO NAO DIZ NADA  ####
+      //
+      // Foi a pergunta do dono, olhando a tela: "2 pontos de que?".
+      // Sem o nome do ranking a linha promete um numero e esconde
+      // de onde ele sai — e quando a metrica NAO esta no catalogo,
+      // esconde tambem que ela nao existe.
+      //
+      // A metrica crua no lugar do nome e feia de proposito: ela e
+      // o sinal de que aquele ranking precisa ser criado.
+      const label = catalog.rankingLabelOf?.(reward.metric) ?? reward.metric;
 
-      return { text: label === null ? points : `${points} em ${label}`, icon: null };
+      return { text: `${plural(reward.amount, 'ponto', 'pontos')} em ${label}`, icon: null };
     }
 
     case 'vip':
@@ -1470,6 +1488,17 @@ function detailElements(detail: QuestDetail): UiElement[] {
         align: 'UpperLeft',
       }),
     );
+
+    // ####  ELA TAMBEM ANDA COM O CURSOR  ####
+    //
+    // ISTO APARECEU NO JOGO: a nota era a unica secao que desenhava
+    // sem avancar o cursor. Como a altura da caixa sai DELE, o
+    // rodape era calculado como se ela nao existisse — e o "Conclua
+    // X antes desta" saia escrito atras do botao FECHAR.
+    //
+    // Qualquer secao nova aqui precisa fazer o mesmo. E o que o
+    // teste do rodape cobra.
+    cursor += 46;
   }
 
   // ------------------------------------------------------------

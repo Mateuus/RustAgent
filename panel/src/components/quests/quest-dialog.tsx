@@ -78,7 +78,7 @@ const OBJECTIVE_LABELS: Readonly<Record<QuestObjectiveKind, string>> = {
 
 const REWARD_LABELS: Readonly<Record<QuestRewardKind, string>> = {
   item: 'Item do jogo',
-  coins: 'Moedas',
+  coins: 'OZCoin',
   kit: 'Kit',
   points: 'Pontos de ranking',
   vip: 'VIP',
@@ -715,7 +715,7 @@ function rewardFields(
       );
     case 'coins':
       return (
-        <Field label="Moedas">
+        <Field label="OZCoin">
           <input
             type="number"
             min={0}

@@ -329,6 +329,46 @@ describe('os pontos', () => {
     );
   });
 
+  // ####  O PONTO PRECISA TER ONDE CAIR  ####
+  //
+  // MEDIDO em 06/09/2026: uma quest prometia pontos em
+  // `quest.completed`, que não é ranking nenhum. O evento era
+  // gravado sem reclamar, o resgate dizia "1 ponto", e o jogador
+  // nunca via aquilo — porque não há tela que leia essa métrica.
+  //
+  // É a mesma regra que o `#item` já aplicava ao shortname fora do
+  // catálogo do jogo.
+  it('métrica que não é ranking VIRA PENDÊNCIA, e não um ponto perdido', async () => {
+    const applyEvent = vi.fn((_event: PointsInput) => ({ applied: true }));
+    const service = build({ points: { applyEvent, hasMetric: () => false } });
+
+    const outcomes = await service.deliver(
+      input([reward({ kind: 'points', metric: 'quest.completed', amount: 1 })]),
+    );
+
+    expect(outcomes[0]).toMatchObject({ ok: false, code: 'RANKING_METRIC_UNKNOWN' });
+    // E o evento NÃO é gravado: um ponto numa tabela que ninguém lê
+    // é pior que a pendência, porque ninguém vai procurá-lo.
+    expect(applyEvent).not.toHaveBeenCalled();
+    // A frase nomeia a métrica — é o que o admin precisa para saber
+    // qual ranking criar.
+    expect(outcomes[0]?.message).toContain('quest.completed');
+  });
+
+  it('quem não sabe conferir a métrica paga como antes', async () => {
+    // `hasMetric` ausente = o serviço foi montado sem os rankings.
+    // Recusar aí seria quebrar quem já funcionava.
+    const applyEvent = vi.fn((_event: PointsInput) => ({ applied: true }));
+    const service = build({ points: { applyEvent } });
+
+    const outcomes = await service.deliver(
+      input([reward({ kind: 'points', metric: 'seja.o.que.for', amount: 1 })]),
+    );
+
+    expect(outcomes[0]?.ok).toBe(true);
+    expect(applyEvent).toHaveBeenCalledTimes(1);
+  });
+
   it('"já tinha somado" NÃO é falha — é o retry funcionando', async () => {
     const service = build({ points: { applyEvent: () => ({ applied: false }) } });
 

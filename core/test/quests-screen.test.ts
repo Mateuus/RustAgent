@@ -69,7 +69,7 @@ function card(overrides: Partial<QuestCard> = {}): QuestCard {
     line: 'Coletar 5.000 de Minério de Enxofre — 3.240 / 5.000',
     progress: 0.648,
     detailScreenId: null,
-    reward: '500 moedas',
+    reward: '500 OZCoin',
     ...overrides,
   };
 }
@@ -155,7 +155,7 @@ describe('o tamanho da tela', () => {
         card({
           title: `Missão ${String(index)} — ${'Ç'.repeat(100)}`,
           line: `Coletar 5.000 de Minério de Enxofre de Altíssima Qualidade — 3.240 / 5.000  (+3)`,
-          reward: '2500 moedas + 1x rifle.ak.diamond.edition +4',
+          reward: '2500 OZCoin + 1x rifle.ak.diamond.edition +4',
           actionId: `quest:claim:${String(84120 + index)}`,
           actionLabel: 'RESGATAR',
         }),
@@ -785,7 +785,7 @@ describe('o detalhe', () => {
     ]);
     // A moeda leva o ícone do OZCoin; o nome do item vem do
     // catálogo do jogo, e não do cadastro da missão.
-    expect(result.detail?.rewards).toEqual([{ text: '500 moedas', icon: { kind: 'coin' } }]);
+    expect(result.detail?.rewards).toEqual([{ text: '500 OZCoin', icon: { kind: 'coin' } }]);
     expect(result.detail?.actionId).toBe('quest:accept:minerador');
   });
 
@@ -816,10 +816,29 @@ describe('o detalhe', () => {
 
     expect(result.detail?.rewards).toEqual([
       { text: '25x High Quality Metal', icon: { kind: 'item', itemId: 317_398_316, skinId: '0' } },
-      { text: '500 moedas', icon: { kind: 'coin' } },
+      { text: '500 OZCoin', icon: { kind: 'coin' } },
       // Pontos não são item: não há imagem. O que eles ganham é o
       // NOME do ranking, que `trophy.bleik` não dizia.
       { text: '2 pontos em Bleik Store', icon: null },
+    ]);
+  });
+
+  // "2 pontos" sozinho foi a pergunta do dono olhando a tela: "2
+  // pontos de quê?". A métrica crua é feia de propósito — ela é o
+  // sinal de que aquele ranking precisa ser criado.
+  it('a métrica que não é ranking aparece crua, e nunca some', async () => {
+    const offer = questWith([{ kind: 'points', metric: 'quest.completed', amount: 2 }]);
+
+    const result = await readQuestsView({
+      reader: reader({ offersFor: () => Promise.resolve([offer]) }),
+      serverId: 'pvp1',
+      steamId: '76561198000000001',
+      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+      catalog: { rankingLabelOf: () => null },
+    });
+
+    expect(result.detail?.rewards).toEqual([
+      { text: '2 pontos em quest.completed', icon: null },
     ]);
   });
 
@@ -847,7 +866,7 @@ describe('o detalhe', () => {
           objectives: [],
           rewards: [
             { text: '25x High Quality Metal', icon: { kind: 'item', itemId: 42, skinId: '0' } },
-            { text: '500 moedas', icon: { kind: 'coin' } },
+            { text: '500 OZCoin', icon: { kind: 'coin' } },
             { text: '2 pontos em Bleik Store', icon: null },
           ],
           note: null,
@@ -912,7 +931,7 @@ describe('o detalhe', () => {
         need: 10,
         done: false,
       })),
-      rewards: Array.from({ length: 4 }, () => ({ text: '500 moedas', icon: { kind: 'coin' } })),
+      rewards: Array.from({ length: 4 }, () => ({ text: '500 OZCoin', icon: { kind: 'coin' } })),
       note: 'Concluída.',
     };
 
@@ -924,6 +943,57 @@ describe('o detalhe', () => {
     expect(boxOf(cheia)).toBeGreaterThanOrEqual(384 + 16);
   });
 
+  // ####  NADA DO CONTEÚDO PODE ENTRAR NA FAIXA DO RODAPÉ  ####
+  //
+  // ISTO APARECEU NO JOGO, com o "Conclua X antes desta" escrito
+  // atrás do botão FECHAR: a nota era a única seção que desenhava
+  // SEM avançar o cursor, e a altura da caixa sai dele.
+  //
+  // O teste não olha a nota: olha TODOS os elementos, com todas as
+  // seções cheias. É o que faz a próxima seção que esquecer de
+  // andar com o cursor cair aqui, e não no jogo do dono.
+  it('nenhuma seção do detalhe invade os botões', () => {
+    const cheia: QuestDetail = {
+      title: 'Veterano',
+      description: 'Só aparece depois que você resgatar a Limpeza no monumento.',
+      objectives: Array.from({ length: 6 }, (_, i) => ({
+        text: `Matar ${String(i)} scientist`,
+        have: 0,
+        need: 5,
+        done: false,
+      })),
+      rewards: [
+        { text: '750 OZCoin', icon: { kind: 'coin' } },
+        { text: '2 pontos', icon: null },
+      ],
+      note: 'Conclua "Limpeza no monumento" antes desta.',
+      actionId: null,
+      actionLabel: null,
+      abandonId: null,
+    };
+
+    const screen = buildQuestsScreen({ view: view({ detail: cheia }), screenId: 'tela-missoes:det:1' });
+    const box = walk(screen.elements).find((element) => element.id === 'qdcaixa');
+    const height = (box?.rect.offsetMax.y ?? 0) - (box?.rect.offsetMin.y ?? 0);
+
+    // Os botões ocupam de 16 a 46 medidos do FUNDO da caixa.
+    const footerTop = height - 46;
+
+    for (const element of walk(box?.children ?? [])) {
+      // O rodapé é ancorado embaixo (anchorMin.y === 0); o conteúdo,
+      // no topo. Só o conteúdo é cobrado aqui.
+      if (element.rect.anchorMin.y === 0) {
+        continue;
+      }
+
+      // O `offsetMin.y` é negativo: é a distância do topo até o
+      // fundo do elemento.
+      const bottom = -element.rect.offsetMin.y;
+
+      expect(bottom).toBeLessThanOrEqual(footerTop);
+    }
+  });
+
   it('os três botões do rodapé usam os canais certos', () => {
     const screen = buildQuestsScreen({
       view: view({
@@ -931,7 +1001,7 @@ describe('o detalhe', () => {
           title: 'Minerador',
           description: 'Junte enxofre.',
           objectives: [{ text: 'Coletar 100', have: 20, need: 100, done: false }],
-          rewards: [{ text: '500 moedas', icon: { kind: 'coin' } }],
+          rewards: [{ text: '500 OZCoin', icon: { kind: 'coin' } }],
           note: null,
           actionId: 'quest:claim:8412',
           actionLabel: 'RESGATAR',

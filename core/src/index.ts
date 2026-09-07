@@ -1448,7 +1448,16 @@ async function main(): Promise<void> {
       catalog: { itemIdOf: (shortname) => itemsRepository.get(shortname)?.itemId ?? null },
       wallet: walletFor,
       kits,
-      points: rankingsRepository,
+      points: {
+        applyEvent: (event) => rankingsRepository.applyEvent(event),
+        // ####  O PONTO PRECISA TER ONDE CAIR  ####
+        //
+        // Uma recompensa de pontos numa métrica que não é ranking
+        // grava o evento e não aparece em tela nenhuma. Com isto
+        // ela vira pendência no painel, com o nome da métrica. Ver
+        // `hasMetric` em quests/rewards.ts.
+        hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
+      },
     }),
     // ####  O NÚMERO DOS OBJETIVOS `metric` E `playtime`  ####
     //

@@ -138,6 +138,13 @@ if (withMainMenu) {
  * contador subir, a missão concluir, o prêmio sair —, e não medir
  * paciência.
  */
+// ####  A METRICA PRECISA SER UM RANKING QUE EXISTE  ####
+//
+// `quest.completed` esteve aqui e NAO e ranking nenhum: o resgate
+// gravava o evento, a tela dizia "2 pontos", e o jogador nunca via
+// aquilo em lugar nenhum. Hoje o resgate recusa
+// (`RANKING_METRIC_UNKNOWN`) — e a semente aponta para um ranking
+// de verdade, `trophy.bleik`, que se chama "Trofeu Bleik Store".
 const SEED: readonly (QuestDraft & { readonly id: string })[] = [
   {
     id: 'teste-cientistas',
@@ -171,7 +178,7 @@ const SEED: readonly (QuestDraft & { readonly id: string })[] = [
     // `autoAccept`: ela abre no `onPlayerJoined` sem ninguém clicar.
     autoAccept: true,
     objectives: [{ seq: 0, kind: 'playtime', amount: 2 }],
-    rewards: [{ kind: 'points', metric: 'quest.completed', amount: 1 }],
+    rewards: [{ kind: 'points', metric: 'trophy.bleik', amount: 1 }],
   },
   {
     id: 'teste-saque',
@@ -194,7 +201,7 @@ const SEED: readonly (QuestDraft & { readonly id: string })[] = [
     objectives: [{ seq: 0, kind: 'kill', target: 'scientist', amount: 5 }],
     rewards: [
       { kind: 'coins', amount: 750 },
-      { kind: 'points', metric: 'quest.completed', amount: 2 },
+      { kind: 'points', metric: 'trophy.bleik', amount: 2 },
     ],
   },
 ];
