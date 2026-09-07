@@ -62,7 +62,7 @@ Configs/*.ini
 /data/
 
 # ------------------------------------------------------------
-#  Plugins\  -  a biblioteca, com UMA excecao
+#  Plugins\  -  a biblioteca, com DUAS excecoes
 #
 #  ####  OS NOSSOS .cs SAO CODIGO, E NAO CONTEUDO  ####
 #
@@ -82,17 +82,48 @@ Configs/*.ini
 # ------------------------------------------------------------
 /Plugins/*
 !/Plugins/OrigemZ*.cs
+!/Plugins/BetterLoot.cs
 
-#  E a mesma excecao UM NIVEL ABAIXO.
+#  ####  O BetterLoot E A SEGUNDA EXCECAO, E ELA E NOMEADA  ####
 #
-#  Plugin que vale so num servidor mora em Plugins/<id>/, e a
-#  excecao de cima NAO desce: o git nem olha dentro de uma pasta
-#  ignorada, entao o ! precisa desfazer a pasta primeiro. Foi
-#  assim que o OrigemZLootDiag.cs - a ferramenta que mediu os
-#  defeitos do BetterLoot - quase ficou fora do repositorio.
-!/Plugins/*/
-/Plugins/*/*
-!/Plugins/*/OrigemZ*.cs
+#  Ele NAO e nosso: e o 4.4.0 do MagicServices.co // TGWA, sem uma
+#  linha editada aqui - o que a tela chama de "custom deste
+#  servidor" era a pasta onde ele estava, e nunca uma modificacao.
+#  Mesmo assim entra, por dois motivos.
+#
+#  core/src/http/routes/betterloot.ts ESCREVE nos arquivos dele -
+#  oxide/data/BetterLoot/LootTables.json e
+#  oxide/config/BetterLoot.json. Isso e a mesma "outra ponta de
+#  contrato" dos OrigemZ*.cs, so que o dono do formato e de fora:
+#  quando ele mudar de versao, quem for conferir o editor precisa
+#  do .cs que o editor assumia.
+#
+#  E o OrigemZLootRefresh.cs conserta um comportamento DESTA
+#  versao - o OnLootSpawn cancelado, lido no IL e medido ao vivo
+#  em 06/09/2026 (Docs/CustomItem/07). Um conserto sem o defeito
+#  ao lado nao tem contra o que ser conferido.
+#
+#  Terceiro entra assim e so assim: NOMEADO, com o motivo escrito
+#  em cima. Nao ha regra automatica, e por isso os Admin*.cs da
+#  raiz continuam de fora.
+
+#  ####  SUBPASTA NAO ENTRA - INTEIRA  ####
+#
+#  Plugin que vale so num servidor mora em Plugins/<id>/, e o
+#  `/Plugins/*` la de cima ja engole a pasta inteira. Aqui nao ha
+#  excecao NENHUMA, de proposito: o que merece versao sobe para a
+#  raiz, onde a regra fica visivel numa linha so.
+#
+#  Ate 07/09/2026 moravam aqui tres linhas que desfaziam a pasta
+#  para salvar os OrigemZ*.cs de dentro dela. O OrigemZLootDiag.cs
+#  e o BetterLoot.cs eram os dois moradores de Plugins/server01/ e
+#  subiram para a raiz; as tres linhas sairam junto.
+#
+#  Subir de pasta NAO e so mover arquivo: para o agente,
+#  Plugins/<arquivo>.cs e biblioteca de TODOS os servidores e
+#  Plugins/<id>/<arquivo>.cs e custom de um so (oxide/library.ts).
+#  E o sumico do arquivo velho nao apaga a linha do banco de quem
+#  ja rodava - quem apaga e a tela, com confirmacao.
 
 # O SteamCMD deixa crash dump na pasta de onde foi chamado. Nao e
 # nosso, nao serve para nada aqui, e vem com nome novo toda vez.
