@@ -38,8 +38,10 @@ import type {
   AdsFit,
   AdsImageMode,
   AdsImageStatus,
+  AdsImportMode,
   AdsLogoAnchor,
   AdsOrderMode,
+  AdsPackage,
   AdsSettings,
   AdsSettingsInput,
 } from '../types/ads.js';
@@ -485,6 +487,55 @@ export class AdsRepository implements AdsReader {
 
     apply();
     return this.list(serverId);
+  }
+
+  /**
+   * Aplica um pacote de overlay vindo de outro servidor.
+   *
+   * ####  A TRANSACAO E O RECURSO, NAO UM DETALHE  ####
+   *
+   * No modo `replace` a primeira coisa que acontece é um DELETE de
+   * tudo. Se a criação seguinte falhasse no meio — uma cor fora do
+   * formato na décima propaganda —, o servidor ficaria com as
+   * antigas apagadas e metade das novas no lugar. E o admin não
+   * teria como voltar: as antigas não existem mais em lugar nenhum.
+   *
+   * Com a transação, ou o overlay inteiro troca, ou nada muda e a
+   * recusa explica o que estava errado.
+   *
+   * ####  O `enabled` DAS PROPAGANDAS ATRAVESSA COMO ESTA  ####
+   *
+   * Diferente do `duplicate`, que nasce desligado de propósito.
+   * Aqui a intenção é o contrário: o pacote existe para o destino
+   * ficar igual à origem, e chegar tudo desligado obrigaria a
+   * ligar uma por uma — que é justamente o trabalho manual que
+   * isto evita.
+   */
+  importPackage(
+    serverId: string,
+    pack: AdsPackage,
+    mode: AdsImportMode,
+    now = Date.now(),
+  ): { readonly removed: number; readonly created: number } {
+    const apply = this.#db.transaction((): { removed: number; created: number } => {
+      let removed = 0;
+
+      if (mode === 'replace') {
+        removed = this.#db.prepare(`DELETE FROM ads WHERE server_id = ?`).run(serverId).changes;
+        this.saveSettings(serverId, pack.settings, now);
+      }
+
+      // A ordem da lista É a ordem do rodízio: `create` sem
+      // `position` põe cada uma no fim, então basta percorrer na
+      // ordem em que vieram.
+      for (const ad of pack.ads) {
+        this.create(serverId, ad, now);
+      }
+
+      return { removed, created: pack.ads.length };
+    });
+
+    return apply();
   }
 
   /** Marca que a propaganda apareceu. Só histórico — ver o schema. */

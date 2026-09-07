@@ -540,6 +540,113 @@ export const adsSettingsSchema = z
   .strict();
 
 // ============================================================
+//  O PACOTE — LEVAR O OVERLAY DE UM SERVIDOR PARA OUTRO
+//
+//  Montar o overlay é trabalho de tela: dezenas de campos, cores,
+//  tempos e uma propaganda por vez. Refazer isso à mão no
+//  servidor de produção, depois de já ter acertado tudo no de
+//  teste, é repetir o trabalho inteiro — e errar um número no meio
+//  não dá erro nenhum, só um desenho diferente.
+//
+//  Por isso o overlay sai daqui como TEXTO, e entra de volta como
+//  texto. Copiar e colar é o transporte, e ele funciona entre duas
+//  máquinas que nunca vão se falar: o agente de teste e o de
+//  produção não compartilham banco.
+//
+//  ------------------------------------------------------------
+//  ####  O PACOTE LEVA CONFIGURACAO, E SO ELA  ####
+//
+//  Fica de fora tudo que é RESULTADO e não escolha: `imageKey`,
+//  `imageSha`, `imageStatus`, `imageBytes`, `shownCount`,
+//  `lastShownAt` e as datas.
+//
+//  A chave do FileStorage é a razão mais dura: ela é o endereço da
+//  imagem DENTRO daquele servidor, e o mesmo número aponta para
+//  outra coisa (ou para nada) no servidor vizinho. Colar uma chave
+//  de fora faria o plugin desenhar a imagem errada — e, pior, sem
+//  erro nenhum, porque para ele a chave é válida.
+//
+//  O que atravessa é a `imageUrl`. O agente do outro lado baixa por
+//  conta própria, como faz com qualquer propaganda nova, e a chave
+//  nasce lá.
+//
+//  ####  O `id` TAMBEM NAO VIAJA  ####
+//
+//  Ele é `randomUUID()` local. Preservá-lo faria o import de um
+//  pacote sobre ele mesmo colidir por chave primária, e não
+//  resolve nada: ninguém procura propaganda por id.
+// ============================================================
+
+/** O que o pacote diz de si mesmo, para a recusa ser específica. */
+export const ADS_PACKAGE_KIND = 'origemz.ads';
+
+/**
+ * A versão do FORMATO do pacote, e não a do agente.
+ *
+ * Ela sobe quando um campo muda de significado — não quando um
+ * campo novo aparece, porque campo novo já é tratado: o schema
+ * preenche o que falta com o padrão.
+ */
+export const ADS_PACKAGE_VERSION = 1;
+
+/**
+ * Uma propaganda dentro do pacote.
+ *
+ * É o `adCreateSchema` sem o `position`: a ordem do rodízio vem da
+ * ORDEM DA LISTA, que é o que a pessoa vê ao abrir o JSON. Deixar
+ * os dois seria deixar duas verdades sobre a mesma coisa, e a
+ * pergunta "qual vale?" não tem resposta boa.
+ */
+export const adsPackageAdSchema = adCreateSchema.omit({ position: true });
+
+export const adsPackageSchema = z
+  .object({
+    kind: z.literal(ADS_PACKAGE_KIND),
+    version: z.number().int().min(1).max(ADS_PACKAGE_VERSION),
+    /**
+     * De onde ele saiu. Só para quem lê o arquivo se situar — o
+     * import não confere, porque o destino é justamente outro.
+     */
+    exportedFrom: z.string().max(64).optional(),
+    exportedAt: z.string().max(40).optional(),
+    settings: adsSettingsSchema,
+    ads: z.array(adsPackageAdSchema).max(ADS_MAX_ACTIVE * 4),
+  })
+  .strict();
+
+export type AdsPackage = z.infer<typeof adsPackageSchema>;
+
+/**
+ * Os dois modos de colar, e a diferença entre eles é destrutiva.
+ *
+ * `replace` apaga as propagandas que já estavam ali e põe as do
+ * pacote no lugar — é o que faz o destino ficar IGUAL à origem, e
+ * é o motivo de existir.
+ *
+ * `append` acrescenta as do pacote ao fim da lista e não toca no
+ * ajuste geral. Serve para levar uma campanha de um servidor a
+ * outro sem mexer no desenho do overlay que já roda lá.
+ */
+export const ADS_IMPORT_MODES = ['replace', 'append'] as const;
+export type AdsImportMode = (typeof ADS_IMPORT_MODES)[number];
+
+/**
+ * O corpo do POST.
+ *
+ * `mode` é OBRIGATORIO, sem padrão, e isso é de propósito: o modo
+ * que apaga não pode ser o que acontece quando alguém esquece de
+ * escolher.
+ */
+export const adsImportSchema = z
+  .object({
+    mode: z.enum(ADS_IMPORT_MODES),
+    package: adsPackageSchema,
+  })
+  .strict();
+
+export type AdsImportInput = z.infer<typeof adsImportSchema>;
+
+// ============================================================
 //  A JANELA DE EXIBIÇÃO
 //
 //  Fica aqui, e não no repositório, porque as duas pontas

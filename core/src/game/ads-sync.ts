@@ -88,6 +88,7 @@ export type AdsSyncTrigger =
   | 'startup'
   | 'rcon-connected'
   | 'ads-saved'
+  | 'ads-imported'
   | 'settings-saved'
   | 'plugin-requested'
   | 'periodic'

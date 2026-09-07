@@ -12,6 +12,8 @@
 //      POST   /api/servers/:serverId/ads/sync            empurra ao jogo agora
 //      POST   /api/servers/:serverId/ads/show            força um ciclo no jogo
 //      POST   /api/servers/:serverId/ads/hide            tira o overlay da tela
+//      GET    /api/servers/:serverId/ads/export          o overlay inteiro como texto
+//      POST   /api/servers/:serverId/ads/import          cola o texto de outro servidor
 //      PUT    /api/servers/:serverId/ads/:id             edita (parcial)
 //      DELETE /api/servers/:serverId/ads/:id
 //      POST   /api/servers/:serverId/ads/:id/duplicate
@@ -56,11 +58,16 @@ import { buildTimeline, imageAnchors } from '../../game/ads-timeline.js';
 import {
   adCreateSchema,
   adUpdateSchema,
+  adsImportSchema,
+  adsPackageSchema,
   adsSettingsSchema,
   isPlayable,
   isWithinSchedule,
   ADS_MAX_ACTIVE,
+  ADS_PACKAGE_KIND,
+  ADS_PACKAGE_VERSION,
   type Advertisement,
+  type AdsPackage,
   type AdsSettings,
 } from '../../types/ads.js';
 import { ADS_PLUGIN_COMMANDS } from '../../types/ads-transport.js';
@@ -424,6 +431,90 @@ export function registerAdsRoutes(app: FastifyInstance, deps: AdsRoutesDeps): vo
   // ----------------------------------------------------------
   //  PUT /ads/:id  -  parcial, como o dos avisos.
   // ----------------------------------------------------------
+  // ----------------------------------------------------------
+  //  GET /ads/export  -  o overlay inteiro como texto.
+  //
+  //  ####  ELE PRECISA VIR ANTES DAS ROTAS COM `:id`  ####
+  //
+  //  O Fastify casa por especificidade e não por ordem de
+  //  registro, então isto hoje é redundante — mas `/ads/export` e
+  //  `/ads/:id` são o mesmo desenho de caminho, e a regra que
+  //  protege disso é escrever as fixas primeiro. Vale para a
+  //  próxima que alguém acrescentar.
+  // ----------------------------------------------------------
+  app.get('/servers/:serverId/ads/export', async (request) => {
+    const { serverId } = serverParams.parse(request.params);
+    assertServer(deps, serverId);
+
+    const settings = deps.ads.settings(serverId);
+    const ads = deps.ads.list(serverId);
+
+    return {
+      ok: true,
+      package: buildPackage(serverId, settings, ads),
+    };
+  });
+
+  // ----------------------------------------------------------
+  //  POST /ads/import  -  cola o pacote de outro servidor.
+  // ----------------------------------------------------------
+  app.post('/servers/:serverId/ads/import', async (request) => {
+    const { serverId } = serverParams.parse(request.params);
+    assertServer(deps, serverId);
+
+    const { mode, package: pack } = adsImportSchema.parse(request.body);
+
+    // ####  O TETO E CONFERIDO ANTES DE APAGAR NADA  ####
+    //
+    // No `replace` a conta é só a do pacote, porque as de agora vão
+    // embora. No `append` as duas somam — e um pacote de trinta
+    // colado num servidor que já tem trinta estouraria o limite
+    // sem esta recusa, deixando o excedente cadastrado e mudo.
+    const incoming = pack.ads.filter((ad) => ad.enabled !== false).length;
+    const current =
+      mode === 'replace' ? 0 : deps.ads.list(serverId).filter((ad) => ad.enabled).length;
+
+    if (current + incoming > ADS_MAX_ACTIVE) {
+      throw new ApiError(
+        'ADS_LIMIT_REACHED',
+        `O pacote tem ${String(incoming)} propaganda(s) ativa(s) e o servidor já tem ${String(current)}: o limite é ${String(ADS_MAX_ACTIVE)}.`,
+        409,
+      );
+    }
+
+    const result = deps.ads.importPackage(serverId, pack, mode);
+
+    // Trocar o ajuste pode ter trocado o `imageMode`, e as chaves
+    // do FileStorage guardadas aqui são do modo antigo. Limpar é
+    // o mesmo cuidado do PUT de settings, pela mesma razão.
+    if (mode === 'replace') {
+      deps.ads.clearImageCache(serverId);
+      deps.sync.clearCache(serverId);
+    }
+
+    deps.sync.pushSoon(serverId, 'ads-imported');
+
+    request.log.info(
+      { serverId, mode, removed: result.removed, created: result.created },
+      'ads package imported',
+    );
+
+    const settings = deps.ads.settings(serverId);
+    const ads = deps.ads.list(serverId);
+
+    // A vista inteira volta junto, como no PUT de settings: depois
+    // de trocar tudo, a tela não tem nada de útil para mostrar sem
+    // uma segunda ida à rede.
+    return {
+      ok: true,
+      removed: result.removed,
+      created: result.created,
+      settings,
+      ads: ads.map((ad) => toApiAd(ad, settings)),
+      timeline: buildTimeline(settings),
+    };
+  });
+
   app.put('/servers/:serverId/ads/:id', async (request) => {
     const { serverId, id } = adParams.parse(request.params);
     assertServer(deps, serverId);
@@ -593,4 +684,79 @@ function toApiAd(ad: Advertisement, settings: AdsSettings): Record<string, unkno
       height: ad.imageHeight,
     }),
   };
+}
+
+/**
+ * O overlay do servidor como um pacote de texto.
+ *
+ * ####  A LISTA VAI COMPLETA, INCLUSIVE AS DESLIGADAS  ####
+ *
+ * Uma campanha desligada é trabalho já feito — imagem escolhida,
+ * horário montado, permissão acertada — esperando a data dela.
+ * Deixá-la fora do pacote faria justamente esse trabalho ser o
+ * único que não atravessa.
+ *
+ * ####  E O `updatedAt` DO AJUSTE NAO VAI  ####
+ *
+ * Ele é o carimbo da última gravação NAQUELE servidor. No destino
+ * quem carimba é a gravação de lá, e levar o de cá diria que o
+ * ajuste foi salvo antes de existir.
+ *
+ * ####  O QUE SAI DAQUI TEM DE ENTRAR NO IMPORT  ####
+ *
+ * Por isso o pacote é conferido contra o mesmo schema que o POST
+ * usa, em vez de sair direto. `AdsSettings.layer` é `string` no
+ * modelo — a coluna é texto —, e um valor que o enum não conhece
+ * (banco editado à mão, camada removida numa versão futura) geraria
+ * um arquivo que só falharia do OUTRO lado, na outra máquina, com
+ * a mensagem chegando a quem não pode consertar.
+ *
+ * Falhando aqui, quem exporta descobre na hora, no servidor que
+ * tem o problema.
+ */
+function buildPackage(
+  serverId: string,
+  settings: AdsSettings,
+  ads: readonly Advertisement[],
+): AdsPackage {
+  const { updatedAt: _ignored, ...rest } = settings;
+
+  const candidate = {
+    kind: ADS_PACKAGE_KIND,
+    version: ADS_PACKAGE_VERSION,
+    exportedFrom: serverId,
+    exportedAt: new Date().toISOString(),
+    settings: rest,
+    ads: ads.map((ad) => ({
+      name: ad.name,
+      imageUrl: ad.imageUrl,
+      enabled: ad.enabled,
+      displayDuration: ad.displayDuration,
+      priority: ad.priority,
+      weight: ad.weight,
+      fit: ad.fit,
+      backgroundColor: ad.backgroundColor,
+      borderColor: ad.borderColor,
+      startDate: ad.startDate,
+      endDate: ad.endDate,
+      startTime: ad.startTime,
+      endTime: ad.endTime,
+      daysOfWeek: [...ad.daysOfWeek],
+      permission: ad.permission,
+    })),
+  };
+
+  const checked = adsPackageSchema.safeParse(candidate);
+
+  if (!checked.success) {
+    const first = checked.error.issues[0];
+
+    throw new ApiError(
+      'ADS_EXPORT_INVALID',
+      `O overlay guardado tem um valor que o pacote não aceita (${first?.path.join('.') ?? '?'}: ${first?.message ?? 'inválido'}).`,
+      500,
+    );
+  }
+
+  return checked.data;
 }

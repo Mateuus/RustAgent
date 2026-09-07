@@ -1660,6 +1660,31 @@ export interface AdsView {
   timeline: AdsTimeline;
 }
 
+/**
+ * O overlay inteiro como texto, para levar de um servidor a outro.
+ *
+ * O tipo é frouxo de propósito: quem confere é o agente, com o
+ * mesmo schema nas duas pontas. Espelhar aqui os trinta e poucos
+ * campos do ajuste criaria uma segunda régua que só divergiria da
+ * primeira — e o navegador não tem nada a decidir sobre o
+ * conteúdo, só a transportá-lo.
+ */
+export interface AdsPackage {
+  kind: string;
+  version: number;
+  exportedFrom?: string;
+  exportedAt?: string;
+  settings: Record<string, unknown>;
+  ads: Record<string, unknown>[];
+}
+
+/** O que `POST /ads/import` devolve: a vista já refeita. */
+export interface AdsImportResult extends AdsView {
+  /** Quantas foram apagadas. Sempre 0 no modo que acrescenta. */
+  removed: number;
+  created: number;
+}
+
 /** O desfecho de um `POST /ads/sync`. */
 export interface AdsSyncResult {
   ok: boolean;
@@ -3706,6 +3731,26 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/ads/preview`,
       { method: 'POST', body: patch },
     ),
+
+  /** `GET /ads/export` — o overlay inteiro, para copiar. */
+  exportAds: (serverId: string, signal?: AbortSignal) =>
+    api<{ ok: true; package: AdsPackage }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/export`,
+      { signal },
+    ),
+
+  /**
+   * `POST /ads/import` — cola o pacote de outro servidor.
+   *
+   * `mode` não tem padrão aqui pelo mesmo motivo que não tem no
+   * agente: `replace` apaga as propagandas que já estavam ali, e
+   * isso não pode ser o que acontece por omissão.
+   */
+  importAds: (serverId: string, mode: 'replace' | 'append', pack: AdsPackage) =>
+    api<AdsImportResult>(`/api/servers/${encodeURIComponent(serverId)}/ads/import`, {
+      method: 'POST',
+      body: { mode, package: pack },
+    }),
 
   /**
    * `GET /ads/audience` — os grupos e permissões do Oxide.

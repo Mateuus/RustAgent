@@ -618,3 +618,257 @@ describe('as rotas de teste', () => {
     expect(response.statusCode).toBe(400);
   });
 });
+
+// ------------------------------------------------------------
+//  COPIAR E COLAR O OVERLAY ENTRE SERVIDORES
+//
+//  O que estes testes protegem não é o caminho feliz — é o que
+//  NÃO pode atravessar de um servidor para o outro, e o que
+//  acontece quando o pacote é recusado DEPOIS de o `replace` já
+//  ter apagado tudo.
+// ------------------------------------------------------------
+
+describe('GET /ads/export', () => {
+  it('o pacote leva o ajuste e as propagandas, inclusive as desligadas', async () => {
+    const { app } = await buildHarness();
+
+    await createAd(app, { name: 'No ar' });
+    await createAd(app, { name: 'Guardada para o Natal', enabled: false });
+
+    const response = await app.inject({ method: 'GET', url: `${ADS}/export` });
+
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json() as {
+      package: { kind: string; version: number; ads: { name: string }[] };
+    };
+
+    expect(body.package.kind).toBe('origemz.ads');
+    expect(body.package.version).toBe(1);
+
+    // A desligada é trabalho já feito esperando a data dela.
+    // Deixá-la fora faria justamente esse trabalho não atravessar.
+    expect(body.package.ads.map((ad) => ad.name)).toEqual(['No ar', 'Guardada para o Natal']);
+  });
+
+  it('a chave do FileStorage e o histórico NÃO viajam', async () => {
+    const { app, ads } = await buildHarness();
+
+    const created = (await createAd(app)).json() as { ad: { id: string } };
+
+    // Como se o agente já tivesse baixado a imagem NESTE servidor.
+    ads.markImage(SERVER, created.ad.id, {
+      status: 'ready',
+      key: '3141592653',
+      sha: 'abc',
+      bytes: 1234,
+      width: 300,
+      height: 150,
+    });
+
+    const response = await app.inject({ method: 'GET', url: `${ADS}/export` });
+    const body = response.json() as { package: { ads: Record<string, unknown>[] } };
+    const first = body.package.ads[0];
+
+    // A chave é o endereço da imagem DENTRO daquele servidor: o
+    // mesmo número aponta para outra coisa no servidor vizinho, e
+    // colá-la faria o plugin desenhar a imagem errada sem erro.
+    expect(first).not.toHaveProperty('imageKey');
+    expect(first).not.toHaveProperty('imageStatus');
+    expect(first).not.toHaveProperty('id');
+    expect(first).not.toHaveProperty('shownCount');
+    expect(first).toHaveProperty('imageUrl', 'https://exemplo.com/ads/vip.png');
+  });
+
+  it('o que sai do export entra no import', async () => {
+    const { app } = await buildHarness();
+
+    await createAd(app, { name: 'Ida e volta', startTime: '20:00', daysOfWeek: [0, 6] });
+
+    const exported = (await app.inject({ method: 'GET', url: `${ADS}/export` })).json() as {
+      package: unknown;
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: { mode: 'replace', package: exported.package },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { created: number }).created).toBe(1);
+  });
+});
+
+describe('POST /ads/import', () => {
+  /** Um pacote mínimo, montado à mão como quem cola de outro servidor. */
+  const packageOf = (
+    list: Record<string, unknown>[],
+    settings: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    kind: 'origemz.ads',
+    version: 1,
+    settings: { enabled: true, panelWidth: 420, ...settings },
+    ads: list,
+  });
+
+  it('substituir troca as propagandas E o ajuste', async () => {
+    const { app } = await buildHarness();
+
+    await createAd(app, { name: 'A que estava aqui' });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: {
+        mode: 'replace',
+        package: packageOf(
+          [{ name: 'A que veio de fora', imageUrl: 'https://exemplo.com/nova.png' }],
+          { panelWidth: 640 },
+        ),
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json() as {
+      removed: number;
+      created: number;
+      settings: { panelWidth: number };
+      ads: { name: string }[];
+    };
+
+    expect(body.removed).toBe(1);
+    expect(body.created).toBe(1);
+    expect(body.ads.map((ad) => ad.name)).toEqual(['A que veio de fora']);
+    expect(body.settings.panelWidth).toBe(640);
+  });
+
+  it('acrescentar preserva o que já estava, e não toca no ajuste', async () => {
+    const { app } = await buildHarness();
+
+    await createAd(app, { name: 'A daqui' });
+
+    const before = (await app.inject({ method: 'GET', url: ADS })).json() as {
+      settings: { panelWidth: number };
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: {
+        mode: 'append',
+        package: packageOf([{ name: 'A de fora', imageUrl: 'https://exemplo.com/nova.png' }], {
+          panelWidth: 640,
+        }),
+      },
+    });
+
+    const body = response.json() as {
+      removed: number;
+      settings: { panelWidth: number };
+      ads: { name: string }[];
+    };
+
+    expect(body.removed).toBe(0);
+    // A ordem da lista é a ordem do rodízio: a que chega vai ao fim.
+    expect(body.ads.map((ad) => ad.name)).toEqual(['A daqui', 'A de fora']);
+    // O ajuste do servidor de destino continua sendo o dele.
+    expect(body.settings.panelWidth).toBe(before.settings.panelWidth);
+  });
+
+  it('um pacote inválido não apaga NADA — a transação volta atrás', async () => {
+    const { app } = await buildHarness();
+
+    await createAd(app, { name: 'A que não pode sumir' });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: {
+        mode: 'replace',
+        package: packageOf([
+          { name: 'Boa', imageUrl: 'https://exemplo.com/boa.png' },
+          // A segunda é recusada pelo schema. Sem a transação, o
+          // `replace` teria apagado a antiga e criado só a primeira
+          // — e a antiga não existiria mais em lugar nenhum.
+          { name: 'Ruim', imageUrl: 'ftp://exemplo.com/ruim.png' },
+        ]),
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    const after = (await app.inject({ method: 'GET', url: ADS })).json() as {
+      ads: { name: string }[];
+    };
+
+    expect(after.ads.map((ad) => ad.name)).toEqual(['A que não pode sumir']);
+  });
+
+  it('sem `mode` é 400: o modo que apaga não pode ser o padrão', async () => {
+    const { app } = await buildHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: { package: packageOf([]) },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('um JSON que não é pacote de overlay é recusado pelo `kind`', async () => {
+    const { app } = await buildHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: {
+        mode: 'append',
+        package: { kind: 'origemz.kits', version: 1, settings: {}, ads: [] },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('o teto de ativas vale para o que chega', async () => {
+    const { app } = await buildHarness();
+
+    const many = Array.from({ length: 51 }, (_, index) => ({
+      name: `Campanha ${String(index)}`,
+      imageUrl: 'https://exemplo.com/x.png',
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: { mode: 'replace', package: packageOf(many) },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { error: string }).error).toBe('ADS_LIMIT_REACHED');
+  });
+
+  it('propaganda desligada no pacote chega desligada', async () => {
+    const { app } = await buildHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `${ADS}/import`,
+      payload: {
+        mode: 'replace',
+        package: packageOf([
+          { name: 'Dorminhoca', imageUrl: 'https://exemplo.com/x.png', enabled: false },
+        ]),
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    // Diferente do `duplicate`, que nasce desligado de propósito: o
+    // pacote existe para o destino ficar IGUAL à origem.
+    expect((response.json() as { ads: { enabled: boolean }[] }).ads[0]?.enabled).toBe(false);
+  });
+});
