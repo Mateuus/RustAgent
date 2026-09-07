@@ -1,6 +1,22 @@
 // ============================================================
-//  custom-items-sync.ts  -  leva o CADASTRO de itens custom até o
-//  plugin.
+//  custom-items-sync.ts  -  leva o CADASTRO de itens custom, e as
+//  REGRAS DE LOOT que os soltam nas caixas, até o plugin.
+//
+//  ####  UM CANAL SÓ, E A ORDEM DENTRO DELE IMPORTA  ####
+//
+//  A regra de loot não é um cadastro independente: ela aponta para
+//  um item custom, e é dele que sai a MARCA que o plugin carimba.
+//  Por isso os dois viajam na MESMA rodada, e nesta ordem —
+//  `item.clear`, os `item.set`, `loot.clear`, os `loot.set`.
+//
+//  Dois canais separados entregariam os dois fora de ordem no dia
+//  em que um deles atrasasse, e a regra chegaria antes do item que
+//  ela cita. O plugin recusaria a regra e ela ficaria fora até a
+//  próxima sincronização — sem nada quebrar, e sem ninguém saber.
+//
+//  E há a consequência boa: uma regra cujo item NÃO foi aceito
+//  pelo plugin nesta rodada não é mandada (ver `#pushLootRules`).
+//  Só quem tem a lista dos dois na mão sabe disso.
 //
 //  ####  SEM ISTO, O ITEM CUSTOM NÃO EXISTE NO JOGO  ####
 //
@@ -49,6 +65,7 @@ import type {
   CustomItemRecord,
   CustomItemsRepository,
 } from '../db/custom-items-repository.js';
+import type { LootRuleRecord } from '../db/loot-rules-repository.js';
 import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
 import { disconnectedRcon } from '../ops/service.js';
@@ -89,6 +106,26 @@ export function buildClearCommand(secret?: string): string {
 
 /** `origemz.item.set <json>` — uma definição. */
 export const SET_COMMAND = 'origemz.item.set';
+
+/**
+ * `origemz.loot.clear` — o plugin esquece as regras de loot.
+ *
+ * Ele sai SEMPRE, inclusive num servidor sem regra nenhuma: é isso
+ * que faz uma regra apagada no painel parar de valer no jogo. Sem
+ * ele, o plugin continuaria soltando o item até o próximo restart.
+ *
+ * ####  E ELE NÃO CARREGA SEGREDO  ####
+ *
+ * O segredo do `item.clear` protege o caminho de VOLTA dos pontos
+ * (`#OZSTAT#`), que é onde alguém digitando um marcador no chat
+ * poderia se premiar. A telemetria de loot não tem essa exposição:
+ * ela é PERGUNTADA por RCON, e o que responde é o plugin — não há
+ * linha de console que alguém possa forjar.
+ */
+export const LOOT_CLEAR_COMMAND = 'origemz.loot.clear';
+
+/** `origemz.loot.set <json>` — uma regra. */
+export const LOOT_SET_COMMAND = 'origemz.loot.set';
 
 /** O marcador, sem o assunto. Ver `isRequestLine`. */
 const REQUEST_MARKER = '#OZAREQ#';
@@ -166,6 +203,21 @@ export interface RankingLabels {
   getByMetric(metric: string): { readonly label: string } | null;
 }
 
+/**
+ * De onde saem as regras de loot daquele servidor.
+ *
+ * Interface mínima, como as duas acima: quem a satisfaz em produção
+ * é o `LootRulesRepository`, e um teste a satisfaz com um objeto
+ * literal.
+ *
+ * Ausente = este agente não tem regra de loot nenhuma para
+ * empurrar, e a rodada continua exatamente como antes. É o que
+ * mantém de pé o teste que monta o sync sem loot.
+ */
+export interface LootRuleSource {
+  listForServer(serverId: string): readonly LootRuleRecord[];
+}
+
 export interface CustomItemsSyncDeps {
   readonly repository: CustomItemsRepository;
   readonly servers: CustomItemServers;
@@ -176,6 +228,15 @@ export interface CustomItemsSyncDeps {
    * testes que não falam de mensagem o omitem. Ver `RankingLabels`.
    */
   readonly rankings?: RankingLabels;
+  /**
+   * As regras de loot daquele servidor.
+   *
+   * Ausente = nenhuma regra viaja, e a rodada é exatamente a de
+   * antes — inclusive sem o `loot.clear`. É deliberado: um agente
+   * que não gerencia loot não deve apagar as regras de um plugin
+   * que talvez as tenha recebido de outra fonte.
+   */
+  readonly lootRules?: LootRuleSource;
   readonly logger: Logger;
   /**
    * O segredo que autentica o `#OZSTAT#` de volta.
@@ -199,6 +260,16 @@ export interface CustomItemsSyncResult {
   readonly sent: number;
   /** Quantas o plugin recusou (marca duplicada, item base sumido). */
   readonly refused: number;
+  /** Quantas regras de loot foram mandadas. */
+  readonly lootSent: number;
+  /**
+   * Quantas regras ficaram de fora.
+   *
+   * Duas causas, e as duas são benignas: o plugin recusou, ou o
+   * ITEM da regra não entrou nesta rodada — e mandar uma regra que
+   * cita um item que o plugin não tem produziria item sem marca.
+   */
+  readonly lootRefused: number;
   /** `null` = o envio aconteceu. Preenchido = por que não. */
   readonly skipped: string | null;
 }
@@ -297,7 +368,14 @@ export class CustomItemsSync {
       // por isso que recusar aqui não perde a edição de quem chamou.
       this.#dirty.add(serverId);
 
-      return { serverId, sent: 0, refused: 0, skipped: 'já havia uma sincronização em curso' };
+      return {
+        serverId,
+        sent: 0,
+        refused: 0,
+        lootSent: 0,
+        lootRefused: 0,
+        skipped: 'já havia uma sincronização em curso',
+      };
     }
 
     const rcon = this.#deps.servers.contextOf(serverId)?.rcon ?? disconnectedRcon(serverId);
@@ -305,7 +383,14 @@ export class CustomItemsSync {
     if (!rcon.isConnected) {
       // Não é erro: o servidor está parado, e o cadastro sobe
       // sozinho quando ele voltar — é o gancho `rcon-connected`.
-      return { serverId, sent: 0, refused: 0, skipped: 'o RCON está fora do ar' };
+      return {
+        serverId,
+        sent: 0,
+        refused: 0,
+        lootSent: 0,
+        lootRefused: 0,
+        skipped: 'o RCON está fora do ar',
+      };
     }
 
     this.#running.add(serverId);
@@ -332,6 +417,15 @@ export class CustomItemsSync {
       let sent = 0;
       let refused = 0;
 
+      // ####  QUEM ENTROU DE VERDADE, E NÃO QUEM FOI LISTADO  ####
+      //
+      // É este conjunto que decide quais regras de loot podem
+      // viajar. Uma regra que cite um item recusado pelo plugin
+      // criaria, no jogo, um `discord.trophy` de skin nenhuma — sem
+      // nome, sem ação, e que o jogador lê como lixo. Ver
+      // Docs/CustomItem/04 §4.3.
+      const sentIds = new Set<string>();
+
       for (const item of items) {
         // Item cujo base sumiu do jogo não é mandado: o plugin o
         // recusaria com UNKNOWN_BASE_ITEM, e uma recusa esperada
@@ -351,6 +445,7 @@ export class CustomItemsSync {
 
         if (response.includes('"ok":true')) {
           sent += 1;
+          sentIds.add(item.id);
         } else {
           refused += 1;
           this.#deps.logger.warn(
@@ -360,12 +455,19 @@ export class CustomItemsSync {
         }
       }
 
+      // ####  AS REGRAS VÊM DEPOIS DOS ITENS, E NÃO É DETALHE  ####
+      //
+      // A regra cita um item pelo id, e o plugin resolve a marca no
+      // cadastro que acabou de receber. Mandá-la antes seria mandar
+      // uma referência para o que ainda não chegou.
+      const loot = await this.#pushLootRules(serverId, trigger, rcon, sentIds);
+
       this.#deps.logger.info(
-        { server: serverId, sent, refused, trigger },
+        { server: serverId, sent, refused, lootSent: loot.sent, lootRefused: loot.refused, trigger },
         'itens custom empurrados ao plugin',
       );
 
-      return { serverId, sent, refused, skipped: null };
+      return { serverId, sent, refused, lootSent: loot.sent, lootRefused: loot.refused, skipped: null };
     } catch (error) {
       const reason = toError(error).message;
 
@@ -374,7 +476,7 @@ export class CustomItemsSync {
         'não consegui empurrar os itens custom',
       );
 
-      return { serverId, sent: 0, refused: 0, skipped: reason };
+      return { serverId, sent: 0, refused: 0, lootSent: 0, lootRefused: 0, skipped: reason };
     } finally {
       this.#running.delete(serverId);
 
@@ -430,6 +532,81 @@ export class CustomItemsSync {
    * pode impedir a definição de chegar ao jogo, porque a
    * identidade do item (nome, ícone) não depende do ranking.
    */
+  /**
+   * As regras de loot daquele servidor, depois dos itens.
+   *
+   * ####  ELE NUNCA LANÇA POR CAUSA DE UMA REGRA  ####
+   *
+   * O `try` está no `push`, um nível acima, e é ele que cobre a
+   * queda do RCON. O que este método garante é o outro lado: um
+   * servidor SEM regras ainda recebe o `loot.clear`, que é o único
+   * comando capaz de fazer uma regra apagada parar de valer no
+   * jogo.
+   *
+   * @param sentIds os itens que o plugin aceitou nesta rodada.
+   */
+  async #pushLootRules(
+    serverId: string,
+    trigger: string,
+    rcon: OpsRcon,
+    sentIds: ReadonlySet<string>,
+  ): Promise<{ readonly sent: number; readonly refused: number }> {
+    const source = this.#deps.lootRules;
+
+    if (source === undefined) {
+      return { sent: 0, refused: 0 };
+    }
+
+    const rules = source.listForServer(serverId);
+
+    const cleared = await rcon.send(LOOT_CLEAR_COMMAND);
+
+    // Plugin velho, que ainda não conhece o comando, responde
+    // "Command not found" — e o servidor segue funcionando com os
+    // itens custom, só sem regra de loot. Um `warn` é o certo: não
+    // é erro daqui, mas quem procurar "por que a medição não anda"
+    // precisa achar esta linha.
+    if (!cleared.includes('"ok":true')) {
+      this.#deps.logger.warn(
+        { server: serverId, trigger, response: cleared.slice(0, 200) },
+        'o plugin não confirmou o esquecimento das regras de loot; ele está atualizado ali?',
+      );
+    }
+
+    let sent = 0;
+    let refused = 0;
+
+    for (const rule of rules) {
+      // O item não entrou nesta rodada (base sumido do jogo, marca
+      // duplicada, plugin recusou). Mandar a regra assim mesmo
+      // faria nascer item sem marca — ver `sentIds`.
+      if (!sentIds.has(rule.customItemId)) {
+        this.#deps.logger.warn(
+          { server: serverId, rule: rule.id, item: rule.customItemId },
+          'regra de loot não sincronizada: o item custom dela não chegou ao plugin',
+        );
+        refused += 1;
+        continue;
+      }
+
+      const response = await rcon.send(
+        `${LOOT_SET_COMMAND} ${JSON.stringify(toLootPluginBody(rule))}`,
+      );
+
+      if (response.includes('"ok":true')) {
+        sent += 1;
+      } else {
+        refused += 1;
+        this.#deps.logger.warn(
+          { server: serverId, rule: rule.id, response: response.slice(0, 200) },
+          'o plugin recusou uma regra de loot',
+        );
+      }
+    }
+
+    return { sent, refused };
+  }
+
   #rankingLabel(item: CustomItemRecord): string | undefined {
     const metric = item.action.kind === 'points' ? item.action.metric : undefined;
 
@@ -506,6 +683,56 @@ export function toPluginBody(
     // ícone. Mandar o nome do arquivo seria inventar um contrato
     // que o outro lado não tem.
     action: toActionBody(item.action, rankingLabel),
+  };
+}
+
+/**
+ * Uma regra de loot, na forma que o plugin entende.
+ *
+ * ####  A MARCA VIAJA INTEIRA, E É POR ISSO QUE ELA VAI AQUI  ####
+ *
+ * `base` e `skin` saem do item custom e viajam DENTRO da regra —
+ * ainda que o plugin já os tenha no cadastro do item. Não é
+ * duplicação por descuido: é o que permite ao `OnLootSpawn` criar o
+ * item sem uma segunda consulta no caminho quente, que dispara
+ * milhares de vezes por dia (medido: 71 dos 105 containers têm
+ * refresh de 1 a 2 h, `Docs/CustomItem/05` §2.6).
+ *
+ * E é a única coisa que faz o item ser o NOSSO: a tabela de loot do
+ * Rust cria tudo com `skin = 0`, e o `Match` do plugin sai em
+ * `item.skin == 0UL`. Ver `Docs/CustomItem/04` §4.
+ *
+ * ####  OS DOIS LADOS MUDAM JUNTOS  ####
+ *
+ * O `ParseLootRule` do `OrigemZItems.cs` lê exatamente estes nomes.
+ * Acrescentar campo aqui sem acrescentar lá faz o campo ser
+ * ignorado em silêncio — a tela mostra a configuração e o jogo não
+ * a obedece.
+ */
+export function toLootPluginBody(rule: LootRuleRecord): Record<string, unknown> {
+  return {
+    id: rule.id,
+    item: rule.customItemId,
+    // Ver o cabeçalho desta função.
+    base: rule.itemBaseShortname ?? undefined,
+    skin: rule.itemSkinId ?? undefined,
+    containers: rule.containers,
+    chance: rule.chance,
+    amountMin: rule.amountMin,
+    amountMax: rule.amountMax,
+    // O campo que decide se sai item ou só conta. Ele viaja SEMPRE:
+    // um plugin que não o receba não teria como saber, e o default
+    // dele é o que solta item no mundo.
+    mode: rule.mode,
+    // ####  CAMPO NULO É CAMPO OMITIDO  ####
+    //
+    // MEDIDO em 05/09/2026: `"maxStack":null` estourava o
+    // `ParseItem` com "Can not convert Null to Int32". O plugin
+    // passou a tolerar o nulo (ver `Missing`), mas o agente não o
+    // manda — e `dailyCap`/`playerCooldownHours` são nulos na
+    // maioria das regras. `JSON.stringify` descarta `undefined`.
+    dailyCap: rule.dailyCap ?? undefined,
+    playerCooldownHours: rule.playerCooldownHours ?? undefined,
   };
 }
 

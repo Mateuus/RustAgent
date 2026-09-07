@@ -151,6 +151,35 @@ namespace Oxide.Plugins
         private const string PendingCommand = "origemz.item.pending";
 
         // ========================================================
+        //  A REGRA DE LOOT
+        //
+        //  ####  COMPLEMENTAR, NUNCA SUBSTITUIR  ####
+        //
+        //  O jogo popula o container normalmente e nos
+        //  acrescentamos por cima. Nada aqui reimplementa FillLoot,
+        //  PopulateLoot ou GenerateScrap - e o motivo decisivo nao e
+        //  seguranca, e o update: a tabela do Rust sao 1.396
+        //  entradas que a Facepunch mantem de graca, com filtro de
+        //  era e conteudo sazonal. Ver Docs/CustomItem/05 §4.
+        //
+        //  ####  E POR QUE ISTO PRECISA SER CODIGO, E NAO TABELA  ####
+        //
+        //  MEDIDO em Docs/CustomItem/04 §4.1: LootSpawn.SpawnIntoContainer
+        //  chama ItemManager.Create com `0uL` LITERAL no parametro
+        //  da skin, e ItemAmount nao tem campo de skin para
+        //  preencher. Um item nascido da tabela nativa sai SEM
+        //  marca; o Match() aqui em cima sai em `item.skin == 0UL`;
+        //  o item fica com o nome do corpo emprestado e o jogador o
+        //  le como lixo.
+        //
+        //  So o nosso codigo carimba skin. E e por isso que a regra
+        //  carrega `base` e `skin` junto - ver ParseLootRule.
+        // ========================================================
+        private const string LootSetCommand = "origemz.loot.set";
+        private const string LootClearCommand = "origemz.loot.clear";
+        private const string LootStatsCommand = "origemz.loot.stats";
+
+        // ========================================================
         //  CODIGOS DE ERRO
         //
         //  SCREAMING_SNAKE_CASE, nunca frase para o jogador: quem
@@ -418,12 +447,184 @@ namespace Oxide.Plugins
             new Dictionary<string, byte[][]>();
 
         // ========================================================
+        //  O ESTADO DA REGRA DE LOOT
+        //
+        //  ####  ELE GRAVA EM DISCO, E ESTA E A SEGUNDA EXCECAO  ####
+        //
+        //  O cabecalho deste arquivo diz que o plugin nao guarda
+        //  cadastro, e a fila de pontos ja abriu uma excecao a isso.
+        //  Esta e a segunda, e as duas tem o mesmo formato de
+        //  argumento: o que se guarda AQUI nao pode ser
+        //  reconstruido a tempo.
+        //
+        //  Tres coisas moram neste arquivo, e cada uma tem uma razao
+        //  propria:
+        //
+        //   1. AS REGRAS. Decisao do dono, Q1 do Docs/CustomItem/05:
+        //      a configuracao vale desde a PRIMEIRA caixa do boot. E
+        //      o mapa nasce antes de o agente mandar qualquer coisa
+        //      - MEDIDO: BaseNetworkable.Spawn chama ServerInit()
+        //      (que popula o loot) muito antes de qualquer
+        //      OnServerInitialized. Uma regra que chegue depois nao
+        //      volta atras: as caixas ja nasceram;
+        //
+        //   2. OS CONTADORES. Sao a MEDICAO, e ela e o ponto inteiro
+        //      do modo `measuring`. Um `oxide.reload` no meio do dia
+        //      zeraria a contagem e o teto diario viraria "teto por
+        //      carga do plugin" - numa madrugada de tres reloads, o
+        //      dia renderia tres vezes o teto, e ninguem perceberia
+        //      porque nada quebrou. Ver Docs/CustomItem/04 §5.1;
+        //
+        //   3. OS COOLDOWNS. Mesma coisa, do lado do jogador: um
+        //      reload devolveria o direito a quem acabou de levar.
+        //
+        //  ####  E O AGENTE NAO E A FONTE DA VERDADE DOS DOIS
+        //        ULTIMOS  ####
+        //
+        //  Ele COPIA os contadores (ver origemz.loot.stats), e a
+        //  copia e por sobrescrita: ler nao consome, e o numero
+        //  continua aqui. Uma leitura perdida se conserta sozinha na
+        //  volta seguinte.
+        // ========================================================
+
+        /// <summary>Onde as regras, os contadores e os cooldowns moram.</summary>
+        private const string LootFile = "OrigemZItems/loot";
+
+        /// <summary>
+        /// Quantos dias de contagem ficam guardados.
+        ///
+        /// O agente le de minuto em minuto, entao uma semana e folga
+        /// larga: ela cobre um agente parado o fim de semana inteiro.
+        /// Guardar para sempre faria o arquivo crescer sem teto por
+        /// causa de um numero que ja foi copiado.
+        /// </summary>
+        private const int LootCounterDays = 7;
+
+        /// <summary>
+        /// De quanto em quanto tempo o estado vai para o disco.
+        ///
+        /// ####  GRAVAR A CADA SORTEIO SERIA GRAVAR MILHARES DE
+        ///       VEZES POR DIA  ####
+        ///
+        /// MEDIDO em Docs/CustomItem/05 §2.6: 71 dos 105 containers
+        /// tem refresh de 1 a 2 h, e so os barris de mundo aberto
+        /// dao da ordem de 6.400 populacoes por dia. O contador sobe
+        /// nesse ritmo.
+        ///
+        /// O preco desta escolha e claro e pequeno: uma queda do
+        /// servidor perde ate um minuto de CONTAGEM. Nao perde item,
+        /// nao perde ponto e nao perde regra - a regra so muda
+        /// quando o agente manda, e ai a gravacao e imediata.
+        /// </summary>
+        private const float LootSaveEverySeconds = 60f;
+
+        /// <summary>As regras, por id do agente.</summary>
+        private readonly Dictionary<string, LootRule> _lootRules =
+            new Dictionary<string, LootRule>();
+
+        /// <summary>
+        /// O indice que o OnLootSpawn consulta: prefab -> regras.
+        ///
+        /// ####  ELE E O QUE TORNA O HOOK BARATO  ####
+        ///
+        /// O OnLootSpawn dispara para todo container que nasce E a
+        /// cada refresh dele. Varrer a lista de regras a cada
+        /// disparo seria pagar o custo do nosso sistema em cima de
+        /// um servidor que talvez nao tenha regra nenhuma. Com o
+        /// indice, um container sem regra custa UMA consulta de
+        /// dicionario e volta - a mesma regra 5 do cabecalho.
+        /// </summary>
+        private readonly Dictionary<string, List<LootRule>> _lootByContainer =
+            new Dictionary<string, List<LootRule>>();
+
+        /// <summary>
+        /// O indice do PORTAO: marca (baseItemId:skin) -> regras.
+        ///
+        /// O CanAcceptItem precisa responder "este item veio de uma
+        /// regra com cooldown?" olhando so para o item que tem na
+        /// mao. A marca e a unica coisa que o item carrega.
+        /// </summary>
+        private readonly Dictionary<string, List<LootRule>> _lootByMark =
+            new Dictionary<string, List<LootRule>>();
+
+        /// <summary>
+        /// Os contadores, por "regra|dia|modo".
+        ///
+        /// O MODO entra na chave de proposito: o dia em que alguem
+        /// virou a chave de `measuring` para `live` tem duas linhas,
+        /// e e isso que permite dizer "com esta chance, teria dado
+        /// tantos" ao lado de "deu tantos".
+        /// </summary>
+        private Dictionary<string, LootCounter> _lootCounters =
+            new Dictionary<string, LootCounter>();
+
+        /// <summary>
+        /// Quando cada jogador levou o item de cada regra.
+        ///
+        /// Chave "regra|steamId", valor em epoch de SEGUNDOS. E o
+        /// que o portao do OnLootEntity consulta.
+        /// </summary>
+        private Dictionary<string, long> _lootCooldowns =
+            new Dictionary<string, long>();
+
+        /// <summary>Ha coisa nova para gravar? Ver LootSaveEverySeconds.</summary>
+        private bool _lootDirty;
+
+        /// <summary>
+        /// A quem ja avisamos, nesta abertura, que o portao barrou.
+        ///
+        /// Sem isto, o RefreshLoot que roda a cada abertura mandaria
+        /// a mesma frase de novo a cada vez que o jogador reabrisse
+        /// a caixa - e a frase e um aviso, nao um alarme.
+        /// </summary>
+        private readonly Dictionary<string, double> _lootWarned =
+            new Dictionary<string, double>();
+
+        /// <summary>Quanto tempo o aviso do portao fica quieto, em segundos.</summary>
+        private const double LootWarnQuietSeconds = 60.0;
+
+        // ========================================================
         //  CICLO DE VIDA
         // ========================================================
+
+        /// <summary>
+        /// Roda no CARREGAMENTO do plugin, antes de o mundo nascer.
+        ///
+        /// ####  E E POR ISSO QUE A REGRA DE LOOT E LIDA AQUI  ####
+        ///
+        /// MEDIDO: BaseNetworkable.Spawn chama ServerInit(), que e
+        /// quem popula o loot, muito ANTES de qualquer
+        /// OnServerInitialized. Ler as regras la seria ler depois de
+        /// o mapa inteiro de barris ja ter nascido - e uma regra que
+        /// chega tarde nao volta atras.
+        ///
+        /// E a decisao do dono na Q1 do Docs/CustomItem/05: a
+        /// configuracao vale desde a primeira caixa do boot.
+        /// </summary>
+        private void Init()
+        {
+            LoadLoot();
+        }
 
         private void OnServerInitialized()
         {
             LoadQueue();
+
+            // ####  OS INDICES SAO REFEITOS AGORA  ####
+            //
+            // As regras vieram do disco no Init(), quando o
+            // ItemManager ainda podia nao estar montado - e sem ele
+            // o shortname do item base nao vira itemid, que e a
+            // metade da marca de que o portao precisa.
+            //
+            // Refazer aqui custa uma varredura de algumas dezenas de
+            // regras, uma vez por boot.
+            RebuildLootIndexes();
+
+            // O contador sobe milhares de vezes por dia; gravar a
+            // cada sorteio seria gravar disco no caminho quente. Ver
+            // LootSaveEverySeconds para o que se perde numa queda.
+            timer.Every(LootSaveEverySeconds, delegate { SaveLootIfDirty(); });
 
             // O pedido vai DEPOIS de o servidor subir: em Init() o
             // console ainda nao e lido de forma confiavel, e um
@@ -458,6 +659,20 @@ namespace Oxide.Plugins
             _byMark.Clear();
             _icons.Clear();
             _iconParts.Clear();
+
+            // ####  A MEDICAO NAO PODE MORRER NO RELOAD  ####
+            //
+            // O relogio de um minuto pode nao ter passado desde o
+            // ultimo sorteio, e um `oxide.reload` no meio do dia
+            // levaria a contagem e as carencias junto. As REGRAS nao
+            // sao limpas aqui de proposito: elas moram no disco, e
+            // e delas que o proximo Init() parte.
+            SaveLootIfDirty();
+
+            _lootRules.Clear();
+            _lootByContainer.Clear();
+            _lootByMark.Clear();
+            _lootWarned.Clear();
 
             // Os relogios do agrupamento morrem com o plugin (o
             // Oxide os cancela), mas os baldes nao: deixa-los
@@ -2765,6 +2980,1074 @@ namespace Oxide.Plugins
             // codigo.
         }
 
+
+        // ========================================================
+        //  origemz.loot.set <json>
+        //
+        //  Cadastra ou atualiza UMA regra. O agente manda uma por
+        //  linha, pelo mesmo motivo do origemz.item.set: um lote
+        //  estouraria o frame do RCON.
+        //
+        //  {"id":"trofeu-no-elite","item":"trofeu-bleik-store",
+        //   "base":"trophy","skin":"3000000001",
+        //   "containers":["crate_elite","heli_crate"],
+        //   "chance":0.0001,"amountMin":1,"amountMax":1,
+        //   "mode":"measuring","dailyCap":3,"playerCooldownHours":24}
+        // ========================================================
+        [ConsoleCommand(LootSetCommand)]
+        private void CommandLootSet(ConsoleSystem.Arg arg)
+        {
+            // Ver o CommandSet: veio de um jogador no F1, e nao do
+            // RCON. Configuracao e do agente.
+            if (arg.Connection != null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (!arg.HasArgs(1))
+                {
+                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
+                    return;
+                }
+
+                JObject body;
+
+                try
+                {
+                    body = JObject.Parse(arg.FullString.ToString());
+                }
+                catch (Exception)
+                {
+                    arg.ReplyWith(BuildError(ErrorInvalidJson));
+                    return;
+                }
+
+                LootRule rule = ParseLootRule(body);
+
+                if (rule == null)
+                {
+                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
+                    return;
+                }
+
+                // Ver o cabecalho da secao: sem skin o item nasce
+                // sendo o do JOGO, e nao o nosso. Recusar aqui e a
+                // diferenca entre saber agora e descobrir quando um
+                // jogador reclamar de um trofeu sem nome.
+                if (rule.Skin == 0UL)
+                {
+                    arg.ReplyWith(BuildError(ErrorZeroSkin));
+                    return;
+                }
+
+                ForgetLootRule(rule.Id);
+                IndexLootRule(rule);
+
+                // A regra e cadastro que precisa valer no BOOT - ver
+                // o cabecalho do estado. Ela vai para o disco agora,
+                // e nao no relogio: uma queda entre o `set` e a
+                // proxima gravacao faria o boot seguinte rodar com a
+                // configuracao de dois ciclos atras.
+                SaveLoot();
+
+                arg.ReplyWith("{\"ok\":true,\"id\":" + JsonConvert.ToString(rule.Id) +
+                              ",\"containers\":" +
+                              rule.Containers.Count.ToString(CultureInfo.InvariantCulture) + "}");
+            }
+            catch (Exception ex)
+            {
+                PrintError(LootSetCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        /// <summary>
+        /// Esquece TODAS as regras. Os contadores e os cooldowns
+        /// FICAM.
+        /// </summary>
+        /// <remarks>
+        /// ####  A DIFERENCA ENTRE CADASTRO E FATO CONSUMADO  ####
+        ///
+        /// A regra e cadastro: o agente a remanda inteira, e apaga-la
+        /// aqui e o que faz uma regra removida no painel parar de
+        /// valer no jogo.
+        ///
+        /// O contador e o cooldown sao o que JA ACONTECEU. Zera-los
+        /// a cada sincronizacao daria um teto diario que reinicia a
+        /// cada `oxide.reload` do outro lado, e um cooldown que
+        /// devolve o direito a quem acabou de levar - e o agente
+        /// sincroniza varias vezes por dia.
+        /// </remarks>
+        [ConsoleCommand(LootClearCommand)]
+        private void CommandLootClear(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null)
+            {
+                return;
+            }
+
+            try
+            {
+                int had = _lootRules.Count;
+
+                _lootRules.Clear();
+                _lootByContainer.Clear();
+                _lootByMark.Clear();
+
+                SaveLoot();
+
+                arg.ReplyWith("{\"ok\":true,\"forgotten\":" +
+                              had.ToString(CultureInfo.InvariantCulture) + "}");
+            }
+            catch (Exception ex)
+            {
+                PrintError(LootClearCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        // ========================================================
+        //  origemz.loot.stats
+        //
+        //  ####  LER NAO CONSOME  ####
+        //
+        //  O contador NAO e zerado aqui, e o agente SOBRESCREVE a
+        //  linha do dia em vez de somar. As duas metades da mesma
+        //  escolha: uma leitura perdida se conserta sozinha na volta
+        //  seguinte, e duas leituras do mesmo estado dao o mesmo
+        //  resultado - que com um relogio de 60 s do outro lado e o
+        //  caso NORMAL.
+        //
+        //  E o oposto do origemz.item.pending, de proposito: la o
+        //  item JA FOI DESTRUIDO e o que se perde nao volta.
+        //
+        //  ####  E O `day` SAI DAQUI, NAO DE LA  ####
+        //
+        //  Quem aplica o teto diario e este plugin, com o relogio
+        //  DESTE servidor. Se o agente recalculasse o dia com o fuso
+        //  da maquina dele, o teto viraria a meia-noite de um fuso e
+        //  o grafico a de outro - duas verdades sobre o mesmo dia, e
+        //  a pergunta "por que o teto de 3 rendeu 4?" sem resposta.
+        //
+        //  A resposta nao e paginada: sao 7 dias x (regras x modos),
+        //  e com 20 regras isso da ~280 linhas de ~90 bytes. Bem
+        //  dentro do frame. Se um dia passar, o teto de dias e o que
+        //  se ajusta.
+        // ========================================================
+        [ConsoleCommand(LootStatsCommand)]
+        private void CommandLootStats(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null)
+            {
+                return;
+            }
+
+            try
+            {
+                PruneLootCounters();
+
+                List<LootCounter> list = new List<LootCounter>();
+
+                foreach (KeyValuePair<string, LootCounter> entry in _lootCounters)
+                {
+                    list.Add(entry.Value);
+                }
+
+                arg.ReplyWith(JsonConvert.SerializeObject(new LootStatsResponse
+                {
+                    Ok = true,
+                    Count = list.Count,
+                    Stats = list
+                }));
+            }
+            catch (Exception ex)
+            {
+                PrintError(LootStatsCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        // ========================================================
+        //  A VIA A - O SORTEIO
+        //
+        //  ####  ELE DECIDE SE NASCE, E E O UNICO QUE CRIA  ####
+        //
+        //  Decisao do dono (Q1 do Docs/CustomItem/04): a Via A
+        //  (OnLootSpawn) decide se o item nasce - probabilidade,
+        //  tipo de container, orcamento do dia -, e a Via B
+        //  (OnLootEntity) NUNCA cria nada; ela so decide se aquele
+        //  jogador pode levar.
+        //
+        //  A divisao e de RESPONSABILIDADE, e nao de opiniao: se um
+        //  dia alguem precisar mudar a raridade, ha um lugar so para
+        //  mexer.
+        // ========================================================
+
+        /// <summary>
+        /// O container vai ser populado. NUNCA cancela.
+        /// </summary>
+        /// <remarks>
+        /// ####  DEVOLVER NAO-NULO AQUI ESVAZIA O CONTAINER  ####
+        ///
+        /// MEDIDO no IL de LootContainer.SpawnLoot: a ordem e
+        /// inventory.Clear() -> DoRemoves() -> ESTE HOOK ->
+        /// PopulateLoot(). Um retorno nao-nulo faz o SpawnLoot
+        /// RETORNAR, e o PopulateLoot nunca roda - o container fica
+        /// com o que nos pusermos e mais NADA.
+        ///
+        /// O defeito apareceria como "depois do plugin novo os
+        /// crates so tem o trofeu", e so quando alguem abrisse um.
+        /// Por isso este metodo devolve `null` em todos os caminhos,
+        /// inclusive no catch.
+        ///
+        /// ####  E POR ISSO O TRABALHO VAI PARA O NextTick  ####
+        ///
+        /// No instante do hook o inventario esta VAZIO - o Clear()
+        /// acabou de rodar. Inserir aqui e disputar slot com o
+        /// PopulateLoot que vem em seguida. No NextTick o container
+        /// ja esta cheio e nos acrescentamos por cima, que e o que
+        /// "complementar" quer dizer.
+        ///
+        /// ####  O CUSTO, QUE AQUI E O ASSUNTO  ####
+        ///
+        /// MEDIDO em Docs/CustomItem/05 §2.6: 71 dos 105 containers
+        /// tem refresh de 1 a 2 h, e so os 400 barris de mundo
+        /// aberto dao da ordem de 6.400 populacoes por dia. As
+        /// saidas vem em ordem de preco, e a primeira cobre o
+        /// servidor inteiro: sem regra nenhuma, isto e a leitura de
+        /// um int.
+        /// </remarks>
+        private object OnLootSpawn(LootContainer container)
+        {
+            try
+            {
+                if (_lootByContainer.Count == 0 || container == null)
+                {
+                    return null;
+                }
+
+                List<LootRule> rules;
+
+                if (!_lootByContainer.TryGetValue(container.ShortPrefabName, out rules))
+                {
+                    // O container nao esta na lista de nenhuma regra.
+                    // E o caminho da esmagadora maioria dos
+                    // disparos.
+                    return null;
+                }
+
+                string day = LootDayKey();
+
+                for (int i = 0; i < rules.Count; i++)
+                {
+                    LootRule rule = rules[i];
+                    LootCounter counter = LootCounterOf(rule, day);
+
+                    // O denominador. E o numero que o
+                    // Docs/CustomItem/04 §6.3 precisava e nao
+                    // conseguiu medir: quantos containers ELEGIVEIS
+                    // nascem por dia neste servidor.
+                    counter.Rolls++;
+                    _lootDirty = true;
+
+                    if (UnityEngine.Random.Range(0f, 1f) >= rule.Chance)
+                    {
+                        continue;
+                    }
+
+                    counter.Hits++;
+
+                    // ####  MEDINDO: CONTA E NAO CRIA  ####
+                    //
+                    // E o ponto inteiro desta fatia. Ver a Q8 do
+                    // Docs/CustomItem/04: mede antes de soltar. A
+                    // diferenca entre Hits e Spawned e o que faz o
+                    // modo servir para alguma coisa.
+                    if (rule.Mode != LootModeLive)
+                    {
+                        continue;
+                    }
+
+                    // ####  O TETO E RESERVADO AGORA, E NAO DEPOIS  ####
+                    //
+                    // A criacao acontece no NextTick, e no wipe
+                    // dezenas de containers nascem no MESMO frame.
+                    // Conferir o teto aqui e incrementa-lo la
+                    // deixaria todos passarem pela mesma leitura de
+                    // "ainda cabe" - e o teto de 1 renderia 20.
+                    //
+                    // Entao o orcamento e reservado no sorteio e
+                    // DEVOLVIDO se a criacao falhar.
+                    if (rule.DailyCap > 0 && counter.Spawned >= rule.DailyCap)
+                    {
+                        continue;
+                    }
+
+                    counter.Spawned++;
+
+                    LootRule captured = rule;
+                    LootContainer target = container;
+                    LootCounter budget = counter;
+
+                    NextTick(delegate { InjectLoot(target, captured, budget); });
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                // Ver a regra 4 do cabecalho, e ver o remarks: o
+                // `null` aqui nao e cortesia, e a diferenca entre um
+                // erro nosso e um container vazio.
+                PrintError("OnLootSpawn falhou: " + ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Cria o item COM A MARCA e o poe no container.
+        /// </summary>
+        /// <remarks>
+        /// ####  A MARCA NASCE COM O ITEM  ####
+        ///
+        /// Nada de carimbar depois: um `discord.trophy` de skin 0
+        /// pode ser o que o proprio jogo distribui em evento, e
+        /// reconhece-lo pela AUSENCIA de skin faria o servidor
+        /// converter em ponto o trofeu que o jogador ja tinha no
+        /// bau. Ver Docs/CustomItem/04 §4.3.
+        ///
+        /// ####  E O ApplyIdentity E CHAMADO EXPLICITAMENTE  ####
+        ///
+        /// Em tese ele nao precisaria: MoveToContainer termina em
+        /// ItemContainer.Insert, que dispara OnItemAddedToContainer,
+        /// que ja veste o item. Na pratica isso so vale se o
+        /// CADASTRO ja tiver chegado - e no boot as regras vem do
+        /// disco enquanto o _byMark ainda esta vazio.
+        ///
+        /// A chamada explicita nao substitui aquele caminho: ela e a
+        /// segunda rede, e nao custa nada quando a primeira
+        /// funcionou (o ApplyIdentity sai sem escrever quando o nome
+        /// ja esta certo).
+        /// </remarks>
+        private void InjectLoot(LootContainer container, LootRule rule, LootCounter budget)
+        {
+            try
+            {
+                if (container == null || container.IsDestroyed)
+                {
+                    LootRefund(budget);
+                    return;
+                }
+
+                ItemContainer inventory = container.inventory;
+
+                if (inventory == null)
+                {
+                    LootRefund(budget);
+                    return;
+                }
+
+                int baseItemId = LootBaseItemId(rule);
+
+                if (baseItemId == 0)
+                {
+                    // O item base sumiu desta versao do Rust. O
+                    // agente ja nao manda a regra nesse caso, mas o
+                    // disco pode ter uma de antes do update.
+                    LootRefund(budget);
+                    return;
+                }
+
+                int amount = rule.AmountMax > rule.AmountMin
+                    ? UnityEngine.Random.Range(rule.AmountMin, rule.AmountMax + 1)
+                    : rule.AmountMin;
+
+                if (amount < 1)
+                {
+                    amount = 1;
+                }
+
+                Item item = ItemManager.CreateByItemID(baseItemId, amount, rule.Skin);
+
+                if (item == null)
+                {
+                    LootRefund(budget);
+                    return;
+                }
+
+                if (!item.MoveToContainer(inventory, -1, true, false, null, true))
+                {
+                    // Container cheio. O item some E o orcamento
+                    // volta: gastar o teto do dia com um item que
+                    // ninguem vai achar seria o pior dos dois
+                    // mundos.
+                    item.Remove();
+                    LootRefund(budget);
+                    return;
+                }
+
+                CustomItem custom = Match(item);
+
+                if (custom != null)
+                {
+                    ApplyIdentity(item, custom);
+                }
+            }
+            catch (Exception ex)
+            {
+                // O NextTick tirou este codigo de dentro do try do
+                // hook: sem este catch a excecao subiria para o laco
+                // do Oxide, e nao para o nosso log.
+                PrintError("InjectLoot falhou: " + ex);
+                LootRefund(budget);
+            }
+        }
+
+        /// <summary>
+        /// Devolve o orcamento do dia que a criacao nao usou.
+        ///
+        /// Ver o OnLootSpawn: o teto e reservado no sorteio para que
+        /// varios containers nascendo no mesmo frame nao leiam todos
+        /// o mesmo "ainda cabe".
+        /// </summary>
+        private void LootRefund(LootCounter budget)
+        {
+            if (budget == null || budget.Spawned <= 0)
+            {
+                return;
+            }
+
+            budget.Spawned--;
+            _lootDirty = true;
+        }
+
+        // ========================================================
+        //  A VIA B - O PORTAO
+        //
+        //  ####  ELA NUNCA CRIA NADA  ####
+        //
+        //  Decisao do dono (Q1 do Docs/CustomItem/04): a Via B e um
+        //  FILTRO sobre o que a Via A ja sorteou, e nao uma segunda
+        //  chance de sortear.
+        //
+        //  ####  E BARRAR NAO E DESTRUIR  ####
+        //
+        //  Quando o jogador nao pode levar, o item PERMANECE no
+        //  container para o proximo. Destrui-lo gastaria o orcamento
+        //  do dia sem que ninguem tivesse ganhado nada - e o troféu
+        //  sumiria da cara de quem o viu, que e a pior coisa que uma
+        //  mecanica de raridade pode fazer.
+        //
+        //  Por isso a recusa mora no CanAcceptItem (o item nao entra
+        //  no inventario) e nao numa remocao: o que o jogador ve e
+        //  uma caixa com o item dentro que ele nao consegue pegar, e
+        //  uma frase dizendo por que.
+        // ========================================================
+
+        /// <summary>
+        /// Este jogador esta em carencia para esta regra?
+        /// </summary>
+        private bool LootOnCooldown(LootRule rule, string steamId)
+        {
+            if (rule.CooldownHours <= 0 || string.IsNullOrEmpty(steamId))
+            {
+                return false;
+            }
+
+            long last;
+
+            if (!_lootCooldowns.TryGetValue(rule.Id + "|" + steamId, out last))
+            {
+                return false;
+            }
+
+            long now = (long)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            return now - last < (long)rule.CooldownHours * 3600L;
+        }
+
+        /// <summary>
+        /// A regra que barra este item para este jogador, ou null.
+        ///
+        /// Uma consulta de dicionario pela MARCA, que e a unica
+        /// coisa que o item carrega. Item sem marca nem chega aqui:
+        /// quem chama ja passou pelo Match.
+        /// </summary>
+        private LootRule LootGateOf(Item item, string steamId)
+        {
+            if (_lootByMark.Count == 0 || item == null || item.info == null)
+            {
+                return null;
+            }
+
+            List<LootRule> rules;
+
+            if (!_lootByMark.TryGetValue(MarkOf(item.info.itemid, item.skin), out rules))
+            {
+                return null;
+            }
+
+            for (int i = 0; i < rules.Count; i++)
+            {
+                if (LootOnCooldown(rules[i], steamId))
+                {
+                    return rules[i];
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Conta o que o portao barrou e avisa quem foi barrado.
+        ///
+        /// Roda um tick depois do OnLootEntity, junto do
+        /// RefreshLoot, quando a lista de containers do PlayerLoot
+        /// ja esta montada - ver o remarks daquele hook.
+        ///
+        /// ####  ELE SO CONTA E AVISA; QUEM RECUSA E O
+        ///       CanAcceptItem  ####
+        ///
+        /// Separar as duas coisas e o que garante que o item nao
+        /// seja tocado aqui. Um metodo que "barrasse" mexendo no
+        /// container seria a tentacao de remover o item - e remover
+        /// e exatamente o que a decisao do dono proibe.
+        /// </summary>
+        private void GateLoot(BasePlayer player)
+        {
+            try
+            {
+                if (_lootByMark.Count == 0 || player == null ||
+                    player.inventory == null || player.inventory.loot == null)
+                {
+                    return;
+                }
+
+                List<ItemContainer> containers = player.inventory.loot.containers;
+
+                if (containers == null)
+                {
+                    return;
+                }
+
+                string steamId = player.UserIDString;
+                LootRule blocked = null;
+
+                for (int i = 0; i < containers.Count && blocked == null; i++)
+                {
+                    ItemContainer container = containers[i];
+
+                    if (container == null || container.itemList == null)
+                    {
+                        continue;
+                    }
+
+                    for (int j = 0; j < container.itemList.Count; j++)
+                    {
+                        LootRule rule = LootGateOf(container.itemList[j], steamId);
+
+                        if (rule != null)
+                        {
+                            blocked = rule;
+                            break;
+                        }
+                    }
+                }
+
+                if (blocked == null)
+                {
+                    return;
+                }
+
+                LootCounterOf(blocked, LootDayKey()).Blocked++;
+                _lootDirty = true;
+
+                // O aviso e por jogador e por janela: reabrir a
+                // mesma caixa nao pode repetir a frase a cada vez.
+                string key = blocked.Id + "|" + steamId;
+                double now = UnityEngine.Time.realtimeSinceStartup;
+                double warned;
+
+                if (_lootWarned.TryGetValue(key, out warned) &&
+                    now - warned < LootWarnQuietSeconds)
+                {
+                    return;
+                }
+
+                _lootWarned[key] = now;
+                player.ChatMessage(Msg(MsgLootCooldown, steamId));
+            }
+            catch (Exception ex)
+            {
+                PrintError("GateLoot falhou: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Marca que este jogador levou o item desta regra.
+        ///
+        /// ####  O CARIMBO ACONTECE NA ENTREGA, E NAO NO SORTEIO  ####
+        ///
+        /// No instante do OnLootSpawn nao existe jogador - o
+        /// container e populado pelo mundo, sozinho, muitas vezes
+        /// longe de todos. Nao ha a quem aplicar carencia. Ver
+        /// Docs/CustomItem/04 §6.5.
+        ///
+        /// ####  E ELE NAO DISTINGUE DE ONDE O ITEM VEIO  ####
+        ///
+        /// Um trofeu comprado na loja tambem arma a carencia do
+        /// loot, porque a marca e a mesma nos dois casos e a
+        /// procedencia nao viaja no item hoje (a linha `ORIGEM` do
+        /// §7.2 daquele estudo depende da Q6, que o dono ainda nao
+        /// respondeu).
+        ///
+        /// O efeito de errar assim e o trofeu do loot ficar MAIS
+        /// raro para quem acabou de ganhar um - que e o lado seguro
+        /// do erro, e o mesmo lado que o §6.3 recomenda.
+        /// </summary>
+        private void LootStampCooldown(Item item, BasePlayer player)
+        {
+            if (_lootByMark.Count == 0 || item == null || item.info == null || player == null)
+            {
+                return;
+            }
+
+            List<LootRule> rules;
+
+            if (!_lootByMark.TryGetValue(MarkOf(item.info.itemid, item.skin), out rules))
+            {
+                return;
+            }
+
+            long now = (long)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            for (int i = 0; i < rules.Count; i++)
+            {
+                if (rules[i].CooldownHours <= 0)
+                {
+                    continue;
+                }
+
+                _lootCooldowns[rules[i].Id + "|" + player.UserIDString] = now;
+                _lootDirty = true;
+            }
+        }
+
+        // ========================================================
+        //  OS AUXILIARES DA REGRA DE LOOT
+        // ========================================================
+
+        /// <summary>O modo que CRIA. O outro so conta.</summary>
+        private const string LootModeLive = "live";
+
+        /// <summary>
+        /// O dia, no relogio DESTE servidor.
+        ///
+        /// ####  E O FUSO E O LOCAL, DE PROPOSITO  ####
+        ///
+        /// O teto diario e o que um admin lê como "por dia", e o dia
+        /// dele e o do relogio da maquina que roda o servidor - nao
+        /// o UTC. Usar UTC faria o teto virar as 21h no Brasil, no
+        /// meio do horario de pico, e ninguem ligaria uma coisa a
+        /// outra.
+        ///
+        /// O agente NAO recalcula este valor: ele grava o dia que
+        /// vem daqui. Ver o cabecalho do origemz.loot.stats.
+        /// </summary>
+        private static string LootDayKey()
+        {
+            return DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// O contador daquela regra, naquele dia, naquele modo.
+        /// Cria se ainda nao existe.
+        /// </summary>
+        private LootCounter LootCounterOf(LootRule rule, string day)
+        {
+            string key = rule.Id + "|" + day + "|" + rule.Mode;
+            LootCounter counter;
+
+            if (_lootCounters.TryGetValue(key, out counter))
+            {
+                return counter;
+            }
+
+            counter = new LootCounter();
+            counter.Rule = rule.Id;
+            counter.Day = day;
+            counter.Mode = rule.Mode;
+
+            _lootCounters[key] = counter;
+
+            return counter;
+        }
+
+        /// <summary>
+        /// O itemid do item base, resolvido uma vez so.
+        ///
+        /// Zero = o jogo nao tem este shortname. A resolucao e
+        /// preguicosa porque as regras chegam do DISCO no Init(),
+        /// quando o ItemManager ainda pode nao estar montado.
+        /// </summary>
+        private static int LootBaseItemId(LootRule rule)
+        {
+            if (rule.BaseItemId != 0 || rule.BaseMissing)
+            {
+                return rule.BaseItemId;
+            }
+
+            ItemDefinition definition = ItemManager.FindItemDefinition(rule.Base);
+
+            if (definition == null)
+            {
+                rule.BaseMissing = true;
+                return 0;
+            }
+
+            rule.BaseItemId = definition.itemid;
+
+            return rule.BaseItemId;
+        }
+
+        /// <summary>Poe a regra nos dois indices.</summary>
+        private void IndexLootRule(LootRule rule)
+        {
+            _lootRules[rule.Id] = rule;
+
+            for (int i = 0; i < rule.Containers.Count; i++)
+            {
+                string prefab = rule.Containers[i];
+                List<LootRule> list;
+
+                if (!_lootByContainer.TryGetValue(prefab, out list))
+                {
+                    list = new List<LootRule>();
+                    _lootByContainer[prefab] = list;
+                }
+
+                list.Add(rule);
+            }
+
+            // O indice da marca so serve ao portao, e so a regra com
+            // cooldown tem portao. Indexar as outras faria o
+            // CanAcceptItem varrer lista para sempre devolver null.
+            if (rule.CooldownHours <= 0)
+            {
+                return;
+            }
+
+            int baseItemId = LootBaseItemId(rule);
+
+            if (baseItemId == 0)
+            {
+                // O ItemManager ainda nao esta montado (Init) ou o
+                // item sumiu do jogo. No primeiro caso o indice e
+                // refeito no OnServerInitialized; no segundo a regra
+                // nao teria como criar item nenhum.
+                return;
+            }
+
+            string mark = MarkOf(baseItemId, rule.Skin);
+            List<LootRule> marked;
+
+            if (!_lootByMark.TryGetValue(mark, out marked))
+            {
+                marked = new List<LootRule>();
+                _lootByMark[mark] = marked;
+            }
+
+            marked.Add(rule);
+        }
+
+        /// <summary>Tira a regra dos dois indices.</summary>
+        private void ForgetLootRule(string id)
+        {
+            LootRule previous;
+
+            if (!_lootRules.TryGetValue(id, out previous))
+            {
+                return;
+            }
+
+            _lootRules.Remove(id);
+
+            // Reconstruir os indices e mais barato de LER do que
+            // remover a regra de cada lista - e um `set` acontece
+            // algumas dezenas de vezes por sincronizacao, nao
+            // milhares por dia como o hook.
+            RebuildLootIndexes();
+        }
+
+        /// <summary>
+        /// Refaz os indices a partir de _lootRules.
+        ///
+        /// Chamado tambem no OnServerInitialized: as regras que
+        /// vieram do disco no Init() podem nao ter resolvido o
+        /// itemid, porque o ItemManager ainda nao existia.
+        /// </summary>
+        private void RebuildLootIndexes()
+        {
+            _lootByContainer.Clear();
+            _lootByMark.Clear();
+
+            List<LootRule> all = new List<LootRule>(_lootRules.Values);
+
+            _lootRules.Clear();
+
+            for (int i = 0; i < all.Count; i++)
+            {
+                IndexLootRule(all[i]);
+            }
+        }
+
+        /// <summary>
+        /// Joga fora a contagem velha e a carencia vencida.
+        ///
+        /// Sem isto o arquivo cresceria para sempre por causa de
+        /// numeros que o agente ja copiou e de carencias que ja
+        /// passaram.
+        /// </summary>
+        private void PruneLootCounters()
+        {
+            string oldest = DateTime.Now.AddDays(-LootCounterDays)
+                .ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+            List<string> drop = new List<string>();
+
+            foreach (KeyValuePair<string, LootCounter> entry in _lootCounters)
+            {
+                if (string.CompareOrdinal(entry.Value.Day, oldest) < 0)
+                {
+                    drop.Add(entry.Key);
+                }
+            }
+
+            for (int i = 0; i < drop.Count; i++)
+            {
+                _lootCounters.Remove(drop[i]);
+            }
+
+            // A carencia mais longa que o agente aceita e um ano;
+            // usar esse teto aqui evita ter de olhar regra por regra
+            // para saber se uma linha ainda importa.
+            long floor = (long)DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 366L * 24L * 3600L;
+            List<string> stale = new List<string>();
+
+            foreach (KeyValuePair<string, long> entry in _lootCooldowns)
+            {
+                if (entry.Value < floor)
+                {
+                    stale.Add(entry.Key);
+                }
+            }
+
+            for (int i = 0; i < stale.Count; i++)
+            {
+                _lootCooldowns.Remove(stale[i]);
+            }
+
+            if (drop.Count > 0 || stale.Count > 0)
+            {
+                _lootDirty = true;
+            }
+        }
+
+        /// <summary>
+        /// O JSON vira regra. Devolve null quando falta o essencial.
+        /// </summary>
+        /// <remarks>
+        /// Os nomes sao os do `toLootPluginBody` em
+        /// core/src/game/custom-items-sync.ts. OS DOIS LADOS MUDAM
+        /// JUNTOS: um campo acrescentado la e ignorado aqui em
+        /// silencio, e a tela do painel mostraria uma configuracao
+        /// que o jogo nao obedece.
+        ///
+        /// Todo campo opcional passa pelo Missing(): um `null` no
+        /// JSON NAO devolve null do C#, devolve um JValue de tipo
+        /// Null que passa no `!= null` e estoura no cast. Ver o
+        /// remarks do Missing.
+        /// </remarks>
+        private static LootRule ParseLootRule(JObject body)
+        {
+            string id = (string)body["id"];
+            string baseName = (string)body["base"];
+
+            if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(baseName))
+            {
+                return null;
+            }
+
+            JArray containers = body["containers"] as JArray;
+
+            if (containers == null || containers.Count == 0)
+            {
+                // Regra sem container nao dispara em lugar nenhum.
+                // Recusar e melhor que aceitar uma regra inerte que
+                // a tela mostra como ligada.
+                return null;
+            }
+
+            LootRule rule = new LootRule();
+            rule.Id = id;
+            rule.ItemId = (string)body["item"];
+            rule.Base = baseName;
+            rule.Containers = new List<string>();
+
+            for (int i = 0; i < containers.Count; i++)
+            {
+                string prefab = (string)containers[i];
+
+                if (!string.IsNullOrEmpty(prefab))
+                {
+                    rule.Containers.Add(prefab);
+                }
+            }
+
+            if (rule.Containers.Count == 0)
+            {
+                return null;
+            }
+
+            // A skin vem como STRING, e nao como numero: ela e um
+            // UInt64, e um JSON com numero de 20 digitos passa por
+            // double em bibliotecas que nao esperam por isso -
+            // perdendo precisao em silencio. Mesma escolha do
+            // ParseItem.
+            string skinText = (string)body["skin"];
+            ulong skin;
+
+            if (!string.IsNullOrEmpty(skinText) &&
+                ulong.TryParse(skinText, NumberStyles.None, CultureInfo.InvariantCulture, out skin))
+            {
+                rule.Skin = skin;
+            }
+
+            JToken chance = body["chance"];
+            rule.Chance = Missing(chance) ? 0f : (float)chance;
+
+            JToken amountMin = body["amountMin"];
+            rule.AmountMin = Missing(amountMin) ? 1 : (int)amountMin;
+
+            JToken amountMax = body["amountMax"];
+            rule.AmountMax = Missing(amountMax) ? rule.AmountMin : (int)amountMax;
+
+            // ####  O MODO DESCONHECIDO MEDE, E NAO CRIA  ####
+            //
+            // Um agente antigo, que nao mande o campo, faz a regra
+            // CONTAR - nunca soltar item no mundo. Errar para
+            // "conta" e barato; errar para "solta" nao e.
+            string mode = (string)body["mode"];
+            rule.Mode = mode == LootModeLive ? LootModeLive : "measuring";
+
+            JToken dailyCap = body["dailyCap"];
+            rule.DailyCap = Missing(dailyCap) ? 0 : (int)dailyCap;
+
+            JToken cooldown = body["playerCooldownHours"];
+            rule.CooldownHours = Missing(cooldown) ? 0 : (int)cooldown;
+
+            return rule;
+        }
+
+        /// <summary>
+        /// Le as regras, os contadores e as carencias do disco.
+        ///
+        /// Chamado no Init(), que roda ANTES de o mundo nascer - e e
+        /// isso que faz a configuracao valer desde a primeira caixa
+        /// do boot (Q1 do Docs/CustomItem/05).
+        /// </summary>
+        private void LoadLoot()
+        {
+            try
+            {
+                LootState state = Interface.Oxide.DataFileSystem.ReadObject<LootState>(LootFile);
+
+                if (state == null)
+                {
+                    return;
+                }
+
+                if (state.Rules != null)
+                {
+                    for (int i = 0; i < state.Rules.Count; i++)
+                    {
+                        LootRule rule = state.Rules[i];
+
+                        if (rule != null && !string.IsNullOrEmpty(rule.Id) && rule.Containers != null)
+                        {
+                            IndexLootRule(rule);
+                        }
+                    }
+                }
+
+                if (state.Counters != null)
+                {
+                    for (int i = 0; i < state.Counters.Count; i++)
+                    {
+                        LootCounter counter = state.Counters[i];
+
+                        if (counter != null && !string.IsNullOrEmpty(counter.Rule))
+                        {
+                            _lootCounters[counter.Rule + "|" + counter.Day + "|" + counter.Mode] = counter;
+                        }
+                    }
+                }
+
+                if (state.Cooldowns != null)
+                {
+                    _lootCooldowns = state.Cooldowns;
+                }
+
+                if (_lootRules.Count > 0)
+                {
+                    Puts("regras de loot: " + _lootRules.Count +
+                         " carregada(s) do disco, valendo desde a primeira caixa.");
+                }
+            }
+            catch (Exception ex)
+            {
+                // Arquivo ilegivel NAO vira estado vazio gravado por
+                // cima: sobrescrever apagaria a medicao que ninguem
+                // conseguiu ler. Mesma escolha do LoadQueue.
+                PrintError("estado de loot ilegivel, seguindo VAZIO sem gravar por cima: " + ex.Message);
+            }
+        }
+
+        private void SaveLoot()
+        {
+            try
+            {
+                LootState state = new LootState();
+                state.Rules = new List<LootRule>(_lootRules.Values);
+                state.Counters = new List<LootCounter>(_lootCounters.Values);
+                state.Cooldowns = _lootCooldowns;
+
+                Interface.Oxide.DataFileSystem.WriteObject(LootFile, state);
+
+                _lootDirty = false;
+            }
+            catch (Exception ex)
+            {
+                PrintError("nao consegui gravar o estado de loot: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Grava se houver coisa nova. E o que o relogio chama.
+        /// </summary>
+        private void SaveLootIfDirty()
+        {
+            if (!_lootDirty)
+            {
+                return;
+            }
+
+            PruneLootCounters();
+            SaveLoot();
+        }
+
         // ========================================================
         //  DIAGNOSTICO
         //
@@ -3129,6 +4412,17 @@ namespace Oxide.Plugins
         /// <summary>A recusa de largar no chao. Ver a de cima.</summary>
         private const string MsgCannotDrop = "CannotDrop";
 
+        /// <summary>
+        /// O portao da Via B barrou este jogador.
+        ///
+        /// A frase NAO diz quanto falta nem qual e a regra: dizer
+        /// transformaria a carencia num relogio que o jogador
+        /// otimiza, e o valor de "raro" e nao ser agendavel. Ver a
+        /// Q5 do Docs/CustomItem/04 - o dono recusou o piso pelo
+        /// mesmo motivo.
+        /// </summary>
+        private const string MsgLootCooldown = "LootCooldown";
+
         protected override void LoadDefaultMessages()
         {
             lang.RegisterMessages(new Dictionary<string, string>
@@ -3137,7 +4431,8 @@ namespace Oxide.Plugins
                 { MsgPointsTotalHint, "check your total in /menu" },
                 { MsgRankingFallback, "the ranking" },
                 { MsgCannotStore, "This item cannot be stored: use it to claim your points." },
-                { MsgCannotDrop, "This item cannot be dropped: use it to claim your points." }
+                { MsgCannotDrop, "This item cannot be dropped: use it to claim your points." },
+                { MsgLootCooldown, "You found one of these recently. Leave it for someone else." }
             }, this);
 
             lang.RegisterMessages(new Dictionary<string, string>
@@ -3153,7 +4448,10 @@ namespace Oxide.Plugins
                 { MsgCannotStore, "Este item n\u00e3o pode ser guardado: use-o para receber os seus pontos." },
                 // Rende: Este item nao pode ser largado no chao:
                 // use-o para receber os seus pontos.
-                { MsgCannotDrop, "Este item n\u00e3o pode ser largado no ch\u00e3o: use-o para receber os seus pontos." }
+                { MsgCannotDrop, "Este item n\u00e3o pode ser largado no ch\u00e3o: use-o para receber os seus pontos." },
+                // Rende: Voce ja encontrou um destes ha pouco.
+                // Deixe para o proximo.
+                { MsgLootCooldown, "Voc\u00ea j\u00e1 encontrou um destes h\u00e1 pouco. Deixe para o pr\u00f3ximo." }
             }, this, "pt-BR");
         }
 
@@ -3671,6 +4969,168 @@ namespace Oxide.Plugins
         // ========================================================
         //  OS TIPOS
         // ========================================================
+
+        /// <summary>
+        /// Uma regra de loot: o que acrescentar, onde e com que
+        /// chance.
+        ///
+        /// ####  ELA CARREGA A MARCA JUNTO  ####
+        ///
+        /// `Base` e `Skin` tambem estao no cadastro do item custom,
+        /// e a duplicacao e deliberada: com eles aqui, o
+        /// OnLootSpawn cria o item sem uma segunda consulta no
+        /// caminho quente - que dispara milhares de vezes por dia.
+        ///
+        /// E e ela que faz o item ser o NOSSO: a tabela de loot do
+        /// Rust cria tudo com skin 0, e o Match() sai em
+        /// `item.skin == 0UL`.
+        ///
+        /// Os nomes de JSON sao os do `toLootPluginBody` do agente.
+        /// Os dois lados mudam juntos.
+        /// </summary>
+        private class LootRule
+        {
+            [JsonProperty("id")]
+            public string Id;
+
+            /// <summary>O id do item custom. Diagnostico e log.</summary>
+            [JsonProperty("item")]
+            public string ItemId;
+
+            [JsonProperty("base")]
+            public string Base;
+
+            /// <summary>
+            /// A skin, como TEXTO no arquivo.
+            ///
+            /// UInt64 num JSON de 20 digitos passa por double em
+            /// bibliotecas que nao esperam por isso, e perde
+            /// precisao em silencio. E aqui isso seria fatal: a
+            /// skin E a marca.
+            /// </summary>
+            [JsonProperty("skin")]
+            public string SkinText
+            {
+                get { return Skin.ToString(CultureInfo.InvariantCulture); }
+                set
+                {
+                    ulong parsed;
+
+                    Skin = !string.IsNullOrEmpty(value) &&
+                           ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out parsed)
+                        ? parsed
+                        : 0UL;
+                }
+            }
+
+            [JsonIgnore]
+            public ulong Skin;
+
+            [JsonProperty("containers")]
+            public List<string> Containers;
+
+            [JsonProperty("chance")]
+            public float Chance;
+
+            [JsonProperty("amountMin")]
+            public int AmountMin;
+
+            [JsonProperty("amountMax")]
+            public int AmountMax;
+
+            /// <summary>"measuring" conta e nao cria; "live" cria.</summary>
+            [JsonProperty("mode")]
+            public string Mode;
+
+            /// <summary>Teto por dia. Zero = sem teto.</summary>
+            [JsonProperty("dailyCap")]
+            public int DailyCap;
+
+            /// <summary>A carencia do portao. Zero = sem carencia.</summary>
+            [JsonProperty("playerCooldownHours")]
+            public int CooldownHours;
+
+            /// <summary>
+            /// Resolvido do Base no primeiro uso, nunca vindo do
+            /// JSON: o itemid e do JOGO, e ele muda entre versoes.
+            /// </summary>
+            [JsonIgnore]
+            public int BaseItemId;
+
+            /// <summary>Ja procuramos e este jogo nao tem o item base.</summary>
+            [JsonIgnore]
+            public bool BaseMissing;
+        }
+
+        /// <summary>
+        /// A contagem de uma regra num dia, num modo.
+        ///
+        /// Os quatro numeros respondem perguntas diferentes, e por
+        /// isso sao quatro:
+        ///
+        ///   Rolls    containers ELEGIVEIS que passaram pelo
+        ///            sorteio. E o `N` que o Docs/CustomItem/04 §6.3
+        ///            precisava e nao conseguiu medir;
+        ///   Hits     sorteios que deram positivo;
+        ///   Spawned  itens que de fato nasceram. Em "measuring" e
+        ///            sempre zero - e essa diferenca e o que faz o
+        ///            modo servir para alguma coisa;
+        ///   Blocked  jogadores que o portao barrou. O item
+        ///            continuou no container.
+        ///
+        /// Sem Spawned separado de Hits, "nao saiu trofeu" nao teria
+        /// como distinguir sorte ruim de teto batendo.
+        /// </summary>
+        private class LootCounter
+        {
+            [JsonProperty("rule")]
+            public string Rule;
+
+            /// <summary>"yyyy-MM-dd", no relogio DESTE servidor.</summary>
+            [JsonProperty("day")]
+            public string Day;
+
+            [JsonProperty("mode")]
+            public string Mode;
+
+            [JsonProperty("rolls")]
+            public int Rolls;
+
+            [JsonProperty("hits")]
+            public int Hits;
+
+            [JsonProperty("spawned")]
+            public int Spawned;
+
+            [JsonProperty("blocked")]
+            public int Blocked;
+        }
+
+        /// <summary>O arquivo em oxide/data. Ver o cabecalho do estado.</summary>
+        private class LootState
+        {
+            [JsonProperty("rules")]
+            public List<LootRule> Rules;
+
+            [JsonProperty("counters")]
+            public List<LootCounter> Counters;
+
+            /// <summary>"regra|steamId" -> epoch em segundos.</summary>
+            [JsonProperty("cooldowns")]
+            public Dictionary<string, long> Cooldowns;
+        }
+
+        private class LootStatsResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok;
+
+            [JsonProperty("count")]
+            public int Count;
+
+            [JsonProperty("stats")]
+            public List<LootCounter> Stats;
+        }
 
         private class CustomItem
         {
