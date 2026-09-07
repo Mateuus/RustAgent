@@ -736,10 +736,17 @@ export function applyHidden(document: UiDocument, hidden: readonly string[]): Ui
     return target !== null && target !== document.entryScreenId && hide.has(target);
   };
 
-  const prune = (elements: readonly UiElement[]): UiElement[] =>
-    elements
-      .filter((element) => !hide.has(element.id) && !leadsToHidden(element))
-      .map((element) => ({ ...element, children: prune(element.children) }));
+  const prune = (elements: readonly UiElement[]): UiElement[] => {
+    const kept = elements.filter((element) => !hide.has(element.id) && !leadsToHidden(element));
+
+    // O vão que a poda abriu se fecha AQUI, antes de descer nos
+    // filhos: fechá-lo é mexer no retângulo do próprio elemento, e
+    // a conta precisa da fila INTEIRA — inclusive de quem acabou
+    // de sair dela.
+    const moved = kept.length === elements.length ? kept : closeRowGaps(elements, kept);
+
+    return moved.map((element) => ({ ...element, children: prune(element.children) }));
+  };
 
   return {
     ...document,
@@ -748,4 +755,163 @@ export function applyHidden(document: UiDocument, hidden: readonly string[]): Ui
       .filter((screen) => screen.id === document.entryScreenId || !hide.has(screen.id))
       .map((screen) => ({ ...screen, elements: prune(screen.elements) })),
   };
+}
+
+// ============================================================
+//  A FILA QUE SE FECHA
+//
+//  ####  ESCONDER UM BOTÃO NÃO PODE DEIXAR UM BURACO  ####
+//
+//  A barra do cabeçalho é desenhada por deslocamento acumulado:
+//  cada botão começa onde o anterior terminou. É o que a mantém
+//  colada na borda em qualquer proporção de tela — e é também o
+//  que fazia o servidor sem EVENTOS e sem REGRAS mostrar um vão do
+//  tamanho dos dois entre CALENDÁRIO e KITS. O menu não quebrava;
+//  ele só parecia quebrado, que em interface dá no mesmo.
+//
+//  ####  A FILA É RECONHECIDA, NÃO DECLARADA  ####
+//
+//  O documento não tem contêiner de fluxo: o modelo é de
+//  retângulos livres, e inventar um agora obrigaria todo desenho
+//  já gravado a ser remontado para ganhar o conserto.
+//
+//  Então a fila é reconhecida pela FORMA — irmãos de largura fixa,
+//  no mesmo trilho vertical, presos à mesma âncora e sem se
+//  sobrepor. Um cabeçalho é exatamente isso. Um rótulo em cima de
+//  um painel não é, e fica onde o admin o pôs.
+// ============================================================
+
+/**
+ * O trilho de uma fila, ou `null` para quem não pode estar em uma.
+ *
+ * Largura que ACOMPANHA o pai fica de fora: quem divide o espaço
+ * dele — os cartões da HOME — já se redistribui por outra conta
+ * (ver `cardsOf` em game/ui-home-screen.ts), e um empurrão daqui o
+ * desalinharia.
+ */
+function rowKey(element: UiElement): string | null {
+  const { rect } = element;
+
+  if (rect.anchorMin.x !== rect.anchorMax.x) {
+    return null;
+  }
+
+  return [rect.anchorMin.x, rect.anchorMin.y, rect.anchorMax.y, rect.offsetMin.y, rect.offsetMax.y]
+    .map((value) => String(value))
+    .join(':');
+}
+
+/** O mesmo elemento, deslocado na horizontal. */
+function shiftX(element: UiElement, delta: number): UiElement {
+  const { rect } = element;
+
+  return {
+    ...element,
+    rect: {
+      ...rect,
+      offsetMin: { ...rect.offsetMin, x: rect.offsetMin.x + delta },
+      offsetMax: { ...rect.offsetMax, x: rect.offsetMax.x + delta },
+    },
+  };
+}
+
+/**
+ * Os sobreviventes, com o vão dos removidos fechado.
+ *
+ * `before` é o nível como estava; `kept` é o que sobrou dele, na
+ * mesma ordem.
+ *
+ * ####  O VÃO FECHA EM DIREÇÃO À ÂNCORA  ####
+ *
+ * A fila presa à ESQUERDA puxa quem está à direita do vão; a presa
+ * à DIREITA empurra quem está à esquerda. Nas duas, a ponta que
+ * estava colada na borda continua colada — que é o motivo de o
+ * desenho ter escolhido aquela âncora.
+ */
+function closeRowGaps(before: readonly UiElement[], kept: readonly UiElement[]): UiElement[] {
+  const survivors = new Set(kept.map((element) => element.id));
+  const rows = new Map<string, UiElement[]>();
+
+  for (const element of before) {
+    const key = rowKey(element);
+
+    if (key === null) {
+      continue;
+    }
+
+    const row = rows.get(key);
+
+    if (row === undefined) {
+      rows.set(key, [element]);
+    } else {
+      row.push(element);
+    }
+  }
+
+  const move = new Map<string, number>();
+
+  for (const row of rows.values()) {
+    // Um elemento sozinho não é fila; e uma fila que sobreviveu
+    // inteira não tem vão a fechar.
+    if (row.length < 2 || row.every((element) => survivors.has(element.id))) {
+      continue;
+    }
+
+    const sorted = [...row].sort((a, b) => a.rect.offsetMin.x - b.rect.offsetMin.x);
+    const first = sorted[0];
+
+    if (first === undefined) {
+      continue;
+    }
+
+    // Caixas que se SOBREPÕEM são um desenho — um rótulo sobre um
+    // painel, uma borda atrás de um ícone —, não uma sequência.
+    const isRow = sorted.every((element, index) => {
+      const previous = sorted[index - 1];
+
+      return previous === undefined || previous.rect.offsetMax.x <= element.rect.offsetMin.x;
+    });
+
+    if (!isRow) {
+      continue;
+    }
+
+    const towardsStart = first.rect.anchorMin.x < 0.5;
+    const order = towardsStart ? sorted : [...sorted].reverse();
+
+    let gap = 0;
+
+    for (const [index, element] of order.entries()) {
+      if (survivors.has(element.id)) {
+        move.set(element.id, towardsStart ? -gap : gap);
+        continue;
+      }
+
+      // O vão que ele deixa é a distância até o vizinho SEGUINTE na
+      // mesma direção: essa medida já traz a largura e o respiro
+      // juntos, sem o desenho precisar declarar qual é qual — e ela
+      // continua certa num cabeçalho editado à mão, onde os
+      // espaços não são todos iguais.
+      //
+      // Quem sai da PONTA não tem ninguém para puxar, e não abre
+      // vão nenhum: a fila só ficou mais curta.
+      const next = order[index + 1];
+
+      if (next !== undefined) {
+        gap += towardsStart
+          ? next.rect.offsetMin.x - element.rect.offsetMin.x
+          : element.rect.offsetMax.x - next.rect.offsetMax.x;
+      }
+    }
+  }
+
+  if (move.size === 0) {
+    return [...kept];
+  }
+
+  return kept.map((element) => {
+    const delta = move.get(element.id) ?? 0;
+
+    return delta === 0 ? element : shiftX(element, delta);
+  });
 }
