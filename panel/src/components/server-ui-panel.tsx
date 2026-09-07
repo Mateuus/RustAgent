@@ -306,8 +306,9 @@ export function ServerUiPanel({ serverId }: { readonly serverId: string }) {
             </div>
 
             <p className="text-2xs leading-relaxed text-muted">
-              Esconder uma tela NÃO esconde o botão que leva a ela — esconda os dois. O plugin
-              recusa navegar para uma tela que não conhece, então o clique não faria nada.
+              Esconder uma TELA já leva junto o botão que abre ela, e a barra se fecha no lugar
+              dele — não sobra buraco nem clique morto. Esconder só o BOTÃO tira o caminho e deixa
+              a tela de pé, para quem chega nela por outro lugar.
             </p>
           </div>
         </Section>

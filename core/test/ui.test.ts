@@ -46,7 +46,13 @@ import { UiSync } from '../src/game/ui-sync.js';
 import { apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
 import { registerUiRoutes } from '../src/http/routes/ui.js';
 import { createLogger } from '../src/logger.js';
-import { applyHidden, findDocumentProblems, walkElements } from '../src/types/ui-document.js';
+import {
+  applyHidden,
+  findDocumentProblems,
+  walkElements,
+  type UiDocument,
+  type UiElement,
+} from '../src/types/ui-document.js';
 import {
   encodeUiDocPayload,
   toDocumentPayload,
@@ -390,6 +396,133 @@ describe('o que este servidor esconde', () => {
     const view = applyHidden(document, [document.entryScreenId]);
 
     expect(view.screens.some((screen) => screen.id === document.entryScreenId)).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------
+//  E O CABEÇALHO SE FECHA
+// ------------------------------------------------------------
+
+/** O retângulo do elemento, procurado na árvore inteira. */
+function rectOf(document: UiDocument, id: string): UiElement['rect'] {
+  for (const { element } of walkElements(document.shell)) {
+    if (element.id === id) {
+      return element.rect;
+    }
+  }
+
+  throw new Error(`O elemento "${id}" não está no cabeçalho.`);
+}
+
+describe('o cabeçalho depois da poda', () => {
+  it('fecha o vão dos botões escondidos', () => {
+    const document = buildMainMenu();
+
+    // Onde cada um começava, antes de EVENTOS e REGRAS saírem.
+    const eventos = rectOf(document, 'nav-eventos').offsetMin.x;
+    const kits = rectOf(document, 'nav-kits').offsetMin.x;
+    const calendario = rectOf(document, 'nav-calendario');
+    const gap = kits - rectOf(document, 'nav-regras').offsetMax.x;
+
+    const view = applyHidden(document, ['tela-eventos', 'tela-regras']);
+
+    // KITS assume o lugar de EVENTOS: o vão dos dois sumiu.
+    expect(rectOf(view, 'nav-kits').offsetMin.x).toBe(eventos);
+    // E o respiro entre ele e o vizinho é o mesmo de sempre — não
+    // um encosto nem o buraco de antes.
+    expect(rectOf(view, 'nav-kits').offsetMin.x - calendario.offsetMax.x).toBe(gap);
+
+    // Quem estava ANTES do vão não se mexeu.
+    expect(rectOf(view, 'nav-calendario')).toEqual(calendario);
+
+    // A largura de cada botão é a mesma: a fila desliza, não estica.
+    const largura = (rect: UiElement['rect']): number => rect.offsetMax.x - rect.offsetMin.x;
+
+    expect(largura(rectOf(view, 'nav-kits'))).toBe(largura(rectOf(document, 'nav-kits')));
+  });
+
+  it('não mexe em ninguém quando quem sai é a ponta da fila', () => {
+    const document = buildMainMenu();
+    // DISCORD é o último da barra: tirá-lo só a encurta.
+    const view = applyHidden(document, ['nav-discord']);
+
+    for (const id of ['nav-home', 'nav-loja', 'nav-missoes']) {
+      expect(rectOf(view, id)).toEqual(rectOf(document, id));
+    }
+  });
+
+  it('deixa quieto quem não está numa fila', () => {
+    const document = buildMainMenu();
+    // O X mora sozinho no trilho dele, ancorado à direita.
+    const view = applyHidden(document, ['nav-eventos', 'tela-eventos']);
+
+    for (const id of ['btn-fechar', 'coin-value', 'vip-tier', 'conteudo']) {
+      expect(rectOf(view, id)).toEqual(rectOf(document, id));
+    }
+  });
+
+  it('a fila presa à direita fecha o vão para a direita', () => {
+    // A barra do cabeçalho gruda na esquerda; uma fila ancorada na
+    // borda oposta precisa fechar para o outro lado, ou ela se
+    // descola da borda que o desenho escolheu.
+    const trilho = (x: number, width: number): UiElement['rect'] => ({
+      anchorMin: { x: 1, y: 0.5 },
+      anchorMax: { x: 1, y: 0.5 },
+      offsetMin: { x, y: -10 },
+      offsetMax: { x: x + width, y: 10 },
+    });
+
+    const base = buildMainMenu();
+    const document: UiDocument = {
+      ...base,
+      shell: [
+        {
+          id: 'direita-a',
+          name: 'A',
+          type: 'label',
+          rect: trilho(-300, 80),
+          children: [],
+          text: 'A',
+          fontSize: 12,
+          font: 'RobotoCondensed-Bold.ttf',
+          color: '#FFFFFFFF',
+          align: 'MiddleCenter',
+        },
+        {
+          id: 'direita-b',
+          name: 'B',
+          type: 'label',
+          rect: trilho(-210, 80),
+          children: [],
+          text: 'B',
+          fontSize: 12,
+          font: 'RobotoCondensed-Bold.ttf',
+          color: '#FFFFFFFF',
+          align: 'MiddleCenter',
+        },
+        {
+          id: 'direita-c',
+          name: 'C',
+          type: 'label',
+          rect: trilho(-120, 80),
+          children: [],
+          text: 'C',
+          fontSize: 12,
+          font: 'RobotoCondensed-Bold.ttf',
+          color: '#FFFFFFFF',
+          align: 'MiddleCenter',
+        },
+        ...base.shell,
+      ],
+    };
+
+    const view = applyHidden(document, ['direita-b']);
+
+    // C não se mexe (é o mais próximo da borda) e A escorrega para
+    // o lugar que era de B.
+    expect(rectOf(view, 'direita-c')).toEqual(rectOf(document, 'direita-c'));
+    expect(rectOf(view, 'direita-a').offsetMin.x).toBe(-210);
+    expect(rectOf(view, 'direita-a').offsetMax.x).toBe(-130);
   });
 });
 
