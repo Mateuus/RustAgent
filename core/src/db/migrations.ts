@@ -4138,6 +4138,56 @@ DELETE FROM meta WHERE key = 'items.protocol';
 `;
 
 // ------------------------------------------------------------
+//  049 — o catálogo passa a saber a RARIDADE de cada item
+//
+//  ####  SEM ELA, O EDITOR DE LOOT NÃO MOSTRA PORCENTAGEM  ####
+//
+//  O BetterLoot não guarda probabilidade nenhuma nas entradas de
+//  `Ungrouped Items` — foram medidas 6.824 delas no `server01`, e
+//  nenhuma tem o campo. Quem decide a chance é a raridade do item
+//  NO JOGO: o plugin separa os itens da caixa em cinco baldes por
+//  `(int)ItemDefinition.rarity` e pesa cada balde com
+//  `2^(4-i)*1000` — [16000, 8000, 4000, 2000, 1000] —, multiplica
+//  pelo tamanho do balde e sorteia.
+//
+//  Ou seja: a coluna de porcentagem da tela de loot é uma conta
+//  que só fecha com este número. Sem ele a tela mostra travessão
+//  em todas as linhas, que é honesto e inútil.
+//
+//  ####  E POR QUE ELA NÃO TEM CHECK DE FAIXA  ####
+//
+//  Diferente da 045, que aceita só `0` e `1` porque booleano tem
+//  dois valores e ponto. Aqui a faixa é a de um ENUM DO JOGO, e a
+//  Facepunch pode acrescentar um valor a ele num update qualquer.
+//
+//  Um `CHECK (rarity BETWEEN 0 AND 4)` derrubaria a transação
+//  inteira no dia em que o jogo devolvesse `5` — e a gravação do
+//  catálogo é TUDO OU NADA (ver game/item-catalog.ts), então o
+//  agente ficaria sem catálogo nenhum por causa de um item. O que
+//  se guarda é o que o jogo disse; quem não reconhece o número é
+//  a tela, e ela já sabe mostrar o valor cru em vez de inventar um
+//  rótulo (`rarityLabel`, no painel).
+//
+//  ####  E POR QUE ELA APAGA O PROTOCOLO  ####
+//
+//  Pela mesma razão da 045, e ela é a metade que se esquece: a
+//  releitura do catálogo é invalidada por PROTOCOLO. Com o mesmo
+//  protocolo guardado, o agente conclui que a cópia vale e não
+//  relê — a coluna nasceria nula e ficaria nula para sempre, até o
+//  próximo update do Rust.
+//
+//  Apagar a chave é dizer "não sei em que versão o jogo está", que
+//  é o que o `#isFresh` trata como motivo para reler. O custo é
+//  uma leitura de ~1250 itens na próxima conexão de RCON.
+// ------------------------------------------------------------
+const ITEMS_RARITY_SCHEMA = `
+ALTER TABLE items
+  ADD COLUMN rarity INTEGER;
+
+DELETE FROM meta WHERE key = 'items.protocol';
+`;
+
+// ------------------------------------------------------------
 //  046  -  AS QUESTS
 //
 //  ####  A DEFINIÇÃO É DE REDE; O PROGRESSO É DE SERVIDOR  ####
@@ -4667,6 +4717,202 @@ CREATE TABLE quest_npcs (
 CREATE INDEX idx_quest_npcs_server ON quest_npcs (server_id, enabled);
 `;
 
+// ------------------------------------------------------------
+//  048 — a regra de loot: o que NÓS acrescentamos ao que o jogo
+//  já põe na caixa.
+//
+//  ####  ELA É COMPLEMENTAR, E NUNCA SUBSTITUI  ####
+//
+//  O jogo popula o container normalmente; nós acrescentamos por
+//  cima. Nada aqui reimplementa `FillLoot`, `PopulateLoot` ou
+//  `GenerateScrap` — e o motivo decisivo não é segurança, é o
+//  update: a tabela do Rust são 1.396 entradas alcançáveis que a
+//  Facepunch mantém de graça, com filtro de era e 38 tabelas de
+//  Halloween que aparecem e somem sozinhas. Substituir é assumir
+//  essa manutenção em silêncio.
+//
+//  Ver Docs/CustomItem/05-EDITOR-DE-LOOT.md §4.
+//
+//  ####  UMA REGRA É UMA LINHA; A CÓPIA DA TABELA SERIAM 1.396  ####
+//
+//  Por isso o que se guarda aqui é a REGRA — "no crate_elite,
+//  acrescente o troféu com chance 1/10.000" —, e não a tabela do
+//  jogo. O que não foi tocado continua sendo o do jogo, de graça.
+//
+//  ####  A MARCA SAI DO `custom_items`, E É POR ISSO QUE HÁ FK  ####
+//
+//  MEDIDO em Docs/CustomItem/04 §4.1: `LootSpawn.SpawnIntoContainer`
+//  passa `0uL` literal ao `ItemManager.Create`, e `ItemAmount` não
+//  tem campo de skin. Um item nascido da tabela nativa sai SEM
+//  marca, o `Match` do plugin sai em `skin == 0`, e o jogador acha
+//  lixo. Só o nosso código carimba skin — e a skin vem daqui, do
+//  item custom apontado pela FK.
+//
+//  Apagar o item custom leva as regras junto (CASCADE): uma regra
+//  que aponta para item que não existe mais não teria como
+//  carimbar marca nenhuma.
+//
+//  ####  O `mode` NÃO É OPCIONAL, E ELE É O CORAÇÃO DESTA FATIA  ####
+//
+//  Q8 do `04`, respondida pelo dono: mede antes de soltar. Em
+//  `measuring` a regra CONTA quantas vezes teria disparado e não
+//  cria item nenhum; em `live` ela cria. É o que troca a
+//  estimativa de 1.000–5.000 containers/dia por número medido —
+//  sem ele, a probabilidade de partida é um chute com fator de
+//  erro de 5.
+//
+//  ####  E `loot_rule_hits` É CONTADOR, NÃO FILA  ####
+//
+//  A linha é SOBRESCRITA a cada leitura, e não somada. O plugin
+//  guarda o acumulado do dia em disco e o agente o copia — ler
+//  duas vezes dá o mesmo número, e uma leitura perdida se conserta
+//  sozinha na volta seguinte. É o oposto da fila de pontos
+//  (OrigemZItems, `pending`), e de propósito: lá o item JÁ FOI
+//  DESTRUÍDO e o que se perde não volta; aqui o que se perde é uma
+//  contagem que o próprio plugin ainda tem.
+//
+//  O `day` chega PRONTO do servidor de jogo, e não é recalculado
+//  aqui. Quem aplica o teto diário é o plugin, com o relógio dele:
+//  um teto que vira à meia-noite de um fuso e um gráfico que vira
+//  à de outro seriam duas verdades sobre o mesmo dia, e a pergunta
+//  "por que o teto de 3 rendeu 4?" não teria resposta.
+// ------------------------------------------------------------
+const LOOT_RULES_SCHEMA = `
+CREATE TABLE loot_rules (
+  -- Slug derivado do rótulo, como em custom_items: ele viaja num
+  -- comando de console do Rust, onde espaço separa argumentos.
+  id              TEXT PRIMARY KEY,
+
+  -- O que o admin lê na lista.
+  label           TEXT NOT NULL,
+
+  -- De onde sai a MARCA (base_shortname, skin_id). Ver o cabeçalho.
+  custom_item_id  TEXT NOT NULL REFERENCES custom_items(id) ON DELETE CASCADE,
+
+  -- Os ShortPrefabName, em JSON. Lista, e não tabela de junção:
+  -- ela é lida e escrita SEMPRE inteira (o PUT reescreve a regra),
+  -- nunca consultada por container do lado do agente — quem
+  -- pergunta "esta caixa tem regra?" é o plugin, com o índice dele
+  -- em memória. Uma tabela aqui daria três consultas para guardar
+  -- o que cabe numa coluna.
+  containers      TEXT NOT NULL,
+
+  -- Por container POPULADO — e o denominador é esse, não "caixa
+  -- aberta". Ver Docs/CustomItem/04 §6.3: em regime estacionário
+  -- os dois convergem, porque barril destruído é barril que
+  -- alguém abriu.
+  chance          REAL NOT NULL CHECK (chance > 0 AND chance <= 1),
+
+  amount_min      INTEGER NOT NULL DEFAULT 1 CHECK (amount_min >= 1),
+  amount_max      INTEGER NOT NULL DEFAULT 1 CHECK (amount_max >= amount_min),
+
+  -- 'measuring' conta e NÃO cria; 'live' cria. Ver o cabeçalho.
+  -- O default é o que não solta item no mundo: uma regra criada
+  -- por um painel antigo, sem o campo, mede em vez de emitir.
+  mode            TEXT NOT NULL DEFAULT 'measuring'
+                  CHECK (mode IN ('measuring', 'live')),
+
+  -- Teto por servidor por dia. NULL = sem teto.
+  --
+  -- Ele existe porque probabilidade sozinha entrega o controle da
+  -- economia a quem mais joga: dobrar a rota de farm dobra a
+  -- emissão. Ver Docs/CustomItem/04 §6.1.
+  daily_cap       INTEGER CHECK (daily_cap IS NULL OR daily_cap > 0),
+
+  -- O portão da Via B (OnLootEntity). NULL = sem cooldown.
+  --
+  -- Ele não cabe na Via A: no instante em que o container é
+  -- populado NÃO EXISTE JOGADOR a quem aplicar cooldown. Ver
+  -- Docs/CustomItem/04 §6.5 e a Q1 de lá.
+  player_cooldown_hours INTEGER
+                  CHECK (player_cooldown_hours IS NULL OR player_cooldown_hours > 0),
+
+  -- Desligada não é apagada: o histórico de medição continua
+  -- valendo, e religar não exige recadastrar.
+  enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+
+CREATE INDEX idx_loot_rules_item ON loot_rules (custom_item_id);
+
+-- Em quais servidores esta regra vale. Junção PURA, cópia do
+-- \`custom_item_servers\` (041) e do \`kit_servers\` (012),
+-- inclusive o índice: a chave primária começa por \`rule_id\`, e a
+-- pergunta do plugin é a OUTRA — "quais regras este servidor
+-- tem?" —, que sem o índice varreria a tabela.
+--
+-- Sem linha nenhuma = em nenhum servidor. Uma regra recém-criada
+-- que já valesse em tudo soltaria item em produção sem ninguém
+-- mandar.
+--
+-- ####  SEM COLUNA DE OVERRIDE, E ISSO É UMA ESCOLHA  ####
+--
+-- O Docs/CustomItem/05 §6.2 recomenda junção COM payload (chance
+-- diferente por servidor, no molde de \`player_servers\`), e a Q4
+-- de lá deixou isso em aberto. Esta fatia fica na junção pura: o
+-- que ela entrega é UM item raro medido antes de soltar, e uma
+-- coluna de override que nasce NULL em todas as linhas é uma
+-- pergunta respondida cedo demais. Quando ela for pedida, é uma
+-- migração de três colunas — o mesmo custo de agora.
+CREATE TABLE loot_rule_servers (
+  rule_id   TEXT NOT NULL REFERENCES loot_rules(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (rule_id, server_id)
+);
+
+CREATE INDEX idx_loot_rule_servers_server
+  ON loot_rule_servers (server_id);
+
+-- ----------------------------------------------------------
+--  A MEDIÇÃO — o que a regra fez, por dia.
+--
+--  Quatro números, e cada um responde uma pergunta diferente:
+--
+--    rolls    quantos containers ELEGÍVEIS passaram pelo sorteio.
+--             É o \`N\` do Docs/CustomItem/04 §6.3, o denominador
+--             que o estudo não conseguiu medir;
+--    hits     quantas vezes o sorteio deu positivo;
+--    spawned  quantas vezes o item de fato NASCEU. Em
+--             'measuring' é sempre 0 — é essa diferença que faz o
+--             modo servir para alguma coisa. Em 'live' ele é menor
+--             que \`hits\` quando o teto do dia estourou ou o
+--             container estava cheio;
+--    blocked  quantas vezes o portão da Via B barrou um jogador
+--             (cooldown). O item CONTINUA no container: barrar não
+--             é destruir. Ver Docs/CustomItem/04, Q1.
+--
+--  Sem \`spawned\` separado de \`hits\`, "não saiu troféu" não teria
+--  como distinguir sorte ruim de teto batendo — que é a
+--  caixa-preta que o §7.4 daquele documento manda evitar.
+-- ----------------------------------------------------------
+CREATE TABLE loot_rule_hits (
+  rule_id    TEXT NOT NULL REFERENCES loot_rules(id) ON DELETE CASCADE,
+  server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- 'YYYY-MM-DD', no fuso do SERVIDOR DE JOGO. Ver o cabeçalho.
+  day        TEXT NOT NULL,
+
+  -- O modo em que a regra estava. Ele entra na chave de propósito:
+  -- o dia em que alguém virou a chave de 'measuring' para 'live'
+  -- tem duas linhas, e é isso que permite dizer "com esta chance,
+  -- teria dado tantos" ao lado de "deu tantos".
+  mode       TEXT NOT NULL CHECK (mode IN ('measuring', 'live')),
+
+  rolls      INTEGER NOT NULL DEFAULT 0,
+  hits       INTEGER NOT NULL DEFAULT 0,
+  spawned    INTEGER NOT NULL DEFAULT 0,
+  blocked    INTEGER NOT NULL DEFAULT 0,
+
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (rule_id, server_id, day, mode)
+);
+
+CREATE INDEX idx_loot_rule_hits_day ON loot_rule_hits (day);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -4780,6 +5026,23 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 46, name: 'quests-core', sql: QUESTS_CORE_SCHEMA },
   { id: 47, name: 'quests-npc', sql: QUESTS_NPC_SCHEMA },
 
+  // A 048 e a frente da regra de loot (Docs/CustomItem/05). Ela
+  // referencia `custom_items`, que nasce na 041, e `servers`, da
+  // 001 — as duas ja rodaram quando ela chega.
+  //
+  // O numero 046 que o estudo previa JA FOI USADO pelas quests,
+  // que entraram entre a escrita daquele documento e esta
+  // migracao. O runner aplica cada id UMA vez para sempre: reusar
+  // o 046 daria merge limpo e banco sem estas tabelas.
+  { id: 48, name: 'loot-rules', sql: LOOT_RULES_SCHEMA },
+
+  // A 049 é do EDITOR DE LOOT (Docs/CustomItem/06). Ela acrescenta
+  // uma coluna à `items` da 007 — e é uma migração própria, e não
+  // uma edição da 045 que está logo ao lado, pela razão que a 042
+  // registra e a 043 conserta: o runner aplica cada id UMA vez, e
+  // mexer no SQL de uma migração já aplicada deixa o banco de
+  // produção sem a coluna, para sempre.
+  { id: 49, name: 'items-rarity', sql: ITEMS_RARITY_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

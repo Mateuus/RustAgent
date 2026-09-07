@@ -657,7 +657,8 @@ namespace Oxide.Plugins
         //             "category":"Weapon",
         //             "maxStack":1,
         //             "hasCondition":true,
-        //             "consumable":false}]}
+        //             "consumable":false,
+        //             "rarity":2}]}
         //
         //  "count" e o TOTAL do catalogo, nao o tamanho da pagina:
         //  e por ele que o painel sabe quantas paginas pedir.
@@ -879,7 +880,13 @@ namespace Oxide.Plugins
 
                 HasCondition = definition.condition.enabled,
 
-                Consumable = DefinitionIsConsumable(definition)
+                Consumable = DefinitionIsConsumable(definition),
+
+                // O cast e direto porque Rarity e um enum de valores
+                // pequenos e contiguos, e o que o BetterLoot usa e
+                // exatamente este numero - ele faz o mesmo cast em
+                // (int)def.rarity antes de escolher o balde.
+                Rarity = (int)definition.rarity
             };
         }
 
@@ -3035,6 +3042,26 @@ namespace Oxide.Plugins
             // depende deste campo.
             [JsonProperty("consumable")]
             public bool Consumable { get; set; }
+
+            // ####  E ELE E QUEM DECIDE A CHANCE NO LOOT  ####
+            //
+            // A raridade da ItemDefinition, como INDICE: 0 e o mais
+            // comum e 4 o mais raro. O editor de loot do painel
+            // precisa dela porque o BetterLoot nao guarda
+            // probabilidade nenhuma nas entradas dele - ele separa
+            // os itens da caixa em cinco baldes por
+            // (int)definition.rarity e pesa cada balde com
+            // 2^(4-i)*1000. Sem este numero a tela nao consegue
+            // mostrar porcentagem alguma, e o certo ali e o
+            // travessao, nunca um zero.
+            //
+            // Vai como int, e nao como o nome do enum, porque o que
+            // pesa e o INDICE. Mandar "Common" obrigaria os dois
+            // lados a manter a mesma tabela de nomes, e ela
+            // envelheceria calada no dia em que o jogo criasse uma
+            // raridade nova.
+            [JsonProperty("rarity")]
+            public int Rarity { get; set; }
         }
 
         private class PositionInfo

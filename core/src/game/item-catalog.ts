@@ -70,7 +70,7 @@ import { firstJsonLine, PLAYERS_PLUGIN as AGENT_PLUGIN } from './plugin-contract
 //      {"ok":true,"count":1252,"offset":0,"limit":250,"items":[
 //        {"shortname":"hat.wolf","displayName":"Wolf Headdress",
 //         "itemId":-1478212975,"category":"Attire","maxStack":1,
-//         "hasCondition":false,"consumable":false}, …]}
+//         "hasCondition":false,"consumable":false,"rarity":0}, …]}
 //
 //  `count` é o TOTAL do catálogo, e não o tamanho da página;
 //  `offset` e `limit` voltam JÁ NORMALIZADOS, então quem pede 5000
@@ -117,6 +117,22 @@ export const rustItemSchema = z.object({
    * diferente de "não é consumível". Ver a migração 045.
    */
   consumable: z.boolean().optional(),
+  /**
+   * A raridade da definição, como índice (0 = mais comum).
+   *
+   * ####  OPCIONAL PELA MESMA RAZÃO DO `consumable`  ####
+   *
+   * O campo nasceu em 06/09/2026, no `origemz.items`. Um servidor
+   * com o plugin de antes responde sem ele, e exigi-lo aqui
+   * reprovaria a rodada INTEIRA — a leitura é tudo-ou-nada — e
+   * deixaria a rede sem catálogo por um campo que só o editor de
+   * loot usa.
+   *
+   * Sem `.min()` nem `.max()` de propósito: a faixa é a de um enum
+   * do jogo, e um valor novo num update derrubaria toda a leitura.
+   * Ver a migração 049.
+   */
+  rarity: z.number().int().optional(),
 });
 
 export const itemsOkSchema = z.object({

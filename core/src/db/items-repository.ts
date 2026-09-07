@@ -70,12 +70,34 @@ export interface ItemInput {
    * migração 045.
    */
   readonly consumable?: boolean | null | undefined;
+  /**
+   * A raridade da `ItemDefinition`, como ÍNDICE.
+   *
+   * ####  É ELA QUE DECIDE A CHANCE NO EDITOR DE LOOT  ####
+   *
+   * `0` é o mais comum e `4` o mais raro. O BetterLoot não guarda
+   * probabilidade nas entradas dele: separa os itens da caixa em
+   * cinco baldes por este número e pesa cada balde com
+   * `2^(4-i)*1000`. Sem ele a tela de loot não tem como calcular
+   * porcentagem nenhuma.
+   *
+   * Ausente (ou `null`) = a varredura que gravou a linha é
+   * anterior a este campo. É diferente de `0`, que é uma raridade
+   * de verdade — a mais comum de todas. Ver a migração 049.
+   *
+   * O tipo é `number`, e não uma união de `0..4`, de propósito: a
+   * faixa é a de um enum do JOGO, e ele pode ganhar um valor num
+   * update qualquer. Ver o cabeçalho daquela migração.
+   */
+  readonly rarity?: number | null | undefined;
 }
 
 /** Um item guardado, com o que só a tabela sabe. */
 export interface ItemRecord extends ItemInput {
   /** `null` = ninguém perguntou ainda. Ver `ItemInput.consumable`. */
   readonly consumable: boolean | null;
+  /** `null` = ninguém perguntou ainda. Ver `ItemInput.rarity`. */
+  readonly rarity: number | null;
   /** Epoch ms. Nunca muda depois da inserção. */
   readonly firstSeen: number;
   readonly lastSeen: number;
@@ -150,6 +172,8 @@ interface ItemRow {
   readonly has_condition: number;
   /** 1/0, ou NULL quando a varredura não trouxe o campo. */
   readonly consumable: number | null;
+  /** 0 a 4 no jogo de hoje, ou NULL. Ver a migração 049. */
+  readonly rarity: number | null;
   readonly first_seen: number;
   readonly last_seen: number;
 }
@@ -170,9 +194,9 @@ interface ItemRow {
 const UPSERT_ITEM = `
 INSERT INTO items
      (shortname, display_name, item_id, category, max_stack, has_condition, consumable,
-      first_seen, last_seen)
+      rarity, first_seen, last_seen)
      VALUES (@shortname, @display_name, @item_id, @category, @max_stack, @has_condition,
-             @consumable, @at, @at)
+             @consumable, @rarity, @at, @at)
 ON CONFLICT (shortname) DO UPDATE SET
      display_name  = excluded.display_name,
      item_id       = excluded.item_id,
@@ -190,6 +214,15 @@ ON CONFLICT (shortname) DO UPDATE SET
      -- O coalesce mantém a resposta que alguém já deu; quem
      -- responde de novo, sobrescreve.
      consumable    = coalesce(excluded.consumable, items.consumable),
+     -- O mesmo coalesce, e pelo mesmo motivo: um plugin anterior a
+     -- 06/09/2026 responde sem rarity, e gravar o nulo por cima
+     -- faria a tela de loot voltar ao travessao toda vez que um
+     -- servidor desatualizado fosse o primeiro a subir.
+     --
+     -- (Sem crase em volta de rarity: este SQL mora numa template
+     -- string, e a crase do comentario FECHA a string. Foi assim
+     -- que o agente parou de subir em 06/09/2026.)
+     rarity        = coalesce(excluded.rarity, items.rarity),
      last_seen     = excluded.last_seen
 `;
 
@@ -375,6 +408,10 @@ export class ItemsRepository {
               : item.consumable
                 ? 1
                 : 0,
+          // Mesma leitura do `consumable`: `undefined` e `null`
+          // viram NULL, e o `coalesce` do UPSERT preserva o que já
+          // se sabia.
+          rarity: item.rarity === undefined || item.rarity === null ? null : item.rarity,
           at,
         });
       }
@@ -443,6 +480,10 @@ function toItem(row: ItemRow, scannedAt: number | null): ItemRecord {
     // `ItemInput.consumable`. Quem decide o que fazer com o "não
     // sei" é quem lê: a rota de custom-items só recusa o `false`.
     consumable: row.consumable === null ? null : row.consumable === 1,
+    // O número cru, sem clamp e sem rótulo. Quem não reconhece a
+    // faixa é a tela, e ela já mostra o valor em vez de inventar um
+    // nome — ver o cabeçalho da migração 049.
+    rarity: row.rarity,
     firstSeen: row.first_seen,
     lastSeen: row.last_seen,
     // Sem carimbo de varredura não dá para afirmar que sumiu, e
