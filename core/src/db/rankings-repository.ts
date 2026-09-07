@@ -1008,6 +1008,33 @@ export class RankingsRepository {
     return run();
   }
 
+  /**
+   * O valor de UMA métrica de UM jogador num período.
+   *
+   * ####  ELE EXISTE PARA AS QUESTS  ####
+   *
+   * O objetivo de quest do tipo `metric` mede "quanto subiu desde
+   * o aceite", e a conta é `total agora - total no aceite`. Sem
+   * este método, quem quisesse o número teria de montar uma
+   * consulta de leaderboard e procurar o jogador nela — pagando
+   * uma ordenação de milhares de linhas para ler uma.
+   *
+   * `0` quando aquilo nunca foi medido: ausência de linha é zero
+   * aqui, e não "não sei". A distinção que importa no ranking (o
+   * `coverage`) não importa numa subtração — o que não subiu não
+   * conta, tenha sido por não jogar ou por não haver coleta.
+   */
+  valueOf(periodId: number, steamId: string, metric: string): number {
+    const row = this.#db
+      .prepare(
+        `SELECT value FROM player_stats
+          WHERE period_id = @period_id AND steam_id = @steam_id AND metric = @metric`,
+      )
+      .get({ period_id: periodId, steam_id: steamId, metric }) as { value: number } | undefined;
+
+    return row?.value ?? 0;
+  }
+
   openPeriodOf(serverId: string, kind: PeriodKind): StatPeriod | null {
     const row = this.#db
       .prepare(

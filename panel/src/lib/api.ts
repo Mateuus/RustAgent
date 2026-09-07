@@ -1788,7 +1788,383 @@ export interface RankingSeasonTurnResponse {
   frozen: number;
 }
 
+// ============================================================
+//  AS MISSOES
+//
+//  ####  A DEFINICAO E DE REDE; O PROGRESSO E DE SERVIDOR  ####
+//
+//  Uma quest e escrita uma vez e vale em todos os servidores - como
+//  VIP, kit e loja. O que conta separado em cada mundo e o
+//  PROGRESSO, e e por isso que toda linha de progresso carrega o
+//  serverId enquanto a quest nao carrega.
+//
+//  ####  AS DATAS AQUI SAO EPOCH, E NAO ISO  ####
+//
+//  Ao contrario do ranking. A razao e esta tela: ela faz contas de
+//  tempo (quanto falta do cooldown, quanto durou a tentativa), e ISO
+//  a obrigaria a reconverter tudo.
+//
+//  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §11 e §12.
+// ============================================================
+
+export type QuestRepeatMode = 'once' | 'cooldown' | 'daily' | 'weekly';
+
+export type QuestObjectiveKind =
+  | 'kill'
+  | 'gather'
+  | 'craft'
+  | 'loot'
+  | 'deliver'
+  | 'playtime'
+  | 'metric';
+
+export type QuestRewardKind = 'item' | 'coins' | 'kit' | 'points' | 'vip';
+
+export type PlayerQuestStatus = 'active' | 'completed' | 'claimed' | 'abandoned';
+
+export interface QuestObjective {
+  seq: number;
+  kind: QuestObjectiveKind;
+  /** Shortname, nome de criatura ou id de NPC. `null` em playtime/metric. */
+  target: string | null;
+  /** So em `metric`. */
+  metric: string | null;
+  amount: number;
+  /** Sobrescreve a frase montada pelo agente. */
+  label: string | null;
+  /** Tira os itens do inventario no resgate. So em loot/gather. */
+  consume: boolean;
+}
+
+/**
+ * A recompensa, achatada.
+ *
+ * O `kind` decide quais campos existem - e o mesmo formato que a
+ * API recebe, e o formulario monta um objeto por vez.
+ */
+export type QuestReward =
+  | { kind: 'item'; shortname: string; amount: number; skinId: string }
+  | {
+      kind: 'coins';
+      amount: number | null;
+      perMeter: number | null;
+      min: number | null;
+      max: number | null;
+    }
+  | { kind: 'kit'; slug: string }
+  | { kind: 'points'; metric: string; amount: number }
+  | { kind: 'vip'; tier: string; days: number };
+
+export interface QuestDefinition {
+  id: string;
+  title: string;
+  description: string | null;
+  category: string;
+  enabled: boolean;
+  sort: number;
+  /** `vip:ouro`, ou uma permissao do Oxide. `null` = todo mundo. */
+  requires: string | null;
+  /** `null` = aparece no menu; preenchido = so perto daquele NPC. */
+  npcId: string | null;
+  repeatMode: QuestRepeatMode;
+  cooldownSeconds: number;
+  requiresQuest: string | null;
+  availableFrom: number | null;
+  availableTo: number | null;
+  autoAccept: boolean;
+  wipePolicy: 'reset' | 'keep';
+  /** Vazia = vale em TODOS os servidores. */
+  servers: string[];
+  objectives: QuestObjective[];
+  rewards: QuestReward[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** O corpo que a API recebe: a quest sem os campos que ela gera. */
+export type QuestInput = Omit<QuestDefinition, 'id' | 'createdAt' | 'updatedAt'>;
+
+export interface QuestObjectiveView {
+  seq: number;
+  /** A frase ja montada pelo agente, com o nome bonito do item. */
+  label: string;
+  have: number;
+  need: number;
+  done: boolean;
+}
+
+/**
+ * Uma tentativa.
+ *
+ * E o MESMO corpo que a tela do jogo recebe, mais os campos de
+ * quem/onde - duas formas para a mesma tentativa dariam duas
+ * contagens de progresso.
+ */
+export interface QuestProgressRow {
+  playerQuestId: number;
+  questId: string;
+  title: string;
+  status: PlayerQuestStatus;
+  objectives: QuestObjectiveView[];
+  rewards: QuestReward[];
+  complete: boolean;
+  acceptedAt: number;
+  completedAt: number | null;
+  claimedAt: number | null;
+  cooldownUntil: number | null;
+  serverId: string;
+  steamId: string;
+  attempt: number;
+}
+
+export interface QuestNpc {
+  id: string;
+  serverId: string;
+  name: string;
+  kind: 'quest' | 'delivery';
+  x: number;
+  y: number;
+  z: number;
+  rotation: number;
+  prefab: string;
+  mapMarker: boolean;
+  useRadius: number;
+  enabled: boolean;
+  wipePolicy: 'keep' | 'remove';
+  /** As quests que apontam para ele. E o aviso do botao de apagar. */
+  quests: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface QuestSettingsRow {
+  serverId: string;
+  maxActive: number;
+  enabled: boolean;
+  flushSeconds: number;
+  lootEnabled: boolean;
+  resetAtMinute: number;
+  updatedAt: number | null;
+}
+
+export interface QuestEvent {
+  id: number;
+  eventId: string | null;
+  serverId: string;
+  steamId: string;
+  questId: string;
+  attempt: number;
+  kind: 'accept' | 'progress' | 'complete' | 'claim' | 'abandon' | 'reset' | 'reward_failed';
+  detail: unknown;
+  source: 'plugin' | 'agent' | 'panel' | 'wipe';
+  actor: string | null;
+  at: number;
+}
+
+export interface QuestRewardOutcome {
+  kind: QuestRewardKind;
+  ok: boolean;
+  message: string;
+  code: string | null;
+}
+
+export interface QuestClaimResult {
+  playerQuestId: number;
+  questId: string;
+  outcomes: QuestRewardOutcome[];
+  pending: boolean;
+}
+
 export const agent = {
+  // ---- as missoes ----
+
+  quests: (options: { category?: string; serverId?: string } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.category !== undefined) {
+      query.set('category', options.category);
+    }
+
+    if (options.serverId !== undefined) {
+      query.set('serverId', options.serverId);
+    }
+
+    const suffix = query.toString();
+
+    return api<{ quests: QuestDefinition[] }>(`/api/quests${suffix === '' ? '' : `?${suffix}`}`);
+  },
+
+  questCategories: () =>
+    api<{ categories: { category: string; total: number }[] }>('/api/quests/categories'),
+
+  // ####  NÃO HÁ `quest(id)` NEM `questOffers()` AQUI  ####
+  //
+  // As duas rotas existem na API — `GET /quests/:id` e
+  // `GET /quests/offers` —, e quem as consome é o SITE e a tela do
+  // jogo, não este painel: ele lê a lista inteira de uma vez, e o
+  // `liveCount` chega na recusa do DELETE, que é onde ele importa.
+  //
+  // Um método de cliente que ninguém chama é uma promessa de que
+  // alguma tela o usa. Ver §11.4 do plano.
+
+  createQuest: (body: QuestInput) =>
+    api<{ quest: QuestDefinition }>('/api/quests', { method: 'POST', body }),
+
+  updateQuest: (id: string, body: QuestInput) =>
+    api<{ quest: QuestDefinition }>(`/api/quests/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  /** A ordem vai INTEIRA: uma lista parcial e recusada pela API. */
+  reorderQuests: (ids: string[]) =>
+    api<{ quests: QuestDefinition[] }>('/api/quests/order', { method: 'PUT', body: { ids } }),
+
+  duplicateQuest: (id: string, title?: string) =>
+    api<{ quest: QuestDefinition }>(`/api/quests/${encodeURIComponent(id)}/duplicate`, {
+      method: 'POST',
+      body: title === undefined ? {} : { title },
+    }),
+
+  /**
+   * Apaga.
+   *
+   * Sem `force`, a API recusa com `QUEST_IN_USE` e a contagem de
+   * quem esta no meio dela - e o que a tela mostra antes do segundo
+   * clique.
+   */
+  removeQuest: (id: string, force = false) =>
+    api<{ removed: boolean; live: number }>(
+      `/api/quests/${encodeURIComponent(id)}${force ? '?force=true' : ''}`,
+      { method: 'DELETE' },
+    ),
+
+  /** Exige `steamId` OU `questId`: sem recorte a API recusa. */
+  questProgress: (options: {
+    steamId?: string;
+    questId?: string;
+    serverId?: string;
+    status?: PlayerQuestStatus;
+    limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) {
+        query.set(key, String(value));
+      }
+    }
+
+    return api<{ progress: QuestProgressRow[] }>(`/api/quests/progress?${query.toString()}`);
+  },
+
+  playerQuests: (steamId: string, options: { serverId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) {
+      query.set('serverId', options.serverId);
+    }
+
+    if (options.limit !== undefined) {
+      query.set('limit', String(options.limit));
+    }
+
+    const suffix = query.toString();
+
+    return api<{ quests: QuestProgressRow[] }>(
+      `/api/players/${steamId}/quests${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  questEvents: (options: { steamId?: string; questId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) {
+        query.set(key, String(value));
+      }
+    }
+
+    const suffix = query.toString();
+
+    return api<{ events: QuestEvent[] }>(`/api/quests/events${suffix === '' ? '' : `?${suffix}`}`);
+  },
+
+  questPendingRewards: () =>
+    api<{ pending: (QuestEvent & { attempt: QuestProgressRow | null })[] }>(
+      '/api/quests/rewards/pending',
+    ),
+
+  grantQuest: (id: string, body: { serverId: string; steamId: string; actor?: string }) =>
+    api<{ quest: QuestProgressRow }>(`/api/quests/${encodeURIComponent(id)}/grant`, {
+      method: 'POST',
+      body,
+    }),
+
+  setQuestProgress: (
+    playerQuestId: number,
+    body: { objectiveSeq: number; value: number; actor?: string; reason?: string },
+  ) =>
+    api<{ quest: QuestProgressRow }>(`/api/quests/progress/${String(playerQuestId)}/set`, {
+      method: 'POST',
+      body,
+    }),
+
+  claimQuest: (playerQuestId: number, actor?: string) =>
+    api<{ result: QuestClaimResult }>(`/api/quests/progress/${String(playerQuestId)}/claim`, {
+      method: 'POST',
+      body: { actor },
+    }),
+
+  cancelQuest: (playerQuestId: number, body: { actor?: string; reason?: string } = {}) =>
+    api<{ cancelled: boolean }>(`/api/quests/progress/${String(playerQuestId)}/cancel`, {
+      method: 'POST',
+      body,
+    }),
+
+  retryQuestReward: (playerQuestId: number, actor?: string) =>
+    api<{ result: QuestClaimResult }>(`/api/quests/rewards/${String(playerQuestId)}/retry`, {
+      method: 'POST',
+      body: { actor },
+    }),
+
+  /** O recorte e obrigatorio, e o motivo tambem. */
+  wipeQuests: (body: {
+    serverId?: string;
+    questId?: string;
+    steamId?: string;
+    actor: string;
+    reason: string;
+  }) => api<{ wiped: number }>('/api/quests/wipe', { method: 'POST', body }),
+
+  questSettings: (serverId?: string) =>
+    api<{ settings: QuestSettingsRow[] }>(
+      `/api/quests/settings${
+        serverId === undefined ? '' : `?serverId=${encodeURIComponent(serverId)}`
+      }`,
+    ),
+
+  saveQuestSettings: (serverId: string, body: Omit<QuestSettingsRow, 'serverId' | 'updatedAt'>) =>
+    api<{ settings: QuestSettingsRow }>(`/api/quests/settings/${encodeURIComponent(serverId)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  questNpcs: (serverId?: string) =>
+    api<{ npcs: QuestNpc[] }>(
+      `/api/quests/npcs${
+        serverId === undefined ? '' : `?serverId=${encodeURIComponent(serverId)}`
+      }`,
+    ),
+
+  updateQuestNpc: (id: string, body: Omit<QuestNpc, 'id' | 'quests' | 'createdAt' | 'updatedAt'>) =>
+    api<{ npc: QuestNpc }>(`/api/quests/npcs/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+
+  removeQuestNpc: (id: string) =>
+    api<{ removed: boolean; orphaned: string[] }>(`/api/quests/npcs/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
   login: (user: string, password: string) =>
     api<{ ok: true; user: string; csrfToken: string }>('/auth/login', {
       method: 'POST',

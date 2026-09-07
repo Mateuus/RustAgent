@@ -36,6 +36,7 @@ import {
   Server,
   Settings,
   ShoppingBag,
+  ScrollText,
   Trophy,
   Users,
   X,
@@ -142,6 +143,16 @@ const NAV: readonly NavItem[] = [
     label: 'Ranking',
     hint: 'Quem está na frente, em que janela, e desde quando aquilo é medido',
     Icon: Trophy,
+  },
+  // As missões são de REDE, como o kit e o ranking: a missão é
+  // escrita uma vez e vale em todos os servidores. O que conta
+  // separado em cada mundo é o PROGRESSO — e o wipe de um não mexe
+  // no outro.
+  {
+    href: '/quests/',
+    label: 'Missões',
+    hint: 'O que os jogadores têm para fazer, o que ganham, e como está o progresso de cada um',
+    Icon: ScrollText,
   },
   {
     href: '/interface/',

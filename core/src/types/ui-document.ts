@@ -345,6 +345,29 @@ const screenSchema = z.object({
   id: idSchema,
   name: z.string().max(64),
   /**
+   * O AGENTE monta esta tela a cada abertura?
+   *
+   * ####  SEM ISTO, A TELA GRAVADA GANHA DA MONTADA  ####
+   *
+   * MEDIDO no jogo em 06/09/2026: o `OpenScreen` do `OrigemZUI`
+   * desenha o que está no documento e SÓ pede ao agente o que não
+   * tem. A tela de ENTRADA sempre viaja na carga inicial — então
+   * uma entrada montada pelo agente nunca era pedida, e o jogador
+   * ficava olhando o "carregando" para sempre.
+   *
+   * `true` faz o plugin pedir mesmo tendo. O que está gravado
+   * continua servindo de REPOUSO: é o que aparece enquanto a
+   * resposta não chega, e o que sobra se o agente estiver fora.
+   *
+   * Ausente (o normal) é toda tela desenhada no editor.
+   *
+   * `.optional()` e não `.default(false)`: com o default, o tipo de
+   * SAÍDA passa a exigir o campo, e todo construtor de tela do
+   * projeto — kits, calendário, loja, ranking — teria de informá-lo
+   * para dizer "não". Ausente já quer dizer isso.
+   */
+  generated: z.boolean().optional(),
+  /**
    * `page` ocupa o slot de conteúdo; `modal` fica POR CIMA dele.
    *
    * É propriedade da TELA, e não da ação que a abre, porque o lugar
@@ -426,6 +449,41 @@ export const uiDocumentSchema = z.object({
   modalSlotId: idSchema.nullable().default(null),
   /** A tela mostrada ao abrir. Precisa existir em `screens`. */
   entryScreenId: idSchema,
+  /**
+   * Comandos de chat que abrem o menu JÁ NUMA TELA.
+   *
+   * ####  ELES EXISTEM PARA NÃO HAVER UM MENU CLONADO  ####
+   *
+   * `/quest` precisava abrir direto nas missões. A primeira versão
+   * fez isso com um SEGUNDO DOCUMENTO — o mesmo shell, as mesmas
+   * onze telas, outro `command` e outra entrada. Funcionava, e
+   * estava errado: o servidor recebia duas cópias do menu inteiro
+   * no RCON, o admin via dois "Menu" na tela de Interface e toda
+   * mudança de estilo tinha dois lugares para ser feita.
+   *
+   * Aqui é uma LINHA: `{ command: 'quest', screenId: 'tela-missoes' }`.
+   * O plugin registra o comando extra e abre naquela tela; o resto
+   * do menu é o mesmo, porque é o mesmo.
+   *
+   * Cada `screenId` precisa existir em `screens` — ver
+   * `findDocumentProblems`.
+   */
+  shortcuts: z
+    .array(
+      z.object({
+        command: z
+          .string()
+          .min(1)
+          .max(32)
+          .regex(/^[a-z0-9][a-z0-9._-]*$/, 'comando aceita minúsculas, números, ponto e hífen'),
+        screenId: idSchema,
+      }),
+    )
+    // Oito é folga: são comandos de chat, e cada um ocupa um nome
+    // global no servidor. Um documento que precise de mais que
+    // isso está querendo ser vários.
+    .max(8)
+    .default([]),
   screens: z.array(screenSchema).min(1).max(MAX_SCREENS_PER_DOCUMENT),
 });
 
@@ -476,6 +534,25 @@ export function findDocumentProblems(document: UiDocument): readonly DocumentPro
 
   if (screenIds.size !== document.screens.length) {
     problems.push({ message: 'Há telas com o mesmo id.' });
+  }
+
+  for (const shortcut of document.shortcuts) {
+    if (!screenIds.has(shortcut.screenId)) {
+      problems.push({
+        message:
+          `O comando "/${shortcut.command}" abre numa tela ("${shortcut.screenId}") que não ` +
+          'existe neste documento.',
+      });
+    }
+
+    if (shortcut.command === document.command) {
+      // O plugin guarda um documento por comando: o atalho
+      // sobrescreveria o principal, e `/menu` passaria a abrir na
+      // tela do atalho.
+      problems.push({
+        message: `O comando "/${shortcut.command}" é o mesmo que abre o documento inteiro.`,
+      });
+    }
   }
 
   const slotIds = new Set<string>();

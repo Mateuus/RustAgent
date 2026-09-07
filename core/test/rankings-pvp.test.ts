@@ -742,7 +742,20 @@ async function pluginTail(): Promise<string> {
 
   expect(start).toBeGreaterThan(0);
 
-  return source.slice(start);
+  // ####  O RECORTE TERMINA ONDE AS MISSÕES COMEÇAM  ####
+  //
+  // Em 06/09/2026 o plugin ganhou a região `Quests`, que fica DEPOIS
+  // desta. As promessas deste arquivo são sobre a COLETA DE
+  // ESTATÍSTICA — "o ranking de farm não premia quem comprou" —, e
+  // uma delas é por AUSÊNCIA de hook (ver o teste do hook de posse).
+  //
+  // Sem este corte, um hook legítimo das missões faria a promessa do
+  // ranking parecer quebrada. O que garante que ela continua de pé é
+  // o teste novo logo abaixo daquele: o hook de loot existe, e não
+  // encosta em métrica nenhuma.
+  const end = source.indexOf('//  AS MISSOES', start);
+
+  return end < 0 ? source.slice(start) : source.slice(start, end);
 }
 
 describe('a coleta de PvP dentro do jogo', () => {
@@ -937,6 +950,45 @@ describe('a coleta de PvP dentro do jogo', () => {
     ]) {
       expect(tail, `o plugin passou a escutar ${hook}`).not.toContain(hook);
     }
+  });
+
+  it('o hook de loot das MISSÕES existe, e não encosta em métrica de ranking', async () => {
+    // ####  A PROMESSA DE CIMA MUDOU DE FORMA, E NÃO DE CONTEÚDO  ####
+    //
+    // Até 06/09/2026 ela era por AUSÊNCIA: `OnItemAddedToContainer`
+    // não existia no arquivo. As missões precisaram dele — "saqueie
+    // 100 de scrap" não tem outro jeito de ser contado —, e a
+    // promessa passou a ser sobre o QUE ele faz.
+    //
+    // O que o ranking de farm não pode fazer continua igual: item
+    // que entra no inventário pela loja, pelo kit ou pelo `give` do
+    // painel NÃO vira craft nem minério. Este teste é o que garante
+    // isso agora.
+    const source = await readFile(PLUGIN_PATH, 'utf8');
+    const start = source.indexOf('private void OnItemAddedToContainer(');
+
+    expect(start, 'o hook de loot sumiu do plugin').toBeGreaterThan(0);
+
+    // O corpo do método: do começo até o fecho de chave no nível da
+    // classe. É recorte grosseiro de propósito — o que interessa é
+    // o que ele CHAMA, e uma linha a mais ou a menos não muda isso.
+    const body = source.slice(start, start + 1400);
+
+    // Ele chama o contador das MISSÕES, e nada mais.
+    expect(body).toContain('QuestOnLoot(');
+
+    // E nenhuma das portas do ranking.
+    for (const forbidden of ['BumpMetric', 'AddOre(', 'BumpPlayerMetric', 'AddSeq']) {
+      expect(body, `o hook de loot passou a alimentar o ranking (${forbidden})`).not.toContain(
+        forbidden,
+      );
+    }
+
+    // O hook nasce DESINSCRITO: o Oxide registra todo método que
+    // existe na classe, e sem isto o hook mais quente do jogo
+    // rodaria em todo servidor — inclusive nos que não têm missão de
+    // loot nenhuma.
+    expect(source).toContain('Unsubscribe("OnItemAddedToContainer")');
   });
 
   it('todo hook de coleta é medido, e o `diag` responde com o número', async () => {

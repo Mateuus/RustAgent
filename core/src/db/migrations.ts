@@ -4137,6 +4137,536 @@ ALTER TABLE items
 DELETE FROM meta WHERE key = 'items.protocol';
 `;
 
+// ------------------------------------------------------------
+//  046  -  AS QUESTS
+//
+//  ####  A DEFINIÇÃO É DE REDE; O PROGRESSO É DE SERVIDOR  ####
+//
+//  Cadastrar "minerar 5.000 de enxofre" em cada servidor produziria
+//  N quests com o mesmo nome e progressos que ninguém consegue
+//  comparar. A quest é uma só, como VIP, kit e mensagem — e o
+//  servidor onde ela foi feita mora na linha de player_quests.
+//
+//  ####  QUEST É ASSINATURA SOBRE EVENTO  ####
+//
+//  O ranking guarda estatística como (metric, value) para que criar
+//  um ranking deixasse de ser escrever código. Quest é o passo
+//  seguinte da mesma ideia: se o evento do jogo já vira uma linha,
+//  uma quest é uma ASSINATURA sobre ela — um alvo, uma quantidade,
+//  e o que acontece quando a soma chega lá.
+//
+//  A consequência que faz o pedido do dono caber: criar uma quest
+//  é uma linha aqui, N em quest_objectives e N em quest_rewards.
+//  A vigésima custa o mesmo que a segunda: zero.
+//
+//  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §3.
+// ------------------------------------------------------------
+const QUESTS_CORE_SCHEMA = `
+CREATE TABLE quests (
+  -- Slug estável. É o que a URL do painel guarda, o que o site
+  -- consome e o que o endereço da tela do jogo carrega.
+  id TEXT PRIMARY KEY,
+
+  title TEXT NOT NULL,
+
+  -- O que o jogador lê antes de aceitar. Aceita a marcação de chat
+  -- do projeto (game/chat-markup.ts).
+  description TEXT,
+
+  -- 'diaria', 'semanal', 'historia', 'evento', 'geral'. É TEXTO
+  -- LIVRE de propósito: a categoria é uma aba na tela e um filtro
+  -- no painel, e inventar uma nova não pode ser uma migração.
+  category TEXT NOT NULL DEFAULT 'geral',
+
+  -- 0 = cadastrada mas fora do ar. Apagar seria perder o progresso
+  -- de quem já a fez; a mesma escolha do server_plugins.enabled da
+  -- migração 002.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- A ordem na tela do jogo e no painel. Arrastável, como o
+  -- catálogo de rankings da migração 044.
+  sort INTEGER NOT NULL DEFAULT 0,
+
+  -- ####  QUEM PODE VER  ####
+  --
+  -- NULL = todo mundo. Preenchido = uma permissão do Oxide
+  -- ('origemzquests.vip') ou um tier de VIP ('vip:ouro').
+  --
+  -- A checagem é do AGENTE, na montagem da tela: o plugin não
+  -- decide quem vê o quê, pela mesma razão que applyHidden roda no
+  -- agente e não no OrigemZUI — a decisão fica do lado que tem
+  -- teste.
+  requires TEXT,
+
+  -- ####  ONDE SE PEGA  ####
+  --
+  -- NULL = aparece no menu /quest para todos.
+  -- Preenchido = só aparece na tela DAQUELE NPC.
+  --
+  -- Sem REFERENCES de propósito: quest_npcs nasce na migração 047,
+  -- que pode chegar depois — e uma FK para tabela inexistente
+  -- derrubaria esta migração inteira. A integridade é cobrada na
+  -- rota (QUEST_NPC_MISSING), que é quem sabe dizer em que
+  -- servidor aquele NPC está.
+  npc_id TEXT,
+
+  -- ####  REPETIÇÃO  ####
+  --   'once'     — uma vez na vida, por servidor
+  --   'cooldown' — repete depois de cooldown_seconds
+  --   'daily'    — repete na virada do dia
+  --   'weekly'   — repete na virada da semana
+  repeat_mode TEXT NOT NULL DEFAULT 'once'
+    CHECK (repeat_mode IN ('once','cooldown','daily','weekly')),
+
+  -- Só lido quando repeat_mode = 'cooldown'.
+  cooldown_seconds INTEGER NOT NULL DEFAULT 0 CHECK (cooldown_seconds >= 0),
+
+  -- ####  A CADEIA  ####
+  --
+  -- A quest só aparece depois que ESTA outra foi concluída. É o
+  -- que transforma quests soltas numa história.
+  --
+  -- Ciclo (A exige B, B exige A) é recusado NA ROTA, e não aqui:
+  -- o SQLite não tem como ver isso, e o custo de estar errado é
+  -- uma quest que nunca aparece para ninguém e ninguém entende
+  -- por quê.
+  requires_quest TEXT REFERENCES quests(id) ON DELETE SET NULL,
+
+  -- Epoch em MILISSEGUNDOS, como o resto do agente. NULL nos dois
+  -- = sempre disponível.
+  available_from INTEGER,
+  available_to   INTEGER,
+
+  -- 1 = o jogador não precisa aceitar; ela já nasce ativa quando
+  -- ele conecta. É o que faz a diária funcionar sem clique.
+  auto_accept INTEGER NOT NULL DEFAULT 0 CHECK (auto_accept IN (0, 1)),
+
+  -- ####  O QUE O WIPE FAZ COM ELA  ####
+  --   'reset' — o progresso zera quando o mundo zera
+  --   'keep'  — atravessa o wipe
+  wipe_policy TEXT NOT NULL DEFAULT 'reset'
+    CHECK (wipe_policy IN ('reset','keep')),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_quests_listing ON quests (enabled, category, sort);
+CREATE INDEX idx_quests_npc     ON quests (npc_id) WHERE npc_id IS NOT NULL;
+
+-- ----------------------------------------------------------
+--  quest_objectives — o que precisa ser feito. N por quest.
+--
+--  ####  POR QUE MULTI-OBJETIVO, SE O Quests.cs TEM UM SÓ  ####
+--
+--  Porque uma tabela custa o mesmo que uma coluna, e ela abre
+--  "mate 10 cientistas E colete 500 de scrap" — que é a diferença
+--  entre uma tarefa e uma MISSÃO. Um objetivo só é o caso
+--  particular de N = 1, e a tela desenha os dois igual.
+--
+--  A quest conclui quando TODOS fecham. "Qualquer um deles" não
+--  existe no primeiro corte: ninguém pediu, e ele exigiria um
+--  campo de modo que a tela teria de explicar.
+--
+--  ####  seq É A CHAVE QUE ATRAVESSA  ####
+--
+--  O id autoincremento nunca sai desta tabela. Quem viaja até o
+--  plugin, quem a linha de progresso guarda e quem o snapshot da
+--  tentativa referencia é o seq — é ele que sobrevive a um
+--  objetivo reescrito no painel.
+-- ----------------------------------------------------------
+CREATE TABLE quest_objectives (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  quest_id TEXT NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+
+  seq INTEGER NOT NULL,
+
+  -- ####  DE ONDE O NÚMERO VEM  ####
+  --   'kill'     — matar. target = 'scientist', 'bear', 'player'
+  --   'gather'   — colher. target = shortname do recurso
+  --   'craft'    — fabricar. target = shortname do item
+  --   'loot'     — pegar de container/chão. target = shortname
+  --   'deliver'  — levar de um NPC a outro. target = id do NPC
+  --   'playtime' — tempo online, em minutos. target = NULL
+  --   'metric'   — qualquer métrica do ranking. metric preenchido
+  --
+  -- Os quatro primeiros e o metric custam ZERO em performance: o
+  -- OrigemZAgent já roda esses hooks para o ranking. O loot é o
+  -- único caro, e ele só é registrado no plugin quando existe
+  -- objetivo de loot vivo.
+  kind TEXT NOT NULL
+    CHECK (kind IN ('kill','gather','craft','loot','deliver','playtime','metric')),
+
+  -- O alvo. NULL em 'playtime' e em 'metric'.
+  target TEXT,
+
+  -- Só em kind = 'metric': a chave em player_stats. Mesmo formato
+  -- do ranking: familia.nome, minúsculas.
+  metric TEXT,
+
+  -- Zero é recusado: um objetivo de zero conclui sozinho e a quest
+  -- inteira vira um botão de recompensa grátis.
+  amount INTEGER NOT NULL CHECK (amount > 0),
+
+  -- Sobrescreve a frase montada. NULL = o agente monta ("Matar 20
+  -- cientistas") a partir de kind + target + amount, com o nome
+  -- bonito do catálogo de itens.
+  label TEXT,
+
+  -- ####  ItemDeduction, o nome dele no Quests.cs  ####
+  --
+  -- 1 = os itens SAEM do inventário quando a quest é resgatada.
+  -- Só faz sentido em 'loot' e 'gather' — e quem cobra isso é o
+  -- zod, porque a frase de erro precisa ser lida por quem cadastra.
+  --
+  -- Quem tira é o plugin, a mando do agente; e se não houver o que
+  -- tirar, o resgate FALHA antes de a recompensa sair.
+  consume INTEGER NOT NULL DEFAULT 0 CHECK (consume IN (0, 1)),
+
+  UNIQUE (quest_id, seq)
+);
+
+CREATE INDEX idx_quest_objectives_quest ON quest_objectives (quest_id, seq);
+
+-- A consulta mais quente do sistema: "que objetivos vivos existem
+-- para este par kind+target?" — é ela que monta o catálogo que
+-- desce ao plugin no origemz.quest.watch.
+CREATE INDEX idx_quest_objectives_watch ON quest_objectives (kind, target);
+
+-- ----------------------------------------------------------
+--  quest_rewards — o que ela dá. N por quest.
+--
+--  ####  O PAYLOAD É JSON, COMO A AÇÃO DO ITEM CUSTOM  ####
+--
+--  Cinco tipos de recompensa com colunas próprias dariam uma
+--  tabela com quinze colunas das quais treze são NULL em toda
+--  linha, e um tipo novo seria uma migração. A migração 041 já
+--  resolveu isso com custom_items.action, e o padrão é o dela.
+--
+--  A régua é UMA e mora no zod (types/quests.ts). O banco só
+--  garante que o kind é conhecido.
+-- ----------------------------------------------------------
+CREATE TABLE quest_rewards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  quest_id TEXT NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+
+  kind TEXT NOT NULL CHECK (kind IN ('item','coins','kit','points','vip')),
+
+  -- O corpo, conforme o kind, sem repetir o kind dentro.
+  payload TEXT NOT NULL,
+
+  UNIQUE (quest_id, seq)
+);
+
+CREATE INDEX idx_quest_rewards_quest ON quest_rewards (quest_id, seq);
+
+-- ----------------------------------------------------------
+--  quest_servers — a quest que só vale em alguns servidores.
+--
+--  AUSÊNCIA DE LINHA = VALE EM TODOS. É o padrão, e é o caso da
+--  esmagadora maioria das quests.
+--
+--  A alternativa — uma linha por servidor sempre — obrigaria a
+--  mexer nesta tabela a cada servidor novo, e uma quest esquecida
+--  ficaria invisível lá sem ninguém entender por quê.
+-- ----------------------------------------------------------
+CREATE TABLE quest_servers (
+  quest_id  TEXT NOT NULL REFERENCES quests(id)  ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (quest_id, server_id)
+);
+
+-- "Que quests valem neste servidor?" é a pergunta do catálogo que
+-- desce ao plugin, e a chave primária começa pela outra coluna.
+CREATE INDEX idx_quest_servers_server ON quest_servers (server_id);
+
+-- ----------------------------------------------------------
+--  player_quests — uma TENTATIVA de um jogador numa quest.
+--
+--  ####  POR QUE attempt, E NÃO UMA LINHA POR JOGADOR  ####
+--
+--  Porque quest repetível é a regra, não a exceção: a diária é
+--  feita trinta vezes por mês. Uma linha só, sobrescrita, apagaria
+--  o histórico — e "quantas vezes o Fulano fez a diária?" é
+--  exatamente a pergunta que o painel precisa responder.
+--
+--  A tentativa VIVA é a de maior attempt, e a consulta dela usa o
+--  índice parcial abaixo, que só enxerga as não terminadas.
+-- ----------------------------------------------------------
+CREATE TABLE player_quests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id  TEXT NOT NULL REFERENCES players(steam_id) ON DELETE CASCADE,
+  quest_id  TEXT NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+
+  -- 1, 2, 3… Sobe a cada nova tentativa da mesma quest.
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+
+  -- ####  OS QUATRO ESTADOS  ####
+  --   'active'    — aceita, contando
+  --   'completed' — os objetivos fecharam; a recompensa espera
+  --   'claimed'   — resgatada. É o estado FINAL feliz
+  --   'abandoned' — ele cancelou, ou o admin resetou
+  --
+  -- 'completed' é um estado, e não um instante: concluir e receber
+  -- são coisas diferentes. Sem essa separação a recompensa sairia
+  -- no instante da conclusão — num inventário cheio, no meio de um
+  -- tiroteio, ou com o jogador desconectando.
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active','completed','claimed','abandoned')),
+
+  accepted_at  INTEGER NOT NULL,
+  completed_at INTEGER,
+  claimed_at   INTEGER,
+
+  -- Quando ela pode ser aceita de novo. Preenchido no RESGATE, a
+  -- partir do repeat_mode. NULL = já pode.
+  cooldown_until INTEGER,
+
+  -- ####  A DEFINIÇÃO, CONGELADA  ####
+  --
+  -- O que a quest EXIGIA e o que ela PROMETIA no instante do
+  -- aceite, como JSON. Mesma razão do DeliveryPlan da loja: o
+  -- resgate acontece horas depois, e uma quest editada no meio
+  -- entregaria outra coisa — ou, se apagada, nada.
+  --
+  -- E aqui é pior que na compra, que leva segundos: uma diária
+  -- aceita às 8h é resgatada às 23h.
+  snapshot TEXT NOT NULL,
+
+  UNIQUE (server_id, steam_id, quest_id, attempt)
+);
+
+-- A consulta do jogo: "as quests vivas deste jogador neste
+-- servidor". Parcial porque as terminadas são a maioria das linhas
+-- e nenhuma delas interessa a essa pergunta.
+CREATE INDEX idx_player_quests_live
+  ON player_quests (server_id, steam_id)
+  WHERE status IN ('active','completed');
+
+-- A do painel: "o histórico do Fulano", e "quem fez esta quest".
+CREATE INDEX idx_player_quests_history ON player_quests (steam_id, accepted_at DESC);
+CREATE INDEX idx_player_quests_quest   ON player_quests (quest_id, status);
+
+-- ----------------------------------------------------------
+--  player_quest_progress — quanto falta, objetivo a objetivo.
+--
+--  A chave aponta para a TENTATIVA, e não para (steam_id,
+--  quest_id): sem isso, a segunda diária começaria com o contador
+--  da primeira.
+--
+--  objective_seq e não objective_id: o seq é o que viaja até o
+--  plugin e o que sobrevive a um objetivo editado no painel. O
+--  snapshot da tentativa é quem diz o que aquele seq significava.
+-- ----------------------------------------------------------
+CREATE TABLE player_quest_progress (
+  player_quest_id INTEGER NOT NULL REFERENCES player_quests(id) ON DELETE CASCADE,
+  objective_seq   INTEGER NOT NULL,
+
+  value      INTEGER NOT NULL DEFAULT 0 CHECK (value >= 0),
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (player_quest_id, objective_seq)
+);
+
+-- ----------------------------------------------------------
+--  quest_batches — o lote já aplicado.
+--
+--  Cópia deliberada do stat_batches da migração 033: o mesmo
+--  problema, a mesma solução, e um desenho que já sobreviveu a
+--  quedas de RCON em produção.
+--
+--  Ele existe porque o ack pode se perder DEPOIS do commit — e
+--  então o mesmo lote volta na rodada seguinte. Sem esta tabela,
+--  ele somaria duas vezes e nada no log diria por quê.
+-- ----------------------------------------------------------
+CREATE TABLE quest_batches (
+  server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  batch_id   TEXT NOT NULL,
+  applied_at INTEGER NOT NULL,
+  players    INTEGER NOT NULL,
+  entries    INTEGER NOT NULL,
+  PRIMARY KEY (server_id, batch_id)
+);
+
+CREATE INDEX idx_quest_batches_recent ON quest_batches (server_id, applied_at DESC);
+
+-- ----------------------------------------------------------
+--  quest_events — o que aconteceu, append-only.
+--
+--  ####  ELA EXISTE PARA RESPONDER RECLAMAÇÃO  ####
+--
+--  "Fiz a quest e não recebi" é a mensagem que o dono vai ler, e
+--  sem esta tabela a única resposta possível seria "o número está
+--  zerado aqui". Com ela: aceitou às 14h02, progrediu até 4.980, o
+--  servidor caiu às 14h31, o lote de 14h32 trouxe os 20 que
+--  faltavam, resgatou às 14h33, o kit saiu.
+--
+--  ####  event_id É DO PLUGIN, E É ELE QUE DESEMPATA  ####
+--
+--  O mesmo fato chega duas vezes DE PROPÓSITO: o push dá o
+--  "agora", o lote dá o "garantido". O UNIQUE aqui é o que faz as
+--  duas chegadas virarem uma linha só — e "já vi este" é o caso
+--  NORMAL, nunca uma linha de log de alarme.
+--
+--  NULL nos eventos que nascem no agente (aceite pelo menu, reset
+--  pelo painel): só o plugin gera id de evento.
+-- ----------------------------------------------------------
+CREATE TABLE quest_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  event_id TEXT UNIQUE,
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id  TEXT NOT NULL,
+  quest_id  TEXT NOT NULL,
+  attempt   INTEGER NOT NULL,
+
+  kind TEXT NOT NULL
+    CHECK (kind IN ('accept','progress','complete','claim','abandon','reset','reward_failed')),
+
+  -- O corpo do evento, como JSON: o objetivo e o delta no
+  -- 'progress', o que foi entregue no 'claim', o código do erro no
+  -- 'reward_failed'.
+  detail TEXT,
+
+  source TEXT NOT NULL CHECK (source IN ('plugin','agent','panel','wipe')),
+
+  -- Quem mandou, quando é gente. NULL quando é o jogo.
+  actor TEXT,
+
+  at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_quest_events_player ON quest_events (steam_id, at DESC);
+CREATE INDEX idx_quest_events_quest  ON quest_events (quest_id, at DESC);
+
+-- ----------------------------------------------------------
+--  quest_settings — o que muda por servidor.
+--
+--  Uma linha por servidor, e ela pode não existir: ausência = os
+--  padrões de DEFAULT_QUEST_SETTINGS.
+--
+--  ####  POR QUE NÃO UM JSON NA TABELA servers  ####
+--
+--  Porque cada frente que precisasse de uma chave teria de
+--  reescrever o mesmo blob, e duas gravações concorrentes
+--  perderiam uma. O ranking já tem ranking_settings pelo mesmo
+--  motivo.
+-- ----------------------------------------------------------
+CREATE TABLE quest_settings (
+  server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- 0 = sem teto. É o PlayerMaxQuests do Quests.cs.
+  max_active INTEGER NOT NULL DEFAULT 0 CHECK (max_active >= 0),
+
+  -- 0 = o módulo inteiro desligado neste servidor. O /quest
+  -- continua abrindo e diz que não há quests — nunca some sem
+  -- explicação.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- Segundos entre dois ciclos de flush. 60 é o do ranking, e é o
+  -- padrão; um servidor apertado sobe isso.
+  flush_seconds INTEGER NOT NULL DEFAULT 60 CHECK (flush_seconds >= 15),
+
+  -- 0 = o hook de loot NÃO é registrado neste servidor, mesmo
+  -- havendo quest de loot cadastrada. É a válvula que o
+  -- origemz.quest.diag existe para informar.
+  loot_enabled INTEGER NOT NULL DEFAULT 1 CHECK (loot_enabled IN (0, 1)),
+
+  -- A hora da virada da diária/semanal, em minutos desde a
+  -- meia-noite do fuso do agente. 0 = meia-noite.
+  reset_at_minute INTEGER NOT NULL DEFAULT 0
+    CHECK (reset_at_minute BETWEEN 0 AND 1439),
+
+  updated_at INTEGER NOT NULL
+);
+`;
+
+// ------------------------------------------------------------
+//  047  -  O NPC DAS QUESTS
+//
+//  ####  POR QUE ELE É UMA MIGRAÇÃO SEPARADA  ####
+//
+//  Porque é a frente mais cara e a mais provável de escorregar: o
+//  Quests.cs de referência depende do HumanNPC, que não está
+//  instalado aqui, e não há hook de conversa no Oxide desta
+//  instalação (CONFERIDO: grep no Oxide.Rust.dll só devolve
+//  OnNpcTarget). O boneco é construído por nós.
+//
+//  Separada, ela pode chegar depois sem segurar o resto — e o
+//  sistema inteiro funciona com npc_id nulo em todas as quests.
+//
+//  ####  O NPC NÃO É DE REDE  ####
+//
+//  Ao contrário da quest, um X/Z do mapa de hoje não significa
+//  nada no mapa do outro servidor, e menos ainda depois do wipe.
+//
+//  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §4 e §10.
+// ------------------------------------------------------------
+const QUESTS_NPC_SCHEMA = `
+CREATE TABLE quest_npcs (
+  id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O que aparece sobre a cabeça dele e no marcador do mapa.
+  name TEXT NOT NULL,
+
+  -- 'quest'    — abre a tela com as quests dele
+  -- 'delivery' — é destino de uma quest de entrega
+  kind TEXT NOT NULL DEFAULT 'quest' CHECK (kind IN ('quest','delivery')),
+
+  -- A posição no mundo. y é gravado, mas o plugin RECALCULA a
+  -- altura do terreno ao spawnar: o mapa muda, o chão sobe e
+  -- desce, e um NPC enterrado é invisível e insuportável de
+  -- diagnosticar.
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  z REAL NOT NULL,
+
+  -- Para onde ele olha, em graus. É o que faz o NPC encarar quem
+  -- chega em vez de dar as costas.
+  rotation REAL NOT NULL DEFAULT 0,
+
+  -- O prefab do boneco. MEDIDO com Mono.Cecil contra o
+  -- Assembly-CSharp.dll real: NPCShopKeeper existe e é o que se
+  -- spawna parado.
+  --
+  -- Guardado, e não fixo no código, porque trocar a aparência é
+  -- pedido de admin — não release de agente.
+  prefab TEXT NOT NULL
+    DEFAULT 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab',
+
+  -- 1 = desenha um marcador no mapa do jogo.
+  map_marker INTEGER NOT NULL DEFAULT 1 CHECK (map_marker IN (0, 1)),
+
+  -- O raio, em metros, dentro do qual apertar USE abre a tela. Um
+  -- raio grande faz dois NPCs próximos disputarem o mesmo clique,
+  -- e quem joga não tem como saber com qual dos dois falou.
+  use_radius REAL NOT NULL DEFAULT 3.0 CHECK (use_radius > 0),
+
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- ####  O QUE O WIPE FAZ COM ELE  ####
+  --   'keep'   — a posição sobrevive. É o certo para NPC em
+  --              monumento, que existe em todo mapa
+  --   'remove' — o wipe apaga a linha. É o certo para NPC posto
+  --              num ponto que só existia naquele mapa
+  wipe_policy TEXT NOT NULL DEFAULT 'keep'
+    CHECK (wipe_policy IN ('keep','remove')),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_quest_npcs_server ON quest_npcs (server_id, enabled);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -4243,6 +4773,13 @@ export const MIGRATIONS: readonly Migration[] = [
   // migração já aplicada deixa o banco de produção sem a coluna,
   // para sempre.
   { id: 45, name: 'items-consumable', sql: ITEMS_CONSUMABLE_SCHEMA },
+
+  // As quests. A 046 é o sistema inteiro; a 047 é só o boneco no
+  // mapa, e ela é separada para poder chegar depois — ver o
+  // cabeçalho de cada uma.
+  { id: 46, name: 'quests-core', sql: QUESTS_CORE_SCHEMA },
+  { id: 47, name: 'quests-npc', sql: QUESTS_NPC_SCHEMA },
+
 ];
 
 /** Linha da tabela de controle. */

@@ -224,7 +224,43 @@ export interface WipeRunnerDeps {
    * temporada — e a caixa de três estados da tela não faria nada.
    */
   readonly rankings?: WipeRankings | undefined;
+
+  /**
+   * As MISSÕES, no wipe.
+   *
+   * ####  A COLUNA `wipe_policy` SÓ EXISTE POR CAUSA DISTO  ####
+   *
+   * Cada missão diz se o progresso dela zera quando o mundo zera, e
+   * cada NPC diz se a posição dele sobrevive. Sem este passo, os
+   * dois campos estariam no painel sem fazer nada — e o jogador
+   * entraria no mundo novo com a missão de minerar já pela metade.
+   *
+   * Ausente = o módulo de missões não está montado, e o wipe segue
+   * sem ele.
+   */
+  readonly quests?: WipeQuests | undefined;
   readonly logger?: Logger | undefined;
+}
+
+/** O que o wipe precisa das missões. E nada além disso. */
+export interface WipeQuests {
+  /**
+   * Zera o progresso das missões marcadas como `reset`.
+   *
+   * @returns quantas tentativas foram zeradas.
+   */
+  wipeProgress(input: {
+    readonly serverId: string;
+    readonly actor: string;
+    readonly reason: string;
+    readonly respectPolicy: boolean;
+  }): number;
+  /**
+   * Apaga os NPCs marcados como `remove`.
+   *
+   * @returns quantos sumiram.
+   */
+  wipeNpcs(serverId: string): number;
 }
 
 export interface WipeRunRequest {
@@ -1203,6 +1239,42 @@ export class WipeRunner implements WipeExecutor {
   ): Promise<string> {
     const { serverId } = request;
     const notes: string[] = [];
+
+    // ####  AS MISSÕES ZERAM AQUI  ####
+    //
+    // Antes da leitura do mundo novo, e não depois: este passo não
+    // depende do RCON — ele mexe só no banco —, e pô-lo depois faria
+    // um RCON fora adiar o zeramento para a próxima execução.
+    //
+    // `respectPolicy: true` é o que separa esta chamada do botão do
+    // painel: aqui cada missão decide (a coluna `wipe_policy`), e lá
+    // quem clicou já disse o que queria.
+    //
+    // O try/catch é a regra de ouro deste passo: o mundo já nasceu, e
+    // nada aqui pode desfazê-lo. Uma missão que não zerou é uma
+    // pendência que o admin resolve pelo painel — não um wipe
+    // quebrado.
+    if (this.#deps.quests !== undefined) {
+      try {
+        const zeradas = this.#deps.quests.wipeProgress({
+          serverId,
+          actor: 'wipe',
+          reason: `wipe do servidor (execução ${String(request.runId)})`,
+          respectPolicy: true,
+        });
+
+        const npcs = this.#deps.quests.wipeNpcs(serverId);
+
+        if (zeradas > 0 || npcs > 0) {
+          notes.push(
+            `missões: ${String(zeradas)} progresso(s) zerado(s)` +
+              (npcs > 0 ? `, ${String(npcs)} NPC(s) removido(s)` : ''),
+          );
+        }
+      } catch (error) {
+        notes.push(`missões: não deu para zerar (${String(error)})`);
+      }
+    }
 
     // ####  ESQUECER É O QUE FAZ O RESTO FUNCIONAR  ####
     //

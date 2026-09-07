@@ -54,6 +54,7 @@
 
 import type { UiAction, UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 
+import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
 import {
   BUNDLE_TEMPLATE_ID,
@@ -322,10 +323,25 @@ const NAV: readonly NavEntry[] = [
   // agente (ver `buildMainMenu`). Ela fica para o dia em que
   // alguém apagar a tela e o botão precisar dizer alguma coisa.
   { id: 'ranking', label: 'RANKING', width: 90, hint: 'O ranking de jogadores entra aqui.' },
+  // A dica desta também não é desenhada: a página é montada pelo
+  // agente, como a do ranking. Ver `buildMainMenu`.
+  //
+  // O `id` é `missoes` e não `quest` porque dele sai o id da tela
+  // (`tela-missoes`), e ele fica numa lista de sete portugueses.
+  { id: 'missoes', label: 'MISSÕES', width: 84, hint: 'As missões do servidor entram aqui.' },
 ];
 
-/** A entrada cuja página o AGENTE monta. Ver `buildMainMenu`. */
+/** As entradas cuja página o AGENTE monta. Ver `buildMainMenu`. */
 const RANKING_NAV_ID = 'ranking';
+const QUESTS_NAV_ID = 'missoes';
+
+/**
+ * O comando que abre o menu JÁ nas missões.
+ *
+ * Ele é um ATALHO do próprio documento, e não um segundo menu —
+ * ver `shortcuts` em types/ui-document.ts.
+ */
+const QUESTS_COMMAND = 'quest';
 
 /**
  * O Discord não é uma tela.
@@ -1159,16 +1175,39 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     // `screenId` de ação. Por isso a versão de repouso nasce SEM
     // ABA NENHUMA: uma aba levaria a `tela-ranking:pvp.kills`, e o
     // documento inteiro seria recusado na gravação.
-    ...NAV.map((entry): UiScreen =>
-      entry.id === RANKING_NAV_ID
-        ? buildRankingScreen({ view: emptyRankingView() })
-        : {
-            id: SCREEN_ID(entry.id),
-            name: entry.label,
-            kind: 'page',
-            elements: buildPlaceholder(entry),
-          },
-    ),
+    ...NAV.map((entry): UiScreen => {
+      if (entry.id === RANKING_NAV_ID) {
+        return buildRankingScreen({ view: emptyRankingView() });
+      }
+
+      // ####  A PÁGINA MISSÕES TAMBÉM É MONTADA  ####
+      //
+      // Mesma escolha da de ranking, com uma diferença que custou
+      // uma sessão: ela vai marcada com `generated: true`. Sem a
+      // marca, o plugin desenha o repouso gravado e NUNCA pede a de
+      // verdade — o jogador fica no "carregando" para sempre.
+      //
+      // Ela também nasce SEM A BARRA LATERAL, pela mesma razão do
+      // ranking: o schema não aceita `:` em `screenId` de ação, e o
+      // item da barra navega para `tela-quest:disponiveis`.
+      if (entry.id === QUESTS_NAV_ID) {
+        return {
+          ...buildQuestsScreen({
+            view: { ...emptyQuestsView(), emptyMessage: 'Carregando as suas missões…' },
+            screenId: QUESTS_SCREEN_ID,
+            withNav: false,
+          }),
+          generated: true,
+        };
+      }
+
+      return {
+        id: SCREEN_ID(entry.id),
+        name: entry.label,
+        kind: 'page',
+        elements: buildPlaceholder(entry),
+      };
+    }),
 
     // ####  OS MODAIS DA LOJA  ####
     //
@@ -1214,6 +1253,10 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     contentSlotId: CONTENT_SLOT,
     modalSlotId: MODAL_SLOT,
     entryScreenId: SCREEN_ID(HOME.id),
+    // `/quest` abre este mesmo menu, direto em MISSÕES. Um segundo
+    // documento faria o servidor carregar o menu inteiro duas
+    // vezes — ver `shortcuts` em types/ui-document.ts.
+    shortcuts: [{ command: QUESTS_COMMAND, screenId: QUESTS_SCREEN_ID }],
     screens,
   };
 }

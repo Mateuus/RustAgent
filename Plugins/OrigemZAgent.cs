@@ -58,6 +58,10 @@ using System.Globalization;
 using System.Text;
 using Newtonsoft.Json;
 
+// JObject/JArray, para ler os payloads em base64 que o agente
+// manda nas missoes. Ver a regiao Quests, no fim do arquivo.
+using Newtonsoft.Json.Linq;
+
 // Interface.Oxide.DataFileSystem mora em Oxide.Core: e por ele que
 // o buffer de estatistica sobrevive a um oxide.reload. Ver a secao
 // A COLETA DE ESTATISTICA, no fim do arquivo.
@@ -204,6 +208,14 @@ namespace Oxide.Plugins
         private const string RequestMarker = "#OZAREQ#";
         private const string RequestLoadouts = "loadouts";
         private const string RequestVips = "vips";
+
+        // ####  AS MISSOES PRECISAM DISSO MAIS QUE O RESTO  ####
+        //
+        // Um oxide.reload esvazia o catalogo E as atribuicoes.
+        // Sem o pedido, o plugin ficaria sem saber o que contar
+        // ate o jogador aceitar uma missao nova - e o cache do
+        // AGENTE continuaria achando que ja mandou.
+        private const string RequestQuests = "quests";
         private const string RequestSpawnStatus = "status";
 
         // Paginacao do origemz.items.
@@ -374,6 +386,7 @@ namespace Oxide.Plugins
                 RequestSync(RequestVips);
                 RequestSync(RequestLoadouts);
                 RequestSync(RequestSpawnStatus);
+                RequestSync(RequestQuests);
             });
 
             try
@@ -384,6 +397,27 @@ namespace Oxide.Plugins
             {
                 PrintError("Catalogo de itens nao montou no boot: " + ex);
             }
+
+            // ####  O HOOK DE LOOT NASCE DESLIGADO  ####
+            //
+            // O Oxide registra TODO hook cujo metodo existe na
+            // classe. Sem este Unsubscribe, o OnItemAddedToContainer
+            // rodaria desde o boot em todo servidor - inclusive nos
+            // que nao tem missao de loot nenhuma, que e o caso que a
+            // contencao existe para proteger.
+            //
+            // Quem o liga e o catalogo, no QuestSyncLootHook.
+            Unsubscribe("OnItemAddedToContainer");
+            _questLootHooked = false;
+
+            // Mesma razao, e este e o mais caro de todos: o
+            // OnPlayerInput dispara a cada QUADRO, para cada
+            // jogador. Quem o liga e o primeiro NPC.
+            Unsubscribe("OnPlayerInput");
+            _questNpcInputHooked = false;
+
+            // E o lote que o oxide.reload deixou no disco.
+            QuestLoad();
 
             // O SEQ do explosivo sai da recursao sobre os
             // blueprints, e ela NAO pode acontecer dentro do hook de
@@ -4620,6 +4654,11 @@ namespace Oxide.Plugins
                 return;
             }
 
+            // As missoes contam o recurso PELO NOME, e nao pela
+            // familia: o ranking soma `ore.total`, a missao pede
+            // enxofre. O mesmo golpe de picareta serve aos dois.
+            QuestOnGather(player, info.shortname, amount);
+
             string metric;
 
             if (!OreMetrics.TryGetValue(info.shortname, out metric))
@@ -4859,6 +4898,21 @@ namespace Oxide.Plugins
             }
 
             BasePlayer attacker = AttackerOf(info);
+
+            // ####  AS MISSOES ENGANCHAM AQUI  ####
+            //
+            // No hook que JA roda, e nao num proprio: um segundo
+            // OnPlayerDeath custaria o dobro de quadros para contar a
+            // mesma morte. O QuestOnKill sai na primeira comparacao
+            // quando ninguem persegue aquele alvo.
+            //
+            // `ShortPrefabName` para o NPC (o `scientistnpc_heavy`
+            // que o alias normaliza) e `player` para gente: e assim
+            // que o alvo e cadastrado no painel.
+            if (attacker != null && attacker != victim)
+            {
+                QuestOnKill(attacker, victim.IsNpc ? victim.ShortPrefabName : "player");
+            }
 
             // ####  LINHA 1: A VITIMA E NPC  ####
             //
@@ -5575,6 +5629,14 @@ namespace Oxide.Plugins
 
         private void ApplyCraft(ItemCraftTask task, Item item, ItemCrafter crafter)
         {
+            // As missoes contam o item fabricado, no mesmo hook. Um
+            // lote de 500 balas conta 500 - e o painel diz "500
+            // balas", nao "1 craft".
+            if (crafter != null && item != null && item.info != null && item.amount > 0)
+            {
+                QuestOnCraft(crafter.owner, item.info.shortname, item.amount);
+            }
+
             if (task == null || item == null || item.info == null || item.amount <= 0)
             {
                 return;
@@ -6654,6 +6716,18 @@ namespace Oxide.Plugins
         // disco antes de a memoria sumir.
         private void Unload()
         {
+            // As missoes gravam SEMPRE, e nao so quando a coleta
+            // esta pronta: os dois buffers sao independentes, e um
+            // reload no minuto em que a coleta ainda nao subiu nao
+            // pode custar o progresso de missao de ninguem.
+            QuestSave(true);
+
+            // Os NPCs sao `enableSaving = false`: eles nao vao para o
+            // save do mundo, e um oxide.reload sem esta linha
+            // deixaria bonecos orfaos no mapa que ninguem consegue
+            // remover. O agente os manda de volta na proxima rodada.
+            QuestNpcDespawnAll();
+
             if (!_statsReady)
             {
                 return;
@@ -6964,5 +7038,1651 @@ namespace Oxide.Plugins
             [JsonProperty("pending")]
             public StatsBatch Pending { get; set; }
         }
+
+        // ============================================================
+        //  AS MISSOES
+        //
+        //  ####  ESTA REGIAO NAO ABRE HOOK NENHUM DE GRACA  ####
+        //
+        //  Os hooks de matar, colher e fabricar JA existem neste
+        //  plugin, para o ranking. As missoes ENGANCHAM neles: o
+        //  ApplyDeath, o AddOre e o OnItemCraftFinished chamam os
+        //  QuestOn* daqui, e nenhum quadro a mais e gasto.
+        //
+        //  A excecao e o LOOT. `OnItemAddedToContainer` dispara para
+        //  todo item que entra em qualquer caixa do servidor, o tempo
+        //  inteiro, e por isso ele so e REGISTRADO quando o agente
+        //  manda um catalogo com alvo de loot dentro. Um servidor sem
+        //  missao de loot paga zero.
+        //
+        //  ####  O PLUGIN CONTA PARA A TELA; O AGENTE CONTA PARA O
+        //        PREMIO  ####
+        //
+        //  Daqui sai o progresso e a PROPOSTA de conclusao. Quem
+        //  confere `have >= need` e entrega o premio e o agente, com
+        //  o numero dele. Um oxide.reload esvazia este cache sem
+        //  derrubar o RCON - e sem essa conferencia a recompensa
+        //  sairia de um contador incompleto.
+        //
+        //  ####  O LOTE CONGELA, E O `ack` E O UNICO QUE DESCARTA  ####
+        //
+        //  Mesmo desenho do `origemz.stats.flush`: o flush com
+        //  offset 0 fecha o buffer como lote pendente e abre um novo;
+        //  o ack descarta. Uma queda de RCON no meio do ciclo nao
+        //  custa nada.
+        //
+        //  Contrato: core/src/game/quests-contract.ts.
+        //  Documento: Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md, secao 8.
+        // ============================================================
+        #region Quests
+
+        private const string QuestWatchCommand = "origemz.quest.watch";
+        private const string QuestAssignCommand = "origemz.quest.assign";
+        private const string QuestForgetCommand = "origemz.quest.forget";
+        private const string QuestFlushCommand = "origemz.quest.flush";
+        private const string QuestAckCommand = "origemz.quest.ack";
+        private const string QuestDiagCommand = "origemz.quest.diag";
+        private const string QuestConsumeCommand = "origemz.quest.consume";
+
+        private const string QuestEventMarker = "#OZQUEST#";
+
+        // O nome que o diagnostico de custo usa. Ele entra na
+        // MESMA medicao dos hooks do ranking: um so lugar para
+        // perguntar quanto os ganchos custam neste servidor.
+        private const string HookItemAdded = "OnItemAddedToContainer";
+        private const string HookPlayerInput = "OnPlayerInput";
+        private const string QuestDataFile = "OrigemZAgentQuests";
+        private const int QuestContract = 1;
+
+        // Iguais aos do contrato, no agente. A duplicata e de
+        // proposito: este comando tambem e digitado a mao no console
+        // do servidor, e o plugin nao pode depender de quem o chama.
+        private const int DefaultQuestLimit = 100;
+        private const int MaxQuestLimit = 250;
+        private const int MaxQuestBytes = 60000;
+
+        private const string QuestErrorTooLarge = "PAYLOAD_TOO_LARGE";
+        private const string QuestErrorNoBatch = "NO_BATCH";
+
+        // O que observar, por tipo. Vazio = nao observe.
+        private Dictionary<string, HashSet<string>> _questWatch =
+            new Dictionary<string, HashSet<string>>();
+
+        // A normalizacao das criaturas, que desce do agente. Ver o
+        // CREATURE_ALIASES do collector.ts: uma criatura nova do Rust
+        // nao pode exigir um release deste plugin.
+        private Dictionary<string, string> _questAlias = new Dictionary<string, string>();
+
+        // O segredo que autentica o `#OZQUEST#` de volta. Sem ele, o
+        // push nao sai: o agente ignoraria a linha de qualquer jeito.
+        private string _questSecret;
+
+        // As tentativas vivas de cada jogador. steamId -> lista.
+        private Dictionary<ulong, List<QuestAssignment>> _questAssigned =
+            new Dictionary<ulong, List<QuestAssignment>>();
+
+        // O buffer aberto: (pq, seq) -> delta acumulado.
+        private Dictionary<string, QuestEntryInfo> _questOpen =
+            new Dictionary<string, QuestEntryInfo>();
+
+        private QuestBatch _questPending;
+        private int _questSeq;
+        private bool _questDirty;
+        private bool _questLootHooked;
+
+        // O que ja foi proposto ao agente, para nao gritar duas vezes
+        // a mesma conclusao a cada golpe de picareta depois de ela
+        // fechar.
+        private HashSet<long> _questAnnounced = new HashSet<long>();
+
+        // ------------------------------------------------------
+        //  O CATALOGO
+        // ------------------------------------------------------
+
+        [ConsoleCommand(QuestWatchCommand)]
+        private void CommandQuestWatch(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleQuestWatch(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestWatchCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleQuestWatch(ConsoleSystem.Arg arg)
+        {
+            if (!arg.HasArgs(1))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            JObject payload = QuestDecode(arg.GetString(0));
+
+            if (payload == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            // ####  ELE SUBSTITUI O ANTERIOR, INTEIRO  ####
+            //
+            // Um alvo que sumiu do catalogo para de ser contado. Sem
+            // isso, o plugin guardaria para sempre o que ja nao
+            // existe - o mesmo motivo do `origemz.item.clear`.
+            Dictionary<string, HashSet<string>> watch =
+                new Dictionary<string, HashSet<string>>();
+
+            JObject raw = payload["watch"] as JObject;
+
+            if (raw != null)
+            {
+                foreach (KeyValuePair<string, JToken> entry in raw)
+                {
+                    JArray list = entry.Value as JArray;
+
+                    if (list == null)
+                    {
+                        continue;
+                    }
+
+                    HashSet<string> targets = new HashSet<string>();
+
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        string target = (string)list[i];
+
+                        if (!string.IsNullOrEmpty(target))
+                        {
+                            targets.Add(target);
+                        }
+                    }
+
+                    if (targets.Count > 0)
+                    {
+                        watch[entry.Key] = targets;
+                    }
+                }
+            }
+
+            Dictionary<string, string> alias = new Dictionary<string, string>();
+            JObject aliasRaw = payload["alias"] as JObject;
+
+            if (aliasRaw != null)
+            {
+                foreach (KeyValuePair<string, JToken> entry in aliasRaw)
+                {
+                    alias[entry.Key] = (string)entry.Value;
+                }
+            }
+
+            _questWatch = watch;
+            _questAlias = alias;
+            _questSecret = (string)payload["secret"];
+
+            QuestSyncLootHook();
+
+            int total = 0;
+
+            foreach (KeyValuePair<string, HashSet<string>> entry in watch)
+            {
+                total += entry.Value.Count;
+            }
+
+            // Isto PRECISA aparecer no log: a resposta abaixo vai pelo
+            // RCON e nao fica no log do Oxide. Sem esta linha, "a
+            // missao nao progride" nao teria como ser diagnosticado.
+            Puts("Missoes: catalogo com " + total + " alvo(s); loot " +
+                (_questLootHooked ? "LIGADO" : "desligado"));
+
+            return "{\"ok\":true,\"contract\":" + QuestContract + ",\"targets\":" + total + "}";
+        }
+
+        // ####  O HOOK MAIS QUENTE DO JOGO SO ENTRA SE PRECISAR  ####
+        //
+        // `OnItemAddedToContainer` dispara para todo item que entra em
+        // qualquer caixa do servidor. Registra-lo sem missao de loot
+        // seria cobrar de todo servidor por um recurso que so alguns
+        // usam.
+        private void QuestSyncLootHook()
+        {
+            bool wanted = _questWatch.ContainsKey("loot");
+
+            if (wanted == _questLootHooked)
+            {
+                return;
+            }
+
+            if (wanted)
+            {
+                Subscribe("OnItemAddedToContainer");
+            }
+            else
+            {
+                Unsubscribe("OnItemAddedToContainer");
+            }
+
+            _questLootHooked = wanted;
+        }
+
+        // ------------------------------------------------------
+        //  QUEM PERSEGUE O QUE
+        // ------------------------------------------------------
+
+        [ConsoleCommand(QuestAssignCommand)]
+        private void CommandQuestAssign(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleQuestAssign(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestAssignCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleQuestAssign(ConsoleSystem.Arg arg)
+        {
+            if (!arg.HasArgs(2))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            ulong steamId;
+
+            if (!ulong.TryParse(arg.GetString(0), out steamId))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            JObject payload = QuestDecode(arg.GetString(1));
+
+            if (payload == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            List<QuestAssignment> assignments = new List<QuestAssignment>();
+            JArray quests = payload["quests"] as JArray;
+
+            if (quests != null)
+            {
+                for (int i = 0; i < quests.Count; i++)
+                {
+                    JObject quest = quests[i] as JObject;
+
+                    if (quest == null)
+                    {
+                        continue;
+                    }
+
+                    JArray objectives = quest["objectives"] as JArray;
+
+                    if (objectives == null)
+                    {
+                        continue;
+                    }
+
+                    for (int j = 0; j < objectives.Count; j++)
+                    {
+                        JObject objective = objectives[j] as JObject;
+
+                        if (objective == null)
+                        {
+                            continue;
+                        }
+
+                        assignments.Add(new QuestAssignment
+                        {
+                            PlayerQuestId = (long)quest["pq"],
+                            Seq = (int)objective["seq"],
+                            Kind = (string)objective["kind"],
+                            Target = (string)objective["target"],
+                            Need = (int)objective["need"],
+                            Have = (int)objective["have"]
+                        });
+                    }
+                }
+            }
+
+            if (assignments.Count == 0)
+            {
+                _questAssigned.Remove(steamId);
+            }
+            else
+            {
+                _questAssigned[steamId] = assignments;
+            }
+
+            // O anunciado e limpo junto: uma tentativa nova precisa
+            // poder anunciar a conclusao dela, mesmo que o id seja
+            // reaproveitado depois de um wipe do banco.
+            for (int i = 0; i < assignments.Count; i++)
+            {
+                _questAnnounced.Remove(assignments[i].PlayerQuestId);
+            }
+
+            return "{\"ok\":true,\"contract\":" + QuestContract +
+                ",\"objectives\":" + assignments.Count + "}";
+        }
+
+        [ConsoleCommand(QuestForgetCommand)]
+        private void CommandQuestForget(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                ulong steamId;
+
+                if (!arg.HasArgs(1) || !ulong.TryParse(arg.GetString(0), out steamId))
+                {
+                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
+                    return;
+                }
+
+                _questAssigned.Remove(steamId);
+                arg.ReplyWith("{\"ok\":true,\"contract\":" + QuestContract + "}");
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestForgetCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        // O jogador saiu: o cache dele nao precisa mais existir.
+        //
+        // Sem isto, um servidor de meses acumularia a atribuicao de
+        // todo mundo que ja passou por ele - e o agente reenvia no
+        // OnPlayerConnected de qualquer jeito.
+        private void OnPlayerDisconnected(BasePlayer player, string reason)
+        {
+            if (player != null)
+            {
+                _questAssigned.Remove(player.userID);
+            }
+        }
+
+        // ------------------------------------------------------
+        //  A CONTAGEM
+        // ------------------------------------------------------
+
+        // Os quatro pontos de entrada. Cada um e chamado de DENTRO de
+        // um hook que ja existe para o ranking - nenhum quadro a mais
+        // e gasto por causa das missoes.
+        private void QuestOnKill(BasePlayer killer, string rawTarget)
+        {
+            QuestCount(killer, "kill", QuestNormalize(rawTarget), 1);
+        }
+
+        private void QuestOnGather(BasePlayer player, string shortname, int amount)
+        {
+            QuestCount(player, "gather", shortname, amount);
+        }
+
+        private void QuestOnCraft(BasePlayer player, string shortname, int amount)
+        {
+            QuestCount(player, "craft", shortname, amount);
+        }
+
+        private void QuestOnLoot(BasePlayer player, string shortname, int amount)
+        {
+            QuestCount(player, "loot", shortname, amount);
+        }
+
+        // ####  O HOOK MAIS CARO DO JOGO  ####
+        //
+        // Ele dispara para TODO item que entra em qualquer container
+        // do servidor. Tres contencoes o seguram:
+        //
+        //   1. ele so e REGISTRADO quando ha alvo de loot no catalogo
+        //      (ver QuestSyncLootHook) - num servidor sem missao de
+        //      loot este metodo nunca e chamado;
+        //   2. a primeira coisa que ele faz e comparar o shortname
+        //      contra um HashSet, dentro do QuestCount;
+        //   3. so conta o que entra no inventario de um JOGADOR - o
+        //      item que vai para uma caixa nao e loot de ninguem.
+        //
+        // O custo medido sai no `origemz.quest.diag`.
+        private void OnItemAddedToContainer(ItemContainer container, Item item)
+        {
+            long started = StatsHookStart();
+
+            try
+            {
+                if (container == null || item == null || item.info == null || item.amount <= 0)
+                {
+                    return;
+                }
+
+                BasePlayer owner = container.playerOwner;
+
+                if (owner == null)
+                {
+                    return;
+                }
+
+                QuestOnLoot(owner, item.info.shortname, item.amount);
+            }
+            catch (Exception ex)
+            {
+                ReportStatsHookError(HookItemAdded, ex);
+            }
+            finally
+            {
+                StatsHookStop(HookItemAdded, started);
+            }
+        }
+
+        // A criatura, com o nome que o admin cadastrou.
+        //
+        // `scientistnpc_heavy` vira `scientist`. A tabela desce do
+        // agente: ver o cabecalho do QuestWatchCommand.
+        private string QuestNormalize(string raw)
+        {
+            if (string.IsNullOrEmpty(raw))
+            {
+                return raw;
+            }
+
+            string mapped;
+
+            return _questAlias.TryGetValue(raw, out mapped) ? mapped : raw;
+        }
+
+        // O coracao. Ele sai na PRIMEIRA comparacao quando ninguem
+        // persegue aquilo - e e por isso que o custo de uma missao
+        // cadastrada nao aparece nos hooks das outras.
+        private void QuestCount(BasePlayer player, string kind, string target, int amount)
+        {
+            if (player == null || player.IsNpc || amount <= 0 || string.IsNullOrEmpty(target))
+            {
+                return;
+            }
+
+            HashSet<string> targets;
+
+            if (!_questWatch.TryGetValue(kind, out targets) || !targets.Contains(target))
+            {
+                return;
+            }
+
+            List<QuestAssignment> assignments;
+
+            if (!_questAssigned.TryGetValue(player.userID, out assignments))
+            {
+                return;
+            }
+
+            for (int i = 0; i < assignments.Count; i++)
+            {
+                QuestAssignment assignment = assignments[i];
+
+                if (assignment.Kind != kind || assignment.Target != target)
+                {
+                    continue;
+                }
+
+                assignment.Have += amount;
+                QuestBump(assignment.PlayerQuestId, assignment.Seq, amount);
+
+                // ####  O PUSH SO SAI NA VIRADA, E UMA VEZ SO  ####
+                //
+                // Gritar a cada golpe de picareta depois de a missao
+                // fechar encheria o console e o agente recusaria
+                // todos, menos o primeiro. O `_questAnnounced` e o
+                // que garante uma linha por tentativa.
+                if (assignment.Have >= assignment.Need &&
+                    QuestAllDone(player.userID, assignment.PlayerQuestId) &&
+                    _questAnnounced.Add(assignment.PlayerQuestId))
+                {
+                    QuestPush(player, assignment.PlayerQuestId, "complete", 0);
+                }
+            }
+        }
+
+        // Todos os objetivos daquela tentativa fecharam?
+        //
+        // O plugin PROPOE; quem decide e o agente. Mas propor sem
+        // conferir os outros objetivos faria uma missao de dois
+        // passos gritar no primeiro.
+        private bool QuestAllDone(ulong steamId, long playerQuestId)
+        {
+            List<QuestAssignment> assignments;
+
+            if (!_questAssigned.TryGetValue(steamId, out assignments))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < assignments.Count; i++)
+            {
+                if (assignments[i].PlayerQuestId == playerQuestId &&
+                    assignments[i].Have < assignments[i].Need)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void QuestBump(long playerQuestId, int seq, int delta)
+        {
+            string key = playerQuestId + ":" + seq;
+            QuestEntryInfo entry;
+
+            if (!_questOpen.TryGetValue(key, out entry))
+            {
+                entry = new QuestEntryInfo
+                {
+                    PlayerQuestId = playerQuestId,
+                    Seq = seq,
+                    Delta = 0
+                };
+
+                _questOpen[key] = entry;
+            }
+
+            entry.Delta += delta;
+            _questDirty = true;
+        }
+
+        // ------------------------------------------------------
+        //  O PUSH
+        // ------------------------------------------------------
+
+        // ####  O SEGREDO NAO E ZELO  ####
+        //
+        // O agente le TODA linha do console, e o chat dos jogadores
+        // passa por ele. Sem o segredo, alguem digitando o marcador
+        // no chat concluiria a propria missao.
+        private void QuestPush(BasePlayer player, long playerQuestId, string kind, float meters)
+        {
+            if (string.IsNullOrEmpty(_questSecret) || player == null)
+            {
+                return;
+            }
+
+            // O eventId e daqui, e e ele que faz o push e o lote do
+            // mesmo fato virarem UMA linha no agente.
+            string eventId = playerQuestId + ":" + kind + ":" + _questSeq;
+
+            StringBuilder line = new StringBuilder();
+
+            line.Append(QuestEventMarker);
+            line.Append("{\"contract\":").Append(QuestContract);
+            line.Append(",\"secret\":\"").Append(_questSecret).Append('"');
+            line.Append(",\"eventId\":\"").Append(eventId).Append('"');
+            line.Append(",\"kind\":\"").Append(kind).Append('"');
+            line.Append(",\"steamId\":\"").Append(player.UserIDString).Append('"');
+            line.Append(",\"pq\":").Append(playerQuestId);
+
+            if (kind == "deliver")
+            {
+                line.Append(",\"meters\":").Append(
+                    meters.ToString("0.##", CultureInfo.InvariantCulture));
+            }
+
+            line.Append('}');
+
+            Puts(line.ToString());
+        }
+
+        // ------------------------------------------------------
+        //  O `consume`: os itens que a missao cobra
+        // ------------------------------------------------------
+
+        // ####  E TUDO OU NADA, E ESSA E A REGRA INTEIRA  ####
+        //
+        // O agente pergunta ANTES de entregar o premio. Se faltar um
+        // item, NADA sai do inventario e o resgate para - o jogador
+        // junta o que falta e volta. Tirar metade cobraria material
+        // por um premio que nao veio.
+        //
+        // Por isso sao duas passadas: a primeira CONTA, a segunda
+        // tira. Uma passada so, tirando enquanto conta, deixaria o
+        // inventario mexido quando o ultimo item faltasse.
+        [ConsoleCommand(QuestConsumeCommand)]
+        private void CommandQuestConsume(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleQuestConsume(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestConsumeCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleQuestConsume(ConsoleSystem.Arg arg)
+        {
+            if (!arg.HasArgs(2))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            ulong steamId;
+
+            if (!ulong.TryParse(arg.GetString(0), out steamId))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            BasePlayer player = BasePlayer.FindByID(steamId);
+
+            if (player == null || player.inventory == null)
+            {
+                // Ele saiu entre o clique e este comando. O agente
+                // trata como "faltou", e a missao continua pronta.
+                return "{\"ok\":true,\"contract\":" + QuestContract +
+                    ",\"taken\":[],\"complete\":false}";
+            }
+
+            JObject payload = QuestDecode(arg.GetString(1));
+
+            if (payload == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            JArray items = payload["items"] as JArray;
+
+            if (items == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            List<string> names = new List<string>();
+            List<int> amounts = new List<int>();
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                JObject item = items[i] as JObject;
+
+                if (item == null)
+                {
+                    continue;
+                }
+
+                string shortname = (string)item["shortname"];
+                int amount = (int)item["amount"];
+
+                if (string.IsNullOrEmpty(shortname) || amount <= 0)
+                {
+                    continue;
+                }
+
+                names.Add(shortname);
+                amounts.Add(amount);
+            }
+
+            // Primeira passada: da para pagar tudo?
+            for (int i = 0; i < names.Count; i++)
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(names[i]);
+
+                if (definition == null || player.inventory.GetAmount(definition.itemid) < amounts[i])
+                {
+                    return "{\"ok\":true,\"contract\":" + QuestContract +
+                        ",\"taken\":[],\"complete\":false}";
+                }
+            }
+
+            // Segunda: tira.
+            StringBuilder taken = new StringBuilder();
+
+            for (int i = 0; i < names.Count; i++)
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(names[i]);
+
+                player.inventory.Take(null, definition.itemid, amounts[i]);
+
+                if (taken.Length > 0)
+                {
+                    taken.Append(',');
+                }
+
+                taken.Append("{\"shortname\":").Append(JsonConvert.ToString(names[i]));
+                taken.Append(",\"amount\":").Append(amounts[i]).Append('}');
+            }
+
+            return "{\"ok\":true,\"contract\":" + QuestContract +
+                ",\"taken\":[" + taken + "],\"complete\":true}";
+        }
+
+        // ------------------------------------------------------
+        //  O LOTE
+        // ------------------------------------------------------
+
+        [ConsoleCommand(QuestFlushCommand)]
+        private void CommandQuestFlush(ConsoleSystem.Arg arg)
+        {
+            // Excecao que sobe de um ConsoleCommand vindo do RCON nao
+            // produz resposta nenhuma, e o agente fica pendurado ate o
+            // timeout. Todo caminho de saida responde.
+            try
+            {
+                arg.ReplyWith(HandleQuestFlush(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestFlushCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleQuestFlush(ConsoleSystem.Arg arg)
+        {
+            int offset;
+
+            if (!TryReadInt(arg, 0, 0, out offset) || offset < 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            int limit;
+
+            if (!TryReadInt(arg, 1, DefaultQuestLimit, out limit) || limit < 1)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            if (limit > MaxQuestLimit)
+            {
+                limit = MaxQuestLimit;
+            }
+
+            // ####  O OFFSET ZERO E O QUE CONGELA  ####
+            //
+            // Ele fecha o buffer atual como lote pendente e abre um
+            // novo. Com um pendente nao confirmado, ele devolve o
+            // MESMO lote - e e isso que faz uma queda de RCON no meio
+            // do ciclo nao custar nada.
+            if (offset == 0 && _questPending == null && _questOpen.Count > 0)
+            {
+                _questSeq++;
+
+                _questPending = new QuestBatch
+                {
+                    BatchId = _questSeq + "-" + DateTime.UtcNow.Ticks,
+                    Entries = new List<QuestEntryInfo>(_questOpen.Values)
+                };
+
+                _questOpen = new Dictionary<string, QuestEntryInfo>();
+                _questDirty = true;
+                QuestSave(true);
+            }
+
+            if (_questPending == null)
+            {
+                // Nada pendente: um lote vazio, com um batchId que o
+                // agente vai confirmar e descartar. Responder "sem
+                // lote" faria o agente tratar como falha.
+                return "{\"ok\":true,\"contract\":" + QuestContract +
+                    ",\"batchId\":\"vazio\",\"entries\":[],\"total\":0}";
+            }
+
+            StringBuilder json = new StringBuilder();
+
+            json.Append("{\"ok\":true,\"contract\":").Append(QuestContract);
+            json.Append(",\"batchId\":\"").Append(_questPending.BatchId).Append('"');
+            json.Append(",\"total\":").Append(_questPending.Entries.Count);
+            json.Append(",\"entries\":[");
+
+            int written = 0;
+
+            for (int i = offset; i < _questPending.Entries.Count && written < limit; i++)
+            {
+                QuestEntryInfo entry = _questPending.Entries[i];
+
+                if (written > 0)
+                {
+                    json.Append(',');
+                }
+
+                json.Append("{\"pq\":").Append(entry.PlayerQuestId);
+                json.Append(",\"seq\":").Append(entry.Seq);
+                json.Append(",\"delta\":").Append(entry.Delta).Append('}');
+
+                written++;
+            }
+
+            json.Append("]}");
+
+            // ####  A PAGINA E RECUSADA INTEIRA, E NAO CORTADA  ####
+            //
+            // Resposta truncada chega ao agente como JSON invalido, e
+            // meio lote PARECE ter funcionado. Quem recebe este codigo
+            // reduz o limit pela metade e pede de novo, sem avancar o
+            // offset.
+            if (json.Length > MaxQuestBytes)
+            {
+                return BuildError(QuestErrorTooLarge);
+            }
+
+            return json.ToString();
+        }
+
+        [ConsoleCommand(QuestAckCommand)]
+        private void CommandQuestAck(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                if (!arg.HasArgs(1))
+                {
+                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
+                    return;
+                }
+
+                string batchId = arg.GetString(0);
+
+                if (_questPending == null || _questPending.BatchId != batchId)
+                {
+                    // Um oxide.reload entre duas paginas, ou um ack
+                    // repetido de um lote que ja saiu. Nenhum dos dois
+                    // e defeito.
+                    arg.ReplyWith(BuildError(QuestErrorNoBatch));
+                    return;
+                }
+
+                _questPending = null;
+                _questDirty = true;
+                QuestSave(true);
+
+                arg.ReplyWith("{\"ok\":true,\"contract\":" + QuestContract + "}");
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestAckCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        // ####  O DIAG EXISTE PARA UMA DECISAO, E NAO PARA CURIOSIDADE  ####
+        //
+        // "O hook de loot cabe no orcamento deste servidor?" e a
+        // pergunta que ele responde, com numero. Quem nao gostar da
+        // resposta desliga o loot em quest_settings, e o resto do
+        // modulo continua funcionando.
+        [ConsoleCommand(QuestDiagCommand)]
+        private void CommandQuestDiag(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                StringBuilder json = new StringBuilder();
+
+                json.Append("{\"ok\":true,\"contract\":").Append(QuestContract);
+                json.Append(",\"lootHooked\":").Append(_questLootHooked ? "true" : "false");
+                json.Append(",\"watchedKinds\":").Append(_questWatch.Count);
+                json.Append(",\"assignedPlayers\":").Append(_questAssigned.Count);
+                json.Append(",\"openEntries\":").Append(_questOpen.Count);
+                json.Append(",\"pending\":").Append(
+                    _questPending == null ? 0 : _questPending.Entries.Count);
+                json.Append('}');
+
+                arg.ReplyWith(json.ToString());
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestDiagCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        // ------------------------------------------------------
+        //  O DISCO
+        // ------------------------------------------------------
+
+        // ####  O oxide.reload NAO PODE CUSTAR PROGRESSO  ####
+        //
+        // O que ainda nao foi confirmado vai para o disco antes de a
+        // memoria sumir. O catalogo e as atribuicoes NAO vao: eles
+        // vem do agente, e o plugin pede de volta com `#OZAREQ#`.
+        private void QuestSave(bool force)
+        {
+            if (!force && !_questDirty)
+            {
+                return;
+            }
+
+            try
+            {
+                Interface.Oxide.DataFileSystem.WriteObject(QuestDataFile, new QuestState
+                {
+                    Seq = _questSeq,
+                    Open = new List<QuestEntryInfo>(_questOpen.Values),
+                    Pending = _questPending
+                });
+
+                _questDirty = false;
+            }
+            catch (Exception ex)
+            {
+                PrintError("Nao consegui gravar " + QuestDataFile + ": " + ex);
+            }
+        }
+
+        private void QuestLoad()
+        {
+            try
+            {
+                QuestState state = Interface.Oxide.DataFileSystem.ReadObject<QuestState>(QuestDataFile);
+
+                if (state == null)
+                {
+                    return;
+                }
+
+                _questSeq = state.Seq;
+                _questPending = state.Pending;
+                _questOpen = new Dictionary<string, QuestEntryInfo>();
+
+                if (state.Open != null)
+                {
+                    for (int i = 0; i < state.Open.Count; i++)
+                    {
+                        QuestEntryInfo entry = state.Open[i];
+
+                        _questOpen[entry.PlayerQuestId + ":" + entry.Seq] = entry;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Arquivo ilegivel e o mesmo que arquivo ausente: o
+                // progresso do minuto se perde, e o resto continua. O
+                // agente reenvia as atribuicoes na proxima rodada.
+                PrintWarning("Nao consegui ler " + QuestDataFile + ": " + ex.Message);
+            }
+        }
+
+        private JObject QuestDecode(string base64)
+        {
+            try
+            {
+                string json = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+
+                return JObject.Parse(json);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        // ------------------------------------------------------
+        //  OS TIPOS
+        // ------------------------------------------------------
+
+        private class QuestAssignment
+        {
+            public long PlayerQuestId;
+            public int Seq;
+            public string Kind;
+            public string Target;
+            public int Need;
+            public int Have;
+        }
+
+        private class QuestEntryInfo
+        {
+            [JsonProperty("pq")]
+            public long PlayerQuestId { get; set; }
+
+            [JsonProperty("seq")]
+            public int Seq { get; set; }
+
+            [JsonProperty("delta")]
+            public int Delta { get; set; }
+        }
+
+        private class QuestBatch
+        {
+            [JsonProperty("batchId")]
+            public string BatchId { get; set; }
+
+            [JsonProperty("entries")]
+            public List<QuestEntryInfo> Entries { get; set; }
+        }
+
+        // O que vai para oxide/data/OrigemZAgentQuests.json.
+        private class QuestState
+        {
+            [JsonProperty("seq")]
+            public int Seq { get; set; }
+
+            [JsonProperty("open")]
+            public List<QuestEntryInfo> Open { get; set; }
+
+            [JsonProperty("pending")]
+            public QuestBatch Pending { get; set; }
+        }
+
+        #endregion
+
+        // ============================================================
+        //  OS NPCs DAS MISSOES
+        //
+        //  ####  POR QUE ELES SAO CONSTRUIDOS AQUI  ####
+        //
+        //  O Quests.cs de referencia depende do HumanNPC, que nao
+        //  esta instalado nesta rede - e nao ha hook de conversa no
+        //  Oxide desta instalacao (CONFERIDO: grep no Oxide.Rust.dll
+        //  so devolve OnNpcTarget). O boneco e nosso.
+        //
+        //  MEDIDO com Mono.Cecil contra o Assembly-CSharp.dll real:
+        //  NPCShopKeeper existe, herda de NPCPlayer, e o prefab
+        //  `bandit_shopkeeper.prefab` esta nos bundles do servidor.
+        //
+        //  ####  O `OnPlayerInput` E O HOOK MAIS QUENTE QUE EXISTE  ####
+        //
+        //  Ele dispara a cada quadro, para cada jogador. Tres
+        //  contencoes o seguram:
+        //
+        //    1. ele so e REGISTRADO quando ha NPC neste servidor;
+        //    2. a primeira coisa que ele faz e olhar UM botao;
+        //    3. so depois disso ele mede distancia, e contra uma
+        //       lista que tem tres ou quatro entradas.
+        //
+        //  ####  A TELA E DO AGENTE, E O TRANSPORTE JA EXISTE  ####
+        //
+        //  Apertar USE perto do NPC nao abre nada aqui: o plugin
+        //  manda o jogador abrir `tela-quest:npc:<id>` pelo mesmo
+        //  caminho que o menu ja usa. Zero transporte novo, zero
+        //  cache novo, zero tratamento de erro novo.
+        //
+        //  Documento: Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md, secao 10.
+        // ============================================================
+        #region QuestNpcs
+
+        private const string QuestNpcClearCommand = "origemz.quest.npc.clear";
+        private const string QuestNpcSetCommand = "origemz.quest.npc.set";
+        private const string QuestNpcMarker = "#OZQUESTNPC#";
+
+        // O que o agente mandou spawnar. id -> definicao.
+        private Dictionary<string, QuestNpcInfo> _questNpcs =
+            new Dictionary<string, QuestNpcInfo>();
+
+        // O que esta VIVO no mundo. id -> boneco.
+        private Dictionary<string, BasePlayer> _questNpcEntities =
+            new Dictionary<string, BasePlayer>();
+
+        private Dictionary<string, BaseEntity> _questNpcMarkers =
+            new Dictionary<string, BaseEntity>();
+
+        private bool _questNpcInputHooked;
+
+        // Quando cada jogador falou com um NPC pela ultima vez.
+        //
+        // O USE fica pressionado por varios quadros; sem este freio,
+        // um toque no botao mandaria dez pedidos de tela ao agente.
+        private Dictionary<ulong, float> _questNpcLastUse = new Dictionary<ulong, float>();
+
+        private const float QuestNpcUseCooldown = 1.5f;
+
+        [ConsoleCommand(QuestNpcClearCommand)]
+        private void CommandQuestNpcClear(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                QuestNpcDespawnAll();
+                _questNpcs.Clear();
+                QuestNpcSyncInputHook();
+
+                arg.ReplyWith("{\"ok\":true,\"contract\":" + QuestContract + "}");
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestNpcClearCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        [ConsoleCommand(QuestNpcSetCommand)]
+        private void CommandQuestNpcSet(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleQuestNpcSet(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestNpcSetCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleQuestNpcSet(ConsoleSystem.Arg arg)
+        {
+            if (!arg.HasArgs(1))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            JObject payload = QuestDecode(arg.GetString(0));
+
+            if (payload == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            QuestNpcInfo info = new QuestNpcInfo
+            {
+                Id = (string)payload["id"],
+                Name = (string)payload["name"],
+                X = (float)payload["x"],
+                Y = (float)payload["y"],
+                Z = (float)payload["z"],
+                Rotation = (float)payload["rotation"],
+                Prefab = (string)payload["prefab"],
+                MapMarker = (bool)payload["mapMarker"],
+                UseRadius = (float)payload["useRadius"]
+            };
+
+            if (string.IsNullOrEmpty(info.Id) || string.IsNullOrEmpty(info.Prefab))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            _questNpcs[info.Id] = info;
+
+            QuestNpcDespawn(info.Id);
+            bool spawned = QuestNpcSpawn(info);
+
+            QuestNpcSyncInputHook();
+
+            return "{\"ok\":true,\"contract\":" + QuestContract +
+                ",\"spawned\":" + (spawned ? "true" : "false") + "}";
+        }
+
+        // ####  A ALTURA E RECALCULADA, E A GRAVADA E SO UM PALPITE  ####
+        //
+        // O mapa muda a cada wipe: o chao sobe e desce, e um NPC
+        // enterrado e invisivel e insuportavel de diagnosticar. O
+        // TerrainMeta manda; o `y` do banco so serve para o painel
+        // mostrar alguma coisa.
+        private bool QuestNpcSpawn(QuestNpcInfo info)
+        {
+            try
+            {
+                Vector3 position = new Vector3(info.X, info.Y, info.Z);
+
+                if (TerrainMeta.HeightMap != null)
+                {
+                    position.y = TerrainMeta.HeightMap.GetHeight(position);
+                }
+
+                BaseEntity entity = GameManager.server.CreateEntity(
+                    info.Prefab,
+                    position,
+                    Quaternion.Euler(0f, info.Rotation, 0f));
+
+                if (entity == null)
+                {
+                    PrintWarning("NPC de missao: o prefab nao existe - " + info.Prefab);
+                    return false;
+                }
+
+                entity.enableSaving = false;
+                entity.Spawn();
+
+                BasePlayer npc = entity as BasePlayer;
+
+                if (npc == null)
+                {
+                    entity.Kill();
+                    PrintWarning("NPC de missao: o prefab nao e um BasePlayer - " + info.Prefab);
+                    return false;
+                }
+
+                // O nome que aparece sobre a cabeca dele.
+                npc.displayName = info.Name;
+
+                // ####  ELE NAO ANDA E NAO MORRE  ####
+                //
+                // Um vendedor que persegue jogador ou que morre para
+                // o primeiro tiro nao e um ponto do mapa: e um bug
+                // que alguem vai reportar como "o NPC sumiu".
+                NPCPlayer ai = npc as NPCPlayer;
+
+                if (ai != null)
+                {
+                    ai.CancelInvoke("EquipTest");
+                }
+
+                npc.SetPlayerFlag(BasePlayer.PlayerFlags.Sleeping, false);
+                npc.baseProtection.Clear();
+                npc.baseProtection.Add(1f);
+
+                _questNpcEntities[info.Id] = npc;
+
+                if (info.MapMarker)
+                {
+                    QuestNpcMark(info, position);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PrintError("NPC de missao nao subiu (" + info.Id + "): " + ex);
+                return false;
+            }
+        }
+
+        // ####  O CIRCULO, E NAO O ROTULO  ####
+        //
+        // `MapMarkerGenericRadius` desenha um circulo colorido e nao
+        // depende de nada. O rotulo com NOME seria
+        // `VendingMachineMapMarker`, que exige uma VendingMachine de
+        // verdade por tras - MEDIDO na DLL: `SetVendingMachine(vm,
+        // shopName)`. Uma maquina invisivel por NPC e uma entidade a
+        // mais no mundo para um texto; o circulo diz onde, e o
+        // jogador ve o nome ao chegar.
+        private void QuestNpcMark(QuestNpcInfo info, Vector3 position)
+        {
+            try
+            {
+                BaseEntity marker = GameManager.server.CreateEntity(
+                    "assets/prefabs/tools/map/genericradiusmarker.prefab",
+                    position);
+
+                if (marker == null)
+                {
+                    return;
+                }
+
+                MapMarkerGenericRadius radius = marker as MapMarkerGenericRadius;
+
+                if (radius != null)
+                {
+                    radius.radius = 0.25f;
+                    radius.alpha = 0.7f;
+                    radius.color1 = new Color(0.77f, 0.25f, 0.17f);
+                    radius.color2 = new Color(0.77f, 0.25f, 0.17f);
+                }
+
+                marker.enableSaving = false;
+                marker.Spawn();
+
+                if (radius != null)
+                {
+                    radius.SendUpdate(true);
+                }
+
+                _questNpcMarkers[info.Id] = marker;
+            }
+            catch (Exception ex)
+            {
+                // O marcador e conforto: o NPC continua la, e quem
+                // sabe onde ele fica chega do mesmo jeito.
+                PrintWarning("Marcador do NPC " + info.Id + " nao subiu: " + ex.Message);
+            }
+        }
+
+        private void QuestNpcDespawn(string id)
+        {
+            BasePlayer npc;
+
+            if (_questNpcEntities.TryGetValue(id, out npc))
+            {
+                if (npc != null && !npc.IsDestroyed)
+                {
+                    npc.Kill();
+                }
+
+                _questNpcEntities.Remove(id);
+            }
+
+            BaseEntity marker;
+
+            if (_questNpcMarkers.TryGetValue(id, out marker))
+            {
+                if (marker != null && !marker.IsDestroyed)
+                {
+                    marker.Kill();
+                }
+
+                _questNpcMarkers.Remove(id);
+            }
+        }
+
+        private void QuestNpcDespawnAll()
+        {
+            List<string> ids = new List<string>(_questNpcEntities.Keys);
+
+            for (int i = 0; i < ids.Count; i++)
+            {
+                QuestNpcDespawn(ids[i]);
+            }
+
+            ids = new List<string>(_questNpcMarkers.Keys);
+
+            for (int i = 0; i < ids.Count; i++)
+            {
+                QuestNpcDespawn(ids[i]);
+            }
+        }
+
+        // Ver o cabecalho: o hook so entra se houver NPC.
+        private void QuestNpcSyncInputHook()
+        {
+            bool wanted = _questNpcs.Count > 0;
+
+            if (wanted == _questNpcInputHooked)
+            {
+                return;
+            }
+
+            if (wanted)
+            {
+                Subscribe("OnPlayerInput");
+            }
+            else
+            {
+                Unsubscribe("OnPlayerInput");
+            }
+
+            _questNpcInputHooked = wanted;
+        }
+
+        // ####  O HOOK DE CADA QUADRO  ####
+        //
+        // A primeira linha e uma comparacao de botao. Tudo o que vem
+        // depois so roda no quadro em que alguem apertou USE - e
+        // esse gesto acontece algumas vezes por minuto, nao 60 vezes
+        // por segundo.
+        private void OnPlayerInput(BasePlayer player, InputState input)
+        {
+            if (input == null || !input.WasJustPressed(BUTTON.USE))
+            {
+                return;
+            }
+
+            try
+            {
+                if (player == null || player.IsNpc || _questNpcs.Count == 0)
+                {
+                    return;
+                }
+
+                // O freio do toque repetido. Ver `_questNpcLastUse`.
+                float last;
+
+                if (_questNpcLastUse.TryGetValue(player.userID, out last) &&
+                    UnityEngine.Time.realtimeSinceStartup - last < QuestNpcUseCooldown)
+                {
+                    return;
+                }
+
+                QuestNpcInfo nearest = QuestNpcNear(player);
+
+                if (nearest == null)
+                {
+                    return;
+                }
+
+                _questNpcLastUse[player.userID] = UnityEngine.Time.realtimeSinceStartup;
+
+                // ####  A ENTREGA ACONTECE ANTES DA TELA  ####
+                //
+                // Se este NPC e o destino de uma entrega que o
+                // jogador esta fazendo, o pacote chega AQUI - e a
+                // tela que abre em seguida ja mostra a missao
+                // pronta para resgatar.
+                //
+                // A ordem importa: abrir a tela primeiro mostraria a
+                // entrega ainda pendente, e o jogador apertaria USE
+                // de novo achando que nao funcionou.
+                QuestTryDeliver(player, nearest.Id);
+
+                // ####  QUEM ABRE A TELA E O AGENTE  ####
+                //
+                // Nao ha CUI aqui, e o plugin TAMBEM nao manda o
+                // `origemz.ui.open`: aquele comando recusa o que vem
+                // do cliente (`arg.Connection != null`) - de
+                // proposito, para um jogador nao abrir a tela de
+                // outro.
+                //
+                // Entao este plugin GRITA, o agente le, confere que
+                // o NPC existe naquele servidor e manda o comando
+                // com a autoridade dele. Uma ida a mais, e a
+                // conferencia que ela paga vale.
+                QuestNpcPush(player, nearest.Id);
+            }
+            catch (Exception ex)
+            {
+                ReportStatsHookError(HookPlayerInput, ex);
+            }
+        }
+
+        // O pacote chegou?
+        //
+        // ####  O PLUGIN SO SABE ONDE O JOGADOR ESTA  ####
+        //
+        // Ele nao decide se a entrega vale: manda "o Fulano apertou
+        // USE no npc X, na tentativa Y" e o agente confere que
+        // aquela tentativa realmente pedia uma entrega PARA ESSE
+        // NPC. Um push com o NPC errado nao marca nada.
+        //
+        // A distancia vai junto porque o contrato a aceita - e o
+        // agente a IGNORA, medindo a dele com as coordenadas do
+        // banco. Um cliente adulterado que dissesse ter andado 40 km
+        // seria pago por 40 km.
+        private void QuestTryDeliver(BasePlayer player, string npcId)
+        {
+            List<QuestAssignment> assignments;
+
+            if (!_questAssigned.TryGetValue(player.userID, out assignments))
+            {
+                return;
+            }
+
+            for (int i = 0; i < assignments.Count; i++)
+            {
+                QuestAssignment assignment = assignments[i];
+
+                if (assignment.Kind != "deliver" || assignment.Target != npcId)
+                {
+                    continue;
+                }
+
+                if (assignment.Have >= assignment.Need)
+                {
+                    // Ja entregue. O USE repetido no mesmo NPC cai
+                    // aqui, e nao grita de novo.
+                    continue;
+                }
+
+                assignment.Have = assignment.Need;
+
+                float meters = 0f;
+                BasePlayer npc;
+
+                if (_questNpcEntities.TryGetValue(npcId, out npc) && npc != null)
+                {
+                    meters = Vector3.Distance(player.transform.position, npc.transform.position);
+                }
+
+                QuestPushDeliver(player, assignment.PlayerQuestId, npcId, meters);
+            }
+        }
+
+        private void QuestPushDeliver(BasePlayer player, long playerQuestId, string npcId, float meters)
+        {
+            if (string.IsNullOrEmpty(_questSecret))
+            {
+                return;
+            }
+
+            StringBuilder line = new StringBuilder();
+
+            line.Append(QuestEventMarker);
+            line.Append("{\"contract\":").Append(QuestContract);
+            line.Append(",\"secret\":\"").Append(_questSecret).Append('"');
+            line.Append(",\"eventId\":\"").Append(playerQuestId).Append(":deliver:").Append(npcId).Append('"');
+            line.Append(",\"kind\":\"deliver\"");
+            line.Append(",\"steamId\":\"").Append(player.UserIDString).Append('"');
+            line.Append(",\"pq\":").Append(playerQuestId);
+            line.Append(",\"npcId\":").Append(JsonConvert.ToString(npcId));
+            line.Append(",\"meters\":").Append(meters.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append('}');
+
+            Puts(line.ToString());
+        }
+
+        // O grito. Mesmo segredo e mesmo cano do `#OZQUEST#`: sem
+        // ele, alguem digitando o marcador no chat abriria a tela de
+        // qualquer NPC para si mesmo - o que e inofensivo, mas o
+        // canal e um so e a regra tambem.
+        private void QuestNpcPush(BasePlayer player, string npcId)
+        {
+            if (string.IsNullOrEmpty(_questSecret))
+            {
+                return;
+            }
+
+            StringBuilder line = new StringBuilder();
+
+            line.Append(QuestNpcMarker);
+            line.Append("{\"contract\":").Append(QuestContract);
+            line.Append(",\"secret\":\"").Append(_questSecret).Append('"');
+            line.Append(",\"kind\":\"use\"");
+            line.Append(",\"steamId\":\"").Append(player.UserIDString).Append('"');
+            line.Append(",\"npcId\":").Append(JsonConvert.ToString(npcId));
+            line.Append('}');
+
+            Puts(line.ToString());
+        }
+
+        // O NPC mais proximo dentro do raio dele.
+        //
+        // "O mais proximo", e nao "o primeiro que couber": dois NPCs
+        // vizinhos disputariam o mesmo clique, e quem joga nao teria
+        // como saber com qual dos dois falou.
+        private QuestNpcInfo QuestNpcNear(BasePlayer player)
+        {
+            QuestNpcInfo best = null;
+            float bestDistance = float.MaxValue;
+            Vector3 position = player.transform.position;
+
+            foreach (KeyValuePair<string, QuestNpcInfo> entry in _questNpcs)
+            {
+                BasePlayer npc;
+
+                if (!_questNpcEntities.TryGetValue(entry.Key, out npc) ||
+                    npc == null || npc.IsDestroyed)
+                {
+                    continue;
+                }
+
+                float distance = Vector3.Distance(position, npc.transform.position);
+
+                if (distance <= entry.Value.UseRadius && distance < bestDistance)
+                {
+                    best = entry.Value;
+                    bestDistance = distance;
+                }
+            }
+
+            return best;
+        }
+
+        // ------------------------------------------------------
+        //  O CADASTRO IN-GAME
+        // ------------------------------------------------------
+
+        // ####  NINGUEM ESCOLHE COORDENADA DIGITANDO NUMERO  ####
+        //
+        // O admin vai ate o lugar, olha para onde o NPC deve olhar, e
+        // digita. Para posicao no mundo, o jogo e a melhor interface
+        // que existe - e e o unico pedaco do Quests.cs que sobrevive
+        // quase igual.
+        //
+        // O painel faz o resto: renomear, ligar, desligar, apagar.
+        [ChatCommand("questnpc")]
+        private void ChatQuestNpc(BasePlayer player, string command, string[] args)
+        {
+            if (player == null || !player.IsAdmin)
+            {
+                return;
+            }
+
+            if (args == null || args.Length == 0)
+            {
+                player.ChatMessage("/questnpc add <nome>  |  /questnpc list");
+                return;
+            }
+
+            if (args[0] == "list")
+            {
+                if (_questNpcs.Count == 0)
+                {
+                    player.ChatMessage("Nenhum NPC de missao neste servidor.");
+                    return;
+                }
+
+                foreach (KeyValuePair<string, QuestNpcInfo> entry in _questNpcs)
+                {
+                    player.ChatMessage(entry.Key + " - " + entry.Value.Name);
+                }
+
+                return;
+            }
+
+            if (args[0] != "add" || args.Length < 2)
+            {
+                player.ChatMessage("Uso: /questnpc add <nome>");
+                return;
+            }
+
+            string name = string.Join(" ", args, 1, args.Length - 1);
+            Vector3 position = player.transform.position;
+            float rotation = player.eyes == null
+                ? 0f
+                : player.eyes.rotation.eulerAngles.y;
+
+            // O agente e quem grava: aqui so se REPORTA a posicao. Um
+            // NPC que existisse so na memoria do plugin sumiria no
+            // primeiro oxide.reload, e o painel nunca saberia dele.
+            StringBuilder line = new StringBuilder();
+
+            line.Append(QuestNpcMarker);
+            line.Append("{\"contract\":").Append(QuestContract);
+            line.Append(",\"secret\":\"").Append(_questSecret ?? string.Empty).Append('"');
+            line.Append(",\"kind\":\"add\"");
+            line.Append(",\"name\":").Append(JsonConvert.ToString(name));
+            line.Append(",\"x\":").Append(position.x.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append(",\"y\":").Append(position.y.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append(",\"z\":").Append(position.z.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append(",\"rotation\":").Append(rotation.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append('}');
+
+            Puts(line.ToString());
+
+            player.ChatMessage("Pedi ao agente para cadastrar \"" + name +
+                "\" aqui. Ele aparece em instantes.");
+        }
+
+        private class QuestNpcInfo
+        {
+            public string Id;
+            public string Name;
+            public float X;
+            public float Y;
+            public float Z;
+            public float Rotation;
+            public string Prefab;
+            public bool MapMarker;
+            public float UseRadius;
+        }
+
+        #endregion
     }
 }

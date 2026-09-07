@@ -183,6 +183,35 @@ describe('a carga inicial do Menu Principal', () => {
     expect(findDocumentProblems(buildMainMenu())).toEqual([]);
   });
 
+  // ####  `/quest` É UM ATALHO, E NÃO UM SEGUNDO MENU  ####
+  //
+  // A primeira versão das missões clonou o menu inteiro — mesmo
+  // shell, mesmas onze telas — só para responder a outro comando.
+  // O servidor recebia duas cópias pelo RCON e o admin via dois
+  // "Menu" na tela de Interface. Este teste é o que impede a volta
+  // disso sem alguém perceber.
+  it('o `/quest` abre este mesmo menu, direto em MISSÕES', () => {
+    const menu = buildMainMenu();
+
+    expect(menu.shortcuts).toEqual([{ command: 'quest', screenId: 'tela-missoes' }]);
+    // E a tela existe: um atalho para uma tela apagada abriria o
+    // menu num "carregando" que nunca termina.
+    expect(menu.screens.some((screen) => screen.id === 'tela-missoes')).toBe(true);
+    // O atalho viaja ao plugin. Sem isto ele não registra o
+    // comando, e `/quest` volta a ser "unknown command".
+    expect(toDocumentPayload(menu).shortcuts).toEqual([
+      { command: 'quest', screenId: 'tela-missoes' },
+    ]);
+  });
+
+  it('um atalho para tela inexistente é recusado', () => {
+    const broken = { ...buildMainMenu(), shortcuts: [{ command: 'x', screenId: 'tela-sumida' }] };
+
+    expect(findDocumentProblems(broken)).toEqual([
+      { message: expect.stringContaining('tela-sumida') as unknown as string },
+    ]);
+  });
+
   /**
    * ####  UM PAINEL TRANSPARENTE POR CIMA ENGOLE OS CLIQUES  ####
    *

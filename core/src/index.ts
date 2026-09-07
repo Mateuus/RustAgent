@@ -68,8 +68,22 @@ import { PLAYERS_PLUGIN } from './game/plugin-contract.js';
 import { loadUiImages } from './game/ui-images.js';
 import { buildKitsScreen, KITS_SCREEN_ID, parseKitScreenId } from './game/ui-kits-screen.js';
 // A página RANKING do menu do jogo (Docs/Ranking/20 §11).
+import { QuestsRepository } from './db/quests-repository.js';
+import { isApiError } from './http/error-response.js';
+import { firstJsonLine } from './game/plugin-contract.js';
+import { questConsumeSchema } from './game/quests-contract.js';
+import { QuestCollector } from './quests/collector.js';
+import { QuestNpcSync } from './quests/npc-sync.js';
+import { QuestEvents } from './quests/events.js';
+import { QuestRewardService } from './quests/rewards.js';
+import { QuestsService } from './quests/service.js';
+import {
+  createQuestsScreenProvider,
+  parseQuestsScreenId,
+  type QuestsScreenProvider,
+} from './game/ui-quests-screen.js';
 import { createRankingScreenProvider } from './game/ui-ranking-screen.js';
-import { buildMainMenu } from './game/ui-preset-main-menu.js';
+import { buildMainMenu, MAIN_MENU_SLUG } from './game/ui-preset-main-menu.js';
 import {
   buildResult,
   createHeaderProvider,
@@ -250,6 +264,14 @@ async function main(): Promise<void> {
   // gancho de console precisa dele.
   let statEvents: StatEventsConsumer | null = null;
   let spawnStatusSync: SpawnStatusSync | null = null;
+  // As MISSÕES, pela mesma razão do calendário: a entrega delas
+  // depende do `kits`, que nasce bem abaixo. `null` = ainda não
+  // montadas, e aí a tela responde o aviso em vez de ficar muda.
+  let questScreens: QuestsScreenProvider | null = null;
+  let questsService: QuestsService | null = null;
+  let questEvents: QuestEvents | null = null;
+  let questCollector: QuestCollector | null = null;
+  let questNpcs: QuestNpcSync | null = null;
   // A página CALENDÁRIO do menu do jogo, pela mesma razão: ela lê a
   // agenda e a fila de mapas, que nascem bem abaixo, e quem a chama
   // é o `generatedScreens` do `UiSync`, que só corre no clique do
@@ -360,6 +382,18 @@ async function main(): Promise<void> {
       // ao plugin por um relógio — mandar o `ack` daqui seria o laço
       // descrito logo acima.
       statEvents?.handleLine(serverId, line);
+      // E o `#OZQUEST#`: o "agora" da missão concluída. Mesmo
+      // desenho do de cima — aplica aqui, fala com o jogo por um
+      // relógio.
+      questEvents?.handleLine(serverId, line);
+      // E o `#OZQUESTNPC#`: o admin cadastrando um NPC de pé no
+      // lugar, ou um jogador apertando USE perto de um.
+      questNpcs?.handleLine(serverId, line);
+      // E o `#OZAREQ#quests`: o plugin dizendo que um
+      // `oxide.reload` esvaziou o catálogo e as atribuições
+      // dele. Sem esta linha, nada seria contado até alguém
+      // aceitar uma missão nova.
+      questCollector?.handleLine(serverId, line);
     },
     // Ver o comentário do `let wipeRunner`, logo acima.
     wipeRunner: {
@@ -495,7 +529,20 @@ async function main(): Promise<void> {
     // inventário, e não até 15 s depois: a cabeça da fila é onde
     // moram as tarefas adiadas com PLAYER_OFFLINE, e acabou de
     // entrar uma das pessoas que faltavam.
-    onJoined: (serverId) => siteDeliveries.get(serverId)?.wake(),
+    onJoined: (serverId, steamIds) => {
+      siteDeliveries.get(serverId)?.wake();
+
+      // ####  AS MISSÕES DELE, NA HORA  ####
+      //
+      // O ciclo do coletor bate a cada 15 s, e o `flushSeconds` do
+      // servidor pode ser bem maior. Quem entra e vai direto minerar
+      // teria esse tempo inteiro em que nada conta — e é o primeiro
+      // minuto de jogo, quando ele está olhando se a missão funciona.
+      //
+      // `void` com o erro tratado dentro: o gancho de presença não
+      // espera ninguém.
+      void questCollector?.onPlayerJoined(serverId, steamIds);
+    },
   });
 
   presenceWatcher.start();
@@ -1199,6 +1246,24 @@ async function main(): Promise<void> {
           return fromRanking;
         }
 
+        // ####  AS MISSÕES TAMBÉM SÃO UMA FAMÍLIA  ####
+        //
+        // `tela-quest`, `tela-quest:disponiveis:2`, `tela-quest:npc:x`
+        // — o prefixo é dele. Mesma regra da loja e do ranking:
+        // quem reconhece uma família vem antes de quem casa um id
+        // exato.
+        //
+        // O `parseQuestsScreenId` decide se o endereço é dele ANTES
+        // de o provedor existir: sem isso, um pedido que chegasse
+        // cedo demais cairia no calendário e voltaria a tela errada.
+        if (parseQuestsScreenId(input.screenId) !== null) {
+          const fromQuests = await questScreens?.(input);
+
+          if (fromQuests !== undefined && fromQuests !== null) {
+            return fromQuests;
+          }
+        }
+
         // ####  E, POR ÚLTIMO, O CALENDÁRIO  ####
         //
         // Ele reconhece um id EXATO (`tela-calendario`) e devolve
@@ -1259,6 +1324,29 @@ async function main(): Promise<void> {
       // kit: os dois entram pelo mesmo botão. Ver `fallback` em
       // game/ui-store-bridge.ts.
       fallback: async ({ serverId, steamId, offerId, document, screenId }) => {
+        // ####  O BOTÃO DE MISSÃO PEGA CARONA AQUI  ####
+        //
+        // `quest:accept:<id>`, `quest:claim:<pq>`, `quest:cancel:<pq>`.
+        // Reusar o canal da loja é o que faz a tela inteira de
+        // missões não custar uma linha no `OrigemZUI.cs` — é o
+        // mesmo caminho que os kits já percorrem, com a mesma
+        // autenticação por token de sessão.
+        if (offerId.startsWith('quest:')) {
+          const [, verb, target] = offerId.split(':');
+          const outcome = await runQuestAction({
+            service: questsService,
+            serverId,
+            steamId,
+            verb,
+            target,
+          });
+
+          return {
+            ...outcome,
+            screen: buildResult(document, outcome.ok, outcome.message, null, screenId),
+          };
+        }
+
         const kit = kits.list().find((entry) => entry.slug === offerId);
 
         if (kit === undefined) {
@@ -1337,6 +1425,193 @@ async function main(): Promise<void> {
       at: (serverId) => wipeClock.at(serverId, supervisor.contextOf(serverId)?.rcon ?? null),
     },
   });
+
+  // ####  AS MISSÕES  ####
+  //
+  // Montadas AQUI, e não lá em cima, porque a entrega delas
+  // depende do `kits` — que precisa da presença, que precisa do
+  // supervisor. As variáveis foram declaradas no topo justamente
+  // para que o `UiSync` e o `onBuy`, criados antes, possam
+  // alcançá-las.
+  const questsRepository = new QuestsRepository(db);
+
+  questsService = new QuestsService({
+    repository: questsRepository,
+    logger,
+    rewards: new QuestRewardService({
+      logger,
+      // Os quatro caminhos que já existem. Nenhum deles é
+      // reescrito — ver o cabeçalho de quests/rewards.ts.
+      delivery: store,
+      // O `deliverPlan` exige o id numérico; a recompensa guarda o
+      // shortname, que é o que o admin digita.
+      catalog: { itemIdOf: (shortname) => itemsRepository.get(shortname)?.itemId ?? null },
+      wallet: walletFor,
+      kits,
+      points: rankingsRepository,
+    }),
+    // ####  O NÚMERO DOS OBJETIVOS `metric` E `playtime`  ####
+    //
+    // Sai do período `lifetime`, o único que NUNCA zera: um wipe no
+    // meio de uma quest faria o total cair, e a subtração
+    // `agora - partida` viraria negativa. O jogador veria o
+    // progresso andar para trás por algo que não fez.
+    stats: {
+      totalOf: (serverId, steamId, metric) => {
+        const period = rankingsRepository.openPeriodOf(serverId, 'lifetime');
+
+        return period === null ? 0 : rankingsRepository.valueOf(period.id, steamId, metric);
+      },
+    },
+    // ####  QUEM RESPONDE AO `requires` DA QUEST  ####
+    //
+    // Hoje só a forma `vip:<tier>`, que é a que o dono pediu. Uma
+    // forma desconhecida devolve `false` — e a quest fica trancada
+    // com a frase que explica, em vez de aberta para todo mundo:
+    // liberar o que não se sabe conferir é o erro caro aqui.
+    permissions: {
+      can: ({ steamId, requires }) => {
+        const [kind, value] = requires.split(':');
+
+        if (kind !== 'vip' || value === undefined) {
+          logger.warn({ requires }, 'requisito de quest que o agente não sabe conferir');
+
+          return false;
+        }
+
+        // `activeOf` e não `historyOf`: o VIP que venceu ontem não
+        // abre a quest de hoje. Um jogador pode ter mais de um tier
+        // ativo, e qualquer um deles que case serve.
+        return vipsRepository.activeOf(steamId).some((vip) => vip.tier === value);
+      },
+    },
+    // O nome bonito do catálogo do JOGO, para a frase do objetivo.
+    // Ele muda a cada update do Rust — é por isso que a frase é
+    // montada, e não gravada.
+    items: {
+      displayNameOf: (shortname) => itemsRepository.get(shortname)?.displayName ?? null,
+    },
+    // ####  QUEM TIRA OS ITENS QUE A MISSÃO COBRA  ####
+    //
+    // É o `ItemDeduction` do Quests.cs. O plugin faz duas passadas —
+    // conta e só então tira —, e responde `complete: false` sem
+    // mexer em nada quando falta. Ver §7.4 do plano.
+    // O coletor esquece o que mandou daquele jogador, e o `assign`
+    // sai na rodada seguinte — que é em segundos, e não no minuto.
+    onLiveChanged: ({ serverId, steamId }) => {
+      questCollector?.forgetPlayer(serverId, steamId);
+    },
+    consumer: {
+      take: async ({ serverId, steamId, items }) => {
+        const rcon = supervisor.contextOf(serverId)?.rcon;
+
+        if (rcon === undefined) {
+          return { complete: false, missing: 'O servidor não está respondendo agora.' };
+        }
+
+        const payload = Buffer.from(JSON.stringify({ items }), 'utf8').toString('base64');
+        const raw = firstJsonLine(await rcon.send(`origemz.quest.consume ${steamId} ${payload}`));
+        const parsed = questConsumeSchema.safeParse(raw);
+
+        if (!parsed.success) {
+          // Resposta ilegível NUNCA vira "deu certo": o prêmio sairia
+          // sem o material ter saído.
+          return { complete: false, missing: 'Não deu para conferir os seus itens agora.' };
+        }
+
+        return { complete: parsed.data.complete };
+      },
+    },
+  });
+
+  questScreens = createQuestsScreenProvider({
+    quests: questsService,
+    npcNameOf: (npcId) => questsRepository.getNpc(npcId)?.name ?? null,
+    logger,
+  });
+
+  // ####  O SEGREDO SEPARA O CLIQUE DO CHAT  ####
+  //
+  // O agente lê o console inteiro, e o chat dos jogadores passa por
+  // ele. Sem o segredo, alguém digitando `#OZQUEST#` no chat
+  // concluiria a própria missão. Ele é sorteado A CADA SUBIDA: um
+  // segredo guardado em disco vazaria junto com qualquer backup, e
+  // não há nada aqui que precise sobreviver a um restart.
+  //
+  // É o mesmo desenho do `UiSync` e do `#OZSTAT#`.
+  const questSecret = randomUUID();
+
+  questEvents = new QuestEvents({
+    service: questsService,
+    logger,
+    secret: questSecret,
+    // O recibo no chat DELE, e nunca no de todo mundo: a conclusão
+    // de uma missão é assunto de quem a fez.
+    chat: {
+      tell: async (serverId, steamId, message) => {
+        const rcon = supervisor.contextOf(serverId)?.rcon;
+
+        if (rcon === undefined) {
+          return;
+        }
+
+        await rcon.send(`origemz.chat.tell ${steamId} ${JSON.stringify(message)}`);
+      },
+    },
+  });
+
+  questCollector = new QuestCollector({
+    repository: questsRepository,
+    service: questsService,
+    servers: {
+      ids: () => supervisor.ids(),
+      contextOf: (serverId) => {
+        const context = supervisor.contextOf(serverId);
+
+        return context === null ? null : { rcon: context.rcon };
+      },
+    },
+    // A MESMA fonte de presença do resto do agente. `null` = não
+    // deu para perguntar, e é DIFERENTE de "ninguém online".
+    presence: { online: onlineSteamIdsOf },
+    logger,
+    secret: questSecret,
+    // A referência é tardia porque o `questNpcs` nasce logo abaixo —
+    // e os dois precisam um do outro: o coletor chama o push, e o
+    // push precisa do RCON que o coletor já sabe achar.
+    npcs: { push: async (serverId) => questNpcs?.push(serverId) },
+  });
+
+  questNpcs = new QuestNpcSync({
+    repository: questsRepository,
+    servers: {
+      ids: () => supervisor.ids(),
+      contextOf: (serverId) => {
+        const context = supervisor.contextOf(serverId);
+
+        return context === null ? null : { rcon: context.rcon };
+      },
+    },
+    logger,
+    secret: questSecret,
+    // ####  QUEM ABRE A TELA E O AGENTE, E NAO O PLUGIN  ####
+    //
+    // O `origemz.ui.open` recusa o que vem do cliente — de
+    // propósito, para um jogador não abrir a tela de outro. O
+    // terceiro argumento (a tela) é o que leva o jogador direto às
+    // missões DAQUELE NPC.
+    openScreen: async ({ serverId, steamId, screenId }) => {
+      const rcon = supervisor.contextOf(serverId)?.rcon;
+
+      if (rcon === undefined) {
+        return;
+      }
+
+      await rcon.send(`origemz.ui.open ${steamId} ${MAIN_MENU_SLUG} ${screenId}`);
+    },
+  });
+
+  questCollector.start();
 
   // O vigia da Steam: compara o build instalado com o publicado e,
   // com STEAM_AUTO_UPDATE=1, dispara o ciclo de atualização
@@ -1947,6 +2222,26 @@ async function main(): Promise<void> {
         statsCollector.rollOnWipe(input);
       },
     },
+    // As missões: o progresso das que zeram no wipe, e os NPCs cuja
+    // posição só valia naquele mapa. É o que faz a coluna
+    // `wipe_policy` dos dois existir de verdade.
+    //
+    // O `questsRepository` nasce mais abaixo — daí a referência
+    // tardia, como o resto desta montagem.
+    quests: {
+      wipeProgress: (input) => questsRepository?.wipeProgress(input) ?? 0,
+      wipeNpcs: (serverId) => {
+        const removed = questsRepository?.wipeNpcs(serverId) ?? 0;
+
+        // O plugin precisa saber: os bonecos removidos continuariam
+        // no mundo até o próximo reload sem isto.
+        if (removed > 0) {
+          questNpcs?.forget(serverId);
+        }
+
+        return removed;
+      },
+    },
     schedule: wipeSchedule,
     mapPool,
     servers: supervisor,
@@ -2236,6 +2531,25 @@ async function main(): Promise<void> {
       servers: { ids: () => supervisor.ids() },
       customItems: customItemsRepository,
     },
+    // As missões. Como o ranking, elas respondem do BANCO: o
+    // catálogo, o progresso e a auditoria continuam de pé com os
+    // servidores parados — que é justamente quando se cadastra uma
+    // quest nova.
+    quests: {
+      repository: questsRepository,
+      service: questsService,
+      servers: { list: () => repository.list().map((server) => ({ id: server.id })) },
+      // O ciclo já notaria sozinho, do banco. Estes dois só ADIANTAM
+      // o momento — e para o NPC a diferença é visível: o admin
+      // clica em apagar e o boneco some do mapa, não daqui a um
+      // ciclo.
+      onCatalogChanged: () => {
+        questCollector?.forget();
+      },
+      onNpcsChanged: (serverId) => {
+        questNpcs?.forget(serverId);
+      },
+    },
   });
 
   await app.listen({ host: agent.host, port: agent.port });
@@ -2301,6 +2615,8 @@ async function main(): Promise<void> {
         // `ack`. Nada se perde: o plugin segura o pendente até a
         // próxima subida, e ele sobrevive ao reload no data file.
         statsCollector.stop();
+        questCollector?.stop();
+        questEvents?.stop();
         // O dos VIPs junto dos outros: um relógio esquecido aqui é
         // uma rodada que começa depois de o supervisor já ter
         // parado, falando com um RCON que não existe mais.
@@ -2395,3 +2711,95 @@ main().catch((error: unknown) => {
   console.error('[RustAgent] falha ao subir:', toError(error));
   process.exit(1);
 });
+
+// ============================================================
+//  O BOTÃO DE MISSÃO
+//
+//  ####  ELE PEGA CARONA NO CANAL DA LOJA  ####
+//
+//  `store.buy` com `offerId` prefixado — o mesmo caminho dos kits.
+//  É o que faz a tela inteira de missões não custar uma linha no
+//  `OrigemZUI.cs`: o plugin já sabe autenticar este clique, já
+//  revalida que a ação pertence à tela aberta, e já devolve o
+//  resultado num modal.
+//
+//  ####  A FRASE VEM DE QUEM CONHECE A REGRA  ####
+//
+//  "Esta quest volta em 4h", "conclua Boas-vindas antes" e "seu
+//  inventário está cheio" nascem no serviço e chegam aqui prontas.
+//  Reescrevê-las produziria duas explicações para o mesmo
+//  problema — e a daqui seria a mais pobre, porque este ponto não
+//  sabe por que a regra existe.
+// ============================================================
+
+async function runQuestAction(input: {
+  readonly service: QuestsService | null;
+  readonly serverId: string;
+  readonly steamId: string;
+  readonly verb: string | undefined;
+  readonly target: string | undefined;
+}): Promise<{ readonly ok: boolean; readonly message: string }> {
+  const { service, verb, target } = input;
+
+  if (service === null) {
+    // A subida é síncrona, então na prática ele já existe quando o
+    // primeiro clique chega. A frase existe para o caso de não.
+    return { ok: false, message: 'As missões ainda não estão prontas. Tente em instantes.' };
+  }
+
+  if (verb === undefined || target === undefined || target === '') {
+    return { ok: false, message: 'Este botão não é mais válido. Reabra o menu.' };
+  }
+
+  try {
+    if (verb === 'accept') {
+      const view = await service.accept({
+        serverId: input.serverId,
+        steamId: input.steamId,
+        questId: target,
+      });
+
+      return { ok: true, message: `Missão aceita: ${view.title}.` };
+    }
+
+    // O id da tentativa vem do endereço da tela, que o AGENTE
+    // montou — mas a tela é do cliente, e um número forjado
+    // chegaria aqui. Quem confere que aquela tentativa é dele é o
+    // serviço, contra o `steamId` da conexão.
+    const playerQuestId = Number(target);
+
+    if (!Number.isInteger(playerQuestId) || playerQuestId <= 0) {
+      return { ok: false, message: 'Este botão não é mais válido. Reabra o menu.' };
+    }
+
+    if (verb === 'claim') {
+      const result = await service.claim({ playerQuestId });
+      const message = result.outcomes.map((outcome) => outcome.message).join(' ');
+
+      return {
+        ok: !result.pending,
+        message:
+          message === ''
+            ? 'Missão resgatada.'
+            : result.pending
+              ? `${message} Um administrador foi avisado do que faltou.`
+              : message,
+      };
+    }
+
+    if (verb === 'cancel') {
+      return service.cancel({ playerQuestId })
+        ? { ok: true, message: 'Missão cancelada. O progresso dela foi perdido.' }
+        : { ok: false, message: 'Esta missão já não estava em andamento.' };
+    }
+
+    return { ok: false, message: 'Este botão não é mais válido. Reabra o menu.' };
+  } catch (cause) {
+    // O `ApiError` do serviço já traz a frase certa em português —
+    // é ela que o jogador precisa ler.
+    return {
+      ok: false,
+      message: isApiError(cause) ? cause.message : 'Não deu para fazer isso agora.',
+    };
+  }
+}

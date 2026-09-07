@@ -104,6 +104,7 @@ import type { BpRepository } from '../db/bp-repository.js';
 import type { BlueprintService } from '../wipe/blueprints.js';
 import { registerWipeBlueprintRoutes } from './routes/wipe-blueprints.js';
 // ---- o ranking ----
+import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 
 export interface BuildServerOptions {
@@ -294,6 +295,15 @@ export interface BuildServerOptions {
    * "forçar ciclo agora" recusa. Ver Docs/Ranking/20 §9.
    */
   readonly rankings: RankingRoutesDeps;
+
+  /**
+   * As quests.
+   *
+   * Opcional porque o módulo inteiro pode não estar montado — e um
+   * agente sem ele responde 404 nessas rotas em vez de subir com
+   * dependências pela metade. Ver Docs/OrigemZQuests/01 §11.
+   */
+  readonly quests?: QuestRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -447,6 +457,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // continuam de pé com os servidores parados, e é o
       // `coverage` de cada lista que diz quem estava coletando.
       registerRankingRoutes(api, options.rankings);
+
+      // As quests. Elas respondem do BANCO, como o ranking: o
+      // catálogo, o progresso e a auditoria continuam de pé com os
+      // servidores parados — que é justamente quando se cadastra
+      // uma quest nova.
+      if (options.quests !== undefined) {
+        registerQuestRoutes(api, options.quests);
+      }
 
       // O catálogo de itens. Ele responde do BANCO, e por isso
       // continua de pé com todos os servidores parados — que é
