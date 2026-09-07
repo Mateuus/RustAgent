@@ -24,13 +24,23 @@
 //  ajuste.
 // ============================================================
 
-import { Ban as BanIcon, Copy, Crown, History, IdCard, Server, Wallet } from 'lucide-react';
+import {
+  Ban as BanIcon,
+  Copy,
+  Crown,
+  History,
+  IdCard,
+  ScrollText,
+  Server,
+  Wallet,
+} from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { BanDialog } from '@/components/ban-dialog';
 import { PageHeader } from '@/components/page-header';
+import { Section } from '@/components/section';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -47,6 +57,7 @@ import {
   type PlayerServer,
   type StorePurchase,
   type Vip,
+  type QuestProgressRow,
   type WalletView,
 } from '@/lib/api';
 import { copySteamId } from '@/lib/clipboard';
@@ -54,7 +65,7 @@ import { EM_DASH, formatDateTime, formatDuration, formatInteger, formatWhen } fr
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-type Tab = 'identidade' | 'servidores' | 'vip' | 'carteira' | 'historico';
+type Tab = 'identidade' | 'servidores' | 'vip' | 'carteira' | 'missoes' | 'historico';
 
 const TABS = [
   { key: 'identidade', label: 'Identidade', Icon: IdCard },
@@ -69,6 +80,12 @@ const TABS = [
   // aqui que chega quem veio do Discord perguntar "paguei e não
   // recebi" — o saldo, o extrato e as compras na mesma tela.
   { key: 'carteira', label: 'Carteira', Icon: Wallet },
+  // ####  AS MISSÕES SÃO ESTADO, E VÊM ANTES DO HISTÓRICO  ####
+  //
+  // "O que ele está fazendo agora, e o que já concluiu" é a
+  // pergunta de quem chegou pelo Discord dizendo "fiz a missão e
+  // não recebi". Ela pertence ao mesmo grupo do VIP e da carteira.
+  { key: 'missoes', label: 'Missões', Icon: ScrollText },
   { key: 'historico', label: 'Histórico', Icon: History },
 ] as const;
 
@@ -264,6 +281,8 @@ function Jogador() {
             {tab === 'vip' && <VipDoJogador steamId={steamId} />}
 
             {tab === 'carteira' && <CarteiraDoJogador steamId={steamId} />}
+
+            {tab === 'missoes' && <MissoesDoJogador steamId={steamId} servers={servers} />}
 
             {tab === 'historico' && <Historico steamId={steamId} />}
           </div>
@@ -556,6 +575,10 @@ const EVENT_LABEL: Record<PlayerEvent['kind'], string> = {
   // detalhe do evento já diz qual nível e qual kit.
   vip: 'VIP',
   kit: 'kit',
+  compra: 'compra',
+  // "recebeu" e não "item": o que se procura na ficha é o VERBO —
+  // alguém deu isso a ele, não foi ele que pegou.
+  item: 'recebeu item',
 };
 
 function Historico({ steamId }: { steamId: string }) {
@@ -1093,5 +1116,215 @@ function CarteiraDoJogador({ steamId }: { readonly steamId: string }) {
         </>
       )}
     </div>
+  );
+}
+
+// ============================================================
+//  MISSÕES
+//
+//  ####  UMA SUB-ABA POR SERVIDOR, E ELA NÃO É ENFEITE  ####
+//
+//  O progresso de missão é POR SERVIDOR: "minerar 5.000 de
+//  enxofre" conta separado em cada mundo, e o wipe de um não mexe
+//  no outro. Uma lista misturada mostraria a mesma missão três
+//  vezes, com três números diferentes, e ninguém saberia qual é
+//  qual.
+//
+//  A sub-aba TODOS existe porque a pergunta do suporte costuma ser
+//  "ele fez isso em ALGUM servidor?" — e obrigar a clicar em três
+//  abas para responder seria pior.
+// ============================================================
+
+function MissoesDoJogador({
+  steamId,
+  servers,
+}: {
+  readonly steamId: string;
+  readonly servers: readonly PlayerServer[];
+}) {
+  const [rows, setRows] = useState<QuestProgressRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  /** `''` = todos os servidores. */
+  const [serverId, setServerId] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+
+    void (async () => {
+      try {
+        // A rota já filtra por servidor, mas a lista é lida INTEIRA
+        // uma vez: trocar de sub-aba não pode custar uma ida à
+        // rede, e o volume é o histórico de UM jogador.
+        const response = await agent.playerQuests(steamId, { limit: 200 });
+
+        if (alive) {
+          setRows(response.quests);
+          setError(null);
+        }
+      } catch (cause) {
+        if (alive) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [steamId]);
+
+  if (error !== null) {
+    return <StateBlock variant="error" title="Não consegui ler as missões" detail={error} />;
+  }
+
+  if (rows === null) {
+    return <StateBlock variant="loading" title="Lendo as missões dele…" />;
+  }
+
+  const visible = serverId === '' ? rows : rows.filter((row) => row.serverId === serverId);
+  const live = visible.filter((row) => row.status === 'active' || row.status === 'completed');
+  const done = visible.filter((row) => row.status === 'claimed');
+
+  return (
+    <div className="space-y-4">
+      {/* A sub-aba do servidor. Ver o cabeçalho. */}
+      <div className="flex flex-wrap gap-1 border-b border-border">
+        <SubTab active={serverId === ''} onClick={() => setServerId('')}>
+          Todos ({String(rows.length)})
+        </SubTab>
+        {servers.map((server) => {
+          const count = rows.filter((row) => row.serverId === server.serverId).length;
+
+          return (
+            <SubTab
+              key={server.serverId}
+              active={serverId === server.serverId}
+              onClick={() => setServerId(server.serverId)}
+            >
+              {server.serverId} ({String(count)})
+            </SubTab>
+          );
+        })}
+      </div>
+
+      {visible.length === 0 && (
+        <StateBlock
+          variant="empty"
+          title="Nenhuma missão por aqui"
+          detail={
+            serverId === ''
+              ? 'Este jogador ainda não aceitou nenhuma missão.'
+              : 'Ele não aceitou nenhuma missão neste servidor.'
+          }
+        />
+      )}
+
+      {live.length > 0 && (
+        <Section title={`Em andamento (${String(live.length)})`}>
+          <div className="space-y-3">
+            {live.map((row) => (
+              <QuestRow key={row.playerQuestId} row={row} showServer={serverId === ''} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {done.length > 0 && (
+        <Section title={`Concluídas (${String(done.length)})`}>
+          <div className="space-y-2">
+            {done.map((row) => (
+              <div
+                key={row.playerQuestId}
+                className="flex flex-wrap items-baseline justify-between gap-2 text-2xs"
+              >
+                <span className="font-condensed font-bold text-foreground">
+                  {row.title}
+                  {row.attempt > 1 && (
+                    <span className="ml-1 font-normal text-muted">
+                      ({String(row.attempt)}ª vez)
+                    </span>
+                  )}
+                </span>
+                <span className="text-muted">
+                  {serverId === '' && `${row.serverId} · `}
+                  {row.claimedAt === null ? EM_DASH : formatDateTime(new Date(row.claimedAt).toISOString())}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function QuestRow({
+  row,
+  showServer,
+}: {
+  readonly row: QuestProgressRow;
+  readonly showServer: boolean;
+}) {
+  return (
+    <div className="border border-border p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h4 className="font-condensed text-xs font-bold">{row.title}</h4>
+        <span className={cn('text-2xs', row.complete ? 'text-rust' : 'text-muted')}>
+          {showServer && `${row.serverId} · `}
+          {row.complete ? 'pronta para resgatar' : 'em andamento'}
+        </span>
+      </div>
+
+      <div className="mt-2 space-y-1.5">
+        {row.objectives.map((objective) => (
+          <div key={objective.seq}>
+            <div className="flex justify-between text-2xs">
+              <span className={cn(objective.done && 'text-muted line-through')}>
+                {objective.label}
+              </span>
+              <span className="text-muted">
+                {formatInteger(objective.have)} / {formatInteger(objective.need)}
+              </span>
+            </div>
+            <div className="mt-0.5 h-1 rounded bg-background">
+              <div
+                className="h-1 rounded bg-rust"
+                style={{
+                  width: `${String(Math.min(100, (objective.have / objective.need) * 100))}%`,
+                }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-2 text-2xs text-muted">Aceita em {formatDateTime(new Date(row.acceptedAt).toISOString())}</p>
+    </div>
+  );
+}
+
+function SubTab({
+  active,
+  onClick,
+  children,
+}: {
+  readonly active: boolean;
+  readonly onClick: () => void;
+  readonly children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        '-mb-px border-b-2 px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+        active
+          ? 'border-rust text-foreground'
+          : 'border-transparent text-muted hover:text-foreground',
+      )}
+    >
+      {children}
+    </button>
   );
 }

@@ -23,9 +23,12 @@
 import { Trash2 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 
+import { findOurItemById } from '@/components/item-choice';
 import { ItemCombobox } from '@/components/item-combobox';
+import { SkinInput } from '@/components/skin-input';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useCustomItems } from '@/lib/hooks/use-custom-items';
 import { formatHexColor, parseHexColor } from '@/lib/ui-doc/color';
 import { createAction } from '@/lib/ui-doc/factory';
 import { ANCHOR_PRESETS, matchAnchorPreset, reanchor, REFERENCE_SIZE } from '@/lib/ui-doc/geometry';
@@ -200,6 +203,10 @@ export function Inspector({ element, screens, onChange, onRemove }: InspectorPro
    * aparecer na primeira busca.
    */
   const [itemPreview, setItemPreview] = useState('');
+
+  // Para reconhecer a marca de um item nosso já gravada no
+  // elemento e travar o campo `skinId`. Ver `findOurItemById`.
+  const { items: customItems } = useCustomItems();
 
   useEffect(() => {
     setItemPreview('');
@@ -632,13 +639,26 @@ export function Inspector({ element, screens, onChange, onRemove }: InspectorPro
                   `1545779598`. O `itemPreview` guarda o shortname só
                   para o ícone — o que vai para o jogo é o id, que é
                   o que o CUI entende. */}
-              <Field label="Item" hint="Busca no catálogo do agente. Funciona com tudo parado.">
+              <Field
+                label="Item"
+                hint="Busca no catálogo do agente e nos itens nossos. Funciona com tudo parado."
+              >
                 <ItemCombobox
                   value={itemPreview}
                   onValueChange={setItemPreview}
-                  onItemChange={(item) => {
-                    if (item !== null) {
-                      patch({ source: { kind: 'item', itemId: item.itemId, skinId: '0' } });
+                  onChoiceChange={(choice) => {
+                    // O par inteiro vai para o modelo: o CUI desenha
+                    // por `(itemId, skinId)`, e um item nosso sem a
+                    // skin desenharia o CORPO emprestado — a taça de
+                    // discord no lugar do troféu.
+                    if (choice !== null) {
+                      patch({
+                        source: {
+                          kind: 'item',
+                          itemId: choice.itemId ?? 0,
+                          skinId: choice.skinId,
+                        },
+                      });
                     }
                   }}
                 />
@@ -660,18 +680,25 @@ export function Inspector({ element, screens, onChange, onRemove }: InspectorPro
                   }
                 />
                 <Field label="skinId" hint="0 = o ícone padrão do item.">
-                  <Input
+                  <SkinInput
                     value={element.source.skinId}
-                    onChange={(event) =>
+                    label="skinId"
+                    showHint={false}
+                    className="text-2xs"
+                    lockedBy={findOurItemById(
+                      customItems,
+                      element.source.itemId,
+                      element.source.skinId,
+                    )}
+                    onChange={(skinId) =>
                       patch({
                         source: {
                           kind: 'item',
                           itemId: element.source.kind === 'item' ? element.source.itemId : 0,
-                          skinId: event.target.value.replace(/\D/g, ''),
+                          skinId,
                         },
                       })
                     }
-                    className="font-mono text-2xs"
                   />
                 </Field>
               </div>

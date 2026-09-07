@@ -13,7 +13,10 @@
 //       recusados pelo índice;
 //    4. a reconciliação ADOTA quem já estava no grupo, e tira quem
 //       a tabela mandou tirar;
-//    5. o SteamID atravessa a API e o payload sem perder dígito.
+//    5. o SteamID atravessa a API e o payload sem perder dígito;
+//    6. o que acontece na CORRIDA: uma concessão feita no meio da
+//       reconciliação não pode ser desfeita por ela — e uma
+//       revogação, tampouco.
 //
 //  Banco em memória e um RCON de mentira que se comporta como o
 //  servidor: guarda os grupos do Oxide, responde ao
@@ -70,6 +73,15 @@ interface FakeServer {
   applyRepliesWithLog: boolean;
   /** Onde mora o `oxide\config` deste servidor. */
   readonly configDir: string;
+  /**
+   * Roda ANTES de o servidor responder ao comando.
+   *
+   * É como o teste injeta uma concessão (ou uma revogação) NO MEIO
+   * de uma reconciliação — que é exatamente o que a fila do site
+   * fez no boot de 04/09/2026, e o que este dublê existe para
+   * reproduzir sem servidor de Rust nenhum.
+   */
+  onCommand?: (command: string) => void;
 }
 
 /** Os três níveis do `server01`, medidos no servidor de verdade. */
@@ -126,6 +138,7 @@ function fakeRcon(server: FakeServer): OpsRcon {
     },
     send: (command: string): Promise<string> => {
       server.commands.push(command);
+      server.onCommand?.(command);
 
       const show = /^oxide\.show group (\S+)$/.exec(command);
 
@@ -712,5 +725,119 @@ describe('o SteamID atravessa a API e o payload sem perder dígito', () => {
         createdBy: 'admin',
       }),
     ).rejects.toSatisfy((error: unknown) => isApiError(error) && error.code === 'INVALID_STEAM_ID');
+  });
+});
+
+describe('a corrida entre a reconciliação e quem mexe no VIP', () => {
+  /** O grupo do nível mais alto, que é onde o jogador deve estar. */
+  const GOLD = 'origemz.vip.gold';
+
+  it('a concessão feita NO MEIO da passada não é desfeita por ela', async () => {
+    // ####  ISTO ACONTECEU DE VERDADE  ####
+    //
+    // 04/09/2026, no boot: a fila do site entregou um VIP entre a
+    // primeira e a terceira leitura de grupo da reconciliação. O
+    // retrato dela era anterior à concessão, mas o `latestOf` — a
+    // única leitura ao vivo do laço — encontrava a linha nova e
+    // concluía "resíduo de VIP revogado". O jogador saiu do grupo
+    // que o `origemz.vip.apply` acabara de dar, ficou com a tag e a
+    // fila (que vêm do payload) e sem as permissões, e só a
+    // reconciliação seguinte o consertaria — dias depois, num
+    // servidor estável.
+    const server = harness.servers.get('pvp1');
+
+    if (server === undefined) {
+      throw new Error('sem servidor de teste');
+    }
+
+    let injected = false;
+
+    server.onCommand = (command): void => {
+      // Na PRIMEIRA leitura de grupo: o retrato da reconciliação já
+      // foi tirado, e a entrega chega agora.
+      if (!injected && command.startsWith('oxide.show group ')) {
+        injected = true;
+
+        harness.repository.grant({
+          steamId: STEAM_ID,
+          tier: 'gold',
+          expiresAt: null,
+          origin: 'loja',
+          createdBy: 'loja',
+        });
+
+        // E o `apply` da entrega põe o jogador no grupo.
+        server.groups.get(GOLD)?.add(STEAM_ID);
+      }
+    };
+
+    const result = await harness.vips.reconcile('pvp1');
+
+    expect(server.groups.get(GOLD)?.has(STEAM_ID)).toBe(true);
+    expect(result.removed).toEqual([]);
+  });
+
+  it('a revogação feita NO MEIO não é desfeita: o grupo não volta', async () => {
+    // O simétrico, e o mesmo mecanismo: `want` é do retrato velho, e
+    // sem reler o estado a reconciliação devolveria o grupo a quem
+    // acabou de perdê-lo.
+    const server = harness.servers.get('pvp1');
+
+    if (server === undefined) {
+      throw new Error('sem servidor de teste');
+    }
+
+    harness.repository.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      expiresAt: null,
+      origin: 'painel',
+      createdBy: 'admin',
+    });
+
+    // Ele está na tabela e FORA do grupo: é o caso que a
+    // reconciliação conserta adicionando.
+    expect(server.groups.get(GOLD)?.has(STEAM_ID)).toBe(false);
+
+    let injected = false;
+
+    server.onCommand = (command): void => {
+      if (!injected && command.startsWith('oxide.show group ')) {
+        injected = true;
+        harness.repository.revoke(STEAM_ID, 'gold', 'admin');
+      }
+    };
+
+    const result = await harness.vips.reconcile('pvp1');
+
+    expect(server.groups.get(GOLD)?.has(STEAM_ID)).toBe(false);
+    expect(result.added).toEqual([]);
+  });
+
+  it('duas reconciliações do mesmo servidor não se atropelam', async () => {
+    // O boot e o gancho `onRconConnected` chamam as duas sem
+    // `await`, e uma reconexão no meio do boot dispara ambas. Duas
+    // passadas simultâneas leem os mesmos grupos, decidem com
+    // retratos diferentes e escrevem uma por cima da outra.
+    const server = harness.servers.get('pvp1');
+
+    if (server === undefined) {
+      throw new Error('sem servidor de teste');
+    }
+
+    const [first, second] = await Promise.all([
+      harness.vips.reconcile('pvp1'),
+      harness.vips.reconcile('pvp1'),
+    ]);
+
+    const dispensed = [first, second].filter((result) => result.skipped !== null);
+
+    expect(dispensed).toHaveLength(1);
+    expect(dispensed[0]?.skipped).toContain('em andamento');
+
+    // E o servidor foi lido UMA vez por nível, não duas.
+    expect(server.commands.filter((command) => command.startsWith('oxide.show group '))).toHaveLength(
+      LEVELS.length,
+    );
   });
 });

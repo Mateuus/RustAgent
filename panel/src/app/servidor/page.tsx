@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   TerminalSquare,
+  Trophy,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -31,6 +32,7 @@ import { ConsolePanel } from '@/components/console-panel';
 import { OperationsPanel } from '@/components/operations-panel';
 import { PageHeader } from '@/components/page-header';
 import { PluginsPanel } from '@/components/plugins-panel';
+import { ServerRankingPanel } from '@/components/ranking/server-ranking-panel';
 import { ServerMenuPanel } from '@/components/server-menu-panel';
 import { ServerSettings } from '@/components/server-settings';
 import { ServerStateBadge } from '@/components/server-state';
@@ -49,6 +51,7 @@ type Tab =
   | 'plugins'
   | 'menu'
   | 'wipe'
+  | 'ranking'
   | 'config';
 
 /**
@@ -84,6 +87,13 @@ const TABS = [
   // mundo dele zera, e o que sobrevive — antes das telas de
   // operador. Depois dela só vem configuração de máquina.
   { key: 'wipe', label: 'WIPE', Icon: CalendarClock },
+  // ####  RANKING VEM DEPOIS DO WIPE  ####
+  //
+  // Porque é a mesma família de decisão: quando o mundo zera, e o
+  // que zera junto com ele. A lista de quem está na frente é de
+  // REDE e mora na barra lateral; aqui fica só o que é DESTE
+  // servidor — o tamanho da temporada dele, e quando ela vira.
+  { key: 'ranking', label: 'Ranking', Icon: Trophy },
   { key: 'config', label: 'Configurações', Icon: Settings2 },
 ] as const;
 
@@ -270,6 +280,7 @@ function Servidor() {
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
           {tab === 'menu' && <ServerMenuPanel serverId={server.id} />}
           {tab === 'wipe' && <WipePanel server={server} />}
+          {tab === 'ranking' && <ServerRankingPanel serverId={server.id} />}
           {tab === 'config' && <ServerSettings server={server} onChanged={() => void load()} />}
         </>
       )}

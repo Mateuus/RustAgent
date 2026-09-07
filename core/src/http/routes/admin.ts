@@ -32,7 +32,13 @@ import { grantAdmin, readAdmins, revokeAdmin } from '../../game/admins.js';
 import { DEFAULT_CHAT_LIMIT, MAX_CHAT_LIMIT, readChat } from '../../game/chat.js';
 import { mapImagePath, readMapImage, renderMapImage } from '../../game/map-image.js';
 import type { MonumentReader } from '../../game/monuments.js';
-import { kickPlayer, teleportPlayer, type PlayersReader } from '../../game/players.js';
+import {
+  givePlayerItem,
+  kickPlayer,
+  teleportPlayer,
+  type PlayersReader,
+} from '../../game/players.js';
+import { GIVE_MODES, MAX_GIVE_AMOUNT } from '../../game/plugin-contract.js';
 import type { ServerContext } from '../../servers/context.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { ApiError } from '../error-response.js';
@@ -65,6 +71,43 @@ const chatQuery = z.object({
 });
 
 const kickBody = z.object({ reason: z.string().trim().max(200).optional() }).strict();
+
+/**
+ * O item que o admin põe na mão de alguém.
+ *
+ * ####  A RÉGUA É A MESMA DO LOADOUT, E NÃO POR ECONOMIA  ####
+ *
+ * `shortname` vai para a LINHA DE COMANDO do console: espaço ou
+ * aspa no meio fatiaria o `origemz.give` e a entrega faria outra
+ * coisa, em silêncio. `skinId` é string de dígitos porque um id de
+ * skin passa de 2^53 e não sobrevive a um `number` — o mesmo
+ * motivo do SteamID.
+ *
+ * O teto de `amount` é o do plugin (`MAX_GIVE_AMOUNT`). Ele recusa
+ * sozinho de qualquer jeito; recusar aqui troca um código cru por
+ * uma frase, sem gastar um comando de RCON.
+ */
+const giveBody = z
+  .object({
+    shortname: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(
+        /^[A-Za-z0-9._-]+$/,
+        'o shortname do item usa letras, dígitos, ponto, hífen ou sublinhado — por exemplo, rifle.ak',
+      ),
+    amount: z.number().int().min(1).max(MAX_GIVE_AMOUNT),
+    skinId: z
+      .string()
+      .trim()
+      .regex(/^\d*$/, 'o skinId é uma sequência de dígitos (0 = sem skin)')
+      .max(20)
+      .default('0'),
+    mode: z.enum(GIVE_MODES).default('auto'),
+  })
+  .strict();
 
 /**
  * O destino de um teleporte.
@@ -213,6 +256,62 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminRoutesDeps)
       message:
         `${steamId} foi expulso. Ele pode entrar de novo a qualquer momento — para impedir, ` +
         'use Banir.',
+    };
+  });
+
+  /**
+   * Põe um item na mão de um jogador conectado.
+   *
+   * ####  PELO MESMO CAMINHO DO KIT E DA LOJA  ####
+   *
+   * `origemz.give`, e não o `inventory.give` nativo. O nativo cria
+   * UMA pilha com o total pedido — MEDIDO: 3500 de madeira viram um
+   * slot com 3500, e cinco AKs viram uma pilha de cinco. O plugin
+   * fatia em pilhas de verdade, e é o que a loja já entrega. Dois
+   * caminhos entregariam diferente, e a diferença só apareceria no
+   * inventário do jogador.
+   *
+   * ####  E FICA NA FICHA  ####
+   *
+   * Dar item é o poder mais fácil de abusar que este painel tem:
+   * ele não derruba ninguém, não aparece no log do jogo e o que ele
+   * cria vale dinheiro no servidor. "Quem deu 100 explosivos para
+   * esse jogador?" precisa ter resposta — com o nome de quem pediu,
+   * e três semanas depois.
+   */
+  app.post('/servers/:id/players/:steamId/give', async (request) => {
+    const { id, steamId } = playerParams.parse(request.params);
+    const item = giveBody.parse(request.body);
+    const context = contextOf(deps, id);
+
+    const result = await givePlayerItem(id, context.rcon, steamId, item);
+    const by = operatorOf(request);
+    // O que a ficha e o console guardam. `dropped` entra porque é a
+    // diferença entre "está na mochila dele" e "está no chão da
+    // base, onde qualquer um pega".
+    const detail =
+      `${String(item.amount)}x ${item.shortname}` +
+      (item.skinId === '0' || item.skinId === '' ? '' : ` (skin ${item.skinId})`) +
+      (result.dropped > 0 ? ` — ${String(result.dropped)} no chão` : '');
+
+    request.log.warn(
+      { server: id, steamId, by, ...item, ...result },
+      'item entregue a um jogador pelo painel',
+    );
+
+    context.console.pushLocal(`${by ?? 'alguém'} deu ${detail} para ${steamId}`);
+
+    deps.history.recordAction({ steamId, serverId: id, kind: 'item', actor: by, detail });
+
+    return {
+      ok: true,
+      steamId,
+      ...result,
+      message:
+        result.dropped === 0
+          ? `${detail} entregue no inventário.`
+          : `Entregue: ${String(result.given)} no inventário e ${String(result.dropped)} no chão ` +
+            '— o inventário dele não tinha espaço para tudo.',
     };
   });
 

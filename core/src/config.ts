@@ -429,6 +429,23 @@ export interface ServerPaths {
    * ninguém mais mexer em nada.
    */
   readonly oxideConfigDir: string;
+  /**
+   * `Servers\<id>\oxide\data` — o que os plugins GUARDAM.
+   *
+   * ####  NÃO É A MESMA COISA QUE O `oxideConfigDir`  ####
+   *
+   * Ali mora o que o admin ajusta; aqui, o que o plugin escreve
+   * sozinho e relê no próximo boot — a tabela de loot que o
+   * BetterLoot gerou do mundo, o `pending.json` do nosso
+   * `OrigemZItems`. Um é decisão, o outro é estado, e por isso o
+   * wipe apaga um e não o outro (ver wipe/plugin-data.ts).
+   *
+   * Cada plugin ganha uma SUBPASTA com o nome dele quando escreve
+   * mais de um arquivo — `oxide\data\BetterLoot\LootTables.json`.
+   * Quem monta esse caminho é o `oxide/data-files.ts`, com a mesma
+   * trava de `..` do `pluginConfigPath`.
+   */
+  readonly oxideDataDir: string;
   readonly logsDir: string;
   readonly backupsDir: string;
 }
@@ -593,6 +610,7 @@ export function resolveServerPaths(paths: AgentPaths, id: string): ServerPaths {
     exePath: join(installDir, RUST_DEDICATED_EXE),
     pluginsDir: join(installDir, 'oxide', 'plugins'),
     oxideConfigDir: join(installDir, 'oxide', 'config'),
+    oxideDataDir: join(installDir, 'oxide', 'data'),
     logsDir: join(paths.logsDir, id),
     backupsDir: join(paths.backupsDir, id),
   };

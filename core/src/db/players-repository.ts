@@ -78,7 +78,15 @@ export interface PlayerServerRecord {
  * tabela. Acrescentar um valor aqui SEM a migração faria o `INSERT`
  * estourar no banco — e só na máquina de quem já está de pé.
  */
-export type PlayerEventKind = 'join' | 'leave' | 'kick' | 'teleport' | 'vip' | 'kit' | 'compra';
+export type PlayerEventKind =
+  | 'join'
+  | 'leave'
+  | 'kick'
+  | 'teleport'
+  | 'vip'
+  | 'kit'
+  | 'compra'
+  | 'item';
 
 export interface PlayerEventRecord {
   readonly id: number;
@@ -337,6 +345,37 @@ export class PlayersRepository {
     return rows.map(toPlayerServer);
   }
 
+  /**
+   * O tempo acumulado de cada jogador NAQUELE servidor.
+   *
+   * ####  PARA QUE UMA LEITURA CRUA, SE `presenceOf` JÁ EXISTE  ####
+   *
+   * Porque a pergunta é outra. `presenceOf` responde sobre uma
+   * lista de jogadores conhecida; esta responde sobre o servidor
+   * inteiro, e quem a faz é o coletor do ranking — a cada 60 s, sem
+   * saber de antemão quem jogou.
+   *
+   * Ele guarda a marca d'água da rodada anterior em memória e soma
+   * a DIFERENÇA na métrica `time.played`. `played_seconds` é
+   * acumulado desde sempre e não sabe o que é período: copiá-lo
+   * daria o total de sempre em toda temporada. Ver
+   * `Docs/Ranking/20-PLANO-E-CONTRATOS.md` §8.4.
+   *
+   * A linha com zero VEM JUNTO, e não é desperdício: é ela que
+   * semeia a marca de quem acabou de chegar. Sem a semente, a
+   * primeira sessão dele inteira apareceria de uma vez como delta
+   * — e cairia toda no período em que ele desconectou.
+   */
+  playedSecondsOf(serverId: string): ReadonlyMap<string, number> {
+    const rows = this.#db
+      .prepare(
+        `SELECT steam_id, played_seconds FROM player_servers WHERE server_id = @server_id`,
+      )
+      .all({ server_id: serverId }) as { steam_id: string; played_seconds: number }[];
+
+    return new Map(rows.map((row) => [row.steam_id, row.played_seconds]));
+  }
+
   /** Os N últimos eventos daquele jogador, do mais novo ao mais velho. */
   events(steamId: string, limit: number): readonly PlayerEventRecord[] {
     const rows = this.#db
@@ -568,8 +607,27 @@ function toEvent(row: PlayerEventRow): PlayerEventRecord {
   };
 }
 
-/** Os mesmos valores do `CHECK` da tabela. Ver `PlayerEventKind`. */
-const EVENT_KINDS: readonly string[] = ['join', 'leave', 'kick', 'teleport', 'vip', 'kit'];
+/**
+ * Os mesmos valores do `CHECK` da tabela. Ver `PlayerEventKind`.
+ *
+ * ####  ESQUECER UM AQUI NÃO QUEBRA NADA — E ESSE É O PROBLEMA  ####
+ *
+ * `compra` entrou na tabela na 017 e não entrou nesta lista: cada
+ * compra lida de volta virava `join` silenciosamente, e a ficha
+ * mostrava uma entrada onde houve uma venda. Nenhum erro, nenhum
+ * log — só a linha errada. Migração que mexe no `CHECK` mexe aqui
+ * junto.
+ */
+const EVENT_KINDS: readonly string[] = [
+  'join',
+  'leave',
+  'kick',
+  'teleport',
+  'vip',
+  'kit',
+  'compra',
+  'item',
+];
 
 function isEventKind(value: string): value is PlayerEventKind {
   return EVENT_KINDS.includes(value);

@@ -555,6 +555,31 @@ export interface PlayersSnapshot {
 }
 
 /**
+ * Onde o item entregue deve parar.
+ *
+ * `auto` é o que a loja e os kits usam: tenta o inventário e larga
+ * no chão o que não couber. `inventory` prefere NÃO entregar a ver
+ * o item no chão de uma base cheia de gente — ele recusa com
+ * `INVENTORY_FULL`. `drop` larga direto, que é o modo de entregar
+ * um veículo... e de entregar uma armadilha.
+ */
+export type GiveMode = 'auto' | 'inventory' | 'drop';
+
+/** O teto por chamada do `origemz.give`. Igual ao do plugin. */
+export const MAX_GIVE_AMOUNT = 100_000;
+
+/**
+ * Quantas pilhas uma entrega pode criar, no plugin.
+ *
+ * O limite real por chamada é `min(MAX_GIVE_AMOUNT, 100 × pilha
+ * máxima do item)`: flecha (pilha 64) para em 6400, AK (pilha 1)
+ * para em 100. O catálogo sabe a pilha máxima, então a tela avisa
+ * ANTES de gastar um comando de RCON — quem recusa de verdade
+ * continua sendo o plugin, com `TOO_MANY_STACKS`.
+ */
+export const MAX_GIVE_STACK_PIECES = 100;
+
+/**
  * Uma mensagem do histórico de chat do SERVIDOR.
  *
  * Não é um buffer do agente: vem do `chat.tail`, que o jogo mantém
@@ -708,7 +733,12 @@ export type PlayerEventKind =
   // Os dois entraram com a migração 014: ganhar VIP e resgatar kit
   // são acontecimentos, e a ficha mostra UMA linha do tempo.
   | 'vip'
-  | 'kit';
+  | 'kit'
+  // A compra veio com a 017 e demorou a chegar aqui; o item, com a
+  // 040. Os dois são o que o suporte procura quando alguém aparece
+  // com o que não devia ter.
+  | 'compra'
+  | 'item';
 
 export interface PlayerEvent {
   at: string;
@@ -1164,6 +1194,15 @@ export interface CatalogItem {
   category: string;
   maxStack: number;
   hasCondition: boolean;
+  /**
+   * O item tem `ItemModConsumable` — ou seja, dá para USÁ-LO.
+   *
+   * `null` é "ninguém perguntou ainda": o catálogo foi lido por um
+   * agente anterior a este campo. É diferente de `false`, e a
+   * diferença importa — o cadastro de item custom só desabilita a
+   * conversão "ao usar" quando o jogo respondeu que NÃO.
+   */
+  consumable: boolean | null;
   firstSeen: string;
   lastSeen: string;
   /**
@@ -1200,6 +1239,131 @@ export interface ItemsPage {
   catalog: ItemCatalogInfo;
 }
 
+// ----------------------------------------------------------
+//  OS ITENS QUE NÓS CRIAMOS
+//
+//  Eles são o oposto do `CatalogItem` acima: aquele é o que o jogo
+//  tem, lido e espelhado; este é o que nós decidimos, e nada o
+//  apaga sozinho.
+//
+//  ####  UM ITEM CUSTOM NÃO É UM ITEM NOVO  ####
+//
+//  É um item do jogo com uma MARCA nossa — o par
+//  `(baseShortname, skinId)`. Foi medido no binário que um itemid
+//  que o cliente não conhece é descartado; a skin, não. Ver
+//  Docs\CustomItem\01-PESQUISA-ITEM-CUSTOM.md §3.
+// ----------------------------------------------------------
+
+/** Os oito tipos de efeito, e são os do JOGO. */
+export const EFFECT_TYPES = [
+  'Health',
+  'HealthOverTime',
+  'Bleeding',
+  'Calories',
+  'Hydration',
+  'Poison',
+  'Radiation',
+  'Heartrate',
+] as const;
+
+export type EffectType = (typeof EFFECT_TYPES)[number];
+
+export interface CustomItemEffect {
+  type: EffectType;
+  amount: number;
+  /** Só age abaixo desta vida. Ausente = sempre. */
+  onlyIfHealthBelow?: number;
+}
+
+export type CustomItemAction =
+  | { kind: 'none' }
+  | {
+      kind: 'consume';
+      /** O gesto que dispara: `use`, `drop`, `unwrap`… */
+      trigger: string;
+      consumes: number;
+      effects: CustomItemEffect[];
+    }
+  | {
+      /**
+       * O item vira ponto de ranking.
+       *
+       * É o desenho do Troféu Bleik: o item não é para guardar, é
+       * um RECIBO — nasce, é visto e morre, deixando um número que
+       * só cresce.
+       */
+      kind: 'points';
+      /** Qual ranking recebe. A lista vem de `GET /api/rankings/metrics`. */
+      metric: string;
+      perUnit: number;
+      /**
+       * Converter assim que o item cai no inventário?
+       *
+       * `true` é o padrão do troféu: some na hora, e com isso as
+       * três proibições do briefing (guardar, dropar, transferir)
+       * se resolvem sozinhas — não há o que dropar.
+       */
+      onPickup: boolean;
+    };
+
+export interface CustomItem {
+  /** Gerado do nome (`trofeu-bleik-store`), e não muda depois. */
+  id: string;
+  displayName: string;
+  /** O item do jogo que empresta o corpo. */
+  baseShortname: string;
+  /** Do catálogo. `null` quando o item base sumiu do jogo. */
+  baseItemId: number | null;
+  /** O item base não existe mais nesta versão do Rust. */
+  baseMissing: boolean;
+  /** UInt64 em texto. Nunca `'0'`. */
+  skinId: string;
+  category: string;
+  description: string | null;
+  iconFile: string | null;
+  /** `null` herda o do item base. Só sabe DIMINUIR. */
+  maxStack: number | null;
+  deployable: boolean;
+  /** O item se gasta assim que cai no inventario, e a acao roda. */
+  consumeOnPickup: boolean;
+  action: CustomItemAction;
+  message: string | null;
+  enabled: boolean;
+  /** Vazio = em nenhum servidor, e o item não é entregue. */
+  servers: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O corpo que cria ou reescreve um item custom. */
+/**
+ * A URL do PNG de um icone, para a tela poder mostra-lo.
+ *
+ * O arquivo mora em `Assets/items/` na maquina do agente, e o que o
+ * jogo tem e um CRC dentro do servidor de Rust — sem esta rota, a
+ * tela mostraria o nome do arquivo e pediria fe.
+ */
+export function iconUrl(name: string): string {
+  return agentUrl('/api/custom-items/icons/' + encodeURIComponent(name));
+}
+
+export interface CustomItemInput {
+  displayName: string;
+  baseShortname: string;
+  skinId: string;
+  category: string;
+  description: string | null;
+  iconFile: string | null;
+  maxStack: number | null;
+  deployable: boolean;
+  /** O item se gasta assim que cai no inventario, e a acao roda. */
+  consumeOnPickup: boolean;
+  action: CustomItemAction;
+  message: string | null;
+  enabled: boolean;
+  servers: string[];
+}
+
 /** O que um servidor faz com uma interface. */
 export interface ServerUiBinding {
   serverId: string;
@@ -1217,11 +1381,36 @@ export interface UiDocumentSummary {
   slug: string;
   name: string;
   command: string;
+  /**
+   * Os comandos EXTRAS que abrem este menu.
+   *
+   * `/quest` abre o Menu Principal direto nas missões sem ser um
+   * documento à parte. Eles ocupam o mesmo nome global no servidor
+   * que o `command`, e é por isso que a lista os mostra: sem eles,
+   * a recusa "Menu Principal já responde a /quest" apontaria para
+   * uma linha da tabela que diz só `/menu`.
+   */
+  shortcuts: string[];
   revision: number;
   screens: number;
   createdAt: string;
   updatedAt: string;
   servers: ServerUiBinding[];
+}
+
+/**
+ * Um modelo de interface, do jeito que o agente o anuncia.
+ *
+ * `preset` é a chave que volta no POST; `id` é o identificador que
+ * o documento vai NASCER com — e é ele que colide com uma interface
+ * já criada, e não a chave.
+ */
+export interface UiPreset {
+  preset: string;
+  id: string;
+  name: string;
+  command: string;
+  screens: number;
 }
 
 /** O documento inteiro. `document` é o modelo de `lib/ui-doc`. */
@@ -1246,6 +1435,248 @@ export interface UiPreview {
   screen: { id: string; name: string; kind: 'page' | 'modal' };
   cui: { name: string; parent: string; components: Record<string, unknown>[] }[];
   payload: { bytes: number; limit: number; fits: boolean };
+}
+
+// ------------------------------------------------------------
+//  O OVERLAY DE PROPAGANDAS (/api/servers/:id/ads)
+//
+//  ####  ELE NAO E UMA INTERFACE, E POR ISSO ESTA A PARTE  ####
+//
+//  Um documento de interface abre por comando, tem sessão e telas
+//  que trocam sob clique. O overlay aparece sozinho, para todo
+//  mundo, e o que ele faz é se MEXER — ver o cabeçalho do bloco
+//  do overlay em Plugins/OrigemZUI.cs.
+//
+//  Ele fica AQUI, ao lado das interfaces, por vizinhança de
+//  assunto: as duas coisas desenham na tela de quem joga.
+// ------------------------------------------------------------
+
+export const AD_FITS = ['cover', 'contain'] as const;
+export type AdFit = (typeof AD_FITS)[number];
+
+export const AD_IMAGE_STATUSES = ['pending', 'ready', 'error'] as const;
+export type AdImageStatus = (typeof AD_IMAGE_STATUSES)[number];
+
+export const AD_IMAGE_MODES = ['stored', 'url'] as const;
+export type AdImageMode = (typeof AD_IMAGE_MODES)[number];
+
+/**
+ * As camadas do jogo onde o overlay pode ser pendurado.
+ *
+ * As cinco primeiras ficam SEMPRE na tela. As três últimas só
+ * existem enquanto aquela tela do jogo está aberta — é assim que
+ * "a propaganda só no inventário" funciona, sem hook nenhum.
+ *
+ * `Hud.Menu` NÃO é uma delas: apesar do nome, ela continua visível
+ * com o inventário fechado (medido no jogo em 07/09/2026).
+ *
+ * Espelha `ADS_LAYERS` de core/src/types/ads.ts.
+ */
+export const AD_ALWAYS_LAYERS = ['Overall', 'Overlay', 'Hud.Menu', 'Hud', 'Under'] as const;
+export const AD_SCREEN_LAYERS = ['Inventory', 'Crafting', 'Map'] as const;
+export const AD_LAYERS = [...AD_ALWAYS_LAYERS, ...AD_SCREEN_LAYERS] as const;
+export type AdLayer = (typeof AD_LAYERS)[number];
+
+export const AD_ANCHORS = ['top-right', 'top-left', 'bottom-right', 'bottom-left'] as const;
+export type AdAnchor = (typeof AD_ANCHORS)[number];
+
+/**
+ * Os nove pontos onde o LOGO pode ficar quando é solto do painel.
+ *
+ * O painel ABRE — e crescer a partir do meio da tela não se lê
+ * como "um painel abrindo". O logo só FICA, então ele pode estar
+ * em qualquer lugar, e "no alto e ao centro" é o pedido comum.
+ */
+export const AD_LOGO_ANCHORS = [
+  'top-left',
+  'top-center',
+  'top-right',
+  'middle-left',
+  'middle-center',
+  'middle-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+] as const;
+export type AdLogoAnchor = (typeof AD_LOGO_ANCHORS)[number];
+
+export interface Advertisement {
+  id: string;
+  name: string;
+  enabled: boolean;
+  imageUrl: string;
+  /** `null` = usa o padrão do ajuste. */
+  displayDuration: number | null;
+  position: number;
+  priority: number;
+  weight: number;
+  fit: AdFit;
+  backgroundColor: string;
+  borderColor: string;
+
+  startDate: string | null;
+  endDate: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  daysOfWeek: number[];
+  permission: string | null;
+
+  imageStatus: AdImageStatus;
+  imageKey: string | null;
+  imageBytes: number | null;
+  imageWidth: number | null;
+  imageHeight: number | null;
+  imageError: string | null;
+  imageFetchedAt: string | null;
+
+  shownCount: number;
+  lastShownAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+
+  // ----------------------------------------------------------
+  //  DERIVADOS — calculados pelo AGENTE, e não aqui.
+  //
+  //  A regra de calendário (janela que vira a meia-noite, fuso
+  //  do servidor) mora no agente. Repeti-la no navegador daria
+  //  duas verdades que divergem no primeiro fuso horário.
+  // ----------------------------------------------------------
+  /** Passa no calendário NESTE instante? */
+  inSchedule: boolean;
+  /** Ligada, com imagem pronta e dentro da janela? */
+  live: boolean;
+  /** O enquadramento que o jogo vai usar. O preview usa o mesmo. */
+  anchors: { min: string; max: string };
+}
+
+export interface AdsSettings {
+  enabled: boolean;
+  layer: AdLayer;
+  permission: string | null;
+
+  /**
+   * O painel fica parado, com UMA propaganda?
+   *
+   * Ligado, não há ciclo: o painel é desenhado junto com o logo e
+   * fica. É independente da `layer` de propósito — dá para ter um
+   * banner fixo sempre visível, e o rodízio animado só dentro do
+   * inventário.
+   */
+  staticMode: boolean;
+
+  anchor: AdAnchor;
+  marginTop: number;
+  marginRight: number;
+
+  logoEnabled: boolean;
+  logoImageUrl: string | null;
+  logoWidth: number;
+  logoHeight: number;
+  logoOpacity: number;
+  logoAnimationEnabled: boolean;
+  logoSwayPixels: number;
+  logoScaleAmount: number;
+  logoDurationSeconds: number;
+  logoFps: number;
+  /** Solta o logo do canto do painel: âncora e posição próprias. */
+  logoDetached: boolean;
+  /**
+   * A camada do LOGO. `null` = a mesma do painel.
+   *
+   * É o campo que separa os dois: sem ele, pôr o painel em
+   * `Hud.Menu` levaria o logo junto, e o servidor ficaria sem
+   * marca na tela fora do inventário. Só vale com `logoDetached`.
+   */
+  logoLayer: AdLayer | null;
+  logoAnchor: AdLogoAnchor;
+  /** Num canto é margem; no centro, deslocamento (pode ser negativo). */
+  logoMarginX: number;
+  logoMarginY: number;
+
+  panelWidth: number;
+  panelHeight: number;
+  panelColor: string;
+  panelBorderColor: string;
+  panelBorderEnabled: boolean;
+
+  intervalSeconds: number;
+  defaultDisplayDuration: number;
+  openingMs: number;
+  closingMs: number;
+  transitionMs: number;
+  orderMode: 'sequential' | 'random';
+  /** 0 = todas as elegíveis. */
+  adsPerCycle: number;
+  animationFps: number;
+
+  imageMode: AdImageMode;
+  updatedAt: string | null;
+}
+
+/**
+ * Um quadro da animação, como o agente o gerou.
+ *
+ * O painel NÃO recalcula nada a partir dele: o preview toca
+ * exatamente os mesmos quadros que descem ao jogo. Duas
+ * renderizações divergiriam no primeiro campo que uma implementa
+ * e a outra não — e a divergência apareceria dentro do jogo, que
+ * é o pior lugar para descobrir.
+ */
+export interface AdsFrame {
+  at: number;
+  /**
+   * O que sai da tela neste quadro.
+   *
+   * ####  OPCIONAL, E O AGENTE REALMENTE O OMITE  ####
+   *
+   * Quando nao ha nada a destruir o campo nao vem — sao bytes que
+   * nao precisam atravessar o RCON. Declara-lo obrigatorio aqui
+   * fez o preview iterar um `undefined` e derrubar a pagina
+   * inteira. Ver `destroy?:` em core/src/game/ads-timeline.ts.
+   */
+  destroy?: string[];
+  /** CUI cru: o preview lê o RectTransform e a cor daqui. */
+  cui?: Record<string, unknown>[];
+}
+
+export interface AdsAnimation {
+  durationMs: number;
+  frames: AdsFrame[];
+}
+
+export interface AdsTimeline {
+  root: Record<string, unknown>[];
+  opening: AdsAnimation;
+  adEnter: AdsAnimation;
+  adExit: AdsAnimation;
+  closing: AdsAnimation;
+}
+
+/** O que `GET /ads` devolve: as três coisas de que a tela precisa. */
+export interface AdsView {
+  ok: true;
+  settings: AdsSettings;
+  ads: Advertisement[];
+  timeline: AdsTimeline;
+}
+
+/** O desfecho de um `POST /ads/sync`. */
+export interface AdsSyncResult {
+  ok: boolean;
+  status: 'sent' | 'skipped' | 'refused' | 'failed';
+  ads?: number;
+  bytes?: number;
+  reason?: string;
+  message?: string;
+}
+
+/** Os grupos e permissões do Oxide daquele servidor. */
+export interface AdsAudience {
+  ok: true;
+  /** `false` = sem RCON ou plugin antigo. A tela cai no campo livre. */
+  available: boolean;
+  groups: string[];
+  permissions: string[];
 }
 
 // ------------------------------------------------------------
@@ -1367,7 +1798,1031 @@ export interface MessageVariables {
   namespaces: string[];
 }
 
+// ----------------------------------------------------------
+//  O RANKING
+//
+//  ####  ELES ESPELHAM `core/src/http/routes/rankings.ts`  ####
+//
+//  O painel duplica à mão os tipos do core, de propósito — não há
+//  pacote compartilhado. O que atravessa a borda é o que as funções
+//  `toRankingBody`, `toPeriodBody`, `toPeriodViewBody`,
+//  `toCoverageBody`, `toEntryBody` e `toSnapshotBody` de lá
+//  produzem: instante em ISO, e `null` sobrevivendo como `null`.
+//
+//  Ver Docs\Ranking\20-PLANO-E-CONTRATOS.md §9.
+// ----------------------------------------------------------
+
+/** De onde o número vem. */
+export type RankingSource = 'plugin' | 'agent' | 'item' | 'computed';
+
+/** Como o valor se forma: soma, melhor marca, ou divisão. */
+export type RankingValueKind = 'counter' | 'record' | 'ratio';
+
+export type RankingDirection = 'desc' | 'asc';
+
+/** O papel de uma janela — e, num ranking, a janela em que ele disputa. */
+export type RankingPeriodKind = 'wipe' | 'season' | 'lifetime';
+
+export type RankingScope = 'server' | 'global';
+
+export type RankingSeasonMode = 'wipe' | 'biweekly' | 'monthly' | 'quarterly' | 'days' | 'manual';
+
+/**
+ * Como a coleta daquele servidor estava.
+ *
+ * NÃO é um booleano, e é essa a razão de o campo existir: um
+ * servidor em `not-loaded` que virasse lista vazia diria que
+ * ninguém pontuou ali — uma afirmação sobre os jogadores, quando a
+ * verdade é sobre a coleta.
+ */
+export type RankingCoverageStatus = 'ok' | 'never' | 'not-loaded' | 'no-answer';
+
+/** A definição de um ranking. Fixo e dinâmico são a mesma linha. */
+export interface RankingDefinition {
+  /** Slug estável: é o que a URL do painel e o site guardam. */
+  id: string;
+  /** A chave em `player_stats`. Única entre os rankings. */
+  metric: string;
+  label: string;
+  /**
+   * O nome que cabe na aba do JOGO, onde a coluna é estreita.
+   *
+   * `null` = não tem, e vale o `label`. Quem resolve isso é o
+   * `gameLabelOf` do core, num lugar só — o painel edita o campo
+   * e mostra o `label` como espelho.
+   */
+  shortLabel: string | null;
+  /** "abates", "troféus", "metros". `null` quando o número não tem unidade. */
+  unit: string | null;
+  description: string | null;
+  source: RankingSource;
+  valueKind: RankingValueKind;
+  direction: RankingDirection;
+  /** Em que janela ele DISPUTA — a que a tela abre, e a única cuja virada o zera. */
+  window: RankingPeriodKind;
+  /** Entra na soma da rede? `false` para minério e explosivo. */
+  globalEligible: boolean;
+  /** Veio semeado com o agente: o painel some com o botão de apagar. */
+  builtin: boolean;
+  enabled: boolean;
+  /**
+   * Aparece no menu do jogo? NÃO é o mesmo que `enabled`.
+   *
+   * Desligado, o ranking some de todo lugar; com isto em `false`
+   * ele sai só do menu do jogo e continua no painel, no site e na
+   * contagem.
+   */
+  showInGame: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O corpo que cria ou reescreve um ranking. `builtin` não se digita. */
+export interface RankingDefinitionInput {
+  id: string;
+  metric: string;
+  label: string;
+  /** Vazio vira `null` na escrita, e a API recusa acima de 24. */
+  shortLabel: string | null;
+  unit: string | null;
+  description: string | null;
+  source: RankingSource;
+  valueKind: RankingValueKind;
+  direction: RankingDirection;
+  window: RankingPeriodKind;
+  globalEligible: boolean;
+  enabled: boolean;
+  showInGame: boolean;
+  /**
+   * Opcional, e sem valor padrão na tela.
+   *
+   * A ordem se muda arrastando (`reorderRankings`). Mandá-la num
+   * PUT de edição desfaria um arrasto feito entre o carregamento
+   * do formulário e o clique em salvar. Ausente na criação = o
+   * agente põe no fim da lista.
+   */
+  sortOrder?: number;
+}
+
+/** Uma janela do banco: (servidor, papel, começo). */
+export interface RankingPeriod {
+  id: number;
+  serverId: string;
+  kind: RankingPeriodKind;
+  /** A linha de `wipes` que abriu esta janela, quando houve uma. */
+  wipeId: number | null;
+  label: string | null;
+  /** Como o modo estava configurado QUANDO ela abriu. */
+  seasonMode: RankingSeasonMode | null;
+  startedAt: string;
+  /** `null` = ainda aberta. */
+  endedAt: string | null;
+}
+
+/**
+ * A janela em que a lista foi lida.
+ *
+ * No escopo de rede ela não tem `id`: são várias janelas somadas, e
+ * eleger uma delas como "a" janela seria mentira.
+ */
+export interface RankingPeriodView {
+  id: number | null;
+  kind: RankingPeriodKind;
+  serverId: string | null;
+  label: string | null;
+  seasonMode: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** Quando ela vira, se ninguém mexer. `null` = não tem data. */
+  turnsAt: string | null;
+}
+
+export interface RankingCoverageServer {
+  serverId: string;
+  status: RankingCoverageStatus;
+  /**
+   * O aviso pronto, do MESMO módulo que a tela do jogo lê.
+   *
+   * O painel não escreve a sua versão: as duas divergiriam no
+   * primeiro ajuste de texto, e o admin e o jogador passariam a
+   * ler histórias diferentes sobre o mesmo defeito. `null` em
+   * `ok` — não há aviso quando não há o que avisar.
+   */
+  message: string | null;
+  lastBatchAt: string | null;
+}
+
+export interface RankingCoverage {
+  servers: RankingCoverageServer[];
+}
+
+/** Uma linha da lista, com a colocação já calculada. */
+export interface RankingEntry {
+  position: number;
+  steamId: string;
+  /** `null` quando o jogador saiu da base. */
+  name: string | null;
+  value: number;
+  updatedAt: string;
+}
+
+/** Uma linha do pódio CONGELADO: ela não muda mais. */
+export interface RankingSnapshotEntry {
+  position: number;
+  steamId: string;
+  /** O nome de quando ele ganhou, copiado no fechamento. */
+  name: string | null;
+  value: number;
+  frozenAt: string;
+}
+
+/** A janela configurada de um servidor. */
+export interface RankingSettings {
+  seasonMode: RankingSeasonMode;
+  seasonDays: number | null;
+  seasonAnchorAt: string | null;
+  /** A temporada TAMBÉM vira quando o mundo vira? */
+  seasonOnWipe: boolean;
+  /** Quantas posições o pódio congela ao fechar. */
+  snapshotSize: number;
+  /** `null` = o servidor nunca foi configurado; valem os padrões. */
+  updatedAt: string | null;
+}
+
+export interface RankingSettingsInput {
+  seasonMode: RankingSeasonMode;
+  seasonDays: number | null;
+  /** ISO, ou epoch em ms. `null` = a abertura do período serve de âncora. */
+  seasonAnchorAt: string | null;
+  seasonOnWipe: boolean;
+  snapshotSize: number;
+}
+
+export interface RankingMetricsResponse {
+  ok: true;
+  count: number;
+  rankings: RankingDefinition[];
+}
+
+export interface RankingListResponse {
+  ok: true;
+  /** O que veio nesta página. */
+  count: number;
+  /** A lista inteira, antes da paginação. */
+  total: number;
+  limit: number;
+  offset: number;
+  ranking: RankingDefinition;
+  scope: RankingScope;
+  period: RankingPeriodView;
+  /** Veio do pódio congelado? Aí ela não muda mais. */
+  frozen: boolean;
+  measuredSince: string | null;
+  updatedAt: string | null;
+  coverage: RankingCoverage;
+  entries: RankingEntry[];
+}
+
+export interface RankingPeriodsResponse {
+  ok: true;
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+  periods: RankingPeriod[];
+}
+
+export interface RankingPeriodDetailResponse {
+  ok: true;
+  period: RankingPeriod;
+  podium: { metric: string; label: string; entries: RankingSnapshotEntry[] }[];
+}
+
+export interface RankingSettingsResponse {
+  ok: true;
+  serverId: string;
+  settings: RankingSettings;
+  /** A temporada mais recente daquele servidor. `null` = nenhuma ainda. */
+  season: RankingPeriod | null;
+}
+
+/** O que a virada devolve: a que fechou, a que abriu, e quantas linhas congelaram. */
+export interface RankingSeasonTurnResponse {
+  ok: true;
+  closed: RankingPeriod;
+  opened: RankingPeriod;
+  frozen: number;
+}
+
+// ------------------------------------------------------------
+//  O LOOT
+//
+//  ####  UMA REGRA ACRESCENTA; ELA NÃO REESCREVE A TABELA  ####
+//
+//  A configuração do jogo continua sendo do jogo — o plugin deixa
+//  o container nascer cheio e SÓ ACRESCENTA por cima. É a decisão
+//  do Docs/CustomItem/05 §4, e ela é o que faz a configuração
+//  sobreviver a um update do Rust: o que ninguém tocou continua
+//  acompanhando a Facepunch.
+//
+//  ####  E O ITEM É SEMPRE NOSSO  ####
+//
+//  Um item do jogo puro nasceria do loot com skin 0 — sem marca,
+//  o plugin não o reconhece e ele não vira ponto (05 §3.4). Por
+//  isso a regra aponta para um `custom_items`, e não para um
+//  shortname.
+// ------------------------------------------------------------
+
+/**
+ * Medindo ou valendo.
+ *
+ * `measuring` NÃO CRIA ITEM NENHUM: a regra é sorteada, o
+ * resultado é contado, e nada cai na caixa. É como se descobre
+ * quantas vezes por dia aquela chance dispararia antes de soltá-la
+ * no servidor — o denominador real (containers populados por dia)
+ * não é medido em lugar nenhum (05 §9.6).
+ */
+export type LootRuleMode = 'measuring' | 'live';
+
+export interface LootRule {
+  /** Nasce do nome e não muda depois: é o que a URL e o stats usam. */
+  id: string;
+  /** O que o admin lê na lista. */
+  label: string;
+  /** O id em `custom_items`. Item nosso, sempre — ver o cabeçalho. */
+  customItemId: string;
+  /** `ShortPrefabName` de cada container em que a regra vale. */
+  containers: string[];
+  /** 0 a 1, por container populado. `0.0001` é uma em dez mil. */
+  chance: number;
+  amountMin: number;
+  amountMax: number;
+  mode: LootRuleMode;
+  /** Teto por servidor e por dia. `null` = sem teto. */
+  dailyCap: number | null;
+  /** O mesmo jogador não acha outro nessas horas. `null` = sem carência. */
+  playerCooldownHours: number | null;
+  enabled: boolean;
+  /** Vazio = em nenhum servidor, como em `custom_item_servers`. */
+  servers: string[];
+}
+
+/** O corpo que cria ou reescreve uma regra. O PUT é total, não PATCH. */
+export type LootRuleInput = LootRule;
+
+/**
+ * Um container que o plugin aceita.
+ *
+ * `label` e `group` são do AGENTE quando ele os manda; o painel
+ * tem os dele para quando não vierem (ver `components/loot/containers.ts`).
+ */
+export interface LootContainerInfo {
+  /** `ShortPrefabName` — é o que o plugin casa, e é a identidade. */
+  name: string;
+  /** Nome que o admin reconhece. `null` = o painel resolve. */
+  label: string | null;
+  /** A natureza (barril, caixa de risco, evento…). `null` = idem. */
+  group: string | null;
+  /**
+   * De quantos em quantos segundos o container refaz o loot.
+   *
+   * `null` é "não sei", e não "nunca": 71 dos 105 têm refresh
+   * finito (05 §2.6), e é ele que faz a regra valer de novo sem
+   * ninguém abrir nada.
+   */
+  refreshSeconds: number | null;
+}
+
+/** Um dia de contagem de uma regra. */
+export interface LootRuleStatsDay {
+  /** `AAAA-MM-DD`, no fuso do agente. */
+  day: string;
+  /** Quantas vezes a regra disparou — ou TERIA disparado, em medição. */
+  rolls: number | null;
+  /** Quantos itens saíram de verdade. Zero enquanto o modo é medição. */
+  emitted: number | null;
+  /** Quantos containers a regra viu naquele dia. `null` = o agente não conta. */
+  containers: number | null;
+}
+
+export interface LootRulesResponse {
+  ok: true;
+  count: number;
+  rules: LootRule[];
+}
+
+export interface LootContainersResponse {
+  ok: true;
+  count: number;
+  containers: LootContainerInfo[];
+}
+
+export interface LootRuleStatsResponse {
+  ok: true;
+  ruleId: string;
+  mode: LootRuleMode;
+  /** Do dia mais velho para o mais novo. Vazio = ainda não contou nada. */
+  days: LootRuleStatsDay[];
+}
+
+// ------------------------------------------------------------
+//  O EDITOR DE LOOT: a configuração do BetterLoot
+//
+//  ####  ESTA FATIA EDITA O ARQUIVO DE UM PLUGIN DE TERCEIRO  ####
+//
+//  A decisão do dono (Docs/CustomItem/06 §0) é que o painel
+//  configura TODO o loot do jogo editando os JSONs do BetterLoot,
+//  em vez de construirmos motor de loot. É o papel que o Looty
+//  cumpre por fora; nós o cumprimos de dentro do servidor.
+//
+//  Isso convive com as `loot_rules` acima, e as duas NÃO são a
+//  mesma coisa: a regra é do nosso plugin e sabe teto por dia,
+//  carência por jogador e medição; a tabela é do BetterLoot e sabe
+//  encher a caixa inteira. O §3.5 daquele documento tem a divisão
+//  linha a linha.
+//
+//  ####  A IDENTIDADE É O CAMINHO INTEIRO DO PREFAB  ####
+//
+//  `assets/bundled/prefabs/radtown/crate_elite.prefab`, e não
+//  `crate_elite`. Ele tem barra e às vezes espaço (`dmloot/dm
+//  ammo.prefab`), e por isso viaja em QUERY STRING, nunca em
+//  pedaço de caminho.
+//
+//  ####  O ARQUIVO NÃO CABE NUMA RESPOSTA  ####
+//
+//  Medido: 2,53 MB, 111 prefabs, 6.824 entradas. A lista devolve
+//  RESUMO por prefab; o conteúdo de uma caixa é uma segunda
+//  chamada. Mandar tudo junto seria uma resposta de megabytes para
+//  uma tela que mostra uma caixa por vez.
+//
+//  ####  SALVAR SUBSTITUI O ARQUIVO INTEIRO  ####
+//
+//  O plugin serializa o dicionário todo — não há merge. Duas telas
+//  abertas na mesma caixa fariam a segunda apagar a primeira em
+//  silêncio, e é por isso que existe a `revision` abaixo.
+// ------------------------------------------------------------
+
+/**
+ * Um item que sai JUNTO com outro (`Bonus Items`).
+ *
+ * Ele não conta como sorteio: quem o traz é a entrada dona. É o
+ * "rifle com munição" que o mercado vende como recurso avançado.
+ */
+export interface BetterLootBonusItem {
+  /** A chave do arquivo, com o sufixo `{n}` quando existe. */
+  key: string;
+  shortname: string;
+  /** `'0'` = a skin do jogo. String porque é `ulong` — ver §818. */
+  skinId: string;
+  /** O nome que o plugin carimba. `null` = nenhum. */
+  customName: string | null;
+  min: number;
+  max: number;
+}
+
+/** Um item que sai SEMPRE, sem sorteio (`Guaranteed Items`). */
+export interface BetterLootGuaranteedEntry {
+  key: string;
+  shortname: string;
+  /** O nome do item no catálogo do agente. `null` = ele não o conhece. */
+  displayName: string | null;
+  skinId: string;
+  customName: string | null;
+  min: number;
+  max: number;
+}
+
+/** Uma entrada de `Ungrouped Items` — o corpo da tabela de uma caixa. */
+export interface BetterLootEntry {
+  /**
+   * A CHAVE do arquivo. É a identidade, e pode ter sufixo `{n}`.
+   *
+   * O plugin remove `{\d+}` antes de resolver o item, o que deixa o
+   * mesmo shortname entrar várias vezes com skins diferentes. É o
+   * que faz um catálogo de itens nossos caber numa caixa só.
+   */
+  key: string;
+  /** A chave sem o sufixo — o item que o jogo conhece. */
+  shortname: string;
+  /** O nome do item no catálogo do agente. `null` = ele não o conhece. */
+  displayName: string | null;
+  skinId: string;
+  customName: string | null;
+  min: number;
+  max: number;
+  allowDuplicates: boolean;
+  /** `null` = o plugin decide sozinho (o item não é pesquisável). */
+  canConvertToBlueprint: boolean | null;
+  /** Em PORCENTAGEM da condição, não em pontos. `null` = o item não tem. */
+  durability: { min: number; max: number } | null;
+  /**
+   * A raridade do item NO JOGO, 0 a 4.
+   *
+   * ####  É ELA QUE DECIDE A CHANCE, E O ARQUIVO NÃO A TEM  ####
+   *
+   * Uma entrada de `Ungrouped Items` não carrega probabilidade: o
+   * plugin lê `ItemDefinition.rarity` do jogo e pesa por ela. Sem
+   * este campo a tela NÃO CONSEGUE mostrar porcentagem nenhuma — e
+   * a saída certa é o travessão, nunca um zero.
+   *
+   * `null` = o agente não soube dizer.
+   */
+  rarity: number | null;
+  bonusItems: BetterLootBonusItem[];
+  /**
+   * O item tem `Item Properties` (munição e acessórios de arma).
+   *
+   * A tela não edita isso e diz que não edita: o plugin reescreve
+   * esse bloco sozinho ao validar, removendo acessório incompatível
+   * (`scanEntry`, BetterLoot.cs:2140). Prometer edição aqui seria
+   * prometer o que o plugin desfaz.
+   */
+  hasWeaponProperties: boolean;
+}
+
+/** Quanto sai de cada coisa numa caixa (`Item Settings`). */
+export interface BetterLootItemSettings {
+  /** O jogo limita o total a 36, e a 1 no piso (BetterLoot.cs:2349). */
+  minItems: number;
+  maxItems: number;
+  minScrap: number;
+  maxScrap: number;
+  minBlueprints: number;
+  maxBlueprints: number;
+  bonusItemsCountToTotal: boolean;
+  guaranteedItemsCountToTotal: boolean;
+}
+
+/** Um grupo de `LootGroups.json` associado a uma caixa (`Loot Profiles`). */
+export interface BetterLootProfileLink {
+  /** Aponta para uma chave de `LootGroups.json`. */
+  name: string;
+  enabled: boolean;
+  /** 1 a 100. É cumulativa entre os perfis, e não absoluta. */
+  probability: number;
+  /** `0` = sem limite. */
+  maxItems: number;
+}
+
+/** A linha da lista de caixas: o que cabe sem abrir a tabela. */
+export interface BetterLootTableSummary {
+  /** O caminho inteiro do prefab. É a identidade — ver o cabeçalho. */
+  prefab: string;
+  /** Desligado devolve a caixa ao loot NATIVO, e não a caixa vazia. */
+  enabled: boolean;
+  itemCount: number;
+  guaranteedCount: number;
+  profileCount: number;
+  itemSettings: BetterLootItemSettings;
+}
+
+/** A tabela de uma caixa, inteira. */
+export interface BetterLootTable extends BetterLootTableSummary {
+  /** Trava o sorteio num perfil só por caixa. */
+  poolLocking: boolean;
+  /** Sorteio uniforme em vez de enviesado por raridade — ver `rarity`. */
+  ignoreRarityBias: boolean;
+  profiles: BetterLootProfileLink[];
+  guaranteed: BetterLootGuaranteedEntry[];
+  items: BetterLootEntry[];
+}
+
+/**
+ * O que vale para o SERVIDOR INTEIRO (`BetterLoot.json`).
+ *
+ * ####  OS MULTIPLICADORES SÃO GLOBAIS E INTEIROS  ####
+ *
+ * Não existe 2x só nos barris, e não existe 1,5x. Quem quer
+ * multiplicar uma caixa só mexe no `Item Minimum`/`Item Maximum`
+ * das entradas dela. E eles multiplicam a QUANTIDADE, não a
+ * chance: 5x não dá cinco vezes mais itens, dá os mesmos itens com
+ * quantidade cinco vezes maior.
+ */
+export interface BetterLootGlobals {
+  lootMultiplier: number;
+  scrapMultiplier: number;
+  /** 0 a 1. Quanto do sorteio vira projeto em vez de item. */
+  blueprintWeight: number;
+  blueprintConversion: boolean;
+  allowDuplicates: boolean;
+  poolLocking: boolean;
+}
+
+/**
+ * O que a tela pode MUDAR nos globais.
+ *
+ * ####  QUATRO CAMPOS, E NÃO OS SEIS QUE SE LEEM  ####
+ *
+ * `allowDuplicates` e `poolLocking` são lidos e mostrados, mas não
+ * são editáveis aqui: eles mudam o SORTEIO (se o mesmo item pode
+ * sair duas vezes, se a caixa trava num perfil), e não a escala do
+ * loot. O pedido é o multiplicador; levar os outros dois de carona
+ * seria mexer no que ninguém pediu.
+ */
+export interface BetterLootGlobalsInput {
+  /** Inteiro ≥ 1 — é `int` no plugin, e zero zeraria o servidor. */
+  lootMultiplier: number;
+  scrapMultiplier: number;
+  /** 0 a 1, como o arquivo guarda. A tela é que fala em %. */
+  blueprintWeight: number;
+  blueprintConversion: boolean;
+}
+
+/** O corpo do PUT dos globais. A revisão é a do `BetterLoot.json`. */
+export interface BetterLootGlobalsSaveInput {
+  baseRevision: string | null;
+  globals: BetterLootGlobalsInput;
+}
+
+/** `PUT /api/servers/:id/betterloot/globals` — a resposta, relida do disco. */
+export interface BetterLootGlobalsResponse {
+  ok: true;
+  serverId: string;
+  /** A revisão NOVA do `BetterLoot.json`. */
+  revision: string;
+  /** `null` = o arquivo ficou ilegível. A tela mostra travessão. */
+  globals: BetterLootGlobals | null;
+  /** Onde ficou a cópia anterior. `null` = não havia arquivo. */
+  backup: string | null;
+  reloaded: boolean;
+  reloadOutput: string | null;
+}
+
+/** `GET /api/servers/:id/betterloot` — a lista, e o estado do plugin ali. */
+export interface BetterLootStatusResponse {
+  ok: true;
+  serverId: string;
+  /** O plugin está carregado naquele servidor? `null` = não deu para perguntar. */
+  loaded: boolean | null;
+  version: string | null;
+  /** Quando o agente leu o disco. `null` = nunca leu. */
+  readAt: string | null;
+  /**
+   * A impressão do `LootTables.json` no disco.
+   *
+   * A tela devolve a mesma no PUT; o agente recusa quando ela não
+   * bate. É o que impede duas telas abertas de uma apagar a outra —
+   * o mesmo papel do `appliedSha` da biblioteca de plugins.
+   */
+  revision: string | null;
+  /**
+   * A impressão do `BetterLoot.json` — a revisão dos GLOBAIS.
+   *
+   * ####  DOIS ARQUIVOS, DUAS REVISÕES  ####
+   *
+   * A `revision` acima é da tabela; esta é da configuração. Uma só
+   * faria gravar o multiplicador recusar o próximo salvamento de
+   * caixa, porque recarregar o plugin reescreve o `LootTables.json`
+   * sozinho.
+   */
+  configRevision: string | null;
+  globals: BetterLootGlobals | null;
+  /** Os shortnames banidos (`Blacklist.json`). É global, não por caixa. */
+  blacklist: string[];
+  count: number;
+  tables: BetterLootTableSummary[];
+}
+
+/** `GET /api/servers/:id/betterloot/table?prefab=…` — uma caixa. */
+export interface BetterLootTableResponse {
+  ok: true;
+  serverId: string;
+  revision: string | null;
+  table: BetterLootTable;
+}
+
+/**
+ * O corpo do PUT de uma caixa.
+ *
+ * A resposta vem RELIDA DO DISCO depois do `oxide.reload`, e não é
+ * o que foi enviado: o plugin preenche durabilidade, propriedades e
+ * "pode virar blueprint" sozinho ao validar (`scanEntry`). O que se
+ * escreve não é o que fica.
+ */
+export interface BetterLootSaveInput {
+  /** A revisão em que a tela abriu. `null` = a tela não viu nenhuma. */
+  baseRevision: string | null;
+  table: BetterLootTable;
+}
+
+// ============================================================
+//  AS MISSOES
+//
+//  ####  A DEFINICAO E DE REDE; O PROGRESSO E DE SERVIDOR  ####
+//
+//  Uma quest e escrita uma vez e vale em todos os servidores - como
+//  VIP, kit e loja. O que conta separado em cada mundo e o
+//  PROGRESSO, e e por isso que toda linha de progresso carrega o
+//  serverId enquanto a quest nao carrega.
+//
+//  ####  AS DATAS AQUI SAO EPOCH, E NAO ISO  ####
+//
+//  Ao contrario do ranking. A razao e esta tela: ela faz contas de
+//  tempo (quanto falta do cooldown, quanto durou a tentativa), e ISO
+//  a obrigaria a reconverter tudo.
+//
+//  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §11 e §12.
+// ============================================================
+
+export type QuestRepeatMode = 'once' | 'cooldown' | 'daily' | 'weekly';
+
+export type QuestObjectiveKind =
+  | 'kill'
+  | 'gather'
+  | 'craft'
+  | 'loot'
+  | 'deliver'
+  | 'playtime'
+  | 'metric';
+
+export type QuestRewardKind = 'item' | 'coins' | 'kit' | 'points' | 'vip';
+
+export type PlayerQuestStatus = 'active' | 'completed' | 'claimed' | 'abandoned';
+
+export interface QuestObjective {
+  seq: number;
+  kind: QuestObjectiveKind;
+  /** Shortname, nome de criatura ou id de NPC. `null` em playtime/metric. */
+  target: string | null;
+  /** So em `metric`. */
+  metric: string | null;
+  amount: number;
+  /** Sobrescreve a frase montada pelo agente. */
+  label: string | null;
+  /** Tira os itens do inventario no resgate. So em loot/gather. */
+  consume: boolean;
+}
+
+/**
+ * A recompensa, achatada.
+ *
+ * O `kind` decide quais campos existem - e o mesmo formato que a
+ * API recebe, e o formulario monta um objeto por vez.
+ */
+export type QuestReward =
+  | { kind: 'item'; shortname: string; amount: number; skinId: string }
+  | {
+      kind: 'coins';
+      amount: number | null;
+      perMeter: number | null;
+      min: number | null;
+      max: number | null;
+    }
+  | { kind: 'kit'; slug: string }
+  | { kind: 'points'; metric: string; amount: number }
+  | { kind: 'vip'; tier: string; days: number };
+
+export interface QuestDefinition {
+  id: string;
+  title: string;
+  description: string | null;
+  category: string;
+  enabled: boolean;
+  sort: number;
+  /** `vip:ouro`, ou uma permissao do Oxide. `null` = todo mundo. */
+  requires: string | null;
+  /** `null` = aparece no menu; preenchido = so perto daquele NPC. */
+  npcId: string | null;
+  repeatMode: QuestRepeatMode;
+  cooldownSeconds: number;
+  requiresQuest: string | null;
+  availableFrom: number | null;
+  availableTo: number | null;
+  autoAccept: boolean;
+  wipePolicy: 'reset' | 'keep';
+  /** Vazia = vale em TODOS os servidores. */
+  servers: string[];
+  objectives: QuestObjective[];
+  rewards: QuestReward[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** O corpo que a API recebe: a quest sem os campos que ela gera. */
+export type QuestInput = Omit<QuestDefinition, 'id' | 'createdAt' | 'updatedAt'>;
+
+export interface QuestObjectiveView {
+  seq: number;
+  /** A frase ja montada pelo agente, com o nome bonito do item. */
+  label: string;
+  have: number;
+  need: number;
+  done: boolean;
+}
+
+/**
+ * Uma tentativa.
+ *
+ * E o MESMO corpo que a tela do jogo recebe, mais os campos de
+ * quem/onde - duas formas para a mesma tentativa dariam duas
+ * contagens de progresso.
+ */
+export interface QuestProgressRow {
+  playerQuestId: number;
+  questId: string;
+  title: string;
+  status: PlayerQuestStatus;
+  objectives: QuestObjectiveView[];
+  rewards: QuestReward[];
+  complete: boolean;
+  acceptedAt: number;
+  completedAt: number | null;
+  claimedAt: number | null;
+  cooldownUntil: number | null;
+  serverId: string;
+  steamId: string;
+  attempt: number;
+}
+
+export interface QuestNpc {
+  id: string;
+  serverId: string;
+  name: string;
+  kind: 'quest' | 'delivery';
+  x: number;
+  y: number;
+  z: number;
+  rotation: number;
+  prefab: string;
+  mapMarker: boolean;
+  useRadius: number;
+  enabled: boolean;
+  wipePolicy: 'keep' | 'remove';
+  /** As quests que apontam para ele. E o aviso do botao de apagar. */
+  quests: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface QuestSettingsRow {
+  serverId: string;
+  maxActive: number;
+  enabled: boolean;
+  flushSeconds: number;
+  lootEnabled: boolean;
+  resetAtMinute: number;
+  updatedAt: number | null;
+}
+
+export interface QuestEvent {
+  id: number;
+  eventId: string | null;
+  serverId: string;
+  steamId: string;
+  questId: string;
+  attempt: number;
+  kind: 'accept' | 'progress' | 'complete' | 'claim' | 'abandon' | 'reset' | 'reward_failed';
+  detail: unknown;
+  source: 'plugin' | 'agent' | 'panel' | 'wipe';
+  actor: string | null;
+  at: number;
+}
+
+export interface QuestRewardOutcome {
+  kind: QuestRewardKind;
+  ok: boolean;
+  message: string;
+  code: string | null;
+}
+
+export interface QuestClaimResult {
+  playerQuestId: number;
+  questId: string;
+  outcomes: QuestRewardOutcome[];
+  pending: boolean;
+}
+
 export const agent = {
+  // ---- as missoes ----
+
+  quests: (options: { category?: string; serverId?: string } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.category !== undefined) {
+      query.set('category', options.category);
+    }
+
+    if (options.serverId !== undefined) {
+      query.set('serverId', options.serverId);
+    }
+
+    const suffix = query.toString();
+
+    return api<{ quests: QuestDefinition[] }>(`/api/quests${suffix === '' ? '' : `?${suffix}`}`);
+  },
+
+  questCategories: () =>
+    api<{ categories: { category: string; total: number }[] }>('/api/quests/categories'),
+
+  // ####  NÃO HÁ `quest(id)` NEM `questOffers()` AQUI  ####
+  //
+  // As duas rotas existem na API — `GET /quests/:id` e
+  // `GET /quests/offers` —, e quem as consome é o SITE e a tela do
+  // jogo, não este painel: ele lê a lista inteira de uma vez, e o
+  // `liveCount` chega na recusa do DELETE, que é onde ele importa.
+  //
+  // Um método de cliente que ninguém chama é uma promessa de que
+  // alguma tela o usa. Ver §11.4 do plano.
+
+  createQuest: (body: QuestInput) =>
+    api<{ quest: QuestDefinition }>('/api/quests', { method: 'POST', body }),
+
+  updateQuest: (id: string, body: QuestInput) =>
+    api<{ quest: QuestDefinition }>(`/api/quests/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  /** A ordem vai INTEIRA: uma lista parcial e recusada pela API. */
+  reorderQuests: (ids: string[]) =>
+    api<{ quests: QuestDefinition[] }>('/api/quests/order', { method: 'PUT', body: { ids } }),
+
+  duplicateQuest: (id: string, title?: string) =>
+    api<{ quest: QuestDefinition }>(`/api/quests/${encodeURIComponent(id)}/duplicate`, {
+      method: 'POST',
+      body: title === undefined ? {} : { title },
+    }),
+
+  /**
+   * Apaga.
+   *
+   * Sem `force`, a API recusa com `QUEST_IN_USE` e a contagem de
+   * quem esta no meio dela - e o que a tela mostra antes do segundo
+   * clique.
+   */
+  removeQuest: (id: string, force = false) =>
+    api<{ removed: boolean; live: number }>(
+      `/api/quests/${encodeURIComponent(id)}${force ? '?force=true' : ''}`,
+      { method: 'DELETE' },
+    ),
+
+  /** Exige `steamId` OU `questId`: sem recorte a API recusa. */
+  questProgress: (options: {
+    steamId?: string;
+    questId?: string;
+    serverId?: string;
+    status?: PlayerQuestStatus;
+    limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) {
+        query.set(key, String(value));
+      }
+    }
+
+    return api<{ progress: QuestProgressRow[] }>(`/api/quests/progress?${query.toString()}`);
+  },
+
+  playerQuests: (steamId: string, options: { serverId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) {
+      query.set('serverId', options.serverId);
+    }
+
+    if (options.limit !== undefined) {
+      query.set('limit', String(options.limit));
+    }
+
+    const suffix = query.toString();
+
+    return api<{ quests: QuestProgressRow[] }>(
+      `/api/players/${steamId}/quests${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  questEvents: (options: { steamId?: string; questId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) {
+        query.set(key, String(value));
+      }
+    }
+
+    const suffix = query.toString();
+
+    return api<{ events: QuestEvent[] }>(`/api/quests/events${suffix === '' ? '' : `?${suffix}`}`);
+  },
+
+  questPendingRewards: () =>
+    api<{ pending: (QuestEvent & { attempt: QuestProgressRow | null })[] }>(
+      '/api/quests/rewards/pending',
+    ),
+
+  grantQuest: (id: string, body: { serverId: string; steamId: string; actor?: string }) =>
+    api<{ quest: QuestProgressRow }>(`/api/quests/${encodeURIComponent(id)}/grant`, {
+      method: 'POST',
+      body,
+    }),
+
+  setQuestProgress: (
+    playerQuestId: number,
+    body: { objectiveSeq: number; value: number; actor?: string; reason?: string },
+  ) =>
+    api<{ quest: QuestProgressRow }>(`/api/quests/progress/${String(playerQuestId)}/set`, {
+      method: 'POST',
+      body,
+    }),
+
+  claimQuest: (playerQuestId: number, actor?: string) =>
+    api<{ result: QuestClaimResult }>(`/api/quests/progress/${String(playerQuestId)}/claim`, {
+      method: 'POST',
+      body: { actor },
+    }),
+
+  cancelQuest: (playerQuestId: number, body: { actor?: string; reason?: string } = {}) =>
+    api<{ cancelled: boolean }>(`/api/quests/progress/${String(playerQuestId)}/cancel`, {
+      method: 'POST',
+      body,
+    }),
+
+  retryQuestReward: (playerQuestId: number, actor?: string) =>
+    api<{ result: QuestClaimResult }>(`/api/quests/rewards/${String(playerQuestId)}/retry`, {
+      method: 'POST',
+      body: { actor },
+    }),
+
+  /** O recorte e obrigatorio, e o motivo tambem. */
+  wipeQuests: (body: {
+    serverId?: string;
+    questId?: string;
+    steamId?: string;
+    actor: string;
+    reason: string;
+  }) => api<{ wiped: number }>('/api/quests/wipe', { method: 'POST', body }),
+
+  questSettings: (serverId?: string) =>
+    api<{ settings: QuestSettingsRow[] }>(
+      `/api/quests/settings${
+        serverId === undefined ? '' : `?serverId=${encodeURIComponent(serverId)}`
+      }`,
+    ),
+
+  saveQuestSettings: (serverId: string, body: Omit<QuestSettingsRow, 'serverId' | 'updatedAt'>) =>
+    api<{ settings: QuestSettingsRow }>(`/api/quests/settings/${encodeURIComponent(serverId)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  questNpcs: (serverId?: string) =>
+    api<{ npcs: QuestNpc[] }>(
+      `/api/quests/npcs${
+        serverId === undefined ? '' : `?serverId=${encodeURIComponent(serverId)}`
+      }`,
+    ),
+
+  updateQuestNpc: (id: string, body: Omit<QuestNpc, 'id' | 'quests' | 'createdAt' | 'updatedAt'>) =>
+    api<{ npc: QuestNpc }>(`/api/quests/npcs/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+
+  removeQuestNpc: (id: string) =>
+    api<{ removed: boolean; orphaned: string[] }>(`/api/quests/npcs/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
   login: (user: string, password: string) =>
     api<{ ok: true; user: string; csrfToken: string }>('/auth/login', {
       method: 'POST',
@@ -1576,6 +3031,34 @@ export const agent = {
       `/api/servers/${encodeURIComponent(id)}/players/${encodeURIComponent(steamId)}/kick`,
       { method: 'POST', body: reason === undefined ? {} : { reason } },
     ),
+
+  /**
+   * Põe um item na mão de um jogador CONECTADO.
+   *
+   * `skinId` é string de dígitos, e não número: um id de skin passa
+   * de 2^53 e não sobrevive a um `number` — o mesmo motivo do
+   * SteamID. `"0"` é sem skin.
+   *
+   * A resposta separa `given` de `dropped` porque a diferença
+   * importa: o que não coube foi para o CHÃO, onde qualquer um
+   * pega, e quem entregou precisa saber disso na hora.
+   */
+  givePlayerItem: (
+    id: string,
+    steamId: string,
+    item: { shortname: string; amount: number; skinId: string; mode: GiveMode },
+  ) =>
+    api<{
+      ok: true;
+      steamId: string;
+      delivered: 'inventory' | 'drop' | 'mixed';
+      given: number;
+      dropped: number;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/players/${encodeURIComponent(steamId)}/give`, {
+      method: 'POST',
+      body: item,
+    }),
 
   /**
    * As últimas mensagens do histórico do servidor.
@@ -2033,6 +3516,17 @@ export const agent = {
     });
   },
 
+  /**
+   * Um item do catálogo do jogo, pelo shortname.
+   *
+   * Existe para a tela mostrar o nome e o empilhamento de um item
+   * base que ela carregou de um cadastro — e não de um clique.
+   */
+  item: (shortname: string) =>
+    api<{ ok: true; item: CatalogItem; catalog: ItemCatalogInfo }>(
+      `/api/items/${encodeURIComponent(shortname)}`,
+    ),
+
   itemCategories: () =>
     api<{ ok: true; categories: { category: string; total: number }[]; catalog: ItemCatalogInfo }>(
       '/api/items/categories',
@@ -2047,6 +3541,60 @@ export const agent = {
     }>('/api/items/refresh', { method: 'POST' }),
 
   // ----------------------------------------------------------
+  //  OS ITENS QUE NÓS CRIAMOS
+  //
+  //  Todas respondem com os servidores parados, como as de cima e
+  //  pelo mesmo motivo: cadastrar item é trabalho de madrugada.
+  //  Quem leva o cadastro ao jogo é a sincronização, quando o
+  //  servidor sobe.
+  // ----------------------------------------------------------
+
+  customItems: () => api<{ ok: true; count: number; items: CustomItem[] }>('/api/custom-items'),
+
+  customItemCategories: () =>
+    api<{ ok: true; categories: { category: string; total: number }[] }>(
+      '/api/custom-items/categories',
+    ),
+
+  createCustomItem: (input: CustomItemInput) =>
+    api<{ ok: true; item: CustomItem }>('/api/custom-items', {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Reescreve o item INTEIRO. Não é PATCH — ver a rota. */
+  updateCustomItem: (id: string, input: CustomItemInput) =>
+    api<{ ok: true; item: CustomItem }>(`/api/custom-items/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  removeCustomItem: (id: string) =>
+    api<{ ok: true }>(`/api/custom-items/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** Os PNGs que já estão em `Assets\items\`. */
+  customItemIcons: () =>
+    api<{ ok: true; icons: { name: string; bytes: number }[] }>('/api/custom-items/icons'),
+
+  /**
+   * Envia um PNG e devolve o NOME dele.
+   *
+   * O nome é o que vai para o cadastro; os bytes só chegam ao jogo
+   * depois, pela sincronização. O teto é ~33 KB — acima disso o PNG
+   * não cabe na linha de console que o leva até o servidor.
+   */
+  uploadCustomItemIcon: (file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/custom-items/icons', {
+      method: 'POST',
+      form,
+    });
+  },
+
+  // ----------------------------------------------------------
   //  INTERFACE
   //
   //  O DESENHO é da rede (`/ui/documents`); o que APARECE é do
@@ -2059,8 +3607,15 @@ export const agent = {
   uiDocument: (id: number) =>
     api<{ ok: true; document: UiDocumentDetail }>(`/api/ui/documents/${String(id)}`),
 
-  /** Os modelos que o botão "Criar a partir do modelo" oferece. */
-  uiPresets: () => api<{ ok: true; presets: string[] }>('/api/ui/presets'),
+  /**
+   * Os modelos que o botão "Criar a partir do modelo" oferece.
+   *
+   * Vem montado do agente — nome, comando e número de telas do
+   * documento que o modelo DE FATO produz. O painel não inventa
+   * nenhum desses campos, porque quem os inventa erra no dia em que
+   * o modelo ganhar uma tela.
+   */
+  uiPresets: () => api<{ ok: true; presets: UiPreset[] }>('/api/ui/presets'),
 
   /**
    * Cria a partir de um MODELO.
@@ -2075,6 +3630,132 @@ export const agent = {
       method: 'POST',
       body: { preset },
     }),
+
+  // ---- o overlay de propagandas -------------------------
+  //
+  // ####  TUDO AQUI LEVA O SERVIDOR  ####
+  //
+  // O overlay do PVP anuncia o Discord do PVP. Diferente das
+  // interfaces, onde o DESENHO é da rede e só a escolha é do
+  // servidor, aqui não há nada compartilhado: a lista e o ajuste
+  // são daquele mundo.
+
+  /** `GET /ads` — a lista, o ajuste e a prévia, numa chamada só. */
+  ads: (serverId: string, signal?: AbortSignal) =>
+    api<AdsView>(`/api/servers/${encodeURIComponent(serverId)}/ads`, { signal }),
+
+  /** `POST /ads` — cadastra. A imagem é baixada DEPOIS, pelo agente. */
+  createAd: (serverId: string, input: Record<string, unknown>) =>
+    api<{ ok: true; ad: Advertisement }>(`/api/servers/${encodeURIComponent(serverId)}/ads`, {
+      method: 'POST',
+      body: input,
+    }),
+
+  /**
+   * `PUT /ads/:id` — parcial.
+   *
+   * ####  `null` NAO E "NAO MANDEI"  ####
+   *
+   * Apagar a data de fim é mandar `null`; omitir o campo é
+   * mantê-la. Quem monta o corpo aqui precisa saber a diferença —
+   * confundi-las deixaria a campanha de Natal no ar em janeiro.
+   */
+  updateAd: (serverId: string, id: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; ad: Advertisement }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: patch },
+    ),
+
+  deleteAd: (serverId: string, id: string) =>
+    api<{ ok: true; deleted: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** `POST /ads/:id/duplicate` — a cópia nasce DESLIGADA. */
+  duplicateAd: (serverId: string, id: string) =>
+    api<{ ok: true; ad: Advertisement }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}/duplicate`,
+      { method: 'POST' },
+    ),
+
+  /** `PUT /ads/reorder` — a lista inteira, na ordem nova. */
+  reorderAds: (serverId: string, ids: string[]) =>
+    api<{ ok: true; ads: Advertisement[] }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/reorder`,
+      { method: 'PUT', body: { ids } },
+    ),
+
+  /** `PUT /ads/settings` — o ajuste. A prévia volta junto. */
+  saveAdsSettings: (serverId: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; settings: AdsSettings; timeline: AdsTimeline }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/settings`,
+      { method: 'PUT', body: patch },
+    ),
+
+  /**
+   * `POST /ads/preview` — os quadros de um ajuste NÃO salvo.
+   *
+   * Ela não grava nada. Existe para o preview acompanhar os
+   * controles deslizantes sem que o navegador precise de uma
+   * segunda implementação do gerador de animação — que divergiria
+   * da do agente no primeiro campo que uma trata e a outra não.
+   */
+  previewAdsSettings: (serverId: string, patch: Record<string, unknown>) =>
+    api<{ ok: true; settings: AdsSettings; timeline: AdsTimeline }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/preview`,
+      { method: 'POST', body: patch },
+    ),
+
+  /**
+   * `GET /ads/audience` — os grupos e permissões do Oxide.
+   *
+   * Sem RCON responde `available: false`, e a tela volta ao campo
+   * de texto livre. Um nome digitado errado (`vips` em vez de
+   * `vip`) não dá erro nenhum: a propaganda simplesmente não
+   * aparece — e isso é indistinguível de "ainda não é a hora dela".
+   */
+  adsAudience: (serverId: string, signal?: AbortSignal) =>
+    api<AdsAudience>(`/api/servers/${encodeURIComponent(serverId)}/ads/audience`, { signal }),
+
+  /** `POST /ads/refresh` — rebaixa as imagens. `force` refaz as prontas. */
+  refreshAdImages: (serverId: string, force = false) =>
+    api<{ ok: true; ready: number; failed: number; ads: Advertisement[] }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/refresh`,
+      { method: 'POST', body: { force } },
+    ),
+
+  clearAdsCache: (serverId: string) =>
+    api<{ ok: true; cleared: number }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/cache/clear`,
+      { method: 'POST' },
+    ),
+
+  /** `POST /ads/sync` — empurra AGORA e espera o desfecho. */
+  syncAds: (serverId: string) =>
+    api<AdsSyncResult>(`/api/servers/${encodeURIComponent(serverId)}/ads/sync`, {
+      method: 'POST',
+    }),
+
+  /** `POST /ads/show` e `/ads/hide` — sem `steamId`, valem para todos. */
+  showAds: (serverId: string, steamId?: string) =>
+    api<{ ok: true; response: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/show`,
+      { method: 'POST', body: steamId === undefined ? {} : { steamId } },
+    ),
+
+  hideAds: (serverId: string, steamId?: string) =>
+    api<{ ok: true; response: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/hide`,
+      { method: 'POST', body: steamId === undefined ? {} : { steamId } },
+    ),
+
+  /** `POST /ads/:id/test` — mostra SÓ esta, agora, sem mexer no rodízio. */
+  testAd: (serverId: string, id: string, steamId?: string) =>
+    api<{ ok: true; response: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ads/${encodeURIComponent(id)}/test`,
+      { method: 'POST', body: steamId === undefined ? {} : { steamId } },
+    ),
 
   createUiDocument: (document: unknown) =>
     api<{ ok: true; document: UiDocumentDetail }>('/api/ui/documents', {
@@ -2793,6 +4474,16 @@ export const agent = {
       fullWipe?: boolean;
       /** Epoch ms. Ausente = agora. Com hora futura, os avisos saem antes. */
       at?: number;
+      /**
+       * A temporada do ranking vira NESTE wipe?
+       *
+       * Três estados: `true` força abrir, `false` força não abrir, e
+       * ausente (ou `null`) é "não decidi" — aí vale a configuração
+       * do servidor. Um booleano de dois estados transformaria toda
+       * execução em que ninguém tocou na caixa numa decisão explícita
+       * de NÃO virar. Ver Docs\Ranking\20 §3.4.
+       */
+      openRankingSeason?: boolean | null;
     },
   ) => {
     const { idempotencyKey, ...body } = input;
@@ -2878,6 +4569,218 @@ export const agent = {
     api<WipeBlueprintsRestoreResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/wipe/blueprints/restore`,
       { method: 'POST', body: input },
+    ),
+
+  // ---- O RANKING -------------------------------------------
+  //
+  // A leitura responde com os servidores parados: a definição é do
+  // AGENTE, e o número já está no banco dele. O que precisa do jogo
+  // no ar é só o ciclo de coleta, que roda sozinho a cada 60 s.
+
+  /** O catálogo: o que existe, e como cada um se comporta. */
+  rankingMetrics: (options: { enabledOnly?: boolean } = {}) =>
+    api<RankingMetricsResponse>(
+      `/api/rankings/metrics${options.enabledOnly === true ? '?enabled=1' : ''}`,
+    ),
+
+  /**
+   * A lista, paginada.
+   *
+   * `periodId` sobrepõe `period` e é como se lê uma temporada
+   * FECHADA — aí a fonte é o pódio congelado, e a resposta vem com
+   * `frozen: true`.
+   */
+  ranking: (options: {
+    metric: string;
+    scope?: RankingScope;
+    serverId?: string | undefined;
+    period?: RankingPeriodKind;
+    periodId?: number | undefined;
+    limit: number;
+    offset: number;
+  }) => {
+    const params = new URLSearchParams();
+
+    params.set('metric', options.metric);
+
+    if (options.scope !== undefined) params.set('scope', options.scope);
+    if (options.serverId !== undefined) params.set('serverId', options.serverId);
+    if (options.period !== undefined) params.set('period', options.period);
+    if (options.periodId !== undefined) params.set('periodId', String(options.periodId));
+
+    params.set('limit', String(options.limit));
+    params.set('offset', String(options.offset));
+
+    return api<RankingListResponse>(`/api/rankings?${params.toString()}`);
+  },
+
+  /** O histórico: as janelas, da mais nova para a mais velha. */
+  rankingPeriods: (options: {
+    serverId?: string | undefined;
+    kind?: RankingPeriodKind;
+    limit: number;
+    offset: number;
+  }) => {
+    const params = new URLSearchParams();
+
+    if (options.serverId !== undefined) params.set('serverId', options.serverId);
+    if (options.kind !== undefined) params.set('kind', options.kind);
+
+    params.set('limit', String(options.limit));
+    params.set('offset', String(options.offset));
+
+    return api<RankingPeriodsResponse>(`/api/rankings/periods?${params.toString()}`);
+  },
+
+  /** Uma janela, e o pódio congelado dela. O valor de lá não muda mais. */
+  rankingPeriod: (periodId: number) =>
+    api<RankingPeriodDetailResponse>(`/api/rankings/periods/${String(periodId)}`),
+
+  /** A janela configurada de um servidor, com a temporada de agora junto. */
+  rankingSettings: (serverId: string) =>
+    api<RankingSettingsResponse>(
+      `/api/rankings/settings?serverId=${encodeURIComponent(serverId)}`,
+    ),
+
+  saveRankingSettings: (serverId: string, input: RankingSettingsInput) =>
+    api<{ ok: true; serverId: string; settings: RankingSettings }>(
+      `/api/rankings/settings/${encodeURIComponent(serverId)}`,
+      { method: 'PUT', body: input },
+    ),
+
+  createRanking: (input: RankingDefinitionInput) =>
+    api<{ ok: true; ranking: RankingDefinition }>('/api/rankings/metrics', {
+      method: 'POST',
+      body: input,
+    }),
+
+  /** Reescreve o ranking INTEIRO. Não é PATCH — ver a rota. */
+  updateRanking: (id: string, input: RankingDefinitionInput) =>
+    api<{ ok: true; ranking: RankingDefinition }>(
+      `/api/rankings/metrics/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: input },
+    ),
+
+  /** Só os dinâmicos saem. O `builtin` é recusado pelo agente. */
+  removeRanking: (id: string) =>
+    api<{ ok: true }>(`/api/rankings/metrics/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /**
+   * A ordem do catálogo INTEIRO, de uma vez.
+   *
+   * A lista tem de trazer todos os rankings que existem: sem os
+   * ausentes a posição deles ficaria indefinida, e por isso a rota
+   * recusa uma lista parcial (ou com id repetido, ou desconhecido)
+   * com `RANKING_ORDER_MISMATCH` — a frase dela diz quais.
+   */
+  reorderRankings: (ids: readonly string[]) =>
+    api<{ ok: true; count: number; rankings: RankingDefinition[] }>(
+      '/api/rankings/metrics/order',
+      { method: 'PUT', body: { ids } },
+    ),
+
+  /**
+   * Fecha a temporada aberta e abre a seguinte, numa transação só.
+   *
+   * O `periodId` é a temporada que quem clicou estava vendo: com
+   * ele, o segundo clique recusa em vez de abrir uma terceira.
+   */
+  openRankingSeason: (
+    serverId: string,
+    input: { label: string | null; periodId?: number; reason: string },
+  ) =>
+    api<RankingSeasonTurnResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/rankings/season`,
+      { method: 'POST', body: input },
+    ),
+
+  // ---- O LOOT ----------------------------------------------
+  //
+  // A leitura responde com os servidores parados: a regra é
+  // cadastro do AGENTE. O que precisa do jogo no ar é a aplicação
+  // dela, que o plugin faz quando o container nasce.
+
+  /** As regras. Com `serverId`, só as que valem naquele servidor. */
+  lootRules: (options: { serverId?: string | undefined } = {}) =>
+    api<LootRulesResponse>(
+      `/api/loot/rules${
+        options.serverId === undefined || options.serverId === ''
+          ? ''
+          : `?serverId=${encodeURIComponent(options.serverId)}`
+      }`,
+    ),
+
+  /** Os containers que o plugin aceita. É a lista que a tela navega. */
+  lootContainers: () => api<LootContainersResponse>('/api/loot/containers'),
+
+  createLootRule: (input: LootRuleInput) =>
+    api<{ ok: true; rule: LootRule }>('/api/loot/rules', { method: 'POST', body: input }),
+
+  /** Reescreve a regra INTEIRA — é PUT, e não PATCH. */
+  updateLootRule: (id: string, input: LootRuleInput) =>
+    api<{ ok: true; rule: LootRule }>(`/api/loot/rules/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  removeLootRule: (id: string) =>
+    api<{ ok: true }>(`/api/loot/rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /**
+   * O que a regra contou, por dia.
+   *
+   * É o que faz o modo de medição valer a pena: sem ele, uma regra
+   * medindo é uma regra que não faz nada visível.
+   */
+  lootRuleStats: (id: string) =>
+    api<LootRuleStatsResponse>(`/api/loot/rules/${encodeURIComponent(id)}/stats`),
+
+  // ---- O EDITOR DE LOOT (BetterLoot) -----------------------
+  //
+  // Ao contrário das regras acima, isto NÃO responde com o
+  // servidor parado: o que a tela lê é um arquivo no disco daquele
+  // servidor, e quem o lê é o agente que fala com ele.
+  //
+  // O prefab viaja em query string porque tem barra e às vezes
+  // espaço — como pedaço de caminho ele quebraria a rota.
+
+  /** A lista de caixas de um servidor, com o estado do plugin ali. */
+  betterLootStatus: (serverId: string) =>
+    api<BetterLootStatusResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot`,
+    ),
+
+  /** Uma caixa inteira. É a segunda chamada — a lista só traz resumo. */
+  betterLootTable: (serverId: string, prefab: string) =>
+    api<BetterLootTableResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/table?prefab=${encodeURIComponent(prefab)}`,
+    ),
+
+  /**
+   * Grava a caixa e manda o plugin recarregar.
+   *
+   * A resposta vem RELIDA DO DISCO: o plugin reescreve o que
+   * recebeu. Quem ignorar o retorno mostra ao admin o que ele
+   * pediu, e não o que o servidor tem.
+   */
+  saveBetterLootTable: (serverId: string, input: BetterLootSaveInput) =>
+    api<BetterLootTableResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/table`,
+      { method: 'PUT', body: input },
+    ),
+
+  /**
+   * Grava o que vale no SERVIDOR INTEIRO e manda recarregar.
+   *
+   * Outro arquivo e outra revisão que a de tabela: aqui é o
+   * `oxide/config/BetterLoot.json`, e ele é gravado por MERGE — o
+   * agente preserva as 111 chaves de contêiner vigiado que a tela
+   * não vê.
+   */
+  saveBetterLootGlobals: (serverId: string, input: BetterLootGlobalsSaveInput) =>
+    api<BetterLootGlobalsResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/globals`,
+      { method: 'PUT', body: input },
     ),
 };
 

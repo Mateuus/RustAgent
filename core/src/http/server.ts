@@ -26,11 +26,14 @@ import { ZodError } from 'zod';
 import type { OperatorAuth } from '../auth/operator.js';
 import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
+import type { CustomItemsRepository } from '../db/custom-items-repository.js';
+import type { LootRulesRepository } from '../db/loot-rules-repository.js';
 import type { ItemsRepository } from '../db/items-repository.js';
 import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
 import type { SpawnStatusRepository } from '../db/spawn-status-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
+import type { AdsRepository } from '../db/ads-repository.js';
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { ItemCatalog } from '../game/item-catalog.js';
 import type { KitStore } from '../kits/service.js';
@@ -38,12 +41,14 @@ import type { SpawnStatusSync } from '../loadouts/status.js';
 import type { LoadoutSync } from '../loadouts/sync.js';
 import type { VipList } from '../vip/service.js';
 import type { MonumentReader } from '../game/monuments.js';
+import type { AdsSync } from '../game/ads-sync.js';
 import type { UiSync } from '../game/ui-sync.js';
 import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
 import type { OperationStore } from '../ops/operations.js';
+import { BetterLootEditor, BETTERLOOT_PLUGIN } from '../oxide/betterloot.js';
 import type { PluginLibrary } from '../oxide/library.js';
-import { MAX_PLUGIN_BYTES } from '../oxide/plugins.js';
+import { MAX_PLUGIN_BYTES, reloadPlugin } from '../oxide/plugins.js';
 import type { PlayerDirectory } from '../players/service.js';
 import type { ServerSupervisor } from '../servers/supervisor.js';
 import type { SteamUpdateWatcher } from '../steam/update-watcher.js';
@@ -71,7 +76,11 @@ import { registerServerRoutes } from './routes/servers.js';
 import { registerSteamUpdateRoutes } from './routes/steam-updates.js';
 import { registerSystemRoutes } from './routes/system.js';
 // ---- itens e interface ----
+import { registerBetterLootRoutes } from './routes/betterloot.js';
+import { registerCustomItemRoutes } from './routes/custom-items.js';
+import { registerLootRoutes } from './routes/loot.js';
 import { registerItemRoutes } from './routes/items.js';
+import { registerAdsRoutes } from './routes/ads.js';
 import { registerUiRoutes } from './routes/ui.js';
 // ---- VIP, loadouts e kits ----
 import { registerVipRoutes } from './routes/vips.js';
@@ -101,6 +110,9 @@ import { registerRustMapsRoutes } from './routes/rustmaps.js';
 import type { BpRepository } from '../db/bp-repository.js';
 import type { BlueprintService } from '../wipe/blueprints.js';
 import { registerWipeBlueprintRoutes } from './routes/wipe-blueprints.js';
+// ---- o ranking ----
+import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
+import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -137,10 +149,41 @@ export interface BuildServerOptions {
   readonly items: ItemsRepository;
   /** Quem relê o catálogo do jogo. Ver game/item-catalog.ts. */
   readonly itemCatalog: ItemCatalog;
+  /**
+   * Os itens que NÓS criamos. Ver db/custom-items-repository.ts.
+   *
+   * Separado do `items` de propósito: aquele é um espelho do jogo,
+   * reescrito a cada varredura; este guarda decisões nossas, e nada
+   * o apaga sozinho.
+   */
+  readonly customItems: CustomItemsRepository;
+  /** Quem leva o cadastro de itens custom ao jogo. */
+  readonly customItemsSync?: { pushAll(trigger: string): Promise<unknown> };
+  /**
+   * As regras de loot: o que NÓS acrescentamos ao que o jogo já põe
+   * na caixa. Ver db/loot-rules-repository.ts.
+   *
+   * Elas viajam até o jogo pelo MESMO `customItemsSync`: a regra
+   * aponta para um item custom, e dois canais os entregariam fora
+   * de ordem no dia em que um deles atrasasse.
+   */
+  readonly lootRules: LootRulesRepository;
   /** As interfaces. Ver db/ui-documents-repository.ts. */
   readonly uiDocuments: UiDocumentsRepository;
   /** O transporte até o jogo. Ver game/ui-sync.ts. */
   readonly uiSync: UiSync;
+  /**
+   * O overlay de propagandas: a lista e o ajuste.
+   *
+   * Ele NÃO é uma interface do editor, e por isso não entra em
+   * `uiDocuments`: um documento abre por comando, tem sessão e
+   * telas que trocam sob clique. O overlay aparece sozinho, para
+   * todo mundo, e o que ele faz é se MEXER — ver o cabeçalho do
+   * bloco do overlay em Plugins/OrigemZUI.cs.
+   */
+  readonly ads: AdsRepository;
+  /** Quem leva o overlay ao jogo. Ver game/ads-sync.ts. */
+  readonly adsSync: AdsSync;
   // ---- o VIP, os loadouts e a loja de kits ----------------
   //
   // Ver Docs\15-BRIEFING-VIP-LOADOUTS-KITS.md. Os três chegam
@@ -261,6 +304,34 @@ export interface BuildServerOptions {
     readonly repository: BpRepository;
     readonly service: BlueprintService;
   };
+
+  /**
+   * O RANKING: o catálogo, as listas, o histórico e as janelas.
+   *
+   * ####  ELE CHEGA MONTADO, E NÃO EM PEDAÇOS  ####
+   *
+   * Diferente dos vizinhos, aqui não há um repositório solto: o
+   * `RankingsService` é a única porta da regra (o K/D é calculado
+   * lá, e a rota nem sabe), e ele já nasce no `index.ts` com a
+   * dependência que só o `index.ts` tem — o `coverage`, que sabe
+   * se o plugin daquele servidor estava carregado. Passar o
+   * repositório aqui abriria um segundo caminho para a mesma
+   * pergunta, sem a regra no meio.
+   *
+   * O `collector` é opcional de propósito: sem coleta ligada, as
+   * listas continuam respondendo o que já foi medido, e só o
+   * "forçar ciclo agora" recusa. Ver Docs/Ranking/20 §9.
+   */
+  readonly rankings: RankingRoutesDeps;
+
+  /**
+   * As quests.
+   *
+   * Opcional porque o módulo inteiro pode não estar montado — e um
+   * agente sem ele responde 404 nessas rotas em vez de subir com
+   * dependências pela metade. Ver Docs/OrigemZQuests/01 §11.
+   */
+  readonly quests?: QuestRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -408,10 +479,83 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // registrado por `registerAdminRoutes`.
       registerPlayerRoutes(api, { directory: options.directory });
 
+      // O ranking, junto do jogador porque é dele que ele fala — e
+      // porque `/players/:steamId/rankings` é a ficha dele vista
+      // pelo outro lado. As rotas respondem do BANCO: elas
+      // continuam de pé com os servidores parados, e é o
+      // `coverage` de cada lista que diz quem estava coletando.
+      registerRankingRoutes(api, options.rankings);
+
+      // As quests. Elas respondem do BANCO, como o ranking: o
+      // catálogo, o progresso e a auditoria continuam de pé com os
+      // servidores parados — que é justamente quando se cadastra
+      // uma quest nova.
+      if (options.quests !== undefined) {
+        registerQuestRoutes(api, options.quests);
+      }
+
       // O catálogo de itens. Ele responde do BANCO, e por isso
       // continua de pé com todos os servidores parados — que é
       // justamente quando se monta um kit.
       registerItemRoutes(api, { repository: options.items, catalog: options.itemCatalog });
+
+      // Os itens que nós criamos. Mesma tela do catálogo, outra
+      // natureza: "quais itens o jogo tem?" é consulta; "quais
+      // itens nós criamos?" é administração. Ver
+      // Docs\CustomItem\01-PESQUISA-ITEM-CUSTOM.md §8.
+      registerCustomItemRoutes(api, {
+        repository: options.customItems,
+        items: options.items,
+        servers: options.repository,
+        ...(options.customItemsSync === undefined ? {} : { sync: options.customItemsSync }),
+      });
+
+      // A regra de loot. Ela é a terceira PÁGINA, e não uma aba do
+      // item: o objeto que ela edita não é um item, é um container.
+      // O que a regra faz é USAR o item que já está cadastrado ali —
+      // e é dele que sai a MARCA, sem a qual o item nascido na caixa
+      // não é o nosso. Ver Docs/CustomItem/05 §8.1.
+      registerLootRoutes(api, {
+        repository: options.lootRules,
+        customItems: options.customItems,
+        servers: options.repository,
+        supervisor: options.supervisor,
+        ...(options.customItemsSync === undefined ? {} : { sync: options.customItemsSync }),
+      });
+
+      // ####  O EDITOR DE LOOT: A TABELA DO BETTERLOOT  ####
+      //
+      // A quarta página da mesma tela, e a única que NÃO é cadastro
+      // do agente: o que ela edita é um arquivo no disco de um
+      // servidor. Por isso o caminho é `/servers/:id/...`, como as
+      // rotas de operação, e não `/loot/...` como as vizinhas.
+      //
+      // O editor é montado AQUI, e não recebido pronto do
+      // `index.ts`, porque tudo de que ele precisa já está nestas
+      // opções — o supervisor sabe os caminhos e o RCON, e o
+      // catálogo sabe a raridade. Uma dependência a mais no boot
+      // seria um lugar a mais para esquecer de ligar.
+      registerBetterLootRoutes(api, {
+        editor: new BetterLootEditor({
+          servers: options.supervisor,
+          items: options.items,
+          // Servidor parado NÃO é erro: o arquivo está gravado, e o
+          // BetterLoot o lê no próximo load. Recusar aqui obrigaria
+          // a subir o jogo para editar loot — que é justamente o
+          // trabalho que se faz com tudo desligado.
+          reload: async (serverId) => {
+            const context = options.supervisor.contextOf(serverId);
+
+            if (context === null) {
+              return { sent: false, output: null };
+            }
+
+            const result = await reloadPlugin(context.rcon, BETTERLOOT_PLUGIN);
+
+            return { sent: result.sent, output: result.output };
+          },
+        }),
+      });
 
       // As interfaces do jogo. O desenho é da rede; o que cada
       // servidor mostra dele é dado da ligação — daí as rotas
@@ -420,6 +564,18 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         repository: options.uiDocuments,
         sync: options.uiSync,
         servers: options.supervisor,
+      });
+
+      // O overlay de propagandas. Ele fica ao lado das interfaces
+      // por vizinhança de assunto — as duas desenham na tela de
+      // quem joga —, mas o caminho é `/servers/:id/ads` porque
+      // TUDO nele é por servidor: o overlay do PVP anuncia o
+      // Discord do PVP.
+      registerAdsRoutes(api, {
+        ads: options.ads,
+        sync: options.adsSync,
+        servers: options.repository,
+        supervisor: options.supervisor,
       });
 
       // ---- o VIP, os loadouts e a loja ---------------------

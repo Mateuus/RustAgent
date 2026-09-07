@@ -257,11 +257,24 @@ inúteis.
 
 A seleção é **a mesma dos dois lados**: clicar num ponto do mapa abre as ações
 daquele jogador na lista, e clicar na lista destaca o ponto. Por jogador:
-*Copiar SteamID*, *Expulsar* (confirmação em dois passos) e *Banir* (abre o
-diálogo).
+*Copiar SteamID*, e um botão **Ações** com *Dar item*, *Expulsar* e *Banir* —
+cada um abrindo uma caixa que repete de quem se trata antes de acontecer.
 
-As ações aparecem só na linha **selecionada**. Três botões em duzentas linhas é
-uma parede de botões, e todos ficam pequenos demais para acertar.
+**Por que um menu, e por que todas as três em caixa.** A versão anterior tinha
+*Expulsar* em confirmação de dois toques ao lado de *Banir* em diálogo: duas
+gramáticas de confirmação encostadas uma na outra, e a lista se reordenando a
+cada cinco segundos. O segundo toque podia cair em cima de outro jogador — e um
+botão armado que muda de dono sozinho é a forma mais silenciosa de expulsar quem
+não devia.
+
+*Dar item* abre a caixa de entrega: item (com busca no catálogo e ícone),
+quantidade, skin e o que fazer se o inventário estiver cheio — *automático* (o
+resto cai no chão, como na loja), *só inventário* ou *no chão*. A tela avisa
+quando o jogador está morto (o jogo recusa a entrega) e trava a quantidade que
+daria pilhas demais, que o plugin recusaria depois de gastar o comando.
+
+As ações aparecem só na linha **selecionada**. Uma fileira de botões em duzentas
+linhas é uma parede, e todos ficam pequenos demais para acertar.
 
 A lista é de linhas, e não uma tabela: ela precisa caber numa coluna estreita ao
 lado do mapa **e** ocupar a tela inteira sozinha. Uma tabela de sete colunas não
@@ -500,8 +513,9 @@ desde maio é *jogador desde maio* na rede e *desde hoje* no PVE. Tempo zero com
 sessão aberta vira **"na primeira sessão"**, e não "0min": o tempo é somado no
 fechamento, e um zero ali seria lido como "nunca jogou".
 
-**Histórico.** A linha do tempo: entrou, saiu, expulso, teleportado, banido,
-revogado. As duas últimas vêm da tabela `bans` — quem revoga mexe num lugar só.
+**Histórico.** A linha do tempo: entrou, saiu, expulso, teleportado, VIP, kit,
+compra, item recebido de um admin, banido, revogado. As duas últimas vêm da
+tabela `bans` — quem revoga mexe num lugar só.
 
 Abaixo dela, um bloco tracejado com a etiqueta **"exemplo — ainda não é
 medido"**: a estrutura de kill e morte, com a frase do agente dizendo que nada

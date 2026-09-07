@@ -35,6 +35,7 @@
 import { Package } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
+import { iconUrl } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /**
@@ -118,6 +119,83 @@ export function ItemIcon({ shortname, size = 'md', label, className }: ItemIconP
         setFailed(true);
       }}
       className={cn(box, 'object-contain')}
+      style={{ width: pixels, height: pixels }}
+    />
+  );
+}
+
+// ============================================================
+//  ####  O ÍCONE DE UM ITEM NOSSO VEM DO AGENTE  ####
+//
+//  O de um item do jogo é um arquivo do PAINEL, gerado uma vez e
+//  versionado (ver o cabeçalho). O nosso é o oposto: ele foi
+//  ENVIADO no cadastro, mora em `Assets\items\` na máquina do
+//  agente, e chega à tela pela rota `/api/custom-items/icons/:name`.
+//
+//  Por isso ele precisa de um componente próprio, e não de mais
+//  uma prop no `ItemIcon`: a origem do arquivo é outra, e o
+//  fallback também — quando o item nosso não tem arte própria
+//  (`iconFile` nulo, que é o caso do Troféu hoje), o que se
+//  desenha é o ícone do CORPO EMPRESTADO, porque é ele que o
+//  jogador vê no inventário enquanto a arte não sobe.
+// ============================================================
+
+interface CustomItemIconProps {
+  /** O PNG enviado no cadastro. `null` = usa o do corpo. */
+  readonly iconFile: string | null;
+  /** O corpo emprestado, que é o fallback. */
+  readonly baseShortname: string;
+  readonly size?: ItemIconSize;
+  readonly label?: string;
+  readonly className?: string;
+}
+
+export function CustomItemIcon({
+  iconFile,
+  baseShortname,
+  size = 'md',
+  label,
+  className,
+}: CustomItemIconProps) {
+  const [failed, setFailed] = useState(false);
+  const pixels = SIZES[size];
+
+  // Mesmo motivo do `ItemIcon`: o cadastro pode trocar o arquivo
+  // debaixo do componente, e um `failed` grudado deixaria o
+  // fallback no lugar mesmo depois de a arte nova subir.
+  useEffect(() => {
+    setFailed(false);
+  }, [iconFile]);
+
+  if (iconFile === null || failed) {
+    return (
+      <ItemIcon
+        shortname={baseShortname}
+        size={size}
+        {...(label === undefined ? {} : { label })}
+        className={className}
+      />
+    );
+  }
+
+  return (
+    // `<img>` cru: a imagem vem do AGENTE, e o otimizador do Next
+    // não existe num export estático.
+    <img
+      src={iconUrl(iconFile)}
+      alt={label ?? ''}
+      width={pixels}
+      height={pixels}
+      loading="lazy"
+      decoding="async"
+      draggable={false}
+      // O PNG pode ter sido apagado do disco por fora do painel.
+      // Cair para o ícone do corpo é melhor do que um retângulo
+      // quebrado no meio de uma lista de escolha.
+      onError={() => {
+        setFailed(true);
+      }}
+      className={cn('shrink-0 border border-border bg-surface-2 object-contain', className)}
       style={{ width: pixels, height: pixels }}
     />
   );

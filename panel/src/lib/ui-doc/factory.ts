@@ -197,6 +197,10 @@ export function createDocument(id: string, name: string, command: string): UiDoc
     modalSlotId: null,
     entryScreenId: screen.id,
     fadeIn: 0.15,
+    // Sem atalho: cada um ocupa um nome global de comando no
+    // servidor, e uma interface recém-criada não tem tela para
+    // apontar além da de entrada — que o `command` já abre.
+    shortcuts: [],
     screens: [screen],
   };
 }

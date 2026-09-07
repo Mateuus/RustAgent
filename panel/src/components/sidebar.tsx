@@ -23,12 +23,14 @@
 
 import {
   Ban,
+  Boxes,
   ChevronsLeft,
   ChevronsRight,
   Crown,
   LayoutDashboard,
   LayoutTemplate,
   LogOut,
+  Image as ImageIcon,
   Menu,
   Package,
   Package2,
@@ -36,6 +38,8 @@ import {
   Server,
   Settings,
   ShoppingBag,
+  ScrollText,
+  Trophy,
   Users,
   X,
   Megaphone,
@@ -131,6 +135,46 @@ const NAV: readonly NavItem[] = [
     label: 'Mensagens',
     hint: 'O que o servidor fala sozinho: avisos, convites e lembretes, cada um no seu ritmo',
     Icon: Megaphone,
+  },
+  // O ranking é de REDE, como o VIP e a loja: a lista soma os
+  // servidores elegíveis, e o cadastro vale para todos. O que é de
+  // UM servidor — o tamanho da temporada dele, e quando ela vira —
+  // mora na aba Ranking da página do servidor.
+  {
+    href: '/ranking/',
+    label: 'Ranking',
+    hint: 'Quem está na frente, em que janela, e desde quando aquilo é medido',
+    Icon: Trophy,
+  },
+  // O loot é de REDE pelo mesmo motivo do kit e do ranking: a
+  // regra é uma linha no agente, e a tela escolhe em quais
+  // servidores ela vale. Ela fica ao lado de Itens de propósito —
+  // o que ela acrescenta às caixas é sempre um item NOSSO, e é lá
+  // que ele é cadastrado.
+  {
+    href: '/loot/',
+    label: 'Loot',
+    hint: 'O que a casa acrescenta às caixas do jogo: onde, com que chance, e com que freio',
+    Icon: Boxes,
+  },
+  // As missões são de REDE, como o kit e o ranking: a missão é
+  // escrita uma vez e vale em todos os servidores. O que conta
+  // separado em cada mundo é o PROGRESSO — e o wipe de um não mexe
+  // no outro.
+  {
+    href: '/quests/',
+    label: 'Missões',
+    hint: 'O que os jogadores têm para fazer, o que ganham, e como está o progresso de cada um',
+    Icon: ScrollText,
+  },
+  // As duas de baixo desenham na tela de quem joga, e é por isso
+  // que ficam lado a lado. O que as separa é quem pede: o menu o
+  // jogador abre; o overlay aparece sozinho.
+  {
+    href: '/propaganda/',
+    label: 'Propaganda',
+    hint: 'O overlay que aparece sozinho na tela: o logo do servidor e o rodízio de campanhas',
+    Icon: ImageIcon,
   },
   {
     href: '/interface/',

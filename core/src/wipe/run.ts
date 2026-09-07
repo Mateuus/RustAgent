@@ -182,6 +182,28 @@ export interface WipeBlueprints {
   }): number;
 }
 
+/**
+ * Quem vira as janelas do ranking quando o mundo troca.
+ *
+ * ####  UMA PORTA, E NÃO O REPOSITÓRIO INTEIRO  ####
+ *
+ * A máquina de passos do wipe não precisa saber o que é período,
+ * temporada ou pódio — ela precisa avisar que um mundo novo
+ * nasceu. Quem sabe o resto é `rankings/collector.ts`, que faz o
+ * MESMO trabalho quando o wipe é feito à mão.
+ *
+ * A implementação é `StatsCollector.rollOnWipe`.
+ */
+export interface WipeRankings {
+  onWipeDetected(input: {
+    readonly serverId: string;
+    /** A linha de `wipes` daquele mundo. */
+    readonly wipeId: number | null;
+    /** A execução que o criou — é ela que carrega a decisão do §3.4. */
+    readonly wipeRunId: number | null;
+  }): void;
+}
+
 export interface WipeRunnerDeps {
   readonly runs: WipeRunsRepository;
   readonly wipes: WipesRepository;
@@ -197,7 +219,48 @@ export interface WipeRunnerDeps {
   readonly resync?: ((serverId: string) => Promise<void>) | undefined;
   /** A Frente I. Sem ela, `wipe_except_vip` se comporta como `wipe`. */
   readonly blueprints?: WipeBlueprints | undefined;
+  /**
+   * A F3. Sem ela, o wipe executado pelo painel não vira a
+   * temporada — e a caixa de três estados da tela não faria nada.
+   */
+  readonly rankings?: WipeRankings | undefined;
+
+  /**
+   * As MISSÕES, no wipe.
+   *
+   * ####  A COLUNA `wipe_policy` SÓ EXISTE POR CAUSA DISTO  ####
+   *
+   * Cada missão diz se o progresso dela zera quando o mundo zera, e
+   * cada NPC diz se a posição dele sobrevive. Sem este passo, os
+   * dois campos estariam no painel sem fazer nada — e o jogador
+   * entraria no mundo novo com a missão de minerar já pela metade.
+   *
+   * Ausente = o módulo de missões não está montado, e o wipe segue
+   * sem ele.
+   */
+  readonly quests?: WipeQuests | undefined;
   readonly logger?: Logger | undefined;
+}
+
+/** O que o wipe precisa das missões. E nada além disso. */
+export interface WipeQuests {
+  /**
+   * Zera o progresso das missões marcadas como `reset`.
+   *
+   * @returns quantas tentativas foram zeradas.
+   */
+  wipeProgress(input: {
+    readonly serverId: string;
+    readonly actor: string;
+    readonly reason: string;
+    readonly respectPolicy: boolean;
+  }): number;
+  /**
+   * Apaga os NPCs marcados como `remove`.
+   *
+   * @returns quantos sumiram.
+   */
+  wipeNpcs(serverId: string): number;
 }
 
 export interface WipeRunRequest {
@@ -1177,6 +1240,42 @@ export class WipeRunner implements WipeExecutor {
     const { serverId } = request;
     const notes: string[] = [];
 
+    // ####  AS MISSÕES ZERAM AQUI  ####
+    //
+    // Antes da leitura do mundo novo, e não depois: este passo não
+    // depende do RCON — ele mexe só no banco —, e pô-lo depois faria
+    // um RCON fora adiar o zeramento para a próxima execução.
+    //
+    // `respectPolicy: true` é o que separa esta chamada do botão do
+    // painel: aqui cada missão decide (a coluna `wipe_policy`), e lá
+    // quem clicou já disse o que queria.
+    //
+    // O try/catch é a regra de ouro deste passo: o mundo já nasceu, e
+    // nada aqui pode desfazê-lo. Uma missão que não zerou é uma
+    // pendência que o admin resolve pelo painel — não um wipe
+    // quebrado.
+    if (this.#deps.quests !== undefined) {
+      try {
+        const zeradas = this.#deps.quests.wipeProgress({
+          serverId,
+          actor: 'wipe',
+          reason: `wipe do servidor (execução ${String(request.runId)})`,
+          respectPolicy: true,
+        });
+
+        const npcs = this.#deps.quests.wipeNpcs(serverId);
+
+        if (zeradas > 0 || npcs > 0) {
+          notes.push(
+            `missões: ${String(zeradas)} progresso(s) zerado(s)` +
+              (npcs > 0 ? `, ${String(npcs)} NPC(s) removido(s)` : ''),
+          );
+        }
+      } catch (error) {
+        notes.push(`missões: não deu para zerar (${String(error)})`);
+      }
+    }
+
     // ####  ESQUECER É O QUE FAZ O RESTO FUNCIONAR  ####
     //
     // O `WipeClock` cacheia a hora do wipe por meia hora. Sem este
@@ -1194,13 +1293,41 @@ export class WipeRunner implements WipeExecutor {
 
       const world = this.#deps.runs.get(serverId, request.runId)?.mapAfter ?? run.mapAfter;
 
-      this.#deps.wipes.record(serverId, {
+      const detected = this.#deps.wipes.record(serverId, {
         saveCreatedAt: saveCreatedAfter,
         level: world?.level ?? null,
         seed: world?.seed ?? null,
         worldSize: world?.worldSize ?? null,
         wipeRunId: request.runId,
       });
+
+      // ####  E AS JANELAS DO RANKING VIRAM AQUI  ####
+      //
+      // Depois do `record`, e não antes: é a linha de `wipes` que
+      // ancora o período novo, e sem o id dele a virada não teria
+      // como dizer a que mundo ela pertence.
+      //
+      // O `runId` vai junto porque é ele que carrega a decisão de
+      // três estados de `wipe_runs.open_ranking_season` — a caixa
+      // da tela de wipe. O coletor, que faz o mesmo trabalho para o
+      // wipe feito à mão, nunca a veria.
+      //
+      // E o try/catch é a regra de ouro deste passo: o mundo já
+      // nasceu, e nada aqui pode desfazê-lo. Uma virada que falha é
+      // uma pendência — a próxima rodada do coletor a refaz, porque
+      // ele compara o mesmo `SaveCreatedTime`.
+      if (this.#deps.rankings !== undefined) {
+        try {
+          this.#deps.rankings.onWipeDetected({
+            serverId,
+            wipeId: detected.id,
+            wipeRunId: request.runId,
+          });
+          notes.push('as janelas do ranking foram reavaliadas');
+        } catch (error) {
+          notes.push(`a virada do ranking não aconteceu (${toError(error).message})`);
+        }
+      }
 
       if (run.saveCreatedBefore !== null && run.saveCreatedBefore === saveCreatedAfter) {
         // A conferência independente, e a razão de a tabela `wipes`

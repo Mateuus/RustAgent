@@ -25,7 +25,12 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { createLogger } from '../src/logger.js';
-import { SiteClient, unknownAcks, type CommandAck } from '../src/site/client.js';
+import {
+  SiteClient,
+  unknownAcks,
+  type CommandAck,
+  type ItemImageUpload,
+} from '../src/site/client.js';
 
 const silent = createLogger({ log: { level: 'silent', pretty: false } });
 
@@ -117,6 +122,12 @@ function invoke(client: SiteClient, call: string, args: readonly unknown[]): Pro
       return client.serverConfig(args[0] as string | null);
     case 'domainConfig':
       return client.domainConfig(args[0] as string, args[1] as string | null);
+    case 'itemsMirrorVersion':
+      return client.itemsMirrorVersion();
+    case 'pushItemsMirror':
+      return client.pushItemsMirror(args[0]);
+    case 'pushItemImages':
+      return client.pushItemImages(args[0] as readonly ItemImageUpload[]);
     default:
       throw new Error(`fixture com um método que este teste não conhece: ${call}`);
   }

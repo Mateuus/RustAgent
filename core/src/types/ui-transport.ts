@@ -176,6 +176,8 @@ export interface UiScreenRef {
 export interface UiScreenBundle {
   readonly id: string;
   readonly name: string;
+  /** O agente monta esta tela? Ver `generated` em ui-document.ts. */
+  readonly generated?: boolean;
   /** `modal` é desenhado por cima, sem apagar a página. */
   readonly kind: 'page' | 'modal';
   /**
@@ -224,6 +226,12 @@ export function toScreenBundle(document: UiDocument, screenId: string): UiScreen
     id: screen.id,
     name: screen.name,
     kind: screen.kind,
+    // ####  A MARCA VIAJA COM A TELA DE ENTRADA  ####
+    //
+    // A carga inicial manda só ELA; o resto é pedido. Se a de
+    // entrada for montada pelo agente, o plugin precisa saber —
+    // senão desenha a de repouso e nunca pede. MEDIDO no jogo.
+    generated: screen.generated,
     cui: shell ? screenContentToCui(document, screen) : screenToCui(document, screen),
     updates: shell ? screenUpdatesToCui(document, screen) : [],
     actions: collectScreenActions(screen, document.shell),
@@ -276,6 +284,8 @@ export interface UiDocumentPayload {
   readonly cursor: boolean;
   readonly fadeIn: number;
   readonly entryScreenId: string;
+  /** Comandos de chat extras, cada um abrindo numa tela. */
+  readonly shortcuts: readonly { readonly command: string; readonly screenId: string }[];
   /**
    * O SHELL, já convertido: desenhado UMA vez, na abertura.
    *
@@ -460,6 +470,12 @@ export function toDocumentPayload(document: UiDocument): UiDocumentPayload {
     cursor: document.cursor,
     fadeIn: document.fadeIn,
     entryScreenId: document.entryScreenId,
+    // Os comandos extras. Sem eles no pacote, `/quest` só existiria
+    // como um segundo documento — ver `shortcuts` em ui-document.ts.
+    shortcuts: document.shortcuts.map((shortcut) => ({
+      command: shortcut.command,
+      screenId: shortcut.screenId,
+    })),
     shell: documentUsesShell(document) ? shellToCui(document) : [],
     contentSlot: document.contentSlotId,
     modalSlot: document.modalSlotId,
@@ -467,7 +483,11 @@ export function toDocumentPayload(document: UiDocument): UiDocumentPayload {
     // HTTP recusa), mas se existir vale mandar vazio e deixar o
     // plugin recusar a abrir — melhor que mandar a tela errada.
     screens: entry === null ? [] : [entry],
-    screenIndex: document.screens.map((screen) => ({ id: screen.id, name: screen.name })),
+    screenIndex: document.screens.map((screen) => ({
+      id: screen.id,
+      name: screen.name,
+      generated: screen.generated,
+    })),
   };
 }
 

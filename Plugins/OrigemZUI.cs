@@ -208,6 +208,21 @@ namespace Oxide.Plugins
             /// confiando nele.
             /// </summary>
             public bool Volatile;
+
+            /// <summary>
+            /// O AGENTE monta esta tela a cada abertura.
+            ///
+            /// ####  SEM ISTO A GRAVADA GANHA DA MONTADA  ####
+            ///
+            /// O OpenScreen desenha o que tem e so pede o que nao
+            /// tem. A tela de ENTRADA sempre chega na carga
+            /// inicial - entao uma entrada montada pelo agente
+            /// nunca era pedida, e o jogador ficava olhando o
+            /// "carregando" para sempre. MEDIDO no jogo.
+            ///
+            /// O que veio gravado continua servindo de REPOUSO: e
+            /// o que aparece enquanto a resposta nao chega.
+            public bool Generated;
         }
 
         private class DocumentCache
@@ -231,6 +246,20 @@ namespace Oxide.Plugins
             public Dictionary<string, ScreenCache> Screens = new Dictionary<string, ScreenCache>();
             /// <summary>Todas as telas que EXISTEM, baixadas ou nao.</summary>
             public Dictionary<string, string> ScreenIndex = new Dictionary<string, string>();
+            /// <summary>
+            /// Comando de chat extra -> a tela em que ele abre.
+            ///
+            /// ####  ELE EXISTE PARA NAO HAVER UM MENU CLONADO  ####
+            ///
+            /// `/quest` precisa abrir direto nas missoes. A
+            /// primeira versao fez isso com um SEGUNDO DOCUMENTO -
+            /// mesmo shell, mesmas onze telas, outro comando. O
+            /// servidor recebia duas copias do menu inteiro pelo
+            /// RCON e o admin via dois "Menu" no painel.
+            ///
+            /// Aqui e uma entrada de dicionario.
+            /// </summary>
+            public Dictionary<string, string> Shortcuts = new Dictionary<string, string>();
         }
 
         private readonly Dictionary<string, DocumentCache> _documents =
@@ -621,6 +650,15 @@ namespace Oxide.Plugins
                 {
                     byCommand[document.Command] = document.Id;
                 }
+
+                // Os atalhos entram no MESMO mapa: para o Oxide eles
+                // sao comandos como qualquer outro, e quem decide em
+                // que tela abrir e o HandleOpenChat, olhando
+                // document.Shortcuts.
+                foreach (KeyValuePair<string, string> shortcut in document.Shortcuts)
+                {
+                    byCommand[shortcut.Key] = document.Id;
+                }
             }
 
             // O segredo da loja vem no mesmo pacote. Ausente =
@@ -773,6 +811,27 @@ namespace Oxide.Plugins
                 }
             }
 
+            JArray shortcuts = item["shortcuts"] as JArray;
+            if (shortcuts != null)
+            {
+                for (int i = 0; i < shortcuts.Count; i++)
+                {
+                    JObject shortcut = shortcuts[i] as JObject;
+                    if (shortcut == null)
+                    {
+                        continue;
+                    }
+
+                    string chat = (string)shortcut["command"];
+                    string screen = (string)shortcut["screenId"];
+
+                    if (!string.IsNullOrEmpty(chat) && !string.IsNullOrEmpty(screen))
+                    {
+                        document.Shortcuts[chat] = screen;
+                    }
+                }
+            }
+
             // Permissao registrada aqui, e nao no Init: ela vem do
             // documento, e o documento so existe depois da carga.
             if (!string.IsNullOrEmpty(document.Permission) &&
@@ -809,6 +868,9 @@ namespace Oxide.Plugins
 
             JToken isVolatile = item["volatile"];
             screen.Volatile = isVolatile != null && (bool)isVolatile;
+
+            JToken isGenerated = item["generated"];
+            screen.Generated = isGenerated != null && (bool)isGenerated;
 
             return screen;
         }
@@ -862,14 +924,41 @@ namespace Oxide.Plugins
             // redesenhar. E a segunda saida para quem ficou preso:
             // o chat continua funcionando mesmo com o cursor
             // liberado, e nem todo mundo sabe usar o F1.
+            // ####  O COMANDO DECIDE ONDE ABRIR  ####
+            //
+            // `/menu` abre na entrada; `/quest` abre nas missoes. E
+            // o mesmo documento nos dois casos - ver Shortcuts.
+            string target;
+            if (!document.Shortcuts.TryGetValue(command, out target) || string.IsNullOrEmpty(target))
+            {
+                target = document.EntryScreenId;
+            }
+
+            // ####  O MESMO COMANDO FECHA  ####
+            //
+            // Digitar /menu com o menu aberto FECHA, em vez de
+            // redesenhar. E a segunda saida para quem ficou preso:
+            // o chat continua funcionando mesmo com o cursor
+            // liberado, e nem todo mundo sabe usar o F1.
+            //
+            // Com os atalhos isso ganhou uma condicao: /quest com o
+            // menu aberto na HOME nao fecha - ele LEVA as missoes.
+            // Fechar ali seria responder a "me mostra as missoes"
+            // com uma tela preta.
             Session existing;
             if (_sessions.TryGetValue(player.userID, out existing) && existing.ShellDrawn)
             {
-                ForceClose(player);
+                if (existing.ScreenId == target)
+                {
+                    ForceClose(player);
+                    return;
+                }
+
+                Open(player, document, target);
                 return;
             }
 
-            Open(player, document, document.EntryScreenId);
+            Open(player, document, target);
         }
 
         [ConsoleCommand(OpenCommand)]
@@ -908,7 +997,20 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Open(player, document, document.EntryScreenId);
+            // ####  O TERCEIRO ARGUMENTO E OPCIONAL, E E A TELA  ####
+            //
+            // Sem ele, abre na entrada - que e o que todo chamador
+            // fazia ate agora, e por isso ele nao quebra ninguem.
+            //
+            // Com ele, abre DIRETO numa tela: e o que faz o NPC de
+            // missao levar o jogador as missoes DELE, em vez de
+            // largar no menu geral. A tela e pedida ao agente pelo
+            // caminho normal (#OZUIREQ#) se nao estiver em cache.
+            string screenId = arg.HasArgs(3) ? arg.GetString(2) : null;
+
+            Open(player, document,
+                string.IsNullOrEmpty(screenId) ? document.EntryScreenId : screenId);
+
             arg.ReplyWith("{\"ok\":true}");
         }
 
@@ -1073,6 +1175,22 @@ namespace Oxide.Plugins
             ScreenCache screen;
             if (document.Screens.TryGetValue(screenId, out screen))
             {
+                // ####  A TELA MONTADA PELO AGENTE E PEDIDA SEMPRE  ####
+                //
+                // O que esta gravado dela e so o REPOUSO. Desenha-lo
+                // e parar seria mostrar "carregando" para sempre - e
+                // foi exatamente o que aconteceu com o menu de
+                // missoes, MEDIDO no jogo em 06/09/2026.
+                //
+                // Desenha o repouso ANTES de pedir: sem isto o
+                // jogador ve a moldura vazia enquanto a resposta vem.
+                if (screen.Generated)
+                {
+                    Draw(player, session, document, screen);
+                    RequestScreen(player, session, document.Id, screenId);
+                    return;
+                }
+
                 Draw(player, session, document, screen);
                 return;
             }
@@ -2476,6 +2594,27 @@ namespace Oxide.Plugins
         /// ao lado.
         /// </summary>
         private bool _adsLogoDetached;
+
+        /// <summary>
+        /// O painel fica PARADO, com uma propaganda so?
+        ///
+        /// ####  ELE NAO E "ONDE APARECE"  ####
+        ///
+        /// Onde e a `_adsLayer`: `Hud.Menu` e a camada em que o
+        /// Rust poe o inventario, e pendurar o overlay ali o faz
+        /// aparecer so com o inventario aberto - sem hook nenhum.
+        ///
+        /// Este aqui e COMO ele se comporta. Ligado, nao ha ciclo:
+        /// o painel e desenhado junto com o logo, com a primeira
+        /// propaganda da fila daquele jogador, e fica. Depois do
+        /// primeiro desenho, ZERO trafego.
+        ///
+        /// Os dois sao independentes de proposito: da para ter um
+        /// banner fixo sempre visivel, e da para ter o rodizio
+        /// animado so dentro do inventario.
+        /// </summary>
+        private bool _adsStatic;
+
         private string _adsOrderMode = "sequential";
         private int _adsPerCycle = 3;
 
@@ -2714,6 +2853,9 @@ namespace Oxide.Plugins
 
             JToken detached = payload["logoDetached"];
             _adsLogoDetached = detached != null && (bool)detached;
+
+            JToken estatico = payload["staticMode"];
+            _adsStatic = estatico != null && (bool)estatico;
             _adsPermission = (string)payload["permission"];
             _adsRoot = payload["root"] as JArray;
 
@@ -2790,9 +2932,19 @@ namespace Oxide.Plugins
             // antigo.
             int remaining = (int)Math.Max(0f, _adsNextCycleAt - Time.realtimeSinceStartup);
 
-            Puts("overlay: " + _adsItems.Count + " propaganda(s), ciclo a cada " +
-                 (_adsIntervalMs / 1000) + "s (proximo em " + remaining + "s), logo " +
-                 (_adsLogoDetached ? "em lugar proprio" : "no canto do painel"));
+            if (_adsStatic)
+            {
+                Puts("overlay: " + _adsItems.Count + " propaganda(s), PARADO (sem ciclo), camada " +
+                     _adsLayer + ", logo " +
+                     (_adsLogoDetached ? "em lugar proprio" : "no canto do painel"));
+            }
+            else
+            {
+                Puts("overlay: " + _adsItems.Count + " propaganda(s), ciclo a cada " +
+                     (_adsIntervalMs / 1000) + "s (proximo em " + remaining + "s), camada " +
+                     _adsLayer + ", logo " +
+                     (_adsLogoDetached ? "em lugar proprio" : "no canto do painel"));
+            }
 
             arg.ReplyWith("{\"ok\":true,\"ads\":" + _adsItems.Count + "}");
         }
@@ -2981,6 +3133,68 @@ namespace Oxide.Plugins
             _adsDrawn.Add(player.userID);
 
             AdsPreload(player);
+            AdsDrawStatic(player);
+        }
+
+        /// <summary>
+        /// O painel PARADO deste jogador, com uma propaganda so.
+        ///
+        /// ####  POR QUE ISTO E DO PLUGIN, E NAO DO AGENTE  ####
+        ///
+        /// A fila depende da PERMISSAO de quem esta olhando, e so
+        /// este lado a conhece. O agente manda os mesmos quadros de
+        /// sempre; o que muda e o que se faz com eles.
+        ///
+        /// ####  O ULTIMO QUADRO, E NAO A ANIMACAO  ####
+        ///
+        /// O ultimo quadro de `opening` e o painel JA ABERTO, e o
+        /// de `adEnter` e a imagem JA DENTRO dele. Aplicar so esses
+        /// dois da o estado final sem tocar um unico quadro
+        /// intermediario - que e exatamente o que "fica parada"
+        /// quer dizer.
+        ///
+        /// Quem nao tem propaganda nenhuma para ver fica so com o
+        /// logo. E o mesmo comportamento do rodizio, e nao um
+        /// defeito.
+        /// </summary>
+        private void AdsDrawStatic(BasePlayer player)
+        {
+            if (!_adsStatic || !_adsEnabled || _adsItems.Count == 0)
+            {
+                return;
+            }
+
+            List<int> queue = AdsQueueFor(player);
+
+            if (queue.Count == 0)
+            {
+                return;
+            }
+
+            List<BasePlayer> audience = new List<BasePlayer>();
+            audience.Add(player);
+
+            // A primeira da fila: `AdsQueueFor` ja a devolve na
+            // ordem de prioridade que o agente resolveu.
+            AdItem ad = _adsItems[queue[0]];
+
+            AdsApplyLastFrame(_adsOpening, audience, null);
+            AdsApplyLastFrame(_adsEnter, audience, ad);
+        }
+
+        /// <summary>
+        /// Aplica so o ULTIMO quadro de uma animacao.
+        ///
+        /// Sem timer e sem espera: o estado final, de uma vez.
+        /// </summary>
+        private void AdsApplyLastFrame(AdAnimation animation, List<BasePlayer> audience, AdItem ad)
+        {
+            if (animation == null || animation.Frames.Count == 0)
+            {
+                return;
+            }
+
+            AdsApplyFrame(animation.Frames[animation.Frames.Count - 1] as JObject, audience, ad);
         }
 
         /// <summary>
@@ -3101,6 +3315,17 @@ namespace Oxide.Plugins
         {
             AdsKillTimer(ref _adsCycleTimer);
 
+            if (_adsStatic)
+            {
+                // ####  NO ESTATICO NAO HA RELOGIO  ####
+                //
+                // O painel ja foi desenhado junto com o logo, em
+                // AdsDrawStatic, e fica. Agendar um ciclo aqui o
+                // faria abrir por cima de si mesmo a cada
+                // intervalo - e a "propaganda parada" piscaria.
+                return;
+            }
+
             if (!_adsEnabled || _adsItems.Count == 0)
             {
                 // Sem propaganda nenhuma o overlay fica no logo, e
@@ -3141,7 +3366,9 @@ namespace Oxide.Plugins
         {
             AdsKillTimer(ref _adsCycleTimer);
 
-            if (!_adsEnabled || _adsItems.Count == 0)
+            // Ver AdsScheduleCycle: no estatico nao ha contagem
+            // para retomar.
+            if (_adsStatic || !_adsEnabled || _adsItems.Count == 0)
             {
                 return;
             }

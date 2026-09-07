@@ -27,14 +27,27 @@
 //  concluir que o servidor está vazio.
 // ============================================================
 
-import { Copy, Maximize2, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
+import {
+  Ban,
+  Copy,
+  Gift,
+  LogOut,
+  Maximize2,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
+  X,
+} from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { BanDialog } from '@/components/ban-dialog';
+import { GiveItemDialog } from '@/components/give-item-dialog';
 import { MapView } from '@/components/map-view';
 import { StateBlock } from '@/components/state-block';
+import { ActionMenu } from '@/components/ui/action-menu';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -196,7 +209,17 @@ function PlayersSection({ server }: { server: ServerView }) {
   const [snapshot, setSnapshot] = useState<PlayersSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  /**
+   * De quem é cada caixa aberta. `null` = fechada.
+   *
+   * Guardam o JOGADOR, e não o SteamID: a lista é relida a cada
+   * cinco segundos e o jogador pode sair no meio da decisão — com o
+   * objeto em mãos, a caixa continua dizendo de quem ela é em vez
+   * de virar uma pergunta sobre um id que sumiu da lista.
+   */
   const [banning, setBanning] = useState<GamePlayer | null>(null);
+  const [kicking, setKicking] = useState<GamePlayer | null>(null);
+  const [giving, setGiving] = useState<GamePlayer | null>(null);
   /**
    * Começa DIVIDIDO: as duas perguntas ("quem está aí" e "onde
    * eles estão") são feitas juntas na maior parte das vezes, e
@@ -278,6 +301,10 @@ function PlayersSection({ server }: { server: ServerView }) {
       const response = await agent.kickPlayer(server.id, player.steamId);
 
       toast.success(`${player.name} expulso`, { description: response.message });
+      // A caixa só fecha no SUCESSO: uma recusa (ele já tinha saído,
+      // o RCON caiu) com a caixa fechada viraria um toast vermelho
+      // sem nada por trás, e ninguém saberia se tentar de novo.
+      setKicking(null);
       await load();
     } catch (cause) {
       toast.error('Não consegui expulsar', {
@@ -533,7 +560,8 @@ function PlayersSection({ server }: { server: ServerView }) {
                 onSelect={(player) =>
                   setSelected(player.steamId === selected ? null : player.steamId)
                 }
-                onKick={(player) => void kick(player)}
+                onGive={(player) => setGiving(player)}
+                onKick={(player) => setKicking(player)}
                 onBan={(player) => setBanning(player)}
                 compact={mode === 'dividido'}
               />
@@ -670,7 +698,8 @@ function PlayersSection({ server }: { server: ServerView }) {
                     onSelect={(player) =>
                       setSelected(player.steamId === selected ? null : player.steamId)
                     }
-                    onKick={(player) => void kick(player)}
+                    onGive={(player) => setGiving(player)}
+                    onKick={(player) => setKicking(player)}
                     onBan={(player) => setBanning(player)}
                   />
                 </div>
@@ -717,6 +746,42 @@ function PlayersSection({ server }: { server: ServerView }) {
           onClose={() => setBanning(null)}
           onDone={() => void load()}
         />
+      )}
+
+      {giving !== null && (
+        <GiveItemDialog
+          key={giving.steamId}
+          open
+          serverId={server.id}
+          player={giving}
+          onClose={() => setGiving(null)}
+          onDone={() => void load()}
+        />
+      )}
+
+      {kicking !== null && (
+        <ConfirmDialog
+          open
+          title="Expulsar jogador"
+          confirmLabel="Expulsar"
+          busy={busy === kicking.steamId}
+          onConfirm={() => void kick(kicking)}
+          onClose={() => setKicking(null)}
+        >
+          <p className="text-sm text-muted">
+            <strong className="text-foreground">{kicking.name}</strong>{' '}
+            <span className="font-mono text-2xs">{kicking.steamId}</span> cai do servidor agora.
+          </p>
+
+          <StateBlock
+            variant="empty"
+            title="Ele pode voltar a qualquer momento."
+            detail={
+              'Expulsar tira da partida, não impede de entrar de novo — quem impede é Banir. Fica ' +
+              'registrado na ficha dele, com o seu nome.'
+            }
+          />
+        </ConfirmDialog>
       )}
     </div>
   );
@@ -1050,6 +1115,7 @@ function PlayerList({
   busy,
   compact,
   onSelect,
+  onGive,
   onKick,
   onBan,
 }: {
@@ -1058,6 +1124,8 @@ function PlayerList({
   busy: string | null;
   compact: boolean;
   onSelect: (player: GamePlayer) => void;
+  /** Abre a caixa de entrega. A lista não entrega nada sozinha. */
+  onGive: (player: GamePlayer) => void;
   onKick: (player: GamePlayer) => void;
   onBan: (player: GamePlayer) => void;
 }) {
@@ -1139,24 +1207,44 @@ function PlayerList({
                     Copiar
                   </Button>
 
-                  <ConfirmButton
-                    variant="primary"
-                    disabled={busy !== null}
-                    icon={null}
-                    label="Expulsar"
-                    confirmLabel="Expulsar mesmo"
-                    hint={`${player.name} cai do servidor agora. Ele pode voltar a qualquer momento.`}
-                    onConfirm={() => onKick(player)}
-                  />
+                  {/* ####  UM BOTÃO SÓ, E CADA AÇÃO COM SUA CAIXA  ####
 
-                  <Button
-                    size="sm"
-                    variant="danger"
+                      Antes eram dois botões soltos: "Expulsar" em
+                      dois toques e "Banir" abrindo caixa. Duas
+                      gramáticas de confirmação lado a lado ensinam
+                      a errar — e a lista se reordena a cada cinco
+                      segundos, então o segundo toque pode cair em
+                      cima de outro jogador.
+
+                      Agora as três ações moram no menu, e cada uma
+                      abre uma caixa que REPETE de quem se trata
+                      antes de acontecer. */}
+                  <ActionMenu
+                    text="Ações"
+                    label={`Ações para ${player.name}`}
                     disabled={busy !== null}
-                    onClick={() => onBan(player)}
-                  >
-                    Banir
-                  </Button>
+                    items={[
+                      {
+                        label: 'Dar item',
+                        icon: <Gift aria-hidden className="h-3.5 w-3.5" />,
+                        hint: 'Põe um item no inventário dele, agora.',
+                        onSelect: () => onGive(player),
+                      },
+                      {
+                        label: 'Expulsar',
+                        icon: <LogOut aria-hidden className="h-3.5 w-3.5" />,
+                        hint: 'Ele cai do servidor e pode voltar a qualquer momento.',
+                        onSelect: () => onKick(player),
+                      },
+                      {
+                        label: 'Banir',
+                        icon: <Ban aria-hidden className="h-3.5 w-3.5" />,
+                        hint: 'Ele cai e fica impedido de voltar.',
+                        danger: true,
+                        onSelect: () => onBan(player),
+                      },
+                    ]}
+                  />
                 </div>
               )}
             </li>

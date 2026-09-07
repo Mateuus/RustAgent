@@ -445,6 +445,31 @@ export interface UiDocument {
    */
   readonly fadeIn: number;
 
+  /**
+   * Comandos extras que abrem o menu direto numa tela.
+   *
+   * ####  ELES EXISTEM PARA NÃO HAVER UM MENU CLONADO  ####
+   *
+   * `/quest` precisava abrir direto nas missões. A primeira versão
+   * fez isso com um SEGUNDO DOCUMENTO — o mesmo shell, as mesmas
+   * onze telas — e o servidor recebia duas cópias do menu inteiro
+   * pelo RCON. Aqui é uma linha.
+   *
+   * ####  CADA UM OCUPA UM NOME GLOBAL NO SERVIDOR  ####
+   *
+   * O plugin põe `command` e os atalhos no MESMO mapa
+   * (`_byCommand`). Dois documentos disputando a mesma palavra
+   * fazem um deles ficar inalcançável no jogo, sem erro nenhum — é
+   * o que o core recusa desde 06/09/2026, e é por isso que copiar
+   * uma interface no painel NÃO leva os atalhos junto.
+   *
+   * Espelha `shortcuts` de core/src/types/ui-document.ts. O
+   * cabeçalho deste arquivo manda os dois andarem juntos: sem ele
+   * aqui, um documento que passasse por qualquer reconstrução no
+   * editor perderia os atalhos em silêncio.
+   */
+  readonly shortcuts: readonly { readonly command: string; readonly screenId: string }[];
+
   readonly screens: readonly UiScreen[];
 }
 

@@ -60,6 +60,21 @@
 //  Ela acontece nos MESMOS TRÊS MOMENTOS: boot, servidor ligado e
 //  `onRconConnected`. Um servidor que ficou fora do ar durante a
 //  compra precisa receber o estado quando voltar.
+//
+//  ####  E ELA NÃO É A ÚNICA MEXENDO NOS GRUPOS  ####
+//
+//  A reconciliação tira um retrato do banco e depois passa segundos
+//  no RCON, um `oxide.show group` por nível. Nesse meio-tempo a
+//  fila do site entrega VIP, o painel concede e o relógio expira —
+//  e a decisão que ela tomar com o retrato velho vira comando de
+//  console mesmo assim.
+//
+//  MEDIDO em 04/09/2026, no boot: uma entrega coube entre a
+//  primeira e a terceira leitura de grupo, e a reconciliação tirou
+//  do grupo o VIP que o `origemz.vip.apply` acabara de dar. Por
+//  isso as duas decisões que MEXEM no grupo releem o estado antes
+//  de agir (`#topGroupNow`), e por isso duas passadas do mesmo
+//  servidor não rodam juntas (`#reconciling`).
 // ============================================================
 
 import { STEAM_ID_PATTERN } from '../bans/rust-bans.js';
@@ -194,6 +209,14 @@ export interface VipSyncResult {
 
 export class VipList {
   readonly #deps: VipListDeps;
+
+  /**
+   * Os servidores com uma reconciliação em andamento.
+   *
+   * Ver `reconcile`: duas passadas ao mesmo tempo decidem com
+   * retratos diferentes e escrevem uma por cima da outra.
+   */
+  readonly #reconciling = new Set<string>();
 
   constructor(deps: VipListDeps) {
     this.#deps = deps;
@@ -458,8 +481,38 @@ export class VipList {
    * repetir aqui é o que ela NÃO faz: não tira do grupo quem o
    * agente não conhece (adota), e não age sobre um nível cujo grupo
    * ela não conseguiu ler.
+   *
+   * ####  UMA POR SERVIDOR, DE CADA VEZ  ####
+   *
+   * O boot e o gancho `onRconConnected` a chamam sem `await`, e uma
+   * reconexão no meio do boot dispara as duas. Duas passadas
+   * simultâneas leem os mesmos grupos, decidem com retratos
+   * diferentes e mandam `usergroup add`/`remove` uma por cima da
+   * outra — o estado final vira quem chegou por último.
+   *
+   * A segunda chamada não enfileira: ela devolve `skipped`. Quem
+   * ressincroniza depois de um wipe ou de um reload não precisa de
+   * duas passadas, precisa de uma que termine.
    */
   async reconcile(serverId: string): Promise<VipSyncResult> {
+    if (this.#reconciling.has(serverId)) {
+      return skipped(
+        serverId,
+        `Já há uma reconciliação de VIP em andamento em "${serverId}". Esta rodada foi dispensada ` +
+          '— duas ao mesmo tempo decidiriam com retratos diferentes.',
+      );
+    }
+
+    this.#reconciling.add(serverId);
+
+    try {
+      return await this.#reconcileOnce(serverId);
+    } finally {
+      this.#reconciling.delete(serverId);
+    }
+  }
+
+  async #reconcileOnce(serverId: string): Promise<VipSyncResult> {
     const rcon = this.#rconOf(serverId);
 
     if (!rcon.isConnected) {
@@ -558,6 +611,25 @@ export class VipList {
         const known = this.#deps.repository.latestOf(steamId, level.tier);
 
         if (hasOther || known !== null) {
+          // ####  O RETRATO É VELHO, E TIRAR É IRREVERSÍVEL  ####
+          //
+          // `want` veio de um `active()` lido ANTES das idas ao
+          // RCON, e entre ele e agora cabe uma concessão inteira:
+          // MEDIDO em 04/09/2026, a fila do site entregou um VIP no
+          // boot e esta linha o tirou do grupo que o
+          // `origemz.vip.apply` acabara de dar. O jogador ficou com
+          // a tag e a fila (que vêm do payload) e sem as permissões
+          // — e só a reconciliação seguinte, dias depois, o
+          // consertaria.
+          //
+          // Reler custa uma consulta local contra um round-trip de
+          // RCON que já foi pago. E repare que só ela é ao vivo no
+          // laço: era o `latestOf` decidindo com dado novo em cima
+          // de um retrato velho que produzia a remoção.
+          if (this.#topGroupNow(steamId, levels) === level.group) {
+            continue;
+          }
+
           if (await this.#setGroup(serverId, steamId, level.group, false)) {
             removed.push(steamId);
           }
@@ -592,6 +664,13 @@ export class VipList {
 
       for (const steamId of want) {
         if (present.has(steamId)) {
+          continue;
+        }
+
+        // O simétrico da remoção, e pelo mesmo motivo: uma
+        // revogação feita no meio da passada seria DESFEITA aqui,
+        // devolvendo o grupo a quem acabou de perdê-lo.
+        if (this.#topGroupNow(steamId, levels) !== level.group) {
           continue;
         }
 
@@ -764,6 +843,20 @@ export class VipList {
    * o Oxide recusa quem ele nunca viu ("Player 'x' not found"), e
    * isso é rotina num VIP comprado por quem ainda não entrou.
    */
+  /**
+   * Em que grupo este jogador deve estar AGORA. `null` = nenhum.
+   *
+   * A pergunta é a mesma do retrato do `reconcile` — o nível mais
+   * alto entre os VIPs ativos —, só que respondida no instante em
+   * que a decisão vai virar comando de console. Ver a remoção, no
+   * `#reconcileOnce`.
+   */
+  #topGroupNow(steamId: string, levels: readonly VipTierLevel[]): string | null {
+    const tiers = this.#deps.repository.activeOf(steamId).map((vip) => vip.tier);
+
+    return highestLevel(levels, tiers)?.group ?? null;
+  }
+
   async #setGroup(
     serverId: string,
     steamId: string,

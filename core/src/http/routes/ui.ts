@@ -129,9 +129,36 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiRoutesDeps): void
     };
   });
 
-  /** Os modelos que a tela pode oferecer em "Criar a partir do modelo". */
+  /**
+   * Os modelos que a tela pode oferecer em "Criar a partir do modelo".
+   *
+   * ####  A LISTA VEM MONTADA, E NÃO SÓ COM AS CHAVES  ####
+   *
+   * Uma lista de slugs (`menu-principal`, `quest`) obriga o painel a
+   * inventar o nome que aparece no seletor — e o dia em que o
+   * preset ganhar uma tela, o painel continua dizendo o número
+   * velho. Montar o documento aqui custa uma chamada de função pura
+   * e devolve o que ELE de fato produz.
+   *
+   * O `id` viaja junto porque é ele que colide: já existe uma
+   * interface com aquele identificador, e o seletor precisa poder
+   * dizer isso antes de a pessoa apertar o botão.
+   */
   app.get('/ui/presets', async () => {
-    return { ok: true, presets: Object.keys(UI_PRESETS) };
+    return {
+      ok: true,
+      presets: Object.entries(UI_PRESETS).map(([preset, build]) => {
+        const document = build();
+
+        return {
+          preset,
+          id: document.id,
+          name: document.name,
+          command: document.command,
+          screens: document.screens.length,
+        };
+      }),
+    };
   });
 
   app.post('/ui/documents', async (request, reply) => {
@@ -146,6 +173,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiRoutesDeps): void
         409,
       );
     }
+
+    mustNotRepeatCommand(deps, parsed, null);
 
     const created = deps.repository.create(parsed);
 
@@ -187,6 +216,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiRoutesDeps): void
         409,
       );
     }
+
+    mustNotRepeatCommand(deps, parsed, id);
 
     const saved = deps.repository.update(id, parsed);
 
@@ -543,6 +574,64 @@ function mustGet(deps: UiRoutesDeps, id: number): StoredUiDocument {
   }
 
   return stored;
+}
+
+/**
+ * Recusa um comando de chat que outra interface já usa.
+ *
+ * ####  O SEGUNDO SUMIRIA, E SEM DIZER NADA  ####
+ *
+ * O plugin guarda um mapa `comando -> documento` (`_byCommand`, em
+ * `Plugins/OrigemZUI.cs`) e registra cada palavra UMA vez no Oxide.
+ * Duas interfaces com `command: "menu"` não dão erro em lugar
+ * nenhum: uma delas ganha o `/menu` e a outra fica sem porta de
+ * entrada, viva no banco e inalcançável no jogo.
+ *
+ * O identificador já era barrado por `getBySlug`; o comando não
+ * era, e é o que a pessoa de fato digita.
+ *
+ * ####  OS ATALHOS CONTAM, E É POR ISSO QUE ISTO LÊ TUDO  ####
+ *
+ * `shortcuts` entra no MESMO mapa do plugin — `byCommand[shortcut] =
+ * document.Id` —, e o schema já dizia por quê: cada comando "ocupa
+ * um nome global no servidor". Um `/vip` novo colide tanto com o
+ * `command` de outra interface quanto com um atalho dela, e o
+ * sintoma é o mesmo.
+ *
+ * O resumo da listagem traz os dois — o `command` e as palavras dos
+ * atalhos —, então isto é uma consulta só, sem abrir documento
+ * nenhum.
+ *
+ * `self` = o id do documento sendo editado, que não colide consigo
+ * mesmo. `null` na criação, onde não há um.
+ */
+function mustNotRepeatCommand(deps: UiRoutesDeps, document: UiDocument, self: number | null): void {
+  const wanted = commandsOf(document);
+
+  for (const summary of deps.repository.list()) {
+    if (summary.id === self) {
+      continue;
+    }
+
+    const taken = [summary.command, ...summary.shortcuts].find((command) =>
+      wanted.includes(command),
+    );
+
+    if (taken !== undefined) {
+      throw new ApiError(
+        'UI_COMMAND_EXISTS',
+        `A interface "${summary.name}" já responde a /${taken}. O plugin resolve o comando para ` +
+          'UM documento — a segunda ficaria sem porta de entrada no jogo, sem erro nenhum ' +
+          'aparecer. Escolha outro comando.',
+        409,
+      );
+    }
+  }
+}
+
+/** O comando de abrir mais os atalhos. Todos ocupam o mesmo mapa. */
+function commandsOf(document: UiDocument): string[] {
+  return [document.command, ...document.shortcuts.map((shortcut) => shortcut.command)];
 }
 
 function assertServer(deps: UiRoutesDeps, id: string): void {

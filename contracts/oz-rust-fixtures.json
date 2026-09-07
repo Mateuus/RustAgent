@@ -649,6 +649,312 @@
       "responses": [
         { "case": "gravado", "origin": "manual", "status": 200, "body": { "ok": true, "recorded": true, "currentVersion": 3 } }
       ]
+    },
+
+    "items-mirror": {
+      "route": 19,
+      "method": "POST",
+      "path": "/api/agent/items/mirror",
+      "auth": "bearer",
+      "note": "O ESPELHO DE CATALOGO DE ITENS. O agent empurra os ~1259 itens que o jogo tem (RCON `origemz.items`) e o site devolve SO O QUE FALTA de icone. A `version` e sha256 hex minusculo calculado PELO AGENT sobre o corpo SEM `version` e SEM `generatedAt` — o site nao recalcula. O alfabeto do shortname INCLUI ESPACO (`mini fridge`, `legacy bow`, `lumberjack hoodie`, `military flamethrower` sao itens de verdade): regra `^[a-z0-9][a-z0-9._ -]{0,95}$`. `isSkin` e `skinOf` sao RESERVA DE CONTRATO — aceitos e IGNORADOS nesta fase. `missingImages` tem teto de 200 nomes; `missingImageCount` NAO tem teto.",
+      "request": {
+        "version": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "generatedAt": "2026-09-04T18:00:00.000Z",
+        "protocol": "oz-rust/7",
+        "items": [
+          {
+            "shortname": "rifle.ak",
+            "displayName": "Assault Rifle",
+            "itemId": 1545779598,
+            "category": "Weapon",
+            "maxStack": 1,
+            "hasCondition": true,
+            "removed": false,
+            "imageSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "shortname": "mini fridge",
+            "displayName": "Mini Fridge",
+            "itemId": 1041607622,
+            "category": "Construction",
+            "maxStack": 1,
+            "hasCondition": false,
+            "removed": false,
+            "imageSha": null
+          }
+        ]
+      },
+      "responses": [
+        {
+          "case": "gravado, faltando icone",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "accepted": true,
+            "version": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "count": 2,
+            "removed": 0,
+            "missingImages": ["mini fridge", "rifle.ak"],
+            "missingImageCount": 2,
+            "storedAt": "2026-09-04T18:00:01.000Z"
+          },
+          "agent": {
+            "call": "pushItemsMirror",
+            "args": [
+              {
+                "version": "0000000000000000000000000000000000000000000000000000000000000000",
+                "items": [
+                  {
+                    "shortname": "rifle.ak"
+                  }
+                ]
+              }
+            ],
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "ok": true,
+                "accepted": true,
+                "version": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "count": 2,
+                "removed": 0,
+                "missingImages": [
+                  "mini fridge",
+                  "rifle.ak"
+                ],
+                "missingImageCount": 2,
+                "storedAt": "2026-09-04T18:00:01.000Z"
+              }
+            }
+          }
+        },
+        {
+          "case": "bearer de outro jogo — a tabela `agents` e compartilhada e nao tem coluna de jogo",
+          "origin": "manual",
+          "status": 400,
+          "body": { "error": "Esta rota e do agent de Rust.", "error_code": "ITEMS_GAME_NOT_SUPPORTED" },
+          "agent": {
+            "call": "pushItemsMirror",
+            "args": [
+              {
+                "version": "x",
+                "items": []
+              }
+            ],
+            "expect": {
+              "ok": false,
+              "status": 400,
+              "code": "ITEMS_GAME_NOT_SUPPORTED"
+            }
+          }
+        },
+        {
+          "case": "version fora do formato",
+          "origin": "manual",
+          "status": 400,
+          "body": { "error": "version precisa ser um sha256 em hex minusculo (64 chars).", "error_code": "ITEMS_INVALID_VERSION" },
+          "agent": {
+            "call": "pushItemsMirror",
+            "args": [
+              {
+                "version": "x",
+                "items": []
+              }
+            ],
+            "expect": {
+              "ok": false,
+              "status": 400,
+              "code": "ITEMS_INVALID_VERSION"
+            }
+          }
+        },
+        {
+          "case": "shortname fora do alfabeto — reprova o push INTEIRO, nao descarta o item em silencio",
+          "origin": "manual",
+          "status": 400,
+          "body": { "error": "items[3].shortname fora do alfabeto permitido (recebido: \"Rifle.AK\").", "error_code": "ITEMS_INVALID_BODY" },
+          "agent": {
+            "call": "pushItemsMirror",
+            "args": [
+              {
+                "version": "x",
+                "items": []
+              }
+            ],
+            "expect": {
+              "ok": false,
+              "status": 400,
+              "code": "ITEMS_INVALID_BODY"
+            }
+          }
+        },
+        {
+          "case": "corpo acima de 1 MiB",
+          "origin": "manual",
+          "status": 413,
+          "body": { "error": "Espelho de itens acima do teto de 1048576 bytes.", "error_code": "ITEMS_TOO_LARGE" },
+          "agent": {
+            "call": "pushItemsMirror",
+            "args": [
+              {
+                "version": "x",
+                "items": []
+              }
+            ],
+            "expect": {
+              "ok": false,
+              "status": 413,
+              "code": "ITEMS_TOO_LARGE"
+            }
+          }
+        }
+      ]
+    },
+
+    "items-mirror-version": {
+      "route": 20,
+      "method": "GET",
+      "path": "/api/agent/items/mirror/version",
+      "auth": "bearer",
+      "note": "A pergunta barata. `missingImageCount` NAO e enfeite: a `version` cobre o CATALOGO, nao as imagens. Se o bootstrap de icones quebrar no meio (o agent reinicia no lote 13 de 26), a version ja esta gravada e as imagens restantes nunca seriam pedidas. A regra do agent e \"version bate E missingImageCount === 0 ⇒ nada a fazer\". `version: null` = nunca mandaram espelho.",
+      "responses": [
+        {
+          "case": "em dia",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "version": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "missingImageCount": 0,
+            "updatedAt": "2026-09-04T18:00:01.000Z"
+          },
+          "agent": {
+            "call": "itemsMirrorVersion",
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "ok": true,
+                "version": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "missingImageCount": 0,
+                "updatedAt": "2026-09-04T18:00:01.000Z"
+              }
+            }
+          }
+        },
+        {
+          "case": "nunca mandaram espelho",
+          "origin": "manual",
+          "status": 200,
+          "body": { "ok": true, "version": null, "missingImageCount": 0, "updatedAt": null },
+          "agent": {
+            "call": "itemsMirrorVersion",
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "ok": true,
+                "version": null,
+                "missingImageCount": 0,
+                "updatedAt": null
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "items-images": {
+      "route": 21,
+      "method": "POST",
+      "path": "/api/agent/items/images",
+      "auth": "bearer",
+      "note": "Os ICONES, em lotes de 1..50. O site IGNORA o `contentType` e valida os BYTES (RIFF/WEBP), CONFERE o sha256 do binario, grava de forma atomica e fixa a extensao `.webp` no codigo. Tetos: 512 KB de corpo, 64 KB por `data` base64, 32 KB por arquivo decodificado. Responde 200 sempre que o LOTE e bem-formado — entrada ruim vai em `rejected[]` e nunca derruba as outras. `INVALID_SHORTNAME` e PERMANENTE (o agent nao reenvia); `NOT_WEBP`, `TOO_LARGE`, `SHA_MISMATCH`, `UNKNOWN_ITEM` e `WRITE_FAILED` sao retentaveis. O `image_url` gravado no item vai PERCENT-ENCODED (`mini%20fridge.webp`) para ser usavel direto num <img src>, mas o ARQUIVO no disco tem o nome literal.",
+      "request": {
+        "images": [
+          { "shortname": "rifle.ak", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "contentType": "image/webp", "data": "UklGRhIAAABXRUJQVlA4TAYAAAAvAAAAAA==" },
+          { "shortname": "mini fridge", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "contentType": "image/webp", "data": "UklGRhIAAABXRUJQVlA4TAYAAAAvAAAAAA==" }
+        ]
+      },
+      "responses": [
+        {
+          "case": "um entrou, um recusado",
+          "origin": "manual",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "stored": 1,
+            "urls": { "rifle.ak": "/uploads/rust-items/rifle.ak.webp" },
+            "rejected": [{ "shortname": "mini fridge", "reason": "SHA_MISMATCH" }]
+          },
+          "agent": {
+            "call": "pushItemImages",
+            "args": [
+              [
+                {
+                  "shortname": "rifle.ak",
+                  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "contentType": "image/webp",
+                  "data": "UklGRg=="
+                }
+              ]
+            ],
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "ok": true,
+                "stored": 1,
+                "urls": {
+                  "rifle.ak": "/uploads/rust-items/rifle.ak.webp"
+                },
+                "rejected": [
+                  {
+                    "shortname": "mini fridge",
+                    "reason": "SHA_MISMATCH"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "case": "lote fora de 1..50 — 400, nunca truncar em silencio",
+          "origin": "manual",
+          "status": 400,
+          "body": { "error": "images precisa ter de 1 a 50 entradas (veio 60).", "error_code": "ITEMS_INVALID_BODY" },
+          "agent": {
+            "call": "pushItemImages",
+            "args": [
+              []
+            ],
+            "expect": {
+              "ok": false,
+              "status": 400,
+              "code": "ITEMS_INVALID_BODY"
+            }
+          }
+        },
+        {
+          "case": "corpo acima de 512 KB",
+          "origin": "manual",
+          "status": 413,
+          "body": { "error": "Lote de icones acima do teto de 524288 bytes.", "error_code": "ITEMS_TOO_LARGE" },
+          "agent": {
+            "call": "pushItemImages",
+            "args": [
+              []
+            ],
+            "expect": {
+              "ok": false,
+              "status": 413,
+              "code": "ITEMS_TOO_LARGE"
+            }
+          }
+        }
+      ]
     }
   }
 }
