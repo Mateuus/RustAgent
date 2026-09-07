@@ -83,6 +83,17 @@ Configs/*.ini
 /Plugins/*
 !/Plugins/OrigemZ*.cs
 
+#  E a mesma excecao UM NIVEL ABAIXO.
+#
+#  Plugin que vale so num servidor mora em Plugins/<id>/, e a
+#  excecao de cima NAO desce: o git nem olha dentro de uma pasta
+#  ignorada, entao o ! precisa desfazer a pasta primeiro. Foi
+#  assim que o OrigemZLootDiag.cs - a ferramenta que mediu os
+#  defeitos do BetterLoot - quase ficou fora do repositorio.
+!/Plugins/*/
+/Plugins/*/*
+!/Plugins/*/OrigemZ*.cs
+
 # O SteamCMD deixa crash dump na pasta de onde foi chamado. Nao e
 # nosso, nao serve para nada aqui, e vem com nome novo toda vez.
 /dumps/
