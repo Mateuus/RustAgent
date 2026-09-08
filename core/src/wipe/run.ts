@@ -371,7 +371,7 @@ export class WipeRunner implements WipeExecutor {
     ];
 
     for (const step of steps) {
-      if (done.has(step.name)) {
+      if (done.has(step.name) && !(await this.#mustRedo(step.name, request))) {
         continue;
       }
 
@@ -598,6 +598,37 @@ export class WipeRunner implements WipeExecutor {
   }
 
   /** `quit` pelo RCON, que salva antes de sair. */
+  /**
+   * Um passo já concluído precisa correr DE NOVO nesta retomada?
+   *
+   * ####  `parar` OLHA O ESTADO, E NÃO O HISTÓRICO  ####
+   *
+   * Todo passo daqui é idempotente, e por isso o normal é pular o
+   * que já terminou. O `parar` é a exceção: ele não é um trabalho
+   * que se faz uma vez, é uma PRÉ-CONDIÇÃO dos três que vêm
+   * depois — o `apagar` recusa mexer no save com o jogo de pé,
+   * porque o Rust mantém os arquivos abertos e reescreve no
+   * `saveinterval` seguinte o que tiver sido apagado.
+   *
+   * Entre o `parar` original e a retomada, o servidor pode ter
+   * voltado ao ar: alguém clicou em iniciar, um script de boot da
+   * máquina o subiu, o agente reiniciou e o encontrou de pé.
+   * Pulando o passo por ele estar `done`, ninguém derruba esse
+   * processo — e o wipe morre no `apagar`, com o mundo intacto e
+   * a execução falhada. Medido em 08/09/2026, em simulação.
+   *
+   * A pergunta certa, então, não é "eu já parei?" e sim "está
+   * parado?". Só o `parar` a faz: os outros passos podem confiar
+   * no que já fizeram.
+   */
+  async #mustRedo(step: WipeRunStep, request: WipeRunRequest): Promise<boolean> {
+    if (step !== 'parar') {
+      return false;
+    }
+
+    return request.control.isRunning();
+  }
+
   async #parar(request: WipeRunRequest, exec: WipeExecSettings): Promise<string> {
     const { control } = request;
 

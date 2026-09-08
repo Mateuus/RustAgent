@@ -576,6 +576,17 @@ export function registerWipeRunRoutes(app: FastifyInstance, deps: WipeRunRoutesD
 
     const operation = run.operationId === null ? null : deps.store.get(run.operationId);
 
+    // ####  O PEDIDO É CARIMBADO ANTES DE QUALQUER COISA  ####
+    //
+    // Ele não é o desfecho — quem grava `cancelled` continua sendo a
+    // máquina de passos, logo abaixo. Este carimbo existe para o
+    // clique sobreviver a um reinício do agente no meio de um passo
+    // longo (um `backup` de save grande leva minutos): sem ele, o
+    // boot veria uma linha `running` como qualquer outra execução
+    // interrompida e RETOMARIA um wipe que o admin mandou parar.
+    // Ver a migração 056 e `wipe/recover.ts`.
+    deps.runs.requestCancel(id, runId);
+
     if (operation !== null) {
       operation.cancel();
     }

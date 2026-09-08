@@ -155,6 +155,7 @@ import { MapPoolRepository } from './db/map-pool-repository.js';
 import { WipeRunsRepository } from './db/wipe-runs-repository.js';
 import { WipesRepository } from './db/wipes-repository.js';
 import { currentWorldReader } from './wipe/next-wipe.js';
+import { recoverInterruptedWipes } from './wipe/recover.js';
 import { WipeRunner, type WipeExecutor } from './wipe/run.js';
 import { WipeScheduler } from './wipe/scheduler.js';
 // ---- as mensagens agendadas ----
@@ -2545,30 +2546,6 @@ async function main(): Promise<void> {
     blueprints,
   });
 
-  // ####  O QUE FICOU `running` DE UMA SESSÃO ANTERIOR  ####
-  //
-  // Uma execução cuja operação não existe mais (o agente reiniciou
-  // no meio) vira `failed`, com a frase dizendo isso — e a tela
-  // oferece retomar. Deixá-la `running` para sempre é a única saída
-  // pior: ela bloquearia o próximo wipe pela trava por recurso, não
-  // apareceria como problema em lugar nenhum, e não ofereceria
-  // retomada.
-  for (const orphan of wipeRuns.running()) {
-    const alive = orphan.operationId !== null && operations.get(orphan.operationId) !== null;
-
-    if (alive) {
-      continue;
-    }
-
-    wipeRuns.orphan(orphan.serverId, orphan.id);
-
-    logger.warn(
-      { server: orphan.serverId, run: orphan.id },
-      'execução de wipe interrompida por um reinício do agente; marcada como falha, e a tela ' +
-        'oferece retomar',
-    );
-  }
-
   // ---- a ponte: `{wipe.*}` nas mensagens ---------------------
   //
   // ####  É AQUI QUE OS DOIS MÓDULOS SE ENCOSTAM, E SÓ AQUI  ####
@@ -2827,6 +2804,39 @@ async function main(): Promise<void> {
         'servidores desta máquina — ponha um proxy com TLS e restrinja no firewall.',
     );
   }
+
+  // ####  O QUE FICOU `running` DE UMA SESSÃO ANTERIOR  ####
+  //
+  // Uma execução cuja operação não existe mais (o agente reiniciou
+  // no meio) vira `failed`, com a frase dizendo isso — e o agente
+  // TENTA RETOMÁ-LA na hora, sem esperar clique.
+  //
+  // O passo `avisar` espera a hora do wipe com a execução viva na
+  // memória; um wipe marcado para daqui a duas horas passa duas
+  // horas ali. Sem esta retomada, qualquer `pm2 restart` nesse
+  // intervalo — ou qualquer arquivo salvo sob `tsx watch` — deixava
+  // o wipe marcado morto até alguém reparar. As regras de quando
+  // NÃO retomar (o cancelamento do admin, o teto do atraso, e a
+  // exceção do servidor já parado) estão em wipe/recover.ts.
+  //
+  // ####  E É AQUI, DEPOIS DO `listen`, POR UMA RAZÃO  ####
+  //
+  // A porta é a única trava que diz "só existe UM agente nesta
+  // máquina". Um segundo processo — o `npm run dev` esquecido ao
+  // lado do PM2 — morre no `listen` com EADDRINUSE; antes dele, o
+  // segundo agente já teria lido o banco, visto a execução do
+  // PRIMEIRO como órfã (o registro de operações vive na memória de
+  // cada processo) e retomado o mesmo wipe em paralelo. Dois
+  // `apagar` correndo sobre a mesma pasta de save.
+  //
+  // Não bloqueia a subida: o `void` é de propósito, porque a
+  // execução retomada dura o wipe inteiro.
+  void recoverInterruptedWipes({
+    runs: wipeRuns,
+    operations,
+    servers: supervisor,
+    logger,
+  });
 
   // ---- desligamento ----------------------------------------
   let shuttingDown = false;
