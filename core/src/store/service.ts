@@ -75,6 +75,42 @@ export const VEHICLE_SPAWN_COMMAND = 'origemz.vehicle.spawn';
 export const VEHICLE_SPACE_COMMAND = 'origemz.vehicle.space';
 
 /**
+ * Com quanto combustível nasce o veículo que veio SEM nenhum.
+ *
+ * ####  POR QUE ISTO MORA NA ENTREGA  ####
+ *
+ * Um default só de cadastro valeria para a oferta criada DEPOIS
+ * dele. As que já existem gravaram `vehicle_fuel = 0` (a coluna
+ * nasceu com esse default na migração 035), e a loja do site monta o
+ * payload por conta própria — nenhum dos dois passa por um
+ * formulário deste agente. O resultado era o mesmo dos dois lados: o
+ * jogador paga por um minicopter e recebe um enfeite que não sai do
+ * lugar.
+ *
+ * Na entrega, um ponto só cobre os dois caminhos: a compra in-game e
+ * a fila do site chamam o mesmo `deliverPlan`.
+ */
+export const DEFAULT_VEHICLE_FUEL = 100;
+
+/**
+ * Quanto combustível o veículo leva de fato.
+ *
+ * ####  É DEFAULT, NÃO PISO  ####
+ *
+ * Só o zero vira 100. Uma oferta cadastrada com 50 entrega 50 — o
+ * admin que escreveu um número pequeno quis um tanque pequeno, e o
+ * problema que isto resolve é o veículo que sai SECO, não o que sai
+ * com pouco.
+ *
+ * Veículo sem tanque (um cavalo, um barco a remo) ignora o número: o
+ * plugin devolve `fuel: 0` e a entrega segue — ver `FuelVehicle` em
+ * Plugins/OrigemZAgent.cs.
+ */
+export function vehicleFuelOf(fuel: number): number {
+  return fuel > 0 ? fuel : DEFAULT_VEHICLE_FUEL;
+}
+
+/**
  * `auto` = tenta o inventário e joga no chão o que não couber.
  *
  * Os outros modos do plugin existem e não são usados aqui, pela
@@ -757,7 +793,7 @@ export class StoreService {
       const response = firstJsonLine(
         await rcon.send(
           `${VEHICLE_SPAWN_COMMAND} ${steamId} ${plan.vehicle.prefab} ` +
-            String(plan.vehicle.fuel),
+            String(vehicleFuelOf(plan.vehicle.fuel)),
         ),
       );
 

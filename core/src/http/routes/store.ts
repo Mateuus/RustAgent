@@ -58,7 +58,11 @@ import {
 import type { WalletsRepository } from '../../db/wallets-repository.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import type { SettleOutcome } from '../../store/settle.js';
-import { describePurchase, type StoreService } from '../../store/service.js';
+import {
+  DEFAULT_VEHICLE_FUEL,
+  describePurchase,
+  type StoreService,
+} from '../../store/service.js';
 import type { Wallet } from '../../store/wallet.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
@@ -170,7 +174,10 @@ export const storeOfferBody = z
     vehicle: z
       .object({
         prefab: z.string().trim().min(1).max(64),
-        fuel: z.number().int().min(0).max(1000).default(0),
+        // Cadastro que não diz nada sobre combustível ganha o padrão.
+        // Cadastrar 0 também não deixa o veículo seco: a entrega
+        // aplica `DEFAULT_VEHICLE_FUEL` no lugar do zero.
+        fuel: z.number().int().min(0).max(1000).default(DEFAULT_VEHICLE_FUEL),
       })
       .strict()
       .nullable()

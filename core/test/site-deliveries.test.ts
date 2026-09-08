@@ -504,6 +504,15 @@ describe('o vocabulário do payload', () => {
     expect(planOfPayload('vehicle', { prefab: 'minicopter.prefab', fuel: 0 })).toBeNull();
   });
 
+  it('veículo SEM o campo `fuel` continua sendo uma entrega válida', () => {
+    // Exigir o campo reprovava o payload inteiro, e a entrega ACKava
+    // `PAYLOAD_INVALID`: o jogador pagava no site e não recebia
+    // veículo NENHUM. Quem garante o tanque é o piso da entrega.
+    const plan = planOfPayload('vehicle', { prefab: 'minicopter' });
+
+    expect(plan?.vehicle).toEqual({ prefab: 'minicopter', fuel: 0 });
+  });
+
   it('recusa o que está fora de faixa, régua por régua', () => {
     const item = (over: Record<string, unknown>): unknown => ({
       items: [{ shortname: 'metal.refined', amount: 100, skinId: '0', ...over }],
