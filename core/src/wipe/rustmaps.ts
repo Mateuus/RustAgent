@@ -18,30 +18,41 @@
 //  a imagem é o que o admin e o VIP olham antes, e nada mais.
 //
 //  ------------------------------------------------------------
-//  ####  O CONTRATO, E DE ONDE ELE VEIO  ####
+//  ####  O CONTRATO, MEDIDO EM 07/09/2026  ####
 //
 //      POST /v4/maps              { size, seed, staging }
-//        200  o mapa já existe, e vem com as URLs
+//        200  o mapa JÁ EXISTE — e o corpo vem com `data: null`
 //        201  entrou na fila:  data.mapId, data.state, data.queuePosition
 //        409  existe, mas ainda não está pronto: só o id
 //        401  chave inválida
 //        403  chave sem plano para o que foi pedido
 //        429  passou do limite de requisições
 //
-//      GET  /v4/maps/{mapId}      o retrato de um mapa pelo id
+//      GET  /v4/maps/{mapId}          o retrato de um mapa pelo id
+//      GET  /v4/maps/{size}/{seed}?staging=   o retrato pela seed
+//      GET  /v4/maps/limits           cota de geração da conta
 //
 //      cabeçalhos:  X-API-Key
 //      cota:        x-rate-limit-limit / -remaining / -reset
 //
-//  `api.rustmaps.com/docs` responde 403 sem chave, então o
-//  contrato acima foi montado a partir da implementação de
-//  referência (RustServerManager/RustMaps-API) e das fontes
-//  listadas no Docs\16. **Ele não foi conferido contra a API real
-//  com uma chave em mãos** — por isso a leitura da resposta é
-//  DEFENSIVA: cada campo é procurado por mais de um nome, e o que
-//  não vier vira `null` em vez de estourar. Uma prévia que não
-//  aparece é um enfeite ausente; um parser que lança é um relógio
-//  morto.
+//  ####  O 200 DO POST NÃO TRAZ O MAPA  ####
+//
+//  Esta é a linha que custou uma prévia que nunca aparecia. O
+//  `200` do POST significa apenas "esse mapa já existe" — o
+//  swagger v4-public declara a resposta SEM CORPO, e a API real
+//  devolve `{"meta":{...},"data":null}`. Quem tem as URLs é o GET
+//  por `{size}/{seed}`. Um cliente que espere as imagens no POST
+//  fica preso num laço: pede, recebe 200, não acha id, chama de
+//  instabilidade e tenta de novo na volta seguinte, para sempre.
+//
+//  O contrato acima foi conferido com uma chave em mãos contra
+//  `api.rustmaps.com/swagger/v4-public/swagger.json` e contra a
+//  API de verdade; as respostas estão gravadas em
+//  `core/test/fixtures/rustmaps-*.json`. A leitura continua
+//  DEFENSIVA — cada campo é procurado por mais de um nome, e o
+//  que não vier vira `null` em vez de estourar. Uma prévia que
+//  não aparece é um enfeite ausente; um parser que lança é um
+//  relógio morto.
 //
 //  ------------------------------------------------------------
 //  ####  A CHAVE NÃO SAI DAQUI  ####
@@ -60,14 +71,15 @@ export const RUSTMAPS_BASE_URL = 'https://api.rustmaps.com';
 /**
  * O teto de requisições por minuto.
  *
- * ####  ESTE NÚMERO NÃO FOI MEDIDO  ####
+ * ####  MEDIDO EM 07/09/2026, E MESMO ASSIM CONSERVADOR  ####
  *
- * Ele veio de um CLI NÃO-OFICIAL (maintc/rustmaps-cli), e não da
- * documentação — `api.rustmaps.com/docs` responde 403 sem chave.
- * Meça com a chave em mãos antes de encostar no intervalo do
- * poll. Enquanto ninguém mediu, o agente trabalha MUITO abaixo
- * disto (ver `RUSTMAPS_MAX_CALLS_PER_TICK`): estourar a cota de
- * um enfeite não vale o risco.
+ * A API responde `x-rate-limit-limit: 1m` — a janela, não o teto
+ * — e um `x-rate-limit-remaining` que começou em 79, ou seja, 80
+ * por minuto para aquela chave. O número aqui continua 60 de
+ * propósito: ele é do lado do agente, e ficar abaixo do teto
+ * alheio é o que impede uma volta mal calculada de gastar cota
+ * de um enfeite. Repare que este teto NÃO é a cota de geração —
+ * essa é mensal, e quem a conta é `GET /v4/maps/limits`.
  */
 export const RUSTMAPS_REQUESTS_PER_MINUTE = 60;
 
@@ -82,7 +94,14 @@ export interface RustMapsPreview {
   readonly pageUrl: string | null;
   /** A imagem grande. `null` = ainda não tem. */
   readonly imageUrl: string | null;
-  /** A miniatura, para a lista da fila. */
+  /**
+   * A miniatura, para a lista da fila.
+   *
+   * Ela vem em **webp** (medido: `thumbnail.webp`). O navegador
+   * do painel abre; o cliente do jogo, não necessariamente — por
+   * isso a tela do calendário pede `previewUrl` primeiro e só cai
+   * aqui quando a imagem grande falta.
+   */
   readonly thumbUrl: string | null;
   /**
    * Os monumentos pelo nome. `null` = **não sabemos**, que é
@@ -157,12 +176,16 @@ export interface RustMapsKeyStatus {
   /**
    * O plano da conta, quando a resposta o traz.
    *
-   * ####  NÃO EXISTE ROTA DE "QUAL É O MEU PLANO"  ####
+   * ####  NENHUMA ROTA DIZ O NOME DO PLANO  ####
    *
    * O que o RustMaps devolve é 403 quando o pedido passa do que o
    * plano permite. Então o plano só é afirmado quando a própria
    * resposta o nomeia; fora disso é `null`, e a tela diz que não
    * dá para saber sem tentar. Ver Docs\16 §14.
+   *
+   * O que existe — e é outra coisa — é `GET /v4/maps/limits`, que
+   * conta quantos mapas a conta ainda pode gerar (medido nesta
+   * chave: 3 ao mesmo tempo, 250 no mês). Números, não nome.
    */
   readonly plan: string | null;
   readonly quota: RustMapsQuota;
@@ -223,21 +246,56 @@ export class RustMapsClient {
   /**
    * Pede a prévia de um mundo procedural.
    *
-   * O 200 já traz tudo (alguém no mundo já gerou essa seed); o
-   * 201 e o 409 devolvem só o id, e daí em diante é o poll que
-   * acompanha.
+   * São DUAS chamadas no melhor caso, e isso é de propósito. O
+   * 200 do POST diz "já existe" e nada mais — nem id, nem URL —,
+   * então quando ele vem o retrato é buscado pela seed. O 201 e o
+   * 409 devolvem só o id, e daí em diante é o poll que acompanha.
    */
   async request(input: RustMapsRequestInput): Promise<RustMapsOutcome> {
-    return this.#call('POST', '/v4/maps', input.staging, {
+    const outcome = await this.#call('POST', '/v4/maps', input.staging, {
       seed: Number(input.seed),
       size: input.size,
       staging: input.staging,
     });
+
+    // Um 200 do POST só pode ter virado `throttled` por um
+    // motivo: o corpo veio sem mapa, que é o que a API sempre
+    // faz aqui. Não é instabilidade — é o mapa existindo. Vá
+    // buscá-lo onde ele mora. Se o POST algum dia passar a
+    // responder com as URLs, `#interpret` devolve `ready` e este
+    // desvio nunca acontece.
+    if (outcome.kind === 'throttled' && outcome.status === 200) {
+      const bySeed = await this.mapOfSeed(input.size, input.seed, input.staging);
+
+      // O segundo pedido pode cair na rede. Nesse caso vale mais
+      // o desfecho do primeiro, que ao menos sabe que a chave
+      // serve e que o mapa existe: os dois pedem para tentar de
+      // novo, e o do POST diz a verdade sobre o que aconteceu.
+      return bySeed.kind === 'offline' ? outcome : bySeed;
+    }
+
+    return outcome;
   }
 
   /** O retrato de um mapa pelo id — é o que o poll pergunta. */
   async mapOf(mapId: string, staging = false): Promise<RustMapsOutcome> {
-    return this.#call('GET', `/v4/maps/${encodeURIComponent(mapId)}`, staging);
+    return this.#call('GET', `/v4/maps/${encodeURIComponent(mapId)}`, staging, undefined, mapId);
+  }
+
+  /**
+   * O retrato de um mapa pela seed e pelo tamanho.
+   *
+   * É a rota que devolve as imagens de um mapa que já existe sem
+   * gastar geração nenhuma: o mundo procedural é a seed, então
+   * tamanho + seed já identificam o retrato. É por aqui que o
+   * `request()` termina o serviço quando o POST responde 200.
+   */
+  async mapOfSeed(size: number, seed: string, staging = false): Promise<RustMapsOutcome> {
+    const path =
+      `/v4/maps/${encodeURIComponent(String(size))}/${encodeURIComponent(seed)}` +
+      `?staging=${staging ? 'true' : 'false'}`;
+
+    return this.#call('GET', path, staging);
   }
 
   /**
@@ -329,12 +387,19 @@ export class RustMapsClient {
    * `RustMapsPreview` — o RustMaps não repete o campo em toda
    * resposta, e quem grava precisa saber em que branch aquele
    * retrato foi pedido.
+   *
+   * O `knownMapId` é o id que QUEM CHAMOU já tinha na mão. Ele
+   * existe porque o 409 de `GET /v4/maps/{mapId}` — "ainda não
+   * terminou de gerar" — vem sem corpo: sem esta linha, a
+   * resposta certa sobre um mapa que está no forno viraria
+   * instabilidade, e a entrada sairia de `generating` sem motivo.
    */
   async #call(
     method: 'GET' | 'POST',
     path: string,
     staging: boolean,
     body?: unknown,
+    knownMapId?: string,
   ): Promise<RustMapsOutcome> {
     if (!this.configured) {
       return {
@@ -365,7 +430,7 @@ export class RustMapsClient {
 
       this.#quota = quota;
 
-      return await this.#interpret(response, quota, staging);
+      return await this.#interpret(response, quota, staging, knownMapId);
     } catch (error) {
       // Sem rede, DNS caído, tempo esgotado. NÃO é erro do agente
       // e não pode virar exceção: quem chama roda dentro de um
@@ -389,6 +454,7 @@ export class RustMapsClient {
     response: Response,
     quota: RustMapsQuota,
     staging: boolean,
+    knownMapId?: string,
   ): Promise<RustMapsOutcome> {
     const payload = await readJson(response);
     const data = dataOf(payload);
@@ -443,7 +509,7 @@ export class RustMapsClient {
     // 201 e 409 são o MESMO caminho: os dois dizem "está sendo
     // gerado, volte depois com este id". O 409 traz só o id.
     if (response.status === 201 || response.status === 409) {
-      const mapId = stringField(data, 'mapId', 'mapID', 'id');
+      const mapId = stringField(data, 'mapId', 'mapID', 'id') ?? knownMapId ?? null;
 
       if (mapId === null) {
         // A fila do RustMaps aceitou, mas sem id não há como
@@ -506,7 +572,15 @@ export class RustMapsClient {
  * significa chave ruim, e qualquer outra resposta — inclusive
  * 404 — significa que a autenticação passou. Um id fixo e
  * inofensivo evita gastar cota de geração só para desenhar o
- * cadeado verde da tela.
+ * cadeado verde da tela. Medido em 07/09/2026: com chave boa
+ * este id responde 404 com `data: null`, que é exatamente o
+ * "passou" que se espera.
+ *
+ * Existe rota melhor — `GET /v4/maps/limits` devolve a cota de
+ * geração de verdade (`concurrent` e `monthly`) — e o dia em que
+ * a tela quiser mostrar "faltam N mapas neste mês" é o dia de
+ * trocar esta sonda por ela. Hoje ninguém pergunta isso, e uma
+ * sonda que só precisa dizer sim ou não já diz.
  */
 const STATUS_PROBE_MAP_ID = '00000000-0000-0000-0000-000000000000';
 

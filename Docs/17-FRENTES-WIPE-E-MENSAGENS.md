@@ -620,11 +620,21 @@ core/test/rustmaps.test.ts             contra respostas GRAVADAS, nunca a API re
 
 | Código | Significa | O agente faz |
 |---|---|---|
-| `200` | o mapa **já existe** — vem com as URLs | grava e marca `ready` |
+| `200` | o mapa **já existe** — e o corpo vem **vazio** (`data: null`) | busca o retrato em `GET /v4/maps/{size}/{seed}`, grava e marca `ready` |
 | `201` | entrou na fila (`mapId`, `state`, `queuePosition`) | grava o id, marca `generating`, entra no poll |
 | `409` | existe, mas ainda **não está pronto** — só o id | mesmo caminho do `201` |
 | `401` / `403` | chave inválida ou plano insuficiente | marca `failed` com a frase certa, e **desliga a geração automática** até o admin trocar a chave |
 | `429` / `5xx` | limite ou instabilidade | backoff, e **nunca** derruba a fila |
+
+> **O `200` do POST não traz o mapa.** Esta linha da tabela dizia o contrário, e
+> o preço foi uma fila que mostrava *"pronta · sem prévia ainda"* para sempre:
+> o agente pedia, recebia `200`, não achava id nenhum no corpo, tratava como
+> instabilidade e tentava de novo na volta seguinte. O `200` ali significa
+> apenas *"esse mapa já existe"* — quem tem as URLs é o `GET` por tamanho e
+> seed. Conferido em 07/09/2026 contra
+> `api.rustmaps.com/swagger/v4-public/swagger.json` e contra a API real, com
+> chave; as respostas estão gravadas em `core/test/fixtures/rustmaps-*.json`.
+
 
 ### As regras que não se negociam
 

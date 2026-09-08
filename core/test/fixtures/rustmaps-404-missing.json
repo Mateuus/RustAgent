@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "status": "Failed",
+    "statusCode": 404,
+    "errors": [
+      "Map not found"
+    ]
+  },
+  "data": null
+}

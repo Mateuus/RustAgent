@@ -162,21 +162,59 @@ function seedNaFila(pool: MapPoolRepository, seed = '18422', worldSize = 4000): 
 }
 
 describe('os códigos da API, e o que o agente faz com cada um', () => {
-  it('200 grava as URLs e a entrada continua pronta', async () => {
-    const bancada = rig([{ status: 200, body: fixture('rustmaps-200-ready') }]);
-    const id = seedNaFila(bancada.pool);
+  it('200 no POST significa "ja existe", e o retrato vem do GET pela seed', async () => {
+    // ####  ESTE TESTE EXISTE POR UM DEFEITO DE VERDADE  ####
+    //
+    // A fila mostrava "pronta - sem previa ainda" para sempre, e
+    // o cartao dizia que o rustmaps.com tinha respondido 200 sem
+    // o id do mapa. Respondeu mesmo: o 200 do POST e so um "esse
+    // mapa ja existe", com `data: null`. Quem tem as URLs e o GET
+    // por tamanho/seed. As duas respostas abaixo sao capturas da
+    // API real - ver fixtures/LEIA-ME.md.
+    const bancada = rig([
+      { status: 200, body: fixture('rustmaps-200-post-exists') },
+      { status: 200, body: fixture('rustmaps-200-ready') },
+    ]);
+    const id = seedNaFila(bancada.pool, '2026680033');
+
+    await bancada.watcher.tick();
+
+    expect(bancada.fetch.calls[0]?.method).toBe('POST');
+    expect(bancada.fetch.calls[1]?.method).toBe('GET');
+    expect(bancada.fetch.calls[1]?.url).toContain('/v4/maps/4000/2026680033');
+    expect(bancada.fetch.calls[1]?.url).toContain('staging=false');
+
+    const entry = bancada.pool.get(SERVER, id);
+
+    expect(entry?.status).toBe('ready');
+    expect(entry?.rustmapsId).toBe('bf46c3f82f2c43e0921b32ae83e7205a');
+    expect(entry?.previewUrl).toContain('map_raw_normalized.png');
+    expect(entry?.thumbUrl).toContain('thumbnail.webp');
+    expect(entry?.monuments).toContain('Launch Site');
+    expect(entry?.lastError).toBeNull();
+  });
+
+  it('o 200 do POST NAO deixa a entrada em "sem previa" quando o GET cai', async () => {
+    // O desvio do 200 nao pode inventar sucesso: se o segundo
+    // pedido nao chega la, a entrada continua na fila, sem
+    // previa, e a volta seguinte tenta de novo. Era assim que o
+    // mapa ficava preso - a diferenca e que agora isso so
+    // acontece quando a rede realmente falhou.
+    const bancada = rig([
+      { status: 200, body: fixture('rustmaps-200-post-exists') },
+      { status: 200, throws: new Error('getaddrinfo ENOTFOUND api.rustmaps.com') },
+    ]);
+    const id = seedNaFila(bancada.pool, '2026680033');
 
     await bancada.watcher.tick();
 
     const entry = bancada.pool.get(SERVER, id);
 
+    // A entrada continua PRONTA para o wipe - num mundo
+    // procedural a seed ja e o mapa. O que falta e so o enfeite.
     expect(entry?.status).toBe('ready');
-    expect(entry?.rustmapsId).toBe('b3c1f0a2-9d44-4e77-9a6f-2c1e7f0a5d31');
-    expect(entry?.previewUrl).toContain('map.png');
-    expect(entry?.thumbUrl).toContain('thumbnail.png');
-    expect(entry?.monuments).toContain('Launch Site');
-    expect(entry?.monuments).toHaveLength(12);
-    expect(entry?.lastError).toBeNull();
+    expect(entry?.previewUrl).toBeNull();
+    expect(entry?.rustmapsId).toBeNull();
   });
 
   it('201 marca "gerando", guarda o mapId e entra no poll', async () => {
@@ -201,7 +239,7 @@ describe('os códigos da API, e o que o agente faz com cada um', () => {
     expect(bancada.fetch.calls[1]?.method).toBe('GET');
     expect(bancada.fetch.calls[1]?.url).toContain('7a19c8d5-1f60-4b23-8d0e-55b9a4c2e118');
     expect(bancada.pool.get(SERVER, id)?.status).toBe('ready');
-    expect(bancada.pool.get(SERVER, id)?.previewUrl).toContain('map.png');
+    expect(bancada.pool.get(SERVER, id)?.previewUrl).toContain('map_raw_normalized.png');
   });
 
   it('409 anda pelo MESMO caminho do 201 — o id vem, e só ele', async () => {

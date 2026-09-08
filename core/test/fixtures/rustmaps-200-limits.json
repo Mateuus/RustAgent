@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "status": "Success",
+    "statusCode": 200
+  },
+  "data": {
+    "concurrent": {
+      "current": 0,
+      "allowed": 3
+    },
+    "monthly": {
+      "current": 0,
+      "allowed": 250
+    }
+  }
+}

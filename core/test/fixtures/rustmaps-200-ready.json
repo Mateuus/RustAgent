@@ -1,43 +1,1337 @@
 {
   "meta": {
     "status": "Success",
-    "statusCode": 200,
-    "errors": null
+    "statusCode": 200
   },
   "data": {
-    "id": "b3c1f0a2-9d44-4e77-9a6f-2c1e7f0a5d31",
+    "id": "bf46c3f82f2c43e0921b32ae83e7205a",
     "type": "Procedural",
-    "seed": 18422,
+    "seed": 2026680033,
     "size": 4000,
-    "saveVersion": 287,
-    "url": "https://rustmaps.com/map/4000_18422",
-    "rawImageUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/map_raw.png",
-    "imageUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/map.png",
-    "imageIconUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/map_icons.png",
-    "thumbnailUrl": "https://files.rustmaps.com/img/287/b3c1f0a2/thumbnail.png",
+    "saveVersion": 288,
+    "url": "https://rustmaps.com/map/4000_2026680033",
+    "rawImageUrl": "https://content.rustmaps.com/maps/288/bf46c3f82f2c43e0921b32ae83e7205a/map_raw.png",
+    "imageUrl": "https://content.rustmaps.com/maps/288/bf46c3f82f2c43e0921b32ae83e7205a/map_raw_normalized.png",
+    "imageIconUrl": "https://content.rustmaps.com/maps/288/bf46c3f82f2c43e0921b32ae83e7205a/map_icons.png",
+    "thumbnailUrl": "https://content.rustmaps.com/maps/288/bf46c3f82f2c43e0921b32ae83e7205a/thumbnail.webp",
     "isStaging": false,
     "isCustomMap": false,
-    "canDownload": true,
-    "downloadUrl": "https://files.rustmaps.com/maps/287/b3c1f0a2/proceduralmap.4000.18422.287.map",
-    "totalMonuments": 12,
-    "landPercentageOfMap": 65,
-    "islands": 3,
-    "mountains": 7,
-    "iceLakes": 2,
-    "rivers": 4,
+    "canDownload": false,
+    "downloadUrl": null,
+    "totalMonuments": 185,
     "monuments": [
-      { "type": "Launch Site" },
-      { "type": "Airfield" },
-      { "type": "Water Treatment Plant" },
-      { "type": "Military Tunnel" },
-      { "type": "Train Yard" },
-      { "type": "Power Plant" },
-      { "type": "Satellite Dish" },
-      { "type": "The Dome" },
-      { "type": "Sewer Branch" },
-      { "type": "Harbor" },
-      { "type": "Oxum's Gas Station" },
-      { "type": "Abandoned Supermarket" }
-    ]
+      {
+        "type": "Lake B",
+        "coordinates": {
+          "x": -379,
+          "y": -142
+        }
+      },
+      {
+        "type": "Oasis A",
+        "coordinates": {
+          "x": -301,
+          "y": 850
+        }
+      },
+      {
+        "type": "Ferry Terminal",
+        "coordinates": {
+          "x": -740,
+          "y": 1538
+        }
+      },
+      {
+        "type": "Small Harbor",
+        "coordinates": {
+          "x": 262,
+          "y": -1719
+        }
+      },
+      {
+        "type": "Large Harbor",
+        "coordinates": {
+          "x": -1330,
+          "y": -1596
+        }
+      },
+      {
+        "type": "Fishing Village A",
+        "coordinates": {
+          "x": 1815,
+          "y": 506
+        }
+      },
+      {
+        "type": "Fishing Village C",
+        "coordinates": {
+          "x": -1646,
+          "y": -70
+        }
+      },
+      {
+        "type": "Fishing Village B",
+        "coordinates": {
+          "x": -1462,
+          "y": 1562
+        }
+      },
+      {
+        "type": "Military Base B",
+        "coordinates": {
+          "x": 523,
+          "y": 1350
+        }
+      },
+      {
+        "type": "Arctic Research Base A",
+        "coordinates": {
+          "x": 850,
+          "y": -1249
+        }
+      },
+      {
+        "type": "Launch Site",
+        "coordinates": {
+          "x": 460,
+          "y": -379
+        }
+      },
+      {
+        "type": "Water Treatment",
+        "coordinates": {
+          "x": -190,
+          "y": -899
+        }
+      },
+      {
+        "type": "Powerplant",
+        "coordinates": {
+          "x": 1016,
+          "y": 980
+        }
+      },
+      {
+        "type": "Bandit Town",
+        "coordinates": {
+          "x": 327,
+          "y": 397
+        }
+      },
+      {
+        "type": "Nuclear Missile Silo",
+        "coordinates": {
+          "x": 1583,
+          "y": 1107
+        }
+      },
+      {
+        "type": "Apartments Complex",
+        "coordinates": {
+          "x": -1058,
+          "y": -1050
+        }
+      },
+      {
+        "type": "Outpost",
+        "coordinates": {
+          "x": -769,
+          "y": 977
+        }
+      },
+      {
+        "type": "Junkyard",
+        "coordinates": {
+          "x": -178,
+          "y": -486
+        }
+      },
+      {
+        "type": "Ranch",
+        "coordinates": {
+          "x": -1218,
+          "y": 1120
+        }
+      },
+      {
+        "type": "Airfield",
+        "coordinates": {
+          "x": -542,
+          "y": 515
+        }
+      },
+      {
+        "type": "Trainyard",
+        "coordinates": {
+          "x": 275,
+          "y": -22
+        }
+      },
+      {
+        "type": "Sewer Branch",
+        "coordinates": {
+          "x": -771,
+          "y": 125
+        }
+      },
+      {
+        "type": "Sphere Tank",
+        "coordinates": {
+          "x": -404,
+          "y": -1540
+        }
+      },
+      {
+        "type": "Sulfur Quarry",
+        "coordinates": {
+          "x": 1544,
+          "y": 513
+        }
+      },
+      {
+        "type": "Hqm Quarry",
+        "coordinates": {
+          "x": 1461,
+          "y": -1211
+        }
+      },
+      {
+        "type": "Stone Quarry",
+        "coordinates": {
+          "x": 665,
+          "y": 1609
+        }
+      },
+      {
+        "type": "Satellite Dish",
+        "coordinates": {
+          "x": -58,
+          "y": 162
+        }
+      },
+      {
+        "type": "Excavator",
+        "coordinates": {
+          "x": 58,
+          "y": 1042
+        }
+      },
+      {
+        "type": "Military Tunnels",
+        "coordinates": {
+          "x": 870,
+          "y": -860
+        }
+      },
+      {
+        "type": "Large Barn",
+        "coordinates": {
+          "x": -716,
+          "y": -340
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 1539,
+          "y": -354
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -1272,
+          "y": 1683
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -588,
+          "y": -1515
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 1038,
+          "y": 1572
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -210,
+          "y": 261
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -1473,
+          "y": -333
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 906,
+          "y": -1554
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -18,
+          "y": 1584
+        }
+      },
+      {
+        "type": "Water Well C",
+        "coordinates": {
+          "x": -1372,
+          "y": 684
+        }
+      },
+      {
+        "type": "Water Well B",
+        "coordinates": {
+          "x": -1096,
+          "y": -882
+        }
+      },
+      {
+        "type": "Water Well C",
+        "coordinates": {
+          "x": -884,
+          "y": -1
+        }
+      },
+      {
+        "type": "Water Well A",
+        "coordinates": {
+          "x": -456,
+          "y": -550
+        }
+      },
+      {
+        "type": "Water Well D",
+        "coordinates": {
+          "x": 1145,
+          "y": 507
+        }
+      },
+      {
+        "type": "Water Well A",
+        "coordinates": {
+          "x": -1471,
+          "y": 4
+        }
+      },
+      {
+        "type": "Water Well E",
+        "coordinates": {
+          "x": -1131,
+          "y": -407
+        }
+      },
+      {
+        "type": "Water Well E",
+        "coordinates": {
+          "x": -925,
+          "y": 519
+        }
+      },
+      {
+        "type": "Water Well D",
+        "coordinates": {
+          "x": -1253,
+          "y": 320
+        }
+      },
+      {
+        "type": "Water Well B",
+        "coordinates": {
+          "x": -1057,
+          "y": 809
+        }
+      },
+      {
+        "type": "Water Well B",
+        "coordinates": {
+          "x": -109,
+          "y": -267
+        }
+      },
+      {
+        "type": "Ziggurat",
+        "coordinates": {
+          "x": -1063,
+          "y": -85
+        }
+      },
+      {
+        "type": "Ruin A",
+        "coordinates": {
+          "x": -1184,
+          "y": 649
+        }
+      },
+      {
+        "type": "Ruin B",
+        "coordinates": {
+          "x": -988,
+          "y": -748
+        }
+      },
+      {
+        "type": "Swamp A",
+        "coordinates": {
+          "x": -715,
+          "y": -603
+        }
+      },
+      {
+        "type": "Swamp B",
+        "coordinates": {
+          "x": 1347,
+          "y": 543
+        }
+      },
+      {
+        "type": "Swamp C",
+        "coordinates": {
+          "x": -1408,
+          "y": -957
+        }
+      },
+      {
+        "type": "Ice Lake 3",
+        "coordinates": {
+          "x": 729,
+          "y": -560
+        }
+      },
+      {
+        "type": "Ice Lake 4",
+        "coordinates": {
+          "x": 1401,
+          "y": -1096
+        }
+      },
+      {
+        "type": "Ice Lake 4",
+        "coordinates": {
+          "x": -512,
+          "y": -806
+        }
+      },
+      {
+        "type": "Gas Station",
+        "coordinates": {
+          "x": 1177,
+          "y": 1232
+        }
+      },
+      {
+        "type": "Supermarket",
+        "coordinates": {
+          "x": -1002,
+          "y": 1243
+        }
+      },
+      {
+        "type": "Radtown",
+        "coordinates": {
+          "x": -855,
+          "y": -1170
+        }
+      },
+      {
+        "type": "Warehouse",
+        "coordinates": {
+          "x": 93,
+          "y": 480
+        }
+      },
+      {
+        "type": "Supermarket",
+        "coordinates": {
+          "x": -983,
+          "y": -515
+        }
+      },
+      {
+        "type": "Supermarket",
+        "coordinates": {
+          "x": 455,
+          "y": 1050
+        }
+      },
+      {
+        "type": "Warehouse",
+        "coordinates": {
+          "x": 537,
+          "y": -778
+        }
+      },
+      {
+        "type": "Warehouse",
+        "coordinates": {
+          "x": -269,
+          "y": 1051
+        }
+      },
+      {
+        "type": "Cave Small Medium",
+        "coordinates": {
+          "x": 1502,
+          "y": 353
+        }
+      },
+      {
+        "type": "Cave Large Sewers Hard",
+        "coordinates": {
+          "x": 1259,
+          "y": -392
+        }
+      },
+      {
+        "type": "Cave Small Easy",
+        "coordinates": {
+          "x": -464,
+          "y": 1519
+        }
+      },
+      {
+        "type": "Cave Medium Hard",
+        "coordinates": {
+          "x": 1135,
+          "y": 1442
+        }
+      },
+      {
+        "type": "Cave Small Hard",
+        "coordinates": {
+          "x": -1216,
+          "y": 1466
+        }
+      },
+      {
+        "type": "Cave Small Easy",
+        "coordinates": {
+          "x": 1089,
+          "y": -1188
+        }
+      },
+      {
+        "type": "Cave Medium Easy",
+        "coordinates": {
+          "x": -1415,
+          "y": -1352
+        }
+      },
+      {
+        "type": "Cave Medium Medium",
+        "coordinates": {
+          "x": -1071,
+          "y": 117
+        }
+      },
+      {
+        "type": "Cave Large Hard",
+        "coordinates": {
+          "x": 530,
+          "y": 597
+        }
+      },
+      {
+        "type": "Cave Large Medium",
+        "coordinates": {
+          "x": 1048,
+          "y": 30
+        }
+      },
+      {
+        "type": "Underwater Lab C",
+        "coordinates": {
+          "x": -1883,
+          "y": -850
+        }
+      },
+      {
+        "type": "Large Oilrig",
+        "coordinates": {
+          "x": 2328,
+          "y": -408
+        }
+      },
+      {
+        "type": "Small Oilrig",
+        "coordinates": {
+          "x": 1335,
+          "y": -2349
+        }
+      },
+      {
+        "type": "Lighthouse",
+        "coordinates": {
+          "x": -1459,
+          "y": 1347
+        }
+      },
+      {
+        "type": "Lighthouse",
+        "coordinates": {
+          "x": -1570,
+          "y": -1180
+        }
+      },
+      {
+        "type": "Tiny God Rock",
+        "coordinates": {
+          "x": -1349,
+          "y": 805
+        }
+      },
+      {
+        "type": "Tiny God Rock",
+        "coordinates": {
+          "x": -498,
+          "y": -439
+        }
+      },
+      {
+        "type": "Large God Rock",
+        "coordinates": {
+          "x": -1164,
+          "y": 1586
+        }
+      },
+      {
+        "type": "Tiny God Rock",
+        "coordinates": {
+          "x": 656,
+          "y": 1110
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -1073,
+          "y": -525
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -1314,
+          "y": 1170
+        }
+      },
+      {
+        "type": "Tiny God Rock",
+        "coordinates": {
+          "x": -1334,
+          "y": 867
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -1089,
+          "y": -169
+        }
+      },
+      {
+        "type": "Medium God Rock",
+        "coordinates": {
+          "x": -1033,
+          "y": 750
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -1233,
+          "y": -611
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": 403,
+          "y": 1226
+        }
+      },
+      {
+        "type": "Anvil Rock",
+        "coordinates": {
+          "x": -1080,
+          "y": 1522
+        }
+      },
+      {
+        "type": "Medium God Rock",
+        "coordinates": {
+          "x": -365,
+          "y": 62
+        }
+      },
+      {
+        "type": "Large God Rock",
+        "coordinates": {
+          "x": -55,
+          "y": -57
+        }
+      },
+      {
+        "type": "Large God Rock",
+        "coordinates": {
+          "x": -147,
+          "y": 908
+        }
+      },
+      {
+        "type": "Anvil Rock",
+        "coordinates": {
+          "x": -803,
+          "y": 1330
+        }
+      },
+      {
+        "type": "Large God Rock",
+        "coordinates": {
+          "x": 517,
+          "y": 1221
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -1087,
+          "y": 1572
+        }
+      },
+      {
+        "type": "Tiny God Rock",
+        "coordinates": {
+          "x": -1099,
+          "y": -676
+        }
+      },
+      {
+        "type": "Medium God Rock",
+        "coordinates": {
+          "x": -1054,
+          "y": 282
+        }
+      },
+      {
+        "type": "Tiny God Rock",
+        "coordinates": {
+          "x": -1232,
+          "y": 1398
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -471,
+          "y": 1369
+        }
+      },
+      {
+        "type": "3 Wall Rock",
+        "coordinates": {
+          "x": -1092,
+          "y": -1591
+        }
+      },
+      {
+        "type": "Medium God Rock",
+        "coordinates": {
+          "x": 185,
+          "y": 1170
+        }
+      },
+      {
+        "type": "Anvil Rock",
+        "coordinates": {
+          "x": -1233,
+          "y": 230
+        }
+      },
+      {
+        "type": "Large God Rock",
+        "coordinates": {
+          "x": 320,
+          "y": 949
+        }
+      },
+      {
+        "type": "Medium God Rock",
+        "coordinates": {
+          "x": 53,
+          "y": -863
+        }
+      },
+      {
+        "type": "Anvil Rock",
+        "coordinates": {
+          "x": 589,
+          "y": -1235
+        }
+      },
+      {
+        "type": "Iceberg 2",
+        "coordinates": {
+          "x": 1727,
+          "y": -1021
+        }
+      },
+      {
+        "type": "Iceberg 4",
+        "coordinates": {
+          "x": 1124,
+          "y": -1816
+        }
+      },
+      {
+        "type": "Iceberg 5",
+        "coordinates": {
+          "x": 1798,
+          "y": -365
+        }
+      },
+      {
+        "type": "Iceberg 4",
+        "coordinates": {
+          "x": 1803,
+          "y": -763
+        }
+      },
+      {
+        "type": "Iceberg 4",
+        "coordinates": {
+          "x": 1795,
+          "y": -204
+        }
+      },
+      {
+        "type": "Iceberg 4",
+        "coordinates": {
+          "x": 1768,
+          "y": -1164
+        }
+      },
+      {
+        "type": "Iceberg 2",
+        "coordinates": {
+          "x": -670,
+          "y": -1711
+        }
+      },
+      {
+        "type": "Iceberg 4",
+        "coordinates": {
+          "x": 1711,
+          "y": -73
+        }
+      },
+      {
+        "type": "Iceberg 2",
+        "coordinates": {
+          "x": 800,
+          "y": -1816
+        }
+      },
+      {
+        "type": "Iceberg 5",
+        "coordinates": {
+          "x": 1668,
+          "y": -1368
+        }
+      },
+      {
+        "type": "Iceberg 4",
+        "coordinates": {
+          "x": -339,
+          "y": -1821
+        }
+      },
+      {
+        "type": "Iceberg 1",
+        "coordinates": {
+          "x": 948,
+          "y": -1778
+        }
+      },
+      {
+        "type": "Power Substation Small 1",
+        "coordinates": {
+          "x": -1155,
+          "y": -1606
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": -736,
+          "y": 1377
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": -78,
+          "y": 982
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": -447,
+          "y": -1452
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": 190,
+          "y": -587
+        }
+      },
+      {
+        "type": "Power Substation Small 1",
+        "coordinates": {
+          "x": -244,
+          "y": -578
+        }
+      },
+      {
+        "type": "Power Substation Small 1",
+        "coordinates": {
+          "x": 839,
+          "y": 986
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": -204,
+          "y": 134
+        }
+      },
+      {
+        "type": "Power Substation Small 1",
+        "coordinates": {
+          "x": -1312,
+          "y": -1463
+        }
+      },
+      {
+        "type": "Power Substation Small 1",
+        "coordinates": {
+          "x": -730,
+          "y": 467
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": 324,
+          "y": -672
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": 166,
+          "y": 99
+        }
+      },
+      {
+        "type": "Power Substation Small 2",
+        "coordinates": {
+          "x": -59,
+          "y": -387
+        }
+      },
+      {
+        "type": "Power Substation Small 1",
+        "coordinates": {
+          "x": 1117,
+          "y": 899
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": 577,
+          "y": -450
+        }
+      },
+      {
+        "type": "Powerline B",
+        "coordinates": {
+          "x": 647,
+          "y": -350
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": -990,
+          "y": -1253
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": -1223,
+          "y": -1515
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": -1560,
+          "y": -7
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": -1043,
+          "y": 1058
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": -1350,
+          "y": 1553
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": -1151,
+          "y": 1099
+        }
+      },
+      {
+        "type": "Powerline C",
+        "coordinates": {
+          "x": -1168,
+          "y": 1172
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": -1123,
+          "y": 1318
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": -1174,
+          "y": 1377
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": -330,
+          "y": -742
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": -67,
+          "y": -570
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": 262,
+          "y": -1200
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 282,
+          "y": -1550
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": -848,
+          "y": 1050
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": -787,
+          "y": 1162
+        }
+      },
+      {
+        "type": "Powerline B",
+        "coordinates": {
+          "x": -761,
+          "y": 1234
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": -705,
+          "y": 735
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": -753,
+          "y": 560
+        }
+      },
+      {
+        "type": "Powerline B",
+        "coordinates": {
+          "x": -746,
+          "y": 435
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": -105,
+          "y": 82
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 97,
+          "y": 135
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": 757,
+          "y": 112
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": 1718,
+          "y": 480
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 983,
+          "y": 218
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 1062,
+          "y": 220
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 1208,
+          "y": 267
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 1253,
+          "y": 338
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": 1298,
+          "y": 442
+        }
+      },
+      {
+        "type": "Power Substation Big 1",
+        "coordinates": {
+          "x": 1163,
+          "y": 998
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 1151,
+          "y": 670
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 1172,
+          "y": 748
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": 1125,
+          "y": 1073
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": 1148,
+          "y": 1170
+        }
+      },
+      {
+        "type": "Power Substation Big 2",
+        "coordinates": {
+          "x": 1500,
+          "y": 1170
+        }
+      },
+      {
+        "type": "Powerline B",
+        "coordinates": {
+          "x": 1247,
+          "y": 1116
+        }
+      },
+      {
+        "type": "Powerline A",
+        "coordinates": {
+          "x": 1288,
+          "y": 1045
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -750,
+          "y": 1521
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 201,
+          "y": -1641
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -1311,
+          "y": -1554
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 407,
+          "y": -576
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -321,
+          "y": -945
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 933,
+          "y": 957
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -1028,
+          "y": -1155
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -747,
+          "y": 1077
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -723,
+          "y": 540
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 336,
+          "y": -60
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": -24,
+          "y": 989
+        }
+      },
+      {
+        "type": "Tunnel Entrance",
+        "coordinates": {
+          "x": 897,
+          "y": -948
+        }
+      }
+    ],
+    "landPercentageOfMap": 57,
+    "biomePercentages": {
+      "s": 29.15248469467449,
+      "d": 19.27953641675566,
+      "f": 24.411387289599144,
+      "t": 16.265078769123832,
+      "j": 10.891512829846873
+    },
+    "islands": 2,
+    "mountains": 0,
+    "iceLakes": 3,
+    "rivers": 4,
+    "lakes": 1,
+    "canyons": 0,
+    "oases": 1,
+    "buildableRocks": 9,
+    "estimatedDeletionDate": null
   }
 }
