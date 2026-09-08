@@ -398,10 +398,12 @@ daqui, e é o que já acontece pelo painel local.
       "description": "Para quem acabou de entrar",
       "category": "Começo",
       "kind": "resgate",
-      "priceCents": null,
       "cooldownSeconds": null,
+      "useLimit": 1,
+      "useResetOn": "never",
       "wipeDelaySeconds": null,
       "requiredTier": null,
+      "requiredTierExact": false,
       "items": [
         { "slot": "belt", "shortname": "rifle.ak", "amount": 1, "skinId": "0", "position": 0 }
       ],
@@ -421,17 +423,27 @@ loja, e é por isso que a ausência não é tratada como lista vazia.
 | `name` | string | 1–64 |
 | `description` | string·null | até 400 |
 | `category` | string·null | até 32 — é a aba dentro do jogo |
-| `kind` | enum | `compra` · `resgate` · `cooldown` |
-| `priceCents` | int·null | em **centavos**. Obrigatório e > 0 quando `kind: "compra"` |
+| `kind` | enum | `resgate` · `cooldown`. **`compra` saiu** — ver o aviso abaixo |
 | `cooldownSeconds` | int·null | 1–31536000. Obrigatório quando `kind: "cooldown"` |
+| `useLimit` | int·null | 1–10000 — quantas vezes cada jogador leva. Só em `resgate`; ausente = 1, que é o resgate único de sempre. Em `cooldown` tem de ser `null` |
+| `useResetOn` | enum | `never` (padrão) · `wipe` · `full-wipe` — quando a conta de usos zera |
 | `wipeDelaySeconds` | int·null | 1–2592000 — segundos depois do wipe em que o kit fica bloqueado |
 | `requiredTier` | string·null | o nível de VIP exigido; `null` = qualquer um |
+| `requiredTierExact` | boolean | padrão `false` (aquele nível **ou mais alto**). `true` = SÓ aquele — o Ouro não pega o kit do Bronze. Com `requiredTier: null` é `INVALID_VALUE` |
 | `items` | array | até 60 `{slot, shortname, amount, skinId, position}` |
 | `enabled` | boolean | padrão `true` |
 | `servers` | string[] | **os `SITE_SERVER_ID`** — ver o aviso |
 
 `slot` é `wear` · `belt` · `main`; `position` é 0–47; `shortname` usa `[A-Za-z0-9._-]` (ele vai para
 a linha de comando do console do jogo, e um espaço fatiaria o comando).
+
+> ####  KIT NÃO SE COMPRA MAIS  ####
+>
+> O `kind: "compra"` e o `priceCents` saíram em 07/09/2026 (migrações 052 e 054). Quem vende na
+> rede é a LOJA, que tem vitrine, categoria e carteira — o kit com preço era uma segunda vitrine.
+> Um snapshot que ainda mande `kind: "compra"` ou o campo `priceCents` recebe `INVALID_VALUE`
+> **naquela linha**, e o kit não entra; o resto do snapshot entra normalmente. Os kits de compra
+> que existiam viraram resgate único, sem preço.
 
 > ####  A CHAVE É O `slug`, E NÃO UM ID  ####
 >

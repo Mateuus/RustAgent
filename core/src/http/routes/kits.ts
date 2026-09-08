@@ -15,11 +15,13 @@
 //  servidores que o oferecem; entregar acontece onde o inventário
 //  existe.
 //
-//  ####  DINHEIRO EM CENTAVOS, INTEIRO  ####
+//  ####  AQUI NÃO SE VENDE NADA  ####
 //
-//  `priceCents` é `z.number().int()`. Preço em float é o erro que
-//  aparece no extrato do cliente — e o zod é o único lugar onde dá
-//  para recusá-lo antes de ele virar linha no banco.
+//  O kit tinha um terceiro tipo, `compra`, com preço em centavos.
+//  Ele saiu na migração 052: quem vende na rede é a LOJA, com
+//  vitrine, categoria e carteira. Um `kind: "compra"` agora é
+//  recusado pelo enum — inclusive o que vier do site, que precisa
+//  mandar `resgate` ou `cooldown`.
 //
 //  ####  O PUT REESCREVE O KIT INTEIRO  ####
 //
@@ -68,10 +70,10 @@ const claimBody = z.object({ steamId: z.string().min(1) }).strict();
 /**
  * O corpo de criação e de edição.
  *
- * O `superRefine` é onde as três formas de kit ficam honestas: um
- * kit de compra sem preço e um de cooldown sem intervalo são
- * pedidos que o banco aceitaria (as colunas são anuláveis) e que o
- * jogador descobriria como "clico e não acontece nada".
+ * O `superRefine` é onde as duas formas de kit ficam honestas: um
+ * kit de cooldown sem intervalo é um pedido que o banco aceitaria (a
+ * coluna é anulável) e que o jogador descobriria como "clico e não
+ * acontece nada".
  */
 export const kitBody = z
   .object({
@@ -98,11 +100,18 @@ export const kitBody = z
       .nullable()
       .default(null)
       .transform((value) => (value === null || value === '' ? null : value)),
-    kind: z.enum(['compra', 'resgate', 'cooldown']),
-    /** Em CENTAVOS. Ver o cabeçalho. */
-    priceCents: z.number().int().min(0).max(100_000_000).nullable().default(null),
+    kind: z.enum(['resgate', 'cooldown']),
     /** Em SEGUNDOS. */
     cooldownSeconds: z.number().int().min(1).max(31_536_000).nullable().default(null),
+    /**
+     * Quantas vezes cada jogador leva. Só em `resgate`.
+     *
+     * Ausente vira 1, que é o "resgate único" de sempre — e é o que
+     * o site continua mandando sem saber deste campo.
+     */
+    useLimit: z.number().int().min(1).max(10_000).nullable().default(null),
+    /** Quando a conta de usos zera. */
+    useResetOn: z.enum(['never', 'wipe', 'full-wipe']).default('never'),
     /**
      * Em SEGUNDOS depois do wipe. `null` = sem bloqueio.
      *
@@ -112,19 +121,37 @@ export const kitBody = z
     wipeDelaySeconds: z.number().int().min(1).max(2_592_000).nullable().default(null),
     /** `null` = qualquer um. */
     requiredTier: z.string().trim().min(1).max(32).nullable().default(null),
+    /**
+     * O nível exigido é EXATO?
+     *
+     * `false` (o padrão) = aquele nível ou um mais alto, que é como
+     * o campo sempre funcionou. `true` = só aquele — e aí o Ouro
+     * não pega o kit do Bronze.
+     */
+    requiredTierExact: z.boolean().default(false),
     items: loadoutItemsSchema,
     enabled: z.boolean().default(true),
     servers: z.array(z.string().min(1)).default([]),
   })
   .strict()
   .superRefine((kit, ctx) => {
-    if (kit.kind === 'compra' && (kit.priceCents === null || kit.priceCents <= 0)) {
+    if (kit.requiredTierExact && kit.requiredTier === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ['priceCents'],
+        path: ['requiredTierExact'],
         message:
-          'um kit de compra precisa de preço, em centavos. Para dar de graça, use o tipo ' +
-          '"resgate" (uma vez por jogador) ou "cooldown" (de tempos em tempos)',
+          '"somente este nível" precisa de um nível para valer. Escolha o VIP exigido, ou ' +
+          'deixe a exclusividade desligada',
+      });
+    }
+
+    if (kit.kind === 'cooldown' && kit.useLimit !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['useLimit'],
+        message:
+          'um kit de cooldown não conta usos, e sim horas. Para dar um número fechado de vezes, ' +
+          'use o tipo "resgate" com o limite que quiser',
       });
     }
 

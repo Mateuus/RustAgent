@@ -3,9 +3,14 @@
 //
 //  Um kit é um loadout com REGRAS DE ENTREGA:
 //
-//      compra     paga e leva, quantas vezes quiser
-//      resgate    uma vez por jogador, para sempre
+//      resgate    N usos por jogador — 1 é o "resgate único"
 //      cooldown   de N em N segundos
+//
+//  ####  E O USO PODE VOLTAR NO WIPE  ####
+//
+//  `useResetOn` move a JANELA da contagem: nada é apagado e nenhum
+//  contador é zerado — `#usedIn` só passa a contar de uma data para
+//  cá. Ver a migração 054.
 //
 //  ------------------------------------------------------------
 //  ####  A ENTREGA EXIGE O JOGADOR ONLINE  ####
@@ -15,12 +20,11 @@
 //  o `BasePlayer` de quem saiu. A recusa precisa dizer isso: "entre
 //  no servidor para resgatar" é acionável; "falha na entrega" não.
 //
-//  ####  O AGENTE ENTREGA; ELE NÃO COBRA  ####
+//  ####  O AGENTE ENTREGA; ELE NÃO VENDE  ####
 //
-//  `price_cents` viaja com o kit e a tela o mostra, mas não existe
-//  carteira aqui: quem cobra é quem chama a rota (o site, a loja).
-//  Fingir uma cobrança que não acontece seria pior que não ter preço
-//  nenhum — a primeira compra "grátis" apareceria como paga.
+//  Kit não tem preço desde a migração 052: o que se vende na rede
+//  está na LOJA, com vitrine, categoria e carteira. Aqui só existem
+//  as duas regras de quando se pode pegar de novo.
 //
 //  ####  A LINHA DO CLAIM NASCE ANTES DO COMANDO  ####
 //
@@ -111,6 +115,32 @@ export interface KitHistory {
  */
 export interface KitWipeClock {
   at(serverId: string): Promise<number | null>;
+  /**
+   * Quando foi o último FULL WIPE daquele servidor.
+   *
+   * O do agente: quem responde é `wipe_runs`, e ele só conhece os
+   * wipes que ELE conduziu. `null` = nenhum registrado — e aí o kit
+   * que reseta no full wipe não reseta, porque resetar sem saber a
+   * data daria usos infinitos. Ver a migração 054.
+   *
+   * Opcional para quem só precisa do bloqueio pós-wipe (os testes
+   * antigos, por exemplo).
+   */
+  fullAt?(serverId: string): Promise<number | null>;
+}
+
+/**
+ * As duas horas de wipe que a regra do kit consulta.
+ *
+ * Lidas UMA vez por chamada e passadas adiante: `#whyNot` roda uma
+ * vez por kit da vitrine, e perguntar a hora do wipe por kit seria
+ * uma ida ao RCON por linha da tela.
+ */
+interface WipeMoment {
+  /** O wipe do servidor (`SaveCreatedTime`). */
+  readonly at: number | null;
+  /** O último full wipe conduzido pelo agente. */
+  readonly fullAt: number | null;
 }
 
 export interface KitStoreDeps {
@@ -133,11 +163,16 @@ export interface KitView {
   /** A aba em que ele aparece no jogo. `null` = sem categoria. */
   readonly category: string | null;
   readonly kind: KitRecord['kind'];
-  readonly priceCents: number | null;
   readonly cooldownSeconds: number | null;
+  /** Quantas vezes cada jogador pode levar. `null` em `cooldown`. */
+  readonly useLimit: number | null;
+  /** Quando a conta de usos zera. */
+  readonly useResetOn: KitRecord['useResetOn'];
   /** Só libera este tanto de segundos depois do wipe. */
   readonly wipeDelaySeconds: number | null;
   readonly requiredTier: string | null;
+  /** `true` = SÓ aquele nível; um mais alto não serve. */
+  readonly requiredTierExact: boolean;
   readonly items: readonly LoadoutItem[];
   readonly enabled: boolean;
   readonly servers: readonly string[];
@@ -170,8 +205,21 @@ export interface KitOfferView extends KitView {
    *
    * Diferente de `claimCount`, que é o total da rede: aquele número
    * é do admin, este é do jogador.
+   *
+   * É o total HISTÓRICO, e continua sendo depois de um reset de
+   * wipe: "você já pegou 12 vezes" é um fato, e apagá-lo da tela
+   * porque a conta zerou seria mentir sobre o que aconteceu. Quantos
+   * usos sobraram é a outra pergunta, e ela tem campo próprio.
    */
   readonly myClaims: number;
+  /**
+   * Quantos usos ainda restam a ELE. `null` = não se conta usos
+   * neste kit (é o de cooldown).
+   *
+   * Já com o reset aplicado: num kit que zera no wipe, é o que
+   * sobrou DESTE wipe.
+   */
+  readonly usesLeft: number | null;
 }
 
 export interface ClaimResult {
@@ -224,18 +272,16 @@ export class KitStore {
         nextAt: null,
         lastClaimedAt: null,
         myClaims: 0,
+        usesLeft: kit.useLimit,
       }));
     }
 
-    const [levels, wipeAt] = await Promise.all([
-      this.#levelsOf(serverId),
-      this.#wipeAt(serverId),
-    ]);
+    const [levels, wipe] = await Promise.all([this.#levelsOf(serverId), this.#wipeOf(serverId)]);
 
     const now = Date.now();
 
     return kits.map((kit) => {
-      const problem = this.#whyNot(kit, steamId, levels, now, wipeAt);
+      const problem = this.#whyNot(kit, steamId, levels, now, wipe);
       const last = this.#deps.repository.lastDeliveredClaim(steamId, kit.id);
 
       return {
@@ -245,6 +291,7 @@ export class KitStore {
         nextAt: problem?.nextAt ?? null,
         lastClaimedAt: last === null ? null : new Date(last.claimedAt).toISOString(),
         myClaims: this.#deps.repository.deliveredCountOf(steamId, kit.id),
+        usesLeft: this.#usesLeft(kit, steamId, wipe),
       };
     });
   }
@@ -317,14 +364,14 @@ export class KitStore {
       );
     }
 
-    const [levels, wipeAt] = await Promise.all([
+    const [levels, wipe] = await Promise.all([
       this.#levelsOf(input.serverId),
-      this.#wipeAt(input.serverId),
+      this.#wipeOf(input.serverId),
     ]);
 
     // A MESMA função da vitrine: uma tela que oferece o botão e uma
     // rota que recusa é o pior desencontro possível.
-    const problem = this.#whyNot(kit, input.steamId, levels, Date.now(), wipeAt);
+    const problem = this.#whyNot(kit, input.steamId, levels, Date.now(), wipe);
 
     if (problem !== null) {
       throw new ApiError(problem.code, problem.reason, 409);
@@ -422,8 +469,8 @@ export class KitStore {
     steamId: string,
     levels: readonly VipTierLevel[],
     now: number,
-    /** Epoch ms do último wipe. `null` = não deu para saber. */
-    wipeAt: number | null = null,
+    /** As horas de wipe. `null` em cada uma = não deu para saber. */
+    wipe: WipeMoment = { at: null, fullAt: null },
   ): { readonly code: string; readonly reason: string; readonly nextAt: string | null } | null {
     if (!kit.enabled) {
       return { code: 'KIT_DISABLED', reason: `O kit "${kit.name}" está fora do ar.`, nextAt: null };
@@ -437,8 +484,8 @@ export class KitStore {
     // Sem saber a hora do wipe (`null`), o kit LIBERA. Recusar sem
     // certeza puniria o jogador por um servidor que não respondeu —
     // o mesmo critério do veículo sem espaço, na loja.
-    if (kit.wipeDelaySeconds !== null && wipeAt !== null) {
-      const free = wipeAt + kit.wipeDelaySeconds * 1000;
+    if (kit.wipeDelaySeconds !== null && wipe.at !== null) {
+      const free = wipe.at + kit.wipeDelaySeconds * 1000;
 
       if (free > now) {
         return {
@@ -451,26 +498,48 @@ export class KitStore {
       }
     }
 
-    if (kit.requiredTier !== null && !this.#hasTier(steamId, kit.requiredTier, levels, now)) {
+    if (
+      kit.requiredTier !== null &&
+      !this.#hasTier(steamId, kit.requiredTier, kit.requiredTierExact, levels, now)
+    ) {
       return {
         code: 'KIT_TIER_REQUIRED',
-        reason:
-          `O kit "${kit.name}" é do VIP ${kit.requiredTier} (ou superior), e ${steamId} não tem ` +
-          'esse nível ativo.',
+        reason: kit.requiredTierExact
+          ? `O kit "${kit.name}" é exclusivo do VIP ${kit.requiredTier}, e ${steamId} não tem ` +
+            'esse nível ativo. Um nível mais alto NÃO serve — este kit é só daquele.'
+          : `O kit "${kit.name}" é do VIP ${kit.requiredTier} (ou superior), e ${steamId} não tem ` +
+            'esse nível ativo.',
         nextAt: null,
       };
     }
 
     const last = this.#deps.repository.lastDeliveredClaim(steamId, kit.id);
 
-    if (kit.kind === 'resgate' && last !== null) {
-      return {
-        code: 'KIT_ALREADY_CLAIMED',
-        reason:
-          `O kit "${kit.name}" é de resgate único, e ${steamId} já o pegou em ` +
-          `${new Date(last.claimedAt).toLocaleDateString('pt-BR')}.`,
-        nextAt: null,
-      };
+    // ####  OS USOS ACABARAM  ####
+    //
+    // "Resgate único" é este mesmo teste com o limite valendo 1 —
+    // não são duas regras, é uma só com dois números. A janela da
+    // contagem é o que o reset move: ver `#usedIn`.
+    if (kit.kind === 'resgate') {
+      const limit = kit.useLimit ?? 1;
+      const used = this.#usedIn(kit, steamId, wipe);
+
+      if (used >= limit) {
+        return {
+          code: limit === 1 ? 'KIT_ALREADY_CLAIMED' : 'KIT_USES_SPENT',
+          reason:
+            limit === 1
+              ? `O kit "${kit.name}" é de resgate único, e ${steamId} já o pegou` +
+                (last === null
+                  ? '.'
+                  : ` em ${new Date(last.claimedAt).toLocaleDateString('pt-BR')}.`) +
+                resetNote(kit.useResetOn)
+              : `O kit "${kit.name}" dá ${String(limit)} ${limit === 1 ? 'uso' : 'usos'} por ` +
+                `jogador, e ${steamId} já gastou ${String(used)}.` +
+                resetNote(kit.useResetOn),
+          nextAt: null,
+        };
+      }
     }
 
     if (kit.kind === 'cooldown' && last !== null) {
@@ -497,13 +566,31 @@ export class KitStore {
    * é a mesma tabela que o plugin usa no `HasVipTier`. Sem os níveis
    * (config ausente), a comparação vira igualdade pura: é o que se
    * pode afirmar sem inventar hierarquia.
+   *
+   * ####  E COM `exact`, "MAIS ALTO" NÃO VALE  ####
+   *
+   * O kit exclusivo de um nível é a recompensa DAQUELE nível: se o
+   * Diamante também o pegasse, o Ouro deixaria de ter algo que só
+   * ele tem — e o mesmo vale ao contrário, com o Ouro limpando os
+   * kits do Bronze. Ter o tier exato entre os VIPs ativos basta:
+   * quem tem dois níveis ativos pega os kits dos dois.
    */
-  #hasTier(steamId: string, required: string, levels: readonly VipTierLevel[], now: number): boolean {
+  #hasTier(
+    steamId: string,
+    required: string,
+    exact: boolean,
+    levels: readonly VipTierLevel[],
+    now: number,
+  ): boolean {
     const tiers = this.#deps.vips.activeOf(steamId, now).map((vip) => vip.tier);
     const wanted = required.trim().toLowerCase();
 
     if (tiers.includes(wanted)) {
       return true;
+    }
+
+    if (exact) {
+      return false;
     }
 
     const rankOf = new Map(levels.map((level, index) => [level.tier, level.rank ?? index]));
@@ -585,8 +672,54 @@ export class KitStore {
   }
 
   /** Quando foi o wipe. `null` = sem relógio, ou sem resposta. */
-  async #wipeAt(serverId: string): Promise<number | null> {
-    return (await this.#deps.wipe?.at(serverId)) ?? null;
+  async #wipeOf(serverId: string): Promise<WipeMoment> {
+    const clock = this.#deps.wipe;
+
+    if (clock === undefined) {
+      return { at: null, fullAt: null };
+    }
+
+    const [at, fullAt] = await Promise.all([
+      clock.at(serverId),
+      clock.fullAt?.(serverId) ?? Promise.resolve(null),
+    ]);
+
+    return { at, fullAt };
+  }
+
+  /**
+   * Quantos usos ele já gastou DENTRO da janela do reset.
+   *
+   * ####  A JANELA É A DO SERVIDOR ONDE ELE ESTÁ PEGANDO  ####
+   *
+   * O kit é da rede e o claim é de um servidor: um kit que reseta no
+   * wipe, oferecido em dois servidores, usa a hora do wipe DAQUELE
+   * em que o jogador está agora. É o que ele espera ver — quem
+   * acabou de pegar um mapa novo espera o kit de novo.
+   *
+   * Sem a hora (servidor mudo, nenhum full wipe registrado), a
+   * janela é "desde sempre": ver a migração 054.
+   */
+  #usedIn(kit: KitRecord, steamId: string, wipe: WipeMoment): number {
+    const since =
+      kit.useResetOn === 'wipe'
+        ? (wipe.at ?? 0)
+        : kit.useResetOn === 'full-wipe'
+          ? (wipe.fullAt ?? 0)
+          : 0;
+
+    return since === 0
+      ? this.#deps.repository.deliveredCountOf(steamId, kit.id)
+      : this.#deps.repository.deliveredCountSince(steamId, kit.id, since);
+  }
+
+  /** Quantos usos sobraram. `null` no kit que não conta usos. */
+  #usesLeft(kit: KitRecord, steamId: string, wipe: WipeMoment): number | null {
+    if (kit.kind !== 'resgate') {
+      return null;
+    }
+
+    return Math.max(0, (kit.useLimit ?? 1) - this.#usedIn(kit, steamId, wipe));
   }
 
   async #levelsOf(serverId: string): Promise<readonly VipTierLevel[]> {
@@ -629,6 +762,20 @@ export class KitStore {
   }
 }
 
+/**
+ * O que ainda pode devolver o uso, na frase da recusa.
+ *
+ * "Você já gastou os 10" sem dizer que o wipe devolve manda o
+ * jogador ao suporte perguntar exatamente isso.
+ */
+function resetNote(reset: KitRecord['useResetOn']): string {
+  if (reset === 'wipe') {
+    return ' A conta zera no próximo wipe.';
+  }
+
+  return reset === 'full-wipe' ? ' A conta zera no próximo full wipe.' : '';
+}
+
 /** "2 h 15 min", "45 min", "30 s" — para a frase da recusa. */
 function describeWait(ms: number): string {
   const seconds = Math.ceil(ms / 1000);
@@ -657,10 +804,12 @@ function toKitView(kit: KitRecord): KitView {
     description: kit.description,
     category: kit.category,
     kind: kit.kind,
-    priceCents: kit.priceCents,
     cooldownSeconds: kit.cooldownSeconds,
+    useLimit: kit.useLimit,
+    useResetOn: kit.useResetOn,
     wipeDelaySeconds: kit.wipeDelaySeconds,
     requiredTier: kit.requiredTier,
+    requiredTierExact: kit.requiredTierExact,
     items: kit.items,
     enabled: kit.enabled,
     servers: kit.servers,

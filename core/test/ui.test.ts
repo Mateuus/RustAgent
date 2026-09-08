@@ -885,6 +885,8 @@ describe('a página de kits', () => {
       name: 'Kit Inicial',
       description: null,
       kind: 'resgate',
+      useLimit: null,
+      useResetOn: 'never' as const,
       cooldownSeconds: null,
       requiredTier: null,
       requiredTierExact: false,
@@ -900,6 +902,7 @@ describe('a página de kits', () => {
       nextAt: null,
       lastClaimedAt: null,
       myClaims: 0,
+      usesLeft: 1,
       ...over,
     }) as KitOfferView;
 
@@ -997,6 +1000,8 @@ describe('a página de kits', () => {
     const screen = grid([
       offer({
         kind: 'cooldown',
+        useLimit: null,
+        useResetOn: 'never' as const,
         cooldownSeconds: 86_400,
         available: false,
         reason: 'a frase comprida do painel',
@@ -1016,7 +1021,9 @@ describe('a página de kits', () => {
   });
 
   it('o resgate único já usado diz JÁ PEGOU', () => {
-    const screen = grid([offer({ available: false, lastClaimedAt: '2026-08-01T00:00:00.000Z' })]);
+    const screen = grid([
+      offer({ available: false, lastClaimedAt: '2026-08-01T00:00:00.000Z', usesLeft: 0 }),
+    ]);
 
     expect(JSON.stringify(screenContentToCui(buildMainMenu(), screen))).toContain('JÁ PEGOU');
   });
@@ -1058,6 +1065,8 @@ describe('a página de kits', () => {
       offers: [
         offer({
           kind: 'cooldown',
+          useLimit: null,
+          useResetOn: 'never' as const,
           cooldownSeconds: 86_400,
           myClaims: 3,
           lastClaimedAt: '2026-08-10T15:30:00.000Z',
@@ -1158,6 +1167,8 @@ describe('a página de kits', () => {
       offers: [
         offer({
           kind: 'cooldown',
+          useLimit: null,
+          useResetOn: 'never' as const,
           cooldownSeconds: 86_400,
           description: 'Um kit de reposição para quem acabou de morrer.',
           requiredTier: 'gold',

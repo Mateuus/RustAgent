@@ -5127,6 +5127,114 @@ ALTER TABLE ads_settings ADD COLUMN ads_static INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ads_settings ADD COLUMN logo_layer TEXT;
 `;
 
+// ------------------------------------------------------------
+//  052 — o kit deixa de ser comprado
+//
+//  ####  QUEM VENDE É A LOJA, E ELA TEM VITRINE PRÓPRIA  ####
+//
+//  Um kit nasceu com três tipos, e um deles era `compra`: preço em
+//  centavos, e o jogador levava quantas vezes quisesse. Só que o que
+//  se vende na rede está na LOJA (`store_offers`), com vitrine,
+//  categoria e carteira. O kit com preço era uma segunda vitrine
+//  escondida num formulário — e duas vitrines discordam no primeiro
+//  ajuste de preço.
+//
+//  ####  O QUE ERA COMPRA VIRA RESGATE ÚNICO  ####
+//
+//  E não cooldown curto: um kit que era PAGO virando ilimitado e de
+//  graça é o pior desfecho possível para quem já pagou. Resgate
+//  único é o mais restritivo dos dois que sobraram, e é o que dá
+//  para desfazer com uma edição.
+//
+//  ####  O `CHECK` ANTIGO FICA, E ISSO É DELIBERADO  ####
+//
+//  Tirar `'compra'` da lista exigiria recriar a tabela `kits` — e
+//  `DROP TABLE` aqui levaria `kit_claims` e `kit_servers` junto,
+//  pela cascata. O histórico de resgates vale mais do que a beleza
+//  do `CHECK`. Quem recusa o valor hoje é a rota (`http/routes/kits`
+//  não tem mais o enum) e a leitura (`toRecord` devolve `resgate`).
+//
+//  A coluna do preço, essa sai: ela não está em índice nem em
+//  restrição, e `DROP COLUMN` não dispara cascata nenhuma.
+// ------------------------------------------------------------
+const KIT_SEM_COMPRA_SCHEMA = `
+UPDATE kits SET kind = 'resgate' WHERE kind = 'compra';
+
+ALTER TABLE kits DROP COLUMN price_cents;
+`;
+
+// ------------------------------------------------------------
+//  053 — o kit exclusivo de UM nível de VIP
+//
+//  ####  "OU MAIS ALTO" NÃO SERVE PARA TODO KIT  ####
+//
+//  `required_tier` sempre significou "aquele nível, ou um acima" —
+//  o que é certo para um benefício acumulativo, e errado para o kit
+//  que É a recompensa daquele nível. Sem esta coluna, o kit do Ouro
+//  também cai na mão do Diamante, e o do Bronze cai na de todo
+//  mundo — e aí o Bronze deixa de ter algo que só ele tem.
+//
+//  Ligado, o nível vira igualdade pura: só quem tem AQUELE tier
+//  ativo pega, e quem está acima não pega o kit de baixo.
+//
+//  ####  DESLIGADO POR PADRÃO, PORQUE É O QUE JÁ VALIA  ####
+//
+//  Todo kit que existe hoje foi configurado esperando "ou mais
+//  alto". Um DEFAULT 1 mudaria a regra de quem não pediu — e o
+//  sintoma seria o VIP mais caro perdendo kits da noite para o dia.
+//
+//  Sem `required_tier`, a coluna não tem efeito: ver `toColumns` em
+//  db/kits-repository.ts, que a zera junto.
+// ------------------------------------------------------------
+const KIT_TIER_EXCLUSIVO_SCHEMA = `
+ALTER TABLE kits ADD COLUMN required_tier_exact INTEGER NOT NULL DEFAULT 0;
+`;
+
+// ------------------------------------------------------------
+//  054 — o kit com N usos, e o que o wipe faz com a conta
+//
+//  ####  "RESGATE ÚNICO" SEMPRE FOI UM LIMITE DE 1  ####
+//
+//  Um kit de 10 usos não é um tipo novo de kit: é o mesmo resgate,
+//  com outro número. Por isso `use_limit` entra como COLUNA e não
+//  como um quarto `kind` — e por isso a migração preenche 1 em todo
+//  kit de resgate que já existe, que é exatamente o que ele sempre
+//  significou.
+//
+//  (O `CHECK` do `kind` também não aceitaria um valor novo sem
+//  recriar a tabela, e recriar levaria `kit_claims` junto pela
+//  cascata. Mas mesmo sem esse detalhe o desenho seria este.)
+//
+//  ####  A CONTA É CALCULADA, NUNCA GUARDADA  ####
+//
+//  Não existe `uses_left`. "Quantos ele já gastou?" é
+//  `count(kit_claims WHERE status = 'entregue' AND claimed_at >= X)`
+//  — e o X é o que esta migração acrescenta. Um contador guardado
+//  seria um segundo lugar para a mesma verdade, e ele erraria no dia
+//  em que alguém mudasse o limite do kit.
+//
+//  ####  E O X VEM DO RESET  ####
+//
+//      never       X = 0. O gasto vale para sempre.
+//      wipe        X = a hora do último wipe DAQUELE servidor, que
+//                  quem sabe é ele (`SaveCreatedTime`).
+//      full-wipe   X = a hora do último full wipe conduzido pelo
+//                  agente (`wipe_runs.full_wipe = 1`).
+//
+//  Sem saber a hora (servidor mudo, nenhum full wipe registrado), a
+//  janela cai para "desde sempre" — o kit NÃO reseta. É o oposto da
+//  escolha do bloqueio pós-wipe, e de propósito: lá a dúvida libera
+//  o kit uma vez, aqui ela daria usos infinitos.
+// ------------------------------------------------------------
+const KIT_USE_LIMIT_SCHEMA = `
+ALTER TABLE kits ADD COLUMN use_limit INTEGER;
+ALTER TABLE kits ADD COLUMN use_reset_on TEXT NOT NULL DEFAULT 'never';
+
+-- O que já existe continua valendo o que valia: uma vez por
+-- jogador, para sempre.
+UPDATE kits SET use_limit = 1 WHERE kind = 'resgate';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -5275,6 +5383,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // sem a coluna, para sempre. Isto custou uma tabela em
   // 07/09/2026, no mesmo dia em que a 050 nasceu.
   { id: 51, name: 'ads-static-e-camada-do-logo', sql: ADS_STATIC_SCHEMA },
+  // 07/09/2026: o kit sai da vitrine e ganha o nível exclusivo.
+  { id: 52, name: 'kit-sem-compra', sql: KIT_SEM_COMPRA_SCHEMA },
+  { id: 53, name: 'kit-tier-exclusivo', sql: KIT_TIER_EXCLUSIVO_SCHEMA },
+  { id: 54, name: 'kit-use-limit', sql: KIT_USE_LIMIT_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

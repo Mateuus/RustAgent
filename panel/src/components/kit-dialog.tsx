@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================
-//  kit-dialog.tsx  -  criar e editar um kit da loja.
+//  kit-dialog.tsx  -  criar e editar um kit.
 //
 //  ####  UM KIT É UM LOADOUT COM REGRAS DE ENTREGA  ####
 //
@@ -12,23 +12,25 @@
 //
 //  O que este formulário acrescenta é só a REGRA:
 //
-//      compra     preço em centavos, e o jogador leva quantas
-//                 vezes quiser
 //      resgate    uma vez por jogador, para sempre
+//      uso        N vezes por jogador, e elas podem voltar no wipe
 //      cooldown   de N em N horas
 //
-//  ####  O PREÇO É EM CENTAVOS, E A TELA MOSTRA EM REAIS  ####
+//  As duas primeiras são o MESMO tipo no agente, com o limite
+//  valendo 1 ou N. Ver `KitMode`.
 //
-//  Dinheiro em float é o erro que aparece no extrato do cliente. O
-//  campo aceita "19,90" e manda 1990 — a conversão é de UM lado só,
-//  e é aqui.
+//  ####  KIT NÃO SE COMPRA  ####
 //
-//  ####  E O AGENTE NÃO COBRA  ####
+//  Existiu um terceiro tipo, com preço em centavos. Ele saiu: o que
+//  se vende na rede está na LOJA, com vitrine, categoria e carteira.
+//  Duas vitrines — uma delas escondida num formulário — discordam no
+//  primeiro ajuste de preço.
 //
-//  Ele entrega. Quem cobra é quem chama a rota (o site, a loja); o
-//  preço viaja com o kit para a interface do jogo poder mostrá-lo.
-//  A tela diz isso, para ninguém esperar uma carteira que não
-//  existe.
+//  ####  O NÍVEL DE VIP TEM DOIS SENTIDOS  ####
+//
+//  Por padrão ele é um PISO: aquele nível, ou um mais alto. Marcado
+//  como exclusivo, ele vira igualdade — e aí o kit é a recompensa
+//  daquele nível, que ninguém acima leva junto.
 // ============================================================
 
 import { useEffect, useState } from 'react';
@@ -39,15 +41,66 @@ import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
-import { agent, type Kit, type KitKind, type LoadoutItem, type VipTier } from '@/lib/api';
+import {
+  agent,
+  type Kit,
+  type KitKind,
+  type KitUseReset,
+  type LoadoutItem,
+  type VipTier,
+} from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-const KINDS: readonly { value: KitKind; label: string; hint: string }[] = [
-  { value: 'compra', label: 'Compra', hint: 'o jogador paga e leva, quantas vezes quiser' },
+/**
+ * As três abas da tela.
+ *
+ * ####  E SÓ DUAS DELAS SÃO UM `kind`  ####
+ *
+ * "Resgate único" e "Uso" são o MESMO tipo no agente (`resgate`):
+ * um limite de 1 e um limite de N. A aba separa as duas porque a
+ * pergunta de quem configura é outra — "uma vez e pronto" não é a
+ * mesma decisão que "dez usos, que voltam no wipe".
+ */
+type KitMode = 'resgate' | 'uso' | 'cooldown';
+
+const MODES: readonly { value: KitMode; label: string; hint: string }[] = [
   { value: 'resgate', label: 'Resgate único', hint: 'uma vez por jogador, para sempre' },
+  {
+    value: 'uso',
+    label: 'Uso',
+    hint: 'um número de vezes por jogador — e eles podem voltar no wipe',
+  },
   { value: 'cooldown', label: 'Cooldown', hint: 'de tempos em tempos' },
 ];
+
+/** Quando a conta de usos zera. Os valores são os do agente. */
+const USE_RESETS: readonly { value: KitUseReset; label: string; hint: string }[] = [
+  { value: 'never', label: 'Nunca', hint: 'o que ele gastou, gastou — vale para sempre' },
+  {
+    value: 'wipe',
+    label: 'A cada wipe',
+    hint: 'a conta zera no wipe do servidor. A hora vem do servidor — se ele não responder, a conta NÃO zera',
+  },
+  {
+    value: 'full-wipe',
+    label: 'Só no full wipe',
+    hint: 'zera só no wipe que leva os blueprints. O agente conhece os full wipes que ELE conduziu — nenhum registrado, nada zera',
+  },
+];
+
+/** O modo em que este kit abre. Ver `KitMode`. */
+function modeOf(kit: Kit | null): KitMode {
+  if (kit === null) {
+    return 'resgate';
+  }
+
+  if (kit.kind === 'cooldown') {
+    return 'cooldown';
+  }
+
+  return (kit.useLimit ?? 1) > 1 || kit.useResetOn !== 'never' ? 'uso' : 'resgate';
+}
 
 interface KitDialogProps {
   readonly open: boolean;
@@ -72,14 +125,16 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
       ? ''
       : String(Math.round(kit.wipeDelaySeconds / 3600)),
   );
-  const [kind, setKind] = useState<KitKind>(kit?.kind ?? 'resgate');
-  const [price, setPrice] = useState(centsToInput(kit?.priceCents));
+  const [mode, setMode] = useState<KitMode>(modeOf(kit));
+  const [useLimit, setUseLimit] = useState(Math.max(1, kit?.useLimit ?? 10));
+  const [useResetOn, setUseResetOn] = useState<KitUseReset>(kit?.useResetOn ?? 'never');
   const [hours, setHours] = useState(
     kit?.cooldownSeconds === null || kit?.cooldownSeconds === undefined
       ? 24
       : Math.max(1, Math.round(kit.cooldownSeconds / 3600)),
   );
   const [requiredTier, setRequiredTier] = useState(kit?.requiredTier ?? '');
+  const [requiredTierExact, setRequiredTierExact] = useState(kit?.requiredTierExact ?? false);
   const [items, setItems] = useState<LoadoutItem[]>(kit === null ? [] : [...kit.items]);
   const [enabled, setEnabled] = useState(kit?.enabled ?? true);
   const [chosen, setChosen] = useState<string[]>(kit === null ? [] : [...kit.servers]);
@@ -114,6 +169,10 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
       return;
     }
 
+    // A aba "Uso" e a "Resgate único" são o mesmo `kind` no agente:
+    // a diferença entre elas é o LIMITE. Ver `KitMode`.
+    const kind: KitKind = mode === 'cooldown' ? 'cooldown' : 'resgate';
+
     const body = {
       slug: slug.trim(),
       name: name.trim(),
@@ -122,9 +181,13 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
       wipeDelaySeconds:
         wipeHours.trim() === '' ? null : Math.max(1, Math.round(Number(wipeHours) * 3600)),
       kind,
-      priceCents: kind === 'compra' ? inputToCents(price) : null,
-      cooldownSeconds: kind === 'cooldown' ? hours * 3600 : null,
+      useLimit: mode === 'uso' ? Math.max(1, useLimit) : mode === 'resgate' ? 1 : null,
+      useResetOn: mode === 'uso' ? useResetOn : 'never',
+      cooldownSeconds: mode === 'cooldown' ? hours * 3600 : null,
       requiredTier: requiredTier === '' ? null : requiredTier,
+      // Sem nível escolhido a exclusividade não quer dizer nada — e
+      // o agente recusa a combinação. Aqui ela já sai zerada.
+      requiredTierExact: requiredTier !== '' && requiredTierExact,
       items,
       enabled,
       servers: chosen,
@@ -228,18 +291,18 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
         <div>
           <Label>Como o jogador recebe</Label>
           <div className="flex flex-wrap items-stretch border border-border">
-            {KINDS.map((option, index) => (
+            {MODES.map((option, index) => (
               <div key={option.value} className="flex items-stretch">
                 {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
 
                 <button
                   type="button"
-                  aria-pressed={kind === option.value}
+                  aria-pressed={mode === option.value}
                   disabled={busy}
-                  onClick={() => setKind(option.value)}
+                  onClick={() => setMode(option.value)}
                   className={cn(
                     'px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
-                    kind === option.value
+                    mode === option.value
                       ? 'bg-surface-2 text-foreground'
                       : 'text-muted hover:text-foreground',
                   )}
@@ -251,29 +314,50 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
           </div>
 
           <p className="mt-1 text-2xs text-muted">
-            {KINDS.find((option) => option.value === kind)?.hint}
+            {MODES.find((option) => option.value === mode)?.hint}
           </p>
         </div>
 
-        {kind === 'compra' && (
-          <div>
-            <Label>Preço</Label>
-            <Input
-              value={price}
-              placeholder="19,90"
-              disabled={busy}
-              onChange={(event) => setPrice(event.target.value)}
-              className="font-mono"
-            />
-            <p className="mt-1 text-2xs leading-relaxed text-muted">
-              Em reais; o agente guarda em centavos. <strong>O agente não cobra</strong> — ele
-              entrega. Quem cobra é a loja que chama a rota; o preço viaja junto para a interface do
-              jogo poder mostrá-lo.
-            </p>
+        {mode === 'uso' && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <Label>Quantos usos por jogador</Label>
+              <Input
+                type="number"
+                min={1}
+                max={10000}
+                value={useLimit}
+                disabled={busy}
+                onChange={(event) => setUseLimit(Math.max(1, Number(event.target.value)))}
+              />
+              <p className="mt-1 text-2xs leading-relaxed text-muted">
+                Gastou os {String(Math.max(1, useLimit))}, o kit some para ele. Só as entregas que
+                DERAM CERTO contam — uma tentativa que falhou não gasta uso.
+              </p>
+            </div>
+
+            <div>
+              <Label>Os usos voltam</Label>
+              <select
+                value={useResetOn}
+                disabled={busy}
+                onChange={(event) => setUseResetOn(event.target.value as KitUseReset)}
+                className="h-9 w-full border border-border bg-surface-2 px-3 text-sm text-foreground"
+              >
+                {USE_RESETS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-2xs leading-relaxed text-muted">
+                {USE_RESETS.find((option) => option.value === useResetOn)?.hint}
+              </p>
+            </div>
           </div>
         )}
 
-        {kind === 'cooldown' && (
+        {mode === 'cooldown' && (
           <div>
             <Label>De quantas em quantas horas</Label>
             <Input
@@ -319,7 +403,16 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
             <select
               value={requiredTier}
               disabled={busy}
-              onChange={(event) => setRequiredTier(event.target.value)}
+              onChange={(event) => {
+                // Voltar para "qualquer um" desliga a exclusividade
+                // junto: um checkbox marcado sem nível nenhum é uma
+                // regra que não existe, e o agente recusa o corpo.
+                if (event.target.value === '') {
+                  setRequiredTierExact(false);
+                }
+
+                setRequiredTier(event.target.value);
+              }}
               className="h-9 w-full border border-border bg-surface-2 px-3 text-sm text-foreground"
             >
               <option value="">Qualquer um</option>
@@ -329,7 +422,31 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-2xs text-muted">Quem tem um nível MAIS ALTO também pode.</p>
+
+            <label
+              className={cn(
+                'mt-2 flex items-start gap-2 text-2xs leading-relaxed',
+                requiredTier === '' && 'opacity-50',
+              )}
+            >
+              <input
+                type="checkbox"
+                checked={requiredTierExact}
+                disabled={busy || requiredTier === ''}
+                onChange={(event) => setRequiredTierExact(event.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                <strong className="text-foreground">Somente este nível</strong>
+                <span className="block text-muted">
+                  {requiredTier === ''
+                    ? 'Escolha um nível para poder deixar o kit exclusivo dele.'
+                    : requiredTierExact
+                      ? `Só quem tem ${labelOf(tiers, requiredTier)} pega. Um nível MAIS ALTO não pega este kit.`
+                      : 'Hoje quem tem um nível MAIS ALTO também pode.'}
+                </span>
+              </span>
+            </label>
           </div>
 
           <div>
@@ -416,20 +533,12 @@ function slugify(value: string): string {
     .slice(0, 48);
 }
 
-/** 1990 -> "19,90". */
-function centsToInput(cents: number | null | undefined): string {
-  return cents === null || cents === undefined ? '' : (cents / 100).toFixed(2).replace('.', ',');
-}
-
 /**
- * "19,90" -> 1990.
+ * O nome do nível como ele aparece no select.
  *
- * O arredondamento é no FIM, e não durante: `19.9 * 100` dá
- * 1989.9999… em ponto flutuante, e um centavo perdido por kit é o
- * tipo de erro que só aparece na conciliação do mês.
+ * Sem a lista de tiers (o agente não respondeu), sobra o próprio
+ * valor — que é o que está gravado no kit.
  */
-function inputToCents(value: string): number {
-  const parsed = Number(value.replace(/\s/g, '').replace(',', '.'));
-
-  return Number.isFinite(parsed) ? Math.round(parsed * 100) : 0;
+function labelOf(tiers: readonly VipTier[], tier: string): string {
+  return tiers.find((entry) => entry.tier === tier)?.title ?? tier;
 }

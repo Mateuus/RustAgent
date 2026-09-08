@@ -968,6 +968,15 @@ export interface SpawnStatusInput {
 
 export type KitKind = 'resgate' | 'cooldown';
 
+/**
+ * Quando a conta de usos de um kit volta a zero.
+ *
+ *   `never`       nunca: o que ele gastou, gastou.
+ *   `wipe`        a cada wipe daquele servidor.
+ *   `full-wipe`   só no full wipe (o que leva blueprints junto).
+ */
+export type KitUseReset = 'never' | 'wipe' | 'full-wipe';
+
 export interface Kit {
   id: number;
   slug: string;
@@ -978,6 +987,14 @@ export interface Kit {
   kind: KitKind;
   /** Em SEGUNDOS. `null` fora de `cooldown`. */
   cooldownSeconds: number | null;
+  /**
+   * Quantas vezes cada jogador pode levar. `null` em `cooldown`.
+   *
+   * "Resgate único" é este campo valendo 1.
+   */
+  useLimit: number | null;
+  /** Quando a conta de usos zera. */
+  useResetOn: KitUseReset;
   /**
    * Só libera este tanto de segundos DEPOIS do wipe.
    *
@@ -1010,6 +1027,11 @@ export interface KitOffer extends Kit {
   lastClaimedAt: string | null;
   /** Quantas vezes ELE pegou — diferente de `claimCount`, da rede. */
   myClaims: number;
+  /**
+   * Quantos usos ainda restam a ELE, já com o reset do wipe
+   * aplicado. `null` = este kit não conta usos (é o de cooldown).
+   */
+  usesLeft: number | null;
 }
 
 export interface KitClaim {

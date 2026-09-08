@@ -576,17 +576,25 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
  * não escondida atrás do "i".
  */
 function ruleOf(kit: KitOfferView): string {
-  const tier = kit.requiredTier === null ? '' : ` · VIP ${kit.requiredTier.toUpperCase()}`;
-
-  if (kit.kind === 'resgate') {
-    return `uma vez${tier}`;
-  }
+  // "SÓ VIP OURO" e "VIP OURO" dizem coisas diferentes para quem
+  // está acima do nível — e é justamente ele quem clica no kit de
+  // baixo e é recusado.
+  const tier =
+    kit.requiredTier === null
+      ? ''
+      : ` · ${kit.requiredTierExact ? 'SÓ ' : ''}VIP ${kit.requiredTier.toUpperCase()}`;
 
   if (kit.kind === 'cooldown') {
     return `a cada ${describeWait((kit.cooldownSeconds ?? 0) * 1000)}${tier}`;
   }
 
-  return `compra${tier}`;
+  const limit = kit.useLimit ?? 1;
+
+  if (limit === 1) {
+    return `uma vez${kit.useResetOn === 'never' ? '' : ' por wipe'}${tier}`;
+  }
+
+  return `${String(limit)} usos${kit.useResetOn === 'never' ? '' : ' por wipe'}${tier}`;
 }
 
 /**
@@ -608,12 +616,14 @@ function shortReason(kit: KitOfferView): string {
     return left > 0 ? `EM ${describeWait(left).toUpperCase()}` : 'JÁ PODE';
   }
 
-  if (kit.kind === 'resgate' && kit.lastClaimedAt !== null) {
-    return 'JÁ PEGOU';
+  if (kit.kind === 'resgate' && kit.usesLeft === 0) {
+    return (kit.useLimit ?? 1) === 1 ? 'JÁ PEGOU' : 'SEM USOS';
   }
 
   if (kit.requiredTier !== null) {
-    return `EXIGE ${kit.requiredTier.toUpperCase()}`;
+    return kit.requiredTierExact
+      ? `SÓ ${kit.requiredTier.toUpperCase()}`
+      : `EXIGE ${kit.requiredTier.toUpperCase()}`;
   }
 
   return 'INDISPONÍVEL';
@@ -856,7 +866,12 @@ function generalTab(kit: KitOfferView, page: number): UiElement[] {
   lines.push({ text: `Regra: ${ruleOf(kit)}`, item: null });
 
   if (kit.requiredTier !== null) {
-    lines.push({ text: `Exige VIP ${kit.requiredTier.toUpperCase()} (ou mais alto)`, item: null });
+    lines.push({
+      text: kit.requiredTierExact
+        ? `Exclusivo do VIP ${kit.requiredTier.toUpperCase()} — só esse nível pega`
+        : `Exige VIP ${kit.requiredTier.toUpperCase()} (ou mais alto)`,
+      item: null,
+    });
   }
 
   lines.push({
@@ -866,6 +881,20 @@ function generalTab(kit: KitOfferView, page: number): UiElement[] {
         : `Você já pegou ${formatNumber(kit.myClaims)} ${kit.myClaims === 1 ? 'vez' : 'vezes'}`,
     item: null,
   });
+
+  // ####  "QUANTOS ME SOBRAM?" É A OUTRA PERGUNTA  ####
+  //
+  // O total acima é histórico e não muda no wipe; este é o que vale
+  // AGORA. Num kit que zera no wipe os dois discordam de propósito,
+  // e é justamente essa diferença que o jogador precisa ver.
+  if (kit.usesLeft !== null && (kit.useLimit ?? 1) > 1) {
+    lines.push({
+      text:
+        `Restam ${formatNumber(kit.usesLeft)} de ${formatNumber(kit.useLimit ?? 1)} usos` +
+        (kit.useResetOn === 'never' ? '' : ' — a conta zera no wipe'),
+      item: null,
+    });
+  }
 
   if (kit.lastClaimedAt !== null) {
     lines.push({

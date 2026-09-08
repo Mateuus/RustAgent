@@ -6,13 +6,11 @@
 //  ####  KIT NÃO É OFERTA DA LOJA  ####
 //
 //  Um kit é entrega com REGRA: uma vez por jogador, de N em N horas.
-//  Ele pode ter preço anotado, mas o agente NÃO COBRA por ele — quem
-//  cobra é quem chama a rota.
+//  Ele NÃO tem preço — kit não se compra.
 //
-//  A LOJA (`/loja`) é o outro sistema: ela tem carteira, débito,
-//  estorno e extrato. Os dois aparecem no mesmo menu do jogo, em
-//  abas diferentes, e entram pelo mesmo botão de comprar — quem
-//  decide qual é qual é a EXISTÊNCIA da oferta. Ver
+//  A LOJA (`/loja`) é o outro sistema, e é lá que se vende: ela tem
+//  vitrine, carteira, débito, estorno e extrato. Os dois aparecem no
+//  mesmo menu do jogo, em abas diferentes. Ver
 //  core/src/game/ui-store-bridge.ts.
 //
 //  ####  O KIT É DA REDE; CADA SERVIDOR DECIDE SE O OFERECE  ####
@@ -190,7 +188,7 @@ function Kits() {
                     </td>
 
                     <td className="px-3 py-2">
-                      {regraDe(kit)}
+                      {ruleOf(kit)}
 
                       {/* O bloqueio pós-wipe vale para os três tipos,
                           e é a regra que mais surpreende quem não a
@@ -203,7 +201,18 @@ function Kits() {
                       )}
                     </td>
 
-                    <td className="px-3 py-2 text-muted">{kit.requiredTier ?? EM_DASH}</td>
+                    {/* "só ouro" e "ouro" são regras diferentes, e a
+                        diferença aparece justamente quando o VIP mais
+                        caro reclama que não pega o kit de baixo. */}
+                    <td className="px-3 py-2 text-muted">
+                      {kit.requiredTier === null ? (
+                        EM_DASH
+                      ) : kit.requiredTierExact ? (
+                        <span className="text-amber">só {kit.requiredTier}</span>
+                      ) : (
+                        kit.requiredTier
+                      )}
+                    </td>
 
                     {/* Os NOMES, e não a contagem: "2 servidores"
                         obriga a ir procurar quais. */}
@@ -324,19 +333,21 @@ function Kits() {
   );
 }
 
-/** "R$ 19,90", "uma vez por jogador" ou "a cada 24 h". */
-function regraDe(kit: Kit): string {
-  if (kit.kind === 'compra') {
-    return kit.priceCents === null
+/** "uma vez por jogador", "10 usos por jogador" ou "a cada 24 h". */
+function ruleOf(kit: Kit): string {
+  if (kit.kind === 'cooldown') {
+    return kit.cooldownSeconds === null
       ? EM_DASH
-      : (kit.priceCents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+      : `a cada ${String(Math.round(kit.cooldownSeconds / 3600))} h`;
   }
 
-  if (kit.kind === 'resgate') {
-    return 'uma vez por jogador';
-  }
+  const limit = kit.useLimit ?? 1;
+  const reset =
+    kit.useResetOn === 'wipe'
+      ? ', zera no wipe'
+      : kit.useResetOn === 'full-wipe'
+        ? ', zera no full wipe'
+        : '';
 
-  return kit.cooldownSeconds === null
-    ? EM_DASH
-    : `a cada ${String(Math.round(kit.cooldownSeconds / 3600))} h`;
+  return limit === 1 ? `uma vez por jogador${reset}` : `${String(limit)} usos por jogador${reset}`;
 }

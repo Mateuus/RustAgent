@@ -5,7 +5,7 @@
 //  Três tabelas (migrações 012 e 013), e cada uma responde a uma
 //  pergunta:
 //
-//      kits         o que existe para vender ou resgatar
+//      kits         o que existe para resgatar
 //      kit_servers  onde cada um é oferecido
 //      kit_claims   quem já pegou, quando, e se deu certo
 //
@@ -43,11 +43,30 @@ import type { AgentDatabase } from './database.js';
 /**
  * Como o kit chega ao jogador.
  *
- *   `compra`    ele paga e leva, quantas vezes quiser
  *   `resgate`   uma vez por jogador, para sempre
  *   `cooldown`  de N em N segundos
+ *
+ * Existiu um terceiro, `compra`, com preço em centavos. Ele saiu na
+ * migração 052: quem vende na rede é a LOJA, que tem vitrine,
+ * categoria e carteira — o kit com preço era uma segunda vitrine
+ * escondida num formulário.
  */
-export type KitKind = 'compra' | 'resgate' | 'cooldown';
+export type KitKind = 'resgate' | 'cooldown';
+
+/**
+ * Quando a conta de usos volta a zero.
+ *
+ *   `never`       nunca: o que ele gastou, gastou.
+ *   `wipe`        a cada wipe daquele servidor.
+ *   `full-wipe`   só no full wipe (o que leva blueprints junto).
+ *
+ * Ver a migração 054 para o que acontece quando não dá para saber a
+ * hora do wipe: a janela cai para "desde sempre", e o kit NÃO
+ * reseta — a dúvida aqui daria usos infinitos.
+ */
+export type KitUseReset = 'never' | 'wipe' | 'full-wipe';
+
+export const KIT_USE_RESETS: readonly KitUseReset[] = ['never', 'wipe', 'full-wipe'];
 
 /** O desfecho de uma entrega. Ver o cabeçalho. */
 export type KitClaimStatus = 'entregue' | 'falhou';
@@ -66,10 +85,18 @@ export interface KitRecord {
    */
   readonly category: string | null;
   readonly kind: KitKind;
-  /** Em CENTAVOS. `null` fora de `compra`. */
-  readonly priceCents: number | null;
   /** Em SEGUNDOS. `null` fora de `cooldown`. */
   readonly cooldownSeconds: number | null;
+  /**
+   * Quantas vezes cada jogador pode levar este kit.
+   *
+   * Só em `resgate`, e lá ele é sempre um número: "resgate único"
+   * é este campo valendo 1. `null` em `cooldown`, que não conta
+   * usos — ele conta HORAS.
+   */
+  readonly useLimit: number | null;
+  /** Quando a conta de usos zera. `never` fora de `resgate`. */
+  readonly useResetOn: KitUseReset;
   /**
    * Só libera este tanto de segundos DEPOIS do wipe.
    *
@@ -79,6 +106,16 @@ export interface KitRecord {
   readonly wipeDelaySeconds: number | null;
   /** `null` = qualquer um. Preenchido = só quem tem aquele nível. */
   readonly requiredTier: string | null;
+  /**
+   * O nível exigido é EXATO?
+   *
+   * `false` (o padrão) = aquele nível ou um mais alto. `true` = só
+   * aquele — o Ouro não pega o kit do Bronze. É o que faz o kit ser
+   * a recompensa DAQUELE nível, e não um piso.
+   *
+   * Sem `requiredTier` não tem efeito nenhum: ver `toColumns`.
+   */
+  readonly requiredTierExact: boolean;
   readonly items: readonly LoadoutItem[];
   readonly enabled: boolean;
   /** Epoch ms. */
@@ -103,10 +140,12 @@ export interface KitInput {
   readonly description: string | null;
   readonly category: string | null;
   readonly kind: KitKind;
-  readonly priceCents: number | null;
   readonly cooldownSeconds: number | null;
+  readonly useLimit: number | null;
+  readonly useResetOn: KitUseReset;
   readonly wipeDelaySeconds: number | null;
   readonly requiredTier: string | null;
+  readonly requiredTierExact: boolean;
   readonly items: readonly LoadoutItem[];
   readonly enabled: boolean;
   readonly servers: readonly string[];
@@ -135,10 +174,12 @@ interface KitRow {
   readonly description: string | null;
   readonly category: string | null;
   readonly kind: string;
-  readonly price_cents: number | null;
   readonly cooldown_seconds: number | null;
+  readonly use_limit: number | null;
+  readonly use_reset_on: string;
   readonly wipe_delay_seconds: number | null;
   readonly required_tier: string | null;
+  readonly required_tier_exact: number;
   readonly items: string;
   readonly enabled: number;
   readonly created_at: number;
@@ -233,11 +274,13 @@ export class KitsRepository {
       const result = this.#db
         .prepare(
           `INSERT INTO kits
-             (slug, name, description, category, kind, price_cents, cooldown_seconds, wipe_delay_seconds, required_tier,
-              items, enabled, created_at, updated_at)
+             (slug, name, description, category, kind, cooldown_seconds, use_limit, use_reset_on,
+              wipe_delay_seconds, required_tier, required_tier_exact, items, enabled,
+              created_at, updated_at)
            VALUES
-             (@slug, @name, @description, @category, @kind, @price_cents, @cooldown_seconds, @wipe_delay_seconds, @required_tier,
-              @items, @enabled, @created_at, @updated_at)`,
+             (@slug, @name, @description, @category, @kind, @cooldown_seconds, @use_limit,
+              @use_reset_on, @wipe_delay_seconds, @required_tier, @required_tier_exact, @items,
+              @enabled, @created_at, @updated_at)`,
         )
         .run({ ...toColumns(input), created_at: now, updated_at: now });
 
@@ -275,11 +318,11 @@ export class KitsRepository {
         .prepare(
           `UPDATE kits
               SET slug = @slug, name = @name, description = @description, category = @category,
-                  kind = @kind,
-                  price_cents = @price_cents, cooldown_seconds = @cooldown_seconds,
+                  kind = @kind, cooldown_seconds = @cooldown_seconds,
+                  use_limit = @use_limit, use_reset_on = @use_reset_on,
                   wipe_delay_seconds = @wipe_delay_seconds,
-                  required_tier = @required_tier, items = @items, enabled = @enabled,
-                  updated_at = @updated_at
+                  required_tier = @required_tier, required_tier_exact = @required_tier_exact,
+                  items = @items, enabled = @enabled, updated_at = @updated_at
             WHERE id = @id`,
         )
         .run({ ...toColumns(input), id, updated_at: now });
@@ -413,6 +456,30 @@ export class KitsRepository {
     ).total;
   }
 
+  /**
+   * Quantas vezes ele levou este kit DE `since` PARA CÁ.
+   *
+   * ####  É ASSIM QUE O RESET DO WIPE ACONTECE  ####
+   *
+   * Nada é apagado e nenhum contador é zerado: o wipe só move a
+   * janela da contagem. `since = 0` é "desde sempre", que é o kit
+   * sem reset — e o histórico continua inteiro para o suporte ler,
+   * inclusive o de antes do wipe.
+   *
+   * Só as ENTREGUES, pelo mesmo motivo de `lastDeliveredClaim`.
+   */
+  deliveredCountSince(steamId: string, kitId: number, since: number): number {
+    return (
+      this.#db
+        .prepare(
+          `SELECT count(*) AS total FROM kit_claims
+            WHERE steam_id = @steam_id AND kit_id = @kit_id AND status = 'entregue'
+              AND claimed_at >= @since`,
+        )
+        .get({ steam_id: steamId, kit_id: kitId, since }) as { readonly total: number }
+    ).total;
+  }
+
   /** Quem já pegou este kit, do mais recente ao mais antigo. */
   claimsOf(
     kitId: number,
@@ -525,17 +592,25 @@ function toColumns(input: KitInput): Record<string, string | number | null> {
     description: input.description,
     category: input.category,
     kind: input.kind,
-    // Preço só faz sentido em `compra`, e cooldown só em
-    // `cooldown`. Zerar o que não se aplica é o que impede um kit
-    // que virou resgate de continuar cobrando na tela.
-    price_cents: input.kind === 'compra' ? input.priceCents : null,
+    // Cooldown só faz sentido em `cooldown`, e o limite de usos só
+    // em `resgate`. Zerar o que não se aplica é o que impede um kit
+    // que trocou de tipo de continuar contando pela regra antiga.
     cooldown_seconds: input.kind === 'cooldown' ? input.cooldownSeconds : null,
+    // Em `resgate` o limite é sempre um número: "resgate único" é
+    // este campo valendo 1, e é o que a migração 054 gravou nos que
+    // já existiam.
+    use_limit: input.kind === 'resgate' ? Math.max(1, input.useLimit ?? 1) : null,
+    use_reset_on: input.kind === 'resgate' ? input.useResetOn : 'never',
     // O atraso pós-wipe NÃO é zerado por tipo: ele vale para os
-    // três. Um kit de compra liberado só depois do wipe é tão
+    // dois. Um kit de cooldown liberado só depois do wipe é tão
     // legítimo quanto um de resgate — a regra é sobre QUANDO, e não
     // sobre COMO.
     wipe_delay_seconds: input.wipeDelaySeconds,
     required_tier: input.requiredTier,
+    // "Só este nível" sem nível nenhum não quer dizer nada — e
+    // guardado ligado, ele voltaria a valer sozinho no dia em que
+    // alguém escolhesse um tier de novo, sem ter pedido isso.
+    required_tier_exact: input.requiredTier !== null && input.requiredTierExact ? 1 : 0,
     items: serializeLoadoutItems(sortLoadoutItems(input.items)),
     // 0/1: o better-sqlite3 recusa boolean como parâmetro.
     enabled: input.enabled ? 1 : 0,
@@ -556,11 +631,19 @@ function toRecord(row: KitRow, servers: readonly string[], claimCount: number): 
     name: row.name,
     description: row.description,
     category: row.category,
-    kind: row.kind === 'compra' || row.kind === 'cooldown' ? row.kind : 'resgate',
-    priceCents: row.price_cents,
+    // A migração 052 já converteu os `compra` que existiam; o
+    // `CHECK` da tabela é que continua aceitando a palavra, e aqui
+    // ela cai em `resgate` — o mesmo destino da migração.
+    kind: row.kind === 'cooldown' ? 'cooldown' : 'resgate',
     cooldownSeconds: row.cooldown_seconds,
+    // Um kit de resgate gravado antes da 054 não tem limite na
+    // coluna; ele vale 1, que é o que "resgate único" sempre quis
+    // dizer.
+    useLimit: row.kind === 'cooldown' ? null : (row.use_limit ?? 1),
+    useResetOn: isUseReset(row.use_reset_on) ? row.use_reset_on : 'never',
     wipeDelaySeconds: row.wipe_delay_seconds,
     requiredTier: row.required_tier,
+    requiredTierExact: row.required_tier_exact === 1,
     items: parseLoadoutItems(row.items),
     enabled: row.enabled === 1,
     createdAt: row.created_at,
@@ -568,6 +651,11 @@ function toRecord(row: KitRow, servers: readonly string[], claimCount: number): 
     servers,
     claimCount,
   };
+}
+
+/** O texto do banco é um reset conhecido? Ver `toRecord`. */
+function isUseReset(value: string): value is KitUseReset {
+  return (KIT_USE_RESETS as readonly string[]).includes(value);
 }
 
 function toClaim(row: KitClaimRow): KitClaimRecord {

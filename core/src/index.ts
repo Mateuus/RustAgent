@@ -1586,6 +1586,11 @@ async function main(): Promise<void> {
   // `null` = não deu para perguntar, e é DIFERENTE de lista vazia:
   // com `null` a entrega é recusada dizendo que não deu para
   // conferir, em vez de afirmar que o jogador está fora.
+  // As execuções de wipe. Nascem AQUI, antes da loja, porque o kit
+  // com limite de usos que zera no full wipe pergunta a elas quando
+  // foi o último — e o agente só conhece os wipes que ele conduziu.
+  const wipeRuns = new WipeRunsRepository(db);
+
   const kits = new KitStore({
     repository: kitsRepository,
     vips: vipsRepository,
@@ -1598,6 +1603,10 @@ async function main(): Promise<void> {
     // que não respondeu.
     wipe: {
       at: (serverId) => wipeClock.at(serverId, supervisor.contextOf(serverId)?.rcon ?? null),
+      // E "quando foi o último full wipe?", para o limite de usos
+      // que zera só nele. Sem nenhum registrado, a conta NÃO zera —
+      // aqui a dúvida daria usos infinitos, o contrário do de cima.
+      fullAt: (serverId) => Promise.resolve(wipeRuns.lastFullWipeAt(serverId)),
     },
   });
 
@@ -2276,8 +2285,6 @@ async function main(): Promise<void> {
   // O recorte por nível de VIP acontece DENTRO dela, antes de o
   // documento existir — o que o jogador não pode ver não atravessa
   // o RCON. Ver game/ui-calendar-screen.ts.
-  const wipeRuns = new WipeRunsRepository(db);
-
   calendarScreens = createCalendarScreenProvider({
     schedule: wipeSchedule,
     // ####  ELA LÊ AS EXECUÇÕES, E NÃO SÓ A AGENDA  ####
