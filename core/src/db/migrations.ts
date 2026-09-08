@@ -4188,6 +4188,67 @@ DELETE FROM meta WHERE key = 'items.protocol';
 `;
 
 // ------------------------------------------------------------
+//  055 — o catálogo passa a saber o nome do item EM PORTUGUÊS
+//
+//  ####  SEM ELA, A TELA DO JOGO FALA INGLÊS  ####
+//
+//  A tela de kits mostrava "Burlap Headwrap" e "Nailgun" para um
+//  jogador com o jogo em português — no meio de uma interface em
+//  que todo o resto ("KITS", "RANKING", "Resgatar") já estava
+//  traduzido.
+//
+//  O CUI não tem token de tradução: ele imprime a string que o
+//  servidor mandar, e ponto. Então o nome que o jogador lê é
+//  escolhido AQUI, e precisa estar guardado.
+//
+//  ####  A TRADUÇÃO É A DO JOGO, E NÃO UMA TABELA NOSSA  ####
+//
+//  Não há nome inventado nesta coluna. O que ela guarda é o que a
+//  Facepunch traduziu, lido pelo plugin com
+//  `Translate.GetServerTranslation(token, "pt-BR")` — que resolve
+//  `assets/localization/pt-br/engine.json`, de dentro do
+//  `content.bundle` do próprio servidor.
+//
+//  Isso importa: o nome no menu passa a ser LETRA POR LETRA o
+//  mesmo que o jogador vê no inventário. Uma tradução nossa, por
+//  melhor que fosse, diria "Rifle de Assalto" onde o inventário
+//  diz outra coisa — e o jogador não acharia o item.
+//
+//  MEDIDO no server01: 1.058 dos 1.259 itens do catálogo têm
+//  tradução (84%). Os 201 restantes são veículos e itens internos
+//  (`sedan`, `2module.car`, `ptboat`), que ficam NULOS.
+//
+//  ####  E POR QUE NULO NÃO É DEFEITO  ####
+//
+//  Nulo aqui quer dizer "o jogo não traduz este item" — e a tela
+//  cai no `display_name`, que é o que ela já mostrava. Um item sem
+//  tradução não regride; ele só não melhora.
+//
+//  Vale para a coluna inteira, também: um servidor com o plugin
+//  anterior a 07/09/2026 responde o catálogo sem o campo, e a
+//  rede inteira fica com a coluna nula até que ele atualize. A
+//  tela volta a ser a de hoje, e nada quebra.
+//
+//  ####  E POR QUE ELA APAGA O PROTOCOLO  ####
+//
+//  Pela mesma razão da 045 e da 049, e ela é a metade que se
+//  esquece: a releitura do catálogo é invalidada por PROTOCOLO.
+//  Com o mesmo protocolo guardado, o agente conclui que a cópia
+//  vale e não relê — a coluna nasceria nula e ficaria nula para
+//  sempre, até o próximo update do Rust.
+//
+//  Apagar a chave é dizer "não sei em que versão o jogo está", que
+//  é o que o `#isFresh` trata como motivo para reler. O custo é
+//  uma leitura de ~1250 itens na próxima conexão de RCON.
+// ------------------------------------------------------------
+const ITEMS_DISPLAY_NAME_PTBR_SCHEMA = `
+ALTER TABLE items
+  ADD COLUMN display_name_ptbr TEXT;
+
+DELETE FROM meta WHERE key = 'items.protocol';
+`;
+
+// ------------------------------------------------------------
 //  046  -  AS QUESTS
 //
 //  ####  A DEFINIÇÃO É DE REDE; O PROGRESSO É DE SERVIDOR  ####
@@ -5387,6 +5448,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 52, name: 'kit-sem-compra', sql: KIT_SEM_COMPRA_SCHEMA },
   { id: 53, name: 'kit-tier-exclusivo', sql: KIT_TIER_EXCLUSIVO_SCHEMA },
   { id: 54, name: 'kit-use-limit', sql: KIT_USE_LIMIT_SCHEMA },
+  // 07/09/2026: a tela do jogo para de mostrar o nome do item em
+  // inglês para quem joga em português.
+  { id: 55, name: 'items-display-name-ptbr', sql: ITEMS_DISPLAY_NAME_PTBR_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
