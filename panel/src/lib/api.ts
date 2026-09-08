@@ -176,6 +176,8 @@ export interface ServerView {
   description: string;
   url: string;
   headerImage: string;
+  /** O convite do Discord que a tela DISCORD do menu mostra. */
+  discord: string;
   steam: { appId: string; login: string; branch: string };
   ports: { game: number; rcon: number; query: number; app: number };
   rcon: { connected: boolean; state: string } | null;
@@ -964,7 +966,7 @@ export interface SpawnStatusInput {
   enabled: boolean;
 }
 
-export type KitKind = 'compra' | 'resgate' | 'cooldown';
+export type KitKind = 'resgate' | 'cooldown';
 
 export interface Kit {
   id: number;
@@ -974,8 +976,6 @@ export interface Kit {
   /** A aba em que ele aparece no menu do jogo. `null` = sem aba. */
   category: string | null;
   kind: KitKind;
-  /** Em CENTAVOS. `null` fora de `compra`. */
-  priceCents: number | null;
   /** Em SEGUNDOS. `null` fora de `cooldown`. */
   cooldownSeconds: number | null;
   /**
@@ -987,6 +987,8 @@ export interface Kit {
   wipeDelaySeconds: number | null;
   /** `null` = qualquer um. */
   requiredTier: string | null;
+  /** `true` = SÓ aquele nível; um mais alto não serve. */
+  requiredTierExact: boolean;
   items: LoadoutItem[];
   enabled: boolean;
   /** Em quais servidores ele é oferecido. */

@@ -199,15 +199,16 @@ describe('a carga inicial do Menu Principal', () => {
   it('o `/quest` abre este mesmo menu, direto em MISSÕES', () => {
     const menu = buildMainMenu();
 
-    expect(menu.shortcuts).toEqual([{ command: 'quest', screenId: 'tela-missoes' }]);
+    expect(menu.shortcuts).toContainEqual({ command: 'quest', screenId: 'tela-missoes' });
     // E a tela existe: um atalho para uma tela apagada abriria o
     // menu num "carregando" que nunca termina.
     expect(menu.screens.some((screen) => screen.id === 'tela-missoes')).toBe(true);
     // O atalho viaja ao plugin. Sem isto ele não registra o
     // comando, e `/quest` volta a ser "unknown command".
-    expect(toDocumentPayload(menu).shortcuts).toEqual([
-      { command: 'quest', screenId: 'tela-missoes' },
-    ]);
+    expect(toDocumentPayload(menu).shortcuts).toContainEqual({
+      command: 'quest',
+      screenId: 'tela-missoes',
+    });
   });
 
   it('um atalho para tela inexistente é recusado', () => {
@@ -884,9 +885,9 @@ describe('a página de kits', () => {
       name: 'Kit Inicial',
       description: null,
       kind: 'resgate',
-      priceCents: null,
       cooldownSeconds: null,
       requiredTier: null,
+      requiredTierExact: false,
       items: [{ slot: 'belt', shortname: 'rifle.ak', amount: 1, skinId: '0', position: 0 }],
       enabled: true,
       servers: ['pvp1'],
@@ -1160,6 +1161,7 @@ describe('a página de kits', () => {
           cooldownSeconds: 86_400,
           description: 'Um kit de reposição para quem acabou de morrer.',
           requiredTier: 'gold',
+          requiredTierExact: false,
           myClaims: 4,
           lastClaimedAt: '2026-08-10T15:30:00.000Z',
           nextAt: new Date(Date.now() + 3_600_000).toISOString(),

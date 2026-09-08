@@ -460,6 +460,20 @@ export interface ServerConfig {
   readonly description: string;
   readonly url: string;
   readonly headerImage: string;
+  /**
+   * `SERVER_DISCORD`: o convite que o menu mostra.
+   *
+   * ####  ELE NÃO VAI PARA A LINHA DE COMANDO  ####
+   *
+   * O jogo não tem convar de Discord, e inventar `+server.discord`
+   * cairia na armadilha do `+server.password` logo abaixo: o Rust
+   * aceita qualquer `+x.y` e ignora em silêncio o que não conhece.
+   * Quem lê esta chave é o AGENTE, ao montar a tela do menu.
+   *
+   * Vazio = aquele servidor não tem Discord, e a tela diz isso em
+   * vez de mostrar um endereço inventado.
+   */
+  readonly discord: string;
   // ####  NÃO EXISTE SENHA DE SERVIDOR NO RUST  ####
   //
   // Houve aqui um campo `password`, que virava `+server.password` na
@@ -727,6 +741,10 @@ export function readServerConfig(paths: AgentPaths, id: string): ServerConfig {
     description: (values.SERVER_DESCRIPTION ?? '').trim(),
     url: (values.SERVER_URL ?? '').trim(),
     headerImage: (values.SERVER_HEADERIMAGE ?? '').trim(),
+    // Opcional, como o `levelUrl`: um `.ini` escrito antes desta
+    // chave existir continua valendo, e o menu daquele servidor só
+    // não mostra o convite.
+    discord: (values.SERVER_DISCORD ?? '').trim(),
     level: (values.SERVER_LEVEL ?? '').trim() || 'Procedural Map',
     seed: requiredInt(values, 'SERVER_SEED', id, 0, 2_147_483_647),
     worldSize: requiredInt(values, 'SERVER_WORLDSIZE', id, 1_000, 6_000),

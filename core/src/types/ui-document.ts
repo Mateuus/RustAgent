@@ -50,6 +50,14 @@ export const MAX_ELEMENTS_PER_SCREEN = 400;
 export const MAX_SCREENS_PER_DOCUMENT = 40;
 
 /**
+ * Quantos comandos de chat extras um documento pode ter.
+ *
+ * Oito é folga: cada um ocupa um nome GLOBAL no servidor, e um
+ * documento que precise de mais que isso está querendo ser vários.
+ */
+export const MAX_SHORTCUTS_PER_DOCUMENT = 8;
+
+/**
  * Teto do documento serializado, em bytes.
  *
  * NÃO é o limite do RCON — esse é do transporte, e vale por TELA
@@ -479,10 +487,7 @@ export const uiDocumentSchema = z.object({
         screenId: idSchema,
       }),
     )
-    // Oito é folga: são comandos de chat, e cada um ocupa um nome
-    // global no servidor. Um documento que precise de mais que
-    // isso está querendo ser vários.
-    .max(8)
+    .max(MAX_SHORTCUTS_PER_DOCUMENT)
     .default([]),
   screens: z.array(screenSchema).min(1).max(MAX_SCREENS_PER_DOCUMENT),
 });
