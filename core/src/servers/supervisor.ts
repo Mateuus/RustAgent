@@ -136,6 +136,8 @@ export interface ServerView {
   readonly description: string;
   readonly url: string;
   readonly headerImage: string;
+  /** O convite do Discord que o menu do jogo mostra. */
+  readonly discord: string;
   readonly steam: { appId: string; login: string; branch: string };
   readonly ports: { game: number; rcon: number; query: number; app: number };
   readonly rcon: { connected: boolean; state: string } | null;
@@ -422,6 +424,7 @@ export class ServerSupervisor {
       description: config.description,
       url: config.url,
       headerImage: config.headerImage,
+      discord: config.discord,
       steam: { ...config.steam },
       ports: {
         game: config.ports.game,
@@ -555,6 +558,11 @@ export class ServerSupervisor {
       description: 'SERVER_DESCRIPTION',
       url: 'SERVER_URL',
       headerImage: 'SERVER_HEADERIMAGE',
+      // O convite do Discord. Ele NÃO entra em `RESTART_KEYS`: quem
+      // o lê é o agente, ao montar a tela do menu, e não a linha de
+      // comando do jogo. Gravar aqui já muda o que o próximo clique
+      // desenha.
+      discord: 'SERVER_DISCORD',
       map: 'SERVER_LEVEL',
       seed: 'SERVER_SEED',
       worldSize: 'SERVER_WORLDSIZE',

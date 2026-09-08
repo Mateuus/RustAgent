@@ -109,6 +109,7 @@ interface Draft {
   description: string;
   url: string;
   headerImage: string;
+  discord: string;
   map: string;
   seed: number;
   worldSize: number;
@@ -130,6 +131,7 @@ function draftOf(server: ServerView): Draft {
     description: server.description,
     url: server.url,
     headerImage: server.headerImage,
+    discord: server.discord,
     map: server.map,
     seed: server.seed,
     worldSize: server.worldSize,
@@ -545,7 +547,35 @@ export function ServerSettings({
 
       {section === 'oxide' && <OxidePanel serverId={server.id} />}
 
-      {section === 'interface' && <ServerUiPanel serverId={server.id} />}
+      {section === 'interface' && (
+        <div className="space-y-4">
+          {/* ####  O CONVITE É DESTE SERVIDOR; O MENU É DA REDE  ####
+
+              O desenho do menu é um só, compartilhado; o endereço
+              do Discord muda de servidor para servidor. Por isso
+              ele mora aqui, ao lado da escolha do menu, e não
+              dentro do editor de interface — onde ficaria igual
+              para todos. */}
+          <Card
+            title="O Discord deste servidor"
+            busy={busy}
+            onSave={() => void save({ discord: draft.discord }, 'Discord')}
+          >
+            <Field
+              label="Convite"
+              hint="É o que a tela DISCORD do menu mostra — e o que o jogador vai digitar no navegador. Vale na hora, sem reiniciar. Vazio: a tela passa a dizer que este servidor não tem Discord."
+            >
+              <Input
+                value={draft.discord}
+                placeholder="discord.gg/origemz"
+                onChange={(event) => setDraft({ ...draft, discord: event.target.value })}
+              />
+            </Field>
+          </Card>
+
+          <ServerUiPanel serverId={server.id} />
+        </div>
+      )}
       {section === 'player' && <PlayerPanel serverId={server.id} />}
 
       {section === 'avancado' && (

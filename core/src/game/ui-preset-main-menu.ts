@@ -54,6 +54,11 @@
 
 import type { UiAction, UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 
+import {
+  buildDiscordScreen,
+  DISCORD_COMMAND,
+  DISCORD_SCREEN_ID,
+} from './ui-discord-screen.js';
 import { buildHomeScreen, emptyHomeView } from './ui-home-screen.js';
 import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
@@ -334,16 +339,6 @@ const QUESTS_NAV_ID = 'missoes';
  */
 const QUESTS_COMMAND = 'quest';
 
-/**
- * O Discord não é uma tela.
- *
- * O jogo não abre navegador a partir de um botão de CUI, então não
- * há "página do Discord" a mostrar. O que servidores fazem é rodar
- * um comando de chat que imprime o convite — e é isso que o botão
- * faz. Trocar o comando é editar o botão, no editor.
- */
-const DISCORD_COMMAND = '/discord';
-
 const SCREEN_ID = (entry: string): string => `tela-${entry}`;
 
 /** Onde as telas são penduradas. Ver `contentSlotId`. */
@@ -399,8 +394,12 @@ function buildShell(): UiElement[] {
       'DISCORD',
       navRect(88),
       'DISCORD',
-      { id: 'ir-discord', kind: 'chat', command: DISCORD_COMMAND },
+      { id: 'ir-discord', kind: 'navigate', screenId: DISCORD_SCREEN_ID },
       'nav',
+      12,
+      // Fica vermelho quando a tela dele estiver aberta, como o
+      // resto da barra.
+      DISCORD_SCREEN_ID,
     ),
 
     // ####  O VIP DO JOGADOR  ####
@@ -1124,6 +1123,19 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
       };
     }),
 
+    // ####  A PÁGINA DISCORD  ####
+    //
+    // O convite é do `.ini` de cada servidor, e por isso ela é
+    // MONTADA pelo agente (ver game/ui-discord-screen.ts). O que
+    // fica gravado é a mesma tela sem convite nenhum — que é
+    // também o que o servidor que não configurou nada mostra.
+    //
+    // `generated: true` pelo motivo de sempre: sem a marca, o
+    // plugin desenha o repouso e nunca pede a de verdade, e o
+    // jogador fica olhando "este servidor ainda não divulgou um
+    // Discord" num servidor que divulgou.
+    { ...buildDiscordScreen({ view: { invite: '' } }), generated: true },
+
     // ####  OS MODAIS DA LOJA  ####
     //
     // Eles NÃO são navegáveis: nenhum botão do menu leva a eles. São
@@ -1171,7 +1183,19 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     // `/quest` abre este mesmo menu, direto em MISSÕES. Um segundo
     // documento faria o servidor carregar o menu inteiro duas
     // vezes — ver `shortcuts` em types/ui-document.ts.
-    shortcuts: [{ command: QUESTS_COMMAND, screenId: QUESTS_SCREEN_ID }],
+    //
+    // ####  E `/discord` EXISTE POR CAUSA DESTA LINHA  ####
+    //
+    // Ela não é conveniência: o plugin registra no Oxide todo
+    // comando de atalho que chega na carga, e é isso que faz o
+    // servidor parar de responder `Unknown command: discord` a
+    // quem digita no chat. O botão do cabeçalho não depende dela —
+    // ele navega direto —, mas o jogador que aprendeu `/discord`
+    // em outro servidor depende.
+    shortcuts: [
+      { command: QUESTS_COMMAND, screenId: QUESTS_SCREEN_ID },
+      { command: DISCORD_COMMAND, screenId: DISCORD_SCREEN_ID },
+    ],
     screens,
   };
 }

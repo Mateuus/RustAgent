@@ -61,6 +61,10 @@ const patchSchema = z
     description: iniText('description', 500).optional().or(z.literal('')),
     url: iniText('url', 300).optional().or(z.literal('')),
     headerImage: iniText('headerImage', 300).optional().or(z.literal('')),
+    // O convite do Discord, que o menu do jogo mostra. Vazio é o
+    // jeito de DESLIGAR: a tela passa a dizer que este servidor não
+    // tem Discord, em vez de mostrar um endereço velho.
+    discord: iniText('discord', 200).optional().or(z.literal('')),
 
     map: z.enum(MAP_LEVELS).optional(),
     seed: z.number().int().min(0).max(MAX_SEED).optional(),

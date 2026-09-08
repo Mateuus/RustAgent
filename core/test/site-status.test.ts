@@ -110,6 +110,7 @@ function serverView(over: Partial<ServerView> = {}): ServerView {
     description: 'servidor de teste',
     url: 'https://origemz.com',
     headerImage: '',
+    discord: '',
     steam: { appId: '258550', login: 'anonymous', branch: 'public' },
     ports: { game: 28015, rcon: 28016, query: 28017, app: 28082 },
     rcon: { connected: true, state: 'connected' },

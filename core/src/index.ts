@@ -85,6 +85,7 @@ import {
   parseQuestsScreenId,
   type QuestsScreenProvider,
 } from './game/ui-quests-screen.js';
+import { createDiscordScreenProvider, withDiscordScreen } from './game/ui-discord-screen.js';
 import {
   buildEmptyHomeBundle,
   createHomeScreenProvider,
@@ -1263,6 +1264,38 @@ async function main(): Promise<void> {
     );
   }
 
+  // ####  O BOTÃO DISCORD DOS MENUS QUE JÁ EXISTEM  ####
+  //
+  // Mudar o modelo não conserta quem já tem o menu gravado: ele
+  // nasce dali UMA vez e depois é do admin. Um documento anterior a
+  // esta frente tem o botão rodando `/discord` no chat, comando que
+  // nenhum plugin atende — o jogador clicava e lia
+  // `Unknown command: discord`.
+  //
+  // Só documento com o botão E sem a tela é tocado, e a edição é a
+  // mínima: a tela entra, o botão passa a navegar até ela e o
+  // atalho de chat é registrado. Ver `withDiscordScreen`.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withDiscordScreen(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'o botão DISCORD deste menu não levava a lugar nenhum: a tela entrou e ele agora abre nela',
+    );
+  }
+
   // ####  A PÁGINA RANKING DO MENU DO JOGO  ####
   //
   // Ela nasce AQUI, e não lá embaixo junto do calendário, porque o
@@ -1275,6 +1308,17 @@ async function main(): Promise<void> {
   const rankingScreens = createRankingScreenProvider({
     rankings: rankingsService,
     logger,
+  });
+
+  // ####  E A PÁGINA DISCORD, QUE NÃO VAI AO BANCO  ####
+  //
+  // O convite é do `.ini` daquele servidor (`SERVER_DISCORD`), e o
+  // supervisor já tem a configuração em memória — trocar o link no
+  // painel muda o que o próximo clique desenha, sem reiniciar
+  // nada. Servidor que sumiu do cadastro devolve texto vazio, e a
+  // tela diz que não há Discord em vez de estourar.
+  const discordScreens = createDiscordScreenProvider({
+    inviteOf: (serverId) => supervisor.configOf(serverId)?.discord ?? '',
   });
 
   uiSync = new UiSync({
@@ -1353,6 +1397,19 @@ async function main(): Promise<void> {
           return (
             (await homeScreens?.(input)) ?? buildEmptyHomeBundle(input.document, input.screenId)
           );
+        }
+
+        // ####  A PÁGINA DISCORD  ####
+        //
+        // Id exato (`tela-discord`), e o único provedor daqui que
+        // não vai ao banco: ele lê o `SERVER_DISCORD` daquele
+        // servidor, que já está na memória do supervisor. Por isso
+        // ele não tem a janela de "ainda não montado" dos outros —
+        // existe desde a subida.
+        const fromDiscord = await discordScreens(input);
+
+        if (fromDiscord !== null) {
+          return fromDiscord;
         }
 
         // ####  E, POR ÚLTIMO, O CALENDÁRIO  ####
