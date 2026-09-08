@@ -131,7 +131,7 @@ function Kits() {
     <div>
       <PageHeader
         title="Kits"
-        description="Os kits da rede: compra, resgate único e cooldown. Quem cobra em OZCoin é a Loja."
+        description="Os kits da rede: resgate único, uso e cooldown. Kit não se vende — quem cobra em OZCoin é a Loja."
         aside={
           <Button variant="primary" disabled={busy} onClick={() => setEditing(null)}>
             Novo kit
