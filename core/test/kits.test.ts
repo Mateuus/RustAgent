@@ -48,6 +48,8 @@ interface FakeServer {
   readonly commands: string[];
   /** Epoch ms do último wipe. `null` = não deu para saber. */
   wipeAt: number | null;
+  /** Epoch ms do último FULL wipe conduzido pelo agente. */
+  fullWipeAt: number | null;
   connected: boolean;
   /** Quem está dentro do servidor agora. `null` = não deu para ler. */
   online: string[] | null;
@@ -129,6 +131,7 @@ beforeEach(() => {
     // Sem wipe conhecido, por padrão: é o estado de quem não usa a
     // regra, e o que a maioria dos testes exercita.
     wipeAt: null,
+    fullWipeAt: null,
   };
 
   const kits = new KitsRepository(db);
@@ -149,7 +152,10 @@ beforeEach(() => {
       },
       presence: { online: () => Promise.resolve(server.online) },
       logger: createLogger({ log: { level: 'silent', pretty: false } }),
-      wipe: { at: () => Promise.resolve(server.wipeAt) },
+      wipe: {
+        at: () => Promise.resolve(server.wipeAt),
+        fullAt: () => Promise.resolve(server.fullWipeAt),
+      },
     }),
   };
 });
@@ -168,9 +174,11 @@ function createKit(overrides: Partial<KitInput> = {}) {
     category: null,
     wipeDelaySeconds: null,
     kind: 'resgate',
-    priceCents: null,
+    useLimit: null,
+    useResetOn: 'never' as const,
     cooldownSeconds: null,
     requiredTier: null,
+    requiredTierExact: false,
     items: ITEMS,
     enabled: true,
     servers: ['pvp1'],
@@ -326,7 +334,7 @@ describe('a entrega que não acontece', () => {
   });
 
   it('a falha não conta como resgate na contagem do kit', async () => {
-    const kit = createKit({ kind: 'compra', priceCents: 1990 });
+    const kit = createKit({ kind: 'cooldown', cooldownSeconds: 3600 });
 
     harness.server.acceptsGive = false;
 
@@ -440,6 +448,137 @@ describe('o kit que só libera depois do wipe', () => {
   });
 });
 
+describe('o limite de usos', () => {
+  it('entrega até o limite e recusa depois', async () => {
+    const kit = createKit({ useLimit: 2 });
+
+    for (let time = 0; time < 2; time += 1) {
+      const resultado = await harness.store.claim({
+        kitId: kit.id,
+        steamId: STEAM_ID,
+        serverId: 'pvp1',
+        actor: 'admin',
+      });
+
+      expect(resultado.status).toBe('entregue');
+    }
+
+    await expect(
+      harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: 'admin' }),
+    ).rejects.toSatisfy((error: unknown) => isApiError(error) && error.code === 'KIT_USES_SPENT');
+  });
+
+  it('e a vitrine mostra quantos sobraram', async () => {
+    const kit = createKit({ useLimit: 3 });
+
+    await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    const oferta = (await harness.store.listForServer('pvp1', STEAM_ID))[0];
+
+    expect(oferta?.usesLeft).toBe(2);
+    expect(oferta?.available).toBe(true);
+  });
+
+  it('o wipe devolve os usos de quem os gastou antes dele', async () => {
+    const kit = createKit({ useLimit: 1, useResetOn: 'wipe' });
+
+    await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    await expect(
+      harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: 'admin' }),
+    ).rejects.toSatisfy(
+      (error: unknown) => isApiError(error) && error.code === 'KIT_ALREADY_CLAIMED',
+    );
+
+    // O claim fica no passado e o wipe acontece DEPOIS dele: a
+    // janela da contagem passa a começar no wipe, e o que ele
+    // gastou ficou do lado de lá.
+    harness.db
+      .prepare('UPDATE kit_claims SET claimed_at = @at WHERE kit_id = @kit')
+      .run({ at: Date.now() - 2 * HOUR, kit: kit.id });
+
+    harness.server.wipeAt = Date.now() - HOUR;
+
+    const depois = await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    expect(depois.status).toBe('entregue');
+    // E o histórico continua inteiro: o reset move a janela, não
+    // apaga o que aconteceu.
+    expect(harness.kits.deliveredCountOf(STEAM_ID, kit.id)).toBe(2);
+  });
+
+  it('um wipe comum NÃO devolve o uso de quem só reseta no full', async () => {
+    const kit = createKit({ useLimit: 1, useResetOn: 'full-wipe' });
+
+    await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    harness.db
+      .prepare('UPDATE kit_claims SET claimed_at = @at WHERE kit_id = @kit')
+      .run({ at: Date.now() - 2 * HOUR, kit: kit.id });
+
+    harness.server.wipeAt = Date.now() - HOUR;
+
+    await expect(
+      harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: 'admin' }),
+    ).rejects.toSatisfy(
+      (error: unknown) => isApiError(error) && error.code === 'KIT_ALREADY_CLAIMED',
+    );
+
+    // O full wipe, esse devolve.
+    harness.server.fullWipeAt = Date.now() - HOUR;
+
+    const depois = await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    expect(depois.status).toBe('entregue');
+  });
+
+  it('sem saber a hora do wipe, a conta NÃO zera', async () => {
+    const kit = createKit({ useLimit: 1, useResetOn: 'wipe' });
+
+    await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    // O servidor não respondeu. Resetar sem saber a data daria usos
+    // infinitos — o contrário do bloqueio pós-wipe, que libera.
+    harness.server.wipeAt = null;
+
+    await expect(
+      harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: 'admin' }),
+    ).rejects.toSatisfy(
+      (error: unknown) => isApiError(error) && error.code === 'KIT_ALREADY_CLAIMED',
+    );
+  });
+});
+
 describe('o nível exigido', () => {
   it('recusa quem não tem o nível', async () => {
     const kit = createKit({ requiredTier: 'gold' });
@@ -462,6 +601,45 @@ describe('o nível exigido', () => {
 
     // A ordem vem do `Rank` do OrigemZVip.json — a mesma tabela que
     // o plugin usa no `HasVipTier`.
+    const resultado = await harness.store.claim({
+      kitId: kit.id,
+      steamId: STEAM_ID,
+      serverId: 'pvp1',
+      actor: 'admin',
+    });
+
+    expect(resultado.status).toBe('entregue');
+  });
+
+  it('mas o kit EXCLUSIVO do bronze não vai para o gold', async () => {
+    const kit = createKit({ requiredTier: 'bronze', requiredTierExact: true });
+
+    harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'admin',
+    });
+
+    // O kit do bronze É a recompensa do bronze: se o gold o levasse
+    // junto, o nível de baixo deixaria de ter algo que só ele tem.
+    await expect(
+      harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: 'admin' }),
+    ).rejects.toSatisfy((error: unknown) => isApiError(error) && error.code === 'KIT_TIER_REQUIRED');
+  });
+
+  it('e o exclusivo do gold vai para quem TEM gold', async () => {
+    const kit = createKit({ requiredTier: 'gold', requiredTierExact: true });
+
+    harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'admin',
+    });
+
     const resultado = await harness.store.claim({
       kitId: kit.id,
       steamId: STEAM_ID,
@@ -517,12 +695,14 @@ describe('o kit é da rede, e cada servidor decide se o oferece', () => {
       slug: kit.slug,
       name: kit.name,
       description: null,
-    category: null,
-    wipeDelaySeconds: null,
-      kind: 'compra',
-      priceCents: 1990,
+      category: null,
+      wipeDelaySeconds: null,
+      kind: 'resgate',
+      useLimit: null,
+      useResetOn: 'never' as const,
       cooldownSeconds: null,
       requiredTier: null,
+      requiredTierExact: false,
       items: ITEMS,
       enabled: false,
       servers: ['pvp1'],

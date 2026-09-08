@@ -9603,11 +9603,19 @@ categoria leva as ofertas dela junto, em cascata.
 
 `slug` (`^[a-z0-9][a-z0-9-]*$`, 1–48 — **é a chave**, e não um id: o id é AUTOINCREMENT
 daquela máquina) · `name` (1–64) · `description` (≤400·null) · `category` (≤32·null) ·
-`kind` (`compra`·`resgate`·`cooldown`) · `priceCents` (int·null, **centavos**, obrigatório
-e > 0 em `compra`) · `cooldownSeconds` (1–31536000, obrigatório em `cooldown`) ·
-`wipeDelaySeconds` (1–2592000) · `requiredTier` (string·null) · `items` (até 60
+`kind` (`resgate`·`cooldown` — **`compra` e `priceCents` saíram**, ver abaixo) ·
+`cooldownSeconds` (1–31536000, obrigatório em `cooldown`) · `useLimit` (1–10000·null,
+quantas vezes cada jogador leva; só em `resgate`, ausente = 1) · `useResetOn`
+(`never`·`wipe`·`full-wipe`, padrão `never`) · `wipeDelaySeconds` (1–2592000) ·
+`requiredTier` (string·null) · `requiredTierExact` (boolean, padrão `false`: aquele nível
+**ou mais alto**; `true` = só aquele) · `items` (até 60
 `{slot, shortname, amount, skinId, position}`; `slot` é `wear`·`belt`·`main`, `position`
 0–47, `shortname` em `[A-Za-z0-9._-]`) · `enabled` · `servers` (**os `SITE_SERVER_ID`**).
+
+**Kit não se compra mais.** O `kind: "compra"` e o `priceCents` saíram em 07/09/2026
+(migrações 052 e 054): quem vende na rede é a LOJA, com vitrine, categoria e carteira. Uma
+linha que ainda os mande vira `INVALID_VALUE` — e só ela; o resto do snapshot entra. Os
+kits de compra que existiam viraram resgate único.
 
 Dois kits com o mesmo `slug` no mesmo snapshot: o segundo vira `INVALID_VALUE`. Um
 `servers[]` que não casa com pareamento nenhum vira `UNKNOWN_REFERENCE` em

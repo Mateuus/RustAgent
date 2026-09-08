@@ -565,6 +565,34 @@ export class WipeRunsRepository {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  /**
+   * Quando foi o último FULL WIPE que TERMINOU naquele servidor.
+   *
+   * `null` = nenhum registrado. E "registrado" é a palavra: o agente
+   * só conhece os wipes que ele mesmo conduziu — um full wipe feito
+   * na mão, por fora, não está aqui. Quem lê isto (o limite de usos
+   * do kit, em kits/service.ts) trata o `null` como "não reseta",
+   * porque resetar sem saber a data daria usos infinitos.
+   *
+   * A hora preferida é a que o SERVIDOR confirmou depois do wipe
+   * (`save_created_after`); sem ela, sobra a hora em que o agente
+   * executou.
+   */
+  lastFullWipeAt(serverId: string): number | null {
+    const row = this.#db
+      .prepare(
+        `SELECT save_created_after, wipe_at FROM wipe_runs
+          WHERE server_id = @server_id AND full_wipe = 1 AND status = 'done'
+          ORDER BY wipe_at DESC, id DESC
+          LIMIT 1`,
+      )
+      .get({ server_id: serverId }) as
+      | { readonly save_created_after: number | null; readonly wipe_at: number }
+      | undefined;
+
+    return row === undefined ? null : (row.save_created_after ?? row.wipe_at);
+  }
+
   /** As que ficaram `running` — em QUALQUER servidor. Ver `orphan`. */
   running(): readonly WipeRunRecord[] {
     const rows = this.#db
