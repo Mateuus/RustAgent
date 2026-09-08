@@ -78,7 +78,10 @@ namespace Oxide.Plugins
 {
     // O nome em [Info], o nome da classe e o nome do arquivo tem
     // de ser identicos, senao o Oxide recusa carregar.
-    [Info("OrigemZAgent", "OrigemZ", "0.3.0")]
+    // 0.4.0: o origemz.items passou a responder "displayNamePtBr".
+    // O campo e OPCIONAL, entao o agente antigo continua lendo este
+    // plugin, e este plugin continua servindo o agente antigo.
+    [Info("OrigemZAgent", "OrigemZ", "0.4.0")]
     [Description("Ponta no jogo do RustAgent: lista jogadores, publica o catalogo de itens, entrega itens via RCON e expoe o estado de VIP por hook")]
     public class OrigemZAgent : RustPlugin
     {
@@ -653,6 +656,7 @@ namespace Oxide.Plugins
         //  {"ok":true,"count":1234,"offset":0,"limit":250,
         //   "items":[{"shortname":"rifle.ak",
         //             "displayName":"Assault Rifle",
+        //             "displayNamePtBr":"Rifle de Assalto",
         //             "itemId":1545779598,
         //             "category":"Weapon",
         //             "maxStack":1,
@@ -679,6 +683,10 @@ namespace Oxide.Plugins
         //
         //  Os dois argumentos sao opcionais e posicionais. Sem
         //  nenhum, e a primeira pagina.
+        //
+        //  "displayNamePtBr" SO APARECE quando o jogo tem o nome
+        //  traduzido - ~84% dos itens, MEDIDO. Ausente e nulo sao a
+        //  mesma coisa para quem le: use o "displayName".
         // ========================================================
         [ConsoleCommand(ItemsCommand)]
         private void CommandItems(ConsoleSystem.Arg arg)
@@ -796,6 +804,9 @@ namespace Oxide.Plugins
             int unusable = 0;
             int duplicated = 0;
 
+            translationMissing = 0;
+            translationFailed = 0;
+
             // Sem declarar o tipo da colecao: ItemManager.itemList
             // ja mudou entre lista e array em versoes do jogo, e o
             // foreach compila com os dois.
@@ -844,15 +855,26 @@ namespace Oxide.Plugins
                  unusable + " sem shortname/itemid utilizavel, " +
                  duplicated + " com shortname repetido.");
 
+            // A cobertura da traducao numa linha, para que uma queda
+            // dela apareca no console em vez de virar tela em ingles
+            // sem explicacao. MEDIDO no server01: ~84% traduzidos.
+            Puts("Nome em portugues: " + (catalog.Count - translationMissing - translationFailed) +
+                 " de " + catalog.Count + " item(ns). Sem traducao no jogo: " + translationMissing +
+                 (translationFailed > 0
+                     ? ". FALHARAM na leitura: " + translationFailed +
+                       " - Translate.GetServerTranslation lancou, e esses itens vao aparecer em ingles."
+                     : "."));
+
             return catalog;
         }
 
-        private static ItemInfo BuildItemInfo(ItemDefinition definition)
+        private ItemInfo BuildItemInfo(ItemDefinition definition)
         {
             return new ItemInfo
             {
                 Shortname = definition.shortname,
                 DisplayName = ReadDisplayName(definition),
+                DisplayNamePtBr = ReadDisplayNamePtBr(definition),
                 ItemId = definition.itemid,
 
                 // ItemCategory e enum: ToString() da o nome do
@@ -963,6 +985,102 @@ namespace Oxide.Plugins
             }
 
             return string.IsNullOrEmpty(label) ? definition.shortname : label;
+        }
+
+        // ####  O NOME EM PORTUGUES VEM DO PROPRIO JOGO  ####
+        //
+        // O CUI so imprime a string que o servidor mandar - nao ha
+        // token de traducao numa tela desenhada por plugin. Entao
+        // quem escreve "Rifle de Assalto" na tela de kits e AQUI.
+        //
+        // E a traducao nao precisa ser inventada: ela ja esta no
+        // servidor. MEDIDO no server01, dentro de
+        // Bundles/shared/content.bundle, em
+        // assets/localization/pt-br/engine.json - 7.512 chaves, das
+        // quais 1.058 dos 1.259 itens do catalogo (84%).
+        //
+        // Translate.GetServerTranslation(token, lang) e o que le
+        // esse arquivo; "pt-BR" esta na lista allServerLanguages do
+        // proprio jogo.
+        //
+        // ####  E POR QUE NAO displayName.translated  ####
+        //
+        // Porque ele resolve pelo idioma CORRENTE do servidor, que
+        // e "en" - Translate.Phrase.translated chama Translate.Get,
+        // MEDIDO no IL de Rust.Localization.dll. Num servidor
+        // dedicado ele devolve o ingles em todos os itens, que e
+        // exatamente o defeito que esta linha existe para corrigir.
+        //
+        // ####  O TOKEN NAO E O SHORTNAME  ####
+        //
+        // Uns coincidem ("wood", "stones", "burlap.headwrap"),
+        // outros nao ("scrap" e "scrap.name", "gears" e
+        // "gears.name"). Por isso a chave sai de
+        // displayName.token, que e o que o jogo usa - montar a
+        // chave a partir do shortname perderia 19 pontos de
+        // cobertura.
+        //
+        // Vazio quando o item nao tem traducao (veiculos e itens
+        // internos, na maioria). O agente cai no ingles, que e o
+        // que a tela ja mostrava - item sem traducao nao regride.
+        // Quantos itens a ultima montagem do catalogo deixou sem
+        // nome em portugues, e quantos ficaram assim por EXCECAO.
+        // Sao coisas diferentes: item sem traducao e o normal (o
+        // jogo nao traduz veiculo), excecao e a API de traducao
+        // fora do ar. Os dois viram uma linha so no fim do
+        // BuildItemCatalog - avisar por item seriam 1.259 linhas.
+        private int translationMissing;
+        private int translationFailed;
+
+        private string ReadDisplayNamePtBr(ItemDefinition definition)
+        {
+            if (definition.displayName == null || string.IsNullOrEmpty(definition.displayName.token))
+            {
+                translationMissing++;
+                return null;
+            }
+
+            string translated;
+
+            // Um try aqui, e nao uma checagem: este e o unico ponto
+            // do catalogo que chama uma API de outra assembly do
+            // jogo, e a leitura e TUDO OU NADA (ver
+            // game/item-catalog.ts no agente). Uma excecao aqui
+            // derrubaria a rodada inteira e deixaria a rede sem
+            // catalogo por causa de um nome bonito.
+            try
+            {
+                translated = Translate.GetServerTranslation(definition.displayName.token, "pt-BR");
+            }
+            catch (Exception)
+            {
+                translationFailed++;
+                return null;
+            }
+
+            if (string.IsNullOrEmpty(translated))
+            {
+                translationMissing++;
+                return null;
+            }
+
+            // O arquivo do jogo tem nome com espaco sobrando
+            // ("Balaclava de Pano ", "Motocicleta ") - MEDIDO. Na
+            // tela isso desloca o texto do icone.
+            translated = translated.Trim();
+
+            if (translated.Length == 0)
+            {
+                translationMissing++;
+                return null;
+            }
+
+            // De proposito NAO descartamos a traducao igual ao
+            // ingles: "Fogger-3000" sai igual nos dois idiomas
+            // porque o nome nao muda, e trata-la como ausente faria
+            // a tela cair no ingles por um caminho diferente para
+            // chegar no mesmo texto.
+            return translated;
         }
 
         // ========================================================
@@ -3011,6 +3129,20 @@ namespace Oxide.Plugins
 
             [JsonProperty("displayName")]
             public string DisplayName { get; set; }
+
+            // ####  O NOME QUE O JOGADOR LE NA TELA DO JOGO  ####
+            //
+            // O DisplayName acima e a IDENTIDADE do item: e por ele
+            // que o admin procura no painel, e ele casa com o
+            // shortname. Este aqui e o rotulo, e so a tela do jogo
+            // usa - ver ReadDisplayNamePtBr.
+            //
+            // NullValueHandling.Ignore: item sem traducao nao gasta
+            // bytes no JSON. Sao ~1.250 itens numa resposta que ja
+            // passa de 150 KB e viaja num frame de WebRCON, e o
+            // agente trata ausente e nulo do mesmo jeito.
+            [JsonProperty("displayNamePtBr", NullValueHandling = NullValueHandling.Ignore)]
+            public string DisplayNamePtBr { get; set; }
 
             // int, e nao string: itemid do Rust cabe folgado num
             // number de JavaScript - o problema de precisao do

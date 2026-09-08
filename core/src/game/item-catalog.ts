@@ -94,6 +94,34 @@ export const rustItemSchema = z.object({
   shortname: z.string().min(1),
   displayName: z.string(),
   /**
+   * O nome do item EM PORTUGUÊS, como o jogo o traduz.
+   *
+   * ####  É ELE QUE A TELA DO JOGO MOSTRA  ####
+   *
+   * O `displayName` acima é a identidade do item — o painel procura
+   * por ele, e ele casa com o shortname. Este é o rótulo, e quem o
+   * usa é o CUI: a tela de kits mostrava "Burlap Headwrap" para um
+   * jogador com o jogo em português.
+   *
+   * A tradução é a OFICIAL, e vem do próprio servidor: o plugin lê
+   * `Translate.GetServerTranslation(token, "pt-BR")`, que resolve
+   * `assets/localization/pt-br/engine.json` de dentro do
+   * `content.bundle`. MEDIDO no server01: 1.058 dos 1.259 itens do
+   * catálogo (84%).
+   *
+   * ####  OPCIONAL PELA MESMA RAZÃO DO `consumable`  ####
+   *
+   * O campo nasceu em 07/09/2026. Um servidor com o plugin de antes
+   * responde sem ele, e exigi-lo aqui reprovaria a rodada INTEIRA —
+   * a leitura é tudo-ou-nada — deixando a rede sem catálogo por
+   * causa de um rótulo.
+   *
+   * Ausente é o mesmo que nulo: "este item não tem tradução" (são
+   * veículos e itens internos, na maioria). A tela cai no inglês,
+   * que é o que ela já mostrava.
+   */
+  displayNamePtBr: z.string().min(1).optional(),
+  /**
    * O id numérico do jogo. Pode ser NEGATIVO — `hat.wolf` é
    * `-1478212975`, MEDIDO. Um `.positive()` aqui recusaria metade
    * do catálogo.

@@ -530,3 +530,70 @@ describe('o `consumable` do catálogo', () => {
     expect(harness.repository.get('rifle.ak')?.consumable).toBe(true);
   });
 });
+
+// ------------------------------------------------------------
+//  O NOME EM PORTUGUÊS
+// ------------------------------------------------------------
+//
+//  Ele nasceu em 07/09/2026 porque a tela de kits mostrava "Burlap
+//  Headwrap" para quem joga em português, no meio de uma interface
+//  em que todo o resto já estava traduzido. Ver a migração 055.
+//
+//  O que estes testes seguram é a REGRA DE QUEDA: sem tradução, a
+//  tela mostra o inglês — nunca um branco, nunca o shortname.
+
+describe('o nome em português do catálogo', () => {
+  it('atravessa a leitura do jogo até a tabela', async () => {
+    harness.game.catalog = [{ ...AK, displayNamePtBr: 'Rifle de Assalto' }];
+
+    await harness.catalog.sync('pvp1');
+
+    expect(harness.repository.get('rifle.ak')?.displayNamePtBr).toBe('Rifle de Assalto');
+    // O inglês continua ali: ele é a identidade do item, e é por
+    // ele que o painel procura.
+    expect(harness.repository.get('rifle.ak')?.displayName).toBe('Assault Rifle');
+  });
+
+  it('o item que o JOGO não traduz fica nulo, e a tela cai no inglês', async () => {
+    // Veículos e itens internos não têm tradução — 201 dos 1.259,
+    // MEDIDO. Nulo aqui não é defeito: é o que faz a tela mostrar
+    // o inglês de sempre em vez de um rótulo vazio.
+    harness.game.catalog = [AK];
+
+    await harness.catalog.sync('pvp1');
+
+    const stored = harness.repository.get('rifle.ak');
+
+    expect(stored?.displayNamePtBr).toBeNull();
+    expect(stored?.displayNamePtBr ?? stored?.displayName).toBe('Assault Rifle');
+  });
+
+  it('uma rodada sem o campo NÃO apaga o que a rodada anterior soube', async () => {
+    harness.game.catalog = [{ ...AK, displayNamePtBr: 'Rifle de Assalto' }];
+
+    await harness.catalog.sync('pvp1');
+    expect(harness.repository.get('rifle.ak')?.displayNamePtBr).toBe('Rifle de Assalto');
+
+    // O servidor com o plugin anterior a 07/09/2026 sobe primeiro e
+    // é ele quem relê o catálogo. Sem o `coalesce` do UPSERT, a
+    // rede inteira voltaria ao inglês por causa dele.
+    harness.game.catalog = [AK];
+    harness.game.protocol = '2999.999.9';
+
+    await harness.catalog.sync('pvp1');
+
+    expect(harness.repository.get('rifle.ak')?.displayNamePtBr).toBe('Rifle de Assalto');
+  });
+
+  it('a rodada inteira NÃO cai quando o plugin responde sem o campo', async () => {
+    // A leitura do catálogo é tudo-ou-nada: se o schema exigisse o
+    // campo, um plugin desatualizado deixaria a rede SEM CATÁLOGO
+    // NENHUM — e o painel pararia de listar item, por causa de um
+    // rótulo. É o mesmo cuidado que `consumable` e `rarity` tomam.
+    harness.game.catalog = [AK, BOW, HAT];
+
+    await harness.catalog.sync('pvp1');
+
+    expect(harness.repository.list({ limit: 10, offset: 0 }).total).toBe(3);
+  });
+});

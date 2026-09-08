@@ -69,6 +69,9 @@ import { PlayersReader, type PlayersSnapshot } from './game/players.js';
 // é o mesmo arquivo, e o `coverage` do ranking pergunta por ele.
 import { PLAYERS_PLUGIN } from './game/plugin-contract.js';
 import { loadUiImages } from './game/ui-images.js';
+// O nome do item que o JOGADOR lê — português quando o jogo
+// traduz, inglês quando não.
+import { screenLabelOf } from './game/ui-item-label.js';
 import { buildKitsScreen, KITS_SCREEN_ID, parseKitScreenId } from './game/ui-kits-screen.js';
 // A página RANKING do menu do jogo (Docs/Ranking/20 §11).
 import { QuestsRepository } from './db/quests-repository.js';
@@ -1449,10 +1452,19 @@ async function main(): Promise<void> {
           screenId: input.screenId,
           // O ícone e o nome bonito vêm do catálogo: o kit guarda
           // `rifle.ak`, e o CUI desenha por `itemId`.
+          //
+          // ####  E O NOME É O QUE O JOGADOR LÊ  ####
+          //
+          // Quem abre esta tela está com o jogo em português, e via
+          // "Burlap Headwrap" no meio de uma interface traduzida.
+          // Quem decide o idioma é o `screenLabelOf` — ver o
+          // cabeçalho de game/ui-item-label.ts.
           itemOf: (shortname) => {
             const item = itemsRepository.get(shortname);
 
-            return item === null ? null : { itemId: item.itemId, displayName: item.displayName };
+            return item === null
+              ? null
+              : { itemId: item.itemId, displayName: screenLabelOf(item) };
           },
         }),
         // O SHELL conhece `tela-kits`; o modal de detalhes é filho
@@ -1731,10 +1743,13 @@ async function main(): Promise<void> {
     // Lidos AQUI, a cada abertura da tela: gravar o nome junto com
     // a recompensa deixaria o nome velho no jogo para sempre.
     catalog: {
+      // O rótulo em português, pelo mesmo motivo da tela de kits:
+      // quem lê a missão está com o jogo traduzido. Ver
+      // game/ui-item-label.ts.
       itemOf: (shortname) => {
         const item = itemsRepository.get(shortname);
 
-        return item === null ? null : { itemId: item.itemId, displayName: item.displayName };
+        return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
       },
       rankingLabelOf: (metric) => rankingsRepository.getByMetric(metric)?.label ?? null,
     },

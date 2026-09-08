@@ -48,6 +48,18 @@ export interface ItemInput {
   readonly shortname: string;
   /** `Assault Rifle`. */
   readonly displayName: string;
+  /**
+   * `Rifle de Assalto` — o mesmo item, como o JOGO o traduz.
+   *
+   * O `displayName` é a identidade (é por ele que o painel procura,
+   * e ele casa com o shortname); este é o rótulo que a tela do jogo
+   * mostra ao jogador. Ver `game/item-catalog.ts`.
+   *
+   * Ausente ou `null` = o jogo não traduz este item, OU a varredura
+   * é anterior ao campo (plugin velho, catálogo de antes da
+   * migração 055). Nos dois casos a tela cai no `displayName`.
+   */
+  readonly displayNamePtBr?: string | null | undefined;
   readonly itemId: number;
   readonly category: string;
   readonly maxStack: number;
@@ -94,6 +106,15 @@ export interface ItemInput {
 
 /** Um item guardado, com o que só a tabela sabe. */
 export interface ItemRecord extends ItemInput {
+  /**
+   * `null` = o jogo não traduz este item. Ver
+   * `ItemInput.displayNamePtBr`.
+   *
+   * Lido sempre — quem veio da tabela tem a coluna, mesmo vazia.
+   * É isso que deixa a tela escrever `displayNamePtBr ?? displayName`
+   * sem precisar saber se o campo existe.
+   */
+  readonly displayNamePtBr: string | null;
   /** `null` = ninguém perguntou ainda. Ver `ItemInput.consumable`. */
   readonly consumable: boolean | null;
   /** `null` = ninguém perguntou ainda. Ver `ItemInput.rarity`. */
@@ -166,6 +187,8 @@ export interface ItemScanResult {
 interface ItemRow {
   readonly shortname: string;
   readonly display_name: string;
+  /** O nome em português, ou NULL. Ver a migração 055. */
+  readonly display_name_ptbr: string | null;
   readonly item_id: number;
   readonly category: string;
   readonly max_stack: number;
@@ -193,10 +216,10 @@ interface ItemRow {
  */
 const UPSERT_ITEM = `
 INSERT INTO items
-     (shortname, display_name, item_id, category, max_stack, has_condition, consumable,
-      rarity, first_seen, last_seen)
-     VALUES (@shortname, @display_name, @item_id, @category, @max_stack, @has_condition,
-             @consumable, @rarity, @at, @at)
+     (shortname, display_name, display_name_ptbr, item_id, category, max_stack, has_condition,
+      consumable, rarity, first_seen, last_seen)
+     VALUES (@shortname, @display_name, @display_name_ptbr, @item_id, @category, @max_stack,
+             @has_condition, @consumable, @rarity, @at, @at)
 ON CONFLICT (shortname) DO UPDATE SET
      display_name  = excluded.display_name,
      item_id       = excluded.item_id,
@@ -223,6 +246,18 @@ ON CONFLICT (shortname) DO UPDATE SET
      -- string, e a crase do comentario FECHA a string. Foi assim
      -- que o agente parou de subir em 06/09/2026.)
      rarity        = coalesce(excluded.rarity, items.rarity),
+     -- O mesmo coalesce, e pelo mesmo motivo: um plugin anterior a
+     -- 07/09/2026 responde sem o nome em português, e gravar o nulo
+     -- por cima faria a tela do jogo voltar ao inglês toda vez que
+     -- um servidor desatualizado fosse o primeiro a subir.
+     --
+     -- Isto guarda um efeito colateral que é preciso saber: item
+     -- que o JOGO deixasse de traduzir num update ficaria com o
+     -- nome antigo aqui para sempre. É o preço de não esquecer, e é
+     -- o mesmo que consumable e rarity já pagam — a alternativa,
+     -- deixar o servidor velho apagar o que o novo descobriu, é
+     -- pior e acontece com muito mais frequência.
+     display_name_ptbr = coalesce(excluded.display_name_ptbr, items.display_name_ptbr),
      last_seen     = excluded.last_seen
 `;
 
@@ -394,6 +429,10 @@ export class ItemsRepository {
         upsert.run({
           shortname: item.shortname,
           display_name: item.displayName,
+          // `?? null` e nao `?? item.displayName`: a coluna guarda
+          // "o jogo traduz este item?", e repetir o ingles aqui
+          // apagaria a diferenca entre traduzido e nao traduzido.
+          display_name_ptbr: item.displayNamePtBr ?? null,
           item_id: item.itemId,
           category: item.category,
           max_stack: item.maxStack,
@@ -472,6 +511,10 @@ function toItem(row: ItemRow, scannedAt: number | null): ItemRecord {
   return {
     shortname: row.shortname,
     displayName: row.display_name,
+    // `null` = o jogo não traduz este item (ou o plugin que gravou
+    // é anterior à migração 055). Quem lê cai no `displayName` —
+    // ver o cabeçalho daquela migração.
+    displayNamePtBr: row.display_name_ptbr,
     itemId: row.item_id,
     category: row.category,
     maxStack: row.max_stack,
