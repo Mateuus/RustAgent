@@ -685,8 +685,9 @@ namespace Oxide.Plugins
         //  nenhum, e a primeira pagina.
         //
         //  "displayNamePtBr" SO APARECE quando o jogo tem o nome
-        //  traduzido - ~84% dos itens, MEDIDO. Ausente e nulo sao a
-        //  mesma coisa para quem le: use o "displayName".
+        //  traduzido - 1.255 de 1.259 itens, MEDIDO em producao.
+        //  Ausente e nulo sao a mesma coisa para quem le: use o
+        //  "displayName".
         // ========================================================
         [ConsoleCommand(ItemsCommand)]
         private void CommandItems(ConsoleSystem.Arg arg)
@@ -857,7 +858,7 @@ namespace Oxide.Plugins
 
             // A cobertura da traducao numa linha, para que uma queda
             // dela apareca no console em vez de virar tela em ingles
-            // sem explicacao. MEDIDO no server01: ~84% traduzidos.
+            // sem explicacao. MEDIDO em producao: 1255 de 1259.
             Puts("Nome em portugues: " + (catalog.Count - translationMissing - translationFailed) +
                  " de " + catalog.Count + " item(ns). Sem traducao no jogo: " + translationMissing +
                  (translationFailed > 0
@@ -996,8 +997,8 @@ namespace Oxide.Plugins
         // E a traducao nao precisa ser inventada: ela ja esta no
         // servidor. MEDIDO no server01, dentro de
         // Bundles/shared/content.bundle, em
-        // assets/localization/pt-br/engine.json - 7.512 chaves, das
-        // quais 1.058 dos 1.259 itens do catalogo (84%).
+        // assets/localization/pt-br/engine.json (7.512 chaves).
+        // MEDIDO em producao: 1.255 dos 1.259 itens do catalogo.
         //
         // Translate.GetServerTranslation(token, lang) e o que le
         // esse arquivo; "pt-BR" esta na lista allServerLanguages do
@@ -1017,8 +1018,9 @@ namespace Oxide.Plugins
         // outros nao ("scrap" e "scrap.name", "gears" e
         // "gears.name"). Por isso a chave sai de
         // displayName.token, que e o que o jogo usa - montar a
-        // chave a partir do shortname perderia 19 pontos de
-        // cobertura.
+        // chave a partir do shortname derrubaria a cobertura de
+        // 1.255 para 1.058 itens - 197 a menos, quase todos os que
+        // usam a forma "<shortname>.name".
         //
         // Vazio quando o item nao tem traducao (veiculos e itens
         // internos, na maioria). O agente cai no ingles, que e o

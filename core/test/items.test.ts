@@ -555,8 +555,8 @@ describe('o nome em português do catálogo', () => {
   });
 
   it('o item que o JOGO não traduz fica nulo, e a tela cai no inglês', async () => {
-    // Veículos e itens internos não têm tradução — 201 dos 1.259,
-    // MEDIDO. Nulo aqui não é defeito: é o que faz a tela mostrar
+    // 4 dos 1.259 itens não têm tradução no jogo, MEDIDO em
+    // produção. Nulo aqui não é defeito: é o que faz a tela mostrar
     // o inglês de sempre em vez de um rótulo vazio.
     harness.game.catalog = [AK];
 

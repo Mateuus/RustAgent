@@ -19,8 +19,9 @@ describe('o nome do item na tela do jogo', () => {
   });
 
   it('é o inglês quando o jogo NÃO traduz o item', () => {
-    // 201 dos 1.259 itens do catálogo — veículos e itens internos,
-    // na maioria. Para eles a tela mostra o que já mostrava.
+    // 4 dos 1.259 itens do catálogo, MEDIDO em produção. São
+    // poucos, e é por isso que este caminho precisa de teste: um
+    // ramo que roda em 4 casos de 1.259 ninguém vê quebrado.
     expect(screenLabelOf({ displayName: 'Sedan', displayNamePtBr: null })).toBe('Sedan');
   });
 

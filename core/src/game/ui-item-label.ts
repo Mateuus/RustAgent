@@ -33,10 +33,14 @@
 //
 //  ####  E A QUEDA É PARA O INGLÊS, NUNCA PARA O VAZIO  ####
 //
-//  201 dos 1.259 itens do catálogo não têm tradução no jogo
-//  (veículos e itens internos, na maioria) — MEDIDO. Para eles o
-//  rótulo é o inglês, que é exatamente o que a tela já mostrava:
-//  item sem tradução não regride, só não melhora.
+//  4 dos 1.259 itens do catálogo não têm tradução no jogo — MEDIDO
+//  em produção. Para eles o rótulo é o inglês, que é exatamente o
+//  que a tela já mostrava: item sem tradução não regride, só não
+//  melhora.
+//
+//  São poucos, e é justamente por isso que a queda precisa estar
+//  escrita e testada: um caminho que roda em 4 casos de 1.259 é um
+//  caminho que ninguém percebe quebrado.
 // ============================================================
 
 /** O que este módulo precisa saber de um item. */

@@ -4214,9 +4214,12 @@ DELETE FROM meta WHERE key = 'items.protocol';
 //  melhor que fosse, diria "Rifle de Assalto" onde o inventário
 //  diz outra coisa — e o jogador não acharia o item.
 //
-//  MEDIDO no server01: 1.058 dos 1.259 itens do catálogo têm
-//  tradução (84%). Os 201 restantes são veículos e itens internos
-//  (`sedan`, `2module.car`, `ptboat`), que ficam NULOS.
+//  MEDIDO em produção (07/09/2026, com o plugin 0.4.0): 1.255 dos
+//  1.259 itens do catálogo têm tradução. Só 4 ficam NULOS.
+//
+//  O número é alto porque a chave é o `displayName.token`, e não o
+//  shortname: casando por shortname a cobertura cai para 84%, e é
+//  esse o erro que uma leitura apressada do bundle produz.
 //
 //  ####  E POR QUE NULO NÃO É DEFEITO  ####
 //

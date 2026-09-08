@@ -106,8 +106,8 @@ export const rustItemSchema = z.object({
    * A tradução é a OFICIAL, e vem do próprio servidor: o plugin lê
    * `Translate.GetServerTranslation(token, "pt-BR")`, que resolve
    * `assets/localization/pt-br/engine.json` de dentro do
-   * `content.bundle`. MEDIDO no server01: 1.058 dos 1.259 itens do
-   * catálogo (84%).
+   * `content.bundle`. MEDIDO em produção: 1.255 dos 1.259 itens do
+   * catálogo — só 4 ficam sem.
    *
    * ####  OPCIONAL PELA MESMA RAZÃO DO `consumable`  ####
    *
