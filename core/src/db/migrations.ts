@@ -4252,6 +4252,36 @@ DELETE FROM meta WHERE key = 'items.protocol';
 `;
 
 // ------------------------------------------------------------
+//  056  -  O PEDIDO DE CANCELAMENTO SOBREVIVE AO REINÍCIO
+//
+//  ####  PEDIDO E DESFECHO SÃO DOIS FATOS  ####
+//
+//  A rota de cancelar, com a operação viva, só chamava
+//  \`operation.cancel()\`: quem gravava \`cancelled\` era a máquina de
+//  passos, no fim — para não haver duas verdades sobre o mesmo
+//  desfecho. Isso deixava uma janela em que o admin JÁ tinha
+//  cancelado e a linha ainda dizia \`running\`.
+//
+//  A janela não é teórica: o \`backup\` de um save grande leva
+//  minutos, e o cancelamento pedido no meio dele só vira desfecho
+//  quando o passo termina.
+//
+//  Enquanto um agente morto era o fim da execução, a janela não
+//  fazia mal — a linha virava \`failed\` e alguém decidia. Com a
+//  retomada automática do boot (wipe/recover.ts), ela passou a ser
+//  o caminho para o pior resultado possível: o agente voltando e
+//  TERMINANDO um wipe que o admin mandou parar.
+//
+//  Esta coluna é o pedido, e não o desfecho. Ela é gravada na hora
+//  do clique, sobrevive ao restart, e a máquina de passos continua
+//  dona do \`status\` — as duas verdades continuam sendo uma só.
+// ------------------------------------------------------------
+const WIPE_RUN_CANCEL_REQUESTED_SCHEMA = `
+ALTER TABLE wipe_runs
+  ADD COLUMN cancel_requested_at INTEGER;
+`;
+
+// ------------------------------------------------------------
 //  046  -  AS QUESTS
 //
 //  ####  A DEFINIÇÃO É DE REDE; O PROGRESSO É DE SERVIDOR  ####
@@ -5454,6 +5484,9 @@ export const MIGRATIONS: readonly Migration[] = [
   // 07/09/2026: a tela do jogo para de mostrar o nome do item em
   // inglês para quem joga em português.
   { id: 55, name: 'items-display-name-ptbr', sql: ITEMS_DISPLAY_NAME_PTBR_SCHEMA },
+  // 08/09/2026: com a retomada automática do boot, o cancelamento
+  // do admin precisou passar a sobreviver ao reinício do agente.
+  { id: 56, name: 'wipe-run-cancel-requested', sql: WIPE_RUN_CANCEL_REQUESTED_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

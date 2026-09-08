@@ -225,6 +225,7 @@ function run(over: Partial<WipeRunRecord> = {}): WipeRunRecord {
     // `null` = esta execução não decidiu sobre a temporada do
     // ranking, e vale a configuração do servidor. Ver a migração 034.
     openRankingSeason: null,
+    cancelRequestedAt: null,
     steps: [],
     ...over,
   };

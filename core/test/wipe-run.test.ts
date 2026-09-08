@@ -23,7 +23,9 @@
 //    5. `configurar` chama `updateSettings`, e nunca escreve .ini;
 //    6. o passo `avisar` chama o locutor uma vez por offset, e um
 //       aviso que EXPLODE não derruba o wipe;
-//    7. um `apagar` com o servidor de pé é RECUSADO;
+//    7. o servidor que VOLTOU ao ar entre a morte e a retomada é
+//       parado de novo, e o wipe acontece — mas nada é apagado
+//       quando o `parar` não consegue derrubá-lo;
 //    8. o relógio que dispara o plano vencido: ele dispara ANTES da
 //       hora (pela folga dos avisos), nunca duas vezes o mesmo
 //       plano, tenta de novo depois de uma recusa, e NUNCA lança.
@@ -756,6 +758,45 @@ describe('`keep`: o mundo NÃO muda', () => {
     expect(finished.mapAfter?.mapPoolId).toBeNull();
     expect(finished.mapAfter?.drawn).toBe(false);
     expect(finished.steps.find((step) => step.step === 'configurar')?.message).toContain('MANTER');
+  });
+
+  it('a retomada PARA DE NOVO o servidor que voltou ao ar, e o wipe acontece', async () => {
+    // ####  O CASO QUE MATAVA O WIPE EM SILÊNCIO  ####
+    //
+    // O agente morre depois do `parar`, e entre a morte e a
+    // retomada alguém sobe o servidor — um clique, um script de
+    // boot da máquina. Pulando o `parar` por ele estar `done`,
+    // ninguém derruba esse processo, e o `apagar` recusa mexer no
+    // save com o jogo de pé: o wipe morria ali, com a execução
+    // falhada e o mundo intacto. Medido em simulação, 08/09/2026.
+    const s = await scenario();
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'wipe' });
+
+    // O que sobrou da sessão que morreu: os três primeiros passos
+    // concluídos, e o `apagar` ainda por fazer.
+    s.runs.markStep(run.id, 'avisar', 'done');
+    s.runs.markStep(run.id, 'esvaziar', 'done');
+    s.runs.markStep(run.id, 'parar', 'done');
+
+    // E o servidor está DE PÉ de novo.
+    s.control.running = true;
+
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+    });
+
+    // O `parar` correu de novo — é a pré-condição do `apagar`, e
+    // não um trabalho que se faz uma vez. (No fim o servidor está
+    // no ar de novo, porque o passo `subir` o religa.)
+    expect(s.control.stops).toHaveLength(1);
+
+    // E o wipe ACONTECEU: o mundo velho não está mais lá.
+    expect(retomado.steps.find((step) => step.step === 'apagar')?.status).toBe('done');
+    expect(await names(s.saveDir)).not.toContain('proceduralmap.4000.12345.287.sav');
   });
 
   it('a retomada não consome fila nem depois de `configurar` ter passado', async () => {
@@ -1755,7 +1796,15 @@ describe('a retomada', () => {
     expect(s.settings).toHaveLength(0);
   });
 
-  it('`apagar` RECUSA com o servidor de pé', async () => {
+  it('nada é apagado quando o servidor não desce', async () => {
+    // ####  A SEGUNDA LINHA, PARA QUANDO O `parar` NÃO RESOLVE  ####
+    //
+    // Alguém subiu o servidor à mão entre a falha e a retomada. O
+    // `parar` corre de novo (é pré-condição, e não histórico), mas
+    // aqui ele NÃO consegue derrubar o processo — e é justamente
+    // essa a hora em que o save não pode ser tocado: o Rust mantém
+    // os arquivos abertos e reescreve no `saveinterval` seguinte o
+    // que for apagado.
     const s = await scenario();
     const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
 
@@ -1763,8 +1812,9 @@ describe('a retomada', () => {
       s.runs.markStep(run.id, step, 'done', 'ok');
     }
 
-    // Alguém subiu o servidor à mão entre a falha e a retomada.
     s.control.running = true;
+    // Um `stop` que não derruba: o processo do jogo ignorou o quit.
+    s.control.stop = () => Promise.resolve();
 
     await expect(
       s.runner.run({

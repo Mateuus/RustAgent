@@ -205,6 +205,20 @@ export interface WipeRunRecord {
    * significa "wipe feito à mão", e não "execução número zero".
    */
   readonly openRankingSeason: boolean | null;
+  /**
+   * Quando o admin PEDIU o cancelamento. `null` = ninguém pediu.
+   *
+   * ####  ELE NÃO É O `status`  ####
+   *
+   * O desfecho continua sendo da máquina de passos: ela é quem
+   * grava `cancelled` ao terminar de sair. Este carimbo é o outro
+   * fato — o do clique —, e existe porque ele precisa sobreviver ao
+   * reinício do agente: sem ele, o boot não tem como distinguir uma
+   * execução interrompida de uma que o admin mandou parar, e a
+   * retomada automática terminaria um wipe cancelado. Ver a
+   * migração 056 e `wipe/recover.ts`.
+   */
+  readonly cancelRequestedAt: number | null;
   readonly steps: readonly WipeRunStepRecord[];
 }
 
@@ -326,6 +340,7 @@ interface RunRow {
   readonly save_created_after: number | null;
   readonly message: string | null;
   readonly open_ranking_season: number | null;
+  readonly cancel_requested_at: number | null;
 }
 
 interface StepRow {
@@ -341,7 +356,8 @@ interface StepRow {
 
 const RUN_COLUMNS = `id, server_id, plan_id, operation_id, kind, bp_policy, full_wipe,
   started_at, wipe_at, finished_at, status, backup_path, map_before, map_after,
-  map_decision, save_created_before, save_created_after, message, open_ranking_season`;
+  map_decision, save_created_before, save_created_after, message, open_ranking_season,
+  cancel_requested_at`;
 
 /**
  * ####  CADA SERVIDOR TEM AS SUAS EXECUÇÕES  ####
@@ -751,6 +767,26 @@ export class WipeRunsRepository {
   }
 
   /**
+   * Carimba o PEDIDO de cancelamento do admin.
+   *
+   * Escrito na hora do clique, mesmo com a operação viva — e sem
+   * tocar no `status`, que continua sendo da máquina de passos. É o
+   * que faz o cancelamento sobreviver a um reinício do agente no
+   * meio de um passo longo. Ver `WipeRunRecord.cancelRequestedAt`.
+   */
+  requestCancel(serverId: string, id: number, now: number = Date.now()): WipeRunRecord {
+    this.#db
+      .prepare(
+        `UPDATE wipe_runs
+            SET cancel_requested_at = COALESCE(cancel_requested_at, @now), updated_at = @now
+          WHERE server_id = @server_id AND id = @id`,
+      )
+      .run({ server_id: serverId, id, now });
+
+    return this.#require(serverId, id);
+  }
+
+  /**
    * A execução interrompida vira `failed`, e a tela oferece retomar.
    *
    * ####  DEIXÁ-LA `running` PARA SEMPRE É A ÚNICA SAÍDA PIOR  ####
@@ -838,6 +874,7 @@ export class WipeRunsRepository {
       // A coluna nasceu na migração 034: linha antiga tem `NULL`, e
       // `NULL` já é a resposta certa para ela — "não decidi".
       openRankingSeason: row.open_ranking_season === null ? null : row.open_ranking_season === 1,
+      cancelRequestedAt: row.cancel_requested_at,
       steps: steps
         .filter((step): step is StepRow & { step: WipeRunStep } =>
           (WIPE_RUN_STEPS as readonly string[]).includes(step.step),
