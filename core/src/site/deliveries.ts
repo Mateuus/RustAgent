@@ -205,7 +205,19 @@ const payloadSchemas = {
       .refine((value) => !value.endsWith('.prefab'), {
         message: 'o prefab não leva a extensão .prefab',
       }),
-    fuel: z.number().int().min(0).max(1000),
+    /**
+     * Quanto o SITE pediu. Ausente é legítimo, e vira zero.
+     *
+     * ####  EXIGIR O CAMPO SERIA PIOR DO QUE NÃO TER  ####
+     *
+     * Obrigatório, um payload sem `fuel` reprovava no schema e a
+     * entrega inteira ACKava `PAYLOAD_INVALID`: o jogador pagava no
+     * site e não recebia veículo nenhum. Zero aqui não deixa o
+     * veículo seco — a entrega troca o zero por
+     * `DEFAULT_VEHICLE_FUEL`; o campo só serve para o site pedir
+     * outro tanto.
+     */
+    fuel: z.number().int().min(0).max(1000).default(0),
   }),
 } as const;
 

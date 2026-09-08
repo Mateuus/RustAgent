@@ -73,6 +73,15 @@ const KINDS: readonly { value: OfferKind; label: string; hint: string }[] = [
   { value: 'vehicle', label: 'Veículo', hint: 'nasce ao lado do jogador, se houver espaço' },
 ];
 
+/**
+ * O combustível padrão da ENTREGA, repetido aqui para a tela.
+ *
+ * Quem manda é `DEFAULT_VEHICLE_FUEL` em core/src/store/service.ts —
+ * o painel não importa do agente. Se o número mudar lá e não aqui, o
+ * formulário passa a mentir; o veículo continua abastecido.
+ */
+const DEFAULT_VEHICLE_FUEL = 100;
+
 const BADGES: readonly { value: OfferBadge | ''; label: string }[] = [
   { value: '', label: 'sem etiqueta' },
   { value: 'promo', label: 'PROMO' },
@@ -120,7 +129,7 @@ export function StoreOfferDialog({
     offer?.vip?.days === null || offer?.vip?.days === undefined ? '30' : String(offer.vip.days),
   );
   const [prefab, setPrefab] = useState(offer?.vehicle?.prefab ?? '');
-  const [fuel, setFuel] = useState(offer?.vehicle?.fuel ?? 0);
+  const [fuel, setFuel] = useState(offer?.vehicle?.fuel ?? DEFAULT_VEHICLE_FUEL);
 
   const [busy, setBusy] = useState(false);
 
@@ -471,7 +480,10 @@ export function StoreOfferDialog({
                 disabled={busy}
                 onChange={(event) => setFuel(Math.max(0, Number(event.target.value)))}
               />
-              <p className="mt-1 text-2xs text-muted">0 = sai seco.</p>
+              <p className="mt-1 text-2xs leading-relaxed text-muted">
+                Nenhum veículo sai seco: com 0 aqui, o agente entrega {DEFAULT_VEHICLE_FUEL} de low
+                grade. Qualquer outro número é entregue como está.
+              </p>
             </div>
           </div>
         )}

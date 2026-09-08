@@ -59,7 +59,7 @@
 // ============================================================
 
 import type { OfferBadge, StoreOffer } from '../db/store-repository.js';
-import type { StoreCatalogEntry } from '../store/service.js';
+import { vehicleFuelOf, type StoreCatalogEntry } from '../store/service.js';
 import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
 import { SLOTS, fillTemplate } from './ui-store-template.js';
@@ -1643,9 +1643,12 @@ function offerSummary(offer: StoreOffer): string {
   if (offer.kind === 'vehicle') {
     const prefab = offer.vehicle?.prefab ?? 'veículo';
 
-    return offer.vehicle === null || offer.vehicle.fuel === 0
-      ? `${prefab}, sem combustível`
-      : `${prefab}, com ${formatNumber(offer.vehicle.fuel)} de combustível`;
+    // O que a tela promete é o que a ENTREGA faz, e a entrega troca
+    // o zero pelo padrão: "sem combustível" virou mentira no dia em
+    // que ele passou a existir.
+    const fuel = vehicleFuelOf(offer.vehicle?.fuel ?? 0);
+
+    return `${prefab}, com ${formatNumber(fuel)} de combustível`;
   }
 
   if (offer.kind === 'bundle') {

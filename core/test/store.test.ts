@@ -44,7 +44,11 @@ import {
 } from '../src/game/ui-store-screens.js';
 import { createLogger } from '../src/logger.js';
 import type { OpsRcon } from '../src/ops/service.js';
-import { StoreService, type StoreCatalogEntry } from '../src/store/service.js';
+import {
+  DEFAULT_VEHICLE_FUEL,
+  StoreService,
+  type StoreCatalogEntry,
+} from '../src/store/service.js';
 import { LocalWallet, type Wallet, type WalletChange } from '../src/store/wallet.js';
 import type { UiElement, UiScreen } from '../src/types/ui-document.js';
 
@@ -384,6 +388,43 @@ describe('as ofertas que não são item', () => {
     // antes é o que evita débito, estorno e susto no extrato.
     expect(harness.wallets.getBalance(STEAM_ID)).toBe(10_000);
     expect(harness.repository.listPurchases({ steamId: STEAM_ID })).toHaveLength(0);
+  });
+
+  it('veículo cadastrado SEM combustível nasce com o padrão', async () => {
+    const harness = setup({ balance: 10_000 });
+
+    // É o que está gravado hoje em toda oferta antiga: a coluna
+    // nasceu com DEFAULT 0 na migração 035.
+    const id = seed(harness, {
+      kind: 'vehicle',
+      name: 'Minicopter',
+      items: [],
+      vehicle: { prefab: 'minicopter', fuel: 0 },
+    });
+
+    await harness.service.buy({ serverId: SERVER, steamId: STEAM_ID, offerId: id, quantity: 1 });
+
+    expect(harness.server.commands).toContain(
+      `origemz.vehicle.spawn ${STEAM_ID} minicopter ${String(DEFAULT_VEHICLE_FUEL)}`,
+    );
+  });
+
+  it('o número cadastrado manda: o padrão só substitui o zero', async () => {
+    const harness = setup({ balance: 10_000 });
+
+    // 50 é MENOS que o padrão e mesmo assim vale: quem escreveu um
+    // número pequeno quis um tanque pequeno. O que o padrão conserta
+    // é o veículo que sairia SECO.
+    const id = seed(harness, {
+      kind: 'vehicle',
+      name: 'Minicopter na reserva',
+      items: [],
+      vehicle: { prefab: 'minicopter', fuel: 50 },
+    });
+
+    await harness.service.buy({ serverId: SERVER, steamId: STEAM_ID, offerId: id, quantity: 1 });
+
+    expect(harness.server.commands).toContain(`origemz.vehicle.spawn ${STEAM_ID} minicopter 50`);
   });
 });
 
