@@ -1145,6 +1145,104 @@ Como no `quests.ts`, elas existem aqui porque só a rota tem os dados para vê-l
 
 ## 11 — O painel: as telas
 
+### 11.0 O estudo, antes de uma linha de tela
+
+Pedido do dono, em 09/09/2026: *"quando chegar no painel tem que ser bem
+detalhado e trabalhado, um design e construção agradável, não de qualquer
+jeito — faça estudo"*.
+
+#### Quem usa, e quando
+
+O admin, sozinho, depois de um wipe, querendo pôr uma masmorra nova no mapa
+antes de os jogadores entrarem. **Ele não leu documentação nenhuma** e não vai
+ler. O que ele tem é a tela.
+
+#### O que a tela responde, nesta ordem
+
+| # | A pergunta | O que responde |
+|---|---|---|
+| 1 | O que existe? | a lista de masmorras, com o que cada uma é |
+| 2 | Tem alguma no ar agora? | o cartão de estado vivo, no topo |
+| 3 | Como faço uma? | o botão, e a trilha de seis passos |
+| 4 | Isso que montei vai dar o quê? | **a prévia ao vivo** |
+| 5 | Funcionou? | o assistente que detecta (§12.1.1) |
+| 6 | Por que não funcionou? | o histórico, com o motivo em português |
+
+#### As cinco armadilhas deste domínio
+
+Cada uma delas produz uma tela ruim se ignorada, e nenhuma é óbvia:
+
+1. **São trinta campos.** Numa tela só, ninguém preenche o décimo. → a trilha de
+   seis passos (§12.1);
+
+2. **Os números não significam nada sozinhos.** "Densidade de NPC no corredor:
+   20" é um número sem tradução; o admin mexe nele por tentativa e erro, wipe
+   após wipe. → **a prévia ao vivo** traduz: *"≈ 15 salas, ~45 células, ~14 NPCs
+   e 22 caixas"*. É a mesma lição que o editor de loot já pagou
+   (`chance-explainer.tsx`);
+
+3. **O vão entre o painel e o jogo.** O admin salva e nada acontece na tela dele
+   — a masmorra só existe depois de alguém digitar um comando lá dentro. → o
+   passo ⑥ que **fica olhando** e termina sozinho;
+
+4. **A planta sem alçapão sobe bonita.** O erro só aparece 60 segundos depois,
+   no jogo. → o selo de alçapão em cada linha do acervo, e a recusa no upload
+   com a frase que ensina onde fica a marca;
+
+5. **A cor da sala é o tier, não decoração.** Verde/azul/vermelha é a única
+   linguagem que o jogador aprende sem ler nada. Três campos numéricos soltos
+   perdem isso. → a **barra de proporção**, colorida, ao lado dos pesos.
+
+#### A ideia que amarra: a prévia usa o algoritmo do jogo
+
+A peça central da tela é uma **prévia ao vivo**, ao lado dos controles, que
+desenha uma masmorra de exemplo com aqueles parâmetros:
+
+```
+   ┌─ O QUE ISSO PRODUZ ────────────────────────┐
+   │   . . A A A . . . . .                      │
+   │   . . A A A . # # # #     ≈ 15 salas       │
+   │   . # # # . . . . # .     ~78 células      │
+   │   E # . . B B . . # .     ~260 blocos      │
+   │   . # . . B B . . # .                      │
+   │                            ●●●●●●○○○○      │
+   │   [sortear outra]          9 verdes        │
+   │                            5 azuis         │
+   │                            1 vermelha      │
+   └────────────────────────────────────────────┘
+```
+
+**E ela não é uma aproximação.** É o `BuildLayout` do `OrigemZDungeon.cs`
+portado para TypeScript — o mesmo corredor que serpenteia, as mesmas salas
+penduradas, as mesmas invariantes. O admin vê a masmorra que vai nascer, e não
+um desenho decorativo.
+
+O código já existe em rascunho (`core/scripts/pluginlint/layout-check.mjs`, que
+roda 300 sorteios cobrando as invariantes). Aqui ele vira
+`panel/src/lib/dungeon-layout.ts`, e o §14.4 continua valendo: **as duas pontas
+são compiladas separadamente, e nada as amarra além do comentário.**
+
+#### O que o design system já decide, e não se discute
+
+Lido de `panel/src/app/globals.css`, que é rigoroso e documentado:
+
+- **cantos retos** (a escala inteira foi redefinida para 2–4px, justamente para
+  um `rounded-full` copiado de algum exemplo não virar pílula);
+- **barra vertical em `--rust-red`** marcando o começo de todo bloco, no lugar
+  de sombra ou canto;
+- **superfícies quase pretas**, bordas de 1px, tabelas densas;
+- **`--rust-red` mede 3.74:1 e NÃO serve para texto corrido.** Aviso é texto em
+  `--text` com ícone e borda coloridos. Vale para toda mensagem desta tela;
+- **identidade nunca por cor sozinha.** A sala vermelha tem a cor *e* o rótulo;
+  a barra de proporção tem a cor *e* o número.
+
+#### O que fica de fora desta frente, e por quê
+
+O **editor de grid** (desenhar célula a célula) é a frente E: ele é a peça mais
+cara da parte visual, e sem ele já dá para criar masmorra procedural pelo painel
+inteiro. A prévia desta frente é o alicerce dele — o mesmo SVG, o mesmo
+`dungeon-layout.ts`, só que somente-leitura.
+
 ### 11.1 Onde ele entra na navegação
 
 Item novo na sidebar, entre **Loot** e **Missões** — os três são "o que a casa
@@ -1591,16 +1689,78 @@ masmorra**, e é ela que sabe qual planta serve de entrada.
    conserto óbvio, no dia em que apertar, é mandar a cada servidor só as
    masmorras dos eventos ligados nele.
 
-### Frente D — A tela
+### Frente D — A tela · **PRONTA**
 
-As quatro abas, o editor de receita, a lista de plantas, o histórico. **Sem** o
-editor de grid — ele é a frente E.
+As três abas, o editor de seis passos, o acervo de plantas, o histórico — e,
+por decisão tomada durante a construção, **a ajuda junto** (o que era a frente
+F). Separá-las produziria uma tela que seria reformada em seguida: trinta
+campos sem `(?)` não são preenchíveis, e o dono pediu acabamento.
 
-### Frente E — O editor de planta
+| | |
+|---|---|
+| `/eventos` | três abas, cartão do que está no ar, primeiro uso com três caminhos |
+| Editor | trilha de seis passos, com a **prévia ao vivo** ao lado |
+| `lib/dungeon-layout.ts` | o `BuildLayout` portado — a prévia usa o algoritmo do servidor |
+| Acervo | as sete plantas, com selo de alçapão, e **vista de cima** de cada uma |
+| `ui/help-tip.tsx`, `ui/steps.tsx` | peças novas do design system |
+| `lib/help/dungeons.tsx` | 17 verbetes, cada um com exemplo e limite |
 
-O grid em SVG, as ferramentas, a validação ao vivo, o `blueprint.ts` com as
-regras. É a frente mais cara da parte visual e a única que dá para adiar sem
-tirar valor: com A+B+C+D já dá para criar dungeon procedural pelo painel.
+**Cinco defeitos que só apareceram olhando a tela**, e cada um vale a regra:
+
+1. **O padding do wrapper.** Eu pus `p-4`; nenhuma outra tela tem. Dá para ver
+   de relance com `/loot` e `/eventos` lado a lado;
+2. **A trilha truncou os rótulos.** `flex-1` + `truncate` com seis passos num
+   modal estreito virou `IDE… TA… SA… INI… EN… CO…`. Agora cada passo tem a
+   largura que precisa e o trilho é que rola;
+3. **O `Dialog` tem `w-[min(30rem,92vw)]` próprio**, e `max-w-5xl` não alarga
+   nada quando a largura já é menor. Era a causa do defeito acima;
+4. **O modal fechava sozinho ao editar.** Um `<select>` nativo, ao fechar,
+   dispara um clique cujo `target` é o `<dialog>` — e o teste de "clicou no
+   backdrop" o tratava como clique fora. Trinta campos iam junto. Daí o modo
+   `guarded`: dois cliques fora, e o Escape não fecha;
+5. **Os tooltips eram cortados.** Com `absolute`, o `overflow-y-auto` do corpo
+   do modal os cortava, e um `(?)` perto da borda jogava metade do texto para
+   fora da tela. Agora a bolha é `fixed` e a posição é medida, presa dentro da
+   janela.
+
+### Frente E — O editor de planta · **O PAINEL ESTÁ PRONTO**
+
+Pedido do dono, em 09/09/2026: *"eu vi que colocou pixel aí — o admin pode
+desenhar, de uma maneira fácil"*. Ele leu a prévia como uma tela de pixel art,
+e estava certo: **é exatamente isso que ela é**.
+
+`components/dungeons/dungeon-grid-editor.tsx`: uma tela de 24×24, cinco cores
+(apagar, corredor, verde, azul, vermelha), pintura por arrasto, desfazer e
+refazer. Duas decisões que fazem dele *fácil*:
+
+- **as portas nascem sozinhas** onde uma sala encosta no corredor. A
+  alternativa — uma ferramenta "porta" — só criaria um jeito novo de errar:
+  desenhar o cômodo e esquecer a porta produz uma sala perfeita em que ninguém
+  entra;
+- **as salas se descobrem sozinhas.** O admin pinta COR; quem separa "duas
+  salas vermelhas" de "uma vermelha grande" é o preenchimento por vizinhança na
+  hora de salvar. Pedir para nomear cada cômodo transformaria um desenho de dois
+  minutos num formulário.
+
+E **sortear também é um jeito de começar**: o botão enche a tela com um traçado
+do gerador, e dali o admin apaga, estica e repinta. Gerar é o primeiro traço de
+desenhar — os dois caminhos que o dono pediu, no mesmo lugar.
+
+**O verificador**, também pedido: quatro defeitos que **sobem normalmente no
+jogo** e por isso precisam ser cobrados no desenho —
+
+| O que | Por que não dá erro no servidor |
+|---|---|
+| sala que não encosta em corredor | ela é construída; simplesmente não tem porta |
+| corredor que não chega à entrada | é construído; ninguém nunca chega lá |
+| sala de uma célula com corredor em três lados | vira um cômodo quase sem parede |
+| célula solta, sem vizinho | vira um bloco flutuando no meio do nada |
+
+**O que falta para o modo planta funcionar de ponta a ponta:** o
+`OrigemZDungeon.cs` ainda **não constrói a partir do grid** — o `GenerateRooms`
+só sorteia. Ler o `grid` do sync e erguer aquelas células é a próxima peça, e é
+pequena: o construtor já trabalha em células, é o `Layout()` que passa a vir
+pronto em vez de sorteado.
 
 ### Frente F — A ajuda
 

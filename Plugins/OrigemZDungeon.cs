@@ -651,6 +651,27 @@ namespace Oxide.Plugins
             dungeon.watchdog?.Destroy();
             dungeon.watchdog = null;
 
+            // ####  AVISAR QUE ACABOU NÃO É OPCIONAL  ####
+            //
+            // MEDIDO em 09/09/2026: sem esta linha, um `ozdungeon
+            // stop` derruba a masmorra no jogo e deixa a run ABERTA
+            // no banco — para sempre. O painel passa a dizer "1 no
+            // ar" com o mapa vazio, e nada no sistema conserta isso
+            // sozinho.
+            //
+            // A masmorra que nunca chegou a ficar de pé (`ready`
+            // falso) não gera `ended`: quem falhou já reportou
+            // `failed`, e dois eventos para o mesmo desfecho fariam
+            // o histórico contar duas vezes.
+            if (dungeon.ready)
+            {
+                Report("ended", new Dictionary<string, object>
+                {
+                    ["reason"] = reason,
+                    ["entered"] = dungeon.inside.Count,
+                });
+            }
+
             // Quem está dentro sai ANTES de a estrutura sumir. Matar o
             // chão debaixo de um jogador a -90 o deixa caindo para
             // sempre, e ele volta como "preso no terreno".

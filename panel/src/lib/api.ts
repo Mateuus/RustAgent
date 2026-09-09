@@ -4851,7 +4851,215 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/betterloot/globals`,
       { method: 'PUT', body: input },
     ),
+
+  // ==========================================================
+  //  AS MASMORRAS
+  // ==========================================================
+
+  dungeons: () => api<{ dungeons: DungeonSummary[] }>('/api/dungeons'),
+
+  dungeon: (id: string) =>
+    api<{ dungeon: Dungeon }>(`/api/dungeons/${encodeURIComponent(id)}`),
+
+  /**
+   * As quatro receitas de fabrica.
+   *
+   * Elas NAO estao no banco: sao um modelo do qual o admin parte.
+   * E o que faz a tela valer alguma coisa no primeiro minuto -
+   * duplicar e mexer, em vez de encarar trinta campos em branco.
+   */
+  dungeonFactory: () => api<{ recipes: DungeonInput[] }>('/api/dungeons/factory'),
+
+  createDungeon: (body: DungeonInput) =>
+    api<{ dungeon: Dungeon }>('/api/dungeons', { method: 'POST', body }),
+
+  updateDungeon: (id: string, body: Omit<DungeonInput, 'id'>) =>
+    api<{ dungeon: Dungeon }>(`/api/dungeons/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  duplicateDungeon: (id: string, body: { id: string; name: string }) =>
+    api<{ dungeon: Dungeon }>(`/api/dungeons/${encodeURIComponent(id)}/duplicate`, {
+      method: 'POST',
+      body,
+    }),
+
+  removeDungeon: (id: string) =>
+    api<{ ok: true }>(`/api/dungeons/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  dungeonCommand: (id: string) =>
+    api<{ chat: string; console: string }>(`/api/dungeons/${encodeURIComponent(id)}/command`),
+
+  /**
+   * O olho do assistente.
+   *
+   * `since` e o momento em que o passo abriu: sem ele, a tela
+   * celebraria a construcao de ontem. Chamada a cada dois
+   * segundos, SO enquanto o passo esta aberto, e para no primeiro
+   * resultado.
+   */
+  dungeonRuns: (id: string, options: { serverId?: string; since?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) query.set('serverId', options.serverId);
+    if (options.since !== undefined) query.set('since', String(options.since));
+
+    const suffix = query.toString();
+
+    return api<{ runs: EventRun[] }>(
+      `/api/dungeons/${encodeURIComponent(id)}/runs${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  /** A lista NAO traz o `content`: as sete plantas somam 1,1 MB. */
+  dungeonBlueprints: () =>
+    api<{ blueprints: BlueprintSummary[] }>('/api/dungeon-blueprints'),
+
+  /**
+   * UMA planta, com o conteudo.
+   *
+   * So quem vai DESENHAR a construcao precisa disto - e por isso a
+   * leitura e sob demanda, ao abrir a previa, e nunca na listagem.
+   */
+  dungeonBlueprint: (id: string) =>
+    api<{ blueprint: BlueprintSummary & { content: string } }>(
+      `/api/dungeon-blueprints/${encodeURIComponent(id)}`,
+    ),
+
+  uploadBlueprint: (body: {
+    id: string;
+    name?: string;
+    kind: 'entrance' | 'base';
+    content: string;
+  }) => api<{ blueprint: BlueprintSummary }>('/api/dungeon-blueprints', { method: 'POST', body }),
+
+  removeBlueprint: (id: string) =>
+    api<{ ok: true }>(`/api/dungeon-blueprints/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** O historico de tudo que nasceu, com filtro. */
+  worldEventRuns: (options: { serverId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) query.set('serverId', options.serverId);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+
+    const suffix = query.toString();
+
+    return api<{ runs: EventRun[] }>(
+      `/api/world-events/runs${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  stopWorldEventRun: (runId: number) =>
+    api<{ pendingCommand: string }>(`/api/world-events/runs/${String(runId)}/stop`, {
+      method: 'POST',
+    }),
 };
+
+// ------------------------------------------------------------
+//  AS MASMORRAS — os tipos
+//
+//  Espelham `core/src/types/dungeons.ts` e
+//  `core/src/types/world-events.ts`. As duas pontas sao compiladas
+//  separadamente: um campo que o agente renomear e um TypeError no
+//  render, e a pagina inteira cai com "This page couldn't load".
+// ------------------------------------------------------------
+
+export type DungeonMode = 'recipe' | 'blueprint';
+export type RoomColor = 'green' | 'blue' | 'red';
+export type RoomDoor = 'wood' | 'metal' | 'toptier';
+
+export interface DungeonRoom {
+  key: string;
+  color: RoomColor;
+  npc: { min: number; max: number };
+  loot: { min: number; max: number };
+  crates: string[];
+  door: RoomDoor;
+  locked: boolean;
+}
+
+export interface DungeonInput {
+  id: string;
+  name: string;
+  description?: string | null;
+  mode: DungeonMode;
+  entranceBlueprint: string | null;
+  size: { min: number; max: number };
+  weights: { green: number; blue: number; red: number };
+  corridor: { npcDensity: number; lootDensity: number; crates: string[] };
+  grid: string[] | null;
+  npc: {
+    health: { min: number; max: number };
+    damageScale: number;
+    weapons: string[];
+    names: string[];
+  };
+  timeOfDay: number;
+  rooms: DungeonRoom[];
+}
+
+export interface Dungeon extends DungeonInput {
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A linha da lista. Sem `grid` e sem as salas. */
+export interface DungeonSummary {
+  id: string;
+  name: string;
+  mode: DungeonMode;
+  entranceBlueprint: string | null;
+  roomCount: number;
+  sizeMin: number;
+  sizeMax: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Uma planta do acervo, sem o conteudo. */
+export interface BlueprintSummary {
+  id: string;
+  name: string;
+  kind: 'entrance' | 'base';
+  entityCount: number;
+  byteSize: number;
+  /** Sem isto, a masmorra nao abre. E a coluna que importa. */
+  hasHatch: boolean;
+  origin: 'builtin' | 'import' | 'capture';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type RunStatus =
+  | 'scheduled'
+  | 'spawning'
+  | 'active'
+  | 'closing'
+  | 'ended'
+  | 'failed'
+  | 'cancelled';
+
+/** Um nascimento. `failureMessage` ja vem traduzido pela borda. */
+export interface EventRun {
+  id: number;
+  eventId: string;
+  serverId: string;
+  dungeonId: string | null;
+  status: RunStatus;
+  failureReason: string | null;
+  failureMessage?: string | null;
+  x: number | null;
+  z: number | null;
+  grid: string | null;
+  seed: number | null;
+  ownerSteamId: string | null;
+  enteredCount: number;
+  scheduledFor: number | null;
+  startedAt: number | null;
+  endedAt: number | null;
+}
 
 // ------------------------------------------------------------
 //  O WIPE: a fila de mapas
