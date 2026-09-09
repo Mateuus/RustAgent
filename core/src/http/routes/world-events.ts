@@ -52,6 +52,14 @@ import { ApiError } from '../error-response.js';
 export interface WorldEventRoutesDeps {
   readonly events: WorldEventsRepository;
   readonly servers: ServersRepository;
+  /**
+   * Manda derrubar a masmorra no jogo.
+   *
+   * Ausente = o agente subiu sem servidor nenhum, e a rota só fecha a
+   * run no banco. Ver o comentário do `stop` abaixo: essa distinção é
+   * a diferença entre um painel que informa e um que inventa.
+   */
+  readonly demolish?: (serverId: string, reason: string) => Promise<boolean>;
 }
 
 const idParams = z.object({ id: z.string().min(1) });
@@ -113,9 +121,37 @@ export function registerWorldEventRoutes(app: FastifyInstance, deps: WorldEventR
       throw new ApiError('RUN_ALREADY_ENDED', 'Esse nascimento já tinha terminado.', 409);
     }
 
-    deps.events.endRun(runId, 'cancelled');
+    // ####  O COMANDO VAI DE VERDADE, E ANTES DO BANCO  ####
+    //
+    // MEDIDO em 09/09/2026, apontado pelo dono: aqui se fechava a run
+    // e se devolvia `{ pendingCommand: 'ozdungeon stop' }`. Ninguém
+    // mandava esse comando a lugar nenhum — o nome do campo já dizia
+    // que ele estava pendente, e ficava pendente para sempre.
+    //
+    // O resultado era o painel AFIRMAR que a masmorra tinha acabado
+    // com ela de pé no mapa, e o admin só descobrir voltando ao lugar.
+    //
+    // E a ordem importa: manda primeiro, grava depois. Ao contrário, um
+    // RCON caído deixaria a run fechada no banco e a masmorra viva no
+    // chão — que é exatamente o estado que este bug produzia.
+    const sent = deps.demolish === undefined ? false : await deps.demolish(run.serverId, 'painel');
 
-    return { ok: true, pendingCommand: 'ozdungeon stop' };
+    // Sem servidor no fio a masmorra não sobrevive de qualquer jeito:
+    // nada dela entra no save do mundo, e o plugin a derruba ao
+    // descarregar. Fechar a run aqui é o desfecho correto.
+    //
+    // Com o comando entregue, quem fecha é o `ended` que o plugin
+    // manda pelo stream — ele sabe quantos jogadores estavam dentro, e
+    // fechar nos dois lugares contaria o mesmo desfecho duas vezes.
+    if (!sent) deps.events.endRun(runId, 'cancelled');
+
+    return {
+      ok: true,
+      sent,
+      message: sent
+        ? 'Mandei derrubar. Quem estava dentro foi levado para a entrada.'
+        : 'O servidor não estava no fio: marquei como encerrada aqui. Nada dela sobrevive a um servidor parado.',
+    };
   });
 
   // ==========================================================

@@ -180,6 +180,53 @@ export class DungeonSync {
   }
 
   /**
+   * Manda derrubar a masmorra que está de pé naquele servidor.
+   *
+   * ####  ELA EXISTE PORQUE O PAINEL MENTIA  ####
+   *
+   * MEDIDO em 09/09/2026, apontado pelo dono: ele parou uma masmorra
+   * pelo painel, a tela disse que acabou — e a masmorra continuou no
+   * chão do jogo.
+   *
+   * A rota fechava a run no banco e devolvia
+   * `{ pendingCommand: 'ozdungeon stop' }`. Ninguém mandava esse
+   * comando a lugar nenhum: o nome do campo já dizia que ele estava
+   * pendente, e ficava pendente para sempre.
+   *
+   * É o pior tipo de defeito de painel — não o que falha, o que
+   * AFIRMA ter feito. O admin só descobre voltando ao lugar.
+   *
+   * Devolve `false` quando o comando não chegou ao servidor. Quem
+   * chama decide o que fazer com isso; aqui não se inventa sucesso.
+   */
+  async demolish(serverId: string, reason: string): Promise<boolean> {
+    if (this.#stopped) return false;
+
+    const context = this.#deps.servers.contextOf(serverId);
+
+    if (context === null || !context.rcon.isConnected) return false;
+
+    try {
+      await context.rcon.send('ozdungeon stop');
+
+      this.#deps.logger.info({ server: serverId, reason }, 'masmorra derrubada pelo painel');
+
+      // O `ended` NÃO é reportado aqui: o plugin o emite pelo stream
+      // quando termina de derrubar, e é ele quem sabe quantos
+      // jogadores estavam dentro. Fechar a run em dois lugares
+      // contaria o mesmo desfecho duas vezes no histórico.
+      return true;
+    } catch (cause) {
+      this.#deps.logger.warn(
+        { server: serverId, reason, error: toError(cause).message },
+        'não consegui derrubar a masmorra',
+      );
+
+      return false;
+    }
+  }
+
+  /**
    * Agenda um push para daqui a pouco.
    *
    * Existe para ser chamado de dentro do gancho de console sem

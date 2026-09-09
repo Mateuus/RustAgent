@@ -2875,6 +2875,9 @@ async function main(): Promise<void> {
     worldEvents: {
       events: worldEventsRepository,
       servers: repository,
+      // Sem isto, "parar" no painel fecha a linha do banco e deixa a
+      // masmorra de pé no jogo — o painel afirmando o que não fez.
+      demolish: (serverId, reason) => dungeonSync?.demolish(serverId, reason) ?? Promise.resolve(false),
     },
   });
 
