@@ -21,6 +21,7 @@ jogo é o coordenador**, um de cada vez.
 | `ia.md` | o que o inimigo FAZ: perceber, perseguir, atirar, voltar ao posto | `event-ia` |
 | `loot.md` | o que o jogador leva embora: caixas, tabelas, drop, respawn | `event-loot` |
 | `portas.md` | abrir e resistir: porta por cor, cadeado, código, grau da peça | `event-portas` |
+| `acesso.md` | quem desce pelo alçapão, e o que ninguém tira do lugar | `event-acesso` |
 
 Os agentes vivem em `.claude/agents/`, versionados de propósito: eles carregam
 as armadilhas que já custaram caro, e perder isso é repeti-las.

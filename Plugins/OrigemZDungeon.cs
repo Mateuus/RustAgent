@@ -356,6 +356,15 @@ namespace Oxide.Plugins
         private const string PermAdmin = "origemzdungeon.admin";
 
         /// <summary>
+        /// A permissão de descer, quando a receita não abre para todos.
+        ///
+        /// Fica registrada mesmo quando ninguém a usa: o padrão do dono
+        /// é `everyone`, e esta permissão só é concedida por quem
+        /// DECIDIR fechar a masmorra. Ver a seção do acesso.
+        /// </summary>
+        private const string PermEnter = "origemzdungeon.enter";
+
+        /// <summary>
         /// A marca no `_name` de tudo que a masmorra ergueu.
         ///
         /// É como o `OnEntityTakeDamage` sabe, em O(1), que aquela
@@ -455,6 +464,8 @@ namespace Oxide.Plugins
             public Door exitHatch;
             /// <summary>Quem está lá dentro agora.</summary>
             public readonly HashSet<ulong> inside = new HashSet<ulong>();
+            /// <summary>Quando cada um ouviu o último "não sai do lugar".</summary>
+            public readonly Dictionary<ulong, float> lastRefusal = new Dictionary<ulong, float>();
             /// <summary>A cor sorteada de cada sala. Ver `RoomColor`.</summary>
             public readonly Dictionary<int, string> roomColors = new Dictionary<int, string>();
 
@@ -544,6 +555,7 @@ namespace Oxide.Plugins
         private void Init()
         {
             permission.RegisterPermission(PermAdmin, this);
+            permission.RegisterPermission(PermEnter, this);
 
             // ####  SEM SUBPASTA, E ISSO É CONTRATO  ####
             //
@@ -3063,6 +3075,18 @@ namespace Oxide.Plugins
             var link = door.gameObject.GetComponent<HatchLink>();
             if (link == null) return;
 
+            // ####  A CONFERÊNCIA É SÓ NA DESCIDA  ####
+            //
+            // Subir nunca é barrado. Um jogador que perdeu a permissão
+            // enquanto estava lá embaixo — o VIP que venceu, o grupo
+            // que o admin trocou — ficaria preso a -90 metros, com um
+            // alçapão que não responde e nada na tela dizendo por quê.
+            if (link.descends && !MayEnter(active, player))
+            {
+                RefuseEntry(active, player);
+                return;
+            }
+
             if (link.descends) active.inside.Add(player.userID);
             else active.inside.Remove(player.userID);
 
@@ -3136,6 +3160,336 @@ namespace Oxide.Plugins
 
             return true;
         }
+
+        // ============================================================
+        //  QUEM ENTRA, E O QUE NINGUÉM TIRA DO LUGAR
+        //
+        //  ####  NÃO EXISTE DONO DE MASMORRA, E ISSO É DECISÃO  ####
+        //
+        //  Dono, 09/09/2026: "a Dungeon todo o servidor pode entrar
+        //  nela, não só um player que faz claimer".
+        //
+        //  Este plugin nunca teve claim: nem posse, nem dono, nem
+        //  permissão de entrada. A masmorra já era de todos por ACASO —
+        //  porque ninguém tinha escrito o contrário. Agora é por
+        //  ESCOLHA: `access.whoEnters` nasce `everyone`, e fechá-la
+        //  exige dizer isso no painel.
+        //
+        //  A diferença aparece no dia em que alguém acrescentar posse
+        //  sem saber que estava combinado o contrário: vai ter de
+        //  APAGAR uma linha que diz o combinado, e não só acrescentar a
+        //  dele num arquivo que não opinava.
+        //
+        //  ####  E `owner_steam_id` NÃO É PORTA  ####
+        //
+        //  MEDIDO em 09/09/2026: a coluna existe em `world_event_runs`
+        //  (`migrations.ts`), é LIDA — vira `ownerSteamId` no
+        //  `world-events-repository.ts` — e NUNCA É ESCRITA. Nasce NULL
+        //  e morre NULL, em toda run que já rodou.
+        //
+        //  Ela não é dono de nada, e este plugin não a consulta. Se um
+        //  dia ganhar sentido, que seja "quem apertou o botão de
+        //  construir", para auditoria. Nunca controle de entrada — foi
+        //  justamente isso que o dono recusou.
+        // ============================================================
+
+        /// <summary>A política de acesso de quem não mandou nenhuma.</summary>
+        private static readonly AccessSpec DefaultAccessSpec = new AccessSpec();
+
+        /// <summary>A proteção de quem não mandou nenhuma.</summary>
+        private static readonly ProtectionSpec DefaultProtectionSpec = new ProtectionSpec();
+
+        private AccessSpec AccessConfigOf(ActiveDungeon dungeon) =>
+            dungeon == null || dungeon.spec == null || dungeon.spec.access == null
+                ? DefaultAccessSpec
+                : dungeon.spec.access;
+
+        private ProtectionSpec ProtectionConfigOf(ActiveDungeon dungeon) =>
+            dungeon == null || dungeon.spec == null || dungeon.spec.protection == null
+                ? DefaultProtectionSpec
+                : dungeon.spec.protection;
+
+        /// <summary>
+        /// Aquele jogador pode descer?
+        ///
+        /// ####  PERMISSÃO QUE NÃO EXISTE DEIXA ENTRAR  ####
+        ///
+        /// Se a receita aponta para uma permissão que plugin nenhum
+        /// registrou — um erro de digitação, um plugin de VIP que saiu
+        /// do servidor —, `UserHasPermission` devolve false para TODO
+        /// MUNDO. A masmorra ficaria lacrada, o alçapão abriria sem
+        /// levar ninguém, e não haveria nada na tela dizendo por quê.
+        ///
+        /// Então o engano cai para o padrão do dono (todos) e grita no
+        /// log do servidor. Abrir por engano devolve a masmorra ao que
+        /// ela já era antes desta frente existir; trancar por engano é
+        /// um defeito que ninguém consegue diagnosticar de dentro do
+        /// jogo.
+        /// </summary>
+        private bool MayEnter(ActiveDungeon dungeon, BasePlayer player)
+        {
+            if (player == null) return false;
+
+            var access = AccessConfigOf(dungeon);
+
+            // Qualquer valor que não seja `permission` é `everyone`: um
+            // modo escrito errado no painel não pode trancar a masmorra.
+            if (access.whoEnters != "permission") return true;
+
+            var perm = string.IsNullOrWhiteSpace(access.enterPermission)
+                ? PermEnter
+                : access.enterPermission.Trim();
+
+            if (!permission.PermissionExists(perm))
+            {
+                PrintWarning("A masmorra pede a permissão '" + perm + "', que não existe em plugin nenhum. "
+                             + "Deixando entrar todo mundo — confira `access.enterPermission` no painel.");
+                return true;
+            }
+
+            if (permission.UserHasPermission(player.UserIDString, perm)) return true;
+
+            // Quem administra nunca fica de fora da própria masmorra.
+            return permission.UserHasPermission(player.UserIDString, PermAdmin);
+        }
+
+        /// <summary>Diz ao barrado que ele foi barrado, com o mesmo freio do resto.</summary>
+        private void RefuseEntry(ActiveDungeon dungeon, BasePlayer player) =>
+            Throttled(dungeon, player, "Esta masmorra é só para quem tem acesso liberado.");
+
+        // ============================================================
+        //  A INTEGRIDADE DA CONSTRUÇÃO
+        //
+        //  ####  BLINDAR CONTRA DANO NÃO BLINDA CONTRA REMOÇÃO  ####
+        //
+        //  O `OnEntityTakeDamage` acima recusa todo dano na masmorra
+        //  desde sempre — e a entrada continuava saindo do lugar.
+        //  Remover NÃO É DANO: o martelo, o RemoverTool e o pickup
+        //  destroem a entidade por caminhos que nunca passam por
+        //  `Hurt`.
+        //
+        //  São QUATRO famílias de caminho, e cada uma perde a entrada
+        //  sozinha. Todos os ganchos abaixo foram MEDIDOS em
+        //  09/09/2026 no IL do `Assembly-CSharp.dll` do server01 — o
+        //  patchado pelo Oxide —, e não tirados de memória.
+        // ============================================================
+
+        /// <summary>O intervalo mínimo entre dois avisos ao mesmo jogador.</summary>
+        private const float RefusalCooldown = 3f;
+
+        /// <summary>O que quem tenta ouve, e o que o RemoverTool mostra.</summary>
+        private const string RefusalText = "Isto é da masmorra: não sai do lugar.";
+
+        /// <summary>
+        /// A peça é nossa? Só a marca — sem olhar a config.
+        ///
+        /// ####  `active` PRIMEIRO, E NÃO A MARCA  ####
+        ///
+        /// Estes ganchos recebem o SERVIDOR INTEIRO: toda batida de
+        /// martelo, todo pickup e todo tick de decay de toda base do
+        /// mapa. Na maior parte do tempo não há masmorra no ar, e
+        /// comparar uma referência com null descarta tudo isso antes de
+        /// tocar em string.
+        ///
+        /// (O `OnEntityTakeDamage` faz o oposto de propósito: a decisão
+        /// dele não depende de haver masmorra viva.)
+        /// </summary>
+        private bool IsOurs(BaseEntity entity) =>
+            active != null && entity != null && entity._name == MarkIndestructible;
+
+        /// <summary>A peça é nossa E a receita mandou protegê-la?</summary>
+        private bool IsProtected(BaseEntity entity)
+        {
+            var dungeon = active;
+            if (dungeon == null) return false;
+            if (entity == null || entity._name != MarkIndestructible) return false;
+
+            return ProtectionConfigOf(dungeon).enabled;
+        }
+
+        /// <summary>
+        /// O admin passa por cima — se a receita deixar.
+        ///
+        /// Sem isto, uma masmorra que emperrou vira lixo permanente no
+        /// mapa: nem quem administra o servidor a tira de lá. O
+        /// `ozdungeon stop` seria o único caminho, e ele é justamente o
+        /// que não funciona quando alguma coisa já deu errado.
+        /// </summary>
+        private bool BypassesProtection(BasePlayer player)
+        {
+            if (player == null) return false;
+            if (!ProtectionConfigOf(active).allowAdmin) return false;
+
+            return permission.UserHasPermission(player.UserIDString, PermAdmin);
+        }
+
+        /// <summary>
+        /// Diz por quê — no máximo uma vez a cada três segundos.
+        ///
+        /// ####  SEM O FREIO, O CHAT VIRA A PUNIÇÃO  ####
+        ///
+        /// Segurar o botão do martelo dispara `OnHammerHit` várias
+        /// vezes por segundo. Uma linha de chat por batida enche a tela
+        /// em dois segundos e esconde tudo o mais que estivesse escrito
+        /// ali — inclusive o aviso da porta que acabou de abrir.
+        /// </summary>
+        private void Throttled(ActiveDungeon dungeon, BasePlayer player, string message)
+        {
+            if (dungeon == null || player == null || !player.IsConnected) return;
+
+            var now = UnityEngine.Time.realtimeSinceStartup;
+            float last;
+
+            if (dungeon.lastRefusal.TryGetValue(player.userID, out last)
+                && now - last < RefusalCooldown) return;
+
+            dungeon.lastRefusal[player.userID] = now;
+            player.ChatMessage(message);
+        }
+
+        /// <summary>Recusa o toque e avisa, se a receita mandou avisar.</summary>
+        private void RefuseTouch(BasePlayer player)
+        {
+            var dungeon = active;
+            if (dungeon == null) return;
+            if (!ProtectionConfigOf(dungeon).warnOnAttempt) return;
+
+            Throttled(dungeon, player, RefusalText);
+        }
+
+        /// <summary>Este toque é recusado? E, se for, o jogador já foi avisado.</summary>
+        private bool Refuses(BasePlayer player, BaseEntity entity)
+        {
+            if (!IsProtected(entity)) return false;
+            if (BypassesProtection(player)) return false;
+
+            RefuseTouch(player);
+            return true;
+        }
+
+        // ------------------------------------------------------------
+        //  1. O MARTELO
+        //
+        //  MEDIDO no IL, com o método do jogo que chama cada gancho:
+        //
+        //    OnHammerHit          Hammer.DoAttackShared
+        //    OnStructureRepair    BaseCombatEntity.DoRepair
+        //    OnStructureUpgrade   BuildingBlock.DoUpgradeToGrade
+        //    OnStructureRotate    BuildingBlock.DoRotation
+        //    OnStructureDemolish  DecayEntity.DoDemolish e DoImmediateDemolish
+        //
+        //  Nos cinco o IL é `CallHook | ldnull | beq | ret`: retorno
+        //  não-nulo cancela, e o valor devolvido não é lido.
+        //
+        //  ####  O `OnHammerHit` SOZINHO NÃO BASTA  ####
+        //
+        //  Ele roda na BATIDA — e só nela. O menu radial do martelo é
+        //  do CLIENTE: abre sem perguntar ao servidor, e o que chega
+        //  aqui depois é o RPC de melhorar, de girar ou de demolir.
+        //  Quem fecha essas três portas são os outros ganchos, um para
+        //  cada.
+        // ------------------------------------------------------------
+
+        private object OnHammerHit(BasePlayer player, HitInfo info)
+        {
+            if (info == null) return null;
+
+            return Refuses(player, info.HitEntity) ? (object)true : null;
+        }
+
+        private object OnStructureRepair(BaseCombatEntity entity, BasePlayer player) =>
+            Refuses(player, entity) ? (object)true : null;
+
+        private object OnStructureUpgrade(BuildingBlock block, BasePlayer player,
+                                          BuildingGrade.Enum grade, ulong skin) =>
+            Refuses(player, block) ? (object)true : null;
+
+        private object OnStructureRotate(BuildingBlock block, BasePlayer player) =>
+            Refuses(player, block) ? (object)true : null;
+
+        private object OnStructureDemolish(DecayEntity entity, BasePlayer player, bool immediate) =>
+            Refuses(player, entity) ? (object)true : null;
+
+        // ------------------------------------------------------------
+        //  2. O RemoverTool
+        //
+        //  ####  DOIS GANCHOS, PORQUE ELE TEM DOIS CAMINHOS  ####
+        //
+        //  LIDO no `Docs/RemoverTools Plugin/RemoverTool.cs`, que é o
+        //  plugin que o dono vai instalar: o `CanRemoveEntity` dele
+        //  devolve CEDO quando o modo não é `Normal`, e só depois disso
+        //  chama `canRemove`. Os modos Admin, All, Structure e External
+        //  passam por outro gancho, o `CanAdminRemove`, e só por ele.
+        //
+        //  Blindar só um dos dois deixaria a masmorra inteira removível
+        //  para quem tem a ferramenta de admin — que é exatamente quem
+        //  a apaga por engano.
+        //
+        //  Nos dois, devolver STRING faz a razão aparecer na tela do
+        //  jogador; devolver qualquer outra coisa mostra o "bloqueado"
+        //  genérico do plugin dele.
+        //
+        //  ####  `canRemove` COMEÇA COM MINÚSCULA, E TEM DE COMEÇAR  ####
+        //
+        //  É contrato de terceiro: o `Interface.CallHook("canRemove", …)`
+        //  procura este nome exato. `CanRemove` compila, carrega e não é
+        //  chamado nunca — o defeito mais caro que este arquivo pode
+        //  ter, porque parece que funciona.
+        // ------------------------------------------------------------
+
+        private object canRemove(BasePlayer player, BaseEntity entity) =>
+            Refuses(player, entity) ? RefusalText : null;
+
+        private object CanAdminRemove(BasePlayer player, BaseEntity entity, string removeType) =>
+            Refuses(player, entity) ? RefusalText : null;
+
+        // ------------------------------------------------------------
+        //  3. O PICKUP — o E segurado
+        //
+        //  Armário, caixa e luz saem inteiros com o E segurado, sem
+        //  martelo e sem ferramenta nenhuma. A fechadura tem gancho
+        //  próprio: ela sai da porta pelo RPC `RPC_TakeLock`, e uma
+        //  sala vermelha sem fechadura é uma sala aberta.
+        //
+        //  ####  ESTE DEVOLVE `false`, E NÃO `true`  ####
+        //
+        //  MEDIDO no IL de `BaseCombatEntity.CanCompletePickup`: o
+        //  retorno do `CanPickupEntity` passa por `isinst bool` e, se
+        //  for bool, VIRA A RESPOSTA — não é um "cancela ou não".
+        //  Devolver `true` aqui, que é o reflexo de quem vem do
+        //  `OnEntityTakeDamage`, AUTORIZARIA o pickup em vez de barrar.
+        // ------------------------------------------------------------
+
+        private object CanPickupEntity(BasePlayer player, BaseCombatEntity entity) =>
+            Refuses(player, entity) ? (object)false : null;
+
+        private object CanPickupLock(BasePlayer player, BaseLock baseLock) =>
+            Refuses(player, baseLock) ? (object)false : null;
+
+        // ------------------------------------------------------------
+        //  4. O DECAY — o caminho que não tem jogador nenhum
+        //
+        //  O `PrepareBlock` já empurra o `lastDecayTick` de cada BLOCO
+        //  para 999999. Deployable não passa por lá: caixa, luz e
+        //  armário longe de um armário de ferramentas apodrecem
+        //  sozinhos, e a masmorra iria perdendo o miolo durante o
+        //  próprio evento.
+        //
+        //  MEDIDO em 09/09/2026 no `Assembly-CSharp.dll` do server01:
+        //  `OnEntityDecay` NÃO EXISTE — zero ocorrências. O gancho de
+        //  decay do Rust chama-se `OnDecayDamage`, mora em
+        //  `DecayEntity.OnDecay`, recebe SÓ a entidade e cancela com
+        //  retorno não-nulo.
+        //
+        //  ####  ELE NÃO OBEDECE A `protection.enabled`  ####
+        //
+        //  Decay não é alguém tirando coisa do lugar: é a masmorra
+        //  apodrecendo. Desligar a proteção contra martelo e ver a
+        //  entrada cair sozinha três horas depois seria uma surpresa
+        //  que ninguém liga ao botão que apertou.
+        // ------------------------------------------------------------
+
+        private object OnDecayDamage(DecayEntity entity) => IsOurs(entity) ? (object)true : null;
 
         /// <summary>
         /// Estar a -90 metros é, para o anticheat, estar dentro do
@@ -3917,6 +4271,12 @@ namespace Oxide.Plugins
             /// <summary>A fechadura. Ver `LockSpec` sobre o nome.</summary>
             [JsonProperty("lock")]
             public LockSpec doorLock;
+
+            /// <summary>Quem desce. `null` = todo o servidor. Ver `AccessSpec`.</summary>
+            public AccessSpec access;
+
+            /// <summary>O que ninguém tira do lugar. `null` = tudo. Ver `ProtectionSpec`.</summary>
+            public ProtectionSpec protection;
         }
 
         private class Range { public int min; public int max; }
@@ -4058,6 +4418,50 @@ namespace Oxide.Plugins
             public bool announceOpen = true;
             /// <summary>Dizer a quem errou que ele errou.</summary>
             public bool warnOnWrongCode = true;
+        }
+
+        /// <summary>
+        /// Quem desce pelo alçapão.
+        ///
+        /// ####  O PADRÃO É O SERVIDOR INTEIRO, E ISSO É O PEDIDO  ####
+        ///
+        /// Dono, 09/09/2026: *"a Dungeon todo o servidor pode entrar
+        /// nela, não só um player que faz claimer"*. Quem quiser
+        /// fechá-la tem de DIZER isso no painel.
+        /// </summary>
+        private class AccessSpec
+        {
+            /// <summary>`everyone` | `permission`. Qualquer outra coisa é `everyone`.</summary>
+            public string whoEnters = "everyone";
+
+            /// <summary>
+            /// A permissão exigida quando `whoEnters` é `permission`.
+            ///
+            /// Vazio cai na nossa, `origemzdungeon.enter`. Pode apontar
+            /// para a de outro plugin — uma de VIP, por exemplo — desde
+            /// que aquele plugin a registre. Ver `MayEnter` sobre o que
+            /// acontece quando ela não existe em lugar nenhum.
+            /// </summary>
+            public string enterPermission;
+        }
+
+        /// <summary>
+        /// O que ninguém tira do lugar.
+        ///
+        /// Cobre martelo, RemoverTool e pickup. NÃO cobre o decay: a
+        /// masmorra não apodrece nem com a proteção desligada — ver
+        /// `OnDecayDamage` sobre por que essa é a linha certa.
+        /// </summary>
+        private class ProtectionSpec
+        {
+            /// <summary>A masmorra resiste a martelo, remoção e pickup.</summary>
+            public bool enabled = true;
+
+            /// <summary>Quem tem `origemzdungeon.admin` passa por cima.</summary>
+            public bool allowAdmin = true;
+
+            /// <summary>Dizer ao jogador por que aquilo não saiu do lugar.</summary>
+            public bool warnOnAttempt = true;
         }
 
         private SyncState state = new SyncState();
