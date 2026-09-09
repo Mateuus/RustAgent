@@ -4997,7 +4997,89 @@ export const agent = {
 
 export type DungeonMode = 'recipe' | 'blueprint';
 export type RoomColor = 'green' | 'blue' | 'red';
-export type RoomDoor = 'wood' | 'metal' | 'toptier';
+
+/**
+ * As onze portas.
+ *
+ * As quatro primeiras tem um metro de passagem; as seis seguintes,
+ * dois; `none` e o vao aberto. Ver `core/src/types/dungeons.ts`.
+ */
+export const ROOM_DOORS = [
+  'wood',
+  'metal',
+  'toptier',
+  'industrial',
+  'double_wood',
+  'double_metal',
+  'double_toptier',
+  'cell_gate',
+  'fence_gate',
+  'garage',
+  'none',
+] as const;
+export type RoomDoor = (typeof ROOM_DOORS)[number];
+
+export const BUILD_GRADES = ['twigs', 'wood', 'stone', 'metal', 'toptier'] as const;
+export type BuildGrade = (typeof BUILD_GRADES)[number];
+
+export interface GradeSet {
+  foundation: BuildGrade;
+  wall: BuildGrade;
+  ceiling: BuildGrade;
+}
+
+export const LOOT_MODES = ['server', 'add', 'replace'] as const;
+export type LootMode = (typeof LOOT_MODES)[number];
+
+export interface LootEntry {
+  shortname: string;
+  amount: { min: number; max: number };
+  weight: number;
+  guaranteed: boolean;
+  skin: number;
+  blueprint: boolean;
+  condition: number;
+}
+
+export interface LootTable {
+  mode: LootMode;
+  rolls: { min: number; max: number };
+  entries: LootEntry[];
+}
+
+/**
+ * O comportamento do inimigo.
+ *
+ * ####  TODO CAMPO E OPCIONAL, E ISSO E O DESENHO INTEIRO  ####
+ *
+ * Campo ausente nao e zero: e "nao falei disso", e o valor de cima
+ * fica de pe. A heranca e `npc.ai` -> `rooms[].ai` / `corridor.ai`,
+ * campo a campo.
+ */
+export interface AiSpec {
+  visionRadius?: number;
+  requireLineOfSight?: boolean;
+  loseTargetAfter?: number;
+  reactionDelay?: number;
+  maxTargetHeightDelta?: number;
+  alertOnSpot?: boolean;
+
+  holdPosition?: boolean;
+  moveSpeed?: number;
+  chaseRadius?: number;
+  returnHome?: boolean;
+  returnSpeed?: number;
+  arriveRadius?: number;
+  stuckTimeout?: number;
+
+  fireRange?: number;
+  fireInterval?: number;
+  standoffDistance?: number;
+  aimConeScale?: number;
+
+  senseInterval?: number;
+  moveInterval?: number;
+}
 
 export interface DungeonRoom {
   key: string;
@@ -5007,6 +5089,31 @@ export interface DungeonRoom {
   crates: string[];
   door: RoomDoor;
   locked: boolean;
+  /** A porta da sala grande. `null` = usa `door` sempre. */
+  wideDoor: RoomDoor | null;
+  wideDoorCellsPerDoor: number;
+  /** `null` = herda o `structure` da masmorra. */
+  grade: GradeSet | null;
+  table: LootTable;
+  ai: AiSpec;
+}
+
+export interface DungeonLock {
+  enabled: boolean;
+  sharedCode: boolean;
+  carrier: 'npc' | 'crate' | 'none';
+  carrierScope: 'corridor' | 'anywhere';
+  onUndelivered: 'unlock' | 'keep';
+  noteTitle: string;
+  announceOpen: boolean;
+  warnOnWrongCode: boolean;
+}
+
+export interface DungeonRespawn {
+  enabled: boolean;
+  minutes: number;
+  onlyWhenEmpty: boolean;
+  rebuildDestroyed: boolean;
 }
 
 export interface DungeonInput {
@@ -5017,17 +5124,62 @@ export interface DungeonInput {
   entranceBlueprint: string | null;
   size: { min: number; max: number };
   weights: { green: number; blue: number; red: number };
-  corridor: { npcDensity: number; lootDensity: number; crates: string[] };
+  corridor: {
+    npcDensity: number;
+    lootDensity: number;
+    crates: string[];
+    table: LootTable;
+    ai: AiSpec;
+  };
   grid: string[] | null;
   npc: {
     health: { min: number; max: number };
     damageScale: number;
     weapons: string[];
     names: string[];
+    loot: LootTable;
+    ai: AiSpec;
   };
   timeOfDay: number;
+  structure: GradeSet;
+  lock: DungeonLock;
+  respawn: DungeonRespawn;
   rooms: DungeonRoom[];
 }
+
+/**
+ * O que o jogo faz quando o painel nao fala nada.
+ *
+ * Sao os inicializadores do `AiProfile` do `OrigemZDungeon.cs`, e
+ * eles vivem aqui para a TELA poder mostra-los como marca-d'agua:
+ * um campo vazio de `visionRadius` e 18, e nao 0.
+ *
+ * `aimConeScale` fica de fora de proposito — o padrao dele mora no
+ * prefab do cientista, dentro do bundle do jogo.
+ */
+export const AI_DEFAULTS = {
+  visionRadius: 18,
+  requireLineOfSight: true,
+  loseTargetAfter: 6,
+  reactionDelay: 0.4,
+  maxTargetHeightDelta: 3,
+  alertOnSpot: true,
+
+  holdPosition: false,
+  moveSpeed: 2.8,
+  chaseRadius: 25,
+  returnHome: true,
+  returnSpeed: 2.2,
+  arriveRadius: 0.6,
+  stuckTimeout: 6,
+
+  fireRange: 15,
+  fireInterval: 0.35,
+  standoffDistance: 2.5,
+
+  senseInterval: 0.5,
+  moveInterval: 0.2,
+} as const;
 
 export interface Dungeon extends DungeonInput {
   createdAt: number;

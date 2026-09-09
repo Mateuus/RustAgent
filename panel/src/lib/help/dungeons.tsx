@@ -260,17 +260,71 @@ export const DUNGEON_HELP = {
 
   porta: {
     title: 'A porta da sala',
-    short: 'Madeira, metal ou blindada. É o aviso visual do que tem dentro.',
+    short: 'Onze folhas, de madeira a portão de garagem. É o aviso visual do que tem dentro.',
     body: (
       <>
         <p>
-          Ela é a promessa que a sala faz antes de o jogador entrar. Manter a correspondência —
-          madeira na verde, metal na azul, blindada na vermelha — é o que faz a cor significar
-          alguma coisa.
+          Ela é a promessa que a sala faz antes de o jogador entrar. Manter a correspondência de{' '}
+          <strong>material</strong> — madeira na verde, metal na azul, blindada na vermelha — é o
+          que faz a cor significar alguma coisa.
         </p>
+        <p>
+          As quatro primeiras (madeira, metal, blindada, fábrica) têm{' '}
+          <strong>um metro de passagem</strong> e nascem num vão de porta comum. As seis seguintes
+          têm <strong>dois metros</strong> e precisam de um quadro no lugar do vão — o construtor
+          troca a peça sozinho.
+        </p>
+        <HelpExample>
+          Grade de cela numa sala vermelha não é erro: é desenho. O jogador vê o que tem dentro
+          antes de conseguir entrar, e isso é uma promessa melhor que qualquer porta fechada.
+        </HelpExample>
         <HelpWarn>
           Uma sala verde com porta blindada não é uma surpresa divertida: é uma mentira, e o jogador
-          deixa de confiar nas outras portas.
+          deixa de confiar nas outras portas. E <code>nenhuma</code> deixa o vão aberto — a sala
+          deixa de ter porta, e com ela some o aviso da cor.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  portaLarga: {
+    title: 'A porta da sala grande',
+    short: 'Uma folha diferente quando o cômodo é grande demais para uma porta só.',
+    body: (
+      <>
+        <p>
+          Um salão de nove células com <strong>uma</strong> entrada afunila o grupo inteiro numa
+          passagem de um metro: quem entra primeiro leva a rajada, e os outros esperam na fila.
+        </p>
+        <p>
+          A porta larga resolve isso sem mexer no desenho: quando a sala passa do limite abaixo, ela
+          nasce com a folha de dois metros que você escolher aqui. Deixando em branco, toda sala
+          daquela cor usa a porta normal.
+        </p>
+        <HelpExample>
+          Vermelha com porta blindada normal e <em>dupla blindada</em> como larga: as salinhas de
+          uma célula continuam apertadas, e o salão do fundo abre de verdade.
+        </HelpExample>
+      </>
+    ),
+  },
+
+  portaLargaLimite: {
+    title: 'A partir de quantas células',
+    short: 'A conta é células ÷ portas, e não células.',
+    body: (
+      <>
+        <p>
+          Um salão de nove células com <strong>quatro</strong> entradas não afunila ninguém — quatro
+          grupos entram por quatro lados. O funil é nove células com <strong>uma</strong> entrada.
+        </p>
+        <HelpExample>
+          Com o limite em 4: uma sala de 3×3 com uma porta recebe a folha larga (9 ÷ 1 = 9); a mesma
+          sala com três portas fica com a normal (9 ÷ 3 = 3).
+        </HelpExample>
+        <HelpWarn>
+          Baixar para 1 põe folha larga em toda sala, inclusive nas de uma célula — e aí ela deixa
+          de querer dizer &ldquo;aqui é grande&rdquo;.
         </HelpWarn>
       </>
     ),
@@ -278,17 +332,378 @@ export const DUNGEON_HELP = {
 
   trancada: {
     title: 'Porta com código',
-    short: 'A porta fica trancada, e o código cai de um inimigo lá dentro.',
+    short: 'A porta fica trancada, e o código cai de um inimigo lá fora.',
     body: (
       <>
         <p>
           Trancar transforma a sala em objetivo: o jogador precisa limpar o resto da masmorra para
           achar quem carrega o código.
         </p>
+        <p>
+          <strong>O portador nunca está dentro da sala que ele abre</strong> — isso não é opção, é
+          regra do construtor. O código da sala vermelha guardado dentro dela seria uma porta que só
+          abre para quem já entrou.
+        </p>
         <HelpWarn>
           Trancar mais de uma ou duas salas transforma a masmorra numa caçada a bilhetes. E, se o
           inimigo com o código morrer num canto que ninguém revista, a sala fica inalcançável até o
           evento acabar.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  // ----------------------------------------------------------
+  //  O NÍVEL DE CONSTRUÇÃO
+  // ----------------------------------------------------------
+
+  grauConstrucao: {
+    title: 'O material da masmorra',
+    short: 'Piso, parede e teto de toda célula que não é sala. Pedra é o de sempre.',
+    body: (
+      <>
+        <p>
+          São os cinco níveis do jogo — palha, madeira, pedra, metal e blindado —, e eles decidem
+          quanto explosivo o jogador precisa para <strong>entrar por onde não é a porta</strong>.
+        </p>
+        <p>
+          Este bloco vale para o corredor, para a entrada e para toda célula sem dono de sala. As
+          salas podem ter o próprio, no passo das salas.
+        </p>
+        <HelpExample>
+          Pedra aguenta 2 C4 por parede; blindado aguenta 4 e é imune a foguete comum. Numa masmorra
+          de evento de 40 minutos, blindado quer dizer &ldquo;ninguém vai furar parede&rdquo;.
+        </HelpExample>
+        <HelpWarn>
+          Palha desmonta com machado. Se a masmorra inteira for palha, a porta trancada deixa de ser
+          um obstáculo — o jogador entra pela parede em quinze segundos.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  grauDaSala: {
+    title: 'O material desta cor',
+    short: 'Sobrescreve o da masmorra, só para as salas desta cor.',
+    body: (
+      <>
+        <p>
+          Deixando desligado, a sala usa o material da masmorra. Ligando, ela ganha o próprio — e é
+          assim que a sala vermelha fica blindada num corredor de pedra.
+        </p>
+        <p>
+          <strong>A parede entre duas salas tem dois donos, e vence o mais forte.</strong> Uma sala
+          blindada encostada numa de madeira não ganha parede de madeira: o invasor entraria pelo
+          lado barato e a sua escolha viraria decoração.
+        </p>
+        <HelpWarn>
+          Blindado numa sala que também tem porta trancada faz dela um cofre de verdade. É bom uma
+          vez por masmorra; em três salas, o jogador desiste.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  // ----------------------------------------------------------
+  //  A FECHADURA
+  // ----------------------------------------------------------
+
+  fechadura: {
+    title: 'Como a masmorra tranca',
+    short: 'Vale para todas as salas marcadas como trancadas. Desligar aqui abre todas.',
+    body: (
+      <>
+        <p>
+          O código é sempre de <strong>quatro dígitos</strong>, e isso não é configurável: o teclado
+          do cliente do Rust tem quatro casas, e um código de cinco não pode ser digitado — a sala
+          ficaria lacrada sem nada na tela explicando por quê.
+        </p>
+        <p>
+          É <strong>um código por sala</strong>, não por porta. Um cômodo com três entradas tem um
+          código só — o contrário faria o jogador achar o papel da porta norte e continuar trancado
+          do lado sul.
+        </p>
+        <HelpExample>
+          Desligar a fechadura é o jeito de testar a masmorra sem caçar papel nenhum: as salas
+          marcadas continuam marcadas, e nascem abertas.
+        </HelpExample>
+      </>
+    ),
+  },
+
+  portador: {
+    title: 'De onde o código sai',
+    short: 'Um inimigo, uma caixa, ou ninguém.',
+    body: (
+      <>
+        <p>
+          O papel com o código entra no inventário de um <strong>inimigo</strong> (e vai para o
+          corpo dele quando morre) ou de uma <strong>caixa</strong>. &ldquo;Ninguém&rdquo; existe
+          para o evento em que o admin abre a porta na mão.
+        </p>
+        <p>
+          O alcance diz onde o portador pode estar: <strong>corredor</strong> é o padrão, e{' '}
+          <strong>em qualquer lugar</strong> permite que o código da vermelha esteja dentro da azul.
+          Nunca dentro da própria sala trancada.
+        </p>
+        <HelpWarn>
+          Escolhendo &ldquo;ninguém&rdquo; com salas trancadas, o painel recusa salvar. E se o
+          corredor não tiver inimigo nenhum, o código não tem em quem entrar — o construtor
+          destranca a sala e grita no console, mas ninguém lê o console.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  codigoUnico: {
+    title: 'Um código para a masmorra inteira',
+    short: 'Ligado, o mesmo número abre todas as salas trancadas.',
+    body: (
+      <>
+        <p>
+          Com um código só, o primeiro papel encontrado abre tudo. É o modo &ldquo;chave
+          mestra&rdquo;: mais rápido, e transforma a caçada num único achado.
+        </p>
+        <HelpExample>
+          Numa masmorra de evento curto, um código só evita que o grupo perca dez dos quarenta
+          minutos revistando corpos.
+        </HelpExample>
+        <HelpWarn>
+          Numa masmorra grande, isso apaga a progressão: a última sala abre com o papel da primeira,
+          e o resto do caminho deixa de ter recompensa própria.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  // ----------------------------------------------------------
+  //  O LOOT
+  // ----------------------------------------------------------
+
+  tabelaDeLoot: {
+    title: 'O que cai dentro',
+    short: 'A do servidor, acrescentar por cima, ou substituir tudo.',
+    body: (
+      <>
+        <p>
+          <strong>A do servidor</strong> é o padrão e o que acontece hoje: a caixa se enche sozinha
+          pela tabela de loot do servidor, e o BetterLoot continua valendo dentro da masmorra.
+        </p>
+        <p>
+          <strong>Acrescenta</strong> deixa o Rust encher e põe os seus itens por cima —
+          é o modo para &ldquo;além do normal, cai isto&rdquo;. <strong>Substitui</strong> limpa e
+          usa só a sua lista.
+        </p>
+        <HelpExample>
+          Vermelha em &ldquo;acrescenta&rdquo; com 100 de scrap marcado como <em>Sempre</em>: o
+          jogador leva o loot de elite habitual e mais o scrap que justifica a porta trancada.
+        </HelpExample>
+        <HelpWarn>
+          Uma tabela pesa. Com oito itens por cor e mais uma no corredor, cabem sete masmorras no
+          comando que o agente manda ao servidor — contra mais de trinta sem tabela nenhuma. Passou
+          do teto, o envio inteiro é recusado e o jogo fica com o estado anterior.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  sorteios: {
+    title: 'Sorteios por caixa',
+    short: 'Quantos itens da lista caem, por peso. Os marcados “Sempre” não contam aqui.',
+    body: (
+      <>
+        <p>
+          O servidor sorteia um número dentro do intervalo e tira essa quantidade de itens da lista,
+          onde <strong>peso maior sai mais vezes</strong>. Um item de peso 40 numa lista que soma
+          100 sai em cerca de 40% dos sorteios.
+        </p>
+        <HelpExample>
+          Dois sorteios numa lista de oito itens dão caixas diferentes a cada vez — que é o que faz
+          o jogador abrir a próxima.
+        </HelpExample>
+        <HelpWarn>
+          Zero sorteios com nenhum item &ldquo;Sempre&rdquo; é uma caixa vazia, e nada no jogo diz
+          por quê.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  dropDoInimigo: {
+    title: 'O que o corpo carrega',
+    short: 'A tabela do corpo de todo inimigo da masmorra.',
+    body: (
+      <>
+        <p>
+          Vale para o corpo de qualquer inimigo, em qualquer sala. É o prêmio de matar, e é o que
+          mantém o jogador limpando a masmorra em vez de correr para as caixas.
+        </p>
+        <HelpWarn>
+          Substituir apaga o que o cientista traz de fábrica — inclusive a arma dele. Se você quer
+          somar, use &ldquo;acrescenta&rdquo;. O papel do código nunca é apagado por nenhum dos
+          modos.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  respawn: {
+    title: 'Quando o loot volta',
+    short: 'Desligado é o certo no modo evento.',
+    body: (
+      <>
+        <p>
+          Ligado, as caixas se enchem de novo de tantos em tantos minutos, e as destruídas podem ser
+          reconstruídas. Serve para a masmorra <strong>permanente</strong>, que fica de pé o wipe
+          inteiro.
+        </p>
+        <HelpWarn>
+          Numa masmorra de evento de 40 minutos, um ciclo de 30 é loot dobrado: o grupo limpa,
+          espera na porta e limpa de novo. É por isso que o padrão é desligado.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  // ----------------------------------------------------------
+  //  A IA
+  // ----------------------------------------------------------
+
+  iaHeranca: {
+    title: 'O comportamento, e de onde ele vem',
+    short: 'Vazio quer dizer “herda”, e nunca zero.',
+    body: (
+      <>
+        <p>
+          O comportamento é definido em três camadas, e a de baixo sobrescreve a de cima{' '}
+          <strong>campo a campo</strong>:
+        </p>
+        <pre className="overflow-x-auto border border-border bg-background px-3 py-2 text-2xs leading-relaxed text-muted">
+          {`  o padrão desta masmorra
+        ↓
+  a cor da sala  (ou)  o corredor`}
+        </pre>
+        <p>
+          Um campo em branco na sala vermelha não é &ldquo;zero&rdquo;: é &ldquo;não falei
+          disso&rdquo;, e o número do padrão fica de pé. O que a caixa mostra em cinza é justamente
+          o valor que ela vai herdar.
+        </p>
+        <HelpExample>
+          Mude só <em>Entre tentativas</em> na vermelha: os inimigos dela atiram mais rápido, e todo
+          o resto continua igual ao das outras salas.
+        </HelpExample>
+      </>
+    ),
+  },
+
+  iaPercepcao: {
+    title: 'Como o inimigo percebe',
+    short: 'Até onde ele enxerga, se a parede segura, e quanto tempo ele lembra.',
+    body: (
+      <>
+        <p>
+          <strong>Alcance de visão</strong> é a distância em que ele passa a te perseguir. Com 0 ele
+          só reage a tiro — o que faz dele uma sentinela de emboscada.
+        </p>
+        <p>
+          <strong>Precisa enxergar</strong> desligado é o inimigo que atira através da parede. Isso
+          não é dificuldade, é o defeito mais feio que uma masmorra pode ter.
+        </p>
+        <p>
+          <strong>Diferença de altura</strong> é o que impede o inimigo do fundo de perseguir quem
+          está na superfície, 90 metros acima. Abaixo de 3 ele desiste de quem subiu um degrau.
+        </p>
+        <HelpWarn>
+          Alcance acima de 40 numa masmorra apertada faz a sala inteira acordar de uma vez, e o
+          jogador enfrenta oito inimigos em vez de dois.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  iaMovimento: {
+    title: 'Como o inimigo anda',
+    short: 'Velocidade, a coleira do posto, e o que ele faz quando te perde.',
+    body: (
+      <>
+        <p>
+          <strong>A coleira</strong> é o campo que mantém a masmorra funcionando: ela é a distância
+          máxima do lugar onde o inimigo nasceu. Sem ela, uma perseguição levaria o cientista para
+          fora do que foi construído.
+        </p>
+        <p>
+          <strong>Fica no posto</strong> é a sentinela: mira e atira, e nunca sai do lugar. É o que
+          transforma um cômodo numa torre de guarda.
+        </p>
+        <p>
+          <strong>Preso por</strong> é a saída de emergência: preso numa quina por esse tempo, ele
+          reaparece no posto. É feio de propósito — melhor que um inimigo dançando contra a parede.
+          Zero desliga.
+        </p>
+        <HelpExample>
+          2,8 m/s é a velocidade de quem anda; um jogador correndo faz 5,5. Acima de 5, o inimigo
+          alcança qualquer um e a fuga deixa de existir.
+        </HelpExample>
+      </>
+    ),
+  },
+
+  iaCombate: {
+    title: 'Como o inimigo atira',
+    short: 'Alcance, cadência e a distância em que ele para de andar.',
+    body: (
+      <>
+        <p>
+          <strong>Entre tentativas</strong> é o intervalo entre puxadas do gatilho. A rajada e a
+          cadência continuam sendo da arma — este número só pode deixar mais <em>lento</em>.
+        </p>
+        <p>
+          <strong>Para de andar a</strong> é o &ldquo;não me abrace&rdquo;: chegou a essa distância,
+          ele fica onde está e atira. Zero faz o inimigo colar no jogador.
+        </p>
+        <HelpWarn>
+          Alcance de tiro maior que o de visão não serve para nada: ele atira no que vê. E abaixar o
+          intervalo para 0,2 com AK na mão mata um jogador de armadura em menos de dois segundos.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  iaDispersao: {
+    title: 'A dispersão do tiro',
+    short: 'Multiplicador do cone da arma. Menor = mais certeiro. Vazio = o do jogo.',
+    body: (
+      <>
+        <p>
+          O jogo calcula a precisão do inimigo como{' '}
+          <strong>este número × o cone da arma dele</strong>. Menor deixa mais certeiro; maior
+          espalha o tiro.
+        </p>
+        <p>
+          Deixando em branco, o valor do próprio cientista fica de pé — e é o certo enquanto ninguém
+          reclamar da dificuldade.
+        </p>
+        <HelpWarn>
+          O cone de cada arma é diferente, então 0,8 não quer dizer a mesma coisa na AK e na
+          spas12. Ajuste com uma arma só na lista, ou você estará mirando no escuro.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  iaRitmo: {
+    title: 'De quanto em quanto ele pensa',
+    short: 'Existe para o servidor cheio, não para o jogo.',
+    body: (
+      <>
+        <p>
+          São os dois relógios de cada inimigo: um procura alvo, o outro dá o passo. Trinta
+          cientistas com o relógio em 0,1 s são trezentas decisões por segundo.
+        </p>
+        <HelpWarn>
+          Baixar isso não deixa a masmorra mais difícil — deixa o servidor mais lento, e o jogador
+          sente como travamento, não como desafio. Só mexa se o inimigo estiver visivelmente
+          atrasado.
         </HelpWarn>
       </>
     ),

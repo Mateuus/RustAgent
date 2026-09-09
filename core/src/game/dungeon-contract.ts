@@ -204,7 +204,83 @@ function markerBody(line: string): string | null {
 //  O QUE O AGENTE EMPURRA
 // ------------------------------------------------------------
 
-/** Uma masmorra, do jeito que o plugin precisa dela. */
+/**
+ * A tabela de loot, do jeito que o plugin a lê.
+ *
+ * Ausente = `mode: "server"`, ou seja, o Rust enche a caixa e o
+ * BetterLoot continua valendo. É o que o `ModeOf` do plugin faz com
+ * `null`.
+ */
+export interface LootTablePayload {
+  readonly mode: 'server' | 'add' | 'replace';
+  readonly rolls: { readonly min: number; readonly max: number };
+  readonly entries: readonly {
+    readonly shortname: string;
+    readonly amount: { readonly min: number; readonly max: number };
+    readonly weight?: number;
+    readonly guaranteed?: boolean;
+    readonly skin?: number;
+    readonly blueprint?: boolean;
+    readonly condition?: number;
+  }[];
+}
+
+/**
+ * O comportamento do inimigo.
+ *
+ * ####  CAMPO AUSENTE NÃO É ZERO  ####
+ *
+ * Todo campo é opcional porque a herança é campo a campo: `npc.ai` é
+ * o padrão da masmorra, e `rooms[].ai` / `corridor.ai` sobrescrevem
+ * só o que dizem. O `AiSpec` do plugin é todo `float?`/`bool?` pela
+ * mesma razão.
+ */
+export interface AiPayload {
+  readonly visionRadius?: number;
+  readonly requireLineOfSight?: boolean;
+  readonly loseTargetAfter?: number;
+  readonly reactionDelay?: number;
+  readonly maxTargetHeightDelta?: number;
+  readonly alertOnSpot?: boolean;
+
+  readonly holdPosition?: boolean;
+  readonly moveSpeed?: number;
+  readonly chaseRadius?: number;
+  readonly returnHome?: boolean;
+  readonly returnSpeed?: number;
+  readonly arriveRadius?: number;
+  readonly stuckTimeout?: number;
+
+  readonly fireRange?: number;
+  readonly fireInterval?: number;
+  readonly standoffDistance?: number;
+  readonly aimConeScale?: number;
+
+  readonly senseInterval?: number;
+  readonly moveInterval?: number;
+}
+
+/** O nível de construção, por tipo de peça. */
+export interface GradePayload {
+  readonly foundation: string;
+  readonly wall: string;
+  readonly ceiling: string;
+}
+
+/**
+ * Uma masmorra, do jeito que o plugin precisa dela.
+ *
+ * ####  O QUE É OPCIONAL AQUI É O QUE O PLUGIN JÁ SABE  ####
+ *
+ * Um campo ausente cai no inicializador da classe de spec do C#, e
+ * cada omissão abaixo foi conferida contra ele: `structure` ausente
+ * é `Stone`, `lock` ausente é o `new LockSpec()`, `table` ausente é
+ * `server`, `grade` ausente herda o `structure`,
+ * `wideDoorCellsPerDoor` ausente é 4.
+ *
+ * Isso não é economia de digitação: é o orçamento de 50 KB do
+ * comando de RCON. Ver `DUNGEON_SYNC_MAX_BYTES` e `sync.ts`.
+ */
 export interface DungeonPayload {
   readonly id: string;
   readonly mode: 'recipe' | 'blueprint';
@@ -215,6 +291,8 @@ export interface DungeonPayload {
     readonly npcDensity: number;
     readonly lootDensity: number;
     readonly crates: readonly string[];
+    readonly table?: LootTablePayload;
+    readonly ai?: AiPayload;
   };
   readonly grid: readonly string[] | null;
   readonly npc: {
@@ -222,8 +300,37 @@ export interface DungeonPayload {
     readonly damageScale: number;
     readonly weapons: readonly string[];
     readonly names: readonly string[];
+    readonly loot?: LootTablePayload;
+    readonly ai?: AiPayload;
   };
   readonly timeOfDay: number;
+  /** Ausente = pedra em tudo, que é o `DefaultGrade` do plugin. */
+  readonly structure?: GradePayload;
+  /** Ausente = o `new LockSpec()` do plugin, que é o mesmo padrão daqui. */
+  readonly lock?: {
+    readonly enabled: boolean;
+    readonly sharedCode: boolean;
+    readonly carrier: string;
+    readonly carrierScope: string;
+    readonly onUndelivered: string;
+    readonly noteTitle: string;
+    readonly announceOpen: boolean;
+    readonly warnOnWrongCode: boolean;
+  };
+  /**
+   * O ciclo do loot, e ele viaja SEMPRE.
+   *
+   * Ausente e `enabled: false` não são a mesma coisa no plugin:
+   * ausente deixa o refresh do prefab de pé (a caixa de radtown se
+   * repõe sozinha), e `false` o zera. O contrato promete que
+   * desligado é desligado, então este campo não é omitido nunca.
+   */
+  readonly respawn: {
+    readonly enabled: boolean;
+    readonly minutes?: number;
+    readonly onlyWhenEmpty?: boolean;
+    readonly rebuildDestroyed?: boolean;
+  };
   readonly rooms: readonly {
     readonly key: string;
     readonly color: string;
@@ -232,6 +339,14 @@ export interface DungeonPayload {
     readonly crates: readonly string[];
     readonly door: string;
     readonly locked: boolean;
+    /** Ausente = a sala grande usa a mesma porta das outras. */
+    readonly wideDoor?: string;
+    /** Ausente = 4, o `DefaultWideDoorCellsPerDoor` do plugin. */
+    readonly wideDoorCellsPerDoor?: number;
+    /** Ausente = herda o `structure`. */
+    readonly grade?: GradePayload;
+    readonly table?: LootTablePayload;
+    readonly ai?: AiPayload;
   }[];
 }
 
@@ -291,9 +406,18 @@ export function buildDungeonSyncCommand(payload: DungeonSyncPayload): string {
  *
  * ####  E QUANTAS MASMORRAS CABEM  ####
  *
- * MEDIDO em 09/09/2026: uma masmorra de três salas pesa ~900 bytes
- * de JSON, ~1,2 KB em base64. O teto dá para **cerca de 40** —
- * cinquenta se elas forem simples.
+ * MEDIDO em 09/09/2026 com as receitas de fábrica, depois das três
+ * frentes (portas, loot, IA), pelo comando que o `push` monta:
+ *
+ *     sem tabela de loot ................ 1,7 KB  →  ~29 cabem
+ *     4 tabelas de 4 itens .............. 4,1 KB  →  ~12 cabem
+ *     4 tabelas de 8 itens .............. 6,0 KB  →  ~8 cabem
+ *
+ * A conta muda TANTO porque o que pesa é a tabela: uma linha de
+ * loot enxuta são ~60 bytes, e uma masmorra com quatro tabelas de
+ * oito linhas tem 32 delas. Por isso o `sync.ts` ENXUGA — tudo que
+ * está no valor padrão do plugin não viaja. Quem não usa tabela
+ * nenhuma continua perto dos 30, e só quem usa paga.
  *
  * Isso é muito para um servidor e pouco para uma rede grande, e o
  * dia em que apertar tem conserta óbvio: mandar a cada servidor só

@@ -3,13 +3,28 @@
 // ============================================================
 //  dungeon-dialog.tsx  -  montar uma masmorra sem ler manual.
 //
-//  ####  SÃO TRINTA CAMPOS  ####
+//  ####  SÃO MAIS DE CEM CAMPOS  ####
 //
 //  Numa tela só, ninguém preenche o décimo. Então eles viram uma
 //  trilha de seis passos, e cada passo cabe numa tela:
 //
-//    ① identidade   ② tamanho e mistura   ③ o que tem dentro
-//    ④ os inimigos  ⑤ a entrada           ⑥ construir
+//    ① identidade   ② tamanho, mistura e material
+//    ③ salas, loot, portas trancadas e ciclo do loot
+//    ④ os inimigos, o drop e o comportamento
+//    ⑤ a entrada    ⑥ construir
+//
+//  ####  E O QUE NÃO CABE NUM PASSO VIRA ABA  ####
+//
+//  O comportamento sozinho são dezenove campos em cinco lugares —
+//  o padrão da masmorra, cada cor de sala e o corredor. Empilhá-los
+//  daria noventa e cinco caixas no passo ④. Eles moram em
+//  `ai-fields.tsx`, atrás de uma aba por lugar, e a aba diz quantos
+//  campos aquele lugar mudou: sem isso, achar onde se mexeu exigiria
+//  abrir as cinco.
+//
+//  A tabela de loot segue a mesma ideia em `loot-table-fields.tsx`:
+//  enquanto o modo é "a do servidor" — o padrão, e o que quase toda
+//  masmorra quer — não há tabela nenhuma na tela.
 //
 //  ####  E A PRÉVIA ANDA JUNTO  ####
 //
@@ -34,24 +49,38 @@
 import { Check, Copy, Dices, Loader2, Plus, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
+import { AiFields, resolveAi } from '@/components/dungeons/ai-fields';
 import { DungeonGridEditor } from '@/components/dungeons/dungeon-grid-editor';
 import { DungeonPreviewPanel } from '@/components/dungeons/dungeon-preview';
 import { LayoutThumb } from '@/components/dungeons/layout-thumb';
+import { LootTableFields } from '@/components/dungeons/loot-table-fields';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { FieldLabel } from '@/components/ui/help-tip';
 import { Input } from '@/components/ui/input';
 import { StepBody, Steps, type Step } from '@/components/ui/steps';
 import { Toggle } from '@/components/ui/toggle';
-import { previewFromGrid, previewLayout } from '@/lib/dungeon-layout';
+import {
+  previewFromGrid,
+  previewLayout,
+  wideDoorStats,
+  type DungeonPreview,
+} from '@/lib/dungeon-layout';
 import {
   agent,
+  BUILD_GRADES,
+  ROOM_DOORS,
+  type AiSpec,
   type BlueprintSummary,
+  type BuildGrade,
   type Dungeon,
   type DungeonInput,
   type DungeonLayoutSummary,
+  type DungeonLock,
   type DungeonRoom,
   type EventRun,
+  type GradeSet,
+  type LootTable,
   type RoomColor,
   type RoomDoor,
 } from '@/lib/api';
@@ -71,14 +100,112 @@ const DOOR_LABEL: Readonly<Record<RoomDoor, string>> = {
   wood: 'Madeira',
   metal: 'Metal',
   toptier: 'Blindada',
+  industrial: 'De fábrica',
+  double_wood: 'Dupla de madeira',
+  double_metal: 'Dupla de metal',
+  double_toptier: 'Dupla blindada',
+  cell_gate: 'Grade de cela',
+  fence_gate: 'Portão de tela',
+  garage: 'Portão de garagem',
+  none: 'Sem porta (vão aberto)',
+};
+
+/** As de dois metros: elas nascem num quadro, e não num vão de porta. */
+const WIDE_DOORS: readonly RoomDoor[] = [
+  'double_wood',
+  'double_metal',
+  'double_toptier',
+  'cell_gate',
+  'fence_gate',
+  'garage',
+];
+
+/**
+ * O MATERIAL de cada porta.
+ *
+ * ####  O AVISO É SOBRE MATERIAL, E NÃO SOBRE A FOLHA  ####
+ *
+ * Com onze portas, comparar a folha escolhida com "a folha daquela
+ * cor" gritaria em quase toda escolha — e um aviso que aparece
+ * sempre deixa de ser lido. `cell_gate` numa sala vermelha não é
+ * erro: é desenho. Madeira numa sala vermelha continua sendo uma
+ * promessa quebrada.
+ */
+const DOOR_MATERIAL: Readonly<Record<RoomDoor, 'wood' | 'metal' | 'toptier' | 'open'>> = {
+  wood: 'wood',
+  double_wood: 'wood',
+  fence_gate: 'wood',
+  metal: 'metal',
+  double_metal: 'metal',
+  industrial: 'metal',
+  cell_gate: 'metal',
+  garage: 'metal',
+  toptier: 'toptier',
+  double_toptier: 'toptier',
+  none: 'open',
 };
 
 /** A que a cor da sala corresponde. Manter isso é o que faz a cor avisar. */
-const DOOR_OF_COLOR: Readonly<Record<RoomColor, RoomDoor>> = {
+const MATERIAL_OF_COLOR: Readonly<Record<RoomColor, 'wood' | 'metal' | 'toptier'>> = {
   green: 'wood',
   blue: 'metal',
   red: 'toptier',
 };
+
+const GRADE_LABEL: Readonly<Record<BuildGrade, string>> = {
+  twigs: 'Palha',
+  wood: 'Madeira',
+  stone: 'Pedra',
+  metal: 'Metal',
+  toptier: 'Blindado',
+};
+
+const CARRIER_LABEL: Readonly<Record<DungeonLock['carrier'], string>> = {
+  npc: 'Um inimigo',
+  crate: 'Uma caixa',
+  none: 'Ninguém (as salas ficam trancadas)',
+};
+
+const SCOPE_LABEL: Readonly<Record<DungeonLock['carrierScope'], string>> = {
+  corridor: 'No corredor',
+  anywhere: 'Em qualquer lugar (menos na própria sala)',
+};
+
+const UNDELIVERED_LABEL: Readonly<Record<DungeonLock['onUndelivered'], string>> = {
+  unlock: 'Destranca a sala',
+  keep: 'Deixa trancada mesmo assim',
+};
+
+/** A tabela de loot que não muda nada: o padrão de todo campo novo. */
+const SERVER_TABLE: LootTable = { mode: 'server', rolls: { min: 1, max: 2 }, entries: [] };
+
+const CRATE_NORMAL = 'assets/bundled/prefabs/radtown/crate_normal.prefab';
+const CRATE_ELITE = 'assets/bundled/prefabs/radtown/crate_elite.prefab';
+
+/** Os campos que toda sala tem e que quase ninguém mexe. */
+function room(
+  key: RoomColor,
+  npc: { min: number; max: number },
+  loot: { min: number; max: number },
+  crate: string,
+  door: RoomDoor,
+  locked: boolean,
+): DungeonRoom {
+  return {
+    key,
+    color: key,
+    npc,
+    loot,
+    crates: [crate],
+    door,
+    locked,
+    wideDoor: null,
+    wideDoorCellsPerDoor: 4,
+    grade: null,
+    table: { ...SERVER_TABLE },
+    ai: {},
+  };
+}
 
 const EMPTY: DungeonInput = {
   id: '',
@@ -92,6 +219,8 @@ const EMPTY: DungeonInput = {
     npcDensity: 20,
     lootDensity: 10,
     crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
+    table: { ...SERVER_TABLE },
+    ai: {},
   },
   grid: null,
   npc: {
@@ -99,36 +228,26 @@ const EMPTY: DungeonInput = {
     damageScale: 1,
     weapons: ['rifle.semiauto', 'pistol.m92'],
     names: ['Guardião', 'Sentinela'],
+    loot: { ...SERVER_TABLE },
+    ai: {},
   },
   timeOfDay: 0,
+  structure: { foundation: 'stone', wall: 'stone', ceiling: 'stone' },
+  lock: {
+    enabled: true,
+    sharedCode: false,
+    carrier: 'npc',
+    carrierScope: 'corridor',
+    onUndelivered: 'unlock',
+    noteTitle: 'Código da porta',
+    announceOpen: true,
+    warnOnWrongCode: true,
+  },
+  respawn: { enabled: false, minutes: 30, onlyWhenEmpty: true, rebuildDestroyed: true },
   rooms: [
-    {
-      key: 'green',
-      color: 'green',
-      npc: { min: 0, max: 1 },
-      loot: { min: 1, max: 1 },
-      crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
-      door: 'wood',
-      locked: false,
-    },
-    {
-      key: 'blue',
-      color: 'blue',
-      npc: { min: 1, max: 2 },
-      loot: { min: 1, max: 2 },
-      crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
-      door: 'metal',
-      locked: false,
-    },
-    {
-      key: 'red',
-      color: 'red',
-      npc: { min: 2, max: 3 },
-      loot: { min: 2, max: 3 },
-      crates: ['assets/bundled/prefabs/radtown/crate_elite.prefab'],
-      door: 'toptier',
-      locked: true,
-    },
+    room('green', { min: 0, max: 1 }, { min: 1, max: 1 }, CRATE_NORMAL, 'wood', false),
+    room('blue', { min: 1, max: 2 }, { min: 1, max: 2 }, CRATE_NORMAL, 'metal', false),
+    room('red', { min: 2, max: 3 }, { min: 2, max: 3 }, CRATE_ELITE, 'toptier', true),
   ],
 };
 
@@ -198,7 +317,7 @@ export function DungeonDialog({
       problem: problems.tamanho,
       done: true,
     },
-    { id: 'salas', label: 'Salas', done: draft.rooms.length > 0 },
+    { id: 'salas', label: 'Salas e loot', problem: problems.salas, done: draft.rooms.length > 0 },
     { id: 'inimigos', label: 'Inimigos', problem: problems.inimigos, done: true },
     { id: 'entrada', label: 'Entrada', done: true },
     { id: 'construir', label: 'Construir', done: saved },
@@ -274,7 +393,7 @@ export function DungeonDialog({
 
         {step === 'salas' && (
           <WithPreview draft={draft} seed={seed} onReseed={() => setSeed((n) => n + 1)}>
-            <StepSalas draft={draft} patch={patch} />
+            <StepSalas draft={draft} patch={patch} seed={seed} />
           </WithPreview>
         )}
 
@@ -539,7 +658,99 @@ function StepTamanho({
           />
         </div>
       </div>
+
+      {/* O material é da MASMORRA — corredor, entrada e tudo que
+          não tem dono de sala. Por isso ele mora no passo de como
+          ela nasce, e não no das salas. */}
+      <div>
+        <FieldLabel topic={DUNGEON_HELP.grauConstrucao}>De que material ela é feita</FieldLabel>
+        <GradeRow
+          value={draft.structure}
+          onChange={(structure) => patch({ structure })}
+          className="mt-1"
+        />
+      </div>
     </StepBody>
+  );
+}
+
+/**
+ * O que o limite da porta larga produz NAQUELE traçado.
+ *
+ * Sem esta frase, "4 células por porta" é um número sem tradução: o
+ * admin escolhe a folha dupla, salva, e descobre no jogo que ela
+ * nunca aparece — ou que aparece em toda sala.
+ */
+function WideDoorHint({
+  preview,
+  cellsPerDoor,
+}: {
+  readonly preview: DungeonPreview;
+  readonly cellsPerDoor: number;
+}) {
+  const stats = wideDoorStats(preview, cellsPerDoor);
+
+  return (
+    <p className="mt-2 border-l-2 border-border pl-2 text-2xs text-muted">
+      {stats.wide === 0 ? (
+        <>
+          No traçado ao lado, <strong className="text-foreground">nenhuma</strong> das{' '}
+          {String(stats.rooms)} salas chega a {String(cellsPerDoor)} células por porta — com este
+          limite a folha larga não apareceria. Baixe o número.
+        </>
+      ) : (
+        <>
+          No traçado ao lado,{' '}
+          <strong className="text-foreground">
+            {String(stats.wide)} de {String(stats.rooms)}
+          </strong>{' '}
+          salas passam de {String(cellsPerDoor)} células por porta — as desta cor entre elas
+          nasceriam com a folha larga.
+        </>
+      )}
+    </p>
+  );
+}
+
+/** Os três tipos de peça, lado a lado. */
+function GradeRow({
+  value,
+  onChange,
+  className,
+}: {
+  readonly value: GradeSet;
+  readonly onChange: (value: GradeSet) => void;
+  readonly className?: string;
+}) {
+  const pieces = [
+    { field: 'foundation' as const, label: 'Piso' },
+    { field: 'wall' as const, label: 'Parede' },
+    { field: 'ceiling' as const, label: 'Teto' },
+  ];
+
+  return (
+    <div className={cn('grid gap-3 sm:grid-cols-3', className)}>
+      {pieces.map((piece) => (
+        <label key={piece.field} className="block">
+          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+            {piece.label}
+          </span>
+          <select
+            value={value[piece.field]}
+            onChange={(event) =>
+              onChange({ ...value, [piece.field]: event.target.value as BuildGrade })
+            }
+            className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+          >
+            {BUILD_GRADES.map((grade) => (
+              <option key={grade} value={grade}>
+                {GRADE_LABEL[grade]}
+              </option>
+            ))}
+          </select>
+        </label>
+      ))}
+    </div>
   );
 }
 
@@ -814,9 +1025,12 @@ function SaveAsLayout({
 function StepSalas({
   draft,
   patch,
+  seed,
 }: {
   readonly draft: DungeonInput;
   readonly patch: (change: Partial<DungeonInput>) => void;
+  /** A mesma semente da prévia ao lado: a frase da porta larga fala DAQUELE traçado. */
+  readonly seed: number;
 }) {
   function update(index: number, change: Partial<DungeonRoom>) {
     const rooms = draft.rooms.map((room, at) => (at === index ? { ...room, ...change } : room));
@@ -824,10 +1038,20 @@ function StepSalas({
     patch({ rooms });
   }
 
+  // ####  SÓ NO MODO RECEITA  ####
+  //
+  // No modo planta, o `room` da prévia é o índice da COR e não o da
+  // sala — as três vermelhas contariam como um cômodo só, e a frase
+  // mentiria. Lá o admin vê os cômodos que desenhou.
+  const traced =
+    draft.mode === 'recipe'
+      ? previewLayout(Math.round((draft.size.min + draft.size.max) / 2), seed)
+      : null;
+
   return (
     <StepBody
       title="O que tem dentro de cada cor"
-      hint="A cor é o nível do cômodo: quantos inimigos, que loot, que porta o jogador encontra."
+      hint="A cor é o nível do cômodo: quantos inimigos, que loot, que porta e que material o jogador encontra. Embaixo ficam o corredor, as portas trancadas e o ciclo do loot — que valem para a masmorra inteira."
     >
       <div className="space-y-3">
         {draft.rooms.map((room, index) => (
@@ -849,9 +1073,11 @@ function StepSalas({
                 Sala {COLOR_LABEL[room.color]}
               </h4>
 
-              {room.door !== DOOR_OF_COLOR[room.color] && (
+              {DOOR_MATERIAL[room.door] !== MATERIAL_OF_COLOR[room.color] && (
                 <span className="border-l-2 border-amber pl-2 text-2xs text-foreground">
-                  A porta não corresponde à cor: o aviso visual deixa de funcionar.
+                  {room.door === 'none'
+                    ? 'Sem porta, esta sala deixa de avisar o que tem dentro.'
+                    : 'O material da porta não corresponde à cor: o aviso visual deixa de funcionar.'}
                 </span>
               )}
             </div>
@@ -886,7 +1112,7 @@ function StepSalas({
                   onChange={(event) => update(index, { door: event.target.value as RoomDoor })}
                   className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
                 >
-                  {(['wood', 'metal', 'toptier'] as const).map((door) => (
+                  {ROOM_DOORS.map((door) => (
                     <option key={door} value={door}>
                       {DOOR_LABEL[door]}
                     </option>
@@ -908,15 +1134,345 @@ function StepSalas({
               </div>
             </div>
 
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="lg:col-span-2">
+                <FieldLabel topic={DUNGEON_HELP.portaLarga}>Porta da sala grande</FieldLabel>
+                <select
+                  value={room.wideDoor ?? ''}
+                  onChange={(event) =>
+                    update(index, {
+                      wideDoor: event.target.value === '' ? null : (event.target.value as RoomDoor),
+                    })
+                  }
+                  className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+                >
+                  <option value="">A mesma de cima, sempre</option>
+                  {WIDE_DOORS.map((door) => (
+                    <option key={door} value={door}>
+                      {DOOR_LABEL[door]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <FieldLabel topic={DUNGEON_HELP.portaLargaLimite}>A partir de</FieldLabel>
+                <div className="mt-1 flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={64}
+                    className="w-16"
+                    disabled={room.wideDoor === null}
+                    value={room.wideDoorCellsPerDoor}
+                    onChange={(event) =>
+                      update(index, {
+                        wideDoorCellsPerDoor: clampInt(event.target.value, 1, 64),
+                      })
+                    }
+                  />
+                  <span className="text-2xs text-muted">células por porta</span>
+                </div>
+              </div>
+
+              <div>
+                <FieldLabel topic={DUNGEON_HELP.grauDaSala}>Material próprio</FieldLabel>
+                <div className="mt-1.5">
+                  <Toggle
+                    on={room.grade !== null}
+                    busy={false}
+                    onChange={(on) =>
+                      update(index, { grade: on ? { ...draft.structure } : null })
+                    }
+                    labels={['Próprio', 'Herda']}
+                    label={`Material da sala ${COLOR_LABEL[room.color]}`}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {room.wideDoor !== null && traced !== null && (
+              <WideDoorHint preview={traced} cellsPerDoor={room.wideDoorCellsPerDoor} />
+            )}
+
+            {room.grade !== null && (
+              <GradeRow
+                value={room.grade}
+                onChange={(grade) => update(index, { grade })}
+                className="mt-3"
+              />
+            )}
+
             <CrateList
               crates={room.crates}
               onChange={(crates) => update(index, { crates })}
               className="mt-3"
             />
+
+            <div className="mt-3">
+              <LootTableFields
+                title={`O que cai nas caixas da sala ${COLOR_LABEL[room.color].toLowerCase()}`}
+                value={room.table}
+                onChange={(table) => update(index, { table })}
+              />
+            </div>
           </div>
         ))}
       </div>
+
+      {/* ####  O CORREDOR VEM DEPOIS DAS SALAS, E NÃO NO PASSO ②  ####
+
+          A densidade dele é "como a masmorra nasce"; a tabela é
+          "o que cai", e quem está pensando em loot está OLHANDO
+          para as salas. Separar as duas coisas de lugar custaria
+          uma ida e volta a cada ajuste. */}
+      <div className="border border-border bg-surface-2 p-3">
+        <h4 className="mb-3 font-condensed text-xs font-bold uppercase tracking-wide">
+          O corredor
+        </h4>
+        <LootTableFields
+          title="O que cai nas caixas do corredor"
+          value={draft.corridor.table}
+          onChange={(table) => patch({ corridor: { ...draft.corridor, table } })}
+        />
+      </div>
+
+      <LockFields draft={draft} patch={patch} />
+      <RespawnFields draft={draft} patch={patch} />
     </StepBody>
+  );
+}
+
+/**
+ * A fechadura, que é da masmorra inteira.
+ *
+ * Ela mora aqui, e não num passo próprio, porque a pergunta que ela
+ * responde só aparece depois de o admin marcar uma sala como
+ * trancada — e é nesta tela que ele faz isso.
+ */
+function LockFields({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  const anyLocked = draft.rooms.some((current) => current.locked);
+
+  function update(change: Partial<DungeonLock>) {
+    patch({ lock: { ...draft.lock, ...change } });
+  }
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-condensed text-xs font-bold uppercase tracking-wide">
+          As portas trancadas
+        </h4>
+        <Toggle
+          on={draft.lock.enabled}
+          busy={false}
+          onChange={(enabled) => update({ enabled })}
+          labels={['Trancam', 'Abertas']}
+          label="Sistema de fechadura"
+        />
+      </div>
+
+      {!anyLocked && (
+        <p className="text-2xs text-muted">
+          Nenhuma sala está marcada como trancada — o que está aqui embaixo só passa a valer quando
+          uma estiver.
+        </p>
+      )}
+
+      {draft.lock.enabled && (
+        <div className="mt-1 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div>
+            <FieldLabel topic={DUNGEON_HELP.portador}>Quem carrega o código</FieldLabel>
+            <select
+              value={draft.lock.carrier}
+              onChange={(event) =>
+                update({ carrier: event.target.value as DungeonLock['carrier'] })
+              }
+              className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+            >
+              {(Object.keys(CARRIER_LABEL) as DungeonLock['carrier'][]).map((carrier) => (
+                <option key={carrier} value={carrier}>
+                  {CARRIER_LABEL[carrier]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <FieldLabel topic={DUNGEON_HELP.portador}>Onde ele pode estar</FieldLabel>
+            <select
+              value={draft.lock.carrierScope}
+              disabled={draft.lock.carrier === 'none'}
+              onChange={(event) =>
+                update({ carrierScope: event.target.value as DungeonLock['carrierScope'] })
+              }
+              className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+            >
+              {(Object.keys(SCOPE_LABEL) as DungeonLock['carrierScope'][]).map((scope) => (
+                <option key={scope} value={scope}>
+                  {SCOPE_LABEL[scope]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <FieldLabel>Se ninguém receber o código</FieldLabel>
+            <select
+              value={draft.lock.onUndelivered}
+              onChange={(event) =>
+                update({ onUndelivered: event.target.value as DungeonLock['onUndelivered'] })
+              }
+              className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+            >
+              {(Object.keys(UNDELIVERED_LABEL) as DungeonLock['onUndelivered'][]).map((option) => (
+                <option key={option} value={option}>
+                  {UNDELIVERED_LABEL[option]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <FieldLabel topic={DUNGEON_HELP.codigoUnico}>Um código para tudo</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.lock.sharedCode}
+                busy={false}
+                onChange={(sharedCode) => update({ sharedCode })}
+                labels={['Um só', 'Um por sala']}
+                label="Código compartilhado"
+              />
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>Avisar quando uma porta abre</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.lock.announceOpen}
+                busy={false}
+                onChange={(announceOpen) => update({ announceOpen })}
+                labels={['Avisa', 'Calado']}
+                label="Aviso de porta aberta"
+              />
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>Dizer a quem errou o código</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.lock.warnOnWrongCode}
+                busy={false}
+                onChange={(warnOnWrongCode) => update({ warnOnWrongCode })}
+                labels={['Diz', 'Calado']}
+                label="Aviso de código errado"
+              />
+            </div>
+          </div>
+
+          <div className="sm:col-span-2 lg:col-span-3">
+            <FieldLabel>O nome do papel no inventário</FieldLabel>
+            <Input
+              className="mt-1"
+              value={draft.lock.noteTitle}
+              maxLength={40}
+              placeholder="Código da porta"
+              onChange={(event) => update({ noteTitle: event.target.value })}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** O ciclo do loot. Desligado é o certo no modo evento. */
+function RespawnFields({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <FieldLabel topic={DUNGEON_HELP.respawn} className="text-xs font-bold text-foreground">
+          O loot volta sozinho
+        </FieldLabel>
+        <Toggle
+          on={draft.respawn.enabled}
+          busy={false}
+          onChange={(enabled) => patch({ respawn: { ...draft.respawn, enabled } })}
+          labels={['Volta', 'Não volta']}
+          label="Ciclo do loot"
+        />
+      </div>
+
+      {!draft.respawn.enabled ? (
+        <p className="text-2xs text-muted">
+          Desligado: o que o jogador levou, levou. É o certo para uma masmorra de evento — num
+          evento de 40 minutos, um ciclo de 30 é loot dobrado.
+        </p>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div>
+            <FieldLabel>A cada</FieldLabel>
+            <div className="mt-1 flex items-center gap-2">
+              <Input
+                type="number"
+                min={1}
+                max={1440}
+                className="w-20"
+                value={draft.respawn.minutes}
+                onChange={(event) =>
+                  patch({
+                    respawn: { ...draft.respawn, minutes: clampInt(event.target.value, 1, 1440) },
+                  })
+                }
+              />
+              <span className="text-2xs text-muted">minutos</span>
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>Só quando a caixa está vazia</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.respawn.onlyWhenEmpty}
+                busy={false}
+                onChange={(onlyWhenEmpty) => patch({ respawn: { ...draft.respawn, onlyWhenEmpty } })}
+                labels={['Só vazia', 'Sempre']}
+                label="Repor só a caixa vazia"
+              />
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>Refazer as caixas destruídas</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.respawn.rebuildDestroyed}
+                busy={false}
+                onChange={(rebuildDestroyed) =>
+                  patch({ respawn: { ...draft.respawn, rebuildDestroyed } })
+                }
+                labels={['Refaz', 'Some']}
+                label="Refazer caixa destruída"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1002,7 +1558,113 @@ function StepInimigos({
           </span>
         </div>
       </div>
+
+      <LootTableFields
+        title="O que o corpo carrega"
+        value={draft.npc.loot}
+        onChange={(loot) => patch({ npc: { ...draft.npc, loot } })}
+      />
+
+      <BehaviourFields draft={draft} patch={patch} />
     </StepBody>
+  );
+}
+
+/**
+ * O comportamento: o padrão da masmorra, e as exceções.
+ *
+ * ####  DEZENOVE CAMPOS VEZES CINCO LUGARES NÃO CABEM NUMA TELA  ####
+ *
+ * Então o padrão fica aberto — é o que quase todo mundo quer mexer
+ * — e as exceções (cada cor de sala, o corredor) entram por uma
+ * aba, uma de cada vez. A aba mostra quantos campos aquela exceção
+ * mudou, para o admin não precisar abrir as quatro para descobrir
+ * onde ele mexeu.
+ */
+function BehaviourFields({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  /** `null` = o padrão da masmorra; senão o índice da sala; -1 = corredor. */
+  const [target, setTarget] = useState<number | null>(null);
+
+  const tabs: { readonly at: number | null; readonly label: string; readonly ai: AiSpec }[] = [
+    { at: null, label: 'Padrão da masmorra', ai: draft.npc.ai },
+    ...draft.rooms.map((current, index) => ({
+      at: index,
+      label: `Sala ${COLOR_LABEL[current.color].toLowerCase()}`,
+      ai: current.ai,
+    })),
+    { at: -1, label: 'Corredor', ai: draft.corridor.ai },
+  ];
+
+  const current = tabs.find((tab) => tab.at === target) ?? tabs[0];
+
+  function change(ai: AiSpec) {
+    if (target === null) {
+      patch({ npc: { ...draft.npc, ai } });
+      return;
+    }
+
+    if (target === -1) {
+      patch({ corridor: { ...draft.corridor, ai } });
+      return;
+    }
+
+    patch({ rooms: draft.rooms.map((room, index) => (index === target ? { ...room, ai } : room)) });
+  }
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <FieldLabel topic={DUNGEON_HELP.iaHeranca} className="text-xs font-bold text-foreground">
+        Como o inimigo se comporta
+      </FieldLabel>
+
+      <div className="mt-2 flex flex-wrap gap-1">
+        {tabs.map((tab) => {
+          const changed = Object.keys(tab.ai).length;
+
+          return (
+            <button
+              key={String(tab.at)}
+              type="button"
+              aria-pressed={tab.at === (current?.at ?? null)}
+              onClick={() => setTarget(tab.at)}
+              className={cn(
+                'border px-2 py-1 font-condensed text-2xs uppercase tracking-wide',
+                tab.at === (current?.at ?? null)
+                  ? 'border-rust bg-rust/10 text-foreground'
+                  : 'border-border bg-background text-muted hover:border-muted',
+              )}
+            >
+              {tab.label}
+              {changed > 0 && (
+                <span className="ml-1 tabular-nums text-foreground">({String(changed)})</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <p className="mt-2 text-2xs text-muted">
+        {target === null
+          ? 'Campo em branco usa o padrão do jogo — o número em cinza é ele.'
+          : 'Campo em branco herda o padrão da masmorra, que é o número em cinza.'}
+      </p>
+
+      <div className="mt-3">
+        <AiFields
+          value={current?.ai ?? {}}
+          // A marca-d'água mostra o que a sala vai REALMENTE usar:
+          // o padrão do jogo com o padrão da masmorra por cima.
+          inherited={target === null ? {} : resolveAi({}, draft.npc.ai)}
+          onChange={change}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -1546,13 +2208,91 @@ function validate(draft: DungeonInput): Record<string, string | undefined> {
     problems.tamanho = 'Falta desenhar: sem traçado não há o que construir.';
   }
 
+  // ####  AS DUAS REGRAS DA FECHADURA, ANTES DE O AGENTE RECUSAR  ####
+  //
+  // A rota também as cobra — mas o sintoma de errar aqui é MUDO no
+  // jogo (a sala nasce lacrada, o construtor destranca e grita num
+  // console que ninguém lê), e o admin conserta enquanto ainda está
+  // olhando para o campo.
+  const anyLocked = draft.rooms.some((current) => current.locked);
+
+  if (anyLocked && draft.lock.enabled) {
+    if (draft.lock.carrier === 'none') {
+      problems.salas =
+        'Há sala trancada e ninguém para carregar o código: escolha um inimigo ou uma caixa, ou destranque as salas.';
+    } else if (
+      draft.lock.carrier === 'npc' &&
+      draft.lock.carrierScope === 'corridor' &&
+      draft.corridor.npcDensity === 0
+    ) {
+      problems.salas =
+        'O código sai de um inimigo do corredor, e o corredor não tem nenhum: suba a densidade no passo Tamanho, ou permita o portador em qualquer lugar.';
+    }
+  }
+
+  // Uma tabela sem itens em "acrescenta" ou "substitui" não muda
+  // nada, e o schema do agente a recusa. Melhor dizer qual é.
+  const emptyTable = [
+    ...draft.rooms.map((current) => ({
+      table: current.table,
+      where: `da sala ${COLOR_LABEL[current.color].toLowerCase()}`,
+    })),
+    { table: draft.corridor.table, where: 'do corredor' },
+  ].find((entry) => entry.table.mode !== 'server' && entry.table.entries.length === 0);
+
+  if (emptyTable !== undefined) {
+    problems.salas = `A tabela de loot ${emptyTable.where} não tem item nenhum: acrescente um, ou volte para "a do servidor".`;
+  }
+
+  if (draft.npc.loot.mode !== 'server' && draft.npc.loot.entries.length === 0) {
+    problems.inimigos =
+      'A tabela do corpo do inimigo não tem item nenhum: acrescente um, ou volte para "a do servidor".';
+  }
+
   return problems;
 }
 
+/**
+ * A masmorra que o agente devolveu, no formato do rascunho.
+ *
+ * ####  CADA CAMPO NOVO GANHA UM PADRÃO AQUI  ####
+ *
+ * O tipo do painel NÃO valida a resposta: um campo que o agente
+ * omitir chega como `undefined`, e o primeiro `draft.lock.enabled`
+ * do render derruba a página inteira com "This page couldn't
+ * load". Isso já aconteceu neste projeto.
+ *
+ * Um agente atualizado manda tudo — mas um painel novo contra um
+ * agente que ainda não subiu é exatamente o caso em que isso
+ * acontece, e é barato de sustentar.
+ */
 function toInput(dungeon: Dungeon): DungeonInput {
   const { createdAt: _created, updatedAt: _updated, ...input } = dungeon;
 
-  return input;
+  return {
+    ...input,
+    corridor: {
+      ...input.corridor,
+      table: input.corridor.table ?? { ...SERVER_TABLE },
+      ai: input.corridor.ai ?? {},
+    },
+    npc: {
+      ...input.npc,
+      loot: input.npc.loot ?? { ...SERVER_TABLE },
+      ai: input.npc.ai ?? {},
+    },
+    structure: input.structure ?? { ...EMPTY.structure },
+    lock: input.lock ?? { ...EMPTY.lock },
+    respawn: input.respawn ?? { ...EMPTY.respawn },
+    rooms: input.rooms.map((current) => ({
+      ...current,
+      wideDoor: current.wideDoor ?? null,
+      wideDoorCellsPerDoor: current.wideDoorCellsPerDoor ?? 4,
+      grade: current.grade ?? null,
+      table: current.table ?? { ...SERVER_TABLE },
+      ai: current.ai ?? {},
+    })),
+  };
 }
 
 /**

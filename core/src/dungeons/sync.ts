@@ -44,10 +44,19 @@ import {
   DUNGEON_SYNC_MAX_BYTES,
   parseDungeonPush,
   parseDungeonReady,
+  type AiPayload,
   type DungeonPayload,
   type DungeonSyncPayload,
+  type GradePayload,
+  type LootTablePayload,
 } from '../game/dungeon-contract.js';
 import type { Logger } from '../logger.js';
+import type {
+  AiSpecInput,
+  Dungeon,
+  GradeSetInput,
+  LootTableInput,
+} from '../types/dungeons.js';
 import { toError } from '../util.js';
 import type { BlueprintMaterializer } from './materializer.js';
 
@@ -214,10 +223,26 @@ export class DungeonSync {
       entrance: dungeon.entranceBlueprint,
       size: dungeon.size,
       weights: dungeon.weights,
-      corridor: dungeon.corridor,
+      corridor: {
+        npcDensity: dungeon.corridor.npcDensity,
+        lootDensity: dungeon.corridor.lootDensity,
+        crates: dungeon.corridor.crates,
+        table: leanTable(dungeon.corridor.table),
+        ai: leanAi(dungeon.corridor.ai),
+      },
       grid: dungeon.grid,
-      npc: dungeon.npc,
+      npc: {
+        health: dungeon.npc.health,
+        damageScale: dungeon.npc.damageScale,
+        weapons: dungeon.npc.weapons,
+        names: dungeon.npc.names,
+        loot: leanTable(dungeon.npc.loot),
+        ai: leanAi(dungeon.npc.ai),
+      },
       timeOfDay: dungeon.timeOfDay,
+      structure: leanStructure(dungeon.structure),
+      lock: leanLock(dungeon.lock),
+      respawn: leanRespawn(dungeon.respawn),
       rooms: dungeon.rooms.map((room) => ({
         key: room.key,
         color: room.color,
@@ -226,6 +251,22 @@ export class DungeonSync {
         crates: room.crates,
         door: room.door,
         locked: room.locked,
+        wideDoor: room.wideDoor ?? undefined,
+
+        // ####  A SALA MANDA O GRADE INTEIRO, OU NÃO MANDA NADA  ####
+        //
+        // Aqui NÃO cabe o corte do `leanStructure`: uma sala que
+        // pediu pedra numa masmorra de metal precisa dizer "pedra".
+        // Omitir por ser o padrão do PLUGIN faria essa sala herdar o
+        // metal da masmorra — o oposto do que o admin escolheu.
+        grade: room.grade ?? undefined,
+
+        wideDoorCellsPerDoor:
+          room.wideDoorCellsPerDoor === DEFAULT_WIDE_DOOR_CELLS
+            ? undefined
+            : room.wideDoorCellsPerDoor,
+        table: leanTable(room.table),
+        ai: leanAi(room.ai),
       })),
     };
   }
@@ -375,4 +416,150 @@ export class DungeonSync {
 
     return run.id;
   }
+}
+
+// ============================================================
+//  O ENXUGAMENTO DO PAYLOAD
+//
+//  ####  O TETO DO SYNC É 50 KB, E A TABELA DE LOOT COME ISSO  ####
+//
+//  MEDIDO em 09/09/2026: uma masmorra de três salas sem tabela pesa
+//  ~1,0 KB em base64; com tabelas de oito itens por cor e mais uma
+//  no corredor, ~6,7 KB. É a diferença entre caber 36 e caber 7 no
+//  mesmo comando — e um payload que estoura não falha alto, ele é
+//  RECUSADO e deixa o plugin com o estado velho.
+//
+//  ####  UNDEFINED SOME SOZINHO NA SERIALIZAÇÃO  ####
+//
+//  `JSON.stringify` não escreve chave cujo valor é `undefined`.
+//  Então devolver `undefined` aqui é o mesmo que não mandar o
+//  campo, sem um único `delete` nem objeto montado por spread.
+//
+//  ####  E CADA CORTE FOI CONFERIDO CONTRA O C#  ####
+//
+//  Omitir só é seguro quando o plugin, sem o campo, faz EXATAMENTE
+//  o que o valor omitido faria:
+//
+//    · `structure` ausente → `DefaultGrade`, que é `Stone`
+//    · `lock` ausente → `new LockSpec()`, com os mesmos padrões
+//    · `table` ausente → `ModeOf` devolve "server"
+//    · `weight` ausente numa linha → o `LootEntrySpec` do plugin
+//      trata 0 como "peso 1"; por isso ele só é omitido quando é 10,
+//      e o 10 é reposto do lado de lá pelo mesmo inicializador
+//
+//  O `respawn` é a exceção que prova a regra, e por isso ele viaja
+//  sempre — ver `leanRespawn`.
+// ============================================================
+
+/** O `DefaultWideDoorCellsPerDoor` do plugin. */
+const DEFAULT_WIDE_DOOR_CELLS = 4;
+
+/** O peso que o plugin repõe quando a linha não traz nenhum. */
+const DEFAULT_ENTRY_WEIGHT = 10;
+
+/**
+ * O título que o plugin usa quando o `noteTitle` chega vazio.
+ *
+ * Declarado AQUI, e não ao lado da função que o lê: o arquivo de
+ * contrato desta frente já derrubou o boot do agente uma vez por
+ * uma constante lida antes de declarada, e o typecheck não vê isso.
+ */
+const DEFAULT_NOTE_TITLE = 'Código da porta';
+
+/**
+ * A tabela, sem o que já é o padrão.
+ *
+ * `mode: 'server'` não viaja: é o que o plugin faz sem tabela
+ * nenhuma, e é o caso de quase toda masmorra. Dentro das linhas,
+ * cada campo em valor padrão também fica de fora — são ~55 bytes
+ * por linha, e uma masmorra com quatro tabelas de oito tem 32
+ * delas.
+ */
+function leanTable(table: LootTableInput): LootTablePayload | undefined {
+  if (table.mode === 'server') return undefined;
+
+  return {
+    mode: table.mode,
+    rolls: table.rolls,
+    entries: table.entries.map((entry) => ({
+      shortname: entry.shortname,
+      amount: entry.amount,
+      weight: entry.weight === DEFAULT_ENTRY_WEIGHT ? undefined : entry.weight,
+      guaranteed: entry.guaranteed ? true : undefined,
+      skin: entry.skin === 0 ? undefined : entry.skin,
+      blueprint: entry.blueprint ? true : undefined,
+      condition: entry.condition === 0 ? undefined : entry.condition,
+    })),
+  };
+}
+
+/**
+ * O bloco de comportamento, ou nada.
+ *
+ * Ele já nasce mínimo — só carrega o campo que alguém escreveu —,
+ * então o único corte possível é o bloco vazio, que é o caso de
+ * toda masmorra que não mexeu na IA. São 8 bytes por lugar, e os
+ * lugares são cinco numa masmorra de três salas.
+ */
+function leanAi(ai: AiSpecInput): AiPayload | undefined {
+  return Object.keys(ai).length === 0 ? undefined : ai;
+}
+
+/**
+ * O nível das peças da masmorra, ou nada.
+ *
+ * Pedra em tudo é o `DefaultGrade` do plugin — e era o que o
+ * construtor cravava antes desta frente existir.
+ */
+function leanStructure(structure: GradeSetInput): GradePayload | undefined {
+  const untouched =
+    structure.foundation === 'stone' && structure.wall === 'stone' && structure.ceiling === 'stone';
+
+  return untouched ? undefined : structure;
+}
+
+/**
+ * A fechadura, ou nada.
+ *
+ * O `new LockSpec()` do plugin tem exatamente estes valores, e o
+ * `noteTitle` vazio vira "Código da porta" lá dentro. Quem não
+ * mexeu na fechadura não gasta os ~150 bytes dela.
+ */
+function leanLock(lock: Dungeon['lock']): DungeonPayload['lock'] {
+  const untouched =
+    lock.enabled &&
+    !lock.sharedCode &&
+    lock.carrier === 'npc' &&
+    lock.carrierScope === 'corridor' &&
+    lock.onUndelivered === 'unlock' &&
+    lock.noteTitle === DEFAULT_NOTE_TITLE &&
+    lock.announceOpen &&
+    lock.warnOnWrongCode;
+
+  return untouched ? undefined : lock;
+}
+
+/**
+ * O ciclo do loot — e ele NÃO é omitido nunca.
+ *
+ * ####  AUSENTE E `enabled: false` SÃO COISAS DIFERENTES  ####
+ *
+ * MEDIDO no plugin: sem o bloco, ele não toca no `LootContainer` e
+ * o refresh do PREFAB fica de pé — a caixa de radtown se repõe
+ * sozinha em uma hora. Com `enabled: false`, ele zera esse refresh.
+ *
+ * O contrato promete que desligado é desligado, então o bloco
+ * viaja. O que dá para cortar são os outros três campos quando o
+ * ciclo está desligado: eles não são lidos, e os inicializadores do
+ * `RespawnSpec` repõem os mesmos valores do lado de lá.
+ */
+function leanRespawn(respawn: Dungeon['respawn']): DungeonPayload['respawn'] {
+  if (!respawn.enabled) return { enabled: false };
+
+  return {
+    enabled: true,
+    minutes: respawn.minutes,
+    onlyWhenEmpty: respawn.onlyWhenEmpty,
+    rebuildDestroyed: respawn.rebuildDestroyed,
+  };
 }

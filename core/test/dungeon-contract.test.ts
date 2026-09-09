@@ -22,6 +22,7 @@ import {
   DUNGEON_SYNC_MAX_BYTES,
   parseDungeonPush,
   parseDungeonReady,
+  type DungeonPayload,
 } from '../src/game/dungeon-contract.js';
 
 const SECRET = 'eb5d3bc8-3072-4434-afea-a01ec311532d';
@@ -145,53 +146,109 @@ describe('buildDungeonSyncCommand', () => {
     expect(decoded.zones).toHaveLength(1);
   });
 
-  it('quarenta masmorras cabem no teto do RCON, e cem não', () => {
+  it('trinta masmorras simples cabem no teto do RCON, e cem não', () => {
     // MEDIDO: uma masmorra de tres salas pesa ~900 bytes de JSON,
     // ~1,2 KB em base64. Eu tinha escrito "cem cabem folgadas" e
     // este teste provou o contrario - 74 KB, acima do teto.
     //
     // As PLANTAS nao passam por aqui: elas vao pelo disco. O que
     // atravessa o console e so a receita.
-    const build = (count: number) => Array.from({ length: count }, (_unused, index) => ({
-      id: `masmorra-${String(index)}`,
-      mode: 'recipe' as const,
-      entrance: 'entrance2',
-      size: { min: 10, max: 15 },
-      weights: { green: 60, blue: 30, red: 10 },
-      corridor: {
-        npcDensity: 20,
-        lootDensity: 10,
-        crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
-      },
-      grid: null,
-      npc: {
-        health: { min: 100, max: 150 },
-        damageScale: 1,
-        weapons: ['rifle.ak', 'smg.mp5'],
-        names: ['Guardião'],
-      },
-      timeOfDay: 0,
-      rooms: [
-        {
-          key: 'green',
-          color: 'green',
-          npc: { min: 0, max: 1 },
-          loot: { min: 1, max: 1 },
-          crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
-          door: 'wood',
-          locked: false,
-        },
-      ],
-    }));
-
     expect(
-      buildDungeonSyncCommand({ secret: SECRET, dungeons: build(40), zones: [] }).length,
+      buildDungeonSyncCommand({ secret: SECRET, dungeons: plain(30), zones: [] }).length,
     ).toBeLessThan(DUNGEON_SYNC_MAX_BYTES);
 
     // E o teto e para valer: o `push` RECUSA o envio inteiro e
     // deixa o cache anterior de pe - velho, mas integro.
     expect(
-      buildDungeonSyncCommand({ secret: SECRET, dungeons: build(100), zones: [] }).length,
+      buildDungeonSyncCommand({ secret: SECRET, dungeons: plain(100), zones: [] }).length,
+    ).toBeGreaterThan(DUNGEON_SYNC_MAX_BYTES);
+  });
+
+  it('com tabela de loot cheia, sete cabem e oito não', () => {
+    // ####  ESTE É O NÚMERO QUE MUDOU EM 09/09/2026  ####
+    //
+    // O comentário do `dungeon-contract.ts` prometia "cerca de 40"
+    // masmorras. Com as tabelas de loot da frente `event-loot` —
+    // oito itens por cor, mais uma no corredor — são SETE.
+    //
+    // O teste existe para que o dia em que alguém acrescentar mais
+    // um campo ao payload apareça AQUI, e não num plugin que
+    // recebeu meia masmorra.
+    expect(
+      buildDungeonSyncCommand({ secret: SECRET, dungeons: loaded(7), zones: [] }).length,
+    ).toBeLessThan(DUNGEON_SYNC_MAX_BYTES);
+
+    expect(
+      buildDungeonSyncCommand({ secret: SECRET, dungeons: loaded(8), zones: [] }).length,
     ).toBeGreaterThan(DUNGEON_SYNC_MAX_BYTES);
   });
 });
+
+/** Uma masmorra sem nada de opcional: é o que o sync enxuto produz. */
+function plain(count: number): DungeonPayload[] {
+  return Array.from({ length: count }, (_unused, index) => ({
+    id: `masmorra-${String(index)}`,
+    mode: 'recipe' as const,
+    entrance: 'entrance2',
+    size: { min: 10, max: 15 },
+    weights: { green: 60, blue: 30, red: 10 },
+    corridor: {
+      npcDensity: 20,
+      lootDensity: 10,
+      crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
+    },
+    grid: null,
+    npc: {
+      health: { min: 100, max: 150 },
+      damageScale: 1,
+      weapons: ['rifle.ak', 'smg.mp5'],
+      names: ['Guardião'],
+    },
+    timeOfDay: 0,
+    respawn: { enabled: false },
+    rooms: [
+      {
+        key: 'green',
+        color: 'green',
+        npc: { min: 0, max: 1 },
+        loot: { min: 1, max: 1 },
+        crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
+        door: 'wood',
+        locked: false,
+      },
+    ],
+  }));
+}
+
+/** Oito itens, com os campos que NÃO são padrão — o pior caso real. */
+function table(): NonNullable<DungeonPayload['rooms'][number]['table']> {
+  return {
+    mode: 'add',
+    rolls: { min: 1, max: 3 },
+    entries: Array.from({ length: 8 }, (_unused, index) => ({
+      shortname: `item.exemplo.${String(index)}`,
+      amount: { min: 1, max: 25 },
+      weight: 25,
+      guaranteed: index === 0,
+    })),
+  };
+}
+
+/** Três salas com tabela, mais o corredor e o corpo do inimigo. */
+function loaded(count: number): DungeonPayload[] {
+  return plain(count).map((dungeon) => ({
+    ...dungeon,
+    corridor: { ...dungeon.corridor, table: table() },
+    npc: { ...dungeon.npc, loot: table() },
+    rooms: (['green', 'blue', 'red'] as const).map((color) => ({
+      key: color,
+      color,
+      npc: { min: 1, max: 3 },
+      loot: { min: 1, max: 2 },
+      crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
+      door: 'wood',
+      locked: false,
+      table: table(),
+    })),
+  }));
+}

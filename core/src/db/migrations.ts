@@ -5855,6 +5855,166 @@ CREATE TABLE dungeon_layouts (
 );
 `;
 
+const DUNGEON_DOORS_AND_GRADE_SCHEMA = `
+-- ============================================================
+--  062  o nível de construção e a fechadura saem do código.
+--
+--  Duas partes. A segunda é chata porque o SQLite não altera um
+--  CHECK.
+--
+--  ####  A COLUNA door TEM UM CHECK, E ELE ENVELHECEU  ####
+--
+--  A 058 escreveu CHECK (door IN ('wood','metal','toptier')). O
+--  catálogo cresceu de 3 para 11 portas, e o SQLite não altera
+--  restrição: a tabela é renomeada, recriada, copiada e a velha
+--  dropada — o mesmo caminho da 034 (site_deliveries). Por isso
+--  ela vem PRIMEIRO: se algo falhar aqui, nada mais foi escrito.
+--
+--  Todo padrão reproduz o que o construtor cravava: 'stone' em
+--  tudo, fechadura ligada com o código saindo de um NPC de
+--  corredor. Masmorra existente nasce igual.
+--
+--  Ver Docs/OrigemZDurgeon/frentes/portas.md §B.
+-- ============================================================
+
+ALTER TABLE dungeon_rooms RENAME TO dungeon_rooms_061;
+
+CREATE TABLE dungeon_rooms (
+  dungeon_id TEXT NOT NULL REFERENCES dungeons(id) ON DELETE CASCADE,
+  room_key TEXT NOT NULL,
+
+  color TEXT NOT NULL DEFAULT 'green' CHECK (color IN ('green','blue','red')),
+
+  npc_min  INTEGER NOT NULL DEFAULT 0,
+  npc_max  INTEGER NOT NULL DEFAULT 1,
+  loot_min INTEGER NOT NULL DEFAULT 1,
+  loot_max INTEGER NOT NULL DEFAULT 1,
+
+  crates TEXT NOT NULL DEFAULT '[]',
+
+  -- Onze valores. Os quatro primeiros têm um metro de passagem e
+  -- moram num wall.doorway; os seis seguintes têm dois e moram num
+  -- wall.frame; 'none' é o vão aberto, de propósito.
+  door TEXT NOT NULL DEFAULT 'wood' CHECK (door IN (
+    'wood','metal','toptier','industrial',
+    'double_wood','double_metal','double_toptier',
+    'cell_gate','fence_gate','garage','none')),
+
+  locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0,1)),
+
+  -- NULL = a sala grande usa a mesma porta das outras.
+  wide_door TEXT CHECK (wide_door IS NULL OR wide_door IN (
+    'wood','metal','toptier','industrial',
+    'double_wood','double_metal','double_toptier',
+    'cell_gate','fence_gate','garage','none')),
+
+  -- Células POR PORTA, e não células: um salão de nove células com
+  -- quatro entradas não afunila ninguém.
+  wide_door_cells_per_door INTEGER NOT NULL DEFAULT 4,
+
+  -- NULL nos três = herda o structure_* da masmorra.
+  grade_foundation TEXT CHECK (grade_foundation IS NULL OR grade_foundation IN ('twigs','wood','stone','metal','toptier')),
+  grade_wall       TEXT CHECK (grade_wall       IS NULL OR grade_wall       IN ('twigs','wood','stone','metal','toptier')),
+  grade_ceiling    TEXT CHECK (grade_ceiling    IS NULL OR grade_ceiling    IN ('twigs','wood','stone','metal','toptier')),
+
+  PRIMARY KEY (dungeon_id, room_key)
+);
+
+INSERT INTO dungeon_rooms
+  (dungeon_id, room_key, color, npc_min, npc_max, loot_min, loot_max, crates, door, locked)
+SELECT dungeon_id, room_key, color, npc_min, npc_max, loot_min, loot_max, crates, door, locked
+FROM dungeon_rooms_061;
+
+DROP TABLE dungeon_rooms_061;
+
+-- ------------------------------------------------------------
+--  E o resto é ALTER TABLE, que o SQLite faz.
+-- ------------------------------------------------------------
+ALTER TABLE dungeons ADD COLUMN structure_foundation TEXT NOT NULL DEFAULT 'stone';
+ALTER TABLE dungeons ADD COLUMN structure_wall       TEXT NOT NULL DEFAULT 'stone';
+ALTER TABLE dungeons ADD COLUMN structure_ceiling    TEXT NOT NULL DEFAULT 'stone';
+
+ALTER TABLE dungeons ADD COLUMN lock_enabled         INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE dungeons ADD COLUMN lock_shared_code     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN lock_carrier         TEXT NOT NULL DEFAULT 'npc';
+ALTER TABLE dungeons ADD COLUMN lock_carrier_scope   TEXT NOT NULL DEFAULT 'corridor';
+ALTER TABLE dungeons ADD COLUMN lock_on_undelivered  TEXT NOT NULL DEFAULT 'unlock';
+
+-- Anulável porque o texto padrão é do CONTRATO, e não do banco: o
+-- schema Zod escreve "Código da porta" e mudá-lo um dia não pode
+-- exigir uma migração para reescrever linha nenhuma.
+ALTER TABLE dungeons ADD COLUMN lock_note_title      TEXT;
+
+ALTER TABLE dungeons ADD COLUMN lock_announce_open   INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE dungeons ADD COLUMN lock_warn_wrong_code INTEGER NOT NULL DEFAULT 1;
+`;
+
+const DUNGEON_LOOT_TABLES_SCHEMA = `
+-- ============================================================
+--  063  o loot da masmorra deixa de ser o do prefab.
+--
+--  ####  A TABELA MORA EM COLUNA DE TEXTO  ####
+--
+--  É a mesma escolha de crates/weapons/names, e pela mesma razão:
+--  é um objeto pequeno que ninguém consulta POR DENTRO — nenhuma
+--  consulta pergunta "quais masmorras dão scrap". Normalizar
+--  daria duas tabelas e um join para montar uma linha.
+--
+--  '{}' é a tabela padrão: mode 'server', ou seja, o Rust enche a
+--  caixa e o BetterLoot continua valendo. Masmorra existente
+--  nasce igual.
+--
+--  Ver Docs/OrigemZDurgeon/frentes/loot.md §3.
+-- ============================================================
+
+ALTER TABLE dungeon_rooms ADD COLUMN loot_table TEXT NOT NULL DEFAULT '{}';
+
+ALTER TABLE dungeons ADD COLUMN corridor_loot_table TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE dungeons ADD COLUMN npc_loot_table      TEXT NOT NULL DEFAULT '{}';
+
+-- O ciclo do loot. Desligado é o certo no modo evento: a masmorra
+-- dura menos que qualquer ciclo, e loot que volta num evento de 40
+-- minutos é loot dobrado.
+ALTER TABLE dungeons ADD COLUMN respawn_enabled           INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN respawn_minutes           INTEGER NOT NULL DEFAULT 30;
+ALTER TABLE dungeons ADD COLUMN respawn_only_when_empty   INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE dungeons ADD COLUMN respawn_rebuild_destroyed INTEGER NOT NULL DEFAULT 1;
+`;
+
+const DUNGEON_AI_SCHEMA = `
+-- ============================================================
+--  064  o comportamento do inimigo sai do código.
+--
+--  ####  TRÊS COLUNAS DE TEXTO, E NÃO CINQUENTA E SETE  ####
+--
+--  O contrato da frente de IA (Docs/OrigemZDurgeon/frentes/ia.md
+--  §2.1) previa uma coluna por campo, com prefixo ai_. São 19
+--  campos em TRÊS lugares — o padrão da masmorra, cada cor de sala
+--  e o corredor —, ou seja 57 colunas anuláveis numa tabela de
+--  vinte.
+--
+--  Aqui elas viram JSON, pela mesma razão de crates e da tabela de
+--  loot da 063: ninguém consulta um bloco de IA POR DENTRO, e o
+--  único leitor é o sync, que o manda inteiro ao plugin.
+--
+--  ####  E O JSON GUARDA SÓ O QUE FOI DITO  ####
+--
+--  É o que sustenta a herança campo a campo: a sala que não fala
+--  de visionRadius não tem a chave no JSON, e o plugin lê isso
+--  como "não falei disso" — e não como zero. Uma coluna
+--  ai_vision_radius REAL faria NULL e 0 conviverem, e o dia em que
+--  alguém trocasse um pelo outro o cientista ficaria cego sem
+--  ninguém pedir.
+--
+--  '{}' = herda tudo. Masmorra existente nasce igual.
+-- ============================================================
+
+ALTER TABLE dungeon_rooms ADD COLUMN ai TEXT NOT NULL DEFAULT '{}';
+
+ALTER TABLE dungeons ADD COLUMN npc_ai      TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE dungeons ADD COLUMN corridor_ai TEXT NOT NULL DEFAULT '{}';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6020,6 +6180,17 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 59, name: 'dungeon-blueprints', sql: DUNGEON_BLUEPRINTS_SCHEMA },
   { id: 60, name: 'world-event-runs', sql: EVENT_RUNS_SCHEMA },
   { id: 61, name: 'dungeon-layouts', sql: DUNGEON_LAYOUTS_SCHEMA },
+  // 09/09/2026: as três frentes do OrigemZDungeon (portas, loot e
+  // IA) entregaram comportamento no plugin com os campos cravados
+  // no C#. Estas três migrações são o que faz o admin conseguir
+  // mudá-los — sem elas, o painel não tem onde gravar.
+  //
+  // A 062 vem primeiro porque RECRIA `dungeon_rooms` (o CHECK de
+  // `door` não se altera no SQLite); as duas seguintes só
+  // acrescentam colunas a ela.
+  { id: 62, name: 'dungeon-doors-and-grade', sql: DUNGEON_DOORS_AND_GRADE_SCHEMA },
+  { id: 63, name: 'dungeon-loot-tables', sql: DUNGEON_LOOT_TABLES_SCHEMA },
+  { id: 64, name: 'dungeon-ai', sql: DUNGEON_AI_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

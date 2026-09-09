@@ -765,3 +765,73 @@ export function checkLayout(grid: readonly string[]): string[] {
 
   return problems;
 }
+
+// ------------------------------------------------------------
+//  A PORTA DA SALA GRANDE
+//
+//  ####  A CONTA É CÉLULAS ÷ PORTAS, E NÃO CÉLULAS  ####
+//
+//  Um salão de nove células com quatro entradas não afunila
+//  ninguém — quatro grupos entram por quatro lados. O funil é nove
+//  células com UMA entrada.
+//
+//  É a mesma conta do `WideDoorThresholdOf` do plugin, portada
+//  para a tela poder dizer "com este limite, 4 das 13 salas do
+//  traçado ao lado nasceriam com a folha larga" — em vez de
+//  deixar o admin escolher um número e descobrir no jogo que ele
+//  nunca é atingido.
+//
+//  MUDAR A REGRA AQUI EXIGE MUDAR NO PLUGIN JUNTO.
+// ------------------------------------------------------------
+
+export interface WideDoorStats {
+  /** Quantas salas o traçado tem. */
+  readonly rooms: number;
+  /** Quantas delas passariam do limite. */
+  readonly wide: number;
+}
+
+/**
+ * Quantas salas do traçado receberiam a folha larga.
+ *
+ * Só serve no modo RECEITA: no modo planta o `room` da prévia é o
+ * índice da COR, e não o da sala — todas as vermelhas seriam
+ * contadas como um cômodo só.
+ */
+export function wideDoorStats(preview: DungeonPreview, cellsPerDoor: number): WideDoorStats {
+  const cells = new Map<string, PreviewCell>();
+
+  for (const cell of preview.cells) cells.set(key(cell.x, cell.z), cell);
+
+  const size = new Map<number, number>();
+  const doors = new Map<number, number>();
+
+  for (const cell of preview.cells) {
+    if (cell.kind !== 'room') continue;
+
+    size.set(cell.room, (size.get(cell.room) ?? 0) + 1);
+
+    // Uma porta nasce onde a sala encosta no corredor — e uma
+    // célula com corredor em dois lados abre DUAS.
+    const sides = NEIGHBOURS.filter(([dx, dz]) => {
+      const neighbour = cells.get(key(cell.x + dx, cell.z + dz));
+
+      return neighbour?.kind === 'corridor' || neighbour?.kind === 'entrance';
+    }).length;
+
+    if (sides > 0) doors.set(cell.room, (doors.get(cell.room) ?? 0) + sides);
+  }
+
+  let wide = 0;
+
+  for (const [room, count] of size) {
+    // Sala sem porta nenhuma é um defeito do traçado, e não uma
+    // sala larga: dividir por zero aqui a marcaria como a maior de
+    // todas.
+    const openings = Math.max(1, doors.get(room) ?? 0);
+
+    if (count / openings >= cellsPerDoor) wide += 1;
+  }
+
+  return { rooms: size.size, wide };
+}

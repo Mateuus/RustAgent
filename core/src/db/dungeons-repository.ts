@@ -20,18 +20,43 @@
 //  ninguém consulta por dentro. Normalizá-los em tabelas daria
 //  quatro joins para montar uma masmorra que cabe numa linha.
 //
+//  A tabela de loot (063) e o bloco de IA (064) entraram pelo
+//  mesmo caminho, e o de IA por um motivo a mais: guardá-lo em
+//  coluna faria NULL e 0 conviverem na mesma casa, e é justamente
+//  a diferença entre eles que sustenta a herança campo a campo.
+//
+//  ####  LINHA ILEGÍVEL VIRA O PADRÃO, NUNCA UMA EXCEÇÃO  ####
+//
+//  Toda leitura de coluna JSON passa por `safeParse`. Um texto
+//  torto ali — edição à mão, restauração de backup velho — não
+//  pode derrubar a masmorra inteira: ele vira o padrão, com aviso
+//  no log. É a mesma escolha do `ui-documents-repository`.
+//
 //  Ver Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §6.2.
 // ============================================================
 
 import type { Logger } from '../logger.js';
 import {
+  aiSpecSchema,
+  BUILD_GRADES,
   dungeonGridSchema,
+  LOCK_CARRIER_SCOPES,
+  LOCK_CARRIERS,
+  LOCK_UNDELIVERED,
+  lootTableSchema,
   ROOM_COLORS,
   ROOM_DOORS,
+  type AiSpecInput,
+  type BuildGrade,
   type Dungeon,
   type DungeonInput,
   type DungeonRoomInput,
   type DungeonSummary,
+  type GradeSetInput,
+  type LockCarrier,
+  type LockCarrierScope,
+  type LockUndelivered,
+  type LootTableInput,
   type RoomColor,
   type RoomDoor,
 } from '../types/dungeons.js';
@@ -51,13 +76,32 @@ interface DungeonRow {
   readonly corridor_npc_density: number;
   readonly corridor_loot_density: number;
   readonly corridor_crates: string;
+  readonly corridor_loot_table: string;
+  readonly corridor_ai: string;
   readonly grid: string | null;
   readonly npc_health_min: number;
   readonly npc_health_max: number;
   readonly npc_damage_scale: number;
   readonly npc_weapons: string;
   readonly npc_names: string;
+  readonly npc_loot_table: string;
+  readonly npc_ai: string;
   readonly time_of_day: number;
+  readonly structure_foundation: string;
+  readonly structure_wall: string;
+  readonly structure_ceiling: string;
+  readonly lock_enabled: number;
+  readonly lock_shared_code: number;
+  readonly lock_carrier: string;
+  readonly lock_carrier_scope: string;
+  readonly lock_on_undelivered: string;
+  readonly lock_note_title: string | null;
+  readonly lock_announce_open: number;
+  readonly lock_warn_wrong_code: number;
+  readonly respawn_enabled: number;
+  readonly respawn_minutes: number;
+  readonly respawn_only_when_empty: number;
+  readonly respawn_rebuild_destroyed: number;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -73,7 +117,23 @@ interface RoomRow {
   readonly crates: string;
   readonly door: string;
   readonly locked: number;
+  readonly wide_door: string | null;
+  readonly wide_door_cells_per_door: number;
+  readonly grade_foundation: string | null;
+  readonly grade_wall: string | null;
+  readonly grade_ceiling: string | null;
+  readonly loot_table: string;
+  readonly ai: string;
 }
+
+/**
+ * O título padrão do papel do código.
+ *
+ * Ele mora no schema Zod, e a coluna do banco é anulável para não
+ * congelar essa frase em toda linha já gravada. Aqui é o que uma
+ * linha antiga (`NULL`) lê.
+ */
+const DEFAULT_NOTE_TITLE = 'Código da porta';
 
 export class DungeonsRepository {
   readonly #db: AgentDatabase;
@@ -157,13 +217,29 @@ export class DungeonsRepository {
                 (id, name, description, mode, entrance_blueprint,
                  size_min, size_max, weight_green, weight_blue, weight_red,
                  corridor_npc_density, corridor_loot_density, corridor_crates,
+                 corridor_loot_table, corridor_ai,
                  grid, npc_health_min, npc_health_max, npc_damage_scale,
-                 npc_weapons, npc_names, time_of_day, created_at, updated_at)
+                 npc_weapons, npc_names, npc_loot_table, npc_ai, time_of_day,
+                 structure_foundation, structure_wall, structure_ceiling,
+                 lock_enabled, lock_shared_code, lock_carrier, lock_carrier_scope,
+                 lock_on_undelivered, lock_note_title, lock_announce_open,
+                 lock_warn_wrong_code,
+                 respawn_enabled, respawn_minutes, respawn_only_when_empty,
+                 respawn_rebuild_destroyed,
+                 created_at, updated_at)
                 VALUES (@id, @name, @description, @mode, @entranceBlueprint,
                         @sizeMin, @sizeMax, @weightGreen, @weightBlue, @weightRed,
                         @corridorNpc, @corridorLoot, @corridorCrates,
+                        @corridorTable, @corridorAi,
                         @grid, @healthMin, @healthMax, @damageScale,
-                        @weapons, @names, @timeOfDay, @now, @now)
+                        @weapons, @names, @npcTable, @npcAi, @timeOfDay,
+                        @structureFoundation, @structureWall, @structureCeiling,
+                        @lockEnabled, @lockSharedCode, @lockCarrier, @lockCarrierScope,
+                        @lockOnUndelivered, @lockNoteTitle, @lockAnnounceOpen,
+                        @lockWarnWrongCode,
+                        @respawnEnabled, @respawnMinutes, @respawnOnlyWhenEmpty,
+                        @respawnRebuildDestroyed,
+                        @now, @now)
            ON CONFLICT (id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -177,13 +253,32 @@ export class DungeonsRepository {
                 corridor_npc_density = excluded.corridor_npc_density,
                 corridor_loot_density = excluded.corridor_loot_density,
                 corridor_crates = excluded.corridor_crates,
+                corridor_loot_table = excluded.corridor_loot_table,
+                corridor_ai = excluded.corridor_ai,
                 grid = excluded.grid,
                 npc_health_min = excluded.npc_health_min,
                 npc_health_max = excluded.npc_health_max,
                 npc_damage_scale = excluded.npc_damage_scale,
                 npc_weapons = excluded.npc_weapons,
                 npc_names = excluded.npc_names,
+                npc_loot_table = excluded.npc_loot_table,
+                npc_ai = excluded.npc_ai,
                 time_of_day = excluded.time_of_day,
+                structure_foundation = excluded.structure_foundation,
+                structure_wall = excluded.structure_wall,
+                structure_ceiling = excluded.structure_ceiling,
+                lock_enabled = excluded.lock_enabled,
+                lock_shared_code = excluded.lock_shared_code,
+                lock_carrier = excluded.lock_carrier,
+                lock_carrier_scope = excluded.lock_carrier_scope,
+                lock_on_undelivered = excluded.lock_on_undelivered,
+                lock_note_title = excluded.lock_note_title,
+                lock_announce_open = excluded.lock_announce_open,
+                lock_warn_wrong_code = excluded.lock_warn_wrong_code,
+                respawn_enabled = excluded.respawn_enabled,
+                respawn_minutes = excluded.respawn_minutes,
+                respawn_only_when_empty = excluded.respawn_only_when_empty,
+                respawn_rebuild_destroyed = excluded.respawn_rebuild_destroyed,
                 updated_at = excluded.updated_at`,
         )
         .run({
@@ -200,13 +295,32 @@ export class DungeonsRepository {
           corridorNpc: input.corridor.npcDensity,
           corridorLoot: input.corridor.lootDensity,
           corridorCrates: JSON.stringify(input.corridor.crates),
+          corridorTable: JSON.stringify(input.corridor.table),
+          corridorAi: JSON.stringify(input.corridor.ai),
           grid: input.grid === null ? null : JSON.stringify(input.grid),
           healthMin: input.npc.health.min,
           healthMax: input.npc.health.max,
           damageScale: input.npc.damageScale,
           weapons: JSON.stringify(input.npc.weapons),
           names: JSON.stringify(input.npc.names),
+          npcTable: JSON.stringify(input.npc.loot),
+          npcAi: JSON.stringify(input.npc.ai),
           timeOfDay: input.timeOfDay,
+          structureFoundation: input.structure.foundation,
+          structureWall: input.structure.wall,
+          structureCeiling: input.structure.ceiling,
+          lockEnabled: input.lock.enabled ? 1 : 0,
+          lockSharedCode: input.lock.sharedCode ? 1 : 0,
+          lockCarrier: input.lock.carrier,
+          lockCarrierScope: input.lock.carrierScope,
+          lockOnUndelivered: input.lock.onUndelivered,
+          lockNoteTitle: input.lock.noteTitle,
+          lockAnnounceOpen: input.lock.announceOpen ? 1 : 0,
+          lockWarnWrongCode: input.lock.warnOnWrongCode ? 1 : 0,
+          respawnEnabled: input.respawn.enabled ? 1 : 0,
+          respawnMinutes: input.respawn.minutes,
+          respawnOnlyWhenEmpty: input.respawn.onlyWhenEmpty ? 1 : 0,
+          respawnRebuildDestroyed: input.respawn.rebuildDestroyed ? 1 : 0,
           now,
         });
 
@@ -215,9 +329,11 @@ export class DungeonsRepository {
       const insertRoom = this.#db.prepare(
         `INSERT INTO dungeon_rooms
               (dungeon_id, room_key, color, npc_min, npc_max, loot_min, loot_max,
-               crates, door, locked)
+               crates, door, locked, wide_door, wide_door_cells_per_door,
+               grade_foundation, grade_wall, grade_ceiling, loot_table, ai)
               VALUES (@dungeonId, @key, @color, @npcMin, @npcMax, @lootMin, @lootMax,
-                      @crates, @door, @locked)`,
+                      @crates, @door, @locked, @wideDoor, @wideDoorCells,
+                      @gradeFoundation, @gradeWall, @gradeCeiling, @table, @ai)`,
       );
 
       for (const room of input.rooms) {
@@ -232,6 +348,13 @@ export class DungeonsRepository {
           crates: JSON.stringify(room.crates),
           door: room.door,
           locked: room.locked ? 1 : 0,
+          wideDoor: room.wideDoor,
+          wideDoorCells: room.wideDoorCellsPerDoor,
+          gradeFoundation: room.grade === null ? null : room.grade.foundation,
+          gradeWall: room.grade === null ? null : room.grade.wall,
+          gradeCeiling: room.grade === null ? null : room.grade.ceiling,
+          table: JSON.stringify(room.table),
+          ai: JSON.stringify(room.ai),
         });
       }
 
@@ -290,6 +413,8 @@ export class DungeonsRepository {
         npcDensity: row.corridor_npc_density,
         lootDensity: row.corridor_loot_density,
         crates: this.#jsonArray(row.corridor_crates, row.id, 'corridor_crates'),
+        table: this.#lootTable(row.corridor_loot_table, row.id, 'corridor_loot_table'),
+        ai: this.#aiSpec(row.corridor_ai, row.id, 'corridor_ai'),
       },
       grid: this.#grid(row.grid, row.id),
       npc: {
@@ -297,8 +422,31 @@ export class DungeonsRepository {
         damageScale: row.npc_damage_scale,
         weapons: this.#jsonArray(row.npc_weapons, row.id, 'npc_weapons'),
         names: this.#jsonArray(row.npc_names, row.id, 'npc_names'),
+        loot: this.#lootTable(row.npc_loot_table, row.id, 'npc_loot_table'),
+        ai: this.#aiSpec(row.npc_ai, row.id, 'npc_ai'),
       },
       timeOfDay: row.time_of_day,
+      structure: {
+        foundation: grade(row.structure_foundation),
+        wall: grade(row.structure_wall),
+        ceiling: grade(row.structure_ceiling),
+      },
+      lock: {
+        enabled: row.lock_enabled === 1,
+        sharedCode: row.lock_shared_code === 1,
+        carrier: oneOf(LOCK_CARRIERS, row.lock_carrier, 'npc') as LockCarrier,
+        carrierScope: oneOf(LOCK_CARRIER_SCOPES, row.lock_carrier_scope, 'corridor') as LockCarrierScope,
+        onUndelivered: oneOf(LOCK_UNDELIVERED, row.lock_on_undelivered, 'unlock') as LockUndelivered,
+        noteTitle: row.lock_note_title ?? DEFAULT_NOTE_TITLE,
+        announceOpen: row.lock_announce_open === 1,
+        warnOnWrongCode: row.lock_warn_wrong_code === 1,
+      },
+      respawn: {
+        enabled: row.respawn_enabled === 1,
+        minutes: row.respawn_minutes,
+        onlyWhenEmpty: row.respawn_only_when_empty === 1,
+        rebuildDestroyed: row.respawn_rebuild_destroyed === 1,
+      },
       rooms: rooms.map((room) => this.#toRoom(room)),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -316,6 +464,34 @@ export class DungeonsRepository {
       crates: this.#jsonArray(row.crates, row.dungeon_id, 'crates'),
       door: (ROOM_DOORS as readonly string[]).includes(row.door) ? (row.door as RoomDoor) : 'wood',
       locked: row.locked === 1,
+      wideDoor:
+        row.wide_door !== null && (ROOM_DOORS as readonly string[]).includes(row.wide_door)
+          ? (row.wide_door as RoomDoor)
+          : null,
+      wideDoorCellsPerDoor: row.wide_door_cells_per_door,
+      grade: this.#grade(row),
+      table: this.#lootTable(row.loot_table, row.dungeon_id, 'loot_table'),
+      ai: this.#aiSpec(row.ai, row.dungeon_id, 'ai'),
+    };
+  }
+
+  /**
+   * O nível das peças daquela sala.
+   *
+   * Os três `NULL` juntos são "herda o `structure`" — o padrão, e o
+   * que toda linha anterior à 062 tem. Um só preenchido é uma
+   * edição à mão pela metade: os outros dois caem em `stone`, que é
+   * o que o construtor cravava.
+   */
+  #grade(row: RoomRow): GradeSetInput | null {
+    if (row.grade_foundation === null && row.grade_wall === null && row.grade_ceiling === null) {
+      return null;
+    }
+
+    return {
+      foundation: grade(row.grade_foundation),
+      wall: grade(row.grade_wall),
+      ceiling: grade(row.grade_ceiling),
     };
   }
 
@@ -342,6 +518,54 @@ export class DungeonsRepository {
     return [];
   }
 
+  /**
+   * A tabela de loot que veio da coluna.
+   *
+   * Ilegível vira a tabela PADRÃO (`mode: 'server'`), e não uma
+   * tabela vazia: vazia em `replace` seria uma masmorra inteira de
+   * caixas sem nada dentro, e nada no jogo diria por quê.
+   */
+  #lootTable(raw: string, dungeonId: string, column: string): LootTableInput {
+    try {
+      const parsed = lootTableSchema.safeParse(JSON.parse(raw));
+
+      if (parsed.success) return parsed.data;
+    } catch {
+      // cai no aviso abaixo
+    }
+
+    this.#logger?.warn(
+      { dungeon: dungeonId, column },
+      'tabela de loot ilegível: a caixa volta a se encher pela tabela do servidor',
+    );
+
+    return lootTableSchema.parse({});
+  }
+
+  /**
+   * O bloco de comportamento que veio da coluna.
+   *
+   * Ilegível vira o bloco VAZIO, que quer dizer "herda tudo" — e
+   * não um bloco de zeros, que produziria um cientista cego e
+   * parado sem ninguém ter pedido.
+   */
+  #aiSpec(raw: string, dungeonId: string, column: string): AiSpecInput {
+    try {
+      const parsed = aiSpecSchema.safeParse(JSON.parse(raw));
+
+      if (parsed.success) return parsed.data;
+    } catch {
+      // cai no aviso abaixo
+    }
+
+    this.#logger?.warn(
+      { dungeon: dungeonId, column },
+      'bloco de IA ilegível: o inimigo fica com o comportamento padrão',
+    );
+
+    return {};
+  }
+
   #grid(raw: string | null, dungeonId: string): string[] | null {
     if (raw === null) return null;
 
@@ -360,4 +584,22 @@ export class DungeonsRepository {
 
     return null;
   }
+}
+
+/** O grau da peça, com `stone` para o que o banco não souber dizer. */
+function grade(raw: string | null): BuildGrade {
+  return raw !== null && (BUILD_GRADES as readonly string[]).includes(raw)
+    ? (raw as BuildGrade)
+    : 'stone';
+}
+
+/**
+ * Um valor de enum vindo do banco.
+ *
+ * O CHECK da coluna já barra o que não pertence, mas a coluna de
+ * texto continua sendo texto — e um banco restaurado de um schema
+ * mais velho não tem CHECK nenhum.
+ */
+function oneOf(allowed: readonly string[], raw: string, fallback: string): string {
+  return allowed.includes(raw) ? raw : fallback;
 }
