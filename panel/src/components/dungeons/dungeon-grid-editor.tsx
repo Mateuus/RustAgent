@@ -34,8 +34,8 @@
 //  Ver Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §4.2 e §11.0.
 // ============================================================
 
-import { Eraser, Grid2x2, Redo2, Trash2, Undo2 } from 'lucide-react';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { Dices, Eraser, Grid2x2, Maximize2, Minimize2, Redo2, Trash2, Undo2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import type { RoomColor } from '@/lib/api';
@@ -67,6 +67,31 @@ const BRUSHES: readonly {
   },
 ];
 
+/**
+ * A letra de cada cor, no formato salvo.
+ *
+ * ####  A LETRA GUARDA A COR, E NÃO O NÚMERO DA SALA  ####
+ *
+ * MEDIDO em 09/09/2026, apontado pelo dono: com uma letra por
+ * SALA (A, B, C…), a cor se perdia — o formato não a carregava, e
+ * todo desenho reaberto ou sorteado voltava inteiro em verde.
+ *
+ * Guardando a cor, quem separa "duas salas vermelhas" de "uma
+ * vermelha grande" continua sendo o preenchimento por vizinhança
+ * — que é o construtor, e não o arquivo.
+ */
+const CHAR_OF_COLOR: Readonly<Record<RoomColor, string>> = {
+  green: 'G',
+  blue: 'B',
+  red: 'R',
+};
+
+const COLOR_OF_CHAR: Readonly<Record<string, RoomColor>> = {
+  G: 'green',
+  B: 'blue',
+  R: 'red',
+};
+
 /** O lado de uma célula, em unidades de SVG. */
 const CELL = 12;
 
@@ -89,22 +114,75 @@ export interface DungeonGridEditorProps {
   /** O grid salvo, no formato de linhas. `null` = tela em branco. */
   readonly grid: readonly string[] | null;
   readonly onChange: (grid: string[]) => void;
+  /**
+   * Enche a tela com um traçado do gerador.
+   *
+   * ####  ENCARAR UM GRID VAZIO PARALISA  ####
+   *
+   * 576 quadradinhos em branco são tão intimidantes quanto trinta
+   * campos vazios. Sortear é o PRIMEIRO TRAÇO: o gerador põe uma
+   * masmorra completa na tela, e dali o admin apaga, estica e
+   * repinta o que quiser.
+   */
+  readonly onRandomize?: () => void;
 }
 
-export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
+export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEditorProps) {
   const [canvas, setCanvas] = useState<Canvas>(() => fromRows(grid));
   const [brush, setBrush] = useState<Brush>('corridor');
   const [painting, setPainting] = useState(false);
+  /**
+   * A tela cheia.
+   *
+   * Desenhar num painel que ocupa metade da largura é apertado: com
+   * 24 células de lado, cada quadradinho fica com uns 20 pixels, e
+   * pintar uma sala de uma célula vira mira. Expandido, o mesmo
+   * grid ganha o dobro — e o desenho é a única coisa que importa
+   * naquele momento.
+   */
+  const [expanded, setExpanded] = useState(false);
   /** O desfazer. Guarda o estado ANTES de cada traço, não de cada célula. */
   const [undoStack, setUndoStack] = useState<Canvas[]>([]);
   const [redoStack, setRedoStack] = useState<Canvas[]>([]);
   /** Evita repintar a mesma célula cem vezes durante um arrasto. */
   const lastCell = useRef<string>('');
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  /**
+   * O último desenho que ESTE componente emitiu.
+   *
+   * ####  ELE EXISTE POR UM DEFEITO MEDIDO  ####
+   *
+   * O canvas é estado próprio, e `useState(() => …)` só roda o
+   * inicializador UMA vez. Quando o grid mudava por fora — o botão
+   * de sortear —, a tela continuava mostrando o desenho antigo: o
+   * sorteio só aparecia depois de sair do passo e voltar, porque aí
+   * o componente era remontado.
+   *
+   * Comparar com o que eu mesmo emiti separa "o pai mandou um
+   * desenho novo" (ressincroniza) de "eu acabei de pintar" (ignora,
+   * senão cada traço rebobinaria o canvas).
+   */
+  const mine = useRef<string>(signatureOf(grid));
+
+  useEffect(() => {
+    const incoming = signatureOf(grid);
+
+    if (incoming === mine.current) return;
+
+    mine.current = incoming;
+    setCanvas(fromRows(grid));
+    setUndoStack([]);
+    setRedoStack([]);
+  }, [grid]);
 
   const commit = useCallback(
     (next: Canvas) => {
+      const rows = toRows(next);
+
+      mine.current = signatureOf(rows);
       setCanvas(next);
-      onChange(toRows(next));
+      onChange(rows);
     },
     [onChange],
   );
@@ -137,10 +215,59 @@ export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
       if (row === undefined || row[x] === brush) return current;
 
       row[x] = brush;
-      onChange(toRows(next));
+
+      const rows = toRows(next);
+
+      // Marca ANTES de avisar o pai: o `useEffect` acima vai ver
+      // este mesmo desenho voltar como prop, e precisa reconhecê-lo
+      // como nosso.
+      mine.current = signatureOf(rows);
+      onChange(rows);
 
       return next;
     });
+  }
+
+  /**
+   * Pinta a célula que está sob o ponteiro.
+   *
+   * ####  A CONTA É A MATRIZ DO SVG, E NÃO O RETÂNGULO DELE  ####
+   *
+   * MEDIDO em 09/09/2026, apontado pelo dono: o mouse na célula 0
+   * pintava a 7.
+   *
+   * A causa é o `preserveAspectRatio` padrão. O `viewBox` é
+   * quadrado; com `w-full` e `max-h`, a caixa do elemento fica
+   * RETANGULAR, e o navegador desenha o conteúdo centralizado com
+   * margens vazias dos lados. `getBoundingClientRect()` devolve a
+   * caixa inteira — margens incluídas —, e uma regra de três sobre
+   * ela erra exatamente o tamanho da margem.
+   *
+   * `getScreenCTM().inverse()` é a conversão que o próprio SVG
+   * usa, e ela vale para qualquer enquadramento — inclusive o da
+   * tela cheia, que tem margens diferentes.
+   */
+  function paintAt(clientX: number, clientY: number) {
+    const svg = svgRef.current;
+
+    if (svg === null) return;
+
+    const matrix = svg.getScreenCTM();
+
+    if (matrix === null) return;
+
+    const point = svg.createSVGPoint();
+    point.x = clientX;
+    point.y = clientY;
+
+    const local = point.matrixTransform(matrix.inverse());
+
+    const x = Math.floor(local.x / CELL);
+    const z = SIZE - 1 - Math.floor(local.y / CELL);
+
+    if (x < 0 || x >= SIZE || z < 0 || z >= SIZE) return;
+
+    paint(x, z);
   }
 
   function undo() {
@@ -172,7 +299,7 @@ export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
   const problems = useMemo(() => validateCanvas(canvas), [canvas]);
   const counts = useMemo(() => countCanvas(canvas), [canvas]);
 
-  return (
+  const body = (
     <div className="space-y-3">
       {/* A paleta. Rótulo E cor: identidade nunca vem só da cor, e
           aqui isso pesa porque verde e vermelho são o par que o
@@ -223,20 +350,73 @@ export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
           >
             <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
           </Button>
+          <Button
+            size="sm"
+            variant={expanded ? 'primary' : 'outline'}
+            onClick={() => setExpanded((current) => !current)}
+            aria-label={expanded ? 'Voltar ao tamanho normal' : 'Desenhar em tela cheia'}
+          >
+            {expanded ? (
+              <Minimize2 aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+            ) : (
+              <Maximize2 aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+            )}
+            {expanded ? 'Reduzir' : 'Expandir'}
+          </Button>
         </span>
       </div>
 
+      <div className="relative">
+        {counts.cells <= 2 && onRandomize !== undefined && (
+          // Some no instante em que o admin pinta a terceira célula:
+          // ele já começou, e o convite viraria estorvo.
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-4">
+            <div className="pointer-events-auto max-w-xs border border-border bg-surface p-4 text-center">
+              <p className="font-condensed text-sm font-bold uppercase tracking-wide">
+                Comece de algum lugar
+              </p>
+              <p className="mt-1 text-2xs text-muted">
+                Arraste para pintar o corredor e as salas — ou deixe o gerador fazer o primeiro
+                traçado, e mexa nele.
+              </p>
+              <Button size="sm" variant="primary" className="mt-3" onClick={onRandomize}>
+                <Dices aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+                Sortear um traçado
+              </Button>
+            </div>
+          </div>
+        )}
+
       <svg
+        ref={svgRef}
         viewBox={`0 0 ${String(SIZE * CELL)} ${String(SIZE * CELL)}`}
-        className="max-h-[52vh] w-full cursor-crosshair touch-none select-none border border-border bg-background"
+        className={cn(
+          'w-full cursor-crosshair touch-none select-none border border-border bg-background',
+          expanded ? 'max-h-[76vh]' : 'max-h-[52vh]',
+        )}
         role="application"
         aria-label="Desenho da masmorra, 24 por 24 células"
+        // ####  A CÉLULA VEM DA POSIÇÃO, NÃO DO EVENTO DELA  ####
+        //
+        // MEDIDO: com `setPointerCapture` no SVG — que é o que faz o
+        // arrasto continuar mesmo saindo da figura —, o
+        // `pointerenter` dos <rect> filhos PARA DE DISPARAR. Todos
+        // os eventos vão para o elemento que capturou.
+        //
+        // Era por isso que só o clique pintava, e arrastar não fazia
+        // nada. Agora a célula é calculada da posição do ponteiro, o
+        // que funciona com captura e ainda tira 576 handlers da
+        // árvore.
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
           beginStroke();
+          paintAt(event.clientX, event.clientY);
+        }}
+        onPointerMove={(event) => {
+          if (painting) paintAt(event.clientX, event.clientY);
         }}
         onPointerUp={() => setPainting(false)}
-        onPointerLeave={() => setPainting(false)}
+        onPointerCancel={() => setPainting(false)}
       >
         {canvas.map((row, z) =>
           row.map((cell, x) => {
@@ -263,10 +443,6 @@ export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
                 fill={isEntrance ? 'var(--amber)' : fillOf(cell)}
                 stroke="var(--border)"
                 strokeWidth={0.5}
-                onPointerDown={() => paint(x, z)}
-                onPointerEnter={() => {
-                  if (painting) paint(x, z);
-                }}
               >
                 <title>
                   {isEntrance
@@ -278,6 +454,7 @@ export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
           }),
         )}
       </svg>
+      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="flex items-center gap-2 text-2xs text-muted">
@@ -304,11 +481,48 @@ export function DungeonGridEditor({ grid, onChange }: DungeonGridEditorProps) {
       )}
     </div>
   );
+
+  if (!expanded) return body;
+
+  // ####  A TELA CHEIA É O MESMO CORPO, NUM OVERLAY  ####
+  //
+  // Não é um segundo editor: é este, com mais espaço. Duplicar a
+  // tela produziria dois lugares para corrigir cada defeito, e o
+  // desenho num deles não estaria no outro.
+  //
+  // `fixed` funciona dentro do <dialog> porque o overlay é
+  // descendente dele, e o diálogo está no top layer.
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col gap-3 bg-background p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+          <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
+          Desenhando a masmorra
+        </h3>
+        <p className="text-2xs text-muted">
+          O desenho é o mesmo: fechar aqui não perde nada.
+        </p>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
+    </div>
+  );
 }
 
 // ------------------------------------------------------------
 //  O formato salvo
 // ------------------------------------------------------------
+
+/**
+ * A assinatura de um desenho, para comparar dois.
+ *
+ * `JSON.stringify` e não `join`: as linhas podem conter qualquer
+ * caractere da paleta, e um separador escolhido a dedo é um
+ * separador que um dia aparece dentro do dado.
+ */
+function signatureOf(rows: readonly string[] | null): string {
+  return rows === null ? '' : JSON.stringify(rows);
+}
 
 function blankCanvas(): Canvas {
   const canvas: Canvas = Array.from({ length: SIZE }, () =>
@@ -329,9 +543,21 @@ function blankCanvas(): Canvas {
 /**
  * Lê as linhas salvas de volta para a tela.
  *
- * O formato guarda apenas o que foi desenhado, então o desenho é
- * CENTRADO na tela ao abrir — uma masmorra pequena não aparece
- * espremida num canto.
+ * ####  O ALINHAMENTO É PELO `E`, E NÃO PELO CENTRO  ####
+ *
+ * MEDIDO em 09/09/2026, e apontado pelo dono olhando um traçado
+ * sorteado: centrando o desenho, o `E` das linhas caía num lugar e
+ * a entrada FIXA do editor ficava em outro — sozinha, cercada de
+ * vazio.
+ *
+ * Isso não é cosmético. A entrada é onde o alçapão cospe o
+ * jogador: ilhada, ele cai dentro de um quadrado fechado e o
+ * evento acaba ali.
+ *
+ * Alinhando pelo `E`, o desenho inteiro se desloca para que a
+ * entrada dele coincida com a do editor. Sem `E` nas linhas — um
+ * desenho antigo, ou um pedaço colado —, cai no centro, que é o
+ * comportamento anterior.
  */
 function fromRows(rows: readonly string[] | null): Canvas {
   const canvas = blankCanvas();
@@ -340,8 +566,21 @@ function fromRows(rows: readonly string[] | null): Canvas {
 
   const height = rows.length;
   const width = Math.max(...rows.map((row) => row.length));
-  const offsetX = Math.max(0, ENTRANCE.x - Math.floor(width / 2));
-  const offsetZ = Math.max(0, ENTRANCE.z - Math.floor(height / 2));
+
+  let offsetX = Math.max(0, ENTRANCE.x - Math.floor(width / 2));
+  let offsetZ = Math.max(0, ENTRANCE.z - Math.floor(height / 2));
+
+  // Onde está o `E` no desenho que chegou.
+  for (const [index, row] of rows.entries()) {
+    const column = row.indexOf('E');
+
+    if (column < 0) continue;
+
+    // As linhas vêm do maior z para o menor.
+    offsetX = ENTRANCE.x - column;
+    offsetZ = ENTRANCE.z - (height - 1 - index);
+    break;
+  }
 
   rows.forEach((row, index) => {
     // As linhas vêm do maior z para o menor: a primeira é a de
@@ -386,9 +625,6 @@ function toRows(canvas: Canvas): string[] {
 
   if (maxX < 0) return [];
 
-  // A letra de cada mancha contígua. Ver o cabeçalho: o admin
-  // pinta COR, e as salas se descobrem por vizinhança.
-  const rooms = findRooms(canvas);
   const rows: string[] = [];
 
   for (let z = maxZ; z >= minZ; z -= 1) {
@@ -402,9 +638,11 @@ function toRows(canvas: Canvas): string[] {
 
       const cell = canvas[z]?.[x] ?? 'empty';
 
+      // A letra guarda a COR, e não o número da sala. Ver
+      // `CHAR_OF_COLOR`.
       if (cell === 'empty') line += '.';
       else if (cell === 'corridor') line += '#';
-      else line += rooms.get(`${String(x)},${String(z)}`) ?? 'A';
+      else line += CHAR_OF_COLOR[cell];
     }
 
     rows.push(line);
@@ -480,13 +718,13 @@ function findRooms(canvas: Canvas): Map<string, string> {
 /**
  * O que está errado no desenho, em português.
  *
- * ####  QUATRO DEFEITOS, E NENHUM DELES DÁ ERRO NO JOGO  ####
+ * ####  CINCO DEFEITOS, E NENHUM DELES DÁ ERRO NO JOGO  ####
  *
- * É essa a razão de o verificador existir. Uma sala lacrada, um
- * pedaço de corredor ilhado, um cômodo sem parede e um bloco
- * flutuando SOBEM NORMALMENTE: o servidor constrói o que foi
- * mandado, sem reclamar de nada. O defeito só aparece quando um
- * jogador está lá dentro, e aí já é tarde.
+ * É essa a razão de o verificador existir. Uma entrada ilhada, uma
+ * sala lacrada, um pedaço de corredor sem ligação, um cômodo sem
+ * parede e um bloco flutuando SOBEM NORMALMENTE: o servidor
+ * constrói o que foi mandado, sem reclamar de nada. O defeito só
+ * aparece quando um jogador está lá dentro, e aí já é tarde.
  *
  * Cobrar aqui — enquanto o admin desenha, e não no salvamento — é
  * o que faz ele corrigir ainda lembrando o que quis fazer.
@@ -525,7 +763,27 @@ function validateCanvas(canvas: Canvas): string[] {
     );
   }
 
-  // 2. O corredor precisa ser um só, e chegar à entrada. Um pedaço
+  // 2. A ENTRADA precisa encostar em corredor. É por ela que o
+  //    jogador chega: sozinha, ele cai dentro de um quadrado
+  //    fechado e o evento acaba ali.
+  let entranceTouches = false;
+
+  for (const [dx, dz] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const) {
+    if (canvas[ENTRANCE.z + dz]?.[ENTRANCE.x + dx] === 'corridor') entranceTouches = true;
+  }
+
+  if (!entranceTouches) {
+    problems.push(
+      'A entrada não encosta em nenhum corredor: o jogador desceria para dentro de um quadrado fechado.',
+    );
+  }
+
+  // 3. O corredor precisa ser um só, e chegar à entrada. Um pedaço
   //    solto é uma parte da masmorra que nunca será visitada.
   const corridor: string[] = [];
 
@@ -574,7 +832,7 @@ function validateCanvas(canvas: Canvas): string[] {
     }
   }
 
-  // 3. Uma sala de UMA célula encostada em corredor por três lados
+  // 4. Uma sala de UMA célula encostada em corredor por três lados
   //    nasce sem parede em lugar nenhum: o construtor mata a parede
   //    entre células da mesma sala, e o vão vira porta em cada lado
   //    que toca o corredor. Três portas num cômodo de 3x3 metros é
@@ -609,7 +867,7 @@ function validateCanvas(canvas: Canvas): string[] {
     );
   }
 
-  // 4. Célula solta — nem corredor nem grudada em corredor por
+  // 5. Célula solta — nem corredor nem grudada em corredor por
   //    outra sala. Ela vira um bloco isolado no meio do nada, e o
   //    jogador vê um pedaço de construção flutuando.
   let floating = 0;
@@ -664,9 +922,5 @@ function brushOf(char: string): Brush {
   if (char === '#' || char === 'E') return 'corridor';
   if (char === '.' || char === ' ') return 'empty';
 
-  // As letras não guardam a cor — ela vem do `rooms[]` da masmorra.
-  // Ao reabrir um desenho, elas voltam como verde, e o admin
-  // repinta o que quiser. É a perda conhecida deste formato, e ela
-  // é barata perto de guardar a cor de cada célula.
-  return 'green';
+  return COLOR_OF_CHAR[char] ?? 'green';
 }

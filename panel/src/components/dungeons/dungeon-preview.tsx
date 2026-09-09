@@ -35,6 +35,7 @@ import { Button } from '@/components/ui/button';
 import {
   estimateRecipe,
   previewLayout,
+  type DungeonPreview,
   type DungeonPreview as Preview,
   type PreviewCell,
 } from '@/lib/dungeon-layout';
@@ -63,6 +64,14 @@ export interface DungeonPreviewProps {
   readonly rooms: number;
   readonly seed: number;
   readonly onReseed: () => void;
+  /**
+   * O desenho pronto, no modo planta.
+   *
+   * Quando vem preenchido, NÃO se sorteia nada: a prévia mostra o
+   * que o admin desenhou. Sortear ali seria pôr uma masmorra ao
+   * lado de outra e chamar as duas de a mesma.
+   */
+  readonly fixed?: DungeonPreview | null;
   readonly weights: { readonly green: number; readonly blue: number; readonly red: number };
   readonly roomSpecs: readonly {
     readonly key: string;
@@ -77,12 +86,13 @@ export function DungeonPreviewPanel({
   rooms,
   seed,
   onReseed,
+  fixed = null,
   weights,
   roomSpecs,
   corridor,
   className,
 }: DungeonPreviewProps) {
-  const preview = previewLayout(rooms, seed);
+  const preview = fixed ?? previewLayout(rooms, seed);
   const estimate = estimateRecipe({ preview, weights, rooms: roomSpecs, corridor });
 
   return (
@@ -91,10 +101,14 @@ export function DungeonPreviewPanel({
         <h3 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
           <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />O que isso produz
         </h3>
-        <Button size="sm" variant="ghost" onClick={onReseed}>
-          <Dices aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
-          Sortear outra
-        </Button>
+        {/* Sortear não faz sentido sobre um desenho: o que está
+            ali é o que o admin fez. */}
+        {fixed === null && (
+          <Button size="sm" variant="ghost" onClick={onReseed}>
+            <Dices aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+            Sortear outra
+          </Button>
+        )}
       </header>
 
       <div className="grid gap-3 p-3 sm:grid-cols-[1fr_auto]">
@@ -113,9 +127,9 @@ export function DungeonPreviewPanel({
       <ColorBar counts={estimate.byColor} />
 
       <p className="border-t border-border px-3 py-2 text-2xs text-muted">
-        Este é o algoritmo do servidor, não um desenho: cada nascimento sorteia um traçado novo
-        dentro dessas contas. Os números com ≈ são médias — servem para comparar duas receitas, não
-        como promessa.
+        {fixed === null
+          ? 'Este é o algoritmo do servidor, não um desenho: cada nascimento sorteia um traçado novo dentro dessas contas. Os números com ≈ são médias — servem para comparar duas receitas, não como promessa.'
+          : 'Este é o seu desenho, exatamente como ele vai ser construído. Os números com ≈ são médias do conteúdo, que ainda é sorteado dentro de cada sala.'}
       </p>
     </div>
   );

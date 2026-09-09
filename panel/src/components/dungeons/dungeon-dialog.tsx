@@ -42,7 +42,7 @@ import { FieldLabel } from '@/components/ui/help-tip';
 import { Input } from '@/components/ui/input';
 import { StepBody, Steps, type Step } from '@/components/ui/steps';
 import { Toggle } from '@/components/ui/toggle';
-import { previewLayout } from '@/lib/dungeon-layout';
+import { previewFromGrid, previewLayout } from '@/lib/dungeon-layout';
 import {
   agent,
   type BlueprintSummary,
@@ -320,6 +320,16 @@ function WithPreview({
 }) {
   const rooms = Math.round((draft.size.min + draft.size.max) / 2);
 
+  // ####  NO MODO PLANTA, A PRÉVIA É O DESENHO  ####
+  //
+  // Sortear aqui poria uma masmorra ao lado de outra e chamaria as
+  // duas de a mesma: a tela dizia "13 salas" ao lado de um desenho
+  // com quatro. Quem apontou foi o dono, olhando.
+  const fixed =
+    draft.mode === 'blueprint' && draft.grid !== null && draft.grid.length > 0
+      ? previewFromGrid(draft.grid)
+      : null;
+
   return (
     <div className="grid gap-0 lg:grid-cols-[1fr_22rem]">
       <div className="min-w-0">{children}</div>
@@ -328,6 +338,7 @@ function WithPreview({
           rooms={rooms}
           seed={seed}
           onReseed={onReseed}
+          fixed={fixed}
           weights={draft.weights}
           roomSpecs={draft.rooms}
           corridor={draft.corridor}
@@ -534,7 +545,7 @@ function StepDesenho({
             // Sortear é o primeiro traço: o gerador enche a tela e
             // o admin edita a partir dali.
             const rooms = Math.round((draft.size.min + draft.size.max) / 2);
-            patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000) });
+            patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights) });
           }}
         >
           <Dices aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
@@ -542,7 +553,14 @@ function StepDesenho({
         </Button>
       </div>
 
-      <DungeonGridEditor grid={draft.grid} onChange={(grid) => patch({ grid })} />
+      <DungeonGridEditor
+        grid={draft.grid}
+        onChange={(grid) => patch({ grid })}
+        onRandomize={() => {
+          const rooms = Math.round((draft.size.min + draft.size.max) / 2);
+          patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights) });
+        }}
+      />
     </StepBody>
   );
 }
@@ -1302,20 +1320,44 @@ function toInput(dungeon: Dungeon): DungeonInput {
  * escreve nas linhas que o editor lê. É o que faz "sortear" e
  * "desenhar" serem o mesmo objeto, e não dois formatos.
  */
-function sketchFromLayout(rooms: number, seed: number): string[] {
+function sketchFromLayout(
+  rooms: number,
+  seed: number,
+  weights: { readonly green: number; readonly blue: number; readonly red: number },
+): string[] {
   const preview = previewLayout(rooms, seed);
   const { minX, maxX, minZ, maxZ } = preview.bounds;
-  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+  // ####  A COR VEM DOS PESOS, E É SORTEADA POR SALA  ####
+  //
+  // MEDIDO: sem isto o traçado saía inteiro verde, porque o formato
+  // não carregava cor nenhuma. Sortear por CÉLULA seria pior — a
+  // mesma sala nasceria com dois cômodos de cores diferentes, e a
+  // cor deixaria de significar o que ela promete.
+  const total = Math.max(1, weights.green + weights.blue + weights.red);
+  const colorOfRoom = new Map<number, string>();
+
+  const pick = (room: number): string => {
+    const known = colorOfRoom.get(room);
+
+    if (known !== undefined) return known;
+
+    // Determinístico na semente: sortear outra vez com a mesma
+    // semente tem de dar o mesmo desenho.
+    const roll = (seed * 31 + room * 7919) % total;
+    const color = roll < weights.green ? 'G' : roll < weights.green + weights.blue ? 'B' : 'R';
+
+    colorOfRoom.set(room, color);
+
+    return color;
+  };
+
   const at = new Map<string, string>();
 
   for (const cell of preview.cells) {
     at.set(
       `${String(cell.x)},${String(cell.z)}`,
-      cell.kind === 'entrance'
-        ? 'E'
-        : cell.kind === 'corridor'
-          ? '#'
-          : (letters[cell.room % letters.length] ?? 'A'),
+      cell.kind === 'entrance' ? 'E' : cell.kind === 'corridor' ? '#' : pick(cell.room),
     );
   }
 

@@ -266,6 +266,82 @@ function tryPlaceRoom(
   return false;
 }
 
+/**
+ * O mesmo objeto, mas lido de um desenho em vez de sorteado.
+ *
+ * ####  POR QUE ELE EXISTE  ####
+ *
+ * No modo planta, a prévia ao lado dos controles PRECISA mostrar o
+ * que o admin desenhou — e não uma masmorra sorteada. A primeira
+ * versão sorteava nos dois modos, e a tela ficava dizendo "13
+ * salas" ao lado de um desenho com quatro.
+ *
+ * Devolvendo o mesmo `DungeonPreview`, tudo que vem depois — o
+ * SVG, a estimativa, a barra de proporção — continua funcionando
+ * sem saber de onde veio a masmorra.
+ */
+export function previewFromGrid(rows: readonly string[]): DungeonPreview {
+  const cells: PreviewCell[] = [];
+  const roomIds = new Map<string, number>();
+  let corridorCells = 0;
+
+  let minX = 0;
+  let maxX = 0;
+  let minZ = 0;
+  let maxZ = 0;
+  let first = true;
+
+  rows.forEach((row, index) => {
+    // As linhas vêm do maior z para o menor: a primeira é a de
+    // cima, como num mapa com o norte para cima.
+    const z = rows.length - 1 - index;
+
+    [...row].forEach((char, x) => {
+      if (char === '.' || char === ' ') return;
+
+      const kind: CellKind = char === 'E' ? 'entrance' : char === '#' ? 'corridor' : 'room';
+
+      let room = -1;
+
+      if (kind === 'room') {
+        // A letra é a COR (G/B/R), e a prévia colore por ela: o
+        // desenho na tela tem de mostrar as mesmas três cores que o
+        // admin pintou, e não uma paleta de sala numerada.
+        const known = roomIds.get(char);
+
+        if (known === undefined) {
+          room = roomIds.size;
+          roomIds.set(char, room);
+        } else {
+          room = known;
+        }
+      } else {
+        corridorCells += 1;
+      }
+
+      cells.push({ x, z, kind, room });
+
+      if (first) {
+        minX = maxX = x;
+        minZ = maxZ = z;
+        first = false;
+      } else {
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minZ = Math.min(minZ, z);
+        maxZ = Math.max(maxZ, z);
+      }
+    });
+  });
+
+  return {
+    cells,
+    rooms: roomIds.size,
+    bounds: { minX, maxX, minZ, maxZ },
+    corridorCells,
+  };
+}
+
 // ------------------------------------------------------------
 //  A TRADUÇÃO DOS NÚMEROS
 // ------------------------------------------------------------

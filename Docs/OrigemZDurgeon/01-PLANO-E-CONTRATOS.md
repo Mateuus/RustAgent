@@ -341,15 +341,27 @@ O grid desenhado, célula a célula. É o modo de "quero uma sala assim, aqui".
 ```jsonc
 {
   "mode": "blueprint",
-  "bounds": { "minX": -2, "maxX": 8, "minZ": -3, "maxZ": 6 },
-  // uma string por linha de z, do maior para o menor. '.' vazio,
-  // '#' corredor, 'E' entrada, letra = id da sala.
+  // Uma string por linha de z, do MAIOR para o menor — a ordem em
+  // que um mapa é lido, com o norte em cima. Um caractere por
+  // célula: '.' vazio, '#' corredor, 'E' entrada, e G/B/R para a
+  // COR da sala.
+  //
+  // ####  A LETRA É A COR, E NÃO O NÚMERO DA SALA  ####
+  //
+  // MEDIDO em 09/09/2026: com uma letra por sala (A, B, C…), a cor
+  // se perdia — o formato não a carregava, e todo desenho reaberto
+  // ou sorteado voltava inteiro em verde.
+  //
+  // Quem separa "duas salas vermelhas" de "uma vermelha grande"
+  // continua sendo o preenchimento por vizinhança, no construtor.
+  // O arquivo guarda o que o admin PINTOU; o agrupamento é
+  // derivado, e derivado não se guarda.
   "grid": [
-    "..AAA.....",
-    "..AAA.####",
+    "..GGG.....",
+    "..GGG.####",
     ".###....#.",
-    "E#..BB..#.",
-    ".#..BB..#."
+    "E#..RR..#.",
+    ".#..RR..#."
   ],
   "rooms": {
     "A": { "color": "red",   "npc": 4, "crates": ["crate_elite"], "door": "toptier" },
