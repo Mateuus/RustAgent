@@ -477,6 +477,29 @@ namespace Oxide.Plugins
             public bool ready;
             /// <summary>Desiste se a construção não terminar. Ver `buildTimeout`.</summary>
             public Timer watchdog;
+
+            // ####  O QUE TEM DENTRO  ####  (frente do loot)
+
+            /// <summary>Todo ponto de loot, vivo ou a espera de respawn.</summary>
+            public readonly List<LootSpot> spots = new List<LootSpot>();
+
+            /// <summary>netID -> ponto. E como o `OnLootSpawn` nos reconhece em O(1).</summary>
+            public readonly Dictionary<ulong, LootSpot> spotByEntity = new Dictionary<ulong, LootSpot>();
+
+            /// <summary>
+            /// As pecas que PODEM levar dano.
+            ///
+            /// O barril nao abre com E: o loot dele so sai quando ele se
+            /// parte. Sem esta lista, a blindagem da masmorra o
+            /// transformaria em decoracao.
+            /// </summary>
+            public readonly HashSet<ulong> breakable = new HashSet<ulong>();
+
+            /// <summary>Os inimigos, para o `OnCorpsePopulate` decidir rapido.</summary>
+            public readonly HashSet<ulong> npcIds = new HashSet<ulong>();
+
+            /// <summary>O relogio do respawn, no modo permanente.</summary>
+            public Timer respawn;
         }
 
         /// <summary>
@@ -1201,6 +1224,11 @@ namespace Oxide.Plugins
             // existe, e o `Fail` chama `Demolish` de novo.
             dungeon.watchdog?.Destroy();
             dungeon.watchdog = null;
+
+            // O relogio do respawn e da masmorra, e morre com ela: vivo,
+            // ele tentaria repor caixa numa masmorra derrubada.
+            dungeon.respawn?.Destroy();
+            dungeon.respawn = null;
 
             // ####  AVISAR QUE ACABOU NÃO É OPCIONAL  ####
             //
@@ -1954,7 +1982,9 @@ namespace Oxide.Plugins
 
                 for (var i = 0; i < wantedCrates && i < forCrates.Count; i++)
                 {
-                    if (SpawnCrate(dungeon, layout, floors, forCrates[i], prefabs[rng.Next(prefabs.Count)], rng))
+                    var table = spec == null ? null : spec.table;
+
+                    if (SpawnContainer(dungeon, layout, floors, forCrates[i], prefabs[rng.Next(prefabs.Count)], table, rng) != null)
                         crates++;
                 }
 
@@ -1980,7 +2010,9 @@ namespace Oxide.Plugins
                 // parece bug, e nao desenho.
                 if (rng.Next(100) < lootDensity)
                 {
-                    if (SpawnCrate(dungeon, layout, floors, cell, corridorCrates[rng.Next(corridorCrates.Count)], rng))
+                    var table = corridorSpec == null ? null : corridorSpec.table;
+
+                    if (SpawnContainer(dungeon, layout, floors, cell, corridorCrates[rng.Next(corridorCrates.Count)], table, rng) != null)
                         crates++;
 
                     continue;
@@ -1996,6 +2028,10 @@ namespace Oxide.Plugins
             SettleLocks(dungeon);
 
             Debug("conteudo: " + crates + " caixas, " + npcs + " inimigos");
+
+            // O relogio do respawn e a ultima coisa: antes dele, nao ha
+            // o que repor.
+            StartRespawn(dungeon);
         }
 
         /// <summary>
@@ -2064,47 +2100,11 @@ namespace Oxide.Plugins
                    + new Vector3(Mathf.Cos(angle) * radius, 0.1f, Mathf.Sin(angle) * radius);
         }
 
-        private bool SpawnCrate(
-            ActiveDungeon dungeon,
-            Layout layout,
-            Dictionary<(int, int), BuildingBlock> floors,
-            (int, int) cell,
-            string prefab,
-            System.Random rng)
-        {
-            BuildingBlock floor;
-            if (!floors.TryGetValue(cell, out floor) || floor == null) return false;
-
-            var crate = GameManager.server.CreateEntity(
-                prefab, SpotIn(floor, rng), Quaternion.Euler(0f, rng.Next(360), 0f));
-
-            if (crate == null) return false;
-
-            crate.OwnerID = 0UL;
-            crate.EnableSaving(false);
-            crate.Spawn();
-            Adopt(dungeon, crate);
-
-            // ####  UMA LINHA DA FRENTE DAS PORTAS  ####
-            //
-            // Ver `TakeCodeNote`: ela devolve o papel do código de uma
-            // sala trancada, já marcado como entregue, ou `null`. A
-            // caixa é o portador só quando a receita pede
-            // (`lock.carrier: "crate"`).
-            var crateNote = TakeCodeNote(dungeon, layout, cell, "crate");
-            var crateBox = crate as StorageContainer;
-
-            if (crateNote != null)
-            {
-                if (crateBox == null || !crateNote.MoveToContainer(crateBox.inventory))
-                    crateNote.Remove();
-            }
-
-            // A caixa de radtown se enche sozinha ao nascer: quem decide
-            // o que cai e a tabela de loot do servidor, e e assim que o
-            // BetterLoot continua valendo aqui dentro.
-            return true;
-        }
+        // O antigo `SpawnCrate` virou o `SpawnContainer` da secao "O QUE
+        // O JOGADOR LEVA EMBORA": o nome mudou porque agora nasce
+        // armario, barril e mochila por ali, e cada um deles tem
+        // comportamento proprio no Rust. A entrega do papel do codigo
+        // continua igual, e mudou de linha, nao de dono.
 
         /// <summary>
         /// Um inimigo, parado onde nasceu.
@@ -2186,6 +2186,13 @@ namespace Oxide.Plugins
             // acordar, e ligado antes ele encontraria um cientista
             // ainda pela metade.
             AttachAi(npc, AiProfileFor(dungeon, color));
+
+            // ####  UMA LINHA DA FRENTE DO LOOT  ####
+            //
+            // E por ela que o `OnCorpsePopulate` sabe, em O(1), que
+            // aquele corpo e de um inimigo NOSSO - o hook roda para
+            // todo NPC do servidor.
+            if (npc.net != null) dungeon.npcIds.Add(npc.net.ID.Value);
 
             return true;
         }
@@ -2575,10 +2582,24 @@ namespace Oxide.Plugins
         //  sobrevive à morte do NPC, o que mais vem junto e o respawn.
         //
         //  O contrato entre as duas é este método mais UMA LINHA em
-        //  `SpawnNpc` e outra em `SpawnCrate`. `TakeCodeNote` devolve um
-        //  `Item` pronto — quem chama só precisa achar container para
-        //  ele — e já marcou a fechadura como entregue, então chamar
-        //  duas vezes não produz dois papeis do mesmo código.
+        //  `SpawnNpc` e outra em `SpawnContainer` (que era o
+        //  `SpawnCrate` quando esta seção foi escrita, e passou a
+        //  nascer também armário, barril e mochila). `TakeCodeNote`
+        //  devolve um `Item` pronto — quem chama só precisa achar
+        //  container para ele — e já marcou a fechadura como entregue,
+        //  então chamar duas vezes não produz dois papeis do mesmo
+        //  código.
+        //
+        //  ####  E POR ISSO A CHAMADA NÃO MORA NO `Furnish`  ####
+        //
+        //  Ser idempotente por FECHADURA, e não por chamada, quer dizer
+        //  que cada chamada consome a PRÓXIMA sala trancada ainda sem
+        //  portador. O `Furnish` repõe a peça a cada volta do relógio
+        //  do respawn: dali, o papel da sala seguinte apareceria numa
+        //  caixa qualquer, de hora em hora, até acabarem as fechaduras.
+        //
+        //  A chamada mora no `SpawnContainer`, que roda uma vez por
+        //  ponto de loot.
         //
         //  ####  O PORTADOR NUNCA ESTA DENTRO DA SALA QUE ELE ABRE  ####
         //
@@ -3096,6 +3117,22 @@ namespace Oxide.Plugins
         {
             if (entity == null || entity._name != MarkIndestructible) return null;
             if (entity is BasePlayer) return null;
+
+            // ####  O BARRIL E A EXCECAO, E ELA E OBRIGATORIA  ####
+            //
+            // Barril nao abre com E: o loot so sai quando ele se parte.
+            // Blindado, ele vira decoracao - o jogador bate ate
+            // desistir. A lista e preenchida no `Remember`, e so entra
+            // nela conteiner que o proprio prefab declara como nao
+            // saqueavel (`isLootable == false`).
+            //
+            // A consulta e a SEGUNDA: a comparacao de `_name` acima ja
+            // descartou o servidor inteiro, e so o que e nosso paga
+            // este hash.
+            var dungeon = active;
+
+            if (dungeon != null && entity.net != null
+                && dungeon.breakable.Contains(entity.net.ID.Value)) return null;
 
             return true;
         }
@@ -3871,6 +3908,8 @@ namespace Oxide.Plugins
             public NpcSpec npc;
             public float timeOfDay;
             public List<RoomSpec> rooms;
+            /// <summary>O ciclo do loot. `null` = nada volta (o certo no modo evento).</summary>
+            public RespawnSpec respawn;
 
             /// <summary>O nível padrão das peças: corredor, entrada e o resto.</summary>
             public GradeSpec structure;
@@ -3890,6 +3929,8 @@ namespace Oxide.Plugins
             public int npcDensity;
             public int lootDensity;
             public List<string> crates;
+            /// <summary>`null` = a tabela do servidor. Ver a secao do loot.</summary>
+            public LootTableSpec table;
         }
 
         private class NpcSpec
@@ -3900,6 +3941,8 @@ namespace Oxide.Plugins
             public float damageScale;
             public List<string> weapons;
             public List<string> names;
+            /// <summary>O que o corpo carrega. `null` = so o que o jogo poe.</summary>
+            public LootTableSpec loot;
         }
 
         private class RoomSpec
@@ -3913,12 +3956,60 @@ namespace Oxide.Plugins
             public List<string> crates;
             public string door;
             public bool locked;
+            /// <summary>`null` = a tabela do servidor. Ver a secao do loot.</summary>
+            public LootTableSpec table;
             /// <summary>A porta da sala grande. Vazio = usa `door` sempre.</summary>
             public string wideDoor;
             /// <summary>Células por porta a partir das quais `wideDoor` vale. 0 = o padrão.</summary>
             public int wideDoorCellsPerDoor;
             /// <summary>O nível das peças desta cor. `null` = herda de `structure`.</summary>
             public GradeSpec grade;
+        }
+
+        /// <summary>
+        /// A tabela de loot de uma cor de sala, do corredor ou do corpo.
+        ///
+        ///   `server`   o Rust enche a caixa, e o BetterLoot vale (padrao)
+        ///   `add`      o Rust enche, e a nossa tabela acrescenta
+        ///   `replace`  so a nossa tabela
+        /// </summary>
+        private class LootTableSpec
+        {
+            public string mode;
+            public Range rolls;
+            public List<LootEntrySpec> entries;
+        }
+
+        private class LootEntrySpec
+        {
+            public string shortname;
+            public Range amount;
+            public int weight;
+            /// <summary>Cai sempre, e nao gasta sorteio.</summary>
+            public bool guaranteed;
+            public ulong skin;
+            /// <summary>Cai como projeto, e nao como o item.</summary>
+            public bool blueprint;
+            /// <summary>0 a 1 da durabilidade cheia. 0 = a do jogo.</summary>
+            public float condition;
+        }
+
+        /// <summary>
+        /// O ciclo do loot numa masmorra permanente.
+        ///
+        /// ####  OS PADROES MORAM AQUI, E NAO SO NO PAINEL  ####
+        ///
+        /// Campo ausente no JSON deixa o inicializador de pe - e o
+        /// Newtonsoft so escrever o que veio. Sem isto, um payload
+        /// antigo faria `onlyWhenEmpty` virar false em silencio, e a
+        /// masmorra dobraria o loot a cada ciclo.
+        /// </summary>
+        private class RespawnSpec
+        {
+            public bool enabled;
+            public int minutes = 30;
+            public bool onlyWhenEmpty = true;
+            public bool rebuildDestroyed = true;
         }
 
         private class ZoneSpec { public float x; public float z; public float radius; }
@@ -4915,6 +5006,713 @@ namespace Oxide.Plugins
             }
 
             ai.OnHurtBy(info.InitiatorPlayer);
+            return null;
+        }
+
+        // ============================================================
+        //  O QUE O JOGADOR LEVA EMBORA
+        //
+        //  ####  A TABELA É OPCIONAL, E ESSA É A DECISÃO INTEIRA  ####
+        //
+        //  Sem tabela, a caixa de radtown se enche sozinha ao nascer,
+        //  pela tabela de loot do servidor — e é assim que o BetterLoot
+        //  continua valendo aqui dentro. `mode: "server"` é o padrão
+        //  justamente para que quem não mexer em nada não perca isso.
+        //
+        //  ####  A TABELA É NOSSA, E NÃO DO SimpleLootTable  ####
+        //
+        //  A base 1.3.4 chama `SimpleLootTable?.Call("GetSetItems", …)`
+        //  nas linhas 778, 1829 e 1851. O `?.` engole a chamada quando o
+        //  plugin não está instalado: o admin configura a tabela, salva,
+        //  constrói — e encontra o loot do servidor, sem UMA linha de
+        //  aviso. É o mesmo modo de falha do prefab errado que já custou
+        //  uma masmorra inteira neste projeto.
+        //
+        //  E o SimpleLootTable guarda as tabelas dele em `oxide/data/`,
+        //  editadas à mão. Depender dele seria pedir ao dono que
+        //  configurasse loot em DOIS lugares.
+        //
+        //  ####  NUNCA CANCELAMOS UM HOOK DE POPULAÇÃO  ####
+        //
+        //  MEDIDO neste projeto (`Plugins/OrigemZLootRefresh.cs`): quem
+        //  devolve não-nulo em `OnLootSpawn` pula o `PopulateLoot` e as
+        //  duas linhas seguintes do `SpawnLoot` — o cronômetro de
+        //  refresh não é rearmado, a marca de saqueado fica presa e o
+        //  primeiro saqueador nunca é zerado. Foram 469 de 469
+        //  populações perdendo o cronômetro com o BetterLoot ativo.
+        //
+        //  E MEDIDO no IL do `NPCPlayer.CreateCorpse` deste servidor: o
+        //  `OnCorpsePopulate` é chamado ANTES do `ApplyLoot`, e um
+        //  retorno não-nulo o pula — o corpo do cientista nasceria sem
+        //  nada do jogo dentro.
+        //
+        //  Então os dois hooks daqui devolvem `null` SEMPRE, e o
+        //  trabalho acontece no tique seguinte.
+        // ============================================================
+
+        /// <summary>
+        /// O sorteio de fora da construção.
+        ///
+        /// O `rng` do `GenerateRooms` morre quando a masmorra termina de
+        /// subir; o refresh e o corpo do inimigo acontecem depois dele.
+        /// </summary>
+        private readonly System.Random lootRng = new System.Random();
+
+        /// <summary>
+        /// Um ponto de loot da masmorra, e o que nasce nele.
+        ///
+        /// ####  O PONTO SOBREVIVE À PEÇA  ####
+        ///
+        /// Guardar a POSIÇÃO, e não só a entidade, é o que faz o
+        /// respawn poder repor um barril depois de ele ter sido
+        /// quebrado — que é o fim normal de um barril.
+        /// </summary>
+        private class LootSpot
+        {
+            public string prefab;
+            public (int, int) cell;
+            public Vector3 position;
+            public Quaternion rotation;
+            public LootTableSpec table;
+            public BaseEntity entity;
+        }
+
+        // ------------------------------------------------------------
+        //  NASCER
+        // ------------------------------------------------------------
+
+        /// <summary>
+        /// Um contêiner no chão da célula.
+        ///
+        /// ####  NEM TODO CONTÊINER É UMA CAIXA  ####
+        ///
+        /// O prefab decide o comportamento, e o Rust tem três famílias
+        /// bem diferentes atrás da mesma palavra "loot":
+        ///
+        ///   `LootContainer`         a caixa de radtown e o barril: se
+        ///                           enchem sozinhos ao nascer e têm
+        ///                           cronômetro de refresh próprio;
+        ///   `StorageContainer`      o armário, a caixa de madeira e o
+        ///                           esconderijo: nascem VAZIOS, e sem
+        ///                           tabela ficam vazios para sempre;
+        ///   `DroppedItemContainer`  a mochila: nasce vazia, não
+        ///                           repopula e some sozinha com o
+        ///                           tempo.
+        ///
+        /// Por isso não há lista de prefabs cravada aqui: o construtor
+        /// pergunta à peça o que ela é, e trata cada uma como ela pede.
+        /// </summary>
+        private LootSpot SpawnContainer(
+            ActiveDungeon dungeon,
+            Layout layout,
+            Dictionary<(int, int), BuildingBlock> floors,
+            (int, int) cell,
+            string prefab,
+            LootTableSpec table,
+            System.Random rng)
+        {
+            BuildingBlock floor;
+            if (!floors.TryGetValue(cell, out floor) || floor == null) return null;
+
+            var spot = new LootSpot
+            {
+                prefab = prefab,
+                cell = cell,
+                position = SpotIn(floor, rng),
+                rotation = Quaternion.Euler(0f, rng.Next(360), 0f),
+                table = table,
+            };
+
+            if (!Furnish(dungeon, spot)) return null;
+
+            dungeon.spots.Add(spot);
+
+            // ####  UMA LINHA DA FRENTE DAS PORTAS  ####
+            //
+            // Ver `TakeCodeNote`: ela devolve o papel do codigo de uma
+            // sala trancada, ja marcado como entregue, ou `null`.
+            //
+            // ####  AQUI, E NAO NO `Furnish`  ####
+            //
+            // `TakeCodeNote` e idempotente por FECHADURA, e nao por
+            // chamada: cada chamada consome a proxima sala trancada
+            // ainda sem portador. O `Furnish` roda de novo a cada
+            // reposicao do respawn - e o papel da sala seguinte
+            // apareceria numa caixa a cada volta do relogio.
+            //
+            // Este metodo roda uma vez por ponto, no nascimento. E o
+            // lugar certo.
+            var note = TakeCodeNote(dungeon, layout, cell, "crate");
+
+            if (note != null)
+            {
+                var inventory = InventoryOf(spot.entity);
+
+                if (inventory == null || !note.MoveToContainer(inventory)) note.Remove();
+            }
+
+            return spot;
+        }
+
+        /// <summary>
+        /// Põe de pé a peça de um ponto de loot — no nascimento e no
+        /// respawn.
+        /// </summary>
+        private bool Furnish(ActiveDungeon dungeon, LootSpot spot)
+        {
+            // O ponto pode estar reocupando o lugar de uma peça morta:
+            // sem tirar o registro velho, o `OnLootSpawn` continuaria
+            // consertando um fantasma.
+            Forget(dungeon, spot);
+
+            var entity = GameManager.server.CreateEntity(spot.prefab, spot.position, spot.rotation);
+
+            if (entity == null)
+            {
+                // Prefab que o Rust não conhece mais é PULADO, com
+                // aviso. O `CreateEntity` devolve null EM SILÊNCIO — foi
+                // assim que a masmorra subiu uma vez com os vãos
+                // abertos, e o preço de repetir isso é uma sala sem
+                // nada dentro que ninguém explica.
+                PrintWarning("contêiner desconhecido, pulado: " + spot.prefab);
+                return false;
+            }
+
+            entity.OwnerID = 0UL;
+            entity.EnableSaving(false);
+
+            // ####  O CRONÔMETRO É AJUSTADO ANTES DO Spawn  ####
+            //
+            // `Spawn()` chama `ServerInit` -> `SpawnLoot`, e é o
+            // `SpawnLoot` que arma o cronômetro com os valores que
+            // encontrar. Mexer neles depois só teria efeito no ciclo
+            // seguinte — ou seja, uma ou duas horas mais tarde.
+            var loot = entity.GetComponent<LootContainer>();
+            var respawn = dungeon.spec == null ? null : dungeon.spec.respawn;
+
+            if (loot != null && respawn != null)
+            {
+                var seconds = respawn.enabled ? Mathf.Clamp(respawn.minutes, 1, 1440) * 60f : 0f;
+
+                loot.minSecondsBetweenRefresh = seconds;
+                loot.maxSecondsBetweenRefresh = seconds <= 0f ? 0f : seconds * 1.5f;
+            }
+
+            var drop = entity as DroppedItemContainer;
+
+            if (drop != null)
+            {
+                drop.playerSteamID = 0UL;
+                drop.playerName = "";
+            }
+
+            entity.Spawn();
+            Adopt(dungeon, entity);
+
+            if (drop != null) PrepareDrop(dungeon, drop);
+
+            spot.entity = entity;
+            Remember(dungeon, entity, spot);
+
+            ApplyTable(entity, spot.table, lootRng);
+            return true;
+        }
+
+        /// <summary>
+        /// A mochila: inventário e prazo de validade.
+        ///
+        /// ####  ELA SOME SOZINHA, E ISSO É DO JOGO  ####
+        ///
+        /// `DroppedItemContainer` é o saco que cai quando alguém morre,
+        /// e o Rust apaga esses sacos por relógio. Numa masmorra ela
+        /// vira "o que alguém deixou para trás" — e some se ninguém
+        /// vier. Por isso o prazo acompanha o ciclo do respawn, e o
+        /// respawn a repõe no modo permanente.
+        /// </summary>
+        private void PrepareDrop(ActiveDungeon dungeon, DroppedItemContainer drop)
+        {
+            if (drop.inventory == null)
+            {
+                drop.inventory = new ItemContainer();
+                drop.inventory.ServerInitialize(null, Mathf.Max(6, drop.maxItemCount));
+                drop.inventory.GiveUID();
+                drop.inventory.entityOwner = drop;
+            }
+
+            var respawn = dungeon.spec == null ? null : dungeon.spec.respawn;
+            var minutes = respawn != null && respawn.enabled ? Mathf.Clamp(respawn.minutes, 1, 1440) : 60;
+
+            drop.ResetRemovalTime(minutes * 60f);
+        }
+
+        /// <summary>Liga o netID da peça ao ponto, para o hook achá-la em O(1).</summary>
+        private void Remember(ActiveDungeon dungeon, BaseEntity entity, LootSpot spot)
+        {
+            if (entity == null || entity.net == null) return;
+
+            var id = entity.net.ID.Value;
+            dungeon.spotByEntity[id] = spot;
+
+            // ####  O BARRIL PRECISA PODER QUEBRAR  ####
+            //
+            // `OnEntityTakeDamage` recusa todo dano na masmorra, e num
+            // barril isso é fatal: ele não abre com E — o loot só sai
+            // quando ele se parte. O jogador bateria nele até desistir,
+            // e nada no jogo diria por quê.
+            //
+            // Quem responde qual é qual é o próprio prefab: `isLootable`
+            // é false exatamente nos contêineres que só entregam
+            // quebrando.
+            var storage = entity as StorageContainer;
+
+            if (storage != null && !storage.isLootable) dungeon.breakable.Add(id);
+        }
+
+        /// <summary>Desfaz o registro da peça anterior do ponto.</summary>
+        private void Forget(ActiveDungeon dungeon, LootSpot spot)
+        {
+            var old = spot.entity;
+            spot.entity = null;
+
+            if (old == null) return;
+
+            if (old.net != null)
+            {
+                var id = old.net.ID.Value;
+                dungeon.spotByEntity.Remove(id);
+                dungeon.breakable.Remove(id);
+            }
+
+            dungeon.entities.Remove(old);
+
+            if (!old.IsDestroyed) old.Kill();
+        }
+
+        // ------------------------------------------------------------
+        //  A TABELA
+        // ------------------------------------------------------------
+
+        /// <summary>Aplica a tabela ao inventário de uma peça.</summary>
+        private void ApplyTable(BaseEntity entity, LootTableSpec table, System.Random rng)
+        {
+            if (entity == null || entity.IsDestroyed) return;
+
+            // A pergunta do modo vem ANTES da do inventário: no caminho
+            // padrão não há por que procurar contêiner nenhum, e o
+            // aviso abaixo sairia à toa em cada peça da masmorra.
+            var mode = ModeOf(table);
+            if (mode == "server") return;
+
+            var inventory = InventoryOf(entity);
+
+            if (inventory == null)
+            {
+                PrintWarning("tabela aplicada a algo sem inventário: " + entity.ShortPrefabName);
+                return;
+            }
+
+            ApplyTable(inventory, table, rng);
+        }
+
+        /// <summary>
+        /// Aplica a tabela a um inventário.
+        ///
+        /// ####  O CORPO NÃO TEM `inventory`  ####
+        ///
+        /// `LootableCorpse` guarda `containers[]`, e não é
+        /// `StorageContainer` nem `DroppedItemContainer` — a versão
+        /// acima devolveria "sem inventário" e o loot do inimigo
+        /// simplesmente não cairia. Por isso a sobrecarga existe: o
+        /// `OnCorpsePopulate` já tem em mãos o contêiner certo.
+        ///
+        /// ####  TABELA VAZIA NÃO ESVAZIA CAIXA  ####
+        ///
+        /// `replace` com zero entradas é quase sempre um campo que o
+        /// admin ainda não preencheu, e não um pedido de caixa vazia.
+        /// Obedecer ao pé da letra produziria uma masmorra inteira de
+        /// caixas vazias, e nada no jogo diria por quê.
+        /// </summary>
+        private void ApplyTable(ItemContainer inventory, LootTableSpec table, System.Random rng)
+        {
+            if (inventory == null) return;
+
+            var mode = ModeOf(table);
+            if (mode == "server") return;
+
+            // O sorteio vem ANTES de qualquer limpeza: é o que faz
+            // "tabela vazia não esvazia caixa" valer.
+            var items = RollItems(table, rng);
+            if (items.Count == 0) return;
+
+            if (mode == "replace") Wipe(inventory);
+
+            foreach (var item in items) GiveItem(inventory, item);
+        }
+
+        /// <summary>
+        /// Esvazia o contêiner — menos os papéis.
+        ///
+        /// ####  UM `Clear()` CRU APAGARIA O CÓDIGO DA PORTA  ####
+        ///
+        /// A frente das portas põe a nota do código no inventário do NPC
+        /// (que o corpo herda) e dentro de uma caixa. Apagá-la aqui
+        /// deixaria a sala trancada fechada para sempre, sem nada no
+        /// jogo dizendo por quê — é o pior desfecho que esta frente pode
+        /// causar na outra.
+        ///
+        /// Nada mais põe `note` num contêiner de masmorra, então a regra
+        /// não tem falso positivo.
+        /// </summary>
+        private void Wipe(ItemContainer inventory)
+        {
+            var saved = new List<Item>();
+
+            // De trás para frente: `RemoveFromContainer` mexe na mesma
+            // lista que estamos percorrendo.
+            for (var i = inventory.itemList.Count - 1; i >= 0; i--)
+            {
+                var item = inventory.itemList[i];
+
+                if (item == null || item.info == null) continue;
+                if (item.info.shortname != "note") continue;
+
+                item.RemoveFromContainer();
+                saved.Add(item);
+            }
+
+            inventory.Clear();
+            ItemManager.DoRemoves();
+
+            foreach (var note in saved) GiveItem(inventory, note);
+        }
+
+        private static string ModeOf(LootTableSpec table) =>
+            table == null || string.IsNullOrEmpty(table.mode) ? "server" : table.mode;
+
+        /// <summary>
+        /// Sorteia os itens de uma tabela.
+        ///
+        /// ####  DUAS MANEIRAS DE CAIR, E AS DUAS SÃO NECESSÁRIAS  ####
+        ///
+        /// `guaranteed` cai SEMPRE e não gasta sorteio — é o "toda caixa
+        /// vermelha tem 100 de scrap". O resto disputa `rolls` vagas por
+        /// peso — é o "e mais dois itens desta lista".
+        ///
+        /// Sem as duas, o admin não consegue escrever a mesa mais comum
+        /// que existe: um piso garantido mais um prêmio incerto.
+        /// </summary>
+        private List<Item> RollItems(LootTableSpec table, System.Random rng)
+        {
+            var made = new List<Item>();
+
+            if (table == null || table.entries == null || table.entries.Count == 0) return made;
+
+            var pool = new List<LootEntrySpec>();
+            var total = 0;
+
+            foreach (var entry in table.entries)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.shortname)) continue;
+
+                if (entry.guaranteed)
+                {
+                    Mint(made, entry, rng);
+                    continue;
+                }
+
+                pool.Add(entry);
+                total += Mathf.Max(1, entry.weight);
+            }
+
+            var rolls = Mathf.Clamp(Roll(rng, table.rolls), 0, 30);
+
+            for (var i = 0; i < rolls && total > 0; i++)
+            {
+                var pick = rng.Next(total);
+
+                foreach (var entry in pool)
+                {
+                    pick -= Mathf.Max(1, entry.weight);
+                    if (pick >= 0) continue;
+
+                    Mint(made, entry, rng);
+                    break;
+                }
+            }
+
+            return made;
+        }
+
+        /// <summary>Cria um item da entrada, ou avisa e desiste.</summary>
+        private void Mint(List<Item> into, LootEntrySpec entry, System.Random rng)
+        {
+            var amount = Mathf.Max(1, Roll(rng, entry.amount));
+            Item item;
+
+            if (entry.blueprint)
+            {
+                // ####  O BP NÃO É O ITEM  ####
+                //
+                // Blueprint no Rust é um `blueprintbase` APONTANDO para
+                // o item. "Criar o item e marcar como blueprint" não
+                // existe — e um `CreateByName("rifle.ak")` com a flag
+                // sonhada devolveria o rifle de verdade.
+                var target = ItemManager.FindItemDefinition(entry.shortname);
+
+                if (target == null)
+                {
+                    PrintWarning("item desconhecido na tabela: " + entry.shortname);
+                    return;
+                }
+
+                item = ItemManager.CreateByName("blueprintbase", 1, 0UL);
+                if (item == null) return;
+
+                item.blueprintTarget = target.itemid;
+            }
+            else
+            {
+                item = ItemManager.CreateByName(entry.shortname, amount, entry.skin);
+
+                if (item == null)
+                {
+                    // Um shortname que o Rust não conhece mais é
+                    // PULADO, com aviso: uma tabela de vinte linhas não
+                    // pode cair inteira porque um item foi renomeado
+                    // num update.
+                    PrintWarning("item desconhecido na tabela: " + entry.shortname);
+                    return;
+                }
+            }
+
+            if (entry.condition > 0f && entry.condition <= 1f && item.hasCondition)
+                item.conditionNormalized = entry.condition;
+
+            into.Add(item);
+        }
+
+        /// <summary>O inventário de qualquer uma das três famílias.</summary>
+        private static ItemContainer InventoryOf(BaseEntity entity)
+        {
+            var storage = entity as StorageContainer;
+            if (storage != null) return storage.inventory;
+
+            var drop = entity as DroppedItemContainer;
+            if (drop != null) return drop.inventory;
+
+            return null;
+        }
+
+        /// <summary>
+        /// Põe o item dentro, ou o destrói.
+        ///
+        /// ####  O ARMÁRIO RECUSA O QUE NÃO É ROUPA  ####
+        ///
+        /// `Locker` tem filtro próprio (`ItemFilter`): cada linha só
+        /// aceita a peça daquela linha. Um item recusado voltaria como
+        /// `false` e ficaria BOIANDO na memória — item sem contêiner é
+        /// vazamento, e ele reaparece em lugares estranhos.
+        ///
+        /// Então: tenta pela porta da frente, insere à força se o filtro
+        /// recusar, e destrói se nem isso couber.
+        /// </summary>
+        private void GiveItem(ItemContainer container, Item item)
+        {
+            if (item.MoveToContainer(container)) return;
+            if (container.Insert(item)) return;
+
+            item.Remove();
+        }
+
+        // ------------------------------------------------------------
+        //  O REFRESH
+        // ------------------------------------------------------------
+
+        /// <summary>
+        /// O Rust repopulou uma caixa nossa — a tabela volta por cima.
+        ///
+        /// ####  DEVOLVER NÃO-NULO AQUI É O DEFEITO, NÃO O CONSERTO  ####
+        ///
+        /// Ver o cabeçalho da seção: cancelar este hook pula o
+        /// `PopulateLoot`, deixa a caixa sem cronômetro e a marca de
+        /// saqueado presa em true. Foi medido em 469 de 469 populações
+        /// neste servidor.
+        /// </summary>
+        private object OnLootSpawn(LootContainer container)
+        {
+            // A primeira comparação é o que torna isto barato: este
+            // método roda em TODA população do servidor, centenas por
+            // minuto.
+            var dungeon = active;
+
+            if (dungeon == null || container == null || container.IsDestroyed) return null;
+            if (container.net == null) return null;
+
+            LootSpot spot;
+            if (!dungeon.spotByEntity.TryGetValue(container.net.ID.Value, out spot)) return null;
+            if (ModeOf(spot.table) == "server") return null;
+
+            // O conserto é no tique seguinte, quando o `SpawnLoot`
+            // terminou — cancelado por outro plugin ou não. É nesse
+            // ponto que "o que tem dentro?" tem uma resposta só, e a
+            // ordem de carga dos plugins deixa de importar.
+            NextTick(() =>
+            {
+                if (active != dungeon) return;
+                if (container == null || container.IsDestroyed) return;
+
+                ApplyTable(container, spot.table, lootRng);
+            });
+
+            return null;
+        }
+
+        /// <summary>
+        /// O relógio do respawn, no modo permanente.
+        ///
+        /// ####  A CAIXA DE RADTOWN NÃO PRECISA DE NÓS  ####
+        ///
+        /// Ela tem cronômetro próprio, já ajustado no `Furnish`, e o
+        /// `OnLootSpawn` devolve a tabela por cima. Este relógio existe
+        /// para as outras duas famílias — a caixa de madeira, o armário
+        /// e a mochila, que nascem vazias e nunca mais se enchem — e
+        /// para repor o que foi destruído.
+        /// </summary>
+        private void StartRespawn(ActiveDungeon dungeon)
+        {
+            var spec = dungeon.spec == null ? null : dungeon.spec.respawn;
+            if (spec == null || !spec.enabled) return;
+
+            var minutes = Mathf.Clamp(spec.minutes, 1, 1440);
+
+            dungeon.respawn = timer.Every(minutes * 60f, () => RespawnTick(dungeon));
+        }
+
+        private void RespawnTick(ActiveDungeon dungeon)
+        {
+            if (dungeon != active)
+            {
+                // A masmorra caiu e o relógio sobreviveu: ele se
+                // desliga sozinho, em vez de mexer numa masmorra que já
+                // não é.
+                dungeon.respawn?.Destroy();
+                dungeon.respawn = null;
+                return;
+            }
+
+            var spec = dungeon.spec == null ? null : dungeon.spec.respawn;
+            if (spec == null) return;
+
+            var rebuilt = 0;
+            var refilled = 0;
+
+            foreach (var spot in dungeon.spots)
+            {
+                if (spot.entity == null || spot.entity.IsDestroyed)
+                {
+                    if (!spec.rebuildDestroyed) continue;
+                    if (Furnish(dungeon, spot)) rebuilt++;
+                    continue;
+                }
+
+                // Trocar o conteúdo debaixo da mão de quem está com a
+                // caixa aberta parece bug, e não desenho.
+                if (spot.entity.HasFlag(BaseEntity.Flags.Open)) continue;
+
+                // Esta tem cronômetro próprio. Repopular por fora
+                // dobraria o loot no mesmo minuto.
+                if (spot.entity is LootContainer) continue;
+
+                // Sem tabela nossa não há o que repor: um contêiner que
+                // não se enche sozinho e não tem receita fica vazio, e
+                // isso é o que o admin pediu ao não escrever nada.
+                if (ModeOf(spot.table) == "server") continue;
+
+                var inventory = InventoryOf(spot.entity);
+                if (inventory == null) continue;
+                if (spec.onlyWhenEmpty && inventory.itemList.Count > 0) continue;
+
+                var items = RollItems(spot.table, lootRng);
+                if (items.Count == 0) continue;
+
+                // ####  O CICLO REPÕE, E NÃO ACUMULA  ####
+                //
+                // Aqui não existe "o Rust já encheu": estes contêineres
+                // nascem vazios. Então o tique escreve o conteúdo
+                // inteiro, seja o modo `add` ou `replace` — deixar o
+                // `add` acrescentar por cima encheria a caixa até o
+                // teto em algumas voltas do relógio.
+                //
+                // `Wipe` preserva o papel do código; ver o comentário
+                // dele.
+                Wipe(inventory);
+
+                foreach (var item in items) GiveItem(inventory, item);
+                refilled++;
+            }
+
+            if (rebuilt + refilled > 0)
+                Debug("respawn: " + rebuilt + " recolocado(s), " + refilled + " reabastecido(s)");
+        }
+
+        // ------------------------------------------------------------
+        //  O CORPO DO INIMIGO
+        // ------------------------------------------------------------
+
+        /// <summary>
+        /// O que o cientista da masmorra leva no corpo.
+        ///
+        /// ####  O HOOK ACONTECE ANTES DO ApplyLoot  ####
+        ///
+        /// MEDIDO no IL do `NPCPlayer.CreateCorpse` deste servidor. A
+        /// ordem é:
+        ///
+        ///   TakeFrom(containerMain, containerWear, containerBelt)
+        ///   Spawn()
+        ///   Interface.CallHook("OnCorpsePopulate", …)   <-- aqui
+        ///   ApplyLoot(corpse)                            <-- o loot do prefab
+        ///
+        /// Duas consequências, e as duas mudam o código:
+        ///
+        ///   1. devolver não-nulo PULA o `ApplyLoot`, e o corpo nasce
+        ///      sem o loot do jogo. Devolvemos `null` sempre;
+        ///   2. aplicar a nossa tabela AQUI seria aplicá-la antes do
+        ///      loot nativo — e `replace` não substituiria nada, porque
+        ///      o jogo põe o dele depois. Por isso o trabalho vai para o
+        ///      `NextTick`.
+        ///
+        /// E é por causa do `TakeFrom` da primeira linha que o papel do
+        /// código, posto no `containerMain` do cientista pela frente das
+        /// portas, CHEGA ao corpo. `NPCPlayer.CopyInventoryToCorpse` é
+        /// `true` cravado no IL (`ldc.i4.1; ret`), e nem o `HumanNPC`
+        /// nem o `ScientistNPC` o sobrescrevem.
+        /// </summary>
+        private object OnCorpsePopulate(BasePlayer npcPlayer, BaseCorpse corpse)
+        {
+            var dungeon = active;
+
+            if (dungeon == null || npcPlayer == null || corpse == null) return null;
+            if (npcPlayer.net == null) return null;
+            if (!dungeon.npcIds.Contains(npcPlayer.net.ID.Value)) return null;
+
+            var npcSpec = dungeon.spec == null ? null : dungeon.spec.npc;
+            var table = npcSpec == null ? null : npcSpec.loot;
+
+            if (ModeOf(table) == "server") return null;
+
+            var lootable = corpse as LootableCorpse;
+            if (lootable == null) lootable = corpse.GetComponentInParent<LootableCorpse>();
+            if (lootable == null) return null;
+
+            NextTick(() =>
+            {
+                if (active != dungeon) return;
+                if (lootable == null || lootable.IsDestroyed) return;
+                if (lootable.containers == null || lootable.containers.Length == 0) return;
+
+                ApplyTable(lootable.containers[0], table, lootRng);
+            });
+
             return null;
         }
 
