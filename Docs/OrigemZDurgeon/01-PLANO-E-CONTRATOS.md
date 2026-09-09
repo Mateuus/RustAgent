@@ -18,7 +18,7 @@
 | [3](#3--o-modelo-que-sustenta-o-desenho-a-célula-de-3-metros) | O modelo que sustenta o desenho: a célula de 3 metros |
 | [4](#4--os-dois-modos-de-autoria-receita-e-planta) | Os dois modos de autoria: receita e planta |
 | [5](#5--o-acervo-de-plantas-o-json-sai-do-disco-e-vai-para-o-painel) | O acervo de plantas: o JSON sai do disco e vai para o painel |
-| [6](#6--o-esquema-migrações-057-a-060) | O esquema: migrações 057 a 060 |
+| [6](#6--o-esquema-migrações-057-a-061) | O esquema: migrações 057 a 061 |
 | [7](#7--o-contrato-agente--plugin) | O contrato agente ↔ plugin |
 | [8](#8--o-comando-no-jogo-e-o-fluxo-de-construir-onde-eu-estou) | O comando no jogo, e o fluxo de "construir onde eu estou" |
 | [9](#9--o-ciclo-de-vida-evento-e-permanente) | O ciclo de vida: evento e permanente |
@@ -91,7 +91,7 @@ Sete coisas, todas verificadas nesta máquina em 08/09/2026:
    sempre como enfeite de bloco, nunca clicável. O passo a passo que o dono
    pediu é peça nova do design system (§12);
 6. **a última migração é a 56** (`wipe-run-cancel-requested`). As nossas são
-   057 a 060;
+   057 a 061;
 7. **o painel já tem mapa clicável** (`panel/src/components/map-view.tsx`), com
    projeção correta de `x`/`z` e zoom. Ele já sabe desenhar um ponto no mundo —
    é onde a dungeon permanente vai aparecer, de graça.
@@ -376,13 +376,76 @@ células. Como lista de `{x,z,kind}` são 400 objetos e ~20 KB; como 20 strings 
 20 caracteres são 400 bytes, e um humano abre o JSON e **vê a dungeon**. O custo
 é um parse de 6 linhas nas duas pontas.
 
-**Validação, e onde ela mora:** as regras (corredor conectado, `(0,0)` é entrada,
-toda sala tem ao menos uma porta, sala é retângulo, nada fora dos limites)
-moram em **um** arquivo TypeScript, `core/src/dungeons/blueprint.ts`, e a rota
-recusa a planta inválida com a frase pronta. O plugin **também** valida ao
-receber — não por desconfiança, mas porque um `.cs` que assume grid válido
-explode com `NullReferenceException` no meio da construção e deixa meia dungeon
-de pé.
+**Validação, e onde ela mora:** as regras moram em `core/src/dungeons/layout.ts`
+(`checkLayout`), e o painel tem o porte fiel delas em `lib/dungeon-layout.ts`. O
+plugin **também** valida ao receber — não por desconfiança, mas porque um `.cs`
+que assume grid válido explode com `NullReferenceException` no meio da construção
+e deixa meia dungeon de pé.
+
+São seis defeitos, e **nenhum deles dá erro no jogo** — é essa a razão de o
+verificador existir. O servidor constrói o que foi mandado e não reclama de nada:
+
+| o defeito | o que o jogador vê |
+|---|---|
+| sala que não encosta em corredor | um cômodo perfeito em que ninguém entra |
+| entrada ilhada | ele desce o alçapão e cai num quadrado fechado — o evento acaba ali |
+| corredor que não chega à entrada | um pedaço da dungeon que nunca é visitado |
+| sala de 1 célula com corredor em 3 lados | um cômodo sem parede |
+| célula solta | um bloco flutuando no meio do nada |
+| sem `E`, ou com dois | o alçapão não tem onde cuspir, ou cospe em um só |
+
+### 4.2.1 O acervo de traçados — o desenho vira objeto (09/09/2026)
+
+Pedido do dono, verbatim: *"nós temos plantas então ao criar masmorra pode criar
+planta prontas e outra coisa planta desenhada pode virar uma planta pronta.
+outra coisa em plantas podemos ver o desenho da dungeon"*.
+
+O problema que ele apontou: um desenho de vinte minutos morava na coluna `grid`
+de **uma** masmorra. Servia àquela e a mais nenhuma, e a segunda começava do grid
+em branco outra vez.
+
+A partir daqui o traçado é um objeto por si — tabela `dungeon_layouts` (migração
+061), acervo próprio, rotas `/dungeon-layouts`. E o ciclo fecha:
+
+```
+  planta pronta  ->  carrega no editor  ->  edita  ->  salva como planta
+        ^                                                      |
+        +------------------------------------------------------+
+```
+
+Três decisões que este acervo carrega:
+
+1. **Carregar COPIA, não referencia.** O traçado escolhido vira o `grid` daquela
+   masmorra. Referenciar faria uma edição no acervo mudar, sem aviso, uma
+   masmorra que já está no ar — e apagar do acervo quebraria as que partiram
+   dali. Por isso `DELETE /dungeon-layouts/:id` **não** tem a trava
+   `BLUEPRINT_IN_USE` que a planta de entrada tem.
+
+2. **Um traçado com defeito é GRAVADO, e marcado.** É o oposto da regra do
+   `no_hatch`, e a diferença é o que cada coisa é: uma planta de entrada sem
+   alçapão está pronta e não funciona; um traçado é rascunho por definição, e
+   recusar o de quem ia consertar a sala depois do almoço perderia o trabalho
+   dele. `problem_count` é coluna, o selo aparece na grade e as frases aparecem
+   ao abrir.
+
+3. **A lista TRAZ o desenho** — o inverso da regra do acervo de plantas, e pela
+   mesma razão que a criou. Lá o `content` tem meio megabyte e nunca entra na
+   listagem; aqui o desenho inteiro tem algumas centenas de bytes, e é dele que
+   a **miniatura** vive. Uma lista de traçados sem os traçados seria uma lista
+   de nomes, e escolher pela forma é justamente o que ela existe para permitir.
+
+**Os dois acervos não se misturam.** Uma `dungeon_blueprints` guarda peças com
+posição, que o plugin **cola**; um `dungeon_layouts` guarda células, que o plugin
+**constrói**. Na mesma tabela, o materializador escreveria um desenho no disco
+como se fosse planta de colar, e o CopyPaste não saberia ler o arquivo. Na tela
+eles aparecem juntos, em duas seções da aba Plantas, porque para quem usa os dois
+são "plantas".
+
+**Quatro traçados de fábrica** vêm no produto — corredor reto, cruz, espinha,
+serpente —, e eles moram em `types/dungeon-layouts.ts` e não em `Assets/`: são
+quarenta linhas de texto, não megabytes. Os quatro passam limpos no verificador,
+e o teste cobra isso: um traçado de fábrica com defeito seria o pior lugar
+possível para um, porque é o que o admin copia achando que é o certo.
 
 ### 4.3 O terceiro modo, que sai de graça: capturar
 
@@ -561,7 +624,7 @@ mandar parar, avisar que a config mudou, receber o "terminei". Ver §7.
 
 ---
 
-## 6 — O esquema: migrações 057 a 060
+## 6 — O esquema: migrações 057 a 061
 
 A última migração hoje é a **56** (`wipe-run-cancel-requested`). Quatro
 migrações novas, e a divisão delas segue a do OrigemZQuests: uma por assunto,
@@ -1141,6 +1204,22 @@ GET    /dungeon-blueprints/:id/download    baixa o JSON
 **A lista não devolve `content`.** Sete plantas somam 1,1 MB — uma listagem que
 carregasse tudo faria o painel baixar isso a cada abertura de tela, para mostrar
 sete nomes.
+
+### 10.3.1 Os traçados desenhados
+
+```
+GET    /dungeon-layouts                    a lista — COM o desenho de cada um
+GET    /dungeon-layouts/:id                um, com as frases do verificador
+POST   /dungeon-layouts                    salva. 201 se novo, 200 se substituiu
+DELETE /dungeon-layouts/:id                sem trava: carregar COPIA (§4.2.1)
+```
+
+**Aqui a lista TRAZ o conteúdo, e não é incoerência.** A regra de cima existe
+porque uma planta do CopyPaste tem meio megabyte; um desenho tem algumas centenas
+de bytes, e é dele que a miniatura da tela vive. Ver §4.2.1.
+
+**O POST grava o defeituoso** e devolve `problems` com as frases. Um traçado é
+rascunho; o que não pode é o admin não saber.
 
 ### 10.4 As três regras que nascem na rota
 
@@ -1924,7 +2003,10 @@ Servers/server01/oxide/data/OrigemZDungeon/blueprints/*.json   as 7 plantas
 ```
 Plugins/OrigemZEvents.cs
 core/src/dungeons/service.ts
-core/src/dungeons/blueprint.ts          validação da planta + Layout portado
+core/src/dungeons/blueprint.ts          o JSON do CopyPaste: peças com posição
+core/src/dungeons/layout.ts             o traçado: células, salas e os 6 defeitos
+core/src/db/dungeon-layouts-repository.ts   o acervo de traçados (§4.2.1)
+core/src/types/dungeon-layouts.ts       a régua + os 4 traçados de fábrica
 core/src/dungeons/materializer.ts       grava a planta no oxide/data
 core/src/events/scheduler.ts
 core/src/events/sync.ts                 o push (base64) e o stream (#OZDUNGEON#)
@@ -1934,6 +2016,8 @@ core/src/http/routes/events.ts
 core/src/http/routes/dungeons.ts
 panel/src/app/eventos/page.tsx
 panel/src/components/events/*.tsx
+panel/src/components/dungeons/layout-thumb.tsx   a miniatura do traçado
+panel/src/components/dungeons/layout-shelf.tsx   o acervo, na aba Plantas
 panel/src/components/ui/help-tip.tsx    ← design system
 panel/src/components/ui/steps.tsx       ← design system
 panel/src/lib/help/dungeons.tsx
@@ -1942,7 +2026,7 @@ panel/src/lib/help/dungeons.tsx
 **Toca:**
 
 ```
-core/src/db/migrations.ts               057 a 060
+core/src/db/migrations.ts               057 a 061
 core/src/index.ts                       registra as rotas e o agendador
 panel/src/components/sidebar.tsx        o item "Eventos"
 panel/src/lib/api.ts                    os tipos e os fetch

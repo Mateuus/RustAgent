@@ -108,6 +108,33 @@ export const DUNGEON_HELP = {
     ),
   },
 
+  plantaPronta: {
+    title: 'Começar de uma planta pronta',
+    short: 'Um traçado salvo vira o ponto de partida — e o desenho é copiado, não emprestado.',
+    body: (
+      <>
+        <p>
+          Uma <strong>planta pronta</strong> é o desenho de uma masmorra guardado por si só: o mapa
+          dos corredores e das salas, sem nada dentro. Quatro vêm com o projeto, e todo desenho que
+          você fizer pode virar uma pelo botão <strong>Salvar como planta</strong>.
+        </p>
+        <p>
+          Clicar numa delas <strong>copia</strong> o desenho para esta masmorra. A partir daí ele é
+          seu: apagar, esticar e repintar aqui não mexe no que está guardado, e apagar o guardado
+          não quebra esta masmorra.
+        </p>
+        <HelpExample>
+          Escolha a <em>Serpente</em>, apague o braço da direita e pinte duas salas vermelhas no
+          lugar. Salve como &ldquo;Serpente curta&rdquo; e ela passa a estar na faixa da próxima vez.
+        </HelpExample>
+        <HelpWarn>
+          O que uma planta pronta traz é só o traçado. Quantos inimigos, que loot e que porta cada
+          cor tem continuam sendo desta masmorra, nos passos seguintes.
+        </HelpWarn>
+      </>
+    ),
+  },
+
   desenho: {
     title: 'Desenhar o traçado',
     short: 'Cada quadradinho é um cômodo de 3 por 3 metros. Arraste para pintar.',

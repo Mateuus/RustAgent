@@ -24,6 +24,7 @@ import { ZodError } from 'zod';
 
 import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
 import { DungeonBlueprintsRepository } from '../src/db/dungeon-blueprints-repository.js';
+import { DungeonLayoutsRepository } from '../src/db/dungeon-layouts-repository.js';
 import { DungeonsRepository } from '../src/db/dungeons-repository.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
@@ -89,6 +90,7 @@ async function buildHarness(): Promise<Harness> {
 
   const dungeons = new DungeonsRepository(db, silent);
   const blueprints = new DungeonBlueprintsRepository(db, silent);
+  const layouts = new DungeonLayoutsRepository(db, silent);
   const events = new WorldEventsRepository(db, silent);
 
   const app = Fastify({ logger: false });
@@ -108,7 +110,7 @@ async function buildHarness(): Promise<Harness> {
   });
 
   await app.register(async (api) => {
-    registerDungeonRoutes(api, { dungeons, blueprints, events });
+    registerDungeonRoutes(api, { dungeons, blueprints, layouts, events });
   });
 
   await app.ready();
@@ -488,5 +490,122 @@ describe('o olho do assistente', () => {
 
     expect(body.runs[0]?.status).toBe('failed');
     expect(body.runs[0]?.failureReason).toBe('no_hatch');
+  });
+});
+
+describe('o acervo de traçados', () => {
+  const CLEAN = ['..RR..', '..RR..', 'GG##BB', 'GG##BB', '..##..', '..E#..'];
+
+  it('salva o desenho e devolve as contagens', async () => {
+    const { app } = await buildHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'meu', name: 'O meu', grid: CLEAN },
+    });
+
+    expect(response.statusCode).toBe(201);
+
+    const body = response.json() as {
+      layout: { roomCount: number; cellCount: number; grid: string[] };
+      problems: string[];
+    };
+
+    expect(body.layout.roomCount).toBe(3);
+    expect(body.layout.cellCount).toBe(20);
+    expect(body.problems).toEqual([]);
+  });
+
+  it('a lista TRAZ o desenho — e dele vive a miniatura', async () => {
+    const { app } = await buildHarness();
+
+    await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'meu', name: 'O meu', grid: CLEAN },
+    });
+
+    const body = (await app.inject({ method: 'GET', url: '/dungeon-layouts' })).json() as {
+      layouts: { grid: string[] }[];
+    };
+
+    expect(body.layouts[0]?.grid).toEqual(CLEAN);
+  });
+
+  it('GRAVA o desenho com defeito, e diz quais', async () => {
+    // Um traçado é rascunho: recusar perderia o trabalho de quem ia
+    // consertar a sala depois. O que não pode é ele não saber.
+    const { app } = await buildHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'torto', name: 'Torto', grid: ['RRGG##', '..GG##', '....E#'] },
+    });
+
+    expect(response.statusCode).toBe(201);
+
+    const body = response.json() as { layout: { problemCount: number }; problems: string[] };
+
+    expect(body.layout.problemCount).toBe(body.problems.length);
+    expect(body.problems.some((line) => line.includes('ninguém consegue entrar'))).toBe(true);
+  });
+
+  it('salvar de novo com o mesmo slug substitui, e responde 200', async () => {
+    const { app } = await buildHarness();
+
+    await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'meu', name: 'Antes', grid: CLEAN },
+    });
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'meu', name: 'Depois', grid: CLEAN },
+    });
+
+    expect(second.statusCode).toBe(200);
+
+    const body = (await app.inject({ method: 'GET', url: '/dungeon-layouts' })).json() as {
+      layouts: { name: string }[];
+    };
+
+    expect(body.layouts).toHaveLength(1);
+    expect(body.layouts[0]?.name).toBe('Depois');
+  });
+
+  it('apagar um traçado não pergunta quem o usa', async () => {
+    // Ao contrário da planta de entrada: carregar um traçado COPIA
+    // o desenho, então nenhuma masmorra depende do original.
+    const { app } = await buildHarness();
+
+    await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'meu', name: 'O meu', grid: CLEAN },
+    });
+
+    expect((await app.inject({ method: 'DELETE', url: '/dungeon-layouts/meu' })).statusCode).toBe(
+      200,
+    );
+
+    expect((await app.inject({ method: 'DELETE', url: '/dungeon-layouts/meu' })).statusCode).toBe(
+      404,
+    );
+  });
+
+  it('recusa um grid com caractere que o formato não tem', async () => {
+    const { app } = await buildHarness();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/dungeon-layouts',
+      payload: { id: 'meu', name: 'O meu', grid: ['@@@', 'E##'] },
+    });
+
+    expect(response.statusCode).toBe(400);
   });
 });

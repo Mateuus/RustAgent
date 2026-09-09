@@ -4937,6 +4937,35 @@ export const agent = {
   removeBlueprint: (id: string) =>
     api<{ ok: true }>(`/api/dungeon-blueprints/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  /**
+   * O acervo de tracados desenhados.
+   *
+   * Aqui a lista TRAZ o desenho de cada um - ver
+   * `DungeonLayoutSummary`.
+   */
+  dungeonLayouts: () => api<{ layouts: DungeonLayoutSummary[] }>('/api/dungeon-layouts'),
+
+  /**
+   * Salva um desenho como tracado.
+   *
+   * A resposta traz `problems`: um desenho com defeito e GRAVADO, e
+   * marcado. Recusar perderia o trabalho de quem ia consertar a
+   * sala lacrada depois — mas quem salvou precisa saber.
+   */
+  saveDungeonLayout: (body: {
+    id: string;
+    name: string;
+    description?: string | null;
+    grid: string[];
+  }) =>
+    api<{ layout: DungeonLayoutSummary; problems: string[] }>('/api/dungeon-layouts', {
+      method: 'POST',
+      body,
+    }),
+
+  removeDungeonLayout: (id: string) =>
+    api<{ ok: true }>(`/api/dungeon-layouts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   /** O historico de tudo que nasceu, com filtro. */
   worldEventRuns: (options: { serverId?: string; limit?: number } = {}) => {
     const query = new URLSearchParams();
@@ -5028,6 +5057,33 @@ export interface BlueprintSummary {
   /** Sem isto, a masmorra nao abre. E a coluna que importa. */
   hasHatch: boolean;
   origin: 'builtin' | 'import' | 'capture';
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Um tracado desenhado, do acervo.
+ *
+ * ####  ELE TRAZ O DESENHO, E A PLANTA NAO TRAZ O CONTEUDO  ####
+ *
+ * Nao e incoerencia: uma planta do CopyPaste tem meio megabyte e um
+ * desenho tem algumas centenas de bytes. E e o desenho que a tela
+ * precisa para mostrar a miniatura — sem ele, escolher entre oito
+ * tracados seria escolher entre oito nomes.
+ */
+export interface DungeonLayoutSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  /** Uma linha por fileira de z, do maior para o menor. */
+  grid: string[];
+  cellCount: number;
+  roomCount: number;
+  byColor: { green: number; blue: number; red: number };
+  hasEntrance: boolean;
+  /** Quantos defeitos o verificador achou. Gravado, nao recusado. */
+  problemCount: number;
+  origin: 'builtin' | 'panel' | 'capture';
   createdAt: number;
   updatedAt: number;
 }

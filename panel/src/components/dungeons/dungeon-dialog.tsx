@@ -31,11 +31,12 @@
 //  Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §12.1.1.
 // ============================================================
 
-import { Check, Copy, Dices, Loader2, Plus, Trash2 } from 'lucide-react';
+import { Check, Copy, Dices, Loader2, Plus, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { DungeonGridEditor } from '@/components/dungeons/dungeon-grid-editor';
 import { DungeonPreviewPanel } from '@/components/dungeons/dungeon-preview';
+import { LayoutThumb } from '@/components/dungeons/layout-thumb';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { FieldLabel } from '@/components/ui/help-tip';
@@ -48,6 +49,7 @@ import {
   type BlueprintSummary,
   type Dungeon,
   type DungeonInput,
+  type DungeonLayoutSummary,
   type DungeonRoom,
   type EventRun,
   type RoomColor,
@@ -134,6 +136,18 @@ export interface DungeonDialogProps {
   /** `null` = criando. */
   readonly dungeon: Dungeon | null;
   readonly blueprints: readonly BlueprintSummary[];
+  /** O acervo de traçados: é deles que o modo desenho parte. */
+  readonly layouts: readonly DungeonLayoutSummary[];
+  /**
+   * O traçado com que a masmorra nova já nasce.
+   *
+   * É o atalho do botão "Usar" da aba Plantas: sem ele, quem
+   * escolheu um traçado ali teria de abrir a criação, trocar o modo
+   * para desenho e procurar o mesmo traçado outra vez. Ignorado na
+   * edição — trocar o desenho de uma masmorra que já existe é
+   * decisão de quem edita, não efeito de abrir a tela.
+   */
+  readonly startFrom?: readonly string[] | null;
   readonly servers: readonly { readonly id: string; readonly name: string }[];
   readonly onClose: () => void;
   readonly onSaved: () => void;
@@ -142,13 +156,21 @@ export interface DungeonDialogProps {
 export function DungeonDialog({
   dungeon,
   blueprints,
+  layouts,
+  startFrom = null,
   servers,
   onClose,
   onSaved,
 }: DungeonDialogProps) {
-  const [draft, setDraft] = useState<DungeonInput>(() =>
-    dungeon === null ? EMPTY : toInput(dungeon),
-  );
+  const [draft, setDraft] = useState<DungeonInput>(() => {
+    if (dungeon !== null) return toInput(dungeon);
+
+    if (startFrom !== null && startFrom.length > 0) {
+      return { ...EMPTY, mode: 'blueprint', grid: [...startFrom] };
+    }
+
+    return EMPTY;
+  });
   const [step, setStep] = useState('identidade');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -224,13 +246,24 @@ export function DungeonDialog({
     >
       <Steps steps={steps} current={step} onGo={setStep} />
 
-      <div className="max-h-[60vh] overflow-y-auto">
+      {/* ####  68vh, E NAO 60  ####
+
+          O passo do desenho e o mais alto de todos: cabecalho, a
+          faixa de plantas prontas, a paleta e o grid. Com 60vh a
+          entrada amarela — o unico ponto do desenho que NAO se pode
+          deixar de ver — caia abaixo da dobra. */}
+      <div className="max-h-[68vh] overflow-y-auto">
         {step === 'identidade' && (
           <StepIdentidade draft={draft} patch={patch} locked={saved} />
         )}
 
         {step === 'tamanho' && draft.mode === 'blueprint' && (
-          <StepDesenho draft={draft} patch={patch} />
+          <StepDesenho
+            draft={draft}
+            patch={patch}
+            layouts={layouts}
+            onLayoutSaved={onSaved}
+          />
         )}
 
         {step === 'tamanho' && draft.mode === 'recipe' && (
@@ -513,55 +546,264 @@ function StepTamanho({
 /**
  * O passo do modo planta: a tela de desenho.
  *
- * ####  SORTEAR TAMBÉM É UM JEITO DE COMEÇAR  ####
+ * ####  TRÊS JEITOS DE COMEÇAR, E NENHUM É O GRID EM BRANCO  ####
  *
- * Encarar um grid de 24×24 em branco é tão paralisante quanto
- * trinta campos vazios. O botão de sortear enche a tela com um
- * traçado do gerador — e a partir dali o admin apaga, estica e
- * repinta o que quiser.
+ * Encarar 576 quadradinhos vazios é tão paralisante quanto trinta
+ * campos em branco. Então o passo abre com os três caminhos:
  *
- * Os dois caminhos que o dono pediu, no mesmo lugar: gerar, ou
- * desenhar. E gerar é só o primeiro traço de desenhar.
+ *   partir de uma planta pronta   o acervo, em miniatura
+ *   sortear um traçado            o gerador dá o primeiro traço
+ *   desenhar do zero              para quem já sabe o que quer
+ *
+ * E o quarto caminho fecha o ciclo: o desenho de hoje vira planta
+ * pronta, e é dele que a próxima masmorra parte.
+ *
+ * ####  CARREGAR COPIA, E NÃO REFERENCIA  ####
+ *
+ * O traçado escolhido vira o `grid` DESTA masmorra. Mexer nele
+ * aqui não mexe no acervo, e apagar o do acervo não quebra esta
+ * masmorra. Referenciar faria uma edição no acervo mudar, sem
+ * aviso, uma masmorra que já está no ar.
  */
 function StepDesenho({
   draft,
   patch,
+  layouts,
+  onLayoutSaved,
 }: {
   readonly draft: DungeonInput;
   readonly patch: (change: Partial<DungeonInput>) => void;
+  readonly layouts: readonly DungeonLayoutSummary[];
+  readonly onLayoutSaved: () => void;
 }) {
+  const [saving, setSaving] = useState(false);
+
+  function randomize() {
+    // Sortear é o primeiro traço: o gerador enche a tela e o admin
+    // edita a partir dali.
+    const rooms = Math.round((draft.size.min + draft.size.max) / 2);
+
+    patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights) });
+  }
+
+  const drawn = draft.grid !== null && draft.grid.length > 0;
+
   return (
     <StepBody
       title="Desenhe a masmorra"
       hint="Cada quadradinho é um cômodo de 3 por 3 metros. Arraste para pintar; a porta nasce sozinha onde a sala encosta no corredor."
     >
+      {layouts.length > 0 && (
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.plantaPronta}>Começar de uma planta pronta</FieldLabel>
+          <LayoutStrip
+            layouts={layouts}
+            onPick={(layout) => patch({ grid: [...layout.grid] })}
+          />
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <FieldLabel topic={DUNGEON_HELP.desenho}>O traçado</FieldLabel>
 
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            // Sortear é o primeiro traço: o gerador enche a tela e
-            // o admin edita a partir dali.
-            const rooms = Math.round((draft.size.min + draft.size.max) / 2);
-            patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights) });
-          }}
-        >
-          <Dices aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
-          Sortear um traçado
-        </Button>
+        <span className="flex gap-1">
+          <Button size="sm" variant="outline" onClick={randomize}>
+            <Dices aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+            Sortear um traçado
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!drawn}
+            onClick={() => setSaving((current) => !current)}
+          >
+            <Save aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+            Salvar como planta
+          </Button>
+        </span>
       </div>
+
+      {saving && draft.grid !== null && (
+        <SaveAsLayout
+          grid={draft.grid}
+          suggestion={draft.name}
+          onClose={() => setSaving(false)}
+          onSaved={onLayoutSaved}
+        />
+      )}
 
       <DungeonGridEditor
         grid={draft.grid}
         onChange={(grid) => patch({ grid })}
-        onRandomize={() => {
-          const rooms = Math.round((draft.size.min + draft.size.max) / 2);
-          patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights) });
-        }}
+        onRandomize={randomize}
       />
     </StepBody>
+  );
+}
+
+/**
+ * A faixa de traçados prontos.
+ *
+ * Horizontal e rolável: ela divide o passo com o editor, que é o
+ * que importa ali. Em grade, oito traçados empurrariam o desenho
+ * para fora da tela — e o admin escolhe um e nunca mais olha para
+ * esta faixa.
+ */
+function LayoutStrip({
+  layouts,
+  onPick,
+}: {
+  readonly layouts: readonly DungeonLayoutSummary[];
+  readonly onPick: (layout: DungeonLayoutSummary) => void;
+}) {
+  return (
+    <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+      {layouts.map((layout) => (
+        <button
+          key={layout.id}
+          type="button"
+          onClick={() => onPick(layout)}
+          title={`${layout.name} — ${String(layout.roomCount)} sala(s)`}
+          className="w-32 shrink-0 border border-border bg-surface-2 p-1 text-left transition-colors hover:border-amber"
+        >
+          {/* 96px, e nao 80: num quadro menor uma celula de traçado
+              de 11 linhas fica com 7 pixels, e o corredor cinza sobre
+              fundo preto deixa de se ver — o traçado vira um punhado
+              de quadradinhos coloridos soltos. */}
+          <LayoutThumb grid={layout.grid} className="h-24 w-full border-0" />
+          <span className="mt-1 block truncate font-condensed text-2xs font-bold uppercase tracking-wide">
+            {layout.name}
+          </span>
+          <span className="block text-2xs text-muted">
+            {layout.roomCount} sala(s)
+            {layout.problemCount > 0 ? ' · com defeito' : ''}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Salvar o desenho no acervo.
+ *
+ * ####  INLINE, E NÃO UM SEGUNDO DIÁLOGO  ####
+ *
+ * Este passo já mora dentro de um `<dialog>`. Um segundo por cima
+ * empilharia dois top layers, e fechar o de dentro com Escape
+ * fecharia os dois — levando junto os trinta campos da masmorra.
+ *
+ * O bloco pede só o nome: o identificador sai dele, e o desenho é
+ * o que está na tela.
+ */
+function SaveAsLayout({
+  grid,
+  suggestion,
+  onClose,
+  onSaved,
+}: {
+  readonly grid: readonly string[];
+  readonly suggestion: string;
+  readonly onClose: () => void;
+  readonly onSaved: () => void;
+}) {
+  const [name, setName] = useState(suggestion);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [problems, setProblems] = useState<readonly string[] | null>(null);
+
+  async function save() {
+    const id = slugify(name);
+
+    if (id.length < 2) {
+      setError('Dê um nome de pelo menos duas letras: é por ele que você acha o traçado depois.');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      const response = await agent.saveDungeonLayout({ id, name: name.trim(), grid: [...grid] });
+
+      // Os defeitos NÃO impedem o salvamento — um traçado é
+      // rascunho. Mas quem salvou precisa saber, e este é o único
+      // momento em que ele está olhando para cá.
+      setProblems(response.problems);
+      onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (problems !== null) {
+    return (
+      <div className="border-l-2 border-olive bg-surface-2 px-3 py-3">
+        <p className="font-condensed text-sm font-bold uppercase tracking-wide">
+          Salvo no acervo
+        </p>
+        <p className="mt-1 text-2xs text-muted">
+          Ele aparece na aba Plantas, e nesta faixa aqui em cima na próxima masmorra que você criar.
+        </p>
+
+        {problems.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {problems.map((problem) => (
+              <li key={problem} className="border-l-2 border-amber pl-2 text-2xs text-foreground">
+                {problem}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <Button size="sm" variant="ghost" className="mt-2" onClick={onClose}>
+          Fechar
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <FieldLabel>Nome do traçado</FieldLabel>
+      <div className="mt-1 flex flex-wrap gap-2">
+        <Input
+          value={name}
+          placeholder="Corredor em L"
+          className="min-w-40 flex-1"
+          onChange={(event) => setName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              void save();
+            }
+          }}
+        />
+        <Button size="sm" variant="confirm" disabled={busy} onClick={() => void save()}>
+          {busy ? (
+            <Loader2 aria-hidden="true" className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Save aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+          )}
+          Salvar
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onClose}>
+          Cancelar
+        </Button>
+      </div>
+
+      <p className="mt-2 text-2xs text-muted">
+        Um traçado de mesmo nome é substituído. O desenho é copiado: mexer nele aqui depois não
+        mexe no que ficou salvo.
+      </p>
+
+      {error !== null && (
+        <p className="mt-2 border-l-2 border-amber pl-2 text-2xs text-foreground">{error}</p>
+      )}
+    </div>
   );
 }
 

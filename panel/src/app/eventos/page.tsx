@@ -32,6 +32,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { BlueprintShelf } from '@/components/dungeons/blueprint-shelf';
 import { DungeonDialog } from '@/components/dungeons/dungeon-dialog';
 import { DungeonList, LiveCard } from '@/components/dungeons/dungeon-list';
+import { LayoutShelf } from '@/components/dungeons/layout-shelf';
 import { RunHistory } from '@/components/dungeons/run-history';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
@@ -42,6 +43,7 @@ import {
   agent,
   type BlueprintSummary,
   type Dungeon,
+  type DungeonLayoutSummary,
   type DungeonSummary,
   type EventRun,
 } from '@/lib/api';
@@ -62,23 +64,36 @@ function Eventos() {
   const [tab, setTab] = useState<Tab>('masmorras');
   const [dungeons, setDungeons] = useState<readonly DungeonSummary[] | null>(null);
   const [blueprints, setBlueprints] = useState<readonly BlueprintSummary[]>([]);
+  const [layouts, setLayouts] = useState<readonly DungeonLayoutSummary[]>([]);
   const [runs, setRuns] = useState<readonly EventRun[] | null>(null);
   const [servers, setServers] = useState<readonly { id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   /** `undefined` = fechado; `null` = criando; uma masmorra = editando. */
   const [editing, setEditing] = useState<Dungeon | null | undefined>(undefined);
+  /**
+   * O traçado com que a criação começa.
+   *
+   * É o atalho da aba Plantas: clicar em "Usar" abre a masmorra
+   * nova já no modo desenho, com aquele traçado dentro. Sem ele, o
+   * admin teria de abrir a criação, trocar o modo e procurar o
+   * traçado outra vez na faixa.
+   */
+  const [startFrom, setStartFrom] = useState<DungeonLayoutSummary | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [dungeonResponse, blueprintResponse, runResponse, serverResponse] = await Promise.all([
-        agent.dungeons(),
-        agent.dungeonBlueprints(),
-        agent.worldEventRuns({ limit: 50 }),
-        agent.servers(),
-      ]);
+      const [dungeonResponse, blueprintResponse, layoutResponse, runResponse, serverResponse] =
+        await Promise.all([
+          agent.dungeons(),
+          agent.dungeonBlueprints(),
+          agent.dungeonLayouts(),
+          agent.worldEventRuns({ limit: 50 }),
+          agent.servers(),
+        ]);
 
       setDungeons(dungeonResponse.dungeons);
       setBlueprints(blueprintResponse.blueprints);
+      setLayouts(layoutResponse.layouts);
       setRuns(runResponse.runs);
       setServers(serverResponse.servers.map((server) => ({ id: server.id, name: server.name })));
       setError(null);
@@ -126,7 +141,7 @@ function Eventos() {
             Masmorras {dungeons === null ? '' : `(${String(dungeons.length)})`}
           </TabButton>
           <TabButton active={tab === 'plantas'} onClick={() => setTab('plantas')}>
-            Plantas ({String(blueprints.length)})
+            Plantas ({String(blueprints.length + layouts.length)})
           </TabButton>
           <TabButton active={tab === 'historico'} onClick={() => setTab('historico')}>
             Histórico
@@ -173,7 +188,43 @@ function Eventos() {
         )}
 
         {dungeons !== null && tab === 'plantas' && (
-          <BlueprintShelf blueprints={blueprints} onChanged={() => void load()} />
+          // ####  DUAS SEÇÕES, PORQUE SÃO DUAS COISAS  ####
+          //
+          // Um traçado é o mapa das células, que o plugin CONSTRÓI;
+          // uma construção é o JSON do CopyPaste, que ele COLA. Para
+          // quem usa, as duas são "plantas" — e por isso moram na
+          // mesma aba —, mas escolher entre elas é escolher entre
+          // desenhar e colar, e a tela precisa dizer isso.
+          //
+          // Os traçados vêm primeiro: é deles que sai toda masmorra
+          // nova. As construções são a casinha da entrada, e se
+          // escolhem uma vez.
+          <div className="space-y-6">
+            <section className="space-y-3">
+              <SectionTitle
+                title="Plantas desenhadas"
+                detail="O mapa dos corredores e das salas. É daqui que uma masmorra nova parte."
+                count={layouts.length}
+              />
+              <LayoutShelf
+                layouts={layouts}
+                onChanged={() => void load()}
+                onUse={(layout) => {
+                  setStartFrom(layout);
+                  setEditing(null);
+                }}
+              />
+            </section>
+
+            <section className="space-y-3">
+              <SectionTitle
+                title="Construções (.json)"
+                detail="Prédios inteiros no formato do CopyPaste. É deles que sai a casinha da entrada."
+                count={blueprints.length}
+              />
+              <BlueprintShelf blueprints={blueprints} onChanged={() => void load()} />
+            </section>
+          </div>
         )}
 
         {dungeons !== null && tab === 'historico' && <RunHistory runs={runs} error={error} />}
@@ -183,8 +234,13 @@ function Eventos() {
         <DungeonDialog
           dungeon={editing}
           blueprints={blueprints}
+          layouts={layouts}
+          startFrom={startFrom?.grid ?? null}
           servers={servers}
-          onClose={() => setEditing(undefined)}
+          onClose={() => {
+            setEditing(undefined);
+            setStartFrom(null);
+          }}
           onSaved={() => void load()}
         />
       )}
@@ -230,6 +286,34 @@ function FirstRun({ onStart }: { readonly onStart: () => void }) {
         <Plus aria-hidden="true" className="mr-1 h-4 w-4" />
         Criar a primeira
       </Button>
+    </div>
+  );
+}
+
+/**
+ * O cabeçalho de uma seção da aba Plantas.
+ *
+ * Ele existe porque as duas listas parecem a mesma coisa e não são
+ * — e sem uma linha dizendo o que cada uma é, o admin sobe um .json
+ * esperando que ele vire o traçado da masmorra.
+ */
+function SectionTitle({
+  title,
+  detail,
+  count,
+}: {
+  readonly title: string;
+  readonly detail: string;
+  readonly count: number;
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+        <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
+        {title}
+        <span className="font-normal text-muted">({count})</span>
+      </h2>
+      <p className="text-2xs text-muted">{detail}</p>
     </div>
   );
 }

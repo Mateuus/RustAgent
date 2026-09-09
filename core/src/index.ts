@@ -51,11 +51,12 @@ import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
 import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
+import { DungeonLayoutsRepository } from './db/dungeon-layouts-repository.js';
 import { DungeonsRepository } from './db/dungeons-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { WorldEventsRepository } from './db/world-events-repository.js';
 import { BlueprintMaterializer } from './dungeons/materializer.js';
-import { seedDungeonBlueprints } from './dungeons/seed.js';
+import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { LootStatsCollector } from './game/loot-stats.js';
@@ -1294,6 +1295,14 @@ async function main(): Promise<void> {
   // ninguém sabe onde arrumar.
   const dungeonBlueprints = new DungeonBlueprintsRepository(db, logger);
   seedDungeonBlueprints(dungeonBlueprints, { rootDir: projectRoot(), logger });
+
+  // ####  E OS QUATRO TRAÇADOS, PELA MESMA REGRA  ####
+  //
+  // Estes não vêm de arquivo: são quarenta linhas de texto em
+  // `types/dungeon-layouts.ts`. É deles que o admin parte no modo
+  // desenho, em vez de encarar 576 quadradinhos em branco.
+  const dungeonLayouts = new DungeonLayoutsRepository(db, logger);
+  seedDungeonLayouts(dungeonLayouts, { logger });
 
   const dungeonsRepository = new DungeonsRepository(db, logger);
   const worldEventsRepository = new WorldEventsRepository(db, logger);
@@ -2854,6 +2863,7 @@ async function main(): Promise<void> {
     dungeons: {
       dungeons: dungeonsRepository,
       blueprints: dungeonBlueprints,
+      layouts: dungeonLayouts,
       events: worldEventsRepository,
       // Sem `await`: gravar nao pode depender de o servidor estar no
       // ar, e o que vai pelo fio e o estado COMPLETO - uma chamada

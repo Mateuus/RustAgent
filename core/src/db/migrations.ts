@@ -5785,6 +5785,76 @@ CREATE TABLE world_event_run_players (
 CREATE INDEX idx_world_event_run_players_steam ON world_event_run_players (steam_id);
 `;
 
+const DUNGEON_LAYOUTS_SCHEMA = `
+-- ============================================================
+--  061  dungeon_layouts  -  o desenho vira acervo.
+--
+--  ####  UM DESENHO PRESO NUMA MASMORRA MORRE COM ELA  ####
+--
+--  Até aqui o traçado desenhado morava na coluna \`grid\` da
+--  masmorra: um desenho de vinte minutos servia a uma masmorra e a
+--  mais nenhuma, e a segunda começava do grid em branco outra vez.
+--
+--  A partir daqui ele é um objeto por si — salvo, nomeado, e ponto
+--  de partida de quantas masmorras o admin quiser. A coluna
+--  \`grid\` da masmorra continua existindo e continua sendo a
+--  verdade do que ela constrói: carregar um traçado COPIA, e não
+--  referencia. Editar a masmorra depois não pode mexer no acervo
+--  pelas costas de quem salvou.
+--
+--  ####  POR QUE NÃO É UMA dungeon_blueprints  ####
+--
+--  Aquela guarda JSON do CopyPaste — uma construção literal que o
+--  plugin COLA, e que o materializador escreve no disco. Isto é um
+--  esquema de células que o plugin CONSTRÓI. Na mesma tabela, o
+--  materializador escreveria um desenho como se fosse planta de
+--  colar, e o CopyPaste não saberia ler o arquivo.
+--
+--  Na tela os dois aparecem juntos, porque para quem usa são
+--  ambos "plantas".
+-- ============================================================
+
+CREATE TABLE dungeon_layouts (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+
+  -- JSON: array de strings, uma por fileira de z, do MAIOR para o
+  -- menor (o norte em cima). Um caractere por célula: '.' vazio,
+  -- '#' corredor, 'E' entrada, G/B/R a cor da sala.
+  --
+  -- Um desenho inteiro cabe em algumas centenas de bytes — ao
+  -- contrário de uma planta do CopyPaste, que tem meio megabyte.
+  -- É por isso que este vai na LISTA: a tela mostra a miniatura de
+  -- cada um sem uma segunda consulta.
+  grid TEXT NOT NULL,
+
+  -- Derivados, gravados na escrita.
+  cell_count INTEGER NOT NULL DEFAULT 0,
+  room_count INTEGER NOT NULL DEFAULT 0,
+  green_rooms INTEGER NOT NULL DEFAULT 0,
+  blue_rooms INTEGER NOT NULL DEFAULT 0,
+  red_rooms INTEGER NOT NULL DEFAULT 0,
+
+  -- 1 = tem o 'E'. Sem ele o alçapão não tem onde cuspir o jogador.
+  has_entrance INTEGER NOT NULL DEFAULT 0 CHECK (has_entrance IN (0, 1)),
+
+  -- ####  QUANTOS DEFEITOS O VERIFICADOR ACHOU  ####
+  --
+  -- E ele é gravado em vez de recusado. Um traçado com uma sala
+  -- lacrada ainda é um bom ponto de partida — o que não pode é o
+  -- admin não SABER. A lista mostra o selo, e o editor mostra as
+  -- frases.
+  problem_count INTEGER NOT NULL DEFAULT 0,
+
+  origin TEXT NOT NULL DEFAULT 'panel'
+    CHECK (origin IN ('builtin','panel','capture')),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -5949,6 +6019,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 58, name: 'dungeons-core', sql: DUNGEONS_CORE_SCHEMA },
   { id: 59, name: 'dungeon-blueprints', sql: DUNGEON_BLUEPRINTS_SCHEMA },
   { id: 60, name: 'world-event-runs', sql: EVENT_RUNS_SCHEMA },
+  { id: 61, name: 'dungeon-layouts', sql: DUNGEON_LAYOUTS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

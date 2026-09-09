@@ -36,8 +36,23 @@ import { cn } from '@/lib/utils';
 /**
  * As categorias de peça, na ordem em que são desenhadas.
  *
- * A ordem importa: estrutura primeiro, detalhe por cima. Desenhar
- * uma parede depois de uma caixa esconderia a caixa.
+ * A ordem importa por dois motivos. No desenho: estrutura
+ * primeiro, detalhe por cima — uma parede desenhada depois de uma
+ * caixa esconderia a caixa. Na classificação: a PRIMEIRA que casa
+ * vence, então uma regra larga colocada cedo rouba de quem vem
+ * depois.
+ *
+ * ####  "OUTRAS: 74" NÃO É UMA CATEGORIA, É UMA DESISTÊNCIA  ####
+ *
+ * Com seis categorias, um terço da `base2` caía ali — e o dono
+ * perguntou, com razão, o que eram.
+ *
+ * MEDIDO nas sete plantas em 09/09/2026: 276 peças sem categoria,
+ * em 55 prefabs distintos. Quase todas elétrica (110: baterias,
+ * geradores, interruptores, ramificadores) e móveis (counter, rug,
+ * neon, sofá, estante). Mas duas coisas estavam escondidas ali que
+ * NÃO podiam estar: as três `autoturret` — que matam o jogador — e
+ * as escadas, que são estrutura e mudam a leitura da planta.
  */
 const LAYERS = [
   {
@@ -46,6 +61,12 @@ const LAYERS = [
     color: 'var(--surface-2)',
     match: (prefab: string) =>
       prefab.includes('foundation') || prefab.includes('/floor/') || prefab.includes('floor.frame'),
+  },
+  {
+    id: 'stair',
+    label: 'Escadas e rampas',
+    color: 'var(--text-muted)',
+    match: (prefab: string) => prefab.includes('block.stair') || prefab.includes('ramp'),
   },
   {
     id: 'wall',
@@ -58,6 +79,27 @@ const LAYERS = [
     label: 'Portas',
     color: 'var(--amber)',
     match: (prefab: string) => prefab.includes('door') && !prefab.includes('doorway'),
+  },
+  {
+    id: 'decor',
+    label: 'Móveis e decoração',
+    color: 'var(--olive)',
+    // Por nome, e não por uma regra larga: "mesa" e "estante" não
+    // têm raiz comum no Rust, e uma regra do tipo `deployed` pegaria
+    // metade das caixas junto.
+    match: (prefab: string) =>
+      /counter|rug\.|sign\.|shelves|composter|desk|sofa|chair|table|weaponrack|pookie|fridge|workbench|bbq|arcade|youtooz|waterbarrel|barricade|item_drop/.test(
+        prefab,
+      ),
+  },
+  {
+    id: 'electric',
+    label: 'Elétrica',
+    color: 'var(--chart-4)',
+    match: (prefab: string) =>
+      /electric|battery|generator|switch|splitter|combiner|button|pressurepad|rfbroadcaster|rfreceiver/.test(
+        prefab,
+      ),
   },
   {
     id: 'loot',
@@ -77,6 +119,18 @@ const LAYERS = [
       prefab.includes('light') || prefab.includes('lantern') || prefab.includes('lamp'),
   },
   {
+    id: 'threat',
+    label: 'Turrets e câmeras',
+    color: 'var(--chart-1)',
+    // ####  A ÚNICA CATEGORIA QUE ATIRA DE VOLTA  ####
+    //
+    // Três `autoturret` estavam contadas como "outras". Uma turret
+    // esquecida numa planta de evento mata o jogador antes de ele
+    // ver de onde veio o tiro, e quem monta a masmorra precisa
+    // saber que ela está lá ANTES de colar.
+    match: (prefab: string) => prefab.includes('autoturret') || prefab.includes('cctv'),
+  },
+  {
     id: 'hatch',
     label: 'Marca do alçapão',
     color: 'var(--rust-red)',
@@ -94,14 +148,30 @@ interface Piece {
   readonly layer: number;
 }
 
+/** O que a leitura do JSON produz. */
+interface Contents {
+  readonly pieces: readonly Piece[];
+  /**
+   * Peças que o construtor PULA de propósito.
+   *
+   * Um carro só existe montado — chassi, módulos, motor — e colá-lo
+   * peça a peça produz um destroço que não anda. A `entrance4` tem
+   * um: sem esta contagem, a planta diz "114 peças", 113 sobem, e
+   * ninguém sabe qual faltou.
+   */
+  readonly vehicles: number;
+}
+
 export interface BlueprintPreviewProps {
   readonly blueprint: BlueprintSummary;
   readonly onClose: () => void;
 }
 
 export function BlueprintPreview({ blueprint, onClose }: BlueprintPreviewProps) {
-  const [pieces, setPieces] = useState<readonly Piece[] | null>(null);
+  const [contents, setContents] = useState<Contents | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const pieces = contents?.pieces ?? null;
 
   useEffect(() => {
     let alive = true;
@@ -110,7 +180,7 @@ export function BlueprintPreview({ blueprint, onClose }: BlueprintPreviewProps) 
       try {
         const response = await agent.dungeonBlueprint(blueprint.id);
 
-        if (alive) setPieces(readPieces(response.blueprint.content));
+        if (alive) setContents(readPieces(response.blueprint.content));
       } catch (cause) {
         if (alive) setError(cause instanceof Error ? cause.message : String(cause));
       }
@@ -149,6 +219,14 @@ export function BlueprintPreview({ blueprint, onClose }: BlueprintPreviewProps) 
             <Legend pieces={pieces} />
           </div>
         </div>
+      )}
+
+      {contents !== null && contents.vehicles > 0 && (
+        <p className="mt-3 border-l-2 border-amber bg-surface-2 px-3 py-2 text-2xs text-foreground">
+          {contents.vehicles === 1
+            ? 'Uma peça desta planta é um veículo e não vai subir: um carro só existe montado, e colá-lo peça a peça produziria um destroço que não anda. O construtor pula, e o resto sobe normalmente.'
+            : `${String(contents.vehicles)} peças desta planta são veículos e não vão subir: um carro só existe montado. O construtor pula, e o resto sobe normalmente.`}
+        </p>
       )}
 
       <p className="mt-3 border-t border-border pt-2 text-2xs text-muted">
@@ -267,20 +345,21 @@ function Stat({ label, value }: { readonly label: string; readonly value: string
  * mesma leitura sem `InvariantCulture` põe a construção a três
  * milhões de metros de altura.
  */
-function readPieces(raw: string): Piece[] {
+function readPieces(raw: string): Contents {
   let parsed: unknown;
 
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    return { pieces: [], vehicles: 0 };
   }
 
   const entities = (parsed as { entities?: unknown }).entities;
 
-  if (!Array.isArray(entities)) return [];
+  if (!Array.isArray(entities)) return { pieces: [], vehicles: 0 };
 
   const pieces: Piece[] = [];
+  let vehicles = 0;
 
   for (const entity of entities) {
     if (entity === null || typeof entity !== 'object') continue;
@@ -288,6 +367,16 @@ function readPieces(raw: string): Piece[] {
     const node = entity as { prefabname?: unknown; pos?: unknown };
     const prefab = typeof node.prefabname === 'string' ? node.prefabname : '';
     const pos = node.pos as { x?: unknown; z?: unknown } | undefined;
+
+    // As mesmas três raízes de `blueprint.ts` no agente. Duas
+    // pontas compiladas separadamente: mudar lá pede mudar aqui.
+    if (
+      prefab.includes('modularcar') ||
+      prefab.includes('module_car_spawned') ||
+      prefab.includes('modular_car_fuel_storage')
+    ) {
+      vehicles += 1;
+    }
 
     if (pos === undefined) continue;
 
@@ -301,7 +390,7 @@ function readPieces(raw: string): Piece[] {
     pieces.push({ x, z, layer: layer < 0 ? LAYERS.length : layer });
   }
 
-  return pieces;
+  return { pieces, vehicles };
 }
 
 function formatBytes(bytes: number): string {

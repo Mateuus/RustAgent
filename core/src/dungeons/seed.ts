@@ -26,7 +26,9 @@ import type {
   BlueprintKind,
   DungeonBlueprintsRepository,
 } from '../db/dungeon-blueprints-repository.js';
+import type { DungeonLayoutsRepository } from '../db/dungeon-layouts-repository.js';
 import type { Logger } from '../logger.js';
+import { FACTORY_LAYOUTS } from '../types/dungeon-layouts.js';
 import { toError } from '../util.js';
 
 /**
@@ -129,6 +131,60 @@ export function seedDungeonBlueprints(
 
   if (imported > 0) {
     options.logger?.info({ imported }, 'plantas de fábrica importadas');
+  }
+
+  return imported;
+}
+
+/**
+ * Põe os quatro traçados de fábrica no banco, se ele estiver vazio.
+ *
+ * ####  MESMA REGRA DAS PLANTAS: SÓ NUM ACERVO VAZIO  ####
+ *
+ * Um seeder que reinserisse a cada boot ressuscitaria, toda
+ * madrugada, o traçado que alguém apagou de propósito.
+ *
+ * ####  E ELES NÃO SÃO ARQUIVO, SÃO CÓDIGO  ####
+ *
+ * As plantas do CopyPaste são megabytes e moram em `Assets/`. Os
+ * quatro traçados são quarenta linhas de texto: moram em
+ * `types/dungeon-layouts.ts`, ao lado das quatro receitas de
+ * fábrica, e pela mesma razão — são conteúdo do produto,
+ * versionado junto com quem o lê.
+ *
+ * Devolve quantos entraram. Zero é o resultado normal de todo boot
+ * a partir do segundo.
+ */
+export function seedDungeonLayouts(
+  repository: DungeonLayoutsRepository,
+  options: { readonly logger?: Logger } = {},
+): number {
+  if (repository.count() > 0) return 0;
+
+  let imported = 0;
+
+  for (const layout of FACTORY_LAYOUTS) {
+    try {
+      repository.save({
+        id: layout.id,
+        name: layout.name,
+        description: layout.description,
+        grid: layout.grid,
+        origin: 'builtin',
+      });
+
+      imported += 1;
+    } catch (cause) {
+      // Um traçado ruim não pode derrubar os outros três.
+      options.logger?.warn(
+        { layout: layout.id, error: toError(cause).message },
+        'traçado de fábrica recusado',
+      );
+    }
+  }
+
+  if (imported > 0) {
+    options.logger?.info({ imported }, 'traçados de fábrica importados');
   }
 
   return imported;

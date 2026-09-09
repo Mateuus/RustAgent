@@ -39,6 +39,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import type { RoomColor } from '@/lib/api';
+import { analyzeLayout, checkLayout } from '@/lib/dungeon-layout';
 import { cn } from '@/lib/utils';
 
 /** O que se pode pintar. `.` e `#` são os do formato salvo. */
@@ -296,8 +297,16 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
     });
   }
 
-  const problems = useMemo(() => validateCanvas(canvas), [canvas]);
-  const counts = useMemo(() => countCanvas(canvas), [canvas]);
+  // ####  A VERIFICAÇÃO É SOBRE AS LINHAS, NÃO SOBRE O CANVAS  ####
+  //
+  // As linhas são o formato canônico: é o que se salva, o que a
+  // API recebe e o que o agente cobra em `dungeons/layout.ts`.
+  // Verificar o canvas 24×24 daria uma terceira implementação das
+  // mesmas cinco regras — e a que divergisse seria a que o admin
+  // veria.
+  const rows = useMemo(() => toRows(canvas), [canvas]);
+  const problems = useMemo(() => checkLayout(rows), [rows]);
+  const facts = useMemo(() => analyzeLayout(rows), [rows]);
 
   const body = (
     <div className="space-y-3">
@@ -367,7 +376,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
       </div>
 
       <div className="relative">
-        {counts.cells <= 2 && onRandomize !== undefined && (
+        {facts.cellCount <= 2 && onRandomize !== undefined && (
           // Some no instante em que o admin pinta a terceira célula:
           // ele já começou, e o convite viraria estorvo.
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-4">
@@ -392,7 +401,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
         viewBox={`0 0 ${String(SIZE * CELL)} ${String(SIZE * CELL)}`}
         className={cn(
           'w-full cursor-crosshair touch-none select-none border border-border bg-background',
-          expanded ? 'max-h-[76vh]' : 'max-h-[52vh]',
+          expanded ? 'max-h-[76vh]' : 'max-h-[42vh]',
         )}
         role="application"
         aria-label="Desenho da masmorra, 24 por 24 células"
@@ -459,7 +468,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="flex items-center gap-2 text-2xs text-muted">
           <Grid2x2 aria-hidden="true" className="h-3.5 w-3.5" />
-          {counts.cells} células · {counts.rooms} sala(s) · cada célula é 3×3 metros
+          {facts.cellCount} células · {facts.roomCount} sala(s) · cada célula é 3×3 metros
         </p>
 
         <p className="text-2xs text-muted">
@@ -651,264 +660,21 @@ function toRows(canvas: Canvas): string[] {
   return rows;
 }
 
-/**
- * Cada mancha contígua da mesma cor vira uma sala, com sua letra.
- *
- * É o preenchimento por vizinhança do cabeçalho: é ele que separa
- * "duas salas vermelhas" de "uma sala vermelha grande" sem o admin
- * precisar nomear nada.
- */
-function findRooms(canvas: Canvas): Map<string, string> {
-  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const assigned = new Map<string, string>();
-  const seen = new Set<string>();
-  let next = 0;
-
-  for (let z = 0; z < SIZE; z += 1) {
-    for (let x = 0; x < SIZE; x += 1) {
-      const cell = canvas[z]?.[x];
-
-      if (cell === undefined || cell === 'empty' || cell === 'corridor') continue;
-
-      const id = `${String(x)},${String(z)}`;
-
-      if (seen.has(id)) continue;
-
-      const letter = letters[next % letters.length] ?? 'A';
-      next += 1;
-
-      // Uma busca em largura pela mancha daquela cor.
-      const queue = [[x, z] as const];
-      seen.add(id);
-
-      while (queue.length > 0) {
-        const point = queue.pop();
-
-        if (point === undefined) break;
-
-        assigned.set(`${String(point[0])},${String(point[1])}`, letter);
-
-        for (const [dx, dz] of [
-          [1, 0],
-          [-1, 0],
-          [0, 1],
-          [0, -1],
-        ] as const) {
-          const nx = point[0] + dx;
-          const nz = point[1] + dz;
-          const neighbourId = `${String(nx)},${String(nz)}`;
-
-          if (seen.has(neighbourId)) continue;
-          if (canvas[nz]?.[nx] !== cell) continue;
-
-          seen.add(neighbourId);
-          queue.push([nx, nz] as const);
-        }
-      }
-    }
-  }
-
-  return assigned;
-}
-
 // ------------------------------------------------------------
-//  As invariantes, cobradas enquanto se desenha
+//  As invariantes moram em `lib/dungeon-layout.ts`
+//
+//  ####  ELAS ERAM DAQUI, E ISSO ERA UM PROBLEMA  ####
+//
+//  Estavam escritas sobre o canvas 24×24 deste componente, e as
+//  MESMAS cinco regras estavam escritas sobre as linhas no agente.
+//  Duas implementações da mesma coisa, e a que divergisse seria a
+//  que o admin veria enquanto desenha.
+//
+//  Agora este arquivo converte para linhas e chama `checkLayout`,
+//  que é o porte fiel do `core/src/dungeons/layout.ts`. Sobrou uma
+//  duplicação — a das duas pontas, que são compiladas separadamente
+//  — em vez de três.
 // ------------------------------------------------------------
-
-/**
- * O que está errado no desenho, em português.
- *
- * ####  CINCO DEFEITOS, E NENHUM DELES DÁ ERRO NO JOGO  ####
- *
- * É essa a razão de o verificador existir. Uma entrada ilhada, uma
- * sala lacrada, um pedaço de corredor sem ligação, um cômodo sem
- * parede e um bloco flutuando SOBEM NORMALMENTE: o servidor
- * constrói o que foi mandado, sem reclamar de nada. O defeito só
- * aparece quando um jogador está lá dentro, e aí já é tarde.
- *
- * Cobrar aqui — enquanto o admin desenha, e não no salvamento — é
- * o que faz ele corrigir ainda lembrando o que quis fazer.
- */
-function validateCanvas(canvas: Canvas): string[] {
-  const problems: string[] = [];
-  const rooms = findRooms(canvas);
-
-  // 1. Toda sala precisa encostar num corredor — é ali que a porta
-  //    nasce. Sem isso, o cômodo fica lacrado.
-  const touching = new Set<string>();
-
-  for (const [id, letter] of rooms) {
-    const [x, z] = id.split(',').map(Number) as [number, number];
-
-    for (const [dx, dz] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ] as const) {
-      const neighbour = canvas[z + dz]?.[x + dx];
-
-      if (neighbour === 'corridor') touching.add(letter);
-    }
-  }
-
-  const allRooms = new Set(rooms.values());
-  const sealed = [...allRooms].filter((letter) => !touching.has(letter));
-
-  if (sealed.length > 0) {
-    problems.push(
-      sealed.length === 1
-        ? `A sala ${sealed[0] ?? ''} não encosta em nenhum corredor: ninguém consegue entrar nela.`
-        : `${String(sealed.length)} salas não encostam em corredor nenhum: ninguém consegue entrar nelas.`,
-    );
-  }
-
-  // 2. A ENTRADA precisa encostar em corredor. É por ela que o
-  //    jogador chega: sozinha, ele cai dentro de um quadrado
-  //    fechado e o evento acaba ali.
-  let entranceTouches = false;
-
-  for (const [dx, dz] of [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ] as const) {
-    if (canvas[ENTRANCE.z + dz]?.[ENTRANCE.x + dx] === 'corridor') entranceTouches = true;
-  }
-
-  if (!entranceTouches) {
-    problems.push(
-      'A entrada não encosta em nenhum corredor: o jogador desceria para dentro de um quadrado fechado.',
-    );
-  }
-
-  // 3. O corredor precisa ser um só, e chegar à entrada. Um pedaço
-  //    solto é uma parte da masmorra que nunca será visitada.
-  const corridor: string[] = [];
-
-  canvas.forEach((row, z) => {
-    row.forEach((cell, x) => {
-      if (cell === 'corridor') corridor.push(`${String(x)},${String(z)}`);
-    });
-  });
-
-  if (corridor.length === 0) {
-    problems.push('Não há corredor nenhum: comece ligando a entrada ao resto.');
-  } else {
-    const reachable = new Set<string>();
-    const start = `${String(ENTRANCE.x)},${String(ENTRANCE.z)}`;
-    const queue = [start];
-    reachable.add(start);
-
-    while (queue.length > 0) {
-      const current = queue.pop();
-
-      if (current === undefined) break;
-
-      const [x, z] = current.split(',').map(Number) as [number, number];
-
-      for (const [dx, dz] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-      ] as const) {
-        const id = `${String(x + dx)},${String(z + dz)}`;
-
-        if (reachable.has(id) || canvas[z + dz]?.[x + dx] !== 'corridor') continue;
-
-        reachable.add(id);
-        queue.push(id);
-      }
-    }
-
-    const orphans = corridor.filter((id) => !reachable.has(id)).length;
-
-    if (orphans > 0) {
-      problems.push(
-        `${String(orphans)} célula(s) de corredor não chegam na entrada: essa parte fica ilhada.`,
-      );
-    }
-  }
-
-  // 4. Uma sala de UMA célula encostada em corredor por três lados
-  //    nasce sem parede em lugar nenhum: o construtor mata a parede
-  //    entre células da mesma sala, e o vão vira porta em cada lado
-  //    que toca o corredor. Três portas num cômodo de 3x3 metros é
-  //    um cômodo sem parede.
-  const wide = new Map<string, number>();
-
-  for (const letter of rooms.values()) wide.set(letter, (wide.get(letter) ?? 0) + 1);
-
-  let openRooms = 0;
-
-  for (const [id, letter] of rooms) {
-    if ((wide.get(letter) ?? 0) > 1) continue;
-
-    const [x, z] = id.split(',').map(Number) as [number, number];
-    let sides = 0;
-
-    for (const [dx, dz] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ] as const) {
-      if (canvas[z + dz]?.[x + dx] === 'corridor') sides += 1;
-    }
-
-    if (sides >= 3) openRooms += 1;
-  }
-
-  if (openRooms > 0) {
-    problems.push(
-      `${String(openRooms)} sala(s) de uma célula têm corredor em três lados: elas nascem quase sem parede. Aumente-as, ou afaste o corredor.`,
-    );
-  }
-
-  // 5. Célula solta — nem corredor nem grudada em corredor por
-  //    outra sala. Ela vira um bloco isolado no meio do nada, e o
-  //    jogador vê um pedaço de construção flutuando.
-  let floating = 0;
-
-  canvas.forEach((row, z) => {
-    row.forEach((cell, x) => {
-      if (cell === 'empty') return;
-
-      let neighbours = 0;
-
-      for (const [dx, dz] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-      ] as const) {
-        if ((canvas[z + dz]?.[x + dx] ?? 'empty') !== 'empty') neighbours += 1;
-      }
-
-      if (neighbours === 0) floating += 1;
-    });
-  });
-
-  if (floating > 0) {
-    problems.push(
-      `${String(floating)} célula(s) estão soltas, sem encostar em nada: elas viram blocos flutuando no meio do nada.`,
-    );
-  }
-
-  return problems;
-}
-
-function countCanvas(canvas: Canvas): { cells: number; rooms: number } {
-  let cells = 0;
-
-  for (const row of canvas) {
-    for (const cell of row) if (cell !== 'empty') cells += 1;
-  }
-
-  return { cells, rooms: new Set(findRooms(canvas).values()).size };
-}
 
 function fillOf(cell: Brush): string {
   return BRUSHES.find((brush) => brush.id === cell)?.color ?? 'var(--bg)';

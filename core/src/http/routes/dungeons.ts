@@ -1,10 +1,15 @@
 // ============================================================
 //  routes/dungeons.ts  -  a masmorra e as peças dela.
 //
-//  Duas famílias, e são dois assuntos:
+//  Três famílias, e são três assuntos:
 //
 //      /dungeons             a masmorra: receita ou planta
-//      /dungeon-blueprints   o acervo de construções prontas
+//      /dungeon-blueprints   o acervo de construções do CopyPaste
+//      /dungeon-layouts      o acervo de traçados desenhados
+//
+//  Os dois acervos parecem o mesmo e não são: um guarda peças com
+//  posição, que o plugin COLA; o outro guarda células, que o
+//  plugin CONSTRÓI. Ver `dungeons/layout.ts`.
 //
 //  ####  A LISTA DE PLANTAS NUNCA DEVOLVE O `content`  ####
 //
@@ -42,9 +47,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import type { DungeonBlueprintsRepository } from '../../db/dungeon-blueprints-repository.js';
+import type { DungeonLayoutsRepository } from '../../db/dungeon-layouts-repository.js';
 import type { DungeonsRepository } from '../../db/dungeons-repository.js';
 import type { WorldEventsRepository } from '../../db/world-events-repository.js';
 import { BLUEPRINT_PROBLEM_MESSAGE } from '../../dungeons/blueprint.js';
+import { checkLayout } from '../../dungeons/layout.js';
+import { dungeonLayoutInputSchema } from '../../types/dungeon-layouts.js';
 import {
   dungeonInputSchema,
   dungeonUpdateSchema,
@@ -57,6 +65,8 @@ import { ApiError } from '../error-response.js';
 export interface DungeonRoutesDeps {
   readonly dungeons: DungeonsRepository;
   readonly blueprints: DungeonBlueprintsRepository;
+  /** O acervo de traçados desenhados. Ver `dungeon-layouts-repository.ts`. */
+  readonly layouts: DungeonLayoutsRepository;
   readonly events: WorldEventsRepository;
   /**
    * O jogo precisa saber que algo mudou.
@@ -309,6 +319,81 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
 
     return { ok: true };
   });
+
+  // ==========================================================
+  //  OS TRAÇADOS DESENHADOS
+  // ==========================================================
+
+  /**
+   * O acervo de desenhos.
+   *
+   * ####  AQUI A LISTA TRAZ O CONTEÚDO, E ISSO NÃO É INCOERÊNCIA  ####
+   *
+   * A regra do acervo de plantas — nunca devolver o `content` na
+   * lista — existe porque uma planta do CopyPaste tem meio
+   * megabyte. Um desenho tem algumas centenas de bytes, e é ele que
+   * a tela precisa para mostrar a miniatura de cada traçado.
+   *
+   * Sem isso, escolher entre oito traçados seria escolher entre
+   * oito nomes.
+   */
+  app.get('/dungeon-layouts', async () => ({ ok: true, layouts: deps.layouts.list() }));
+
+  app.get('/dungeon-layouts/:id', async (request) => {
+    const { id } = idParams.parse(request.params);
+    const layout = deps.layouts.get(id);
+
+    if (layout === null) throw layoutNotFound(id);
+
+    return { ok: true, layout, problems: checkLayout(layout.grid) };
+  });
+
+  /**
+   * Salva o desenho como traçado.
+   *
+   * ####  UM DESENHO COM DEFEITO É GRAVADO, E MARCADO  ####
+   *
+   * Recusar seria perder o trabalho de quem ia consertar a sala
+   * lacrada depois — um traçado é rascunho por definição. Mas a
+   * resposta traz as frases do verificador, e a lista traz o selo:
+   * o que não pode acontecer é o admin não saber.
+   *
+   * Isso é o oposto da regra da planta de entrada (`no_hatch`), e a
+   * diferença é o que cada coisa é: aquela está pronta e não
+   * funciona.
+   */
+  app.post('/dungeon-layouts', async (request, reply) => {
+    const body = dungeonLayoutInputSchema.parse(request.body);
+    const existed = deps.layouts.exists(body.id);
+
+    const layout = deps.layouts.save({
+      id: body.id,
+      name: body.name,
+      description: body.description,
+      grid: body.grid,
+      origin: 'panel',
+    });
+
+    return reply
+      .status(existed ? 200 : 201)
+      .send({ ok: true, layout, problems: checkLayout(body.grid) });
+  });
+
+  /**
+   * Apaga um traçado.
+   *
+   * Sem a trava de "está em uso" do acervo de plantas — e de
+   * propósito: carregar um traçado COPIA o desenho para dentro da
+   * masmorra. Apagar o original não muda nem quebra nenhuma
+   * masmorra que partiu dele.
+   */
+  app.delete('/dungeon-layouts/:id', async (request) => {
+    const { id } = idParams.parse(request.params);
+
+    if (!deps.layouts.remove(id)) throw layoutNotFound(id);
+
+    return { ok: true };
+  });
 }
 
 function notFound(id: string): ApiError {
@@ -317,6 +402,14 @@ function notFound(id: string): ApiError {
 
 function blueprintNotFound(id: string): ApiError {
   return new ApiError('BLUEPRINT_NOT_FOUND', `Não existe planta com o identificador "${id}".`, 404);
+}
+
+function layoutNotFound(id: string): ApiError {
+  return new ApiError(
+    'LAYOUT_NOT_FOUND',
+    `Não existe traçado com o identificador "${id}".`,
+    404,
+  );
 }
 
 /**
