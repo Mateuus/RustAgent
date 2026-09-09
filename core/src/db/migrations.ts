@@ -6015,6 +6015,45 @@ ALTER TABLE dungeons ADD COLUMN npc_ai      TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE dungeons ADD COLUMN corridor_ai TEXT NOT NULL DEFAULT '{}';
 `;
 
+const DUNGEON_ACCESS_SCHEMA = `
+-- ============================================================
+--  065  quem entra, e o que ninguém tira do lugar.
+--
+--  Os dois blocos que a frente do acesso pôs no plugin
+--  (Docs/OrigemZDurgeon/frentes/acesso.md §3). Sem estas colunas o
+--  painel não tem onde gravar, e os padrões ficam cravados no C#.
+--
+--  ####  TODO PADRÃO AQUI É O DO PLUGIN, E ISSO É O CONTRATO  ####
+--
+--  'everyone' é o pedido literal do dono — "a Dungeon todo o
+--  servidor pode entrar nela" —, e é o que o "new AccessSpec()" do
+--  C# vale. Os três da proteção são o "new ProtectionSpec()". É
+--  essa igualdade que autoriza o sync a NÃO mandar o bloco quando
+--  ele está no padrão: masmorra existente nasce igual, e não paga
+--  byte nenhum do teto de 50 KB.
+--
+--  ####  A PERMISSÃO É ANULÁVEL, COMO O lock_note_title  ####
+--
+--  NULL = vazia = a nossa, 'origemzdungeon.enter'. O texto padrão é
+--  do CONTRATO e não do banco: mudá-lo um dia não pode exigir uma
+--  migração para reescrever linha nenhuma.
+--
+--  Sem CHECK em access_who_enters, como as colunas de lock_* da
+--  062: a leitura passa pelo "oneOf" do repositório, que também
+--  cobre o banco restaurado de um schema mais velho.
+--
+--  (Sem crase em comentário de migração: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+ALTER TABLE dungeons ADD COLUMN access_who_enters       TEXT NOT NULL DEFAULT 'everyone';
+ALTER TABLE dungeons ADD COLUMN access_enter_permission TEXT;
+
+ALTER TABLE dungeons ADD COLUMN protection_enabled         INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE dungeons ADD COLUMN protection_allow_admin     INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE dungeons ADD COLUMN protection_warn_on_attempt INTEGER NOT NULL DEFAULT 1;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6191,6 +6230,11 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 62, name: 'dungeon-doors-and-grade', sql: DUNGEON_DOORS_AND_GRADE_SCHEMA },
   { id: 63, name: 'dungeon-loot-tables', sql: DUNGEON_LOOT_TABLES_SCHEMA },
   { id: 64, name: 'dungeon-ai', sql: DUNGEON_AI_SCHEMA },
+  // A 065 é a quarta frente do mesmo dia: quem desce pelo alçapão e
+  // o que ninguém tira do lugar. Ela só acrescenta colunas à
+  // `dungeons`, então não precisa vir antes da 062 nem depois de
+  // nenhuma outra.
+  { id: 65, name: 'dungeon-access', sql: DUNGEON_ACCESS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

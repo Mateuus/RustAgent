@@ -1,5 +1,5 @@
 // ============================================================
-//  Os campos das três frentes, do schema até o comando de RCON.
+//  Os campos das quatro frentes, do schema até o comando de RCON.
 //
 //  ####  O QUE ESTE ARQUIVO PROTEGE  ####
 //
@@ -36,7 +36,7 @@ const silent = pino({ level: 'silent' });
 const SERVER = 'server01';
 
 /**
- * Uma masmorra com TODO campo das três frentes fora do padrão.
+ * Uma masmorra com TODO campo das quatro frentes fora do padrão.
  *
  * Nenhum valor aqui é o padrão do schema, de propósito: um campo
  * que o repositório esquecer de gravar volta como o padrão, e um
@@ -78,6 +78,8 @@ const FULL = dungeonInputSchema.parse({
     announceOpen: false,
     warnOnWrongCode: false,
   },
+  access: { whoEnters: 'permission', enterPermission: 'origemz.vip.diamante' },
+  protection: { enabled: false, allowAdmin: false, warnOnAttempt: false },
   respawn: { enabled: true, minutes: 45, onlyWhenEmpty: false, rebuildDestroyed: false },
   rooms: [
     {
@@ -166,7 +168,7 @@ function decode(command: string): { dungeons: Record<string, unknown>[] } {
   };
 }
 
-describe('os campos das três frentes atravessam o banco', () => {
+describe('os campos das quatro frentes atravessam o banco', () => {
   it('nada se perde entre a escrita e a leitura', () => {
     const { dungeons } = harness();
 
@@ -177,6 +179,8 @@ describe('os campos das três frentes atravessam o banco', () => {
     // INSERT falha aqui sem ninguém precisar lembrar de testá-lo.
     expect(saved.structure).toEqual(FULL.structure);
     expect(saved.lock).toEqual(FULL.lock);
+    expect(saved.access).toEqual(FULL.access);
+    expect(saved.protection).toEqual(FULL.protection);
     expect(saved.respawn).toEqual(FULL.respawn);
     expect(saved.corridor).toEqual(FULL.corridor);
     expect(saved.npc).toEqual(FULL.npc);
@@ -198,7 +202,7 @@ describe('os campos das três frentes atravessam o banco', () => {
   });
 });
 
-describe('os campos das três frentes atravessam o sync', () => {
+describe('os campos das quatro frentes atravessam o sync', () => {
   it('cada um deles chega ao comando de RCON', async () => {
     const { sync, dungeons, sent } = harness();
 
@@ -217,6 +221,14 @@ describe('os campos das três frentes atravessam o sync', () => {
     expect(dungeon.structure).toEqual(FULL.structure);
     expect(dungeon.lock).toEqual(FULL.lock);
     expect(dungeon.respawn).toEqual(FULL.respawn);
+
+    // Quem escolheu fechar a masmorra tem de ver a escolha chegar ao
+    // jogo INTEIRA: o modo e o nome da permissão. Um `leanAccess`
+    // que cortasse o nome deixaria o plugin cair na permissão dele,
+    // e a masmorra abriria para o grupo errado sem uma linha de
+    // aviso.
+    expect(dungeon.access).toEqual(FULL.access);
+    expect(dungeon.protection).toEqual(FULL.protection);
 
     const corridor = dungeon.corridor as Record<string, unknown>;
     const npc = dungeon.npc as Record<string, unknown>;
@@ -289,6 +301,12 @@ describe('os campos das três frentes atravessam o sync', () => {
 
     expect(dungeon.structure).toBeUndefined();
     expect(dungeon.lock).toBeUndefined();
+
+    // `everyone` e a proteção ligada são o `new AccessSpec()` e o
+    // `new ProtectionSpec()` do C#. Mandá-los seria gastar ~200
+    // bytes por masmorra para pedir o que o plugin já faz.
+    expect(dungeon.access).toBeUndefined();
+    expect(dungeon.protection).toBeUndefined();
     expect((dungeon.npc as Record<string, unknown>).ai).toBeUndefined();
     expect((dungeon.npc as Record<string, unknown>).loot).toBeUndefined();
     expect((dungeon.corridor as Record<string, unknown>).table).toBeUndefined();
@@ -307,6 +325,58 @@ describe('os campos das três frentes atravessam o sync', () => {
     // `enabled: false` não são a mesma coisa no plugin — ausente
     // deixa o refresh do prefab de pé, e a caixa se repõe sozinha.
     expect(dungeon.respawn).toEqual({ enabled: false });
+  });
+
+  it('quem entra e a proteção custam ZERO no padrão, e o teto não se mexe', async () => {
+    // ####  MEÇA O PAYLOAD DEPOIS DE MEXER  ####
+    //
+    // MEDIDO em 09/09/2026 pelo comando que o `push` monta, com a
+    // receita de fábrica "normal": 1.773 bytes no padrão, +48 só
+    // com `whoEnters: permission`, +200 com os dois blocos inteiros
+    // fora do padrão.
+    //
+    // O teste guarda a ORDEM DE GRANDEZA, e não o número exato: um
+    // campo novo nestes dois blocos que passe disso estoura AQUI, e
+    // não num plugin que recebeu meia masmorra.
+    const base = FACTORY_RECIPES[1];
+
+    if (base === undefined) throw new Error('sem receita de fábrica');
+
+    async function bytesOf(patch: Record<string, unknown>, count = 1): Promise<number> {
+      const { sync, dungeons, sent } = harness();
+
+      for (let index = 0; index < count; index += 1) {
+        dungeons.save(
+          dungeonInputSchema.parse({ ...base, ...patch, id: `masmorra-${String(index)}` }),
+        );
+      }
+
+      await sync.push(SERVER, 'medição');
+
+      // O `push` RECUSA o envio acima do teto: nada enviado quer
+      // dizer que estourou.
+      return sent[0]?.length ?? Number.POSITIVE_INFINITY;
+    }
+
+    const OFF_DEFAULT = {
+      access: { whoEnters: 'permission', enterPermission: 'origemz.vip.diamante' },
+      protection: { enabled: false, allowAdmin: false, warnOnAttempt: false },
+    };
+
+    const atDefault = await bytesOf({});
+
+    expect(await bytesOf({ access: { whoEnters: 'permission' } })).toBeLessThanOrEqual(
+      atDefault + 64,
+    );
+    expect(await bytesOf(OFF_DEFAULT)).toBeLessThanOrEqual(atDefault + 256);
+
+    // As ~29 que cabiam antes desta frente continuam cabendo — é o
+    // que significa "no padrão não viaja".
+    expect(await bytesOf({}, 29)).toBeLessThan(DUNGEON_SYNC_MAX_BYTES);
+
+    // E mesmo um servidor em que TODA masmorra fechou a entrada e
+    // desligou a proteção continua longe do teto.
+    expect(await bytesOf(OFF_DEFAULT, 25)).toBeLessThan(DUNGEON_SYNC_MAX_BYTES);
   });
 
   it('as quatro receitas de fábrica cabem folgadas no comando', async () => {

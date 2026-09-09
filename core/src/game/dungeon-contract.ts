@@ -318,6 +318,36 @@ export interface DungeonPayload {
     readonly warnOnWrongCode: boolean;
   };
   /**
+   * Quem desce pelo alçapão.
+   *
+   * Ausente = o `new AccessSpec()` do plugin, que é `everyone`: o
+   * servidor inteiro entra, que é o pedido do dono. Este bloco só
+   * viaja quando alguém escolheu o contrário — no padrão ele custa
+   * ZERO byte.
+   *
+   * `enterPermission` ausente cai em `origemzdungeon.enter` do lado
+   * de lá, e uma permissão que plugin nenhum registrou DEIXA ENTRAR.
+   */
+  readonly access?: {
+    readonly whoEnters: string;
+    readonly enterPermission?: string;
+  };
+  /**
+   * O que ninguém tira do lugar.
+   *
+   * Ausente = o `new ProtectionSpec()` do plugin, com os três
+   * ligados: martelo, ferramenta de remoção e pickup são recusados,
+   * quem tem `origemzdungeon.admin` passa, e o barrado ouve por quê.
+   *
+   * O decay NÃO está aqui, e é de propósito: o plugin o barra pela
+   * marca `#ozdung#`, nunca por este bloco.
+   */
+  readonly protection?: {
+    readonly enabled: boolean;
+    readonly allowAdmin: boolean;
+    readonly warnOnAttempt: boolean;
+  };
+  /**
    * O ciclo do loot, e ele viaja SEMPRE.
    *
    * Ausente e `enabled: false` não são a mesma coisa no plugin:

@@ -11,7 +11,8 @@
 //    ① identidade   ② tamanho, mistura e material
 //    ③ salas, loot, portas trancadas e ciclo do loot
 //    ④ os inimigos, o drop e o comportamento
-//    ⑤ a entrada    ⑥ construir
+//    ⑤ a entrada, quem desce por ela e o que ninguém tira do lugar
+//    ⑥ construir
 //
 //  ####  E O QUE NÃO CABE NUM PASSO VIRA ABA  ####
 //
@@ -70,13 +71,16 @@ import {
   agent,
   BUILD_GRADES,
   ROOM_DOORS,
+  type AccessWhoEnters,
   type AiSpec,
   type BlueprintSummary,
   type BuildGrade,
   type Dungeon,
+  type DungeonAccess,
   type DungeonInput,
   type DungeonLayoutSummary,
   type DungeonLock,
+  type DungeonProtection,
   type DungeonRoom,
   type EventRun,
   type GradeSet,
@@ -176,6 +180,17 @@ const UNDELIVERED_LABEL: Readonly<Record<DungeonLock['onUndelivered'], string>> 
   keep: 'Deixa trancada mesmo assim',
 };
 
+/**
+ * Quem desce pelo alçapão.
+ *
+ * `everyone` vem primeiro porque é o padrão E o pedido do dono: a
+ * masmorra é do servidor inteiro, e fechá-la exige dizer isso.
+ */
+const WHO_ENTERS_LABEL: Readonly<Record<AccessWhoEnters, string>> = {
+  everyone: 'Todo o servidor',
+  permission: 'Só quem tem a permissão',
+};
+
 /** A tabela de loot que não muda nada: o padrão de todo campo novo. */
 const SERVER_TABLE: LootTable = { mode: 'server', rolls: { min: 1, max: 2 }, entries: [] };
 
@@ -243,6 +258,11 @@ const EMPTY: DungeonInput = {
     announceOpen: true,
     warnOnWrongCode: true,
   },
+  // Os dois padrões abaixo são os do plugin, e é isso que faz o
+  // sync não gastar byte nenhum com eles. Mudar um aqui sem mudar o
+  // outro lado é o jeito de quebrar isto em silêncio.
+  access: { whoEnters: 'everyone', enterPermission: '' },
+  protection: { enabled: true, allowAdmin: true, warnOnAttempt: true },
   respawn: { enabled: false, minutes: 30, onlyWhenEmpty: true, rebuildDestroyed: true },
   rooms: [
     room('green', { min: 0, max: 1 }, { min: 1, max: 1 }, CRATE_NORMAL, 'wood', false),
@@ -319,7 +339,7 @@ export function DungeonDialog({
     },
     { id: 'salas', label: 'Salas e loot', problem: problems.salas, done: draft.rooms.length > 0 },
     { id: 'inimigos', label: 'Inimigos', problem: problems.inimigos, done: true },
-    { id: 'entrada', label: 'Entrada', done: true },
+    { id: 'entrada', label: 'Entrada e acesso', done: true },
     { id: 'construir', label: 'Construir', done: saved },
   ];
 
@@ -1669,7 +1689,19 @@ function BehaviourFields({
 }
 
 // ------------------------------------------------------------
-//  ⑤  A ENTRADA
+//  ⑤  A ENTRADA — e quem passa por ela
+//
+//  ####  POR QUE "QUEM ENTRA" MORA AQUI, E NÃO NO PASSO DAS SALAS  ####
+//
+//  Os passos ② a ④ são de quem DESENHA a masmorra: tamanho, cores,
+//  loot, inimigos. "Quem pode descer" e "o que ninguém tira do
+//  lugar" não são desenho — são decisões de quem OPERA o servidor,
+//  e as duas acontecem no mesmo lugar do jogo: o alçapão da
+//  entrada, a única peça que os jogadores veem de fora.
+//
+//  Juntá-las aqui também é o que faz a pergunta certa aparecer
+//  perto da resposta: a casinha que o admin acabou de escolher é
+//  exatamente a que o martelo vai tentar derrubar.
 // ------------------------------------------------------------
 
 function StepEntrada({
@@ -1716,7 +1748,144 @@ function StepEntrada({
           primeiro boot do agente — se a lista está vazia, confira a aba Plantas.
         </p>
       )}
+
+      <AccessFields draft={draft} patch={patch} />
+      <ProtectionFields draft={draft} patch={patch} />
     </StepBody>
+  );
+}
+
+/** Quem desce pelo alçapão. Nasce "todo o servidor", que é o pedido do dono. */
+function AccessFields({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  function update(change: Partial<DungeonAccess>) {
+    patch({ access: { ...draft.access, ...change } });
+  }
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <FieldLabel topic={DUNGEON_HELP.quemEntra} className="text-xs font-bold text-foreground">
+          Quem pode entrar
+        </FieldLabel>
+        <select
+          value={draft.access.whoEnters}
+          onChange={(event) => update({ whoEnters: event.target.value as AccessWhoEnters })}
+          className="h-9 border border-border bg-background px-2 text-sm"
+        >
+          {(Object.keys(WHO_ENTERS_LABEL) as AccessWhoEnters[]).map((option) => (
+            <option key={option} value={option}>
+              {WHO_ENTERS_LABEL[option]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {draft.access.whoEnters === 'everyone' ? (
+        <p className="text-2xs text-muted">
+          Qualquer jogador que achar a casinha desce pelo alçapão. É o padrão, e é o que o servidor
+          sempre fez.
+        </p>
+      ) : (
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.permissaoDeEntrada}>Nome da permissão</FieldLabel>
+          <Input
+            className="mt-1"
+            value={draft.access.enterPermission}
+            maxLength={64}
+            placeholder="origemzdungeon.enter"
+            onChange={(event) => update({ enterPermission: event.target.value })}
+          />
+          <p className="mt-1.5 text-2xs text-muted">
+            Em branco usa a do próprio plugin, <code>origemzdungeon.enter</code>. Pode ser a de
+            outro plugin — uma de VIP, por exemplo —, desde que <strong>aquele plugin a registre</strong>:
+            uma permissão que não existe em lugar nenhum <strong>deixa todo mundo entrar</strong>, e
+            o servidor grita no console. Quem tem <code>origemzdungeon.admin</code> nunca fica de
+            fora.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * O que ninguém tira do lugar.
+ *
+ * ####  O TEXTO DE DESLIGADO É A PARTE QUE IMPORTA  ####
+ *
+ * Ligar não surpreende ninguém. Quem DESLIGA precisa saber que está
+ * abrindo dez caminhos de perder a entrada de uma vez — e que o
+ * decay não é um deles, porque ele não obedece a este botão.
+ */
+function ProtectionFields({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  function update(change: Partial<DungeonProtection>) {
+    patch({ protection: { ...draft.protection, ...change } });
+  }
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <FieldLabel topic={DUNGEON_HELP.protecao} className="text-xs font-bold text-foreground">
+          Proteger a entrada
+        </FieldLabel>
+        <Toggle
+          on={draft.protection.enabled}
+          busy={false}
+          onChange={(enabled) => update({ enabled })}
+          labels={['Protegida', 'Solta']}
+          label="Proteção contra remoção"
+        />
+      </div>
+
+      {!draft.protection.enabled ? (
+        <p className="border-l-2 border-amber pl-2 text-2xs text-foreground">
+          Desligada: qualquer jogador pode <strong>demolir, melhorar, girar ou reparar</strong> a
+          casinha com o martelo, levar a luz e as caixas com o &ldquo;segurar E&rdquo;, e apagar a
+          entrada inteira com a ferramenta de remoção. Uma peça a menos no alçapão fecha a masmorra
+          para todos. O apodrecimento continua barrado — ele não passa por este botão.
+        </p>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <FieldLabel topic={DUNGEON_HELP.protecaoAdmin}>Quem administra passa</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.protection.allowAdmin}
+                busy={false}
+                onChange={(allowAdmin) => update({ allowAdmin })}
+                labels={['Passa', 'Nem ele']}
+                label="Administrador passa pela proteção"
+              />
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>Dizer a quem tentou</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.protection.warnOnAttempt}
+                busy={false}
+                onChange={(warnOnAttempt) => update({ warnOnAttempt })}
+                labels={['Diz', 'Calado']}
+                label="Aviso de peça protegida"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2283,6 +2452,8 @@ function toInput(dungeon: Dungeon): DungeonInput {
     },
     structure: input.structure ?? { ...EMPTY.structure },
     lock: input.lock ?? { ...EMPTY.lock },
+    access: input.access ?? { ...EMPTY.access },
+    protection: input.protection ?? { ...EMPTY.protection },
     respawn: input.respawn ?? { ...EMPTY.respawn },
     rooms: input.rooms.map((current) => ({
       ...current,

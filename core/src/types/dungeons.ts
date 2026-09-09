@@ -85,6 +85,22 @@ export type LockCarrierScope = (typeof LOCK_CARRIER_SCOPES)[number];
 export const LOCK_UNDELIVERED = ['unlock', 'keep'] as const;
 export type LockUndelivered = (typeof LOCK_UNDELIVERED)[number];
 
+/**
+ * Quem desce pelo alçapão.
+ *
+ * ####  `everyone` NASCE PRIMEIRO PORQUE É O PEDIDO DO DONO  ####
+ *
+ * "A Dungeon todo o servidor pode entrar nela, não só um player que
+ * faz claimer" — 09/09/2026. A masmorra já era de todos por acaso,
+ * porque ninguém tinha escrito o contrário; agora é por escolha.
+ *
+ * Fechá-la exige DIZER isso, e o plugin trata qualquer valor que
+ * não seja exatamente `permission` como `everyone`: um modo escrito
+ * errado não pode trancar a masmorra.
+ */
+export const ACCESS_WHO_ENTERS = ['everyone', 'permission'] as const;
+export type AccessWhoEnters = (typeof ACCESS_WHO_ENTERS)[number];
+
 // ------------------------------------------------------------
 //  §2  A RÉGUA DA ESCRITA
 // ------------------------------------------------------------
@@ -409,6 +425,53 @@ const dungeonBodySchema = z
         noteTitle: z.string().max(40).default('Código da porta'),
         announceOpen: z.boolean().default(true),
         warnOnWrongCode: z.boolean().default(true),
+      })
+      .prefault({}),
+
+    /**
+     * Quem desce pelo alçapão.
+     *
+     * O padrão é o servidor inteiro, e ele é IDÊNTICO ao
+     * `new AccessSpec()` do plugin — é isso que autoriza o
+     * `leanAccess` do sync a não mandar nada neste caso. Mudar o
+     * padrão de um lado só é o jeito de quebrar isto em silêncio:
+     * o admin escolhe uma coisa, o sync não manda, e o jogo faz
+     * outra.
+     */
+    access: z
+      .object({
+        whoEnters: z.enum(ACCESS_WHO_ENTERS).default('everyone'),
+        /**
+         * A permissão exigida no modo `permission`.
+         *
+         * Vazio cai na nossa, `origemzdungeon.enter`. Pode apontar
+         * para a de outro plugin — uma de VIP, por exemplo —, e
+         * uma que plugin nenhum registrou DEIXA ENTRAR: trancar por
+         * engano é o defeito que ninguém diagnostica de dentro do
+         * jogo.
+         */
+        enterPermission: z.string().trim().max(64).default(''),
+      })
+      .prefault({}),
+
+    /**
+     * O que ninguém tira do lugar.
+     *
+     * Martelo (bater, melhorar, girar, demolir, reparar), a
+     * ferramenta de remoção e o "segurar E". Blindar contra DANO
+     * nunca blindou contra isso: remover não passa por `Hurt`.
+     *
+     * O decay fica de fora de propósito e não obedece a este bloco
+     * — ver o `OnDecayDamage` do plugin. Desligar a proteção contra
+     * martelo e ver a entrada cair sozinha três horas depois seria
+     * uma surpresa que ninguém liga ao botão que apertou.
+     */
+    protection: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** Sem isto, uma masmorra emperrada vira lixo permanente no mapa. */
+        allowAdmin: z.boolean().default(true),
+        warnOnAttempt: z.boolean().default(true),
       })
       .prefault({}),
 

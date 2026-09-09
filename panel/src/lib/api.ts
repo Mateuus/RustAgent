@@ -5116,6 +5116,33 @@ export interface DungeonRespawn {
   rebuildDestroyed: boolean;
 }
 
+export const ACCESS_WHO_ENTERS = ['everyone', 'permission'] as const;
+export type AccessWhoEnters = (typeof ACCESS_WHO_ENTERS)[number];
+
+/**
+ * Quem desce pelo alcapao.
+ *
+ * `everyone` e o padrao, e e o pedido do dono: o servidor inteiro
+ * entra. `enterPermission` so e lido no modo `permission`, e vazio
+ * cai na permissao do proprio plugin (`origemzdungeon.enter`).
+ */
+export interface DungeonAccess {
+  whoEnters: AccessWhoEnters;
+  enterPermission: string;
+}
+
+/**
+ * O que ninguem tira do lugar.
+ *
+ * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
+ * a este bloco: a masmorra nao apodrece nem com ele desligado.
+ */
+export interface DungeonProtection {
+  enabled: boolean;
+  allowAdmin: boolean;
+  warnOnAttempt: boolean;
+}
+
 export interface DungeonInput {
   id: string;
   name: string;
@@ -5143,6 +5170,8 @@ export interface DungeonInput {
   timeOfDay: number;
   structure: GradeSet;
   lock: DungeonLock;
+  access: DungeonAccess;
+  protection: DungeonProtection;
   respawn: DungeonRespawn;
   rooms: DungeonRoom[];
 }

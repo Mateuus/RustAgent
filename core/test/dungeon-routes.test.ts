@@ -238,6 +238,56 @@ describe('as masmorras', () => {
     expect(body.dungeon.mode).toBe('recipe');
   });
 
+  it('a masmorra nasce aberta ao servidor inteiro e protegida', async () => {
+    // ####  É O PEDIDO DO DONO, E ELE É O PADRÃO  ####
+    //
+    // "A Dungeon todo o servidor pode entrar nela, não só um player
+    // que faz claimer" — e "impedir que jogadores com martelo
+    // remover objetos da entrada". Quem cria uma masmorra sem tocar
+    // em nada tem de receber exatamente isso.
+    const { app } = await buildHarness();
+
+    await createDungeon(app);
+
+    const body = (await app.inject({ method: 'GET', url: '/dungeons/bunker' })).json() as {
+      dungeon: {
+        access: { whoEnters: string; enterPermission: string };
+        protection: { enabled: boolean; allowAdmin: boolean; warnOnAttempt: boolean };
+      };
+    };
+
+    expect(body.dungeon.access).toEqual({ whoEnters: 'everyone', enterPermission: '' });
+    expect(body.dungeon.protection).toEqual({
+      enabled: true,
+      allowAdmin: true,
+      warnOnAttempt: true,
+    });
+  });
+
+  it('guarda quem entra e a proteção, e devolve os dois na edição', async () => {
+    const { app } = await buildHarness();
+
+    await createDungeon(app, {
+      access: { whoEnters: 'permission', enterPermission: 'origemz.vip.diamante' },
+      protection: { enabled: true, allowAdmin: false, warnOnAttempt: false },
+    });
+
+    const body = (await app.inject({ method: 'GET', url: '/dungeons/bunker' })).json() as {
+      dungeon: {
+        access: { whoEnters: string; enterPermission: string };
+        protection: { allowAdmin: boolean; warnOnAttempt: boolean };
+      };
+    };
+
+    // O nome da permissão é o campo que o painel precisa VER de
+    // volta: sem ele, reabrir a masmorra mostraria o campo vazio e
+    // salvar de novo apagaria a escolha sem avisar.
+    expect(body.dungeon.access.whoEnters).toBe('permission');
+    expect(body.dungeon.access.enterPermission).toBe('origemz.vip.diamante');
+    expect(body.dungeon.protection.allowAdmin).toBe(false);
+    expect(body.dungeon.protection.warnOnAttempt).toBe(false);
+  });
+
   it('recusa duas com o mesmo identificador', async () => {
     const { app } = await buildHarness();
 

@@ -566,6 +566,124 @@ export const DUNGEON_HELP = {
   },
 
   // ----------------------------------------------------------
+  //  QUEM ENTRA, E O QUE NINGUÉM TIRA DO LUGAR
+  // ----------------------------------------------------------
+
+  quemEntra: {
+    title: 'Quem pode entrar',
+    short: 'Todo o servidor, ou só quem tem uma permissão do Oxide.',
+    body: (
+      <>
+        <p>
+          O padrão é <strong>todo o servidor</strong>: quem achar a casinha desce pelo alçapão. Não
+          existe dono de masmorra neste plugin — ninguém a &ldquo;reivindica&rdquo;, e ela não
+          pertence a quem a encontrou primeiro.
+        </p>
+        <p>
+          No outro modo, o alçapão só leva quem tem a <strong>permissão</strong> que você nomear ao
+          lado. Quem não tem recebe uma linha explicando, e continua de pé na superfície.
+        </p>
+        <HelpExample>
+          Um evento de fim de semana só para VIP: escolha &ldquo;só quem tem a permissão&rdquo; e
+          aponte para a permissão do seu plugin de VIP. Os outros jogadores continuam vendo a
+          casinha no mapa — e não descem.
+        </HelpExample>
+        <HelpWarn>
+          <strong>Subir nunca é barrado.</strong> Quem perdeu a permissão enquanto estava lá embaixo
+          ficaria preso a 90 metros abaixo do mundo, sem porta e sem mapa — então o alçapão de volta
+          leva qualquer um.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  permissaoDeEntrada: {
+    title: 'O nome da permissão',
+    short: 'Em branco usa a do plugin. Uma que não existe deixa todo mundo entrar.',
+    body: (
+      <>
+        <p>
+          É um nome de permissão do <strong>Oxide</strong>, do tipo{' '}
+          <code>origemzdungeon.enter</code> ou <code>vip.diamante</code>. Deixando em branco, vale a
+          do próprio plugin — e você a concede pelo console, com{' '}
+          <code>oxide.grant user &lt;jogador&gt; origemzdungeon.enter</code>.
+        </p>
+        <p>
+          Pode ser a permissão de <em>outro</em> plugin, desde que aquele plugin esteja no servidor
+          e a registre. É assim que a masmorra vira &ldquo;só para VIP&rdquo; sem duplicar lista
+          nenhuma.
+        </p>
+        <HelpWarn>
+          Um nome digitado errado — ou o plugin de VIP que saiu do servidor — faria o jogo recusar{' '}
+          <strong>todo mundo</strong>: o alçapão abriria sem levar ninguém, e nada na tela diria por
+          quê. Então uma permissão que não existe em plugin nenhum{' '}
+          <strong>deixa entrar</strong>, e o servidor avisa no console. Abrir por engano devolve a
+          masmorra ao que ela já era; trancar por engano ninguém descobre de dentro do jogo.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  protecao: {
+    title: 'Proteger a entrada',
+    short: 'Impede martelo, ferramenta de remoção e “segurar E” na masmorra inteira.',
+    body: (
+      <>
+        <p>
+          A masmorra já não recebia <strong>dano</strong>. Mas remover não é dano: o martelo, a
+          ferramenta de remoção e o &ldquo;segurar E&rdquo; destroem a peça por caminhos que nunca
+          passam por um tiro. Ligada, esta proteção fecha todos eles:
+        </p>
+        <ul className="ml-4 list-disc space-y-0.5 text-xs">
+          <li>bater com o martelo, e o menu radial dele: demolir, melhorar, girar e reparar;</li>
+          <li>a ferramenta de remoção, nos dois modos — inclusive o de administrador;</li>
+          <li>segurar E na luz, na caixa e no armário;</li>
+          <li>tirar a fechadura da porta.</li>
+        </ul>
+        <p>
+          <strong>Saquear continua funcionando.</strong> O jogador abre a caixa e leva o conteúdo; o
+          que ele não faz é levar a caixa.
+        </p>
+        <p>
+          O aviso a quem tentou sai <strong>no máximo uma vez a cada três segundos</strong> por
+          jogador. Segurar o botão do martelo dispara a checagem várias vezes por segundo, e uma
+          linha de chat por batida encheria a tela — escondendo inclusive o aviso da porta que
+          acabou de abrir.
+        </p>
+        <HelpExample>
+          Uma parede da casinha da entrada custa um martelo e dez segundos. Sem esta proteção, o
+          primeiro jogador que passar pode fechar a masmorra para todos os outros — sem invadir
+          nada, e sem que ninguém veja quem foi.
+        </HelpExample>
+        <HelpWarn>
+          O <strong>apodrecimento</strong> não obedece a este botão: a masmorra não cai sozinha nem
+          com a proteção desligada. Ver a entrada apodrecer três horas depois seria uma surpresa que
+          ninguém ligaria ao botão que apertou.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  protecaoAdmin: {
+    title: 'Quem administra passa',
+    short: 'Sem isso, nem você tira do mapa uma masmorra que emperrou.',
+    body: (
+      <>
+        <p>
+          Quem tem <code>origemzdungeon.admin</code> continua podendo remover as peças. É a saída de
+          emergência: o comando de parar a masmorra é justamente o que não funciona quando alguma
+          coisa já deu errado.
+        </p>
+        <HelpWarn>
+          Desligando, uma masmorra que não encerrar sozinha vira construção permanente no mapa até o
+          próximo wipe. Só desligue se a proteção contra o próprio administrador for o ponto — um
+          servidor com muitos administradores, por exemplo.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  // ----------------------------------------------------------
   //  A IA
   // ----------------------------------------------------------
 

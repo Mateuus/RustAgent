@@ -289,6 +289,8 @@ export class DungeonSync {
       timeOfDay: dungeon.timeOfDay,
       structure: leanStructure(dungeon.structure),
       lock: leanLock(dungeon.lock),
+      access: leanAccess(dungeon.access),
+      protection: leanProtection(dungeon.protection),
       respawn: leanRespawn(dungeon.respawn),
       rooms: dungeon.rooms.map((room) => ({
         key: room.key,
@@ -489,6 +491,8 @@ export class DungeonSync {
 //
 //    · `structure` ausente → `DefaultGrade`, que é `Stone`
 //    · `lock` ausente → `new LockSpec()`, com os mesmos padrões
+//    · `access` ausente → `new AccessSpec()`, que é `everyone`
+//    · `protection` ausente → `new ProtectionSpec()`, os três ligados
 //    · `table` ausente → `ModeOf` devolve "server"
 //    · `weight` ausente numa linha → o `LootEntrySpec` do plugin
 //      trata 0 como "peso 1"; por isso ele só é omitido quando é 10,
@@ -584,6 +588,55 @@ function leanLock(lock: Dungeon['lock']): DungeonPayload['lock'] {
     lock.warnOnWrongCode;
 
   return untouched ? undefined : lock;
+}
+
+/**
+ * Quem desce pelo alçapão, ou nada.
+ *
+ * ####  `everyone` NÃO VIAJA, E ISSO É O CASO DE QUASE TODA MASMORRA  ####
+ *
+ * O `new AccessSpec()` do plugin nasce `everyone` — o pedido literal
+ * do dono, "a Dungeon todo o servidor pode entrar nela". Omitir o
+ * bloco faz o `MayEnter` devolver `true` antes de olhar qualquer
+ * permissão, que é exatamente o que este lado escolheu.
+ *
+ * E por isso a permissão também não viaja no modo `everyone`: ela
+ * NÃO É LIDA lá. Guardá-la no banco e não mandá-la é o certo — o
+ * admin que escreveu "vip.premium" e deixou aberto para todos não
+ * perde o que digitou, e o jogo não recebe uma regra que ninguém
+ * mandou aplicar.
+ */
+function leanAccess(access: Dungeon['access']): DungeonPayload['access'] {
+  if (access.whoEnters !== 'permission') return undefined;
+
+  return {
+    whoEnters: access.whoEnters,
+    // Vazia é o que o plugin já faz sozinho: cai em
+    // `origemzdungeon.enter`. São ~30 bytes por masmorra.
+    enterPermission: access.enterPermission === '' ? undefined : access.enterPermission,
+  };
+}
+
+/**
+ * A proteção, ou nada.
+ *
+ * Os três ligados são o `new ProtectionSpec()` do plugin, e é o que
+ * o dono pediu: "impedir que jogadores com martelo remover objetos
+ * da entrada". Quem não mexeu não paga os ~95 bytes do bloco
+ * (MEDIDO em 09/09/2026, no comando em base64).
+ *
+ * ####  E DESLIGAR NÃO É O MESMO QUE OMITIR  ####
+ *
+ * `enabled: false` VIAJA, porque abre dez caminhos de perder a
+ * entrada — martelo, melhorar, girar, demolir, reparar, os dois
+ * modos da ferramenta de remoção, o pickup e a fechadura. Só o
+ * decay fica de fora dos dois lados: ele obedece à marca
+ * `#ozdung#`, nunca a este bloco.
+ */
+function leanProtection(protection: Dungeon['protection']): DungeonPayload['protection'] {
+  const untouched = protection.enabled && protection.allowAdmin && protection.warnOnAttempt;
+
+  return untouched ? undefined : protection;
 }
 
 /**

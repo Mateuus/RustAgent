@@ -37,6 +37,7 @@
 
 import type { Logger } from '../logger.js';
 import {
+  ACCESS_WHO_ENTERS,
   aiSpecSchema,
   BUILD_GRADES,
   dungeonGridSchema,
@@ -46,6 +47,7 @@ import {
   lootTableSchema,
   ROOM_COLORS,
   ROOM_DOORS,
+  type AccessWhoEnters,
   type AiSpecInput,
   type BuildGrade,
   type Dungeon,
@@ -98,6 +100,11 @@ interface DungeonRow {
   readonly lock_note_title: string | null;
   readonly lock_announce_open: number;
   readonly lock_warn_wrong_code: number;
+  readonly access_who_enters: string;
+  readonly access_enter_permission: string | null;
+  readonly protection_enabled: number;
+  readonly protection_allow_admin: number;
+  readonly protection_warn_on_attempt: number;
   readonly respawn_enabled: number;
   readonly respawn_minutes: number;
   readonly respawn_only_when_empty: number;
@@ -224,6 +231,8 @@ export class DungeonsRepository {
                  lock_enabled, lock_shared_code, lock_carrier, lock_carrier_scope,
                  lock_on_undelivered, lock_note_title, lock_announce_open,
                  lock_warn_wrong_code,
+                 access_who_enters, access_enter_permission,
+                 protection_enabled, protection_allow_admin, protection_warn_on_attempt,
                  respawn_enabled, respawn_minutes, respawn_only_when_empty,
                  respawn_rebuild_destroyed,
                  created_at, updated_at)
@@ -237,6 +246,8 @@ export class DungeonsRepository {
                         @lockEnabled, @lockSharedCode, @lockCarrier, @lockCarrierScope,
                         @lockOnUndelivered, @lockNoteTitle, @lockAnnounceOpen,
                         @lockWarnWrongCode,
+                        @accessWhoEnters, @accessEnterPermission,
+                        @protectionEnabled, @protectionAllowAdmin, @protectionWarnOnAttempt,
                         @respawnEnabled, @respawnMinutes, @respawnOnlyWhenEmpty,
                         @respawnRebuildDestroyed,
                         @now, @now)
@@ -275,6 +286,11 @@ export class DungeonsRepository {
                 lock_note_title = excluded.lock_note_title,
                 lock_announce_open = excluded.lock_announce_open,
                 lock_warn_wrong_code = excluded.lock_warn_wrong_code,
+                access_who_enters = excluded.access_who_enters,
+                access_enter_permission = excluded.access_enter_permission,
+                protection_enabled = excluded.protection_enabled,
+                protection_allow_admin = excluded.protection_allow_admin,
+                protection_warn_on_attempt = excluded.protection_warn_on_attempt,
                 respawn_enabled = excluded.respawn_enabled,
                 respawn_minutes = excluded.respawn_minutes,
                 respawn_only_when_empty = excluded.respawn_only_when_empty,
@@ -317,6 +333,13 @@ export class DungeonsRepository {
           lockNoteTitle: input.lock.noteTitle,
           lockAnnounceOpen: input.lock.announceOpen ? 1 : 0,
           lockWarnWrongCode: input.lock.warnOnWrongCode ? 1 : 0,
+          accessWhoEnters: input.access.whoEnters,
+          // Vazia vira NULL: a coluna é anulável justamente para não
+          // congelar a permissão padrão, que é do contrato.
+          accessEnterPermission: input.access.enterPermission === '' ? null : input.access.enterPermission,
+          protectionEnabled: input.protection.enabled ? 1 : 0,
+          protectionAllowAdmin: input.protection.allowAdmin ? 1 : 0,
+          protectionWarnOnAttempt: input.protection.warnOnAttempt ? 1 : 0,
           respawnEnabled: input.respawn.enabled ? 1 : 0,
           respawnMinutes: input.respawn.minutes,
           respawnOnlyWhenEmpty: input.respawn.onlyWhenEmpty ? 1 : 0,
@@ -440,6 +463,20 @@ export class DungeonsRepository {
         noteTitle: row.lock_note_title ?? DEFAULT_NOTE_TITLE,
         announceOpen: row.lock_announce_open === 1,
         warnOnWrongCode: row.lock_warn_wrong_code === 1,
+      },
+      access: {
+        // Um modo que o banco não conhece cai em `everyone`, e não
+        // em "lacrada": é a mesma escolha do plugin, e pela mesma
+        // razão — abrir por engano devolve a masmorra ao que ela já
+        // era; trancar por engano ninguém diagnostica de dentro do
+        // jogo.
+        whoEnters: oneOf(ACCESS_WHO_ENTERS, row.access_who_enters, 'everyone') as AccessWhoEnters,
+        enterPermission: row.access_enter_permission ?? '',
+      },
+      protection: {
+        enabled: row.protection_enabled === 1,
+        allowAdmin: row.protection_allow_admin === 1,
+        warnOnAttempt: row.protection_warn_on_attempt === 1,
       },
       respawn: {
         enabled: row.respawn_enabled === 1,
