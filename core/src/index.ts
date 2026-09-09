@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { OperatorAuth } from './auth/operator.js';
 import { BanExpiryWatcher } from './bans/expiry-watcher.js';
 import { BanList } from './bans/service.js';
-import { ConfigError, loadConfig } from './config.js';
+import { ConfigError, loadConfig, projectRoot } from './config.js';
 import { BansRepository } from './db/bans-repository.js';
 import { openDatabase } from './db/database.js';
 import { KitsRepository } from './db/kits-repository.js';
@@ -50,7 +50,9 @@ import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
+import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
+import { seedDungeonBlueprints } from './dungeons/seed.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
@@ -1267,6 +1269,15 @@ async function main(): Promise<void> {
       'nenhuma interface no banco: o Menu Principal foi criado a partir do modelo',
     );
   }
+
+  // ####  E AS PLANTAS DE MASMORRA, PELA MESMA REGRA  ####
+  //
+  // Sete construções prontas em `Assets/dungeons`, importadas só
+  // num acervo VAZIO. É o que faz o sistema ter conteúdo no
+  // primeiro minuto em vez de uma tela pedindo um arquivo que
+  // ninguém sabe onde arrumar.
+  const dungeonBlueprints = new DungeonBlueprintsRepository(db, logger);
+  seedDungeonBlueprints(dungeonBlueprints, { rootDir: projectRoot(), logger });
 
   // ####  O BOTÃO DISCORD DOS MENUS QUE JÁ EXISTEM  ####
   //

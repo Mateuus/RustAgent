@@ -1592,8 +1592,11 @@ namespace Oxide.Plugins
                 if (dungeon.entranceHatch == null
                     || hatch.transform.position.y > dungeon.entranceHatch.transform.position.y)
                 {
-                    // Planta com mais de uma marca (a `entrance1` tem
-                    // oito): a de cima é a que o jogador alcança a pé.
+                    // MEDIDO: as sete plantas herdadas têm UMA marca
+                    // cada — a `entrance1` tem dois alçapões e seis
+                    // vasos, e só um deles é marcado. O desempate por
+                    // altura é defesa para uma planta futura com duas:
+                    // a de cima é a que o jogador alcança a pé.
                     dungeon.entranceHatch = hatch;
                 }
             }

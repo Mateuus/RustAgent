@@ -473,11 +473,15 @@ bonita e não funciona:
    três das quatro entradas herdadas** — e falha 60 segundos depois de o
    jogador ver a casinha de pé.
 
-   A `entrance1` tem **oito** marcas (dois hatches e seis vasos): ela é uma
-   entrada de vários andares. Por isso o par de alçapões não é "os dois mais
-   distantes em `y`", e sim **um campo para cada**: o de cima vem da planta (o
-   mais alto entre as marcas), o de baixo é sempre o que nós erguemos no teto
-   do lobby;
+   **Cada planta tem exatamente UMA marca** — medido nas sete. E isso não é
+   sorte: a `entrance1` tem *dois* alçapões e *seis* vasos, e só um deles
+   carrega a marca. A convenção é precisa de propósito; se qualquer alçapão
+   servisse, o construtor teria de adivinhar qual é a porta de entrada.
+
+   Ainda assim, o par não é "os dois mais distantes em `y`", e sim **um campo
+   para cada**: o de cima vem da planta, o de baixo é sempre o que nós erguemos
+   no teto do lobby. O desempate por altura fica como defesa para uma planta
+   futura com duas marcas;
 
 8. **a marca do alçapão MORRE antes de você usá-la.** Guardar a `BaseEntity` da
    marca e convertê-la depois funciona para o vaso e **falha para o hatch**: um

@@ -5329,6 +5329,462 @@ ALTER TABLE kits ADD COLUMN use_reset_on TEXT NOT NULL DEFAULT 'never';
 UPDATE kits SET use_limit = 1 WHERE kind = 'resgate';
 `;
 
+// ------------------------------------------------------------
+//  057 a 060 — O ORIGEMZEVENTS E A MASMORRA
+//
+//  Quatro migrações, uma por assunto, para que uma delas poder ser
+//  adiada não trave as outras. É a divisão do OrigemZQuests, pela
+//  mesma razão.
+//
+//    057  o guarda-chuva: quando nasce, onde pode, o que fala
+//    058  a masmorra por dentro: receita ou planta, e as salas
+//    059  o acervo de plantas, que sai do disco e vira linha
+//    060  o que aconteceu: cada nascimento e cada falha
+//
+//  ####  POR QUE `world_` NA FRENTE DE TUDO  ####
+//
+//  Porque `events` JÁ EXISTE, e é outra coisa: a migração 027 a
+//  criou para o CALENDÁRIO — "Raid Night, sábado às 20h", com
+//  `starts_at`, `image_url` e o que o jogador lê na grade.
+//
+//  As duas são "evento" em português e não têm nada em comum. A do
+//  calendário é uma DATA que alguém anunciou; estas são coisas que
+//  NASCEM no mapa, com posição, dono e destroços. Reaproveitar a
+//  primeira faria a grade do wipe listar masmorras, e o agendador
+//  tentar erguer uma Raid Night.
+//
+//  `world_` é o prefixo porque é o que as separa: estas nascem no
+//  mundo.
+//
+//  Ver Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §6.
+// ------------------------------------------------------------
+
+const EVENTS_CORE_SCHEMA = `
+-- ============================================================
+--  057  world_events  -  o guarda-chuva de tudo que NASCE no mapa.
+--
+--  ####  POR QUE ELE EXISTE ANTES DE HAVER DOIS EVENTOS  ####
+--
+--  A masmorra é o primeiro inquilino, e sozinha ela não justifica
+--  uma camada. O que justifica é o SEGUNDO: agenda, marcador,
+--  anúncio, dono, time e zona proibida são os mesmos para qualquer
+--  coisa que nasça no mundo e morra depois. Descobrir isso quando
+--  o convoy chegar significa reescrever a masmorra inteira.
+--
+--  O que é DAQUI: quando nasce, onde pode nascer, o que fala, quem
+--  entra, quanto dura.
+--  O que é da masmorra: geometria, salas, alçapão, radiação.
+-- ============================================================
+
+CREATE TABLE world_events (
+  -- Slug. É o que o comando de console leva e o que a URL guarda.
+  id TEXT PRIMARY KEY,
+
+  -- 'dungeon' hoje. TEXTO LIVRE de propósito, como quests.category:
+  -- um evento novo não pode custar uma migração.
+  kind TEXT NOT NULL DEFAULT 'dungeon',
+
+  name TEXT NOT NULL,
+  description TEXT,
+
+  -- 0 = cadastrado mas fora do ar. Apagar perderia o histórico de
+  -- event_runs; a mesma escolha do server_plugins.enabled (002).
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  sort INTEGER NOT NULL DEFAULT 0,
+
+  -- ####  COMO ELE NASCE  ####
+  --   'schedule'  — o agendador sorteia dentro da janela
+  --   'manual'    — só por comando ou botão do painel
+  --   'permanent' — plantado à mão, fica até o wipe
+  spawn_mode TEXT NOT NULL DEFAULT 'schedule'
+    CHECK (spawn_mode IN ('schedule','manual','permanent')),
+
+  -- A janela do sorteio, em segundos. Herda o desenho do 1.3.4:
+  -- sorteia um número entre os dois e conta.
+  interval_min INTEGER NOT NULL DEFAULT 3600,
+  interval_max INTEGER NOT NULL DEFAULT 7200,
+
+  -- Quanto ele dura depois de no ar, em segundos.
+  -- Inerte quando spawn_mode = 'permanent'.
+  duration_min INTEGER NOT NULL DEFAULT 2000,
+  duration_max INTEGER NOT NULL DEFAULT 3000,
+
+  -- Abaixo disso o agendador ADIA em vez de nascer. Evento para
+  -- ninguém é loot de graça para o primeiro que logar.
+  min_online INTEGER NOT NULL DEFAULT 1,
+
+  -- 1 = a próxima contagem só começa quando este acabar.
+  -- É o 'afterTime' do 1.3.4.
+  count_after_end INTEGER NOT NULL DEFAULT 0 CHECK (count_after_end IN (0, 1)),
+
+  -- ####  QUEM ENTRA  ####
+  --   'anyone' — qualquer um
+  --   'owner'  — só quem chegou primeiro
+  --   'team'   — o dono e o time dele
+  --
+  -- No modo permanente isto cai para 'anyone' na leitura: uma
+  -- masmorra fixa em que só o primeiro entra é uma masmorra que
+  -- ninguém visita.
+  access TEXT NOT NULL DEFAULT 'team'
+    CHECK (access IN ('anyone','owner','team')),
+
+  -- Segundos que o dono pode ficar deslogado antes de perder a
+  -- posse. O 1.3.4 usa 300.
+  owner_grace_seconds INTEGER NOT NULL DEFAULT 300,
+
+  -- ####  O MARCADOR NO MAPA  ####
+  marker_enabled INTEGER NOT NULL DEFAULT 1 CHECK (marker_enabled IN (0, 1)),
+  marker_label TEXT NOT NULL DEFAULT 'Masmorra',
+  marker_color TEXT NOT NULL DEFAULT '#ff0000',
+  marker_alpha REAL NOT NULL DEFAULT 0.55,
+  marker_radius REAL NOT NULL DEFAULT 0.5,
+  marker_show_owner INTEGER NOT NULL DEFAULT 1 CHECK (marker_show_owner IN (0, 1)),
+  marker_show_time INTEGER NOT NULL DEFAULT 1 CHECK (marker_show_time IN (0, 1)),
+
+  -- ####  O QUE ELE FALA  ####
+  --
+  -- NULL = a frase padrão do agente. Aceita a marcação de chat do
+  -- projeto (game/chat-markup.ts), como as mensagens.
+  msg_start TEXT,
+  msg_location TEXT,
+  msg_warning TEXT,
+  msg_end TEXT,
+  msg_denied TEXT,
+
+  -- Segundos ANTES do fim em que cada coisa acontece.
+  warn_before INTEGER NOT NULL DEFAULT 300,
+  radiation_before INTEGER NOT NULL DEFAULT 180,
+  -- Segundos DEPOIS do fim até a entrada ser destruída.
+  destroy_after INTEGER NOT NULL DEFAULT 60,
+
+  -- ####  SÓ PARA O MODO PERMANENTE  ####
+  --
+  -- De quanto em quanto tempo o loot volta. Uma masmorra fixa e
+  -- vazia é decoração; com respawn ela vira monumento.
+  -- 0 = o loot não volta.
+  respawn_seconds INTEGER NOT NULL DEFAULT 3600,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_world_events_kind ON world_events (kind, enabled);
+
+-- ----------------------------------------------------------
+--  world_event_servers — onde cada evento vale.
+--
+--  O evento é da REDE e cada servidor liga o que quiser, igual a
+--  quest_servers (046). Sem linha aqui, ele não roda em lugar
+--  nenhum — o que é o estado normal de um evento recém-criado.
+-- ----------------------------------------------------------
+CREATE TABLE world_event_servers (
+  event_id  TEXT NOT NULL REFERENCES world_events(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (event_id, server_id)
+);
+
+CREATE INDEX idx_world_event_servers_server ON world_event_servers (server_id);
+
+-- ----------------------------------------------------------
+--  world_event_zones — onde NENHUM evento nasce.
+--
+--  ####  ELA É POR SERVIDOR, E NÃO DA REDE  ####
+--
+--  Uma zona é um lugar no mapa, e cada servidor tem o seu mapa.
+--  Guardá-la na rede faria a proibição de um mundo cair no meio de
+--  outro — e ninguém entenderia por que aquele canto não nasce
+--  evento.
+--
+--  ####  E O RAIO É UMA COLUNA  ####
+--
+--  No 1.3.4 a zona é um Vector3 numa lista de config, com o campo
+--  \`y\` SEQUESTRADO para guardar o raio. Funciona, e é ilegível:
+--  quem abre o JSON vê uma altura absurda e não sabe que é um raio.
+-- ----------------------------------------------------------
+CREATE TABLE world_event_zones (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- Para o admin saber por que aquela zona existe.
+  label TEXT NOT NULL DEFAULT '',
+
+  x REAL NOT NULL,
+  z REAL NOT NULL,
+  radius REAL NOT NULL DEFAULT 100,
+
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_world_event_zones_server ON world_event_zones (server_id);
+`;
+
+const DUNGEONS_CORE_SCHEMA = `
+-- ============================================================
+--  058  dungeons  -  a masmorra por dentro.
+--
+--  Duas maneiras de produzir a MESMA estrutura, e daí para baixo o
+--  construtor é um só:
+--
+--    'recipe'    parâmetros; o jogo sorteia o layout, e cada
+--                nascimento sai diferente
+--    'blueprint' um grid desenhado no painel; sai sempre igual
+--
+--  A cor da sala (verde/azul/vermelha) NÃO é decoração: ela é o
+--  tier de conteúdo daquele cômodo — quantos NPCs, que loot, que
+--  porta. Ver dungeon_rooms.
+-- ============================================================
+
+CREATE TABLE dungeons (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+
+  mode TEXT NOT NULL DEFAULT 'recipe' CHECK (mode IN ('recipe','blueprint')),
+
+  -- ####  A ENTRADA  ####
+  --
+  -- A casinha da superfície: o slug de uma linha de
+  -- dungeon_blueprints. NULL = a entrada mínima gerada por código
+  -- (uma laje, um alçapão, uma luz) — é o que faz uma masmorra
+  -- funcionar sem nenhuma planta importada.
+  --
+  -- Sem REFERENCES: dungeon_blueprints nasce na 059, que pode ser
+  -- adiada, e uma FK para tabela inexistente derrubaria esta
+  -- migração inteira. A integridade é cobrada na rota
+  -- (BLUEPRINT_MISSING), que é quem sabe explicar o que faltou.
+  entrance_blueprint TEXT,
+
+  -- ####  MODO 'recipe'  ####
+  size_min INTEGER NOT NULL DEFAULT 10,       -- em SALAS, não células
+  size_max INTEGER NOT NULL DEFAULT 15,
+
+  -- Pesos, não porcentagens: não precisam somar 100.
+  weight_green INTEGER NOT NULL DEFAULT 60,
+  weight_blue  INTEGER NOT NULL DEFAULT 30,
+  weight_red   INTEGER NOT NULL DEFAULT 10,
+
+  corridor_npc_density  INTEGER NOT NULL DEFAULT 20,
+  corridor_loot_density INTEGER NOT NULL DEFAULT 10,
+  -- JSON: array de prefab de caixa.
+  corridor_crates TEXT NOT NULL DEFAULT '[]',
+
+  -- ####  MODO 'blueprint'  ####
+  --
+  -- O grid desenhado, como JSON. NULL quando mode='recipe'.
+  --
+  -- Uma linha por z, do maior para o menor, com um caractere por
+  -- célula: '.' vazio, '#' corredor, 'E' entrada, letra = sala.
+  -- Uma masmorra de 20x20 são 400 células: como lista de objetos
+  -- seriam ~20 KB e ninguém leria; como 20 strings são 400 bytes e
+  -- um humano ABRE O JSON E VÊ A MASMORRA.
+  grid TEXT,
+
+  -- ####  O NPC (vale nos dois modos)  ####
+  npc_health_min REAL NOT NULL DEFAULT 100,
+  npc_health_max REAL NOT NULL DEFAULT 150,
+  npc_damage_scale REAL NOT NULL DEFAULT 1.0,
+  npc_weapons TEXT NOT NULL DEFAULT '[]',     -- JSON: shortnames
+  npc_names   TEXT NOT NULL DEFAULT '[]',     -- JSON: nomes sorteados
+
+  -- A hora do dia de quem está lá dentro, de 0 a 23.
+  -- -1 = não mexe. O 1.3.4 usa 0 para deixar a masmorra escura.
+  time_of_day REAL NOT NULL DEFAULT 0,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- ----------------------------------------------------------
+--  dungeon_rooms — o conteúdo, por cor ou por sala.
+--
+--  No modo receita são TRÊS linhas por masmorra (green/blue/red) e
+--  elas descrevem uma CLASSE de sala. No modo planta é uma linha
+--  por sala nomeada ('A', 'B', 'C'…) e cada uma descreve AQUELE
+--  cômodo.
+--
+--  A mesma tabela para os dois porque a pergunta é a mesma —
+--  "quantos NPCs, que loot, que porta?" —, e duplicá-la faria o
+--  construtor ter dois caminhos para ler a mesma coisa.
+-- ----------------------------------------------------------
+CREATE TABLE dungeon_rooms (
+  dungeon_id TEXT NOT NULL REFERENCES dungeons(id) ON DELETE CASCADE,
+
+  -- 'green'|'blue'|'red' no modo receita; 'A','B','C'… no modo planta.
+  room_key TEXT NOT NULL,
+
+  color TEXT NOT NULL DEFAULT 'green' CHECK (color IN ('green','blue','red')),
+
+  npc_min  INTEGER NOT NULL DEFAULT 0,
+  npc_max  INTEGER NOT NULL DEFAULT 1,
+  loot_min INTEGER NOT NULL DEFAULT 1,
+  loot_max INTEGER NOT NULL DEFAULT 1,
+
+  -- JSON: array de prefab de caixa.
+  crates TEXT NOT NULL DEFAULT '[]',
+
+  -- O que a cor SIGNIFICA no jogo: a porta que o jogador encontra.
+  door TEXT NOT NULL DEFAULT 'wood' CHECK (door IN ('wood','metal','toptier')),
+
+  -- 1 = a porta tem fechadura, e o código cai de um NPC.
+  locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+
+  PRIMARY KEY (dungeon_id, room_key)
+);
+`;
+
+const DUNGEON_BLUEPRINTS_SCHEMA = `
+-- ============================================================
+--  059  dungeon_blueprints  -  as plantas saem do disco.
+--
+--  ####  O ARQUIVO DEIXA DE SER A VERDADE  ####
+--
+--  Até aqui uma planta era um .json em oxide/data de UM servidor,
+--  copiado à mão de máquina em máquina. A partir daqui a verdade é
+--  esta tabela, e o arquivo no disco é uma cópia de trabalho que o
+--  agente reescreve: apagado à mão, ele volta no próximo save.
+--
+--  ####  E A COLUNA content GUARDA MEGABYTES  ####
+--
+--  A maior das sete plantas herdadas tem 584 peças e 512 KB. O
+--  SQLite guarda TEXT sem teto prático, e o que NÃO cabe é o
+--  console do RCON (~70 KB de frame). É por isso que a planta
+--  viaja pelo disco e o comando leva só o slug.
+-- ============================================================
+
+CREATE TABLE dungeon_blueprints (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+
+  -- 'entrance' é colada na SUPERFÍCIE; 'base', a -90 metros.
+  -- Marcar isso evita o erro que o 1.3.4 só descobre 60 segundos
+  -- depois, com a casinha já de pé, no "No hatch found".
+  kind TEXT NOT NULL DEFAULT 'entrance' CHECK (kind IN ('entrance','base')),
+
+  -- O JSON inteiro, no formato do CopyPaste.
+  content TEXT NOT NULL,
+
+  -- Derivados, gravados na escrita. Sem eles a lista do painel
+  -- precisaria abrir 512 KB para dizer "584 peças".
+  entity_count INTEGER NOT NULL DEFAULT 0,
+  byte_size INTEGER NOT NULL DEFAULT 0,
+
+  -- ####  1 = TEM MARCA DE ALÇAPÃO  ####
+  --
+  -- E é o campo mais importante da tabela. Sem alçapão não há
+  -- masmorra, e uma planta sem ele SOBE BONITA e falha depois —
+  -- que é o pior lugar para descobrir. Medido na escrita, para a
+  -- rota poder recusar já no upload (BLUEPRINT_NO_HATCH).
+  --
+  -- A marca é uma convenção, e são duas: um floor.ladder.hatch com
+  -- fechadura de código '0707', ou um planter.large com
+  -- fertilizante 1 no slot 0 e 999 no slot 5.
+  has_hatch INTEGER NOT NULL DEFAULT 0 CHECK (has_hatch IN (0, 1)),
+
+  --   'builtin' — veio com o projeto (as sete herdadas)
+  --   'import'  — alguém subiu um arquivo pelo painel
+  --   'capture' — foi lida do mundo por /ozdungeon capturar
+  origin TEXT NOT NULL DEFAULT 'import'
+    CHECK (origin IN ('builtin','import','capture')),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_dungeon_blueprints_kind ON dungeon_blueprints (kind);
+`;
+
+const EVENT_RUNS_SCHEMA = `
+-- ============================================================
+--  060  world_event_runs  -  o que aconteceu de verdade.
+--
+--  ####  ELA EXISTE PARA RESPONDER "POR QUE NÃO NASCEU ONTEM?"  ####
+--
+--  Que é a pergunta cara. Sem esta tabela, a única resposta
+--  possível é "não sei" — e a causa (não tinha gente online, caiu
+--  em zona proibida, a planta sumiu do disco) fica num log que já
+--  rodou.
+--
+--  Por isso ela guarda tanto o SUCESSO quanto a FALHA, e a falha
+--  com NOME: os oito motivos do §7.3 do plano são os mesmos dos
+--  dois lados do fio.
+-- ============================================================
+
+CREATE TABLE world_event_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- Sem REFERENCES para events: apagar um evento não pode apagar a
+  -- história dele. É a mesma razão pela qual uma nota fiscal não
+  -- some quando o produto sai do catálogo.
+  event_id TEXT NOT NULL,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  dungeon_id TEXT,
+
+  --  'scheduled'  esperando a hora
+  --  'spawning'   mandou construir, esperando o "terminei"
+  --  'active'     no ar
+  --  'closing'    avisou, radiação subindo
+  --  'ended'      acabou bem
+  --  'failed'     não conseguiu nascer (failure_reason diz por quê)
+  --  'cancelled'  o admin parou
+  status TEXT NOT NULL
+    CHECK (status IN ('scheduled','spawning','active','closing','ended','failed','cancelled')),
+
+  -- Um dos oito códigos do contrato: no_position, no_hatch,
+  -- blueprint_missing, blueprint_invalid, too_few_online,
+  -- already_active, wipe_window, build_timeout.
+  failure_reason TEXT,
+
+  pos_x REAL,
+  pos_z REAL,
+  -- 'K7'. Guardado pronto porque quem lê a linha é gente, e
+  -- recalcular a grade exige o tamanho do mundo daquele wipe.
+  grid TEXT,
+
+  -- ####  A SEMENTE, E POR QUE ELA É UMA COLUNA  ####
+  --
+  -- Nada da masmorra entra no save do mundo (EnableSaving(false)),
+  -- então ela não sobrevive a um restart por si só: ela é
+  -- RECONSTRUÍDA. Com a mesma semente, sai idêntica — e um jogador
+  -- que decorou o caminho até a sala vermelha volta ao mesmo lugar.
+  --
+  -- Sem ela, guardar uma masmorra permanente exigiria serializar
+  -- 3.000 entidades. Com ela, é um inteiro.
+  seed INTEGER,
+
+  owner_steam_id TEXT,
+  entered_count INTEGER NOT NULL DEFAULT 0,
+
+  scheduled_for INTEGER,
+  started_at INTEGER,
+  ended_at INTEGER
+);
+
+CREATE INDEX idx_world_event_runs_server ON world_event_runs (server_id, status);
+CREATE INDEX idx_world_event_runs_recent ON world_event_runs (started_at DESC);
+CREATE INDEX idx_world_event_runs_event  ON world_event_runs (event_id, started_at DESC);
+
+-- ----------------------------------------------------------
+--  world_event_run_players — quem entrou.
+--
+--  É o que a ficha do jogador vai ler, do mesmo jeito que já lê as
+--  quests dele. E é o que responde "eu estava lá e não levei nada".
+-- ----------------------------------------------------------
+CREATE TABLE world_event_run_players (
+  run_id   INTEGER NOT NULL REFERENCES world_event_runs(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL,
+
+  entered_at INTEGER NOT NULL,
+  -- NULL = ainda está lá dentro, ou o evento acabou com ele dentro.
+  left_at INTEGER,
+
+  died INTEGER NOT NULL DEFAULT 0 CHECK (died IN (0, 1)),
+
+  PRIMARY KEY (run_id, steam_id)
+);
+
+CREATE INDEX idx_world_event_run_players_steam ON world_event_run_players (steam_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -5487,6 +5943,12 @@ export const MIGRATIONS: readonly Migration[] = [
   // 08/09/2026: com a retomada automática do boot, o cancelamento
   // do admin precisou passar a sobreviver ao reinício do agente.
   { id: 56, name: 'wipe-run-cancel-requested', sql: WIPE_RUN_CANCEL_REQUESTED_SCHEMA },
+  // 08/09/2026: o OrigemZEvents e a masmorra. `world_` porque
+  // `events` já é o calendário (027) — ver o cabeçalho delas.
+  { id: 57, name: 'world-events-core', sql: EVENTS_CORE_SCHEMA },
+  { id: 58, name: 'dungeons-core', sql: DUNGEONS_CORE_SCHEMA },
+  { id: 59, name: 'dungeon-blueprints', sql: DUNGEON_BLUEPRINTS_SCHEMA },
+  { id: 60, name: 'world-event-runs', sql: EVENT_RUNS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
