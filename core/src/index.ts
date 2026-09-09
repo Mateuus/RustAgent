@@ -51,7 +51,9 @@ import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
 import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
+import { DungeonsRepository } from './db/dungeons-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
+import { WorldEventsRepository } from './db/world-events-repository.js';
 import { seedDungeonBlueprints } from './dungeons/seed.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { LootStatsCollector } from './game/loot-stats.js';
@@ -1278,6 +1280,9 @@ async function main(): Promise<void> {
   // ninguém sabe onde arrumar.
   const dungeonBlueprints = new DungeonBlueprintsRepository(db, logger);
   seedDungeonBlueprints(dungeonBlueprints, { rootDir: projectRoot(), logger });
+
+  const dungeonsRepository = new DungeonsRepository(db, logger);
+  const worldEventsRepository = new WorldEventsRepository(db, logger);
 
   // ####  O BOTÃO DISCORD DOS MENUS QUE JÁ EXISTEM  ####
   //
@@ -2801,6 +2806,18 @@ async function main(): Promise<void> {
       onNpcsChanged: (serverId) => {
         questNpcs?.forget(serverId);
       },
+    },
+    // A masmorra, o acervo de plantas e o que nasce no mapa. Do
+    // BANCO, pela mesma razao das quests: desenhar uma masmorra e
+    // subir uma planta funcionam com todos os servidores parados.
+    dungeons: {
+      dungeons: dungeonsRepository,
+      blueprints: dungeonBlueprints,
+      events: worldEventsRepository,
+    },
+    worldEvents: {
+      events: worldEventsRepository,
+      servers: repository,
     },
   });
 

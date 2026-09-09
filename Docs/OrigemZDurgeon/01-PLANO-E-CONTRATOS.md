@@ -1101,10 +1101,20 @@ POST   /dungeons/:id/duplicate        duplica. 201
 DELETE /dungeons/:id                  apaga
 POST   /dungeons/:id/validate         valida a planta SEM salvar
 GET    /dungeons/:id/command          o comando para colar no jogo
+GET    /dungeons/:id/runs             o que aconteceu com ela — é o
+                                      olho do assistente (§12.1.1)
 ```
 
 O `/validate` é o que faz o editor de planta dizer *"a sala C não tem porta"*
 enquanto o admin desenha, sem gravar nada.
+
+**`/runs` é a rota que faz o passo ⑥ terminar sozinho.** Ela aceita
+`?serverId=` e `?since=` (epoch ms) e devolve o que nasceu daquela dungeon
+depois daquele instante — vazio enquanto o admin ainda não colou o comando,
+uma linha quando ele colou. O painel a chama a cada dois segundos **só
+enquanto o passo está aberto**, e para no primeiro resultado.
+
+Sem `since`, o assistente celebraria a construção de ontem.
 
 ### 10.3 As plantas
 
@@ -1251,6 +1261,100 @@ Regras da trilha, e cada uma tem um porquê:
 4. **o passo ⑥ termina com o comando** — grande, com botão de copiar, e o
    "Construir onde o Fulano está" quando há admin online. O último passo do
    painel é o primeiro passo no jogo.
+
+### 12.1.1 O passo ⑥ se resolve sozinho — o painel FICA OLHANDO
+
+Pedido do dono, em 09/09/2026:
+
+> "Tem que ser facilitado para criar dungeon via painel. O usuário cria; aí, se
+> precisa do comando no jogo, o painel manda o admin digitar na posição — **e o
+> painel detecta e faz o próximo passo**."
+
+Isto muda o passo ⑥ de "aqui está o comando, boa sorte" para um passo que
+**termina sozinho**. É a diferença entre uma instrução e um assistente.
+
+```
+  ⑥  Onde ela nasce
+  ─────────────────────────────────────────────────────────
+
+     Entre no jogo, vá até o lugar, olhe para onde a masmorra
+     deve crescer e cole:
+
+         ┌──────────────────────────────────┐
+         │  /ozdungeon build bunker-vermelho│  [copiar]
+         └──────────────────────────────────┘
+
+     ⟳  Esperando você construir…                    [pular]
+
+  ─────────────────────────────────────────────────────────
+```
+
+e, quatro segundos depois, sem ninguém clicar em nada:
+
+```
+     ✓  Construída em K7, às 19:42
+        618 peças · 1.275 ms · alçapões ligados
+
+        [ Ver no mapa ]   [ Derrubar ]   [ Concluir ]
+```
+
+**Como ele detecta, sem inventar transporte novo.** A cadeia inteira já existe:
+
+```
+  jogo ──/ozdungeon build──► plugin
+                               │
+                               │  #OZDUNGEON#{"kind":"built",…}
+                               ▼
+                          stream do console
+                               │
+                               ▼
+                          agente  ──grava──►  world_event_runs
+                               ▲
+                               │  GET /dungeons/:id/runs?serverId=&since=
+                          painel (a cada 2 s, só enquanto o passo ⑥ está aberto)
+```
+
+Quatro decisões que isso força, e cada uma tem um porquê:
+
+1. **`since` é o momento em que o passo abriu.** Sem ele, o assistente
+   celebraria a construção de ontem. O painel manda o relógio dele e o agente
+   responde só o que veio depois;
+2. **o polling só existe com o passo aberto**, e para no primeiro resultado.
+   Um `setInterval` que sobrevive à navegação é o jeito clássico de o painel
+   ficar batendo no agente para sempre;
+3. **a falha também é um resultado.** `no_hatch` fecha a espera com a frase
+   pronta e o botão de tentar de novo — não com o spinner girando até o admin
+   desistir e abrir o console do servidor;
+4. **`[pular]` existe.** Quem só quer salvar a receita e construir amanhã não
+   pode ficar preso numa tela que espera um jogo aberto.
+
+**Por que polling, e não WebSocket.** O painel inteiro já é polling — é assim
+que o console e o mapa funcionam. Um canal novo para um passo de assistente
+seria a peça mais frágil do sistema, mantida por causa de dois segundos de
+latência que ninguém percebe.
+
+### 12.1.2 A mesma detecção serve à aba Plantas
+
+O acervo de plantas (§11.2) **já nasce cheio**: as sete que vieram com o
+projeto são importadas no primeiro boot e aparecem lá, com peças, tamanho e o
+selo de alçapão. Ver §5.1 e §6.3.
+
+E a captura in-game (§4.3) usa exatamente o mesmo desenho:
+
+```
+     Digite no jogo, de pé onde você construiu:
+
+         ┌────────────────────────────────────┐
+         │  /ozdungeon capturar minha-entrada │  [copiar]
+         └────────────────────────────────────┘
+
+     ⟳  Esperando a captura…
+
+     ✓  Recebida: 312 peças, com alçapão. [ Salvar no acervo ]
+```
+
+Uma cadeia, dois usos. O assistente que constrói e o que captura são a mesma
+tela com um verbo diferente.
 
 ### 12.2 O `(?)`, e o que ele abre
 
@@ -1418,10 +1522,38 @@ turrets, card readers, fuse boxes, o fim do evento (radiação e fecho) e a cor
 de sala — hoje toda porta nasce verde, porque quem decide a cor é a receita, e
 a receita vem do painel.
 
-### Frente B — O banco e a API
+### Frente B — O banco e a API · **PRONTA**
 
-Migrações 057–060, repositórios, serviço, rotas (§10). Importa as 7 plantas.
-Sem tela e sem plugin: testado por `core/test/`.
+Migrações 057–060, repositórios, rotas (§10). Importa as 7 plantas. Sem tela e
+sem plugin: testado por `core/test/`.
+
+**O que está de pé (09/09/2026):**
+
+| | |
+|---|---|
+| Migrações | 057 `world-events-core`, 058 `dungeons-core`, 059 `dungeon-blueprints`, 060 `world-event-runs` |
+| A régua | `types/world-events.ts` e `types/dungeons.ts` — importada pela rota **e** pelo repositório |
+| Repositórios | `dungeon-blueprints`, `dungeons`, `world-events` |
+| Rotas | `/dungeons`, `/dungeon-blueprints`, `/world-events`, `/servers/:id/event-zones` |
+| O olho do assistente | `GET /dungeons/:id/runs?serverId=&since=` (§12.1.1) |
+| As 7 plantas | importadas sozinhas no primeiro boot, de `Assets/dungeons` |
+| As 4 receitas de fábrica | `GET /dungeons/factory` — modelo para duplicar, e não linha no banco |
+| Testes | 29 novos; a suíte inteira em 1.943 |
+
+**Três armadilhas que este trabalho encontrou**, e que valem para o repositório
+inteiro:
+
+1. **`events` já existia** (migração 027, o calendário). Medido *antes* de
+   aplicar; aplicar direto teria quebrado a migração no `CREATE TABLE`. Daí o
+   prefixo `world_`;
+2. **a ordem de declaração de um módulo derruba o agente, e o typecheck não a
+   vê.** `FACTORY_RECIPES` chama uma função que lê constantes declaradas
+   abaixo: compila limpo e explode no import com
+   `Cannot access 'CORRIDOR_CRATES' before initialization` — no boot, antes de
+   servir a primeira rota;
+3. **`.default({})` em objeto aninhado não basta no Zod 4.** O default recebe o
+   tipo de *saída*; quem quer "o objeto vazio, deixe os defaults internos
+   agirem" usa `.prefault({})`.
 
 ### Frente C — O agente fala com o plugin
 
