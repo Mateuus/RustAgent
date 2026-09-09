@@ -58,6 +58,22 @@ export interface DungeonRoutesDeps {
   readonly dungeons: DungeonsRepository;
   readonly blueprints: DungeonBlueprintsRepository;
   readonly events: WorldEventsRepository;
+  /**
+   * O jogo precisa saber que algo mudou.
+   *
+   * ####  E ELE NÃO É ESPERADO  ####
+   *
+   * A rota responde assim que o BANCO gravou, sem aguardar o RCON.
+   * Duas razões: gravar não pode depender de o servidor estar no
+   * ar — desenhar masmorra com tudo parado é o caso normal —, e um
+   * `await` aqui faria o painel travar cinco segundos por causa de
+   * um servidor que não responde.
+   *
+   * O que chega ao jogo é o estado COMPLETO, então uma chamada
+   * perdida se conserta na próxima. Ausente = o agente subiu sem
+   * servidores, e a tela funciona igual.
+   */
+  readonly onChanged?: (reason: string) => void;
 }
 
 const idParams = z.object({ id: z.string().min(1) });
@@ -120,7 +136,10 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
 
     assertBlueprintExists(deps, input);
 
-    return reply.status(201).send({ ok: true, dungeon: deps.dungeons.save(input) });
+    const dungeon = deps.dungeons.save(input);
+    deps.onChanged?.('dungeon-created');
+
+    return reply.status(201).send({ ok: true, dungeon });
   });
 
   app.put('/dungeons/:id', async (request) => {
@@ -132,7 +151,10 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
     const input = { id, ...body } as DungeonInput;
     assertBlueprintExists(deps, input);
 
-    return { ok: true, dungeon: deps.dungeons.save(input) };
+    const dungeon = deps.dungeons.save(input);
+    deps.onChanged?.('dungeon-updated');
+
+    return { ok: true, dungeon };
   });
 
   /**
@@ -160,13 +182,18 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
 
     const copy = { ...source, id: body.id, name: body.name } as DungeonInput;
 
-    return reply.status(201).send({ ok: true, dungeon: deps.dungeons.save(copy) });
+    const dungeon = deps.dungeons.save(copy);
+    deps.onChanged?.('dungeon-duplicated');
+
+    return reply.status(201).send({ ok: true, dungeon });
   });
 
   app.delete('/dungeons/:id', async (request) => {
     const { id } = idParams.parse(request.params);
 
     if (!deps.dungeons.remove(id)) throw notFound(id);
+
+    deps.onChanged?.('dungeon-removed');
 
     return { ok: true };
   });
@@ -256,6 +283,8 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
 
       throw new ApiError('BLUEPRINT_INVALID', BLUEPRINT_PROBLEM_MESSAGE[result.problem], 422);
     }
+
+    deps.onChanged?.('blueprint-uploaded');
 
     return reply.status(201).send({ ok: true, blueprint: result.blueprint });
   });

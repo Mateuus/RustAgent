@@ -202,6 +202,8 @@ namespace Oxide.Plugins
         private class ActiveDungeon
         {
             public string slug;
+            /// <summary>A receita do painel. `null` = a planta foi colada crua.</summary>
+            public DungeonSpec spec;
             /// <summary>Onde a entrada foi colada, na superfície.</summary>
             public Vector3 surface;
             /// <summary>O canto de onde a masmorra cresceu, a -90.</summary>
@@ -223,6 +225,8 @@ namespace Oxide.Plugins
             public Door exitHatch;
             /// <summary>Quem está lá dentro agora.</summary>
             public readonly HashSet<ulong> inside = new HashSet<ulong>();
+            /// <summary>A cor sorteada de cada sala. Ver `RoomColor`.</summary>
+            public readonly Dictionary<int, string> roomColors = new Dictionary<int, string>();
             public DateTime startedAt;
             public bool ready;
             /// <summary>Desiste se a construção não terminar. Ver `buildTimeout`.</summary>
@@ -249,7 +253,16 @@ namespace Oxide.Plugins
         private void Init()
         {
             permission.RegisterPermission(PermAdmin, this);
-            blueprintDir = Path.Combine(Interface.Oxide.DataDirectory, "OrigemZDungeon", "blueprints");
+
+            // ####  SEM SUBPASTA, E ISSO É CONTRATO  ####
+            //
+            // Quem grava aqui é o agente, pelo `oxide/data-files.ts`,
+            // e ele só sabe escrever `<plugin>/<arquivo>.json` — os
+            // dois nomes sem barra. É essa restrição que faz a trava
+            // de `..` dele valer. Mudar para uma subpasta aqui é
+            // pedir para o agente escrever num lugar que o plugin
+            // não lê.
+            blueprintDir = Path.Combine(Interface.Oxide.DataDirectory, "OrigemZDungeon");
         }
 
         private void OnServerInitialized()
@@ -264,6 +277,20 @@ namespace Oxide.Plugins
             }
 
             Puts("OrigemZDungeon no ar. Plantas em: " + blueprintDir);
+
+            // ####  O PLUGIN PEDE O ESTADO; O AGENTE NÃO ADIVINHA  ####
+            //
+            // Um `oxide.reload` esvazia o cache daqui sem derrubar o
+            // RCON: para o agente, nada aconteceu. Sem este grito, o
+            // plugin ficaria sem masmorra nenhuma até o próximo sync
+            // por relógio — e o admin veria "não conheço essa planta"
+            // logo depois de recarregar.
+            //
+            // Ele vai SEM segredo, porque é justamente o segredo que
+            // o plugin ainda não tem. Forjá-lo pelo chat não faz
+            // dano: o agente responde reenviando o que já era para
+            // estar aqui.
+            timer.Once(1f, () => Puts(config.agentMarker + "{\"kind\":\"ready\",\"version\":\"0.1.0\"}"));
         }
 
         private void Unload()
@@ -459,9 +486,29 @@ namespace Oxide.Plugins
 
         private void Build(string slug, Vector3 surface, Vector3 forward, IPlayer requester)
         {
+            // ####  O SLUG É DE UMA MASMORRA; A PLANTA É PLANO B  ####
+            //
+            // Com o painel no ar, `/ozdungeon build bunker` quer dizer
+            // "erga a masmorra Bunker" — e é ELA que sabe qual planta
+            // serve de entrada, de que tamanho é e o que tem em cada
+            // sala.
+            //
+            // Sem o painel (agente parado, plugin recém-instalado, um
+            // .json posto à mão para testar), o slug cai de volta para
+            // "cole esta planta". Os dois caminhos existem porque o
+            // segundo é o que permite conferir uma planta ANTES de
+            // cadastrar qualquer coisa.
+            DungeonSpec spec;
+            state.dungeons.TryGetValue(slug, out spec);
+
+            var blueprintName = spec != null && !string.IsNullOrEmpty(spec.entrance)
+                ? spec.entrance
+                : slug;
+
             var dungeon = new ActiveDungeon
             {
                 slug = slug,
+                spec = spec,
                 surface = surface,
                 origin = new Vector3(surface.x, config.baseDepth, surface.z),
                 buildingId = BuildingManager.server.NewBuildingID(),
@@ -469,11 +516,14 @@ namespace Oxide.Plugins
             };
             active = dungeon;
 
-            var blueprint = LoadBlueprint(slug);
+            var blueprint = LoadBlueprint(blueprintName);
             if (blueprint == null)
             {
                 Fail(requester, "blueprint_missing",
-                     "Não achei a planta '" + slug + "' em " + blueprintDir);
+                     spec == null
+                         ? "Não achei a masmorra nem a planta '" + slug + "'. Use /ozdungeon para ver o que existe."
+                         : "A masmorra '" + slug + "' aponta para a planta '" + blueprintName
+                           + "', que não está em " + blueprintDir);
                 return;
             }
 
@@ -827,7 +877,18 @@ namespace Oxide.Plugins
             // permanente, que reconstrói a MESMA masmorra depois de um
             // restart (ver o §9.3 do plano). Ela entra junto com ele.
             var rng = new System.Random();
-            var layout = BuildLayout(DefaultRoomCount, rng);
+
+            // O tamanho vem da receita do painel; sem receita, o padrão.
+            var rooms = DefaultRoomCount;
+
+            if (dungeon.spec != null && dungeon.spec.size != null)
+            {
+                var min = Mathf.Clamp(dungeon.spec.size.min, 1, 40);
+                var max = Mathf.Clamp(dungeon.spec.size.max, min, 40);
+                rooms = rng.Next(min, max + 1);
+            }
+
+            var layout = BuildLayout(rooms, rng);
 
             var right = Vector3.Cross(Vector3.up, forward).normalized;
             var floors = new Dictionary<(int, int), BuildingBlock>();
@@ -883,7 +944,12 @@ namespace Oxide.Plugins
                     Adopt(dungeon, wall);
                     walls[key] = wall;
 
-                    if (isDoor) HangDoor(dungeon, wall, RoomColor(layout, cell, neighbour));
+                    if (isDoor)
+                    {
+                        var roomCell = layout.owner.ContainsKey(cell) && layout.owner[cell] >= 0 ? cell : neighbour;
+                        var color = RoomColor(dungeon, layout, roomCell, rng);
+                        HangDoor(dungeon, wall, DoorOf(dungeon, color));
+                    }
                 }
             }
 
@@ -924,7 +990,71 @@ namespace Oxide.Plugins
         /// e a receita vem do painel (frente C). Ela existe agora para
         /// que a porta já nasça do tipo certo quando ela chegar.
         /// </summary>
-        private string RoomColor(Layout layout, (int, int) a, (int, int) b) => "green";
+        /// <summary>
+        /// A cor da sala que aquela porta serve.
+        ///
+        /// ####  A COR É SORTEADA UMA VEZ POR SALA, E FICA  ####
+        ///
+        /// Duas portas do mesmo cômodo com cores diferentes seriam a
+        /// pior coisa que a masmorra poderia fazer: a cor é a única
+        /// linguagem que o jogador aprende sem ler nada — vermelha
+        /// quer dizer "cuidado, e vale a pena". Uma sala bicolor
+        /// desmancha isso em silêncio.
+        ///
+        /// Sem receita, tudo verde: é o que a Frente A fazia, e o
+        /// certo quando ninguém disse o contrário.
+        /// </summary>
+        private string RoomColor(ActiveDungeon dungeon, Layout layout, (int, int) roomCell, System.Random rng)
+        {
+            if (dungeon.spec == null || dungeon.spec.weights == null) return "green";
+
+            int roomId;
+            if (!layout.owner.TryGetValue(roomCell, out roomId) || roomId < 0) return "green";
+
+            string decided;
+            if (dungeon.roomColors.TryGetValue(roomId, out decided)) return decided;
+
+            var w = dungeon.spec.weights;
+            var total = Mathf.Max(0, w.green) + Mathf.Max(0, w.blue) + Mathf.Max(0, w.red);
+
+            // Pesos todos zero seria divisão por zero. A régua do
+            // agente já barra isso, mas um estado antigo em cache
+            // não passou por ela.
+            var color = "green";
+
+            if (total > 0)
+            {
+                var roll = rng.Next(total);
+
+                if (roll < Mathf.Max(0, w.green)) color = "green";
+                else if (roll < Mathf.Max(0, w.green) + Mathf.Max(0, w.blue)) color = "blue";
+                else color = "red";
+            }
+
+            dungeon.roomColors[roomId] = color;
+            return color;
+        }
+
+        /// <summary>A porta daquela cor, como o painel a definiu.</summary>
+        private string DoorOf(ActiveDungeon dungeon, string color)
+        {
+            if (dungeon.spec == null || dungeon.spec.rooms == null) return color;
+
+            foreach (var room in dungeon.spec.rooms)
+            {
+                if (room != null && room.key == color && !string.IsNullOrEmpty(room.door))
+                {
+                    // A receita fala em madeira/metal/topo; o
+                    // construtor fala em verde/azul/vermelho. A
+                    // tradução é aqui, num lugar só.
+                    if (room.door == "wood") return "green";
+                    if (room.door == "metal") return "blue";
+                    if (room.door == "toptier") return "red";
+                }
+            }
+
+            return color;
+        }
 
         private void HangDoor(ActiveDungeon dungeon, BuildingBlock frame, string color)
         {
@@ -1776,18 +1906,191 @@ namespace Oxide.Plugins
         /// JSON em UMA LINHA, com prefixo. O agente separa as
         /// respostas por linha — um JSON indentado chegaria lá como
         /// vários fragmentos inválidos.
+        ///
+        /// ####  O SEGREDO VAI EM TODA LINHA  ####
+        ///
+        /// O `onConsoleLine` do agente recebe o CHAT dos jogadores
+        /// junto com o resto do console. Sem ele, alguém digitando
+        /// `#OZDUNGEON#{"kind":"built",…}` no chat inventaria um
+        /// nascimento no histórico — e faria o assistente do painel
+        /// declarar sucesso sobre uma masmorra que não existe.
+        ///
+        /// Ele chega no `sync` e vale só enquanto o agente estiver
+        /// de pé. Sem sync ainda, a linha sai sem segredo e o agente
+        /// a IGNORA — que é o certo: ele não pediu nada.
         /// </summary>
         private void Report(string kind, Dictionary<string, object> data)
         {
             try
             {
                 data["kind"] = kind;
+                if (!string.IsNullOrEmpty(state.secret)) data["secret"] = state.secret;
+
                 Puts(config.agentMarker + JsonConvert.SerializeObject(data, Formatting.None));
             }
             catch (Exception e)
             {
                 PrintWarning("não consegui reportar '" + kind + "': " + e.Message);
             }
+        }
+
+        // ============================================================
+        //  O ESTADO QUE VEM DO PAINEL
+        //
+        //  ####  ELE CHEGA COMPLETO, NUNCA EM PEDAÇOS  ####
+        //
+        //  `ApplySync` monta um objeto NOVO e troca o campo inteiro
+        //  na última linha. A masmorra que sumiu do JSON deixa de
+        //  existir aqui no instante em que o comando é aplicado — e é
+        //  isso que faz "apaguei no painel" chegar ao jogo.
+        //
+        //  ####  E A PLANTA NÃO VEM POR AQUI  ####
+        //
+        //  A maior tem 512 KB e o frame do RCON aguenta ~70. Ela vem
+        //  pelo DISCO, escrita pelo agente antes deste comando. O que
+        //  atravessa o console é só a receita: tamanho, cores, NPCs,
+        //  loot — cem masmorras cabem folgadas.
+        // ============================================================
+
+        private class SyncState
+        {
+            /// <summary>Vazio = o agente ainda não falou com este plugin.</summary>
+            public string secret = "";
+            public Dictionary<string, DungeonSpec> dungeons = new Dictionary<string, DungeonSpec>();
+            public List<ZoneSpec> zones = new List<ZoneSpec>();
+        }
+
+        private class DungeonSpec
+        {
+            public string id;
+            public string mode;
+            public string entrance;
+            public Range size;
+            public Weights weights;
+            public CorridorSpec corridor;
+            public List<string> grid;
+            public NpcSpec npc;
+            public float timeOfDay;
+            public List<RoomSpec> rooms;
+        }
+
+        private class Range { public int min; public int max; }
+        private class Weights { public int green; public int blue; public int red; }
+
+        private class CorridorSpec
+        {
+            public int npcDensity;
+            public int lootDensity;
+            public List<string> crates;
+        }
+
+        private class NpcSpec
+        {
+            public Range health;
+            public float damageScale;
+            public List<string> weapons;
+            public List<string> names;
+        }
+
+        private class RoomSpec
+        {
+            public string key;
+            public string color;
+            public Range npc;
+            public Range loot;
+            public List<string> crates;
+            public string door;
+            public bool locked;
+        }
+
+        private class ZoneSpec { public float x; public float z; public float radius; }
+
+        private SyncState state = new SyncState();
+
+        /// <summary>
+        /// `origemz.dungeon.sync &lt;base64&gt;`.
+        ///
+        /// ####  BASE64 PORQUE O CONSOLE COME AS ASPAS  ####
+        ///
+        /// MEDIDO no projeto e documentado no `plugin-push.ts` do
+        /// agente: o parser de console do Rust trata token entre
+        /// aspas como argumento citado e as REMOVE. Mandando o JSON
+        /// cru, este método receberia `recipe` sem aspas e o parse
+        /// quebraria com "Unexpected character encountered while
+        /// parsing value: r".
+        ///
+        /// Base64 não tem aspa, espaço nem chave: atravessa qualquer
+        /// parser de console sem perder byte.
+        /// </summary>
+        /// <remarks>
+        /// ####  `[Command]`, E NÃO `[ConsoleCommand]`  ####
+        ///
+        /// MEDIDO em 09/09/2026: num `CovalencePlugin`, o
+        /// `[ConsoleCommand]` NÃO REGISTRA NADA. O comando some sem
+        /// erro — o console do Rust não reclama do que não conhece,
+        /// ele apenas se cala —, e o agente recebe `RCON_TIMEOUT`
+        /// sobre um comando que nunca existiu.
+        ///
+        /// `[Command]` é a forma do Covalence, e atende os dois
+        /// transportes: o console do servidor e o chat.
+        /// </remarks>
+        [Command("origemz.dungeon.sync")]
+        private void CmdSync(IPlayer caller, string command, string[] args)
+        {
+            // Só do console do servidor: o comando carrega o segredo
+            // desta subida do agente, e um jogador que o executasse
+            // ganharia o direito de forjar eventos.
+            if (!caller.IsServer) return;
+
+            var encoded = args.Length > 0 ? args[0] : "";
+
+            if (string.IsNullOrEmpty(encoded))
+            {
+                PrintWarning("sync sem payload");
+                return;
+            }
+
+            try
+            {
+                var json = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+                var incoming = JsonConvert.DeserializeObject<SyncPayload>(json);
+
+                if (incoming == null)
+                {
+                    PrintWarning("sync com payload ilegível");
+                    return;
+                }
+
+                var next = new SyncState { secret = incoming.secret ?? "" };
+
+                foreach (var spec in incoming.dungeons ?? new List<DungeonSpec>())
+                {
+                    if (spec != null && !string.IsNullOrEmpty(spec.id)) next.dungeons[spec.id] = spec;
+                }
+
+                next.zones = incoming.zones ?? new List<ZoneSpec>();
+
+                // A troca é a ÚLTIMA linha: até aqui, um payload torto
+                // teria deixado o cache antigo intacto.
+                state = next;
+
+                Puts("estado recebido: " + next.dungeons.Count + " masmorra(s), "
+                     + next.zones.Count + " zona(s) proibida(s)");
+            }
+            catch (Exception e)
+            {
+                // Cache velho e íntegro é melhor que cache novo pela
+                // metade: o plugin acreditaria que o incompleto é o
+                // completo.
+                PrintError("sync recusado, o estado anterior continua de pé: " + e.Message);
+            }
+        }
+
+        private class SyncPayload
+        {
+            public string secret;
+            public List<DungeonSpec> dungeons;
+            public List<ZoneSpec> zones;
         }
     }
 }

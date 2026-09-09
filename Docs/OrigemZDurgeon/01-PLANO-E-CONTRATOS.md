@@ -1555,14 +1555,41 @@ inteiro:
    tipo de *saída*; quem quer "o objeto vazio, deixe os defaults internos
    agirem" usa `.prefault({})`.
 
-### Frente C — O agente fala com o plugin
+### Frente C — O agente fala com o plugin · **MEDIDA NO JOGO**
 
 `origemz.dungeon.sync` (base64, estado completo), o marcador `#OZDUNGEON#` no
 stream, o materializador que escreve a planta no `oxide/data` do servidor certo,
-e o `event_runs` sendo alimentado.
+e o `world_event_runs` sendo alimentado.
 
-**Termina quando:** salvar no painel (via `curl`) põe o arquivo no disco e o
-comando no jogo funciona sem ninguém tocar em arquivo.
+**Termina quando:** salvar no painel põe o arquivo no disco e o comando no jogo
+funciona sem ninguém tocar em arquivo.
+
+**Medido no `server01`, em 09/09/2026 — o ciclo inteiro:**
+
+1. apaguei a pasta `oxide/data/OrigemZDungeon/` inteira;
+2. o plugin recarregou, gritou `#OZDUNGEON#{"kind":"ready"}`;
+3. o agente respondeu materializando **as sete plantas de volta** e empurrando
+   o estado;
+4. criei a masmorra `bunker` pelo painel, apontando para a planta `entrance2`;
+5. `ozdungeon build bunker -1500 -1500` — **e não existe planta chamada
+   `bunker`**. Ele só construiu porque recebeu a receita: 327 peças, 8 a 10
+   salas, como o painel mandou;
+6. a linha voltou **com o segredo**, e virou
+   `run #1 active · grid D23` em `GET /dungeons/bunker/runs`.
+
+O passo 5 é o que prova a frente: o comando no jogo passou a nomear **a
+masmorra**, e é ela que sabe qual planta serve de entrada.
+
+**Dois defeitos que só o jogo revelou:**
+
+1. **`[ConsoleCommand]` NÃO REGISTRA NADA num `CovalencePlugin`.** O comando
+   some sem erro — o console do Rust não reclama do que não conhece, ele apenas
+   se cala — e o agente recebe `RCON_TIMEOUT` sobre um comando que nunca
+   existiu. A forma do Covalence é `[Command]`, e ela atende console e chat;
+2. **"cem masmorras cabem folgadas" era falso.** Eu escrevi isso no contrato e
+   o teste mediu 74 KB, acima do teto de 50 KB. Cabem **cerca de 40**. O
+   conserto óbvio, no dia em que apertar, é mandar a cada servidor só as
+   masmorras dos eventos ligados nele.
 
 ### Frente D — A tela
 

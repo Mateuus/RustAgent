@@ -54,7 +54,9 @@ import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.
 import { DungeonsRepository } from './db/dungeons-repository.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { WorldEventsRepository } from './db/world-events-repository.js';
+import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints } from './dungeons/seed.js';
+import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
@@ -272,6 +274,9 @@ async function main(): Promise<void> {
   // reconexão do RCON, e a interface é reenviada por ela.
   let itemCatalog: ItemCatalog | null = null;
   let uiSync: UiSync | null = null;
+  // As masmorras. Como o `uiSync`, nasce depois - ele precisa do
+  // supervisor, que so existe mais abaixo.
+  let dungeonSync: DungeonSync | null = null;
   // O overlay de propagandas. Como o `uiSync`, ele nasce depois
   // dos callbacks que o citam — daí o `let` e o `?.`.
   let adsSync: AdsSync | null = null;
@@ -359,6 +364,10 @@ async function main(): Promise<void> {
       // plugin: um servidor que subiu agora não tem menu nenhum
       // até alguém mandar.
       uiSync?.pushSoon(serverId, 'rcon-connected');
+      // E as masmorras, pelo mesmo motivo: o cache delas vive na
+      // memoria do plugin, e um servidor que subiu agora nao
+      // conhece nenhuma planta ate alguem mandar.
+      dungeonSync?.pushSoon(serverId, 'rcon-connected');
       // E o overlay de propagandas, que perdeu MAIS que o cache: o
       // mapa chave->CRC das imagens vive na memória do plugin, e
       // sem esquecê-lo aqui a carga desceria apontando para bytes
@@ -416,6 +425,11 @@ async function main(): Promise<void> {
     // que não é um pedido do plugin de interface.
     onConsoleLine: (serverId, line) => {
       uiSync?.handleLine(serverId, line);
+      // E o `#OZDUNGEON#`: construiu, falhou, entrou, acabou. Ele
+      // APLICA aqui (escrita em SQLite, que nao fala com o jogo) e,
+      // quando precisa responder, sai por um relogio - mandar o
+      // comando daqui seria o laco descrito logo acima.
+      dungeonSync?.handleLine(serverId, line);
       // O overlay grita `#OZADSREQ#` quando o plugin sobe sem a
       // configuração. Recusa na primeira comparação de string,
       // como o de cima.
@@ -1283,6 +1297,33 @@ async function main(): Promise<void> {
 
   const dungeonsRepository = new DungeonsRepository(db, logger);
   const worldEventsRepository = new WorldEventsRepository(db, logger);
+
+  // ####  A PLANTA VAI PELO DISCO, E O RESTO PELO CONSOLE  ####
+  //
+  // 512 KB nao atravessam um frame de WebRCON, e nao existe
+  // chunking em lugar nenhum deste projeto. O agente e os
+  // servidores rodam na mesma maquina, entao o materializador
+  // escreve em `oxide\data\OrigemZDungeon\` e o comando leva so
+  // o slug. Ver dungeons/materializer.ts.
+  const blueprintMaterializer = new BlueprintMaterializer({
+    blueprints: dungeonBlueprints,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      dataDirOf: (serverId) => supervisor.configOf(serverId)?.paths.oxideDataDir ?? null,
+    },
+    logger,
+  });
+
+  dungeonSync = new DungeonSync({
+    dungeons: dungeonsRepository,
+    events: worldEventsRepository,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      contextOf: (serverId) => supervisor.contextOf(serverId),
+    },
+    materializer: blueprintMaterializer,
+    logger,
+  });
 
   // ####  O BOTÃO DISCORD DOS MENUS QUE JÁ EXISTEM  ####
   //
@@ -2814,6 +2855,12 @@ async function main(): Promise<void> {
       dungeons: dungeonsRepository,
       blueprints: dungeonBlueprints,
       events: worldEventsRepository,
+      // Sem `await`: gravar nao pode depender de o servidor estar no
+      // ar, e o que vai pelo fio e o estado COMPLETO - uma chamada
+      // perdida se conserta na proxima.
+      onChanged: (reason) => {
+        void dungeonSync?.pushAll(reason);
+      },
     },
     worldEvents: {
       events: worldEventsRepository,
@@ -2899,6 +2946,9 @@ async function main(): Promise<void> {
         oxideRuntime.stop();
         uiSync.stop();
         adsSync?.stop();
+        // E o das masmorras: um `pushSoon` armado agora mandaria o
+        // estado a um RCON que ja nao existe.
+        dungeonSync?.stop();
         // O do cadastro de itens custom pela mesma razão: um
         // `invalidate` armado agora mandaria `origemz.item.clear` a
         // um servidor que já está sendo desligado — e o plugin
