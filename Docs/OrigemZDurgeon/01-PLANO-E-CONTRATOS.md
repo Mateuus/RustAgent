@@ -498,6 +498,55 @@ alcançá-lo.
 Medido: 151 peças com a entrada mínima contra 192 com a `entrance2` (42 peças),
 para o mesmo desenho.
 
+### 4.2.4 Três defeitos que só um jogador dentro do jogo encontra
+
+Em 09/09/2026 o dono entrou na masmorra pela primeira vez. Os três defeitos
+abaixo apareceram nos primeiros dez minutos, e **nenhum deles aparece contando
+peças**: a masmorra sobe, o número fecha, e o problema só existe para quem está
+lá dentro.
+
+**1. O corredor era uma fileira de cubículos lacrados.** A regra da parede dizia
+"não erga se os dois lados são a mesma sala" — e terminava em `&& mine >= 0`. O
+corredor tem dono `-1`, então o teste nunca passava para ele: nascia parede
+entre **cada par** de células de corredor. Quem descia o alçapão caía dentro de
+um cubo de 3×3 metros sem saída.
+
+A correção é tirar o `>= 0`: dono igual dos dois lados quer dizer "não há
+parede", e isso vale para sala com sala **e** corredor com corredor. Medido: a
+cruz caiu de 219 para 191 peças, e 28 é exatamente o número de paredes
+corredor-corredor que a geometria previa.
+
+**2. O alçapão cuspia dentro da parede.** O destino da descida era
+`down * 2 - forward * 1.5`, e uma célula tem 3 metros — um metro e meio a partir
+do centro é a linha da parede. O log foi direto ao ponto:
+
+```
+Mateuus was killed by Suicide at (-1271.00, -89.12, 962.50)
+```
+
+com a origem em `z=964`. A célula (0,0) é a única que pode não ter vizinha atrás
+— o corredor sai dela para a frente —, então o desvio apontava para a parede em
+toda masmorra desenhada. Agora a chegada é o **centro** da célula, e a subida
+devolve o jogador **sobre** a tampa em vez de ao lado dela.
+
+**3. Construir na água era aceito.** `GroundAt` devolve o fundo do mar como se
+fosse chão; o comentário dele já dizia isso e delegava a escolha a "quem vê o
+mapa". Com coordenada explícita — que é como o painel constrói — não há ninguém
+vendo mapa nenhum.
+
+Medido em (-1330, 871): chão em y=6.9, água em y=9.2, **2,3 m de profundidade**.
+Era um rio, e rios ficam acima do nível do mar, então o `y` positivo não
+denunciava nada. `no_position` já era um dos oito motivos de falha do plano, com
+"água" na descrição: existia no documento e não no código.
+
+De quebra nasceu o `ozdungeon onde <x> <z>`, que responde antes de construir:
+
+```
+E7 (-1330, 871) · chão y=6.9 · água y=9.2 · profundidade 2.3 m · NÃO SERVE: é água
+```
+
+É o que o painel precisa para não mandar ninguém a um ponto que ele nunca viu.
+
 ### 4.3 O terceiro modo, que sai de graça: capturar
 
 Não estava nas quatro decisões, mas cai no colo: se sabemos **ler** o formato

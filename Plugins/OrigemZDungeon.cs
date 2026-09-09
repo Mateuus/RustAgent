@@ -357,15 +357,21 @@ namespace Oxide.Plugins
                     return;
 
                 case "tp":
-                    CmdTeleportToEntrance(player);
+                case "ir":
+                    CmdTeleportToEntrance(player, args.Skip(1).ToArray());
                     return;
 
                 case "status":
                     ReplyStatus(player);
                     return;
 
+                case "onde":
+                case "where":
+                    ReplyGround(player, args.Skip(1).ToArray());
+                    return;
+
                 default:
-                    player.Reply("Não conheço '" + sub + "'. Use: /ozdungeon [lista|build <planta>|stop|tp|status]");
+                    player.Reply("Não conheço '" + sub + "'. Use: /ozdungeon [lista|build <planta>|stop|tp [quem]|onde [x z]|status]");
                     return;
             }
         }
@@ -391,6 +397,60 @@ namespace Oxide.Plugins
             player.Reply("Use: /ozdungeon build <nome>  — nasce onde você está, para onde você olha.");
         }
 
+        /// <summary>
+        /// Aquele ponto serve para uma masmorra?
+        ///
+        /// ####  ELE EXISTE PORQUE EU MATEI O DONO  ####
+        ///
+        /// Em 09/09/2026 mandei construir em (-1330, 871) sem olhar o
+        /// mapa. A entrada nasceu dentro de um rio, e ele morreu no
+        /// instante em que o teleporte o levou até lá.
+        ///
+        /// Antes disto, a única maneira de saber se um ponto servia era
+        /// construir e ver. Agora dá para PERGUNTAR — e o painel, que
+        /// escolhe pontos no mapa sem nunca ver o terreno, pode
+        /// perguntar antes de mandar alguém para lá.
+        /// </summary>
+        private void ReplyGround(IPlayer player, string[] args)
+        {
+            float x, z;
+
+            if (args.Length >= 2
+                && float.TryParse(args[0], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+                && float.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out z))
+            {
+                // veio do console, ou o admin digitou as coordenadas
+            }
+            else
+            {
+                var basePlayer = player.Object as BasePlayer;
+
+                if (basePlayer == null)
+                {
+                    player.Reply("Do console, informe onde: ozdungeon onde <x> <z>");
+                    return;
+                }
+
+                x = basePlayer.transform.position.x;
+                z = basePlayer.transform.position.z;
+            }
+
+            var ground = GroundAt(x, z);
+            var point = new Vector3(x, ground, z);
+            var depth = WaterDepth(point);
+            var sea = TerrainMeta.WaterMap != null
+                ? TerrainMeta.WaterMap.GetHeight(point)
+                : 0f;
+
+            player.Reply(
+                Grid(point) + " (" + x.ToString("0", CultureInfo.InvariantCulture) + ", "
+                + z.ToString("0", CultureInfo.InvariantCulture) + ")"
+                + " · chão em y=" + ground.ToString("0.0", CultureInfo.InvariantCulture)
+                + " · água em y=" + sea.ToString("0.0", CultureInfo.InvariantCulture)
+                + " · profundidade " + depth.ToString("0.0", CultureInfo.InvariantCulture) + " m"
+                + " · " + (depth > 0.5f ? "NÃO SERVE: é água" : "serve"));
+        }
+
         private void ReplyStatus(IPlayer player)
         {
             if (active == null) { player.Reply("Nenhuma masmorra de pé."); return; }
@@ -403,15 +463,74 @@ namespace Oxide.Plugins
                          + " · entrada em " + Grid(active.surface));
         }
 
-        private void CmdTeleportToEntrance(IPlayer player)
+        /// <summary>
+        /// Leva alguém até a entrada da masmorra que está de pé.
+        ///
+        /// ####  ELE ACEITA UM ALVO, E É POR CAUSA DO CONSOLE  ####
+        ///
+        /// Sem argumento, leva quem digitou — o caso do admin dentro do
+        /// jogo. Mas o console NÃO É um jogador: `player.Object` é nulo,
+        /// e o comando respondia "só funciona de dentro do jogo".
+        ///
+        /// Isso deixava o painel sem caminho nenhum para "me leve até
+        /// lá": ele fala com o servidor pelo console, e o admin que
+        /// acabou de construir uma masmorra pelo painel quer ir vê-la
+        /// sem decorar coordenada.
+        ///
+        /// O alvo é procurado por nome parcial ou SteamID, como todo
+        /// comando de admin do Rust.
+        /// </summary>
+        private void CmdTeleportToEntrance(IPlayer player, string[] args)
         {
             if (active == null) { player.Reply("Não há masmorra de pé."); return; }
 
-            var basePlayer = player.Object as BasePlayer;
-            if (basePlayer == null) { player.Reply("Esse comando só funciona de dentro do jogo."); return; }
+            var target = args.Length > 0 ? FindPlayer(args[0]) : player.Object as BasePlayer;
 
-            basePlayer.Teleport(active.surface + Vector3.up * 1.5f);
-            player.Reply("Você está na entrada.");
+            if (target == null)
+            {
+                player.Reply(args.Length > 0
+                    ? "Não achei ninguém chamado '" + args[0] + "' online."
+                    : "Do console, diga quem: ozdungeon tp <nome ou steamid>");
+                return;
+            }
+
+            // O mesmo caminho do alçapão, e não um `Teleport` cru: sem
+            // as pausas de detecção o jogador leva kick por velocidade.
+            TeleportPlayer(target, active.surface + Vector3.up * 1.5f);
+
+            player.Reply(target.displayName + " está na entrada de '" + active.slug + "'.");
+
+            if (target.IPlayer != null && target.IPlayer.Id != player.Id)
+            {
+                target.IPlayer.Reply("Você foi levado até a entrada da masmorra '" + active.slug + "'.");
+            }
+        }
+
+        /// <summary>
+        /// Acha um jogador online por SteamID ou por pedaço do nome.
+        ///
+        /// O nome exato ganha do parcial: com "Ana" e "Anaconda" online,
+        /// quem digitou "Ana" quis a Ana.
+        /// </summary>
+        private static BasePlayer FindPlayer(string needle)
+        {
+            if (string.IsNullOrEmpty(needle)) return null;
+
+            foreach (var candidate in BasePlayer.activePlayerList)
+            {
+                if (candidate.UserIDString == needle) return candidate;
+                if (string.Equals(candidate.displayName, needle, StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+
+            foreach (var candidate in BasePlayer.activePlayerList)
+            {
+                if (candidate.displayName != null
+                    && candidate.displayName.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return candidate;
+            }
+
+            return null;
         }
 
         // ============================================================
@@ -485,6 +604,25 @@ namespace Oxide.Plugins
             Build(slug, surface, forward, player);
         }
 
+        /// <summary>
+        /// Quantos metros de água há sobre aquele ponto. Zero = terra.
+        ///
+        /// A entrada é a única parte que se importa: a masmorra mora a
+        /// -90 metros, onde tudo está "abaixo do mar" e nada se molha.
+        /// </summary>
+        private static float WaterDepth(Vector3 point)
+        {
+            if (TerrainMeta.WaterMap == null)
+            {
+                // Sem mapa de água, o nível do mar é o zero do mundo —
+                // que é a convenção do Rust. É defesa para um mundo
+                // ainda carregando, não o caminho normal.
+                return Mathf.Max(0f, -point.y);
+            }
+
+            return Mathf.Max(0f, TerrainMeta.WaterMap.GetHeight(point) - point.y);
+        }
+
         // ============================================================
         //  A CONSTRUÇÃO, EM DUAS METADES
         //
@@ -526,6 +664,37 @@ namespace Oxide.Plugins
                 startedAt = DateTime.UtcNow,
             };
             active = dungeon;
+
+            // ####  NA ÁGUA, NÃO  ####
+            //
+            // MEDIDO em 09/09/2026, e da pior maneira: construí em
+            // (-1330, 871) sem olhar o mapa, a entrada nasceu no fundo
+            // do mar, e o dono MORREU no instante em que o `tp` o levou
+            // até lá.
+            //
+            // `GroundAt` devolve o fundo do mar como se fosse chão — o
+            // comentário dele já dizia isso e delegava a escolha a "quem
+            // vê o mapa". Só que com coordenada explícita — que é como o
+            // painel constrói, e o único jeito de testar sem um cliente
+            // aberto — não há ninguém vendo mapa nenhum.
+            //
+            // `no_position` já era um dos oito motivos de falha do
+            // plano, com "água" na descrição: ele existia no documento e
+            // não no código.
+            //
+            // A checagem mora AQUI, e não no comando, porque o `Fail`
+            // precisa da masmorra registrada para dizer ao painel QUAL
+            // delas não nasceu.
+            var depth = WaterDepth(surface);
+
+            if (depth > 0.5f)
+            {
+                Fail(requester, "no_position",
+                     "Ali é água: " + depth.ToString("0.0", CultureInfo.InvariantCulture)
+                     + " m de profundidade. A entrada nasceria submersa, e quem descesse "
+                     + "morreria afogado antes de achar o alçapão. Escolha um ponto em terra firme.");
+                return;
+            }
 
             var blueprint = LoadBlueprint(blueprintName);
 
@@ -1213,11 +1382,33 @@ namespace Oxide.Plugins
                     var key = WallKey(cell, neighbour);
                     if (walls.ContainsKey(key)) continue;
 
-                    // Mesma sala dos dois lados: os cômodos viram um só.
+                    // ####  DONO IGUAL DOS DOIS LADOS: NÃO HÁ PAREDE  ####
+                    //
+                    // Duas células da mesma sala viram um cômodo só. E
+                    // duas de CORREDOR viram caminho — que é o ponto de
+                    // um corredor.
+                    //
+                    // MEDIDO em 09/09/2026, com o dono dentro do jogo:
+                    // esta condição terminava em `&& mine >= 0`, e o
+                    // corredor tem dono -1. O teste nunca passava para
+                    // ele, então nascia parede entre CADA PAR de células
+                    // de corredor — o caminho inteiro virava uma fileira
+                    // de cubículos de 3×3 lacrados, e quem descia o
+                    // alçapão caía dentro de um deles sem saída.
+                    //
+                    // Contar peças não pega isto: a masmorra sobe, o
+                    // número fecha, e o defeito só existe para quem está
+                    // lá dentro. Foi preciso um jogador de verdade
+                    // olhando quatro paredes.
+                    //
+                    // Sem o `>= 0`, sala com sala e corredor com corredor
+                    // ficam abertos; sala com corredor e sala com OUTRA
+                    // sala continuam com parede, que é o que separa os
+                    // cômodos.
                     if (layout.cells.Contains(neighbour)
                         && layout.owner.TryGetValue(cell, out var mine)
                         && layout.owner.TryGetValue(neighbour, out var theirs)
-                        && mine == theirs && mine >= 0)
+                        && mine == theirs)
                         continue;
 
                     var isDoor = doorPairs.Contains(key);
@@ -1556,16 +1747,40 @@ namespace Oxide.Plugins
             var top = dungeon.entranceHatch;
             var bottom = dungeon.exitHatch;
 
-            // Descer cospe o jogador ABAIXO da tampa de baixo, e um
-            // passo à frente: dentro dela, ele nasceria preso na
-            // própria porta.
+            // ####  A CHEGADA É O CENTRO DA CÉLULA, SEM DESVIO  ####
+            //
+            // MEDIDO em 09/09/2026, e o dono pagou por isso: o destino
+            // era `Vector3.down * 2f - forward * 1.5f`, e uma célula tem
+            // 3 metros. Um metro e meio a partir do centro é EXATAMENTE
+            // a borda — a linha onde a parede fica.
+            //
+            // O log não deixou dúvida:
+            //
+            //     Mateuus was killed by Suicide at (-1271.00, -89.12, 962.50)
+            //
+            // com a origem da masmorra em z=964. Ele desceu o alçapão,
+            // nasceu dentro da parede sul da célula de chegada e morreu
+            // preso.
+            //
+            // Não era um erro de meio metro: a célula (0,0) é a ÚNICA
+            // que pode não ter vizinha atrás — o corredor sai dela para
+            // a frente —, então o desvio apontava para a parede em toda
+            // masmorra desenhada.
+            //
+            // O centro da célula é seguro por construção: ela existe
+            // sempre, é a chegada, e está vazia. Dois metros abaixo da
+            // tampa é um metro acima do piso — longe da porta, que era o
+            // medo original, e longe das quatro paredes.
             var down = top.gameObject.AddComponent<HatchLink>();
             down.descends = true;
-            down.target = bottom.transform.position + Vector3.down * 2f - bottom.transform.forward * 1.5f;
+            down.target = bottom.transform.position + Vector3.down * 2f;
 
+            // Subir devolve o jogador SOBRE a tampa, e não ao lado dela:
+            // ao lado é onde ficam as paredes da casinha da entrada, e é
+            // o mesmo jeito de morrer preso, só que na superfície.
             var up = bottom.gameObject.AddComponent<HatchLink>();
             up.descends = false;
-            up.target = top.transform.position - top.transform.forward + Vector3.up * 0.5f;
+            up.target = top.transform.position + Vector3.up * 1.2f;
 
             Debug("alçapões ligados: superfície y=" + top.transform.position.y.ToString("F1")
                   + " ⇄ masmorra y=" + bottom.transform.position.y.ToString("F1"));
