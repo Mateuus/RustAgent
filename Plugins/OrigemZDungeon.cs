@@ -96,6 +96,20 @@ namespace Oxide.Plugins
         private const string PrefabCeilingLight = "assets/prefabs/deployable/ceiling light/ceilinglight.deployed.prefab";
 
         /// <summary>
+        /// O quadro de parede: o bloco das portas largas.
+        ///
+        /// É um `BuildingBlock` como a parede e o vão, entra na MESMA
+        /// pose deles (a 1.3.4 já faz isso com o `wall.window`, na
+        /// mesma `Lp()` das paredes) e tem dois metros de passagem.
+        /// </summary>
+        private const string PrefabWallFrame = "assets/prefabs/building core/wall.frame/wall.frame.prefab";
+
+        /// <summary>
+        /// A fechadura de código. É a mesma da 1.3.4 (`CodeLock`).
+        /// </summary>
+        private const string PrefabCodeLock = "assets/prefabs/locks/keypad/lock.code.prefab";
+
+        /// <summary>
         /// Quanto a tampa precisa andar para ficar centrada no piso.
         ///
         /// Uma `Door` do Rust gira em torno da dobradiça, e é ali que
@@ -142,10 +156,182 @@ namespace Oxide.Plugins
         /// </summary>
         private static readonly Dictionary<string, string> DoorByColor = new Dictionary<string, string>
         {
-            ["green"] = "assets/prefabs/building/door.hinged/door.hinged.wood.prefab",
-            ["blue"] = "assets/prefabs/building/door.hinged/door.hinged.metal.prefab",
-            ["red"] = "assets/prefabs/building/door.hinged/door.hinged.toptier.prefab",
+            ["green"] = "wood",
+            ["blue"] = "metal",
+            ["red"] = "toptier",
         };
+
+        /// <summary>
+        /// Uma porta: o bloco que a segura e a folha que fica nele.
+        ///
+        /// ####  A FOLHA LARGA NÃO CABE NUM `wall.doorway`  ####
+        ///
+        /// O vão de porta do Rust tem UM metro; porta dupla, grade de
+        /// cela, portão de tela e porta de garagem têm DOIS, e o bloco
+        /// delas é o `wall.frame` — o quadro de parede.
+        ///
+        /// MEDIDO em 09/09/2026 nas sete plantas herdadas: as seis
+        /// grades que existem nelas (`base3`, `entrance1`, `entrance4`)
+        /// estão TODAS na posição exata de um `wall.frame`, com a mesma
+        /// rotação ou 180 graus dela — o lado para onde a folha abre.
+        /// A pose local é zero, igual à da porta no vão.
+        /// </summary>
+        private sealed class DoorKind
+        {
+            /// <summary>O BuildingBlock que entra no lugar da parede.</summary>
+            public string frame;
+            /// <summary>A folha pendurada nele. `null` = passagem vazia.</summary>
+            public string leaf;
+            /// <summary>Cabe mais de um jogador de cada vez?</summary>
+            public bool wide;
+            /// <summary>O que o admin vê quando a porta não pode trancar.</summary>
+            public string label;
+        }
+
+        /// <summary>
+        /// As portas que o painel oferece.
+        ///
+        /// ####  TODO CAMINHO AQUI FOI CONFERIDO CONTRA O JOGO  ####
+        ///
+        /// Não contra a memória: os onze prefabs abaixo foram casados,
+        /// em 09/09/2026, com o `Bundles/AssetSceneManifest.json` do
+        /// Rust instalado em `Servers/server01` — 16.358 assets, e os
+        /// onze estão lá. Um caminho errado devolve `null` no
+        /// `CreateEntity`, o `return` engole, e a masmorra sobe com o
+        /// vão aberto: foi assim que a versão anterior desta tabela
+        /// (`door.hinged.wood/...`) chegou ao jogo, e quem descobriu
+        /// foi o dono, lá dentro.
+        /// </summary>
+        private static readonly Dictionary<string, DoorKind> DoorCatalog = new Dictionary<string, DoorKind>
+        {
+            // ####  AS TRÊS DE CONSTRUÇÃO ABREM COM A MÃO  ####
+            //
+            // Elas eram as `door.hinged.security.{green,blue,red}` — as
+            // coloridas dos monumentos, que combinavam com as cores das
+            // salas e eram lindas.
+            //
+            // E não abriam. MEDIDO em 09/09/2026, pelo dono, de dentro
+            // da masmorra: o jogo só oferecia "TOC... TOC...". Aquelas
+            // portas são acionadas por CARTÃO E ENERGIA, e a masmorra
+            // não tem elétrica nenhuma — a masmorra inteira era um
+            // corredor com salas lacradas.
+            //
+            // A cor deixou de estar na porta e passou a estar no
+            // MATERIAL dela, que é o que o jogador de Rust já lê sem
+            // pensar.
+            ["wood"] = new DoorKind
+            {
+                frame = PrefabDoorway,
+                leaf = "assets/prefabs/building/door.hinged/door.hinged.wood.prefab",
+                label = "porta de madeira",
+            },
+            ["metal"] = new DoorKind
+            {
+                frame = PrefabDoorway,
+                leaf = "assets/prefabs/building/door.hinged/door.hinged.metal.prefab",
+                label = "porta de metal",
+            },
+            ["toptier"] = new DoorKind
+            {
+                frame = PrefabDoorway,
+                leaf = "assets/prefabs/building/door.hinged/door.hinged.toptier.prefab",
+                label = "porta blindada",
+            },
+
+            // A de fábrica: um metro, como as três, e é a que a 1.3.4
+            // usa no lobby da entrada dela.
+            ["industrial"] = new DoorKind
+            {
+                frame = PrefabDoorway,
+                leaf = "assets/prefabs/misc/permstore/factorydoor/door.hinged.industrial.d.prefab",
+                label = "porta de fábrica",
+            },
+
+            // ####  AS LARGAS, PARA A SALA QUE VIROU FUNIL  ####
+            //
+            // Nove células com uma porta de um metro são uma fila
+            // indiana debaixo de fogo. Estas cinco têm dois metros de
+            // passagem, e todas moram no `wall.frame`.
+            ["double_wood"] = new DoorKind
+            {
+                frame = PrefabWallFrame,
+                leaf = "assets/prefabs/building/door.double.hinged/door.double.hinged.wood.prefab",
+                wide = true,
+                label = "porta dupla de madeira",
+            },
+            ["double_metal"] = new DoorKind
+            {
+                frame = PrefabWallFrame,
+                leaf = "assets/prefabs/building/door.double.hinged/door.double.hinged.metal.prefab",
+                wide = true,
+                label = "porta dupla de metal",
+            },
+            ["double_toptier"] = new DoorKind
+            {
+                frame = PrefabWallFrame,
+                leaf = "assets/prefabs/building/door.double.hinged/door.double.hinged.toptier.prefab",
+                wide = true,
+                label = "porta dupla blindada",
+            },
+            // A grade de cela deixa VER o que tem dentro sem deixar
+            // entrar — e uma sala vermelha vista de fora é um convite.
+            ["cell_gate"] = new DoorKind
+            {
+                frame = PrefabWallFrame,
+                leaf = "assets/prefabs/building/wall.frame.cell/wall.frame.cell.gate.prefab",
+                wide = true,
+                label = "grade de cela",
+            },
+            ["fence_gate"] = new DoorKind
+            {
+                frame = PrefabWallFrame,
+                leaf = "assets/prefabs/building/wall.frame.fence/wall.frame.fence.gate.prefab",
+                wide = true,
+                label = "portão de tela",
+            },
+            ["garage"] = new DoorKind
+            {
+                frame = PrefabWallFrame,
+                leaf = "assets/prefabs/building/wall.frame.garagedoor/wall.frame.garagedoor.prefab",
+                wide = true,
+                label = "portão de garagem",
+            },
+
+            // Sem folha: o vão fica aberto de propósito. Serve para a
+            // sala verde de uma masmorra que quer ser corrida, e para
+            // depurar "a porta não abre" separando os dois casos.
+            ["none"] = new DoorKind
+            {
+                frame = PrefabDoorway,
+                leaf = null,
+                label = "vão aberto",
+            },
+        };
+
+        /// <summary>
+        /// Os graus, do nome que o painel manda ao enum do jogo.
+        ///
+        /// MEDIDO por reflexão sobre o `Assembly-CSharp.dll` do
+        /// `Servers/server01` em 09/09/2026: `None = -1`, `Twigs = 0`,
+        /// `Wood = 1`, `Stone = 2`, `Metal = 3`, `TopTier = 4`. O
+        /// `None` fica de fora de propósito — um bloco sem grau não
+        /// tem malha, e a masmorra nasceria invisível.
+        /// </summary>
+        private static readonly Dictionary<string, BuildingGrade.Enum> GradeByName =
+            new Dictionary<string, BuildingGrade.Enum>
+            {
+                ["twigs"] = BuildingGrade.Enum.Twigs,
+                ["wood"] = BuildingGrade.Enum.Wood,
+                ["stone"] = BuildingGrade.Enum.Stone,
+                ["metal"] = BuildingGrade.Enum.Metal,
+                ["toptier"] = BuildingGrade.Enum.TopTier,
+            };
+
+        /// <summary>O grau de quem não escolheu nenhum. Era o único.</summary>
+        private const BuildingGrade.Enum DefaultGrade = BuildingGrade.Enum.Stone;
+
+        /// <summary>As três peças que ganham grau próprio.</summary>
+        private enum Piece { Foundation, Wall, Ceiling }
 
         /// <summary>Leste, norte, oeste, sul — nesta ordem, sempre.</summary>
         private static readonly (int dx, int dz)[] Dirs = { (1, 0), (0, 1), (-1, 0), (0, -1) };
@@ -271,6 +457,22 @@ namespace Oxide.Plugins
             public readonly HashSet<ulong> inside = new HashSet<ulong>();
             /// <summary>A cor sorteada de cada sala. Ver `RoomColor`.</summary>
             public readonly Dictionary<int, string> roomColors = new Dictionary<int, string>();
+
+            // ####  AS FECHADURAS, POR SALA  ####
+            //
+            // O código é sorteado quando a PORTA nasce e o portador só
+            // é escolhido quando o CONTEÚDO nasce — duas fases, e entre
+            // elas a masmorra tem sala trancada sem ninguém que a abra.
+            // É por isso que existe o `SettleLocks`: no fim de tudo,
+            // fechadura sem portador vira porta destrancada, com grito
+            // no log. Uma sala que ninguém abre é um pedaço de masmorra
+            // que o jogador vê e não usa — e ele nunca saberia por que.
+            /// <summary>A fechadura de cada sala trancada, por id de sala.</summary>
+            public readonly Dictionary<int, RoomLock> locks = new Dictionary<int, RoomLock>();
+            /// <summary>Os códigos já sorteados, para não repetir.</summary>
+            public readonly HashSet<string> usedCodes = new HashSet<string>();
+            /// <summary>O código único, quando a receita pede um só.</summary>
+            public string sharedCode;
             public DateTime startedAt;
             public bool ready;
             /// <summary>Desiste se a construção não terminar. Ver `buildTimeout`.</summary>
@@ -288,6 +490,28 @@ namespace Oxide.Plugins
             public Vector3 target;
             /// <summary>true = este é o de cima; abrir desce.</summary>
             public bool descends;
+        }
+
+
+        /// <summary>
+        /// A tranca de uma sala: o código, as portas dela e quem o leva.
+        ///
+        /// É por SALA, e não por porta: um cômodo com três entradas tem
+        /// UM código. Um código por folha faria o jogador achar o papel
+        /// da porta norte e continuar trancado do lado sul, sem nada na
+        /// tela explicando por que aquele número não serve.
+        /// </summary>
+        private sealed class RoomLock
+        {
+            public int roomId;
+            public string color;
+            public string code;
+            /// <summary>As folhas daquela sala. Todas com a mesma fechadura.</summary>
+            public readonly List<CodeLock> locks = new List<CodeLock>();
+            /// <summary>As células do cômodo. O portador nunca está numa delas.</summary>
+            public readonly HashSet<(int, int)> cells = new HashSet<(int, int)>();
+            /// <summary>Já existe alguém no mundo carregando este código?</summary>
+            public bool delivered;
         }
 
         // ============================================================
@@ -539,6 +763,20 @@ namespace Oxide.Plugins
                          + " · " + active.inside.Count + " dentro"
                          + " · de pé há " + minutes + " min"
                          + " · entrada em " + Grid(active.surface));
+
+            // ####  O ADMIN PRECISA DOS CÓDIGOS  ####
+            //
+            // Sem isto, a única maneira de saber o código de uma sala é
+            // matar o NPC certo — e o admin que quer CONFERIR se a
+            // fechadura funcionou teria de jogar a masmorra inteira.
+            // O comando já é só de admin (ver `IsAllowed`).
+            foreach (var entry in active.locks.Values)
+            {
+                player.Reply("  sala " + ColorLabel(entry.color)
+                             + " · código " + entry.code
+                             + " · " + (entry.delivered ? "entregue a alguém" : "SEM PORTADOR")
+                             + " · " + entry.locks.Count + " porta(s)");
+            }
         }
 
         /// <summary>
@@ -1430,6 +1668,43 @@ namespace Oxide.Plugins
             var right = Vector3.Cross(Vector3.up, forward).normalized;
             var floors = new Dictionary<(int, int), BuildingBlock>();
 
+            // ####  A COR VEM ANTES DA PRIMEIRA PEÇA  ####
+            //
+            // O grau de cada peça depende da cor da sala dona dela, e o
+            // CHÃO nasce antes das paredes — que era onde `RoomColor`
+            // sorteava pela primeira vez. Sem esta volta, a fundação e o
+            // teto da sala vermelha sairiam com o grau do corredor e só
+            // as paredes obedeceriam a receita: metade do cômodo
+            // blindada, metade de pedra, e nada no log.
+            //
+            // `RoomColor` cacheia por sala, então isto não sorteia duas
+            // vezes nem repinta o que a planta já pintou.
+            foreach (var pair in layout.owner)
+                if (pair.Value >= 0) RoomColor(dungeon, layout, pair.Key, rng);
+
+            // Quantas células e quantas portas cada sala tem. É disso
+            // que sai a decisão "esta sala virou funil" — ver
+            // `DoorTypeOf`.
+            var roomCells = new Dictionary<int, int>();
+            var roomDoors = new Dictionary<int, int>();
+
+            foreach (var pair in layout.owner)
+            {
+                if (pair.Value < 0) continue;
+
+                int seen;
+                roomCells[pair.Value] = roomCells.TryGetValue(pair.Value, out seen) ? seen + 1 : 1;
+            }
+
+            foreach (var pair in layout.doors)
+            {
+                int owner;
+                if (!layout.owner.TryGetValue(pair.room, out owner) || owner < 0) continue;
+
+                int seen;
+                roomDoors[owner] = roomDoors.TryGetValue(owner, out seen) ? seen + 1 : 1;
+            }
+
             // 1) O chão.
             foreach (var cell in layout.cells)
             {
@@ -1439,7 +1714,7 @@ namespace Oxide.Plugins
                 var block = GameManager.server.CreateEntity(PrefabFoundation, pos, R0) as BuildingBlock;
                 if (block == null) continue;
 
-                PrepareBlock(dungeon, block, BuildingGrade.Enum.Stone);
+                PrepareBlock(dungeon, block, GradeOf(dungeon, layout, cell, Piece.Foundation));
                 Adopt(dungeon, block);
                 floors[cell] = block;
             }
@@ -1490,7 +1765,33 @@ namespace Oxide.Plugins
                         continue;
 
                     var isDoor = doorPairs.Contains(key);
-                    var prefab = isDoor ? PrefabDoorway : PrefabWall;
+
+                    // ####  O BLOCO DEPENDE DA PORTA, E NÃO O CONTRÁRIO  ####
+                    //
+                    // A folha de um metro mora num `wall.doorway`; a de
+                    // dois, num `wall.frame`. Erguer o vão primeiro e
+                    // decidir a porta depois — como era — deixava a
+                    // porta dupla sem onde nascer.
+                    var roomCell = layout.owner.ContainsKey(cell) && layout.owner[cell] >= 0 ? cell : neighbour;
+                    string color = null;
+                    DoorKind kind = null;
+
+                    if (isDoor)
+                    {
+                        color = RoomColor(dungeon, layout, roomCell, rng);
+
+                        int room;
+                        layout.owner.TryGetValue(roomCell, out room);
+
+                        int cellsInRoom;
+                        int doorsInRoom;
+                        if (!roomCells.TryGetValue(room, out cellsInRoom)) cellsInRoom = 1;
+                        if (!roomDoors.TryGetValue(room, out doorsInRoom)) doorsInRoom = 1;
+
+                        kind = DoorKindOf(dungeon, color, cellsInRoom, doorsInRoom);
+                    }
+
+                    var prefab = isDoor ? kind.frame : PrefabWall;
                     var (localPos, localRot) = WallPlacement(cell, neighbour);
 
                     var wall = GameManager.server.CreateEntity(prefab, parent.transform.position) as BuildingBlock;
@@ -1499,16 +1800,11 @@ namespace Oxide.Plugins
                     wall.SetParent(parent);
                     wall.transform.localPosition = localPos;
                     wall.transform.localRotation = localRot;
-                    PrepareBlock(dungeon, wall, BuildingGrade.Enum.Stone);
+                    PrepareBlock(dungeon, wall, WallGradeOf(dungeon, layout, cell, neighbour));
                     Adopt(dungeon, wall);
                     walls[key] = wall;
 
-                    if (isDoor)
-                    {
-                        var roomCell = layout.owner.ContainsKey(cell) && layout.owner[cell] >= 0 ? cell : neighbour;
-                        var color = RoomColor(dungeon, layout, roomCell, rng);
-                        HangDoor(dungeon, wall, DoorOf(dungeon, color));
-                    }
+                    if (isDoor) HangDoor(dungeon, wall, kind, layout, roomCell, color, rng);
                 }
             }
 
@@ -1544,7 +1840,7 @@ namespace Oxide.Plugins
                 ceiling.SetParent(pair.Value);
                 ceiling.transform.localPosition = new Vector3(0f, 3f, 0f);
                 ceiling.transform.localRotation = R0;
-                PrepareBlock(dungeon, ceiling, BuildingGrade.Enum.Stone);
+                PrepareBlock(dungeon, ceiling, GradeOf(dungeon, layout, pair.Key, Piece.Ceiling));
                 Adopt(dungeon, ceiling);
                 ceilings[pair.Key] = ceiling;
             }
@@ -1658,13 +1954,13 @@ namespace Oxide.Plugins
 
                 for (var i = 0; i < wantedCrates && i < forCrates.Count; i++)
                 {
-                    if (SpawnCrate(dungeon, floors, forCrates[i], prefabs[rng.Next(prefabs.Count)], rng))
+                    if (SpawnCrate(dungeon, layout, floors, forCrates[i], prefabs[rng.Next(prefabs.Count)], rng))
                         crates++;
                 }
 
                 for (var i = 0; i < wantedNpcs && i < forNpcs.Count; i++)
                 {
-                    if (SpawnNpc(dungeon, floors, forNpcs[i], color, rng)) npcs++;
+                    if (SpawnNpc(dungeon, layout, floors, forNpcs[i], color, rng)) npcs++;
                 }
             }
 
@@ -1684,14 +1980,20 @@ namespace Oxide.Plugins
                 // parece bug, e nao desenho.
                 if (rng.Next(100) < lootDensity)
                 {
-                    if (SpawnCrate(dungeon, floors, cell, corridorCrates[rng.Next(corridorCrates.Count)], rng))
+                    if (SpawnCrate(dungeon, layout, floors, cell, corridorCrates[rng.Next(corridorCrates.Count)], rng))
                         crates++;
 
                     continue;
                 }
 
-                if (rng.Next(100) < npcDensity && SpawnNpc(dungeon, floors, cell, null, rng)) npcs++;
+                if (rng.Next(100) < npcDensity && SpawnNpc(dungeon, layout, floors, cell, null, rng)) npcs++;
             }
+
+            // ####  O ACERTO DE CONTAS DAS FECHADURAS  ####
+            //
+            // Depois desta linha não nasce mais nada, então é aqui que
+            // se sabe se todo código achou um portador. Ver `SettleLocks`.
+            SettleLocks(dungeon);
 
             Debug("conteudo: " + crates + " caixas, " + npcs + " inimigos");
         }
@@ -1764,6 +2066,7 @@ namespace Oxide.Plugins
 
         private bool SpawnCrate(
             ActiveDungeon dungeon,
+            Layout layout,
             Dictionary<(int, int), BuildingBlock> floors,
             (int, int) cell,
             string prefab,
@@ -1781,6 +2084,21 @@ namespace Oxide.Plugins
             crate.EnableSaving(false);
             crate.Spawn();
             Adopt(dungeon, crate);
+
+            // ####  UMA LINHA DA FRENTE DAS PORTAS  ####
+            //
+            // Ver `TakeCodeNote`: ela devolve o papel do código de uma
+            // sala trancada, já marcado como entregue, ou `null`. A
+            // caixa é o portador só quando a receita pede
+            // (`lock.carrier: "crate"`).
+            var crateNote = TakeCodeNote(dungeon, layout, cell, "crate");
+            var crateBox = crate as StorageContainer;
+
+            if (crateNote != null)
+            {
+                if (crateBox == null || !crateNote.MoveToContainer(crateBox.inventory))
+                    crateNote.Remove();
+            }
 
             // A caixa de radtown se enche sozinha ao nascer: quem decide
             // o que cai e a tabela de loot do servidor, e e assim que o
@@ -1805,6 +2123,7 @@ namespace Oxide.Plugins
         /// </summary>
         private bool SpawnNpc(
             ActiveDungeon dungeon,
+            Layout layout,
             Dictionary<(int, int), BuildingBlock> floors,
             (int, int) cell,
             string color,
@@ -1823,6 +2142,21 @@ namespace Oxide.Plugins
             npc.EnableSaving(false);
             npc.Spawn();
             Adopt(dungeon, npc);
+
+            // ####  UMA LINHA DA FRENTE DAS PORTAS  ####
+            //
+            // Ver `TakeCodeNote`. O papel entra no inventário principal
+            // do cientista; QUE ELE CAIA quando o NPC morre é da frente
+            // do loot — o corpo do `ScientistNPC` leva o `containerMain`
+            // junto por padrão, mas quem confirma isso no jogo, e trata
+            // o caso de não levar, é ela.
+            var npcNote = TakeCodeNote(dungeon, layout, cell, "npc");
+
+            if (npcNote != null)
+            {
+                if (npc.inventory == null || !npcNote.MoveToContainer(npc.inventory.containerMain))
+                    npcNote.Remove();
+            }
 
             var navigator = npc.GetComponent<BaseNavigator>();
             if (navigator != null) navigator.CanUseNavMesh = false;
@@ -1947,37 +2281,107 @@ namespace Oxide.Plugins
             return color;
         }
 
-        /// <summary>A porta daquela cor, como o painel a definiu.</summary>
-        private string DoorOf(ActiveDungeon dungeon, string color)
-        {
-            if (dungeon.spec == null || dungeon.spec.rooms == null) return color;
+        // ============================================================
+        //  A PORTA QUE O PAINEL ESCOLHEU
+        //
+        //  ####  DOIS DEFEITOS QUE SÓ APARECEM DEPOIS  ####
+        //
+        //  O `DoorOf` antigo devolvia uma COR e casava `room.key` com
+        //  ela. Isso funcionava por coincidência: o painel grava
+        //  `key == color` nas três salas, e havia exatamente três
+        //  portas para três cores. Duas coisas quebravam:
+        //
+        //    1. o contrato PERMITE `key = "A"` — o `dungeons.ts` diz
+        //       `key: z.string().min(1).max(16)` e o `dungeon_rooms`
+        //       do plano diz "'A','B','C'... no modo planta". Com uma
+        //       chave dessas, o `DoorOf` NÃO ACHA a sala e devolve a
+        //       cor: o admin escolhe porta blindada, salva, constroi,
+        //       e recebe madeira sem uma linha no log. O `RoomSpecOf`,
+        //       três funções acima, já casava por `room.color` — duas
+        //       regras diferentes para a mesma pergunta, no mesmo
+        //       arquivo;
+        //
+        //    2. traduzir para cor só funciona enquanto houver uma
+        //       porta por cor. `cell_gate` não tem cor nenhuma.
+        //
+        //  Agora há UMA regra (`RoomSpecOf`, por cor) e o que viaja é
+        //  o TIPO da porta, que é o vocabulário do painel.
+        // ============================================================
 
-            foreach (var room in dungeon.spec.rooms)
+        /// <summary>Quantas células por porta antes de o cômodo virar funil.</summary>
+        private const int DefaultWideDoorCellsPerDoor = 4;
+
+        /// <summary>O tipo de porta que o painel pediu para aquela cor.</summary>
+        private string DoorTypeOf(ActiveDungeon dungeon, string color, int cells, int doors)
+        {
+            string fallback;
+            if (!DoorByColor.TryGetValue(color, out fallback)) fallback = DoorByColor["green"];
+
+            var room = RoomSpecOf(dungeon, color);
+            if (room == null) return fallback;
+
+            var wanted = string.IsNullOrEmpty(room.door) ? fallback : room.door;
+
+            // ####  A SALA GRANDE COM UMA PORTA E UM FUNIL  ####
+            //
+            // Nove células e uma folha de um metro põem três jogadores
+            // em fila indiana debaixo de fogo, e o cômodo que devia ser
+            // o prêmio vira o lugar onde eles morrem um por vez. A
+            // conta é CÉLULAS POR PORTA, e não células: um salão com
+            // quatro entradas já não afunila ninguém.
+            if (!string.IsNullOrEmpty(room.wideDoor))
             {
-                if (room != null && room.key == color && !string.IsNullOrEmpty(room.door))
-                {
-                    // A receita fala em madeira/metal/topo; o
-                    // construtor fala em verde/azul/vermelho. A
-                    // tradução é aqui, num lugar só.
-                    if (room.door == "wood") return "green";
-                    if (room.door == "metal") return "blue";
-                    if (room.door == "toptier") return "red";
-                }
+                var perDoor = cells / Mathf.Max(1, doors);
+                var threshold = room.wideDoorCellsPerDoor > 0
+                    ? room.wideDoorCellsPerDoor
+                    : DefaultWideDoorCellsPerDoor;
+
+                if (perDoor >= threshold) wanted = room.wideDoor;
             }
 
-            return color;
+            return wanted;
         }
 
-        private void HangDoor(ActiveDungeon dungeon, BuildingBlock frame, string color)
+        /// <summary>O tipo, já resolvido em bloco e folha.</summary>
+        private DoorKind DoorKindOf(ActiveDungeon dungeon, string color, int cells, int doors)
         {
-            string prefab;
-            if (!DoorByColor.TryGetValue(color, out prefab)) prefab = DoorByColor["green"];
+            var wanted = DoorTypeOf(dungeon, color, cells, doors);
 
-            var door = GameManager.server.CreateEntity(prefab, frame.transform.position);
+            DoorKind kind;
+            if (DoorCatalog.TryGetValue(wanted, out kind)) return kind;
+
+            // Um tipo que este plugin não conhece GRITA e cai na porta
+            // da cor. Silenciar aqui é como o `DoorOf` antigo fazia — e
+            // é assim que o admin passa uma semana achando que o painel
+            // não salva.
+            PrintWarning("porta desconhecida '" + wanted + "' na sala " + color
+                         + ": usando a porta padrão da cor. Tipos: "
+                         + string.Join(", ", DoorCatalog.Keys.ToArray()));
+
+            string fallback;
+            if (!DoorByColor.TryGetValue(color, out fallback)) fallback = DoorByColor["green"];
+
+            return DoorCatalog[fallback];
+        }
+
+        private void HangDoor(
+            ActiveDungeon dungeon,
+            BuildingBlock frame,
+            DoorKind kind,
+            Layout layout,
+            (int, int) roomCell,
+            string color,
+            System.Random rng)
+        {
+            // Vão aberto é uma escolha do admin (`door: "none"`), e não
+            // um erro: sem folha não há o que pendurar.
+            if (kind == null || string.IsNullOrEmpty(kind.leaf)) return;
+
+            var door = GameManager.server.CreateEntity(kind.leaf, frame.transform.position);
 
             if (door == null)
             {
-                // ####  O VÃO SEM PORTA É MUDO  ####
+                // ####  O VÃO SEM PORTA E MUDO  ####
                 //
                 // MEDIDO em 09/09/2026: eu troquei os prefabs e escrevi
                 // o caminho de cabeça — `door.hinged.wood/...` em vez de
@@ -1987,7 +2391,7 @@ namespace Oxide.Plugins
                 //
                 // Um prefab que não existe agora GRITA no log, com o
                 // caminho — que é a única informação que resolve.
-                PrintWarning("porta não criada: o prefab '" + prefab + "' não existe");
+                PrintWarning("porta não criada: o prefab '" + kind.leaf + "' não existe");
                 return;
             }
 
@@ -1998,6 +2402,371 @@ namespace Oxide.Plugins
             door.EnableSaving(false);
             door.Spawn();
             Adopt(dungeon, door);
+
+            if (IsLocked(dungeon, color)) LockDoor(dungeon, door, kind, layout, roomCell, color, rng);
+        }
+
+        // ============================================================
+        //  A FECHADURA E O CÓDIGO
+        //
+        //  ####  CINCO DÍGITOS TRANCAM PARA SEMPRE  ####
+        //
+        //  O `CodeLock.code` do servidor é uma STRING livre: a 1.3.4
+        //  põe "18549" no alçapão dela justamente para que ninguém o
+        //  abra, e "0" numa fechadura de planta. Mas o teclado do
+        //  CLIENTE tem quatro casas — um código de cinco dígitos não
+        //  pode ser digitado, e a sala fica lacrada sem nada na tela
+        //  dizendo por que.
+        //
+        //  Então o sorteio é de QUATRO, sempre, com zeros à esquerda.
+        //  Isso não é configurável de propósito: não há faixa útil do
+        //  outro lado, só uma masmorra quebrada.
+        // ============================================================
+
+        /// <summary>A config de fechadura de quem não mandou nenhuma.</summary>
+        private static readonly LockSpec DefaultLockSpec = new LockSpec();
+
+        private LockSpec LockConfigOf(ActiveDungeon dungeon) =>
+            dungeon.spec == null || dungeon.spec.doorLock == null
+                ? DefaultLockSpec
+                : dungeon.spec.doorLock;
+
+        /// <summary>Aquela cor tranca?</summary>
+        private bool IsLocked(ActiveDungeon dungeon, string color)
+        {
+            if (!LockConfigOf(dungeon).enabled) return false;
+
+            var room = RoomSpecOf(dungeon, color);
+            return room != null && room.locked;
+        }
+
+        /// <summary>Quatro dígitos que ninguém mais tem nesta masmorra.</summary>
+        private string NewCode(ActiveDungeon dungeon, System.Random rng)
+        {
+            var settings = LockConfigOf(dungeon);
+
+            if (settings.sharedCode && !string.IsNullOrEmpty(dungeon.sharedCode))
+                return dungeon.sharedCode;
+
+            string code = null;
+
+            for (var attempt = 0; attempt < 64 && code == null; attempt++)
+            {
+                var candidate = rng.Next(0, 10000).ToString("0000", CultureInfo.InvariantCulture);
+
+                // "0707" é a marca de alçapão das plantas herdadas (ver
+                // `IsEntranceHatchMarker`). Sorteá-lo não quebra nada
+                // hoje — a marca é lida do JSON, não do mundo —, mas
+                // poria o mesmo número em dois significados, e a
+                // próxima pessoa a depurar isso perderia uma tarde.
+                if (candidate == HatchMarkerCode) continue;
+                if (dungeon.usedCodes.Contains(candidate)) continue;
+
+                code = candidate;
+            }
+
+            // Trinta e duas salas trancadas na mesma masmorra é mais do
+            // que o teto do painel; se ainda assim o sorteio não achou
+            // um livre, repetir é melhor que não trancar.
+            if (code == null) code = rng.Next(0, 10000).ToString("0000", CultureInfo.InvariantCulture);
+
+            dungeon.usedCodes.Add(code);
+            if (settings.sharedCode) dungeon.sharedCode = code;
+
+            return code;
+        }
+
+        /// <summary>
+        /// Pendura o cadeado e tranca.
+        ///
+        /// ####  A ORDEM E A DA 1.3.4, E ELA FUNCIONA  ####
+        ///
+        /// `SetParent` no OSSO do encaixe (`GetSlotAnchorName`), pose
+        /// local zero, `Spawn`, e SÓ ENTÃO o código, a flag e o
+        /// `SetSlot`. Sem o osso, a fechadura nasce no centro da porta,
+        /// atravessada nela — e o jogador vê um teclado dentro da
+        /// madeira.
+        /// </summary>
+        private void LockDoor(
+            ActiveDungeon dungeon,
+            BaseEntity leaf,
+            DoorKind kind,
+            Layout layout,
+            (int, int) roomCell,
+            string color,
+            System.Random rng)
+        {
+            var door = leaf as Door;
+
+            if (door == null)
+            {
+                // ####  SALA TRANCADA SEM FECHADURA E PIOR QUE ABERTA  ####
+                //
+                // Nem toda folha do catálogo é uma `Door` com encaixe de
+                // cadeado. Se esta não for, a sala fica ABERTA e o log
+                // diz qual — em vez de o admin ver "trancada" no painel
+                // é uma porta que abre sozinha no jogo.
+                PrintWarning("a " + kind.label + " não aceita fechadura: a sala "
+                             + ColorLabel(color) + " fica destrancada");
+                return;
+            }
+
+            int roomId;
+            if (!layout.owner.TryGetValue(roomCell, out roomId) || roomId < 0) return;
+
+            RoomLock entry;
+            if (!dungeon.locks.TryGetValue(roomId, out entry))
+            {
+                entry = new RoomLock { roomId = roomId, color = color, code = NewCode(dungeon, rng) };
+
+                foreach (var pair in layout.owner)
+                    if (pair.Value == roomId) entry.cells.Add(pair.Key);
+
+                dungeon.locks[roomId] = entry;
+            }
+
+            var padlock = GameManager.server.CreateEntity(PrefabCodeLock, door.transform.position) as CodeLock;
+
+            if (padlock == null)
+            {
+                PrintWarning("fechadura não criada: o prefab '" + PrefabCodeLock + "' não existe");
+                return;
+            }
+
+            padlock.SetParent(door, door.GetSlotAnchorName(BaseEntity.Slot.Lock));
+            padlock.transform.localPosition = Vector3.zero;
+            padlock.transform.localRotation = Quaternion.identity;
+            padlock.OwnerID = 0UL;
+            padlock.EnableSaving(false);
+            padlock.Spawn();
+
+            padlock.code = entry.code;
+            padlock.hasCode = true;
+            padlock.SetFlagLocal(BaseEntity.Flags.Locked, true);
+            door.SetSlot(BaseEntity.Slot.Lock, padlock);
+            door.SetOpen(false);
+            padlock.SendNetworkUpdate();
+
+            // `Adopt` põe a marca que o `OnEntityTakeDamage` lê: sem
+            // ela, dois tiros de espingarda na fechadura resolvem o
+            // enigma inteiro.
+            Adopt(dungeon, padlock);
+            entry.locks.Add(padlock);
+        }
+
+        /// <summary>A cor, como o jogador a lê.</summary>
+        private static string ColorLabel(string color)
+        {
+            if (color == "blue") return "azul";
+            if (color == "red") return "vermelha";
+            return "verde";
+        }
+
+        // ============================================================
+        //  A FRONTEIRA COM A FRENTE DO LOOT
+        //
+        //  ####  DUAS METADES, E ELAS SE ENCONTRAM AQUI  ####
+        //
+        //  PORTAS (este arquivo, daqui para cima): a fechadura existe,
+        //  o código é sorteado, e há uma regra dizendo QUEM pode
+        //  carrega-lo.
+        //
+        //  LOOT (a outra frente): em que corpo o papel entra, se ele
+        //  sobrevive à morte do NPC, o que mais vem junto e o respawn.
+        //
+        //  O contrato entre as duas é este método mais UMA LINHA em
+        //  `SpawnNpc` e outra em `SpawnCrate`. `TakeCodeNote` devolve um
+        //  `Item` pronto — quem chama só precisa achar container para
+        //  ele — e já marcou a fechadura como entregue, então chamar
+        //  duas vezes não produz dois papeis do mesmo código.
+        //
+        //  ####  O PORTADOR NUNCA ESTA DENTRO DA SALA QUE ELE ABRE  ####
+        //
+        //  Isso NÃO é configurável, e não é capricho: o código da sala
+        //  vermelha guardado dentro da sala vermelha é uma porta que só
+        //  abre para quem já entrou. O jogador daria a volta na masmorra
+        //  inteira procurando um papel que estava do outro lado da porta
+        //  trancada.
+        // ============================================================
+
+        private Item TakeCodeNote(ActiveDungeon dungeon, Layout layout, (int, int) cell, string carrier)
+        {
+            if (dungeon.locks.Count == 0) return null;
+
+            var settings = LockConfigOf(dungeon);
+            if (settings.carrier != carrier) return null;
+
+            // `corridor` é o padrão porque é o que se lê sozinho: o
+            // guarda do corredor tem a chave da sala. `anywhere` deixa
+            // o papel cair em qualquer cômodo que não seja o trancado —
+            // útil quando a receita quase não tem NPC de corredor.
+            var scope = string.IsNullOrEmpty(settings.carrierScope) ? "corridor" : settings.carrierScope;
+
+            int owner;
+            var inCorridor = layout.owner.TryGetValue(cell, out owner) && owner < 0;
+
+            if (scope == "corridor" && !inCorridor) return null;
+
+            foreach (var entry in dungeon.locks.Values)
+            {
+                if (entry.delivered) continue;
+                if (entry.cells.Contains(cell)) continue;
+
+                var note = ItemManager.CreateByName("note", 1);
+
+                if (note == null)
+                {
+                    // O `note` existe no Rust de 09/09/2026 (conferido no
+                    // `Bundles/items/note.json` do server01, itemid
+                    // 1414245162). Se um update o renomear, a sala fica
+                    // trancada sem código — e o `SettleLocks` a abre.
+                    PrintWarning("o item 'note' não existe mais: o código da sala "
+                                 + ColorLabel(entry.color) + " não pode ser entregue");
+                    return null;
+                }
+
+                note.name = string.IsNullOrEmpty(settings.noteTitle)
+                    ? "Código da porta"
+                    : settings.noteTitle;
+
+                note.text = "A porta da sala " + ColorLabel(entry.color)
+                            + " abre com o código " + entry.code + ".";
+
+                entry.delivered = true;
+                return note;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// O acerto de contas das fechaduras, no fim da construção.
+        ///
+        /// ####  UMA SALA QUE NINGUÉM ABRE E UM DEFEITO MUDO  ####
+        ///
+        /// A porta nasce trancada antes de o conteúdo existir, e o
+        /// portador só aparece no `Populate`. Se a receita não tiver NPC
+        /// nenhum no corredor — ou se o admin puser `carrier: "none"` —
+        /// a sala fica lacrada para sempre, a masmorra sobe, a contagem
+        /// de peças fecha e ninguém descobre até um jogador desistir de
+        /// procurar o papel.
+        ///
+        /// Então o padrão é DESTRANCAR o que ficou sem portador, e
+        /// gritar qual foi. `onUndelivered: "keep"` existe para quem
+        /// quer mesmo a sala fechada (um evento em que o admin abre).
+        /// </summary>
+        private void SettleLocks(ActiveDungeon dungeon)
+        {
+            if (dungeon.locks.Count == 0) return;
+
+            var settings = LockConfigOf(dungeon);
+            var stranded = 0;
+
+            foreach (var entry in dungeon.locks.Values)
+            {
+                if (entry.delivered) continue;
+                stranded++;
+
+                if (settings.onUndelivered == "keep")
+                {
+                    PrintWarning("a sala " + ColorLabel(entry.color) + " ficou trancada com o código "
+                                 + entry.code + " e ninguém para entregá-lo (onUndelivered=keep)");
+                    continue;
+                }
+
+                foreach (var padlock in entry.locks)
+                {
+                    if (padlock == null || padlock.IsDestroyed) continue;
+
+                    padlock.SetFlagLocal(BaseEntity.Flags.Locked, false);
+                    padlock.SendNetworkUpdate();
+                }
+
+                PrintWarning("a sala " + ColorLabel(entry.color) + " foi DESTRANCADA: não havia onde pôr "
+                             + "o código " + entry.code + " fora dela. Ponha NPC no corredor, "
+                             + "troque `lock.carrier` ou ponha `lock.carrierScope` em 'anywhere'.");
+            }
+
+            Debug("fechaduras: " + dungeon.locks.Count + " sala(s), " + stranded + " sem portador");
+        }
+
+        /// <summary>Uma linha no chat de quem está lá dentro.</summary>
+        private void Announce(ActiveDungeon dungeon, string message)
+        {
+            foreach (var id in dungeon.inside)
+            {
+                var player = BasePlayer.FindByID(id);
+                if (player != null && player.IsConnected) player.ChatMessage(message);
+            }
+        }
+
+        // ============================================================
+        //  O GRAU DE CADA PEÇA
+        //
+        //  ####  ERA `Stone` CRAVADO EM SEIS LUGARES  ####
+        //
+        //  O painel prometia nível de construção e o construtor punha
+        //  pedra em tudo: fundação, parede, teto, corredor e entrada.
+        //  Agora o grau vem da receita, e vale POR TIPO DE PEÇA e POR
+        //  COR DE SALA — a sala vermelha pode ser blindada com o
+        //  corredor de madeira.
+        // ============================================================
+
+        private static BuildingGrade.Enum ParseGrade(string name, BuildingGrade.Enum fallback)
+        {
+            if (string.IsNullOrEmpty(name)) return fallback;
+
+            BuildingGrade.Enum grade;
+            return GradeByName.TryGetValue(name.ToLowerInvariant(), out grade) ? grade : fallback;
+        }
+
+        /// <summary>
+        /// O grau daquela peça naquela célula.
+        ///
+        /// A célula sem dono de sala — corredor, entrada, o que a planta
+        /// colou — usa o `structure` da masmorra. A célula de uma sala
+        /// usa o `grade` da COR dela, e cai no `structure` quando a cor
+        /// não definiu nenhum.
+        /// </summary>
+        private BuildingGrade.Enum GradeOf(ActiveDungeon dungeon, Layout layout, (int, int) cell, Piece piece)
+        {
+            var set = dungeon.spec == null ? null : dungeon.spec.structure;
+
+            int owner;
+            if (layout != null && layout.owner.TryGetValue(cell, out owner) && owner >= 0)
+            {
+                string color;
+                if (dungeon.roomColors.TryGetValue(owner, out color))
+                {
+                    var room = RoomSpecOf(dungeon, color);
+                    if (room != null && room.grade != null) set = room.grade;
+                }
+            }
+
+            if (set == null) return DefaultGrade;
+
+            if (piece == Piece.Foundation) return ParseGrade(set.foundation, DefaultGrade);
+            if (piece == Piece.Ceiling) return ParseGrade(set.ceiling, DefaultGrade);
+
+            return ParseGrade(set.wall, DefaultGrade);
+        }
+
+        /// <summary>
+        /// O grau de uma parede, que tem DOIS donos.
+        ///
+        /// Vence o lado mais forte. Uma sala blindada encostada numa de
+        /// madeira não pode ganhar parede de madeira: o admin escolheu
+        /// blindado para aquele cômodo, e uma única parede fraca torna a
+        /// escolha inteira decorativa — o invasor entra pelo lado barato.
+        /// </summary>
+        private BuildingGrade.Enum WallGradeOf(ActiveDungeon dungeon, Layout layout, (int, int) a, (int, int) b)
+        {
+            var mine = GradeOf(dungeon, layout, a, Piece.Wall);
+
+            if (!layout.cells.Contains(b)) return mine;
+
+            var theirs = GradeOf(dungeon, layout, b, Piece.Wall);
+            return theirs > mine ? theirs : mine;
         }
 
         /// <summary>
@@ -2028,7 +2797,7 @@ namespace Oxide.Plugins
 
             if (foundation == null) return 0;
 
-            PrepareBlock(dungeon, foundation, BuildingGrade.Enum.Stone);
+            PrepareBlock(dungeon, foundation, GradeOf(dungeon, null, (0, 0), Piece.Foundation));
             Adopt(dungeon, foundation);
             made++;
 
@@ -2045,7 +2814,7 @@ namespace Oxide.Plugins
                 frame.SetParent(foundation);
                 frame.transform.localPosition = new Vector3(0f, 3f, 0f);
                 frame.transform.localRotation = R0;
-                PrepareBlock(dungeon, frame, BuildingGrade.Enum.Stone);
+                PrepareBlock(dungeon, frame, GradeOf(dungeon, null, (0, 0), Piece.Ceiling));
                 Adopt(dungeon, frame);
                 made++;
 
@@ -2345,6 +3114,47 @@ namespace Oxide.Plugins
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
             active?.inside.Remove(player.userID);
+        }
+
+        /// <summary>
+        /// Alguém digitou um código.
+        ///
+        /// ####  ESTE GANCHO RECEBE O SERVIDOR INTEIRO  ####
+        ///
+        /// Toda fechadura de todo jogador passa por aqui. A marca no
+        /// `_name` — a mesma que o `OnEntityTakeDamage` usa — responde
+        /// "é nossa?" em uma comparação de string, antes de qualquer
+        /// outra coisa.
+        ///
+        /// Trancar é do plugin; PUNIR quem erra é do jogo: o `CodeLock`
+        /// do Rust já conta os erros (`wrongCodes`) e bloqueia o teclado
+        /// sozinho. Reimplementar isso aqui daria duas punições para o
+        /// mesmo engano, e a nossa não apareceria na interface.
+        /// </summary>
+        private void OnCodeEntered(CodeLock codeLock, BasePlayer player, string code)
+        {
+            if (active == null || codeLock == null || player == null) return;
+            if (codeLock._name != MarkIndestructible) return;
+
+            var settings = LockConfigOf(active);
+
+            if (code != codeLock.code)
+            {
+                if (settings.warnOnWrongCode)
+                    player.ChatMessage("Código errado. O papel com ele está com alguém aqui dentro.");
+
+                return;
+            }
+
+            if (!settings.announceOpen) return;
+
+            foreach (var entry in active.locks.Values)
+            {
+                if (!entry.locks.Contains(codeLock)) continue;
+
+                Announce(active, "A porta da sala " + ColorLabel(entry.color) + " foi aberta.");
+                return;
+            }
         }
 
         // ============================================================
@@ -3061,6 +3871,13 @@ namespace Oxide.Plugins
             public NpcSpec npc;
             public float timeOfDay;
             public List<RoomSpec> rooms;
+
+            /// <summary>O nível padrão das peças: corredor, entrada e o resto.</summary>
+            public GradeSpec structure;
+
+            /// <summary>A fechadura. Ver `LockSpec` sobre o nome.</summary>
+            [JsonProperty("lock")]
+            public LockSpec doorLock;
         }
 
         private class Range { public int min; public int max; }
@@ -3096,9 +3913,61 @@ namespace Oxide.Plugins
             public List<string> crates;
             public string door;
             public bool locked;
+            /// <summary>A porta da sala grande. Vazio = usa `door` sempre.</summary>
+            public string wideDoor;
+            /// <summary>Células por porta a partir das quais `wideDoor` vale. 0 = o padrão.</summary>
+            public int wideDoorCellsPerDoor;
+            /// <summary>O nível das peças desta cor. `null` = herda de `structure`.</summary>
+            public GradeSpec grade;
         }
 
         private class ZoneSpec { public float x; public float z; public float radius; }
+
+
+        /// <summary>
+        /// O nível de construção, por tipo de peça.
+        ///
+        /// Os nomes são os do painel (`twigs`|`wood`|`stone`|`metal`|
+        /// `toptier`) e não os do enum do jogo: o contrato é escrito uma
+        /// vez, em `core/src/types/dungeons.ts`, e o plugin traduz —
+        /// ver `GradeByName`.
+        /// </summary>
+        private class GradeSpec
+        {
+            public string foundation;
+            public string wall;
+            public string ceiling;
+        }
+
+        /// <summary>
+        /// Como a masmorra tranca, e como o código chega ao jogador.
+        ///
+        /// ####  `lock` E PALAVRA RESERVADA EM C#  ####
+        ///
+        /// O campo do JSON se chama `lock`, e um `public LockSpec lock;`
+        /// não compila. O `[JsonProperty]` resolve num lugar só — ver o
+        /// `DungeonSpec`. Renomear o campo do contrato seria mais
+        /// simples e mais errado: quem lê o JSON é o painel, e lá a
+        /// palavra certa é essa.
+        /// </summary>
+        private class LockSpec
+        {
+            public bool enabled = true;
+            /// <summary>Um código para a masmorra inteira, em vez de um por sala.</summary>
+            public bool sharedCode;
+            /// <summary>`npc` | `crate` | `none`.</summary>
+            public string carrier = "npc";
+            /// <summary>`corridor` | `anywhere`. Nunca dentro da sala trancada.</summary>
+            public string carrierScope = "corridor";
+            /// <summary>`unlock` | `keep`, quando ninguém recebeu o código.</summary>
+            public string onUndelivered = "unlock";
+            /// <summary>O nome do papel no inventário.</summary>
+            public string noteTitle;
+            /// <summary>Avisar quem está dentro quando uma porta abre.</summary>
+            public bool announceOpen = true;
+            /// <summary>Dizer a quem errou que ele errou.</summary>
+            public bool warnOnWrongCode = true;
+        }
 
         private SyncState state = new SyncState();
 
