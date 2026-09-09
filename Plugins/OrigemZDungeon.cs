@@ -1664,7 +1664,7 @@ namespace Oxide.Plugins
 
                 for (var i = 0; i < wantedNpcs && i < forNpcs.Count; i++)
                 {
-                    if (SpawnNpc(dungeon, floors, forNpcs[i], rng)) npcs++;
+                    if (SpawnNpc(dungeon, floors, forNpcs[i], color, rng)) npcs++;
                 }
             }
 
@@ -1690,7 +1690,7 @@ namespace Oxide.Plugins
                     continue;
                 }
 
-                if (rng.Next(100) < npcDensity && SpawnNpc(dungeon, floors, cell, rng)) npcs++;
+                if (rng.Next(100) < npcDensity && SpawnNpc(dungeon, floors, cell, null, rng)) npcs++;
             }
 
             Debug("conteudo: " + crates + " caixas, " + npcs + " inimigos");
@@ -1807,6 +1807,7 @@ namespace Oxide.Plugins
             ActiveDungeon dungeon,
             Dictionary<(int, int), BuildingBlock> floors,
             (int, int) cell,
+            string color,
             System.Random rng)
         {
             BuildingBlock floor;
@@ -1844,6 +1845,13 @@ namespace Oxide.Plugins
                 if (spec.weapons != null && spec.weapons.Count > 0)
                     GiveWeapon(npc, spec.weapons[rng.Next(spec.weapons.Count)]);
             }
+
+            // ####  A IA VEM POR ULTIMO  ####
+            //
+            // Depois da arma e da vida: o componente le as duas ao
+            // acordar, e ligado antes ele encontraria um cientista
+            // ainda pela metade.
+            AttachAi(npc, AiProfileFor(dungeon, color));
 
             return true;
         }
@@ -2882,7 +2890,18 @@ namespace Oxide.Plugins
         private void Adopt(ActiveDungeon dungeon, BaseEntity entity)
         {
             if (entity == null) return;
-            entity._name = MarkIndestructible;
+
+            // ####  O CIENTISTA NAO RECEBE A MARCA  ####
+            //
+            // Em `BasePlayer`, `_name` E o nome de exibicao: o que sai
+            // no kill feed e sobre a cabeca. Marcando tudo, um inimigo
+            // sem `names` na receita apareceria chamado "#ozdung#".
+            //
+            // Ele nao precisa da marca: quem a le e a protecao de
+            // estrutura, e `OnEntityTakeDamage` ja devolve cedo para
+            // qualquer `BasePlayer` — o cientista tem de poder morrer.
+            if (!(entity is BasePlayer)) entity._name = MarkIndestructible;
+
             dungeon.entities.Add(entity);
         }
 
@@ -3049,6 +3068,8 @@ namespace Oxide.Plugins
 
         private class CorridorSpec
         {
+            /// <summary>Como o inimigo do corredor se comporta. Ver `AiSpec`.</summary>
+            public AiSpec ai;
             public int npcDensity;
             public int lootDensity;
             public List<string> crates;
@@ -3056,6 +3077,8 @@ namespace Oxide.Plugins
 
         private class NpcSpec
         {
+            /// <summary>O comportamento padrao, do qual as cores herdam.</summary>
+            public AiSpec ai;
             public Range health;
             public float damageScale;
             public List<string> weapons;
@@ -3064,6 +3087,8 @@ namespace Oxide.Plugins
 
         private class RoomSpec
         {
+            /// <summary>O comportamento desta cor. Campo ausente herda do padrao.</summary>
+            public AiSpec ai;
             public string key;
             public string color;
             public Range npc;
@@ -3154,6 +3179,874 @@ namespace Oxide.Plugins
                 // completo.
                 PrintError("sync recusado, o estado anterior continua de pé: " + e.Message);
             }
+        }
+
+        // ============================================================
+        //  A IA DO INIMIGO
+        //
+        //  ####  ELA É NOSSA, E ISSO NÃO É PREFERÊNCIA  ####
+        //
+        //  A masmorra fica a y = -90. O mapa de navegação do Rust é
+        //  assado sobre o terreno, e ali não há terreno: NÃO EXISTE
+        //  NAVMESH. O `ScientistBrain` do jogo, deixado ligado, passa
+        //  o tempo pedindo ao `BaseNavigator` um caminho que não
+        //  existe — e o cientista escorrega pelo chão sem sair do
+        //  lugar.
+        //
+        //  Por isso o brain PARA de pensar (`AIThinkMode.None`, medido
+        //  em `BaseAIBrain.ShouldServerThink`: o modo 2 devolve false e
+        //  o `DoThink` nunca roda) e quem decide tudo é este
+        //  componente: um relógio de percepção e um de movimento, como
+        //  no DungeonBases 1.3.4 (linhas 904 e 956).
+        //
+        //  O que continua sendo do jogo, porque o jogo faz melhor:
+        //
+        //    · a MIRA — `HumanNPC.SetAimDirection` gira o olho E o
+        //      corpo (`ServerRotation`) e passa o aim pela arma, que
+        //      aplica o sway dela;
+        //    · o TIRO — `ScientistNPC.ShotTest(dist)` cuida da rajada,
+        //      da cadência da arma, do som, do efeito e da RECARGA.
+        //      Lido na IL: sem munição ele chama `ServerReload` e
+        //      devolve false; antes do `NextAttackTime` devolve false.
+        //      Chamar demais não faz o NPC atirar mais rápido que a
+        //      arma dele;
+        //    · a POSIÇÃO na rede — `ServerPosition` marca
+        //      `transform.hasChanged`, e é isso que o
+        //      `BasePlayer.NetworkPositionTick` do jogo procura para
+        //      mandar a nova posição aos clientes. Um
+        //      `SendNetworkUpdate` por tick seria trabalho repetido.
+        //
+        //  ####  TODO NÚMERO VEM DE CIMA  ####
+        //
+        //  Nada de constante de comportamento no meio da função: o
+        //  painel manda um bloco `ai` no `npc` (o padrão da masmorra),
+        //  e cada cor de sala — e o corredor — pode sobrescrever
+        //  campo a campo. O inimigo da sala vermelha não é o da verde.
+        //
+        //  As poucas constantes que sobraram são FÍSICA (altura do
+        //  peito, alcance da sonda de chão): mudá-las pelo painel não
+        //  produziria uma masmorra diferente, produziria um NPC
+        //  quebrado.
+        // ============================================================
+
+        /// <summary>
+        /// O que o painel mandou sobre o comportamento. Tudo opcional:
+        /// `null` quer dizer "não falei disso", e não "zero" — é o que
+        /// permite a sala vermelha mudar só a cadência e herdar o resto.
+        /// </summary>
+        private class AiSpec
+        {
+            // percepção
+            public float? visionRadius;
+            public bool? requireLineOfSight;
+            public float? loseTargetAfter;
+            public float? reactionDelay;
+            public float? maxTargetHeightDelta;
+            public bool? alertOnSpot;
+
+            // movimento
+            public bool? holdPosition;
+            public float? moveSpeed;
+            public float? chaseRadius;
+            public bool? returnHome;
+            public float? returnSpeed;
+            public float? arriveRadius;
+            public float? stuckTimeout;
+
+            // combate
+            public float? fireRange;
+            public float? fireInterval;
+            public float? standoffDistance;
+            public float? aimConeScale;
+
+            // ritmo
+            public float? senseInterval;
+            public float? moveInterval;
+        }
+
+        /// <summary>
+        /// A receita já resolvida: padrão da masmorra + o que a cor
+        /// daquela sala sobrescreveu, com cada número dentro da faixa.
+        ///
+        /// Existe separada do `AiSpec` porque o componente não pode
+        /// perguntar "veio ou não veio?" a cada tick — a essa altura a
+        /// pergunta já foi respondida.
+        /// </summary>
+        private class AiProfile
+        {
+            public float visionRadius = 18f;
+            public bool requireLineOfSight = true;
+            public float loseTargetAfter = 6f;
+            public float reactionDelay = 0.4f;
+            public float maxTargetHeightDelta = 3f;
+            public bool alertOnSpot = true;
+
+            public bool holdPosition;
+            public float moveSpeed = 2.8f;
+            public float chaseRadius = 25f;
+            public bool returnHome = true;
+            public float returnSpeed = 2.2f;
+            public float arriveRadius = 0.6f;
+            public float stuckTimeout = 6f;
+
+            public float fireRange = 15f;
+            public float fireInterval = 0.35f;
+            public float standoffDistance = 2.5f;
+
+            /// <summary>
+            /// A dispersão do tiro, como multiplicador do cone da arma
+            /// (medido na IL: `BaseProjectile.GetAIAimcone()` devolve
+            /// `npc.aimConeScale * arma.aiAimCone`). Menor = mais
+            /// certeiro.
+            ///
+            /// `null` de propósito: sem ordem do painel, o valor do
+            /// prefab do cientista fica de pé. Chutar um número aqui
+            /// seria mudar a dificuldade do servidor sem ninguém pedir.
+            /// </summary>
+            public float? aimConeScale;
+
+            public float senseInterval = 0.5f;
+            public float moveInterval = 0.2f;
+
+            /// <summary>
+            /// Aplica por cima o que veio do painel. Campo ausente não
+            /// toca em nada — é o que faz a herança funcionar.
+            /// </summary>
+            public void Apply(AiSpec spec)
+            {
+                if (spec == null) return;
+
+                if (spec.visionRadius.HasValue) visionRadius = Mathf.Clamp(spec.visionRadius.Value, 0f, 150f);
+                if (spec.requireLineOfSight.HasValue) requireLineOfSight = spec.requireLineOfSight.Value;
+                if (spec.loseTargetAfter.HasValue) loseTargetAfter = Mathf.Clamp(spec.loseTargetAfter.Value, 0f, 300f);
+                if (spec.reactionDelay.HasValue) reactionDelay = Mathf.Clamp(spec.reactionDelay.Value, 0f, 30f);
+                if (spec.maxTargetHeightDelta.HasValue) maxTargetHeightDelta = Mathf.Clamp(spec.maxTargetHeightDelta.Value, 0.5f, 50f);
+                if (spec.alertOnSpot.HasValue) alertOnSpot = spec.alertOnSpot.Value;
+
+                if (spec.holdPosition.HasValue) holdPosition = spec.holdPosition.Value;
+                if (spec.moveSpeed.HasValue) moveSpeed = Mathf.Clamp(spec.moveSpeed.Value, 0f, 12f);
+                if (spec.chaseRadius.HasValue) chaseRadius = Mathf.Clamp(spec.chaseRadius.Value, 0f, 250f);
+                if (spec.returnHome.HasValue) returnHome = spec.returnHome.Value;
+                if (spec.returnSpeed.HasValue) returnSpeed = Mathf.Clamp(spec.returnSpeed.Value, 0f, 12f);
+                if (spec.arriveRadius.HasValue) arriveRadius = Mathf.Clamp(spec.arriveRadius.Value, 0.1f, 10f);
+                if (spec.stuckTimeout.HasValue) stuckTimeout = Mathf.Clamp(spec.stuckTimeout.Value, 0f, 120f);
+
+                if (spec.fireRange.HasValue) fireRange = Mathf.Clamp(spec.fireRange.Value, 0f, 250f);
+                if (spec.fireInterval.HasValue) fireInterval = Mathf.Clamp(spec.fireInterval.Value, 0.05f, 60f);
+                if (spec.standoffDistance.HasValue) standoffDistance = Mathf.Clamp(spec.standoffDistance.Value, 0f, 100f);
+                if (spec.aimConeScale.HasValue) aimConeScale = Mathf.Clamp(spec.aimConeScale.Value, 0f, 20f);
+
+                if (spec.senseInterval.HasValue) senseInterval = Mathf.Clamp(spec.senseInterval.Value, 0.1f, 10f);
+                if (spec.moveInterval.HasValue) moveInterval = Mathf.Clamp(spec.moveInterval.Value, 0.05f, 2f);
+            }
+        }
+
+        /// <summary>
+        /// A receita daquele inimigo: o padrão da masmorra com a cor da
+        /// sala por cima. `color` nulo = corredor.
+        /// </summary>
+        private AiProfile AiProfileFor(ActiveDungeon dungeon, string color)
+        {
+            var profile = new AiProfile();
+            if (dungeon == null || dungeon.spec == null) return profile;
+
+            if (dungeon.spec.npc != null) profile.Apply(dungeon.spec.npc.ai);
+
+            if (color == null)
+            {
+                if (dungeon.spec.corridor != null) profile.Apply(dungeon.spec.corridor.ai);
+                return profile;
+            }
+
+            var room = RoomSpecOf(dungeon, color);
+            if (room != null) profile.Apply(room.ai);
+
+            return profile;
+        }
+
+        /// <summary>
+        /// Liga a IA no cientista recém-nascido.
+        ///
+        /// ####  A ORDEM AQUI IMPORTA  ####
+        ///
+        /// O brain só para de pensar DEPOIS do `Spawn()` — antes dele o
+        /// `ServerInit` do cientista ainda não montou os estados, e o
+        /// `SetThinkMode` cairia num objeto que o próprio jogo
+        /// reinicializa em seguida.
+        /// </summary>
+        private void AttachAi(ScientistNPC npc, AiProfile profile)
+        {
+            if (npc == null || profile == null) return;
+
+            // ####  O BRAIN CALA A BOCA  ####
+            //
+            // `AIThinkMode.None` faz o `ShouldServerThink` devolver
+            // false (lido na IL do `BaseAIBrain`), e com isso o
+            // `DoThink` nunca roda: nada de RoamState procurando ponto
+            // de patrulha, nada de ChaseState pedindo caminho ao
+            // navigator. Sem isto, dois donos disputam o mesmo NPC e
+            // ele treme no lugar.
+            var brain = npc.Brain;
+            if (brain != null)
+            {
+                brain.SetThinkMode(AIThinkMode.None);
+                if (brain.Navigator != null) brain.Navigator.Stop();
+            }
+
+            // A -90 não há NavMesh nem grafo A*: qualquer um destes
+            // ligado é trabalho jogado fora a cada tick.
+            var navigator = npc.GetComponent<BaseNavigator>();
+            if (navigator != null)
+            {
+                navigator.CanUseNavMesh = false;
+                navigator.CanUseAStar = false;
+                navigator.CanUseBaseNav = false;
+                navigator.CanUseCustomNav = false;
+            }
+
+            if (profile.aimConeScale.HasValue) npc.aimConeScale = profile.aimConeScale.Value;
+
+            // Sem isto o cientista fica com a arma na cintura: o
+            // `ShotTest` procura o item ATIVO, e um NPC de mãos vazias
+            // persegue em silêncio.
+            npc.EquipWeapon();
+
+            npc.gameObject.AddComponent<DungeonNpcAi>().Setup(npc, profile);
+        }
+
+        /// <summary>
+        /// O inimigo: percebe, persegue, atira e volta para o posto.
+        ///
+        /// Vive como componente do próprio NPC porque é assim que ele
+        /// morre junto: `Kill()` destrói o `GameObject`, o `OnDestroy`
+        /// cancela os dois relógios e não sobra nada rodando. A base
+        /// 1.3.4 usa `timer.Every` do Oxide e o de movimento (linha
+        /// 956) NUNCA é destruído — ele continua acordando de 0,2 em
+        /// 0,2 segundo para cada cientista já morto, até o plugin
+        /// descarregar.
+        /// </summary>
+        private class DungeonNpcAi : FacepunchBehaviour
+        {
+            // ####  AS CONSTANTES QUE NÃO SÃO DE PAINEL  ####
+            //
+            // Física do boneco e das sondas. Um admin que mexesse
+            // nelas não teria uma masmorra mais difícil, teria um
+            // cientista atravessando parede ou enterrado no chão.
+
+            /// <summary>De onde sai a sonda que procura parede.</summary>
+            private const float ChestHeight = 1.1f;
+
+            /// <summary>A largura do boneco, para ele não raspar na quina.</summary>
+            private const float BodyRadius = 0.5f;
+
+            /// <summary>Quanto a sonda de chão começa acima e termina abaixo.</summary>
+            private const float GroundProbeUp = 1f;
+            private const float GroundProbeDown = 2f;
+
+            /// <summary>Para que lado ele tenta contornar o que barrou o passo.</summary>
+            private const float SideStepAngle = 45f;
+
+            /// <summary>Distância entre duas migalhas da trilha.</summary>
+            private const float TrailSpacing = 1.5f;
+
+            /// <summary>
+            /// Teto da trilha. Com 1,5 m entre migalhas isso é uma
+            /// perseguição de 90 metros — mais que qualquer
+            /// `chaseRadius` sensato. Cheia, ela para de crescer: jogar
+            /// fora a migalha mais antiga apagaria justamente o caminho
+            /// de volta.
+            /// </summary>
+            private const int MaxTrail = 64;
+
+            /// <summary>
+            /// Quanto ele precisa se mexer para não ser considerado
+            /// preso.
+            /// </summary>
+            private const float StuckDistance = 0.75f;
+
+            /// <summary>
+            /// O que barra o passo: construção, mundo, deployáveis e o
+            /// que estiver no Default. Jogadores e outros cientistas
+            /// ficam DE FORA de propósito — se entrassem, um NPC
+            /// atravessando a porta travaria a fila inteira atrás dele.
+            ///
+            /// Os números são os do `Rust.Layer`, medidos no
+            /// Assembly-CSharp de 09/09/2026: Default 0, Deployed 8,
+            /// World 16, Construction 21.
+            /// </summary>
+            private const int ObstacleMask = (1 << 0) | (1 << 8) | (1 << 16) | (1 << 21);
+
+            /// <summary>
+            /// O que serve de chão. Sem Deployed: senão ele sobe na
+            /// caixa de loot e fica lá em cima.
+            /// </summary>
+            private const int GroundMask = (1 << 0) | (1 << 16) | (1 << 21) | (1 << 23);
+
+            /// <summary>
+            /// O que corta a linha de visada. É o de cima mais
+            /// Player_Server (17): um colega na frente segura o tiro, e
+            /// é isso que evita o NPC matar o NPC pelas costas.
+            /// </summary>
+            private const int SightMask = ObstacleMask | (1 << 17);
+
+            // ####  A LISTA DE CANDIDATOS É UMA SÓ  ####
+            //
+            // Varrer `activePlayerList` uma vez POR NPC e POR TICK é
+            // trabalho multiplicado por nada: são 30 cientistas
+            // olhando a mesma lista de 100 jogadores. Aqui a varredura
+            // acontece uma vez por `CandidateRefresh`, e o que sobra
+            // para cada NPC é uma lista do tamanho de "quem está lá
+            // embaixo" — quase sempre zero ou um.
+            //
+            // Estático porque a masmorra é UMA por servidor (ver
+            // `active`). No dia em que forem duas, isto vira um campo
+            // do `ActiveDungeon`.
+            private static readonly List<BasePlayer> Candidates = new List<BasePlayer>();
+            private static float candidatesAt = float.MinValue;
+            private static float candidatesCeiling = float.MaxValue;
+            private const float CandidateRefresh = 0.4f;
+
+            private ScientistNPC npc;
+            private AiProfile profile;
+
+            private Vector3 home;
+            private Vector3 homeAim;
+
+            private BasePlayer target;
+            private bool targetVisible;
+            private Vector3 lastKnownPosition;
+            private float lastSeenAt;
+            private float spottedAt;
+
+            /// <summary>Onde o alvo pisou. É por aqui que ele contorna a parede.</summary>
+            private readonly List<Vector3> targetTrail = new List<Vector3>();
+
+            /// <summary>Onde ELE pisou. É por aqui que ele volta.</summary>
+            private readonly List<Vector3> homeTrail = new List<Vector3>();
+
+            private bool goingHome;
+            private float lastMoveAt;
+            private float nextShotAt;
+            private Vector3 stuckAnchor;
+            private float stuckSince;
+
+            public void Setup(ScientistNPC owner, AiProfile settings)
+            {
+                npc = owner;
+                profile = settings;
+
+                home = owner.ServerPosition;
+                homeAim = owner.eyes != null ? owner.eyes.BodyForward() : owner.transform.forward;
+                if (homeAim.sqrMagnitude < 0.001f) homeAim = Vector3.forward;
+                homeAim.y = 0f;
+                if (homeAim.sqrMagnitude < 0.001f) homeAim = Vector3.forward;
+
+                lastMoveAt = Time.time;
+                stuckAnchor = home;
+                stuckSince = Time.time;
+
+                // Quem está na masmorra está abaixo disto. É o filtro
+                // que mantém a lista de candidatos curta sem varrer
+                // distância para cada um dos 100 jogadores do servidor.
+                candidatesCeiling = home.y + 30f;
+
+                // ####  O PRIMEIRO TICK É SORTEADO  ####
+                //
+                // Trinta cientistas nascidos no mesmo frame pensariam
+                // todos no mesmo frame para sempre. Espalhar o começo
+                // custa uma linha e tira o pico do servidor.
+                InvokeRepeating(Sense, UnityEngine.Random.Range(0f, profile.senseInterval), profile.senseInterval);
+                InvokeRepeating(Move, UnityEngine.Random.Range(0f, profile.moveInterval), profile.moveInterval);
+            }
+
+            private void OnDestroy()
+            {
+                CancelInvoke(Sense);
+                CancelInvoke(Move);
+            }
+
+            /// <summary>
+            /// Levou um tiro: passa a saber de quem, mesmo sem ter
+            /// visto. É o que a base 1.3.4 faz na linha 2144, e sem
+            /// isso um jogador mata a sala inteira pelas costas sem
+            /// ninguém virar.
+            /// </summary>
+            public void OnHurtBy(BasePlayer attacker)
+            {
+                if (attacker == null || npc == null || profile == null) return;
+                if (attacker.IsNpc) return;
+
+                if (target != attacker)
+                {
+                    target = attacker;
+                    spottedAt = Time.time;
+                    targetTrail.Clear();
+                }
+
+                targetVisible = false;
+                lastSeenAt = Time.time;
+                lastKnownPosition = attacker.transform.position;
+                goingHome = false;
+            }
+
+            // ------------------------------------------------------------
+            //  PERCEPÇÃO
+            // ------------------------------------------------------------
+
+            private void Sense()
+            {
+                if (npc == null || npc.IsDestroyed || !npc.IsAlive())
+                {
+                    CancelInvoke(Sense);
+                    CancelInvoke(Move);
+                    return;
+                }
+
+                var eye = npc.eyes == null ? npc.ServerPosition : npc.eyes.position;
+
+                // O alvo de agora ainda serve?
+                if (target != null && !Eligible(target)) Forget();
+
+                var best = target;
+                var bestScore = float.MaxValue;
+                var bestVisible = false;
+
+                RefreshCandidates();
+
+                for (var i = 0; i < Candidates.Count; i++)
+                {
+                    var candidate = Candidates[i];
+                    if (!Eligible(candidate)) continue;
+
+                    var position = candidate.transform.position;
+                    var distance = Vector3.Distance(eye, position);
+                    if (distance > profile.visionRadius) continue;
+
+                    // ####  O ANDAR DE CIMA NÃO CONTA  ####
+                    //
+                    // Sem isto o cientista do lobby persegue quem está
+                    // no alçapão da superfície, 90 metros acima, e fica
+                    // girando embaixo dele. A base usa 2,5 m (linha
+                    // 967); aqui o número é do painel.
+                    if (Mathf.Abs(position.y - npc.ServerPosition.y) > profile.maxTargetHeightDelta) continue;
+
+                    var visible = !profile.requireLineOfSight || HasSight(candidate, eye, distance);
+                    if (!visible) continue;
+
+                    // O mais perto ganha; empate não existe na prática.
+                    if (distance >= bestScore) continue;
+
+                    bestScore = distance;
+                    best = candidate;
+                    bestVisible = true;
+                }
+
+                if (bestVisible)
+                {
+                    if (target != best)
+                    {
+                        target = best;
+                        spottedAt = Time.time;
+                        targetTrail.Clear();
+
+                        // O grito do cientista é a única pista sonora
+                        // que o jogador tem de que foi visto.
+                        if (profile.alertOnSpot) npc.Alert();
+                    }
+
+                    targetVisible = true;
+                    lastSeenAt = Time.time;
+                    lastKnownPosition = best.transform.position;
+                    goingHome = false;
+
+                    Breadcrumb(targetTrail, lastKnownPosition);
+                    return;
+                }
+
+                targetVisible = false;
+
+                // Perdeu de vista: ele ainda vai até onde viu por
+                // último, e só depois desiste.
+                if (target != null && Time.time - lastSeenAt > profile.loseTargetAfter) Forget();
+            }
+
+            /// <summary>
+            /// A lista de quem pode ser alvo, refeita no máximo a cada
+            /// `CandidateRefresh` para o servidor inteiro.
+            /// </summary>
+            private static void RefreshCandidates()
+            {
+                if (Time.time - candidatesAt < CandidateRefresh) return;
+                candidatesAt = Time.time;
+
+                Candidates.Clear();
+
+                var everyone = BasePlayer.activePlayerList;
+                for (var i = 0; i < everyone.Count; i++)
+                {
+                    var player = everyone[i];
+                    if (player == null || player.IsNpc) continue;
+                    if (!player.IsAlive() || player.IsSleeping()) continue;
+                    if (player.IsSpectating()) continue;
+                    if (player.transform.position.y > candidatesCeiling) continue;
+
+                    Candidates.Add(player);
+                }
+            }
+
+            private bool Eligible(BasePlayer player)
+            {
+                return player != null
+                       && !player.IsDestroyed
+                       && player.IsAlive()
+                       && !player.IsSleeping()
+                       && !player.IsSpectating();
+            }
+
+            private void Forget()
+            {
+                target = null;
+                targetVisible = false;
+                targetTrail.Clear();
+
+                goingHome = profile.returnHome;
+
+                // Quem não volta larga a trilha: guardada, ela levaria
+                // a próxima perseguição de volta por um caminho que
+                // começa onde ele não está mais.
+                if (!goingHome) homeTrail.Clear();
+            }
+
+            /// <summary>
+            /// Enxerga daqui até lá?
+            ///
+            /// ####  O PRIMEIRO QUE O RAIO ENCONTRA DECIDE  ####
+            ///
+            /// Se for o próprio alvo, há visada; qualquer outra coisa é
+            /// parede, porta ou colega. É o teste da base (linha 926),
+            /// com duas correções: o raio sai do OLHO — e não dos pés,
+            /// onde a fundação da própria célula o interrompia — e a
+            /// máscara é positiva, para caber num comentário.
+            ///
+            /// O raio que começa dentro do próprio colisor não o
+            /// devolve (é como o PhysX trata volume convexo), então o
+            /// cientista não enxerga a si mesmo como obstáculo.
+            /// </summary>
+            private bool HasSight(BasePlayer candidate, Vector3 eye, float distance)
+            {
+                var targetEye = candidate.eyes == null
+                    ? candidate.transform.position + Vector3.up * 1.5f
+                    : candidate.eyes.position;
+
+                var direction = targetEye - eye;
+                if (direction.sqrMagnitude < 0.0001f) return true;
+
+                RaycastHit hit;
+                if (!Physics.Raycast(eye, direction.normalized, out hit, distance + 0.5f, SightMask)) return true;
+
+                var blocker = hit.GetEntity();
+                return blocker == candidate || blocker == npc;
+            }
+
+            // ------------------------------------------------------------
+            //  MOVIMENTO E COMBATE
+            // ------------------------------------------------------------
+
+            private void Move()
+            {
+                if (npc == null || npc.IsDestroyed || !npc.IsAlive())
+                {
+                    CancelInvoke(Sense);
+                    CancelInvoke(Move);
+                    return;
+                }
+
+                var now = Time.time;
+                var delta = Mathf.Min(now - lastMoveAt, 1f);
+                lastMoveAt = now;
+
+                var position = npc.ServerPosition;
+
+                if (target != null)
+                {
+                    // ####  ELE SÓ ENCARA O QUE ESTÁ VENDO  ####
+                    //
+                    // `SetAimDirection` gira o CORPO junto com o olho
+                    // (medido na IL: ela termina em `ServerRotation`).
+                    // Mirar no alvo sem visada faria o cientista girar
+                    // para acompanhar o jogador ATRAVÉS da parede — e
+                    // não há defeito que pareça mais trapaça que esse.
+                    // Sem visada ele encara para onde anda.
+                    if (targetVisible) AimAt(target.eyes == null
+                        ? target.transform.position + Vector3.up * 1.5f
+                        : target.eyes.position);
+
+                    Shoot(position);
+
+                    if (!profile.holdPosition)
+                    {
+                        Chase(position, delta);
+                        CheckStuck(position, now);
+                    }
+
+                    return;
+                }
+
+                // Sem alvo: ou volta para o posto, ou fica olhando para
+                // onde nasceu — o que evita o cientista de costas para
+                // a porta que ele deveria guardar.
+                if (goingHome && !profile.holdPosition)
+                {
+                    GoHome(position, delta);
+                    CheckStuck(position, now);
+                    return;
+                }
+
+                npc.SetAimDirection(homeAim);
+                stuckSince = now;
+            }
+
+            private void AimAt(Vector3 point)
+            {
+                var eye = npc.eyes == null ? npc.ServerPosition : npc.eyes.position;
+                var to = point - eye;
+
+                // `SetAimDirection` ignora o vetor zero — e o corpo
+                // ficaria travado na direção anterior.
+                if (to.sqrMagnitude < 0.0001f) return;
+
+                npc.SetAimDirection(to.normalized);
+            }
+
+            /// <summary>
+            /// Puxa o gatilho, se for a hora.
+            ///
+            /// Quem cuida da rajada, do intervalo entre tiros e da
+            /// recarga é o `ShotTest` do jogo. O que está aqui é o que
+            /// ele NÃO decide: se enxerga, se está no alcance que o
+            /// painel deu, e quanto tempo depois de avistar ele começa.
+            /// </summary>
+            private void Shoot(Vector3 position)
+            {
+                if (!targetVisible && profile.requireLineOfSight) return;
+                if (Time.time < nextShotAt) return;
+                if (Time.time - spottedAt < profile.reactionDelay) return;
+
+                var distance = Vector3.Distance(position, target.transform.position);
+                if (distance > profile.fireRange) return;
+
+                npc.ShotTest(distance);
+                nextShotAt = Time.time + profile.fireInterval;
+            }
+
+            private void Chase(Vector3 position, float delta)
+            {
+                var distance = Vector3.Distance(position, target.transform.position);
+
+                // Chegou perto o bastante: daqui ele atira, não abraça.
+                if (targetVisible && distance <= profile.standoffDistance)
+                {
+                    stuckSince = Time.time;
+                    return;
+                }
+
+                Breadcrumb(homeTrail, position);
+
+                Vector3 destination;
+
+                if (targetVisible)
+                {
+                    // Com o alvo à vista, a trilha dele não serve para
+                    // nada: o caminho é a linha reta.
+                    destination = target.transform.position;
+                    targetTrail.Clear();
+                }
+                else
+                {
+                    // Sem visada, ele pisa onde o jogador pisou — e é
+                    // assim que ele dobra o corredor sem NavMesh. As
+                    // migalhas que já ficaram para trás são jogadas
+                    // fora antes, senão ele anda de volta para pegá-las.
+                    while (targetTrail.Count > 0 && Flat(position, targetTrail[0]) < profile.arriveRadius)
+                        targetTrail.RemoveAt(0);
+
+                    destination = targetTrail.Count > 0 ? targetTrail[0] : lastKnownPosition;
+
+                    // Sem ver, ele encara o caminho — nunca o jogador.
+                    AimAt(new Vector3(destination.x, destination.y + 1.5f, destination.z));
+                }
+
+                Step(position, destination, profile.moveSpeed, delta);
+            }
+
+            private void GoHome(Vector3 position, float delta)
+            {
+                // A trilha de volta é consumida do fim para o começo: o
+                // último lugar em que ele esteve é o mais perto dele
+                // agora.
+                while (homeTrail.Count > 0 && Flat(position, homeTrail[homeTrail.Count - 1]) < profile.arriveRadius)
+                    homeTrail.RemoveAt(homeTrail.Count - 1);
+
+                var destination = homeTrail.Count > 0 ? homeTrail[homeTrail.Count - 1] : home;
+
+                if (homeTrail.Count == 0 && Flat(position, home) < profile.arriveRadius)
+                {
+                    // Chegou. Daqui ele volta a olhar para onde nasceu
+                    // — parado de costas para a porta que guarda seria
+                    // pior que não voltar.
+                    goingHome = false;
+                    npc.SetAimDirection(homeAim);
+                    return;
+                }
+
+                AimAt(new Vector3(destination.x, destination.y + 1.5f, destination.z));
+                Step(position, destination, profile.returnSpeed, delta);
+            }
+
+            /// <summary>
+            /// Um passo na direção do destino, se houver por onde.
+            ///
+            /// ####  NUNCA ATRAVESSA A PAREDE, NUNCA SAI DA MASMORRA  ####
+            ///
+            /// Duas travas, e as duas são de segurança, não de
+            /// desempenho: a sonda à frente impede o passo dentro da
+            /// parede — a IA move o boneco por código, e código não tem
+            /// colisão — e a coleira do posto impede que a perseguição
+            /// leve o cientista para fora do que foi construído.
+            /// </summary>
+            private void Step(Vector3 position, Vector3 destination, float speed, float delta)
+            {
+                if (speed <= 0f) return;
+
+                var flat = new Vector3(destination.x - position.x, 0f, destination.z - position.z);
+                var distance = flat.magnitude;
+                if (distance < 0.01f) return;
+
+                var direction = flat / distance;
+                var step = Mathf.Min(speed * delta, distance);
+
+                if (!Free(position, direction, step))
+                {
+                    var left = Quaternion.Euler(0f, SideStepAngle, 0f) * direction;
+                    var right = Quaternion.Euler(0f, -SideStepAngle, 0f) * direction;
+
+                    if (Free(position, left, step)) direction = left;
+                    else if (Free(position, right, step)) direction = right;
+                    else return;
+                }
+
+                var next = position + direction * step;
+
+                // A coleira. Ela vale para os dois modos: perseguindo
+                // ele não passa do raio, voltando ele já está dentro.
+                if (!goingHome && Flat(next, home) > profile.chaseRadius) return;
+
+                next.y = GroundAt(next, position.y);
+                npc.ServerPosition = next;
+            }
+
+            private static bool Free(Vector3 position, Vector3 direction, float step)
+            {
+                return !Physics.Raycast(
+                    position + Vector3.up * ChestHeight, direction, step + BodyRadius, ObstacleMask);
+            }
+
+            /// <summary>
+            /// A altura do piso naquele ponto.
+            ///
+            /// Sem isto o cientista mantém a altura em que nasceu e vai
+            /// afundando ou flutuando pela masmorra — a IA move o
+            /// boneco por código, e código não tem gravidade. Sem
+            /// acertar nada, ele fica na altura que estava: é melhor
+            /// que cair para sempre.
+            /// </summary>
+            private static float GroundAt(Vector3 point, float fallback)
+            {
+                RaycastHit hit;
+                if (Physics.Raycast(point + Vector3.up * GroundProbeUp, Vector3.down, out hit,
+                        GroundProbeUp + GroundProbeDown, GroundMask))
+                    return hit.point.y;
+
+                return fallback;
+            }
+
+            /// <summary>
+            /// Preso? Volta para o posto.
+            ///
+            /// Uma quina em que a sonda barra os três lados travaria o
+            /// cientista para sempre — e o jogador encontraria um
+            /// inimigo dançando contra a parede. O teleporte é feio, e
+            /// é melhor que isso.
+            /// </summary>
+            private void CheckStuck(Vector3 position, float now)
+            {
+                if (profile.stuckTimeout <= 0f) return;
+
+                if (Vector3.Distance(position, stuckAnchor) > StuckDistance)
+                {
+                    stuckAnchor = position;
+                    stuckSince = now;
+                    return;
+                }
+
+                if (now - stuckSince < profile.stuckTimeout) return;
+
+                npc.ServerPosition = home;
+                stuckAnchor = home;
+                stuckSince = now;
+                homeTrail.Clear();
+                targetTrail.Clear();
+                goingHome = false;
+            }
+
+            private static void Breadcrumb(List<Vector3> trail, Vector3 point)
+            {
+                if (trail.Count >= MaxTrail) return;
+                if (trail.Count > 0 && Vector3.Distance(trail[trail.Count - 1], point) < TrailSpacing) return;
+
+                trail.Add(point);
+            }
+
+            /// <summary>Distância no plano. A altura aqui só atrapalha.</summary>
+            private static float Flat(Vector3 a, Vector3 b)
+            {
+                var dx = a.x - b.x;
+                var dz = a.z - b.z;
+                return Mathf.Sqrt(dx * dx + dz * dz);
+            }
+        }
+
+        /// <summary>
+        /// O tiro que acerta o cientista.
+        ///
+        /// ####  DUAS COISAS, E AS DUAS FORAM MEDIDAS NA BASE  ####
+        ///
+        /// A primeira: cientista não mata cientista. Uma rajada que
+        /// atravessa o colega faria a sala se dizimar sozinha enquanto
+        /// o jogador assiste — e o `damageScale` que o painel deu para
+        /// o jogador vale contra ele também.
+        ///
+        /// A segunda: levar tiro é uma forma de perceber. Sem isto, um
+        /// jogador de mira boa limpa a masmorra pelas costas sem
+        /// ninguém virar (base 1.3.4, linha 2121).
+        /// </summary>
+        private object OnEntityTakeDamage(ScientistNPC npc, HitInfo info)
+        {
+            if (npc == null || info == null) return null;
+
+            var ai = npc.GetComponent<DungeonNpcAi>();
+            if (ai == null) return null;
+
+            var initiator = info.Initiator;
+
+            if (initiator is ScientistNPC && initiator.GetComponent<DungeonNpcAi>() != null)
+            {
+                info.damageTypes.ScaleAll(0f);
+                return null;
+            }
+
+            ai.OnHurtBy(info.InitiatorPlayer);
+            return null;
         }
 
         private class SyncPayload
