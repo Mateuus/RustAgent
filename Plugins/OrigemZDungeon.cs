@@ -95,12 +95,56 @@ namespace Oxide.Plugins
         private const string PrefabHatch = "assets/bundled/prefabs/static/door.hinged.bunker_hatch.prefab";
         private const string PrefabCeilingLight = "assets/prefabs/deployable/ceiling light/ceilinglight.deployed.prefab";
 
+        /// <summary>
+        /// Quanto a tampa precisa andar para ficar centrada no piso.
+        ///
+        /// Uma `Door` do Rust gira em torno da dobradiça, e é ali que
+        /// fica a origem dela — não no meio. Sem este metro, a tampa
+        /// nasce encostada na quina da célula.
+        ///
+        /// É o mesmo valor que o `ConvertToHatch` usa há tempos para as
+        /// marcas de planta (`rotation * Vector3.right`); ele só não
+        /// estava nomeado.
+        /// </summary>
+        private const float HatchPivotOffset = 1f;
+
+        /// <summary>
+        /// O inimigo da masmorra.
+        ///
+        /// E o mesmo que a base 1.3.4 usa. Ele nasce com armadura e arma
+        /// proprias; a receita do painel troca as duas.
+        /// </summary>
+        private const string PrefabScientist =
+            "assets/rust.ai/agents/npcplayer/humannpc/scientist/scientistnpc_heavy.prefab";
+
         /// <summary>A porta de cada cor de sala. Verde é a mais barata.</summary>
+        /// <summary>
+        /// A porta de cada cor.
+        ///
+        /// ####  PORTAS DE CONSTRUÇÃO, E NÃO AS DE MONUMENTO  ####
+        ///
+        /// Elas eram as `door.hinged.security.{green,blue,red}` — as
+        /// coloridas dos monumentos, que combinavam com as cores das
+        /// salas e eram lindas.
+        ///
+        /// E não abriam. MEDIDO em 09/09/2026, pelo dono, de dentro da
+        /// masmorra: o jogo só oferecia "TOC... TOC...". Aquelas portas
+        /// são acionadas por CARTÃO E ENERGIA — um leitor de cartão, um
+        /// botão, um fio. A masmorra não tem elétrica nenhuma, então
+        /// nenhuma delas abriria jamais: a masmorra inteira era um
+        /// corredor com salas lacradas.
+        ///
+        /// Estas três abrem com a mão, e são exatamente o que o painel
+        /// promete ao admin em cada cor: madeira na verde, metal na
+        /// azul, blindada na vermelha. A cor deixa de estar na porta e
+        /// passa a estar no MATERIAL dela — que é o que o jogador de
+        /// Rust já lê sem pensar.
+        /// </summary>
         private static readonly Dictionary<string, string> DoorByColor = new Dictionary<string, string>
         {
-            ["green"] = "assets/bundled/prefabs/static/door.hinged.security.green.prefab",
-            ["blue"] = "assets/bundled/prefabs/static/door.hinged.security.blue.prefab",
-            ["red"] = "assets/bundled/prefabs/static/door.hinged.security.red.prefab",
+            ["green"] = "assets/prefabs/building/door.hinged/door.hinged.wood.prefab",
+            ["blue"] = "assets/prefabs/building/door.hinged/door.hinged.metal.prefab",
+            ["red"] = "assets/prefabs/building/door.hinged/door.hinged.toptier.prefab",
         };
 
         /// <summary>Leste, norte, oeste, sul — nesta ordem, sempre.</summary>
@@ -394,6 +438,40 @@ namespace Oxide.Plugins
             }
 
             player.Reply("Plantas (" + names.Count + "): " + string.Join(", ", names));
+
+            // ####  E O QUE O PAINEL MANDOU  ####
+            //
+            // Sem isto, "o plugin recebeu o desenho?" só se responde
+            // construindo e contando peças. Com uma masmorra que sai
+            // errada, é a primeira pergunta — e ela merecia uma linha,
+            // não uma investigação.
+            if (state.dungeons.Count == 0)
+            {
+                player.Reply("Nenhuma masmorra veio do painel ainda.");
+            }
+            else
+            {
+                foreach (var entry in state.dungeons)
+                {
+                    var spec = entry.Value;
+                    var cells = 0;
+
+                    if (spec != null && spec.grid != null)
+                        foreach (var row in spec.grid)
+                            foreach (var ch in row ?? "")
+                                if (ch != '.' && ch != ' ') cells++;
+
+                    player.Reply("  " + entry.Key
+                                 + " · modo " + (spec == null ? "?" : spec.mode ?? "?")
+                                 + " · desenho " + (spec == null || spec.grid == null
+                                     ? "nenhum"
+                                     : spec.grid.Count + " linhas, " + cells + " células")
+                                 + " · entrada " + (spec == null || string.IsNullOrEmpty(spec.entrance)
+                                     ? "mínima"
+                                     : spec.entrance));
+                }
+            }
+
             player.Reply("Use: /ozdungeon build <nome>  — nasce onde você está, para onde você olha.");
         }
 
@@ -1436,12 +1514,29 @@ namespace Oxide.Plugins
 
             // 3) O teto. Sem ele, quem entra vê o vazio a -90 metros e
             //    entende na hora que está fora do mundo.
+            //
+            // ####  A CÉLULA DO ALÇAPÃO TAMBÉM GANHA TETO  ####
+            //
+            // Ela recebia um `floor.frame` em vez do piso liso, para a
+            // tampa nascer "dentro do vão". Mas um `floor.frame` é um
+            // QUADRO: o buraco do meio só se fecha com o encaixe dele
+            // (uma grade, uma escotilha de construção), e o
+            // `door.hinged.bunker_hatch` é uma tampa de monumento que
+            // apenas abre — ela não veda coisa nenhuma.
+            //
+            // MEDIDO em 09/09/2026, pelo dono, de dentro da masmorra:
+            // "o teto de entrada está bugado, consigo ver o landscape de
+            // baixo pra cima". Era o vão aberto, a noventa metros de
+            // profundidade, olhando para o mundo.
+            //
+            // O vão nunca foi necessário: sair é TELEPORTE, e não subir
+            // por um buraco. A tampa serve para ser vista e usada, e
+            // para isso basta ela estar colada sob um teto inteiro.
+            var ceilings = new Dictionary<(int, int), BuildingBlock>();
+
             foreach (var pair in floors)
             {
                 if (pair.Value == null) continue;
-
-                // A célula do alçapão recebe o vão, não o teto liso.
-                if (pair.Key.Item1 == 0 && pair.Key.Item2 == 0) continue;
 
                 var ceiling = GameManager.server.CreateEntity(PrefabFloor, pair.Value.transform.position) as BuildingBlock;
                 if (ceiling == null) continue;
@@ -1451,17 +1546,339 @@ namespace Oxide.Plugins
                 ceiling.transform.localRotation = R0;
                 PrepareBlock(dungeon, ceiling, BuildingGrade.Enum.Stone);
                 Adopt(dungeon, ceiling);
+                ceilings[pair.Key] = ceiling;
             }
 
-            // 4) O alçapão de saída, no teto da (0,0).
-            if (floors.TryGetValue((0, 0), out var lobby) && lobby != null)
+            // 4) O alçapão de saída, colado sob o teto da (0,0).
+            if (ceilings.TryGetValue((0, 0), out var lobby) && lobby != null)
             {
                 PlaceExitHatch(dungeon, lobby);
                 PlaceLight(dungeon, lobby);
             }
 
+            // 5) O que tem dentro: caixas e inimigos.
+            Populate(dungeon, layout, floors, rng);
+
             Debug("masmorra: " + layout.cells.Count + " células, "
                   + layout.roomCount + " salas, " + dungeon.entities.Count + " peças");
+        }
+
+        // ============================================================
+        //  O QUE TEM DENTRO
+        //
+        //  ####  ATÉ AQUI A MASMORRA ERA UM PRÉDIO VAZIO  ####
+        //
+        //  `npc` e `crates` viajavam do painel até o `DungeonSpec` e
+        //  paravam ali: nenhum código os lia. O admin escolhia caixa de
+        //  elite para a sala vermelha, salvava, construía — e encontrava
+        //  quatro paredes.
+        //
+        //  ####  A CONTA É POR SALA, E NÃO POR CÉLULA  ####
+        //
+        //  "de 2 a 3 caixas na sala vermelha" é uma promessa sobre o
+        //  CÔMODO. Sorteando por célula, uma sala de nove células
+        //  nasceria com vinte e sete caixas — e a receita deixaria de
+        //  querer dizer o que diz.
+        //
+        //  No corredor é o contrário: lá a densidade é "de cada cem
+        //  células, quantas ganham uma", então o sorteio é por célula.
+        // ============================================================
+
+        private void Populate(
+            ActiveDungeon dungeon,
+            Layout layout,
+            Dictionary<(int, int), BuildingBlock> floors,
+            System.Random rng)
+        {
+            var byRoom = new Dictionary<int, List<(int, int)>>();
+            var corridor = new List<(int, int)>();
+
+            foreach (var cell in layout.cells)
+            {
+                // A chegada fica livre: uma caixa ali é onde o jogador
+                // materializa, e um inimigo ali atira nele antes de a
+                // tela terminar de carregar.
+                if (IsEntranceCell(cell)) continue;
+
+                int owner;
+                if (!layout.owner.TryGetValue(cell, out owner)) continue;
+
+                if (owner < 0)
+                {
+                    corridor.Add(cell);
+                    continue;
+                }
+
+                List<(int, int)> list;
+                if (!byRoom.TryGetValue(owner, out list))
+                {
+                    list = new List<(int, int)>();
+                    byRoom[owner] = list;
+                }
+
+                list.Add(cell);
+            }
+
+            var crates = 0;
+            var npcs = 0;
+
+            foreach (var pair in byRoom)
+            {
+                var cells = pair.Value;
+                if (cells.Count == 0) continue;
+
+                var color = RoomColor(dungeon, layout, cells[0], rng);
+                var spec = RoomSpecOf(dungeon, color);
+
+                // ####  UMA CÉLULA RECEBE UMA COISA  ####
+                //
+                // MEDIDO em 09/09/2026, pelo dono, dentro do labirinto:
+                // "está spawnando 3 NPC em cima do outro" e "se a sala é
+                // só 1 cômodo então tem que spawnar só uma caixa".
+                //
+                // A causa era sortear a célula A CADA peça: numa sala de
+                // uma célula, as três caixas e os três inimigos da
+                // receita caíam todos no mesmo quadrado de 3×3 metros,
+                // um dentro do outro. O jogador via um borrão de
+                // cientistas e conseguia abrir uma caixa só.
+                //
+                // Agora as células são embaralhadas e consumidas: a
+                // receita vira um TETO, e o cômodo cabe o que cabe. Uma
+                // sala de uma célula recebe uma caixa e um inimigo,
+                // diga a receita o que disser.
+                var wantedCrates = spec == null ? 1 : Roll(rng, spec.loot);
+                var wantedNpcs = spec == null ? 0 : Roll(rng, spec.npc);
+
+                var prefabs = spec == null || spec.crates == null || spec.crates.Count == 0
+                    ? DefaultCrates
+                    : spec.crates;
+
+                var forCrates = Shuffled(cells, rng);
+                var forNpcs = Shuffled(cells, rng);
+
+                for (var i = 0; i < wantedCrates && i < forCrates.Count; i++)
+                {
+                    if (SpawnCrate(dungeon, floors, forCrates[i], prefabs[rng.Next(prefabs.Count)], rng))
+                        crates++;
+                }
+
+                for (var i = 0; i < wantedNpcs && i < forNpcs.Count; i++)
+                {
+                    if (SpawnNpc(dungeon, floors, forNpcs[i], rng)) npcs++;
+                }
+            }
+
+            var corridorSpec = dungeon.spec == null ? null : dungeon.spec.corridor;
+            var lootDensity = corridorSpec == null ? 0 : Mathf.Clamp(corridorSpec.lootDensity, 0, 100);
+            var npcDensity = corridorSpec == null ? 0 : Mathf.Clamp(corridorSpec.npcDensity, 0, 100);
+
+            var corridorCrates = corridorSpec == null || corridorSpec.crates == null || corridorSpec.crates.Count == 0
+                ? DefaultCrates
+                : corridorSpec.crates;
+
+            foreach (var cell in corridor)
+            {
+                // Uma celula de corredor recebe UMA coisa: com as duas,
+                // o inimigo nasce em cima da caixa e o jogador nao
+                // consegue abri-la sem matar alguem primeiro — o que
+                // parece bug, e nao desenho.
+                if (rng.Next(100) < lootDensity)
+                {
+                    if (SpawnCrate(dungeon, floors, cell, corridorCrates[rng.Next(corridorCrates.Count)], rng))
+                        crates++;
+
+                    continue;
+                }
+
+                if (rng.Next(100) < npcDensity && SpawnNpc(dungeon, floors, cell, rng)) npcs++;
+            }
+
+            Debug("conteudo: " + crates + " caixas, " + npcs + " inimigos");
+        }
+
+        /// <summary>
+        /// Uma copia embaralhada da lista.
+        ///
+        /// Serve para distribuir sem repetir: percorrida em ordem, ela
+        /// da uma celula diferente a cada peca, e acaba quando o comodo
+        /// acaba.
+        /// </summary>
+        private static List<(int, int)> Shuffled(List<(int, int)> cells, System.Random rng)
+        {
+            var copy = new List<(int, int)>(cells);
+
+            for (var i = copy.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                var swap = copy[i];
+                copy[i] = copy[j];
+                copy[j] = swap;
+            }
+
+            return copy;
+        }
+
+        /// <summary>As caixas de quem nao escolheu nenhuma.</summary>
+        private static readonly List<string> DefaultCrates = new List<string>
+        {
+            "assets/bundled/prefabs/radtown/crate_normal.prefab",
+        };
+
+        /// <summary>O que o painel definiu para aquela cor.</summary>
+        private RoomSpec RoomSpecOf(ActiveDungeon dungeon, string color)
+        {
+            if (dungeon.spec == null || dungeon.spec.rooms == null) return null;
+
+            foreach (var room in dungeon.spec.rooms)
+                if (room != null && room.color == color) return room;
+
+            return null;
+        }
+
+        /// <summary>Um numero dentro do intervalo, inclusive nas pontas.</summary>
+        private static int Roll(System.Random rng, Range range)
+        {
+            if (range == null) return 0;
+
+            var min = Mathf.Max(0, range.min);
+            var max = Mathf.Max(min, range.max);
+
+            return rng.Next(min, max + 1);
+        }
+
+        /// <summary>
+        /// Onde uma peca de conteudo nasce dentro da celula.
+        ///
+        /// Nunca no centro exato: duas caixas na mesma celula ficariam
+        /// uma dentro da outra, e o jogador so conseguiria abrir uma.
+        /// Um metro de raio cabe folgado numa celula de tres.
+        /// </summary>
+        private static Vector3 SpotIn(BuildingBlock floor, System.Random rng)
+        {
+            var angle = rng.Next(360) * Mathf.Deg2Rad;
+            var radius = 0.4f + rng.Next(70) / 100f;
+
+            return floor.transform.position
+                   + new Vector3(Mathf.Cos(angle) * radius, 0.1f, Mathf.Sin(angle) * radius);
+        }
+
+        private bool SpawnCrate(
+            ActiveDungeon dungeon,
+            Dictionary<(int, int), BuildingBlock> floors,
+            (int, int) cell,
+            string prefab,
+            System.Random rng)
+        {
+            BuildingBlock floor;
+            if (!floors.TryGetValue(cell, out floor) || floor == null) return false;
+
+            var crate = GameManager.server.CreateEntity(
+                prefab, SpotIn(floor, rng), Quaternion.Euler(0f, rng.Next(360), 0f));
+
+            if (crate == null) return false;
+
+            crate.OwnerID = 0UL;
+            crate.EnableSaving(false);
+            crate.Spawn();
+            Adopt(dungeon, crate);
+
+            // A caixa de radtown se enche sozinha ao nascer: quem decide
+            // o que cai e a tabela de loot do servidor, e e assim que o
+            // BetterLoot continua valendo aqui dentro.
+            return true;
+        }
+
+        /// <summary>
+        /// Um inimigo, parado onde nasceu.
+        ///
+        /// ####  A NAVEGACAO FICA DESLIGADA, E NAO E ESCOLHA  ####
+        ///
+        /// A noventa metros abaixo do mundo nao existe NavMesh: o mapa
+        /// de navegacao do Rust e assado sobre o terreno, e ali nao ha
+        /// terreno. Um cientista com `CanUseNavMesh` ligado passa o
+        /// tempo tentando calcular um caminho que nao existe, e
+        /// escorrega pelo chao.
+        ///
+        /// Parado ele ainda mira, atira e morre — que e o que o jogador
+        /// precisa que ele faca. A IA que persegue e a mesma da base
+        /// 1.3.4, e ela vem junto com a frente que a torna configuravel.
+        /// </summary>
+        private bool SpawnNpc(
+            ActiveDungeon dungeon,
+            Dictionary<(int, int), BuildingBlock> floors,
+            (int, int) cell,
+            System.Random rng)
+        {
+            BuildingBlock floor;
+            if (!floors.TryGetValue(cell, out floor) || floor == null) return false;
+
+            var npc = GameManager.server.CreateEntity(
+                PrefabScientist,
+                floor.transform.position + Vector3.up * 0.2f,
+                Quaternion.Euler(0f, rng.Next(360), 0f)) as ScientistNPC;
+
+            if (npc == null) return false;
+
+            npc.EnableSaving(false);
+            npc.Spawn();
+            Adopt(dungeon, npc);
+
+            var navigator = npc.GetComponent<BaseNavigator>();
+            if (navigator != null) navigator.CanUseNavMesh = false;
+
+            var spec = dungeon.spec == null ? null : dungeon.spec.npc;
+
+            if (spec != null)
+            {
+                if (spec.health != null)
+                {
+                    var health = Mathf.Max(1, Roll(rng, spec.health));
+                    npc.InitializeHealth(health, health);
+                }
+
+                npc.damageScale = Mathf.Max(0f, spec.damageScale);
+
+                if (spec.names != null && spec.names.Count > 0)
+                    npc.displayName = spec.names[rng.Next(spec.names.Count)];
+
+                if (spec.weapons != null && spec.weapons.Count > 0)
+                    GiveWeapon(npc, spec.weapons[rng.Next(spec.weapons.Count)]);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Troca a arma do inimigo pela que a receita pediu.
+        ///
+        /// O cientista ja nasce com uma; a nova entra no primeiro slot
+        /// da barra e vira a ativa. Sem o `UpdateActiveItem` ele fica
+        /// com a arma na cintura e as maos vazias.
+        /// </summary>
+        private void GiveWeapon(BasePlayer npc, string shortname)
+        {
+            if (string.IsNullOrEmpty(shortname) || npc.inventory == null) return;
+
+            var item = ItemManager.CreateByName(shortname, 1);
+
+            if (item == null)
+            {
+                // Um shortname que o Rust nao conhece mais e PULADO, com
+                // aviso: derrubar a masmorra inteira por causa de uma
+                // arma renomeada num update seria desproporcional.
+                PrintWarning("arma desconhecida no inimigo: " + shortname);
+                return;
+            }
+
+            var belt = npc.inventory.containerBelt;
+
+            if (belt == null || !item.MoveToContainer(belt, 0, false))
+            {
+                item.Remove();
+                return;
+            }
+
+            npc.UpdateActiveItem(item.uid);
         }
 
         /// <summary>
@@ -1549,7 +1966,22 @@ namespace Oxide.Plugins
             if (!DoorByColor.TryGetValue(color, out prefab)) prefab = DoorByColor["green"];
 
             var door = GameManager.server.CreateEntity(prefab, frame.transform.position);
-            if (door == null) return;
+
+            if (door == null)
+            {
+                // ####  O VÃO SEM PORTA É MUDO  ####
+                //
+                // MEDIDO em 09/09/2026: eu troquei os prefabs e escrevi
+                // o caminho de cabeça — `door.hinged.wood/...` em vez de
+                // `door.hinged/...`. O `CreateEntity` devolveu null, o
+                // `return` engoliu, e a masmorra subiu inteira com os
+                // vãos abertos. Quem viu foi o dono, lá dentro.
+                //
+                // Um prefab que não existe agora GRITA no log, com o
+                // caminho — que é a única informação que resolve.
+                PrintWarning("porta não criada: o prefab '" + prefab + "' não existe");
+                return;
+            }
 
             door.SetParent(frame);
             door.transform.localPosition = Vector3.zero;
@@ -1592,9 +2024,13 @@ namespace Oxide.Plugins
             Adopt(dungeon, foundation);
             made++;
 
+            // Piso liso, e não um `floor.frame`: o quadro tem um buraco
+            // que a tampa do bunker não fecha (ver `PlaceExitHatch`), e
+            // aqui o buraco daria para dentro da fundação enterrada —
+            // quem pisasse nele cairia três metros para dentro de um
+            // cubo sem saída.
             var frame = GameManager.server.CreateEntity(
-                "assets/prefabs/building core/floor.frame/floor.frame.prefab",
-                foundation.transform.position) as BuildingBlock;
+                PrefabFloor, foundation.transform.position) as BuildingBlock;
 
             if (frame != null)
             {
@@ -1610,8 +2046,12 @@ namespace Oxide.Plugins
                 if (hatch != null)
                 {
                     hatch.SetParent(frame);
-                    hatch.transform.localPosition = Vector3.zero;
-                    hatch.transform.localRotation = Quaternion.identity;
+                    // Cinco centímetros ACIMA do piso: a tampa apoiada
+                    // nele, que é o que o jogador vê e usa. O desvio em
+                    // x e o quarto de volta são o pivô na dobradiça —
+                    // ver `PlaceExitHatch`.
+                    hatch.transform.localPosition = new Vector3(HatchPivotOffset, 0.05f, 0f);
+                    hatch.transform.localRotation = R90;
                     hatch.OwnerID = 0UL;
                     hatch.EnableSaving(false);
                     hatch.Spawn();
@@ -1636,28 +2076,49 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
-        /// O alçapão que sai da masmorra: um vão no teto, e a tampa
-        /// dentro dele. É o gêmeo do que a planta da entrada traz.
+        /// O alçapão que sai da masmorra: a tampa colada sob o teto.
+        ///
+        /// ####  SEM VÃO, E ISSO NÃO É PREGUIÇA  ####
+        ///
+        /// Ela ficava dentro de um `floor.frame` — um quadro com buraco
+        /// no meio. O buraco nunca fechava, porque o que o fecha é o
+        /// encaixe de construção do Rust, e a tampa do bunker é um
+        /// prefab de monumento que só abre. Resultado medido pelo dono,
+        /// de dentro da masmorra: dava para ver o mundo pelo teto, a
+        /// noventa metros de profundidade.
+        ///
+        /// E o vão nunca foi necessário: quem sai é TELEPORTADO
+        /// (`OnDoorOpened`), não sobe por lugar nenhum. A tampa existe
+        /// para ser vista e usada — e para isso basta ela estar colada
+        /// sob um teto inteiro, ao alcance de quem olha para cima.
         /// </summary>
-        private void PlaceExitHatch(ActiveDungeon dungeon, BuildingBlock lobby)
+        private void PlaceExitHatch(ActiveDungeon dungeon, BuildingBlock ceiling)
         {
-            var frame = GameManager.server.CreateEntity(
-                "assets/prefabs/building core/floor.frame/floor.frame.prefab",
-                lobby.transform.position) as BuildingBlock;
-            if (frame == null) return;
-
-            frame.SetParent(lobby);
-            frame.transform.localPosition = new Vector3(0f, 3f, 0f);
-            frame.transform.localRotation = R0;
-            PrepareBlock(dungeon, frame, BuildingGrade.Enum.Stone);
-            Adopt(dungeon, frame);
-
-            var hatch = GameManager.server.CreateEntity(PrefabHatch, frame.transform.position) as Door;
+            var hatch = GameManager.server.CreateEntity(PrefabHatch, ceiling.transform.position) as Door;
             if (hatch == null) return;
 
-            hatch.SetParent(frame);
-            hatch.transform.localPosition = Vector3.zero;
-            hatch.transform.localRotation = Quaternion.identity;
+            hatch.SetParent(ceiling);
+            // ####  O PIVÔ DA TAMPA ESTÁ NA DOBRADIÇA  ####
+            //
+            // Como em toda `Door` do Rust: a origem dela é a beirada em
+            // que ela gira, não o meio. Pondo o pivô no centro do teto,
+            // a tampa nasce inteira para um lado — foi o que o dono viu,
+            // encostada na quina do piso.
+            //
+            // O `ConvertToHatch` já compensava isso na entrada, com um
+            // `rotation * Vector3.right`. Aqui vale o mesmo metro, no
+            // eixo local do teto.
+            //
+            // Um palmo abaixo do teto, e não cinco centímetros: encostada
+            // demais, o piso comia metade dela e a roda ficava afundada
+            // na madeira. Vinte e cinco centímetros a destacam sem
+            // atrapalhar quem passa por baixo.
+            hatch.transform.localPosition = new Vector3(HatchPivotOffset, -0.25f, 0f);
+            // O quarto de volta faz parte da compensação: com a
+            // dobradiça na origem, girar muda para que lado o corpo da
+            // tampa se estende. Deslocar sem girar só a empurra para a
+            // outra quina — foi o que o dono viu na segunda tentativa.
+            hatch.transform.localRotation = R90;
             hatch.OwnerID = 0UL;
             hatch.EnableSaving(false);
             hatch.Spawn();
