@@ -151,6 +151,11 @@ Configs/*.ini
 # ------------------------------------------------------------
 /.claude/*
 !/.claude/settings.json
+# Os agentes SAO do projeto: eles carregam o que a base 1.3.4 ensinou
+# e as armadilhas que ja custaram caro (a porta de monumento que nunca
+# abre, o prefab escrito de cabeca, a parede entre celulas de corredor).
+# Perder isso e repetir os mesmos erros.
+!/.claude/agents/
 
 # Gerado quando alguem roda o Oxide.Compiler.exe a mao, para diagnostico.
 oxide.compiler.log
