@@ -293,8 +293,19 @@ namespace Oxide.Plugins
             timer.Once(1f, () => Puts(config.agentMarker + "{\"kind\":\"ready\",\"version\":\"0.1.0\"}"));
         }
 
+        /// <summary>
+        /// Estamos no meio do descarregamento?
+        ///
+        /// Só o `Report` olha isto, e a razão está lá: um `NextTick`
+        /// agendado durante o `Unload` nunca chega, porque o plugin já
+        /// não existe quando ele rodaria.
+        /// </summary>
+        private bool unloading;
+
         private void Unload()
         {
+            unloading = true;
+
             // Nada da masmorra entra no save do mundo (ver
             // `PrepareBlock`), então o que não for derrubado aqui vira
             // ruína pendurada a -90 até o próximo wipe.
@@ -517,7 +528,20 @@ namespace Oxide.Plugins
             active = dungeon;
 
             var blueprint = LoadBlueprint(blueprintName);
-            if (blueprint == null)
+
+            // ####  SEM PLANTA ESCOLHIDA, A ENTRADA É GERADA AQUI  ####
+            //
+            // O painel oferece "Entrada mínima — gerada por código: uma
+            // laje, um alçapão e uma luz" como a opção PADRÃO, e até
+            // aqui ela produzia `blueprint_missing` no jogo: sem
+            // `spec.entrance`, o plugin caía de volta para "procure uma
+            // planta com o nome da masmorra", que ninguém tinha.
+            //
+            // Quem aceitasse o padrão do painel — o caminho mais provável
+            // de todos — via a masmorra falhar sem entender por quê.
+            var minimal = blueprint == null && spec != null && string.IsNullOrEmpty(spec.entrance);
+
+            if (blueprint == null && !minimal)
             {
                 Fail(requester, "blueprint_missing",
                      spec == null
@@ -544,6 +568,31 @@ namespace Oxide.Plugins
             //    olha. É ela que traz o alçapão de cima.
             var yaw = Quaternion.LookRotation(forward, Vector3.up).eulerAngles.y;
 
+            if (minimal)
+            {
+                int made;
+
+                try
+                {
+                    made = BuildMinimalEntrance(dungeon, surface, yaw);
+                }
+                catch (Exception e)
+                {
+                    Fail(requester, "build_error", "Falhei ao erguer a entrada: " + e.Message);
+                    return;
+                }
+
+                if (made == 0)
+                {
+                    Fail(requester, "build_error", "A entrada mínima não subiu: nenhuma peça nasceu.");
+                    return;
+                }
+
+                Debug("entrada mínima: " + made + " peças em " + surface);
+                BuildBelow(dungeon, slug, surface, forward, requester);
+                return;
+            }
+
             PasteBlueprint(dungeon, blueprint, surface, yaw, (placed, error) =>
             {
                 if (active != dungeon) return;
@@ -563,55 +612,72 @@ namespace Oxide.Plugins
 
                 Debug("entrada: " + placed + " peças em " + surface);
 
-                // 2) A masmorra, a -90. Um tick depois, para as fundações
-                //    da entrada terem terminado de nascer — parede filha
-                //    de uma fundação que ainda não existe cai por
-                //    instabilidade.
-                NextTick(() =>
+                // 2) A masmorra, a -90.
+                BuildBelow(dungeon, slug, surface, forward, requester);
+            });
+        }
+
+        /// <summary>
+        /// A masmorra a -90, depois que a entrada já está de pé.
+        ///
+        /// ####  UM TICK DEPOIS, E ISSO NÃO É ZELO  ####
+        ///
+        /// Parede filha de uma fundação que ainda não existe cai por
+        /// instabilidade no mesmo instante em que nasce.
+        ///
+        /// Ela é chamada dos DOIS caminhos da entrada — a planta colada
+        /// e a entrada mínima gerada por código —, e é por isso que
+        /// virou método: duplicá-la faria a entrada mínima nascer sem
+        /// watchdog, sem emparelhamento ou sem o `Report`, e o painel
+        /// ficaria esperando um "terminei" que nunca vem.
+        /// </summary>
+        private void BuildBelow(
+            ActiveDungeon dungeon, string slug, Vector3 surface, Vector3 forward, IPlayer requester)
+        {
+            NextTick(() =>
+            {
+                if (active != dungeon) return;
+
+                try
+                {
+                    GenerateRooms(dungeon, forward);
+                }
+                catch (Exception e)
+                {
+                    Fail(requester, "build_error", "Falhei ao erguer a masmorra: " + e.Message);
+                    return;
+                }
+
+                // 3) Emparelhar. Só agora existem os dois.
+                timer.Once(1f, () =>
                 {
                     if (active != dungeon) return;
 
-                    try
+                    if (!LinkHatches(dungeon))
                     {
-                        GenerateRooms(dungeon, forward);
-                    }
-                    catch (Exception e)
-                    {
-                        Fail(requester, "build_error", "Falhei ao erguer a masmorra: " + e.Message);
+                        Fail(requester, "no_hatch",
+                             "A planta subiu, mas não achei o par de alçapões. Sem eles não há masmorra.");
                         return;
                     }
 
-                    // 3) Emparelhar. Só agora existem os dois.
-                    timer.Once(1f, () =>
+                    dungeon.ready = true;
+                    dungeon.watchdog?.Destroy();
+                    dungeon.watchdog = null;
+
+                    var ms = (int)(DateTime.UtcNow - dungeon.startedAt).TotalMilliseconds;
+
+                    requester?.Reply("Masmorra '" + slug + "' de pé: "
+                                     + dungeon.entities.Count + " peças em " + ms + " ms. "
+                                     + "A entrada está em " + Grid(surface) + ".");
+
+                    Report("built", new Dictionary<string, object>
                     {
-                        if (active != dungeon) return;
-
-                        if (!LinkHatches(dungeon))
-                        {
-                            Fail(requester, "no_hatch",
-                                 "A planta subiu, mas não achei o par de alçapões. Sem eles não há masmorra.");
-                            return;
-                        }
-
-                        dungeon.ready = true;
-                        dungeon.watchdog?.Destroy();
-                        dungeon.watchdog = null;
-
-                        var ms = (int)(DateTime.UtcNow - dungeon.startedAt).TotalMilliseconds;
-
-                        requester?.Reply("Masmorra '" + slug + "' de pé: "
-                                         + dungeon.entities.Count + " peças em " + ms + " ms. "
-                                         + "A entrada está em " + Grid(surface) + ".");
-
-                        Report("built", new Dictionary<string, object>
-                        {
-                            ["slug"] = slug,
-                            ["x"] = surface.x,
-                            ["z"] = surface.z,
-                            ["grid"] = Grid(surface),
-                            ["entities"] = dungeon.entities.Count,
-                            ["ms"] = ms,
-                        });
+                        ["slug"] = slug,
+                        ["x"] = surface.x,
+                        ["z"] = surface.z,
+                        ["grid"] = Grid(surface),
+                        ["entities"] = dungeon.entities.Count,
+                        ["ms"] = ms,
                     });
                 });
             });
@@ -867,6 +933,202 @@ namespace Oxide.Plugins
             return false;
         }
 
+        // ============================================================
+        //  O DESENHO DO PAINEL VIRA LAYOUT
+        //
+        //  ####  ATÉ AQUI O MODO PLANTA SÓ EXISTIA NO PAINEL  ####
+        //
+        //  O admin desenhava célula a célula, via a prévia, salvava — e
+        //  o jogo sorteava um traçado qualquer assim mesmo, porque
+        //  `GenerateRooms` só sabia chamar `BuildLayout`. O desenho
+        //  chegava aqui dentro de `spec.grid` e não era lido por
+        //  ninguém.
+        //
+        //  ####  A TRANSLAÇÃO É PELO `E`, E NÃO PELO CANTO  ####
+        //
+        //  A (0,0) é a origem da masmorra: o ponto que o alçapão
+        //  conhece, e para onde ele teleporta quem desce. O desenho que
+        //  chega tem o `E` em qualquer lugar das linhas — ele foi
+        //  recortado pelo editor —, então tudo é deslocado para que o
+        //  `E` caia ali.
+        //
+        //  Alinhar pelo canto poria a chegada dentro de uma sala, ou no
+        //  vazio: o jogador desceria para dentro de um quadrado
+        //  fechado, ou cairia noventa metros.
+        // ============================================================
+
+        /// <summary>
+        /// O maior desenho que o construtor aceita, em células.
+        ///
+        /// O editor do painel trabalha num grid de 24×24, ou seja 576
+        /// células — e cada célula são três peças (fundação, teto e a
+        /// média de paredes). O teto existe porque a régua do agente
+        /// aceita 64×64: um desenho colado à mão por API poderia pedir
+        /// 4.096 células e doze mil entidades, e o servidor engasgaria
+        /// no meio, deixando meia masmorra de pé.
+        /// </summary>
+        private const int MaxGridCells = 600;
+
+        /// <summary>
+        /// Lê o desenho do painel e devolve o mesmo <see cref="Layout"/>
+        /// que o sorteio produz. Daí para baixo o construtor é um só.
+        /// </summary>
+        private Layout LayoutFromGrid(ActiveDungeon dungeon, List<string> rows)
+        {
+            var layout = new Layout();
+
+            // 1) Onde está o E. Ver o cabeçalho: tudo é transladado para
+            //    que ele caia em (0,0).
+            var offsetX = 0;
+            var offsetZ = 0;
+            var found = false;
+
+            for (var index = 0; index < rows.Count && !found; index++)
+            {
+                var row = rows[index] ?? "";
+                var column = row.IndexOf('E');
+
+                if (column < 0) continue;
+
+                offsetX = -column;
+                // A primeira linha é a de MAIOR z: o norte em cima, como
+                // um mapa é lido. Inverter isto espelha a masmorra.
+                offsetZ = -(rows.Count - 1 - index);
+                found = true;
+            }
+
+            if (!found)
+            {
+                throw new InvalidOperationException(
+                    "o desenho não tem entrada (E), e é nela que o alçapão cospe o jogador");
+            }
+
+            // 2) As células. A letra é a COR da sala, e não o número
+            //    dela — quem separa "duas vermelhas" de "uma vermelha
+            //    grande" é o passo 3.
+            var painted = new Dictionary<(int, int), char>();
+
+            for (var index = 0; index < rows.Count; index++)
+            {
+                var row = rows[index] ?? "";
+                var z = rows.Count - 1 - index + offsetZ;
+
+                for (var column = 0; column < row.Length; column++)
+                {
+                    var ch = row[column];
+
+                    if (ch == '.' || ch == ' ') continue;
+
+                    var cell = (column + offsetX, z);
+
+                    layout.cells.Add(cell);
+
+                    if (ch == '#' || ch == 'E') layout.owner[cell] = -1;
+                    else painted[cell] = ch;
+                }
+            }
+
+            if (layout.cells.Count > MaxGridCells)
+            {
+                throw new InvalidOperationException(
+                    "o desenho tem " + layout.cells.Count + " células e o teto é " + MaxGridCells);
+            }
+
+            // 3) Cada mancha contígua da mesma cor é uma sala. É a mesma
+            //    regra do editor e a mesma do verificador do agente: o
+            //    admin pinta COR, e o agrupamento é derivado.
+            var nextRoom = 0;
+
+            foreach (var start in painted.Keys.ToList())
+            {
+                if (layout.owner.ContainsKey(start)) continue;
+
+                var color = painted[start];
+                var id = nextRoom++;
+                var queue = new Queue<(int, int)>();
+
+                layout.owner[start] = id;
+                queue.Enqueue(start);
+
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+
+                    for (var d = 0; d < 4; d++)
+                    {
+                        var next = (current.Item1 + Dirs[d].dx, current.Item2 + Dirs[d].dz);
+
+                        if (layout.owner.ContainsKey(next)) continue;
+
+                        char theirs;
+                        if (!painted.TryGetValue(next, out theirs) || theirs != color) continue;
+
+                        layout.owner[next] = id;
+                        queue.Enqueue(next);
+                    }
+                }
+
+                // ####  A COR É A DO DESENHO, E NÃO A DOS PESOS  ####
+                //
+                // Decidida aqui, ela entra no mesmo cache que o sorteio
+                // usa — então `RoomColor` a devolve sem sortear nada. Um
+                // admin que pintou a sala de vermelho não quer que os
+                // pesos da receita a repintem de verde.
+                dungeon.roomColors[id] = ColorOfChar(color);
+            }
+
+            layout.roomCount = nextRoom;
+
+            // 4) A porta nasce onde a sala encosta no corredor. TODAS as
+            //    adjacências, e não uma por sala: é o que o editor
+            //    promete ao admin enquanto ele desenha, e é o que a
+            //    verificação dele assume quando avisa que um cômodo de
+            //    uma célula com corredor em três lados nasce sem parede.
+            foreach (var pair in layout.owner)
+            {
+                if (pair.Value < 0) continue;
+
+                for (var d = 0; d < 4; d++)
+                {
+                    var neighbour = (pair.Key.Item1 + Dirs[d].dx, pair.Key.Item2 + Dirs[d].dz);
+
+                    int theirs;
+                    if (!layout.owner.TryGetValue(neighbour, out theirs) || theirs >= 0) continue;
+
+                    layout.doors.Add((pair.Key, neighbour));
+                }
+            }
+
+            return layout;
+        }
+
+        /// <summary>
+        /// Esta masmorra tem desenho para seguir?
+        ///
+        /// O `mode` é conferido junto com o grid, e não só ele: uma
+        /// receita que carrega um grid velho — porque o admin desenhou,
+        /// mudou de ideia e voltou para receita — não pode construir o
+        /// desenho abandonado.
+        /// </summary>
+        private static bool HasDrawing(ActiveDungeon dungeon) =>
+            dungeon.spec != null
+            && dungeon.spec.mode == "blueprint"
+            && dungeon.spec.grid != null
+            && dungeon.spec.grid.Count > 0;
+
+        /// <summary>A letra do formato salvo, na cor que ela significa.</summary>
+        private static string ColorOfChar(char ch)
+        {
+            if (ch == 'B') return "blue";
+            if (ch == 'R') return "red";
+
+            // Uma letra desconhecida cai em verde — o mesmo que o editor
+            // faz ao reabrir um desenho de antes de a letra guardar a
+            // cor. Recusar aqui derrubaria a masmorra inteira por causa
+            // de um caractere.
+            return "green";
+        }
+
         /// <summary>A (0,0) e a (0,1): a chegada do alçapão.</summary>
         private static bool IsEntranceCell((int, int) cell) =>
             cell.Item1 == 0 && (cell.Item2 == 0 || cell.Item2 == 1);
@@ -909,7 +1171,14 @@ namespace Oxide.Plugins
                 rooms = rng.Next(min, max + 1);
             }
 
-            var layout = BuildLayout(rooms, rng);
+            // ####  DESENHO GANHA DO SORTEIO  ####
+            //
+            // No modo planta o admin já disse exatamente o que quer, e
+            // sortear por cima seria ignorá-lo em silêncio: ele veria a
+            // prévia certa no painel e uma masmorra diferente no jogo.
+            var layout = HasDrawing(dungeon)
+                ? LayoutFromGrid(dungeon, dungeon.spec.grid)
+                : BuildLayout(rooms, rng);
 
             var right = Vector3.Cross(Vector3.up, forward).normalized;
             var floors = new Dictionary<(int, int), BuildingBlock>();
@@ -1027,13 +1296,19 @@ namespace Oxide.Plugins
         /// </summary>
         private string RoomColor(ActiveDungeon dungeon, Layout layout, (int, int) roomCell, System.Random rng)
         {
-            if (dungeon.spec == null || dungeon.spec.weights == null) return "green";
-
             int roomId;
             if (!layout.owner.TryGetValue(roomCell, out roomId) || roomId < 0) return "green";
 
+            // ####  O CACHE É CONSULTADO ANTES DOS PESOS  ####
+            //
+            // No modo planta a cor vem do DESENHO, e `LayoutFromGrid` já
+            // a gravou aqui. Conferir os pesos primeiro faria uma
+            // masmorra desenhada sem receita nenhuma sair inteira em
+            // verde, apagando o que o admin pintou.
             string decided;
             if (dungeon.roomColors.TryGetValue(roomId, out decided)) return decided;
+
+            if (dungeon.spec == null || dungeon.spec.weights == null) return "green";
 
             var w = dungeon.spec.weights;
             var total = Mathf.Max(0, w.green) + Mathf.Max(0, w.blue) + Mathf.Max(0, w.red);
@@ -1092,6 +1367,81 @@ namespace Oxide.Plugins
             door.EnableSaving(false);
             door.Spawn();
             Adopt(dungeon, door);
+        }
+
+        /// <summary>
+        /// A entrada mínima: uma laje, um alçapão e uma luz.
+        ///
+        /// É o que o painel oferece como opção PADRÃO — a masmorra que
+        /// funciona sem ninguém ter de arrumar um .json em lugar nenhum.
+        /// Ela não impressiona, e não é para isso que existe: é para o
+        /// admin conseguir a primeira masmorra de pé no primeiro minuto.
+        ///
+        /// ####  A LAJE FICA ENTERRADA, E O VÃO RENTE AO CHÃO  ####
+        ///
+        /// Uma fundação apoiada NA superfície poria o alçapão a um metro
+        /// do chão, e o jogador teria de pular para alcançá-lo. Rebaixada
+        /// a altura de um andar, o teto dela — que é onde o vão vai —
+        /// nasce no nível do terreno: uma boca de esgoto, que é
+        /// exatamente o que esta entrada quer ser.
+        ///
+        /// Devolve quantas peças subiram. Zero é falha.
+        /// </summary>
+        private int BuildMinimalEntrance(ActiveDungeon dungeon, Vector3 surface, float yaw)
+        {
+            var rotation = Quaternion.Euler(0f, yaw, 0f);
+            var made = 0;
+
+            var foundation = GameManager.server.CreateEntity(
+                PrefabFoundation, surface - Vector3.up * 3f, rotation) as BuildingBlock;
+
+            if (foundation == null) return 0;
+
+            PrepareBlock(dungeon, foundation, BuildingGrade.Enum.Stone);
+            Adopt(dungeon, foundation);
+            made++;
+
+            var frame = GameManager.server.CreateEntity(
+                "assets/prefabs/building core/floor.frame/floor.frame.prefab",
+                foundation.transform.position) as BuildingBlock;
+
+            if (frame != null)
+            {
+                frame.SetParent(foundation);
+                frame.transform.localPosition = new Vector3(0f, 3f, 0f);
+                frame.transform.localRotation = R0;
+                PrepareBlock(dungeon, frame, BuildingGrade.Enum.Stone);
+                Adopt(dungeon, frame);
+                made++;
+
+                var hatch = GameManager.server.CreateEntity(PrefabHatch, frame.transform.position) as Door;
+
+                if (hatch != null)
+                {
+                    hatch.SetParent(frame);
+                    hatch.transform.localPosition = Vector3.zero;
+                    hatch.transform.localRotation = Quaternion.identity;
+                    hatch.OwnerID = 0UL;
+                    hatch.EnableSaving(false);
+                    hatch.Spawn();
+                    Adopt(dungeon, hatch);
+                    made++;
+
+                    // ####  SEM ESTA LINHA A MASMORRA SOBE E FALHA  ####
+                    //
+                    // `LinkHatches` procura o par, e o de cima vem daqui.
+                    // Com a planta ele sai da marca (§5.3.7); aqui não há
+                    // marca nenhuma para achar, então ele é apontado.
+                    dungeon.entranceHatch = hatch;
+                }
+            }
+
+            // A luz fica pendurada no teto do poço, logo abaixo do vão:
+            // é o que faz o alçapão ser visível de noite, que é quando
+            // metade dos eventos acontece.
+            PlaceLight(dungeon, foundation);
+
+            return made;
         }
 
         /// <summary>
@@ -1947,7 +2297,30 @@ namespace Oxide.Plugins
                 data["kind"] = kind;
                 if (!string.IsNullOrEmpty(state.secret)) data["secret"] = state.secret;
 
-                Puts(config.agentMarker + JsonConvert.SerializeObject(data, Formatting.None));
+                var line = config.agentMarker + JsonConvert.SerializeObject(data, Formatting.None);
+
+                // ####  UM TICK DEPOIS, OU O AGENTE NUNCA VÊ  ####
+                //
+                // MEDIDO em 09/09/2026: `ozdungeon stop` pelo RCON
+                // derrubava a masmorra, o plugin emitia este `ended`, e
+                // a linha saía na RESPOSTA CASADA do comando — aquela
+                // que volta no POST /rcon e some do buffer. O agente, que
+                // escuta o STREAM do console, não a via.
+                //
+                // O resultado era a run ficar aberta para sempre: o
+                // painel dizendo "1 masmorra no ar" com o chão vazio, e
+                // nada no sistema consertando isso sozinho.
+                //
+                // Fora do comando, a mesma linha sai no console geral e o
+                // stream a entrega. É a mesma armadilha documentada em
+                // `a-resposta-do-comando-vem-casada-nao-no-console`.
+                //
+                // No descarregamento não há próximo tick — o plugin já
+                // não existe quando ele chegaria —, então ali ela sai
+                // agora. Cair na resposta de um `oxide.reload` é um risco
+                // menor que nunca sair.
+                if (unloading) Puts(line);
+                else NextTick(() => Puts(line));
             }
             catch (Exception e)
             {

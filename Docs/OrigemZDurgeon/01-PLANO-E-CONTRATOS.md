@@ -447,6 +447,57 @@ quarenta linhas de texto, não megabytes. Os quatro passam limpos no verificador
 e o teste cobra isso: um traçado de fábrica com defeito seria o pior lugar
 possível para um, porque é o que o admin copia achando que é o certo.
 
+### 4.2.2 O construtor lê o desenho — medido no jogo em 09/09/2026
+
+Até aqui o modo planta **só existia no painel**. O admin desenhava, via a
+prévia, salvava — e o jogo sorteava um traçado qualquer assim mesmo, porque
+`GenerateRooms` só sabia chamar `BuildLayout`. O `spec.grid` chegava ao plugin
+e não era lido por ninguém.
+
+`LayoutFromGrid` fecha isso, e três decisões dele merecem registro:
+
+1. **A translação é pelo `E`, e não pelo canto.** A `(0,0)` é a origem da
+   masmorra: o ponto que o alçapão conhece, e para onde ele teleporta quem
+   desce. O desenho chega com o `E` em qualquer lugar das linhas — ele foi
+   recortado pelo editor. Alinhar pelo canto poria a chegada dentro de uma
+   sala, ou no vazio.
+
+2. **Toda adjacência sala↔corredor vira porta**, e não uma por sala como no
+   sorteio. É o que o editor promete ao admin enquanto ele desenha, e é o que a
+   verificação dele assume quando avisa que um cômodo de uma célula com corredor
+   em três lados nasce sem parede.
+
+3. **A cor vem do desenho e entra no cache de `RoomColor` antes dos pesos.** Um
+   admin que pintou a sala de vermelho não quer que os pesos da receita a
+   repintem de verde.
+
+**A medição, no server01:**
+
+| desenho | células | peças no jogo |
+|---|---|---|
+| cruz | 40 | 219 |
+| corredor reto | 34 | 192 |
+
+A diferença medida — 27 peças — é **exatamente** a que a geometria prevê
+(40×2+78+14 contra 34×2+67+10). E duas construções do mesmo desenho deram 219
+as duas vezes: o modo planta sai igual, que é o que ele promete.
+
+### 4.2.3 A entrada mínima existia no painel e não no jogo
+
+O painel oferece *"Entrada mínima — gerada por código: uma laje, um alçapão e
+uma luz"* como a opção **padrão**, e escolhê-la produzia `blueprint_missing` no
+jogo: sem `spec.entrance`, o plugin caía de volta para "procure uma planta com o
+nome da masmorra", que ninguém tinha. **Quem aceitasse o padrão via a masmorra
+falhar** — o caminho mais provável de todos.
+
+`BuildMinimalEntrance` a constrói. A laje fica **enterrada** a um andar, e o vão
+no teto dela nasce rente ao terreno: uma boca de esgoto. Uma fundação apoiada na
+superfície poria o alçapão a um metro do chão, e o jogador teria de pular para
+alcançá-lo.
+
+Medido: 151 peças com a entrada mínima contra 192 com a `entrance2` (42 peças),
+para o mesmo desenho.
+
 ### 4.3 O terceiro modo, que sai de graça: capturar
 
 Não estava nas quatro decisões, mas cai no colo: se sabemos **ler** o formato
@@ -923,6 +974,27 @@ perguntado. Vai pelo stream de log, com marcador, como o `#OZQUEST#` das quests:
 O agente lê no mesmo handler de stream do `ui-sync`, e vale a regra de lá: **nada
 ali pode lançar**, porque a exceção subiria por um caminho que ninguém trata e
 levaria junto o resto do stream.
+
+#### O evento emitido DENTRO de um comando não chega — medido em 09/09/2026
+
+E é a armadilha mais cara desta seção, porque falha em silêncio.
+
+`ozdungeon stop` pelo RCON derrubava a masmorra, o plugin emitia o `ended`… e a
+linha saía na **resposta casada do comando** — aquela que volta no POST `/rcon`
+e some do buffer. O agente, que escuta o *stream*, nunca a via. A run ficava
+`active` no banco **para sempre**: o painel dizendo "1 masmorra no ar" com o
+chão vazio, e nada no sistema consertando isso sozinho.
+
+Tudo que o plugin escreve enquanto um comando roda é engolido pela resposta
+dele, inclusive o `Puts` com marcador. A correção é **emitir fora do comando**:
+
+```csharp
+NextTick(() => Puts(line));
+```
+
+A exceção é o `Unload`: ali não existe próximo tick — o plugin já não existe
+quando ele chegaria —, então a linha tem de sair síncrona. É para essa
+distinção, e só para ela, que o plugin carrega um campo `unloading`.
 
 ### 7.3 Os oito motivos de falha, nomeados
 
