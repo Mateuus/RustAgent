@@ -47,6 +47,8 @@ import type { Logger } from '../logger.js';
 import { toError } from '../util.js';
 import {
   ADS_IMAGE_MAX_BYTES,
+  ADS_LOGO_MAX_HEIGHT,
+  ADS_LOGO_MAX_WIDTH,
   ADS_PAYLOAD_MAX_BYTES,
   ADS_STORED_MAX_BYTES,
   isPlayable,
@@ -483,8 +485,29 @@ export class AdsSync {
       try {
         const image = await fetchAdImage(ad.imageUrl, {
           maxBytes,
+          // ####  SO NO MODO `stored`  ####
+          //
+          // É o modo em que NÓS entregamos os bytes ao jogo, e
+          // portanto o único em que encolher muda o que o
+          // jogador vê. No modo `url` quem baixa é o cliente, do
+          // endereço original — ver ads-images.ts.
+          resize: mode === 'stored',
           ...(this.#deps.fetchImpl === undefined ? {} : { fetchImpl: this.#deps.fetchImpl }),
         });
+
+        if (image.resizedFrom !== undefined) {
+          this.#deps.logger?.info(
+            {
+              serverId,
+              ad: ad.id,
+              from: `${String(image.resizedFrom.width)}x${String(image.resizedFrom.height)}`,
+              to: `${String(image.width)}x${String(image.height)}`,
+              bytes: image.bytes.length,
+              originalBytes: image.resizedFrom.bytes,
+            },
+            'ad image was too big and got shrunk to fit',
+          );
+        }
 
         // Conteúdo idêntico ao que já está lá: a chave é a mesma,
         // e o plugin não precisa receber os bytes de novo.
@@ -626,8 +649,32 @@ export class AdsSync {
 
     try {
       const image = await fetchAdImage(url, {
+        maxBytes: ADS_STORED_MAX_BYTES,
+        // ####  O TETO DO LOGO E MENOR QUE O DAS PROPAGANDAS  ####
+        //
+        // Ele nunca é desenhado com mais de 400 pixels de lado, e
+        // a logo do site tem 4048 de largura. Guardá-la inteira
+        // custava 667 KB de RCON e uma textura enorme na memória
+        // de vídeo de cada jogador para pintar um quadrado de 90.
+        maxWidth: ADS_LOGO_MAX_WIDTH,
+        maxHeight: ADS_LOGO_MAX_HEIGHT,
+        resize: true,
         ...(this.#deps.fetchImpl === undefined ? {} : { fetchImpl: this.#deps.fetchImpl }),
       });
+
+      if (image.resizedFrom !== undefined) {
+        this.#deps.logger?.info(
+          {
+            serverId,
+            url,
+            from: `${String(image.resizedFrom.width)}x${String(image.resizedFrom.height)}`,
+            to: `${String(image.width)}x${String(image.height)}`,
+            bytes: image.bytes.length,
+            originalBytes: image.resizedFrom.bytes,
+          },
+          'overlay logo was too big and got shrunk to fit',
+        );
+      }
 
       state.cache.set(image.key, image.bytes);
       state.logoCache.set(url, image.key);
@@ -781,6 +828,13 @@ export class AdsSync {
 
     try {
       const image = await fetchAdImage(owner.imageUrl, {
+        // ####  A REDUCAO PRECISA SER A MESMA DE LA  ####
+        //
+        // A chave sai do CONTEÚDO. Rebaixar sem encolher devolve
+        // outro conteúdo, logo outra chave — e a que o plugin
+        // está pedindo continuaria sem bytes, para sempre. Isto
+        // só roda no modo `stored`, que é o que encolhe.
+        resize: true,
         ...(this.#deps.fetchImpl === undefined ? {} : { fetchImpl: this.#deps.fetchImpl }),
       });
 
