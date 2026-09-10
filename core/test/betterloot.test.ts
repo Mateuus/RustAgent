@@ -1701,3 +1701,207 @@ describe('os itens garantidos', () => {
     expect(response.json().error).toBe('BETTERLOOT_INVALID_RANGE');
   });
 });
+
+// ============================================================
+//  RENOMEAR UM PERFIL
+//
+//  O nome é a CHAVE do LootGroups.json e é citado por nome dentro
+//  de cada caixa do LootTables.json. Renomear só no primeiro
+//  arquivo deixa toda caixa pedindo um perfil que não existe — e o
+//  BetterLoot ignora a citação órfã em silêncio.
+//
+//  É por isso que estes testes conferem os DOIS arquivos.
+// ============================================================
+
+describe('renomear um perfil', () => {
+  beforeEach(async () => {
+    await seedFiles();
+    await seedGroups();
+  });
+
+  /** Liga o perfil à caixa de elite e devolve o estado dele. */
+  async function linkToElite(): Promise<void> {
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(ELITE)}`,
+      })
+    ).json();
+
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        baseRevision: opened.tableRevision,
+        table: {
+          ...opened.table,
+          profiles: [{ name: 'armas_t3', enabled: true, probability: 45, maxItems: 2 }],
+        },
+      },
+    });
+  }
+
+  it('renomeia e reescreve a citação nas caixas, preservando chance e teto', async () => {
+    await linkToElite();
+
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      })
+    ).json();
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'armas_t3', to: 'armas_tier3', baseRevision: opened.revision },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().retargeted).toEqual([ELITE]);
+
+    const groups = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(groups['Loot Groups'].armas_t3).toBeUndefined();
+    // E o CONTEÚDO veio junto: renomear não é recriar.
+    expect(
+      groups['Loot Groups'].armas_tier3['Item List']['rifle.ak']['Item Probability (1-100)'],
+    ).toBe(60);
+
+    const tables = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootTables.json'), 'utf8'),
+    );
+
+    const [link] = tables.LootTables[ELITE]['Loot Profiles'];
+
+    // ####  A CAIXA APONTA PARA O NOME NOVO  ####
+    //
+    // Sem isto ela pediria "armas_t3" para sempre, o BetterLoot a
+    // ignoraria, e o ajuste sumiria sem erro nenhum.
+    expect(link['Loot Profile Name']).toBe('armas_tier3');
+
+    // E o que era DAQUELA associação continua: renomear não é
+    // religar do zero com os padrões.
+    expect(link['Loot Profile Probability (1% - 100%)']).toBe(45);
+    expect(link['Max Items From Profile (0 = unlimited)']).toBe(2);
+    expect(link['Group Enabled?']).toBe(true);
+  });
+
+  it('mantém o perfil renomeado no lugar que ele ocupava', async () => {
+    // Um segundo perfil, para haver ordem que se possa quebrar.
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        profile: { name: 'zz_ultimo', enabled: true, guaranteed: [], items: [] },
+      },
+    });
+
+    await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'armas_t3', to: 'armas_tier3', baseRevision: null },
+    });
+
+    const groups = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    // ####  A ORDEM É PARTE DO ARQUIVO  ####
+    //
+    // Renomear uma chave em JavaScript a joga para o fim. O arquivo
+    // continuaria correto, mas o diff de um backup contra o outro
+    // mostraria o dicionário remexido em vez da linha que mudou.
+    expect(Object.keys(groups['Loot Groups'])).toEqual(['armas_tier3', 'zz_ultimo']);
+  });
+
+  it('recusa renomear para um nome que já existe', async () => {
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        profile: { name: 'medicos', enabled: true, guaranteed: [], items: [] },
+      },
+    });
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'armas_t3', to: 'medicos', baseRevision: null },
+    });
+
+    // Renomear por cima juntaria os dois numa entrada só e apagaria
+    // o conteúdo de um deles, sem aviso.
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe('BETTERLOOT_PROFILE_EXISTS');
+
+    const groups = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(groups['Loot Groups'].armas_t3).toBeDefined();
+    expect(Object.keys(groups['Loot Groups'].medicos['Item List'])).toHaveLength(0);
+  });
+
+  it('recusa renomear um perfil que não existe', async () => {
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'nao_existe', to: 'qualquer', baseRevision: null },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error).toBe('BETTERLOOT_PROFILE_NOT_FOUND');
+  });
+
+  it('recusa quem abriu o perfil antes de outra pessoa gravar', async () => {
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      })
+    ).json();
+
+    // Outra tela mexe no perfil no meio do caminho.
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: opened.revision,
+        profile: { ...opened.profile, enabled: false },
+      },
+    });
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'armas_t3', to: 'armas_tier3', baseRevision: opened.revision },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe('BETTERLOOT_STALE_REVISION');
+  });
+
+  it('renomeia um perfil que nenhuma caixa usa, sem tocar no LootTables', async () => {
+    const antes = await readFile(join(harness.dataDir, 'BetterLoot', 'LootTables.json'), 'utf8');
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'armas_t3', to: 'armas_tier3', baseRevision: null },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().retargeted).toEqual([]);
+
+    // Nenhuma caixa o citava: mexer no arquivo de 2,5 MB à toa
+    // renderia um backup por nada e um diff que não diz nada.
+    const depois = await readFile(join(harness.dataDir, 'BetterLoot', 'LootTables.json'), 'utf8');
+
+    expect(depois).toBe(antes);
+  });
+});

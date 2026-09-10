@@ -391,6 +391,43 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
   });
 
   /**
+   * Renomeia um perfil, e reescreve quem o cita.
+   *
+   * ####  POR QUE ISTO NÃO É O `PUT` DE PERFIL  ####
+   *
+   * O nome é a CHAVE do `LootGroups.json` e é citado por nome
+   * dentro de cada caixa do `LootTables.json`. Mandar um nome novo
+   * no `PUT` criaria um perfil a mais em vez de renomear o que
+   * está lá — e as caixas continuariam apontando para o antigo.
+   * Renomear atravessa os dois arquivos, e por isso tem rota
+   * própria.
+   */
+  app.post('/servers/:id/betterloot/profile/rename', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const body = renameProfileSchema.parse(request.body);
+
+    const result = await deps.editor.renameProfile(id, {
+      from: body.from,
+      to: body.to,
+      baseRevision: body.baseRevision,
+    });
+
+    return {
+      ok: true,
+      serverId: id,
+      revision: result.revision,
+      profile: result.profile,
+      // As caixas cuja citação foi reescrita. A tela diz quantas
+      // foram: renomear parece uma edição de campo, e mexeu em
+      // caixas que o admin não abriu.
+      retargeted: result.retargeted,
+      backup: result.backup,
+      reloaded: result.reloaded,
+      reloadOutput: result.reloadOutput,
+    };
+  });
+
+  /**
    * Apaga um perfil.
    *
    * Em uso e sem `detach`, responde 409 com os nomes das caixas —
@@ -528,6 +565,13 @@ const saveProfileSchema = z.object({
   /** `null` = a tela está CRIANDO. Ver `saveProfile`. */
   baseRevision: z.string().nullable(),
   profile: profileSchema,
+});
+
+const renameProfileSchema = z.object({
+  from: profileName,
+  to: profileName,
+  /** A revisão do perfil que está sendo renomeado. */
+  baseRevision: z.string().nullable(),
 });
 
 const deleteProfileSchema = z.object({

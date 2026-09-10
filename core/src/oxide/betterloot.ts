@@ -1140,6 +1140,28 @@ export function applyProfile(previous: RawObject | null, profile: BetterLootProf
 }
 
 /**
+ * Troca o nome de um perfil dentro de UMA caixa crua.
+ *
+ * `to === null` = tirar a citação (é o que o `deleteProfile` faz);
+ * um nome = renomear no lugar, preservando probabilidade, teto e o
+ * liga/desliga daquela associação.
+ */
+function retargetProfileLinks(raw: RawObject, from: string, to: string | null): RawObject {
+  const links = toProfiles(raw[KEY_PROFILES]);
+  const next = to === null ? links.filter((link) => link.name !== from) : links;
+
+  return {
+    ...raw,
+    [KEY_PROFILES]: next.map((link) => ({
+      'Group Enabled?': link.enabled,
+      'Loot Profile Name': link.name === from && to !== null ? to : link.name,
+      'Loot Profile Probability (1% - 100%)': link.probability,
+      'Max Items From Profile (0 = unlimited)': link.maxItems,
+    })),
+  };
+}
+
+/**
  * Em quais caixas cada perfil está.
  *
  * Uma varredura só do `LootTables.json` inteiro, e não uma por
@@ -1760,6 +1782,174 @@ export class BetterLootEditor {
   }
 
   /**
+   * Renomeia um perfil, e reescreve quem o cita.
+   *
+   * ####  O NOME É A CHAVE, E ELE MORA EM DOIS ARQUIVOS  ####
+   *
+   * No `LootGroups.json` ele é a CHAVE do dicionário; no
+   * `LootTables.json` ele é citado por nome dentro do `Loot
+   * Profiles` de cada caixa que sorteia daquele perfil. Trocar só o
+   * primeiro deixaria toda caixa pedindo um perfil que não existe —
+   * e o BetterLoot ignora a citação órfã em silêncio, resmungando
+   * no log (`:1031`). O admin só descobriria abrindo a caixa.
+   *
+   * Por isso renomear NÃO é uma edição de campo: é uma operação que
+   * atravessa os dois arquivos, e é ela que o botão "Renomear" da
+   * tela chama.
+   *
+   * ####  A ORDEM DAS CHAVES É PRESERVADA  ####
+   *
+   * Renomear uma chave em JavaScript a joga para o fim do objeto. O
+   * arquivo continuaria correto, mas o `diff` de um backup contra o
+   * outro mostraria o dicionário inteiro remexido em vez da linha
+   * que mudou — e é nesse diff que alguém confere o que foi feito.
+   */
+  async renameProfile(
+    serverId: string,
+    input: {
+      readonly from: string;
+      readonly to: string;
+      readonly baseRevision: string | null;
+    },
+  ): Promise<{
+    readonly revision: string;
+    readonly profile: BetterLootProfile;
+    /** As caixas cuja citação foi reescrita. */
+    readonly retargeted: readonly string[];
+    readonly backup: string | null;
+    readonly reloaded: boolean;
+    readonly reloadOutput: string | null;
+  }> {
+    const paths = this.#pathsOf(serverId);
+    const file = await readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+
+    const current =
+      file === null ? emptyLootGroups() : parseLootGroups(file.text, this.#whereGroups(serverId));
+
+    const before = current.groups[input.from];
+
+    if (before === undefined) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_NOT_FOUND',
+        `O perfil de loot "${input.from}" não está no LootGroups.json de "${serverId}".`,
+        404,
+      );
+    }
+
+    if (input.to === input.from) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_SAME_NAME',
+        `O perfil já se chama "${input.to}". Nada foi alterado.`,
+        400,
+      );
+    }
+
+    if (current.groups[input.to] !== undefined) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_EXISTS',
+        `Já existe um perfil chamado "${input.to}" neste servidor. Renomear por cima dele juntaria ` +
+          'os dois numa entrada só e apagaria o conteúdo de um. Escolha outro nome. Nada foi ' +
+          'alterado.',
+        409,
+      );
+    }
+
+    if (input.baseRevision !== null && input.baseRevision !== profileRevisionOf(before)) {
+      throw new ApiError(
+        'BETTERLOOT_STALE_REVISION',
+        `O perfil "${input.from}" mudou no disco depois que esta tela o abriu — outra pessoa ` +
+          'gravou, ou o próprio BetterLoot o rebalanceou ao carregar. Nada foi alterado: ' +
+          'recarregue o perfil e refaça a edição em cima do que está lá.',
+        409,
+      );
+    }
+
+    // A chave nova ocupa o LUGAR da antiga. Ver o cabeçalho.
+    const groups: Record<string, RawObject> = {};
+
+    for (const [name, raw] of Object.entries(current.groups)) {
+      groups[name === input.from ? input.to : name] = raw;
+    }
+
+    const tablesFile = await readPluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+    );
+
+    const tables =
+      tablesFile === null ? null : parseLootTables(tablesFile.text, this.#whereTables(serverId));
+
+    const usedBy = tables === null ? [] : (usageOfProfiles(tables.tables).get(input.from) ?? []);
+
+    // ####  OS GRUPOS PRIMEIRO, E O RELOAD SÓ NO FIM  ####
+    //
+    // Recarregar entre as duas escritas faria o plugin ver, por um
+    // instante, caixas pedindo o nome antigo que já não existe — e
+    // ele reescreveria o arquivo em cima disso. Um reload só, depois
+    // dos dois arquivos no lugar.
+    const written = await this.#writeGroups(
+      serverId,
+      paths,
+      { ...current.root, [KEY_GROUPS]: groups },
+      input.to,
+      { reload: usedBy.length === 0 },
+    );
+
+    if (usedBy.length === 0 || tables === null) {
+      return {
+        revision: written.revision,
+        profile: written.profile,
+        retargeted: [],
+        backup: written.backup,
+        reloaded: written.reloaded,
+        reloadOutput: written.reloadOutput,
+      };
+    }
+
+    const nextTables: Record<string, RawObject> = { ...tables.tables };
+
+    for (const prefab of usedBy) {
+      const raw = nextTables[prefab];
+
+      if (raw !== undefined) {
+        nextTables[prefab] = retargetProfileLinks(raw, input.from, input.to);
+      }
+    }
+
+    const tablesBackup = await backupPluginDataFile(
+      paths.oxideDataDir,
+      paths.backupsDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+      Date.now(),
+    );
+
+    await writePluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+      JSON.stringify({ ...tables.root, [KEY_TABLES]: nextTables }, null, 2),
+    );
+
+    const reload = await this.#deps.reload(serverId);
+
+    // O perfil é RELIDO depois do reload, como em toda gravação
+    // daqui: se o plugin rebalanceou ao carregar, é o rebalanceado
+    // que a tela mostra.
+    const after = await this.profile(serverId, input.to);
+
+    return {
+      revision: after.revision,
+      profile: after.profile,
+      retargeted: usedBy,
+      backup: tablesBackup ?? written.backup,
+      reloaded: reload.sent,
+      reloadOutput: reload.output,
+    };
+  }
+
+  /**
    * Apaga um perfil.
    *
    * ####  APAGAR SEM OLHAR AS CAIXAS É DEIXAR LIXO NO DISCO  ####
@@ -1856,17 +2046,10 @@ export class BetterLootEditor {
         continue;
       }
 
-      nextTables[prefab] = {
-        ...raw,
-        [KEY_PROFILES]: toProfiles(raw[KEY_PROFILES])
-          .filter((link) => link.name !== input.name)
-          .map((link) => ({
-            'Group Enabled?': link.enabled,
-            'Loot Profile Name': link.name,
-            'Loot Profile Probability (1% - 100%)': link.probability,
-            'Max Items From Profile (0 = unlimited)': link.maxItems,
-          })),
-      };
+      // `null` = tirar a citação. O mesmo helper do `renameProfile`:
+      // dois trechos que montam o `Loot Profiles` divergiriam na
+      // primeira vez que o plugin ganhasse um campo.
+      nextTables[prefab] = retargetProfileLinks(raw, input.name, null);
     }
 
     const tablesBackup = await backupPluginDataFile(
