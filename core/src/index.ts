@@ -53,6 +53,8 @@ import { AdsRepository } from './db/ads-repository.js';
 import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
 import { DungeonLayoutsRepository } from './db/dungeon-layouts-repository.js';
 import { DungeonsRepository } from './db/dungeons-repository.js';
+import { DungeonSpawnPointsRepository } from './db/dungeon-spawn-points-repository.js';
+import { DungeonScheduler } from './dungeons/scheduler.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
 import { WorldEventsRepository } from './db/world-events-repository.js';
 import { BlueprintMaterializer } from './dungeons/materializer.js';
@@ -1306,6 +1308,11 @@ async function main(): Promise<void> {
 
   const dungeonsRepository = new DungeonsRepository(db, logger);
   const worldEventsRepository = new WorldEventsRepository(db, logger);
+
+  // Onde a masmorra pode nascer: os lugares que o admin escolheu
+  // olhando o mapa. É o oposto das `world_event_zones`, que dizem
+  // onde nada nasce — ver o repositório.
+  const dungeonSpawnPoints = new DungeonSpawnPointsRepository(db);
 
   // ####  A PLANTA VAI PELO DISCO, E O RESTO PELO CONSOLE  ####
   //
@@ -2685,6 +2692,38 @@ async function main(): Promise<void> {
 
   wipeScheduler.start();
 
+  // ####  E O RELÓGIO DOS EVENTOS DE MAPA  ####
+  //
+  // Ele faz a masmorra nascer sozinha. Mesmo desenho do wipe, e
+  // pelas mesmas razões: mora no agente (um plugin não roda com o
+  // Oxide quebrado), guarda o compromisso no BANCO (reiniciar o
+  // agente não pode matar a agenda) e trata cada evento no seu
+  // próprio try (um evento torto não pode calar os outros).
+  //
+  // Sem `dungeonSync` ele não sobe: sem canal com os servidores não
+  // há para quem mandar o comando de construir.
+  const dungeonScheduler =
+    dungeonSync === undefined
+      ? null
+      : new DungeonScheduler({
+          events: worldEventsRepository,
+          spawnPoints: dungeonSpawnPoints,
+          servers: {
+            ids: () => supervisor.ids(),
+            onlineCount: onlinePlayersOf,
+            worldKey: (serverId) => {
+              const world = supervisor.configOf(serverId);
+
+              return world === null ? null : `${String(world.worldSize)}:${String(world.seed)}`;
+            },
+          },
+          build: (serverId, input) => dungeonSync.build(serverId, input),
+          demolish: (serverId, reason) => dungeonSync.demolish(serverId, reason),
+          logger,
+        });
+
+  dungeonScheduler?.start();
+
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
@@ -2871,6 +2910,19 @@ async function main(): Promise<void> {
       onChanged: (reason) => {
         void dungeonSync?.pushAll(reason);
       },
+      // O botão de erguer, do painel. Sem sync — agente sem servidor
+      // nenhum —, a rota devolve 503 em vez de fingir que mandou.
+      build: dungeonSync === undefined ? undefined : (serverId, input) => dungeonSync.build(serverId, input),
+      groundAt: dungeonSync === undefined ? undefined : (serverId, x, z) => dungeonSync.groundAt(serverId, x, z),
+      spawnPoints: dungeonSpawnPoints,
+      // O mundo do `.ini`: e o que o agente configurou, e a mesma
+      // chave que o MonumentReader usa. Um ponto marcado noutro mapa
+      // aponta para outro lugar, e a tela precisa poder dizer isso.
+      worldKeyOf: (serverId) => {
+        const world = supervisor.configOf(serverId);
+
+        return world === null ? null : `${String(world.worldSize)}:${String(world.seed)}`;
+      },
     },
     worldEvents: {
       events: worldEventsRepository,
@@ -3007,6 +3059,7 @@ async function main(): Promise<void> {
         // ela morre com o processo, e o boot seguinte a marca como
         // falha com a frase que oferece retomar.
         wipeScheduler.stop();
+        dungeonScheduler?.stop();
         // E o da devolução de blueprints junto dos outros: uma
         // rodada que começasse agora falaria com um RCON que já
         // não existe, e marcaria como entregue o que não saiu.

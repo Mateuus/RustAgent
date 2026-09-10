@@ -73,6 +73,31 @@ export type BuildGrade = (typeof BUILD_GRADES)[number];
 export const LOOT_MODES = ['server', 'add', 'replace'] as const;
 export type LootMode = (typeof LOOT_MODES)[number];
 
+/**
+ * O que a casinha da entrada carrega dentro.
+ *
+ * ####  `none` É O PADRÃO PORQUE A PLANTA VEIO CHEIA  ####
+ *
+ * MEDIDO em 09/09/2026, apontado pelo dono: as quatro plantas de
+ * entrada do projeto trazem armas nas caixas — a `entrance2`, que
+ * é a entrada das duas masmorras cadastradas, traz uma M249; a
+ * `entrance3` traz minigun e lança-foguetes; a `entrance1` traz um
+ * arsenal com 200 explosives e 1.000 scrap.
+ *
+ * Não é loot desenhado: é o que estava dentro das caixas quando
+ * alguém copiou a construção, em outro servidor. O construtor
+ * copiava fielmente, e virou conteúdo por acidente.
+ *
+ *   `none`     nada. A casinha nasce com as caixas vazias.
+ *   `unarmed`  tudo, menos arma, munição e explosivo.
+ *   `all`      o que a planta mandar — para quem a desenhou.
+ *
+ * A escolha é da MASMORRA e não da planta: a mesma entrada pode
+ * servir a duas masmorras com regras diferentes.
+ */
+export const ENTRANCE_ITEM_MODES = ['none', 'unarmed', 'all'] as const;
+export type EntranceItemMode = (typeof ENTRANCE_ITEM_MODES)[number];
+
 /** De onde o código da porta trancada sai. */
 export const LOCK_CARRIERS = ['npc', 'crate', 'none'] as const;
 export type LockCarrier = (typeof LOCK_CARRIERS)[number];
@@ -366,6 +391,53 @@ const dungeonBodySchema = z
     /** O slug de uma planta. `null` = a entrada mínima gerada por código. */
     entranceBlueprint: z.string().min(1).max(64).nullable().default(null),
 
+    /**
+     * O que a casinha da entrada carrega dentro.
+     *
+     * O padrão é `none`, e ele MUDA o comportamento de quem já
+     * existia — de propósito. Ver `ENTRANCE_ITEM_MODES`.
+     */
+    entranceItems: z.enum(ENTRANCE_ITEM_MODES).default('none'),
+
+    /**
+     * O ângulo da casinha da entrada, em graus.
+     *
+     * ####  ELE GIRA A CASINHA, E SÓ ELA  ####
+     *
+     * A masmorra lá embaixo cresce na direção que o ponto de
+     * nascimento manda, e quem desce chega de frente para o
+     * corredor — isso o plugin resolve sozinho.
+     *
+     * A planta, essa, tem uma frente própria: a porta foi desenhada
+     * apontando para algum lado, e não há como o agente adivinhar
+     * qual. Pedido do dono em 09/09/2026, de dentro do jogo: "talvez
+     * colocar o ângulo que aí fica certo, uma seta para girar".
+     */
+    entranceRotation: z.number().min(0).max(359).default(0),
+
+    /**
+     * Qual lado do DESENHO fica de frente no jogo.
+     *
+     * ####  NÃO CONFUNDIR COM `entranceRotation`  ####
+     *
+     * Aquele gira a CASINHA no terreno — a porta de frente para a
+     * estrada. Este gira o DESENHO: é o que decide para onde o
+     * corredor sai de quem acabou de descer.
+     *
+     * `null` = automático, e é o caso normal: a masmorra gira
+     * sozinha para o corredor sair de frente para a casinha. A
+     * escolha manual existe para o que o automático não cobre — uma
+     * entrada com dois corredores saindo, ou um traçado que o admin
+     * quer deitado de outro jeito.
+     *
+     * Só os quatro múltiplos de 90: o desenho é uma grade, e 37
+     * graus não existem nela.
+     */
+    entranceFacing: z
+      .union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)])
+      .nullable()
+      .default(null),
+
     // ---- modo 'recipe' ----
     // Uma sala é o piso; trinta é onde uma masmorra leva mais de
     // meia hora para ser limpa, e o evento acaba antes.
@@ -472,6 +544,83 @@ const dungeonBodySchema = z
         /** Sem isto, uma masmorra emperrada vira lixo permanente no mapa. */
         allowAdmin: z.boolean().default(true),
         warnOnAttempt: z.boolean().default(true),
+      })
+      .prefault({}),
+
+    /**
+     * O círculo no mapa do jogo.
+     *
+     * ####  SEM ELE A MASMORRA É INVISÍVEL  ####
+     *
+     * MEDIDO em 09/09/2026, apontado pelo dono ("verificar se está
+     * marcando no mapa"): o plugin não criava marcador nenhum. Quem
+     * não visse o chat não tinha como saber que ela existia, nem
+     * onde — e um evento que ninguém acha é um evento que não
+     * aconteceu.
+     *
+     * São dois prefabs empilhados no jogo, como no DungeonBases
+     * 1.3.4: um `genericradiusmarker` (o círculo colorido) filho de
+     * um `vending_mapmarker` (que carrega o texto do rótulo).
+     */
+    marker: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** O que aparece ao passar o mouse sobre o círculo. */
+        label: z.string().trim().min(1).max(40).default('Masmorra'),
+        /**
+         * A cor do círculo, em `#rrggbb`.
+         *
+         * Hexadecimal e não três números de 0 a 1 como no 1.3.4: o
+         * painel tem um seletor de cor, e traduzir uma vez na
+         * borda é melhor que três campos que ninguém sabe preencher.
+         */
+        color: z
+          .string()
+          .regex(/^#[0-9a-fA-F]{6}$/u, 'a cor é um hexadecimal como #ff0000')
+          .default('#ff0000'),
+        /** 0 = invisível, 1 = sólido. O 1.3.4 usa 0.55. */
+        alpha: z.number().min(0).max(1).default(0.55),
+        /**
+         * O raio do círculo, na escala do mapa do jogo.
+         *
+         * Meio ponto é o do 1.3.4 e cobre a casinha. Acima de uns
+         * poucos pontos ele vira uma mancha que cobre um quarto do
+         * mapa — o teto existe para isso.
+         */
+        radius: z.number().min(0.1).max(10).default(0.5),
+      })
+      .prefault({}),
+
+    /**
+     * O que o servidor inteiro ouve.
+     *
+     * ####  HAVIA UM ÚNICO CAMINHO DE FALA, E ELE NÃO SAÍA DA MASMORRA  ####
+     *
+     * MEDIDO em 09/09/2026, apontado pelo dono ("verificar se
+     * alerta no chat"): o `Announce` do plugin fala com
+     * `dungeon.inside` — quem JÁ está lá dentro. Não havia nada que
+     * alcançasse quem está no mapa.
+     *
+     * Texto vazio = a frase padrão do agente. Isso é de propósito:
+     * mudar a frase padrão um dia não pode exigir reescrever a
+     * linha de cada masmorra.
+     */
+    announce: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** Vazio = "Uma masmorra apareceu em {grid}." */
+        onBuild: z.string().max(200).default(''),
+        /** Vazio = "A masmorra de {grid} fechou." */
+        onEnd: z.string().max(200).default(''),
+        /**
+         * Dizer a grade (`E7`) na frase.
+         *
+         * Ligado é o certo para um evento que as pessoas devem
+         * achar; desligado, para uma masmorra que é para ser
+         * procurada. A coordenada crua nunca entra: ninguém joga
+         * com `(-1330, 871)` na cabeça.
+         */
+        showGrid: z.boolean().default(true),
       })
       .prefault({}),
 

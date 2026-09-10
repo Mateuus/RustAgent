@@ -40,6 +40,7 @@ import type { AgentDatabase } from './database.js';
 interface EventRow {
   readonly id: string;
   readonly kind: string;
+  readonly dungeon_id: string | null;
   readonly name: string;
   readonly description: string | null;
   readonly enabled: number;
@@ -155,7 +156,7 @@ export class WorldEventsRepository {
       this.#db
         .prepare(
           `INSERT INTO world_events
-                (id, kind, name, description, enabled, sort, spawn_mode,
+                (id, kind, dungeon_id, name, description, enabled, sort, spawn_mode,
                  interval_min, interval_max, duration_min, duration_max,
                  min_online, count_after_end, access, owner_grace_seconds,
                  marker_enabled, marker_label, marker_color, marker_alpha,
@@ -163,7 +164,7 @@ export class WorldEventsRepository {
                  msg_start, msg_location, msg_warning, msg_end, msg_denied,
                  warn_before, radiation_before, destroy_after, respawn_seconds,
                  created_at, updated_at)
-                VALUES (@id, @kind, @name, @description, @enabled, @sort, @spawnMode,
+                VALUES (@id, @kind, @dungeonId, @name, @description, @enabled, @sort, @spawnMode,
                         @intervalMin, @intervalMax, @durationMin, @durationMax,
                         @minOnline, @countAfterEnd, @access, @ownerGrace,
                         @markerEnabled, @markerLabel, @markerColor, @markerAlpha,
@@ -172,7 +173,8 @@ export class WorldEventsRepository {
                         @warnBefore, @radiationBefore, @destroyAfter, @respawnSeconds,
                         @now, @now)
            ON CONFLICT (id) DO UPDATE SET
-                kind = excluded.kind, name = excluded.name,
+                kind = excluded.kind, dungeon_id = excluded.dungeon_id,
+                name = excluded.name,
                 description = excluded.description, enabled = excluded.enabled,
                 sort = excluded.sort, spawn_mode = excluded.spawn_mode,
                 interval_min = excluded.interval_min, interval_max = excluded.interval_max,
@@ -196,6 +198,7 @@ export class WorldEventsRepository {
         .run({
           id: input.id,
           kind: input.kind,
+          dungeonId: input.dungeonId,
           name: input.name,
           description: input.description ?? null,
           enabled: input.enabled ? 1 : 0,
@@ -460,6 +463,159 @@ export class WorldEventsRepository {
     return rows.map(toRun);
   }
 
+  // ------------------------------------------------------
+  //  A AGENDA
+  //
+  //  ####  O PRÓXIMO NASCIMENTO É UMA LINHA, E NÃO UM TIMER  ####
+  //
+  //  O agendador podia guardar "daqui a 42 minutos" na memória. O
+  //  wipe já pagou o preço dessa escolha: reiniciar o agente matava
+  //  a execução em curso, e a lição foi gravar o COMPROMISSO.
+  //
+  //  Uma run `scheduled` com `scheduled_for` é isso: reiniciar o
+  //  agente no meio da espera não muda nada, e a agenda é
+  //  consultável — a tela mostra "a próxima é às 21:40" em vez de
+  //  "confie em mim".
+  // ------------------------------------------------------
+
+  /**
+   * Marca a hora do próximo nascimento.
+   *
+   * Uma run `scheduled` não é um nascimento: é um compromisso. Ela
+   * vira `active` quando o plugin confirma, ou `failed` quando não
+   * dá.
+   */
+  scheduleRun(input: {
+    readonly eventId: string;
+    readonly serverId: string;
+    readonly dungeonId: string | null;
+    readonly at: number;
+  }): EventRun {
+    const result = this.#db
+      .prepare(
+        `INSERT INTO world_event_runs
+              (event_id, server_id, dungeon_id, status, scheduled_for)
+              VALUES (@eventId, @serverId, @dungeonId, 'scheduled', @at)`,
+      )
+      .run({
+        eventId: input.eventId,
+        serverId: input.serverId,
+        dungeonId: input.dungeonId,
+        at: input.at,
+      });
+
+    const run = this.run(Number(result.lastInsertRowid));
+
+    if (run === null) throw new Error('a run agendada não pôde ser lida logo após a escrita');
+
+    this.#logger?.debug(
+      { run: run.id, event: input.eventId, at: new Date(input.at).toISOString() },
+      'próximo nascimento agendado',
+    );
+
+    return run;
+  }
+
+  /** O compromisso em aberto daquele evento naquele servidor. */
+  scheduledRun(eventId: string, serverId: string): EventRun | null {
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM world_event_runs
+          WHERE event_id = ? AND server_id = ? AND status = 'scheduled'
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(eventId, serverId) as RunRow | undefined;
+
+    return row === undefined ? null : toRun(row);
+  }
+
+  /**
+   * Os compromissos cuja hora chegou.
+   *
+   * ####  ELE OLHA PARA TRÁS, E NÃO SÓ PARA AGORA  ####
+   *
+   * Um agente que ficou fora do ar uma hora volta com compromissos
+   * VENCIDOS. Buscar `<= agora` — e não uma janela em torno de
+   * agora — é o que faz esses compromissos serem cumpridos em vez
+   * de esquecidos em silêncio.
+   */
+  dueRuns(now: number = Date.now()): readonly EventRun[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM world_event_runs
+          WHERE status = 'scheduled' AND scheduled_for <= ?
+          ORDER BY scheduled_for`,
+      )
+      .all(now) as RunRow[];
+
+    return rows.map(toRun);
+  }
+
+  /**
+   * Adia um compromisso.
+   *
+   * É o que acontece quando o servidor está vazio: o evento não
+   * PULA, ele espera. Loot para ninguém é loot de graça para o
+   * primeiro que logar.
+   */
+  rescheduleRun(runId: number, at: number): boolean {
+    return (
+      this.#db
+        .prepare(`UPDATE world_event_runs SET scheduled_for = ? WHERE id = ? AND status = 'scheduled'`)
+        .run(at, runId).changes > 0
+    );
+  }
+
+  /**
+   * O compromisso virou um pedido de construção.
+   *
+   * `spawning` é o intervalo entre "mandei" e "o plugin confirmou".
+   * Sem ele, um tick que demorasse mandaria construir duas vezes.
+   */
+  markSpawning(runId: number, at: number = Date.now()): boolean {
+    return (
+      this.#db
+        .prepare(
+          `UPDATE world_event_runs
+              SET status = 'spawning', started_at = ?
+            WHERE id = ? AND status = 'scheduled'`,
+        )
+        .run(at, runId).changes > 0
+    );
+  }
+
+  /**
+   * As runs de pé que já passaram da hora de acabar.
+   *
+   * Chamada no boot e a cada tick. É o que impede uma masmorra de
+   * ficar de pé para sempre porque o agente reiniciou no meio da
+   * duração dela.
+   */
+  overdueRuns(deadline: number): readonly EventRun[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM world_event_runs
+          WHERE status IN ('active','closing') AND started_at IS NOT NULL AND started_at <= ?
+          ORDER BY started_at`,
+      )
+      .all(deadline) as RunRow[];
+
+    return rows.map(toRun);
+  }
+
+  /** As runs abertas de um evento, para a tela dizer o que está acontecendo. */
+  openRuns(eventId: string): readonly EventRun[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM world_event_runs
+          WHERE event_id = ? AND status IN ('scheduled','spawning','active','closing')
+          ORDER BY id DESC`,
+      )
+      .all(eventId) as RunRow[];
+
+    return rows.map(toRun);
+  }
+
   /** A run que está de pé naquele servidor, se houver. */
   activeRun(serverId: string): EventRun | null {
     const row = this.#db
@@ -550,6 +706,7 @@ export class WorldEventsRepository {
     return {
       id: row.id,
       kind: row.kind,
+      dungeonId: row.dungeon_id,
       name: row.name,
       description: row.description,
       enabled: row.enabled === 1,

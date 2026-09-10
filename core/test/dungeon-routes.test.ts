@@ -30,7 +30,7 @@ import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { WorldEventsRepository } from '../src/db/world-events-repository.js';
 import { apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
-import { registerDungeonRoutes } from '../src/http/routes/dungeons.js';
+import { registerDungeonRoutes, type DungeonRoutesDeps } from '../src/http/routes/dungeons.js';
 
 const silent = pino({ level: 'silent' });
 const SERVER = 'server01';
@@ -70,7 +70,19 @@ interface Harness {
 
 let harness: Harness | null = null;
 
-async function buildHarness(): Promise<Harness> {
+/**
+ * O que a rota de erguer chama.
+ *
+ * O teste injeta um dublê: o que se prova aqui e a TRADUCAO entre
+ * a tentativa e a resposta HTTP - qual recusa vira 409, qual vira
+ * 422, e o que o painel le. O RCON de verdade e do `sync`.
+ */
+type BuildStub = DungeonRoutesDeps['build'];
+type GroundStub = DungeonRoutesDeps['groundAt'];
+
+async function buildHarness(
+  extra: { readonly build?: BuildStub; readonly groundAt?: GroundStub } = {},
+): Promise<Harness> {
   const db = openDatabase({ file: MEMORY_DATABASE });
 
   runMigrations(db);
@@ -110,7 +122,7 @@ async function buildHarness(): Promise<Harness> {
   });
 
   await app.register(async (api) => {
-    registerDungeonRoutes(api, { dungeons, blueprints, layouts, events });
+    registerDungeonRoutes(api, { dungeons, blueprints, layouts, events, ...extra });
   });
 
   await app.ready();
@@ -657,5 +669,174 @@ describe('o acervo de traçados', () => {
     });
 
     expect(response.statusCode).toBe(400);
+  });
+});
+
+// ============================================================
+//  Erguer a masmorra pelo painel.
+//
+//  ####  O QUE ESTE BLOCO PROTEGE  ####
+//
+//  O passo ⑥ do editor dizia que erguer "é a única parte que não
+//  dá para fazer daqui" — e não era verdade, era uma peça que
+//  faltava: o console aceita `ozdungeon build <slug> <x> <z>`
+//  desde a frente C.
+//
+//  O que se prova aqui é a TRADUÇÃO: cada recusa do servidor vira
+//  um código HTTP que a tela sabe tratar, e nenhuma delas vira um
+//  "pronto" — o painel já afirmou uma vez ter derrubado uma
+//  masmorra que continuava de pé, e essa é a falha que ninguém
+//  desconfia.
+//
+//  Ver Docs/OrigemZDurgeon/02-AS-SETE-PENDENCIAS.md §1.
+// ============================================================
+
+const DRY_LAND = {
+  x: 120,
+  z: -340,
+  grid: 'E7',
+  ground: 12.4,
+  water: 0,
+  depth: 0,
+  serves: true,
+};
+
+async function askBuild(app: FastifyInstance, body: Record<string, unknown> = {}) {
+  return app.inject({
+    method: 'POST',
+    url: '/dungeons/bunker/build',
+    payload: { serverId: SERVER, x: 120, z: -340, ...body },
+  });
+}
+
+describe('erguer pelo painel', () => {
+  it('manda o comando e diz onde, sem afirmar que ela existe', async () => {
+    const asked: unknown[] = [];
+
+    const { app } = await buildHarness({
+      build: async (serverId, input) => {
+        asked.push({ serverId, ...input });
+
+        return Promise.resolve({ sent: true, reply: "Construindo 'bunker'…", ground: DRY_LAND });
+      },
+    });
+
+    await createDungeon(app);
+
+    const response = await askBuild(app, { yaw: 90 });
+
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json() as { sent: boolean; grid: string; message: string };
+
+    expect(body.sent).toBe(true);
+    expect(body.grid).toBe('E7');
+    // A frase não pode prometer o que ainda não aconteceu: quem
+    // confirma é o `built` do stream, segundos depois.
+    expect(body.message).toContain('leva alguns segundos');
+
+    expect(asked).toEqual([{ serverId: SERVER, slug: 'bunker', x: 120, z: -340, yaw: 90 }]);
+  });
+
+  it('a masmorra precisa existir antes', async () => {
+    const { app } = await buildHarness({
+      build: async () => Promise.resolve({ sent: true, reply: '', ground: null }),
+    });
+
+    const response = await askBuild(app);
+
+    expect(response.statusCode).toBe(404);
+    expect((response.json() as { error: string }).error).toBe('DUNGEON_NOT_FOUND');
+  });
+
+  it('água vira 422 com a profundidade na frase', async () => {
+    const { app } = await buildHarness({
+      build: async () =>
+        Promise.resolve({
+          sent: false,
+          refused: 'water' as const,
+          reply: '',
+          ground: { ...DRY_LAND, depth: 3.2, serves: false },
+        }),
+    });
+
+    await createDungeon(app);
+
+    const response = await askBuild(app);
+
+    expect(response.statusCode).toBe(422);
+
+    const body = response.json() as { error: string; message: string };
+
+    expect(body.error).toBe('BUILD_POINT_IS_WATER');
+    expect(body.message).toContain('3.2 m');
+  });
+
+  it('uma masmorra já de pé vira 409, com a frase do plugin', async () => {
+    const { app } = await buildHarness({
+      build: async () =>
+        Promise.resolve({
+          sent: false,
+          refused: 'occupied' as const,
+          reply: "Já existe uma masmorra de pé ('visita'). Use /ozdungeon stop antes.",
+          ground: DRY_LAND,
+        }),
+    });
+
+    await createDungeon(app);
+
+    const response = await askBuild(app);
+
+    expect(response.statusCode).toBe(409);
+
+    const body = response.json() as { error: string; message: string };
+
+    expect(body.error).toBe('DUNGEON_ALREADY_ACTIVE');
+    // A frase do servidor chega inteira: é ela que diz QUAL masmorra
+    // está no chão, e o painel não sabe disso sozinho.
+    expect(body.message).toContain('visita');
+  });
+
+  it('servidor fora do fio vira 409, e não um "pronto"', async () => {
+    const { app } = await buildHarness({
+      build: async () =>
+        Promise.resolve({ sent: false, refused: 'offline' as const, reply: '', ground: null }),
+    });
+
+    await createDungeon(app);
+
+    const response = await askBuild(app);
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { error: string }).error).toBe('SERVER_OFFLINE');
+  });
+
+  it('sem canal com os servidores, a rota recusa em vez de fingir', async () => {
+    const { app } = await buildHarness();
+
+    await createDungeon(app);
+
+    const response = await askBuild(app);
+
+    expect(response.statusCode).toBe(503);
+    expect((response.json() as { error: string }).error).toBe('BUILD_UNAVAILABLE');
+  });
+
+  it('o chão pode ser consultado antes de escolher o ponto', async () => {
+    const { app } = await buildHarness({
+      groundAt: async (_serverId, x, z) => Promise.resolve({ ...DRY_LAND, x, z }),
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/dungeons/ground?serverId=${SERVER}&x=120&z=-340`,
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json() as { ground: { grid: string; serves: boolean } };
+
+    expect(body.ground.grid).toBe('E7');
+    expect(body.ground.serves).toBe(true);
   });
 });

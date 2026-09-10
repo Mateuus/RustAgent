@@ -31,7 +31,10 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { BlueprintShelf } from '@/components/dungeons/blueprint-shelf';
 import { DungeonDialog } from '@/components/dungeons/dungeon-dialog';
+import { BuildDialog } from '@/components/dungeons/build-dialog';
 import { DungeonList, LiveCard } from '@/components/dungeons/dungeon-list';
+import { SchedulePanel } from '@/components/dungeons/schedule-panel';
+import { SpawnPointsPanel } from '@/components/dungeons/spawn-points-panel';
 import { LayoutShelf } from '@/components/dungeons/layout-shelf';
 import { RunHistory } from '@/components/dungeons/run-history';
 import { PageHeader } from '@/components/page-header';
@@ -50,7 +53,7 @@ import {
 import { DUNGEON_HELP } from '@/lib/help/dungeons';
 import { cn } from '@/lib/utils';
 
-type Tab = 'masmorras' | 'plantas' | 'historico';
+type Tab = 'masmorras' | 'onde' | 'agenda' | 'plantas' | 'historico';
 
 export default function EventosPage() {
   return (
@@ -70,6 +73,10 @@ function Eventos() {
   const [error, setError] = useState<string | null>(null);
   /** `undefined` = fechado; `null` = criando; uma masmorra = editando. */
   const [editing, setEditing] = useState<Dungeon | null | undefined>(undefined);
+  /** A masmorra que está para ser erguida. `null` = ninguém. */
+  const [building, setBuilding] = useState<DungeonSummary | null>(null);
+  /** O servidor cujos pontos a aba "Onde nasce" está mostrando. */
+  const [pointsServer, setPointsServer] = useState<string>('');
   /**
    * O traçado com que a criação começa.
    *
@@ -140,6 +147,12 @@ function Eventos() {
           <TabButton active={tab === 'masmorras'} onClick={() => setTab('masmorras')}>
             Masmorras {dungeons === null ? '' : `(${String(dungeons.length)})`}
           </TabButton>
+          <TabButton active={tab === 'onde'} onClick={() => setTab('onde')}>
+            Onde nasce
+          </TabButton>
+          <TabButton active={tab === 'agenda'} onClick={() => setTab('agenda')}>
+            Agenda
+          </TabButton>
           <TabButton active={tab === 'plantas'} onClick={() => setTab('plantas')}>
             Plantas ({String(blueprints.length + layouts.length)})
           </TabButton>
@@ -182,9 +195,30 @@ function Eventos() {
                 dungeons={dungeons}
                 onEdit={(dungeon) => setEditing(dungeon)}
                 onChanged={() => void load()}
+                // Sem servidor cadastrado o botão abriria um diálogo
+                // sem para onde mandar o comando.
+                onBuild={servers.length === 0 ? undefined : (dungeon) => setBuilding(dungeon)}
               />
             )}
           </div>
+        )}
+
+        {dungeons !== null && tab === 'onde' && (
+          // ####  ELA RESPONDE A PERGUNTA QUE O EDITOR NÃO RESPONDIA  ####
+          //
+          // O passo ⑥ dizia: "o painel sabe tudo sobre esta masmorra,
+          // menos ONDE ela deve nascer". Esta aba é onde isso passa a
+          // ser sabido — e é o que faz o botão Erguer ter para onde
+          // apontar.
+          <WhereTab
+            servers={servers}
+            serverId={pointsServer === '' ? (servers[0]?.id ?? '') : pointsServer}
+            onServer={setPointsServer}
+          />
+        )}
+
+        {dungeons !== null && tab === 'agenda' && (
+          <SchedulePanel dungeons={dungeons} servers={servers} />
         )}
 
         {dungeons !== null && tab === 'plantas' && (
@@ -229,6 +263,17 @@ function Eventos() {
 
         {dungeons !== null && tab === 'historico' && <RunHistory runs={runs} error={error} />}
       </div>
+
+      {building !== null && (
+        <BuildDialog
+          dungeon={building}
+          servers={servers}
+          onClose={() => setBuilding(null)}
+          // O histórico é quem confirma que ela subiu: recarregar
+          // aqui é o que faz o cartão "no ar agora" aparecer.
+          onSent={() => void load()}
+        />
+      )}
 
       {editing !== undefined && (
         <DungeonDialog
@@ -353,5 +398,57 @@ function TabButton({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * A aba "Onde nasce".
+ *
+ * Um seletor de servidor e o painel de pontos. O servidor é escolha
+ * desta tela porque um ponto é de um MAPA — e cada servidor tem o
+ * seu.
+ */
+function WhereTab({
+  servers,
+  serverId,
+  onServer,
+}: {
+  readonly servers: readonly { readonly id: string; readonly name: string }[];
+  readonly serverId: string;
+  readonly onServer: (id: string) => void;
+}) {
+  if (servers.length === 0) {
+    return (
+      <StateBlock
+        variant="empty"
+        title="Nenhum servidor cadastrado"
+        detail="Um ponto de nascimento é de um mapa, e um mapa é de um servidor."
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {servers.length > 1 && (
+        <label className="flex items-center gap-2">
+          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+            Servidor
+          </span>
+          <select
+            value={serverId}
+            onChange={(event) => onServer(event.target.value)}
+            className="h-9 border border-border bg-background px-2 text-sm"
+          >
+            {servers.map((server) => (
+              <option key={server.id} value={server.id}>
+                {server.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      <SpawnPointsPanel serverId={serverId} />
+    </div>
   );
 }

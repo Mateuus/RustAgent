@@ -140,7 +140,48 @@ export interface MapViewProps {
    * as pessoas falam de posição no jogo.
    */
   readonly monuments?: readonly MapMonument[];
+  /**
+   * Clicar num lugar vazio do mapa devolve a coordenada dele.
+   *
+   * ####  CLICAR NÃO É ARRASTAR, E OS DOIS COMEÇAM IGUAL  ####
+   *
+   * O arraste move o mapa, e ele nasce do mesmo `pointerdown`. Um
+   * clique que fosse qualquer `pointerup` marcaria um ponto toda
+   * vez que alguém movesse a tela — então só conta o toque que
+   * ficou parado (`PICK_SLOP` unidades de desenho).
+   *
+   * `undefined` = a tela não oferece o gesto, e o mapa segue sendo
+   * só de leitura.
+   */
+  readonly onPick?: (point: { x: number; z: number }) => void;
+  /**
+   * Lugares marcados no mapa, com nome.
+   *
+   * É o que faz uma lista de pontos deixar de ser uma lista de
+   * coordenadas: ninguém escolhe entre (-1330, 871) e (204, -1502)
+   * sem ver os dois no mapa.
+   */
+  readonly marks?: readonly MapMark[];
 }
+
+/** Um lugar marcado: um ponto de nascimento, hoje. */
+export interface MapMark {
+  readonly id: string | number;
+  readonly x: number;
+  readonly z: number;
+  readonly label: string;
+  /** `muted` = desligado, ou de outro mapa. */
+  readonly tone?: 'normal' | 'muted' | 'warning';
+  readonly selected?: boolean;
+}
+
+/**
+ * Quanto o ponteiro pode andar e ainda ser um clique.
+ *
+ * Em unidades do DESENHO (o quadrado de 1000), então ele vale o
+ * mesmo em qualquer zoom.
+ */
+const PICK_SLOP = 6;
 
 /**
  * Mundo -> desenho.
@@ -183,6 +224,8 @@ export function MapView({
   coverage = null,
   onTeleport,
   monuments = [],
+  onPick,
+  marks = [],
 }: MapViewProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   /** O jogador sendo arrastado com Ctrl, e onde o cursor está. */
@@ -325,10 +368,29 @@ export function MapView({
 
   const endDrag = useCallback(
     (event: PointerEvent<SVGSVGElement>) => {
+      const from = dragFrom.current;
+
       dragFrom.current = null;
 
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      // ####  O TOQUE QUE NÃO ANDOU É UM CLIQUE  ####
+      //
+      // E ele só vale fora de um arraste de jogador: soltar alguém
+      // num lugar é teleportar, não marcar ponto.
+      if (teleporting === null && from !== null && onPick !== undefined) {
+        const now = toDrawing(event.clientX, event.clientY, from.view);
+
+        if (Math.abs(now.x - from.x) <= PICK_SLOP && Math.abs(now.y - from.y) <= PICK_SLOP) {
+          const half = span / 2;
+
+          onPick({
+            x: (now.x / SIDE) * span - half,
+            z: half - (now.y / SIDE) * span,
+          });
+        }
       }
 
       if (teleporting === null) {
@@ -348,7 +410,7 @@ export function MapView({
 
       onTeleport?.(alvo.player, { x, z });
     },
-    [onTeleport, span, teleporting],
+    [onPick, onTeleport, span, teleporting, toDrawing],
   );
 
   const zoomed = view.side < MAX_SIDE;
@@ -405,7 +467,9 @@ export function MapView({
         // arraste viraria rolagem da página.
         className={cn(
           'h-full w-full touch-none select-none',
-          zoomed ? 'cursor-grab' : 'cursor-default',
+          // Marcar ganha do arrastar na escolha do cursor: quem
+          // abriu a tela de pontos veio marcar um.
+          onPick !== undefined ? 'cursor-crosshair' : zoomed ? 'cursor-grab' : 'cursor-default',
         )}
         role="img"
         aria-label={`Mapa do mundo com ${String(plotted.length)} jogador(es)`}
@@ -530,6 +594,66 @@ export function MapView({
                 style={{ paintOrder: 'stroke', stroke: 'var(--bg)', strokeWidth: 3 * k }}
               >
                 {monument.name}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* ####  OS PONTOS MARCADOS, ENTRE A REFERÊNCIA E A GENTE  ####
+
+            Eles são o assunto da tela que os mostra, então ficam
+            acima dos monumentos. Abaixo dos jogadores porque gente
+            se move: um marcador fixo escondendo alguém é pior que o
+            contrário. */}
+        {marks.map((mark) => {
+          const { px, py } = project(mark, span);
+          const tone = mark.tone ?? 'normal';
+
+          return (
+            <g
+              key={mark.id}
+              transform={`translate(${String(px)} ${String(py)})`}
+              className="pointer-events-none"
+            >
+              {/* O losango separa "lugar marcado" de "jogador", que
+                  é um círculo. Cor sozinha não distingue nada para
+                  quem não vê a diferença entre verde e vermelho. */}
+              <rect
+                x={-4 * k}
+                y={-4 * k}
+                width={8 * k}
+                height={8 * k}
+                transform="rotate(45)"
+                strokeWidth={1.5 * k}
+                className={cn(
+                  'stroke-bg',
+                  tone === 'muted'
+                    ? 'fill-muted'
+                    : tone === 'warning'
+                      ? 'fill-amber'
+                      : 'fill-rust',
+                )}
+                opacity={tone === 'muted' ? 0.55 : 1}
+              />
+
+              {mark.selected === true && (
+                <circle
+                  r={10 * k}
+                  fill="none"
+                  strokeWidth={1.5 * k}
+                  className="stroke-amber"
+                />
+              )}
+
+              <text
+                x={0}
+                y={-9 * k}
+                textAnchor="middle"
+                fontSize={11 * k}
+                className={tone === 'muted' ? 'fill-muted' : 'fill-foreground'}
+                style={{ paintOrder: 'stroke', stroke: 'var(--bg)', strokeWidth: 3 * k }}
+              >
+                {mark.label}
               </text>
             </g>
           );

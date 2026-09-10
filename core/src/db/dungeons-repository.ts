@@ -41,6 +41,7 @@ import {
   aiSpecSchema,
   BUILD_GRADES,
   dungeonGridSchema,
+  ENTRANCE_ITEM_MODES,
   LOCK_CARRIER_SCOPES,
   LOCK_CARRIERS,
   LOCK_UNDELIVERED,
@@ -57,6 +58,7 @@ import {
   type GradeSetInput,
   type LockCarrier,
   type LockCarrierScope,
+  type EntranceItemMode,
   type LockUndelivered,
   type LootTableInput,
   type RoomColor,
@@ -70,6 +72,18 @@ interface DungeonRow {
   readonly description: string | null;
   readonly mode: string;
   readonly entrance_blueprint: string | null;
+  readonly entrance_items: string;
+  readonly entrance_rotation: number;
+  readonly entrance_facing: number | null;
+  readonly marker_enabled: number;
+  readonly marker_label: string | null;
+  readonly marker_color: string;
+  readonly marker_alpha: number;
+  readonly marker_radius: number;
+  readonly announce_enabled: number;
+  readonly announce_on_build: string | null;
+  readonly announce_on_end: string | null;
+  readonly announce_show_grid: number;
   readonly size_min: number;
   readonly size_max: number;
   readonly weight_green: number;
@@ -141,6 +155,9 @@ interface RoomRow {
  * linha antiga (`NULL`) lê.
  */
 const DEFAULT_NOTE_TITLE = 'Código da porta';
+
+/** O nome do círculo no mapa, quando a coluna está vazia. */
+const DEFAULT_MARKER_LABEL = 'Masmorra';
 
 export class DungeonsRepository {
   readonly #db: AgentDatabase;
@@ -221,7 +238,8 @@ export class DungeonsRepository {
       this.#db
         .prepare(
           `INSERT INTO dungeons
-                (id, name, description, mode, entrance_blueprint,
+                (id, name, description, mode, entrance_blueprint, entrance_items,
+                 entrance_rotation, entrance_facing,
                  size_min, size_max, weight_green, weight_blue, weight_red,
                  corridor_npc_density, corridor_loot_density, corridor_crates,
                  corridor_loot_table, corridor_ai,
@@ -235,8 +253,11 @@ export class DungeonsRepository {
                  protection_enabled, protection_allow_admin, protection_warn_on_attempt,
                  respawn_enabled, respawn_minutes, respawn_only_when_empty,
                  respawn_rebuild_destroyed,
+                 marker_enabled, marker_label, marker_color, marker_alpha, marker_radius,
+                 announce_enabled, announce_on_build, announce_on_end, announce_show_grid,
                  created_at, updated_at)
-                VALUES (@id, @name, @description, @mode, @entranceBlueprint,
+                VALUES (@id, @name, @description, @mode, @entranceBlueprint, @entranceItems,
+                        @entranceRotation, @entranceFacing,
                         @sizeMin, @sizeMax, @weightGreen, @weightBlue, @weightRed,
                         @corridorNpc, @corridorLoot, @corridorCrates,
                         @corridorTable, @corridorAi,
@@ -250,12 +271,17 @@ export class DungeonsRepository {
                         @protectionEnabled, @protectionAllowAdmin, @protectionWarnOnAttempt,
                         @respawnEnabled, @respawnMinutes, @respawnOnlyWhenEmpty,
                         @respawnRebuildDestroyed,
+                        @markerEnabled, @markerLabel, @markerColor, @markerAlpha, @markerRadius,
+                        @announceEnabled, @announceOnBuild, @announceOnEnd, @announceShowGrid,
                         @now, @now)
            ON CONFLICT (id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
                 mode = excluded.mode,
                 entrance_blueprint = excluded.entrance_blueprint,
+                entrance_items = excluded.entrance_items,
+                entrance_rotation = excluded.entrance_rotation,
+                entrance_facing = excluded.entrance_facing,
                 size_min = excluded.size_min,
                 size_max = excluded.size_max,
                 weight_green = excluded.weight_green,
@@ -295,6 +321,15 @@ export class DungeonsRepository {
                 respawn_minutes = excluded.respawn_minutes,
                 respawn_only_when_empty = excluded.respawn_only_when_empty,
                 respawn_rebuild_destroyed = excluded.respawn_rebuild_destroyed,
+                marker_enabled = excluded.marker_enabled,
+                marker_label = excluded.marker_label,
+                marker_color = excluded.marker_color,
+                marker_alpha = excluded.marker_alpha,
+                marker_radius = excluded.marker_radius,
+                announce_enabled = excluded.announce_enabled,
+                announce_on_build = excluded.announce_on_build,
+                announce_on_end = excluded.announce_on_end,
+                announce_show_grid = excluded.announce_show_grid,
                 updated_at = excluded.updated_at`,
         )
         .run({
@@ -303,6 +338,20 @@ export class DungeonsRepository {
           description: input.description ?? null,
           mode: input.mode,
           entranceBlueprint: input.entranceBlueprint,
+          entranceItems: input.entranceItems,
+          entranceRotation: input.entranceRotation,
+          entranceFacing: input.entranceFacing,
+          markerEnabled: input.marker.enabled ? 1 : 0,
+          markerLabel: input.marker.label,
+          markerColor: input.marker.color,
+          markerAlpha: input.marker.alpha,
+          markerRadius: input.marker.radius,
+          announceEnabled: input.announce.enabled ? 1 : 0,
+          // Texto vazio vira NULL: a frase padrão mora no código, e
+          // gravá-la em cada linha a congelaria. Ver a migração 068.
+          announceOnBuild: input.announce.onBuild === '' ? null : input.announce.onBuild,
+          announceOnEnd: input.announce.onEnd === '' ? null : input.announce.onEnd,
+          announceShowGrid: input.announce.showGrid ? 1 : 0,
           sizeMin: input.size.min,
           sizeMax: input.size.max,
           weightGreen: input.weights.green,
@@ -430,6 +479,29 @@ export class DungeonsRepository {
       description: row.description,
       mode: row.mode === 'blueprint' ? 'blueprint' : 'recipe',
       entranceBlueprint: row.entrance_blueprint,
+      // Um modo que o banco nao conhece cai em 'none': a entrada
+      // que nao da nada decepciona, a que da uma M249 de graca
+      // reescreve o wipe. Ver ENTRANCE_ITEM_MODES.
+      entranceItems: oneOf(ENTRANCE_ITEM_MODES, row.entrance_items, 'none') as EntranceItemMode,
+      entranceRotation: clampNumber(row.entrance_rotation, 0, 359, 0),
+      // Um valor que não é múltiplo de 90 — banco editado à mão —
+      // cai no automático, que é o que a coluna nula já vale.
+      entranceFacing: quarterTurn(row.entrance_facing),
+      marker: {
+        enabled: row.marker_enabled === 1,
+        label: row.marker_label ?? DEFAULT_MARKER_LABEL,
+        // Uma cor torta — banco editado à mão — vira o vermelho
+        // padrão em vez de derrubar a leitura da masmorra inteira.
+        color: /^#[0-9a-fA-F]{6}$/u.test(row.marker_color) ? row.marker_color : '#ff0000',
+        alpha: clampNumber(row.marker_alpha, 0, 1, 0.55),
+        radius: clampNumber(row.marker_radius, 0.1, 10, 0.5),
+      },
+      announce: {
+        enabled: row.announce_enabled === 1,
+        onBuild: row.announce_on_build ?? '',
+        onEnd: row.announce_on_end ?? '',
+        showGrid: row.announce_show_grid === 1,
+      },
       size: { min: row.size_min, max: row.size_max },
       weights: { green: row.weight_green, blue: row.weight_blue, red: row.weight_red },
       corridor: {
@@ -639,4 +711,30 @@ function grade(raw: string | null): BuildGrade {
  */
 function oneOf(allowed: readonly string[], raw: string, fallback: string): string {
   return allowed.includes(raw) ? raw : fallback;
+}
+
+/**
+ * Um número do banco, preso na faixa que o schema promete.
+ *
+ * Uma coluna fora da faixa — banco editado à mão, restaurado de
+ * uma versão mais velha — não pode derrubar a leitura: ela vira o
+ * padrão, como toda coluna torta faz neste arquivo.
+ */
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Um dos quatro quartos de volta, ou nada.
+ *
+ * O desenho é uma grade: a entrada aponta para cima, para a
+ * direita, para baixo ou para a esquerda. Qualquer outro valor é
+ * lixo de escrita à mão e vale o mesmo que ausente — o automático.
+ */
+function quarterTurn(value: number | null): 0 | 90 | 180 | 270 | null {
+  if (value === 0 || value === 90 || value === 180 || value === 270) return value;
+
+  return null;
 }

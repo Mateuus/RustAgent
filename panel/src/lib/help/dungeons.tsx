@@ -108,6 +108,102 @@ export const DUNGEON_HELP = {
     ),
   },
 
+  marcador: {
+    title: 'O círculo no mapa do jogo',
+    short: 'Sem ele, quem não vê o chat não tem como saber que a masmorra existe.',
+    body: (
+      <>
+        <p>
+          O marcador é um <strong>círculo colorido</strong> no mapa do jogo, com um nome que aparece
+          ao passar o mouse. É por ele que os jogadores acham a masmorra.
+        </p>
+        <p>
+          Ele nasce junto com ela e morre junto: nada da masmorra entra no save do mundo, e um
+          marcador que sobrevivesse ficaria apontando para o nada até o servidor reiniciar.
+        </p>
+        <p>
+          Desligá-lo é uma escolha válida — uma masmorra que é para ser <em>procurada</em>. Mas aí o
+          aviso no chat passa a ser a única pista.
+        </p>
+      </>
+    ),
+  },
+
+  anuncio: {
+    title: 'O aviso no chat',
+    short: 'Uma linha para o servidor inteiro quando ela nasce e quando ela fecha.',
+    body: (
+      <>
+        <p>
+          Sem isto, a única fala da masmorra alcança quem <strong>já está lá dentro</strong> — o que
+          não ajuda ninguém a chegar.
+        </p>
+        <p>
+          Deixando os textos em branco, valem as frases padrão. Escrevendo, você pode usar{' '}
+          <code>{'{grid}'}</code> para a grade do mapa e <code>{'{nome}'}</code> para o
+          identificador da masmorra.
+        </p>
+        <p>
+          A grade (<strong>E7</strong>) é o que se diz num jogo de Rust. A coordenada crua nunca
+          entra na frase: ninguém joga com <code>(-1330, 871)</code> na cabeça.
+        </p>
+      </>
+    ),
+  },
+
+  anguloDaEntrada: {
+    title: 'Para que lado a casinha aponta',
+    short: 'Gira só a construção da superfície. A masmorra lá embaixo não se mexe.',
+    body: (
+      <>
+        <p>
+          São <strong>dois ângulos</strong>, porque são duas construções. O ângulo do{' '}
+          <strong>ponto de nascimento</strong> orienta a masmorra — a direção em que o desenho
+          cresce a noventa metros de profundidade.
+        </p>
+        <p>
+          A planta da casinha tem uma frente própria: a porta foi desenhada apontando para algum
+          lado, e o servidor não tem como adivinhar qual. É isso que este ângulo acerta.
+        </p>
+        <p>
+          As setas giram de noventa em noventa, que é o que basta para uma construção alinhada aos
+          eixos. A barra embaixo faz o ajuste fino, para uma planta que foi copiada torta.
+        </p>
+        <HelpWarn>
+          Quem desce pelo alçapão <strong>já chega de frente para o corredor</strong> — isso o
+          servidor resolve sozinho, e não depende deste ângulo.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  itensDaEntrada: {
+    title: 'O que vem dentro das caixas da entrada',
+    short: 'As plantas do acervo foram copiadas com as caixas cheias — e vinha arma dentro.',
+    body: (
+      <>
+        <p>
+          Uma planta do acervo guarda a construção <strong>e o que estava dentro dela</strong> no
+          dia em que alguém a copiou. Nenhuma das que vieram com o projeto foi esvaziada antes.
+        </p>
+        <p>
+          A <strong>entrance2</strong> — a entrada que as duas masmorras usam — guarda uma M249. A{' '}
+          <strong>entrance3</strong> guarda minigun e lança-foguetes. A <strong>entrance1</strong>{' '}
+          guarda AK, LR-300, M249, 200 explosivos e mil de scrap.
+        </p>
+        <p>
+          Isso nunca foi loot desenhado: é o entulho de outro servidor, que virou conteúdo por
+          acidente. Por isso o padrão é <strong>nada</strong> — a casinha nasce limpa, e o loot da
+          masmorra é o que você desenhou lá dentro.
+        </p>
+        <HelpWarn>
+          Escolher <strong>Tudo que a planta guardava</strong> devolve o arsenal. Só faz sentido
+          numa planta que você mesmo montou, com o que quis dentro.
+        </HelpWarn>
+      </>
+    ),
+  },
+
   plantaPronta: {
     title: 'Começar de uma planta pronta',
     short: 'Um traçado salvo vira o ponto de partida — e o desenho é copiado, não emprestado.',

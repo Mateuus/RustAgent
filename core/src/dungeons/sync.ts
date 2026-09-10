@@ -41,13 +41,16 @@ import type { DungeonsRepository } from '../db/dungeons-repository.js';
 import type { WorldEventsRepository } from '../db/world-events-repository.js';
 import {
   buildDungeonSyncCommand,
+  DUNGEON_COMMANDS,
   DUNGEON_SYNC_MAX_BYTES,
+  groundReportSchema,
   parseDungeonPush,
   parseDungeonReady,
   type AiPayload,
   type DungeonPayload,
   type DungeonSyncPayload,
   type GradePayload,
+  type GroundReport,
   type LootTablePayload,
 } from '../game/dungeon-contract.js';
 import type { Logger } from '../logger.js';
@@ -61,6 +64,40 @@ import { toError } from '../util.js';
 import type { BlueprintMaterializer } from './materializer.js';
 
 /** O mínimo que o sync precisa de um servidor. */
+/** Onde e para que lado a masmorra deve nascer. */
+export interface DungeonBuildInput {
+  readonly slug: string;
+  readonly x: number;
+  readonly z: number;
+  /** Para onde ela cresce, em graus. É o que o admin olhava. */
+  readonly yaw: number;
+}
+
+/**
+ * O que aconteceu com o pedido de construir.
+ *
+ * ####  `sent` NÃO É "A MASMORRA EXISTE"  ####
+ *
+ * É "o comando chegou ao servidor". A construção leva segundos e
+ * quem confirma é o `built` do stream, com as peças e a grade.
+ * Confundir os dois é como o painel passou a afirmar que tinha
+ * derrubado uma masmorra que continuava de pé.
+ */
+export interface DungeonBuildAttempt {
+  readonly sent: boolean;
+  /**
+   *   `offline`   servidor fora do fio
+   *   `water`     o chão ali é água, e a entrada nasceria submersa
+   *   `occupied`  já há uma masmorra de pé naquele servidor
+   *   `error`     o RCON estourou; `reply` traz a mensagem
+   */
+  readonly refused?: 'offline' | 'water' | 'occupied' | 'error';
+  /** A resposta casada do comando, inteira. É o que explica. */
+  readonly reply: string;
+  /** Como é o chão ali. `null` = não deu para perguntar. */
+  readonly ground: GroundReport | null;
+}
+
 export interface DungeonSyncServers {
   readonly ids: () => readonly string[];
   readonly contextOf: (
@@ -180,6 +217,135 @@ export class DungeonSync {
   }
 
   /**
+   * Pergunta ao servidor se aquele chão serve para uma masmorra.
+   *
+   * ####  ELA EXISTE PORQUE O AGENTE NÃO ENXERGA O TERRENO  ####
+   *
+   * O painel escolhe pontos olhando um mapa desenhado; o relevo, a
+   * água e a altura estão do outro lado do fio. Perguntar custa um
+   * comando e evita a entrada dentro de um rio — que em 09/09/2026
+   * matou o dono no instante do teleporte.
+   *
+   * `null` = não deu para perguntar (servidor fora, resposta
+   * ilegível). Quem chama decide, e o plugin ainda recusa água por
+   * conta própria: esta é a checagem que EXPLICA antes, não a que
+   * protege.
+   */
+  async groundAt(serverId: string, x: number, z: number): Promise<GroundReport | null> {
+    if (this.#stopped) return null;
+
+    const context = this.#deps.servers.contextOf(serverId);
+
+    if (context === null || !context.rcon.isConnected) return null;
+
+    try {
+      // A resposta do comando vem CASADA, no retorno do POST /rcon —
+      // ela não aparece no buffer do console. Procurá-la lá faria o
+      // comando parecer mudo.
+      const reply = await context.rcon.send(
+        `${DUNGEON_COMMANDS.ground} ${String(Math.round(x))} ${String(Math.round(z))} json`,
+      );
+
+      const start = reply.indexOf('{');
+      const end = reply.lastIndexOf('}');
+
+      if (start < 0 || end <= start) return null;
+
+      const parsed = groundReportSchema.safeParse(JSON.parse(reply.slice(start, end + 1)));
+
+      return parsed.success ? parsed.data : null;
+    } catch (cause) {
+      this.#deps.logger.debug(
+        { server: serverId, x, z, error: toError(cause).message },
+        'não consegui perguntar como é o chão ali',
+      );
+
+      return null;
+    }
+  }
+
+  /**
+   * Manda erguer uma masmorra naquele ponto.
+   *
+   * ####  O PAINEL DEIXA DE SER UM COPIADOR DE COMANDO  ####
+   *
+   * Até aqui, a única maneira de uma masmorra nascer era o admin
+   * entrar no jogo e colar `/ozdungeon build <slug>` — o painel
+   * sabia tudo sobre ela menos como fazê-la existir.
+   *
+   * O caminho já estava pronto do outro lado: o console aceita
+   * `ozdungeon build <slug> <x> <z> [graus]` desde que a frente C
+   * nasceu, e é a forma que se testa sem um cliente de Rust aberto.
+   *
+   * ####  E ELE NÃO INVENTA SUCESSO  ####
+   *
+   * `sent` é "o comando chegou ao servidor", e nada mais. Quem diz
+   * que a masmorra existe é o `built` que volta pelo stream, com as
+   * peças e a grade — a construção leva segundos, e a resposta do
+   * comando sai antes dela terminar.
+   *
+   * É a mesma disciplina do `demolish`: o painel já afirmou uma vez
+   * ter derrubado uma masmorra que continuava de pé, e o defeito
+   * que AFIRMA é o que ninguém desconfia.
+   */
+  async build(serverId: string, input: DungeonBuildInput): Promise<DungeonBuildAttempt> {
+    if (this.#stopped) {
+      return { sent: false, refused: 'offline', reply: '', ground: null };
+    }
+
+    const context = this.#deps.servers.contextOf(serverId);
+
+    if (context === null || !context.rcon.isConnected) {
+      return { sent: false, refused: 'offline', reply: '', ground: null };
+    }
+
+    // A pergunta vem ANTES do comando, e não depois: depois seria
+    // uma explicação para uma casinha que já está de pé na água.
+    const ground = await this.groundAt(serverId, input.x, input.z);
+
+    if (ground !== null && !ground.serves) {
+      return { sent: false, refused: 'water', reply: '', ground };
+    }
+
+    const yaw = Math.round(((input.yaw % 360) + 360) % 360);
+
+    const command =
+      `${DUNGEON_COMMANDS.build} ${input.slug}` +
+      ` ${String(Math.round(input.x))} ${String(Math.round(input.z))} ${String(yaw)}`;
+
+    try {
+      const reply = await context.rcon.send(command);
+
+      // O plugin recusa a segunda masmorra em prosa: ele responde
+      // "Já existe uma masmorra de pé ('x')". Não há código de erro
+      // para ler, e inventar um exigiria mudar o comando que o admin
+      // também usa dentro do jogo — então a rota lê a frase e o
+      // painel mostra a frase inteira, que é o que explica.
+      const occupied = reply.toLowerCase().includes('já existe uma masmorra');
+
+      if (occupied) {
+        return { sent: false, refused: 'occupied', reply: reply.trim(), ground };
+      }
+
+      this.#deps.logger.info(
+        { server: serverId, dungeon: input.slug, x: input.x, z: input.z, yaw },
+        'mandei erguer a masmorra pelo painel',
+      );
+
+      return { sent: true, reply: reply.trim(), ground };
+    } catch (cause) {
+      const message = toError(cause).message;
+
+      this.#deps.logger.warn(
+        { server: serverId, dungeon: input.slug, error: message },
+        'não consegui mandar erguer a masmorra',
+      );
+
+      return { sent: false, refused: 'error', reply: message, ground };
+    }
+  }
+
+  /**
    * Manda derrubar a masmorra que está de pé naquele servidor.
    *
    * ####  ELA EXISTE PORQUE O PAINEL MENTIA  ####
@@ -268,6 +434,13 @@ export class DungeonSync {
       id: dungeon.id,
       mode: dungeon.mode,
       entrance: dungeon.entranceBlueprint,
+      // `none` é o padrão dos dois lados do fio, então não viaja:
+      // é o mesmo corte do `leanAccess`.
+      entranceItems: dungeon.entranceItems === 'none' ? undefined : dungeon.entranceItems,
+      // Zero é não girar, dos dois lados do fio: não viaja.
+      entranceRotation: dungeon.entranceRotation === 0 ? undefined : dungeon.entranceRotation,
+      // `null` é o automático dos dois lados: não viaja.
+      entranceFacing: dungeon.entranceFacing ?? undefined,
       size: dungeon.size,
       weights: dungeon.weights,
       corridor: {
@@ -291,6 +464,8 @@ export class DungeonSync {
       lock: leanLock(dungeon.lock),
       access: leanAccess(dungeon.access),
       protection: leanProtection(dungeon.protection),
+      marker: leanMarker(dungeon.marker),
+      announce: leanAnnounce(dungeon.announce),
       respawn: leanRespawn(dungeon.respawn),
       rooms: dungeon.rooms.map((room) => ({
         key: room.key,
@@ -518,6 +693,18 @@ const DEFAULT_ENTRY_WEIGHT = 10;
 const DEFAULT_NOTE_TITLE = 'Código da porta';
 
 /**
+ * O `new MarkerSpec()` do plugin, campo a campo.
+ *
+ * Eles são a régua do corte acima: mudá-los de um lado só é o jeito
+ * de quebrar isto em silêncio — o admin escolhe uma coisa, o sync
+ * não manda, e o jogo faz outra.
+ */
+const DEFAULT_MARKER_LABEL = 'Masmorra';
+const DEFAULT_MARKER_COLOR = '#ff0000';
+const DEFAULT_MARKER_ALPHA = 0.55;
+const DEFAULT_MARKER_RADIUS = 0.5;
+
+/**
  * A tabela, sem o que já é o padrão.
  *
  * `mode: 'server'` não viaja: é o que o plugin faz sem tabela
@@ -637,6 +824,60 @@ function leanProtection(protection: Dungeon['protection']): DungeonPayload['prot
   const untouched = protection.enabled && protection.allowAdmin && protection.warnOnAttempt;
 
   return untouched ? undefined : protection;
+}
+
+/**
+ * O círculo no mapa, sem o que já é o padrão.
+ *
+ * O corte é o mesmo do `leanAccess`: os padrões daqui e os do
+ * `new MarkerSpec()` do plugin são os mesmos, então uma masmorra
+ * que ninguém reeditou não paga byte nenhum do teto de 50 KB.
+ *
+ * Desligado viaja sozinho: os outros quatro campos não são lidos
+ * quando não há marcador para configurar.
+ */
+function leanMarker(marker: Dungeon['marker']): DungeonPayload['marker'] {
+  if (!marker.enabled) return { enabled: false };
+
+  const untouched =
+    marker.label === DEFAULT_MARKER_LABEL &&
+    marker.color === DEFAULT_MARKER_COLOR &&
+    marker.alpha === DEFAULT_MARKER_ALPHA &&
+    marker.radius === DEFAULT_MARKER_RADIUS;
+
+  if (untouched) return undefined;
+
+  return {
+    enabled: true,
+    ...(marker.label === DEFAULT_MARKER_LABEL ? {} : { label: marker.label }),
+    ...(marker.color === DEFAULT_MARKER_COLOR ? {} : { color: marker.color }),
+    ...(marker.alpha === DEFAULT_MARKER_ALPHA ? {} : { alpha: marker.alpha }),
+    ...(marker.radius === DEFAULT_MARKER_RADIUS ? {} : { radius: marker.radius }),
+  };
+}
+
+/**
+ * O anúncio, sem o que já é o padrão.
+ *
+ * ####  TEXTO VAZIO NÃO VIAJA  ####
+ *
+ * Vazio quer dizer "use a frase padrão", e a frase padrão mora no
+ * plugin. Mandar uma string vazia pelo fio faria o plugin ter de
+ * distinguir "vazio" de "ausente" para chegar à mesma conclusão.
+ */
+function leanAnnounce(announce: Dungeon['announce']): DungeonPayload['announce'] {
+  if (!announce.enabled) return { enabled: false };
+
+  const untouched = announce.onBuild === '' && announce.onEnd === '' && announce.showGrid;
+
+  if (untouched) return undefined;
+
+  return {
+    enabled: true,
+    ...(announce.onBuild === '' ? {} : { onBuild: announce.onBuild }),
+    ...(announce.onEnd === '' ? {} : { onEnd: announce.onEnd }),
+    ...(announce.showGrid ? {} : { showGrid: false }),
+  };
 }
 
 /**

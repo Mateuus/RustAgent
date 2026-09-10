@@ -21,7 +21,7 @@
 import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
 
-import { MEMORY_DATABASE, openDatabase } from '../src/db/database.js';
+import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
 import { DungeonBlueprintsRepository } from '../src/db/dungeon-blueprints-repository.js';
 import { DungeonsRepository } from '../src/db/dungeons-repository.js';
 import { runMigrations } from '../src/db/migrations.js';
@@ -109,6 +109,14 @@ interface Captured {
   readonly dungeons: DungeonsRepository;
   /** O último comando que o RCON falso recebeu. */
   readonly sent: string[];
+  /**
+   * O banco cru.
+   *
+   * Só para os testes que precisam ESCREVER uma linha torta — o
+   * que o repositório, por definição, não deixa fazer. Ver o teste
+   * da cor inválida.
+   */
+  readonly db: AgentDatabase;
 }
 
 function harness(): Captured {
@@ -156,7 +164,7 @@ function harness(): Captured {
     logger: silent,
   });
 
-  return { sync, dungeons, sent };
+  return { sync, dungeons, sent, db };
 }
 
 /** O JSON que viajou dentro do `origemz.dungeon.sync <base64>`. */
@@ -391,5 +399,221 @@ describe('os campos das quatro frentes atravessam o sync', () => {
     if (command === undefined) throw new Error('nada foi enviado');
 
     expect(command.length).toBeLessThan(DUNGEON_SYNC_MAX_BYTES);
+  });
+});
+
+// ============================================================
+//  A entrada parou de distribuir arsenal.
+//
+//  ####  O DEFEITO QUE ISTO TRANCA  ####
+//
+//  MEDIDO em 09/09/2026, apontado pelo dono: as plantas de entrada
+//  do acervo trazem armas dentro das caixas, e o construtor as
+//  copiava fielmente. A `entrance2` — a entrada das duas masmorras
+//  cadastradas — traz uma M249: toda vez que uma delas nascia, uma
+//  M249 nascia junto na superfície.
+//
+//  Ver Docs/OrigemZDurgeon/02-AS-SETE-PENDENCIAS.md §7.
+// ============================================================
+
+describe('o que a casinha da entrada carrega', () => {
+  it('nasce sem nada, inclusive numa masmorra gravada antes do campo existir', () => {
+    const { dungeons } = harness();
+
+    // `FACTORY_RECIPES` são o que o admin duplica, e nenhuma delas
+    // menciona o campo: elas têm de valer 'none' também.
+    const recipe = FACTORY_RECIPES[0];
+
+    if (recipe === undefined) throw new Error('sem receita de fábrica');
+
+    expect(recipe.entranceItems).toBe('none');
+
+    const saved = dungeons.save(recipe);
+
+    expect(saved.entranceItems).toBe('none');
+  });
+
+  it('a escolha atravessa o banco', () => {
+    const { dungeons } = harness();
+
+    for (const mode of ['none', 'unarmed', 'all'] as const) {
+      const saved = dungeons.save(
+        dungeonInputSchema.parse({ ...FULL, id: `com-${mode}`, entranceItems: mode }),
+      );
+
+      expect(saved.entranceItems).toBe(mode);
+      expect(dungeons.get(`com-${mode}`)?.entranceItems).toBe(mode);
+    }
+  });
+
+  it('só viaja ao plugin quando não é o padrão', async () => {
+    const { sync, dungeons, sent } = harness();
+
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'limpa', entranceItems: 'none' }));
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'armada', entranceItems: 'all' }));
+
+    await sync.push(SERVER, 'teste');
+
+    const command = sent[0];
+
+    if (command === undefined) throw new Error('nada foi enviado');
+
+    const payload = decode(command);
+    const limpa = payload.dungeons.find((entry) => entry.id === 'limpa');
+    const armada = payload.dungeons.find((entry) => entry.id === 'armada');
+
+    // O padrão é o mesmo dos dois lados do fio, então ele não paga
+    // byte nenhum do teto de 50 KB — é o corte do `leanAccess`.
+    expect(limpa?.entranceItems).toBeUndefined();
+    expect(armada?.entranceItems).toBe('all');
+  });
+
+  it('recusa um modo que ninguém implementou', () => {
+    expect(() =>
+      dungeonInputSchema.parse({ ...FULL, id: 'torta', entranceItems: 'somente-arma' }),
+    ).toThrow();
+  });
+});
+
+// ============================================================
+//  O mapa e o chat.
+//
+//  ####  O QUE ESTE BLOCO PROTEGE  ####
+//
+//  MEDIDO em 09/09/2026, a pedido do dono: a masmorra não marcava
+//  nada no mapa e não falava com ninguém fora dela. O plugin não
+//  tinha uma linha de MapMarker, e o único caminho de fala
+//  alcançava só quem já estava lá dentro.
+//
+//  Agora os dois blocos existem — e o que se prova aqui é que eles
+//  atravessam o banco e o fio, porque um campo que para no
+//  repositório é o pior desfecho: o admin configura, a tela mostra
+//  de volta, e o jogo ignora.
+//
+//  Ver Docs/OrigemZDurgeon/02-AS-SETE-PENDENCIAS.md §3.
+// ============================================================
+
+describe('o marcador e o anúncio', () => {
+  it('nascem ligados, com os padrões do plugin', () => {
+    const recipe = FACTORY_RECIPES[0];
+
+    if (recipe === undefined) throw new Error('sem receita de fábrica');
+
+    expect(recipe.marker).toEqual({
+      enabled: true,
+      label: 'Masmorra',
+      color: '#ff0000',
+      alpha: 0.55,
+      radius: 0.5,
+    });
+
+    expect(recipe.announce).toEqual({
+      enabled: true,
+      onBuild: '',
+      onEnd: '',
+      showGrid: true,
+    });
+  });
+
+  it('atravessam o banco', () => {
+    const { dungeons } = harness();
+
+    const saved = dungeons.save(
+      dungeonInputSchema.parse({
+        ...FULL,
+        id: 'anunciada',
+        marker: { enabled: true, label: 'O Labirinto', color: '#00ff88', alpha: 0.9, radius: 2.5 },
+        announce: {
+          enabled: true,
+          onBuild: 'O Labirinto abriu em {grid}!',
+          onEnd: 'Acabou.',
+          showGrid: false,
+        },
+      }),
+    );
+
+    expect(saved.marker.label).toBe('O Labirinto');
+    expect(saved.marker.color).toBe('#00ff88');
+    expect(saved.marker.alpha).toBe(0.9);
+    expect(saved.marker.radius).toBe(2.5);
+
+    const read = dungeons.get('anunciada');
+
+    expect(read?.announce.onBuild).toBe('O Labirinto abriu em {grid}!');
+    expect(read?.announce.showGrid).toBe(false);
+  });
+
+  it('uma linha torta no banco vira o padrão, e não derruba a leitura', () => {
+    const { dungeons, db } = harness();
+
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'torta' }));
+
+    // O que um banco editado à mão — ou restaurado de uma versão
+    // mais velha — pode conter. O repositório nunca escreveria isto.
+    db.prepare(
+      `UPDATE dungeons
+          SET marker_color = 'vermelho', marker_alpha = 9, marker_radius = -3
+        WHERE id = 'torta'`,
+    ).run();
+
+    const read = dungeons.get('torta');
+
+    // Vira o padrão, e a masmorra continua legível: é a mesma regra
+    // de toda coluna torta deste repositório.
+    expect(read?.marker.color).toBe('#ff0000');
+    expect(read?.marker.alpha).toBe(1);
+    expect(read?.marker.radius).toBe(0.1);
+    expect(read?.name).toBe(FULL.name);
+  });
+
+  it('só o que não é padrão viaja ao plugin', async () => {
+    const { sync, dungeons, sent } = harness();
+
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'padrao' }));
+    dungeons.save(
+      dungeonInputSchema.parse({
+        ...FULL,
+        id: 'gritona',
+        marker: { enabled: true, label: 'Evento', color: '#00ff88', alpha: 0.55, radius: 0.5 },
+        announce: { enabled: true, onBuild: 'Abriu em {grid}', onEnd: '', showGrid: true },
+      }),
+    );
+    dungeons.save(
+      dungeonInputSchema.parse({
+        ...FULL,
+        id: 'muda',
+        marker: { enabled: false, label: 'Masmorra', color: '#ff0000', alpha: 0.55, radius: 0.5 },
+        announce: { enabled: false, onBuild: '', onEnd: '', showGrid: true },
+      }),
+    );
+
+    await sync.push(SERVER, 'teste');
+
+    const command = sent[0];
+
+    if (command === undefined) throw new Error('nada foi enviado');
+
+    const payload = decode(command);
+    const find = (id: string) => payload.dungeons.find((entry) => entry.id === id);
+
+    // No padrão dos dois lados do fio, o bloco não paga byte nenhum
+    // do teto de 50 KB — é o mesmo corte do `leanAccess`.
+    expect(find('padrao')?.marker).toBeUndefined();
+    expect(find('padrao')?.announce).toBeUndefined();
+
+    // Fora do padrão, viaja só o campo que mudou.
+    expect(find('gritona')?.marker).toEqual({ enabled: true, label: 'Evento', color: '#00ff88' });
+    expect(find('gritona')?.announce).toEqual({ enabled: true, onBuild: 'Abriu em {grid}' });
+
+    // Desligado viaja SOZINHO: os outros campos não são lidos
+    // quando não há marcador nem fala para configurar.
+    expect(find('muda')?.marker).toEqual({ enabled: false });
+    expect(find('muda')?.announce).toEqual({ enabled: false });
+  });
+
+  it('recusa uma cor que não é hexadecimal', () => {
+    expect(() =>
+      dungeonInputSchema.parse({ ...FULL, id: 'colorida', marker: { color: 'vermelho' } }),
+    ).toThrow();
   });
 });

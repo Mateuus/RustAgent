@@ -57,7 +57,40 @@ export const DUNGEON_COMMANDS = {
   stop: 'ozdungeon stop',
   /** `ozdungeon status`. */
   status: 'ozdungeon status',
+  /** `ozdungeon onde <x> <z> json` — aquele chão serve? */
+  ground: 'ozdungeon onde',
 } as const;
+
+/**
+ * A resposta de `ozdungeon onde <x> <z> json`.
+ *
+ * ####  POR QUE UMA RESPOSTA DE MÁQUINA, SE JÁ HAVIA UMA FRASE  ####
+ *
+ * A frase do `onde` é escrita para gente — tem acento, "·" e
+ * "NÃO SERVE". Lê-la com expressão regular é um parser que quebra
+ * no dia em que alguém melhorar a frase, e que quebra ACEITANDO:
+ * um "NÃO SERVE" que deixou de casar vira um "serve".
+ *
+ * O painel PRECISA perguntar antes de mandar construir, porque
+ * uma entrada dentro de um rio mata quem se teleporta para ela.
+ * Então a pergunta ganhou uma resposta que não depende de prosa.
+ */
+export const groundReportSchema = z.object({
+  x: z.number(),
+  z: z.number(),
+  /** A grade do mapa: 'E7'. É o que gente lê. */
+  grid: z.string().min(1).max(8),
+  /** A altura do chão naquele ponto. */
+  ground: z.number(),
+  /** A altura do mar ali. */
+  water: z.number(),
+  /** Metros de água sobre o chão. Zero é terra. */
+  depth: z.number(),
+  /** O veredito do plugin, que é quem tem o terreno na mão. */
+  serves: z.boolean(),
+});
+
+export type GroundReport = z.infer<typeof groundReportSchema>;
 
 /** O prefixo das linhas espontâneas. */
 export const DUNGEON_EVENT_MARKER = '#OZDUNGEON#';
@@ -285,6 +318,28 @@ export interface DungeonPayload {
   readonly id: string;
   readonly mode: 'recipe' | 'blueprint';
   readonly entrance: string | null;
+  /**
+   * O que a casinha da entrada carrega dentro.
+   *
+   * Ausente = `none`, que é o padrão do plugin: as plantas do
+   * acervo vêm com arma nas caixas, e copiá-las foi acidente.
+   * Ver `ENTRANCE_ITEM_MODES` em `types/dungeons.ts`.
+   */
+  readonly entranceItems?: 'none' | 'unarmed' | 'all';
+  /**
+   * Quantos graus girar a CASINHA, além do yaw do ponto.
+   *
+   * Ausente = zero, que é não girar. Ver `entranceRotation` em
+   * `types/dungeons.ts` sobre por que são dois ângulos.
+   */
+  readonly entranceRotation?: number;
+  /**
+   * Qual lado do DESENHO fica de frente no jogo.
+   *
+   * Ausente = o automático do plugin, que é a saída do corredor.
+   * Ver `entranceFacing` em `types/dungeons.ts`.
+   */
+  readonly entranceFacing?: number;
   readonly size: { readonly min: number; readonly max: number };
   readonly weights: { readonly green: number; readonly blue: number; readonly red: number };
   readonly corridor: {
@@ -306,6 +361,33 @@ export interface DungeonPayload {
   readonly timeOfDay: number;
   /** Ausente = pedra em tudo, que é o `DefaultGrade` do plugin. */
   readonly structure?: GradePayload;
+  /**
+   * O círculo no mapa do jogo.
+   *
+   * Ausente = o `new MarkerSpec()` do plugin, que é o mesmo padrão
+   * daqui: ligado, "Masmorra", vermelho, 0.55 de alfa, raio 0.5.
+   */
+  readonly marker?: {
+    readonly enabled: boolean;
+    readonly label?: string;
+    /** `#rrggbb`. O plugin traduz para os três floats do Unity. */
+    readonly color?: string;
+    readonly alpha?: number;
+    readonly radius?: number;
+  };
+  /**
+   * O que o servidor inteiro ouve quando ela nasce e quando acaba.
+   *
+   * Ausente = o `new AnnounceSpec()` do plugin: ligado, com as
+   * frases padrão e a grade na frase.
+   */
+  readonly announce?: {
+    readonly enabled: boolean;
+    /** Vazio/ausente = a frase padrão do plugin. */
+    readonly onBuild?: string;
+    readonly onEnd?: string;
+    readonly showGrid?: boolean;
+  };
   /** Ausente = o `new LockSpec()` do plugin, que é o mesmo padrão daqui. */
   readonly lock?: {
     readonly enabled: boolean;

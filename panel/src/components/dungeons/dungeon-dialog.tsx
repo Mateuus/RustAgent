@@ -47,7 +47,7 @@
 //  Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §12.1.1.
 // ============================================================
 
-import { Check, Copy, Dices, Loader2, Plus, Save, Trash2 } from 'lucide-react';
+import { Check, Copy, Dices, Loader2, Plus, RotateCcw, RotateCw, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { AiFields, resolveAi } from '@/components/dungeons/ai-fields';
@@ -81,7 +81,10 @@ import {
   type DungeonLayoutSummary,
   type DungeonLock,
   type DungeonProtection,
+  type DungeonAnnounce,
+  type DungeonMarker,
   type DungeonRoom,
+  type EntranceItemMode,
   type EventRun,
   type GradeSet,
   type LootTable,
@@ -191,6 +194,18 @@ const WHO_ENTERS_LABEL: Readonly<Record<AccessWhoEnters, string>> = {
   permission: 'Só quem tem a permissão',
 };
 
+/**
+ * O que a casinha da entrada carrega dentro.
+ *
+ * A ordem é a do risco: o padrão primeiro. Ver o §7 de
+ * Docs/OrigemZDurgeon/02-AS-SETE-PENDENCIAS.md.
+ */
+const ENTRANCE_ITEMS_LABEL: Readonly<Record<EntranceItemMode, string>> = {
+  none: 'Nada — as caixas nascem vazias',
+  unarmed: 'Só o que não é arma',
+  all: 'Tudo que a planta guardava',
+};
+
 /** A tabela de loot que não muda nada: o padrão de todo campo novo. */
 const SERVER_TABLE: LootTable = { mode: 'server', rolls: { min: 1, max: 2 }, entries: [] };
 
@@ -228,6 +243,11 @@ const EMPTY: DungeonInput = {
   description: null,
   mode: 'recipe',
   entranceBlueprint: null,
+  entranceItems: 'none',
+  entranceRotation: 0,
+  entranceFacing: null,
+  marker: { enabled: true, label: 'Masmorra', color: '#ff0000', alpha: 0.55, radius: 0.5 },
+  announce: { enabled: true, onBuild: '', onEnd: '', showGrid: true },
   size: { min: 10, max: 15 },
   weights: { green: 60, blue: 30, red: 10 },
   corridor: {
@@ -324,6 +344,17 @@ export function DungeonDialog({
 
   const problems = validate(draft);
 
+  // ####  O ✓ PASSA A SIGNIFICAR "EU MEXI AQUI"  ####
+  //
+  // MEDIDO em 09/09/2026, apontado pelo dono ("as config está muito
+  // confusa"): quatro dos seis passos tinham `done: true` cravado.
+  // O trilho mostrava seis vistos verdes numa masmorra recém-criada
+  // em que ninguém tinha aberto passo nenhum.
+  //
+  // Um selo que aparece sempre não informa nada — e este informava
+  // ERRADO, dizendo "pronto" sobre uma tela em branco.
+  const touched = whatChanged(draft);
+
   const steps: Step[] = [
     {
       id: 'identidade',
@@ -335,11 +366,12 @@ export function DungeonDialog({
       id: 'tamanho',
       label: draft.mode === 'blueprint' ? 'Desenho' : 'Tamanho',
       problem: problems.tamanho,
-      done: true,
+      done: touched.tamanho,
     },
     { id: 'salas', label: 'Salas e loot', problem: problems.salas, done: draft.rooms.length > 0 },
-    { id: 'inimigos', label: 'Inimigos', problem: problems.inimigos, done: true },
-    { id: 'entrada', label: 'Entrada e acesso', done: true },
+    { id: 'inimigos', label: 'Inimigos', problem: problems.inimigos, done: touched.inimigos },
+    { id: 'entrada', label: 'Entrada e acesso', done: touched.entrada },
+    { id: 'anuncio', label: 'Mapa e chat', done: touched.anuncio },
     { id: 'construir', label: 'Construir', done: saved },
   ];
 
@@ -427,6 +459,8 @@ export function DungeonDialog({
           <StepEntrada draft={draft} patch={patch} blueprints={blueprints} />
         )}
 
+        {step === 'anuncio' && <StepAnuncio draft={draft} patch={patch} />}
+
         {step === 'construir' && (
           <StepConstruir dungeon={draft} servers={servers} saved={saved} onSave={() => void save()} />
         )}
@@ -442,11 +476,14 @@ export function DungeonDialog({
           ) : blocking.length > 0 ? (
             <span className="border-l-2 border-amber pl-2 text-foreground">{blocking[0]}</span>
           ) : (
-            <span>
-              {saved
-                ? 'Salva. O jogo já recebeu — falta escolher onde ela nasce, no passo Construir.'
-                : 'Nada foi gravado ainda.'}
-            </span>
+            // ####  O RODAPÉ FALA DO PASSO ABERTO  ####
+            //
+            // Ele dizia "falta escolher onde ela nasce, no passo
+            // Construir" enquanto o admin digitava o NOME, no passo
+            // ①. Correto e fora de hora: quem está escolhendo o nome
+            // não tem o que fazer com essa frase, e ela ocupava o
+            // lugar do que fazer AGORA.
+            <span>{footerHint(step, saved)}</span>
           )}
         </div>
 
@@ -538,6 +575,35 @@ function StepIdentidade({
       title="Que masmorra é essa"
       hint="O nome é o que você vê no painel; o identificador é o que você digita no jogo."
     >
+      {/* ####  A BIFURCAÇÃO VEM ANTES DOS CAMPOS DE TEXTO  ####
+
+          MEDIDO em 09/09/2026, apontado pelo dono ("as config está
+          muito confusa"): esta escolha ficava no PÉ do passo,
+          embaixo de três campos de texto — e é ela que reconfigura
+          a tela inteira. O passo ② vira "Desenho" ou "Tamanho"
+          conforme ela.
+
+          Enterrar a bifurcação embaixo do nome é pedir para o admin
+          preencher três campos antes de descobrir que escolheu o
+          caminho errado. */}
+      <div>
+        <FieldLabel topic={DUNGEON_HELP.modo}>Como ela é montada</FieldLabel>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <ModeCard
+            active={draft.mode === 'recipe'}
+            title="Receita"
+            detail="Regras. O servidor sorteia um traçado novo a cada nascimento."
+            onClick={() => patch({ mode: 'recipe' })}
+          />
+          <ModeCard
+            active={draft.mode === 'blueprint'}
+            title="Planta desenhada"
+            detail="Você pinta o traçado célula a célula. Sai sempre igual, e os jogadores decoram o caminho."
+            onClick={() => patch({ mode: 'blueprint' })}
+          />
+        </div>
+      </div>
+
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Nome">
           <Input
@@ -576,25 +642,6 @@ function StepIdentidade({
         />
       </Field>
 
-      <div>
-        <FieldLabel topic={DUNGEON_HELP.modo}>Como ela é montada</FieldLabel>
-        <div className="mt-2 grid gap-2 sm:grid-cols-2">
-          <ModeCard
-            active={draft.mode === 'recipe'}
-            title="Receita"
-            detail="Regras. O servidor sorteia um traçado novo a cada nascimento."
-            onClick={() => patch({ mode: 'recipe' })}
-          />
-          <ModeCard
-            active={draft.mode === 'blueprint'}
-            title="Planta desenhada"
-            detail="Você pinta o traçado célula a célula. Sai sempre igual, e os jogadores decoram o caminho."
-            onClick={() => patch({ mode: 'blueprint' })}
-          />
-        </div>
-      </div>
-
-      <HelpCallout topic="modelo" />
     </StepBody>
   );
 }
@@ -868,6 +915,10 @@ function StepDesenho({
         grid={draft.grid}
         onChange={(grid) => patch({ grid })}
         onRandomize={randomize}
+        // A seta amarela na entrada é o controle: cada clique gira um
+        // quarto de volta, e a quarta devolve o automático.
+        facing={draft.entranceFacing}
+        onFacing={(entranceFacing) => patch({ entranceFacing })}
       />
     </StepBody>
   );
@@ -1749,9 +1800,148 @@ function StepEntrada({
         </p>
       )}
 
+      {draft.entranceBlueprint !== null && <EntranceAngleField draft={draft} patch={patch} />}
+
+      {draft.entranceBlueprint !== null && <EntranceItemsField draft={draft} patch={patch} />}
+
       <AccessFields draft={draft} patch={patch} />
       <ProtectionFields draft={draft} patch={patch} />
     </StepBody>
+  );
+}
+
+/**
+ * O ângulo da casinha.
+ *
+ * ####  POR QUE ELE EXISTE, SE JÁ HÁ UM ÂNGULO NO PONTO  ####
+ *
+ * São duas construções. O ângulo do ponto de nascimento orienta a
+ * MASMORRA — a direção em que o desenho cresce lá embaixo. A
+ * planta da casinha tem uma frente própria: a porta foi desenhada
+ * apontando para algum lado, e nenhum ângulo de quem constrói sabe
+ * qual é.
+ *
+ * MEDIDO em 09/09/2026, pelo dono, olhando a casinha nascer
+ * virada: "talvez colocar o ângulo que aí fica certo, uma seta
+ * para girar".
+ *
+ * Quem desce continua chegando de frente para o corredor — isso o
+ * servidor resolve sozinho e não se configura.
+ */
+function EntranceAngleField({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  function turn(delta: number) {
+    patch({ entranceRotation: (((draft.entranceRotation + delta) % 360) + 360) % 360 });
+  }
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <FieldLabel
+          topic={DUNGEON_HELP.anguloDaEntrada}
+          className="text-xs font-bold text-foreground"
+        >
+          Para que lado a casinha aponta
+        </FieldLabel>
+
+        <span className="flex items-center gap-1">
+          <Button size="sm" variant="outline" onClick={() => turn(-90)} aria-label="Girar 90 graus à esquerda">
+            <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+          </Button>
+
+          <span className="w-16 text-center font-mono text-sm text-foreground">
+            {String(Math.round(draft.entranceRotation))}°
+          </span>
+
+          <Button size="sm" variant="outline" onClick={() => turn(90)} aria-label="Girar 90 graus à direita">
+            <RotateCw aria-hidden="true" className="h-3.5 w-3.5" />
+          </Button>
+        </span>
+      </div>
+
+      {/* O ajuste fino: uma construção pode não estar alinhada aos
+          eixos, e aí os 90° não bastam. */}
+      <input
+        type="range"
+        min={0}
+        max={359}
+        step={5}
+        value={draft.entranceRotation}
+        onChange={(event) => patch({ entranceRotation: Number(event.target.value) })}
+        aria-label="Ângulo da casinha, em graus"
+        className="mt-3 w-full"
+      />
+
+      <p className="mt-1 text-2xs text-muted">
+        {draft.entranceRotation === 0
+          ? 'Sem giro: a casinha nasce como a planta foi desenhada.'
+          : `Girada ${String(Math.round(draft.entranceRotation))}° em relação à planta.`}{' '}
+        Isto gira <strong className="text-foreground">só a casinha</strong> — a masmorra lá embaixo
+        e a direção de quem desce não mudam.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * O que a casinha traz dentro das caixas.
+ *
+ * ####  ELE SÓ APARECE COM UMA PLANTA ESCOLHIDA  ####
+ *
+ * A entrada mínima é gerada por código e não tem caixa nenhuma: o
+ * campo ali seria uma pergunta sobre nada.
+ */
+function EntranceItemsField({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <FieldLabel
+          topic={DUNGEON_HELP.itensDaEntrada}
+          className="text-xs font-bold text-foreground"
+        >
+          O que vem dentro das caixas dela
+        </FieldLabel>
+        <select
+          value={draft.entranceItems}
+          onChange={(event) =>
+            patch({ entranceItems: event.target.value as EntranceItemMode })
+          }
+          className="h-9 border border-border bg-background px-2 text-sm"
+        >
+          {(Object.keys(ENTRANCE_ITEMS_LABEL) as EntranceItemMode[]).map((option) => (
+            <option key={option} value={option}>
+              {ENTRANCE_ITEMS_LABEL[option]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <p className="mt-2 text-2xs text-muted">
+        {draft.entranceItems === 'all' ? (
+          <>
+            As plantas que vieram com o projeto foram copiadas com as caixas cheias, em outro
+            servidor: a <strong className="text-foreground">entrance2</strong> guarda uma M249 e a{' '}
+            <strong className="text-foreground">entrance3</strong>, minigun e lança-foguetes. Nesta
+            opção elas nascem junto.
+          </>
+        ) : draft.entranceItems === 'unarmed' ? (
+          'Recurso, roupa e ferramenta entram; arma, munição e explosivo ficam de fora.'
+        ) : (
+          'A casinha nasce limpa. O loot da masmorra é o de dentro, onde você o desenhou.'
+        )}
+      </p>
+    </div>
   );
 }
 
@@ -1892,6 +2082,196 @@ function ProtectionFields({
 // ------------------------------------------------------------
 //  ⑥  CONSTRUIR — o passo que se resolve sozinho
 // ------------------------------------------------------------
+
+/**
+ * O passo do mapa e do chat.
+ *
+ * ####  ELE EXISTE PORQUE A MASMORRA ERA INVISÍVEL  ####
+ *
+ * MEDIDO em 09/09/2026, a pedido do dono ("verificar se está
+ * marcando no mapa e se alerta no chat"): não fazia nem um nem
+ * outro. O plugin não criava marcador nenhum, e o único caminho de
+ * fala alcançava só quem já estava lá dentro.
+ *
+ * Um evento que ninguém acha é um evento que não aconteceu.
+ */
+function StepAnuncio({
+  draft,
+  patch,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+}) {
+  function marker(change: Partial<DungeonMarker>) {
+    patch({ marker: { ...draft.marker, ...change } });
+  }
+
+  function announce(change: Partial<DungeonAnnounce>) {
+    patch({ announce: { ...draft.announce, ...change } });
+  }
+
+  return (
+    <StepBody
+      title="Como o servidor fica sabendo"
+      hint="Um evento que ninguém acha é um evento que não aconteceu."
+    >
+      <div className="border border-border bg-surface-2 p-3">
+        <label className="flex items-center justify-between gap-3">
+          <FieldLabel topic={DUNGEON_HELP.marcador} className="text-xs font-bold text-foreground">
+            Marcar no mapa do jogo
+          </FieldLabel>
+          <Toggle
+            on={draft.marker.enabled}
+            busy={false}
+            onChange={(enabled) => marker({ enabled })}
+            labels={['Aparece', 'Escondida']}
+            label="Marcar no mapa do jogo"
+          />
+        </label>
+
+        {draft.marker.enabled ? (
+          <div className="mt-3 space-y-3">
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+              <div>
+                <FieldLabel>Nome no mapa</FieldLabel>
+                <Input
+                  className="mt-1"
+                  value={draft.marker.label}
+                  maxLength={40}
+                  onChange={(event) => marker({ label: event.target.value })}
+                />
+              </div>
+
+              <div>
+                <FieldLabel>Cor</FieldLabel>
+                {/* O seletor nativo: é ele que faz a cor deixar de
+                    ser três números de 0 a 1, como no plugin de
+                    origem, e virar um clique. */}
+                <input
+                  type="color"
+                  aria-label="Cor do círculo no mapa"
+                  value={draft.marker.color}
+                  onChange={(event) => marker({ color: event.target.value })}
+                  className="mt-1 h-9 w-16 cursor-pointer border border-border bg-background"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <FieldLabel>Tamanho do círculo</FieldLabel>
+                <span className="mt-1 flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={3}
+                    step={0.1}
+                    value={draft.marker.radius}
+                    onChange={(event) => marker({ radius: Number(event.target.value) })}
+                    className="flex-1"
+                  />
+                  <span className="w-10 text-right font-mono text-2xs text-muted">
+                    {draft.marker.radius.toFixed(1)}
+                  </span>
+                </span>
+              </label>
+
+              <label className="block">
+                <FieldLabel>Opacidade</FieldLabel>
+                <span className="mt-1 flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={draft.marker.alpha}
+                    onChange={(event) => marker({ alpha: Number(event.target.value) })}
+                    className="flex-1"
+                  />
+                  <span className="w-10 text-right font-mono text-2xs text-muted">
+                    {Math.round(draft.marker.alpha * 100)}%
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+        ) : (
+          <p className="mt-2 text-2xs text-muted">
+            Ela não aparece no mapa: quem quiser achá-la vai ter de procurar, ou ler o chat.
+          </p>
+        )}
+      </div>
+
+      <div className="border border-border bg-surface-2 p-3">
+        <label className="flex items-center justify-between gap-3">
+          <FieldLabel topic={DUNGEON_HELP.anuncio} className="text-xs font-bold text-foreground">
+            Avisar no chat
+          </FieldLabel>
+          <Toggle
+            on={draft.announce.enabled}
+            busy={false}
+            onChange={(enabled) => announce({ enabled })}
+            labels={['Avisa', 'Calada']}
+            label="Avisar no chat"
+          />
+        </label>
+
+        {draft.announce.enabled ? (
+          <div className="mt-3 space-y-3">
+            <div>
+              <FieldLabel>Quando ela nasce</FieldLabel>
+              <Input
+                className="mt-1"
+                value={draft.announce.onBuild}
+                maxLength={200}
+                placeholder="Uma masmorra apareceu em {grid}."
+                onChange={(event) => announce({ onBuild: event.target.value })}
+              />
+            </div>
+
+            <div>
+              <FieldLabel>Quando ela fecha</FieldLabel>
+              <Input
+                className="mt-1"
+                value={draft.announce.onEnd}
+                maxLength={200}
+                placeholder="A masmorra de {grid} fechou."
+                onChange={(event) => announce({ onEnd: event.target.value })}
+              />
+            </div>
+
+            <p className="text-2xs text-muted">
+              Em branco, valem as frases acima. <code className="font-mono">{'{grid}'}</code> vira a
+              grade do mapa (E7) e <code className="font-mono">{'{nome}'}</code> vira o
+              identificador da masmorra.
+            </p>
+
+            <label className="flex items-center justify-between gap-3 border-t border-border pt-3">
+              <span className="min-w-0">
+                <span className="block text-xs text-foreground">Dizer onde ela está</span>
+                <span className="block text-2xs text-muted">
+                  Desligado, a frase sai sem a grade — e quem quiser achá-la procura.
+                </span>
+              </span>
+              <Toggle
+                on={draft.announce.showGrid}
+                busy={false}
+                onChange={(showGrid) => announce({ showGrid })}
+                labels={['Diz', 'Não diz']}
+                label="Dizer onde ela está"
+              />
+            </label>
+          </div>
+        ) : (
+          <p className="mt-2 text-2xs text-muted">
+            Ela nasce e fecha em silêncio. Quem estiver lá dentro continua ouvindo o que acontece na
+            masmorra.
+          </p>
+        )}
+      </div>
+    </StepBody>
+  );
+}
 
 function StepConstruir({
   dungeon,
@@ -2347,17 +2727,15 @@ function BlueprintCard({
   );
 }
 
-/** Um bloco de ajuda aberto, para o que ninguém adivinha. */
-function HelpCallout({ topic }: { readonly topic: keyof typeof DUNGEON_HELP }) {
-  const help = DUNGEON_HELP[topic];
-
-  return (
-    <div className="border border-border bg-surface-2 p-3">
-      <p className="font-condensed text-2xs uppercase tracking-wide text-muted">{help.title}</p>
-      <p className="mt-1 text-xs">{help.short}</p>
-    </div>
-  );
-}
+// ####  O BLOCO "COMO UMA MASMORRA FUNCIONA" SAIU DAQUI  ####
+//
+// Ele ficava no pé do passo ①, repetindo o que o "Como funciona" do
+// cabeçalho da página já diz — e ocupava, no passo mais estreito do
+// editor, o lugar da decisão que importa ali.
+//
+// Explicação genérica não é campo de formulário: quem quer entender
+// o modelo clica no "?" da página; quem está criando uma masmorra
+// está escolhendo entre receita e planta.
 
 // ------------------------------------------------------------
 
@@ -2450,6 +2828,11 @@ function toInput(dungeon: Dungeon): DungeonInput {
       loot: input.npc.loot ?? { ...SERVER_TABLE },
       ai: input.npc.ai ?? {},
     },
+    entranceItems: input.entranceItems ?? 'none',
+    entranceRotation: input.entranceRotation ?? 0,
+    entranceFacing: input.entranceFacing ?? null,
+    marker: input.marker ?? { ...EMPTY.marker },
+    announce: input.announce ?? { ...EMPTY.announce },
     structure: input.structure ?? { ...EMPTY.structure },
     lock: input.lock ?? { ...EMPTY.lock },
     access: input.access ?? { ...EMPTY.access },
@@ -2526,6 +2909,80 @@ function sketchFromLayout(
   }
 
   return rows;
+}
+
+/**
+ * Que passos têm alguma coisa além do padrão de fábrica.
+ *
+ * ####  O SELO PRECISAVA DE UM SIGNIFICADO  ####
+ *
+ * Antes, quatro dos seis passos diziam "pronto" sempre. Agora o ✓
+ * quer dizer uma coisa só: aqui dentro há uma escolha que alguém
+ * fez. Passo intocado fica cinza, com o número — que é o convite
+ * para abri-lo.
+ *
+ * A comparação é por JSON contra o rascunho vazio. Ela é grossa de
+ * propósito: reordenar as chaves de um objeto marcaria o passo sem
+ * ninguém ter mexido nele, e o custo desse erro é um visto verde a
+ * mais — não uma masmorra errada.
+ */
+function whatChanged(draft: DungeonInput): {
+  readonly tamanho: boolean;
+  readonly inimigos: boolean;
+  readonly entrada: boolean;
+  readonly anuncio: boolean;
+} {
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+  return {
+    tamanho:
+      draft.mode === 'blueprint'
+        ? draft.grid !== null && draft.grid.length > 0
+        : !same(draft.size, EMPTY.size) ||
+          !same(draft.weights, EMPTY.weights) ||
+          !same(draft.corridor, EMPTY.corridor),
+    inimigos: !same(draft.npc, EMPTY.npc),
+    entrada:
+      draft.entranceBlueprint !== null ||
+      draft.entranceItems !== EMPTY.entranceItems ||
+      !same(draft.access, EMPTY.access) ||
+      !same(draft.protection, EMPTY.protection),
+    anuncio: !same(draft.marker, EMPTY.marker) || !same(draft.announce, EMPTY.announce),
+  };
+}
+
+/**
+ * A frase do rodapé, para o passo que está aberto.
+ *
+ * ####  ELA ERA UMA SÓ, E FALAVA DO PASSO ERRADO  ####
+ *
+ * "Salva. O jogo já recebeu — falta escolher onde ela nasce, no
+ * passo Construir" aparecia enquanto o admin digitava o nome. A
+ * frase certa, na hora errada, ocupa o lugar da frase certa.
+ */
+function footerHint(step: string, saved: boolean): string {
+  if (!saved && step !== 'construir') {
+    return 'Nada foi gravado ainda: o botão aqui do lado grava, e o jogo recebe na hora.';
+  }
+
+  switch (step) {
+    case 'identidade':
+      return 'O identificador não muda depois de criada: é por ele que o comando no jogo a encontra.';
+    case 'tamanho':
+      return 'A prévia ao lado mostra a masmorra que vai nascer com estes números.';
+    case 'salas':
+      return 'A cor da sala é o que o jogador aprende sem ler nada: vermelha quer dizer "cuidado, e vale a pena".';
+    case 'inimigos':
+      return 'O que estiver em branco aqui herda o padrão da masmorra — e não vira zero.';
+    case 'entrada':
+      return 'A casinha é a única parte que os jogadores veem de fora.';
+    case 'anuncio':
+      return 'Sem marcador e sem aviso, só acha a masmorra quem tropeçar nela.';
+    case 'construir':
+      return 'Salva, e o jogo já recebeu. Falta escolher onde ela nasce.';
+    default:
+      return 'Salva. O jogo já recebeu.';
+  }
 }
 
 function slugify(value: string): string {

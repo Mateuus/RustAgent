@@ -179,6 +179,15 @@ export const worldEventInputSchema = z.object({
   enabled: z.boolean().default(true),
   sort: z.number().int().min(0).max(9999).default(0),
 
+  /**
+   * Qual masmorra nasce.
+   *
+   * `null` = um evento que ainda não nasce: o agendador o PULA, e
+   * a tela cobra a escolha. Recusar aqui faria o formulário exigir
+   * a última resposta primeiro — ver a migração 069.
+   */
+  dungeonId: z.string().min(1).max(64).nullable().default(null),
+
   spawnMode: z.enum(SPAWN_MODES).default('schedule'),
 
   // Um minuto é o piso do intervalo: abaixo disso o agendador

@@ -22,7 +22,7 @@
 //  que a linha carrega.
 // ============================================================
 
-import { Copy, Hammer, MapPin, Pencil, Trash2, Users } from 'lucide-react';
+import { Copy, Hammer, MapPin, Pencil, Play, Trash2, Users } from 'lucide-react';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -33,9 +33,17 @@ export interface DungeonListProps {
   readonly dungeons: readonly DungeonSummary[];
   readonly onEdit: (dungeon: Dungeon) => void;
   readonly onChanged: () => void;
+  /**
+   * Erguer esta masmorra agora.
+   *
+   * `undefined` = a página não oferece o gesto. Ele depende de
+   * haver servidor cadastrado: sem nenhum, o botão abriria um
+   * diálogo sem para onde mandar o comando.
+   */
+  readonly onBuild?: (dungeon: DungeonSummary) => void;
 }
 
-export function DungeonList({ dungeons, onEdit, onChanged }: DungeonListProps) {
+export function DungeonList({ dungeons, onEdit, onChanged, onBuild }: DungeonListProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -128,6 +136,19 @@ export function DungeonList({ dungeons, onEdit, onChanged }: DungeonListProps) {
             </div>
 
             <div className="flex shrink-0 gap-1">
+              {/* ####  ERGUER VEM ANTES DE EDITAR  ####
+
+                  É o que se quer fazer com uma masmorra pronta, e
+                  até aqui era a única coisa que esta tela NÃO
+                  fazia: o editor mandava copiar um comando e ir
+                  colar dentro do jogo. */}
+              {onBuild !== undefined && (
+                <Button size="sm" variant="primary" onClick={() => onBuild(dungeon)}>
+                  <Play aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+                  Erguer
+                </Button>
+              )}
+
               <Button size="sm" variant="outline" onClick={() => void open(dungeon.id)}>
                 <Pencil aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
                 Editar

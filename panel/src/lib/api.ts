@@ -4888,6 +4888,70 @@ export const agent = {
   removeDungeon: (id: string) =>
     api<{ ok: true }>(`/api/dungeons/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  /**
+   * Ergue a masmorra, daqui.
+   *
+   * ####  `sent` NAO E "ELA EXISTE"  ####
+   *
+   * E "o comando chegou ao servidor". A construcao leva segundos, e
+   * quem confirma e a linha que aparece no historico — a mesma que
+   * o passo (6) ja esperava quando o admin colava o comando a mao.
+   *
+   * `pointId` e o caminho normal: um lugar que o admin marcou uma
+   * vez. `x`/`z` erguem num lugar novo sem cadastrar nada.
+   */
+  buildDungeon: (
+    id: string,
+    body: { serverId: string; pointId?: number; x?: number; z?: number; yaw?: number },
+  ) =>
+    api<{ sent: boolean; grid: string | null; message: string }>(
+      `/api/dungeons/${encodeURIComponent(id)}/build`,
+      { method: 'POST', body },
+    ),
+
+  /**
+   * Aquele chao serve para uma masmorra?
+   *
+   * So o servidor sabe: o painel escolhe pontos num mapa desenhado,
+   * sem ver o relevo nem a agua. Uma entrada dentro de um rio mata
+   * quem se teleporta para ela.
+   */
+  dungeonGround: (serverId: string, x: number, z: number) =>
+    api<{ ground: GroundReport }>(
+      `/api/dungeons/ground?serverId=${encodeURIComponent(serverId)}` +
+        `&x=${String(Math.round(x))}&z=${String(Math.round(z))}`,
+    ),
+
+  /**
+   * Os lugares onde a masmorra pode nascer.
+   *
+   * `worldKey` e o mundo carregado agora: um ponto com outro
+   * `worldKey` foi marcado noutro mapa, e aquela coordenada e outro
+   * lugar hoje.
+   */
+  spawnPoints: (serverId: string) =>
+    api<{ worldKey: string | null; points: SpawnPoint[] }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points`,
+    ),
+
+  createSpawnPoint: (serverId: string, body: SpawnPointInput) =>
+    api<{ point: SpawnPoint; warning: string | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points`,
+      { method: 'POST', body },
+    ),
+
+  updateSpawnPoint: (serverId: string, pointId: number, body: SpawnPointInput) =>
+    api<{ point: SpawnPoint; warning: string | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points/${String(pointId)}`,
+      { method: 'PUT', body },
+    ),
+
+  removeSpawnPoint: (serverId: string, pointId: number) =>
+    api<{ ok: true }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points/${String(pointId)}`,
+      { method: 'DELETE' },
+    ),
+
   dungeonCommand: (id: string) =>
     api<{ chat: string; console: string }>(`/api/dungeons/${encodeURIComponent(id)}/command`),
 
@@ -4967,6 +5031,26 @@ export const agent = {
     api<{ ok: true }>(`/api/dungeon-layouts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   /** O historico de tudo que nasceu, com filtro. */
+  /**
+   * A agenda: os eventos que fazem a masmorra nascer sozinha.
+   *
+   * Não confundir com `/api/events`, que é o CALENDÁRIO do wipe —
+   * "Raid Night, sábado às 20h". Estes são os que nascem no mapa.
+   */
+  worldEvents: () => api<{ events: WorldEvent[] }>('/api/world-events'),
+
+  createWorldEvent: (body: WorldEventInput) =>
+    api<{ event: WorldEvent }>('/api/world-events', { method: 'POST', body }),
+
+  updateWorldEvent: (id: string, body: Omit<WorldEventInput, 'id'>) =>
+    api<{ event: WorldEvent }>(`/api/world-events/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  removeWorldEvent: (id: string) =>
+    api<{ ok: true }>(`/api/world-events/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   worldEventRuns: (options: { serverId?: string; limit?: number } = {}) => {
     const query = new URLSearchParams();
 
@@ -5137,10 +5221,141 @@ export interface DungeonAccess {
  * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
  * a este bloco: a masmorra nao apodrece nem com ele desligado.
  */
+/**
+ * Um evento que faz a masmorra nascer sozinha.
+ *
+ * Espelha `core/src/types/world-events.ts`. Os campos de marcador e
+ * mensagem existem na tabela e estão INERTES: desde a migração 068
+ * quem decide como a masmorra se anuncia é a masmorra.
+ */
+export interface WorldEventInput {
+  id: string;
+  kind: string;
+  name: string;
+  description?: string | null;
+  /** Qual masmorra nasce. `null` = o agendador pula este evento. */
+  dungeonId: string | null;
+  enabled: boolean;
+  sort: number;
+  /** `schedule` = o relógio; `manual` = só pelo botão. */
+  spawnMode: 'schedule' | 'manual' | 'permanent';
+  /** A janela do sorteio, em segundos. */
+  interval: { min: number; max: number };
+  /** Quanto ela fica de pé, em segundos. */
+  duration: { min: number; max: number };
+  /** Abaixo disso o agendador ADIA. Evento para ninguém é loot de graça. */
+  minOnline: number;
+  countAfterEnd: boolean;
+  access: 'anyone' | 'owner' | 'team';
+  ownerGraceSeconds: number;
+  marker: {
+    enabled: boolean;
+    label: string;
+    color: string;
+    alpha: number;
+    radius: number;
+    showOwner: boolean;
+    showTime: boolean;
+  };
+  messages: {
+    start: string | null;
+    location: string | null;
+    warning: string | null;
+    end: string | null;
+    denied: string | null;
+  };
+  warnBefore: number;
+  radiationBefore: number;
+  destroyAfter: number;
+  respawnSeconds: number;
+  /** Vazio = não roda em servidor nenhum. */
+  servers: string[];
+}
+
+export interface WorldEvent extends WorldEventInput {
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** O círculo no mapa do jogo. Espelha `types/dungeons.ts`. */
+export interface DungeonMarker {
+  enabled: boolean;
+  label: string;
+  /** `#rrggbb`. */
+  color: string;
+  alpha: number;
+  radius: number;
+}
+
+/** O que o servidor inteiro ouve. Texto vazio = a frase padrão. */
+export interface DungeonAnnounce {
+  enabled: boolean;
+  onBuild: string;
+  onEnd: string;
+  showGrid: boolean;
+}
+
 export interface DungeonProtection {
   enabled: boolean;
   allowAdmin: boolean;
   warnOnAttempt: boolean;
+}
+
+/**
+ * O que a casinha da entrada carrega dentro.
+ *
+ * As plantas do acervo vieram com arma nas caixas — a `entrance2`
+ * traz uma M249 —, e copia-las era acidente, nao desenho. Ver
+ * `ENTRANCE_ITEM_MODES` em `core/src/types/dungeons.ts`.
+ */
+export type EntranceItemMode = 'none' | 'unarmed' | 'all';
+
+/**
+ * Como e o chao naquele ponto, segundo o servidor.
+ *
+ * Espelha `groundReportSchema` de `core/src/game/dungeon-contract.ts`.
+ */
+export interface GroundReport {
+  x: number;
+  z: number;
+  /** A grade do mapa: 'E7'. E o que gente le. */
+  grid: string;
+  ground: number;
+  water: number;
+  /** Metros de agua sobre o chao. Zero e terra. */
+  depth: number;
+  serves: boolean;
+}
+
+/** O que se manda ao marcar ou mexer num ponto de nascimento. */
+export interface SpawnPointInput {
+  label: string;
+  x: number;
+  z: number;
+  /** Para onde a masmorra cresce, em graus. Zero e o norte. */
+  yaw: number;
+  enabled: boolean;
+}
+
+/**
+ * Um lugar onde a masmorra pode nascer.
+ *
+ * NAO confundir com as zonas de evento, que dizem onde nada nasce.
+ * Estes sao os lugares que o admin escolheu — ver
+ * `core/src/db/dungeon-spawn-points-repository.ts`.
+ */
+export interface SpawnPoint extends SpawnPointInput {
+  id: number;
+  serverId: string;
+  /** `"<worldSize>:<seed>"` do mundo em que ele foi marcado. */
+  worldKey: string | null;
+  /** A grade, do dia em que o servidor foi consultado. */
+  grid: string | null;
+  waterDepth: number | null;
+  checkedAt: number | null;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface DungeonInput {
@@ -5149,6 +5364,18 @@ export interface DungeonInput {
   description?: string | null;
   mode: DungeonMode;
   entranceBlueprint: string | null;
+  entranceItems: EntranceItemMode;
+  /** O ângulo da casinha, em graus. Gira só ela. */
+  entranceRotation: number;
+  /**
+   * Qual lado do desenho fica de frente no jogo.
+   *
+   * `null` = automático: a masmorra gira sozinha para o corredor
+   * sair de frente para a casinha.
+   */
+  entranceFacing: 0 | 90 | 180 | 270 | null;
+  marker: DungeonMarker;
+  announce: DungeonAnnounce;
   size: { min: number; max: number };
   weights: { green: number; blue: number; red: number };
   corridor: {

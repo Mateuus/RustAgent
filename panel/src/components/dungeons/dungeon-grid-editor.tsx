@@ -97,19 +97,57 @@ const COLOR_OF_CHAR: Readonly<Record<string, RoomColor>> = {
 const CELL = 12;
 
 /**
- * O tamanho da tela, em células.
+ * O tamanho da tela em branco, em células.
  *
  * 24×24 são 576 células — uma masmorra de 24×24×3 m, ou seja 72
  * metros de lado. É grande o bastante para qualquer coisa que um
  * grupo limpe numa sessão, e pequeno o bastante para o desenho
  * inteiro caber na tela sem rolagem.
  */
-const SIZE = 24;
+const BASE_SIZE = 24;
 
-/** O centro da tela é a entrada. Ver o §3 do plano. */
-const ENTRANCE = { x: Math.floor(SIZE / 2), z: Math.floor(SIZE / 2) };
+/**
+ * O teto da tela.
+ *
+ * É o mesmo do formato (`dungeonGridSchema`: 64 linhas de até 64
+ * caracteres). A tela cresce até aqui para caber um desenho que
+ * chega grande — ver `boardFromRows`.
+ */
+const MAX_SIZE = 64;
 
 type Canvas = Brush[][];
+
+/**
+ * A tela inteira: o tamanho, a entrada e as células.
+ *
+ * ####  OS TRÊS ANDAM JUNTOS, E ISSO É O CONSERTO  ####
+ *
+ * MEDIDO em 09/09/2026, apontado pelo dono: escolher o traçado
+ * "Labirinto" (23×23, com a entrada no canto) mostrava 84 das 241
+ * células. As outras 157 sumiam.
+ *
+ * A causa eram duas constantes: uma tela de 24×24 e uma entrada
+ * CRAVADA no centro dela. Carregar um desenho alinhava tudo pela
+ * entrada — e um desenho cuja entrada está no canto se estende 22
+ * células para um lado só, ou seja, para fora da tela. O que não
+ * cabia era descartado em silêncio.
+ *
+ * Pior: descartado só na TELA. O desenho inteiro continuava no
+ * rascunho, então salvar sem tocar em nada gravava 241 células e
+ * salvar depois de encostar no grid gravava 84 — o mesmo clique
+ * com dois resultados.
+ *
+ * Agora a tela cresce até caber (`boardFromRows`) e a entrada é
+ * onde o `E` do desenho está. Nada é cortado; quando o desenho é
+ * maior que o próprio formato, a tela para em `MAX_SIZE` — e aí o
+ * corte é o do formato, não uma surpresa do editor.
+ */
+export interface Board {
+  readonly size: number;
+  /** Onde o alçapão cospe o jogador. É o `E` do formato. */
+  readonly entrance: { readonly x: number; readonly z: number };
+  readonly cells: Canvas;
+}
 
 export interface DungeonGridEditorProps {
   /** O grid salvo, no formato de linhas. `null` = tela em branco. */
@@ -126,10 +164,26 @@ export interface DungeonGridEditorProps {
    * repinta o que quiser.
    */
   readonly onRandomize?: () => void;
+  /**
+   * Para que lado a entrada aponta no jogo.
+   *
+   * `null` = automático: a masmorra gira sozinha para o corredor
+   * sair de frente para a casinha. Ver `entranceFacing` em
+   * `core/src/types/dungeons.ts`.
+   */
+  readonly facing?: 0 | 90 | 180 | 270 | null;
+  /** Clicar na seta gira. `undefined` = a tela não oferece o gesto. */
+  readonly onFacing?: (facing: 0 | 90 | 180 | 270 | null) => void;
 }
 
-export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEditorProps) {
-  const [canvas, setCanvas] = useState<Canvas>(() => fromRows(grid));
+export function DungeonGridEditor({
+  grid,
+  onChange,
+  onRandomize,
+  facing = null,
+  onFacing,
+}: DungeonGridEditorProps) {
+  const [board, setBoard] = useState<Board>(() => boardFromRows(grid));
   const [brush, setBrush] = useState<Brush>('corridor');
   const [painting, setPainting] = useState(false);
   /**
@@ -143,8 +197,8 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
    */
   const [expanded, setExpanded] = useState(false);
   /** O desfazer. Guarda o estado ANTES de cada traço, não de cada célula. */
-  const [undoStack, setUndoStack] = useState<Canvas[]>([]);
-  const [redoStack, setRedoStack] = useState<Canvas[]>([]);
+  const [undoStack, setUndoStack] = useState<Board[]>([]);
+  const [redoStack, setRedoStack] = useState<Board[]>([]);
   /** Evita repintar a mesma célula cem vezes durante um arrasto. */
   const lastCell = useRef<string>('');
   const svgRef = useRef<SVGSVGElement>(null);
@@ -171,18 +225,34 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
 
     if (incoming === mine.current) return;
 
-    mine.current = incoming;
-    setCanvas(fromRows(grid));
+    const next = boardFromRows(grid);
+    const rows = rowsOfBoard(next);
+    const normalized = signatureOf(rows);
+
+    mine.current = normalized;
+    setBoard(next);
     setUndoStack([]);
     setRedoStack([]);
-  }, [grid]);
+
+    // ####  O QUE A TELA MOSTRA É O QUE VAI SER SALVO  ####
+    //
+    // MEDIDO em 09/09/2026: carregar um traçado não emitia nada, e
+    // o rascunho ficava com o desenho que chegou enquanto a tela
+    // mostrava outro. Salvar sem encostar no grid gravava um;
+    // encostar numa célula gravava o outro.
+    //
+    // Emitir aqui fecha isso. Só quando há diferença de verdade —
+    // um desenho que entra e sai igual não pode marcar a masmorra
+    // como alterada só por ter sido aberta.
+    if (incoming !== normalized) onChange(rows);
+  }, [grid, onChange]);
 
   const commit = useCallback(
-    (next: Canvas) => {
-      const rows = toRows(next);
+    (next: Board) => {
+      const rows = rowsOfBoard(next);
 
       mine.current = signatureOf(rows);
-      setCanvas(next);
+      setBoard(next);
       onChange(rows);
     },
     [onChange],
@@ -192,7 +262,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
     // O estado inteiro entra na pilha UMA vez por traço. Guardar
     // por célula faria "desfazer" voltar um quadradinho de cada
     // vez, o que é inútil depois de arrastar por vinte células.
-    setUndoStack((stack) => [...stack.slice(-29), canvas.map((row) => [...row])]);
+    setUndoStack((stack) => [...stack.slice(-29), cloneBoard(board)]);
     setRedoStack([]);
     setPainting(true);
     lastCell.current = '';
@@ -205,19 +275,20 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
 
     lastCell.current = id;
 
-    // A entrada é fixa: ela é onde o alçapão cospe o jogador, e
-    // apagá-la produziria uma masmorra sem chegada.
-    if (x === ENTRANCE.x && z === ENTRANCE.z) return;
+    // A entrada não se apaga: ela é onde o alçapão cospe o
+    // jogador, e sem ela a masmorra não tem chegada.
+    if (x === board.entrance.x && z === board.entrance.z) return;
 
-    setCanvas((current) => {
-      const next = current.map((row) => [...row]);
-      const row = next[z];
+    setBoard((current) => {
+      const cells = current.cells.map((row) => [...row]);
+      const row = cells[z];
 
       if (row === undefined || row[x] === brush) return current;
 
       row[x] = brush;
 
-      const rows = toRows(next);
+      const next: Board = { ...current, cells };
+      const rows = rowsOfBoard(next);
 
       // Marca ANTES de avisar o pai: o `useEffect` acima vai ver
       // este mesmo desenho voltar como prop, e precisa reconhecê-lo
@@ -264,9 +335,9 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
     const local = point.matrixTransform(matrix.inverse());
 
     const x = Math.floor(local.x / CELL);
-    const z = SIZE - 1 - Math.floor(local.y / CELL);
+    const z = board.size - 1 - Math.floor(local.y / CELL);
 
-    if (x < 0 || x >= SIZE || z < 0 || z >= SIZE) return;
+    if (x < 0 || x >= board.size || z < 0 || z >= board.size) return;
 
     paint(x, z);
   }
@@ -277,7 +348,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
 
       if (previous === undefined) return stack;
 
-      setRedoStack((redo) => [...redo, canvas.map((row) => [...row])]);
+      setRedoStack((redo) => [...redo, cloneBoard(board)]);
       commit(previous);
 
       return stack.slice(0, -1);
@@ -290,7 +361,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
 
       if (next === undefined) return stack;
 
-      setUndoStack((undoState) => [...undoState, canvas.map((row) => [...row])]);
+      setUndoStack((undoState) => [...undoState, cloneBoard(board)]);
       commit(next);
 
       return stack.slice(0, -1);
@@ -304,7 +375,36 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
   // Verificar o canvas 24×24 daria uma terceira implementação das
   // mesmas cinco regras — e a que divergisse seria a que o admin
   // veria.
-  const rows = useMemo(() => toRows(canvas), [canvas]);
+  const rows = useMemo(() => rowsOfBoard(board), [board]);
+
+  /**
+   * Para onde a entrada aponta, em graus de tela.
+   *
+   * ####  ELA É A MESMA REGRA DO CONSTRUTOR  ####
+   *
+   * `GridExitYaw`, no plugin: a escolha do admin ganha; sem ela,
+   * manda a saída do corredor, na ordem frente, direita, esquerda,
+   * trás. Escrever as duas de formas diferentes é o jeito de a seta
+   * mentir — e ela já mentiu uma vez.
+   *
+   * `null` = a entrada não encosta em nada. Não há direção a
+   * mostrar, e o verificador reclama disso por outro caminho.
+   */
+  const entranceArrow = useMemo(() => {
+    if (facing !== null) return facing;
+
+    const { entrance, cells, size } = board;
+    const at = (x: number, z: number): boolean =>
+      x >= 0 && x < size && z >= 0 && z < size && (cells[z]?.[x] ?? 'empty') !== 'empty';
+
+    // 0° é para cima na tela, que é o norte do desenho.
+    if (at(entrance.x, entrance.z + 1)) return 0;
+    if (at(entrance.x + 1, entrance.z)) return 90;
+    if (at(entrance.x - 1, entrance.z)) return 270;
+    if (at(entrance.x, entrance.z - 1)) return 180;
+
+    return null;
+  }, [board, facing]);
   const problems = useMemo(() => checkLayout(rows), [rows]);
   const facts = useMemo(() => analyzeLayout(rows), [rows]);
 
@@ -352,8 +452,8 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
             size="sm"
             variant="ghost"
             onClick={() => {
-              setUndoStack((stack) => [...stack, canvas.map((row) => [...row])]);
-              commit(blankCanvas());
+              setUndoStack((stack) => [...stack, cloneBoard(board)]);
+              commit(blankBoard());
             }}
             aria-label="Limpar o desenho"
           >
@@ -398,13 +498,13 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
 
       <svg
         ref={svgRef}
-        viewBox={`0 0 ${String(SIZE * CELL)} ${String(SIZE * CELL)}`}
+        viewBox={`0 0 ${String(board.size * CELL)} ${String(board.size * CELL)}`}
         className={cn(
           'w-full cursor-crosshair touch-none select-none border border-border bg-background',
           expanded ? 'max-h-[76vh]' : 'max-h-[42vh]',
         )}
         role="application"
-        aria-label="Desenho da masmorra, 24 por 24 células"
+        aria-label={`Desenho da masmorra, ${String(board.size)} por ${String(board.size)} células`}
         // ####  A CÉLULA VEM DA POSIÇÃO, NÃO DO EVENTO DELA  ####
         //
         // MEDIDO: com `setPointerCapture` no SVG — que é o que faz o
@@ -427,9 +527,9 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
         onPointerUp={() => setPainting(false)}
         onPointerCancel={() => setPainting(false)}
       >
-        {canvas.map((row, z) =>
+        {board.cells.map((row, z) =>
           row.map((cell, x) => {
-            const isEntrance = x === ENTRANCE.x && z === ENTRANCE.z;
+            const isEntrance = x === board.entrance.x && z === board.entrance.z;
 
             return (
               <rect
@@ -446,7 +546,7 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
                 x={x * CELL}
                 // `z` cresce para o norte no jogo e para baixo na
                 // tela — a mesma inversão do mapa.
-                y={(SIZE - 1 - z) * CELL}
+                y={(board.size - 1 - z) * CELL}
                 width={CELL}
                 height={CELL}
                 fill={isEntrance ? 'var(--amber)' : fillOf(cell)}
@@ -461,6 +561,76 @@ export function DungeonGridEditor({ grid, onChange, onRandomize }: DungeonGridEd
               </rect>
             );
           }),
+        )}
+
+        {/* ####  A SETA DIZ PARA ONDE A CASINHA FICA VIRADA  ####
+
+            MEDIDO em 09/09/2026, pelo dono, comparando o desenho com
+            o jogo: "é a entrada, está virada ao lado contrário do
+            corredor, 90 graus". A casinha da superfície apontava para
+            um lado e o corredor saía para outro.
+
+            O servidor passou a alinhar os dois sozinho — e esta seta
+            é o que torna isso VISÍVEL enquanto se desenha: ela aponta
+            para a mesma saída que o construtor vai usar. Sem ela, o
+            admin só descobre a direção indo ao jogo.
+
+            `null` = a entrada não encosta em nada, e aí não há
+            direção nenhuma para mostrar. O verificador já reclama
+            disso por outro caminho. */}
+        {entranceArrow !== null && (
+          <g
+            // ####  CLICAR NA SETA GIRA A ENTRADA  ####
+            //
+            // Pedido do dono em 09/09/2026: "lá no desenho ter opção
+            // para editar e girar na posição que queremos".
+            //
+            // Cada clique dá um quarto de volta; a quarta volta
+            // devolve o automático, para o admin conseguir DESFAZER a
+            // escolha sem procurar outro controle.
+            role={onFacing === undefined ? undefined : 'button'}
+            tabIndex={onFacing === undefined ? undefined : 0}
+            aria-label={
+              onFacing === undefined
+                ? undefined
+                : `A entrada aponta para ${ARROW_LABEL[entranceArrow] ?? '?'}. Clique para girar.`
+            }
+            onPointerDown={(event) => {
+              if (onFacing === undefined) return;
+
+              // Sem isto o clique vira um traço de pincel na célula.
+              event.stopPropagation();
+              onFacing(nextFacing(facing, entranceArrow));
+            }}
+            transform={
+              `translate(${String(board.entrance.x * CELL + CELL / 2)} ` +
+              `${String((board.size - 1 - board.entrance.z) * CELL + CELL / 2)}) ` +
+              `rotate(${String(entranceArrow)})`
+            }
+            className={onFacing === undefined ? 'pointer-events-none' : 'cursor-pointer'}
+          >
+            {/* O alvo do clique é maior que o desenho da seta: a
+                célula tem 12 unidades e mirar a ponta de um
+                triângulo é pedir precisão que ninguém tem. */}
+            <rect
+              x={-CELL / 2}
+              y={-CELL / 2}
+              width={CELL}
+              height={CELL}
+              fill="transparent"
+            />
+            <path
+              d={`M 0 ${String(-CELL * 0.32)} L ${String(CELL * 0.22)} ${String(CELL * 0.18)} ` +
+                 `L 0 ${String(CELL * 0.05)} L ${String(-CELL * 0.22)} ${String(CELL * 0.18)} Z`}
+              fill="var(--bg)"
+              opacity={0.85}
+            />
+            <title>
+              {facing === null
+                ? 'A entrada aponta para o corredor, sozinha. Clique para escolher outro lado.'
+                : `A entrada aponta para ${ARROW_LABEL[entranceArrow] ?? '?'}, por sua escolha. Clique para girar.`}
+            </title>
+          </g>
         )}
       </svg>
       </div>
@@ -533,63 +703,66 @@ function signatureOf(rows: readonly string[] | null): string {
   return rows === null ? '' : JSON.stringify(rows);
 }
 
-function blankCanvas(): Canvas {
-  const canvas: Canvas = Array.from({ length: SIZE }, () =>
-    Array.from({ length: SIZE }, (): Brush => 'empty'),
-  );
+function emptyCells(size: number): Canvas {
+  return Array.from({ length: size }, () => Array.from({ length: size }, (): Brush => 'empty'));
+}
+
+function cloneBoard(board: Board): Board {
+  return { ...board, cells: board.cells.map((row) => [...row]) };
+}
+
+/** A tela em branco: a entrada no meio, e um passo de corredor. */
+function blankBoard(): Board {
+  const middle = Math.floor(BASE_SIZE / 2);
+  const cells = emptyCells(BASE_SIZE);
 
   // A entrada e a célula à frente dela nascem como corredor: é a
   // chegada do alçapão, e o desenho começa de algum lugar.
-  const entranceRow = canvas[ENTRANCE.z];
-  const nextRow = canvas[ENTRANCE.z + 1];
+  const entranceRow = cells[middle];
+  const nextRow = cells[middle + 1];
 
-  if (entranceRow !== undefined) entranceRow[ENTRANCE.x] = 'corridor';
-  if (nextRow !== undefined) nextRow[ENTRANCE.x] = 'corridor';
+  if (entranceRow !== undefined) entranceRow[middle] = 'corridor';
+  if (nextRow !== undefined) nextRow[middle] = 'corridor';
 
-  return canvas;
+  return { size: BASE_SIZE, entrance: { x: middle, z: middle }, cells };
 }
 
 /**
  * Lê as linhas salvas de volta para a tela.
  *
- * ####  O ALINHAMENTO É PELO `E`, E NÃO PELO CENTRO  ####
+ * ####  A TELA SE AJUSTA AO DESENHO, E NÃO O CONTRÁRIO  ####
  *
- * MEDIDO em 09/09/2026, e apontado pelo dono olhando um traçado
- * sorteado: centrando o desenho, o `E` das linhas caía num lugar e
- * a entrada FIXA do editor ficava em outro — sozinha, cercada de
- * vazio.
+ * Duas coisas saem daqui, e as duas eram constantes antes:
  *
- * Isso não é cosmético. A entrada é onde o alçapão cospe o
- * jogador: ilhada, ele cai dentro de um quadrado fechado e o
- * evento acaba ali.
+ *   O TAMANHO. A tela cresce até caber o desenho inteiro, e nunca
+ *   passa do teto do formato. Um traçado de 23×23 não é mais
+ *   espremido numa tela de 24 com a entrada travada no meio —
+ *   ver o cabeçalho de `Board` para o que isso custava.
  *
- * Alinhando pelo `E`, o desenho inteiro se desloca para que a
- * entrada dele coincida com a do editor. Sem `E` nas linhas — um
- * desenho antigo, ou um pedaço colado —, cai no centro, que é o
- * comportamento anterior.
+ *   A ENTRADA. É onde o `E` do desenho está, deslocado junto com
+ *   ele. Sem `E` — um desenho antigo, um pedaço colado — ela cai
+ *   no centro da tela, que é o comportamento de sempre.
+ *
+ * O desenho é centralizado no que sobrar de tela. Centralizar o
+ * DESENHO, e não a entrada, é o que garante que ele caiba: uma
+ * entrada de canto empurraria tudo para fora por um lado só.
  */
-function fromRows(rows: readonly string[] | null): Canvas {
-  const canvas = blankCanvas();
-
-  if (rows === null || rows.length === 0) return canvas;
+export function boardFromRows(rows: readonly string[] | null): Board {
+  if (rows === null || rows.length === 0) return blankBoard();
 
   const height = rows.length;
   const width = Math.max(...rows.map((row) => row.length));
 
-  let offsetX = Math.max(0, ENTRANCE.x - Math.floor(width / 2));
-  let offsetZ = Math.max(0, ENTRANCE.z - Math.floor(height / 2));
+  // A tela cresce só o necessário, e o teto é o do formato: acima
+  // dele, o corte é do schema — e ele recusa, em vez de aceitar
+  // pela metade.
+  const size = Math.min(MAX_SIZE, Math.max(BASE_SIZE, width, height));
+  const cells = emptyCells(size);
 
-  // Onde está o `E` no desenho que chegou.
-  for (const [index, row] of rows.entries()) {
-    const column = row.indexOf('E');
+  const offsetX = Math.max(0, Math.floor((size - width) / 2));
+  const offsetZ = Math.max(0, Math.floor((size - height) / 2));
 
-    if (column < 0) continue;
-
-    // As linhas vêm do maior z para o menor.
-    offsetX = ENTRANCE.x - column;
-    offsetZ = ENTRANCE.z - (height - 1 - index);
-    break;
-  }
+  let entrance: { x: number; z: number } | null = null;
 
   rows.forEach((row, index) => {
     // As linhas vêm do maior z para o menor: a primeira é a de
@@ -598,32 +771,44 @@ function fromRows(rows: readonly string[] | null): Canvas {
 
     [...row].forEach((char, column) => {
       const x = offsetX + column;
-      const target = canvas[z];
+      const target = cells[z];
 
-      if (target === undefined || x >= SIZE) return;
+      if (target === undefined || x >= size) return;
 
       target[x] = brushOf(char);
+
+      // O primeiro `E` é a entrada. Um segundo é desenho torto de
+      // quem editou o JSON à mão, e vira corredor como qualquer
+      // outra célula.
+      if (char === 'E' && entrance === null) entrance = { x, z };
     });
   });
 
-  return canvas;
+  const middle = Math.floor(size / 2);
+
+  return { size, entrance: entrance ?? { x: middle, z: middle }, cells };
 }
 
 /**
  * Recorta o desenho e o converte para as linhas do formato.
  *
- * Só o retângulo que contém algo é salvo: guardar 24×24 de vazio
- * faria toda masmorra pequena carregar 500 pontos inúteis.
+ * Só o retângulo que contém algo é salvo: guardar a tela inteira
+ * de vazio faria toda masmorra pequena carregar centenas de
+ * pontos inúteis.
  */
-function toRows(canvas: Canvas): string[] {
-  let minX = SIZE;
+export function rowsOfBoard(board: Board): string[] {
+  const { size, entrance, cells } = board;
+
+  let minX = size;
   let maxX = -1;
-  let minZ = SIZE;
+  let minZ = size;
   let maxZ = -1;
 
-  canvas.forEach((row, z) => {
+  cells.forEach((row, z) => {
     row.forEach((cell, x) => {
-      if (cell === 'empty' && !(x === ENTRANCE.x && z === ENTRANCE.z)) return;
+      // A entrada entra no retângulo mesmo vazia: sem o `E` nas
+      // linhas, o desenho perde a chegada do alçapão.
+      if (cell === 'empty' && !(x === entrance.x && z === entrance.z)) return;
 
       minX = Math.min(minX, x);
       maxX = Math.max(maxX, x);
@@ -640,12 +825,12 @@ function toRows(canvas: Canvas): string[] {
     let line = '';
 
     for (let x = minX; x <= maxX; x += 1) {
-      if (x === ENTRANCE.x && z === ENTRANCE.z) {
+      if (x === entrance.x && z === entrance.z) {
         line += 'E';
         continue;
       }
 
-      const cell = canvas[z]?.[x] ?? 'empty';
+      const cell = cells[z]?.[x] ?? 'empty';
 
       // A letra guarda a COR, e não o número da sala. Ver
       // `CHAR_OF_COLOR`.
@@ -689,4 +874,36 @@ function brushOf(char: string): Brush {
   if (char === '.' || char === ' ') return 'empty';
 
   return COLOR_OF_CHAR[char] ?? 'green';
+}
+
+/** O nome de cada quarto de volta, na tela. */
+const ARROW_LABEL: Readonly<Record<number, string>> = {
+  0: 'cima',
+  90: 'direita',
+  180: 'baixo',
+  270: 'esquerda',
+};
+
+/**
+ * O próximo lado, a cada clique na seta.
+ *
+ * ####  A QUARTA VOLTA DEVOLVE O AUTOMÁTICO  ####
+ *
+ * Sem isso, escolher um lado é uma porta sem volta: o admin teria
+ * de saber qual era o automático para reproduzi-lo à mão. Girando
+ * quatro vezes ele passa pelos quatro lados e cai de novo no "deixa
+ * o servidor decidir", que é onde começou.
+ */
+function nextFacing(
+  current: 0 | 90 | 180 | 270 | null,
+  shown: number,
+): 0 | 90 | 180 | 270 | null {
+  // Sem escolha ainda: o primeiro clique parte do que a seta já
+  // mostra, e não do zero — girar tem de mover a seta um quarto,
+  // não jogá-la para o norte.
+  const from = current ?? (shown as 0 | 90 | 180 | 270);
+  const next = ((from + 90) % 360) as 0 | 90 | 180 | 270;
+
+  // Deu a volta inteira: volta ao automático.
+  return current !== null && next === (shown as number) ? null : next;
 }

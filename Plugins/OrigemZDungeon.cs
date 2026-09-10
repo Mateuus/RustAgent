@@ -92,6 +92,17 @@ namespace Oxide.Plugins
         private const string PrefabDoorway = "assets/prefabs/building core/wall.doorway/wall.doorway.prefab";
         private const string PrefabFloor = "assets/prefabs/building core/floor/floor.prefab";
         private const string PrefabHatchSource = "assets/prefabs/building/floor.ladder.hatch/floor.ladder.hatch.prefab";
+
+        /// <summary>O círculo colorido do mapa. Não carrega texto.</summary>
+        private const string PrefabRadiusMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
+
+        /// <summary>
+        /// Quem carrega o NOME que aparece ao passar o mouse.
+        ///
+        /// É o marcador da máquina de venda, e é o único do jogo que
+        /// aceita texto livre. O círculo nasce filho dele.
+        /// </summary>
+        private const string PrefabVendingMarker = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
         private const string PrefabHatch = "assets/bundled/prefabs/static/door.hinged.bunker_hatch.prefab";
         private const string PrefabCeilingLight = "assets/prefabs/deployable/ceiling light/ceilinglight.deployed.prefab";
 
@@ -462,6 +473,20 @@ namespace Oxide.Plugins
             public Door entranceHatch;
             /// <summary>O do fundo. Nasce no teto da célula (0,0).</summary>
             public Door exitHatch;
+
+            /// <summary>
+            /// Para onde o corredor sai da célula (0,0).
+            ///
+            /// É a direção em que quem desce pelo alçapão chega
+            /// olhando. `zero` = não se sabe, e aí o olhar de quem
+            /// chega fica como estava.
+            /// </summary>
+            public Vector3 lobbyFacing;
+
+            /// <summary>O círculo no mapa. Ver `CreateMarker`.</summary>
+            public MapMarkerGenericRadius mapMarker;
+            /// <summary>Quem carrega o nome do círculo.</summary>
+            public VendingMachineMapMarker mapLabel;
             /// <summary>Quem está lá dentro agora.</summary>
             public readonly HashSet<ulong> inside = new HashSet<ulong>();
             /// <summary>Quando cada um ouviu o último "não sai do lugar".</summary>
@@ -778,6 +803,37 @@ namespace Oxide.Plugins
             var sea = TerrainMeta.WaterMap != null
                 ? TerrainMeta.WaterMap.GetHeight(point)
                 : 0f;
+            var serves = depth <= MaxBuildWaterDepth;
+
+            // ####  A ÚLTIMA PALAVRA PODE SER `json`, E ISSO É PARA O AGENTE  ####
+            //
+            // A frase acima é escrita para gente: ela tem acento, "·" e
+            // "NÃO SERVE". Ler isso com expressão regular do outro lado
+            // do fio é um parser que quebra no dia em que alguém
+            // melhorar a frase — e quebra ACEITANDO, que é o pior lado.
+            //
+            // O painel precisa perguntar "aquele ponto serve?" antes de
+            // mandar construir nele, porque o `build <x> <z>` NÃO
+            // confere: foi assim que a entrada nasceu dentro de um rio
+            // em 09/09/2026 e matou o dono no teleporte.
+            //
+            // Então há duas respostas para a mesma pergunta, e a de
+            // máquina é explícita: `ozdungeon onde <x> <z> json`.
+            if (args.Length > 0 && args[args.Length - 1] == "json")
+            {
+                player.Reply(JsonConvert.SerializeObject(new Dictionary<string, object>
+                {
+                    { "x", x },
+                    { "z", z },
+                    { "grid", Grid(point) },
+                    { "ground", ground },
+                    { "water", sea },
+                    { "depth", depth },
+                    { "serves", serves },
+                }, Formatting.None));
+
+                return;
+            }
 
             player.Reply(
                 Grid(point) + " (" + x.ToString("0", CultureInfo.InvariantCulture) + ", "
@@ -785,8 +841,17 @@ namespace Oxide.Plugins
                 + " · chão em y=" + ground.ToString("0.0", CultureInfo.InvariantCulture)
                 + " · água em y=" + sea.ToString("0.0", CultureInfo.InvariantCulture)
                 + " · profundidade " + depth.ToString("0.0", CultureInfo.InvariantCulture) + " m"
-                + " · " + (depth > 0.5f ? "NÃO SERVE: é água" : "serve"));
+                + " · " + (serves ? "serve" : "NÃO SERVE: é água"));
         }
+
+        /// <summary>
+        /// Meio metro de água ainda é praia; um metro é rio.
+        ///
+        /// O número era `0.5f` cravado dentro do `onde`, e agora tem
+        /// dois leitores: aquele e o `build`, que passou a recusar em
+        /// vez de erguer a casinha dentro d'água.
+        /// </summary>
+        private const float MaxBuildWaterDepth = 0.5f;
 
         private void ReplyStatus(IPlayer player)
         {
@@ -929,6 +994,38 @@ namespace Oxide.Plugins
                     float.TryParse(args[3], NumberStyles.Float, CultureInfo.InvariantCulture, out yaw);
 
                 surface = new Vector3(x, GroundAt(x, z), z);
+
+                // ####  E AQUI A ÁGUA É RECUSADA  ####
+                //
+                // MEDIDO em 09/09/2026: mandei construir em
+                // (-1330, 871) sem olhar o mapa, a entrada nasceu
+                // dentro de um rio, e o dono morreu no instante em que
+                // o teleporte o levou até lá.
+                //
+                // O `ozdungeon onde` nasceu daquele acidente e resolvia
+                // metade do problema: dava para PERGUNTAR. Mas
+                // perguntar continuou sendo opcional, e este caminho —
+                // o do console, o que o painel usa — construía em
+                // qualquer lugar.
+                //
+                // A checagem mora aqui, e não só no agente, porque é
+                // este lado que tem o terreno na mão. Um painel novo,
+                // um script, um admin digitando no console: todos
+                // passam por aqui.
+                //
+                // O caminho de dentro do jogo NÃO é checado: o admin
+                // que está com os pés no lugar está vendo a água, e
+                // pode ter um motivo.
+                var depth = WaterDepth(surface);
+
+                if (depth > MaxBuildWaterDepth)
+                {
+                    player.Reply("Aquele ponto é água (" + Grid(surface) + ", "
+                                 + depth.ToString("0.0", CultureInfo.InvariantCulture)
+                                 + " m de profundidade). A entrada nasceria submersa.");
+                    return;
+                }
+
                 forward = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
             }
             else
@@ -1085,8 +1182,26 @@ namespace Oxide.Plugins
             });
 
             // 1) A entrada, na superfície, orientada para onde o admin
-            //    olha. É ela que traz o alçapão de cima.
+            //    olha — mais o ajuste da receita.
+            //
+            // ####  DOIS ÂNGULOS, PORQUE SÃO DUAS CONSTRUÇÕES  ####
+            //
+            // O `forward` orienta a MASMORRA: é a direção em que o
+            // desenho cresce lá embaixo. A casinha tem uma frente
+            // própria — a porta foi desenhada apontando para algum
+            // lado da planta —, e nenhum ângulo de quem constrói sabe
+            // qual é.
+            //
+            // Pedido do dono em 09/09/2026, olhando a casinha nascer
+            // virada: "talvez colocar o ângulo que aí fica certo, uma
+            // seta para girar".
             var yaw = Quaternion.LookRotation(forward, Vector3.up).eulerAngles.y;
+
+            // O ajuste de quem olhou: a planta tem uma frente própria
+            // que ninguém adivinha. Quem alinha a casinha COM O
+            // CORREDOR é outro giro, e ele é da masmorra — ver
+            // `GenerateRooms` e `GridExitYaw`.
+            if (dungeon.spec != null) yaw += dungeon.spec.entranceRotation;
 
             if (minimal)
             {
@@ -1184,6 +1299,16 @@ namespace Oxide.Plugins
                     dungeon.watchdog?.Destroy();
                     dungeon.watchdog = null;
 
+                    // O mapa e o chat: sem eles, a masmorra nasce e
+                    // ninguém no servidor fica sabendo. Ver a seção
+                    // "O MARCADOR NO MAPA".
+                    CreateMarker(dungeon);
+                    Broadcast(dungeon,
+                              dungeon.spec == null || dungeon.spec.announce == null
+                                  ? null
+                                  : dungeon.spec.announce.onBuild,
+                              "Uma masmorra apareceu em {grid}.");
+
                     var ms = (int)(DateTime.UtcNow - dungeon.startedAt).TotalMilliseconds;
 
                     requester?.Reply("Masmorra '" + slug + "' de pé: "
@@ -1219,6 +1344,178 @@ namespace Oxide.Plugins
             });
 
             Demolish(reason);
+        }
+
+        // ============================================================
+        //  O MARCADOR NO MAPA, E O QUE O SERVIDOR OUVE
+        //
+        //  ####  ATÉ 09/09/2026 A MASMORRA ERA INVISÍVEL  ####
+        //
+        //  O dono pediu para "verificar se está marcando no mapa e se
+        //  alerta no chat". Verificado: não fazia nem um nem outro.
+        //  Não havia uma linha de `MapMarker` neste arquivo, e o único
+        //  caminho de fala — o `Announce` — só alcança quem JÁ está
+        //  lá dentro.
+        //
+        //  Um evento que ninguém acha é um evento que não aconteceu.
+        //
+        //  ####  SÃO DOIS PREFABS, E UM É FILHO DO OUTRO  ####
+        //
+        //  O `genericradiusmarker` desenha o círculo (raio, cor,
+        //  alfa) e NÃO carrega texto. Quem carrega o nome que aparece
+        //  ao passar o mouse é o `vending_mapmarker` — o mesmo das
+        //  máquinas de venda.
+        //
+        //  Então o círculo nasce filho do marcador de vending, na
+        //  mesma posição. É o desenho do DungeonBases 1.3.4, e é o
+        //  único jeito de ter círculo COM nome.
+        //
+        //  ####  ELE TEM DE MORRER JUNTO COM A MASMORRA  ####
+        //
+        //  Nada da masmorra entra no save do mundo
+        //  (`EnableSaving(false)`), o marcador incluído. Mas um
+        //  marcador vivo depois do `Demolish` fica no mapa apontando
+        //  para o nada até o servidor reiniciar — e ninguém tem
+        //  comando para apagá-lo.
+        // ============================================================
+
+        /// <summary>
+        /// Põe o círculo no mapa, no lugar da entrada.
+        ///
+        /// Silencioso quando o painel desligou o marcador: uma
+        /// masmorra que é para ser procurada é uma escolha válida.
+        /// </summary>
+        private void CreateMarker(ActiveDungeon dungeon)
+        {
+            var spec = dungeon.spec == null ? null : dungeon.spec.marker;
+
+            if (spec != null && !spec.enabled) return;
+
+            var label = spec == null || string.IsNullOrEmpty(spec.label) ? "Masmorra" : spec.label;
+            var radius = spec == null ? 0.5f : Mathf.Clamp(spec.radius, 0.1f, 10f);
+            var alpha = spec == null ? 0.55f : Mathf.Clamp01(spec.alpha);
+            var color = ParseColor(spec == null ? null : spec.color);
+
+            try
+            {
+                // O de vending vem PRIMEIRO: é o pai, e o círculo
+                // precisa de um pai já existente para ser filho.
+                var vending = GameManager.server
+                    .CreateEntity(PrefabVendingMarker, dungeon.surface)
+                    as VendingMachineMapMarker;
+
+                if (vending == null) return;
+
+                vending.markerShopName = label;
+                vending.enableSaving = false;
+                vending.Spawn();
+
+                var marker = GameManager.server
+                    .CreateEntity(PrefabRadiusMarker, dungeon.surface)
+                    as MapMarkerGenericRadius;
+
+                if (marker == null)
+                {
+                    vending.Kill();
+                    return;
+                }
+
+                marker.radius = radius;
+                marker.alpha = alpha;
+                marker.color1 = color;
+                marker.enableSaving = false;
+                marker.Spawn();
+                marker.SetParent(vending);
+                marker.transform.localPosition = Vector3.zero;
+                marker.SendUpdate();
+                vending.SendNetworkUpdate();
+
+                dungeon.mapMarker = marker;
+                dungeon.mapLabel = vending;
+
+                Debug("marcador no mapa: '" + label + "' em " + Grid(dungeon.surface));
+            }
+            catch (Exception e)
+            {
+                // Um marcador que não nasce não pode derrubar a
+                // masmorra: ela funciona sem ele, só fica escondida.
+                PrintWarning("não consegui pôr o marcador no mapa: " + e.Message);
+            }
+        }
+
+        /// <summary>Tira o círculo do mapa. Ver o cabeçalho da seção.</summary>
+        private static void KillMarker(ActiveDungeon dungeon)
+        {
+            if (dungeon.mapMarker != null && !dungeon.mapMarker.IsDestroyed) dungeon.mapMarker.Kill();
+            if (dungeon.mapLabel != null && !dungeon.mapLabel.IsDestroyed) dungeon.mapLabel.Kill();
+
+            dungeon.mapMarker = null;
+            dungeon.mapLabel = null;
+        }
+
+        /// <summary>
+        /// `#rrggbb` -> a cor do Unity.
+        ///
+        /// O painel manda hexadecimal porque tem um seletor de cor;
+        /// o 1.3.4 pedia três floats de 0 a 1, que ninguém sabia
+        /// preencher. Texto torto vira vermelho, que é o padrão.
+        /// </summary>
+        private static Color ParseColor(string hex)
+        {
+            if (string.IsNullOrEmpty(hex) || hex.Length != 7 || hex[0] != '#') return Color.red;
+
+            int r, g, b;
+
+            if (!int.TryParse(hex.Substring(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out r)
+                || !int.TryParse(hex.Substring(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out g)
+                || !int.TryParse(hex.Substring(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out b))
+            {
+                return Color.red;
+            }
+
+            return new Color(r / 255f, g / 255f, b / 255f);
+        }
+
+        /// <summary>
+        /// Uma linha no chat de TODO MUNDO que está no servidor.
+        ///
+        /// ####  NÃO CONFUNDIR COM O `Announce`  ####
+        ///
+        /// Aquele fala com `dungeon.inside` — quem está lá dentro. Era
+        /// o único caminho de fala que existia, e por isso a masmorra
+        /// nascia em silêncio para o servidor inteiro.
+        ///
+        /// `{grid}` na frase vira a grade do mapa (`E7`); a coordenada
+        /// crua nunca entra, porque ninguém joga com (-1330, 871) na
+        /// cabeça.
+        /// </summary>
+        private void Broadcast(ActiveDungeon dungeon, string custom, string fallback)
+        {
+            var spec = dungeon.spec == null ? null : dungeon.spec.announce;
+
+            if (spec != null && !spec.enabled) return;
+
+            var showGrid = spec == null || spec.showGrid;
+            var grid = Grid(dungeon.surface);
+            var text = string.IsNullOrEmpty(custom) ? fallback : custom;
+
+            text = text.Replace("{grid}", showGrid ? grid : "algum lugar")
+                       .Replace("{nome}", dungeon.slug);
+
+            // Sem `{grid}` na frase e com a grade ligada, ela entra no
+            // fim: uma masmorra que ninguém sabe onde fica não é um
+            // evento, é um boato.
+            if (showGrid && text.IndexOf(grid, StringComparison.Ordinal) < 0)
+            {
+                text = text + " (" + grid + ")";
+            }
+
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player != null && player.IsConnected) player.ChatMessage(text);
+            }
+
+            Debug("anunciado ao servidor: " + text);
         }
 
         // ============================================================
@@ -1261,6 +1558,20 @@ namespace Oxide.Plugins
                     ["reason"] = reason,
                     ["entered"] = dungeon.inside.Count,
                 });
+            }
+
+            // O marcador morre ANTES das peças: vivo depois delas,
+            // ele fica no mapa apontando para o nada até o servidor
+            // reiniciar, e não há comando que o apague.
+            KillMarker(dungeon);
+
+            if (dungeon.ready)
+            {
+                Broadcast(dungeon,
+                          dungeon.spec == null || dungeon.spec.announce == null
+                              ? null
+                              : dungeon.spec.announce.onEnd,
+                          "A masmorra de {grid} fechou.");
             }
 
             // Quem está dentro sai ANTES de a estrutura sumir. Matar o
@@ -1679,8 +1990,170 @@ namespace Oxide.Plugins
         /// </summary>
         private const int DefaultRoomCount = 12;
 
+        /// <summary>
+        /// Quantos graus a casinha tem de girar para ficar de frente
+        /// para o corredor.
+        ///
+        /// ####  A CASINHA APONTAVA PARA UM LADO E O CORREDOR IA PARA OUTRO  ####
+        ///
+        /// MEDIDO em 09/09/2026, apontado pelo dono olhando o desenho e
+        /// o jogo lado a lado: "é a entrada, está virada ao lado
+        /// contrário do corredor, 90 graus".
+        ///
+        /// A casinha era colada apontando para o `forward` — a direção
+        /// que o admin escolheu ao construir. A masmorra lá embaixo usa
+        /// esse mesmo `forward` como o eixo Z do desenho, e o eixo X
+        /// como `right`. Então, num traçado cujo `E` tem o corredor à
+        /// DIREITA — que é o caso do "Labirinto" —, o corredor sai
+        /// noventa graus fora de onde a casinha olha.
+        ///
+        /// Não é erro do desenho nem da planta: são dois sistemas de
+        /// coordenadas que ninguém tinha juntado.
+        ///
+        /// ####  AS QUATRO SAÍDAS, E O QUE CADA UMA VALE  ####
+        ///
+        ///     (0, +1)  para a frente     0°     (o do sorteio)
+        ///     (+1, 0)  para a direita   90°     (o do "Labirinto")
+        ///     (0, -1)  para trás       180°
+        ///     (-1, 0)  para a esquerda 270°
+        ///
+        /// No modo receita o corredor sempre começa em (0,1) e isto
+        /// devolve zero — nada muda para quem já usava sorteio.
+        ///
+        /// A ordem da procura é a mesma do `LobbyFacing`, e tem de
+        /// ser: quem desce chega olhando para o corredor, e ele
+        /// precisa ser o MESMO corredor que a casinha aponta.
+        /// </summary>
+        private static float GridExitYaw(List<string> rows)
+        {
+            if (rows == null || rows.Count == 0) return 0f;
+
+            var column = -1;
+            var line = -1;
+
+            for (var index = 0; index < rows.Count && line < 0; index++)
+            {
+                var found = (rows[index] ?? "").IndexOf('E');
+
+                if (found < 0) continue;
+
+                column = found;
+                line = index;
+            }
+
+            if (line < 0) return 0f;
+
+            // A primeira linha é a de MAIOR z: o norte em cima, como um
+            // mapa é lido. É a mesma conversão do `LayoutFromGrid`.
+            var z = rows.Count - 1 - line;
+
+            if (HasCell(rows, column, z + 1)) return 0f;
+            if (HasCell(rows, column + 1, z)) return 90f;
+            if (HasCell(rows, column - 1, z)) return 270f;
+            if (HasCell(rows, column, z - 1)) return 180f;
+
+            return 0f;
+        }
+
+        /// <summary>Aquela célula do desenho tem alguma coisa?</summary>
+        private static bool HasCell(List<string> rows, int column, int z)
+        {
+            var line = rows.Count - 1 - z;
+
+            if (line < 0 || line >= rows.Count) return false;
+            if (column < 0) return false;
+
+            var row = rows[line] ?? "";
+
+            if (column >= row.Length) return false;
+
+            var ch = row[column];
+
+            return ch != '.' && ch != ' ';
+        }
+
+        /// <summary>
+        /// Para que lado o corredor sai da célula da entrada.
+        ///
+        /// ####  QUEM DESCE PRECISA CHEGAR OLHANDO PARA O CAMINHO  ####
+        ///
+        /// MEDIDO em 09/09/2026, apontado pelo dono de dentro do jogo:
+        /// "ao entrar está virado para o lado ao contrário — tá virado
+        /// pra cá &lt;- [ENTRADA] --- Corredor".
+        ///
+        /// O `Teleport` do Rust move a POSIÇÃO e não mexe no olhar: o
+        /// jogador chega olhando para onde estava olhando lá em cima,
+        /// que é para baixo, na direção do alçapão. Numa masmorra cujo
+        /// corredor sai para trás dele, a primeira coisa que ele vê é
+        /// uma parede — e a impressão é de que a masmorra nasceu
+        /// errada.
+        ///
+        /// ####  A DIREÇÃO É DO DESENHO, E NÃO DO ADMIN  ####
+        ///
+        /// No modo receita o corredor sempre começa em (0,1), que é o
+        /// `forward`. No modo desenho o `E` pode ter a saída em
+        /// qualquer um dos quatro lados — no traçado "Labirinto" ela
+        /// sai para o lado, e não para a frente.
+        ///
+        /// Devolve `Vector3.zero` quando a célula da entrada não tem
+        /// vizinho nenhum: um desenho assim é uma masmorra sem chegada,
+        /// e quem reclama disso é o verificador do painel.
+        /// </summary>
+        private static Vector3 LobbyFacing(Layout layout, Vector3 forward, Vector3 right)
+        {
+            if (layout == null) return Vector3.zero;
+
+            // A ordem é a preferência quando há mais de uma saída: em
+            // frente primeiro, porque é o que o jogador esperaria de
+            // qualquer porta; depois os lados; por último, para trás.
+            if (layout.cells.Contains((0, 1))) return forward;
+            if (layout.cells.Contains((1, 0))) return right;
+            if (layout.cells.Contains((-1, 0))) return -right;
+            if (layout.cells.Contains((0, -1))) return -forward;
+
+            return Vector3.zero;
+        }
+
         private void GenerateRooms(ActiveDungeon dungeon, Vector3 forward)
         {
+            // ####  QUEM GIRA É A MASMORRA, E NÃO A CASINHA  ####
+            //
+            // MEDIDO em 09/09/2026, com o dono dentro do jogo: "é a
+            // entrada, está virada ao lado contrário do corredor, 90
+            // graus".
+            //
+            // A casinha é colada apontando para o `forward`. A masmorra
+            // usa esse mesmo `forward` como o eixo Z do desenho e o
+            // `right` como o eixo X — então, num traçado cujo `E` tem o
+            // corredor à DIREITA (o "Labirinto"), o corredor saía
+            // noventa graus fora de onde a casinha olhava.
+            //
+            // Girar a CASINHA para acompanhar o corredor foi a primeira
+            // tentativa, e ela resolve o alinhamento e piora o resto: a
+            // porta da casinha passa a apontar para qualquer lado do
+            // terreno, e quem desce continua chegando de lado.
+            //
+            // Girar a MASMORRA acerta os dois de uma vez. O desenho é
+            // sempre o mesmo — corredores, salas e portas no lugar —,
+            // só o norte dele muda; e o corredor passa a sair para
+            // onde a casinha aponta, que é onde quem desce olha.
+            // A escolha do admin ganha do automático: ele pode ter
+            // uma razão que o desenho não conta — uma entrada com dois
+            // corredores saindo, por exemplo.
+            var chosen = dungeon.spec == null ? null : dungeon.spec.entranceFacing;
+
+            var exitYaw = chosen.HasValue
+                ? chosen.Value
+                : GridExitYaw(HasDrawing(dungeon) ? dungeon.spec.grid : null);
+
+            if (exitYaw != 0f)
+            {
+                forward = Quaternion.Euler(0f, -exitYaw, 0f) * forward;
+
+                Debug("masmorra: girando " + exitYaw.ToString("0")
+                      + "° para o corredor sair de frente para a entrada");
+            }
+
             // Sem semente, por enquanto: quem precisa de semente é o modo
             // permanente, que reconstrói a MESMA masmorra depois de um
             // restart (ver o §9.3 do plano). Ela entra junto com ele.
@@ -1706,6 +2179,10 @@ namespace Oxide.Plugins
                 : BuildLayout(rooms, rng);
 
             var right = Vector3.Cross(Vector3.up, forward).normalized;
+
+            // Para onde quem desce tem de estar olhando. Ver `LobbyFacing`.
+            dungeon.lobbyFacing = LobbyFacing(layout, forward, right);
+
             var floors = new Dictionary<(int, int), BuildingBlock>();
 
             // ####  A COR VEM ANTES DA PRIMEIRA PEÇA  ####
@@ -3090,7 +3567,9 @@ namespace Oxide.Plugins
             if (link.descends) active.inside.Add(player.userID);
             else active.inside.Remove(player.userID);
 
-            TeleportPlayer(player, link.target);
+            // Descendo, chega olhando para o corredor; subindo, o olhar
+            // fica como estava. Ver `TeleportPlayer` e `LobbyFacing`.
+            TeleportPlayer(player, link.target, link.descends ? active.lobbyFacing : Vector3.zero);
         }
 
         /// <summary>
@@ -3103,6 +3582,27 @@ namespace Oxide.Plugins
         /// ficou para trás.
         /// </summary>
         private void TeleportPlayer(BasePlayer player, Vector3 target)
+        {
+            TeleportPlayer(player, target, Vector3.zero);
+        }
+
+        /// <summary>
+        /// O mesmo teleporte, virando o jogador para onde ele deve
+        /// olhar ao chegar.
+        ///
+        /// ####  A POSIÇÃO É DO SERVIDOR; O OLHAR É DO CLIENTE  ####
+        ///
+        /// `Teleport` move o corpo e não toca no olhar — quem manda
+        /// nele é o cliente, que continua enviando o ângulo de antes.
+        /// Por isso são DUAS coisas aqui: o `viewAngles` do servidor,
+        /// para que ele saiba a verdade, e o RPC `ForceViewAnglesTo`,
+        /// que é o que faz a tela do jogador girar de fato.
+        ///
+        /// `facing` zero deixa o olhar como está: é o caso do subir —
+        /// quem sai da masmorra volta para o mundo aberto, e girar
+        /// alguém sem motivo é desagradável.
+        /// </summary>
+        private void TeleportPlayer(BasePlayer player, Vector3 target, Vector3 facing)
         {
             player.PauseFlyHackDetection(5f);
             player.PauseSpeedHackDetection(5f);
@@ -3122,6 +3622,25 @@ namespace Oxide.Plugins
             player.SendNetworkUpdateImmediate();
             player.ClearEntityQueue(null);
             player.SendCompleteSnapshot();
+
+            if (facing.sqrMagnitude > 0.001f)
+            {
+                var flat = new Vector3(facing.x, 0f, facing.z);
+
+                if (flat.sqrMagnitude > 0.001f)
+                {
+                    // Só o eixo Y: inclinar a cabeça de quem chega para
+                    // cima ou para baixo é enjoativo, e o corredor está
+                    // no plano de qualquer jeito.
+                    var angles = Quaternion.LookRotation(flat.normalized, Vector3.up).eulerAngles;
+
+                    angles.x = 0f;
+                    angles.z = 0f;
+
+                    player.viewAngles = angles;
+                    player.ClientRPC(RpcTarget.Player("ForceViewAnglesTo", player), angles);
+                }
+            }
 
             player.Invoke(() =>
             {
@@ -3643,6 +4162,16 @@ namespace Oxide.Plugins
             if (entities == null) { onDone(0, null); return; }
 
             var spin = Quaternion.Euler(0f, yaw, 0f);
+
+            // Radiano ou grau? A planta inteira decide, e o veredito
+            // vale para as 584 peças da maior delas. Ver `RotationScaleOf`.
+            var rotationScale = RotationScaleOf(entities);
+
+            if (rotationScale != 1f)
+            {
+                Debug("planta: rotação em radianos, convertendo para graus");
+            }
+
             var markers = new List<HatchMark>();
             var placed = 0;
             var skipped = 0;
@@ -3681,7 +4210,7 @@ namespace Oxide.Plugins
                     // nunca é a peça exótica.
                     try
                     {
-                        if (PasteOne(dungeon, node, origin, spin, markers)) placed++;
+                        if (PasteOne(dungeon, node, origin, spin, rotationScale, markers)) placed++;
                         else skipped++;
                     }
                     catch (Exception e)
@@ -3725,6 +4254,7 @@ namespace Oxide.Plugins
             JObject node,
             Vector3 origin,
             Quaternion spin,
+            float rotationScale,
             List<HatchMark> markers)
         {
             var prefab = node.Value<string>("prefabname");
@@ -3743,7 +4273,7 @@ namespace Oxide.Plugins
                 return false;
 
             var worldPos = origin + spin * ReadVector(node["pos"]);
-            var worldRot = spin * Quaternion.Euler(ReadVector(node["rot"]));
+            var worldRot = spin * Quaternion.Euler(ReadVector(node["rot"]) * rotationScale);
 
             var entity = GameManager.server.CreateEntity(prefab, worldPos, worldRot);
             if (entity == null)
@@ -3770,8 +4300,8 @@ namespace Oxide.Plugins
 
             Adopt(dungeon, entity);
             ApplyFlags(entity, node["flags"] as JObject);
-            FillContainer(entity, node["items"] as JArray);
-            PasteChildren(dungeon, entity, node["children"] as JArray);
+            FillContainer(entity, node["items"] as JArray, EntranceItemsOf(dungeon));
+            PasteChildren(dungeon, entity, node["children"] as JArray, rotationScale);
 
             // A pose é lida AGORA, enquanto a peça existe. Ver `HatchMark`.
             if (IsEntranceHatchMarker(node, entity))
@@ -3794,7 +4324,11 @@ namespace Oxide.Plugins
         /// O `parentbone` é o encaixe ("lock"); sem ele a fechadura
         /// nasce no centro da porta, atravessada nela.
         /// </summary>
-        private void PasteChildren(ActiveDungeon dungeon, BaseEntity parent, JArray children)
+        private void PasteChildren(
+            ActiveDungeon dungeon,
+            BaseEntity parent,
+            JArray children,
+            float rotationScale)
         {
             if (children == null || children.Count == 0) return;
 
@@ -3814,7 +4348,7 @@ namespace Oxide.Plugins
                 else child.SetParent(parent);
 
                 child.transform.localPosition = ReadVector(node["pos"]);
-                child.transform.localRotation = Quaternion.Euler(ReadVector(node["rot"]));
+                child.transform.localRotation = Quaternion.Euler(ReadVector(node["rot"]) * rotationScale);
                 child.OwnerID = 0UL;
                 child.EnableSaving(false);
                 child.Spawn();
@@ -3993,15 +4527,81 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// O que a casinha da entrada desta masmorra pode carregar.
+        ///
+        /// `none` quando o painel não disse nada: ver `FillContainer`.
+        /// </summary>
+        private static string EntranceItemsOf(ActiveDungeon dungeon)
+        {
+            if (dungeon == null || dungeon.spec == null) return "none";
+
+            return string.IsNullOrEmpty(dungeon.spec.entranceItems)
+                ? "none"
+                : dungeon.spec.entranceItems;
+        }
+
+        /// <summary>
+        /// Arma, munição ou explosivo?
+        ///
+        /// A categoria resolve o grosso (`Weapon`, `Ammunition`); a
+        /// lista de nomes cobre o que o Rust classifica como recurso
+        /// ou ferramenta e mesmo assim arromba uma base — os 200
+        /// `explosives` da `entrance1` são o exemplo que motivou isto.
+        /// </summary>
+        private static bool IsWeaponish(ItemDefinition definition)
+        {
+            if (definition == null) return false;
+
+            if (definition.category == ItemCategory.Weapon
+                || definition.category == ItemCategory.Ammunition) return true;
+
+            var shortname = definition.shortname ?? "";
+
+            return shortname.StartsWith("explosive")
+                   || shortname.Contains("grenade")
+                   || shortname.Contains("rocket")
+                   || shortname == "surveycharge";
+        }
+
+        /// <summary>
         /// Enche um baú/caixa da planta com o que ela mandava.
         ///
         /// Item cujo id o Rust não conhece mais é PULADO. Deixar um
         /// `null` no inventário é o caminho para o container quebrar
         /// na primeira vez que alguém o abre.
+        ///
+        /// ####  E O PADRÃO É NÃO ENCHER NADA  ####
+        ///
+        /// MEDIDO em 09/09/2026, apontado pelo dono: as quatro plantas
+        /// de entrada do acervo trazem armas nas caixas. A `entrance2`
+        /// — a entrada das duas masmorras cadastradas — traz uma M249;
+        /// a `entrance3` traz minigun e lança-foguetes; a `entrance1`
+        /// traz AK, LR-300, M249, 200 `explosives` e 1.000 scrap.
+        ///
+        /// Isso nunca foi loot desenhado: é o que estava nas caixas
+        /// quando alguém copiou a construção, em outro servidor. Ao
+        /// copiar fielmente, o construtor transformou entulho em
+        /// conteúdo — e uma M249 de graça por evento reescreve o wipe.
+        ///
+        /// `mode` vem do painel (`entranceItems`):
+        ///
+        ///   none     nada. É o padrão, inclusive sem o painel falar.
+        ///   unarmed  tudo menos arma, munição e explosivo.
+        ///   all      o que a planta mandar — para quem a desenhou.
+        ///
+        /// ####  A MARCA DO ALÇAPÃO NÃO PASSA POR AQUI  ####
+        ///
+        /// Ela é lida do JSON (`IsEntranceHatchMarker`), e não do
+        /// container montado — o vaso marcado é morto e convertido em
+        /// alçapão logo depois. Filtrar item nenhum a tira do lugar
+        /// onde ela é lida.
         /// </summary>
-        private void FillContainer(BaseEntity entity, JArray items)
+        private void FillContainer(BaseEntity entity, JArray items, string mode)
         {
             if (items == null || items.Count == 0) return;
+            if (mode == "none") return;
+
+            var unarmed = mode == "unarmed";
 
             var container = entity.GetComponent<StorageContainer>();
             if (container == null || container.inventory == null) return;
@@ -4017,6 +4617,8 @@ namespace Oxide.Plugins
                 var amount = node.Value<int?>("amount") ?? 1;
                 var skin = node.Value<ulong?>("skinid") ?? 0UL;
 
+                if (unarmed && IsWeaponish(ItemManager.FindItemDefinition(id.Value))) continue;
+
                 var item = ItemManager.CreateByItemID(id.Value, amount, skin);
                 if (item == null) continue;
 
@@ -4029,6 +4631,83 @@ namespace Oxide.Plugins
         /// Lê `{x,y,z}` onde cada componente pode ser string ou número.
         /// Ver o cabeçalho da seção sobre `InvariantCulture`.
         /// </summary>
+        /// <summary>
+        /// Dois pi, com folga para o arredondamento do arquivo.
+        ///
+        /// A `entrance1` traz o valor 6.281 e a `base2` traz 6.283 —
+        /// os dois são "uma volta inteira" escritos com sete casas.
+        /// </summary>
+        private const float TwoPiCeiling = 6.2833f;
+
+        /// <summary>
+        /// Por quanto multiplicar a rotação da planta para chegar a GRAUS.
+        ///
+        /// ####  O COPYPASTE GRAVA EM RADIANOS, E NÓS LÍAMOS COMO GRAUS  ####
+        ///
+        /// MEDIDO em 09/09/2026, apontado pelo dono olhando a casinha:
+        /// "a entrada que ficou virada". Ela vinha virada desde sempre,
+        /// e as sete plantas do acervo estão todas assim.
+        ///
+        /// A `entrance2` guarda quatro rotações — 0.676, 2.227, 3.826 e
+        /// 5.389 — e o cabeçalho dela diz `"rotationy": "317.4531"`. Em
+        /// radianos esses quatro valores são 38.7°, 127.6°, 219.2° e
+        /// 308.7°: quatro direções espaçadas de noventa graus, que é o
+        /// que uma construção retangular tem.
+        ///
+        /// `Quaternion.Euler` recebe GRAUS. Lidos como graus, os mesmos
+        /// números viram 0.7°, 2.2°, 3.8° e 5.4° — quatro direções
+        /// quase iguais. Paredes que deviam ser perpendiculares nascem
+        /// paralelas, e a casinha sai desmontada.
+        ///
+        /// ####  A DECISÃO É POR PLANTA, E NÃO POR PEÇA  ####
+        ///
+        /// Uma peça sozinha a 3° é ambígua: pode ser três graus ou três
+        /// radianos. A PLANTA inteira não é — em graus, alguma das
+        /// dezenas de peças passa de 2π (as sete do acervo chegam a
+        /// 6.28 e param ali, porque uma volta inteira em radianos é
+        /// exatamente isso).
+        ///
+        /// Errar para o lado do radiano custa uma planta torta; errar
+        /// para o lado do grau é o que já estava acontecendo com TODAS.
+        /// </summary>
+        private static float RotationScaleOf(JArray entities)
+        {
+            var max = 0f;
+
+            foreach (var token in entities)
+            {
+                var node = token as JObject;
+                if (node == null) continue;
+
+                var rot = ReadVector(node["rot"]);
+
+                max = Mathf.Max(max, Mathf.Abs(rot.x));
+                max = Mathf.Max(max, Mathf.Abs(rot.y));
+                max = Mathf.Max(max, Mathf.Abs(rot.z));
+
+                // Uma peça filha (a fechadura na porta) tem rotação
+                // própria, e ela conta para o mesmo veredito.
+                var children = node["children"] as JArray;
+                if (children == null) continue;
+
+                foreach (var child in children)
+                {
+                    var childNode = child as JObject;
+                    if (childNode == null) continue;
+
+                    var childRot = ReadVector(childNode["rot"]);
+
+                    max = Mathf.Max(max, Mathf.Abs(childRot.x));
+                    max = Mathf.Max(max, Mathf.Abs(childRot.y));
+                    max = Mathf.Max(max, Mathf.Abs(childRot.z));
+                }
+            }
+
+            // Tudo zero cai aqui e dá no mesmo: zero grau e zero
+            // radiano são a mesma rotação.
+            return max <= TwoPiCeiling ? Mathf.Rad2Deg : 1f;
+        }
+
         private static Vector3 ReadVector(JToken node)
         {
             if (node == null) return Vector3.zero;
@@ -4255,6 +4934,41 @@ namespace Oxide.Plugins
             public string id;
             public string mode;
             public string entrance;
+
+            /// <summary>
+            /// O que a casinha da entrada carrega dentro:
+            /// `none` (o padrão), `unarmed` ou `all`.
+            ///
+            /// Ausente no payload = `none`, e o campo nasce assim para
+            /// que uma masmorra antiga — gravada antes de este campo
+            /// existir — também pare de distribuir M249. Ver
+            /// `FillContainer`.
+            /// </summary>
+            public string entranceItems = "none";
+
+            /// <summary>
+            /// Quantos graus girar a CASINHA, além do yaw do comando.
+            ///
+            /// A masmorra de baixo não gira com ela: a planta tem uma
+            /// frente própria (a porta aponta para algum lado do
+            /// desenho), e é isso que este ângulo acerta.
+            /// </summary>
+            public float entranceRotation;
+
+            /// <summary>
+            /// Qual lado do DESENHO fica de frente no jogo.
+            ///
+            /// Zero, 90, 180 ou 270; `null` = o automático, que é a
+            /// saída do corredor (`GridExitYaw`). Não confundir com
+            /// `entranceRotation`, que gira a casinha no terreno.
+            /// </summary>
+            public float? entranceFacing;
+
+            /// <summary>O círculo no mapa. `null` = tudo no padrão.</summary>
+            public MarkerSpec marker;
+            /// <summary>O que o servidor ouve. `null` = tudo no padrão.</summary>
+            public AnnounceSpec announce;
+
             public Range size;
             public Weights weights;
             public CorridorSpec corridor;
@@ -4373,6 +5087,39 @@ namespace Oxide.Plugins
         }
 
         private class ZoneSpec { public float x; public float z; public float radius; }
+
+        /// <summary>
+        /// O círculo no mapa do jogo.
+        ///
+        /// Os padrões aqui são os MESMOS do `types/dungeons.ts`, e é
+        /// essa igualdade que autoriza o sync a não mandar o bloco
+        /// quando ninguém o tocou. Mudá-los de um lado só é o jeito
+        /// de quebrar isto em silêncio.
+        /// </summary>
+        private class MarkerSpec
+        {
+            public bool enabled = true;
+            public string label = "Masmorra";
+            /// <summary>`#rrggbb`. Ver `ParseColor`.</summary>
+            public string color = "#ff0000";
+            public float alpha = 0.55f;
+            public float radius = 0.5f;
+        }
+
+        /// <summary>
+        /// O que o servidor inteiro ouve.
+        ///
+        /// Texto vazio = a frase padrão, que mora no `Broadcast`. É
+        /// por isso que ela NÃO é gravada em cada masmorra: mudá-la
+        /// um dia não pode exigir reescrever linha nenhuma.
+        /// </summary>
+        private class AnnounceSpec
+        {
+            public bool enabled = true;
+            public string onBuild = "";
+            public string onEnd = "";
+            public bool showGrid = true;
+        }
 
 
         /// <summary>
