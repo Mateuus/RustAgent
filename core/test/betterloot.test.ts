@@ -1535,3 +1535,169 @@ describe('a lista de lixo', () => {
     expect(junk.activeOf('server02')).not.toContain('sticks');
   });
 });
+
+// ============================================================
+//  OS GARANTIDOS — o que sai sem sorteio
+//
+//  A tela mostrava esta lista e não a editava, nos dois arquivos.
+//  Estes testes guardam que ela agora atravessa: o que a tela manda
+//  chega ao disco, e o que ela tira some de lá.
+// ============================================================
+
+describe('os itens garantidos', () => {
+  beforeEach(async () => {
+    await seedFiles();
+    await seedGroups();
+  });
+
+  it('acrescenta e tira um garantido de uma caixa', async () => {
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(ELITE)}`,
+      })
+    ).json();
+
+    // O seed tem um: `scrap`, 10 a 25.
+    expect(opened.table.guaranteed).toHaveLength(1);
+
+    const put = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        baseRevision: opened.tableRevision,
+        table: {
+          ...opened.table,
+          guaranteed: [
+            ...opened.table.guaranteed,
+            {
+              key: 'sticks',
+              shortname: 'sticks',
+              displayName: null,
+              skinId: '0',
+              customName: null,
+              min: 2,
+              max: 4,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(put.statusCode).toBe(200);
+
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootTables.json'), 'utf8'),
+    );
+
+    const guaranteed = disk.LootTables[ELITE]['Guaranteed Items'];
+
+    expect(guaranteed.sticks['Item Minimum']).toBe(2);
+    expect(guaranteed.sticks['Item Maximum']).toBe(4);
+    // E o que já estava lá continua.
+    expect(guaranteed.scrap['Item Minimum']).toBe(10);
+
+    // Agora o caminho de volta: tirar o `scrap` some do arquivo.
+    const after = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(ELITE)}`,
+      })
+    ).json();
+
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        baseRevision: after.tableRevision,
+        table: {
+          ...after.table,
+          guaranteed: after.table.guaranteed.filter(
+            (entry: { key: string }) => entry.key !== 'scrap',
+          ),
+        },
+      },
+    });
+
+    const final = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootTables.json'), 'utf8'),
+    );
+
+    expect(final.LootTables[ELITE]['Guaranteed Items'].scrap).toBeUndefined();
+    expect(final.LootTables[ELITE]['Guaranteed Items'].sticks).toBeDefined();
+  });
+
+  it('acrescenta um garantido dentro de um perfil', async () => {
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      })
+    ).json();
+
+    expect(opened.profile.guaranteed).toEqual([]);
+
+    const put = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: opened.revision,
+        profile: {
+          ...opened.profile,
+          guaranteed: [
+            {
+              key: 'sticks',
+              shortname: 'sticks',
+              displayName: null,
+              skinId: '0',
+              customName: null,
+              min: 1,
+              max: 3,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(put.statusCode).toBe(200);
+
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    // ####  ESTE "SEMPRE" É OUTRO  ####
+    //
+    // O garantido do PERFIL sai quando o perfil é sorteado pela
+    // caixa; o da caixa sai toda vez que ela abre. São dois campos
+    // com o mesmo nome em dois arquivos, e confundi-los faria a tela
+    // prometer um item que quase nunca aparece.
+    expect(disk['Loot Groups'].armas_t3['Guaranteed Items'].sticks['Item Maximum']).toBe(3);
+  });
+
+  it('recusa um garantido com mínimo maior que o máximo', async () => {
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(ELITE)}`,
+      })
+    ).json();
+
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        baseRevision: opened.tableRevision,
+        table: {
+          ...opened.table,
+          guaranteed: [{ ...opened.table.guaranteed[0], min: 9, max: 2 }],
+        },
+      },
+    });
+
+    // Com os dois trocados o BetterLoot entrega sempre o mínimo, e
+    // nada reclama: a tela mostraria "9 a 2" e o admin acharia que
+    // pediu isso.
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('BETTERLOOT_INVALID_RANGE');
+  });
+});

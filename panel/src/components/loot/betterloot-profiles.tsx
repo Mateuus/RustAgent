@@ -36,6 +36,7 @@ import { Plus, Save, RotateCcw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { nextEntryKey } from '@/components/loot/betterloot';
+import { BetterLootGuaranteed } from '@/components/loot/betterloot-guaranteed';
 import { ItemCombobox } from '@/components/item-combobox';
 import { NO_SKIN, type ItemChoice } from '@/components/item-choice';
 import { Button } from '@/components/ui/button';
@@ -439,6 +440,22 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
               <Button size="sm" disabled={saving || draft.items.length === 0} onClick={balance}>
                 Repartir igual
               </Button>
+            </div>
+
+            {/* ####  OS GARANTIDOS DO PERFIL  ####
+                Eles saem sempre que ESTE perfil é sorteado por uma
+                caixa — e não toda vez que a caixa abre. É a
+                diferença para os garantidos da caixa, e por isso a
+                frase ao lado do título diz qual é qual. */}
+            <div className="border border-border bg-surface px-2 pb-2">
+              <BetterLootGuaranteed
+                entries={draft.guaranteed}
+                onChange={(guaranteed) => setDraft({ ...draft, guaranteed })}
+                serverId={serverId}
+                busy={saving}
+                idPrefix={`perfil-${draft.name}`}
+                hint="saem quando este perfil é sorteado"
+              />
             </div>
 
             <div className="flex items-end gap-2 border border-border bg-surface p-2">
