@@ -132,6 +132,13 @@ export function DungeonList({ dungeons, onEdit, onChanged, onBuild }: DungeonLis
                     <span className="italic">mínima, gerada por código</span>
                   )}
                 </span>
+
+                {/* Só quando ela NÃO vale em todos: com um servidor
+                    só na rede — o caso comum — a linha seria ruído
+                    repetido em cada masmorra. */}
+                {dungeon.servers.length > 0 && (
+                  <span className="text-amber">só em {dungeon.servers.join(', ')}</span>
+                )}
               </p>
             </div>
 

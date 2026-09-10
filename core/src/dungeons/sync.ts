@@ -418,7 +418,19 @@ export class DungeonSync {
   #payloadFor(serverId: string): DungeonSyncPayload {
     return {
       secret: this.#secret,
-      dungeons: this.#deps.dungeons.list().map((summary) => this.#dungeonPayload(summary.id)),
+      // ####  SÓ AS MASMORRAS DAQUELE SERVIDOR  ####
+      //
+      // Até 09/09/2026 aqui era `list()`: o catálogo inteiro ia para
+      // cada servidor da rede, e a masmorra desenhada para o PvE
+      // nascia no comando do hardcore. Quem apontou foi o dono —
+      // "na hora de subir masmorra tem que separar por servidor".
+      //
+      // Uma masmorra sem servidor marcado vale em TODOS, que é o que
+      // faz este corte não apagar nada de quem nunca escolheu. Ver a
+      // migração 072.
+      dungeons: this.#deps.dungeons
+        .listFor(serverId)
+        .map((summary) => this.#dungeonPayload(summary.id)),
       zones: this.#deps.events
         .zonesOf(serverId)
         .map((zone) => ({ x: zone.x, z: zone.z, radius: zone.radius })),

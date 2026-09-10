@@ -5374,6 +5374,13 @@ export interface DungeonInput {
    * sair de frente para a casinha.
    */
   entranceFacing: 0 | 90 | 180 | 270 | null;
+  /**
+   * Em que servidores ela vale.
+   *
+   * Vazio = em TODOS, e nao em nenhum: a masmorra e conteudo, e
+   * conteudo sem dono e de todos. Ver a migracao 072.
+   */
+  servers: string[];
   marker: DungeonMarker;
   announce: DungeonAnnounce;
   size: { min: number; max: number };
@@ -5448,6 +5455,8 @@ export interface DungeonSummary {
   name: string;
   mode: DungeonMode;
   entranceBlueprint: string | null;
+  /** Em que servidores ela vale. Vazio = em todos. */
+  servers: string[];
   roomCount: number;
   sizeMin: number;
   sizeMax: number;

@@ -640,6 +640,30 @@ const dungeonBodySchema = z
       })
       .prefault({}),
 
+    /**
+     * Em que servidores esta masmorra vale.
+     *
+     * ####  VAZIO É "EM TODOS", E ISSO É O CONTRÁRIO DO ÓBVIO  ####
+     *
+     * A leitura natural de uma lista vazia é "em nenhum", e ela
+     * está errada aqui por dois motivos.
+     *
+     * O primeiro é a migração: toda masmorra já gravada nasce sem
+     * vínculo nenhum, e "em nenhum" as apagaria do jogo em
+     * silêncio, no primeiro boot depois do update.
+     *
+     * O segundo é o caso comum: quem tem UM servidor nunca vai
+     * querer marcar nada, e quem tem três normalmente quer a
+     * masmorra nos três. A escolha explícita é a exceção, e é ela
+     * que deve custar um clique.
+     *
+     * É o oposto do `servers` do evento agendado, e de propósito:
+     * lá, vazio é "em nenhum", porque um evento sem servidor não
+     * tem quando acontecer. A masmorra é conteúdo, e conteúdo sem
+     * dono é de todos.
+     */
+    servers: z.array(z.string().min(1).max(64)).max(64).default([]),
+
     rooms: z.array(dungeonRoomInputSchema).max(64).default([]),
   })
   .superRefine((value, ctx) => {
@@ -743,6 +767,8 @@ export interface DungeonSummary {
   readonly name: string;
   readonly mode: DungeonMode;
   readonly entranceBlueprint: string | null;
+  /** Em que servidores ela vale. Vazio = em todos. */
+  readonly servers: readonly string[];
   readonly roomCount: number;
   readonly sizeMin: number;
   readonly sizeMax: number;

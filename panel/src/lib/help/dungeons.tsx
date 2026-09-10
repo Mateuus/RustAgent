@@ -108,6 +108,28 @@ export const DUNGEON_HELP = {
     ),
   },
 
+  servidores: {
+    title: 'Em que servidores ela existe',
+    short: 'Nenhum marcado quer dizer em todos — e não em nenhum.',
+    body: (
+      <>
+        <p>
+          Até 09/09/2026 toda masmorra ia para <strong>todos</strong> os servidores da rede: a que
+          você desenhou para o PvE nascia no comando do hardcore, e você só descobria construindo.
+        </p>
+        <p>
+          Marcando servidores, só eles recebem esta masmorra. Os outros não a conhecem — o comando
+          no jogo deles não a encontra, e o agendador não a ergue lá.
+        </p>
+        <HelpWarn>
+          <strong>Nenhum marcado é "em todos"</strong>, e não "em nenhum". É o contrário do que a
+          lista vazia sugere, e é de propósito: quem tem um servidor só nunca vai querer marcar
+          nada, e toda masmorra que já existia continua valendo em todo lugar.
+        </HelpWarn>
+      </>
+    ),
+  },
+
   marcador: {
     title: 'O círculo no mapa do jogo',
     short: 'Sem ele, quem não vê o chat não tem como saber que a masmorra existe.',

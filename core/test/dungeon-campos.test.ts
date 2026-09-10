@@ -34,6 +34,7 @@ import { dungeonInputSchema, FACTORY_RECIPES } from '../src/types/dungeons.js';
 
 const silent = pino({ level: 'silent' });
 const SERVER = 'server01';
+const OTHER_SERVER = 'server02';
 
 /**
  * Uma masmorra com TODO campo das quatro frentes fora do padrão.
@@ -124,7 +125,9 @@ function harness(): Captured {
 
   runMigrations(db);
 
-  new ServersRepository(db).create({
+  const servers = new ServersRepository(db);
+
+  servers.create({
     id: SERVER,
     name: 'Dev',
     identity: SERVER,
@@ -133,6 +136,21 @@ function harness(): Captured {
     queryPort: 28_017,
     appPort: 28_082,
     installDir: 'F:\\Servers\\devserver',
+  });
+
+  // O segundo existe para os testes de "em que servidores ela vale".
+  // A chave estrangeira de `dungeon_servers` recusa um servidor que
+  // não está cadastrado — e é ela que impede o painel de marcar um
+  // servidor que alguém apagou.
+  servers.create({
+    id: OTHER_SERVER,
+    name: 'Dev 2',
+    identity: OTHER_SERVER,
+    gamePort: 28_025,
+    rconPort: 28_026,
+    queryPort: 28_027,
+    appPort: 28_083,
+    installDir: 'F:\\Servers\\devserver2',
   });
 
   const dungeons = new DungeonsRepository(db, silent);
@@ -615,5 +633,91 @@ describe('o marcador e o anúncio', () => {
     expect(() =>
       dungeonInputSchema.parse({ ...FULL, id: 'colorida', marker: { color: 'vermelho' } }),
     ).toThrow();
+  });
+});
+
+// ============================================================
+//  Cada masmorra no seu servidor.
+//
+//  ####  O DEFEITO QUE ISTO TRANCA  ####
+//
+//  MEDIDO em 09/09/2026, apontado pelo dono: "na hora de subir
+//  masmorra tem que separar por servidor isso".
+//
+//  O `sync` mandava `dungeons.list()` — o catálogo INTEIRO — para
+//  cada servidor da rede. A masmorra desenhada para o PvE nascia no
+//  comando do hardcore, e o admin só descobria construindo.
+//
+//  E a regra que mais assusta quem lê: vazio é EM TODOS, e não em
+//  nenhum. Ver a migração 072 sobre por quê.
+//
+//  Ver Docs/OrigemZDurgeon/02-AS-SETE-PENDENCIAS.md §11.
+// ============================================================
+
+describe('em que servidores a masmorra vale', () => {
+  it('sem servidor marcado, ela vale em todos', () => {
+    const { dungeons } = harness();
+
+    const saved = dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'de-todos' }));
+
+    expect(saved.servers).toEqual([]);
+
+    // A pergunta que o `sync` faz, para dois servidores diferentes.
+    expect(dungeons.listFor(SERVER).map((entry) => entry.id)).toContain('de-todos');
+    expect(dungeons.listFor(OTHER_SERVER).map((entry) => entry.id)).toContain('de-todos');
+  });
+
+  it('marcada, ela some dos outros', () => {
+    const { dungeons } = harness();
+
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'so-do-um', servers: [SERVER] }));
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'de-todos' }));
+
+    const noUm = dungeons.listFor(SERVER).map((entry) => entry.id);
+    const noOutro = dungeons.listFor(OTHER_SERVER).map((entry) => entry.id);
+
+    expect(noUm).toContain('so-do-um');
+    expect(noUm).toContain('de-todos');
+
+    // O outro servidor não conhece a masmorra do primeiro — nem pelo
+    // comando no jogo, porque ela não chega no `sync` dele.
+    expect(noOutro).not.toContain('so-do-um');
+    expect(noOutro).toContain('de-todos');
+  });
+
+  it('a lista é REPLACE, como as salas', () => {
+    const { dungeons } = harness();
+
+    dungeons.save(
+      dungeonInputSchema.parse({ ...FULL, id: 'movida', servers: [SERVER, OTHER_SERVER] }),
+    );
+
+    expect(dungeons.get('movida')?.servers).toEqual([SERVER, OTHER_SERVER]);
+
+    // O servidor que sumiu do payload deixa de receber a masmorra.
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'movida', servers: [OTHER_SERVER] }));
+
+    expect(dungeons.get('movida')?.servers).toEqual([OTHER_SERVER]);
+    expect(dungeons.listFor(SERVER).map((entry) => entry.id)).not.toContain('movida');
+  });
+
+  it('o comando de sync leva só as do servidor', async () => {
+    const { sync, dungeons, sent } = harness();
+
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'daqui', servers: [SERVER] }));
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'de-outro', servers: [OTHER_SERVER] }));
+    dungeons.save(dungeonInputSchema.parse({ ...FULL, id: 'de-todos' }));
+
+    await sync.push(SERVER, 'teste');
+
+    const command = sent[0];
+
+    if (command === undefined) throw new Error('nada foi enviado');
+
+    const ids = decode(command).dungeons.map((entry) => entry.id);
+
+    expect(ids).toContain('daqui');
+    expect(ids).toContain('de-todos');
+    expect(ids).not.toContain('de-outro');
   });
 });

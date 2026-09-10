@@ -188,11 +188,16 @@ export class DungeonsRepository {
       'id' | 'name' | 'mode' | 'entrance_blueprint' | 'size_min' | 'size_max' | 'created_at' | 'updated_at'
     > & { room_count: number })[];
 
+    // Um SELECT para todos os vínculos: com dez masmorras, o N+1
+    // daqui seriam dez idas ao banco para montar uma lista.
+    const byDungeon = this.#allServers();
+
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
       mode: row.mode === 'blueprint' ? 'blueprint' : 'recipe',
       entranceBlueprint: row.entrance_blueprint,
+      servers: byDungeon.get(row.id) ?? [],
       roomCount: row.room_count,
       sizeMin: row.size_min,
       sizeMax: row.size_max,
@@ -396,6 +401,24 @@ export class DungeonsRepository {
           now,
         });
 
+      // ####  A LISTA DE SERVIDORES É REPLACE, COMO AS SALAS  ####
+      //
+      // O painel manda o conjunto completo, e o servidor que sumiu
+      // do payload deixa de receber a masmorra. Um merge parcial
+      // precisaria decidir o que fazer com o que sumiu — e a
+      // resposta certa é o que o replace já faz.
+      //
+      // `INSERT OR IGNORE`: um servidor repetido no payload é
+      // descuido de quem chamou, não motivo para recusar a
+      // gravação inteira.
+      this.#db.prepare('DELETE FROM dungeon_servers WHERE dungeon_id = ?').run(input.id);
+
+      const bindServer = this.#db.prepare(
+        'INSERT OR IGNORE INTO dungeon_servers (dungeon_id, server_id) VALUES (?, ?)',
+      );
+
+      for (const serverId of input.servers) bindServer.run(input.id, serverId);
+
       this.#db.prepare('DELETE FROM dungeon_rooms WHERE dungeon_id = ?').run(input.id);
 
       const insertRoom = this.#db.prepare(
@@ -472,6 +495,60 @@ export class DungeonsRepository {
     return rows.map((row) => row.id);
   }
 
+  /** Em que servidores aquela masmorra vale. Vazio = em todos. */
+  #serversOf(dungeonId: string): string[] {
+    const rows = this.#db
+      .prepare('SELECT server_id FROM dungeon_servers WHERE dungeon_id = ? ORDER BY server_id')
+      .all(dungeonId) as { server_id: string }[];
+
+    return rows.map((row) => row.server_id);
+  }
+
+  /**
+   * Todos os vínculos numa consulta só.
+   *
+   * A lista do painel e o `sync` leem o catálogo inteiro; com dez
+   * masmorras, o N+1 daqui seriam dez idas ao banco a cada envio.
+   */
+  #allServers(): Map<string, string[]> {
+    const rows = this.#db
+      .prepare('SELECT dungeon_id, server_id FROM dungeon_servers ORDER BY dungeon_id, server_id')
+      .all() as { dungeon_id: string; server_id: string }[];
+
+    const byDungeon = new Map<string, string[]>();
+
+    for (const row of rows) {
+      const list = byDungeon.get(row.dungeon_id);
+
+      if (list === undefined) byDungeon.set(row.dungeon_id, [row.server_id]);
+      else list.push(row.server_id);
+    }
+
+    return byDungeon;
+  }
+
+  /**
+   * As masmorras que aquele servidor recebe.
+   *
+   * ####  É O QUE O `sync` MANDA, E NADA ALÉM  ####
+   *
+   * Antes ele mandava o catálogo inteiro para cada servidor da
+   * rede: a masmorra desenhada para o PvE nascia no comando do
+   * hardcore, e o admin só descobria construindo.
+   *
+   * Vazio na tabela = vale em todos. Ver o schema sobre por que o
+   * padrão é esse, e não o contrário.
+   */
+  listFor(serverId: string): readonly DungeonSummary[] {
+    const byDungeon = this.#allServers();
+
+    return this.list().filter((summary) => {
+      const servers = byDungeon.get(summary.id);
+
+      return servers === undefined || servers.length === 0 || servers.includes(serverId);
+    });
+  }
+
   #toDungeon(row: DungeonRow, rooms: readonly RoomRow[]): Dungeon {
     return {
       id: row.id,
@@ -487,6 +564,7 @@ export class DungeonsRepository {
       // Um valor que não é múltiplo de 90 — banco editado à mão —
       // cai no automático, que é o que a coluna nula já vale.
       entranceFacing: quarterTurn(row.entrance_facing),
+      servers: this.#serversOf(row.id),
       marker: {
         enabled: row.marker_enabled === 1,
         label: row.marker_label ?? DEFAULT_MARKER_LABEL,

@@ -317,6 +317,27 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
 
     if (!deps.dungeons.exists(id)) throw notFound(id);
 
+    // ####  ERGUER ONDE ELA NÃO VALE É UM COMANDO MUDO  ####
+    //
+    // O `sync` só manda a masmorra para os servidores dela, então o
+    // plugin do outro não a conhece: o comando sairia, o plugin
+    // cairia de volta para "cole esta planta" e o admin veria uma
+    // masmorra errada nascer — ou um erro que não explica nada.
+    const dungeon = deps.dungeons.get(id);
+
+    if (
+      dungeon !== null &&
+      dungeon.servers.length > 0 &&
+      !dungeon.servers.includes(body.serverId)
+    ) {
+      throw new ApiError(
+        'DUNGEON_NOT_ON_SERVER',
+        `A masmorra "${id}" não vale no servidor "${body.serverId}". ` +
+          'Marque esse servidor na masmorra, ou escolha outro.',
+        409,
+      );
+    }
+
     if (deps.build === undefined) {
       throw new ApiError(
         'BUILD_UNAVAILABLE',

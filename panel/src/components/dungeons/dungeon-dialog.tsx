@@ -246,6 +246,7 @@ const EMPTY: DungeonInput = {
   entranceItems: 'none',
   entranceRotation: 0,
   entranceFacing: null,
+  servers: [],
   marker: { enabled: true, label: 'Masmorra', color: '#ff0000', alpha: 0.55, radius: 0.5 },
   announce: { enabled: true, onBuild: '', onEnd: '', showGrid: true },
   size: { min: 10, max: 15 },
@@ -425,7 +426,7 @@ export function DungeonDialog({
           deixar de ver — caia abaixo da dobra. */}
       <div className="max-h-[68vh] overflow-y-auto">
         {step === 'identidade' && (
-          <StepIdentidade draft={draft} patch={patch} locked={saved} />
+          <StepIdentidade draft={draft} patch={patch} locked={saved} servers={servers} />
         )}
 
         {step === 'tamanho' && draft.mode === 'blueprint' && (
@@ -565,10 +566,12 @@ function StepIdentidade({
   draft,
   patch,
   locked,
+  servers,
 }: {
   readonly draft: DungeonInput;
   readonly patch: (change: Partial<DungeonInput>) => void;
   readonly locked: boolean;
+  readonly servers: readonly { readonly id: string; readonly name: string }[];
 }) {
   return (
     <StepBody
@@ -641,6 +644,8 @@ function StepIdentidade({
           onChange={(event) => patch({ description: event.target.value })}
         />
       </Field>
+
+      <ServersField draft={draft} patch={patch} servers={servers} />
 
     </StepBody>
   );
@@ -1811,6 +1816,81 @@ function StepEntrada({
 }
 
 /**
+ * Em que servidores a masmorra vale.
+ *
+ * ####  NENHUM MARCADO É "EM TODOS"  ####
+ *
+ * MEDIDO em 09/09/2026, apontado pelo dono: até aqui o `sync`
+ * mandava o catálogo inteiro para cada servidor da rede — a
+ * masmorra desenhada para o PvE nascia no comando do hardcore.
+ *
+ * Vazio continua valendo em todos, e não em nenhum, por dois
+ * motivos: toda masmorra já gravada nasce sem vínculo (e "em
+ * nenhum" as apagaria do jogo em silêncio), e quem tem um servidor
+ * só nunca vai querer marcar nada.
+ *
+ * Com um servidor só cadastrado o campo nem aparece: seria uma
+ * pergunta com uma resposta.
+ */
+function ServersField({
+  draft,
+  patch,
+  servers,
+}: {
+  readonly draft: DungeonInput;
+  readonly patch: (change: Partial<DungeonInput>) => void;
+  readonly servers: readonly { readonly id: string; readonly name: string }[];
+}) {
+  if (servers.length < 2) return null;
+
+  const todos = draft.servers.length === 0;
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <FieldLabel topic={DUNGEON_HELP.servidores} className="text-xs font-bold text-foreground">
+        Em que servidores ela existe
+      </FieldLabel>
+
+      <div className="mt-2 space-y-1">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={todos}
+            onChange={() => patch({ servers: [] })}
+          />
+          <span className={todos ? 'text-foreground' : 'text-muted'}>Em todos</span>
+        </label>
+
+        {servers.map((server) => (
+          <label key={server.id} className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={draft.servers.includes(server.id)}
+              onChange={(event) =>
+                patch({
+                  servers: event.target.checked
+                    ? [...draft.servers, server.id]
+                    : draft.servers.filter((id) => id !== server.id),
+                })
+              }
+            />
+            <span className={draft.servers.includes(server.id) ? 'text-foreground' : 'text-muted'}>
+              {server.name}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <p className="mt-2 text-2xs text-muted">
+        {todos
+          ? 'Nenhum marcado: ela vale em todos os servidores, e todos a recebem.'
+          : `Só ${String(draft.servers.length)} servidor(es) recebem esta masmorra. Os outros não a conhecem — nem pelo comando no jogo.`}
+      </p>
+    </div>
+  );
+}
+
+/**
  * O ângulo da casinha.
  *
  * ####  POR QUE ELE EXISTE, SE JÁ HÁ UM ÂNGULO NO PONTO  ####
@@ -2831,6 +2911,7 @@ function toInput(dungeon: Dungeon): DungeonInput {
     entranceItems: input.entranceItems ?? 'none',
     entranceRotation: input.entranceRotation ?? 0,
     entranceFacing: input.entranceFacing ?? null,
+    servers: input.servers ?? [],
     marker: input.marker ?? { ...EMPTY.marker },
     announce: input.announce ?? { ...EMPTY.announce },
     structure: input.structure ?? { ...EMPTY.structure },

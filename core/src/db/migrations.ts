@@ -6353,6 +6353,56 @@ const DUNGEON_ENTRANCE_FACING_SCHEMA = `
 ALTER TABLE dungeons ADD COLUMN entrance_facing INTEGER;
 `;
 
+const DUNGEON_SERVERS_SCHEMA = `
+-- ============================================================
+--  072  em que servidores cada masmorra vale.
+--
+--  ####  ATE AQUI TODO SERVIDOR RECEBIA TODAS  ####
+--
+--  O sync mandava o catalogo inteiro para cada servidor da rede:
+--  a masmorra desenhada para o PvE nascia no comando do servidor
+--  hardcore, e o admin so descobria construindo.
+--
+--  Apontado pelo dono em 09/09/2026: "na hora de subir masmorra
+--  tem que separar por servidor isso".
+--
+--  ####  VAZIO E "EM TODOS", E ISSO E O CONTRARIO DO OBVIO  ####
+--
+--  A leitura natural de uma lista vazia e "em nenhum" - e ela
+--  esta errada aqui por dois motivos.
+--
+--  O primeiro e a migracao: toda masmorra ja gravada nasce sem
+--  linha nenhuma nesta tabela, e "em nenhum" as apagaria do jogo
+--  em silencio, no primeiro boot depois do update.
+--
+--  O segundo e o caso comum: quem tem UM servidor nunca vai
+--  querer marcar nada, e quem tem tres normalmente quer a
+--  masmorra nos tres. A escolha explicita e a excecao, e e ela que
+--  deve custar um clique.
+--
+--  E o mesmo desenho do world_event_servers (057), com a mesma
+--  ressalva: la, vazio significa "em nenhum" porque um evento
+--  agendado sem servidor nao tem quando acontecer. Aqui a
+--  masmorra e conteudo, e conteudo sem dono e de todos.
+--
+--  ####  O CATALOGO CONTINUA GLOBAL  ####
+--
+--  O desenho de uma masmorra e reutilizavel, como as plantas: ele
+--  nao pertence a um servidor, ele VALE em alguns. O que e do
+--  servidor sao os pontos de nascimento (067), a agenda (069) e o
+--  historico -- e esses ja nascem com server_id.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE dungeon_servers (
+  dungeon_id TEXT NOT NULL REFERENCES dungeons(id) ON DELETE CASCADE,
+  server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (dungeon_id, server_id)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6546,6 +6596,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 70, name: 'dungeon-entrance-rotation', sql: DUNGEON_ENTRANCE_ROTATION_SCHEMA },
   // 09/09/2026: a seta do desenho vira o controle de para onde a entrada aponta.
   { id: 71, name: 'dungeon-entrance-facing', sql: DUNGEON_ENTRANCE_FACING_SCHEMA },
+  // 09/09/2026: a masmorra deixa de nascer em todo servidor da rede.
+  { id: 72, name: 'dungeon-servers', sql: DUNGEON_SERVERS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
