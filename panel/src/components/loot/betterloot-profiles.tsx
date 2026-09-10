@@ -32,10 +32,11 @@
 //  sabemos dizer QUAIS caixas perdem o ajuste, e dizemos.
 // ============================================================
 
-import { Plus, Save, RotateCcw, Trash2 } from 'lucide-react';
+import { Pencil, Plus, Save, RotateCcw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { nextEntryKey } from '@/components/loot/betterloot';
+import { BetterLootGuaranteed } from '@/components/loot/betterloot-guaranteed';
 import { ItemCombobox } from '@/components/item-combobox';
 import { NO_SKIN, type ItemChoice } from '@/components/item-choice';
 import { Button } from '@/components/ui/button';
@@ -80,6 +81,14 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
 
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  /**
+   * O nome novo enquanto o diálogo de renomear está aberto.
+   *
+   * `null` = ele está fechado. Guardar o texto em vez de um
+   * booleano deixa o campo nascer com o nome de agora, que é o que
+   * se quer editar — ninguém renomeia digitando tudo de novo.
+   */
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<BetterLootProfileSummary | null>(null);
 
   const [shortname, setShortname] = useState('');
@@ -196,6 +205,52 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
     }
   };
 
+  /**
+   * Renomeia, e reescreve as caixas que citam o nome antigo.
+   *
+   * As duas coisas são uma operação só do lado do agente: o nome é
+   * a chave do arquivo de perfis E é citado por nome dentro de cada
+   * caixa. Trocar só o primeiro deixaria as caixas pedindo um
+   * perfil que não existe, e o BetterLoot as ignoraria em silêncio.
+   */
+  const rename = async (): Promise<void> => {
+    const to = (renaming ?? '').trim();
+
+    if (draft === null || to === '' || to === draft.name) {
+      setRenaming(null);
+
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const response = await agent.renameBetterLootProfile(serverId, {
+        from: draft.name,
+        to,
+        baseRevision: revision,
+      });
+
+      setRenaming(null);
+      setSelected(response.profile.name);
+      setSaved(response.profile);
+      setDraft(response.profile);
+      setRevision(response.revision);
+
+      await load();
+
+      toast.success(
+        response.retargeted.length === 0
+          ? `Perfil renomeado para "${to}".`
+          : `Perfil renomeado para "${to}", e ${String(response.retargeted.length)} caixa(s) passaram a citar o nome novo.`,
+      );
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const remove = async (target: BetterLootProfileSummary): Promise<void> => {
     setSaving(true);
 
@@ -301,6 +356,10 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
     });
   };
 
+  /** Em quais caixas o perfil ABERTO está. Sai da lista, já carregada. */
+  const usedByOfDraft =
+    draft === null ? [] : (profiles.find((item) => item.name === draft.name)?.usedBy ?? []);
+
   const sum =
     draft === null ? 0 : Math.round(draft.items.reduce((total, item) => total + item.probability, 0) * 100) / 100;
 
@@ -388,6 +447,16 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
               />
 
               <Button
+                size="sm"
+                disabled={saving}
+                onClick={() => setRenaming(draft.name)}
+                className="flex items-center gap-1"
+              >
+                <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
+                Renomear
+              </Button>
+
+              <Button
                 variant="danger"
                 size="sm"
                 disabled={saving}
@@ -439,6 +508,22 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
               <Button size="sm" disabled={saving || draft.items.length === 0} onClick={balance}>
                 Repartir igual
               </Button>
+            </div>
+
+            {/* ####  OS GARANTIDOS DO PERFIL  ####
+                Eles saem sempre que ESTE perfil é sorteado por uma
+                caixa — e não toda vez que a caixa abre. É a
+                diferença para os garantidos da caixa, e por isso a
+                frase ao lado do título diz qual é qual. */}
+            <div className="border border-border bg-surface px-2 pb-2">
+              <BetterLootGuaranteed
+                entries={draft.guaranteed}
+                onChange={(guaranteed) => setDraft({ ...draft, guaranteed })}
+                serverId={serverId}
+                busy={saving}
+                idPrefix={`perfil-${draft.name}`}
+                hint="saem quando este perfil é sorteado"
+              />
             </div>
 
             <div className="flex items-end gap-2 border border-border bg-surface p-2">
@@ -582,6 +667,49 @@ export function BetterLootProfiles({ serverId, busy }: BetterLootProfilesProps) 
               onClick={() => void create()}
             >
               Criar
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={renaming !== null}
+        title="Renomear o perfil"
+        onClose={() => setRenaming(null)}
+        busy={saving}
+      >
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="profile-rename">Nome novo</Label>
+            <Input
+              id="profile-rename"
+              value={renaming ?? ''}
+              disabled={saving}
+              onChange={(event) => setRenaming(event.target.value)}
+            />
+          </div>
+
+          {/* O que o admin precisa saber ANTES de confirmar: isto
+              mexe em caixas que ele não abriu. */}
+          <p className="text-2xs text-muted">
+            {usedByOfDraft.length === 0
+              ? 'Nenhuma caixa sorteia este perfil, então só o nome dele muda.'
+              : `${String(usedByOfDraft.length)} caixa(s) sorteiam este perfil e passarão a citar o nome novo — a chance e o teto de cada uma continuam como estão.`}
+          </p>
+
+          <div className="flex justify-end gap-2">
+            <Button size="sm" disabled={saving} onClick={() => setRenaming(null)}>
+              Cancelar
+            </Button>
+            <Button
+              variant="confirm"
+              size="sm"
+              disabled={
+                saving || (renaming ?? '').trim() === '' || (renaming ?? '').trim() === draft?.name
+              }
+              onClick={() => void rename()}
+            >
+              Renomear
             </Button>
           </div>
         </div>

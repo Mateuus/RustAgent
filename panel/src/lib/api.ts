@@ -2596,6 +2596,26 @@ export interface BetterLootProfileSaveInput {
   profile: BetterLootProfile;
 }
 
+/** O corpo do rename. A revisão é a do perfil que está mudando de nome. */
+export interface BetterLootProfileRenameInput {
+  from: string;
+  to: string;
+  baseRevision: string | null;
+}
+
+/** `POST /api/servers/:id/betterloot/profile/rename` */
+export interface BetterLootProfileRenameResponse {
+  ok: true;
+  serverId: string;
+  revision: string;
+  profile: BetterLootProfile;
+  /** As caixas cuja citação foi reescrita. */
+  retargeted: string[];
+  backup: string | null;
+  reloaded: boolean;
+  reloadOutput: string | null;
+}
+
 /** `DELETE /api/servers/:id/betterloot/profile` */
 export interface BetterLootProfileDeleteResponse {
   ok: true;
@@ -5007,6 +5027,22 @@ export const agent = {
     api<BetterLootProfileResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/betterloot/profile`,
       { method: 'PUT', body: input },
+    ),
+
+  /**
+   * Renomeia um perfil, e reescreve quem o cita.
+   *
+   * ####  NÃO DÁ PARA FAZER ISSO PELO `PUT`  ####
+   *
+   * O nome é a chave do arquivo de perfis E é citado por nome
+   * dentro de cada caixa. Mandar um nome novo no `PUT` criaria um
+   * perfil a mais, e as caixas continuariam apontando para o
+   * antigo. O agente atravessa os dois arquivos numa operação só.
+   */
+  renameBetterLootProfile: (serverId: string, input: BetterLootProfileRenameInput) =>
+    api<BetterLootProfileRenameResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/profile/rename`,
+      { method: 'POST', body: input },
     ),
 
   /**

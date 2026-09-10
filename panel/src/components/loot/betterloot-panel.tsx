@@ -602,6 +602,7 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
                 busy={saving}
                 junk={junkShortnames}
                 onMarkJunk={(shortname) => void addJunk(shortname)}
+                serverId={serverId}
               />
             </div>
           </div>
@@ -658,6 +659,7 @@ function BetterLootTableBody({
   busy,
   junk,
   onMarkJunk,
+  serverId,
 }: {
   readonly selected: string | null;
   readonly loading: boolean;
@@ -667,6 +669,7 @@ function BetterLootTableBody({
   readonly busy: boolean;
   readonly junk: readonly string[];
   readonly onMarkJunk: (shortname: string) => void;
+  readonly serverId: string;
 }) {
   if (selected === null) {
     return (
@@ -705,6 +708,7 @@ function BetterLootTableBody({
       busy={busy}
       junk={junk}
       onMarkJunk={onMarkJunk}
+      serverId={serverId}
     />
   );
 }

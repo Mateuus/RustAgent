@@ -43,6 +43,8 @@
 // ============================================================
 
 import { AlertTriangle, Ban, Trash2 } from 'lucide-react';
+
+import { BetterLootGuaranteed } from '@/components/loot/betterloot-guaranteed';
 import { useMemo, useState, type ReactNode } from 'react';
 
 import {
@@ -91,6 +93,8 @@ interface BetterLootTableEditorProps {
   readonly onMarkJunk: (shortname: string) => void;
   /** Os shortnames já marcados. O botão some para eles. */
   readonly junk: readonly string[];
+  /** De qual servidor é esta caixa. O seletor de itens precisa saber. */
+  readonly serverId: string;
 }
 
 export function BetterLootTableEditor({
@@ -99,6 +103,7 @@ export function BetterLootTableEditor({
   busy,
   onMarkJunk,
   junk,
+  serverId,
 }: BetterLootTableEditorProps) {
   const chances = useMemo(
     () => chancesOf(table.items, { flat: table.ignoreRarityBias }),
@@ -288,29 +293,24 @@ export function BetterLootTableEditor({
           </section>
         )}
 
-        {/* ####  OS GARANTIDOS  #### */}
-        {table.guaranteed.length > 0 && (
-          <section className="space-y-1 border-t border-border pt-3">
-            <h3 className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
-              Sempre saem ({table.guaranteed.length})
-            </h3>
-            <ul className="divide-y divide-border border border-border">
-              {table.guaranteed.map((entry) => (
-                <li key={entry.key} className="flex items-center gap-2 px-2 py-1.5">
-                  <ItemIcon shortname={entry.shortname} size="sm" label={entry.shortname} />
-                  <span className="min-w-0 flex-1 truncate text-2xs text-foreground">
-                    {entry.customName ?? entry.displayName ?? entry.shortname}
-                  </span>
-                  <span className="shrink-0 text-2xs tabular-nums text-muted">
-                    {entry.min === entry.max
-                      ? entry.min
-                      : `${String(entry.min)}–${String(entry.max)}`}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {/* ####  OS GARANTIDOS  ####
+            Eles saem toda vez que a caixa abre, sem sorteio. Esta
+            lista era só leitura até 10/09/2026, e o admin tinha de
+            editar o JSON à mão para mexer nela. */}
+        <BetterLootGuaranteed
+          entries={table.guaranteed}
+          onChange={(guaranteed) =>
+            onChange({ ...table, guaranteed, guaranteedCount: guaranteed.length })
+          }
+          serverId={serverId}
+          busy={busy}
+          idPrefix={`caixa-${table.prefab}`}
+          hint={
+            table.itemSettings.guaranteedItemsCountToTotal
+              ? 'contam no teto de itens desta caixa'
+              : 'somam por fora do teto de itens'
+          }
+        />
 
         {/* ####  OS ITENS SOLTOS  #### */}
         <section className="space-y-2 border-t border-border pt-3">
