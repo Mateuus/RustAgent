@@ -421,6 +421,40 @@ os bytes voltarem a passar pelo canal do jogo.
 O teto de 1920×1080 (`ADS_MAX_WIDTH`/`ADS_MAX_HEIGHT`) não tem comentário
 dizendo de onde saiu — é um dos poucos números deste módulo sem razão escrita.
 
+### §9.8 — Resolvido: o agente encolhe a imagem sozinho
+
+**09/09/2026.** A recusa dizia o número certo e empurrava o dono para o editor de
+imagem por uma conta que a máquina faz melhor. Agora ela é feita aqui:
+`core/src/game/png-resize.ts` decodifica o PNG, tira a média de área e reescreve
+o arquivo — **sem dependência nova**, só com o `zlib` que já vem no Node.
+(`sharp` é binário nativo e este agente é copiado para outra máquina; `jimp` são
+megabytes de decodificador de tudo.)
+
+Medido com a logo real de produção:
+
+| | antes | depois |
+|---|---|---|
+| tamanho | 4048×1735 | 511×219 |
+| arquivo | 667 KB | 34 KB |
+| comandos de RCON | ~25 | 2 |
+| quem baixa | o cliente, do site | o servidor, pelo canal do jogo |
+
+Três decisões que não são óbvias:
+
+- **o teto da logo é próprio e menor** — `ADS_LOGO_MAX_*`, 512. Ela nunca é
+  desenhada com mais de 400 pixels de lado (o schema de `logoWidth`/`logoHeight`
+  para aí), e guardar 4048 para pintar 90 é textura na memória de vídeo de cada
+  jogador para nada;
+- **o modo `url` continua recusando.** Ali quem baixa é o cliente, do endereço
+  original: encolher uma cópia aqui não mudaria um pixel do que ele vê, e deixar
+  passar seria mentir sobre o que vai para a tela;
+- **a média é ponderada pelo alfa.** Pixel invisível carrega cor qualquer por
+  baixo (preto, na maioria dos exportadores); deixá-lo votar na cor produz o halo
+  escuro clássico na borda de um logo recortado.
+
+O que o encolhedor **não** faz — JPEG, PNG entrelaçado, imagem que promete mais
+de 16 megapixels — volta `null`, e a recusa com número continua sendo a resposta.
+
 ---
 
 ## §10 — O quadro sem `destroy`, e a cena que fica parada

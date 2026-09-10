@@ -79,11 +79,26 @@ executadas):
 | 35 | [Confirmado: o dedupe agora é por `(deliveryId, ação)`](35-CONFIRMACAO-DEDUPE-POR-DELIVERYID.md) | a desconfiança do 34 §2 estava certa — era dedupe por **transição de estado**, não por `(deliveryId, ação)`; foi trocado por checagem explícita, valendo para os três eventos. E o `attempts: 1` do agent contra os 429 do site virou fato de contrato, registrado no [31](31-ENDPOINTS-DO-SITE.md) §6.2 |
 | 36 | [Medido: o evento aparece na ficha](36-CONFIRMACAO-O-EVENTO-APARECE-NA-FICHA.md) | **fecha a troca 32→35**: um resgate real com o dedupe novo no ar, ciclo completo em **349 ms**, e as cinco entregas já processadas com ACK aceito. Diz também o que **não** foi exercitado — o teste negativo (`deferred` sem linha) e o `failed_agent` |
 
+Os documentos de **subsistema**, cada um numa pasta própria. Eles não entram na
+numeração acima de propósito: um subsistema tem vida longa e vários documentos,
+e amarrá-lo a um número da sequência faria a sequência ser sobre pastas em vez
+de ser sobre a ordem em que o projeto foi pensado.
+
+| Pasta | O que responde |
+|---|---|
+| [Interface](Interface/01-TELAS-DESENHADAS-EM-VEZ-DE-PROGRAMADAS.md) | o menu do jogo desenhado no painel em vez de programado no plugin |
+| [CustomItem](CustomItem/01-PESQUISA-ITEM-CUSTOM.md) | item nosso dentro do Rust: o que dá, o que não dá, e por onde |
+| [Ranking](Ranking/20-PLANO-E-CONTRATOS.md) | de onde vem cada número do leaderboard, e como ele é guardado |
+| [Propaganda](Propaganda/01-O-OVERLAY-VOLTOU-DO-AGENTE-ANTIGO.md) | o overlay que aparece sozinho na tela de quem joga |
+| [OrigemZQuests](OrigemZQuests/01-PLANO-E-CONTRATOS.md) | as missões: quest é assinatura sobre evento, e o resto decorre disso |
+| [OrigemZDurgeon](OrigemZDurgeon/01-PLANO-E-CONTRATOS.md) | **o OrigemZDungeon e o OrigemZEvents**: masmorra criada e editada pelo painel, construída de dentro do jogo. A dungeon mora a 90 m abaixo do mundo e o alçapão teleporta |
+
 E fora da pasta `Docs`:
 
 | Onde | O que responde |
 |---|---|
 | [`contracts/`](../contracts/README.md) | as **fixtures compartilhadas** do canal agent↔site: os corpos de requisição e resposta, com `origin` dizendo quais foram **medidos** contra o dev e quais são só o que o manual descreve. Lido pelos testes deste repositório (`core/test/site-fixtures.test.ts`) |
+| [`core/scripts/pluginlint/`](../core/scripts/pluginlint/pluginlint.csproj) | **o plugin `.cs` compila?** Roslyn contra as DLLs reais do `server01`, em ~2 s, sem subir servidor. Ao lado dele, `layout-check.mjs` cobra a geometria da masmorra em N sorteios |
 
 > **O número 23 está ocupado por dois arquivos.** `23-CONFIG-PELO-SITE.md` descreve o que **já foi
 > construído** deste lado; `23-CONFIG-AVANCADA-DO-SITE.md` descreve o que **ainda não existe em

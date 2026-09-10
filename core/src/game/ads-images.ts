@@ -41,23 +41,34 @@
 //      FileStorage e não acumula lixo no servidor.
 //
 //  ------------------------------------------------------------
-//  ####  ESTE ARQUIVO NAO REDIMENSIONA  ####
+//  ####  GRANDE DEMAIS E ENCOLHIDA, NAO RECUSADA  ####
 //
-//  Fazê-lo exigiria uma dependência de processamento de imagem
-//  (sharp é binário nativo; jimp é lento e pesado) para um
-//  problema que o admin resolve uma vez, no editor de imagem
-//  dele. O que existe aqui é RECUSA com número: "sua imagem tem
-//  2 MB e o limite é 1,5 MB" diz o que fazer.
+//  Só no modo `stored`, e só o que é PNG (ver png-resize.ts, que
+//  faz a conta com o zlib do próprio Node — sem dependência
+//  nova).
+//
+//  O modo `url` fica de fora de propósito: ali quem baixa é o
+//  CLIENTE, do endereço original, e uma cópia menor guardada aqui
+//  não mudaria um pixel do que ele vê. Encolher e deixar passar
+//  seria mentir sobre o que vai para a tela — nesse modo a recusa
+//  continua sendo a resposta honesta.
+//
+//  Fora isso — JPEG, PNG entrelaçado, arquivo pesado demais para
+//  o duto mesmo depois de encolhido — o que existe aqui é RECUSA
+//  com número: "sua imagem tem 2 MB e o limite é 1,5 MB" diz o
+//  que fazer.
 // ============================================================
 
 import { createHash } from 'node:crypto';
 
 import {
   ADS_CHUNK_BYTES,
+  ADS_DOWNLOAD_MAX_BYTES,
   ADS_MAX_HEIGHT,
   ADS_MAX_WIDTH,
   ADS_STORED_MAX_BYTES,
 } from '../types/ads.js';
+import { shrinkPngToFit } from './png-resize.js';
 
 /** `origemz.ads.image.begin <chave> <partes>` */
 export const ADS_IMAGE_BEGIN_COMMAND = 'origemz.ads.image.begin';
@@ -99,6 +110,15 @@ export interface FetchedImage {
   readonly width: number;
   readonly height: number;
   readonly mime: string;
+  /**
+   * O tamanho ORIGINAL, quando a imagem foi encolhida aqui.
+   *
+   * Existe para o log: quem olha o agente precisa saber que os
+   * 34 KB que subiram vieram de um arquivo de 667 KB, senão a
+   * diferença entre o que ele cadastrou e o que está no servidor
+   * fica sem explicação.
+   */
+  readonly resizedFrom?: { readonly width: number; readonly height: number; readonly bytes: number };
 }
 
 /**
@@ -206,6 +226,18 @@ function readJpegSize(bytes: Buffer): { width: number; height: number } | null {
 export interface FetchImageOptions {
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
+  readonly maxWidth?: number;
+  readonly maxHeight?: number;
+  /**
+   * Encolher o que passa do teto, em vez de recusar.
+   *
+   * PADRÃO `false`, e o padrão importa: quem pede a redução está
+   * dizendo que é ELE quem entrega a imagem ao jogo (o modo
+   * `stored`). No modo `url` o cliente baixa do endereço original
+   * e uma cópia menor aqui não teria efeito nenhum — ver o
+   * cabeçalho deste arquivo.
+   */
+  readonly resize?: boolean;
   /** Injetável nos testes — o `fetch` global por padrão. */
   readonly fetchImpl?: typeof fetch;
 }
@@ -223,7 +255,17 @@ export async function fetchAdImage(
 ): Promise<FetchedImage> {
   const timeoutMs = options.timeoutMs ?? 10_000;
   const maxBytes = options.maxBytes ?? ADS_STORED_MAX_BYTES;
+  const maxWidth = options.maxWidth ?? ADS_MAX_WIDTH;
+  const maxHeight = options.maxHeight ?? ADS_MAX_HEIGHT;
+  const resize = options.resize ?? false;
   const doFetch = options.fetchImpl ?? fetch;
+
+  // Sem redução, o teto do modo é o teto do download — é o
+  // comportamento de sempre. Com redução, o arquivo grande ainda
+  // pode caber depois de encolhido, e recusá-lo na chegada seria
+  // recusar o que temos como consertar; o que resta aqui é o teto
+  // que protege a MEMÓRIA do agente.
+  const downloadMaxBytes = resize ? Math.max(maxBytes, ADS_DOWNLOAD_MAX_BYTES) : maxBytes;
 
   let response: Response;
 
@@ -259,13 +301,8 @@ export async function fetchAdImage(
     throw new AdImageError('EMPTY', 'o endereço respondeu, mas o arquivo veio vazio');
   }
 
-  if (bytes.length > maxBytes) {
-    throw new AdImageError(
-      'TOO_LARGE',
-      `a imagem tem ${formatBytes(bytes.length)} e o limite é ${formatBytes(maxBytes)}. ` +
-        'Reduza a imagem antes de subir. O modo "o cliente baixa" aguenta mais, mas nele o ' +
-        'cliente busca o endereço e a primeira exibição pisca.',
-    );
+  if (bytes.length > downloadMaxBytes) {
+    throw new AdImageError('TOO_LARGE', tooLargeMessage(bytes.length, downloadMaxBytes, null));
   }
 
   const probe = probeImage(bytes);
@@ -278,24 +315,79 @@ export async function fetchAdImage(
     );
   }
 
-  if (probe.width > ADS_MAX_WIDTH || probe.height > ADS_MAX_HEIGHT) {
-    throw new AdImageError(
-      'TOO_BIG',
-      `a imagem tem ${String(probe.width)}x${String(probe.height)} e o limite é ` +
-        `${String(ADS_MAX_WIDTH)}x${String(ADS_MAX_HEIGHT)}.`,
+  // Anotado: os bytes que chegam vêm de um `ArrayBuffer` e os
+  // encolhidos, do `zlib` — o mesmo Buffer para o TypeScript só
+  // com o tipo escrito.
+  let content: Buffer = bytes;
+  let width = probe.width;
+  let height = probe.height;
+  let resizedFrom: FetchedImage['resizedFrom'];
+
+  if (width > maxWidth || height > maxHeight) {
+    // `null` cobre os dois casos: não pedimos redução (modo
+    // `url`), ou pedimos e o arquivo não é um PNG que saibamos
+    // encolher. Os dois terminam na mesma recusa.
+    const smaller = resize ? shrinkPngToFit(bytes, maxWidth, maxHeight) : null;
+
+    if (smaller === null) {
+      throw new AdImageError(
+        'TOO_BIG',
+        `a imagem tem ${String(probe.width)}x${String(probe.height)} e o limite é ` +
+          `${String(maxWidth)}x${String(maxHeight)}. ` +
+          (resize
+            ? 'Não consegui encolher sozinho: só sei fazer isso com PNG comum (JPEG e PNG ' +
+              'entrelaçado ficam de fora). Reduza a imagem antes de subir.'
+            : 'No modo "o cliente baixa" é o jogador quem busca o endereço, então encolher ' +
+              'uma cópia aqui não mudaria o que ele vê — reduza a imagem no endereço.'),
+      );
+    }
+
+    content = smaller.bytes;
+    width = smaller.width;
+    height = smaller.height;
+    resizedFrom = { width: probe.width, height: probe.height, bytes: bytes.length };
+  }
+
+  if (content.length > maxBytes) {
+    throw new AdImageError('TOO_LARGE', tooLargeMessage(content.length, maxBytes, resizedFrom));
+  }
+
+  const sha = createHash('sha256').update(content).digest('hex');
+
+  return {
+    bytes: content,
+    sha,
+    key: imageKeyOf(sha),
+    width,
+    height,
+    // Encolher reescreve o arquivo como PNG, sempre — mesmo um
+    // JPEG chegaria aqui como PNG se um dia soubéssemos lê-lo.
+    mime: resizedFrom === undefined ? probe.mime : 'image/png',
+    ...(resizedFrom === undefined ? {} : { resizedFrom }),
+  };
+}
+
+function tooLargeMessage(
+  size: number,
+  limit: number,
+  resizedFrom: FetchedImage['resizedFrom'] | null,
+): string {
+  const head = `a imagem tem ${formatBytes(size)} e o limite é ${formatBytes(limit)}. `;
+
+  if (resizedFrom !== null && resizedFrom !== undefined) {
+    // Sem esta frase, o número não bate com nada que o admin
+    // consiga ver: ele cadastrou um arquivo de outro tamanho.
+    return (
+      `mesmo depois de encolhida, ${head}` +
+      `O arquivo original tinha ${formatBytes(resizedFrom.bytes)}.`
     );
   }
 
-  const sha = createHash('sha256').update(bytes).digest('hex');
-
-  return {
-    bytes,
-    sha,
-    key: imageKeyOf(sha),
-    width: probe.width,
-    height: probe.height,
-    mime: probe.mime,
-  };
+  return (
+    head +
+    'Reduza a imagem antes de subir. O modo "o cliente baixa" aguenta mais, mas nele o ' +
+    'cliente busca o endereço e a primeira exibição pisca.'
+  );
 }
 
 /**

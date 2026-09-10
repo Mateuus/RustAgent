@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { OperatorAuth } from './auth/operator.js';
 import { BanExpiryWatcher } from './bans/expiry-watcher.js';
 import { BanList } from './bans/service.js';
-import { ConfigError, loadConfig } from './config.js';
+import { ConfigError, loadConfig, projectRoot } from './config.js';
 import { BansRepository } from './db/bans-repository.js';
 import { openDatabase } from './db/database.js';
 import { KitsRepository } from './db/kits-repository.js';
@@ -50,7 +50,16 @@ import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
+import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
+import { DungeonLayoutsRepository } from './db/dungeon-layouts-repository.js';
+import { DungeonsRepository } from './db/dungeons-repository.js';
+import { DungeonSpawnPointsRepository } from './db/dungeon-spawn-points-repository.js';
+import { DungeonScheduler } from './dungeons/scheduler.js';
 import { UiDocumentsRepository } from './db/ui-documents-repository.js';
+import { WorldEventsRepository } from './db/world-events-repository.js';
+import { BlueprintMaterializer } from './dungeons/materializer.js';
+import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
+import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
@@ -268,6 +277,9 @@ async function main(): Promise<void> {
   // reconexão do RCON, e a interface é reenviada por ela.
   let itemCatalog: ItemCatalog | null = null;
   let uiSync: UiSync | null = null;
+  // As masmorras. Como o `uiSync`, nasce depois - ele precisa do
+  // supervisor, que so existe mais abaixo.
+  let dungeonSync: DungeonSync | null = null;
   // O overlay de propagandas. Como o `uiSync`, ele nasce depois
   // dos callbacks que o citam — daí o `let` e o `?.`.
   let adsSync: AdsSync | null = null;
@@ -355,6 +367,10 @@ async function main(): Promise<void> {
       // plugin: um servidor que subiu agora não tem menu nenhum
       // até alguém mandar.
       uiSync?.pushSoon(serverId, 'rcon-connected');
+      // E as masmorras, pelo mesmo motivo: o cache delas vive na
+      // memoria do plugin, e um servidor que subiu agora nao
+      // conhece nenhuma planta ate alguem mandar.
+      dungeonSync?.pushSoon(serverId, 'rcon-connected');
       // E o overlay de propagandas, que perdeu MAIS que o cache: o
       // mapa chave->CRC das imagens vive na memória do plugin, e
       // sem esquecê-lo aqui a carga desceria apontando para bytes
@@ -412,6 +428,11 @@ async function main(): Promise<void> {
     // que não é um pedido do plugin de interface.
     onConsoleLine: (serverId, line) => {
       uiSync?.handleLine(serverId, line);
+      // E o `#OZDUNGEON#`: construiu, falhou, entrou, acabou. Ele
+      // APLICA aqui (escrita em SQLite, que nao fala com o jogo) e,
+      // quando precisa responder, sai por um relogio - mandar o
+      // comando daqui seria o laco descrito logo acima.
+      dungeonSync?.handleLine(serverId, line);
       // O overlay grita `#OZADSREQ#` quando o plugin sobe sem a
       // configuração. Recusa na primeira comparação de string,
       // como o de cima.
@@ -1267,6 +1288,58 @@ async function main(): Promise<void> {
       'nenhuma interface no banco: o Menu Principal foi criado a partir do modelo',
     );
   }
+
+  // ####  E AS PLANTAS DE MASMORRA, PELA MESMA REGRA  ####
+  //
+  // Sete construções prontas em `Assets/dungeons`, importadas só
+  // num acervo VAZIO. É o que faz o sistema ter conteúdo no
+  // primeiro minuto em vez de uma tela pedindo um arquivo que
+  // ninguém sabe onde arrumar.
+  const dungeonBlueprints = new DungeonBlueprintsRepository(db, logger);
+  seedDungeonBlueprints(dungeonBlueprints, { rootDir: projectRoot(), logger });
+
+  // ####  E OS QUATRO TRAÇADOS, PELA MESMA REGRA  ####
+  //
+  // Estes não vêm de arquivo: são quarenta linhas de texto em
+  // `types/dungeon-layouts.ts`. É deles que o admin parte no modo
+  // desenho, em vez de encarar 576 quadradinhos em branco.
+  const dungeonLayouts = new DungeonLayoutsRepository(db, logger);
+  seedDungeonLayouts(dungeonLayouts, { logger });
+
+  const dungeonsRepository = new DungeonsRepository(db, logger);
+  const worldEventsRepository = new WorldEventsRepository(db, logger);
+
+  // Onde a masmorra pode nascer: os lugares que o admin escolheu
+  // olhando o mapa. É o oposto das `world_event_zones`, que dizem
+  // onde nada nasce — ver o repositório.
+  const dungeonSpawnPoints = new DungeonSpawnPointsRepository(db);
+
+  // ####  A PLANTA VAI PELO DISCO, E O RESTO PELO CONSOLE  ####
+  //
+  // 512 KB nao atravessam um frame de WebRCON, e nao existe
+  // chunking em lugar nenhum deste projeto. O agente e os
+  // servidores rodam na mesma maquina, entao o materializador
+  // escreve em `oxide\data\OrigemZDungeon\` e o comando leva so
+  // o slug. Ver dungeons/materializer.ts.
+  const blueprintMaterializer = new BlueprintMaterializer({
+    blueprints: dungeonBlueprints,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      dataDirOf: (serverId) => supervisor.configOf(serverId)?.paths.oxideDataDir ?? null,
+    },
+    logger,
+  });
+
+  dungeonSync = new DungeonSync({
+    dungeons: dungeonsRepository,
+    events: worldEventsRepository,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      contextOf: (serverId) => supervisor.contextOf(serverId),
+    },
+    materializer: blueprintMaterializer,
+    logger,
+  });
 
   // ####  O BOTÃO DISCORD DOS MENUS QUE JÁ EXISTEM  ####
   //
@@ -2619,6 +2692,38 @@ async function main(): Promise<void> {
 
   wipeScheduler.start();
 
+  // ####  E O RELÓGIO DOS EVENTOS DE MAPA  ####
+  //
+  // Ele faz a masmorra nascer sozinha. Mesmo desenho do wipe, e
+  // pelas mesmas razões: mora no agente (um plugin não roda com o
+  // Oxide quebrado), guarda o compromisso no BANCO (reiniciar o
+  // agente não pode matar a agenda) e trata cada evento no seu
+  // próprio try (um evento torto não pode calar os outros).
+  //
+  // Sem `dungeonSync` ele não sobe: sem canal com os servidores não
+  // há para quem mandar o comando de construir.
+  const dungeonScheduler =
+    dungeonSync === undefined
+      ? null
+      : new DungeonScheduler({
+          events: worldEventsRepository,
+          spawnPoints: dungeonSpawnPoints,
+          servers: {
+            ids: () => supervisor.ids(),
+            onlineCount: onlinePlayersOf,
+            worldKey: (serverId) => {
+              const world = supervisor.configOf(serverId);
+
+              return world === null ? null : `${String(world.worldSize)}:${String(world.seed)}`;
+            },
+          },
+          build: (serverId, input) => dungeonSync.build(serverId, input),
+          demolish: (serverId, reason) => dungeonSync.demolish(serverId, reason),
+          logger,
+        });
+
+  dungeonScheduler?.start();
+
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
     user: agent.panel.user,
@@ -2791,6 +2896,41 @@ async function main(): Promise<void> {
         questNpcs?.forget(serverId);
       },
     },
+    // A masmorra, o acervo de plantas e o que nasce no mapa. Do
+    // BANCO, pela mesma razao das quests: desenhar uma masmorra e
+    // subir uma planta funcionam com todos os servidores parados.
+    dungeons: {
+      dungeons: dungeonsRepository,
+      blueprints: dungeonBlueprints,
+      layouts: dungeonLayouts,
+      events: worldEventsRepository,
+      // Sem `await`: gravar nao pode depender de o servidor estar no
+      // ar, e o que vai pelo fio e o estado COMPLETO - uma chamada
+      // perdida se conserta na proxima.
+      onChanged: (reason) => {
+        void dungeonSync?.pushAll(reason);
+      },
+      // O botão de erguer, do painel. Sem sync — agente sem servidor
+      // nenhum —, a rota devolve 503 em vez de fingir que mandou.
+      build: dungeonSync === undefined ? undefined : (serverId, input) => dungeonSync.build(serverId, input),
+      groundAt: dungeonSync === undefined ? undefined : (serverId, x, z) => dungeonSync.groundAt(serverId, x, z),
+      spawnPoints: dungeonSpawnPoints,
+      // O mundo do `.ini`: e o que o agente configurou, e a mesma
+      // chave que o MonumentReader usa. Um ponto marcado noutro mapa
+      // aponta para outro lugar, e a tela precisa poder dizer isso.
+      worldKeyOf: (serverId) => {
+        const world = supervisor.configOf(serverId);
+
+        return world === null ? null : `${String(world.worldSize)}:${String(world.seed)}`;
+      },
+    },
+    worldEvents: {
+      events: worldEventsRepository,
+      servers: repository,
+      // Sem isto, "parar" no painel fecha a linha do banco e deixa a
+      // masmorra de pé no jogo — o painel afirmando o que não fez.
+      demolish: (serverId, reason) => dungeonSync?.demolish(serverId, reason) ?? Promise.resolve(false),
+    },
   });
 
   await app.listen({ host: agent.host, port: agent.port });
@@ -2871,6 +3011,9 @@ async function main(): Promise<void> {
         oxideRuntime.stop();
         uiSync.stop();
         adsSync?.stop();
+        // E o das masmorras: um `pushSoon` armado agora mandaria o
+        // estado a um RCON que ja nao existe.
+        dungeonSync?.stop();
         // O do cadastro de itens custom pela mesma razão: um
         // `invalidate` armado agora mandaria `origemz.item.clear` a
         // um servidor que já está sendo desligado — e o plugin
@@ -2916,6 +3059,7 @@ async function main(): Promise<void> {
         // ela morre com o processo, e o boot seguinte a marca como
         // falha com a frase que oferece retomar.
         wipeScheduler.stop();
+        dungeonScheduler?.stop();
         // E o da devolução de blueprints junto dos outros: uma
         // rodada que começasse agora falaria com um RCON que já
         // não existe, e marcaria como entregue o que não saiu.

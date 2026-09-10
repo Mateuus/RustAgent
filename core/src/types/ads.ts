@@ -213,6 +213,36 @@ export const ADS_CHUNK_BYTES = 27_000;
 export const ADS_MAX_WIDTH = 1920;
 export const ADS_MAX_HEIGHT = 1080;
 
+/**
+ * Teto do LOGO, que e outro e bem menor.
+ *
+ * ####  ELE NUNCA E DESENHADO GRANDE  ####
+ *
+ * `logoWidth` e `logoHeight` param em 400 (ver o schema mais
+ * abaixo), e o padrao e 90x90. Guardar 4048 pixels de largura
+ * para pintar 90 custa 25 comandos de RCON no envio e uma
+ * textura de dezenas de MB na memoria de video de cada jogador —
+ * e nada disso aparece na tela.
+ *
+ * 512 da nitidez de sobra no maior tamanho possivel, inclusive em
+ * tela grande, e cabe num punhado de comandos.
+ */
+export const ADS_LOGO_MAX_WIDTH = 512;
+export const ADS_LOGO_MAX_HEIGHT = 512;
+
+/**
+ * Teto do DOWNLOAD, quando a imagem ainda vai ser reduzida.
+ *
+ * O teto do modo (`ADS_STORED_MAX_BYTES`) vale para o que
+ * ATRAVESSA o RCON, e uma imagem grande demais para o duto pode
+ * caber nele depois de encolhida — recusa-la antes de tentar
+ * seria recusar o que temos como consertar.
+ *
+ * Este numero existe para o outro lado: o arquivo precisa caber
+ * na memoria do agente antes que alguem possa medi-lo.
+ */
+export const ADS_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024;
+
 /** Propagandas ativas ao mesmo tempo. */
 export const ADS_MAX_ACTIVE = 50;
 

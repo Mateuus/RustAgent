@@ -27,23 +27,24 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Crown,
+  Image as ImageIcon,
   LayoutDashboard,
   LayoutTemplate,
   LogOut,
-  Image as ImageIcon,
+  Megaphone,
   Menu,
   Package,
   Package2,
   Puzzle,
+  ScrollText,
   Server,
   Settings,
   ShoppingBag,
-  ScrollText,
+  Swords,
   Trophy,
+  type LucideIcon,
   Users,
   X,
-  Megaphone,
-  type LucideIcon,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -156,6 +157,16 @@ const NAV: readonly NavItem[] = [
     label: 'Loot',
     hint: 'O que a casa acrescenta às caixas do jogo: onde, com que chance, e com que freio',
     Icon: Boxes,
+  },
+  // Eventos fica ENTRE Loot e Missões porque os três são a mesma
+  // família: o que a casa põe no mundo. O loot entra nas caixas
+  // que já existem; o evento faz nascer uma construção inteira; a
+  // missão dá o que fazer com as duas coisas.
+  {
+    href: '/eventos/',
+    label: 'Eventos',
+    hint: 'O que nasce no mapa sozinho: masmorras, quando, onde, e o que se leva de lá',
+    Icon: Swords,
   },
   // As missões são de REDE, como o kit e o ranking: a missão é
   // escrita uma vez e vale em todos os servidores. O que conta

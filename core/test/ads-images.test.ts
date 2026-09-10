@@ -14,6 +14,8 @@
 //      duas propagandas ocupar uma entrada só.
 // ============================================================
 
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -25,6 +27,21 @@ import {
   imageKeyOf,
   probeImage,
 } from '../src/game/ads-images.js';
+import { decodePng, encodePng } from '../src/game/png-resize.js';
+
+/** Um PNG DE VERDADE, do tamanho pedido - o falso nao encolhe. */
+function realPng(width: number, height: number): Buffer {
+  const pixels = Buffer.alloc(width * height * 4);
+
+  for (let i = 0; i < pixels.length; i += 4) {
+    pixels[i] = i % 256;
+    pixels[i + 1] = (i >> 8) % 256;
+    pixels[i + 2] = 128;
+    pixels[i + 3] = 255;
+  }
+
+  return encodePng({ width, height, pixels });
+}
 
 /** PNG mínimo válido: assinatura + IHDR com largura e altura. */
 function fakePng(width: number, height: number, padding = 0): Buffer {
@@ -194,6 +211,86 @@ describe('fetchAdImage', () => {
       () => expect.unreachable('deveria ter recusado'),
       (error: unknown) => {
         expect((error as AdImageError).code).toBe('EMPTY');
+      },
+    );
+  });
+
+  it('grande demais e PNG: encolhe em vez de recusar', async () => {
+    const grande = realPng(2400, 1000);
+
+    const image = await fetchAdImage('https://exemplo.com/logo.png', {
+      fetchImpl: respondWith(grande),
+      maxWidth: 512,
+      maxHeight: 512,
+      resize: true,
+    });
+
+    expect(image.width).toBe(512);
+    expect(image.height).toBe(213);
+    expect(image.resizedFrom).toEqual({ width: 2400, height: 1000, bytes: grande.length });
+
+    // Os bytes devolvidos são a imagem ENCOLHIDA, e ela abre.
+    expect(image.bytes.length).toBeLessThan(grande.length);
+    expect(decodePng(image.bytes)?.width).toBe(512);
+
+    // E a chave é do conteúdo NOVO: guardar a do original faria o
+    // plugin pedir bytes que ninguém tem.
+    expect(image.key).not.toBe(imageKeyOf(createHash('sha256').update(grande).digest('hex')));
+  });
+
+  it('sem pedir redução, o grande demais continua recusado', async () => {
+    // É o modo "o cliente baixa": encolher uma cópia aqui não
+    // mudaria um pixel do que o jogador vê.
+    await fetchAdImage('https://exemplo.com/logo.png', {
+      fetchImpl: respondWith(realPng(2400, 1000)),
+      maxWidth: 512,
+      maxHeight: 512,
+    }).then(
+      () => expect.unreachable('deveria ter recusado'),
+      (error: unknown) => {
+        expect((error as AdImageError).code).toBe('TOO_BIG');
+        expect((error as Error).message).toContain('2400x1000');
+      },
+    );
+  });
+
+  it('o que não sabemos encolher recusa dizendo isso', async () => {
+    await fetchAdImage('https://exemplo.com/a.jpg', {
+      fetchImpl: respondWith(fakeJpeg(4000, 3000)),
+      resize: true,
+    }).then(
+      () => expect.unreachable('deveria ter recusado'),
+      (error: unknown) => {
+        expect((error as AdImageError).code).toBe('TOO_BIG');
+        expect((error as Error).message).toMatch(/PNG/);
+      },
+    );
+  });
+
+  it('o que já cabe atravessa intacto', async () => {
+    const pequeno = realPng(300, 100);
+
+    const image = await fetchAdImage('https://exemplo.com/a.png', {
+      fetchImpl: respondWith(pequeno),
+      resize: true,
+    });
+
+    expect(image.resizedFrom).toBeUndefined();
+    expect(image.bytes).toEqual(pequeno);
+  });
+
+  it('encolher não é desculpa para estourar o teto de bytes', async () => {
+    await fetchAdImage('https://exemplo.com/a.png', {
+      fetchImpl: respondWith(realPng(2400, 1000)),
+      resize: true,
+      maxBytes: 200,
+    }).then(
+      () => expect.unreachable('deveria ter recusado'),
+      (error: unknown) => {
+        expect((error as AdImageError).code).toBe('TOO_LARGE');
+        // A frase precisa dizer que o número não é o do arquivo
+        // que o admin cadastrou.
+        expect((error as Error).message).toMatch(/encolhida/);
       },
     );
   });

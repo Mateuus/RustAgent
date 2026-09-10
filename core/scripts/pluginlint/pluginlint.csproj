@@ -1,0 +1,123 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       pluginlint  -  o plugin compila? sem subir servidor.
+
+       Uso:
+         dotnet build core/scripts/pluginlint/pluginlint.csproj \
+           -p:PluginFile=<caminho absoluto do .cs>
+
+       Trocar de servidor:  -p:ManagedDir=<...\RustDedicated_Data\Managed>
+
+       ####  POR QUE ISSO EXISTE  ####
+
+       Subir o server01 para descobrir um ponto-e-vírgula custa ~49 s
+       quando ele sobe — e há semanas em que ele nem sobe (falta um
+       bundle, o boot morre antes do RCON). O Oxide ainda COMPILA os
+       plugins nesse estado, mas o erro sai afogado no log do boot.
+
+       Aqui o erro sai em 2 segundos, com arquivo e linha.
+
+       ####  net48 + NoStdLib, E ISSO NÃO É CAPRICHO  ####
+
+       O plugin vive dentro do Mono do Unity, não dentro do SDK. Com o
+       mscorlib do SDK, tudo que o Rust expõe como `ReadOnlySpan<>`
+       (RpcTarget.Player, por exemplo) quebra com CS7069 — o tipo
+       "declara que é definido em mscorlib" e o mscorlib errado está
+       na mesa. Então: nada implícito, e todo assembly vem do
+       `Managed\` do próprio jogo.
+
+       ####  Newtonsoft VEM DE Oxide.References, E SÓ DE LÁ  ####
+
+       O `Newtonsoft.Json.dll` do Managed e o `Oxide.References.dll`
+       têm AMBOS o `JsonPropertyAttribute`. Referenciar os dois dá
+       CS0433 em cada `[JsonProperty]` do arquivo — 80 erros para um
+       plugin que compila perfeitamente no servidor.
+
+       ####  E OS TIPOS DO PLUGIN MORAM NO Oxide.CSharp  ####
+
+       Não no Oxide.Core, que é onde se procura. `CovalencePlugin`,
+       `InfoAttribute`, `CommandAttribute`, `PluginReferenceAttribute`
+       e `Timer` estão todos em `Oxide.Plugins`, dentro do
+       `Oxide.CSharp.dll`. O `Oxide.Core` tem só `Plugin`/`CSPlugin`.
+
+       Medido em 08/09/2026 contra o Oxide 2.0.4143 do server01.
+       ============================================================ -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <!-- Ver o cabeçalho: o mundo do plugin é o do Unity. -->
+    <NoStdLib>true</NoStdLib>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <AutomaticallyUseReferenceAssemblyPackages>false</AutomaticallyUseReferenceAssemblyPackages>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>pluginlint</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0436;CS1701;CS1702;NU1701</NoWarn>
+    <!-- Não queremos o .dll; queremos os erros. -->
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Sobrescrevível pela linha de comando. -->
+    <ManagedDir Condition="'$(ManagedDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\Servers\server01\RustDedicated_Data\Managed</ManagedDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(PluginFile)" />
+  </ItemGroup>
+
+  <!-- As DLLs do jogo e do Oxide. É a lista que o próprio Oxide
+       passa ao compilador dele. -->
+  <ItemGroup>
+    <Reference Include="mscorlib"><HintPath>$(ManagedDir)\mscorlib.dll</HintPath></Reference>
+    <Reference Include="netstandard"><HintPath>$(ManagedDir)\netstandard.dll</HintPath></Reference>
+    <Reference Include="System"><HintPath>$(ManagedDir)\System.dll</HintPath></Reference>
+    <Reference Include="System.Core"><HintPath>$(ManagedDir)\System.Core.dll</HintPath></Reference>
+    <Reference Include="System.Data"><HintPath>$(ManagedDir)\System.Data.dll</HintPath></Reference>
+    <Reference Include="System.Xml"><HintPath>$(ManagedDir)\System.Xml.dll</HintPath></Reference>
+    <Reference Include="System.Memory"><HintPath>$(ManagedDir)\System.Memory.dll</HintPath></Reference>
+    <Reference Include="System.Runtime"><HintPath>$(ManagedDir)\System.Runtime.dll</HintPath></Reference>
+    <Reference Include="System.Runtime.CompilerServices.Unsafe"><HintPath>$(ManagedDir)\System.Runtime.CompilerServices.Unsafe.dll</HintPath></Reference>
+    <Reference Include="System.ValueTuple"><HintPath>$(ManagedDir)\System.ValueTuple.dll</HintPath></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath></Reference>
+    <Reference Include="Assembly-CSharp-firstpass"><HintPath>$(ManagedDir)\Assembly-CSharp-firstpass.dll</HintPath></Reference>
+    <Reference Include="Oxide.References"><HintPath>$(ManagedDir)\Oxide.References.dll</HintPath></Reference>
+    <Reference Include="Oxide.CSharp"><HintPath>$(ManagedDir)\Oxide.CSharp.dll</HintPath></Reference>
+    <Reference Include="Oxide.Core"><HintPath>$(ManagedDir)\Oxide.Core.dll</HintPath></Reference>
+    <Reference Include="Oxide.Common"><HintPath>$(ManagedDir)\Oxide.Common.dll</HintPath></Reference>
+    <Reference Include="Oxide.Rust"><HintPath>$(ManagedDir)\Oxide.Rust.dll</HintPath></Reference>
+    <Reference Include="Oxide.Unity"><HintPath>$(ManagedDir)\Oxide.Unity.dll</HintPath></Reference>
+    <Reference Include="0Harmony"><HintPath>$(ManagedDir)\0Harmony.dll</HintPath></Reference>
+    <Reference Include="Rust.Harmony"><HintPath>$(ManagedDir)\Rust.Harmony.dll</HintPath></Reference>
+    <Reference Include="Rust.Data"><HintPath>$(ManagedDir)\Rust.Data.dll</HintPath></Reference>
+    <Reference Include="Rust.Global"><HintPath>$(ManagedDir)\Rust.Global.dll</HintPath></Reference>
+    <Reference Include="Rust.Localization"><HintPath>$(ManagedDir)\Rust.Localization.dll</HintPath></Reference>
+    <Reference Include="Rust.World"><HintPath>$(ManagedDir)\Rust.World.dll</HintPath></Reference>
+    <Reference Include="Facepunch.Console"><HintPath>$(ManagedDir)\Facepunch.Console.dll</HintPath></Reference>
+    <Reference Include="Facepunch.Network"><HintPath>$(ManagedDir)\Facepunch.Network.dll</HintPath></Reference>
+    <Reference Include="Facepunch.System"><HintPath>$(ManagedDir)\Facepunch.System.dll</HintPath></Reference>
+    <Reference Include="Facepunch.Unity"><HintPath>$(ManagedDir)\Facepunch.Unity.dll</HintPath></Reference>
+    <!-- Onde mora FacepunchBehaviour, a base de todo componente do Rust. -->
+    <Reference Include="Facepunch.UnityEngine"><HintPath>$(ManagedDir)\Facepunch.UnityEngine.dll</HintPath></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(ManagedDir)\UnityEngine.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.AIModule"><HintPath>$(ManagedDir)\UnityEngine.AIModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.TerrainModule"><HintPath>$(ManagedDir)\UnityEngine.TerrainModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.TerrainPhysicsModule"><HintPath>$(ManagedDir)\UnityEngine.TerrainPhysicsModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.AudioModule"><HintPath>$(ManagedDir)\UnityEngine.AudioModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.AnimationModule"><HintPath>$(ManagedDir)\UnityEngine.AnimationModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(ManagedDir)\UnityEngine.ImageConversionModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(ManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule"><HintPath>$(ManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.PhysicsModule2D"><HintPath>$(ManagedDir)\UnityEngine.Physics2DModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.SharedInternalsModule"><HintPath>$(ManagedDir)\UnityEngine.SharedInternalsModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(ManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath></Reference>
+    <Reference Include="protobuf-net"><HintPath>$(ManagedDir)\protobuf-net.dll</HintPath></Reference>
+    <Reference Include="protobuf-net.Core"><HintPath>$(ManagedDir)\protobuf-net.Core.dll</HintPath></Reference>
+    <Reference Include="Facepunch.Sqlite"><HintPath>$(ManagedDir)\Facepunch.Sqlite.dll</HintPath></Reference>
+    <Reference Include="System.Drawing"><HintPath>$(ManagedDir)\System.Drawing.dll</HintPath></Reference>
+  </ItemGroup>
+
+</Project>

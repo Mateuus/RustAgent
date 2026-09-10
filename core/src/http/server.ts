@@ -111,7 +111,9 @@ import type { BpRepository } from '../db/bp-repository.js';
 import type { BlueprintService } from '../wipe/blueprints.js';
 import { registerWipeBlueprintRoutes } from './routes/wipe-blueprints.js';
 // ---- o ranking ----
+import { registerDungeonRoutes, type DungeonRoutesDeps } from './routes/dungeons.js';
 import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
+import { registerWorldEventRoutes, type WorldEventRoutesDeps } from './routes/world-events.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 
 export interface BuildServerOptions {
@@ -332,6 +334,10 @@ export interface BuildServerOptions {
    * dependências pela metade. Ver Docs/OrigemZQuests/01 §11.
    */
   readonly quests?: QuestRoutesDeps;
+  /** A masmorra e o acervo de plantas. */
+  readonly dungeons?: DungeonRoutesDeps;
+  /** O guarda-chuva: o que nasce no mapa, e onde nao nasce. */
+  readonly worldEvents?: WorldEventRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -492,6 +498,18 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // uma quest nova.
       if (options.quests !== undefined) {
         registerQuestRoutes(api, options.quests);
+      }
+
+      // A masmorra e o que nasce no mapa. Do BANCO, pela mesma razao
+      // das quests: o acervo de plantas e o catalogo de eventos
+      // continuam de pe com os servidores parados - que e justamente
+      // quando se desenha uma masmorra nova.
+      if (options.dungeons !== undefined) {
+        registerDungeonRoutes(api, options.dungeons);
+      }
+
+      if (options.worldEvents !== undefined) {
+        registerWorldEventRoutes(api, options.worldEvents);
       }
 
       // O catálogo de itens. Ele responde do BANCO, e por isso

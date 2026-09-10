@@ -4851,7 +4851,688 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/betterloot/globals`,
       { method: 'PUT', body: input },
     ),
+
+  // ==========================================================
+  //  AS MASMORRAS
+  // ==========================================================
+
+  dungeons: () => api<{ dungeons: DungeonSummary[] }>('/api/dungeons'),
+
+  dungeon: (id: string) =>
+    api<{ dungeon: Dungeon }>(`/api/dungeons/${encodeURIComponent(id)}`),
+
+  /**
+   * As quatro receitas de fabrica.
+   *
+   * Elas NAO estao no banco: sao um modelo do qual o admin parte.
+   * E o que faz a tela valer alguma coisa no primeiro minuto -
+   * duplicar e mexer, em vez de encarar trinta campos em branco.
+   */
+  dungeonFactory: () => api<{ recipes: DungeonInput[] }>('/api/dungeons/factory'),
+
+  createDungeon: (body: DungeonInput) =>
+    api<{ dungeon: Dungeon }>('/api/dungeons', { method: 'POST', body }),
+
+  updateDungeon: (id: string, body: Omit<DungeonInput, 'id'>) =>
+    api<{ dungeon: Dungeon }>(`/api/dungeons/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  duplicateDungeon: (id: string, body: { id: string; name: string }) =>
+    api<{ dungeon: Dungeon }>(`/api/dungeons/${encodeURIComponent(id)}/duplicate`, {
+      method: 'POST',
+      body,
+    }),
+
+  removeDungeon: (id: string) =>
+    api<{ ok: true }>(`/api/dungeons/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /**
+   * Ergue a masmorra, daqui.
+   *
+   * ####  `sent` NAO E "ELA EXISTE"  ####
+   *
+   * E "o comando chegou ao servidor". A construcao leva segundos, e
+   * quem confirma e a linha que aparece no historico — a mesma que
+   * o passo (6) ja esperava quando o admin colava o comando a mao.
+   *
+   * `pointId` e o caminho normal: um lugar que o admin marcou uma
+   * vez. `x`/`z` erguem num lugar novo sem cadastrar nada.
+   */
+  buildDungeon: (
+    id: string,
+    body: { serverId: string; pointId?: number; x?: number; z?: number; yaw?: number },
+  ) =>
+    api<{ sent: boolean; grid: string | null; message: string }>(
+      `/api/dungeons/${encodeURIComponent(id)}/build`,
+      { method: 'POST', body },
+    ),
+
+  /**
+   * Aquele chao serve para uma masmorra?
+   *
+   * So o servidor sabe: o painel escolhe pontos num mapa desenhado,
+   * sem ver o relevo nem a agua. Uma entrada dentro de um rio mata
+   * quem se teleporta para ela.
+   */
+  dungeonGround: (serverId: string, x: number, z: number) =>
+    api<{ ground: GroundReport }>(
+      `/api/dungeons/ground?serverId=${encodeURIComponent(serverId)}` +
+        `&x=${String(Math.round(x))}&z=${String(Math.round(z))}`,
+    ),
+
+  /**
+   * Os lugares onde a masmorra pode nascer.
+   *
+   * `worldKey` e o mundo carregado agora: um ponto com outro
+   * `worldKey` foi marcado noutro mapa, e aquela coordenada e outro
+   * lugar hoje.
+   */
+  spawnPoints: (serverId: string) =>
+    api<{ worldKey: string | null; points: SpawnPoint[] }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points`,
+    ),
+
+  createSpawnPoint: (serverId: string, body: SpawnPointInput) =>
+    api<{ point: SpawnPoint; warning: string | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points`,
+      { method: 'POST', body },
+    ),
+
+  updateSpawnPoint: (serverId: string, pointId: number, body: SpawnPointInput) =>
+    api<{ point: SpawnPoint; warning: string | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points/${String(pointId)}`,
+      { method: 'PUT', body },
+    ),
+
+  removeSpawnPoint: (serverId: string, pointId: number) =>
+    api<{ ok: true }>(
+      `/api/servers/${encodeURIComponent(serverId)}/spawn-points/${String(pointId)}`,
+      { method: 'DELETE' },
+    ),
+
+  dungeonCommand: (id: string) =>
+    api<{ chat: string; console: string }>(`/api/dungeons/${encodeURIComponent(id)}/command`),
+
+  /**
+   * O olho do assistente.
+   *
+   * `since` e o momento em que o passo abriu: sem ele, a tela
+   * celebraria a construcao de ontem. Chamada a cada dois
+   * segundos, SO enquanto o passo esta aberto, e para no primeiro
+   * resultado.
+   */
+  dungeonRuns: (id: string, options: { serverId?: string; since?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) query.set('serverId', options.serverId);
+    if (options.since !== undefined) query.set('since', String(options.since));
+
+    const suffix = query.toString();
+
+    return api<{ runs: EventRun[] }>(
+      `/api/dungeons/${encodeURIComponent(id)}/runs${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  /** A lista NAO traz o `content`: as sete plantas somam 1,1 MB. */
+  dungeonBlueprints: () =>
+    api<{ blueprints: BlueprintSummary[] }>('/api/dungeon-blueprints'),
+
+  /**
+   * UMA planta, com o conteudo.
+   *
+   * So quem vai DESENHAR a construcao precisa disto - e por isso a
+   * leitura e sob demanda, ao abrir a previa, e nunca na listagem.
+   */
+  dungeonBlueprint: (id: string) =>
+    api<{ blueprint: BlueprintSummary & { content: string } }>(
+      `/api/dungeon-blueprints/${encodeURIComponent(id)}`,
+    ),
+
+  uploadBlueprint: (body: {
+    id: string;
+    name?: string;
+    kind: 'entrance' | 'base';
+    content: string;
+  }) => api<{ blueprint: BlueprintSummary }>('/api/dungeon-blueprints', { method: 'POST', body }),
+
+  removeBlueprint: (id: string) =>
+    api<{ ok: true }>(`/api/dungeon-blueprints/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /**
+   * O acervo de tracados desenhados.
+   *
+   * Aqui a lista TRAZ o desenho de cada um - ver
+   * `DungeonLayoutSummary`.
+   */
+  dungeonLayouts: () => api<{ layouts: DungeonLayoutSummary[] }>('/api/dungeon-layouts'),
+
+  /**
+   * Salva um desenho como tracado.
+   *
+   * A resposta traz `problems`: um desenho com defeito e GRAVADO, e
+   * marcado. Recusar perderia o trabalho de quem ia consertar a
+   * sala lacrada depois — mas quem salvou precisa saber.
+   */
+  saveDungeonLayout: (body: {
+    id: string;
+    name: string;
+    description?: string | null;
+    grid: string[];
+  }) =>
+    api<{ layout: DungeonLayoutSummary; problems: string[] }>('/api/dungeon-layouts', {
+      method: 'POST',
+      body,
+    }),
+
+  removeDungeonLayout: (id: string) =>
+    api<{ ok: true }>(`/api/dungeon-layouts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** O historico de tudo que nasceu, com filtro. */
+  /**
+   * A agenda: os eventos que fazem a masmorra nascer sozinha.
+   *
+   * Não confundir com `/api/events`, que é o CALENDÁRIO do wipe —
+   * "Raid Night, sábado às 20h". Estes são os que nascem no mapa.
+   */
+  worldEvents: () => api<{ events: WorldEvent[] }>('/api/world-events'),
+
+  createWorldEvent: (body: WorldEventInput) =>
+    api<{ event: WorldEvent }>('/api/world-events', { method: 'POST', body }),
+
+  updateWorldEvent: (id: string, body: Omit<WorldEventInput, 'id'>) =>
+    api<{ event: WorldEvent }>(`/api/world-events/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  removeWorldEvent: (id: string) =>
+    api<{ ok: true }>(`/api/world-events/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  worldEventRuns: (options: { serverId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+
+    if (options.serverId !== undefined) query.set('serverId', options.serverId);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+
+    const suffix = query.toString();
+
+    return api<{ runs: EventRun[] }>(
+      `/api/world-events/runs${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  stopWorldEventRun: (runId: number) =>
+    api<{ pendingCommand: string }>(`/api/world-events/runs/${String(runId)}/stop`, {
+      method: 'POST',
+    }),
 };
+
+// ------------------------------------------------------------
+//  AS MASMORRAS — os tipos
+//
+//  Espelham `core/src/types/dungeons.ts` e
+//  `core/src/types/world-events.ts`. As duas pontas sao compiladas
+//  separadamente: um campo que o agente renomear e um TypeError no
+//  render, e a pagina inteira cai com "This page couldn't load".
+// ------------------------------------------------------------
+
+export type DungeonMode = 'recipe' | 'blueprint';
+export type RoomColor = 'green' | 'blue' | 'red';
+
+/**
+ * As onze portas.
+ *
+ * As quatro primeiras tem um metro de passagem; as seis seguintes,
+ * dois; `none` e o vao aberto. Ver `core/src/types/dungeons.ts`.
+ */
+export const ROOM_DOORS = [
+  'wood',
+  'metal',
+  'toptier',
+  'industrial',
+  'double_wood',
+  'double_metal',
+  'double_toptier',
+  'cell_gate',
+  'fence_gate',
+  'garage',
+  'none',
+] as const;
+export type RoomDoor = (typeof ROOM_DOORS)[number];
+
+export const BUILD_GRADES = ['twigs', 'wood', 'stone', 'metal', 'toptier'] as const;
+export type BuildGrade = (typeof BUILD_GRADES)[number];
+
+export interface GradeSet {
+  foundation: BuildGrade;
+  wall: BuildGrade;
+  ceiling: BuildGrade;
+}
+
+export const LOOT_MODES = ['server', 'add', 'replace'] as const;
+export type LootMode = (typeof LOOT_MODES)[number];
+
+export interface LootEntry {
+  shortname: string;
+  amount: { min: number; max: number };
+  weight: number;
+  guaranteed: boolean;
+  skin: number;
+  blueprint: boolean;
+  condition: number;
+}
+
+export interface LootTable {
+  mode: LootMode;
+  rolls: { min: number; max: number };
+  entries: LootEntry[];
+}
+
+/**
+ * O comportamento do inimigo.
+ *
+ * ####  TODO CAMPO E OPCIONAL, E ISSO E O DESENHO INTEIRO  ####
+ *
+ * Campo ausente nao e zero: e "nao falei disso", e o valor de cima
+ * fica de pe. A heranca e `npc.ai` -> `rooms[].ai` / `corridor.ai`,
+ * campo a campo.
+ */
+export interface AiSpec {
+  visionRadius?: number;
+  requireLineOfSight?: boolean;
+  loseTargetAfter?: number;
+  reactionDelay?: number;
+  maxTargetHeightDelta?: number;
+  alertOnSpot?: boolean;
+
+  holdPosition?: boolean;
+  moveSpeed?: number;
+  chaseRadius?: number;
+  returnHome?: boolean;
+  returnSpeed?: number;
+  arriveRadius?: number;
+  stuckTimeout?: number;
+
+  fireRange?: number;
+  fireInterval?: number;
+  standoffDistance?: number;
+  aimConeScale?: number;
+
+  senseInterval?: number;
+  moveInterval?: number;
+}
+
+export interface DungeonRoom {
+  key: string;
+  color: RoomColor;
+  npc: { min: number; max: number };
+  loot: { min: number; max: number };
+  crates: string[];
+  door: RoomDoor;
+  locked: boolean;
+  /** A porta da sala grande. `null` = usa `door` sempre. */
+  wideDoor: RoomDoor | null;
+  wideDoorCellsPerDoor: number;
+  /** `null` = herda o `structure` da masmorra. */
+  grade: GradeSet | null;
+  table: LootTable;
+  ai: AiSpec;
+}
+
+export interface DungeonLock {
+  enabled: boolean;
+  sharedCode: boolean;
+  carrier: 'npc' | 'crate' | 'none';
+  carrierScope: 'corridor' | 'anywhere';
+  onUndelivered: 'unlock' | 'keep';
+  noteTitle: string;
+  announceOpen: boolean;
+  warnOnWrongCode: boolean;
+}
+
+export interface DungeonRespawn {
+  enabled: boolean;
+  minutes: number;
+  onlyWhenEmpty: boolean;
+  rebuildDestroyed: boolean;
+}
+
+export const ACCESS_WHO_ENTERS = ['everyone', 'permission'] as const;
+export type AccessWhoEnters = (typeof ACCESS_WHO_ENTERS)[number];
+
+/**
+ * Quem desce pelo alcapao.
+ *
+ * `everyone` e o padrao, e e o pedido do dono: o servidor inteiro
+ * entra. `enterPermission` so e lido no modo `permission`, e vazio
+ * cai na permissao do proprio plugin (`origemzdungeon.enter`).
+ */
+export interface DungeonAccess {
+  whoEnters: AccessWhoEnters;
+  enterPermission: string;
+}
+
+/**
+ * O que ninguem tira do lugar.
+ *
+ * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
+ * a este bloco: a masmorra nao apodrece nem com ele desligado.
+ */
+/**
+ * Um evento que faz a masmorra nascer sozinha.
+ *
+ * Espelha `core/src/types/world-events.ts`. Os campos de marcador e
+ * mensagem existem na tabela e estão INERTES: desde a migração 068
+ * quem decide como a masmorra se anuncia é a masmorra.
+ */
+export interface WorldEventInput {
+  id: string;
+  kind: string;
+  name: string;
+  description?: string | null;
+  /** Qual masmorra nasce. `null` = o agendador pula este evento. */
+  dungeonId: string | null;
+  enabled: boolean;
+  sort: number;
+  /** `schedule` = o relógio; `manual` = só pelo botão. */
+  spawnMode: 'schedule' | 'manual' | 'permanent';
+  /** A janela do sorteio, em segundos. */
+  interval: { min: number; max: number };
+  /** Quanto ela fica de pé, em segundos. */
+  duration: { min: number; max: number };
+  /** Abaixo disso o agendador ADIA. Evento para ninguém é loot de graça. */
+  minOnline: number;
+  countAfterEnd: boolean;
+  access: 'anyone' | 'owner' | 'team';
+  ownerGraceSeconds: number;
+  marker: {
+    enabled: boolean;
+    label: string;
+    color: string;
+    alpha: number;
+    radius: number;
+    showOwner: boolean;
+    showTime: boolean;
+  };
+  messages: {
+    start: string | null;
+    location: string | null;
+    warning: string | null;
+    end: string | null;
+    denied: string | null;
+  };
+  warnBefore: number;
+  radiationBefore: number;
+  destroyAfter: number;
+  respawnSeconds: number;
+  /** Vazio = não roda em servidor nenhum. */
+  servers: string[];
+}
+
+export interface WorldEvent extends WorldEventInput {
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** O círculo no mapa do jogo. Espelha `types/dungeons.ts`. */
+export interface DungeonMarker {
+  enabled: boolean;
+  label: string;
+  /** `#rrggbb`. */
+  color: string;
+  alpha: number;
+  radius: number;
+}
+
+/** O que o servidor inteiro ouve. Texto vazio = a frase padrão. */
+export interface DungeonAnnounce {
+  enabled: boolean;
+  onBuild: string;
+  onEnd: string;
+  showGrid: boolean;
+}
+
+export interface DungeonProtection {
+  enabled: boolean;
+  allowAdmin: boolean;
+  warnOnAttempt: boolean;
+}
+
+/**
+ * O que a casinha da entrada carrega dentro.
+ *
+ * As plantas do acervo vieram com arma nas caixas — a `entrance2`
+ * traz uma M249 —, e copia-las era acidente, nao desenho. Ver
+ * `ENTRANCE_ITEM_MODES` em `core/src/types/dungeons.ts`.
+ */
+export type EntranceItemMode = 'none' | 'unarmed' | 'all';
+
+/**
+ * Como e o chao naquele ponto, segundo o servidor.
+ *
+ * Espelha `groundReportSchema` de `core/src/game/dungeon-contract.ts`.
+ */
+export interface GroundReport {
+  x: number;
+  z: number;
+  /** A grade do mapa: 'E7'. E o que gente le. */
+  grid: string;
+  ground: number;
+  water: number;
+  /** Metros de agua sobre o chao. Zero e terra. */
+  depth: number;
+  serves: boolean;
+}
+
+/** O que se manda ao marcar ou mexer num ponto de nascimento. */
+export interface SpawnPointInput {
+  label: string;
+  x: number;
+  z: number;
+  /** Para onde a masmorra cresce, em graus. Zero e o norte. */
+  yaw: number;
+  enabled: boolean;
+}
+
+/**
+ * Um lugar onde a masmorra pode nascer.
+ *
+ * NAO confundir com as zonas de evento, que dizem onde nada nasce.
+ * Estes sao os lugares que o admin escolheu — ver
+ * `core/src/db/dungeon-spawn-points-repository.ts`.
+ */
+export interface SpawnPoint extends SpawnPointInput {
+  id: number;
+  serverId: string;
+  /** `"<worldSize>:<seed>"` do mundo em que ele foi marcado. */
+  worldKey: string | null;
+  /** A grade, do dia em que o servidor foi consultado. */
+  grid: string | null;
+  waterDepth: number | null;
+  checkedAt: number | null;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DungeonInput {
+  id: string;
+  name: string;
+  description?: string | null;
+  mode: DungeonMode;
+  entranceBlueprint: string | null;
+  entranceItems: EntranceItemMode;
+  /** O ângulo da casinha, em graus. Gira só ela. */
+  entranceRotation: number;
+  /**
+   * Qual lado do desenho fica de frente no jogo.
+   *
+   * `null` = automático: a masmorra gira sozinha para o corredor
+   * sair de frente para a casinha.
+   */
+  entranceFacing: 0 | 90 | 180 | 270 | null;
+  /**
+   * Em que servidores ela vale.
+   *
+   * Vazio = em TODOS, e nao em nenhum: a masmorra e conteudo, e
+   * conteudo sem dono e de todos. Ver a migracao 072.
+   */
+  servers: string[];
+  marker: DungeonMarker;
+  announce: DungeonAnnounce;
+  size: { min: number; max: number };
+  weights: { green: number; blue: number; red: number };
+  corridor: {
+    npcDensity: number;
+    lootDensity: number;
+    crates: string[];
+    table: LootTable;
+    ai: AiSpec;
+  };
+  grid: string[] | null;
+  npc: {
+    health: { min: number; max: number };
+    damageScale: number;
+    weapons: string[];
+    names: string[];
+    loot: LootTable;
+    ai: AiSpec;
+  };
+  timeOfDay: number;
+  structure: GradeSet;
+  lock: DungeonLock;
+  access: DungeonAccess;
+  protection: DungeonProtection;
+  respawn: DungeonRespawn;
+  rooms: DungeonRoom[];
+}
+
+/**
+ * O que o jogo faz quando o painel nao fala nada.
+ *
+ * Sao os inicializadores do `AiProfile` do `OrigemZDungeon.cs`, e
+ * eles vivem aqui para a TELA poder mostra-los como marca-d'agua:
+ * um campo vazio de `visionRadius` e 18, e nao 0.
+ *
+ * `aimConeScale` fica de fora de proposito — o padrao dele mora no
+ * prefab do cientista, dentro do bundle do jogo.
+ */
+export const AI_DEFAULTS = {
+  visionRadius: 18,
+  requireLineOfSight: true,
+  loseTargetAfter: 6,
+  reactionDelay: 0.4,
+  maxTargetHeightDelta: 3,
+  alertOnSpot: true,
+
+  holdPosition: false,
+  moveSpeed: 2.8,
+  chaseRadius: 25,
+  returnHome: true,
+  returnSpeed: 2.2,
+  arriveRadius: 0.6,
+  stuckTimeout: 6,
+
+  fireRange: 15,
+  fireInterval: 0.35,
+  standoffDistance: 2.5,
+
+  senseInterval: 0.5,
+  moveInterval: 0.2,
+} as const;
+
+export interface Dungeon extends DungeonInput {
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A linha da lista. Sem `grid` e sem as salas. */
+export interface DungeonSummary {
+  id: string;
+  name: string;
+  mode: DungeonMode;
+  entranceBlueprint: string | null;
+  /** Em que servidores ela vale. Vazio = em todos. */
+  servers: string[];
+  roomCount: number;
+  sizeMin: number;
+  sizeMax: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Uma planta do acervo, sem o conteudo. */
+export interface BlueprintSummary {
+  id: string;
+  name: string;
+  kind: 'entrance' | 'base';
+  entityCount: number;
+  byteSize: number;
+  /** Sem isto, a masmorra nao abre. E a coluna que importa. */
+  hasHatch: boolean;
+  origin: 'builtin' | 'import' | 'capture';
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Um tracado desenhado, do acervo.
+ *
+ * ####  ELE TRAZ O DESENHO, E A PLANTA NAO TRAZ O CONTEUDO  ####
+ *
+ * Nao e incoerencia: uma planta do CopyPaste tem meio megabyte e um
+ * desenho tem algumas centenas de bytes. E e o desenho que a tela
+ * precisa para mostrar a miniatura — sem ele, escolher entre oito
+ * tracados seria escolher entre oito nomes.
+ */
+export interface DungeonLayoutSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  /** Uma linha por fileira de z, do maior para o menor. */
+  grid: string[];
+  cellCount: number;
+  roomCount: number;
+  byColor: { green: number; blue: number; red: number };
+  hasEntrance: boolean;
+  /** Quantos defeitos o verificador achou. Gravado, nao recusado. */
+  problemCount: number;
+  origin: 'builtin' | 'panel' | 'capture';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type RunStatus =
+  | 'scheduled'
+  | 'spawning'
+  | 'active'
+  | 'closing'
+  | 'ended'
+  | 'failed'
+  | 'cancelled';
+
+/** Um nascimento. `failureMessage` ja vem traduzido pela borda. */
+export interface EventRun {
+  id: number;
+  eventId: string;
+  serverId: string;
+  dungeonId: string | null;
+  status: RunStatus;
+  failureReason: string | null;
+  failureMessage?: string | null;
+  x: number | null;
+  z: number | null;
+  grid: string | null;
+  seed: number | null;
+  ownerSteamId: string | null;
+  enteredCount: number;
+  scheduledFor: number | null;
+  startedAt: number | null;
+  endedAt: number | null;
+}
 
 // ------------------------------------------------------------
 //  O WIPE: a fila de mapas
