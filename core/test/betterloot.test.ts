@@ -1905,3 +1905,141 @@ describe('renomear um perfil', () => {
     expect(depois).toBe(antes);
   });
 });
+
+// ============================================================
+//  NOMES DE PERFIL QUE O DISCO JÁ TEM
+//
+//  ####  A TELA LISTAVA E NÃO ABRIA  ####
+//
+//  O servidor do dono tem um perfil chamado `NPC's` — 66 itens, em
+//  21 caixas. Ele aparecia na lista (a rota de lista não valida
+//  nome nenhum) e dava erro ao abrir: a validação recusava apóstrofo
+//  "por causa do JSON".
+//
+//  Não havia causa. `JSON.stringify` escapa aspas e barras
+//  invertidas sozinho, e qualquer string é chave JSON válida. A
+//  regra barrava um dado legítimo que já estava no disco.
+//
+//  A lição está no desenho: para ABRIR, quem manda é o disco; a
+//  regra vale só para o nome que está sendo ESCOLHIDO agora.
+// ============================================================
+
+describe('nomes de perfil que o disco já tem', () => {
+  beforeEach(seedFiles);
+
+  /** Põe no disco um perfil com o nome dado, sem passar pela API. */
+  async function seedNamed(name: string): Promise<void> {
+    await writeFile(
+      join(harness.dataDir, 'BetterLoot', 'LootGroups.json'),
+      JSON.stringify(
+        {
+          'Loot Groups': {
+            [name]: {
+              'Enabled?': true,
+              'Guaranteed Items': {},
+              'Item List': {
+                sticks: {
+                  'Item Probability (1-100)': 100.0,
+                  'Item Amount': { 'Item Minimum': 1, 'Item Maximum': 2, 'Bonus Items': {} },
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  }
+
+  // Os quatro que a regra antiga recusava, e um que ela deixava
+  // passar por acaso. Todos são chave de JSON como qualquer outra.
+  for (const name of ["NPC's", 'Guns "T3"', 'roupas/t1', 'grupo {novo}', 'Comps & Attachs']) {
+    it(`abre o perfil chamado ${name}`, async () => {
+      await seedNamed(name);
+
+      const list = (
+        await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/profiles` })
+      ).json();
+
+      expect(list.profiles[0].name).toBe(name);
+
+      // ####  O QUE A LISTA MOSTRA, A TELA TEM DE ABRIR  ####
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/profile?name=${encodeURIComponent(name)}`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().profile.items).toHaveLength(1);
+    });
+  }
+
+  it('grava um perfil com apóstrofo, e o nome chega ao disco inteiro', async () => {
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        profile: { name: "NPC's", enabled: true, guaranteed: [], items: [] },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(Object.keys(disk['Loot Groups'])).toEqual(["NPC's"]);
+  });
+
+  it('renomeia PARA um nome com apóstrofo', async () => {
+    await seedNamed('npcs');
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/profile/rename`,
+      payload: { from: 'npcs', to: "NPC's", baseRevision: null },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(Object.keys(disk['Loot Groups'])).toEqual(["NPC's"]);
+  });
+
+  it('recusa nome só de espaços', async () => {
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        profile: { name: '   ', enabled: true, guaranteed: [], items: [] },
+      },
+    });
+
+    // Não identifica perfil nenhum, e vira uma linha em branco na
+    // lista que ninguém sabe o que é.
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('recusa nome com caractere invisível', async () => {
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        // Uma quebra de linha no meio: some na tela e no log do
+        // plugin, e dois perfis ficariam com o mesmo nome aparente.
+        profile: { name: 'armas\nt3', enabled: true, guaranteed: [], items: [] },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+});

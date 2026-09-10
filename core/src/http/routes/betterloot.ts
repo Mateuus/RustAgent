@@ -360,7 +360,7 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
   /** Um perfil inteiro. */
   app.get('/servers/:id/betterloot/profile', async (request) => {
     const { id } = serverParams.parse(request.params);
-    const { name } = z.object({ name: profileName }).parse(request.query);
+    const { name } = z.object({ name: existingProfileName }).parse(request.query);
 
     const { revision, profile } = await deps.editor.profile(id, name);
 
@@ -435,7 +435,7 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
    */
   app.delete('/servers/:id/betterloot/profile', async (request) => {
     const { id } = serverParams.parse(request.params);
-    const { name } = z.object({ name: profileName }).parse(request.query);
+    const { name } = z.object({ name: existingProfileName }).parse(request.query);
     const body = deleteProfileSchema.parse(request.body ?? {});
 
     const result = await deps.editor.deleteProfile(id, { name, detach: body.detach });
@@ -533,15 +533,67 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
  * também aparece em caminho de log e em mensagem de erro do plugin;
  * o resto é dele.
  */
+/**
+ * Os caracteres que somem quando alguem os le.
+ *
+ * Escrita com escapes de proposito: os literais seriam invisiveis
+ * no proprio codigo, que e o defeito que ela existe para pegar.
+ */
+// eslint-disable-next-line no-control-regex -- e exatamente o alvo
+const CONTROL_CHARS = /[\u0000-\u001F\u007F]/u;
+
+/**
+ * O nome de um perfil que JÁ EXISTE — para abrir, renomear ou apagar.
+ *
+ * ####  QUEM MANDA AQUI É O DISCO, E NÃO A NOSSA REGRA  ####
+ *
+ * Este nome não está sendo escolhido: ele já é a chave de uma
+ * entrada do `LootGroups.json` daquele servidor, e a nossa lista
+ * ACABOU de mostrá-lo. Recusá-lo aqui produz o pior tipo de tela —
+ * a que lista uma coisa e depois se nega a abri-la.
+ *
+ * Foi exatamente o que aconteceu com um perfil chamado `NPC's`, no
+ * servidor do dono: 66 itens, em 21 caixas, visível na lista e
+ * impossível de abrir. A validação antiga recusava apóstrofo "por
+ * causa do JSON" — e não havia causa: `JSON.stringify` escapa
+ * aspas e barras invertidas sozinho, e QUALQUER string é chave
+ * JSON válida.
+ *
+ * O teto de 200 é o dobro do que a criação aceita, de propósito: um
+ * nome comprido que já esteja no disco tem de poder ser aberto para
+ * ser encurtado.
+ */
+const existingProfileName = z.string().min(1).max(200);
+
+/**
+ * O nome de um perfil que está sendo CRIADO ou escolhido num rename.
+ *
+ * ####  O QUE SE RECUSA, E POR QUÊ  ####
+ *
+ * Só duas coisas, e nenhuma delas é sobre JSON:
+ *
+ *   - só espaços, que não identifica perfil nenhum e ainda vira uma
+ *     linha em branco na lista;
+ *   - caracteres de CONTROLE, que somem na tela e no log do plugin —
+ *     o admin veria dois perfis com o mesmo nome e nenhum jeito de
+ *     saber qual é qual.
+ *
+ * Barra, chave, aspas e apóstrofo passam. Eles são chave de JSON
+ * como qualquer outro caractere, viajam em query string porque a
+ * tela os codifica, e alguém já os usou.
+ */
 const profileName = z
   .string()
   .min(1)
   .max(100)
-  .regex(
-    /^[^/\\{}"']+$/u,
-    'O nome do perfil não pode ter barra, chaves nem aspas — ele vira chave de um JSON que o ' +
-      'BetterLoot lê.',
-  );
+  .refine((name) => name.trim() !== '', {
+    message: 'O nome do perfil não pode ser só espaços.',
+  })
+  .refine((name) => !CONTROL_CHARS.test(name), {
+    message:
+      'O nome do perfil nao pode ter caracteres invisiveis (tabulacao, quebra de linha). Eles ' +
+      'somem na tela e no log do servidor, e dois perfis ficariam com o mesmo nome aparente.',
+  });
 
 const profileItemSchema = entrySchema.extend({
   /**
@@ -568,7 +620,9 @@ const saveProfileSchema = z.object({
 });
 
 const renameProfileSchema = z.object({
-  from: profileName,
+  /** O nome de agora — ele veio do disco, e nao da regra. */
+  from: existingProfileName,
+  /** O nome NOVO. Este esta sendo escolhido, e passa pela regra. */
   to: profileName,
   /** A revisão do perfil que está sendo renomeado. */
   baseRevision: z.string().nullable(),
