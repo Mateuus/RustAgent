@@ -63,6 +63,10 @@ import {
 import { LootRulesRepository } from '../src/db/loot-rules-repository.js';
 import { CustomItemsRepository } from '../src/db/custom-items-repository.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
+import {
+  BetterLootJunkRepository,
+  DEFAULT_JUNK_SHORTNAMES,
+} from '../src/db/betterloot-junk-repository.js';
 
 const SERVER = 'server01';
 
@@ -77,6 +81,15 @@ interface Harness {
   readonly configDir: string;
   readonly backupsDir: string;
   readonly reloads: string[];
+  /**
+   * O que o "Oxide" faz ao receber o `oxide.reload`.
+   *
+   * O plugin de verdade REESCREVE o `LootTables.json` ao carregar
+   * (`BetterLoot.cs:780`), e é essa reescrita que fazia a segunda
+   * gravação da mesma caixa levar 409. Sem um jeito de imitá-la
+   * aqui, o teste nunca veria o defeito.
+   */
+  onReload: (() => Promise<void>) | null;
 }
 
 let harness: Harness;
@@ -266,8 +279,17 @@ beforeEach(async () => {
     reload: async (serverId) => {
       reloads.push(serverId);
 
+      await harness?.onReload?.();
+
       return { sent: true, output: 'Reloaded plugin BetterLoot v4.4.0' };
     },
+    // Os mesmos tempos de produção, em escala de teste: sem um
+    // Oxide do outro lado ninguém reescreve nada, e a paciência de
+    // dois segundos seria cobrada de cada gravação para não
+    // descobrir coisa alguma. A `graceMs` daqui ainda é folgada o
+    // bastante para o teste da corrida ver a reescrita chegar
+    // atrasada. Ver `RewriteWait`.
+    rewriteWait: { pollMs: 5, quietMs: 15, graceMs: 150, timeoutMs: 1_000 },
   });
 
   const app = Fastify();
@@ -290,7 +312,7 @@ beforeEach(async () => {
   });
 
   await app.register(async (api) => {
-    registerBetterLootRoutes(api, { editor });
+    registerBetterLootRoutes(api, { editor, junk: new BetterLootJunkRepository(db) });
     registerLootRoutes(api, {
       repository: new LootRulesRepository(db),
       customItems: new CustomItemsRepository(db),
@@ -301,7 +323,31 @@ beforeEach(async () => {
 
   await app.ready();
 
-  harness = { db, app, dataDir, configDir, backupsDir, reloads };
+  // Os dois servidores existem no BANCO porque a lista de "lixo"
+  // tem FK para `servers` — ela é cadastro nosso, e não arquivo do
+  // plugin. O resto deste teste fala com o disco por `configOf`, que
+  // é fake, e nunca precisou de linha nenhuma aqui.
+  for (const [id, port] of [
+    ['server01', 28015],
+    ['server02', 28025],
+  ] as const) {
+    db.prepare(
+      `INSERT INTO servers
+         (id, name, identity, enabled, game_port, rcon_port, query_port, app_port,
+          install_dir, created_at, updated_at)
+       VALUES (@id, @id, @id, 1, @game, @rcon, @query, @app, @dir, @now, @now)`,
+    ).run({
+      id,
+      game: port,
+      rcon: port + 1,
+      query: port + 2,
+      app: port + 3,
+      dir: dataDir,
+      now: Date.now(),
+    });
+  }
+
+  harness = { db, app, dataDir, configDir, backupsDir, reloads, onReload: null };
 });
 
 /** Põe os três arquivos no lugar. Sem isto, o plugin "nunca rodou". */
@@ -319,6 +365,60 @@ async function seedFiles(): Promise<void> {
   await writeFile(
     join(harness.configDir, 'BetterLoot.json'),
     JSON.stringify(betterLootConfig(), null, 2),
+    'utf8',
+  );
+}
+
+/**
+ * Um `LootGroups.json` com um perfil — a forma medida no
+ * `server01`, campo por campo.
+ */
+function lootGroups(): unknown {
+  return {
+    'Loot Groups': {
+      armas_t3: {
+        'Enabled?': true,
+        'Guaranteed Items': {},
+        'Item List': {
+          'rifle.ak': {
+            'Item Probability (1-100)': 60.0,
+            'Item Amount': {
+              'Allow Duplicates': true,
+              'Skin ID (0 = default)': 0,
+              'Display Name (empty = none)': '',
+              'Item Minimum': 1,
+              'Item Maximum': 1,
+              'Item Properties': {
+                'Ammunition Settings': {
+                  'Ammo Item Shortname': 'ammo.rifle',
+                  'Minimum Amount': 0,
+                  'Maximum Amount': 30,
+                },
+              },
+              'Bonus Items': {},
+            },
+          },
+          sticks: {
+            'Item Probability (1-100)': 40.0,
+            'Item Amount': {
+              'Allow Duplicates': true,
+              'Skin ID (0 = default)': 0,
+              'Display Name (empty = none)': '',
+              'Item Minimum': 5,
+              'Item Maximum': 10,
+              'Bonus Items': {},
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+async function seedGroups(): Promise<void> {
+  await writeFile(
+    join(harness.dataDir, 'BetterLoot', 'LootGroups.json'),
+    JSON.stringify(lootGroups(), null, 2),
     'utf8',
   );
 }
@@ -460,7 +560,8 @@ describe('gravar', () => {
       })
     ).json();
 
-    return { baseRevision: body.revision, table: body.table };
+    // A revisão que o PUT quer é a DA CAIXA, e não a do arquivo.
+    return { baseRevision: body.tableRevision, table: body.table };
   }
 
   it('recusa quem abriu antes de outra pessoa gravar', async () => {
@@ -483,6 +584,149 @@ describe('gravar', () => {
     );
 
     expect(Object.keys(disk.LootTables[ELITE]['Ungrouped Items'])).toHaveLength(3);
+  });
+
+  /**
+   * O que o BetterLoot faz ao carregar, reduzido ao que importa.
+   *
+   * ####  E O ATRASO É O TESTE INTEIRO  ####
+   *
+   * Ele reescreve o `LootTables.json` DEPOIS que o `oxide.reload`
+   * já respondeu — o RCON volta quando o comando é despachado, e o
+   * Oxide só então descarrega, compila e chama `Init`. Reescrever
+   * aqui de forma síncrona provaria outra coisa: a releitura do
+   * `save` pegaria o arquivo novo por acaso, que é justamente o
+   * que NÃO acontece em produção.
+   */
+  function pluginRewritesFileLate(): void {
+    setTimeout(() => {
+      void (async () => {
+        const path = join(harness.dataDir, 'BetterLoot', 'LootTables.json');
+        const disk = JSON.parse(await readFile(path, 'utf8'));
+
+        // Uma caixa que a tela nem abriu: é o que o `scanEntry` faz
+        // ao validar as 6.824 entradas de uma vez.
+        disk.LootTables[SPACED_PREFAB]['Item Settings']['Maximum Scrap Amount'] = 999;
+
+        // E a caixa ABERTA também — o `scanEntry` cria `Item
+        // Durability` para todo item com condição, e é essa mexida
+        // que fazia a revisão devolvida à tela nascer velha.
+        disk.LootTables[ELITE]['Ungrouped Items'].sticks['Can Convert To Blueprint'] = true;
+
+        await writeFile(path, JSON.stringify(disk, null, 2), 'utf8');
+      })();
+    }, 30);
+  }
+
+  it('deixa gravar a mesma caixa duas vezes depois de o plugin reescrever o arquivo', async () => {
+    // ####  ISTO É O DEFEITO QUE O DONO RELATOU  ####
+    //
+    // A primeira gravação funcionava; a segunda, da MESMA caixa e
+    // sem ninguém ter editado nada, respondia
+    // BETTERLOOT_STALE_REVISION. A culpa era a revisão ser do
+    // arquivo inteiro — e o próprio plugin reescrever o arquivo ao
+    // recarregar.
+    harness.onReload = async () => {
+      pluginRewritesFileLate();
+    };
+
+    const first = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: await open(),
+    });
+
+    expect(first.statusCode).toBe(200);
+
+    // ####  O ADMIN NÃO CLICA DUAS VEZES NO MESMO INSTANTE  ####
+    //
+    // Ele lê a tela, muda um número, e só então grava de novo — e
+    // a reescrita do plugin já aconteceu quando isso ocorre. Sem
+    // esta pausa o teste passaria mesmo com o defeito: as duas
+    // gravações caberiam ANTES da reescrita, que é justamente o
+    // caso que não acontece na vida real.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // A revisão que volta é a da CAIXA, e é com ela que a tela
+    // grava de novo — sem F5, sem reabrir.
+    const second = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        baseRevision: first.json().tableRevision,
+        table: {
+          ...first.json().table,
+          itemSettings: { ...first.json().table.itemSettings, maxScrap: 42 },
+        },
+      },
+    });
+
+    expect(second.statusCode).toBe(200);
+    expect(second.json().table.itemSettings.maxScrap).toBe(42);
+  });
+
+  it('não chama de conflito a gravação de OUTRA caixa', async () => {
+    // O `save` copia as demais caixas do disco de agora: gravar a
+    // caixa A nunca pôde apagar a caixa B. Com a revisão do arquivo
+    // inteiro isso era recusado assim mesmo.
+    const elite = await open();
+
+    const spaced = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(SPACED_PREFAB)}`,
+      })
+    ).json();
+
+    expect(
+      (
+        await harness.app.inject({
+          method: 'PUT',
+          url: `/servers/${SERVER}/betterloot/table`,
+          payload: elite,
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // A segunda tela abriu ANTES da gravação acima e grava depois.
+    // A caixa dela não foi tocada, logo não há conflito nenhum.
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: { baseRevision: spaced.tableRevision, table: spaced.table },
+    });
+
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('ainda recusa quem abriu a MESMA caixa antes de outra pessoa gravar', async () => {
+    // A trava não foi afrouxada: o conflito de verdade continua
+    // sendo pego. Duas telas na mesma caixa, e a segunda perde.
+    const first = await open();
+    const second = await open();
+
+    expect(first.baseRevision).toBe(second.baseRevision);
+
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        ...first,
+        table: {
+          ...first.table,
+          itemSettings: { ...(first.table.itemSettings as object), maxScrap: 99 },
+        },
+      },
+    });
+
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: second,
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe('BETTERLOOT_STALE_REVISION');
   });
 
   it('grava, faz backup antes e recarrega o plugin', async () => {
@@ -930,5 +1174,364 @@ describe('os globais', () => {
     const disk = JSON.parse(await readFile(join(harness.configDir, 'BetterLoot.json'), 'utf8'));
 
     expect(disk['Loot Configuration']['Loot Multiplier']).toBe(3);
+  });
+});
+
+// ============================================================
+//  OS PERFIS — o `LootGroups.json`
+//
+//  O que este bloco guarda:
+//
+//    1. o arquivo AUSENTE responde lista vazia, e criar o primeiro
+//       perfil funciona. Um servidor sem perfil nenhum é normal;
+//    2. a lista diz EM QUAIS CAIXAS cada perfil está — é o que a
+//       tela precisa para perguntar antes de apagar, e é o que o
+//       Looty não faz;
+//    3. apagar um perfil em uso é RECUSADO sem `detach`, e com ele
+//       a associação sai das caixas junto. Sem isso, o BetterLoot
+//       ignora a caixa e o ajuste se perde em silêncio;
+//    4. `Item Properties` sobrevive aqui também: a tela não edita
+//       esse bloco nem dentro de um perfil.
+// ============================================================
+
+describe('os perfis de loot', () => {
+  beforeEach(async () => {
+    await seedFiles();
+    await seedGroups();
+  });
+
+  it('lista os perfis com a soma das probabilidades', async () => {
+    const body = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/profiles` })
+    ).json();
+
+    expect(body.count).toBe(1);
+    expect(body.profiles[0].name).toBe('armas_t3');
+    expect(body.profiles[0].itemCount).toBe(2);
+
+    // 60 + 40. Diferente de 100, o plugin rebalanceia sozinho no
+    // próximo load — e a tela tem de avisar antes disso.
+    expect(body.profiles[0].probabilitySum).toBe(100);
+  });
+
+  it('abre um perfil com o peso de cada item', async () => {
+    const body = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      })
+    ).json();
+
+    const ak = body.profile.items.find((item: { key: string }) => item.key === 'rifle.ak');
+
+    expect(ak.probability).toBe(60);
+    expect(ak.min).toBe(1);
+
+    // O nome do catálogo atravessa aqui também: ele não está no
+    // arquivo, e sem ele a tela mostra shortname cru.
+    expect(ak.displayName).toBe('Assault Rifle');
+  });
+
+  it('cria um perfil num servidor que ainda não tem o arquivo', async () => {
+    await rm(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'));
+
+    const empty = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/profiles` })
+    ).json();
+
+    // Arquivo ausente é lista vazia, e não erro.
+    expect(empty.configured).toBe(false);
+    expect(empty.count).toBe(0);
+
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        profile: {
+          name: 'medicos',
+          enabled: true,
+          guaranteed: [],
+          items: [
+            {
+              key: 'sticks',
+              shortname: 'sticks',
+              displayName: null,
+              skinId: '0',
+              customName: null,
+              min: 1,
+              max: 2,
+              allowDuplicates: true,
+              canConvertToBlueprint: null,
+              durability: null,
+              rarity: null,
+              bonusItems: [],
+              hasWeaponProperties: false,
+              probability: 100,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(disk['Loot Groups'].medicos['Item List'].sticks['Item Probability (1-100)']).toBe(100);
+    expect(disk['Loot Groups'].medicos['Item List'].sticks['Item Amount']['Item Maximum']).toBe(2);
+  });
+
+  it('recusa criar um perfil com nome que já existe', async () => {
+    const response = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: null,
+        profile: { name: 'armas_t3', enabled: true, guaranteed: [], items: [] },
+      },
+    });
+
+    // Dois admins criando "armas_t3" ao mesmo tempo não podem virar
+    // um sobrescrevendo o trabalho do outro sem aviso.
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe('BETTERLOOT_PROFILE_EXISTS');
+  });
+
+  it('preserva Item Properties ao gravar', async () => {
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      })
+    ).json();
+
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/profile`,
+      payload: {
+        baseRevision: opened.revision,
+        profile: {
+          ...opened.profile,
+          items: opened.profile.items.map((item: { key: string }) =>
+            item.key === 'rifle.ak' ? { ...item, min: 2, max: 3 } : item,
+          ),
+        },
+      },
+    });
+
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    const amount = disk['Loot Groups'].armas_t3['Item List']['rifle.ak']['Item Amount'];
+
+    expect(amount['Item Minimum']).toBe(2);
+
+    // ####  E A MUNIÇÃO CONTINUA LÁ  ####
+    //
+    // A tela não edita este bloco. Montar a entrada do zero o
+    // apagaria — sem erro, e só percebido no jogo.
+    expect(amount['Item Properties']['Ammunition Settings']['Ammo Item Shortname']).toBe(
+      'ammo.rifle',
+    );
+  });
+});
+
+describe('apagar um perfil em uso', () => {
+  beforeEach(async () => {
+    await seedFiles();
+    await seedGroups();
+
+    // A caixa de elite passa a pedir o perfil — é a associação que
+    // mora no OUTRO arquivo.
+    const opened = (
+      await harness.app.inject({
+        method: 'GET',
+        url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(ELITE)}`,
+      })
+    ).json();
+
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: {
+        baseRevision: opened.tableRevision,
+        table: {
+          ...opened.table,
+          profiles: [{ name: 'armas_t3', enabled: true, probability: 30, maxItems: 0 }],
+        },
+      },
+    });
+  });
+
+  it('a lista diz em quais caixas ele está', async () => {
+    const body = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/profiles` })
+    ).json();
+
+    expect(body.profiles[0].usedBy).toEqual([ELITE]);
+  });
+
+  it('recusa apagar sem autorização, e diz quais caixas perderiam o ajuste', async () => {
+    const response = await harness.app.inject({
+      method: 'DELETE',
+      url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe('BETTERLOOT_PROFILE_IN_USE');
+
+    // A mensagem nomeia a caixa: "está em uso" sozinho manda o
+    // admin procurar em 111 prefabs.
+    expect(response.json().message).toContain('crate_elite');
+
+    // E nada foi apagado.
+    const disk = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(disk['Loot Groups'].armas_t3).toBeDefined();
+  });
+
+  it('com detach, tira a associação das caixas junto', async () => {
+    const response = await harness.app.inject({
+      method: 'DELETE',
+      url: `/servers/${SERVER}/betterloot/profile?name=armas_t3`,
+      payload: { detach: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    // A tela precisa dizer quantas caixas mudaram: o admin
+    // autorizou um apagamento, e não uma edição que ele não viu.
+    expect(response.json().detached).toEqual([ELITE]);
+
+    const groups = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootGroups.json'), 'utf8'),
+    );
+
+    expect(groups['Loot Groups'].armas_t3).toBeUndefined();
+
+    // ####  E A CAIXA NÃO FICOU PEDINDO O QUE NÃO EXISTE  ####
+    //
+    // O BetterLoot ignora o import órfão e resmunga no log; o admin
+    // só descobriria abrindo a caixa.
+    const tables = JSON.parse(
+      await readFile(join(harness.dataDir, 'BetterLoot', 'LootTables.json'), 'utf8'),
+    );
+
+    expect(tables.LootTables[ELITE]['Loot Profiles']).toEqual([]);
+  });
+});
+
+// ============================================================
+//  O LIXO — a lista de curadoria
+//
+//  ####  ELA NÃO É DO PLUGIN, E É POR ISSO QUE ELA É NOSSA  ####
+//
+//  `grep -i junk` no BetterLoot.cs v4.4.0 dá zero. A lista mora no
+//  banco e o que chega ao servidor é a caixa já sem esses itens.
+//
+//  O que este bloco guarda:
+//
+//    1. os 31 padrões vêm de graça, sem ninguém semear nada;
+//    2. desligar um PADRÃO não o apaga — ele volta desligado, para
+//       poder ser religado. Apagar a linha o traria de volta ligado
+//       na leitura seguinte, que é o contrário do que o admin pediu;
+//    3. o que o admin acrescenta some de vez quando ele tira;
+//    4. e a lista é POR SERVIDOR: o PvP e o PvE discordam sobre o
+//       que é lixo.
+// ============================================================
+
+describe('a lista de lixo', () => {
+  it('nasce com os 31 padrões, sem semear linha nenhuma', async () => {
+    const body = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/junk` })
+    ).json();
+
+    expect(body.count).toBe(DEFAULT_JUNK_SHORTNAMES.length);
+    expect(body.items.every((item: { isDefault: boolean }) => item.isDefault)).toBe(true);
+
+    // E o banco continua vazio: o padrão mora no código, e é por
+    // isso que um item novo na lista chega a todo servidor já
+    // cadastrado.
+    expect(
+      harness.db.prepare('SELECT COUNT(*) AS n FROM betterloot_junk').get() as { n: number },
+    ).toEqual({ n: 0 });
+  });
+
+  it('acrescenta um item e o tira de vez', async () => {
+    await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/junk`,
+      payload: { shortname: 'sticks' },
+    });
+
+    const added = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/junk` })
+    ).json();
+
+    const sticks = added.items.find((item: { shortname: string }) => item.shortname === 'sticks');
+
+    expect(sticks).toEqual({ shortname: 'sticks', isDefault: false, active: true });
+
+    await harness.app.inject({
+      method: 'DELETE',
+      url: `/servers/${SERVER}/betterloot/junk?shortname=sticks`,
+    });
+
+    const removed = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/junk` })
+    ).json();
+
+    expect(
+      removed.items.some((item: { shortname: string }) => item.shortname === 'sticks'),
+    ).toBe(false);
+  });
+
+  it('desligar um padrão o deixa apagado, e não o apaga', async () => {
+    await harness.app.inject({
+      method: 'DELETE',
+      url: `/servers/${SERVER}/betterloot/junk?shortname=rug`,
+    });
+
+    const body = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/junk` })
+    ).json();
+
+    const rug = body.items.find((item: { shortname: string }) => item.shortname === 'rug');
+
+    // ####  ELE CONTINUA NA LISTA, DESLIGADO  ####
+    //
+    // Sumir seria o mesmo que voltar: o padrão mora no código, e a
+    // leitura seguinte o traria de volta LIGADO — desfazendo em
+    // silêncio o que o admin acabou de decidir.
+    expect(rug).toEqual({ shortname: 'rug', isDefault: true, active: false });
+    expect(body.count).toBe(DEFAULT_JUNK_SHORTNAMES.length - 1);
+
+    // E religar funciona.
+    await harness.app.inject({
+      method: 'POST',
+      url: `/servers/${SERVER}/betterloot/junk`,
+      payload: { shortname: 'rug' },
+    });
+
+    const back = (
+      await harness.app.inject({ method: 'GET', url: `/servers/${SERVER}/betterloot/junk` })
+    ).json();
+
+    expect(back.count).toBe(DEFAULT_JUNK_SHORTNAMES.length);
+  });
+
+  it('é de um servidor, e não da rede', async () => {
+    const junk = new BetterLootJunkRepository(harness.db);
+
+    junk.add('server01', 'sticks', Date.now());
+
+    expect(junk.activeOf('server02')).not.toContain('sticks');
   });
 });

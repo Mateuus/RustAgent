@@ -34,6 +34,7 @@ import { openDatabase } from './db/database.js';
 import { KitsRepository } from './db/kits-repository.js';
 import { LoadoutsRepository } from './db/loadouts-repository.js';
 import { runMigrations } from './db/migrations.js';
+import { BetterLootJunkRepository } from './db/betterloot-junk-repository.js';
 import { CustomItemsRepository } from './db/custom-items-repository.js';
 import { LootRulesRepository } from './db/loot-rules-repository.js';
 import { ItemsRepository } from './db/items-repository.js';
@@ -636,6 +637,9 @@ async function main(): Promise<void> {
   // `items` é reescrita a cada varredura do catálogo; esta aqui
   // nada apaga sozinho. Ver db/custom-items-repository.ts.
   const customItemsRepository = new CustomItemsRepository(db);
+  // A lista de "lixo" do editor de loot. E nossa: o BetterLoot nao
+  // conhece esse conceito (migracao 073).
+  const betterLootJunkRepository = new BetterLootJunkRepository(db);
 
   // E as regras que soltam esses itens nas caixas do jogo. Elas
   // apontam para o cadastro acima — é dele que sai a MARCA, sem a
@@ -2754,6 +2758,7 @@ async function main(): Promise<void> {
     directory,
     monuments,
     items: itemsRepository,
+    betterLootJunk: betterLootJunkRepository,
     customItems: customItemsRepository,
     customItemsSync,
     lootRules: lootRulesRepository,

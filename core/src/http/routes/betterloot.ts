@@ -10,10 +10,16 @@
 //
 //  A de tabela mexe em `oxide/data/BetterLoot/LootTables.json`; a
 //  de globais, em `oxide/config/BetterLoot.json`. Elas não
-//  compartilham a `revision` de propósito: recarregar o plugin
-//  reescreve a TABELA sozinho, e uma revisão só faria gravar o
-//  multiplicador recusar o próximo salvamento de caixa — e
-//  vice-versa.
+//  compartilham a revisão de propósito: recarregar o plugin
+//  reescreve os DOIS arquivos sozinho, e uma revisão só faria
+//  gravar o multiplicador recusar o próximo salvamento de caixa —
+//  e vice-versa.
+//
+//  E a da tabela é por CAIXA (`tableRevision`), não do arquivo: o
+//  `save` copia as outras caixas do disco de agora, então só a
+//  caixa aberta pode entrar em conflito de verdade. O `revision`
+//  que o `GET /betterloot` devolve é do arquivo inteiro e serve à
+//  lista — nunca para gravar.
 //
 //  ####  ELAS SÃO DE UM SERVIDOR, E NÃO DA REDE  ####
 //
@@ -49,12 +55,31 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import type { BetterLootJunkRepository } from '../../db/betterloot-junk-repository.js';
 import type { BetterLootEditor, BetterLootTable } from '../../oxide/betterloot.js';
 import { ApiError } from '../error-response.js';
 
 export interface BetterLootRoutesDeps {
   readonly editor: BetterLootEditor;
+  /**
+   * A lista de "lixo" de cada servidor.
+   *
+   * ####  ELA NÃO VAI PARA O DISCO DO SERVIDOR  ####
+   *
+   * O BetterLoot não conhece a palavra "junk" — a lista é
+   * curadoria nossa, e o que chega ao jogo é a caixa já sem esses
+   * itens. Por isso ela é banco, e não arquivo do plugin. Ver
+   * `db/betterloot-junk-repository.ts`.
+   */
+  readonly junk: BetterLootJunkRepository;
 }
+
+/** Um shortname de item. É a chave da lista de lixo. */
+const junkShortname = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[a-z0-9_.-]+$/, 'Um shortname de item do Rust é minúsculo, sem espaço nem acento.');
 
 const serverParams = z.object({ id: z.string().min(1) });
 
@@ -148,7 +173,14 @@ const tableSchema = z.object({
 });
 
 const saveSchema = z.object({
-  /** A revisão em que a tela abriu. `null` = a tela não viu nenhuma. */
+  /**
+   * A revisão DA CAIXA em que a tela abriu — o `tableRevision` que
+   * o GET devolveu, e não o sha do arquivo. `null` = a tela não viu
+   * nenhuma, e grava por cima do que houver.
+   *
+   * Ver `tableRevisionOf` em `oxide/betterloot.ts` para por que a
+   * revisão deixou de ser a do arquivo inteiro.
+   */
   baseRevision: z.string().nullable(),
   table: tableSchema,
 });
@@ -243,9 +275,9 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
     const { id } = serverParams.parse(request.params);
     const { prefab } = tableQuery.parse(request.query);
 
-    const { revision, table } = await deps.editor.table(id, prefab);
+    const { tableRevision, table } = await deps.editor.table(id, prefab);
 
-    return { ok: true, serverId: id, revision, table };
+    return { ok: true, serverId: id, tableRevision, table };
   });
 
   /**
@@ -270,7 +302,8 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
     return {
       ok: true,
       serverId: id,
-      revision: result.revision,
+      tableRevision: result.tableRevision,
+      revision: result.fileRevision,
       table: result.table,
       // Onde ficou a cópia do arquivo anterior. É o que torna um
       // salvamento errado reversível — e um caminho na resposta é
@@ -298,6 +331,140 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
    * Container Prefabs`, e montá-lo do zero as devolveria todas
    * ligadas.
    */
+  // ----------------------------------------------------------
+  //  OS PERFIS — o `LootGroups.json`
+  // ----------------------------------------------------------
+  //
+  //  Eles são do servidor, como as caixas, e por isso moram no
+  //  mesmo `/servers/:id/`. O que os separa da tabela é o ARQUIVO:
+  //  outro arquivo, outra revisão, outro salvamento.
+
+  /** A lista de perfis, com em quais caixas cada um está. */
+  app.get('/servers/:id/betterloot/profiles', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const result = await deps.editor.profiles(id);
+
+    return {
+      ok: true,
+      serverId: id,
+      // `false` = não existe LootGroups.json ali. NÃO é erro: um
+      // servidor sem perfil nenhum é o estado normal de quem nunca
+      // criou um, e criar o primeiro tem de funcionar.
+      configured: result.configured,
+      revision: result.revision,
+      count: result.profiles.length,
+      profiles: result.profiles,
+    };
+  });
+
+  /** Um perfil inteiro. */
+  app.get('/servers/:id/betterloot/profile', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { name } = z.object({ name: profileName }).parse(request.query);
+
+    const { revision, profile } = await deps.editor.profile(id, name);
+
+    return { ok: true, serverId: id, revision, profile };
+  });
+
+  /** Cria ou grava um perfil, recarrega e devolve o que releu. */
+  app.put('/servers/:id/betterloot/profile', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const body = saveProfileSchema.parse(request.body);
+
+    assertProfileConsistent(body.profile);
+
+    const result = await deps.editor.saveProfile(id, {
+      baseRevision: body.baseRevision,
+      profile: body.profile,
+    });
+
+    return {
+      ok: true,
+      serverId: id,
+      revision: result.revision,
+      profile: result.profile,
+      backup: result.backup,
+      reloaded: result.reloaded,
+      reloadOutput: result.reloadOutput,
+    };
+  });
+
+  /**
+   * Apaga um perfil.
+   *
+   * Em uso e sem `detach`, responde 409 com os nomes das caixas —
+   * é a pergunta que o Looty não faz antes de apagar.
+   */
+  app.delete('/servers/:id/betterloot/profile', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { name } = z.object({ name: profileName }).parse(request.query);
+    const body = deleteProfileSchema.parse(request.body ?? {});
+
+    const result = await deps.editor.deleteProfile(id, { name, detach: body.detach });
+
+    return {
+      ok: true,
+      serverId: id,
+      // As caixas de onde a associação saiu junto. A tela precisa
+      // dizer quantas foram: o admin autorizou um apagamento, e não
+      // uma edição de seis caixas que ele não abriu.
+      detached: result.detached,
+      backup: result.backup,
+      reloaded: result.reloaded,
+      reloadOutput: result.reloadOutput,
+    };
+  });
+
+  // ----------------------------------------------------------
+  //  O LIXO — a lista de curadoria, que é NOSSA
+  // ----------------------------------------------------------
+  //
+  //  ####  NENHUMA DESTAS ROTAS TOCA O DISCO DO SERVIDOR  ####
+  //
+  //  Elas mexem numa tabela do agente. Quem tira os itens da caixa
+  //  é a TELA, montando o rascunho sem eles — e é o "Gravar" da
+  //  caixa que leva isso ao jogo, com a mesma revisão, o mesmo
+  //  backup e o mesmo "descartar" de qualquer outra edição.
+  //
+  //  Esse é o ponto em que somos melhores que o Looty: lá o
+  //  `Remove Junk` apaga na hora e sem confirmar. Aqui o admin vê o
+  //  que vai sair e ainda pode desistir.
+
+  /** A lista de lixo daquele servidor: os padrões e os do admin. */
+  app.get('/servers/:id/betterloot/junk', async (request) => {
+    const { id } = serverParams.parse(request.params);
+
+    const items = deps.junk.list(id);
+
+    return {
+      ok: true,
+      serverId: id,
+      count: items.filter((item) => item.active).length,
+      items,
+    };
+  });
+
+  /** Marca um item como lixo — ou religa um padrão desligado. */
+  app.post('/servers/:id/betterloot/junk', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { shortname } = z.object({ shortname: junkShortname }).parse(request.body);
+
+    deps.junk.add(id, shortname, Date.now());
+
+    return { ok: true, serverId: id, items: deps.junk.list(id) };
+  });
+
+  /** Tira um item da lista. O padrão fica desligado; o do admin some. */
+  app.delete('/servers/:id/betterloot/junk', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { shortname } = z.object({ shortname: junkShortname }).parse(request.query);
+
+    deps.junk.remove(id, shortname, Date.now());
+
+    return { ok: true, serverId: id, items: deps.junk.list(id) };
+  });
+
   app.put('/servers/:id/betterloot/globals', async (request) => {
     const { id } = serverParams.parse(request.params);
     const body = saveGlobalsSchema.parse(request.body);
@@ -320,6 +487,61 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
 }
 
 /**
+ * O nome de um perfil.
+ *
+ * ####  ELE É A CHAVE DO ARQUIVO, E VIAJA EM QUERY STRING  ####
+ *
+ * O admin escolhe o nome livremente e ele vira chave do
+ * `LootGroups.json`. Barra e ponto ficam de fora porque o nome
+ * também aparece em caminho de log e em mensagem de erro do plugin;
+ * o resto é dele.
+ */
+const profileName = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(
+    /^[^/\\{}"']+$/u,
+    'O nome do perfil não pode ter barra, chaves nem aspas — ele vira chave de um JSON que o ' +
+      'BetterLoot lê.',
+  );
+
+const profileItemSchema = entrySchema.extend({
+  /**
+   * O peso dentro do perfil.
+   *
+   * Zero é aceito de propósito: é o estado de um item recém-posto
+   * na lista, antes de o admin distribuir os pesos. Quem cobra a
+   * soma 100 é a tela — e, no fim, o rebalanceamento do plugin.
+   */
+  probability: z.number().min(0).max(100),
+});
+
+const profileSchema = z.object({
+  name: profileName,
+  enabled: z.boolean(),
+  guaranteed: z.array(guaranteedSchema).max(MAX_ENTRIES),
+  items: z.array(profileItemSchema).max(MAX_ENTRIES),
+});
+
+const saveProfileSchema = z.object({
+  /** `null` = a tela está CRIANDO. Ver `saveProfile`. */
+  baseRevision: z.string().nullable(),
+  profile: profileSchema,
+});
+
+const deleteProfileSchema = z.object({
+  /**
+   * Apagar também a associação nas caixas que pedem este perfil.
+   *
+   * Sem isto, um perfil em uso é recusado com 409 e a lista das
+   * caixas — para a tela poder perguntar antes, em vez de apagar e
+   * deixar o admin descobrir depois.
+   */
+  detach: z.boolean().default(false),
+});
+
+/**
  * As conferências que o zod não faz sozinho.
  *
  * ####  MÍNIMO MAIOR QUE MÁXIMO É SILÊNCIO NO JOGO  ####
@@ -328,6 +550,53 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
  * trocados o resultado é o mínimo, sempre, e nada reclama. A tela
  * mostraria "2 a 1" e o admin acharia que pediu isso.
  */
+/**
+ * As mesmas conferências, para um perfil.
+ *
+ * ####  A SOMA 100 NÃO ESTÁ AQUI, E ISSO É DE PROPÓSITO  ####
+ *
+ * Um perfil cuja soma não dá 100 é REBALANCEADO pelo plugin, e não
+ * recusado — e o meio de uma edição é um lugar legítimo para a soma
+ * estar errada. Quem avisa é a tela, antes de gravar; recusar aqui
+ * obrigaria a acertar tudo antes de poder salvar qualquer coisa.
+ */
+function assertProfileConsistent(profile: z.infer<typeof profileSchema>): void {
+  const named: readonly { readonly key: string; readonly min: number; readonly max: number }[] = [
+    ...profile.items,
+    ...profile.guaranteed,
+  ];
+
+  for (const entry of named) {
+    if (entry.min > entry.max) {
+      throw new ApiError(
+        'BETTERLOOT_INVALID_RANGE',
+        `No perfil "${profile.name}", a entrada "${entry.key}" tem mínimo ${String(
+          entry.min,
+        )} maior que o máximo ${String(entry.max)}. Nada foi alterado.`,
+        400,
+      );
+    }
+  }
+
+  const keys = new Set<string>();
+
+  for (const item of profile.items) {
+    if (keys.has(item.key)) {
+      // O `Item List` é um DICIONÁRIO: duas entradas com a mesma
+      // chave viram uma no arquivo, e a tela mostraria uma lista
+      // que o disco não tem.
+      throw new ApiError(
+        'BETTERLOOT_DUPLICATE_KEY',
+        `O perfil "${profile.name}" tem "${item.key}" duas vezes. No arquivo do BetterLoot a ` +
+          'chave é única — use o sufixo {1}, {2} para repetir o mesmo item. Nada foi alterado.',
+        400,
+      );
+    }
+
+    keys.add(item.key);
+  }
+}
+
 function assertConsistent(table: z.infer<typeof tableSchema>): void {
   const settings = table.itemSettings;
 

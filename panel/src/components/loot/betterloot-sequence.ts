@@ -73,10 +73,25 @@ export function isLatest(seq: Sequence, ticket: number): boolean {
   return seq.current === ticket;
 }
 
+/** Uma caixa lida, com a impressão que o "Gravar" devolve. */
+export interface ReadTable {
+  readonly table: BetterLootTable;
+  /** O `tableRevision` — a impressão DESTA caixa, não a do arquivo. */
+  readonly revision: string;
+}
+
 /** Onde a leitura de uma caixa escreve. São os `setState` do painel. */
 export interface TableSink {
   readonly setSaved: (table: BetterLootTable | null) => void;
   readonly setDraft: (table: BetterLootTable | null) => void;
+  /**
+   * A impressão da caixa aberta.
+   *
+   * Ela anda junto com o `saved` porque é dele que ela fala: guardar
+   * a revisão de uma caixa e o conteúdo de outra é exatamente o
+   * estado que a revisão existe para impedir.
+   */
+  readonly setRevision: (revision: string | null) => void;
   readonly setError: (message: string | null) => void;
   readonly setLoading: (loading: boolean) => void;
 }
@@ -92,7 +107,7 @@ export interface TableSink {
  */
 export async function readTableInto(
   seq: Sequence,
-  read: () => Promise<BetterLootTable>,
+  read: () => Promise<ReadTable>,
   sink: TableSink,
 ): Promise<void> {
   const ticket = openRequest(seq);
@@ -101,14 +116,15 @@ export async function readTableInto(
   sink.setError(null);
 
   try {
-    const table = await read();
+    const read_ = await read();
 
     if (!isLatest(seq, ticket)) {
       return;
     }
 
-    sink.setSaved(table);
-    sink.setDraft(table);
+    sink.setSaved(read_.table);
+    sink.setDraft(read_.table);
+    sink.setRevision(read_.revision);
   } catch (cause) {
     if (!isLatest(seq, ticket)) {
       return;
@@ -116,6 +132,7 @@ export async function readTableInto(
 
     sink.setSaved(null);
     sink.setDraft(null);
+    sink.setRevision(null);
     sink.setError(cause instanceof Error ? cause.message : String(cause));
   } finally {
     if (isLatest(seq, ticket)) {

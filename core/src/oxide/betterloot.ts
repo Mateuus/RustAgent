@@ -42,17 +42,27 @@
 //  jogo. O `applyTable` abaixo sobrescreve os campos que a tela
 //  edita e PRESERVA o resto da entrada crua.
 //
-//  ####  A REVISÃO  ####
+//  ####  A REVISÃO É DA CAIXA, E NÃO DO ARQUIVO  ####
 //
 //  Salvar substitui o `LootTables.json` INTEIRO: o plugin
 //  serializa o dicionário todo, e não há merge do lado dele. Duas
-//  telas abertas fariam a segunda apagar a primeira em silêncio.
+//  telas abertas na MESMA caixa fariam a segunda apagar a primeira
+//  em silêncio.
 //
-//  A defesa é o sha256 do arquivo: a tela devolve o que leu, e o
-//  agente recusa quando o disco mudou. É o mesmo papel do
-//  `appliedSha` da biblioteca de plugins (library.ts:498) — e o
-//  mesmo motivo: um estado do disco que ninguém conferiu é um
-//  estado que alguém sobrescreve.
+//  A defesa é o sha256 da ENTRADA daquele prefab
+//  (`tableRevisionOf`): a tela devolve o que leu, e o agente recusa
+//  quando aquela caixa mudou. É o mesmo papel do `appliedSha` da
+//  biblioteca de plugins (library.ts:498) — e o mesmo motivo: um
+//  estado do disco que ninguém conferiu é um estado que alguém
+//  sobrescreve.
+//
+//  Ela já foi o sha do ARQUIVO, e isso estava errado de duas
+//  maneiras: o `save` copia as outras 110 caixas do disco de agora
+//  (logo duas telas em caixas diferentes nunca brigaram), e o
+//  próprio plugin reescreve o arquivo ao recarregar — o que fazia
+//  a SEGUNDA gravação da mesma caixa levar 409 sem ninguém ter
+//  tocado em nada. Ver `waitForRewrite` para a outra metade do
+//  conserto.
 //
 //  ####  2,53 MB NÃO CABEM NUMA RESPOSTA  ####
 //
@@ -73,13 +83,23 @@
 //  a faria parecer quebrada.
 // ============================================================
 
+import { stat } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
+
 import type { ItemRecord, ItemsRepository } from '../db/items-repository.js';
 import { ApiError } from '../http/error-response.js';
 import { toError } from '../util.js';
-import { backupPluginConfig, readPluginConfig, writePluginConfig } from './plugin-config.js';
+import {
+  backupPluginConfig,
+  pluginConfigPath,
+  readPluginConfig,
+  writePluginConfig,
+} from './plugin-config.js';
+import { reloadFailed } from './plugins.js';
 import { sha256Of } from './plugin-metadata.js';
 import {
   backupPluginDataFile,
+  pluginDataPath,
   readPluginDataFile,
   writePluginDataFile,
 } from './data-files.js';
@@ -170,6 +190,66 @@ export interface BetterLootItemSettings {
   readonly maxBlueprints: number;
   readonly bonusItemsCountToTotal: boolean;
   readonly guaranteedItemsCountToTotal: boolean;
+}
+
+// ------------------------------------------------------------
+//  Os PERFIS — o `LootGroups.json`
+// ------------------------------------------------------------
+//
+//  ####  É O QUE O LOOTY CHAMA DE "LOOT PROFILE"  ####
+//
+//  Não é abstração de tela: um perfil é uma entrada do
+//  `LootGroups.json`, a classe `LootProfile` do plugin
+//  (`BetterLoot.cs:1137`), com três campos e nada mais — `Enabled?`,
+//  `Guaranteed Items` e `Item List`.
+//
+//  ####  O PERFIL NÃO SABE EM QUE CAIXA ELE ENTRA  ####
+//
+//  Quem sabe é a CAIXA, no campo `Loot Profiles` do prefab lá no
+//  `LootTables.json` (o `BetterLootProfileLink` abaixo). São dois
+//  arquivos, e a associação mora no segundo. Por isso apagar um
+//  perfil não limpa nada sozinho: as caixas continuam pedindo um
+//  nome que não existe mais, e o plugin só resmunga no log
+//  (`:1031`) e ignora. Ver `deleteProfile`.
+//
+//  ####  E A SOMA DAS PROBABILIDADES TEM DE DAR 100  ####
+//
+//  Se não der, o plugin REBALANCEIA sozinho no próximo load
+//  (`:600`) e o admin vê números diferentes dos que digitou. A tela
+//  precisa avisar antes; recusar seria pior, porque o meio de uma
+//  edição é um lugar legítimo para a soma estar errada.
+
+/** Um item dentro de um perfil: uma entrada de caixa, com peso. */
+export interface BetterLootProfileItem extends BetterLootEntry {
+  /** O peso dentro do perfil, de 1 a 100. A soma deve dar 100. */
+  readonly probability: number;
+}
+
+/** A linha da lista de perfis. */
+export interface BetterLootProfileSummary {
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly itemCount: number;
+  readonly guaranteedCount: number;
+  /** A soma das probabilidades. Diferente de 100, o plugin rebalanceia. */
+  readonly probabilitySum: number;
+  /**
+   * Os prefabs que pedem este perfil, do `LootTables.json`.
+   *
+   * É o que a tela mostra antes de apagar. O Looty não diz isto —
+   * ele apaga e desfaz a associação em silêncio.
+   */
+  readonly usedBy: readonly string[];
+  /** A impressão DESTE perfil. É o que o PUT quer de volta. */
+  readonly revision: string;
+}
+
+/** Um perfil inteiro. */
+export interface BetterLootProfile {
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly guaranteed: readonly BetterLootGuaranteedEntry[];
+  readonly items: readonly BetterLootProfileItem[];
 }
 
 /** Um grupo de `LootGroups.json` associado a uma caixa. */
@@ -894,8 +974,375 @@ export function parseLootTables(text: string, where: string): LootTablesFile {
 }
 
 // ------------------------------------------------------------
+//  O `LootGroups.json`, aberto
+// ------------------------------------------------------------
+
+const KEY_GROUPS = 'Loot Groups';
+const KEY_GROUP_ENABLED = 'Enabled?';
+const KEY_ITEM_LIST = 'Item List';
+const KEY_ITEM_PROBABILITY = 'Item Probability (1-100)';
+const KEY_ITEM_AMOUNT = 'Item Amount';
+
+/** O `LootGroups.json` lido. */
+export interface LootGroupsFile {
+  readonly revision: string;
+  /** `{ "<nome>": {...} }`, cru. */
+  readonly groups: Record<string, RawObject>;
+  /** A raiz inteira, para preservar o que não conhecemos ao gravar. */
+  readonly root: RawObject;
+}
+
+/**
+ * O arquivo vazio, para quando ele ainda não existe.
+ *
+ * ####  ELE NASCE DA GENTE, E ISSO É DIFERENTE DA TABELA  ####
+ *
+ * O `LootTables.json` o plugin gera sozinho varrendo o mundo — se
+ * não existe, o admin precisa subir o servidor uma vez, e o agente
+ * diz isso. O `LootGroups.json` não: ele é só a lista de perfis, e
+ * uma lista vazia é um estado legítimo. Criar o primeiro perfil de
+ * um servidor que nunca carregou o plugin tem de funcionar.
+ */
+function emptyLootGroups(): LootGroupsFile {
+  const root: RawObject = { [KEY_GROUPS]: {} };
+
+  return { revision: sha256Of(Buffer.from('', 'utf8')), groups: {}, root };
+}
+
+/** @throws {ApiError} 500 quando o arquivo existe e não é o esperado. */
+export function parseLootGroups(text: string, where: string): LootGroupsFile {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new ApiError(
+      'BETTERLOOT_INVALID_FILE',
+      `${where} não é um JSON válido: ${error instanceof Error ? error.message : String(error)}. ` +
+        'Nada foi alterado.',
+      500,
+    );
+  }
+
+  const root = asObject(parsed);
+  const groups = asObject(root?.[KEY_GROUPS]);
+
+  if (root === null || groups === null) {
+    throw new ApiError(
+      'BETTERLOOT_INVALID_FILE',
+      `${where} não tem o objeto "${KEY_GROUPS}" que o BetterLoot escreve. Ou o arquivo é de ` +
+        'outra coisa, ou ele foi editado à mão. Nada foi alterado.',
+      500,
+    );
+  }
+
+  const byName: Record<string, RawObject> = {};
+
+  for (const [name, value] of Object.entries(groups)) {
+    const group = asObject(value);
+
+    if (group !== null) {
+      byName[name] = group;
+    }
+  }
+
+  return { revision: sha256Of(Buffer.from(text, 'utf8')), groups: byName, root };
+}
+
+/** A revisão de UM perfil. O mesmo motivo do `tableRevisionOf`. */
+export function profileRevisionOf(raw: RawObject | null): string {
+  return sha256Of(Buffer.from(JSON.stringify(raw ?? {}), 'utf8'));
+}
+
+/**
+ * As probabilidades de um perfil, somadas.
+ *
+ * Sai do CRU porque a lista precisa dela sem montar cada item — são
+ * 100 perfis possíveis, e cada um com o seu catálogo.
+ */
+function probabilitySumOf(raw: RawObject): number {
+  const items = asObject(raw[KEY_ITEM_LIST]);
+
+  if (items === null) {
+    return 0;
+  }
+
+  let sum = 0;
+
+  for (const value of Object.values(items)) {
+    sum += asNumber(asObject(value)?.[KEY_ITEM_PROBABILITY], 0);
+  }
+
+  // Duas casas: a soma de decimais em ponto flutuante produz
+  // 99.99999999999999, e a tela mostraria "incompleto" para um
+  // perfil que está exato.
+  return Math.round(sum * 100) / 100;
+}
+
+function toProfile(
+  name: string,
+  raw: RawObject,
+  catalog: ReadonlyMap<string, ItemRecord>,
+): BetterLootProfile {
+  const items = asObject(raw[KEY_ITEM_LIST]) ?? {};
+
+  return {
+    name,
+    // O plugin trata a ausência como LIGADO (`public bool Enabled =
+    // true`), e a tela precisa mostrar o mesmo que o jogo faz.
+    enabled: asBoolean(raw[KEY_GROUP_ENABLED], true),
+    guaranteed: toGuaranteed(raw[KEY_GUARANTEED], catalog),
+    items: Object.entries(items).map(([key, value]) => {
+      const item = asObject(value) ?? {};
+
+      // O item do perfil é uma entrada de caixa embrulhada: o que
+      // está em `Item Amount` tem a MESMA forma de uma entrada de
+      // `Ungrouped Items`. Por isso o `toEntries` é reaproveitado
+      // inteiro — um segundo leitor divergiria do primeiro na
+      // primeira vez que o plugin mudasse um campo.
+      const [entry] = toEntries({ [key]: asObject(item[KEY_ITEM_AMOUNT]) ?? {} }, catalog);
+
+      return {
+        ...(entry as BetterLootEntry),
+        probability: asNumber(item[KEY_ITEM_PROBABILITY], 0),
+      };
+    }),
+  };
+}
+
+/**
+ * O perfil da tela, aplicado sobre o perfil cru.
+ *
+ * PRESERVA o que a tela não edita — a mesma regra do `applyTable`,
+ * e pelo mesmo motivo: o `scanEntry` também passa por aqui.
+ */
+export function applyProfile(previous: RawObject | null, profile: BetterLootProfile): RawObject {
+  const before = previous ?? {};
+  const beforeItems = asObject(before[KEY_ITEM_LIST]);
+  const items: RawObject = {};
+
+  for (const item of profile.items) {
+    const beforeItem = asObject(beforeItems?.[item.key]);
+
+    items[item.key] = {
+      ...(beforeItem ?? {}),
+      [KEY_ITEM_PROBABILITY]: item.probability,
+      [KEY_ITEM_AMOUNT]: applyEntry(asObject(beforeItem?.[KEY_ITEM_AMOUNT]), item),
+    };
+  }
+
+  return {
+    ...before,
+    [KEY_GROUP_ENABLED]: profile.enabled,
+    [KEY_GUARANTEED]: applyGuaranteed(asObject(before[KEY_GUARANTEED]), profile.guaranteed),
+    [KEY_ITEM_LIST]: items,
+  };
+}
+
+/**
+ * Em quais caixas cada perfil está.
+ *
+ * Uma varredura só do `LootTables.json` inteiro, e não uma por
+ * perfil: são 111 prefabs, e perguntar perfil a perfil seria ler o
+ * mesmo objeto cem vezes.
+ */
+function usageOfProfiles(tables: Record<string, RawObject>): ReadonlyMap<string, string[]> {
+  const usage = new Map<string, string[]>();
+
+  for (const [prefab, raw] of Object.entries(tables)) {
+    for (const link of toProfiles(raw[KEY_PROFILES])) {
+      if (link.name === '') {
+        continue;
+      }
+
+      const list = usage.get(link.name);
+
+      if (list === undefined) {
+        usage.set(link.name, [prefab]);
+      } else {
+        list.push(prefab);
+      }
+    }
+  }
+
+  return usage;
+}
+
+/**
+ * A revisão de UMA CAIXA.
+ *
+ * ####  POR QUE NÃO É O SHA DO ARQUIVO  ####
+ *
+ * O `save` faz merge POR PREFAB: ele relê o disco na hora de
+ * gravar e troca só a caixa editada, preservando as outras 110.
+ * Duas telas em caixas DIFERENTES nunca se atropelaram — e com a
+ * revisão do arquivo inteiro a segunda levava 409 assim mesmo,
+ * porque o arquivo mudou.
+ *
+ * O conflito que existe de verdade é um só: alguém mexeu NESTA
+ * caixa entre a hora em que a tela a abriu e a hora em que ela
+ * gravou. É esse que este sha vê.
+ *
+ * E ele é o que faz a reescrita do plugin parar de virar conflito:
+ * o `scanEntry` mexe em campos de muitas caixas ao validar, mas se
+ * não mexeu na que está aberta, a revisão dela continua valendo.
+ *
+ * Caixa que ainda não existe tem revisão do objeto vazio — e não
+ * `null`: assim "a caixa apareceu no disco depois que abri" também
+ * é um conflito, e não um salvamento silencioso por cima.
+ */
+export function tableRevisionOf(raw: RawObject | null): string {
+  return sha256Of(Buffer.from(JSON.stringify(raw ?? {}), 'utf8'));
+}
+
+// ------------------------------------------------------------
+//  A espera pela reescrita do plugin
+// ------------------------------------------------------------
+//
+// ####  O `oxide.reload` VOLTA ANTES DE O PLUGIN TER RODADO  ####
+//
+// `rcon.send('oxide.reload BetterLoot')` responde quando o comando
+// é DESPACHADO. O Oxide só então descarrega, recompila, chama
+// `Init` — e é aí que o `scanEntry` valida as 6.824 entradas e
+// REESCREVE o `LootTables.json` (`BetterLoot.cs:780`, não
+// condicional).
+//
+// Sem esperar por isso, a releitura do `save` pega o arquivo que
+// NÓS gravamos, e a revisão que a tela guarda nasce velha: um
+// instante depois o disco é outro. O sintoma era o 409 na SEGUNDA
+// gravação da mesma caixa, sem ninguém ter editado nada por fora.
+//
+// A espera é por sinal do disco, e não por tempo fixo: um `sleep`
+// de dois segundos seria curto num servidor carregado e longo em
+// todos os outros.
+
+/**
+ * Os três tempos da espera.
+ *
+ * ####  ELA DESISTE DE DUAS MANEIRAS, E DE PROPÓSITO  ####
+ *
+ * `graceMs` é a paciência ATÉ VER a primeira mudança: se o disco
+ * não mexeu nesse tempo, o plugin não vai reescrever (não compilou,
+ * a versão não reescreve, o servidor caiu no meio) e continuar
+ * esperando não traria nada. `timeoutMs` é o teto de tudo, para o
+ * caso de um arquivo que não para de mudar.
+ *
+ * Esperar aqui é conveniência: a gravação JÁ ACONTECEU quando se
+ * chega neste ponto, e o pior que o teto causa é a tela mostrar a
+ * caixa um instante antes de o plugin normalizá-la. Travar a
+ * resposta por causa disso seria trocar um conflito falso por uma
+ * tela pendurada.
+ */
+export interface RewriteWait {
+  /** De quanto em quanto tempo o disco é perguntado. */
+  readonly pollMs: number;
+  /** Quanto tempo parado já conta como "acabou de escrever". */
+  readonly quietMs: number;
+  /** Quanto esperar pela PRIMEIRA mudança antes de desistir. */
+  readonly graceMs: number;
+  /** O teto de tudo. */
+  readonly timeoutMs: number;
+}
+
+/**
+ * Os tempos de produção.
+ *
+ * O `graceMs` de 2 s é o que separa "o Oxide ainda está
+ * recompilando" de "não vem": o reload do BetterLoot no `server01`
+ * leva menos que isso para começar a escrever, e um recompilar mais
+ * lento que 2 s custa apenas a tela mostrar a caixa antes da
+ * normalização — a revisão POR CAIXA já impede que isso vire
+ * conflito na gravação seguinte.
+ */
+const PRODUCTION_REWRITE_WAIT: RewriteWait = {
+  pollMs: 100,
+  quietMs: 300,
+  graceMs: 2_000,
+  timeoutMs: 8_000,
+};
+
+/** O que identifica uma versão do arquivo sem lê-lo inteiro. */
+interface FileMark {
+  readonly mtimeMs: number;
+  readonly size: number;
+}
+
+async function markOf(path: string): Promise<FileMark | null> {
+  try {
+    const info = await stat(path);
+
+    return { mtimeMs: info.mtimeMs, size: info.size };
+  } catch {
+    // Sumiu no meio da reescrita, ou nunca esteve lá. Quem chama
+    // trata os dois como "ainda não deu para saber".
+    return null;
+  }
+}
+
+function sameMark(a: FileMark, b: FileMark): boolean {
+  return a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+/**
+ * Espera o plugin reescrever o arquivo, e parar.
+ *
+ * Volta assim que o disco MUDOU em relação ao que gravamos e ficou
+ * quieto por `REWRITE_QUIET_MS` — ou no teto, o que vier antes. A
+ * exigência de ver a mudança é o que impede voltar cedo demais no
+ * intervalo entre o `oxide.reload` e o `Init`.
+ */
+async function waitForRewrite(
+  path: string,
+  written: FileMark | null,
+  wait: RewriteWait,
+): Promise<void> {
+  if (written === null || wait.timeoutMs <= 0) {
+    return;
+  }
+
+  const started = Date.now();
+  const deadline = started + wait.timeoutMs;
+  let last = written;
+  let changedAt: number | null = null;
+
+  while (Date.now() < deadline) {
+    await delay(wait.pollMs);
+
+    const now = await markOf(path);
+
+    if (now !== null && !sameMark(now, last)) {
+      last = now;
+      changedAt = Date.now();
+
+      continue;
+    }
+
+    if (changedAt === null) {
+      // Ainda não vimos o plugin mexer. Passada a paciência, ele
+      // não vai mexer — e o disco já tem o que gravamos.
+      if (Date.now() - started >= wait.graceMs) {
+        return;
+      }
+
+      continue;
+    }
+
+    if (Date.now() - changedAt >= wait.quietMs) {
+      return;
+    }
+  }
+}
+
+// ------------------------------------------------------------
 //  O serviço
 // ------------------------------------------------------------
+
+/** As três pastas de um servidor que este editor toca. */
+export interface BetterLootPaths {
+  readonly oxideConfigDir: string;
+  readonly oxideDataDir: string;
+  readonly backupsDir: string;
+}
 
 /** O que o editor precisa saber dos servidores. E nada além. */
 export interface BetterLootServers {
@@ -922,6 +1369,15 @@ export interface BetterLootDeps {
    * para editar loot — que é justamente o trabalho de madrugada.
    */
   readonly reload: (serverId: string) => Promise<{ readonly sent: boolean; readonly output: string | null }>;
+  /**
+   * Quanto esperar o plugin reescrever o arquivo depois do reload.
+   *
+   * Existe para o TESTE, e só: sem um Oxide de verdade do outro
+   * lado ninguém reescreve nada, e cada gravação pagaria a espera
+   * inteira à toa. Ver `waitForRewrite` para o que cada número
+   * significa; omitido, valem os de produção.
+   */
+  readonly rewriteWait?: RewriteWait;
 }
 
 /** O que o `saveGlobals` devolve. Os globais vêm RELIDOS do disco. */
@@ -938,7 +1394,10 @@ export interface BetterLootGlobalsSaveResult {
 
 /** O que o `save` devolve. A tabela vem RELIDA do disco. */
 export interface BetterLootSaveResult {
-  readonly revision: string;
+  /** A revisão DESTA CAIXA, já com o que o plugin reescreveu. */
+  readonly tableRevision: string;
+  /** A do arquivo inteiro — para a lista, e não para gravar. */
+  readonly fileRevision: string;
   readonly table: BetterLootTable;
   /** Onde ficou a cópia do arquivo anterior. `null` = não havia. */
   readonly backup: string | null;
@@ -951,6 +1410,10 @@ export class BetterLootEditor {
 
   constructor(deps: BetterLootDeps) {
     this.#deps = deps;
+  }
+
+  #rewriteWait(): RewriteWait {
+    return this.#deps.rewriteWait ?? PRODUCTION_REWRITE_WAIT;
   }
 
   /** A lista de caixas, os globais e a blacklist daquele servidor. */
@@ -994,11 +1457,18 @@ export class BetterLootEditor {
     };
   }
 
-  /** Uma caixa inteira. */
+  /**
+   * Uma caixa inteira.
+   *
+   * A `tableRevision` que sai daqui é a que o PUT quer de volta —
+   * ver `tableRevisionOf`. A do arquivo inteiro fica no `status`,
+   * onde ela ainda diz alguma coisa (a lista mudou), e não serve
+   * mais de trava para gravar caixa.
+   */
   async table(
     serverId: string,
     prefab: string,
-  ): Promise<{ readonly revision: string; readonly table: BetterLootTable }> {
+  ): Promise<{ readonly tableRevision: string; readonly table: BetterLootTable }> {
     const paths = this.#pathsOf(serverId);
     const file = await readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE);
 
@@ -1018,7 +1488,7 @@ export class BetterLootEditor {
       );
     }
 
-    return { revision: parsed.revision, table: toTable(prefab, raw, this.#catalog()) };
+    return { tableRevision: tableRevisionOf(raw), table: toTable(prefab, raw, this.#catalog()) };
   }
 
   /**
@@ -1049,16 +1519,23 @@ export class BetterLootEditor {
 
     // ####  A REVISÃO É CONFERIDA ANTES DE TUDO  ####
     //
-    // Salvar substitui o arquivo INTEIRO. Sem esta conferência,
-    // duas telas abertas na mesma caixa fariam a segunda apagar o
-    // trabalho da primeira em silêncio — e "em silêncio" é o
-    // problema, não "apagar".
-    if (input.baseRevision !== null && input.baseRevision !== current.revision) {
+    // Salvar substitui o arquivo inteiro, mas o CONTEÚDO desta
+    // caixa é a única parte que esta gravação decide — o resto é
+    // copiado do disco de agora, logo abaixo. Por isso a conferência
+    // é da caixa, e não do arquivo: duas telas na mesma caixa
+    // continuam sendo pegas, e duas telas em caixas diferentes
+    // param de brigar por nada.
+    //
+    // Ela também é o que faz a reescrita do próprio plugin deixar
+    // de virar conflito. Ver `tableRevisionOf` e `waitForRewrite`.
+    const currentRevision = tableRevisionOf(current.tables[input.table.prefab] ?? null);
+
+    if (input.baseRevision !== null && input.baseRevision !== currentRevision) {
       throw new ApiError(
         'BETTERLOOT_STALE_REVISION',
-        'O LootTables.json mudou no disco depois que esta tela o abriu — outra pessoa gravou, ou ' +
-          'o próprio BetterLoot reescreveu o arquivo ao recarregar. Nada foi alterado: recarregue ' +
-          'a caixa e refaça a edição em cima do que está lá.',
+        `A caixa "${input.table.prefab}" mudou no disco depois que esta tela a abriu — outra ` +
+          'pessoa gravou, ou ela foi editada à mão. Nada foi alterado: recarregue a caixa e ' +
+          'refaça a edição em cima do que está lá.',
         409,
       );
     }
@@ -1096,7 +1573,20 @@ export class BetterLootEditor {
 
     await writePluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE, text);
 
+    const tablesPath = pluginDataPath(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE);
+    const written = await markOf(tablesPath);
+
     const reload = await this.#deps.reload(serverId);
+
+    // ####  ESPERAR O PLUGIN TERMINAR É PARTE DA GRAVAÇÃO  ####
+    //
+    // Só quando ele mandou o reload e o plugin compilou: servidor
+    // parado não reescreve nada, e plugin que não compilou também
+    // não. Esperar nesses dois casos seria segurar a tela por seis
+    // segundos para reler o que já está na mão.
+    if (reload.sent && !reloadFailed(reload.output)) {
+      await waitForRewrite(tablesPath, written, this.#rewriteWait());
+    }
 
     // ####  A RESPOSTA VEM DO DISCO, E NÃO DO QUE ENVIAMOS  ####
     //
@@ -1122,7 +1612,11 @@ export class BetterLootEditor {
     const raw = reread.tables[input.table.prefab] ?? null;
 
     return {
-      revision: reread.revision,
+      // A revisão da caixa COMO ELA FICOU — depois do plugin. É
+      // ela que o próximo "Gravar" desta mesma tela devolve, e é
+      // por isso que a espera acima não é opcional.
+      tableRevision: tableRevisionOf(raw),
+      fileRevision: reread.revision,
       table:
         raw === null
           ? input.table
@@ -1131,6 +1625,342 @@ export class BetterLootEditor {
       reloaded: reload.sent,
       reloadOutput: reload.output,
     };
+  }
+
+  // ----------------------------------------------------------
+  //  Os PERFIS
+  // ----------------------------------------------------------
+
+  /**
+   * A lista de perfis daquele servidor, com o uso de cada um.
+   *
+   * ####  ELA LÊ OS DOIS ARQUIVOS  ####
+   *
+   * O perfil está no `LootGroups.json`; QUEM O USA está no
+   * `LootTables.json`. A tela precisa dos dois na mesma resposta
+   * porque a pergunta que ela faz — "posso apagar este?" — não cabe
+   * em nenhum dos arquivos sozinho.
+   */
+  async profiles(serverId: string): Promise<{
+    readonly configured: boolean;
+    readonly revision: string | null;
+    readonly profiles: readonly BetterLootProfileSummary[];
+  }> {
+    const paths = this.#pathsOf(serverId);
+
+    const [groupsFile, tablesFile] = await Promise.all([
+      readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE),
+      readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE),
+    ]);
+
+    // Arquivo ausente é lista vazia, e não erro: um servidor sem
+    // perfil nenhum é o estado normal de quem nunca criou um.
+    const parsed =
+      groupsFile === null
+        ? emptyLootGroups()
+        : parseLootGroups(groupsFile.text, this.#whereGroups(serverId));
+
+    const usage =
+      tablesFile === null
+        ? new Map<string, string[]>()
+        : usageOfProfiles(parseLootTables(tablesFile.text, this.#whereTables(serverId)).tables);
+
+    return {
+      configured: groupsFile !== null,
+      revision: groupsFile === null ? null : parsed.revision,
+      profiles: Object.entries(parsed.groups).map(([name, raw]) => ({
+        name,
+        enabled: asBoolean(raw[KEY_GROUP_ENABLED], true),
+        itemCount: Object.keys(asObject(raw[KEY_ITEM_LIST]) ?? {}).length,
+        guaranteedCount: Object.keys(asObject(raw[KEY_GUARANTEED]) ?? {}).length,
+        probabilitySum: probabilitySumOf(raw),
+        usedBy: usage.get(name) ?? [],
+        revision: profileRevisionOf(raw),
+      })),
+    };
+  }
+
+  /** Um perfil inteiro. */
+  async profile(
+    serverId: string,
+    name: string,
+  ): Promise<{ readonly revision: string; readonly profile: BetterLootProfile }> {
+    const paths = this.#pathsOf(serverId);
+    const file = await readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+
+    const parsed =
+      file === null ? emptyLootGroups() : parseLootGroups(file.text, this.#whereGroups(serverId));
+
+    const raw = parsed.groups[name];
+
+    if (raw === undefined) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_NOT_FOUND',
+        `O perfil de loot "${name}" não está no LootGroups.json de "${serverId}".`,
+        404,
+      );
+    }
+
+    return { revision: profileRevisionOf(raw), profile: toProfile(name, raw, this.#catalog()) };
+  }
+
+  /**
+   * Cria ou grava um perfil.
+   *
+   * `baseRevision: null` = a tela está CRIANDO. Se já houver um
+   * perfil com esse nome, é recusado — dois admins criando "armas"
+   * ao mesmo tempo não podem virar um sobrescrevendo o outro.
+   */
+  async saveProfile(
+    serverId: string,
+    input: { readonly baseRevision: string | null; readonly profile: BetterLootProfile },
+  ): Promise<{
+    readonly revision: string;
+    readonly profile: BetterLootProfile;
+    readonly backup: string | null;
+    readonly reloaded: boolean;
+    readonly reloadOutput: string | null;
+  }> {
+    const paths = this.#pathsOf(serverId);
+    const file = await readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+
+    const current =
+      file === null ? emptyLootGroups() : parseLootGroups(file.text, this.#whereGroups(serverId));
+
+    const before = current.groups[input.profile.name] ?? null;
+
+    if (input.baseRevision === null && before !== null) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_EXISTS',
+        `Já existe um perfil de loot chamado "${input.profile.name}" neste servidor. Escolha ` +
+          'outro nome, ou abra o que está lá para editá-lo. Nada foi alterado.',
+        409,
+      );
+    }
+
+    if (input.baseRevision !== null && input.baseRevision !== profileRevisionOf(before)) {
+      throw new ApiError(
+        'BETTERLOOT_STALE_REVISION',
+        `O perfil "${input.profile.name}" mudou no disco depois que esta tela o abriu — outra ` +
+          'pessoa gravou, ou o próprio BetterLoot o rebalanceou ao carregar. Nada foi alterado: ' +
+          'recarregue o perfil e refaça a edição em cima do que está lá.',
+        409,
+      );
+    }
+
+    const next = {
+      ...current.root,
+      [KEY_GROUPS]: {
+        ...current.groups,
+        [input.profile.name]: applyProfile(before, input.profile),
+      },
+    };
+
+    return this.#writeGroups(serverId, paths, next, input.profile.name);
+  }
+
+  /**
+   * Apaga um perfil.
+   *
+   * ####  APAGAR SEM OLHAR AS CAIXAS É DEIXAR LIXO NO DISCO  ####
+   *
+   * A associação mora no `LootTables.json`, e o perfil apagado
+   * continua sendo pedido lá. O plugin resmunga no log e ignora — o
+   * admin só descobre que perdeu o ajuste quando abre a caixa.
+   *
+   * Por isso o `detach` é OBRIGATÓRIO quando o perfil está em uso:
+   * sem ele, a resposta é 409 com os nomes das caixas, para a tela
+   * poder perguntar antes. É o que o Looty não faz.
+   */
+  async deleteProfile(
+    serverId: string,
+    input: { readonly name: string; readonly detach: boolean },
+  ): Promise<{
+    readonly detached: readonly string[];
+    readonly backup: string | null;
+    readonly reloaded: boolean;
+    readonly reloadOutput: string | null;
+  }> {
+    const paths = this.#pathsOf(serverId);
+    const file = await readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+
+    const current =
+      file === null ? emptyLootGroups() : parseLootGroups(file.text, this.#whereGroups(serverId));
+
+    if (current.groups[input.name] === undefined) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_NOT_FOUND',
+        `O perfil de loot "${input.name}" não está no LootGroups.json de "${serverId}".`,
+        404,
+      );
+    }
+
+    const tablesFile = await readPluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+    );
+
+    const tables =
+      tablesFile === null
+        ? null
+        : parseLootTables(tablesFile.text, this.#whereTables(serverId));
+
+    const usedBy = tables === null ? [] : (usageOfProfiles(tables.tables).get(input.name) ?? []);
+
+    if (usedBy.length > 0 && !input.detach) {
+      throw new ApiError(
+        'BETTERLOOT_PROFILE_IN_USE',
+        `O perfil "${input.name}" está em ${String(usedBy.length)} caixa(s): ` +
+          `${usedBy.map((prefab) => shortPrefabOf(prefab)).join(', ')}. Apagá-lo deixaria essas ` +
+          'caixas pedindo um perfil que não existe — o BetterLoot as ignora e o ajuste se perde. ' +
+          'Nada foi alterado.',
+        409,
+      );
+    }
+
+    const groups = { ...current.groups };
+
+    delete groups[input.name];
+
+    const written = await this.#writeGroups(
+      serverId,
+      paths,
+      { ...current.root, [KEY_GROUPS]: groups },
+      input.name,
+      // Um reload só no fim: as caixas ainda vão ser reescritas
+      // logo abaixo, e recarregar duas vezes seguidas faria o
+      // mundo perder contêineres duas vezes (Docs/CustomItem/07 §1).
+      { reload: usedBy.length === 0 },
+    );
+
+    if (usedBy.length === 0 || tables === null) {
+      return {
+        detached: [],
+        backup: written.backup,
+        reloaded: written.reloaded,
+        reloadOutput: written.reloadOutput,
+      };
+    }
+
+    // ####  E AGORA AS CAIXAS  ####
+    //
+    // Tirar o nome de cada `Loot Profiles` é o que faz "apaguei o
+    // perfil" ser verdade no jogo, e não só no arquivo dele.
+    const nextTables: Record<string, RawObject> = { ...tables.tables };
+
+    for (const prefab of usedBy) {
+      const raw = nextTables[prefab];
+
+      if (raw === undefined) {
+        continue;
+      }
+
+      nextTables[prefab] = {
+        ...raw,
+        [KEY_PROFILES]: toProfiles(raw[KEY_PROFILES])
+          .filter((link) => link.name !== input.name)
+          .map((link) => ({
+            'Group Enabled?': link.enabled,
+            'Loot Profile Name': link.name,
+            'Loot Profile Probability (1% - 100%)': link.probability,
+            'Max Items From Profile (0 = unlimited)': link.maxItems,
+          })),
+      };
+    }
+
+    const tablesBackup = await backupPluginDataFile(
+      paths.oxideDataDir,
+      paths.backupsDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+      Date.now(),
+    );
+
+    await writePluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+      JSON.stringify({ ...tables.root, [KEY_TABLES]: nextTables }, null, 2),
+    );
+
+    const reload = await this.#deps.reload(serverId);
+
+    return {
+      detached: usedBy,
+      backup: tablesBackup ?? written.backup,
+      reloaded: reload.sent,
+      reloadOutput: reload.output,
+    };
+  }
+
+  /** Grava o `LootGroups.json`, recarrega e relê. */
+  async #writeGroups(
+    serverId: string,
+    paths: BetterLootPaths,
+    next: RawObject,
+    name: string,
+    options?: { readonly reload: boolean },
+  ): Promise<{
+    readonly revision: string;
+    readonly profile: BetterLootProfile;
+    readonly backup: string | null;
+    readonly reloaded: boolean;
+    readonly reloadOutput: string | null;
+  }> {
+    const backup = await backupPluginDataFile(
+      paths.oxideDataDir,
+      paths.backupsDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_GROUPS_FILE,
+      Date.now(),
+    );
+
+    await writePluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_GROUPS_FILE,
+      JSON.stringify(next, null, 2),
+    );
+
+    const groupsPath = pluginDataPath(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+    const written = await markOf(groupsPath);
+
+    const reload =
+      options?.reload === false
+        ? { sent: false, output: null }
+        : await this.#deps.reload(serverId);
+
+    // O plugin valida os perfis ao carregar e reescreve o arquivo
+    // (`BetterLoot.cs:566-634`) — inclusive REBALANCEANDO as
+    // probabilidades que não somam 100. A mesma corrida da tabela.
+    if (reload.sent && !reloadFailed(reload.output)) {
+      await waitForRewrite(groupsPath, written, this.#rewriteWait());
+    }
+
+    const after = await readPluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+
+    const reread =
+      after === null ? emptyLootGroups() : parseLootGroups(after.text, this.#whereGroups(serverId));
+
+    const raw = reread.groups[name] ?? null;
+
+    return {
+      revision: profileRevisionOf(raw),
+      // A resposta vem do disco: se o plugin rebalanceou, é o
+      // rebalanceado que a tela mostra. Ver o `applyTable`.
+      profile:
+        raw === null
+          ? { name, enabled: true, guaranteed: [], items: [] }
+          : toProfile(name, raw, this.#catalog()),
+      backup,
+      reloaded: reload.sent,
+      reloadOutput: reload.output,
+    };
+  }
+
+  #whereGroups(serverId: string): string {
+    return `o LootGroups.json do BetterLoot em "${serverId}"`;
   }
 
   /**
@@ -1203,7 +2033,17 @@ export class BetterLootEditor {
 
     await writePluginConfig(paths.oxideConfigDir, BETTERLOOT_PLUGIN, text);
 
+    const configPath = pluginConfigPath(paths.oxideConfigDir, BETTERLOOT_PLUGIN);
+    const written = await markOf(configPath);
+
     const reload = await this.#deps.reload(serverId);
+
+    // O `MaybeUpdateConfigDict` completa a configuração e a grava
+    // de volta DEPOIS que o reload já respondeu — a mesma corrida
+    // da tabela, no outro arquivo. Ver `waitForRewrite`.
+    if (reload.sent && !reloadFailed(reload.output)) {
+      await waitForRewrite(configPath, written, this.#rewriteWait());
+    }
 
     // ####  A RESPOSTA VEM DO DISCO  ####
     //
@@ -1264,11 +2104,7 @@ export class BetterLootEditor {
     );
   }
 
-  #pathsOf(serverId: string): {
-    readonly oxideConfigDir: string;
-    readonly oxideDataDir: string;
-    readonly backupsDir: string;
-  } {
+  #pathsOf(serverId: string): BetterLootPaths {
     const config = this.#deps.servers.configOf(serverId);
 
     if (config === null) {

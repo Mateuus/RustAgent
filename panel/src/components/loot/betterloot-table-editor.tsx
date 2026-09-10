@@ -42,7 +42,7 @@
 //  "Gravar".
 // ============================================================
 
-import { AlertTriangle, Trash2 } from 'lucide-react';
+import { AlertTriangle, Ban, Trash2 } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
 
 import {
@@ -75,9 +75,31 @@ interface BetterLootTableEditorProps {
   readonly onChange: (next: BetterLootTable) => void;
   /** Trava tudo enquanto o PUT está no ar. */
   readonly busy: boolean;
+  /**
+   * Marca este item como lixo NO SERVIDOR INTEIRO.
+   *
+   * ####  É UMA AÇÃO DE OUTRO ALCANCE, E ELA DIZ ISSO  ####
+   *
+   * A lixeira ao lado tira o item DESTA caixa; este botão diz "isto
+   * é lixo aqui", e a partir daí o "Remover lixo" o tira de
+   * qualquer caixa que o admin abrir. Confundir os dois seria dar
+   * ao mesmo gesto dois alcances.
+   *
+   * O item NÃO sai da caixa ao ser marcado — é o que o Looty também
+   * faz, e é o certo: marcar é opinião, tirar é edição.
+   */
+  readonly onMarkJunk: (shortname: string) => void;
+  /** Os shortnames já marcados. O botão some para eles. */
+  readonly junk: readonly string[];
 }
 
-export function BetterLootTableEditor({ table, onChange, busy }: BetterLootTableEditorProps) {
+export function BetterLootTableEditor({
+  table,
+  onChange,
+  busy,
+  onMarkJunk,
+  junk,
+}: BetterLootTableEditorProps) {
   const chances = useMemo(
     () => chancesOf(table.items, { flat: table.ignoreRarityBias }),
     [table.items, table.ignoreRarityBias],
@@ -386,6 +408,8 @@ export function BetterLootTableEditor({ table, onChange, busy }: BetterLootTable
                   }
                   flat={chances.flat}
                   disabled={busy}
+                  isJunk={junk.includes(entry.shortname)}
+                  onMarkJunk={() => onMarkJunk(entry.shortname)}
                   onChange={(next) =>
                     onChange({
                       ...table,
@@ -501,14 +525,18 @@ function EntryRow({
   probability,
   flat,
   disabled,
+  isJunk,
   onChange,
+  onMarkJunk,
   onRemove,
 }: {
   readonly entry: BetterLootEntry;
   readonly probability: number | null;
   readonly flat: boolean;
   readonly disabled: boolean;
+  readonly isJunk: boolean;
   readonly onChange: (next: BetterLootEntry) => void;
+  readonly onMarkJunk: () => void;
   readonly onRemove: () => void;
 }) {
   const marked = entry.skinId !== '' && entry.skinId !== '0';
@@ -575,6 +603,30 @@ function EntryRow({
           onChange={(max) => onChange({ ...entry, max, min: Math.min(max, entry.min) })}
         />
       </span>
+
+      {/* ####  MARCAR NÃO É TIRAR  ####
+          Este botão diz "isto é lixo neste servidor" e não mexe na
+          caixa; a lixeira ao lado tira o item daqui. Já marcado, ele
+          vira só um selo — repetir a marca não faria nada. */}
+      {isJunk ? (
+        <span
+          className="shrink-0 px-1 text-2xs uppercase tracking-wide text-muted"
+          title="Este item está na lista de lixo deste servidor"
+        >
+          lixo
+        </span>
+      ) : (
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label={`Marcar ${entry.shortname} como lixo neste servidor`}
+          title="Marcar como lixo neste servidor (não tira da caixa)"
+          onClick={onMarkJunk}
+          className="shrink-0 p-1 text-muted hover:text-amber disabled:opacity-40"
+        >
+          <Ban aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      )}
 
       <button
         type="button"

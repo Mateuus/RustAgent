@@ -6403,6 +6403,60 @@ CREATE TABLE dungeon_servers (
 );
 `;
 
+const BETTERLOOT_JUNK_SCHEMA = `
+-- ============================================================
+--  073  o que e "lixo" no loot deste servidor.
+--
+--  ####  O BETTERLOOT NAO CONHECE ESSA PALAVRA  ####
+--
+--  Medido em 09/09/2026: grep -i junk no BetterLoot.cs v4.4.0 da
+--  zero (fora o prefab scientistnpc_junkpile_pistol). "Junk" e
+--  ferramenta de CURADORIA do editor Looty, e nao campo de
+--  configuracao do plugin -- uma lista de itens que o admin
+--  considera lixo, e um botao que os tira da caixa aberta.
+--
+--  O que chega ao servidor e o RESULTADO -- a caixa sem eles --,
+--  nunca a lista. Por isso ela mora aqui, e nao no LootTables.json:
+--  o scanEntry reescreve aquele arquivo a cada load e apagaria
+--  qualquer campo nosso.
+--
+--  Ver Docs/CustomItem/08-ESTUDO-DO-LOOTY.md §3.
+--
+--  ####  E POR SERVIDOR, POR DECISAO DO DONO (09/09/2026)  ####
+--
+--  E o mesmo alcance do resto da aba de loot, onde tudo e "o disco
+--  DESTE servidor": o PvP e o PvE podem discordar sobre o que e
+--  lixo, e normalmente discordam.
+--
+--  ####  A TABELA GUARDA A DIVERGENCIA, E NAO A LISTA  ####
+--
+--  Os 31 itens padrao vivem no CODIGO
+--  (db/betterloot-junk-repository.ts), e nao aqui. Uma linha desta
+--  tabela diz uma de duas coisas:
+--
+--    active = 0 num shortname que E padrao  -> o admin o desligou
+--    active = 1 num shortname que NAO e     -> o admin o acrescentou
+--
+--  A lista que vale e (padroes - desligados) + acrescentados.
+--
+--  Semear as 31 linhas por servidor seria o contrario disto, e teria
+--  um custo especifico: o dia em que a lista padrao ganhasse um item
+--  novo, nenhum servidor ja cadastrado o receberia. Assim ela
+--  evolui com o codigo, e o que o admin decidiu continua de pe.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE betterloot_junk (
+  server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  shortname  TEXT NOT NULL,
+  active     INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (server_id, shortname)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6598,6 +6652,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 71, name: 'dungeon-entrance-facing', sql: DUNGEON_ENTRANCE_FACING_SCHEMA },
   // 09/09/2026: a masmorra deixa de nascer em todo servidor da rede.
   { id: 72, name: 'dungeon-servers', sql: DUNGEON_SERVERS_SCHEMA },
+  { id: 73, name: 'betterloot-junk', sql: BETTERLOOT_JUNK_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

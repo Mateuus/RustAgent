@@ -28,6 +28,7 @@ import type { BanList } from '../bans/service.js';
 import type { AgentConfig } from '../config.js';
 import type { CustomItemsRepository } from '../db/custom-items-repository.js';
 import type { LootRulesRepository } from '../db/loot-rules-repository.js';
+import type { BetterLootJunkRepository } from '../db/betterloot-junk-repository.js';
 import type { ItemsRepository } from '../db/items-repository.js';
 import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
@@ -149,6 +150,13 @@ export interface BuildServerOptions {
 
   /** O catálogo guardado. Ver db/items-repository.ts. */
   readonly items: ItemsRepository;
+  /**
+   * A lista de "lixo" do loot, por servidor.
+   *
+   * Ela e do agente, e nao do BetterLoot: o plugin nao conhece esse
+   * conceito. Ver a migracao 073 e o Docs/CustomItem/08 §3.
+   */
+  readonly betterLootJunk: BetterLootJunkRepository;
   /** Quem relê o catálogo do jogo. Ver game/item-catalog.ts. */
   readonly itemCatalog: ItemCatalog;
   /**
@@ -554,6 +562,9 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // catálogo sabe a raridade. Uma dependência a mais no boot
       // seria um lugar a mais para esquecer de ligar.
       registerBetterLootRoutes(api, {
+        // A lista de "lixo" e NOSSA, e nao do plugin: o BetterLoot
+        // nao conhece esse conceito. Ver a migracao 073.
+        junk: options.betterLootJunk,
         editor: new BetterLootEditor({
           servers: options.supervisor,
           items: options.items,

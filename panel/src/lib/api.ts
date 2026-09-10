@@ -2477,7 +2477,20 @@ export interface BetterLootStatusResponse {
 export interface BetterLootTableResponse {
   ok: true;
   serverId: string;
-  revision: string | null;
+  /**
+   * A impressão DESTA CAIXA. É ela que o PUT quer de volta.
+   *
+   * ####  ELA NÃO É A DO ARQUIVO, E A DIFERENÇA IMPORTA  ####
+   *
+   * O agente grava fazendo merge por caixa: as outras 110 saem do
+   * disco na hora da gravação. Só a caixa aberta pode entrar em
+   * conflito de verdade — e usar a impressão do arquivo inteiro
+   * fazia toda SEGUNDA gravação ser recusada, porque recarregar o
+   * plugin reescreve o arquivo sozinho.
+   */
+  tableRevision: string;
+  /** Só no PUT: a do arquivo inteiro, para a lista. */
+  revision?: string | null;
   table: BetterLootTable;
 }
 
@@ -2490,9 +2503,142 @@ export interface BetterLootTableResponse {
  * escreve não é o que fica.
  */
 export interface BetterLootSaveInput {
-  /** A revisão em que a tela abriu. `null` = a tela não viu nenhuma. */
+  /**
+   * O `tableRevision` com que a tela abriu ESTA CAIXA. `null` = a
+   * tela não viu nenhuma, e grava por cima do que houver.
+   */
   baseRevision: string | null;
   table: BetterLootTable;
+}
+
+
+// ------------------------------------------------------------
+//  OS PERFIS DE LOOT — o `LootGroups.json`
+// ------------------------------------------------------------
+//
+//  ####  É O QUE O LOOTY CHAMA DE "LOOT PROFILE"  ####
+//
+//  Não é abstração de tela: um perfil é uma entrada do
+//  `LootGroups.json`, OUTRO arquivo do BetterLoot. Ele agrupa itens
+//  com PESO próprio — ao contrário dos itens soltos de uma caixa,
+//  que saem por raridade do jogo.
+//
+//  ####  E O PERFIL NÃO SABE EM QUE CAIXA ELE ENTRA  ####
+//
+//  Quem sabe é a caixa, no campo `profiles` da tabela dela. São dois
+//  arquivos, e por isso duas telas: a lista de perfis, e o bloco
+//  "perfis desta caixa" dentro do editor de caixa.
+
+/** Um item dentro de um perfil: uma entrada de caixa, com peso. */
+export interface BetterLootProfileItem extends BetterLootEntry {
+  /**
+   * O peso dentro do perfil, de 0 a 100.
+   *
+   * A SOMA dos itens deve dar 100. Se não der, o BetterLoot
+   * rebalanceia sozinho no próximo carregamento — e o admin vê
+   * números diferentes dos que digitou. A tela avisa antes.
+   */
+  probability: number;
+}
+
+/** A linha da lista de perfis. */
+export interface BetterLootProfileSummary {
+  name: string;
+  enabled: boolean;
+  itemCount: number;
+  guaranteedCount: number;
+  /** A soma dos pesos. Diferente de 100, o plugin rebalanceia. */
+  probabilitySum: number;
+  /**
+   * Os prefabs das caixas que pedem este perfil.
+   *
+   * É o que a tela mostra antes de apagar — o Looty não diz isto,
+   * ele apaga e desfaz a associação em silêncio.
+   */
+  usedBy: string[];
+  /** A impressão DESTE perfil. É o que o PUT quer de volta. */
+  revision: string;
+}
+
+/** Um perfil inteiro. */
+export interface BetterLootProfile {
+  name: string;
+  enabled: boolean;
+  guaranteed: BetterLootGuaranteedEntry[];
+  items: BetterLootProfileItem[];
+}
+
+/** `GET /api/servers/:id/betterloot/profiles` */
+export interface BetterLootProfilesResponse {
+  ok: true;
+  serverId: string;
+  /** `false` = não existe LootGroups.json ali. NÃO é erro. */
+  configured: boolean;
+  revision: string | null;
+  count: number;
+  profiles: BetterLootProfileSummary[];
+}
+
+/** `GET`/`PUT /api/servers/:id/betterloot/profile` */
+export interface BetterLootProfileResponse {
+  ok: true;
+  serverId: string;
+  revision: string;
+  profile: BetterLootProfile;
+  backup?: string | null;
+  reloaded?: boolean;
+  reloadOutput?: string | null;
+}
+
+/** O corpo do PUT de um perfil. `baseRevision: null` = criando. */
+export interface BetterLootProfileSaveInput {
+  baseRevision: string | null;
+  profile: BetterLootProfile;
+}
+
+/** `DELETE /api/servers/:id/betterloot/profile` */
+export interface BetterLootProfileDeleteResponse {
+  ok: true;
+  serverId: string;
+  /** As caixas de onde a associação saiu junto. */
+  detached: string[];
+  backup: string | null;
+  reloaded: boolean;
+  reloadOutput: string | null;
+}
+
+// ------------------------------------------------------------
+//  O LIXO — a lista de curadoria
+// ------------------------------------------------------------
+//
+//  ####  ELA NÃO É DO BETTERLOOT  ####
+//
+//  O plugin não conhece a palavra "junk": a lista é NOSSA, mora no
+//  banco do agente e é por servidor. O que chega ao jogo é a caixa
+//  já sem esses itens — e quem os tira é esta tela, montando o
+//  rascunho sem eles. O "Gravar" da caixa é que leva ao servidor,
+//  com o mesmo backup e o mesmo "descartar" de sempre.
+
+/** Uma linha da lista de lixo. */
+export interface BetterLootJunkItem {
+  shortname: string;
+  /**
+   * Veio da lista de fábrica?
+   *
+   * A tela separa os dois: o padrão desligado pode voltar; o que o
+   * admin acrescentou some de vez.
+   */
+  isDefault: boolean;
+  active: boolean;
+}
+
+/** `GET`/`POST`/`DELETE /api/servers/:id/betterloot/junk` */
+export interface BetterLootJunkResponse {
+  ok: true;
+  serverId: string;
+  /** Quantos estão ATIVOS. O `items` traz os desligados também. */
+  count?: number;
+  items: BetterLootJunkItem[];
 }
 
 // ============================================================
@@ -4836,6 +4982,65 @@ export const agent = {
     api<BetterLootTableResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/betterloot/table`,
       { method: 'PUT', body: input },
+    ),
+
+
+  // ---- os PERFIS de loot (LootGroups.json) ------------------
+  //
+  // Outro arquivo que a tabela, e por isso outra revisão: gravar um
+  // perfil não pode recusar o próximo salvamento de caixa.
+
+  /** A lista de perfis, com em quais caixas cada um está. */
+  betterLootProfiles: (serverId: string) =>
+    api<BetterLootProfilesResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/profiles`,
+    ),
+
+  /** Um perfil inteiro, com o peso de cada item. */
+  betterLootProfile: (serverId: string, name: string) =>
+    api<BetterLootProfileResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/profile?name=${encodeURIComponent(name)}`,
+    ),
+
+  /** Cria (`baseRevision: null`) ou grava um perfil. */
+  saveBetterLootProfile: (serverId: string, input: BetterLootProfileSaveInput) =>
+    api<BetterLootProfileResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/profile`,
+      { method: 'PUT', body: input },
+    ),
+
+  /**
+   * Apaga um perfil.
+   *
+   * Sem `detach`, um perfil EM USO é recusado com 409 e a lista das
+   * caixas — para a tela poder perguntar antes. É a pergunta que o
+   * Looty não faz: lá o perfil some e as associações somem junto,
+   * sem aviso.
+   */
+  deleteBetterLootProfile: (serverId: string, name: string, detach: boolean) =>
+    api<BetterLootProfileDeleteResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/profile?name=${encodeURIComponent(name)}`,
+      { method: 'DELETE', body: { detach } },
+    ),
+
+  // ---- o LIXO (lista nossa, não do plugin) ------------------
+
+  /** A lista de lixo daquele servidor: os padrões e os do admin. */
+  betterLootJunk: (serverId: string) =>
+    api<BetterLootJunkResponse>(`/api/servers/${encodeURIComponent(serverId)}/betterloot/junk`),
+
+  /** Marca um item como lixo — ou religa um padrão desligado. */
+  addBetterLootJunk: (serverId: string, shortname: string) =>
+    api<BetterLootJunkResponse>(`/api/servers/${encodeURIComponent(serverId)}/betterloot/junk`, {
+      method: 'POST',
+      body: { shortname },
+    }),
+
+  /** Tira da lista. O padrão fica desligado; o do admin some. */
+  removeBetterLootJunk: (serverId: string, shortname: string) =>
+    api<BetterLootJunkResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/junk?shortname=${encodeURIComponent(shortname)}`,
+      { method: 'DELETE' },
     ),
 
   /**

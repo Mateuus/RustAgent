@@ -41,7 +41,7 @@
 //  tem.
 // ============================================================
 
-import { RotateCcw, Save } from 'lucide-react';
+import { RotateCcw, Save, Settings2, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { BetterLootAddItem } from '@/components/loot/betterloot-add-item';
@@ -55,12 +55,17 @@ import {
   readTableInto,
 } from '@/components/loot/betterloot-sequence';
 import { BetterLootGlobalsBar } from '@/components/loot/betterloot-globals-bar';
+import { BetterLootProfiles } from '@/components/loot/betterloot-profiles';
+import { BetterLootJunkDialog } from '@/components/loot/betterloot-junk-dialog';
+import { BetterLootTableProfiles } from '@/components/loot/betterloot-table-profiles';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/lib/toast';
 import {
   agent,
   type BetterLootGlobalsInput,
+  type BetterLootJunkItem,
+  type BetterLootProfileSummary,
   type BetterLootStatusResponse,
   type BetterLootTable,
 } from '@/lib/api';
@@ -79,9 +84,52 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
   const [saved, setSaved] = useState<BetterLootTable | null>(null);
   /** O que o admin mexeu. */
   const [draft, setDraft] = useState<BetterLootTable | null>(null);
+  /**
+   * A impressão da CAIXA aberta — o que o "Gravar" devolve.
+   *
+   * ####  ELA NAO E A DO ARQUIVO, E ESSA ERA A CAUSA DO BUG  ####
+   *
+   * A tela mandava o `status.revision`, que e do `LootTables.json`
+   * inteiro. Como recarregar o plugin faz o proprio BetterLoot
+   * reescrever esse arquivo, a segunda gravacao da MESMA caixa era
+   * recusada com um conflito que nunca existiu — e so um F5
+   * resolvia. O agente agora confere caixa por caixa.
+   */
+  const [tableRevision, setTableRevision] = useState<string | null>(null);
   const [tableError, setTableError] = useState<string | null>(null);
   const [loadingTable, setLoadingTable] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  /**
+   * Qual das duas telas está aberta.
+   *
+   * ####  SÃO DOIS ARQUIVOS, E POR ISSO DUAS ABAS  ####
+   *
+   * As caixas moram no `LootTables.json`; os perfis, no
+   * `LootGroups.json`. Misturá-los numa tela só faria o "Gravar"
+   * significar duas coisas diferentes conforme onde o admin
+   * estivesse olhando.
+   */
+  const [tab, setTab] = useState<'boxes' | 'profiles'>('boxes');
+
+  /**
+   * A lista de "lixo" deste servidor.
+   *
+   * Ela é NOSSA, e não do BetterLoot: o plugin não conhece esse
+   * conceito. Fica aqui em cima porque quem a usa é o editor de
+   * caixa, e quem a configura é o diálogo — os dois filhos.
+   */
+  const [junk, setJunk] = useState<readonly BetterLootJunkItem[]>([]);
+  const [junkOpen, setJunkOpen] = useState(false);
+
+  /**
+   * Os perfis do servidor, para o bloco "Perfis desta caixa".
+   *
+   * A ABA de perfis carrega a sua própria lista: ela edita, e
+   * precisa da revisão de cada um. Aqui só se LIGA um perfil à
+   * caixa, e para isso basta o nome e se ele está ligado.
+   */
+  const [profiles, setProfiles] = useState<readonly BetterLootProfileSummary[]>([]);
 
   /**
    * Qual leitura de CAIXA é a que vale — e quem pode repovoar o rascunho.
@@ -157,6 +205,60 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
     void loadStatus();
   }, [loadStatus]);
 
+  const loadJunk = useCallback(async () => {
+    if (serverId === '') {
+      return;
+    }
+
+    try {
+      setJunk((await agent.betterLootJunk(serverId)).items);
+    } catch {
+      // A lista de lixo é conveniência: sem ela o botão "Remover
+      // lixo" não tem o que tirar, e o resto da tela funciona. Um
+      // erro aqui não pode empurrar o editor de loot para fora do ar.
+      setJunk([]);
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    void loadJunk();
+  }, [loadJunk]);
+
+  const loadProfiles = useCallback(async () => {
+    if (serverId === '') {
+      return;
+    }
+
+    try {
+      setProfiles((await agent.betterLootProfiles(serverId)).profiles);
+    } catch {
+      // Sem a lista, o bloco da caixa diz "ainda não há perfis" e o
+      // resto do editor continua inteiro. Ver `loadJunk`.
+      setProfiles([]);
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    void loadProfiles();
+  }, [loadProfiles]);
+
+  /** Marca um item como lixo — ou religa um padrão desligado. */
+  const addJunk = async (shortname: string): Promise<void> => {
+    try {
+      setJunk((await agent.addBetterLootJunk(serverId, shortname)).items);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const removeJunk = async (shortname: string): Promise<void> => {
+    try {
+      setJunk((await agent.removeBetterLootJunk(serverId, shortname)).items);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   // Trocar de servidor troca o arquivo: o que estava aberto era de
   // outro disco, e mantê-lo na tela ofereceria salvar a caixa de um
   // servidor por cima do outro.
@@ -168,6 +270,7 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
     setSelected(null);
     setSaved(null);
     setDraft(null);
+    setTableRevision(null);
     setTableError(null);
     setLoadingTable(false);
   }, [serverId]);
@@ -181,10 +284,15 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
       // clique, e não pelo que estiver escolhido quando ela voltar.
       await readTableInto(
         tableSeq,
-        async () => (await agent.betterLootTable(serverId, prefab)).table,
+        async () => {
+          const response = await agent.betterLootTable(serverId, prefab);
+
+          return { table: response.table, revision: response.tableRevision };
+        },
         {
           setSaved,
           setDraft,
+          setRevision: setTableRevision,
           setError: setTableError,
           setLoading: setLoadingTable,
         },
@@ -192,6 +300,46 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
     },
     [serverId],
   );
+
+  /** Os shortnames que valem agora. É o que o "Remover lixo" usa. */
+  const junkShortnames = useMemo(
+    () => junk.filter((item) => item.active).map((item) => item.shortname),
+    [junk],
+  );
+
+  /**
+   * Quantos itens DESTA caixa estão marcados como lixo.
+   *
+   * O número entra no botão porque "remover lixo" sem número é um
+   * botão que ninguém sabe se vale a pena clicar — e, com zero, ele
+   * fica inerte em vez de fingir que fez algo.
+   */
+  const junkCount = useMemo(
+    () =>
+      draft === null
+        ? 0
+        : draft.items.filter((item) => junkShortnames.includes(item.shortname)).length,
+    [draft, junkShortnames],
+  );
+
+  /**
+   * Tira do RASCUNHO os itens marcados como lixo.
+   *
+   * Nada vai para o disco aqui: o "Gravar e recarregar" é que leva,
+   * com backup e revisão. Antes dele, "Descartar" desfaz.
+   */
+  const removeJunkFromDraft = (): void => {
+    if (draft === null || junkCount === 0) {
+      return;
+    }
+
+    const items = draft.items.filter((item) => !junkShortnames.includes(item.shortname));
+
+    setDraft({ ...draft, items, itemCount: items.length });
+    toast.success(
+      `${String(junkCount)} item(ns) tirado(s) da caixa. Grave para valer no servidor.`,
+    );
+  };
 
   const dirty = useMemo(
     () => draft !== null && saved !== null && JSON.stringify(draft) !== JSON.stringify(saved),
@@ -215,7 +363,8 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
       // o disco que o admin estava vendo, mesmo que ele troque de
       // servidor enquanto a gravação está no ar.
       const response = await agent.saveBetterLootTable(serverId, {
-        baseRevision: status.revision,
+        // A da CAIXA, e nao a do arquivo. Ver `tableRevision`.
+        baseRevision: tableRevision,
         table: draft,
       });
 
@@ -238,6 +387,9 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
       // A resposta manda, e não o rascunho — ver o cabeçalho.
       setSaved(response.table);
       setDraft(response.table);
+      // E a impressao nova vale para o proximo "Gravar": e ela que
+      // deixa editar de novo sem recarregar a pagina.
+      setTableRevision(response.tableRevision);
       toast.success('Caixa gravada e plugin recarregado.');
 
       // A lista traz contagens que acabaram de mudar, e a revisão
@@ -325,6 +477,40 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
       />
 
       {status !== null && (
+        <div
+          role="tablist"
+          aria-label="O que editar"
+          className="flex items-center gap-1 border-b border-border"
+        >
+          {(
+            [
+              ['boxes', 'Caixas'],
+              ['profiles', 'Perfis'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={tab === value}
+              onClick={() => setTab(value)}
+              className={`-mb-px border-b-2 px-3 py-1.5 text-2xs font-medium ${
+                tab === value
+                  ? 'border-accent text-foreground'
+                  : 'border-transparent text-muted hover:text-foreground'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {status !== null && tab === 'profiles' && (
+        <BetterLootProfiles serverId={serverId} busy={saving} />
+      )}
+
+      {status !== null && tab === 'boxes' && (
         <div className="grid gap-3 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)_minmax(0,22rem)]">
           <div className="h-[38rem]">
             <BetterLootTableList
@@ -342,6 +528,36 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
                     Mudanças não gravadas nesta caixa.
                   </span>
                 )}
+
+                {/* ####  O LIXO SAI DO RASCUNHO, E NÃO DO DISCO  ####
+
+                    O `Remove Junk` do Looty apaga na hora e sem
+                    confirmar. Aqui ele só mexe no rascunho: o admin
+                    VÊ a caixa sem os itens, e ainda tem "Descartar"
+                    e "Gravar" na frente dele. */}
+                <Button
+                  size="sm"
+                  disabled={saving || junkCount === 0}
+                  onClick={removeJunkFromDraft}
+                  className="flex items-center gap-1"
+                  title={
+                    junkCount === 0
+                      ? 'Nenhum item desta caixa está marcado como lixo'
+                      : `Tirar ${String(junkCount)} item(ns) desta caixa`
+                  }
+                >
+                  <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                  Remover lixo{junkCount > 0 ? ` (${String(junkCount)})` : ''}
+                </Button>
+
+                <Button
+                  size="sm"
+                  disabled={saving}
+                  onClick={() => setJunkOpen(true)}
+                  title="Escolher o que conta como lixo neste servidor"
+                >
+                  <Settings2 aria-hidden="true" className="h-3.5 w-3.5" />
+                </Button>
                 <Button
                   size="sm"
                   disabled={!dirty || saving}
@@ -364,6 +580,18 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
               </div>
             )}
 
+            {/* O bloco dos perfis fica FORA do corpo rolável: ele
+                é o que decide de onde os itens vêm, e a lista de
+                itens abaixo só faz sentido depois dele. */}
+            {draft !== null && (
+              <BetterLootTableProfiles
+                table={draft}
+                onChange={setDraft}
+                available={profiles}
+                busy={saving}
+              />
+            )}
+
             <div className="min-h-0 flex-1">
               <BetterLootTableBody
                 selected={selected}
@@ -372,6 +600,8 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
                 table={draft}
                 onChange={setDraft}
                 busy={saving}
+                junk={junkShortnames}
+                onMarkJunk={(shortname) => void addJunk(shortname)}
               />
             </div>
           </div>
@@ -403,6 +633,18 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
           </div>
         </div>
       )}
+
+      {/* A lista de lixo é do SERVIDOR, e não da caixa: por isso o
+          diálogo mora aqui em cima, e não dentro do editor. */}
+      <BetterLootJunkDialog
+        open={junkOpen}
+        onClose={() => setJunkOpen(false)}
+        serverId={serverId}
+        items={junk}
+        busy={saving}
+        onAdd={(shortname) => void addJunk(shortname)}
+        onRemove={(shortname) => void removeJunk(shortname)}
+      />
     </div>
   );
 }
@@ -414,6 +656,8 @@ function BetterLootTableBody({
   table,
   onChange,
   busy,
+  junk,
+  onMarkJunk,
 }: {
   readonly selected: string | null;
   readonly loading: boolean;
@@ -421,6 +665,8 @@ function BetterLootTableBody({
   readonly table: BetterLootTable | null;
   readonly onChange: (next: BetterLootTable) => void;
   readonly busy: boolean;
+  readonly junk: readonly string[];
+  readonly onMarkJunk: (shortname: string) => void;
 }) {
   if (selected === null) {
     return (
@@ -451,7 +697,16 @@ function BetterLootTableBody({
   // na caixa de elite, clica no barril, e o "Aplicar 10x" continua
   // ali — mirando o barril. É a mesma razão da `key` do
   // `BetterLootAddItem` ao lado.
-  return <BetterLootTableEditor key={table.prefab} table={table} onChange={onChange} busy={busy} />;
+  return (
+    <BetterLootTableEditor
+      key={table.prefab}
+      table={table}
+      onChange={onChange}
+      busy={busy}
+      junk={junk}
+      onMarkJunk={onMarkJunk}
+    />
+  );
 }
 
 /**

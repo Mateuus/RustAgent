@@ -26,6 +26,7 @@ import {
   joinRequest,
   openRequest,
   readTableInto,
+  type ReadTable,
   type Sequence,
   type TableSink,
 } from '@/components/loot/betterloot-sequence';
@@ -63,6 +64,7 @@ interface Recording {
   readonly draft: (BetterLootTable | null)[];
   readonly error: (string | null)[];
   readonly loading: boolean[];
+  readonly revision: (string | null)[];
 }
 
 function recording(): Recording {
@@ -70,11 +72,13 @@ function recording(): Recording {
   const draft: (BetterLootTable | null)[] = [];
   const error: (string | null)[] = [];
   const loading: boolean[] = [];
+  const revision: (string | null)[] = [];
 
   return {
     sink: {
       setSaved: (table) => saved.push(table),
       setDraft: (table) => draft.push(table),
+      setRevision: (value) => revision.push(value),
       setError: (message) => error.push(message),
       setLoading: (value) => loading.push(value),
     },
@@ -82,6 +86,7 @@ function recording(): Recording {
     draft,
     error,
     loading,
+    revision,
   };
 }
 
@@ -110,13 +115,24 @@ function deferred<T>(): Deferred<T> {
   };
 }
 
+/**
+ * Uma caixa lida, com a impressão que o "Gravar" devolve.
+ *
+ * O conteúdo do sha não importa aqui: o que estes testes guardam é
+ * que ele ANDA JUNTO com a caixa — guardar a revisão de uma e o
+ * conteúdo de outra é o estado que a revisão existe para impedir.
+ */
+function read(table: BetterLootTable): ReadTable {
+  return { table, revision: `sha-de-${table.prefab}` };
+}
+
 describe('readTableInto', () => {
   it('a caixa que volta a tempo abre na tela', async () => {
     const seq: Sequence = { current: 0 };
     const sink = recording();
     const elite = tableOf('crate_elite');
 
-    await readTableInto(seq, () => Promise.resolve(elite), sink.sink);
+    await readTableInto(seq, () => Promise.resolve(read(elite)), sink.sink);
 
     expect(sink.saved).toEqual([elite]);
     expect(sink.draft).toEqual([elite]);
@@ -132,14 +148,14 @@ describe('readTableInto', () => {
   it('a resposta do servidor anterior não altera o estado depois da troca', async () => {
     const seq: Sequence = { current: 0 };
     const sink = recording();
-    const old = deferred<BetterLootTable>();
+    const old = deferred<ReadTable>();
 
     const reading = readTableInto(seq, () => old.promise, sink.sink);
 
     // O admin troca de servidor: o painel invalida o que está no ar.
     openRequest(seq);
 
-    old.resolve(tableOf('crate_do_servidor_anterior'));
+    old.resolve(read(tableOf('crate_do_servidor_anterior')));
     await reading;
 
     expect(sink.saved).toEqual([]);
@@ -154,16 +170,16 @@ describe('readTableInto', () => {
   it('de duas caixas clicadas rápido, só a última pedida escreve', async () => {
     const seq: Sequence = { current: 0 };
     const sink = recording();
-    const big = deferred<BetterLootTable>();
-    const small = deferred<BetterLootTable>();
+    const big = deferred<ReadTable>();
+    const small = deferred<ReadTable>();
 
     const first = readTableInto(seq, () => big.promise, sink.sink);
     const second = readTableInto(seq, () => small.promise, sink.sink);
 
     // Fora de ordem de propósito: a grande responde por último.
-    small.resolve(tableOf('crate_normal'));
+    small.resolve(read(tableOf('crate_normal')));
     await second;
-    big.resolve(tableOf('crate_elite'));
+    big.resolve(read(tableOf('crate_elite')));
     await first;
 
     expect(sink.draft).toEqual([tableOf('crate_normal')]);
@@ -173,7 +189,7 @@ describe('readTableInto', () => {
   it('o erro de uma leitura vencida não pinta erro na tela', async () => {
     const seq: Sequence = { current: 0 };
     const sink = recording();
-    const old = deferred<BetterLootTable>();
+    const old = deferred<ReadTable>();
 
     const reading = readTableInto(seq, () => old.promise, sink.sink);
 
@@ -213,13 +229,13 @@ describe('joinRequest', () => {
   it('a gravação entra na fila sem cortar a leitura que está no ar', async () => {
     const seq: Sequence = { current: 0 };
     const sink = recording();
-    const box = deferred<BetterLootTable>();
+    const box = deferred<ReadTable>();
 
     const reading = readTableInto(seq, () => box.promise, sink.sink);
 
     const ticket = joinRequest(seq);
 
-    box.resolve(tableOf('crate_elite'));
+    box.resolve(read(tableOf('crate_elite')));
     await reading;
 
     expect(sink.draft).toEqual([tableOf('crate_elite')]);
