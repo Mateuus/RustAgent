@@ -6517,6 +6517,31 @@ CREATE TABLE player_timers (
 );
 `;
 
+const STORE_OFFER_ICON_FILE_SCHEMA = `
+-- ============================================================
+--  075  o card da loja com arte propria.
+--
+--  ####  O ICONE DO JOGO CONTINUA SENDO O PADRAO  ####
+--
+--  \`icon_shortname\`/\`icon_item_id\`/\`icon_skin_id\` desenham o card
+--  com o icone que o CLIENTE ja tem: nao custa download nenhum e o
+--  jogador reconhece a arte. Isso nao muda.
+--
+--  O que faltava era o outro caso: um VIP, um pacote, um kit -- o
+--  que nao E "o item" -- desenhado hoje com a caixa de madeira
+--  emprestada. Para esses, o admin envia um PNG pelo painel.
+--
+--  NULL = usa o icone do jogo, e e o padrao de toda oferta que ja
+--  existe. Preenchido, manda.
+--
+--  Guarda o NOME do arquivo em \`Assets\\store\\\`, e nao os bytes nem
+--  o CRC: os bytes vao ao jogo pelo OrigemZImages, que devolve um
+--  CRC que nasce do conteudo -- grava-lo aqui seria uma segunda
+--  verdade sobre a mesma imagem. Ver http/icon-files.ts.
+-- ============================================================
+ALTER TABLE store_offers ADD COLUMN icon_file TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6715,6 +6740,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 73, name: 'betterloot-junk', sql: BETTERLOOT_JUNK_SCHEMA },
   // 11/09/2026: a aba Timers deixa de ser maquete, e o QuickSmelt sai.
   { id: 74, name: 'player-timers', sql: PLAYER_TIMERS_SCHEMA },
+  // 11/09/2026: o card da loja passa a aceitar arte propria.
+  { id: 75, name: 'store-offer-icon-file', sql: STORE_OFFER_ICON_FILE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
