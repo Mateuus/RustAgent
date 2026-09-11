@@ -131,10 +131,17 @@ export const IMAGE_FAMILIES = {
   item: (key: string): boolean => key.startsWith('item.'),
   /** `store.<id da oferta>`. Ver `storeIconKey`. */
   store: (key: string): boolean => key.startsWith('store.'),
+  /** `kit.<slug>`. Ver `kitIconKey`. */
+  kit: (key: string): boolean => key.startsWith('kit.'),
 } as const;
 
 export function isReservedImageKey(key: string): boolean {
-  return IMAGE_FAMILIES.ad(key) || IMAGE_FAMILIES.item(key) || IMAGE_FAMILIES.store(key);
+  return (
+    IMAGE_FAMILIES.ad(key) ||
+    IMAGE_FAMILIES.item(key) ||
+    IMAGE_FAMILIES.store(key) ||
+    IMAGE_FAMILIES.kit(key)
+  );
 }
 
 /**

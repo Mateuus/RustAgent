@@ -157,7 +157,7 @@ function storeIconsDir(): string {
 /**
  * Os bytes da arte de uma oferta, ou `null`.
  *
- * É a porta da sincronização com o jogo (game/store-icons.ts). A
+ * É a porta da sincronização com o jogo (game/card-icons.ts). A
  * régua do nome mora no `readIcon`, e aqui ela protege o que vem do
  * BANCO — `icon_file` só tem o tamanho conferido pelo zod.
  */

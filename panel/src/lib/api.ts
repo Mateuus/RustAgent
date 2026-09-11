@@ -1040,6 +1040,13 @@ export interface Kit {
   slug: string;
   name: string;
   description: string | null;
+  /**
+   * A arte própria do card, em `Assets/kits/`.
+   *
+   * `null` = o desenho padrão: o ícone do PRIMEIRO item do kit.
+   * Opcional porque um agente anterior a este campo não o manda.
+   */
+  iconFile?: string | null;
   /** A aba em que ele aparece no menu do jogo. `null` = sem aba. */
   category: string | null;
   kind: KitKind;
@@ -1443,6 +1450,11 @@ export function iconUrl(name: string): string {
  */
 export function storeIconUrl(name: string): string {
   return agentUrl('/api/store/icons/' + encodeURIComponent(name));
+}
+
+/** A URL da arte de um kit. Mesma ideia, outro acervo. */
+export function kitIconUrl(name: string): string {
+  return agentUrl('/api/kits/icons/' + encodeURIComponent(name));
 }
 
 export interface CustomItemInput {
@@ -3878,6 +3890,26 @@ export const agent = {
     form.append('file', file);
 
     return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/custom-items/icons', {
+      method: 'POST',
+      form,
+    });
+  },
+
+  /** As artes de kit que já estão em `Assets\kits\`. */
+  kitIcons: () => api<{ ok: true; icons: { name: string; bytes: number }[] }>('/api/kits/icons'),
+
+  /**
+   * Envia a arte de um kit e devolve o NOME dela.
+   *
+   * O nome é o que vai para `iconFile` do kit; os bytes só chegam ao
+   * jogo depois, pela sincronização da interface.
+   */
+  uploadKitIcon: (file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/kits/icons', {
       method: 'POST',
       form,
     });

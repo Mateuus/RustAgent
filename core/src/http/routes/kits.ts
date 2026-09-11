@@ -31,14 +31,18 @@
 //  mexer — o oposto do que espera quem apagou um item na tela.
 // ============================================================
 
+import { join } from 'node:path';
+
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import type { KitsRepository } from '../../db/kits-repository.js';
+import { projectRoot } from '../../config.js';
+import type { KitInput, KitsRepository } from '../../db/kits-repository.js';
 import type { KitStore } from '../../kits/service.js';
 import { loadoutItemsSchema } from '../../loadouts/items.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { ApiError } from '../error-response.js';
+import { listIcons, readIcon, saveIcon, uploadedIcon } from '../icon-files.js';
 import { operatorOf } from './admin.js';
 
 export interface KitRoutesDeps {
@@ -88,6 +92,18 @@ export const kitBody = z
       ),
     name: z.string().trim().min(1).max(64),
     description: z.string().trim().max(400).nullable().default(null),
+    /**
+     * A arte propria do card, em `Assets\kits\`.
+     *
+     * ####  OMITIDO NAO E `null`  ####
+     *
+     * `null` e uma ESCOLHA -- "volta ao icone do primeiro item" -- e o
+     * painel a manda. Omitido e "nao falei sobre isso", e e o que o
+     * site manda: ele aplica os kits pelo mesmo schema e nao conhece
+     * este campo. Tratá-los igual faria uma sincronizacao do site
+     * apagar a arte escolhida no painel.
+     */
+    iconFile: z.string().trim().max(120).nullable().optional(),
     /**
      * A aba do jogo. Vazio vira `null`: um rótulo de espaços em
      * branco criaria uma aba sem nome, que ninguém consegue clicar
@@ -166,7 +182,88 @@ export const kitBody = z
     }
   });
 
+// ============================================================
+//  A ARTE PRÓPRIA DO CARD
+//
+//  `Assets\kits\` fica ao lado de `Assets\store\`, `Assets\items\` e
+//  `Assets\ui\`, e a regra do upload é a mesma dos quatro — ver
+//  http/icon-files.ts.
+// ============================================================
+
+/** Onde a arte dos kits mora, na raiz do projeto. */
+export const KIT_ASSETS_DIR = join('Assets', 'kits');
+
+/** A pasta, resolvida na hora: `projectRoot` é injetável. */
+function kitIconsDir(): string {
+  return join(projectRoot(), KIT_ASSETS_DIR);
+}
+
+/**
+ * Os bytes da arte de um kit, ou `null`.
+ *
+ * É a porta da sincronização com o jogo (game/card-icons.ts). A régua
+ * do nome mora no `readIcon`, e aqui ela protege o que vem do BANCO.
+ */
+export function readKitIcon(name: string): Buffer | null {
+  return readIcon(kitIconsDir(), name);
+}
+
+/**
+ * O corpo conferido, virado cadastro — resolvendo a arte.
+ *
+ * `iconFile` omitido conserva o que estava gravado; `null` volta ao
+ * ícone do primeiro item. Ver o campo no schema.
+ *
+ * @param before o kit como ele está, ou `null` quando é criação.
+ */
+export function toKitInput(
+  body: z.infer<typeof kitBody>,
+  before: { readonly iconFile: string | null } | null,
+): KitInput {
+  return {
+    ...body,
+    iconFile:
+      body.iconFile === undefined
+        ? (before?.iconFile ?? null)
+        : body.iconFile === ''
+          ? null
+          : body.iconFile,
+  };
+}
+
 export function registerKitRoutes(app: FastifyInstance, deps: KitRoutesDeps): void {
+  // ----------------------------------------------------------
+  //  A arte própria — ver KIT_ASSETS_DIR
+  // ----------------------------------------------------------
+
+  app.get('/kits/icons', async () => {
+    return { ok: true, icons: listIcons(kitIconsDir()) };
+  });
+
+  app.get('/kits/icons/:name', async (request, reply) => {
+    const { name } = z.object({ name: z.string().min(1) }).parse(request.params);
+    const content = readKitIcon(name);
+
+    if (content === null) {
+      throw new ApiError('ICON_NOT_FOUND', `Nenhuma arte chamada "${name}".`, 404);
+    }
+
+    return reply.type('image/png').header('cache-control', 'private, max-age=60').send(content);
+  });
+
+  app.post('/kits/icons', async (request) => {
+    const { filename, content } = await uploadedIcon(request);
+
+    saveIcon(kitIconsDir(), filename, content);
+
+    request.log.info(
+      { icon: filename, bytes: content.length, by: operatorOf(request) },
+      'arte de kit recebida',
+    );
+
+    return { ok: true, icon: { name: filename, bytes: content.length } };
+  });
+
   // ==========================================================
   //  A loja da rede
   // ==========================================================
@@ -187,7 +284,7 @@ export function registerKitRoutes(app: FastifyInstance, deps: KitRoutesDeps): vo
       );
     }
 
-    const kit = deps.repository.create(body);
+    const kit = deps.repository.create(toKitInput(body, null));
 
     request.log.info(
       { kit: kit.slug, kind: kit.kind, servers: kit.servers, by: operatorOf(request) },
@@ -222,7 +319,7 @@ export function registerKitRoutes(app: FastifyInstance, deps: KitRoutesDeps): vo
       );
     }
 
-    const kit = deps.repository.update(id, body);
+    const kit = deps.repository.update(id, toKitInput(body, deps.repository.get(id)));
 
     if (kit === null) {
       throw new ApiError('KIT_NOT_FOUND', `Não existe kit com o id ${String(id)}.`, 404);

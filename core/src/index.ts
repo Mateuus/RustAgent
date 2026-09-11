@@ -64,8 +64,9 @@ import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
-import { loadStoreIcons } from './game/store-icons.js';
+import { loadKitIcons, loadStoreIcons } from './game/card-icons.js';
 import { readItemIcon } from './http/routes/custom-items.js';
+import { readKitIcon } from './http/routes/kits.js';
 import { readStoreIcon } from './http/routes/store.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
@@ -1673,18 +1674,22 @@ async function main(): Promise<void> {
     // reiniciar o agente. O manifesto do OrigemZImages é que impede
     // o reenvio do que não mudou — ver `loadUiImages`.
     //
-    // A arte das ofertas vai junto porque é a MESMA carga: a vitrine
-    // é uma tela da interface, e o card precisa do CRC na mão quando
-    // ela for desenhada. A poda é só da família `store.` — a oferta
-    // apagada não pode deixar a arte dela na tabela do plugin para
-    // sempre.
+    // A arte das ofertas e a dos kits vão junto porque é a MESMA
+    // carga: a vitrine e a página KITS são telas da interface, e o
+    // card precisa do CRC na mão quando elas forem desenhadas.
+    //
+    // A poda cobre as duas famílias: a oferta (ou o kit) apagada não
+    // pode deixar a arte dela na tabela do plugin para sempre. As
+    // imagens de `Assets\ui` ficam de fora — a chave delas é o nome
+    // do arquivo, sem família que as separe do que é de outro dono.
     images: {
       library: imageLibrary,
       load: () => [
         ...loadUiImages(agent.paths.root, logger),
         ...loadStoreIcons(storeRepository.listOffers(), readStoreIcon, logger),
+        ...loadKitIcons(kitsRepository.list(), readKitIcon, logger),
       ],
-      prune: { owns: IMAGE_FAMILIES.store },
+      prune: { owns: (key) => IMAGE_FAMILIES.store(key) || IMAGE_FAMILIES.kit(key) },
     },
   });
 
