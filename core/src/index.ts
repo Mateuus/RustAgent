@@ -50,6 +50,7 @@ import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
+import { PlayerTimersRepository } from './db/player-timers-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
 import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
 import { DungeonLayoutsRepository } from './db/dungeon-layouts-repository.js';
@@ -70,6 +71,8 @@ import { VipsRepository } from './db/vips-repository.js';
 import { KitStore } from './kits/service.js';
 import { SpawnStatusSync } from './loadouts/status.js';
 import { LoadoutSync } from './loadouts/sync.js';
+import { PlayerTimersSync } from './loadouts/timers.js';
+import { AgentRequests } from './game/agent-requests.js';
 import { VipExpiryWatcher } from './vip/expiry-watcher.js';
 import { VipList } from './vip/service.js';
 import { VipSiteMirror } from './vip/site-mirror.js';
@@ -301,6 +304,11 @@ async function main(): Promise<void> {
   // o RCON de cada servidor.
   let lootStats: LootStatsCollector | null = null;
   let spawnStatusSync: SpawnStatusSync | null = null;
+  // Os timers são o quarto cache do hub, e nascem ao lado do status.
+  let playerTimersSync: PlayerTimersSync | null = null;
+  // Quem responde ao `#OZAREQ#` do hub. Ver game/agent-requests.ts:
+  // o pedido existia e ninguém o atendia.
+  let agentRequests: AgentRequests | null = null;
   // As MISSÕES, pela mesma razão do calendário: a entrega delas
   // depende do `kits`, que nasce bem abaixo. `null` = ainda não
   // montadas, e aí a tela responde o aviso em vez de ficar muda.
@@ -392,6 +400,9 @@ async function main(): Promise<void> {
       // O status de nascimento é o terceiro cache do plugin, e ele
       // esvazia junto com os outros dois.
       void spawnStatusSync?.push(serverId, 'rcon-connected');
+      // E os timers são o quarto — sem eles, fornalha e craft voltam
+      // ao ×1 a cada queda do RCON.
+      void playerTimersSync?.push(serverId, 'rcon-connected');
       // E o cadastro de itens custom, pelo mesmo motivo: o cache
       // do plugin esvazia junto com os outros.
       void customItemsSync?.push(serverId, 'rcon-connected');
@@ -444,6 +455,10 @@ async function main(): Promise<void> {
       // `oxide.reload` esvazia o cache dele. Recusa na primeira
       // comparação de string, como o de cima.
       customItemsSync?.handleLine(serverId, line);
+      // E o hub grita `#OZAREQ#{"want":"loadouts"}` (e vips, status,
+      // timers) pelo mesmo motivo. Só arma um relógio — o reenvio sai
+      // dele, e não daqui. Ver game/agent-requests.ts.
+      agentRequests?.handleLine(serverId, line);
       // E o `#OZSTAT#`, que é o troféu virando ponto. Ele APLICA
       // aqui (escrita em SQLite, que não fala com o jogo) e confirma
       // ao plugin por um relógio — mandar o `ack` daqui seria o laço
@@ -669,6 +684,7 @@ async function main(): Promise<void> {
   const vipsRepository = new VipsRepository(db);
   const loadoutsRepository = new LoadoutsRepository(db);
   const spawnStatusRepository = new SpawnStatusRepository(db);
+  const playerTimersRepository = new PlayerTimersRepository(db);
   const kitsRepository = new KitsRepository(db);
 
   // Ele só nasce lá embaixo, junto com os clientes do site — e a
@@ -905,6 +921,25 @@ async function main(): Promise<void> {
   spawnStatusSync = new SpawnStatusSync({
     repository: spawnStatusRepository,
     servers: supervisor,
+    logger,
+  });
+
+  playerTimersSync = new PlayerTimersSync({
+    repository: playerTimersRepository,
+    servers: supervisor,
+    logger,
+  });
+
+  // O reenvio de cada assunto é o MESMO da reconexão do RCON, logo
+  // acima: uma verdade só sobre "o que mandar quando o hub esquece".
+  // Os closures leem as variáveis na hora do pedido.
+  agentRequests = new AgentRequests({
+    resend: {
+      vips: async (serverId) => vips?.reconcile(serverId),
+      loadouts: async (serverId) => loadoutSync?.push(serverId, 'plugin-request'),
+      status: async (serverId) => spawnStatusSync?.push(serverId, 'plugin-request'),
+      timers: async (serverId) => playerTimersSync?.push(serverId, 'plugin-request'),
+    },
     logger,
   });
 
@@ -1666,6 +1701,7 @@ async function main(): Promise<void> {
   // sem isso, o plugin só os conheceria na próxima reconexão.
   void customItemsSync.pushAll('boot');
   void spawnStatusSync.pushAll('boot');
+  void playerTimersSync.pushAll('boot');
 
   // ####  E A FILA DE PONTOS É RECOLHIDA NO BOOT  ####
   //
@@ -2630,6 +2666,7 @@ async function main(): Promise<void> {
       await vips?.reconcile(serverId);
       await loadoutSync?.push(serverId, 'rcon-connected');
       await spawnStatusSync?.push(serverId, 'rcon-connected');
+      await playerTimersSync?.push(serverId, 'rcon-connected');
       uiSync?.pushSoon(serverId, 'rcon-connected');
     },
     logger,
@@ -2788,6 +2825,8 @@ async function main(): Promise<void> {
       sync: loadoutSync,
       statusRepository: spawnStatusRepository,
       statusSync: spawnStatusSync,
+      timersRepository: playerTimersRepository,
+      timersSync: playerTimersSync,
     },
     kits: { store: kits, repository: kitsRepository },
     store: {
@@ -3042,6 +3081,8 @@ async function main(): Promise<void> {
         // E as imagens que esperavam o boot de um servidor: a nova
         // tentativa sairia para um RCON que já não existe.
         imageLibrary.stop();
+        // E os reenvios pedidos pelo hub, pela mesma razão.
+        agentRequests?.stop();
         // E o relógio da contagem de loot: uma leitura que começasse
         // agora falaria com um RCON que já não existe. Nada se perde:
         // o número continua no `oxide/data` do plugin.

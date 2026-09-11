@@ -32,6 +32,7 @@ import type { BetterLootJunkRepository } from '../db/betterloot-junk-repository.
 import type { ItemsRepository } from '../db/items-repository.js';
 import type { KitsRepository } from '../db/kits-repository.js';
 import type { LoadoutsRepository } from '../db/loadouts-repository.js';
+import type { PlayerTimersRepository } from '../db/player-timers-repository.js';
 import type { SpawnStatusRepository } from '../db/spawn-status-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
 import type { AdsRepository } from '../db/ads-repository.js';
@@ -40,6 +41,7 @@ import type { ItemCatalog } from '../game/item-catalog.js';
 import type { KitStore } from '../kits/service.js';
 import type { SpawnStatusSync } from '../loadouts/status.js';
 import type { LoadoutSync } from '../loadouts/sync.js';
+import type { PlayerTimersSync } from '../loadouts/timers.js';
 import type { VipList } from '../vip/service.js';
 import type { MonumentReader } from '../game/monuments.js';
 import type { AdsSync } from '../game/ads-sync.js';
@@ -203,17 +205,20 @@ export interface BuildServerOptions {
   /** O VIP da rede. Ver vip/service.ts. */
   readonly vips: VipList;
   /**
-   * O que cada grupo recebe ao nascer, por servidor — e em que
-   * ESTADO ele acorda (vida, fome e sede).
+   * O que cada grupo recebe ao nascer, por servidor — em que ESTADO
+   * ele acorda (vida, fome e sede) e quão RÁPIDO as coisas andam
+   * para ele (os timers).
    *
-   * Os dois juntos porque são a mesma tela; separados no jogo,
-   * porque são dois comandos e dois caches do plugin.
+   * Os três juntos porque são a mesma tela; separados no jogo,
+   * porque são três comandos e três caches do plugin.
    */
   readonly loadouts: {
     readonly repository: LoadoutsRepository;
     readonly sync: LoadoutSync;
     readonly statusRepository: SpawnStatusRepository;
     readonly statusSync: SpawnStatusSync;
+    readonly timersRepository: PlayerTimersRepository;
+    readonly timersSync: PlayerTimersSync;
   };
   /** A loja de kits, e a entrega dentro do jogo. */
   readonly kits: {
@@ -620,6 +625,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         sync: options.loadouts.sync,
         statusRepository: options.loadouts.statusRepository,
         statusSync: options.loadouts.statusSync,
+        timersRepository: options.loadouts.timersRepository,
+        timersSync: options.loadouts.timersSync,
         supervisor: options.supervisor,
       });
 
