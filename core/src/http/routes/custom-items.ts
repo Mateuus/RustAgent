@@ -31,10 +31,9 @@
 //  entende metade dela é pior que nenhum.
 // ============================================================
 
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { projectRoot } from '../../config.js';
@@ -47,6 +46,7 @@ import type {
 import type { ItemsRepository } from '../../db/items-repository.js';
 import type { ServersRepository } from '../../db/servers-repository.js';
 import { ApiError } from '../error-response.js';
+import { listIcons, readIcon, saveIcon, uploadedIcon } from '../icon-files.js';
 
 export interface CustomItemRoutesDeps {
   readonly repository: CustomItemsRepository;
@@ -202,178 +202,14 @@ const idParams = z.object({ id: z.string().min(1) });
 export const ITEM_ASSETS_DIR = join('Assets', 'items');
 
 /**
- * Teto do PNG, em bytes.
+ * O teto e o tamanho recomendado do PNG.
  *
- * ####  ELE NASCEU DO RCON, E FICOU POR OUTRO MOTIVO  ####
- *
- * Nasceu quando o ícone ia numa linha só de console: o frame do
- * WebRCON aguenta ~50 KB, o base64 infla 4/3, e 33 KB de PNG davam
- * ~45.000 caracteres. Desde 11/09/2026 ele vai em pedaços, pelo
- * OrigemZImages (game/image-library.ts), e esse limite deixou de
- * existir — o do transporte agora é 3 MiB.
- *
- * Ficou porque continua certo para o que ele é: um ícone de slot é
- * desenhado com menos de 100 pixels, e CADA jogador baixa o arquivo
- * na primeira vez que vê o item. MEDIDO com a arte real do Troféu
- * Bleik: 96×96 dá 25 KB, que é o que o painel já produz sozinho.
- * Subir o teto é uma linha, se um dia um ícone pedir mais.
+ * Reexportados porque a tela e os testes daqui os leem; quem os
+ * define e a regra de upload compartilhada com a loja, em
+ * http/icon-files.ts.
  */
-export const MAX_ICON_BYTES = 33_000;
+export { MAX_ICON_BYTES, RECOMMENDED_ICON_SIZE } from '../icon-files.js';
 
-/**
- * O lado que a recusa RECOMENDA, e que o painel já aplica sozinho.
- *
- * MEDIDO no Chrome 152 com a arte real do Troféu Bleik (1254×1254,
- * 2,9 MB): 96×96 sai com 25.060 bytes e sobra um quarto do teto;
- * 112×112 sai com 33.478 e estoura por 478. Dizer o número na frase
- * é a diferença entre "não coube" e "faça assim".
- */
-export const RECOMMENDED_ICON_SIZE = 96;
-
-/**
- * Quanto o agente LÊ antes de decidir.
- *
- * ####  ELE É MAIOR QUE O TETO DE PROPÓSITO  ####
- *
- * Parar de ler exatamente no teto custava o tamanho do arquivo: o
- * multipart corta a leitura e lança sem dizer quanto o PNG tinha, e
- * a recusa virava "passou do teto" para 34 KB e para 3 MB do mesmo
- * jeito. Quatro vezes o teto são 132 KB de memória no pior caso — e
- * cobrem a imagem QUASE certa, que é a que mais aparece: alguém
- * exportou em 128×128 e passou por 10 KB.
- *
- * O que vem muito acima disso continua sendo cortado antes de subir
- * inteiro à memória, e aí a frase diz só o teto.
- */
-const ICON_READ_LIMIT = MAX_ICON_BYTES * 4;
-
-/** A régua do nome de arquivo. */
-const ICON_NAME = /^[a-z0-9][a-z0-9._-]{0,80}\.png$/i;
-
-/**
- * Bytes na unidade em que uma pessoa lê.
- *
- * ####  KB DECIMAL AQUI, E KiB NOS OUTROS TETOS  ####
- *
- * Cada teto é escrito na base em que ele é REDONDO: o do plugin é
- * `2 * 1024 * 1024` e aparece em MiB; este é 33.000, e em KiB
- * viraria "32,2 KB" — a frase passaria a dizer um número que não
- * está em lugar nenhum do código.
- */
-function formatBytes(bytes: number): string {
-  return bytes < 1_000_000
-    ? `${String(Math.round(bytes / 1_000))} KB`
-    : `${(bytes / 1_000_000).toFixed(1).replace('.', ',')} MB`;
-}
-
-/**
- * A recusa por tamanho, com o que fazer depois dela.
- *
- * ####  ELA É A ÚNICA PORTA PARA QUEM NÃO USA O PAINEL  ####
- *
- * O painel reduz a imagem sozinho, no navegador, antes de enviar —
- * um upload por script ou `curl` não passa por lá. Para esse
- * caminho, esta frase é toda a orientação que existe: sem o tamanho
- * recomendado dentro dela, quem manda a arte original pelo terminal
- * só descobre que ela não serve, e não o que fazer.
- *
- * @param measured os bytes que chegaram, ou `null` quando o
- * multipart cortou a leitura antes de saber o tamanho.
- */
-function iconTooLarge(measured: number | null): ApiError {
-  const size =
-    measured === null
-      ? `O PNG passa do teto de ${formatBytes(MAX_ICON_BYTES)}`
-      : `O PNG tem ${formatBytes(measured)} e o teto é ${formatBytes(MAX_ICON_BYTES)}`;
-
-  return new ApiError(
-    'ICON_TOO_LARGE',
-    `${size} (${String(MAX_ICON_BYTES)} bytes). O ícone é desenhado pequeno no inventário, e ` +
-      'cada jogador baixa o arquivo inteiro na primeira vez que vê o item. Envie pelo painel, ' +
-      `que reduz a imagem sozinho, ou redimensione para ${String(RECOMMENDED_ICON_SIZE)}×` +
-      `${String(RECOMMENDED_ICON_SIZE)} antes de mandar — a arte da medalha, nesse tamanho, dá ` +
-      '25 KB.',
-    400,
-  );
-}
-
-/** O erro que o multipart lança quando o arquivo passa do teto. */
-function isFileTooLarge(cause: unknown): boolean {
-  return cause instanceof Error && (cause as { code?: unknown }).code === 'FST_REQ_FILE_TOO_LARGE';
-}
-
-/** O PNG que veio no multipart, conferido. */
-async function uploadedIcon(
-  request: FastifyRequest,
-): Promise<{ filename: string; content: Buffer }> {
-  if (!request.isMultipart()) {
-    throw new ApiError(
-      'INVALID_BODY',
-      'Mande o PNG como multipart/form-data (campo "file").',
-      400,
-    );
-  }
-
-  const file = await request.file({ limits: { fileSize: ICON_READ_LIMIT } });
-
-  if (file === undefined) {
-    throw new ApiError('INVALID_BODY', 'Nenhum arquivo veio na requisição.', 400);
-  }
-
-  if (!ICON_NAME.test(file.filename)) {
-    throw new ApiError(
-      'INVALID_ICON_NAME',
-      `"${file.filename}" não serve como nome de arquivo. Use letras, números, ponto, hífen ou ` +
-        'sublinhado, e termine em .png — o nome viaja num comando de console do jogo, onde ' +
-        'espaço separa argumentos.',
-      400,
-    );
-  }
-
-  let content: Buffer;
-
-  try {
-    content = await file.toBuffer();
-  } catch (cause) {
-    // ####  QUEM MANDA A ARTE ORIGINAL É CORTADO AQUI  ####
-    //
-    // O multipart para de ler no `fileSize` — que é o ponto: sem
-    // isso o agente carregaria os 2,9 MB da medalha na memória só
-    // para depois recusá-los. O preço é que o erro vem do
-    // @fastify/multipart, em inglês e falando de "multipart
-    // config", que não é o assunto de quem mandou uma imagem
-    // grande demais. Traduzi-lo aqui é o que faz a recusa dizer o
-    // tamanho recomendado.
-    if (isFileTooLarge(cause)) {
-      throw iconTooLarge(null);
-    }
-
-    throw cause;
-  }
-
-  // ####  PNG DE VERDADE, E NÃO SÓ COM O NOME CERTO  ####
-  //
-  // Os oito bytes da assinatura. Um JPG renomeado para .png
-  // chegaria ao FileStorage do servidor, ganharia um CRC válido, e
-  // o sintoma seria um quadrado vazio no inventário sem nada
-  // dizendo por quê.
-  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-  if (content.length < 8 || !content.subarray(0, 8).equals(signature)) {
-    throw new ApiError(
-      'INVALID_ICON',
-      'O arquivo não é um PNG. O ícone precisa ser PNG porque é o formato que guarda o fundo ' +
-        'transparente — um JPG viraria um quadrado opaco no slot do inventário.',
-      400,
-    );
-  }
-
-  if (content.length > MAX_ICON_BYTES) {
-    throw iconTooLarge(content.length);
-  }
-
-  return { filename: file.filename, content };
-}
 
 export function registerCustomItemRoutes(app: FastifyInstance, deps: CustomItemRoutesDeps): void {
   /**
@@ -400,7 +236,7 @@ export function registerCustomItemRoutes(app: FastifyInstance, deps: CustomItemR
    * pedir que alguém digite o nome do arquivo de cabeça.
    */
   app.get('/custom-items/icons', async () => {
-    return { ok: true, icons: listIcons() };
+    return { ok: true, icons: listIcons(itemIconsDir()) };
   });
 
   /**
@@ -427,17 +263,12 @@ export function registerCustomItemRoutes(app: FastifyInstance, deps: CustomItemR
   app.get('/custom-items/icons/:name', async (request, reply) => {
     const { name } = z.object({ name: z.string().min(1) }).parse(request.params);
 
-    // A régua barra `..` e barra invertida antes de o nome virar
-    // caminho: sem ela, `../../.env` seria um pedido válido.
-    if (!ICON_NAME.test(name)) {
-      throw new ApiError('INVALID_ICON_NAME', `"${name}" não é um nome de ícone válido.`, 400);
-    }
+    // A régua do `readIcon` barra `..` e barra invertida antes de o
+    // nome virar caminho: sem ela, `../../.env` seria um pedido
+    // válido. Nome fora dela e arquivo ausente dão a mesma resposta.
+    const content = readIcon(itemIconsDir(), name);
 
-    let content: Buffer;
-
-    try {
-      content = readFileSync(join(projectRoot(), ITEM_ASSETS_DIR, name));
-    } catch {
+    if (content === null) {
       throw new ApiError('ICON_NOT_FOUND', `Nenhum ícone chamado "${name}".`, 404);
     }
 
@@ -446,17 +277,8 @@ export function registerCustomItemRoutes(app: FastifyInstance, deps: CustomItemR
 
   app.post('/custom-items/icons', async (request) => {
     const { filename, content } = await uploadedIcon(request);
-    const dir = join(projectRoot(), ITEM_ASSETS_DIR);
 
-    // A pasta não existir é o estado normal de quem nunca enviou
-    // ícone nenhum — criá-la é parte do trabalho, e não um erro.
-    mkdirSync(dir, { recursive: true });
-
-    // Sobrescrever é o comportamento certo: reenviar a arte
-    // corrigida com o mesmo nome é exatamente o gesto de "troquei o
-    // ícone". E o CRC do jogo nasce dos BYTES, então o cliente
-    // baixa a versão nova sozinho, sem ninguém invalidar nada.
-    writeFileSync(join(dir, filename), content);
+    saveIcon(itemIconsDir(), filename, content);
 
     request.log.info({ icon: filename, bytes: content.length }, 'ícone de item custom recebido');
 
@@ -631,44 +453,21 @@ function validate(deps: CustomItemRoutesDeps, input: CustomItemInput, currentId:
 }
 
 /**
- * Os PNGs de `Assets\items\`, com o tamanho de cada um.
- *
- * Pasta ausente devolve lista vazia, sem aviso: é o estado normal
- * de quem ainda não enviou ícone nenhum, e um `warn` por leitura
- * seria ruído que ensina a ignorar o log.
- */
-function listIcons(): readonly { readonly name: string; readonly bytes: number }[] {
-  const dir = join(projectRoot(), ITEM_ASSETS_DIR);
-
-  try {
-    return readdirSync(dir)
-      .filter((file) => /\.png$/i.test(file))
-      .map((file) => ({ name: file, bytes: statSync(join(dir, file)).size }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Os bytes de um ícone de `Assets\items\`, ou `null`.
  *
  * É a porta da sincronização (game/custom-items-sync.ts), que leva o
- * PNG ao OrigemZImages. A régua do nome é a MESMA do upload, e aqui
- * ela protege outra coisa: `icon_file` vem do banco, e o PUT só
- * confere o tamanho dele — sem a régua, `../../.env` seria lido e
- * mandado ao RCON.
+ * PNG ao OrigemZImages. A régua do nome mora no `readIcon`, e aqui
+ * ela protege o que vem do BANCO: `icon_file` só tem o tamanho
+ * conferido pelo PUT — sem a régua, `../../.env` seria lido e mandado
+ * ao RCON.
  */
 export function readItemIcon(name: string): Buffer | null {
-  if (!ICON_NAME.test(name)) {
-    return null;
-  }
+  return readIcon(itemIconsDir(), name);
+}
 
-  try {
-    return readFileSync(join(projectRoot(), ITEM_ASSETS_DIR, name));
-  } catch {
-    return null;
-  }
+/** A pasta dos ícones. Resolvida na hora: `projectRoot` é injetável. */
+function itemIconsDir(): string {
+  return join(projectRoot(), ITEM_ASSETS_DIR);
 }
 
 function mustGet(deps: CustomItemRoutesDeps, id: string): CustomItemRecord {
