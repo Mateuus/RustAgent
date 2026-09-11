@@ -62,6 +62,8 @@ import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
+import { ImageLibrary } from './game/image-library.js';
+import { readItemIcon } from './http/routes/custom-items.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
 import { VipsRepository } from './db/vips-repository.js';
@@ -732,6 +734,15 @@ async function main(): Promise<void> {
   // Store" em vez de `trophy.bleik`. Ver `RankingLabels`.
   const rankingsRepository = new RankingsRepository(db);
 
+  // ####  UMA BIBLIOTECA DE IMAGENS PARA OS TRÊS  ####
+  //
+  // O menu, as propagandas e os ícones de item levam imagem ao
+  // mesmo OrigemZImages. A instância é UMA porque é ela que enfileira
+  // os envios por servidor: duas mandariam a mesma chave ao mesmo
+  // tempo, e o `begin` de uma recomeçaria o envio da outra. Ver
+  // game/image-library.ts.
+  const imageLibrary = new ImageLibrary({ logger });
+
   customItemsSync = new CustomItemsSync({
     repository: customItemsRepository,
     servers: supervisor,
@@ -745,6 +756,9 @@ async function main(): Promise<void> {
     lootRules: lootRulesRepository,
     logger,
     secret: statChannelSecret,
+    // O PNG de `Assets\items\` que o painel gravou. Sem isto ele
+    // nunca chegava ao jogo — ver `CustomItemsSyncDeps.icons`.
+    icons: { library: imageLibrary, read: readItemIcon },
   });
 
   // ####  A OUTRA METADE DO ITEM CUSTOM: O PONTO  ####
@@ -1618,10 +1632,10 @@ async function main(): Promise<void> {
     // disco vazaria junto com qualquer backup, e não há nada aqui
     // que precise sobreviver a um restart.
     secret: randomUUID(),
-    // Lidas UMA vez, no boot: são bytes de PNG que não mudam
-    // enquanto o processo vive, e relê-las a cada envio seria ler
-    // disco para mandar o mesmo conteúdo.
-    images: loadUiImages(agent.paths.root, logger),
+    // Lidas a CADA envio: um PNG novo em `Assets\ui` vale sem
+    // reiniciar o agente. O manifesto do OrigemZImages é que impede
+    // o reenvio do que não mudou — ver `loadUiImages`.
+    images: { library: imageLibrary, load: () => loadUiImages(agent.paths.root, logger) },
   });
 
   uiSync.start();
@@ -1641,6 +1655,7 @@ async function main(): Promise<void> {
     ads: adsRepository,
     servers: supervisor,
     logger,
+    images: imageLibrary,
   });
 
   adsSync.start();
@@ -3024,6 +3039,9 @@ async function main(): Promise<void> {
         // um servidor que já está sendo desligado — e o plugin
         // ficaria sem lista sem nunca receber a de volta.
         customItemsSync.stop();
+        // E as imagens que esperavam o boot de um servidor: a nova
+        // tentativa sairia para um RCON que já não existe.
+        imageLibrary.stop();
         // E o relógio da contagem de loot: uma leitura que começasse
         // agora falaria com um RCON que já não existe. Nada se perde:
         // o número continua no `oxide/data` do plugin.

@@ -70,6 +70,22 @@ import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
 import { disconnectedRcon } from '../ops/service.js';
 import { toError } from '../util.js';
+import {
+  IMAGE_FAMILIES,
+  imageAsset,
+  type ImageAsset,
+  type ImageLibrary,
+} from './image-library.js';
+
+/**
+ * A chave do ícone de um item no OrigemZImages.
+ *
+ * PRECISA BATER COM `IconKeyPrefix` em Plugins/OrigemZItems.cs: é
+ * por ela que o plugin pergunta o CRC na hora de vestir o item.
+ */
+export function itemIconKey(itemId: string): string {
+  return `item.${itemId}`;
+}
 
 /** `origemz.item.clear` — o plugin esquece tudo antes de reaprender. */
 export const CLEAR_COMMAND = 'origemz.item.clear';
@@ -252,6 +268,24 @@ export interface CustomItemsSyncDeps {
    * cinco minutos".
    */
   readonly secret?: string;
+  /**
+   * Os ícones dos itens, e quem os leva ao jogo.
+   *
+   * ####  SEM ISTO, O ÍCONE NUNCA SAÍA DO DISCO  ####
+   *
+   * O painel grava o PNG em `Assets\items\` e o nome em
+   * `icon_file`; o plugin tinha comandos para recebê-lo. Faltava a
+   * ponte: nada daqui lia o arquivo, e o item aparecia no jogo com
+   * o ícone do item base.
+   *
+   * `read` recebe o `icon_file` e devolve os bytes, ou `null`.
+   * Ausente = nenhum ícone viaja, e a rodada é a de antes — é o que
+   * os testes que não falam de ícone usam.
+   */
+  readonly icons?: {
+    readonly library: ImageLibrary;
+    readonly read: (file: string) => Buffer | null;
+  };
 }
 
 export interface CustomItemsSyncResult {
@@ -397,6 +431,14 @@ export class CustomItemsSync {
 
     try {
       const items = this.#deps.repository.listForServer(serverId);
+
+      // ####  OS ÍCONES VÊM ANTES DO CADASTRO  ####
+      //
+      // Pela mesma razão das imagens do menu virem antes dos
+      // documentos: quando o `set` chegar e o plugin vestir o item, o
+      // CRC precisa já estar no OrigemZImages. Falha aqui não segura a
+      // rodada — item sem ícone próprio continua sendo o item.
+      await this.#pushIcons(serverId, rcon, items);
 
       // O segredo do caminho de volta vai junto — ver
       // `buildClearCommand`.
@@ -607,6 +649,57 @@ export class CustomItemsSync {
     return { sent, refused };
   }
 
+  /**
+   * Garante que o OrigemZImages tem o ícone de cada item. NUNCA lança:
+   * a biblioteca traduz falha em desfecho e registra o que faltou.
+   *
+   * Lê o disco a cada rodada, e é barato: a rodada acontece no boot,
+   * na reconexão e a cada edição — não num relógio — e o manifesto
+   * do plugin garante que o ícone que não mudou não sobe.
+   */
+  async #pushIcons(
+    serverId: string,
+    rcon: OpsRcon,
+    items: readonly CustomItemRecord[],
+  ): Promise<void> {
+    const icons = this.#deps.icons;
+
+    if (icons === undefined) {
+      return;
+    }
+
+    const assets: ImageAsset[] = [];
+
+    for (const item of items) {
+      // Sem arquivo é o padrão BOM: o ícone do item base, que o
+      // jogador já reconhece. E item cujo base sumiu nem vai ao
+      // plugin, então o ícone dele não teria em quem aparecer.
+      if (item.iconFile === null || item.baseMissing) {
+        continue;
+      }
+
+      const bytes = icons.read(item.iconFile);
+
+      if (bytes === null) {
+        this.#deps.logger.warn(
+          { server: serverId, item: item.id, icon: item.iconFile },
+          'o ícone do item custom não está em Assets\\items; ele fica com o ícone do item base',
+        );
+        continue;
+      }
+
+      assets.push(imageAsset(itemIconKey(item.id), bytes));
+    }
+
+    // ####  O ÍCONE TIRADO PRECISA SAIR DO JOGO  ####
+    //
+    // A tabela do OrigemZImages sobrevive a reload e a restart, e o
+    // plugin veste o item com o que achar lá. Sem a poda, um ícone
+    // removido no painel (ou o de um item apagado) continuaria
+    // aparecendo para sempre. A família `item.` é só nossa.
+    await icons.library.sync(serverId, rcon, assets, { owns: IMAGE_FAMILIES.item });
+  }
+
   #rankingLabel(item: CustomItemRecord): string | undefined {
     const metric = item.action.kind === 'points' ? item.action.metric : undefined;
 
@@ -678,10 +771,10 @@ export function toPluginBody(
     description: item.description ?? undefined,
     message: item.message ?? undefined,
     maxStack: item.maxStack ?? undefined,
-    // O ícone NÃO vai aqui: ele são bytes, viaja por
-    // `origemz.item.icon` e o `ParseItem` não lê campo nenhum de
-    // ícone. Mandar o nome do arquivo seria inventar um contrato
-    // que o outro lado não tem.
+    // O ícone NÃO vai aqui: ele são bytes, viaja ao OrigemZImages
+    // com a chave `itemIconKey(id)` (ver `#pushIcons`) e o
+    // `ParseItem` não lê campo nenhum de ícone. Mandar o nome do
+    // arquivo seria inventar um contrato que o outro lado não tem.
     action: toActionBody(item.action, rankingLabel),
   };
 }

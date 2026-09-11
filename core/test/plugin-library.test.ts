@@ -549,6 +549,36 @@ describe('as dependências entre plugins', () => {
     expect(plugin.missingRequires).toEqual([]);
   });
 
+  it('avisa a dependência MOLE que está no acervo e desligada aqui', async () => {
+    const { agente, ui } = await comDependentes();
+
+    // O OrigemZUI sobe sem o outro — e uma parte dele não funciona,
+    // sem nada no log do Oxide dizer isso. É o caso do OrigemZImages.
+    const { plugin } = await harness.library.setEnabled(SERVER_ID, ui, true);
+
+    expect(plugin.missingRequires).toEqual([]);
+    expect(plugin.missingReferences).toEqual(['OrigemZAgent']);
+
+    await harness.library.setEnabled(SERVER_ID, agente, true);
+
+    const { plugins } = await harness.library.serverList(SERVER_ID);
+
+    expect(plugins.find((p) => p.name === 'OrigemZUI')?.missingReferences).toEqual([]);
+  });
+
+  it('a integração opcional que NÃO está no acervo não vira aviso', async () => {
+    // Plugin de terceiro referencia meia dúzia de coisas que ninguém
+    // pretende instalar. Avisar de cada uma seria alarme permanente.
+    const { plugin: added } = await harness.library.add(
+      PLUGIN_FILE,
+      pluginSource('1.0.0', { references: ['Friends', 'Clans'] }),
+    );
+
+    const { plugin } = await harness.library.setEnabled(SERVER_ID, added.id, true);
+
+    expect(plugin.missingReferences).toEqual([]);
+  });
+
   it('a tela sabe quem cai se o plugin for tirado', async () => {
     const { agente, player, ui } = await comDependentes();
 

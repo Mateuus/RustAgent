@@ -331,6 +331,17 @@ export interface ServerPlugin extends LibraryPlugin {
    */
   missingRequires: string[];
   /**
+   * Dependências MOLES que estão no acervo e não estão ligadas aqui.
+   *
+   * O plugin carrega assim mesmo, e a parte que usa o outro fica
+   * morta sem erro nenhum — o OrigemZUI sem o OrigemZImages abre o
+   * menu, mas sem as imagens próprias.
+   *
+   * Opcional porque um agente anterior a este campo não o manda, e
+   * ler `.length` de `undefined` derrubaria a tela inteira.
+   */
+  missingReferences?: string[];
+  /**
    * Quem, ligado aqui, depende deste plugin.
    *
    * `hard` sai do ar junto se este for tirado; `soft` continua no ar

@@ -19,12 +19,15 @@
 //     como um overlay travado no meio da animação.
 // ============================================================
 
+import { createHash } from 'node:crypto';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AdsRepository } from '../src/db/ads-repository.js';
 import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
+import { imageKeyOf } from '../src/game/ads-images.js';
 import { AdsSync, type AdsSyncRcon, isAdsRequest } from '../src/game/ads-sync.js';
 import { ADS_REQUEST_MARKER, type AdsPayload } from '../src/types/ads-transport.js';
 
@@ -91,7 +94,15 @@ interface Harness {
 
 let harness: Harness | null = null;
 
-function buildHarness(options: { connected?: boolean; now?: number } = {}): Harness {
+function buildHarness(
+  options: {
+    connected?: boolean;
+    now?: number;
+    /** O que o OrigemZImages diz que já tem: chave -> sha. */
+    manifest?: Record<string, string>;
+    fetchImpl?: typeof fetch;
+  } = {},
+): Harness {
   const db = createTestDatabase();
   const ads = new AdsRepository(db);
   const sent: string[] = [];
@@ -102,13 +113,22 @@ function buildHarness(options: { connected?: boolean; now?: number } = {}): Harn
       isConnected: options.connected ?? true,
       send: async (command: string) => {
         sent.push(command);
+
+        if (command === 'origemz.image.list') {
+          return Promise.resolve(
+            JSON.stringify({ ok: true, ready: true, images: options.manifest ?? {} }),
+          );
+        }
+
         return Promise.resolve('{"ok":true}');
       },
     }),
     // Um `fetch` que recusa na hora. Sem ele, o serviço tentaria
     // alcançar `exemplo.com` de verdade e cada teste esperaria o
     // DNS estourar — segundos de espera para provar nada.
-    fetchImpl: (async () => Promise.reject(new Error('sem rede no teste'))) as unknown as typeof fetch,
+    fetchImpl:
+      options.fetchImpl ??
+      ((async () => Promise.reject(new Error('sem rede no teste'))) as unknown as typeof fetch),
     ...(options.now === undefined ? {} : { now: () => options.now! }),
   });
 
@@ -162,6 +182,39 @@ function readyAd(
   return ad.id;
 }
 
+/**
+ * O começo de um PNG de `width` x `height`.
+ *
+ * Basta para o `probeImage`, que lê as dimensões do IHDR — e como
+ * cabe no teto, nada tenta decodificá-lo.
+ */
+function pngHeader(width: number, height: number): Buffer {
+  const bytes = Buffer.alloc(64);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'ascii');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+}
+
+/** Uma propaganda pronta cuja linha guarda o sha DE VERDADE destes bytes. */
+function readyAdWithBytes(ads: AdsRepository, name: string, bytes: Buffer): string {
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  const ad = ads.create(SERVER, { name, imageUrl: `https://exemplo.com/${name}.png` } as never);
+
+  ads.markImage(SERVER, ad.id, {
+    status: 'ready',
+    key: imageKeyOf(sha),
+    sha,
+    bytes: bytes.length,
+    width: 600,
+    height: 200,
+  });
+
+  return ad.id;
+}
+
 describe('o envio', () => {
   it('desligado, MANDA a carga vazia para o plugin limpar a tela', async () => {
     const { sync, sent } = buildHarness();
@@ -200,22 +253,80 @@ describe('o envio', () => {
   });
 
   it('os BYTES vão antes da carga', async () => {
-    const { ads, sync, sent } = buildHarness();
+    const bytes = pngHeader(600, 200);
+    const { ads, sync, sent } = buildHarness({
+      fetchImpl: (async () => Promise.resolve(new Response(bytes))) as unknown as typeof fetch,
+    });
 
     ads.saveSettings(SERVER, { enabled: true });
-    readyAd(ads, 'vip');
+    readyAdWithBytes(ads, 'vip', bytes);
 
-    // Sem bytes em memória, o serviço tenta rebaixar e falha (sem
-    // rede no teste) — o que ele NÃO pode fazer é mandar a carga
-    // antes de tentar.
+    // Sem bytes em memória (o agente acabou de subir) e sem a imagem
+    // no plugin: o serviço rebaixa e sobe — e a carga só depois.
     await sync.push(SERVER, 'manual');
 
     const config = sent.findIndex((line) => line.startsWith('origemz.ads.config'));
-    const imagem = sent.findIndex((line) => line.startsWith('origemz.ads.image'));
+    const fim = sent.findIndex((line) => line.startsWith('origemz.image.end '));
 
-    if (imagem !== -1) {
-      expect(imagem).toBeLessThan(config);
-    }
+    expect(fim).toBeGreaterThan(-1);
+    expect(fim).toBeLessThan(config);
+  });
+
+  it('a imagem da propaganda APAGADA é esquecida; a que está fora do horário, não', async () => {
+    // Chaves de verdade (`ad` + 12 hex): são as únicas que a poda das
+    // propagandas reconhece como suas.
+    const vip = pngHeader(600, 200);
+    const noite = pngHeader(600, 201);
+    const shaVip = createHash('sha256').update(vip).digest('hex');
+    const shaNoite = createHash('sha256').update(noite).digest('hex');
+
+    const { ads, sync, sent } = buildHarness({
+      manifest: {
+        adaaaaaaaaaaaa: 'x',
+        [imageKeyOf(shaVip)]: shaVip,
+        [imageKeyOf(shaNoite)]: shaNoite,
+      },
+      // 12h: a janela da madrugada está fechada.
+      now: new Date(2026, 8, 11, 12, 0).getTime(),
+    });
+
+    ads.saveSettings(SERVER, { enabled: true });
+    readyAdWithBytes(ads, 'vip', vip);
+    // Fora da janela agora: não sobe, mas não pode ser esquecida.
+    const id = readyAdWithBytes(ads, 'noite', noite);
+    ads.update(SERVER, id, { startTime: '03:00', endTime: '03:01' });
+
+    await sync.push(SERVER, 'manual');
+
+    const esquecidas = sent.filter((line) => line.startsWith('origemz.image.forget'));
+
+    // A da madrugada ficou fora do ciclo — e mesmo assim não foi
+    // esquecida. `adaaaaaaaaaaaa` era de uma propaganda que não existe
+    // mais, e só ela sai.
+    expect(lastConfig(sent).ads).toHaveLength(1);
+    expect(esquecidas).toEqual(['origemz.image.forget adaaaaaaaaaaaa']);
+  });
+
+  it('a imagem que o plugin JÁ TEM não é rebaixada depois de um reinício do agente', async () => {
+    const bytes = pngHeader(600, 200);
+    const sha = createHash('sha256').update(bytes).digest('hex');
+    const baixou = vi.fn(async () => Promise.resolve(new Response(bytes)));
+
+    const { ads, sync, sent } = buildHarness({
+      manifest: { [imageKeyOf(sha)]: sha },
+      fetchImpl: baixou as unknown as typeof fetch,
+    });
+
+    ads.saveSettings(SERVER, { enabled: true });
+    readyAdWithBytes(ads, 'vip', bytes);
+
+    await sync.push(SERVER, 'manual');
+
+    // O sha está no banco e o OrigemZImages tem a mesma versão: nem
+    // download, nem pedaço. Antes, todo reinício rebaixava tudo.
+    expect(baixou).not.toHaveBeenCalled();
+    expect(sent.some((line) => line.startsWith('origemz.image.begin'))).toBe(false);
+    expect(lastConfig(sent).ads).toHaveLength(1);
   });
 
   it('propaganda sem imagem pronta NÃO entra na carga', async () => {
@@ -254,7 +365,7 @@ describe('o envio', () => {
     // Sem download nenhum: quem baixa é o cliente.
     expect(payload.ads).toHaveLength(1);
     expect(payload.ads[0]?.image).toBe('https://exemplo.com/vip.png');
-    expect(sent.some((line) => line.startsWith('origemz.ads.image'))).toBe(false);
+    expect(sent.some((line) => line.startsWith('origemz.image.'))).toBe(false);
   });
 
   it('a permissão viaja com cada item — é o plugin que filtra por jogador', async () => {
@@ -309,7 +420,12 @@ describe('o reenvio periódico', () => {
     // O plugin foi consertado para retomar a contagem; este
     // dedup é a outra metade.
     expect(outcome.status).toBe('skipped');
-    expect(sent.length).toBe(primeiro);
+
+    // O que a volta periódica ainda faz é PERGUNTAR ao OrigemZImages
+    // o que ele tem — é assim que um `origemz.image.forget` ou um
+    // wipe são notados. Carga e bytes, nada.
+    const depois = sent.slice(primeiro);
+    expect(depois.every((line) => line === 'origemz.image.list')).toBe(true);
   });
 
   it('reenvia quando algo muda', async () => {

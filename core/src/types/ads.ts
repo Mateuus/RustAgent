@@ -193,9 +193,11 @@ export const ADS_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
  * projeto). A imagem viaja em base64, que infla 4/3, e cada
  * pedaco leva ainda o nome do comando e a chave.
  *
- * Com 27 KB de arquivo por pedaco, 1,5 MB dá ~57 comandos. Cada
- * um leva alguns milissegundos, e isso acontece UMA vez por
- * imagem — o resultado fica no FileStorage do servidor.
+ * Com 27 KB de arquivo por pedaco (IMAGE_CHUNK_BYTES, em
+ * game/image-library.ts), 1,5 MB dá ~57 comandos. Cada um leva
+ * alguns milissegundos, e isso acontece UMA vez por imagem — o
+ * resultado fica no FileStorage do servidor, e o manifesto do
+ * OrigemZImages impede o reenvio.
  *
  * ####  POR QUE ELE SUBIU DE 420 KB  ####
  *
@@ -206,9 +208,6 @@ export const ADS_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
  * que o jogador vê.
  */
 export const ADS_STORED_MAX_BYTES = 1_536 * 1024;
-
-/** Bytes de arquivo por pedaco — ver ADS_STORED_MAX_BYTES. */
-export const ADS_CHUNK_BYTES = 27_000;
 
 export const ADS_MAX_WIDTH = 1920;
 export const ADS_MAX_HEIGHT = 1080;

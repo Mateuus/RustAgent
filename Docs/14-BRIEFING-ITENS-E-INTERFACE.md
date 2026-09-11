@@ -300,8 +300,13 @@ Por isso o contrato é **carga inicial leve, telas sob demanda**:
 ```
 
 Os comandos que o plugin já expõe (leia o `.cs` para o formato exato):
-`origemz.ui.doc`, `origemz.ui.screen`, `origemz.ui.image`, `origemz.ui.open`,
-`origemz.ui.close`, `origemz.ui.act`, `origemz.ui.reask`, `origemz.ui.debug`.
+`origemz.ui.doc`, `origemz.ui.screen`, `origemz.ui.open`, `origemz.ui.close`,
+`origemz.ui.act`, `origemz.ui.reask`, `origemz.ui.debug`.
+
+As imagens próprias (`{img:chave}`) não passam mais por ele: desde 11/09/2026
+os bytes vão ao `OrigemZImages` (`origemz.image.begin/part/end`, com o manifesto
+em `origemz.image.list`), e o OrigemZUI só pergunta o CRC na hora de desenhar.
+Ver `core/src/game/image-library.ts` e `Docs/ImageLibrary/README.md`.
 
 **As duas regras da metade puxada**, que valem código:
 

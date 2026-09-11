@@ -234,6 +234,25 @@ export interface ServerPluginView extends PluginView {
    */
   readonly missingRequires: readonly string[];
   /**
+   * Dependências MOLES que estão no acervo e não estão ligadas aqui.
+   *
+   * ####  O PLUGIN SOBE, E UMA PARTE DELE NÃO FUNCIONA  ####
+   *
+   * O `[PluginReference]` não segura ninguém: o OrigemZUI carrega
+   * sem o OrigemZImages, abre o menu, vende — e as imagens próprias
+   * simplesmente não aparecem. Nada no log do Oxide diz isso, e é
+   * por isso que a tela precisa dizer.
+   *
+   * ####  SÓ O QUE ESTÁ NO ACERVO  ####
+   *
+   * Plugin de terceiro costuma referenciar meia dúzia de integrações
+   * opcionais (Friends, Clans, Economics…). Avisar de cada uma seria
+   * um alarme permanente sobre o que ninguém pretende instalar. O que
+   * está no acervo e desligado aqui é outra coisa: é quase sempre
+   * esquecimento, e ligar é um clique.
+   */
+  readonly missingReferences: readonly string[];
+  /**
    * Quem, LIGADO aqui, depende deste plugin.
    *
    * `hard` sai do ar junto se este for tirado; `soft` continua no ar
@@ -483,6 +502,9 @@ export class PluginLibrary {
     // este?".
     const onlineNames = new Set([...holderOf.keys()]);
 
+    // O que PODERIA ser ligado aqui. É a régua do `missingReferences`.
+    const availableNames = new Set(available.map((plugin) => plugin.name));
+
     const plugins = available.map((plugin): ServerPluginView => {
       const row = state.get(plugin.id);
       const enabled = row?.enabled === true;
@@ -503,6 +525,9 @@ export class PluginLibrary {
               ? 'biblioteca'
               : 'custom',
         missingRequires: (plugin.requires ?? []).filter((name) => !onlineNames.has(name)),
+        missingReferences: (plugin.references ?? []).filter(
+          (name) => name !== plugin.name && !onlineNames.has(name) && availableNames.has(name),
+        ),
         dependents: dependentsOf(plugin.name, [...holderOf.values()]),
         // Só para quem está ligado: um plugin desligado não tem
         // reload a comentar, e mostrar o erro de quando ele esteve no
