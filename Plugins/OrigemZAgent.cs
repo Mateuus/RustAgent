@@ -81,7 +81,11 @@ namespace Oxide.Plugins
     // 0.4.0: o origemz.items passou a responder "displayNamePtBr".
     // O campo e OPCIONAL, entao o agente antigo continua lendo este
     // plugin, e este plugin continua servindo o agente antigo.
-    [Info("OrigemZAgent", "OrigemZ", "0.4.0")]
+    // 0.5.0: o origemz.timers.sync e o hook GetTimers - a velocidade
+    // de fornalha, craft, pesquisa e reciclador por nivel, que quem
+    // aplica e o OrigemZPlayer. Um agente antigo nunca manda o
+    // comando, e o hook responde null: todo mundo fica no x1.
+    [Info("OrigemZAgent", "OrigemZ", "0.5.0")]
     [Description("Ponta no jogo do RustAgent: lista jogadores, publica o catalogo de itens, entrega itens via RCON e expoe o estado de VIP por hook")]
     public class OrigemZAgent : RustPlugin
     {
@@ -163,6 +167,7 @@ namespace Oxide.Plugins
         private const string VipSyncCommand = "origemz.vip.sync";
         private const string LoadoutSyncCommand = "origemz.loadout.sync";
         private const string SpawnStatusSyncCommand = "origemz.status.sync";
+        private const string TimersSyncCommand = "origemz.timers.sync";
 
         /// <summary>
         /// `origemz.vehicle.spawn <steamId> <prefab> [combustivel]`
@@ -220,6 +225,7 @@ namespace Oxide.Plugins
         // AGENTE continuaria achando que ja mandou.
         private const string RequestQuests = "quests";
         private const string RequestSpawnStatus = "status";
+        private const string RequestTimers = "timers";
 
         // Paginacao do origemz.items.
         //
@@ -360,6 +366,15 @@ namespace Oxide.Plugins
         private Dictionary<string, string> _spawnStatusCache =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        // A VELOCIDADE das coisas, por nivel, JA SERIALIZADA: fornalha,
+        // craft, pesquisa e reciclador.
+        //
+        // Quarto cache, e separado pelo mesmo motivo do de status: e
+        // outra aba da tela, com outro ciclo de edicao. Quem consome e
+        // o OrigemZPlayer, pelo hook GetTimers.
+        private Dictionary<string, string> _timersCache =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         // ========================================================
         //  CICLO DE VIDA
         // ========================================================
@@ -389,6 +404,7 @@ namespace Oxide.Plugins
                 RequestSync(RequestVips);
                 RequestSync(RequestLoadouts);
                 RequestSync(RequestSpawnStatus);
+                RequestSync(RequestTimers);
                 RequestSync(RequestQuests);
             });
 
@@ -3590,6 +3606,186 @@ namespace Oxide.Plugins
             }
         }
 
+        // ========================================================
+        //  origemz.timers.sync <base64>
+        //
+        //  A VELOCIDADE de fornalha, craft, pesquisa e reciclador,
+        //  por nivel. Quarto membro da familia empurrada, e com o
+        //  mesmo desenho: base64, estado COMPLETO, cache trocado
+        //  inteiro. Nivel que sumiu do payload volta ao x1.
+        //
+        //      {"tiers":{"gold":{"smelt":3,"craft":2}}}
+        //
+        //  Campo ausente e x1 NAQUELE nivel - e quem decide o que
+        //  isso vira no jogador e o OrigemZPlayer, que cai para o
+        //  nivel de baixo antes de cair para o x1. Este plugin so
+        //  guarda e repassa.
+        //
+        //      {"ok":true,"tiers":3}
+        //      {"ok":false,"error":"INVALID_ARGS"}
+        // ========================================================
+        // O log adiado um frame pelo mesmo motivo medido no
+        // CommandVipSync: o Puts sai antes da resposta e seria
+        // casado como se FOSSE a resposta.
+        [ConsoleCommand(TimersSyncCommand)]
+        private void CommandTimersSync(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                string logLine;
+                string response = HandleTimersSync(arg, out logLine);
+
+                arg.ReplyWith(response);
+
+                if (logLine != null)
+                {
+                    string line = logLine;
+                    timer.Once(0f, delegate { Puts(line); });
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintError(TimersSyncCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleTimersSync(ConsoleSystem.Arg arg, out string logLine)
+        {
+            logLine = null;
+
+            if (arg.Args == null || arg.Args.Length == 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            string raw = JoinConsoleArgs(arg);
+            string payload = DecodeBase64Payload(raw);
+
+            if (payload == null)
+            {
+                payload = raw;
+            }
+
+            int tiers;
+            string error = ApplyTimersCache(payload, out tiers);
+
+            if (error != null)
+            {
+                return BuildError(error);
+            }
+
+            logLine = TimersSyncCommand + ": " + tiers + " nivel(is) no cache de timers.";
+
+            return JsonConvert.SerializeObject(new TimersSyncOkResponse
+            {
+                Tiers = tiers
+            });
+        }
+
+        // Le o JSON e TROCA o cache - mesma regra do
+        // ApplySpawnStatusCache: dicionario novo, atribuido ao campo
+        // so na ultima linha. Payload vazio e legitimo, e e assim que
+        // "apaguei o ultimo timer" chega aqui.
+        private string ApplyTimersCache(string json, out int tierCount)
+        {
+            tierCount = 0;
+
+            if (string.IsNullOrEmpty(json))
+            {
+                return ErrorInvalidArgs;
+            }
+
+            TimersSyncPayload payload;
+
+            try
+            {
+                payload = JsonConvert.DeserializeObject<TimersSyncPayload>(json);
+            }
+            catch (Exception ex)
+            {
+                PrintWarning("Cache de timers recusado: JSON ilegivel. " + ex.Message);
+                return ErrorInvalidArgs;
+            }
+
+            if (payload == null || payload.Tiers == null)
+            {
+                return ErrorInvalidArgs;
+            }
+
+            Dictionary<string, string> rebuilt =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            int discarded = 0;
+
+            foreach (KeyValuePair<string, TimersPayload> entry in payload.Tiers)
+            {
+                string tier = NormalizeLoadoutTier(entry.Key);
+
+                if (tier == null || entry.Value == null)
+                {
+                    discarded++;
+                    continue;
+                }
+
+                // Os quatro ausentes nao viram entrada: e o mesmo que o
+                // nivel nao estar no payload.
+                if (!entry.Value.Smelt.HasValue &&
+                    !entry.Value.Craft.HasValue &&
+                    !entry.Value.Research.HasValue &&
+                    !entry.Value.Recycle.HasValue)
+                {
+                    discarded++;
+                    continue;
+                }
+
+                rebuilt[tier] = JsonConvert.SerializeObject(entry.Value);
+            }
+
+            _timersCache = rebuilt;
+            tierCount = rebuilt.Count;
+
+            if (discarded > 0)
+            {
+                PrintWarning("Cache de timers: " + discarded + " entrada(s) descartada(s) por " +
+                             "nivel invalido ou sem nenhum timer definido.");
+            }
+
+            return null;
+        }
+
+        // Os timers de um nivel, em JSON, ou null quando o nivel nao
+        // tem configuracao. null e a resposta comum, como no
+        // GetSpawnStatus: nivel sem timers e o estado de todo
+        // servidor recem-instalado.
+        [HookMethod(nameof(GetTimers))]
+        private string GetTimers(string tier)
+        {
+            try
+            {
+                string normalized = NormalizeLoadoutTier(tier);
+
+                if (normalized == null)
+                {
+                    return null;
+                }
+
+                string json;
+
+                if (!_timersCache.TryGetValue(normalized, out json))
+                {
+                    return null;
+                }
+
+                return json;
+            }
+            catch (Exception ex)
+            {
+                PrintError("GetTimers falhou para '" + tier + "': " + ex);
+                return null;
+            }
+        }
+
         // Pede ao RustAgent que reenvie um estado.
         //
         // Nao ha resposta a esperar: o agente reage empurrando o
@@ -3734,6 +3930,44 @@ namespace Oxide.Plugins
         }
 
         private class SpawnStatusSyncOkResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok { get { return true; } }
+
+            [JsonProperty("tiers")]
+            public int Tiers { get; set; }
+        }
+
+        private class TimersSyncPayload
+        {
+            [JsonProperty("tiers")]
+            public Dictionary<string, TimersPayload> Tiers { get; set; }
+        }
+
+        // Repassado ADIANTE como veio - mesma regra do
+        // SpawnStatusPayload: este plugin e o hub, e quem entende de
+        // fornalha e bancada e o OrigemZPlayer.
+        //
+        // float? e nao float: ausente quer dizer "este nivel nao
+        // decide este timer", e o OrigemZPlayer cai para o nivel de
+        // baixo. Um float sem nullable viraria 0 na desserializacao,
+        // e 0 aqui nao e x1 - e parar o tempo.
+        private class TimersPayload
+        {
+            [JsonProperty("smelt", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Smelt { get; set; }
+
+            [JsonProperty("craft", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Craft { get; set; }
+
+            [JsonProperty("research", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Research { get; set; }
+
+            [JsonProperty("recycle", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Recycle { get; set; }
+        }
+
+        private class TimersSyncOkResponse
         {
             [JsonProperty("ok")]
             public bool Ok { get { return true; } }

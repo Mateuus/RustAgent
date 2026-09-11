@@ -6457,6 +6457,66 @@ CREATE TABLE betterloot_junk (
 );
 `;
 
+const PLAYER_TIMERS_SCHEMA = `
+-- ============================================================
+--  074  quao RAPIDO as coisas andam para cada grupo.
+--
+--  A aba Configuracoes > Player > Timers, que ate aqui era
+--  maquete. Quatro multiplicadores de VELOCIDADE por grupo do
+--  Oxide: fornalha, craft, pesquisa e reciclador. x2 e duas vezes
+--  mais rapido - metade do tempo.
+--
+--  Quem aplica e o OrigemZPlayer, a partir do
+--  origemz.timers.sync (loadouts/timers.ts). Nasceu para tirar do
+--  servidor o QuickSmelt, que parou de compilar no Rust de
+--  setembro de 2026 e so sabia de permissao, nao de nivel.
+--
+--  ####  POR QUE NAO E COLUNA DA spawn_status  ####
+--
+--  Pelo mesmo motivo que a 022 deu para nao ser coluna da
+--  loadouts: sao abas diferentes da mesma tela, com comandos e
+--  caches diferentes no jogo. Desligar os timers de um grupo nao
+--  pode levar o status de nascimento junto.
+--
+--  ####  NULL E "ESTE GRUPO NAO DECIDE ESTE TIMER"  ####
+--
+--  E nao x1. O plugin resolve campo a campo: admin, depois o VIP,
+--  depois o normal, e o primeiro que DEFINE o timer ganha. Um NULL
+--  no grupo do VIP deixa o jogador cair para o que o default
+--  disser - e so no fim de tudo para o x1 do jogo.
+--
+--  Por isso o 1 nunca chega aqui: a rota o grava como NULL. Um 1
+--  gravado no VIP travaria a queda, e o VIP perderia o x2 que o
+--  servidor inteiro tem - configuracao que ninguem faz querendo.
+--
+--  REAL, e nao INTEGER: x1.5 e configuracao legitima. A faixa
+--  (1 a 20) e conferida na rota, e nao num CHECK: o teto e regra
+--  do plugin, e mudar a regra nao pode exigir recriar a tabela.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE player_timers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  group_name TEXT NOT NULL,
+
+  smelt_speed    REAL,
+  craft_speed    REAL,
+  research_speed REAL,
+  recycle_speed  REAL,
+
+  -- Desligado e diferente de apagado, como no loadout e no status:
+  -- continua guardado aqui e some do payload empurrado.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  updated_at INTEGER NOT NULL,
+  updated_by TEXT,
+
+  UNIQUE (server_id, group_name)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6653,6 +6713,8 @@ export const MIGRATIONS: readonly Migration[] = [
   // 09/09/2026: a masmorra deixa de nascer em todo servidor da rede.
   { id: 72, name: 'dungeon-servers', sql: DUNGEON_SERVERS_SCHEMA },
   { id: 73, name: 'betterloot-junk', sql: BETTERLOOT_JUNK_SCHEMA },
+  // 11/09/2026: a aba Timers deixa de ser maquete, e o QuickSmelt sai.
+  { id: 74, name: 'player-timers', sql: PLAYER_TIMERS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

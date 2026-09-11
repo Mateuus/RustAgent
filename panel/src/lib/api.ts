@@ -966,6 +966,53 @@ export interface SpawnStatusInput {
   enabled: boolean;
 }
 
+/**
+ * Quão RÁPIDO as coisas andam para quem está naquele grupo.
+ *
+ * Mesma lista de grupos do loadout e do status, e as mesmas regras de
+ * órfão e de servidor fora do ar. A diferença: a lista vem na ordem
+ * da HIERARQUIA (normal, os VIPs, admin, e por fim quem não é nível),
+ * porque é nessa ordem que o plugin desce quando um campo está em
+ * branco.
+ *
+ * Cada timer é um multiplicador de velocidade (×2 = metade do tempo).
+ * `null` NÃO é ×1: é "este grupo não decide", e quem é dele cai para o
+ * nível de baixo — ver core/src/loadouts/timers.ts.
+ */
+export interface ServerPlayerTimers {
+  name: string;
+  exists: boolean | null;
+  members: number | null;
+  /**
+   * O nível que o grupo é para o plugin: `normal`, o tier do VIP,
+   * `admin` — ou `null`, quando o plugin nunca o consulta.
+   */
+  tier: string | null;
+  smelt: number | null;
+  craft: number | null;
+  research: number | null;
+  recycle: number | null;
+  enabled: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface PlayerTimersSyncResult {
+  serverId: string;
+  tiers: number;
+  cachedTiers: number;
+  skipped: string | null;
+}
+
+/** O que o formulário grava. O 1 vira `null` do lado do agente. */
+export interface PlayerTimersInput {
+  smelt: number | null;
+  craft: number | null;
+  research: number | null;
+  recycle: number | null;
+  enabled: boolean;
+}
+
 export type KitKind = 'resgate' | 'cooldown';
 
 /**
@@ -4224,6 +4271,46 @@ export const agent = {
   syncSpawnStatus: (id: string) =>
     api<{ ok: true } & SpawnStatusSyncResult & { message: string }>(
       `/api/servers/${encodeURIComponent(id)}/spawn-status/sync`,
+      { method: 'POST' },
+    ),
+
+  // ---- Os timers daquele servidor ---------------------------
+  //
+  // A terceira pergunta sobre a mesma pessoa: quão RÁPIDO a
+  // fornalha, o craft, a pesquisa e o reciclador andam para ela.
+
+  playerTimers: (id: string) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      groups: ServerPlayerTimers[];
+      truncated: number;
+      /** Por que os níveis de VIP não foram lidos. `null` = foram. */
+      levelsProblem: string | null;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/timers`),
+
+  savePlayerTimers: (id: string, group: string, input: PlayerTimersInput) =>
+    api<{
+      ok: true;
+      timers: Omit<ServerPlayerTimers, 'exists' | 'members' | 'tier'>;
+      sync: PlayerTimersSyncResult;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/timers/${encodeURIComponent(group)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  /** Apaga. Quem é desse grupo passa a seguir o nível de baixo. */
+  removePlayerTimers: (id: string, group: string) =>
+    api<{ ok: true; sync: PlayerTimersSyncResult; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/timers/${encodeURIComponent(group)}`,
+      { method: 'DELETE' },
+    ),
+
+  syncPlayerTimers: (id: string) =>
+    api<{ ok: true } & PlayerTimersSyncResult & { message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/timers/sync`,
       { method: 'POST' },
     ),
 
