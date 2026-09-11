@@ -260,6 +260,12 @@ export interface AgentConfig {
   readonly log: {
     readonly level: string;
     readonly pretty: boolean;
+    /**
+     * `GAME_LOG_MAX_MB`: quanto o `-logfile` do JOGO pode ocupar em
+     * disco antes de o começo ser devolvido. Ver
+     * servers/game-log-guard.ts.
+     */
+    readonly gameMaxBytes: number;
   };
   /**
    * De onde vem o saldo de OZCoin.
@@ -927,6 +933,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): LoadedConfig {
       log: {
         level: (merged.LOG_LEVEL ?? 'info').trim() || 'info',
         pretty: boolFromEnv(merged.LOG_PRETTY, false),
+        gameMaxBytes: intFromEnv(merged.GAME_LOG_MAX_MB, 1024, 'GAME_LOG_MAX_MB') * 1024 * 1024,
       },
       store: {
         // A barra final sai aqui, e não em quem monta a URL: assim

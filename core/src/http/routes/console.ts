@@ -19,11 +19,11 @@
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import { gameLogPath } from '../../ops/server-process.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { ApiError } from '../error-response.js';
 
@@ -127,7 +127,7 @@ export function registerConsoleRoutes(app: FastifyInstance, deps: ConsoleRoutesD
       throw new ApiError('UNKNOWN_SERVER', `Não existe servidor com o id "${id}".`, 404);
     }
 
-    const path = join(config.paths.logsDir, `server-${config.identity}.log`);
+    const path = gameLogPath(config);
 
     try {
       return { ok: true, path, lines: await tailFile(path, lines ?? 200) };
