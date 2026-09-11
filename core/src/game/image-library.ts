@@ -129,10 +129,12 @@ export const IMAGE_FAMILIES = {
   ad: (key: string): boolean => /^ad[0-9a-f]{12}$/.test(key),
   /** `item.<id>`. Ver `itemIconKey`. */
   item: (key: string): boolean => key.startsWith('item.'),
+  /** `store.<id da oferta>`. Ver `storeIconKey`. */
+  store: (key: string): boolean => key.startsWith('store.'),
 } as const;
 
 export function isReservedImageKey(key: string): boolean {
-  return IMAGE_FAMILIES.ad(key) || IMAGE_FAMILIES.item(key);
+  return IMAGE_FAMILIES.ad(key) || IMAGE_FAMILIES.item(key) || IMAGE_FAMILIES.store(key);
 }
 
 /**

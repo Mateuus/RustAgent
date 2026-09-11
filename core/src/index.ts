@@ -63,8 +63,10 @@ import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
-import { ImageLibrary } from './game/image-library.js';
+import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
+import { loadStoreIcons } from './game/store-icons.js';
 import { readItemIcon } from './http/routes/custom-items.js';
+import { readStoreIcon } from './http/routes/store.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
 import { VipsRepository } from './db/vips-repository.js';
@@ -1670,7 +1672,20 @@ async function main(): Promise<void> {
     // Lidas a CADA envio: um PNG novo em `Assets\ui` vale sem
     // reiniciar o agente. O manifesto do OrigemZImages é que impede
     // o reenvio do que não mudou — ver `loadUiImages`.
-    images: { library: imageLibrary, load: () => loadUiImages(agent.paths.root, logger) },
+    //
+    // A arte das ofertas vai junto porque é a MESMA carga: a vitrine
+    // é uma tela da interface, e o card precisa do CRC na mão quando
+    // ela for desenhada. A poda é só da família `store.` — a oferta
+    // apagada não pode deixar a arte dela na tabela do plugin para
+    // sempre.
+    images: {
+      library: imageLibrary,
+      load: () => [
+        ...loadUiImages(agent.paths.root, logger),
+        ...loadStoreIcons(storeRepository.listOffers(), readStoreIcon, logger),
+      ],
+      prune: { owns: IMAGE_FAMILIES.store },
+    },
   });
 
   uiSync.start();

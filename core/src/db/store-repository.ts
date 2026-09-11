@@ -87,11 +87,26 @@ export interface OfferItem {
   readonly amount: number;
 }
 
-/** O desenho que representa a oferta na loja. */
+/**
+ * O desenho que representa a oferta na loja.
+ *
+ * ####  DOIS CAMINHOS, E O DO JOGO E O PADRAO  ####
+ *
+ * `shortname`/`itemId`/`skinId` desenham o card com o icone que o
+ * CLIENTE ja tem: nao custa download nenhum e o jogador reconhece a
+ * arte. `file` e o outro caso — um VIP, um pacote, um kit, que nao
+ * SAO "o item" e hoje pegam emprestada a caixa de madeira.
+ *
+ * `file` NULL = usa o icone do jogo. Preenchido, manda: e o nome de
+ * um PNG em `Assets\store\`, e os bytes vao ao jogo pelo
+ * OrigemZImages (ver game/store-icons.ts).
+ */
 export interface OfferIcon {
   readonly shortname: string;
   readonly itemId: number;
   readonly skinId: string;
+  /** O PNG proprio, ou `null` para o icone do jogo. */
+  readonly file: string | null;
 }
 
 /**
@@ -248,6 +263,7 @@ interface OfferRow {
   readonly icon_shortname: string;
   readonly icon_item_id: number;
   readonly icon_skin_id: string;
+  readonly icon_file: string | null;
   readonly vip_tier: string | null;
   readonly vip_days: number | null;
   readonly vehicle_prefab: string | null;
@@ -330,6 +346,9 @@ function toOffer(row: OfferRow, items: readonly OfferItem[], perks: readonly str
       shortname: row.icon_shortname,
       itemId: row.icon_item_id,
       skinId: row.icon_skin_id,
+      // Coluna nova: a oferta gravada antes dela vem com NULL, que é
+      // "usa o ícone do jogo" — o comportamento de sempre.
+      file: row.icon_file === '' ? null : row.icon_file,
     },
     name: row.name,
     price: row.price,
@@ -569,18 +588,19 @@ export class StoreRepository {
         .prepare(
           `INSERT INTO store_offers
              (id, category_id, kind, icon_shortname, icon_item_id, icon_skin_id,
-              vip_tier, vip_days, vehicle_prefab, vehicle_fuel, name, price,
-              position, enabled, badge, old_price, created_at, updated_at)
+              icon_file, vip_tier, vip_days, vehicle_prefab, vehicle_fuel, name,
+              price, position, enabled, badge, old_price, created_at, updated_at)
            VALUES
              (@id, @categoryId, @kind, @iconShortname, @iconItemId, @iconSkinId,
-              @vipTier, @vipDays, @vehiclePrefab, @vehicleFuel, @name, @price,
-              @position, @enabled, @badge, @oldPrice, @now, @now)
+              @iconFile, @vipTier, @vipDays, @vehiclePrefab, @vehicleFuel, @name,
+              @price, @position, @enabled, @badge, @oldPrice, @now, @now)
            ON CONFLICT(id) DO UPDATE SET
              category_id    = excluded.category_id,
              kind           = excluded.kind,
              icon_shortname = excluded.icon_shortname,
              icon_item_id   = excluded.icon_item_id,
              icon_skin_id   = excluded.icon_skin_id,
+             icon_file      = excluded.icon_file,
              vip_tier       = excluded.vip_tier,
              vip_days       = excluded.vip_days,
              vehicle_prefab = excluded.vehicle_prefab,
@@ -600,6 +620,7 @@ export class StoreRepository {
           iconShortname: input.icon.shortname,
           iconItemId: input.icon.itemId,
           iconSkinId: input.icon.skinId,
+          iconFile: input.icon.file,
           vipTier: input.vip?.tier ?? null,
           vipDays: input.vip?.days ?? null,
           vehiclePrefab: input.vehicle?.prefab ?? null,

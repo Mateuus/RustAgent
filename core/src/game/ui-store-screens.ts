@@ -62,6 +62,8 @@ import type { OfferBadge, StoreOffer } from '../db/store-repository.js';
 import { vehicleFuelOf, type StoreCatalogEntry } from '../store/service.js';
 import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
+import { storeIconKey } from './store-icons.js';
+import type { SlotValue } from './ui-template.js';
 import { SLOTS, fillTemplate } from './ui-store-template.js';
 import {
   itemRows,
@@ -746,7 +748,7 @@ function buildItemScreen(
   if (template !== null && stacks) {
     return fillTemplate(template, id, {
       [SLOTS.nome]: { text: offer.name },
-      [SLOTS.icone]: { item: { itemId: offer.icon.itemId, skinId: offer.icon.skinId } },
+      [SLOTS.icone]: offerImageSlot(offer),
       [SLOTS.descricao]: { text: offerSummary(offer) },
       [SLOTS.quantidade]: { text: String(quantity) },
       [SLOTS.total]: { text: formatNumber(total), color: canBuy ? C.amber : C.rust },
@@ -795,7 +797,7 @@ function buildItemScreen(
   if (!stacks && bundleTemplate !== null) {
     return fillTemplate(bundleTemplate, id, {
       [SLOTS.pacoteNome]: { text: offer.name },
-      [SLOTS.pacoteIcone]: { item: { itemId: offer.icon.itemId, skinId: offer.icon.skinId } },
+      [SLOTS.pacoteIcone]: offerImageSlot(offer),
       [SLOTS.pacoteResumo]: { text: offerSummary(offer) },
       [SLOTS.pacoteTitulo]:
         lines.length === 0
@@ -1599,10 +1601,36 @@ function itemImage(id: string, offer: StoreOffer, rect: Rect): UiElement {
     name: id,
     type: 'image',
     rect,
-    source: { kind: 'item', itemId: offer.icon.itemId, skinId: offer.icon.skinId },
+    source: offerImageSource(offer),
     color: C.white,
     children: [],
   };
+}
+
+/**
+ * O desenho da oferta: a arte própria, ou o ícone do jogo.
+ *
+ * ####  O ICONE DO JOGO CONTINUA SENDO O PADRAO  ####
+ *
+ * Ele não custa download nenhum — o cliente já o tem — e o jogador
+ * reconhece a arte. A arte própria existe para o que NÃO é um item:
+ * um VIP de 30 dias, um pacote, um kit, que antes pegavam emprestado
+ * o ícone de alguma coisa.
+ *
+ * Quem leva os bytes ao jogo é game/store-icons.ts; aqui sai só o
+ * lugar reservado, que o plugin troca pelo CRC na hora de desenhar.
+ */
+function offerImageSource(offer: StoreOffer): Extract<UiElement, { type: 'image' }>['source'] {
+  return offer.icon.file === null
+    ? { kind: 'item', itemId: offer.icon.itemId, skinId: offer.icon.skinId }
+    : { kind: 'stored', key: storeIconKey(offer.id) };
+}
+
+/** O mesmo desenho, na forma que o preenchimento de modelo entende. */
+function offerImageSlot(offer: StoreOffer): SlotValue {
+  return offer.icon.file === null
+    ? { item: { itemId: offer.icon.itemId, skinId: offer.icon.skinId } }
+    : { stored: { key: storeIconKey(offer.id) } };
 }
 
 /**

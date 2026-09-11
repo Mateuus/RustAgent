@@ -1155,8 +1155,13 @@ export interface StoreOffer {
   position: number;
   enabled: boolean;
   badge: OfferBadge | null;
-  /** O desenho da oferta. De campo próprio: um kit não tem "o item". */
-  icon: { shortname: string; itemId: number; skinId: string };
+  /**
+   * O desenho da oferta. De campo próprio: um kit não tem "o item".
+   *
+   * `file` é a arte própria, em `Assets/store/`. `null` = usa o ícone
+   * do jogo, que é o padrão e não custa download ao jogador.
+   */
+  icon: { shortname: string; itemId: number; skinId: string; file?: string | null };
   items: OfferItem[];
   /** As vantagens listadas, só em `vip`. */
   perks: string[];
@@ -1427,6 +1432,17 @@ export interface CustomItem {
  */
 export function iconUrl(name: string): string {
   return agentUrl('/api/custom-items/icons/' + encodeURIComponent(name));
+}
+
+/**
+ * A URL da arte de uma oferta da loja.
+ *
+ * Mesma ideia do `iconUrl`, outro acervo: a arte do card mora em
+ * `Assets/store/`, separada da dos itens — a lista de uma não deve
+ * encher da outra.
+ */
+export function storeIconUrl(name: string): string {
+  return agentUrl('/api/store/icons/' + encodeURIComponent(name));
 }
 
 export interface CustomItemInput {
@@ -3862,6 +3878,29 @@ export const agent = {
     form.append('file', file);
 
     return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/custom-items/icons', {
+      method: 'POST',
+      form,
+    });
+  },
+
+  /** As artes que já estão em `Assets\store\`. */
+  storeIcons: () =>
+    api<{ ok: true; icons: { name: string; bytes: number }[] }>('/api/store/icons'),
+
+  /**
+   * Envia a arte de um card e devolve o NOME dela.
+   *
+   * O nome é o que vai para `icon.file` da oferta; os bytes só chegam
+   * ao jogo depois, pela sincronização da interface. O teto é o mesmo
+   * do ícone de item (~33 KB), e o painel reduz a imagem antes de
+   * enviar.
+   */
+  uploadStoreIcon: (file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/store/icons', {
       method: 'POST',
       form,
     });

@@ -64,7 +64,7 @@ import {
   type UiScreenBundle,
 } from '../types/ui-transport.js';
 import { toError } from '../util.js';
-import type { ImageAsset, ImageLibrary } from './image-library.js';
+import type { ImageAsset, ImageLibrary, ImagePrune } from './image-library.js';
 import { headerUpdatesToCui, type CuiElement, type HeaderValue } from './ui-cui.js';
 
 /** O que o transporte precisa de um RCON. E nada além disso. */
@@ -150,6 +150,16 @@ export interface UiSyncDeps {
   readonly images?: {
     readonly library: ImageLibrary;
     readonly load: () => readonly ImageAsset[];
+    /**
+     * O que apagar no plugin quando ninguém mais usa.
+     *
+     * A arte de uma oferta apagada continuaria na tabela do
+     * OrigemZImages para sempre — ela sobrevive a reload e a
+     * restart. As imagens de `Assets\ui` ficam de fora da poda: a
+     * chave delas é o nome do arquivo, sem família que as separe do
+     * que é de outro dono.
+     */
+    readonly prune?: ImagePrune;
   };
   /**
    * Telas que o AGENTE monta, em vez de virem do documento.
@@ -364,7 +374,12 @@ export class UiSync {
       // já registra o que falhou: menu com ícone faltando é melhor
       // que menu nenhum, então a carga desce de qualquer jeito.
       if (this.#deps.images !== undefined) {
-        await this.#deps.images.library.sync(serverId, context.rcon, this.#deps.images.load());
+        await this.#deps.images.library.sync(
+          serverId,
+          context.rcon,
+          this.#deps.images.load(),
+          this.#deps.images.prune,
+        );
       }
 
       await context.rcon.send(buildUiDocCommand(encoded));

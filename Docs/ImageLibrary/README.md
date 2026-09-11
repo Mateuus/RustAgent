@@ -95,6 +95,16 @@ afirmar é o que o código faz.
 | `origemz.image.list` | `{"ok":true,"ready":true,"images":{"chave":"sha256"}}` |
 | `origemz.image.forget <chave>\|*` | `{"ok":true,"forgotten":N}` — esquece o mapa, não os bytes |
 
-Chaves em uso: o nome do arquivo de `Assets\ui` (`ozcoin`), `ad` + 12 dígitos do
-sha para as propagandas, e `item.<id>` para os ícones de item custom. O lado do
-agente é `core/src/game/image-library.ts`.
+Chaves em uso:
+
+| Família | De onde vem | Quem poda |
+|---|---|---|
+| `ozcoin`, … | o nome do arquivo em `Assets\ui` | ninguém — a chave é o nome do arquivo, sem família que a separe |
+| `ad` + 12 dígitos do sha | a imagem da propaganda | o `ads-sync`, quando a propaganda é apagada |
+| `item.<id>` | `Assets\items`, o ícone do item custom | o `custom-items-sync`, quando o ícone é tirado |
+| `store.<id da oferta>` | `Assets\store`, a arte do card da loja | o `ui-sync`, quando a oferta perde a arte ou é apagada |
+
+As três últimas são **reservadas**: `loadUiImages` recusa um arquivo de
+`Assets\ui` cujo nome caia numa delas, senão o dono da família o apagaria e o
+menu o reenviaria, a cada rodada. O lado do agente é
+`core/src/game/image-library.ts`.
