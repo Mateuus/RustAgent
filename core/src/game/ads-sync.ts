@@ -7,8 +7,8 @@
 //               conferir formato e tamanho, e gravar o resultado
 //               na propaganda (inclusive o erro, que a tela
 //               mostra);
-//    2. BYTES   mandar ao plugin as imagens que ele ainda não
-//               tem, em pedaços — ver game/ads-images.ts;
+//    2. BYTES   garantir que o OrigemZImages tem as imagens da
+//               vez — ver game/image-library.ts;
 //    3. CARGA   mandar a configuração: os quadros da animação e
 //               a lista do ciclo já resolvida.
 //
@@ -27,11 +27,10 @@
 //  desenho do `UiSync`, e segui-lo é o que faz o `index.ts` ter
 //  um lugar só para ligar console e reconexão.
 //
-//  O ESTADO, porém, continua sendo por servidor: bytes enviados,
-//  última carga e cache de imagem moram num `#stateOf(serverId)`.
-//  Compartilhá-los faria o segundo servidor achar que já mandou
-//  os bytes que só o primeiro recebeu — o mapa chave->CRC vive na
-//  memória de CADA plugin.
+//  O ESTADO, porém, continua sendo por servidor: última carga e
+//  cache de imagem moram num `#stateOf(serverId)`. O que cada
+//  plugin JÁ TEM não mora aqui — quem responde isso é o manifesto
+//  do OrigemZImages daquele servidor, perguntado a cada envio.
 //
 //  ------------------------------------------------------------
 //  ####  ELE NUNCA LANCA  ####
@@ -63,15 +62,9 @@ import {
   type AdsPayload,
   type AdsPayloadItem,
 } from '../types/ads-transport.js';
-import {
-  AdImageError,
-  buildImageBeginCommand,
-  buildImageEndCommand,
-  buildImagePartCommand,
-  chunkImage,
-  fetchAdImage,
-} from './ads-images.js';
+import { AdImageError, fetchAdImage } from './ads-images.js';
 import { ADS_ROOT, adBackground, buildTimeline, imageAnchors } from './ads-timeline.js';
+import { IMAGE_FAMILIES, ImageLibrary, sha256Hex, type ImageAsset } from './image-library.js';
 
 /** O que o transporte precisa de um RCON. E nada além disso. */
 export interface AdsSyncRcon {
@@ -110,6 +103,15 @@ export interface AdsSyncDeps {
   readonly now?: () => number;
   /** Injetável no teste — o `fetch` global por padrão. */
   readonly fetchImpl?: typeof fetch;
+  /**
+   * Quem leva os bytes ao jogo.
+   *
+   * O `index.ts` passa a MESMA instância do menu e dos itens: é ela
+   * que enfileira os envios por servidor, e duas instâncias poderiam
+   * mandar a mesma chave ao mesmo tempo. Ausente = uma própria, que
+   * é o que os testes usam.
+   */
+  readonly images?: ImageLibrary;
 }
 
 /** Junta edições em rajada num envio só. */
@@ -141,31 +143,19 @@ const PLUGIN_PREFIX = '[OrigemZUI]';
 /**
  * O que cada servidor carrega entre um envio e o outro.
  *
- * ####  POR QUE NADA DISTO E COMPARTILHADO  ####
+ * ####  "O QUE O PLUGIN JÁ TEM" NÃO MORA AQUI  ####
  *
- * `sentImages` espelha o mapa chave->CRC que vive na memória do
- * PLUGIN daquele servidor. Um cache comum faria o segundo
- * servidor pular o envio dos bytes que só o primeiro recebeu — e
- * o defeito apareceria como propaganda em branco, num servidor
- * só, sem erro nenhum no log.
+ * Morava: um `sentImages` que espelhava, de memória, o mapa do
+ * plugin — e que errava nos dois sentidos. Um `oxide.reload` o
+ * deixava achando que o plugin tinha o que perdeu; um reinício do
+ * agente o deixava achando que o plugin não tinha nada, e tudo era
+ * rebaixado e reenviado. Quem responde agora é o manifesto do
+ * OrigemZImages, perguntado a cada envio.
  *
- * O preço é conhecido: dois servidores com a mesma imagem a
- * baixam uma vez cada.
+ * O preço que ficou é conhecido: dois servidores com a mesma
+ * imagem a baixam uma vez cada.
  */
 interface ServerAdsState {
-  /**
-   * As chaves que o plugin JÁ recebeu nesta conexão.
-   *
-   * ####  POR QUE EM MEMORIA, E POR QUE ESVAZIA  ####
-   *
-   * O mapa chave->CRC vive na memória do PLUGIN, e um
-   * `oxide.reload` o apaga sem o agente saber. Guardar aqui o que
-   * já foi enviado economiza o reenvio de megabytes a cada
-   * edição de texto — e esvaziar na reconexão é o que garante
-   * que, depois de um reload, tudo volta.
-   */
-  sentImages: Set<string>;
-
   /**
    * A ultima carga enviada, em base64.
    *
@@ -196,6 +186,7 @@ interface ServerAdsState {
 export class AdsSync {
   readonly #deps: AdsSyncDeps;
   readonly #now: () => number;
+  readonly #images: ImageLibrary;
 
   /** id do servidor -> o estado dele. Ver `ServerAdsState`. */
   readonly #states = new Map<string, ServerAdsState>();
@@ -221,6 +212,7 @@ export class AdsSync {
   constructor(deps: AdsSyncDeps) {
     this.#deps = deps;
     this.#now = deps.now ?? Date.now;
+    this.#images = deps.images ?? new ImageLibrary({ logger: deps.logger });
   }
 
   /**
@@ -296,15 +288,11 @@ export class AdsSync {
   /**
    * O RCON daquele servidor reconectou.
    *
-   * ####  ESQUECER OS BYTES E OBRIGATORIO AQUI  ####
-   *
-   * O plugin perdeu o mapa de imagens junto com a conexão. Sem
-   * esta limpeza, o agente acharia que já mandou os bytes e a
-   * carga desceria apontando para chaves que o outro lado não
-   * tem mais — propaganda em branco, sem erro nenhum.
+   * O servidor pode ter reiniciado, e o plugin nasce sem carga. As
+   * imagens não precisam de cuidado aqui: o manifesto do envio diz
+   * o que o OrigemZImages ainda tem.
    */
   handleRconConnected(serverId: string): void {
-    this.#stateOf(serverId).sentImages.clear();
     this.pushSoon(serverId, 'rcon-connected');
   }
 
@@ -551,7 +539,6 @@ export class AdsSync {
     const state = this.#stateOf(serverId);
 
     state.cache.clear();
-    state.sentImages.clear();
     state.logoCache.clear();
     // Sem isto, "limpar o cache" não faria a próxima carga sair:
     // ela seria idêntica à anterior e o dedup a engoliria.
@@ -568,7 +555,6 @@ export class AdsSync {
     }
 
     const fresh: ServerAdsState = {
-      sentImages: new Set<string>(),
       lastPayload: null,
       cache: new Map<string, Buffer>(),
       logoCache: new Map<string, string>(),
@@ -738,10 +724,19 @@ export class AdsSync {
   }
 
   /**
-   * Manda os bytes das imagens que o plugin ainda não tem.
+   * Garante que o OrigemZImages tem as imagens da vez.
    *
    * Falha em UMA não aborta as outras: um retângulo vazio numa
-   * propaganda é melhor que overlay nenhum.
+   * propaganda é melhor que overlay nenhum. A biblioteca não lança
+   * e registra o que falhou.
+   *
+   * ####  O SHA VEM DO BANCO, E OS BYTES SÓ SE PRECISAR  ####
+   *
+   * Depois de um reinício do agente o cache em memória está vazio,
+   * mas a linha da propaganda guarda o sha da imagem. Com ele a
+   * biblioteca pergunta ao plugin se ele já tem esta versão — e só
+   * quando não tem é que `#restore` rebaixa a URL. Antes, todo
+   * reinício do agente rebaixava e reenviava todas as imagens.
    */
   async #pushImages(
     serverId: string,
@@ -750,82 +745,70 @@ export class AdsSync {
     logoKey: string | null,
   ): Promise<void> {
     const state = this.#stateOf(serverId);
-    const keys = new Set<string>();
+    const assets: ImageAsset[] = [];
 
     // O logo PRIMEIRO: é ele que fica na tela o tempo todo, e a
-    // carga só desce depois de tudo isto.
-    if (logoKey !== null) {
-      keys.add(logoKey);
+    // carga só desce depois de tudo isto. Os bytes dele estão na
+    // mão — o `#ensureLogo` acabou de pô-los no cache.
+    const logoBytes = logoKey === null ? undefined : state.cache.get(logoKey);
+
+    if (logoKey !== null && logoBytes !== undefined) {
+      assets.push({ key: logoKey, sha: sha256Hex(logoBytes), load: () => logoBytes });
     }
 
     for (const ad of ads) {
-      if (ad.imageKey !== null) {
-        keys.add(ad.imageKey);
-      }
-    }
+      const key = ad.imageKey;
 
-    for (const key of keys) {
-      if (state.sentImages.has(key)) {
+      if (key === null) {
         continue;
       }
 
-      const bytes = state.cache.get(key);
+      const cached = state.cache.get(key);
+      let sha = cached === undefined ? this.#deps.ads.imageSha(serverId, ad.id) : sha256Hex(cached);
 
-      if (bytes === undefined) {
-        // O agente reiniciou depois de o cache do banco já estar
-        // pronto: a chave existe na linha, mas os bytes não estão
-        // mais em memória. Rebaixar resolve, e é raro.
-        const restored = await this.#restore(serverId, key, ads);
+      if (sha === null) {
+        // Linha sem sha e sem bytes em memória: sem os bytes não há
+        // como perguntar ao plugin. Rebaixar agora é o único caminho.
+        const restored = await this.#restore(serverId, ad);
+
         if (restored === null) {
           continue;
         }
+
+        sha = sha256Hex(restored);
       }
 
-      const payload = state.cache.get(key);
-      if (payload === undefined) {
-        continue;
-      }
+      assets.push({
+        key,
+        sha,
+        load: async () => state.cache.get(key) ?? (await this.#restore(serverId, ad)),
+      });
+    }
 
-      try {
-        const parts = chunkImage(payload);
+    // ####  A POUPANÇA E A PODA  ####
+    //
+    // Cada imagem trocada deixa uma chave velha no OrigemZImages, e a
+    // tabela dele sobrevive a restart: sem poda, o manifesto cresceria
+    // até não caber no frame do RCON. Mas só a propaganda APAGADA sai
+    // — a que está fora da janela de horário não sobe agora e fica,
+    // senão os seus megabytes subiriam de novo quando a janela abrisse.
+    const keep = new Set<string>();
 
-        await rcon.send(buildImageBeginCommand(key, parts.length));
-
-        for (let index = 0; index < parts.length; index += 1) {
-          // `parts[index]` é definido pelo laço, mas
-          // noUncheckedIndexedAccess não sabe disso.
-          const part = parts[index] ?? '';
-          await rcon.send(buildImagePartCommand(key, index, part));
-        }
-
-        await rcon.send(buildImageEndCommand(key));
-
-        state.sentImages.add(key);
-        this.#deps.logger?.info(
-          { serverId, key, bytes: payload.length, parts: parts.length },
-          'ad image pushed to the plugin',
-        );
-      } catch (error) {
-        this.#deps.logger?.warn(
-          { err: toError(error), serverId, key },
-          'failed to push ad image',
-        );
+    for (const ad of this.#deps.ads.list(serverId)) {
+      if (ad.imageKey !== null) {
+        keep.add(ad.imageKey);
       }
     }
+
+    if (logoKey !== null) {
+      keep.add(logoKey);
+    }
+
+    await this.#images.sync(serverId, rcon, assets, { owns: IMAGE_FAMILIES.ad, keep });
   }
 
   /** Rebaixa uma imagem cujo cache em memória se perdeu. */
-  async #restore(
-    serverId: string,
-    key: string,
-    ads: readonly Advertisement[],
-  ): Promise<Buffer | null> {
-    const owner = ads.find((ad) => ad.imageKey === key);
-
-    if (owner === undefined) {
-      return null;
-    }
-
+  async #restore(serverId: string, owner: Advertisement): Promise<Buffer | null> {
     try {
       const image = await fetchAdImage(owner.imageUrl, {
         // ####  A REDUCAO PRECISA SER A MESMA DE LA  ####

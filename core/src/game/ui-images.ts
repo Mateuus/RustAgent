@@ -19,8 +19,8 @@
 //  ####  QUEM GUARDA É O PLUGIN, E O CRC SÓ EXISTE LÁ  ####
 //
 //  Só o servidor de Rust pode chamar o FileStorage, então o agente
-//  manda os BYTES e o plugin guarda. O CRC nasce lá — o agente
-//  nunca o conhece.
+//  manda os BYTES ao OrigemZImages (ver game/image-library.ts) e ele
+//  guarda. O CRC nasce lá — o agente nunca o conhece.
 //
 //  Por isso a tela sai daqui com um lugar reservado
 //  (`{img:ozcoin}`) e o plugin o troca pelo CRC na hora de
@@ -43,9 +43,12 @@ import { join } from 'node:path';
 
 import type { Logger } from '../logger.js';
 import { toError } from '../util.js';
-
-/** `origemz.ui.image <chave> <base64>` */
-export const UI_IMAGE_COMMAND = 'origemz.ui.image';
+import {
+  imageAsset,
+  isReservedImageKey,
+  isValidImageKey,
+  type ImageAsset,
+} from './image-library.js';
 
 /**
  * Onde as imagens do menu moram, dentro da raiz do projeto.
@@ -66,35 +69,24 @@ export function imagePlaceholder(key: string): string {
   return `{img:${key}}`;
 }
 
-export interface UiImageAsset {
-  /** O nome do arquivo sem a extensão: `ozcoin.png` → `ozcoin`. */
-  readonly key: string;
-  readonly base64: string;
-  readonly bytes: number;
-}
-
 /**
- * Teto por imagem, com a mesma folga dos outros comandos.
- *
- * Passando disso a imagem é DESCARTADA, e não cortada: meio PNG
- * chega ao plugin como arquivo inválido, e o sintoma seria um
- * quadrado vazio no menu sem nada dizendo por quê.
- *
- * 45.000 caracteres de base64 são ~33 KB de PNG. Um ícone de
- * 128x128 pesa 17 KB — o teto tem folga de sobra, e quem passar
- * dele está mandando uma foto onde cabia um ícone.
- */
-export const UI_IMAGE_MAX_BYTES = 45_000;
-
-/**
- * As imagens de `Assets\ui`, prontas para o comando.
+ * As imagens de `Assets\ui`, prontas para a biblioteca.
  *
  * A chave é o nome do arquivo sem extensão, e é assim que o
  * documento se refere a ela (`source: { kind: 'stored', key:
- * 'ozcoin' }`). Um PNG novo na pasta fica disponível no próximo
- * envio, sem recompilar nada.
+ * 'ozcoin' }`).
+ *
+ * ####  LIDA A CADA ENVIO, E NÃO NO BOOT  ####
+ *
+ * Um PNG novo na pasta fica disponível no próximo envio, sem
+ * reiniciar o agente. Ler a pasta de novo é barato — são poucos
+ * arquivos pequenos — e o manifesto do OrigemZImages garante que
+ * o que não mudou não sobe.
+ *
+ * Não há mais teto de 45 KB por imagem: ela vai em pedaços, e o
+ * teto que vale é o da biblioteca (`IMAGE_MAX_BYTES`).
  */
-export function loadUiImages(root: string, logger?: Logger): readonly UiImageAsset[] {
+export function loadUiImages(root: string, logger?: Logger): readonly ImageAsset[] {
   const dir = join(root, UI_ASSETS_DIR);
 
   let files: readonly string[];
@@ -106,23 +98,36 @@ export function loadUiImages(root: string, logger?: Logger): readonly UiImageAss
     return [];
   }
 
-  const images: UiImageAsset[] = [];
+  const images: ImageAsset[] = [];
 
   for (const file of files) {
     const path = join(dir, file);
+    const key = file.replace(/\.png$/i, '').toLowerCase();
+
+    if (!isValidImageKey(key)) {
+      // `logo do site.png` viraria dois argumentos no comando de
+      // console. Dizer o nome é o que permite consertar.
+      logger?.warn(
+        { path, key },
+        'imagem de interface deixada de fora: o nome do arquivo não serve como chave (use ' +
+          'minúsculas, dígitos, ponto, hífen ou sublinhado)',
+      );
+      continue;
+    }
+
+    if (isReservedImageKey(key)) {
+      // `item.moeda.png` seria podado pelos itens e reenviado por
+      // aqui, a cada rodada. Ver `IMAGE_FAMILIES`.
+      logger?.warn(
+        { path, key },
+        'imagem de interface deixada de fora: o nome cai numa família reservada (`item.` ou ' +
+          '`ad` + 12 dígitos hex). Renomeie o arquivo.',
+      );
+      continue;
+    }
 
     try {
-      const base64 = readFileSync(path).toString('base64');
-
-      if (base64.length > UI_IMAGE_MAX_BYTES) {
-        logger?.error(
-          { path, bytes: base64.length, limit: UI_IMAGE_MAX_BYTES },
-          'imagem de interface grande demais para o RCON; ela foi deixada de fora',
-        );
-        continue;
-      }
-
-      images.push({ key: file.replace(/\.png$/i, '').toLowerCase(), base64, bytes: base64.length });
+      images.push(imageAsset(key, readFileSync(path)));
     } catch (error) {
       // Uma imagem ilegível não derruba o menu: ela vira um espaço
       // vazio, e o resto funciona.
@@ -131,8 +136,4 @@ export function loadUiImages(root: string, logger?: Logger): readonly UiImageAss
   }
 
   return images;
-}
-
-export function buildUiImageCommand(asset: UiImageAsset): string {
-  return `${UI_IMAGE_COMMAND} ${asset.key} ${asset.base64}`;
 }

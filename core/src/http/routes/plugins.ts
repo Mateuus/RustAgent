@@ -226,7 +226,7 @@ export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDep
     // responde 409 dizendo quem cai junto. Ver
     // PluginLibrary.setEnabled.
     const result = await deps.library.setEnabled(id, pluginId, enabled, force === '1');
-    const { name, missingRequires } = result.plugin;
+    const { name, missingRequires, missingReferences } = result.plugin;
 
     return {
       ok: true,
@@ -252,6 +252,13 @@ export function registerPluginRoutes(app: FastifyInstance, deps: PluginRoutesDep
         enabled && missingRequires.length > 0
           ? `Atenção: ele depende de ${missingRequires.join(', ')}, que não está ligado aqui — ` +
             'o Oxide só vai carregá-lo quando isso mudar.'
+          : null,
+        // A dependência MOLE não segura o plugin: ele carrega e uma
+        // parte dele fica morta, sem erro nenhum. Ver
+        // `ServerPluginView.missingReferences`.
+        enabled && missingReferences.length > 0
+          ? `Ele usa ${missingReferences.join(', ')}, que está no acervo e não está ligado aqui — ` +
+            'a parte que depende disso não vai funcionar.'
           : null,
       ]
         .filter((parte): parte is string => parte !== null)

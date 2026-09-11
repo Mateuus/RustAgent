@@ -204,17 +204,19 @@ export const ITEM_ASSETS_DIR = join('Assets', 'items');
 /**
  * Teto do PNG, em bytes.
  *
- * ####  O NÚMERO SAI DO RCON, E NÃO DE UM PALPITE  ####
+ * ####  ELE NASCEU DO RCON, E FICOU POR OUTRO MOTIVO  ####
  *
- * O frame do WebRCON aguenta ~50 KB e o base64 infla o arquivo em
- * 4/3 — medido em `Plugins/OrigemZUI.cs`. 33 KB de PNG dão ~45.000
- * caracteres, que é o mesmo teto que o `UI_IMAGE_MAX_BYTES` já
- * aplica às imagens do menu.
+ * Nasceu quando o ícone ia numa linha só de console: o frame do
+ * WebRCON aguenta ~50 KB, o base64 infla 4/3, e 33 KB de PNG davam
+ * ~45.000 caracteres. Desde 11/09/2026 ele vai em pedaços, pelo
+ * OrigemZImages (game/image-library.ts), e esse limite deixou de
+ * existir — o do transporte agora é 3 MiB.
  *
- * MEDIDO com a arte real do Troféu Bleik: 96×96 dá 25 KB e cabe;
- * 128×128 dá 43 KB e não cabe. Recusar aqui é a diferença entre
- * saber disso no upload e descobrir no silêncio, com o ícone nunca
- * aparecendo no jogo.
+ * Ficou porque continua certo para o que ele é: um ícone de slot é
+ * desenhado com menos de 100 pixels, e CADA jogador baixa o arquivo
+ * na primeira vez que vê o item. MEDIDO com a arte real do Troféu
+ * Bleik: 96×96 dá 25 KB, que é o que o painel já produz sozinho.
+ * Subir o teto é uma linha, se um dia um ícone pedir mais.
  */
 export const MAX_ICON_BYTES = 33_000;
 
@@ -286,9 +288,9 @@ function iconTooLarge(measured: number | null): ApiError {
 
   return new ApiError(
     'ICON_TOO_LARGE',
-    `${size} (${String(MAX_ICON_BYTES)} bytes). Ele viaja até o jogo dentro de uma linha de ` +
-      'console do WebRCON, e acima disso a linha não passa. Envie pelo painel, que reduz a ' +
-      `imagem sozinho, ou redimensione para ${String(RECOMMENDED_ICON_SIZE)}×` +
+    `${size} (${String(MAX_ICON_BYTES)} bytes). O ícone é desenhado pequeno no inventário, e ` +
+      'cada jogador baixa o arquivo inteiro na primeira vez que vê o item. Envie pelo painel, ' +
+      `que reduz a imagem sozinho, ou redimensione para ${String(RECOMMENDED_ICON_SIZE)}×` +
       `${String(RECOMMENDED_ICON_SIZE)} antes de mandar — a arte da medalha, nesse tamanho, dá ` +
       '25 KB.',
     400,
@@ -645,6 +647,27 @@ function listIcons(): readonly { readonly name: string; readonly bytes: number }
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Os bytes de um ícone de `Assets\items\`, ou `null`.
+ *
+ * É a porta da sincronização (game/custom-items-sync.ts), que leva o
+ * PNG ao OrigemZImages. A régua do nome é a MESMA do upload, e aqui
+ * ela protege outra coisa: `icon_file` vem do banco, e o PUT só
+ * confere o tamanho dele — sem a régua, `../../.env` seria lido e
+ * mandado ao RCON.
+ */
+export function readItemIcon(name: string): Buffer | null {
+  if (!ICON_NAME.test(name)) {
+    return null;
+  }
+
+  try {
+    return readFileSync(join(projectRoot(), ITEM_ASSETS_DIR, name));
+  } catch {
+    return null;
   }
 }
 

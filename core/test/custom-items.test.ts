@@ -48,10 +48,12 @@ import {
 import {
   CLEAR_COMMAND,
   CustomItemsSync,
+  itemIconKey,
   REQUEST_LINE,
   SET_COMMAND,
   type RankingLabels,
 } from '../src/game/custom-items-sync.js';
+import { ImageLibrary } from '../src/game/image-library.js';
 import { registerCustomItemRoutes } from '../src/http/routes/custom-items.js';
 import { createLogger } from '../src/logger.js';
 
@@ -725,6 +727,92 @@ describe('o cadastro chegando ao plugin', () => {
     // O `onPickup` fica de fora: quem decide o "quando" é a COLUNA,
     // e o `ParseAction` do plugin nem lê esse campo. Ver §3.2.
     expect(set).not.toContain('onPickup');
+
+    sync.stop();
+  });
+});
+
+// ------------------------------------------------------------
+//  O ícone, que ficava no disco do agente
+// ------------------------------------------------------------
+//
+//  ####  ATÉ 11/09/2026 O PNG NUNCA SAÍA DE `Assets\items`  ####
+//
+//  O painel gravava o arquivo e o nome; o plugin tinha comandos para
+//  recebê-lo. Nenhuma linha daqui os ligava, e o troféu aparecia no
+//  jogo com o ícone da taça.
+
+describe('o ícone do item chegando ao OrigemZImages', () => {
+  it('sobe com a chave `item.<id>`, ANTES do cadastro', async () => {
+    const created = harness.repository.create(trofeu({ iconFile: 'trofeu.png' }));
+    const icon = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+    const pvp1 = new FakeRcon();
+    const lidos: string[] = [];
+
+    // O plugin ainda não tem nada.
+    pvp1.send = (command: string): Promise<string> => {
+      pvp1.sent.push(command);
+      return Promise.resolve(
+        command === 'origemz.image.list' ? '{"ok":true,"ready":true,"images":{}}' : '{"ok":true}',
+      );
+    };
+
+    const sync = new CustomItemsSync({
+      repository: harness.repository,
+      servers: { ids: () => ['pvp1'], contextOf: (id) => (id === 'pvp1' ? { rcon: pvp1 } : null) },
+      logger: createLogger({ log: { level: 'silent', pretty: false } }),
+      icons: {
+        library: new ImageLibrary(),
+        read: (file) => {
+          lidos.push(file);
+          return file === 'trofeu.png' ? icon : null;
+        },
+      },
+    });
+
+    await sync.push('pvp1', 'teste');
+
+    const begin = pvp1.sent.findIndex((line) => line.startsWith('origemz.image.begin '));
+    const clear = pvp1.sent.findIndex((line) => line.startsWith(CLEAR_COMMAND));
+
+    expect(lidos).toEqual(['trofeu.png']);
+    expect(pvp1.sent[begin]?.split(' ')[1]).toBe(itemIconKey(created.id));
+    // Quando o `set` chegar e o plugin vestir o item, o CRC já está lá.
+    expect(begin).toBeGreaterThan(-1);
+    expect(begin).toBeLessThan(clear);
+
+    sync.stop();
+  });
+
+  it('o ícone TIRADO no painel é esquecido no jogo', async () => {
+    const created = harness.repository.create(trofeu());
+
+    const pvp1 = new FakeRcon();
+
+    // O OrigemZImages ainda tem o ícone de quando o item tinha um — a
+    // tabela dele sobrevive a reload e a restart.
+    pvp1.send = (command: string): Promise<string> => {
+      pvp1.sent.push(command);
+      return Promise.resolve(
+        command === 'origemz.image.list'
+          ? JSON.stringify({ ok: true, ready: true, images: { [itemIconKey(created.id)]: 'aa' } })
+          : '{"ok":true}',
+      );
+    };
+
+    const sync = new CustomItemsSync({
+      repository: harness.repository,
+      servers: { ids: () => ['pvp1'], contextOf: (id) => (id === 'pvp1' ? { rcon: pvp1 } : null) },
+      logger: createLogger({ log: { level: 'silent', pretty: false } }),
+      icons: { library: new ImageLibrary(), read: () => null },
+    });
+
+    await sync.push('pvp1', 'teste');
+
+    // Sem isto o plugin continuaria vestindo o troféu com a arte velha.
+    expect(pvp1.sent).toContain(`origemz.image.forget ${itemIconKey(created.id)}`);
+    expect(pvp1.sent.some((line) => line.startsWith('origemz.image.begin'))).toBe(false);
 
     sync.stop();
   });

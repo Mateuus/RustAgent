@@ -151,6 +151,28 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
   }
 
   /**
+   * Liga, pelo NOME, a dependência mole que falta a outro plugin.
+   *
+   * O botão mora na linha de quem precisa (o OrigemZUI), e não na
+   * de quem falta (o OrigemZImages): é ali que a pessoa está olhando
+   * quando lê o aviso.
+   */
+  async function enableByName(name: string): Promise<void> {
+    const target = plugins?.find(
+      (plugin) => plugin.name === name && !plugin.enabled && plugin.blockedBy === null,
+    );
+
+    if (target === undefined) {
+      toast.error(`Não achei ${name} para ligar`, {
+        description: 'Ele pode ter saído do acervo. Recarregue a página.',
+      });
+      return;
+    }
+
+    await setEnabled(target, true);
+  }
+
+  /**
    * Tira o custom do acervo deste servidor.
    *
    * `force` porque o botão já é uma confirmação em dois passos, e o
@@ -301,6 +323,7 @@ export function PluginsPanel({ serverId }: { serverId: string }) {
                 // `force` quando há dependentes: o botão já escreveu
                 // quem cai junto, então a confirmação foi dada ali.
                 onDisable={(force) => void setEnabled(plugin, false, force)}
+                onEnableReference={(name) => void enableByName(name)}
               />
             ))}
           </Column>
@@ -549,6 +572,17 @@ function AvailableRow({
           </Button>
         </div>
       )}
+
+      {/* A dependência MOLE não impede nada, e por isso é só uma
+          nota: ligar este sozinho funciona — sem a parte que usa o
+          outro. Depois de ligado, a linha dele na coluna ao lado
+          oferece o conserto. */}
+      {plugin.blockedBy === null && (plugin.missingReferences ?? []).length > 0 && (
+        <p className="mt-2 text-2xs leading-relaxed text-muted">
+          Usa <strong>{(plugin.missingReferences ?? []).join(', ')}</strong> quando está ligado
+          aqui. Sem ele, a parte que depende disso não funciona.
+        </p>
+      )}
     </div>
   );
 }
@@ -558,13 +592,16 @@ function ActiveRow({
   busy,
   onApply,
   onDisable,
+  onEnableReference,
 }: {
   plugin: ServerPlugin;
   busy: boolean;
   onApply: () => void;
   onDisable: (force: boolean) => void;
+  onEnableReference: (name: string) => void;
 }) {
   const { hard, soft } = plugin.dependents;
+  const faltaMole = plugin.missingReferences ?? [];
   const arrastaOutros = hard.length > 0 || soft.length > 0;
   // ####  DUAS TESTEMUNHAS DO MESMO FATO  ####
   //
@@ -658,6 +695,38 @@ function ActiveRow({
               {motivo}
             </pre>
           )}
+        </div>
+      )}
+
+      {/* ####  RODANDO, MAS SEM UMA PARTE  ####
+
+          A dependência MOLE não segura o plugin: o OrigemZUI carrega
+          sem o OrigemZImages, abre o menu, vende — e as imagens
+          próprias não aparecem. Nada no log do Oxide diz isso, então
+          quem diz é esta faixa, com o conserto a um clique. */}
+      {faltaMole.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-amber bg-surface-2 p-3">
+          <p className="flex min-w-0 items-start gap-2 text-2xs leading-relaxed">
+            <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-amber" />
+            <span>
+              Usa <strong>{faltaMole.join(', ')}</strong>, que está no acervo e não está ligado
+              aqui. O plugin roda, mas a parte que depende disso não funciona.
+            </span>
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            {faltaMole.map((name) => (
+              <Button
+                key={name}
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => onEnableReference(name)}
+              >
+                {`Ligar ${name}`}
+              </Button>
+            ))}
+          </div>
         </div>
       )}
 

@@ -204,6 +204,45 @@ export function isPortFree(port: number): Promise<boolean> {
   });
 }
 
+/**
+ * Espera as portas daquele servidor ficarem livres. Devolve as que
+ * continuaram ocupadas quando o tempo acabou (vazio = todas livres).
+ *
+ * ####  O PROCESSO MORTO AINDA SEGURA A PORTA  ####
+ *
+ * MEDIDO em 11/09/2026, duas vezes: `server-restart` com force matou
+ * o processo, e o start logo em seguida recusou com "a porta 28082
+ * (app) já está ocupada". O `taskkill /F` volta antes de o Windows
+ * terminar de derrubar o processo e soltar os sockets dele; um
+ * `server-start` manual segundos depois subia normalmente.
+ *
+ * A checagem do `startServer` continua certa — porta ocupada num
+ * start comum é conflito de verdade. O que faltava era quem ACABOU
+ * de parar o servidor esperar as portas dele voltarem.
+ */
+export async function waitForPortsFree(
+  ports: readonly number[],
+  timeoutMs: number,
+): Promise<readonly number[]> {
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const busy: number[] = [];
+
+    for (const port of ports) {
+      if (!(await isPortFree(port))) {
+        busy.push(port);
+      }
+    }
+
+    if (busy.length === 0 || Date.now() >= deadline) {
+      return busy;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
 export interface StartServerOptions {
   readonly server: ServerConfig;
   readonly onLine: (line: string) => void;

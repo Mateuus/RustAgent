@@ -64,8 +64,8 @@ import {
   type UiScreenBundle,
 } from '../types/ui-transport.js';
 import { toError } from '../util.js';
+import type { ImageAsset, ImageLibrary } from './image-library.js';
 import { headerUpdatesToCui, type CuiElement, type HeaderValue } from './ui-cui.js';
-import { buildUiImageCommand, type UiImageAsset } from './ui-images.js';
 
 /** O que o transporte precisa de um RCON. E nada além disso. */
 export interface UiSyncRcon {
@@ -135,18 +135,22 @@ export interface UiSyncDeps {
   readonly servers: UiSyncServers;
   readonly logger: Logger;
   /**
-   * As imagens próprias do menu.
+   * As imagens próprias do menu, e quem as leva ao jogo.
    *
-   * Vão ANTES dos documentos em cada envio: o plugin precisa ter o
-   * CRC guardado quando for desenhar a tela que a usa. Sem isso, o
-   * primeiro desenho sai com um quadrado vazio.
+   * Vão ANTES dos documentos em cada envio: o OrigemZImages precisa
+   * ter o CRC guardado quando o OrigemZUI for desenhar a tela que a
+   * usa. Sem isso, o primeiro desenho sai com um quadrado vazio.
    *
-   * Reenviadas a cada carga porque o mapa chave->CRC vive na
-   * MEMÓRIA do plugin, e um `oxide.reload` o esvazia. Os bytes
-   * continuam no FileStorage do servidor — o que se perde é só a
-   * tabela.
+   * `load` é chamado a cada envio (ver `loadUiImages`), e a
+   * biblioteca só sobe o que o plugin não tem — então "a cada envio"
+   * custa uma pergunta de RCON, e não os bytes.
+   *
+   * Ausente = o menu vai sem imagem própria nenhuma.
    */
-  readonly images?: readonly UiImageAsset[];
+  readonly images?: {
+    readonly library: ImageLibrary;
+    readonly load: () => readonly ImageAsset[];
+  };
   /**
    * Telas que o AGENTE monta, em vez de virem do documento.
    *
@@ -356,18 +360,11 @@ export class UiSync {
         return { status: 'refused', reason };
       }
 
-      // As imagens PRIMEIRO — ver `images`. Falhar ao mandar uma
-      // não aborta a carga: menu com ícone faltando é melhor que
-      // menu nenhum.
-      for (const image of this.#deps.images ?? []) {
-        try {
-          await context.rcon.send(buildUiImageCommand(image));
-        } catch (error) {
-          this.#deps.logger.warn(
-            { server: serverId, key: image.key, err: toError(error) },
-            'não consegui mandar uma imagem da interface',
-          );
-        }
+      // As imagens PRIMEIRO — ver `images`. A biblioteca não lança e
+      // já registra o que falhou: menu com ícone faltando é melhor
+      // que menu nenhum, então a carga desce de qualquer jeito.
+      if (this.#deps.images !== undefined) {
+        await this.#deps.images.library.sync(serverId, context.rcon, this.#deps.images.load());
       }
 
       await context.rcon.send(buildUiDocCommand(encoded));

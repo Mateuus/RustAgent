@@ -4,16 +4,16 @@
 //
 //  ####  POR QUE REDIMENSIONAR, E NÃO PEDIR AO ADMIN  ####
 //
-//  Porque o teto não é uma preferência nossa: ele é o tamanho do
-//  frame do WebRCON. O PNG viaja até o servidor DENTRO de uma linha
-//  de console (`origemz.item.icon <id> <base64>`), o base64 infla o
-//  arquivo em 4/3, e acima de ~33 KB a linha não passa.
+//  O agente recusa ícone acima de ~33 KB (`MAX_ICON_BYTES`). O teto
+//  nasceu do frame do WebRCON, quando o PNG ia numa linha só de
+//  console; desde 11/09/2026 ele vai em pedaços pelo OrigemZImages,
+//  e o teto ficou porque um ícone de slot é desenhado pequeno e
+//  cada jogador baixa o arquivo inteiro.
 //
 //  Exigir que quem cadastra saiba disso — e abra um editor de
 //  imagem para descobrir que 128×128 dá 43 KB e 96×96 dá 25 KB — é
-//  transferir para ele um detalhe de transporte que não é problema
-//  dele. A arte real do Troféu Bleik tem 1254×1254 e 2,9 MB: 89
-//  vezes o teto.
+//  transferir para ele um detalhe que não é problema dele. A arte
+//  real do Troféu Bleik tem 1254×1254 e 2,9 MB: 89 vezes o teto.
 //
 //  ####  POR QUE NO NAVEGADOR, E NÃO NO AGENTE  ####
 //
