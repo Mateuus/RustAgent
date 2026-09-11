@@ -155,6 +155,7 @@ import { PluginLibrary } from './oxide/library.js';
 import { OxideRuntimeMonitor } from './oxide/runtime.js';
 import { PresenceTracker, PresenceWatcher } from './players/presence.js';
 import { PlayerDirectory } from './players/service.js';
+import { GameLogGuard } from './servers/game-log-guard.js';
 import { ServerSupervisor } from './servers/supervisor.js';
 import { SteamUpdateWatcher } from './steam/update-watcher.js';
 import { toError } from './util.js';
@@ -529,6 +530,17 @@ async function main(): Promise<void> {
   const banWatcher = new BanExpiryWatcher({ bans, logger });
 
   banWatcher.start();
+
+  // O teto do `-logfile` do jogo. Quem escreve o arquivo é o Unity,
+  // e um erro em laço já o levou a 46 GB numa execução só — ver
+  // servers/game-log-guard.ts.
+  const gameLogGuard = new GameLogGuard({
+    servers: supervisor,
+    logger,
+    maxBytes: agent.log.gameMaxBytes,
+  });
+
+  gameLogGuard.start();
 
   // A imagem do mapa: desenhada pelo próprio jogo, UMA vez por
   // mundo. O nome do arquivo carrega tamanho e seed, então o wipe
@@ -3010,6 +3022,7 @@ async function main(): Promise<void> {
         // falaria com um supervisor já parado.
         steamWatcher.stop();
         banWatcher.stop();
+        gameLogGuard.stop();
         presenceWatcher.stop();
         // O do estado dos plugins junto: uma leitura que começasse
         // agora falaria com um RCON que já não existe.

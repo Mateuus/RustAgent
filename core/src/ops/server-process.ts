@@ -287,6 +287,17 @@ export function serverArgs(server: ServerConfig, logFile: string): string[] {
   return args;
 }
 
+/**
+ * O `-logfile` daquele servidor.
+ *
+ * Um lugar só para o nome: quem sobe o jogo, a rota que mostra o
+ * fim do arquivo e o vigia que segura o tamanho dele (ver
+ * servers/game-log-guard.ts) precisam falar do MESMO arquivo.
+ */
+export function gameLogPath(server: Pick<ServerConfig, 'identity' | 'paths'>): string {
+  return join(server.paths.logsDir, `server-${server.identity}.log`);
+}
+
 export interface StartedServer {
   readonly pid: number;
   readonly logFile: string;
@@ -324,7 +335,7 @@ export async function startServer(options: StartServerOptions): Promise<StartedS
 
   await mkdir(server.paths.logsDir, { recursive: true });
 
-  const logFile = join(server.paths.logsDir, `server-${server.identity}.log`);
+  const logFile = gameLogPath(server);
 
   options.onLine(`[agente] subindo ${server.paths.exePath}`);
   options.onLine(`[agente] log do jogo: ${logFile}`);
