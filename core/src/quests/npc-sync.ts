@@ -290,6 +290,22 @@ export class QuestNpcSync {
       return;
     }
 
+    // ####  ESTA LINHA É O QUE SE PROCURA NO CONSOLE  ####
+    //
+    // O TALK atravessa três pontos — o plugin grita, o agente lê, o
+    // agente manda abrir — e, quando o jogador vê "não consegui
+    // carregar essa página", só um deles falhou. Sem este registro,
+    // descobrir qual exige instrumentar o servidor de produção.
+    //
+    // Se ela aparece, o grito chegou: o que falhou está adiante.
+    // Se não aparece, o agente não está lendo o console daquele
+    // servidor — e isso acontece quando o agente reinicia sem que o
+    // servidor do jogo reinicie junto.
+    this.#deps.logger.info(
+      { server: serverId, npc: npc.id, steamId: push.steamId },
+      'um jogador falou com o NPC de missão',
+    );
+
     // ####  A TESTEMUNHA VEM ANTES DA TELA  ####
     //
     // Ela é o que diferencia "abriu a tela do NPC" de "pode pegar a

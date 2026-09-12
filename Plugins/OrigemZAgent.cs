@@ -4938,7 +4938,25 @@ namespace Oxide.Plugins
 
             try
             {
-                if (dispenser == null || dispenser.gatherType != ResourceDispenser.GatherType.Ore)
+                if (dispenser == null)
+                {
+                    return;
+                }
+
+                // ####  A MISSAO CONTA ARVORE; O RANKING, SO PEDRA  ####
+                //
+                // O filtro de `GatherType.Ore` logo abaixo e do
+                // RANKING, que mede minerio. Ele estava ANTES desta
+                // linha, e por isso "colete 100 wood" nunca saia do
+                // zero: madeira e `GatherType.Tree`, e o golpe
+                // voltava daqui sem que a missao visse o item.
+                //
+                // MEDIDO no Assembly-CSharp: o enum tem Tree, Ore,
+                // Flesh. A missao quer os tres - quem decide o que
+                // conta e o `target` dela, e nao a familia do no.
+                QuestGatherItem(entity as BasePlayer, item);
+
+                if (dispenser.gatherType != ResourceDispenser.GatherType.Ore)
                 {
                     return;
                 }
@@ -4969,7 +4987,16 @@ namespace Oxide.Plugins
 
             try
             {
-                if (dispenser == null || dispenser.gatherType != ResourceDispenser.GatherType.Ore)
+                if (dispenser == null)
+                {
+                    return;
+                }
+
+                // Ver o comentario do OnDispenserGather: derrubar a
+                // arvore inteira tambem conta para a missao.
+                QuestGatherItem(player, item);
+
+                if (dispenser.gatherType != ResourceDispenser.GatherType.Ore)
                 {
                     return;
                 }
@@ -5018,6 +5045,7 @@ namespace Oxide.Plugins
                         continue;
                     }
 
+                    QuestGatherItem(player, slot.itemDef, (int)slot.amount);
                     AddOre(player, slot.itemDef, (int)slot.amount);
                 }
             }
@@ -5029,6 +5057,33 @@ namespace Oxide.Plugins
             {
                 StatsHookStop(HookCollectiblePickup, started);
             }
+        }
+
+        // ####  A COLETA, DO PONTO DE VISTA DA MISSAO  ####
+        //
+        // As missoes contam o recurso PELO NOME, e nao pela familia:
+        // o ranking soma `ore.total`, a missao pede `wood` ou
+        // `sulfur.ore`. O mesmo golpe serve aos dois, mas o filtro
+        // de familia e so do ranking - ver OnDispenserGather.
+        //
+        // As mesmas recusas do AddOre: NPC, entidade sem dono, id
+        // que nao e SteamID64.
+        private void QuestGatherItem(BasePlayer player, Item item)
+        {
+            if (item != null)
+            {
+                QuestGatherItem(player, item.info, item.amount);
+            }
+        }
+
+        private void QuestGatherItem(BasePlayer player, ItemDefinition info, int amount)
+        {
+            if (player == null || info == null || amount <= 0 || player.IsNpc)
+            {
+                return;
+            }
+
+            QuestOnGather(player, info.shortname, amount);
         }
 
         private void AddOreFromItem(BasePlayer player, Item item)
@@ -5053,11 +5108,6 @@ namespace Oxide.Plugins
             {
                 return;
             }
-
-            // As missoes contam o recurso PELO NOME, e nao pela
-            // familia: o ranking soma `ore.total`, a missao pede
-            // enxofre. O mesmo golpe de picareta serve aos dois.
-            QuestOnGather(player, info.shortname, amount);
 
             string metric;
 
