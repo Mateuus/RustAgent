@@ -27,6 +27,7 @@ import { Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { matchesRow, sectionsOf, type TableRow } from '@/components/loot/betterloot';
+import { isAdopted } from '@/components/loot/betterloot-native';
 import { Input } from '@/components/ui/input';
 import type { BetterLootTableSummary } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -163,10 +164,18 @@ function TableListRow({
           <span className="block truncate font-mono text-[10px] text-muted">{row.shortName}</span>
         </span>
 
-        {/* Desligado devolve a caixa ao loot do JOGO — não a deixa
+        {/* ####  "JOGO" SÃO DOIS INTERRUPTORES, E NÃO UM  ####
+
+            Desligado devolve a caixa ao loot do JOGO — não a deixa
             vazia. O rótulo diz "jogo" por isso: "desligado" faria
-            pensar em caixa sem nada dentro. */}
-        {!row.table.enabled && (
+            pensar em caixa sem nada dentro.
+
+            E ele olha os DOIS agora. Até 12/09/2026 esta marca
+            saía só do `Is Prefab Enabled?`, e uma caixa fora da
+            lista de vigia do BetterLoot.json aparecia como se
+            fosse do plugin — enquanto o servidor entregava o loot
+            do jogo nela. Ver `isAdopted`. */}
+        {!isAdopted(row.table) && (
           <span className="shrink-0 border border-border px-1 text-[10px] uppercase text-muted">
             jogo
           </span>

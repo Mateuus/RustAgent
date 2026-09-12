@@ -572,6 +572,9 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         // A lista de "lixo" e NOSSA, e nao do plugin: o BetterLoot
         // nao conhece esse conceito. Ver a migracao 073.
         junk: options.betterLootJunk,
+        // So a rota do loot NATIVO usa isto - e a unica ali que
+        // precisa do jogo no ar. Ver o comentario dela.
+        servers: options.supervisor,
         editor: new BetterLootEditor({
           servers: options.supervisor,
           items: options.items,

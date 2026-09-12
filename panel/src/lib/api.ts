@@ -2446,6 +2446,25 @@ export interface BetterLootTableSummary {
   prefab: string;
   /** Desligado devolve a caixa ao loot NATIVO, e não a caixa vazia. */
   enabled: boolean;
+  /**
+   * A caixa está na lista de vigia do `BetterLoot.json`?
+   *
+   * ####  SÃO DOIS INTERRUPTORES, EM DOIS ARQUIVOS  ####
+   *
+   * O `enabled` acima é o `Is Prefab Enabled?` do
+   * `LootTables.json`: ele decide se o plugin PREENCHE a caixa.
+   * Este é o `Watched Container Prefabs` do `BetterLoot.json`: ele
+   * decide se o plugin chega a OLHAR para ela.
+   *
+   * O plugin exige os dois. A tela mostrava só o primeiro, e por
+   * isso podia dizer "BetterLoot" numa caixa que o servidor
+   * entregava do jogo — foi assim que a `crate_elite` ficou presa
+   * em "jogo" sem ter como sair.
+   *
+   * `null` = aquele servidor não tem `BetterLoot.json`, então não
+   * há lista para consultar. É diferente de `false`.
+   */
+  watched: boolean | null;
   itemCount: number;
   guaranteedCount: number;
   profileCount: number;
@@ -2595,6 +2614,61 @@ export interface BetterLootSaveInput {
    */
   baseRevision: string | null;
   table: BetterLootTable;
+}
+
+// ------------------------------------------------------------
+//  O LOOT QUE O JOGO PÕE NA CAIXA
+// ------------------------------------------------------------
+//
+//  ####  ELE NÃO ESTÁ EM ARQUIVO NENHUM  ####
+//
+//  O BetterLoot lê a tabela nativa do jogo UMA vez, quando cria a
+//  entrada daquele prefab no `LootTables.json`. Dali em diante o
+//  arquivo é a única verdade que ele conhece — e quem apagou a
+//  lista, ou montou a caixa só com perfis, não tem como pedir o
+//  padrão de volta.
+//
+//  Por isso esta parte da tela é a única que precisa do servidor NO
+//  AR: a tabela nativa vive na memória dele, e é lida por RCON.
+//
+//  ####  E É ELA QUE SEPARA "DO JOGO" DE "SEU"  ####
+//
+//  O `LootTables.json` guarda os dois no mesmo dicionário, sem
+//  marca nenhuma. A separação que a tela mostra é o cruzamento
+//  entre a tabela e esta lista — ver `components/loot/betterloot-native.ts`.
+
+/** De onde o plugin tirou a tabela nativa. */
+export type BetterLootNativeSource = 'container' | 'npc' | 'lootfill' | 'unwrap';
+
+/**
+ * Um item da tabela nativa.
+ *
+ * O `shortname` é a CHAVE do `LootTables.json`: item que nasce como
+ * projeto vem com o sufixo `.blueprint` grudado.
+ */
+export interface BetterLootNativeItem {
+  shortname: string;
+  min: number;
+  max: number;
+}
+
+/** O loot que o jogo põe naquela caixa, lido ao vivo. */
+export interface BetterLootNativeTable {
+  prefab: string;
+  source: BetterLootNativeSource;
+  /** Quantos itens a caixa entrega por vez, no jogo. */
+  slotsMin: number;
+  slotsMax: number;
+  /** O scrap do prefab. Zero fora de contêiner. */
+  scrap: number;
+  items: BetterLootNativeItem[];
+  guaranteed: BetterLootNativeItem[];
+}
+
+export interface BetterLootNativeResponse {
+  ok: true;
+  serverId: string;
+  native: BetterLootNativeTable;
 }
 
 
@@ -5158,6 +5232,24 @@ export const agent = {
   betterLootTable: (serverId: string, prefab: string) =>
     api<BetterLootTableResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/betterloot/table?prefab=${encodeURIComponent(prefab)}`,
+    ),
+
+  /**
+   * O loot que o JOGO põe naquela caixa.
+   *
+   * ####  É A ÚNICA CHAMADA DAQUI QUE EXIGE O JOGO NO AR  ####
+   *
+   * O resto do editor é arquivo no disco e funciona com tudo
+   * parado. Esta não tem como: a tabela nativa vive na memória do
+   * servidor, e o BetterLoot a lê uma vez só, no primeiro boot.
+   *
+   * 409/503 aqui não são defeito da tela — são "o servidor está
+   * parado". Quem chama trata como falta de informação, nunca como
+   * erro que impeça editar a caixa.
+   */
+  betterLootNative: (serverId: string, prefab: string) =>
+    api<BetterLootNativeResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/native?prefab=${encodeURIComponent(prefab)}`,
     ),
 
   /**

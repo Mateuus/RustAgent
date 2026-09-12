@@ -77,6 +77,7 @@ function table(patch: Partial<BetterLootTable> = {}): BetterLootTable {
   return {
     prefab: 'assets/bundled/prefabs/radtown/crate_elite.prefab',
     enabled: true,
+    watched: true,
     itemCount: 0,
     guaranteedCount: 0,
     profileCount: 0,

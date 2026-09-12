@@ -81,17 +81,7 @@ export interface QuestEventsDeps {
    * os testes usam.
    */
   readonly flushNow?: (serverId: string) => void;
-  /**
-   * Quanto esperar antes de falar com o jogo.
-   *
-   * Zero seria dentro do gancho — o laço de console. Ver o
-   * cabeçalho. O valor é pequeno porque o recibo precisa parecer
-   * imediato.
-   */
-  readonly replyDelayMs?: number;
 }
-
-const DEFAULT_REPLY_DELAY_MS = 50;
 
 export class QuestEvents {
   readonly #deps: QuestEventsDeps;
@@ -184,14 +174,9 @@ export class QuestEvents {
         eventId: event.eventId,
       });
 
-      // O recibo da entrega sai pelo caminho normal se ela fechou a
-      // missão — e a leitura abaixo é quem descobre isso.
-      const view = this.#deps.service.viewById(event.pq);
-
-      if (view?.status === 'completed') {
-        this.#later(() => this.#receipt(serverId, event));
-      }
-
+      // A entrega pode ter fechado a missão — e quem avisa o jogador
+      // nesse caso é o `onCompleted` do serviço, que dispara de
+      // dentro da transição. Aqui não sobra nada a fazer.
       return;
     }
 
@@ -219,52 +204,13 @@ export class QuestEvents {
       return;
     }
 
-    // E o relógio para falar com o jogo. Ver o cabeçalho.
-    this.#later(() => this.#receipt(serverId, event));
-  }
-
-  async #receipt(serverId: string, event: QuestPushEvent): Promise<void> {
-    const chat = this.#deps.chat;
-
-    if (chat === undefined) {
-      return;
-    }
-
-    // O título vem do SNAPSHOT da tentativa — o que o jogador
-    // aceitou —, e não da quest de hoje, que pode ter sido
-    // renomeada no meio.
-    const view = this.#deps.service.viewById(event.pq);
-
-    if (view === null) {
-      return;
-    }
-
-    try {
-      await chat.tell(
-        serverId,
-        event.steamId,
-        `Missão concluída: ${view.title}. Abra /quest para resgatar.`,
-      );
-    } catch (error) {
-      // O recibo é conforto, não contrato: a missão está concluída
-      // no banco de qualquer jeito, e a tela mostra o botão de
-      // resgatar quando ele abrir.
-      this.#deps.logger.debug(
-        { server: serverId, steamId: event.steamId, err: error },
-        'não deu para mandar o recibo da missão',
-      );
-    }
-  }
-
-  #later(action: () => Promise<void> | void): void {
-    const timer = setTimeout(() => {
-      this.#timers.delete(timer);
-      void action();
-    }, this.#deps.replyDelayMs ?? DEFAULT_REPLY_DELAY_MS);
-
-    // `unref` para o relógio não segurar o processo na saída: um
-    // recibo pendente não pode impedir o agente de parar.
-    timer.unref();
-    this.#timers.add(timer);
+    // ####  O RECIBO NÃO MORA MAIS AQUI  ####
+    //
+    // Ele avisava só quem concluiu pelo PUSH do plugin; quem
+    // fechou pelo lote de 60 s, pelo recálculo do tempo online ou
+    // pela mão do suporte não recebia nada. O aviso passou para o
+    // `onCompleted` do serviço, que é o único ponto por onde os
+    // quatro caminhos passam — e que só dispara na transição, o
+    // que garante uma mensagem por conclusão.
   }
 }

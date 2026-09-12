@@ -44,6 +44,7 @@ function summary(prefab: string, patch: Partial<BetterLootTableSummary> = {}): B
   return {
     prefab,
     enabled: true,
+    watched: true,
     itemCount: 10,
     guaranteedCount: 0,
     profileCount: 0,
