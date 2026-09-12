@@ -1142,6 +1142,21 @@ namespace Oxide.Plugins
         /// O console do Rust quebra a linha no espaco e nao ha como
         /// pedir o resto cru - o caminho do prefab, que tem espaco,
         /// precisa ser remontado aqui.
+        ///
+        /// #### arg.Args NAO E string[] ####
+        ///
+        /// MEDIDO nesta build: ele e `Facepunch.StringView[]`. E a
+        /// descoberta custou uma sessao, porque ela nao da erro de
+        /// compilacao - `string.Join(" ", arg.Args, 2, 1)` casa com
+        /// o overload `Join(string, params object[])` e devolve a
+        /// string "Facepunch.StringView[] 2 1", que e o array
+        /// impresso pelo ToString junto dos dois numeros.
+        ///
+        /// Ou seja: compila, roda, e monta um caminho de prefab que
+        /// nao existe. Por isso a leitura aqui e SEMPRE pelo
+        /// `arg.GetString(index, "")`, que e a API que o jogo
+        /// oferece para isso. Indexar `arg.Args` direto e a
+        /// armadilha.
         /// </summary>
         private static string RestOfArgs(ConsoleSystem.Arg arg, int first)
         {
@@ -1150,11 +1165,23 @@ namespace Oxide.Plugins
                 return "";
             }
 
-            // string.Join, e nao StringBuilder: com as DLLs do jogo
+            // Concatenacao, e nao StringBuilder: com as DLLs do jogo
             // na mesa, `Append(" ")` fica ambiguo entre
             // Append(object) e Append(ReadOnlySpan<char>) - o
-            // literal converte para os dois. Medido no pluginlint.
-            return string.Join(" ", arg.Args, first, arg.Args.Length - first).Trim();
+            // literal converte para os dois. Sao poucos pedacos.
+            string joined = "";
+
+            for (int index = first; index < arg.Args.Length; index++)
+            {
+                if (joined.Length > 0)
+                {
+                    joined = joined + " ";
+                }
+
+                joined = joined + arg.GetString(index, "");
+            }
+
+            return joined.Trim();
         }
 
         /// <summary>

@@ -66,11 +66,26 @@ import {
 } from '@/components/loot/betterloot-bulk';
 import { BetterLootMultiplierMenu } from '@/components/loot/betterloot-multiplier-menu';
 import { labelOfPrefab } from '@/components/loot/betterloot';
+import {
+  compareWithNative,
+  importNative,
+  isAdopted,
+  switchesDisagree,
+  type EntryOrigin,
+  type NativeComparison,
+  type NativeImportMode,
+  type NativeImportOutcome,
+} from '@/components/loot/betterloot-native';
 import { ItemIcon } from '@/components/item-icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
-import type { BetterLootEntry, BetterLootItemSettings, BetterLootTable } from '@/lib/api';
+import type {
+  BetterLootEntry,
+  BetterLootItemSettings,
+  BetterLootNativeTable,
+  BetterLootTable,
+} from '@/lib/api';
 
 interface BetterLootTableEditorProps {
   readonly table: BetterLootTable;
@@ -95,6 +110,23 @@ interface BetterLootTableEditorProps {
   readonly junk: readonly string[];
   /** De qual servidor é esta caixa. O seletor de itens precisa saber. */
   readonly serverId: string;
+  /**
+   * O loot que o JOGO põe nesta caixa. `null` = ninguém respondeu.
+   *
+   * ####  NULO É UM ESTADO, E NÃO UMA FALHA  ####
+   *
+   * Ele é lido do servidor NO AR, e todo o resto desta tela é
+   * arquivo no disco — que é o que se edita com tudo parado. Sem
+   * a resposta, a tela continua inteira: o que ela perde é a
+   * marca de "do jogo" em cada linha e o botão de trazer o que
+   * falta.
+   */
+  readonly native: BetterLootNativeTable | null;
+  /** Por que não houve resposta. `null` = houve, ou nem se pediu. */
+  readonly nativeError: string | null;
+  readonly nativeLoading: boolean;
+  /** Pede a leitura de novo — o servidor pode ter subido desde então. */
+  readonly onNativeRetry: () => void;
 }
 
 export function BetterLootTableEditor({
@@ -104,7 +136,43 @@ export function BetterLootTableEditor({
   onMarkJunk,
   junk,
   serverId,
+  native,
+  nativeError,
+  nativeLoading,
+  onNativeRetry,
 }: BetterLootTableEditorProps) {
+  /**
+   * A caixa é do BetterLoot?
+   *
+   * Os dois interruptores numa pergunta só — ver `isAdopted`.
+   */
+  const adopted = isAdopted(table);
+
+  /**
+   * O cruzamento com o loot do jogo, refeito a cada tecla.
+   *
+   * Sobre o RASCUNHO, e não sobre o disco: quem acabou de
+   * acrescentar um item precisa vê-lo marcado como seu na hora.
+   */
+  const comparison = useMemo(() => compareWithNative(table, native), [table, native]);
+
+  /**
+   * A importação escolhida, ainda não aplicada.
+   *
+   * Mesma regra do multiplicador logo abaixo, e pelo mesmo motivo:
+   * ela mexe em dezenas de linhas de uma vez, e o `reset` APAGA o
+   * que não é do jogo. Guarda o modo, e não a tabela pronta, para
+   * a conta ser refeita sobre o rascunho de agora.
+   */
+  const [pendingImport, setPendingImport] = useState<NativeImportMode | null>(null);
+  const importing = useMemo<NativeImportOutcome | null>(
+    () =>
+      pendingImport === null || native === null
+        ? null
+        : importNative(table, native, pendingImport),
+    [table, native, pendingImport],
+  );
+
   const chances = useMemo(
     () => chancesOf(table.items, { flat: table.ignoreRarityBias }),
     [table.items, table.ignoreRarityBias],
@@ -165,20 +233,74 @@ export function BetterLootTableEditor({
             desenha ao lado, e não uma segunda redação dele: quem usa
             leitor de tela ouve o aria-label do grupo, e um rótulo
             diferente do escrito faz a pessoa responder a uma
-            pergunta que não está na tela. */}
+            pergunta que não está na tela.
+
+            ####  UM CONTROLE, DOIS INTERRUPTORES  ####
+
+            O plugin exige os dois ligados para mexer na caixa:
+            `Is Prefab Enabled?` (LootTables.json) e a lista
+            `Watched Container Prefabs` (BetterLoot.json). São
+            arquivos diferentes, e a tela mostrava só o primeiro —
+            por isso a crate_elite ficava presa em "jogo" sem ter
+            como sair por aqui.
+
+            Um controle só porque a pergunta do admin é uma só:
+            "esta caixa é minha ou é do jogo?". Oferecer os dois
+            seria expor um detalhe de arquivo do plugin numa tela
+            que existe para esconder exatamente isso. */}
         <section className="space-y-2">
           <Field
             label="Esta caixa é do BetterLoot"
             hint="Desligar NÃO esvazia a caixa: devolve o loot do jogo, como se o plugin não existisse ali."
           >
             <Toggle
-              on={table.enabled}
+              on={adopted}
               busy={busy}
               label="Esta caixa é do BetterLoot"
               labels={['BetterLoot', 'Jogo']}
-              onChange={(on) => onChange({ ...table, enabled: on })}
+              onChange={(on) =>
+                onChange({
+                  ...table,
+                  enabled: on,
+                  // `null` fica `null`: aquele servidor não tem
+                  // BetterLoot.json, e inventar um valor faria a
+                  // gravação CRIAR o arquivo de configuração por
+                  // causa de um clique numa caixa.
+                  watched: table.watched === null ? null : on,
+                })
+              }
             />
           </Field>
+
+          {/* ####  A DIVERGÊNCIA PRECISA SER DITA  ####
+
+              Os dois interruptores em desacordo é um estado real,
+              e o mais difícil de diagnosticar de todos: o arquivo
+              afirma uma coisa e o servidor faz outra. A causa
+              comum não é ninguém — é o `CheckWatchedPrefabs` do
+              plugin, que cadastra caixa nova como não-vigiada
+              sempre que a configuração já existia e não é dia de
+              wipe. */}
+          {switchesDisagree(table) && (
+            <p className="flex items-start gap-2 border border-amber-500/40 bg-amber-500/5 px-2 py-1.5 text-2xs leading-relaxed text-muted">
+              <AlertTriangle
+                aria-hidden="true"
+                className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500"
+              />
+              <span>
+                Os dois arquivos do plugin discordam sobre esta caixa:{' '}
+                <strong className="text-foreground">
+                  {table.enabled ? 'o LootTables.json' : 'a lista de vigia'}
+                </strong>{' '}
+                a liga e{' '}
+                <strong className="text-foreground">
+                  {table.enabled ? 'a lista de vigia do BetterLoot.json' : 'o LootTables.json'}
+                </strong>{' '}
+                a desliga — e o servidor só usa a tabela com os dois ligados. Gravar alinha os
+                dois com o que está escolhido acima.
+              </span>
+            </p>
+          )}
 
           <Field
             label="Ignorar a raridade no sorteio"
@@ -312,11 +434,50 @@ export function BetterLootTableEditor({
           }
         />
 
+        {/* ####  O LOOT DO JOGO  ####
+
+            É a única parte desta tela que precisa do servidor NO
+            AR, e a razão é que a tabela nativa não está em arquivo
+            nenhum: o BetterLoot a lê uma vez, no primeiro boot, e
+            dali em diante só conhece o LootTables.json. Quem
+            apagou a lista — ou montou a caixa só com perfis — não
+            tinha como pedir o padrão de volta. */}
+        <NativeSection
+          table={table}
+          comparison={comparison}
+          loading={nativeLoading}
+          error={nativeError}
+          busy={busy}
+          outcome={importing}
+          onRetry={onNativeRetry}
+          onPick={setPendingImport}
+          onCancel={() => {
+            setPendingImport(null);
+          }}
+          onConfirm={() => {
+            if (importing !== null) {
+              onChange(importing.table);
+            }
+
+            setPendingImport(null);
+          }}
+        />
+
         {/* ####  OS ITENS SOLTOS  #### */}
         <section className="space-y-2 border-t border-border pt-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
               Itens da caixa ({table.items.length})
+              {/* A divisão só aparece quando alguém respondeu. Com
+                  o servidor parado ela seria um "0 do jogo" que se
+                  lê como "esta caixa não tem nada do jogo" — o
+                  contrário do que se sabe. */}
+              {comparison.native !== null && (
+                <span className="ml-1.5 font-sans font-normal normal-case tracking-normal text-muted">
+                  · {comparison.fromGame} do jogo · {comparison.added}{' '}
+                  {comparison.added === 1 ? 'acrescentado' : 'acrescentados'}
+                </span>
+              )}
             </h3>
 
             <div className="flex items-center gap-3">
@@ -402,6 +563,7 @@ export function BetterLootTableEditor({
                 <EntryRow
                   key={entry.key}
                   entry={entry}
+                  origin={comparison.originOf(entry.key)}
                   probability={
                     chances.entries.find((candidate) => candidate.key === entry.key)?.probability ??
                     null
@@ -430,6 +592,228 @@ export function BetterLootTableEditor({
             </ul>
           )}
         </section>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * O loot que o JOGO põe nesta caixa.
+ *
+ * ####  ELA EXISTE PARA RESPONDER "O QUE É MEU AQUI?"  ####
+ *
+ * O `LootTables.json` guarda item do jogo e item da casa no mesmo
+ * dicionário, sem marca nenhuma. Antes desta seção, o admin que
+ * abrisse a caixa de elite via 145 linhas e não tinha como saber
+ * quais eram dele — nem como trazer de volta as que faltavam.
+ *
+ * ####  E ELA É A ÚNICA PARTE DA TELA QUE PRECISA DO JOGO NO AR  ####
+ *
+ * Por isso os três estados têm desenho próprio, e nenhum deles
+ * trava o resto do editor: lendo, sem resposta (com o porquê e o
+ * botão de tentar de novo) e respondido.
+ */
+function NativeSection({
+  table,
+  comparison,
+  loading,
+  error,
+  busy,
+  outcome,
+  onRetry,
+  onPick,
+  onCancel,
+  onConfirm,
+}: {
+  readonly table: BetterLootTable;
+  readonly comparison: NativeComparison;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly busy: boolean;
+  readonly outcome: NativeImportOutcome | null;
+  readonly onRetry: () => void;
+  readonly onPick: (mode: NativeImportMode) => void;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
+}) {
+  const { native } = comparison;
+
+  return (
+    <section className="space-y-2 border-t border-border pt-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+          Loot do jogo
+        </h3>
+
+        {native !== null && (
+          <span className="text-2xs text-muted">
+            {/* O que o JOGO entrega, e não o que esta caixa
+                entrega: são números diferentes assim que alguém
+                mexe no "Quanto sai", e confundi-los faria a
+                referência não servir para nada. */}
+            {native.items.length + native.guaranteed.length} itens ·{' '}
+            {native.slotsMin === native.slotsMax
+              ? `${String(native.slotsMin)} por caixa`
+              : `${String(native.slotsMin)}–${String(native.slotsMax)} por caixa`}
+            {native.source === 'container' && ` · ${String(native.scrap)} scrap`}
+          </span>
+        )}
+      </div>
+
+      {loading && (
+        <p className="border border-border px-3 py-3 text-center text-2xs text-muted">
+          Lendo o loot do jogo neste servidor…
+        </p>
+      )}
+
+      {/* ####  SEM RESPOSTA NÃO É TELA QUEBRADA  ####
+
+          O servidor parado é o estado normal de quem está
+          configurando loot — é justamente quando se faz esse
+          trabalho. A frase diz o que se perde (a separação e o
+          "trazer"), e não o que falhou. */}
+      {!loading && error !== null && (
+        <div className="space-y-2 border border-border bg-surface-2 px-2 py-2">
+          <p className="text-2xs leading-relaxed text-muted">{error}</p>
+          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onRetry}>
+            Tentar de novo
+          </Button>
+        </div>
+      )}
+
+      {!loading && error === null && native !== null && (
+        <>
+          <p className="text-2xs leading-relaxed text-muted">
+            {comparison.missing.length === 0 ? (
+              <>
+                Esta caixa já tem tudo o que o jogo põe nela.
+                {comparison.added > 0 && (
+                  <> Os {comparison.added} itens marcados <em>da casa</em> são acréscimos seus.</>
+                )}
+              </>
+            ) : (
+              <>
+                <strong className="text-foreground">
+                  {comparison.missing.length}{' '}
+                  {comparison.missing.length === 1 ? 'item que o jogo põe' : 'itens que o jogo põe'}
+                </strong>{' '}
+                nesta caixa {comparison.missing.length === 1 ? 'não está' : 'não estão'} na tabela.
+                Trazer não apaga nada do que já existe aqui.
+              </>
+            )}
+          </p>
+
+          {outcome === null && (
+            <div className="flex flex-wrap gap-2">
+              {comparison.missing.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => onPick('fill')}
+                >
+                  Trazer os {comparison.missing.length} que faltam
+                </Button>
+              )}
+
+              {/* O "voltar" só aparece quando há o que desfazer:
+                  numa caixa que é exatamente o jogo ele abriria
+                  para não fazer nada. */}
+              {comparison.added > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => onPick('reset')}
+                >
+                  Voltar ao loot do jogo…
+                </Button>
+              )}
+            </div>
+          )}
+
+          {outcome !== null && (
+            <ImportConfirm
+              outcome={outcome}
+              prefab={table.prefab}
+              busy={busy}
+              onCancel={onCancel}
+              onConfirm={onConfirm}
+            />
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * O que a importação vai fazer, escrito por extenso.
+ *
+ * ####  O `reset` APAGA, E ISSO PRECISA ESTAR NA FRASE  ####
+ *
+ * "Voltar ao loot do jogo" soa inofensivo e não é: ele tira da
+ * caixa todo item que o jogo não põe ali — inclusive o troféu que
+ * a casa levou semanas para montar. O número some na confirmação
+ * genérica e aparece aqui.
+ */
+function ImportConfirm({
+  outcome,
+  prefab,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  readonly outcome: NativeImportOutcome;
+  readonly prefab: string;
+  readonly busy: boolean;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Confirmar a importação do loot do jogo"
+      className="space-y-2 border border-amber/40 bg-amber/10 px-2 py-2"
+    >
+      <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-foreground">
+        <AlertTriangle aria-hidden="true" className="mt-px h-3.5 w-3.5 shrink-0 text-amber" />
+        <span>
+          {outcome.mode === 'fill' ? (
+            <>
+              <strong>Trazer o que falta em {labelOfPrefab(prefab)}:</strong> entram{' '}
+              <strong>{outcome.added}</strong>{' '}
+              {outcome.added === 1 ? 'item do jogo' : 'itens do jogo'}
+              {outcome.guaranteedAdded > 0 && (
+                <> e {outcome.guaranteedAdded} garantidos</>
+              )}
+              . Nada sai, e nenhuma quantidade que você ajustou muda.
+            </>
+          ) : (
+            <>
+              <strong>Voltar {labelOfPrefab(prefab)} ao loot do jogo:</strong> saem{' '}
+              <strong>{outcome.removed}</strong>{' '}
+              {outcome.removed === 1 ? 'item que o jogo não põe' : 'itens que o jogo não põe'} aqui
+              {outcome.added > 0 && <> e entram {outcome.added} que faltavam</>}.
+              {outcome.settingsChanged && <> O “quanto sai” também volta ao do jogo.</>}
+              {' '}
+              As quantidades dos itens que ficam <strong>não</strong> mudam — quem quiser as do
+              jogo de volta tira o item e traz de novo.
+            </>
+          )}{' '}
+          Os grupos desta caixa continuam como estão.
+        </span>
+      </p>
+
+      <div className="flex gap-2">
+        <Button type="button" size="sm" disabled={busy} onClick={onConfirm}>
+          {outcome.mode === 'fill' ? 'Trazer' : 'Voltar ao loot do jogo'}
+        </Button>
+        <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+          Cancelar
+        </Button>
       </div>
     </div>
   );
@@ -522,6 +906,7 @@ function BulkConfirm({
 
 function EntryRow({
   entry,
+  origin,
   probability,
   flat,
   disabled,
@@ -531,6 +916,8 @@ function EntryRow({
   onRemove,
 }: {
   readonly entry: BetterLootEntry;
+  /** Do jogo, acrescentado, ou não deu para saber. */
+  readonly origin: EntryOrigin;
   readonly probability: number | null;
   readonly flat: boolean;
   readonly disabled: boolean;
@@ -550,6 +937,33 @@ function EntryRow({
           <span className="truncate text-2xs text-foreground">
             {entry.customName ?? entry.displayName ?? entry.shortname}
           </span>
+          {/* ####  DE ONDE A LINHA VEIO  ####
+
+              Só duas marcas, e nunca as duas juntas: "do jogo" é o
+              caso comum numa caixa recém-adotada, e marcar 145
+              linhas iguais não informa nada — o que se procura é o
+              que DESTOA. Por isso a marca visível é a do que a
+              casa acrescentou, e "do jogo" fica só no title.
+
+              Com o servidor parado a origem é `unknown` e nenhuma
+              marca aparece: a tela não afirma o que não sabe. */}
+          {origin === 'added' && (
+            <span
+              title="Este item não está no loot que o jogo põe nesta caixa: alguém o acrescentou."
+              className="shrink-0 border border-rust/50 px-1 text-[10px] uppercase text-rust"
+            >
+              da casa
+            </span>
+          )}
+          {origin === 'game' && (
+            <span
+              aria-hidden="true"
+              title="O jogo já põe este item nesta caixa."
+              className="shrink-0 text-[10px] text-muted"
+            >
+              jogo
+            </span>
+          )}
           {/* A marca é o que separa o Troféu Bleik de um troféu
               qualquer. Sem ela na lista, duas linhas do mesmo
               shortname ficariam idênticas na tela. */}
