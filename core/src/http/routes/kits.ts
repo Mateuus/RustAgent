@@ -49,6 +49,34 @@ export interface KitRoutesDeps {
   readonly store: KitStore;
   readonly repository: KitsRepository;
   readonly supervisor: ServerSupervisor;
+  /**
+   * Alguem mexeu num kit, e a INTERFACE precisa saber.
+   *
+   * ####  A ARTE NAO VAI SOZINHA  ####
+   *
+   * A pagina KITS e gerada a cada clique, entao nome, regra e itens
+   * aparecem na hora. A ARTE nao: os bytes dela viajam com a carga da
+   * interface, e sem este aviso a imagem so chegaria na volta
+   * periodica (5 min) -- quem acabou de salvar abre o jogo, ve o
+   * icone velho e conclui que nao funcionou.
+   *
+   * Chamado SEM `await` e dentro de try/catch: uma falha de envio nao
+   * pode desfazer uma edicao que ja foi gravada. Ausente nos testes.
+   */
+  readonly onArtChanged?: (() => void) | undefined;
+}
+
+/**
+ * Avisa a interface, e NUNCA derruba a rota.
+ *
+ * Ver `onArtChanged`. O mesmo desenho do `notifyCatalog` da loja.
+ */
+function notifyArt(deps: KitRoutesDeps): void {
+  try {
+    deps.onArtChanged?.();
+  } catch {
+    // De proposito: o envio e consequencia, e a edicao ja aconteceu.
+  }
 }
 
 /** Tamanho de página da lista de resgates. */
@@ -291,6 +319,9 @@ export function registerKitRoutes(app: FastifyInstance, deps: KitRoutesDeps): vo
       'kit criado pelo painel',
     );
 
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
+
     return reply.status(201).send({
       ok: true,
       kit: deps.store.get(kit.id),
@@ -327,6 +358,9 @@ export function registerKitRoutes(app: FastifyInstance, deps: KitRoutesDeps): vo
 
     request.log.info({ kit: kit.slug, by: operatorOf(request) }, 'kit alterado pelo painel');
 
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
+
     return { ok: true, kit: deps.store.get(kit.id), message: `Kit "${kit.name}" gravado.` };
   });
 
@@ -352,6 +386,9 @@ export function registerKitRoutes(app: FastifyInstance, deps: KitRoutesDeps): vo
       { kit: kit.slug, claims: kit.claimCount, by: operatorOf(request) },
       'kit removido pelo painel',
     );
+
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     return {
       ok: true,

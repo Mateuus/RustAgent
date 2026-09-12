@@ -224,6 +224,8 @@ export interface BuildServerOptions {
   readonly kits: {
     readonly store: KitStore;
     readonly repository: KitsRepository;
+    /** Um kit mudou: a ARTE do card viaja na carga da interface. */
+    readonly onArtChanged?: (() => void) | undefined;
   };
   /**
    * A LOJA: categorias, ofertas, carteira e histórico de compras.
@@ -630,11 +632,12 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         supervisor: options.supervisor,
       });
 
-      registerKitRoutes(api, {
-        store: options.kits.store,
-        repository: options.kits.repository,
-        supervisor: options.supervisor,
-      });
+      // Espalhado, e não campo a campo: listar os campos aqui fazia
+      // um novo (o `onArtChanged`) ser DESCARTADO em silêncio — o
+      // painel salvava o kit, a arte ficava no banco e não chegava ao
+      // jogo. O supervisor vem depois porque é ele que esta camada
+      // acrescenta.
+      registerKitRoutes(api, { ...options.kits, supervisor: options.supervisor });
 
       // A loja depois dos kits porque ela DEPENDE do VIP: uma oferta
       // de VIP concede pelo `VipList`, e não por um segundo caminho.

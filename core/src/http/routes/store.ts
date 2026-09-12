@@ -85,6 +85,21 @@ export interface StoreRoutesDeps {
    * a integração com o site.
    */
   readonly onCatalogChanged?: (() => void) | undefined;
+  /**
+   * Alguem mexeu numa oferta, e a INTERFACE precisa saber.
+   *
+   * ####  A ARTE NAO VAI SOZINHA  ####
+   *
+   * A vitrine e gerada a cada clique, entao nome, preco e etiqueta
+   * aparecem na hora. A ARTE propria nao: os bytes dela viajam com a
+   * carga da interface, e sem este aviso a imagem so chegaria na
+   * volta periodica (5 min) -- quem acabou de salvar abre o jogo, ve
+   * o icone velho e conclui que nao funcionou.
+   *
+   * Chamado SEM `await` e dentro de try/catch, como o
+   * `onCatalogChanged`.
+   */
+  readonly onArtChanged?: (() => void) | undefined;
 }
 
 /**
@@ -94,6 +109,14 @@ export interface StoreRoutesDeps {
  * de gravar. O painel do site mostrar a loja de ontem é um
  * problema; a edição não salvar é outro, bem maior.
  */
+function notifyArt(deps: StoreRoutesDeps): void {
+  try {
+    deps.onArtChanged?.();
+  } catch {
+    // De proposito: o envio e consequencia, e a edicao ja aconteceu.
+  }
+}
+
 function notifyCatalog(deps: StoreRoutesDeps): void {
   try {
     deps.onCatalogChanged?.();
@@ -518,6 +541,8 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     // O painel do site precisa ver a loja de AGORA. Sem await e
     // sem poder derrubar a rota: a edição já foi gravada.
     notifyCatalog(deps);
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     request.log.info(
       { offer: offer.id, name: offer.name, kind: offer.kind, by: operatorOf(request) },
@@ -551,6 +576,8 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     // O painel do site precisa ver a loja de AGORA. Sem await e
     // sem poder derrubar a rota: a edição já foi gravada.
     notifyCatalog(deps);
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     return { ok: true, offer: toOfferView(saved) };
   });
@@ -575,6 +602,8 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     // O painel do site precisa ver a loja de AGORA. Sem await e
     // sem poder derrubar a rota: a edição já foi gravada.
     notifyCatalog(deps);
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     request.log.warn({ offer: id, name: offer.name, by: operatorOf(request) }, 'oferta removida');
 

@@ -2848,7 +2848,14 @@ async function main(): Promise<void> {
       timersRepository: playerTimersRepository,
       timersSync: playerTimersSync,
     },
-    kits: { store: kits, repository: kitsRepository },
+    kits: {
+      store: kits,
+      repository: kitsRepository,
+      // A arte do card do kit viaja com a carga da interface: sem
+      // isto, ela só chegaria na volta periódica (5 min), e quem
+      // acabou de salvar abriria o jogo com o ícone velho.
+      onArtChanged: () => uiSync.pushAllSoon('arte-salva'),
+    },
     store: {
       repository: storeRepository,
       wallets: walletsRepository,
@@ -2857,6 +2864,8 @@ async function main(): Promise<void> {
       // Uma edição de catálogo avisa o espelho. Sem site,
       // `undefined`, e as rotas não mudam de comportamento.
       ...(catalogMirror === null ? {} : { onCatalogChanged: () => catalogMirror.notifyChanged() }),
+      // A arte do card da oferta, pela mesma razão do kit.
+      onArtChanged: () => uiSync.pushAllSoon('arte-salva'),
     },
     site: {
       baseUrl: siteBaseUrl,

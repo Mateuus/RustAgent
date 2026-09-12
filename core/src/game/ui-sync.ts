@@ -85,6 +85,8 @@ export type UiSyncTrigger =
   | 'rcon-connected'
   | 'documento-salvo'
   | 'documento-removido'
+  /** Um kit ou uma oferta mudou: a ARTE do card viaja nesta carga. */
+  | 'arte-salva'
   | 'configuração'
   | 'plugin-pediu'
   | 'periódico'
