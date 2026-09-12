@@ -831,7 +831,7 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
  * respeito a qual? Os ícones ficam no detalhe, onde há uma linha
  * para cada.
  */
-function rewardLine(rewards: readonly QuestReward[], catalog: QuestsCatalog): string {
+export function rewardLine(rewards: readonly QuestReward[], catalog: QuestsCatalog): string {
   if (rewards.length === 0) {
     return '';
   }

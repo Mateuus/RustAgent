@@ -72,6 +72,7 @@ using Oxide.Core;
 // Oxide.CSharp). Sao namespaces diferentes e nao ha nome repetido
 // entre os dois, entao este using nao cria ambiguidade.
 using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -7172,6 +7173,14 @@ namespace Oxide.Plugins
             // pode custar o progresso de missao de ninguem.
             QuestSave(true);
 
+            // ####  A CAIXA ABERTA PRENDE O CURSOR  ####
+            //
+            // Ela tem `CursorEnabled`, e um `oxide.reload` com
+            // alguem conversando deixaria essa pessoa sem mirar,
+            // correr ou sair - com um painel que nenhum botao
+            // fecha, porque o plugin que os atende acabou de sumir.
+            QuestNpcDialogCloseAll();
+
             // Os NPCs sao `enableSaving = false`: eles nao vao para o
             // save do mundo, e um oxide.reload sem esta linha
             // deixaria bonecos orfaos no mapa que ninguem consegue
@@ -7854,6 +7863,7 @@ namespace Oxide.Plugins
             if (player != null)
             {
                 _questAssigned.Remove(player.userID);
+                _questNpcDialogs.Remove(player.userID);
             }
         }
 
@@ -8668,6 +8678,30 @@ namespace Oxide.Plugins
                 UseRadius = (float)payload["useRadius"]
             };
 
+            JArray offers = payload["offers"] as JArray;
+
+            if (offers != null)
+            {
+                for (int i = 0; i < offers.Count; i++)
+                {
+                    JObject offer = offers[i] as JObject;
+
+                    if (offer == null)
+                    {
+                        continue;
+                    }
+
+                    info.Offers.Add(new QuestNpcOffer
+                    {
+                        Id = (string)offer["id"],
+                        Title = (string)offer["title"],
+                        Description = (string)offer["description"],
+                        Goal = (string)offer["goal"],
+                        Reward = (string)offer["reward"]
+                    });
+                }
+            }
+
             if (string.IsNullOrEmpty(info.Id) || string.IsNullOrEmpty(info.Prefab))
             {
                 return BuildError(ErrorInvalidArgs);
@@ -8997,6 +9031,359 @@ namespace Oxide.Plugins
             }
         }
 
+        // ============================================================
+        //  A CAIXA DE CONVERSA
+        //
+        //  ####  POR QUE ELA E DESENHADA AQUI, E NAO PEDIDA  ####
+        //
+        //  Ate 12/09/2026 o TALK mandava o AGENTE abrir a tela de
+        //  missoes daquele NPC. Eram cinco saltos antes de o jogador
+        //  ver qualquer coisa: o plugin gritava, o agente lia o
+        //  console, mandava abrir, o plugin pedia a tela, o agente
+        //  respondia. Qualquer tropeco no caminho virava "Nao
+        //  consegui carregar essa pagina" - que foi o que o teste de
+        //  12/09/2026 relatou com o NPC "Wood".
+        //
+        //  Agora a caixa e local: o que ela mostra desceu junto com
+        //  o NPC (ver `Offers`), e o TALK a desenha no quadro
+        //  seguinte. Nenhuma ida a rede, nenhum "carregando".
+        //
+        //  ####  O QUE CONTINUA SENDO DO AGENTE  ####
+        //
+        //  A DECISAO. O plugin nao sabe se o jogador ja pegou aquela
+        //  missao, se ela esta em cooldown ou se a cadeia permite -
+        //  e nao vai saber. O clique em ACEITAR grita, o agente
+        //  decide, e a frase que o jogador le ("esta quest volta em
+        //  4h") nasce la.
+        //
+        //  ####  O DESENHO SEGUE O DO JOGO  ####
+        //
+        //  Pedido do dono em 12/09/2026, com a caixa do CZ-721 do
+        //  Outpost na mao: faixa com o nome, a fala embaixo, opcoes
+        //  numeradas. A conversa NATIVA nao servia - as falas dela
+        //  sao asset do CLIENTE e o servidor so manda indices: o NPC
+        //  falaria as frases do vendedor de helicoptero, em ingles.
+        // ============================================================
+
+        private const string QuestNpcDialogName = "OZQuestNpcDialog";
+        private const string QuestNpcPickCommand = "origemz.quest.npc.pick";
+        private const string QuestNpcCloseCommand = "origemz.quest.npc.close";
+
+        /// <summary>Quem esta com a caixa aberta, e de qual NPC.</summary>
+        private Dictionary<ulong, string> _questNpcDialogs = new Dictionary<ulong, string>();
+
+        private void QuestNpcDialogOpen(BasePlayer player, QuestNpcInfo npc)
+        {
+            QuestNpcDialogClose(player);
+
+            CuiElementContainer container = new CuiElementContainer();
+
+            // A caixa fica ao lado do centro, como a do jogo: no
+            // meio da tela ela cobriria justamente o boneco com quem
+            // se esta falando.
+            string root = container.Add(new CuiPanel
+            {
+                Image = { Color = "0.10 0.10 0.10 0.96" },
+                RectTransform = { AnchorMin = "0.34 0.36", AnchorMax = "0.72 0.60" },
+                CursorEnabled = true
+            }, "Overlay", QuestNpcDialogName);
+
+            // A faixa do nome, com o X vermelho no canto - o mesmo
+            // lugar em que o jogo o poe.
+            container.Add(new CuiPanel
+            {
+                Image = { Color = "0.16 0.16 0.16 1" },
+                RectTransform = { AnchorMin = "0 0.86", AnchorMax = "1 1" }
+            }, root);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = string.IsNullOrEmpty(npc.Name) ? "NPC" : npc.Name.ToUpperInvariant(),
+                    FontSize = 14,
+                    Font = "robotocondensed-bold.ttf",
+                    Align = TextAnchor.MiddleLeft,
+                    Color = "0.92 0.92 0.92 1"
+                },
+                RectTransform = { AnchorMin = "0.03 0.86", AnchorMax = "0.85 1" }
+            }, root);
+
+            container.Add(new CuiButton
+            {
+                Button = { Color = "0.70 0.22 0.15 1", Command = QuestNpcCloseCommand },
+                Text =
+                {
+                    Text = "X",
+                    FontSize = 12,
+                    Font = "robotocondensed-bold.ttf",
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "1 1 1 1"
+                },
+                RectTransform = { AnchorMin = "0.93 0.88", AnchorMax = "0.985 0.98" }
+            }, root);
+
+            // A fala. Com uma missao so, ela e a descricao dela - o
+            // texto que o admin escreveu para ser lido antes de
+            // aceitar.
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = QuestNpcDialogGreeting(npc),
+                    FontSize = 12,
+                    Font = "robotocondensed-regular.ttf",
+                    Align = TextAnchor.UpperLeft,
+                    Color = "0.82 0.82 0.82 1"
+                },
+                RectTransform = { AnchorMin = "0.04 0.60", AnchorMax = "0.96 0.84" }
+            }, root);
+
+            // As opcoes, numeradas de cima para baixo.
+            float top = 0.56f;
+            const float height = 0.115f;
+            const float gap = 0.02f;
+            int number = 1;
+
+            for (int i = 0; i < npc.Offers.Count && number <= 4; i++)
+            {
+                QuestNpcOffer offer = npc.Offers[i];
+
+                QuestNpcDialogOption(
+                    container,
+                    root,
+                    number,
+                    QuestNpcOfferLine(offer),
+                    QuestNpcPickCommand + " " + npc.Id + " " + offer.Id,
+                    top,
+                    top + height);
+
+                top -= height + gap;
+                number++;
+            }
+
+            // O "sair" existe sempre: um menu com o cursor preso e
+            // sem saida e pior que menu nenhum.
+            QuestNpcDialogOption(
+                container,
+                root,
+                number,
+                npc.Offers.Count == 0
+                    ? "Entendido. [SAIR]"
+                    : "Agora nao. [SAIR]",
+                QuestNpcCloseCommand,
+                top,
+                top + height);
+
+            CuiHelper.AddUi(player, container);
+            _questNpcDialogs[player.userID] = npc.Id;
+        }
+
+        /// <summary>Uma linha da caixa: o numero e o texto.</summary>
+        private void QuestNpcDialogOption(
+            CuiElementContainer container,
+            string root,
+            int number,
+            string text,
+            string command,
+            float bottom,
+            float top)
+        {
+            string min = "0.04 " + bottom.ToString("0.###", CultureInfo.InvariantCulture);
+            string max = "0.96 " + top.ToString("0.###", CultureInfo.InvariantCulture);
+
+            string option = container.Add(new CuiButton
+            {
+                Button = { Color = "0.20 0.26 0.17 0.95", Command = command },
+                Text = { Text = string.Empty },
+                RectTransform = { AnchorMin = min, AnchorMax = max }
+            }, root);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = number.ToString(CultureInfo.InvariantCulture),
+                    FontSize = 12,
+                    Font = "robotocondensed-bold.ttf",
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "0.75 0.90 0.60 1"
+                },
+                RectTransform = { AnchorMin = "0 0", AnchorMax = "0.06 1" }
+            }, option);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = text,
+                    FontSize = 12,
+                    Font = "robotocondensed-regular.ttf",
+                    Align = TextAnchor.MiddleLeft,
+                    Color = "0.90 0.90 0.90 1"
+                },
+                RectTransform = { AnchorMin = "0.07 0", AnchorMax = "0.98 1" }
+            }, option);
+        }
+
+        // A fala de cima.
+        //
+        // A descricao da missao quando ha uma so - e o texto que o
+        // admin escreveu justamente para ser lido antes de aceitar.
+        // Com varias, uma frase neutra: escolher a descricao de uma
+        // delas seria anunciar a errada.
+        private string QuestNpcDialogGreeting(QuestNpcInfo npc)
+        {
+            if (npc.Offers.Count == 1 && !string.IsNullOrEmpty(npc.Offers[0].Description))
+            {
+                return npc.Offers[0].Description;
+            }
+
+            if (npc.Offers.Count == 0)
+            {
+                return "Nao tenho trabalho para voce hoje.";
+            }
+
+            return "Tenho trabalho para voce. O que vai ser?";
+        }
+
+        private string QuestNpcOfferLine(QuestNpcOffer offer)
+        {
+            StringBuilder line = new StringBuilder();
+
+            line.Append(string.IsNullOrEmpty(offer.Title) ? offer.Id : offer.Title);
+
+            if (!string.IsNullOrEmpty(offer.Goal))
+            {
+                line.Append("  -  ").Append(offer.Goal);
+            }
+
+            if (!string.IsNullOrEmpty(offer.Reward))
+            {
+                line.Append("  >  ").Append(offer.Reward);
+            }
+
+            return line.ToString();
+        }
+
+        private void QuestNpcDialogCloseAll()
+        {
+            List<ulong> abertas = new List<ulong>(_questNpcDialogs.Keys);
+
+            for (int i = 0; i < abertas.Count; i++)
+            {
+                QuestNpcDialogClose(BasePlayer.FindByID(abertas[i]));
+            }
+
+            _questNpcDialogs.Clear();
+        }
+
+        private void QuestNpcDialogClose(BasePlayer player)
+        {
+            if (player == null)
+            {
+                return;
+            }
+
+            CuiHelper.DestroyUi(player, QuestNpcDialogName);
+            _questNpcDialogs.Remove(player.userID);
+        }
+
+        [ConsoleCommand(QuestNpcCloseCommand)]
+        private void CommandQuestNpcClose(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = arg == null ? null : arg.Player();
+
+            if (player != null)
+            {
+                QuestNpcDialogClose(player);
+            }
+        }
+
+        // ####  O CLIQUE VEM DO CLIENTE, ENTAO ELE E CONFERIDO  ####
+        //
+        // O comando chega com o npcId e o questId escritos pelo
+        // cliente. O plugin confere a unica coisa que so ele sabe -
+        // que o jogador esta MESMO ao lado daquele boneco -, e o
+        // agente confere o resto: se a missao e daquele NPC, se ela
+        // pode ser pega, se ja foi feita.
+        [ConsoleCommand(QuestNpcPickCommand)]
+        private void CommandQuestNpcPick(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                BasePlayer player = arg == null ? null : arg.Player();
+
+                if (player == null || !arg.HasArgs(2))
+                {
+                    return;
+                }
+
+                string npcId = arg.GetString(0);
+                string questId = arg.GetString(1);
+
+                QuestNpcInfo npc;
+
+                if (!_questNpcs.TryGetValue(npcId, out npc))
+                {
+                    return;
+                }
+
+                if (!QuestNpcWithinReach(player, npc))
+                {
+                    player.ChatMessage("Voce se afastou do NPC.");
+                    QuestNpcDialogClose(player);
+                    return;
+                }
+
+                QuestNpcDialogClose(player);
+                QuestNpcPushAccept(player, npcId, questId);
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestNpcPickCommand + " falhou: " + ex);
+            }
+        }
+
+        // O alcance da caixa e um pouco maior que o do USE: o
+        // jogador da um passo enquanto le, e perder a missao por
+        // isso seria absurdo.
+        private bool QuestNpcWithinReach(BasePlayer player, QuestNpcInfo npc)
+        {
+            BasePlayer boneco;
+
+            if (!_questNpcEntities.TryGetValue(npc.Id, out boneco) ||
+                boneco == null || boneco.IsDestroyed)
+            {
+                return false;
+            }
+
+            float limite = npc.UseRadius + 2f;
+
+            return Vector3.Distance(player.transform.position, boneco.transform.position) <= limite;
+        }
+
+        private void QuestNpcPushAccept(BasePlayer player, string npcId, string questId)
+        {
+            if (string.IsNullOrEmpty(_questSecret))
+            {
+                return;
+            }
+
+            StringBuilder line = new StringBuilder();
+
+            line.Append(QuestNpcMarker);
+            line.Append("{\"contract\":").Append(QuestContract);
+            line.Append(",\"secret\":\"").Append(_questSecret).Append('"');
+            line.Append(",\"kind\":\"accept\"");
+            line.Append(",\"steamId\":\"").Append(player.UserIDString).Append('"');
+            line.Append(",\"npcId\":").Append(JsonConvert.ToString(npcId));
+            line.Append(",\"questId\":").Append(JsonConvert.ToString(questId));
+            line.Append('}');
+
+            Puts(line.ToString());
+        }
+
         // ####  A PORTA UNICA: O TALK E O USE DESAGUAM AQUI  ####
         //
         // O freio esta DENTRO, e nao em cada caminho: apertar E em
@@ -9025,17 +9412,20 @@ namespace Oxide.Plugins
             // novo achando que nao funcionou.
             QuestTryDeliver(player, npc.Id);
 
-            // ####  QUEM ABRE A TELA E O AGENTE  ####
+            // ####  A CAIXA E LOCAL; O GRITO E SO O RECADO  ####
             //
-            // Nao ha CUI aqui, e o plugin TAMBEM nao manda o
-            // `origemz.ui.open`: aquele comando recusa o que vem do
-            // cliente (`arg.Connection != null`) - de proposito,
-            // para um jogador nao abrir a tela de outro.
+            // O desenho acontece AGORA, com o que ja esta na
+            // memoria - ver o cabecalho da caixa de conversa. O
+            // grito segue existindo por dois motivos, e nenhum
+            // deles atrasa o jogador:
             //
-            // Entao este plugin GRITA, o agente le, confere que o
-            // NPC existe naquele servidor e manda o comando com a
-            // autoridade dele. Uma ida a mais, e a conferencia que
-            // ela paga vale.
+            //   1. ele e a TESTEMUNHA de que este jogador esteve no
+            //      balcao, e e ela que o agente exige antes de
+            //      conceder a missao daquele NPC;
+            //   2. ele e a linha que se procura no console quando
+            //      alguem diz "falei com o NPC e nao aconteceu
+            //      nada".
+            QuestNpcDialogOpen(player, npc);
             QuestNpcPush(player, npc.Id);
         }
 
@@ -9316,6 +9706,22 @@ namespace Oxide.Plugins
             public string Prefab;
             public bool MapMarker;
             public float UseRadius;
+
+            // O que ele oferece. Desce com o NPC, no `npc.set`, e e
+            // o que permite desenhar a caixa sem ida a rede.
+            public List<QuestNpcOffer> Offers = new List<QuestNpcOffer>();
+        }
+
+        private class QuestNpcOffer
+        {
+            public string Id;
+            public string Title;
+            /// <summary>A fala. Vazia = a caixa usa o objetivo.</summary>
+            public string Description;
+            /// <summary>"Coletar 100 de Madeira", pronto do agente.</summary>
+            public string Goal;
+            /// <summary>"1x Sucata", pronto do agente.</summary>
+            public string Reward;
         }
 
         #endregion
