@@ -158,6 +158,15 @@ export interface QuestAssignPayload {
   readonly contract: number;
   readonly quests: readonly {
     readonly pq: number;
+    /**
+     * A quest do catálogo, e não a tentativa.
+     *
+     * É o que permite a caixa do NPC dizer "você já está nesta" em
+     * vez de oferecer de novo o que o jogador acabou de pegar — o
+     * boneco conhece as missões DELE pelo id, e o `pq` sozinho não
+     * casa com nenhum.
+     */
+    readonly id: string;
     readonly objectives: readonly {
       readonly seq: number;
       readonly kind: string;
