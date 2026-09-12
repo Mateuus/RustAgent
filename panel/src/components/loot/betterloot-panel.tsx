@@ -65,6 +65,7 @@ import {
   agent,
   type BetterLootGlobalsInput,
   type BetterLootJunkItem,
+  type BetterLootNativeTable,
   type BetterLootProfileSummary,
   type BetterLootStatusResponse,
   type BetterLootTable,
@@ -99,6 +100,24 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
   const [tableError, setTableError] = useState<string | null>(null);
   const [loadingTable, setLoadingTable] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  /**
+   * O loot que o JOGO põe na caixa aberta.
+   *
+   * ####  ELE MORA AQUI, E NÃO NO EDITOR  ####
+   *
+   * Porque é o único pedaço desta tela que vai ao SERVIDOR e não ao
+   * disco, e por isso é o único que pode faltar. Deixá-lo dentro do
+   * editor faria cada remontagem do componente (uma `key` nova a
+   * cada troca de caixa) disparar um RCON — e o editor remonta
+   * também quando a caixa é gravada.
+   *
+   * `null` com `nativeError` preenchido é o estado normal do
+   * servidor parado, e não uma falha da tela.
+   */
+  const [native, setNative] = useState<BetterLootNativeTable | null>(null);
+  const [nativeError, setNativeError] = useState<string | null>(null);
+  const [loadingNative, setLoadingNative] = useState(false);
 
   /**
    * Qual das duas telas está aberta.
@@ -162,6 +181,15 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
    * dispara um `loadStatus` novo, e é esse pedido que passa a valer.
    */
   const statusSeq = useRef(0);
+  /**
+   * Qual leitura do LOOT DO JOGO é a que vale.
+   *
+   * Terceiro contador, e pelo mesmo motivo do segundo: ela demora
+   * mais que a leitura do arquivo (vai ao servidor por RCON, e não
+   * ao disco), então é a que mais chega fora de ordem. Invalidar a
+   * leitura da caixa junto deixaria o "Lendo a caixa…" preso.
+   */
+  const nativeSeq = useRef(0);
 
   // Um servidor só não é escolha: escolher por quem não tem opção é
   // uma tela a mais entre o admin e o trabalho dele.
@@ -273,11 +301,63 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
     setTableRevision(null);
     setTableError(null);
     setLoadingTable(false);
+
+    // O loot do jogo é de OUTRO servidor tanto quanto a caixa —
+    // mantê-lo faria a tela marcar como "do jogo" o que é do jogo
+    // do disco anterior.
+    openRequest(nativeSeq);
+    setNative(null);
+    setNativeError(null);
+    setLoadingNative(false);
   }, [serverId]);
+
+  /**
+   * Pergunta ao servidor o que o JOGO põe naquela caixa.
+   *
+   * ####  NUNCA LANÇA, E NUNCA VIRA `toast`  ####
+   *
+   * Servidor parado é o estado normal de quem configura loot — é
+   * justamente quando se faz esse trabalho. Um erro vermelho aqui
+   * transformaria o normal em alarme, e o alarme em ruído. O que
+   * não deu certo aparece dentro da seção, que explica o que se
+   * perde e oferece tentar de novo.
+   */
+  const loadNative = useCallback(
+    async (prefab: string) => {
+      const ticket = openRequest(nativeSeq);
+
+      setNative(null);
+      setNativeError(null);
+      setLoadingNative(true);
+
+      try {
+        const response = await agent.betterLootNative(serverId, prefab);
+
+        if (isLatest(nativeSeq, ticket)) {
+          setNative(response.native);
+        }
+      } catch (cause) {
+        if (isLatest(nativeSeq, ticket)) {
+          setNativeError(cause instanceof Error ? cause.message : String(cause));
+        }
+      } finally {
+        if (isLatest(nativeSeq, ticket)) {
+          setLoadingNative(false);
+        }
+      }
+    },
+    [serverId],
+  );
 
   const openTable = useCallback(
     async (prefab: string) => {
       setSelected(prefab);
+
+      // Em paralelo com a leitura do arquivo, e não depois: são
+      // duas fontes independentes (o disco e o servidor), e
+      // encadeá-las faria a caixa demorar o tempo do RCON para
+      // aparecer — inclusive quando o RCON não vai responder.
+      void loadNative(prefab);
 
       // O `serverId` fica preso na função que lê: a resposta pode
       // demorar, mas ela pergunta pelo disco que o admin escolheu no
@@ -298,7 +378,7 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
         },
       );
     },
-    [serverId],
+    [serverId, loadNative],
   );
 
   /** Os shortnames que valem agora. É o que o "Remover lixo" usa. */
@@ -603,6 +683,14 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
                 junk={junkShortnames}
                 onMarkJunk={(shortname) => void addJunk(shortname)}
                 serverId={serverId}
+                native={native}
+                nativeError={nativeError}
+                nativeLoading={loadingNative}
+                onNativeRetry={() => {
+                  if (selected !== null) {
+                    void loadNative(selected);
+                  }
+                }}
               />
             </div>
           </div>
@@ -660,6 +748,10 @@ function BetterLootTableBody({
   junk,
   onMarkJunk,
   serverId,
+  native,
+  nativeError,
+  nativeLoading,
+  onNativeRetry,
 }: {
   readonly selected: string | null;
   readonly loading: boolean;
@@ -670,6 +762,11 @@ function BetterLootTableBody({
   readonly junk: readonly string[];
   readonly onMarkJunk: (shortname: string) => void;
   readonly serverId: string;
+  /** O loot do JOGO nesta caixa. Ver o estado que mora no painel. */
+  readonly native: BetterLootNativeTable | null;
+  readonly nativeError: string | null;
+  readonly nativeLoading: boolean;
+  readonly onNativeRetry: () => void;
 }) {
   if (selected === null) {
     return (
@@ -709,6 +806,10 @@ function BetterLootTableBody({
       junk={junk}
       onMarkJunk={onMarkJunk}
       serverId={serverId}
+      native={native}
+      nativeError={nativeError}
+      nativeLoading={nativeLoading}
+      onNativeRetry={onNativeRetry}
     />
   );
 }

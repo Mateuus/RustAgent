@@ -265,7 +265,23 @@ export interface BetterLootProfileLink {
 export interface BetterLootTableSummary {
   /** O caminho inteiro do prefab. É a identidade. */
   readonly prefab: string;
+  /** `Is Prefab Enabled?`: o plugin PREENCHE esta caixa? */
   readonly enabled: boolean;
+  /**
+   * A caixa está na lista de vigia do `BetterLoot.json`?
+   *
+   * ####  SEM ELE, `enabled` NÃO QUER DIZER NADA  ####
+   *
+   * São dois interruptores em dois arquivos, e o plugin exige os
+   * DOIS ligados para mexer na caixa. Este é o que decide se ele
+   * chega a olhar (`OnLootSpawn`); o `enabled` acima, se ele
+   * preenche. Ver `KEY_WATCHED`.
+   *
+   * `null` = não existe `BetterLoot.json` naquele servidor, e
+   * portanto não há lista para consultar. É diferente de `false`,
+   * que é "existe e esta caixa está fora dela".
+   */
+  readonly watched: boolean | null;
   readonly itemCount: number;
   readonly guaranteedCount: number;
   readonly profileCount: number;
@@ -613,10 +629,18 @@ function toEntries(
   });
 }
 
-function toSummary(prefab: string, raw: RawObject): BetterLootTableSummary {
+function toSummary(
+  prefab: string,
+  raw: RawObject,
+  watched: ReadonlyMap<string, boolean> | null,
+): BetterLootTableSummary {
   return {
     prefab,
     enabled: asBoolean(raw[KEY_ENABLED], true),
+    // Ausente da lista vale `false`, e não "não sei": é o que o
+    // plugin faz. O `TryGetValue` dele falha e o hook sai sem
+    // tocar na caixa — logo, para o jogo, ela não é vigiada.
+    watched: watched === null ? null : (watched.get(prefab) ?? false),
     itemCount: Object.keys(asObject(raw[KEY_UNGROUPED]) ?? {}).length,
     guaranteedCount: Object.keys(asObject(raw[KEY_GUARANTEED]) ?? {}).length,
     profileCount: Array.isArray(raw[KEY_PROFILES]) ? (raw[KEY_PROFILES] as unknown[]).length : 0,
@@ -645,9 +669,10 @@ function toTable(
   prefab: string,
   raw: RawObject,
   catalog: ReadonlyMap<string, ItemRecord>,
+  watched: ReadonlyMap<string, boolean> | null,
 ): BetterLootTable {
   return {
-    ...toSummary(prefab, raw),
+    ...toSummary(prefab, raw, watched),
     poolLocking: asBoolean(raw[KEY_POOL_LOCKING], false),
     ignoreRarityBias: asBoolean(raw[KEY_IGNORE_RARITY], false),
     profiles: toProfiles(raw[KEY_PROFILES]),
@@ -693,6 +718,119 @@ export function toGlobals(text: string): BetterLootGlobals | null {
 /** A chave do peso de blueprint. Longa, e é assim no arquivo. */
 const KEY_BLUEPRINT_WEIGHT =
   'Blueprint Weight (0.0 = min bias, 1.0 = max bias, 0.5 = balanced)';
+
+/**
+ * A chave da LISTA DE VIGIA, no `BetterLoot.json`.
+ *
+ * ####  É O SEGUNDO INTERRUPTOR, E É ELE QUE MANDA  ####
+ *
+ * `Is Prefab Enabled?`, no LootTables.json, decide se o plugin
+ * PREENCHE a caixa. Este dicionário decide se ele CHEGA a olhar
+ * para ela: `OnLootSpawn` (BetterLoot.cs:1620-1622) sai com `null`
+ * quando o prefab está aqui como `false`, e o jogo entrega o loot
+ * nativo — mesmo com `Is Prefab Enabled?` valendo `true`.
+ *
+ * A tela mostrava só o primeiro, e por isso podia afirmar
+ * "BetterLoot" numa caixa que o servidor entregava do jogo.
+ *
+ * ####  E O PLUGIN CADASTRA CAIXA NOVA DESLIGADA  ####
+ *
+ * `CheckWatchedPrefabs` (BetterLoot.cs:216-272) roda a cada load e
+ * acrescenta o que faltar com
+ * `NewConfigGenerated || (NewSave && AutoEnableNewContainers)` —
+ * ou seja, `false` sempre que a configuração já existia e não é dia
+ * de wipe. Caixa que entrou num update depois da instalação fica em
+ * "jogo" para sempre, até alguém editar este arquivo à mão. É o
+ * caso que chegou como reclamação da `crate_elite`.
+ */
+const KEY_WATCHED = 'Watched Container Prefabs (true = monitor container loot, false = disabled)';
+
+/**
+ * A lista de vigia, do `BetterLoot.json`.
+ *
+ * `null` = não há arquivo de configuração para consultar, que é
+ * diferente de "não vigia nada". A tela precisa da diferença: no
+ * primeiro caso ela diz que o plugin nunca rodou ali; no segundo,
+ * que a caixa está desligada.
+ */
+export function toWatched(text: string): ReadonlyMap<string, boolean> | null {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Mesma regra do `toGlobals`: config quebrada não derruba a
+    // lista de caixas.
+    return null;
+  }
+
+  const general = asObject(asObject(parsed)?.['General Configuration']);
+  const watched = asObject(general?.[KEY_WATCHED]);
+
+  if (watched === null) {
+    return null;
+  }
+
+  const entries = new Map<string, boolean>();
+
+  for (const [prefab, value] of Object.entries(watched)) {
+    // Só booleano entra. Um valor de outro tipo ali é arquivo
+    // corrompido, e o plugin o leria como `false` — mas adivinhar
+    // por ele faria a tela afirmar um estado que ninguém escreveu.
+    if (typeof value === 'boolean') {
+      entries.set(prefab, value);
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Liga ou desliga UMA caixa na lista de vigia.
+ *
+ * ####  UMA CHAVE, E O RESTO COMO ESTAVA  ####
+ *
+ * Mesma regra do `applyGlobals`: o arquivo tem 111 chaves aqui
+ * dentro e mais quatro blocos de configuração. Montá-lo do zero
+ * devolveria tudo ligado — inclusive a caixa que o admin tinha
+ * tirado de propósito.
+ *
+ * ####  E ELA NÃO TEM TRAVA DE REVISÃO  ####
+ *
+ * Ao contrário do `saveGlobals`, que grava quatro campos que a tela
+ * editou junta. Aqui é UMA chave de um dicionário, e o merge
+ * preserva as outras 110 — duas pessoas adotando caixas diferentes
+ * nunca se atrapalham. Cobrar revisão faria a adoção de uma caixa
+ * ser recusada porque alguém mexeu no multiplicador do servidor, o
+ * que é recusar por nada.
+ *
+ * @throws {ApiError} 400 quando o arquivo do disco não é JSON de
+ * objeto — sobrescrevê-lo apagaria a configuração que existe.
+ */
+export function applyWatched(
+  text: string | null,
+  prefab: string,
+  watched: boolean,
+  where: string,
+): string {
+  const root = text === null ? {} : parseConfigRoot(text, where);
+  const general = asObject(root['General Configuration']) ?? {};
+  const current = asObject(general[KEY_WATCHED]) ?? {};
+
+  return JSON.stringify(
+    {
+      ...root,
+      'General Configuration': {
+        ...general,
+        // Daqui pra baixo é o contrato do BetterLoot: o nome da
+        // chave e o do prefab são dele.
+        [KEY_WATCHED]: { ...current, [prefab]: watched },
+      },
+    },
+    null,
+    2,
+  );
+}
 
 /**
  * Os quatro campos da tela SOBRE a configuração que está no disco.
@@ -1421,6 +1559,15 @@ export interface BetterLootSaveResult {
   /** A do arquivo inteiro — para a lista, e não para gravar. */
   readonly fileRevision: string;
   readonly table: BetterLootTable;
+  /**
+   * A lista de vigia do `BetterLoot.json` foi mexida?
+   *
+   * A tela diz isso por extenso porque é a metade da adoção que
+   * não está no arquivo que ela edita — e porque um `true` aqui
+   * significa que o `configRevision` que a faixa de globais está
+   * segurando ficou velho.
+   */
+  readonly watchedChanged: boolean;
   /** Onde ficou a cópia do arquivo anterior. `null` = não havia. */
   readonly backup: string | null;
   readonly reloaded: boolean;
@@ -1475,7 +1622,9 @@ export class BetterLootEditor {
       // A ordem é a do arquivo, e o arquivo nasce na ordem em que o
       // plugin varreu os prefabs. Ordenar aqui seria escolher por
       // uma tela que já sabe agrupar e rotular sozinha.
-      tables: Object.entries(parsed.tables).map(([prefab, raw]) => toSummary(prefab, raw)),
+      tables: Object.entries(parsed.tables).map(([prefab, raw]) =>
+        toSummary(prefab, raw, config.watched),
+      ),
     };
   }
 
@@ -1510,7 +1659,12 @@ export class BetterLootEditor {
       );
     }
 
-    return { tableRevision: tableRevisionOf(raw), table: toTable(prefab, raw, this.#catalog()) };
+    const config = await this.#readGlobals(paths.oxideConfigDir);
+
+    return {
+      tableRevision: tableRevisionOf(raw),
+      table: toTable(prefab, raw, this.#catalog(), config.watched),
+    };
   }
 
   /**
@@ -1598,6 +1752,20 @@ export class BetterLootEditor {
     const tablesPath = pluginDataPath(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE);
     const written = await markOf(tablesPath);
 
+    // ####  O SEGUNDO INTERRUPTOR VAI ANTES DO RELOAD  ####
+    //
+    // Ele mora no OUTRO arquivo (`BetterLoot.json`), e o plugin lê
+    // os dois no mesmo carregamento. Gravá-lo depois do reload
+    // faria a adoção da caixa só valer no reload SEGUINTE — e a
+    // tela, relendo em seguida, mostraria a caixa adotada num
+    // servidor que ainda entrega o loot do jogo.
+    const watchedChanged = await this.#applyWatched(
+      serverId,
+      paths,
+      input.table.prefab,
+      input.table.watched,
+    );
+
     const reload = await this.#deps.reload(serverId);
 
     // ####  ESPERAR O PLUGIN TERMINAR É PARTE DA GRAVAÇÃO  ####
@@ -1633,6 +1801,11 @@ export class BetterLootEditor {
     const reread = parseLootTables(after.text, this.#whereTables(serverId));
     const raw = reread.tables[input.table.prefab] ?? null;
 
+    // O `BetterLoot.json` também é reescrito pelo plugin ao
+    // carregar (`MaybeUpdateConfigDict`), então a lista de vigia da
+    // resposta é relida do disco pelo mesmo motivo da tabela.
+    const config = await this.#readGlobals(paths.oxideConfigDir);
+
     return {
       // A revisão da caixa COMO ELA FICOU — depois do plugin. É
       // ela que o próximo "Gravar" desta mesma tela devolve, e é
@@ -1642,11 +1815,59 @@ export class BetterLootEditor {
       table:
         raw === null
           ? input.table
-          : toTable(input.table.prefab, raw, this.#catalog()),
+          : toTable(input.table.prefab, raw, this.#catalog(), config.watched),
+      watchedChanged,
       backup,
       reloaded: reload.sent,
       reloadOutput: reload.output,
     };
+  }
+
+  /**
+   * Põe (ou tira) a caixa da lista de vigia do `BetterLoot.json`.
+   *
+   * Devolve `true` se o arquivo mudou. Não mexer é o caminho
+   * comum: o admin edita item numa caixa já adotada dezenas de
+   * vezes para cada vez que ele adota uma.
+   *
+   * `watched: null` é "a tela não sabe" — ela leu de um servidor
+   * sem `BetterLoot.json` — e nunca vira escrita.
+   */
+  async #applyWatched(
+    serverId: string,
+    paths: BetterLootPaths,
+    prefab: string,
+    watched: boolean | null,
+  ): Promise<boolean> {
+    if (watched === null) {
+      return false;
+    }
+
+    const current = await readPluginConfig(paths.oxideConfigDir, BETTERLOOT_PLUGIN);
+    const list = current === null ? null : toWatched(current.text);
+
+    // Já está como se quer. Reescrever o arquivo por nada faria o
+    // `configRevision` mudar e a faixa de globais, aberta na mesma
+    // tela, recusar o próximo salvamento por um conflito que não
+    // existiu.
+    if (list !== null && (list.get(prefab) ?? false) === watched) {
+      return false;
+    }
+
+    await backupPluginConfig(
+      paths.oxideConfigDir,
+      paths.backupsDir,
+      BETTERLOOT_PLUGIN,
+      Date.now(),
+    );
+
+    await writePluginConfig(
+      paths.oxideConfigDir,
+      BETTERLOOT_PLUGIN,
+      applyWatched(current?.text ?? null, prefab, watched, this.#whereConfig(serverId)),
+    );
+
+    return true;
   }
 
   // ----------------------------------------------------------
@@ -2253,14 +2474,21 @@ export class BetterLootEditor {
     };
   }
 
-  async #readGlobals(
-    oxideConfigDir: string,
-  ): Promise<{ readonly globals: BetterLootGlobals | null; readonly revision: string | null }> {
+  async #readGlobals(oxideConfigDir: string): Promise<{
+    readonly globals: BetterLootGlobals | null;
+    readonly revision: string | null;
+    /** A lista de vigia. `null` = não há arquivo. Ver `KEY_WATCHED`. */
+    readonly watched: ReadonlyMap<string, boolean> | null;
+  }> {
     const config = await readPluginConfig(oxideConfigDir, BETTERLOOT_PLUGIN);
 
     return config === null
-      ? { globals: null, revision: null }
-      : { globals: toGlobals(config.text), revision: sha256Of(Buffer.from(config.text, 'utf8')) };
+      ? { globals: null, revision: null, watched: null }
+      : {
+          globals: toGlobals(config.text),
+          revision: sha256Of(Buffer.from(config.text, 'utf8')),
+          watched: toWatched(config.text),
+        };
   }
 
   #whereConfig(serverId: string): string {

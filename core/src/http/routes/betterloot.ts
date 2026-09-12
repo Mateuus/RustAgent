@@ -56,11 +56,34 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import type { BetterLootJunkRepository } from '../../db/betterloot-junk-repository.js';
+import { LOOT_NATIVE_COMMAND, readNativeLoot } from '../../game/loot-native.js';
+import type { OpsRcon } from '../../ops/service.js';
 import type { BetterLootEditor, BetterLootTable } from '../../oxide/betterloot.js';
 import { ApiError } from '../error-response.js';
 
+/**
+ * O que a rota do loot nativo precisa dos servidores. E nada além.
+ *
+ * Interface mínima, como a do catálogo de itens: quem a satisfaz em
+ * produção é o `ServerSupervisor`, e um teste a satisfaz com um
+ * objeto literal.
+ */
+export interface BetterLootRoutesServers {
+  /** `null` = existe, mas está desligado — sem RCON. */
+  contextOf(id: string): { readonly rcon: OpsRcon } | null;
+}
+
 export interface BetterLootRoutesDeps {
   readonly editor: BetterLootEditor;
+  /**
+   * Só a rota do loot NATIVO usa isto.
+   *
+   * Todo o resto deste arquivo é disco: lê e escreve arquivo do
+   * plugin, e funciona com o servidor parado — que é justamente
+   * quando se configura loot. A tabela que o JOGO carregou, não:
+   * ela só existe na memória do servidor no ar.
+   */
+  readonly servers: BetterLootRoutesServers;
   /**
    * A lista de "lixo" de cada servidor.
    *
@@ -152,6 +175,18 @@ const itemSettingsSchema = z.object({
 const tableSchema = z.object({
   prefab: z.string().min(1).max(400),
   enabled: z.boolean(),
+  /**
+   * A caixa na lista de vigia do `BetterLoot.json`.
+   *
+   * ####  NULO É "NÃO MEXA", E NÃO "DESLIGUE"  ####
+   *
+   * A tela lê `null` quando aquele servidor não tem
+   * `BetterLoot.json`, e devolve o `null` de volta. Tratar isso
+   * como `false` faria toda gravação de caixa CRIAR o arquivo de
+   * configuração e desligar o prefab — adotando o comportamento
+   * oposto do que o admin pediu, num arquivo que ele nem abriu.
+   */
+  watched: z.boolean().nullable(),
   itemCount: z.number().int().min(0),
   guaranteedCount: z.number().int().min(0),
   profileCount: z.number().int().min(0),
@@ -281,6 +316,54 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
   });
 
   /**
+   * O loot que o JOGO põe naquela caixa — lido do servidor no ar.
+   *
+   * ####  É A ÚNICA ROTA DAQUI QUE EXIGE O JOGO LIGADO  ####
+   *
+   * Todo o resto é arquivo no disco, e funciona com tudo parado.
+   * Esta não tem como: a tabela nativa vive na memória do servidor
+   * (`LootContainer.LootSpawnSlots`), e o BetterLoot a lê UMA vez,
+   * no primeiro boot. Depois disso ninguém mais a guarda.
+   *
+   * ####  E ELA NÃO ESCREVE NADA  ####
+   *
+   * Quem decide o que fazer com a resposta é a tela: manter,
+   * acrescentar o que falta, ou trocar a caixa inteira. Importar
+   * sozinho aqui apagaria a curadoria de quem já tinha montado a
+   * caixa à mão — e sem perguntar.
+   */
+  app.get('/servers/:id/betterloot/native', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const { prefab } = tableQuery.parse(request.query);
+
+    const context = deps.servers.contextOf(id);
+
+    if (context === null) {
+      throw new ApiError(
+        'SERVER_NOT_OPERATED',
+        `O agente não está cuidando do servidor "${id}", então não há a quem perguntar o loot ` +
+          'do jogo. Ligue o servidor: esta é a única parte do editor de loot que precisa dele ' +
+          'no ar.',
+        409,
+      );
+    }
+
+    if (!context.rcon.isConnected) {
+      throw new ApiError(
+        'RCON_UNAVAILABLE',
+        `Sem conexão com o RCON de "${id}". O loot que o jogo põe na caixa é lido do servidor ` +
+          `ao vivo (${LOOT_NATIVE_COMMAND}) — com ele parado, não existe onde ler. O resto ` +
+          'desta tela continua funcionando.',
+        503,
+      );
+    }
+
+    const native = await readNativeLoot(id, context.rcon, prefab);
+
+    return { ok: true, serverId: id, native };
+  });
+
+  /**
    * Grava a caixa, recarrega e devolve o que RELEU do disco.
    *
    * A resposta não é o que foi enviado: o `scanEntry` do plugin
@@ -305,6 +388,10 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
       tableRevision: result.tableRevision,
       revision: result.fileRevision,
       table: result.table,
+      // A outra metade da adoção: o `BetterLoot.json` mudou junto.
+      // A tela precisa saber para reler os globais — o
+      // `configRevision` que a faixa de cima segura envelheceu.
+      watchedChanged: result.watchedChanged,
       // Onde ficou a cópia do arquivo anterior. É o que torna um
       // salvamento errado reversível — e um caminho na resposta é
       // melhor que uma promessa no log.
