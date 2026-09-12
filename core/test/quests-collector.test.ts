@@ -857,7 +857,17 @@ describe('os NPCs', () => {
 
     // É isto que a caixa de conversa desenha sem ir à rede.
     expect(payload.offers).toEqual([
-      { id: 'lenhador', title: 'Lenhador', description: 'Preciso de madeira.', goal: '', reward: '' },
+      {
+        id: 'lenhador',
+        title: 'Lenhador',
+        description: 'Preciso de madeira.',
+        goal: '',
+        reward: '',
+        // Sem `describeQuest` ligado não há frase nem ícone: o
+        // cartão mostra só o título, e não um quadrado vazio.
+        rewardItemId: null,
+        rewardSkinId: 0,
+      },
     ]);
   });
 

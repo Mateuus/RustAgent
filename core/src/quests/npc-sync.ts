@@ -66,6 +66,16 @@ export interface QuestNpcOffer {
   readonly goal: string;
   /** "100 scrap", já em português. `''` = a missão não dá nada. */
   readonly reward: string;
+  /**
+   * O item do prêmio, para o ícone do cartão.
+   *
+   * `null` = o prêmio não é item (moeda, VIP, ponto de ranking) ou
+   * o catálogo do jogo não conhece aquele shortname. O cartão fica
+   * sem ícone, e não com um quadrado vazio.
+   */
+  readonly rewardItemId: number | null;
+  /** A skin dele. `0` = a arte padrão do item. */
+  readonly rewardSkinId: number;
 }
 
 export interface QuestNpcSyncDeps {
@@ -90,6 +100,8 @@ export interface QuestNpcSyncDeps {
   readonly describeQuest?: (quest: QuestRecord) => {
     readonly goal: string;
     readonly reward: string;
+    readonly rewardItemId: number | null;
+    readonly rewardSkinId: number;
   };
   /**
    * O jogador clicou em aceitar dentro da caixa do NPC.
@@ -103,6 +115,12 @@ export interface QuestNpcSyncDeps {
     readonly steamId: string;
     readonly npcId: string;
     readonly questId: string;
+  }) => void;
+  /** Ele clicou em resgatar, no balcão, com a missão pronta. */
+  readonly onClaim?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly playerQuestId: number;
   }) => void;
   /**
    * O jogador falou com aquele NPC.
@@ -161,6 +179,19 @@ export type NpcPush =
       readonly steamId: string;
       readonly npcId: string;
       readonly questId: string;
+    }
+  /**
+   * Ele voltou ao balcão com a missão pronta e clicou em resgatar.
+   *
+   * O número da tentativa é o que o `assign` levou até o plugin —
+   * mas ele chega de volta pelo cliente, e por isso o agente
+   * confere de quem aquela tentativa é.
+   */
+  | {
+      readonly kind: 'claim';
+      readonly steamId: string;
+      readonly npcId: string;
+      readonly playerQuestId: number;
     };
 
 export class QuestNpcSync {
@@ -248,10 +279,39 @@ export class QuestNpcSync {
         description: quest.description,
         goal: described?.goal ?? '',
         reward: described?.reward ?? '',
+        rewardItemId: described?.rewardItemId ?? null,
+        rewardSkinId: described?.rewardSkinId ?? 0,
       });
     }
 
     return offers;
+  }
+
+  /**
+   * Manda de novo, agora — sem esperar a volta do relógio.
+   *
+   * ####  UM `move` QUE DEMORA UM MINUTO NÃO E UM `move`  ####
+   *
+   * O admin digita `/questnpc move`, olha para o chão e espera o
+   * boneco aparecer. Até 12/09/2026 ele esperava até o `flushSeconds`
+   * daquele servidor — 60 s por padrão —, e no meio disso digitava o
+   * comando de novo achando que não tinha funcionado.
+   *
+   * O relógio de 50 ms existe pela regra que vale para o arquivo
+   * inteiro: nenhum comando de RCON sai de dentro do gancho que lê
+   * o console. `unref` para não segurar o processo no desligamento.
+   */
+  #pushSoon(serverId: string, reason: string): void {
+    const timer = setTimeout(() => {
+      void this.push(serverId).catch((error: unknown) => {
+        this.#deps.logger.warn(
+          { server: serverId, reason, err: error },
+          'não deu para reenviar os NPCs agora; a próxima volta do relógio tenta',
+        );
+      });
+    }, 50);
+
+    timer.unref();
   }
 
   /** Força o reenvio: a rota do painel chama isto depois de gravar. */
@@ -290,6 +350,8 @@ export class QuestNpcSync {
         this.#remove(serverId, push.npcId);
       } else if (push.kind === 'accept') {
         this.#accept(serverId, push);
+      } else if (push.kind === 'claim') {
+        this.#claim(serverId, push);
       } else {
         this.#use(serverId, push);
       }
@@ -327,6 +389,7 @@ export class QuestNpcSync {
     });
 
     this.forget(serverId);
+    this.#pushSoon(serverId, 'npc criado no jogo');
 
     this.#deps.logger.info({ server: serverId, npc: id, name: push.name }, 'NPC de missão criado');
   }
@@ -349,6 +412,7 @@ export class QuestNpcSync {
     });
 
     this.forget(serverId);
+    this.#pushSoon(serverId, 'npc movido no jogo');
 
     this.#deps.logger.info(
       { server: serverId, npc: push.npcId, x: push.x, z: push.z },
@@ -372,6 +436,7 @@ export class QuestNpcSync {
 
     this.#deps.repository.removeNpc(npcId);
     this.forget(serverId);
+    this.#pushSoon(serverId, 'npc apagado no jogo');
 
     this.#deps.logger.info(
       { server: serverId, npc: npcId, orphaned: orphaned.length },
@@ -419,6 +484,42 @@ export class QuestNpcSync {
       npcId: npc.id,
       questId: quest.id,
     });
+  }
+
+  #claim(serverId: string, push: Extract<NpcPush, { kind: 'claim' }>): void {
+    const npc = this.#deps.repository.getNpc(push.npcId);
+
+    if (npc === null || npc.serverId !== serverId || !npc.enabled) {
+      return;
+    }
+
+    const attempt = this.#deps.repository.attempt(push.playerQuestId);
+
+    // ####  A TENTATIVA TEM DE SER DELE  ####
+    //
+    // O número veio do `assign` daquele jogador, mas voltou pelo
+    // CLIENTE — e um cliente adulterado mandaria o número do
+    // vizinho para resgatar a missão dos outros. O `claim` do
+    // serviço não pergunta de quem é: quem pergunta é aqui.
+    if (
+      attempt === null ||
+      attempt.serverId !== serverId ||
+      attempt.steamId !== push.steamId
+    ) {
+      this.#deps.logger.warn(
+        { server: serverId, npc: npc.id, pq: push.playerQuestId, steamId: push.steamId },
+        'resgate pedido no balcão para uma tentativa que não é daquele jogador',
+      );
+
+      return;
+    }
+
+    this.#deps.logger.info(
+      { server: serverId, npc: npc.id, pq: push.playerQuestId, steamId: push.steamId },
+      'resgate pedido no balcão do NPC',
+    );
+
+    this.#deps.onClaim?.({ serverId, steamId: push.steamId, playerQuestId: push.playerQuestId });
   }
 
   #use(serverId: string, push: Extract<NpcPush, { kind: 'use' }>): void {
@@ -540,6 +641,17 @@ export function parseNpcLine(line: string, secret: string): NpcPush | null {
 
     if (body.kind === 'remove') {
       return npcId === null ? null : { kind: 'remove', npcId };
+    }
+
+    if (body.kind === 'claim') {
+      return npcId !== null &&
+        typeof body.steamId === 'string' &&
+        /^\d{17}$/.test(body.steamId) &&
+        typeof body.pq === 'number' &&
+        Number.isInteger(body.pq) &&
+        body.pq > 0
+        ? { kind: 'claim', steamId: body.steamId, npcId, playerQuestId: body.pq }
+        : null;
     }
 
     if (body.kind === 'accept') {

@@ -407,6 +407,27 @@ async function main(): Promise<void> {
       // E os timers são o quarto — sem eles, fornalha e craft voltam
       // ao ×1 a cada queda do RCON.
       void playerTimersSync?.push(serverId, 'rcon-connected');
+      // ####  E AS MISSÕES, QUE FALTAVAM NESTA LISTA  ####
+      //
+      // O plugin PEDE o catálogo de volta quando (re)carrega — mas
+      // esse pedido acontece uma vez, no boot dele, e se o agente
+      // ainda estivesse reconectando o RCON naquele instante a
+      // linha se perdia e ninguém repetia. O servidor ficava sem
+      // contar nada e sem NPC nenhum até alguém salvar uma missão
+      // no painel. Medido em 12/09/2026.
+      //
+      // A reconexão não depende de ninguém gritar: ela é o próprio
+      // sinal de que o outro lado começou do zero.
+      questCollector?.forget(serverId);
+      questNpcs?.forget(serverId);
+
+      void questNpcs?.push(serverId).catch((error: unknown) => {
+        logger.warn(
+          { server: serverId, err: toError(error) },
+          'os NPCs de missão não subiram na reconexão; a volta do relógio tenta',
+        );
+      });
+
       // E o cadastro de itens custom, pelo mesmo motivo: o cache
       // do plugin esvazia junto com os outros.
       void customItemsSync?.push(serverId, 'rcon-connected');
@@ -1978,7 +1999,10 @@ async function main(): Promise<void> {
     // A referência é tardia porque o `questNpcs` nasce logo abaixo —
     // e os dois precisam um do outro: o coletor chama o push, e o
     // push precisa do RCON que o coletor já sabe achar.
-    npcs: { push: async (serverId) => questNpcs?.push(serverId) },
+    npcs: {
+      push: async (serverId) => questNpcs?.push(serverId),
+      forget: (serverId) => questNpcs?.forget(serverId),
+    },
   });
 
   questNpcs = new QuestNpcSync({
@@ -2001,13 +2025,52 @@ async function main(): Promise<void> {
     // "Coletar 100 de Madeira" e "1x Sucata" precisam do catálogo
     // do JOGO e do de rankings, que o plugin não tem. Elas descem
     // prontas com o NPC — ver `#payloadOf`.
-    describeQuest: (quest) => ({
-      goal: quest.objectives
-        .map((objective) => questsService?.describeObjective(objective) ?? '')
-        .filter((text) => text !== '')
-        .join(' · '),
-      reward: rewardLine(quest.rewards, questScreenCatalog),
-    }),
+    describeQuest: (quest) => {
+      // ####  O ÍCONE É O DO PRIMEIRO PRÊMIO QUE FOR ITEM  ####
+      //
+      // Uma missão pode pagar moeda, ponto de ranking e item na
+      // mesma entrega. O cartão tem UM ícone, e o item é o único
+      // desses que o cliente sabe desenhar a partir de um número —
+      // os outros ficam sem, e não com um quadrado vazio.
+      const item = quest.rewards.find((reward) => reward.kind === 'item');
+      const found = item === undefined ? null : itemsRepository.get(item.shortname);
+
+      return {
+        goal: quest.objectives
+          .map((objective) => questsService?.describeObjective(objective) ?? '')
+          .filter((text) => text !== '')
+          .join(' · '),
+        reward: rewardLine(quest.rewards, questScreenCatalog),
+        rewardItemId: found?.itemId ?? null,
+        // O skinId viaja como string no cadastro (ids de workshop
+        // passam de 2^31): aqui ele vira número para o CUI, e um
+        // valor que não couber volta a ser "a arte padrão".
+        rewardSkinId: Number(item?.skinId ?? 0) || 0,
+      };
+    },
+    // Resgatar no balcão: o jogador voltou ao NPC com a missão
+    // pronta. Quem confere que a tentativa é dele é o `#claim`; o
+    // que pode ou não ser resgatado é do serviço.
+    onClaim: ({ serverId, steamId, playerQuestId }) => {
+      void (async () => {
+        try {
+          const result = await questsService?.claim({ playerQuestId });
+          const message = (result?.outcomes ?? []).map((outcome) => outcome.message).join(' ');
+
+          await tellPlayer(
+            serverId,
+            steamId,
+            message === '' ? 'Missão resgatada.' : message,
+          );
+        } catch (error) {
+          await tellPlayer(
+            serverId,
+            steamId,
+            isApiError(error) ? error.message : 'Não deu para resgatar agora.',
+          ).catch(() => undefined);
+        }
+      })();
+    },
     // ####  O CLIQUE NO BALCÃO  ####
     //
     // O plugin conferiu a distância; o serviço confere a REGRA. O
@@ -3020,8 +3083,21 @@ async function main(): Promise<void> {
       onCatalogChanged: () => {
         questCollector?.forget();
       },
+      // ####  O PAINEL TAMBÉM EMPURRA NA HORA  ####
+      //
+      // Esquecer sozinho só marca "manda de novo quando der" — e o
+      // "quando der" é a volta do relógio, até 60 s depois. Quem
+      // clicou em salvar está olhando para o mundo esperando o
+      // boneco mudar.
       onNpcsChanged: (serverId) => {
         questNpcs?.forget(serverId);
+
+        void questNpcs?.push(serverId).catch((error: unknown) => {
+          logger.warn(
+            { server: serverId, err: toError(error) },
+            'não deu para reenviar os NPCs agora; a próxima volta do relógio tenta',
+          );
+        });
       },
     },
     // A masmorra, o acervo de plantas e o que nasce no mapa. Do

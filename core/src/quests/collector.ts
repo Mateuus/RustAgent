@@ -100,7 +100,17 @@ export interface QuestCollectorDeps {
    * Ausente = a frente dos NPCs não está montada, e as quests de
    * menu continuam funcionando inteiras.
    */
-  readonly npcs?: { push(serverId: string): Promise<void> };
+  readonly npcs?: {
+    push(serverId: string): Promise<void>;
+    /**
+     * Esquece o que aquele servidor já teria.
+     *
+     * Sem isto, um plugin que recarregou fica SEM os bonecos: o
+     * agente acha que já os mandou, e a impressão digital não muda
+     * sozinha. Ver `handleLine`.
+     */
+    forget(serverId?: string): void;
+  };
   readonly now?: () => number;
 }
 
@@ -280,8 +290,33 @@ export class QuestCollector {
   forget(serverId?: string): void {
     if (serverId === undefined) {
       this.#sent.clear();
+      this.#assigned.clear();
+      this.#lastSweep.clear();
     } else {
       this.#sent.delete(serverId);
+
+      // ####  O QUE CADA JOGADOR PERSEGUE TAMBÉM SE PERDE  ####
+      //
+      // O `assign` mora na memória do plugin junto com o catálogo, e
+      // some no mesmo `oxide.reload`. Sem esta limpeza o agente acha
+      // que já mandou: o jogador fica com a missão viva no banco e o
+      // plugin sem saber o que contar — e a caixa do NPC oferece de
+      // novo o que ele acabou de pegar, que foi o que o teste de
+      // 12/09/2026 estranhou.
+      for (const key of [...this.#assigned.keys()]) {
+        if (key.startsWith(`${serverId}:`)) {
+          this.#assigned.delete(key);
+        }
+      }
+
+      // ####  ESQUECER SEM APAGAR O RELÓGIO NÃO ADIANTA  ####
+      //
+      // O `flushSeconds` do servidor pode ser 60 s, e a rodada que
+      // reenviaria o catálogo seria pulada com "ainda não é a vez
+      // dele" — um minuto inteiro em que o plugin está sem saber o
+      // que contar. Quem esqueceu quer o reenvio, e o próximo tique
+      // (15 s) é o mais cedo que ele pode acontecer.
+      this.#lastSweep.delete(serverId);
     }
   }
 
@@ -587,7 +622,7 @@ export class QuestCollector {
         }));
 
       if (objectives.length > 0) {
-        quests.push({ pq: attempt.id, objectives });
+        quests.push({ pq: attempt.id, id: attempt.questId, objectives });
       }
     }
 
@@ -633,6 +668,29 @@ export class QuestCollector {
         this.#assigned.delete(key);
       }
     }
+
+    // ####  OS NPCs TAMBEM SE PERDEM NO RELOAD  ####
+    //
+    // O plugin perde TUDO num `oxide.reload`, inclusive os bonecos
+    // — mas o agente guarda a impressão digital do que mandou, e
+    // sem esquecê-la ele nunca reenviaria. O mundo ficava sem NPC
+    // nenhum até alguém editar um deles no painel, e foi
+    // exatamente o que o teste de 12/09/2026 encontrou.
+    //
+    // O empurrão vai por um relógio: nenhum comando de RCON sai de
+    // dentro do gancho que lê o console.
+    this.#deps.npcs?.forget(serverId);
+
+    const timer = setTimeout(() => {
+      void this.#deps.npcs?.push(serverId).catch((error: unknown) => {
+        this.#deps.logger.warn(
+          { server: serverId, err: error },
+          'os NPCs não voltaram depois do reload do plugin; a próxima volta tenta',
+        );
+      });
+    }, 50);
+
+    timer.unref();
 
     this.#deps.logger.info({ server: serverId }, 'o plugin esqueceu as missões; remontando');
 
