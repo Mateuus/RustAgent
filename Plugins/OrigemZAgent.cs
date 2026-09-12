@@ -7824,6 +7824,9 @@ namespace Oxide.Plugins
                             Seq = (int)objective["seq"],
                             Kind = (string)objective["kind"],
                             Target = (string)objective["target"],
+                            Label = objective["label"] == null
+                                ? (string)objective["target"]
+                                : (string)objective["label"],
                             Need = (int)objective["need"],
                             Have = (int)objective["have"]
                         });
@@ -8535,7 +8538,10 @@ namespace Oxide.Plugins
             public string QuestId;
             public int Seq;
             public string Kind;
+            /// <summary>A CHAVE do alvo (`metal.fragments`). E com ela que se conta.</summary>
             public string Target;
+            /// <summary>O nome que uma pessoa le. Vem pronto do agente.</summary>
+            public string Label;
             public int Need;
             public int Have;
         }
@@ -9531,7 +9537,8 @@ namespace Oxide.Plugins
                     line.Append(", ");
                 }
 
-                line.Append(item.Need - item.Have).Append(' ').Append(item.Target);
+                line.Append(item.Need - item.Have).Append(' ')
+                    .Append(string.IsNullOrEmpty(item.Label) ? item.Target : item.Label);
             }
 
             return line.ToString();
