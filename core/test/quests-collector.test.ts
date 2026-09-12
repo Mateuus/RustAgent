@@ -557,43 +557,95 @@ describe('o canal do "agora"', () => {
     events.stop();
   });
 
-  it('o recibo NÃO sai de dentro do gancho', async () => {
-    h.repository.create('minerador', quest());
+  it('o aviso de conclusão sai UMA vez, com o nome da missão e o balcão', async () => {
+    const repository = h.repository;
+    const avisos: {
+      title: string;
+      npcName: string | null;
+      hasRewards: boolean;
+      steamId: string;
+    }[] = [];
+    const service = new QuestsService({
+      repository,
+      logger,
+      onCompleted: (input) => avisos.push(input),
+    });
 
-    const view = await h.service.accept({
+    repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho do Outpost',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    repository.create(
+      'minerador',
+      quest({
+        npcId: 'velho',
+        rewards: [{ kind: 'item', shortname: 'scrap', amount: 50, skinId: '0' }],
+      }),
+    );
+    service.noteNpcTalk({ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' });
+
+    const view = await service.accept({
       serverId: 'pvp1',
       steamId: FULANO,
       questId: 'minerador',
     });
 
-    h.repository.setProgress(view.playerQuestId, 0, 5000);
+    repository.setProgress(view.playerQuestId, 0, 5000);
 
-    const tell = vi.fn((_server: string, _steam: string, _message: string) =>
-      Promise.resolve(),
-    );
-    const events = new QuestEvents({
-      service: h.service,
-      logger,
-      secret: SECRET,
-      chat: { tell },
-      replyDelayMs: 1,
-    });
+    const events = new QuestEvents({ service, logger, secret: SECRET });
 
     events.handleLine('pvp1', push({ pq: view.playerQuestId }));
 
-    // A conclusão é IMEDIATA (SQLite não fala com o jogo)…
-    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('completed');
-    // …mas o comando ao jogo espera o relógio. Um comando mandado
-    // de dentro do `onConsoleLine` volta pelo mesmo caminho e
-    // dispara de novo — o paredão que este projeto já viveu.
-    expect(tell).not.toHaveBeenCalled();
+    // A conclusão é IMEDIATA (SQLite não fala com o jogo), e o aviso
+    // nasce junto dela — é o `#completeIfDone` que o dispara, e não
+    // o push, para que quem fecha pelo lote também seja avisado.
+    expect(repository.attempt(view.playerQuestId)?.status).toBe('completed');
+    expect(avisos).toMatchObject([
+      { title: 'Minerador', npcName: 'Velho do Outpost', hasRewards: true, steamId: FULANO },
+    ]);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // ####  UMA VEZ POR CONCLUSÃO  ####
+    //
+    // O push e o lote trazem o mesmo fato de propósito. O segundo a
+    // chegar não encontra mais a transição — e não avisa de novo.
+    events.handleLine('pvp1', push({ pq: view.playerQuestId }));
 
-    expect(tell).toHaveBeenCalledOnce();
-    expect(tell.mock.calls[0]?.[2]).toContain('Minerador');
+    expect(avisos).toHaveLength(1);
 
     events.stop();
+  });
+
+  it('sem NPC vinculado, o aviso manda só ao menu', async () => {
+    const repository = h.repository;
+    const avisos: { npcName: string | null }[] = [];
+    const service = new QuestsService({
+      repository,
+      logger,
+      onCompleted: (input) => avisos.push(input),
+    });
+
+    repository.create('minerador', quest());
+
+    const view = await service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+    });
+
+    repository.setProgress(view.playerQuestId, 0, 5000);
+    service.reportCompletion({ playerQuestId: view.playerQuestId });
+
+    expect(avisos.map((aviso) => aviso.npcName)).toEqual([null]);
   });
 
   it('o `progress` não escreve nada — o número vem no lote', async () => {

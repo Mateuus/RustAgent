@@ -55,6 +55,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+
+// System.Reflection e do origemz.loot.native: o corpo do cientista
+// novo guarda os slots de loot num campo que so e publico quando o
+// Oxide compila com o publicizer. Ver ReflectedLootSlots.
+using System.Reflection;
 using System.Text;
 using Newtonsoft.Json;
 
@@ -86,7 +91,12 @@ namespace Oxide.Plugins
     // de fornalha, craft, pesquisa e reciclador por nivel, que quem
     // aplica e o OrigemZPlayer. Um agente antigo nunca manda o
     // comando, e o hook responde null: todo mundo fica no x1.
-    [Info("OrigemZAgent", "OrigemZ", "0.5.0")]
+    // 0.6.0: o origemz.loot.native - a tabela de loot que o JOGO
+    // poe naquela caixa, sem escrever nada. Comando novo, entao um
+    // agente antigo nunca o manda e nada muda para ele; um agente
+    // novo contra um plugin velho leva "comando desconhecido" e a
+    // tela diz que aquele servidor ainda nao sabe responder.
+    [Info("OrigemZAgent", "OrigemZ", "0.6.0")]
     [Description("Ponta no jogo do RustAgent: lista jogadores, publica o catalogo de itens, entrega itens via RCON e expoe o estado de VIP por hook")]
     public class OrigemZAgent : RustPlugin
     {
@@ -115,6 +125,15 @@ namespace Oxide.Plugins
         private const string ErrorItemCreateFailed = "ITEM_CREATE_FAILED";
         private const string ErrorInventoryFull = "INVENTORY_FULL";
         private const string ErrorDropFailed = "DROP_FAILED";
+
+        // Os dois do origemz.loot.native, e sao diagnosticos
+        // diferentes: NOT_FOUND e "este caminho nao existe neste
+        // build" - erro de quem pediu, provavelmente prefab velho
+        // depois de um update. NOT_LOOT e "existe, e nao e caixa" -
+        // o caminho esta certo e a pergunta e que nao cabe.
+        private const string ErrorPrefabNotFound = "PREFAB_NOT_FOUND";
+        private const string ErrorPrefabNotLoot = "PREFAB_NOT_LOOT";
+
         private const string ErrorInternal = "INTERNAL_ERROR";
 
         // O que o chamador PEDE (5o argumento do give).
@@ -169,6 +188,17 @@ namespace Oxide.Plugins
         private const string LoadoutSyncCommand = "origemz.loadout.sync";
         private const string SpawnStatusSyncCommand = "origemz.status.sync";
         private const string TimersSyncCommand = "origemz.timers.sync";
+
+        /// <summary>
+        /// `origemz.loot.native &lt;prefab&gt;`
+        ///
+        /// O que o JOGO poe naquela caixa, antes de qualquer
+        /// plugin. Existe porque o BetterLoot le essa tabela UMA
+        /// vez - quando gera o LootTables.json - e nunca mais: uma
+        /// caixa que virou "so perfis" perdeu a lista padrao e nao
+        /// tem como recupera-la. Ver HandleLootNative.
+        /// </summary>
+        private const string LootNativeCommand = "origemz.loot.native";
 
         /// <summary>
         /// `origemz.vehicle.spawn <steamId> <prefab> [combustivel]`
@@ -243,6 +273,19 @@ namespace Oxide.Plugins
         // esse ponto continua NAO medido.
         private const int DefaultItemsLimit = 250;
         private const int MaxItemsLimit = 500;
+
+        // Paginacao do origemz.loot.native.
+        //
+        // O padrao e o TETO aqui, ao contrario dos dois de cima, e
+        // e de proposito: a maior tabela nativa medida no server01
+        // tem 211 itens (os cientistas), ~10 KB pela linha curta
+        // deste comando - contra os 70 KB que o origemz.items ja
+        // atravessa inteiro. Ou seja, 500 faz TODA caixa que existe
+        // hoje caber numa pagina so, e a paginacao fica como rede:
+        // ela so entra em cena se um update do jogo mais que dobrar
+        // a maior tabela.
+        private const int DefaultNativeLootLimit = 500;
+        private const int MaxNativeLootLimit = 500;
 
         // Paginacao do origemz.players - mesma medida, mesmo teto.
         //
@@ -817,6 +860,618 @@ namespace Oxide.Plugins
             }
 
             return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+
+        // ========================================================
+        //  O LOOT QUE O JOGO POE NA CAIXA
+        //
+        //      origemz.loot.native <offset> <limit> <prefab>
+        //
+        //  #### OS NUMEROS VEM ANTES DO PREFAB  ####
+        //
+        //  Fora de ordem de proposito. O caminho do prefab tem
+        //  ESPACO em dezessete casos medidos ("dmloot/dm
+        //  ammo.prefab"), e o console do Rust quebra argumento no
+        //  espaco: com o prefab na frente, nada distingue o ultimo
+        //  pedaco dele de um offset. Com os numeros na frente, o
+        //  resto da linha e o prefab, inteiro, sem depender de
+        //  aspas.
+        //
+        //  #### POR QUE ISTO EXISTE ####
+        //
+        //  O BetterLoot le a tabela nativa do jogo UMA vez: quando
+        //  cria a entrada daquele prefab no LootTables.json
+        //  (LoadAllContainers). Dali em diante o arquivo e a unica
+        //  verdade que ele conhece. Quem apagou a lista de itens -
+        //  ou montou a caixa so com perfis - nao tem como pedir o
+        //  padrao de volta, e o painel nao tem como dizer o que e
+        //  item do jogo e o que alguem acrescentou a mao.
+        //
+        //  Este comando responde isso, e nao escreve nada.
+        //
+        //  #### E POR QUE ELE REPETE O BETTERLOOT ####
+        //
+        //  A leitura abaixo e o GetLootSpawn do BetterLoot 4.4.0
+        //  (BetterLoot.cs:1701-1760) portado. Nao e preguica: se o
+        //  agente resolvesse a arvore de LootSpawn com regra
+        //  propria, a lista "padrao" do painel divergiria da que o
+        //  plugin gerou no primeiro boot - e a comparacao entre as
+        //  duas e justamente o produto.
+        //
+        //  Os tres cuidados que a arvore exige, todos medidos la:
+        //
+        //    1. subSpawn e recursivo, e cada galho tem PESO. Galho
+        //       com peso zero nunca sai; na lista, ele mente.
+        //    2. restrictedEras: o mesmo prefab entrega coisas
+        //       diferentes conforme ConVar.Server.Era.
+        //    3. o item que aparece em TODOS os galhos e garantido,
+        //       e nao sorteado - por isso ele sai da lista de itens
+        //       e vai para a de garantidos.
+        //
+        //  #### A RESPOSTA ####
+        //
+        //      {"ok":true,
+        //       "prefab":"assets/bundled/prefabs/radtown/crate_elite.prefab",
+        //       "source":"container","slotsMin":8,"slotsMax":8,"scrap":25,
+        //       "count":145,"offset":0,"limit":500,
+        //       "items":[{"shortname":"riflebody","min":1,"max":1}],
+        //       "guaranteed":[]}
+        //
+        //  `slotsMin`/`slotsMax` sao quantos itens a caixa entrega
+        //  por vez e `scrap` e o scrap do prefab: os tres alimentam
+        //  o "Quanto sai" do painel, que hoje nao tem de onde tirar
+        //  o padrao.
+        //
+        //  #### A PAGINACAO EXISTE, E NUNCA PAGINA  ####
+        //
+        //  Regra 4 do cabecalho deste arquivo: lista de tamanho
+        //  aberto e paginada, porque resposta truncada chega ao
+        //  agente como JSON invalido - e isso parece bug do plugin,
+        //  nao limite de transporte.
+        //
+        //  A maior tabela nativa medida no server01 tem 211 itens
+        //  (os cientistas), ~10 KB - um quinto do que o
+        //  origemz.items ja trafega numa pagina. Com o limite
+        //  padrao em 500, toda caixa que existe hoje cabe de uma
+        //  vez, e a paginacao so entra em cena se um update do jogo
+        //  dobrar a maior delas.
+        //
+        //  `guaranteed` vai INTEIRO em toda pagina: o maior medido
+        //  tem 6 itens, e reparti-lo custaria mais do que repeti-lo.
+        //
+        //  MUDAR QUALQUER COISA AQUI EXIGE MUDAR
+        //  core/src/game/loot-native.ts JUNTO.
+        // ========================================================
+
+        /// <summary>O prefixo sintetico do presente e do ovo. Nao e pasta.</summary>
+        private const string UnwrapPrefix = "unwrap/";
+
+        [ConsoleCommand(LootNativeCommand)]
+        private void CommandLootNative(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleLootNative(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(LootNativeCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleLootNative(ConsoleSystem.Arg arg)
+        {
+            int offset;
+
+            if (!TryReadInt(arg, 0, 0, out offset) || offset < 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            int limit;
+
+            if (!TryReadInt(arg, 1, DefaultNativeLootLimit, out limit) || limit < 1)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            // Teto silencioso, como no origemz.items: isto e
+            // leitura, e o limit normalizado volta na resposta -
+            // quem chamou ve o que aconteceu.
+            if (limit > MaxNativeLootLimit)
+            {
+                limit = MaxNativeLootLimit;
+            }
+
+            // Do terceiro argumento em diante e tudo prefab, com os
+            // espacos de volta. Ver o cabecalho: e por isso que os
+            // numeros vem antes.
+            string prefab = RestOfArgs(arg, 2);
+
+            if (prefab.Length == 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            Dictionary<string, NativeLootItem> items = new Dictionary<string, NativeLootItem>();
+            Dictionary<string, NativeLootItem> guaranteed = new Dictionary<string, NativeLootItem>();
+
+            NativeLootOkResponse response = new NativeLootOkResponse();
+            response.Prefab = prefab;
+
+            if (prefab.StartsWith(UnwrapPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(prefab.Substring(UnwrapPrefix.Length));
+                ItemModUnwrap unwrap = definition == null ? null : definition.GetComponentInChildren<ItemModUnwrap>();
+
+                if (unwrap == null || unwrap.revealList == null)
+                {
+                    return BuildError(ErrorPrefabNotFound);
+                }
+
+                int minTries = Math.Max(1, Math.Min(unwrap.minTries, unwrap.maxTries));
+                int maxTries = Math.Max(minTries, Math.Max(unwrap.minTries, unwrap.maxTries));
+
+                CollectLootSpawn(unwrap.revealList, items, guaranteed, unwrap.minTries > 0);
+
+                // Cada abertura entrega o garantido de novo, e o
+                // presente abre varias vezes. E assim que o
+                // BetterLoot grava; a lista do painel tem de casar
+                // com o arquivo dele, nao com a arvore crua.
+                foreach (NativeLootItem entry in guaranteed.Values)
+                {
+                    entry.Min *= minTries;
+                    entry.Max *= maxTries;
+                }
+
+                response.Source = "unwrap";
+                response.SlotsMin = minTries;
+                response.SlotsMax = maxTries;
+                response.Scrap = 0;
+                return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+            }
+
+            GameObject basePrefab = GameManager.server.FindPrefab(prefab);
+
+            if (basePrefab == null)
+            {
+                // O caminho vai JUNTO do codigo, ao contrario do
+                // resto do arquivo: "nao achei" sem dizer o que se
+                // procurou nao se diagnostica - e o suspeito numero
+                // um e o proprio caminho, remontado a partir de
+                // pedacos que o console quebrou no espaco.
+                PrintWarning(LootNativeCommand + ": prefab nao encontrado: [" + prefab + "]");
+                return BuildError(ErrorPrefabNotFound);
+            }
+
+            // A ordem e a do BetterLoot (LoadAllContainers): o
+            // mesmo GameObject pode ter mais de um componente, e
+            // trocar a ordem troca a tabela.
+            HumanNPC npc = basePrefab.GetComponent<HumanNPC>();
+            LootContainer.LootSpawnSlot[] slots = npc == null ? ReflectedLootSlots(basePrefab) : npc.LootSpawnSlots;
+
+            if (slots != null)
+            {
+                int slotItemCount = 0;
+
+                foreach (LootContainer.LootSpawnSlot slot in slots)
+                {
+                    // O `onlyWithLoadoutNamed` e o que separa o
+                    // slot que TODO corpo entrega daquele que so
+                    // sai com um loadout especifico: o segundo nao
+                    // e garantido, por mais que a probabilidade
+                    // seja 1.
+                    CollectLootSpawn(slot.definition, items, guaranteed,
+                        slot.numberToSpawn > 0 && slot.probability >= 1f && string.IsNullOrEmpty(slot.onlyWithLoadoutNamed));
+                    slotItemCount += slot.numberToSpawn;
+                }
+
+                response.Source = "npc";
+                response.SlotsMin = slotItemCount;
+                response.SlotsMax = slotItemCount;
+                response.Scrap = 0;
+                return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+            }
+
+            LootFill fill = basePrefab.GetComponent<LootFill>();
+
+            if (fill != null)
+            {
+                CollectContainerSlots(fill.LootSpawnSlots, fill.LootDefinition, fill.MaxDefinitionsToSpawn,
+                    items, guaranteed);
+
+                response.Source = "lootfill";
+                response.SlotsMin = response.SlotsMax = SlotCountOf(fill.LootSpawnSlots, fill.MaxDefinitionsToSpawn);
+                response.Scrap = 0;
+                return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+            }
+
+            LootContainer loot = basePrefab.GetComponent<LootContainer>();
+
+            if (loot == null)
+            {
+                return BuildError(ErrorPrefabNotLoot);
+            }
+
+            CollectContainerSlots(loot.LootSpawnSlots, loot.lootDefinition, loot.maxDefinitionsToSpawn,
+                items, guaranteed);
+
+            response.Source = "container";
+            response.SlotsMin = response.SlotsMax = SlotCountOf(loot.LootSpawnSlots, loot.maxDefinitionsToSpawn);
+            response.Scrap = loot.scrapAmount;
+
+            return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+        }
+
+        /// <summary>
+        /// Fecha a resposta com a pagina pedida de `items`.
+        ///
+        /// `count` e o TOTAL da caixa, e nao o tamanho da pagina -
+        /// mesma regra do origemz.items. Offset alem do fim devolve
+        /// lista vazia com ok:true, que e como o agente sabe que
+        /// acabou.
+        /// </summary>
+        private static string PaginatedNativeLoot(NativeLootOkResponse response,
+            Dictionary<string, NativeLootItem> items, Dictionary<string, NativeLootItem> guaranteed,
+            int offset, int limit)
+        {
+            List<NativeLootItem> sorted = Sorted(items);
+
+            int available = sorted.Count - offset;
+
+            if (available < 0)
+            {
+                available = 0;
+            }
+
+            int take = available < limit ? available : limit;
+
+            response.Count = sorted.Count;
+            response.Offset = offset;
+            response.Limit = limit;
+            response.Items = take > 0 ? sorted.GetRange(offset, take) : new List<NativeLootItem>();
+            response.Guaranteed = Sorted(guaranteed);
+
+            return JsonConvert.SerializeObject(response);
+        }
+
+        /// <summary>
+        /// Do argumento `first` em diante, com os espacos de volta.
+        ///
+        /// O console do Rust quebra a linha no espaco e nao ha como
+        /// pedir o resto cru - o caminho do prefab, que tem espaco,
+        /// precisa ser remontado aqui.
+        /// </summary>
+        private static string RestOfArgs(ConsoleSystem.Arg arg, int first)
+        {
+            if (arg.Args == null || first >= arg.Args.Length)
+            {
+                return "";
+            }
+
+            // string.Join, e nao StringBuilder: com as DLLs do jogo
+            // na mesa, `Append(" ")` fica ambiguo entre
+            // Append(object) e Append(ReadOnlySpan<char>) - o
+            // literal converte para os dois. Medido no pluginlint.
+            return string.Join(" ", arg.Args, first, arg.Args.Length - first).Trim();
+        }
+
+        /// <summary>
+        /// Os slots do prefab, ou a definicao unica quando ele nao
+        /// tem slot nenhum. E a bifurcacao do BetterLoot, e ela
+        /// existe porque `LootSpawnSlots` vazio NAO quer dizer
+        /// caixa vazia: quer dizer que o loot mora em
+        /// `lootDefinition`.
+        /// </summary>
+        private static void CollectContainerSlots(LootContainer.LootSpawnSlot[] slots, LootSpawn single,
+            int maxDefinitions, Dictionary<string, NativeLootItem> items,
+            Dictionary<string, NativeLootItem> guaranteed)
+        {
+            if (slots != null && slots.Length > 0)
+            {
+                foreach (LootContainer.LootSpawnSlot slot in slots)
+                {
+                    // A era do servidor decide se o slot vale. Um
+                    // slot de outra era entra na lista e nunca sai
+                    // no jogo.
+                    if (slot.eras != null && slot.eras.Length > 0 && Array.IndexOf(slot.eras, ConVar.Server.Era) < 0)
+                    {
+                        continue;
+                    }
+
+                    CollectLootSpawn(slot.definition, items, guaranteed,
+                        slot.numberToSpawn > 0 && slot.probability >= 1f);
+                }
+
+                return;
+            }
+
+            if (single != null)
+            {
+                CollectLootSpawn(single, items, guaranteed, maxDefinitions > 0);
+            }
+        }
+
+        private static int SlotCountOf(LootContainer.LootSpawnSlot[] slots, int maxDefinitions)
+        {
+            if (slots == null || slots.Length == 0)
+            {
+                return maxDefinitions;
+            }
+
+            int total = 0;
+
+            foreach (LootContainer.LootSpawnSlot slot in slots)
+            {
+                total += slot.numberToSpawn;
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// Anda a arvore de LootSpawn e separa sorteado de garantido.
+        /// </summary>
+        private static void CollectLootSpawn(LootSpawn spawn, Dictionary<string, NativeLootItem> items,
+            Dictionary<string, NativeLootItem> guaranteed, bool guaranteedCall)
+        {
+            if (spawn == null)
+            {
+                return;
+            }
+
+            List<LootSpawn.Entry> selectable = SelectableEntriesOf(spawn);
+
+            if (selectable.Count > 0)
+            {
+                // Galho: o que importa sao as folhas dele, e
+                // nenhuma delas e garantida por si so.
+                foreach (LootSpawn.Entry entry in selectable)
+                {
+                    CollectLootSpawn(entry.category, items, guaranteed, false);
+                }
+            }
+            else if (spawn.items != null)
+            {
+                foreach (ItemAmount amount in spawn.items)
+                {
+                    if (amount == null || amount.itemDef == null || !amount.itemDef.IsAllowed(Rust.EraRestriction.Loot))
+                    {
+                        continue;
+                    }
+
+                    string key = KeyOf(amount.itemDef);
+
+                    // O primeiro que aparece manda: o mesmo item em
+                    // dois galhos e UMA entrada na tabela, e e
+                    // assim que o BetterLoot grava.
+                    if (items.ContainsKey(key) || guaranteed.ContainsKey(key))
+                    {
+                        continue;
+                    }
+
+                    items.Add(key, AmountsOf(amount, key));
+                }
+            }
+
+            if (!guaranteedCall)
+            {
+                return;
+            }
+
+            // O que sai de TODOS os galhos sai sempre - e garantido,
+            // e nao sorteado. Ele sai da lista de itens para nao
+            // roubar sorteio de quem depende dele.
+            foreach (string key in CommonItemsOf(spawn))
+            {
+                NativeLootItem entry;
+
+                if (guaranteed.ContainsKey(key) || !items.TryGetValue(key, out entry))
+                {
+                    continue;
+                }
+
+                items.Remove(key);
+                guaranteed.Add(key, entry);
+            }
+        }
+
+        /// <summary>
+        /// Os galhos que PODEM sair: com spawn, na era do servidor,
+        /// e com peso maior que zero.
+        /// </summary>
+        private static List<LootSpawn.Entry> SelectableEntriesOf(LootSpawn spawn)
+        {
+            List<LootSpawn.Entry> selectable = new List<LootSpawn.Entry>();
+
+            if (spawn.subSpawn == null)
+            {
+                return selectable;
+            }
+
+            foreach (LootSpawn.Entry entry in spawn.subSpawn)
+            {
+                if (entry.category == null || !entry.category.HasAnySpawns())
+                {
+                    continue;
+                }
+
+                if (entry.restrictedEras != null && entry.restrictedEras.Length > 0 &&
+                    Array.IndexOf(entry.restrictedEras, ConVar.Server.Era) < 0)
+                {
+                    continue;
+                }
+
+                if (entry.weight + entry.RuntimeWeightBonus() <= 0)
+                {
+                    continue;
+                }
+
+                selectable.Add(entry);
+            }
+
+            return selectable;
+        }
+
+        /// <summary>
+        /// Os itens que aparecem em TODOS os galhos deste no - a
+        /// intersecao. Sao os garantidos.
+        /// </summary>
+        private static HashSet<string> CommonItemsOf(LootSpawn spawn)
+        {
+            List<LootSpawn.Entry> selectable = SelectableEntriesOf(spawn);
+
+            if (selectable.Count > 0)
+            {
+                HashSet<string> common = null;
+
+                foreach (LootSpawn.Entry entry in selectable)
+                {
+                    HashSet<string> branch = CommonItemsOf(entry.category);
+
+                    if (common == null)
+                    {
+                        common = branch;
+                    }
+                    else
+                    {
+                        common.IntersectWith(branch);
+                    }
+                }
+
+                return common ?? new HashSet<string>();
+            }
+
+            HashSet<string> leaf = new HashSet<string>();
+
+            if (spawn.items != null)
+            {
+                foreach (ItemAmount amount in spawn.items)
+                {
+                    if (amount != null && amount.itemDef != null && amount.itemDef.IsAllowed(Rust.EraRestriction.Loot))
+                    {
+                        leaf.Add(KeyOf(amount.itemDef));
+                    }
+                }
+            }
+
+            return leaf;
+        }
+
+        /// <summary>
+        /// A chave daquele item no LootTables.json.
+        ///
+        /// O sufixo ".blueprint" faz PARTE da chave: e assim que o
+        /// BetterLoot grava o item que nasce como projeto, e e por
+        /// essa chave que o painel casa a tabela com o padrao.
+        /// </summary>
+        private static string KeyOf(ItemDefinition definition)
+        {
+            return definition.spawnAsBlueprint ? definition.shortname + ".blueprint" : definition.shortname;
+        }
+
+        private static NativeLootItem AmountsOf(ItemAmount amount, string key)
+        {
+            int min = (int)amount.amount;
+            int max = min;
+
+            ItemAmountRanged ranged = amount as ItemAmountRanged;
+
+            if (ranged != null && ranged.maxAmount > 0 && ranged.maxAmount > amount.amount)
+            {
+                max = (int)ranged.maxAmount;
+            }
+
+            NativeLootItem entry = new NativeLootItem();
+            entry.Shortname = key;
+            entry.Min = min;
+            entry.Max = max;
+
+            return entry;
+        }
+
+        /// <summary>
+        /// Por nome, e nao na ordem da arvore.
+        ///
+        /// A arvore nao tem ordem estavel entre dois boots, e a
+        /// resposta e comparada com o arquivo do lado do agente:
+        /// uma lista que troca de ordem sozinha viraria diferenca
+        /// onde nao ha nenhuma.
+        /// </summary>
+        private static List<NativeLootItem> Sorted(Dictionary<string, NativeLootItem> entries)
+        {
+            List<NativeLootItem> list = new List<NativeLootItem>(entries.Values);
+            list.Sort(delegate (NativeLootItem left, NativeLootItem right)
+            {
+                return string.CompareOrdinal(left.Shortname, right.Shortname);
+            });
+
+            return list;
+        }
+
+        /// <summary>
+        /// Os slots de loot de um corpo que nao e HumanNPC.
+        ///
+        /// O cientista novo (Scientist2FSM) guarda os dele num
+        /// campo `dead` que so existe publico quando o Oxide compila
+        /// com o publicizer - o proprio BetterLoot so cobre esse
+        /// caso atras de `#if OXIDE_PUBLICIZED`. Por reflexao
+        /// funciona dos dois jeitos, e quando nao houver nada a
+        /// resposta e PREFAB_NOT_LOOT, que e a verdade.
+        /// </summary>
+        private static LootContainer.LootSpawnSlot[] ReflectedLootSlots(GameObject prefab)
+        {
+            foreach (Component component in prefab.GetComponents<Component>())
+            {
+                if (component == null || component is LootContainer || component is LootFill)
+                {
+                    continue;
+                }
+
+                LootContainer.LootSpawnSlot[] direct = ReadLootSlots(component);
+
+                if (direct != null && direct.Length > 0)
+                {
+                    return direct;
+                }
+
+                object dead = ReadMember(component, "dead");
+
+                if (dead != null)
+                {
+                    LootContainer.LootSpawnSlot[] nested = ReadLootSlots(dead);
+
+                    if (nested != null && nested.Length > 0)
+                    {
+                        return nested;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static LootContainer.LootSpawnSlot[] ReadLootSlots(object target)
+        {
+            return ReadMember(target, "LootSpawnSlots") as LootContainer.LootSpawnSlot[];
+        }
+
+        private static object ReadMember(object target, string name)
+        {
+            Type type = target.GetType();
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            FieldInfo field = type.GetField(name, flags);
+
+            if (field != null)
+            {
+                return field.GetValue(target);
+            }
+
+            PropertyInfo property = type.GetProperty(name, flags);
+
+            return property == null || !property.CanRead ? null : property.GetValue(target, null);
         }
 
         // ========================================================
@@ -3097,6 +3752,76 @@ namespace Oxide.Plugins
             // no PrintWarning do ApplyVipCache.
             [JsonProperty("players")]
             public int Players { get; set; }
+        }
+
+        /// <summary>
+        /// A resposta do origemz.loot.native. Ver HandleLootNative.
+        /// </summary>
+        private class NativeLootOkResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok { get { return true; } }
+
+            /// <summary>O caminho pedido, de volta como veio.</summary>
+            [JsonProperty("prefab")]
+            public string Prefab { get; set; }
+
+            /// <summary>
+            /// De onde a tabela saiu: "container", "npc",
+            /// "lootfill" ou "unwrap".
+            ///
+            /// Vai para o painel porque muda o que os numeros
+            /// significam - corpo de cientista nao tem scrap, e
+            /// presente conta TENTATIVAS, nao itens.
+            /// </summary>
+            [JsonProperty("source")]
+            public string Source { get; set; }
+
+            /// <summary>Quantos itens a caixa entrega por vez.</summary>
+            [JsonProperty("slotsMin")]
+            public int SlotsMin { get; set; }
+
+            [JsonProperty("slotsMax")]
+            public int SlotsMax { get; set; }
+
+            /// <summary>O scrap do prefab. Zero fora de container.</summary>
+            [JsonProperty("scrap")]
+            public int Scrap { get; set; }
+
+            /// <summary>O total de itens da caixa, nao o da pagina.</summary>
+            [JsonProperty("count")]
+            public int Count { get; set; }
+
+            [JsonProperty("offset")]
+            public int Offset { get; set; }
+
+            [JsonProperty("limit")]
+            public int Limit { get; set; }
+
+            [JsonProperty("items")]
+            public List<NativeLootItem> Items { get; set; }
+
+            /// <summary>Inteiro em toda pagina - o maior medido tem 6.</summary>
+            [JsonProperty("guaranteed")]
+            public List<NativeLootItem> Guaranteed { get; set; }
+        }
+
+        /// <summary>
+        /// Um item da tabela nativa.
+        ///
+        /// `shortname` pode terminar em ".blueprint": e a CHAVE do
+        /// LootTables.json, e nao o shortname do catalogo. Ver KeyOf.
+        /// </summary>
+        private class NativeLootItem
+        {
+            [JsonProperty("shortname")]
+            public string Shortname { get; set; }
+
+            [JsonProperty("min")]
+            public int Min { get; set; }
+
+            [JsonProperty("max")]
+            public int Max { get; set; }
         }
 
         private class ItemsOkResponse
@@ -8750,12 +9475,22 @@ namespace Oxide.Plugins
                     {
                         Id = (string)offer["id"],
                         Title = (string)offer["title"],
-                        RewardItemId = offer["rewardItemId"] == null
-                            ? 0
-                            : (int)offer["rewardItemId"],
-                        RewardSkinId = offer["rewardSkinId"] == null
-                            ? 0UL
-                            : (ulong)offer["rewardSkinId"],
+                        // ####  `null` NO JSON NAO E `null` EM C#  ####
+                        //
+                        // `offer["rewardItemId"]` com o campo em null
+                        // devolve um JValue do tipo Null - o `== null`
+                        // da false, e o cast para int estoura com
+                        // "Can not convert Null to Int32". O `npc.set`
+                        // inteiro falhava e o boneco SUMIA do mapa:
+                        // medido em producao em 12/09/2026, ao
+                        // adicionar a um NPC uma missao cujo premio
+                        // nao e item.
+                        //
+                        // O cast para o tipo ANULAVEL e o que o
+                        // Newtonsoft trata: devolve null, e o `??`
+                        // decide.
+                        RewardItemId = (int?)offer["rewardItemId"] ?? 0,
+                        RewardSkinId = (ulong?)offer["rewardSkinId"] ?? 0UL,
                         Description = (string)offer["description"],
                         Goal = (string)offer["goal"],
                         Reward = (string)offer["reward"]

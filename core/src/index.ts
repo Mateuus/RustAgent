@@ -1874,6 +1874,43 @@ async function main(): Promise<void> {
     // mexer em nada quando falta. Ver §7.4 do plano.
     // O coletor esquece o que mandou daquele jogador, e o `assign`
     // sai na rodada seguinte — que é em segundos, e não no minuto.
+    // ####  O AVISO DE QUE A MISSÃO FECHOU  ####
+    //
+    // Pedido do dono em 12/09/2026, com os critérios dele: a frase
+    // sai no instante em que o último objetivo fecha, diz o nome
+    // certo da missão, conta ONDE resgatar — e só para quem a fez.
+    //
+    // Ela é montada aqui, e não no serviço, porque falar com o jogo
+    // é trabalho deste arquivo. O serviço só avisa que aconteceu.
+    onCompleted: ({ serverId, steamId, title, npcName, hasRewards }) => {
+      // ####  O RELÓGIO, PELA REGRA DE SEMPRE  ####
+      //
+      // A conclusão pode nascer do gancho que lê o console (o push
+      // do plugin), e um comando de RCON disparado dali volta pelo
+      // mesmo caminho e dispara de novo — o paredão que este projeto
+      // já viveu. 50 ms bastam para sair da pilha, e o jogador não
+      // percebe a diferença.
+      const timer = setTimeout(() => {
+        // Sem prêmio não há o que resgatar — e prometer resgate numa
+        // missão que não dá nada faria o jogador procurar um botão
+        // que não vale nada. Mesmo assim ela precisa ser fechada no
+        // menu, e é isso que a frase diz.
+        const onde =
+          npcName === null
+            ? 'Resgate no menu, em MISSÕES.'
+            : `Resgate no menu, em MISSÕES, ou fale com ${npcName}.`;
+
+        void tellPlayer(
+          serverId,
+          steamId,
+          hasRewards
+            ? `Missão concluída: ${title}. ${onde}`
+            : `Missão concluída: ${title}. Feche no menu, em MISSÕES.`,
+        ).catch(() => undefined);
+      }, 50);
+
+      timer.unref();
+    },
     // ####  O PLUGIN PRECISA SABER AGORA, E NÃO NO CICLO  ####
     //
     // Esquecer sozinho marca "reenvia quando der" — e o "quando der"
