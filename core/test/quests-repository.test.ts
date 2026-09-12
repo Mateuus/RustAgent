@@ -758,10 +758,13 @@ describe('o NPC', () => {
     });
   }
 
-  it('nasce com o prefab medido e o marcador ligado', () => {
+  it('nasce com o boneco que FALA e o marcador ligado', () => {
     const saved = harness.repository.createNpc('velho-do-outpost', npc(), NOW);
 
-    expect(saved.prefab).toContain('bandit_shopkeeper');
+    // O prefab importa por um motivo só: o prompt "TALK" do jogo é
+    // do `NPCTalking`. Com o `bandit_shopkeeper` de antes, o
+    // jogador chegava perto e não via nada. Ver a migração 077.
+    expect(saved.prefab).toContain('bandit_conversationalist');
     expect(saved.mapMarker).toBe(true);
     expect(saved.useRadius).toBe(3);
   });

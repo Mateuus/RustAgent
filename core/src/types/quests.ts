@@ -564,15 +564,73 @@ export type QuestDraft = z.input<typeof questInputSchema>;
 // ------------------------------------------------------------
 
 /**
+ * Os bonecos que um NPC de missão pode vestir.
+ *
+ * ####  A LISTA NÃO É DE GOSTO: ELA É MEDIDA  ####
+ *
+ * Cada linha foi spawnada no server01 em 11/09/2026 e teve o tipo
+ * lido de volta. O que decide é uma pergunta só: o boneco é um
+ * `NPCTalking`? Se for, o cliente desenha o prompt **TALK** em cima
+ * dele sozinho, e o jogo manda o RPC que o plugin intercepta. Se
+ * não for, o jogador chega perto e não vê nada — que foi
+ * exatamente o que o teste de 11/09 relatou com o
+ * `bandit_shopkeeper`, um `NPCShopKeeper` mudo.
+ *
+ * ####  OS MISSIONPROVIDER FICARAM DE FORA  ####
+ *
+ * `missionprovider_bandit_a` e irmãos também falam, mas são
+ * `IMissionProvider`: o `ServerInit` deles spawna um
+ * `MapMarkerMissionProvider` que fica no mapa de todo mundo — e
+ * NÃO morre junto com o NPC. Medido: o mundo subiu de 16 para 21
+ * marcadores na sondagem. Um NPC nosso não vai sujar o mapa com
+ * missão da Facepunch.
+ */
+export const NPC_PREFABS = [
+  {
+    prefab: 'assets/prefabs/npc/bandit/shopkeepers/bandit_conversationalist.prefab',
+    label: 'Aviador do Bandit',
+    talks: true,
+  },
+  {
+    prefab: 'assets/prefabs/npc/bandit/shopkeepers/boat_shopkeeper.prefab',
+    label: 'Barqueiro',
+    talks: true,
+  },
+  {
+    prefab: 'assets/prefabs/npc/bandit/shopkeepers/stables_shopkeeper.prefab',
+    label: 'Cavalariço',
+    talks: true,
+  },
+  {
+    prefab: 'assets/prefabs/npc/apartment/apartment_vendor.prefab',
+    label: 'Porteiro',
+    talks: true,
+  },
+  {
+    prefab: 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab',
+    label: 'Vendedor do Bandit (mudo)',
+    talks: false,
+  },
+  {
+    prefab: 'assets/prefabs/npc/waterwell/waterwell_shopkeeper.prefab',
+    label: 'Poceiro (mudo)',
+    talks: false,
+  },
+] as const;
+
+/**
  * O prefab do boneco.
  *
- * MEDIDO com Mono.Cecil contra o `Assembly-CSharp.dll` da
- * instalação real (§10.1 do plano): `NPCShopKeeper : NPCPlayer`
- * existe e é o que se spawna parado. Ele é guardado em coluna, e
- * não fixo no código, porque trocar a aparência é pedido de admin
- * — não release de agente.
+ * O `bandit_conversationalist` é o primeiro `NPCTalking` da lista
+ * que não arrasta nada atrás: os outros que falam são vendedores
+ * de veículo (o `spawnerRef` deles nasce inválido e a classe não
+ * faz nada com isso) ou o porteiro do apartamento.
+ *
+ * Ele é guardado em coluna, e não fixo no código, porque trocar a
+ * aparência é pedido de admin — não release de agente.
  */
-export const DEFAULT_NPC_PREFAB = 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab';
+export const DEFAULT_NPC_PREFAB = NPC_PREFABS[0].prefab;
+
 
 export const questNpcInputSchema = z.object({
   serverId: z.string().min(1).max(64),
