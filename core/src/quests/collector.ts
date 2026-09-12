@@ -290,8 +290,18 @@ export class QuestCollector {
   forget(serverId?: string): void {
     if (serverId === undefined) {
       this.#sent.clear();
+      this.#lastSweep.clear();
     } else {
       this.#sent.delete(serverId);
+
+      // ####  ESQUECER SEM APAGAR O RELÓGIO NÃO ADIANTA  ####
+      //
+      // O `flushSeconds` do servidor pode ser 60 s, e a rodada que
+      // reenviaria o catálogo seria pulada com "ainda não é a vez
+      // dele" — um minuto inteiro em que o plugin está sem saber o
+      // que contar. Quem esqueceu quer o reenvio, e o próximo tique
+      // (15 s) é o mais cedo que ele pode acontecer.
+      this.#lastSweep.delete(serverId);
     }
   }
 

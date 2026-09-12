@@ -407,6 +407,27 @@ async function main(): Promise<void> {
       // E os timers são o quarto — sem eles, fornalha e craft voltam
       // ao ×1 a cada queda do RCON.
       void playerTimersSync?.push(serverId, 'rcon-connected');
+      // ####  E AS MISSÕES, QUE FALTAVAM NESTA LISTA  ####
+      //
+      // O plugin PEDE o catálogo de volta quando (re)carrega — mas
+      // esse pedido acontece uma vez, no boot dele, e se o agente
+      // ainda estivesse reconectando o RCON naquele instante a
+      // linha se perdia e ninguém repetia. O servidor ficava sem
+      // contar nada e sem NPC nenhum até alguém salvar uma missão
+      // no painel. Medido em 12/09/2026.
+      //
+      // A reconexão não depende de ninguém gritar: ela é o próprio
+      // sinal de que o outro lado começou do zero.
+      questCollector?.forget(serverId);
+      questNpcs?.forget(serverId);
+
+      void questNpcs?.push(serverId).catch((error: unknown) => {
+        logger.warn(
+          { server: serverId, err: toError(error) },
+          'os NPCs de missão não subiram na reconexão; a volta do relógio tenta',
+        );
+      });
+
       // E o cadastro de itens custom, pelo mesmo motivo: o cache
       // do plugin esvazia junto com os outros.
       void customItemsSync?.push(serverId, 'rcon-connected');
