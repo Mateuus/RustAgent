@@ -290,9 +290,24 @@ export class QuestCollector {
   forget(serverId?: string): void {
     if (serverId === undefined) {
       this.#sent.clear();
+      this.#assigned.clear();
       this.#lastSweep.clear();
     } else {
       this.#sent.delete(serverId);
+
+      // ####  O QUE CADA JOGADOR PERSEGUE TAMBÉM SE PERDE  ####
+      //
+      // O `assign` mora na memória do plugin junto com o catálogo, e
+      // some no mesmo `oxide.reload`. Sem esta limpeza o agente acha
+      // que já mandou: o jogador fica com a missão viva no banco e o
+      // plugin sem saber o que contar — e a caixa do NPC oferece de
+      // novo o que ele acabou de pegar, que foi o que o teste de
+      // 12/09/2026 estranhou.
+      for (const key of [...this.#assigned.keys()]) {
+        if (key.startsWith(`${serverId}:`)) {
+          this.#assigned.delete(key);
+        }
+      }
 
       // ####  ESQUECER SEM APAGAR O RELÓGIO NÃO ADIANTA  ####
       //

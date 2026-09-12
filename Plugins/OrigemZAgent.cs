@@ -445,6 +445,23 @@ namespace Oxide.Plugins
             Unsubscribe("OnNpcConversationStart");
             _questNpcInputHooked = false;
 
+            // ####  O RCON ABRE ANTES DESTE PONTO  ####
+            //
+            // E ai os dois Unsubscribe acima desligam hooks que os
+            // NPCs JA tinham ligado: o WebRCON aceita comando antes
+            // de o servidor terminar de inicializar, entao o
+            // `npc.set` do agente pode chegar primeiro.
+            //
+            // O sintoma e cruel porque nada parece errado: os
+            // bonecos estao de pe, com o "CONVERSAR" na tela, e
+            // apertar E nao faz NADA. Foi assim que o teste de
+            // 12/09/2026 travou, e o `npcHooked` do diag existe por
+            // causa dele.
+            //
+            // Religar aqui e barato e nao tem caso ruim: sem NPC ele
+            // nao faz nada.
+            QuestNpcSyncInputHook();
+
             // E o lote que o oxide.reload deixou no disco.
             QuestLoad();
 
@@ -9169,7 +9186,7 @@ namespace Oxide.Plugins
             public string Color { get { return "1 1 1 1"; } }
         }
 
-        private void QuestNpcDialogOpen(BasePlayer player, QuestNpcInfo npc)
+        private void QuestNpcDialogOpen(BasePlayer player, QuestNpcInfo npc, string aviso = null)
         {
             QuestNpcDialogClose(player);
 
@@ -9258,11 +9275,11 @@ namespace Oxide.Plugins
             {
                 Text =
                 {
-                    Text = QuestNpcDialogGreeting(npc),
+                    Text = string.IsNullOrEmpty(aviso) ? QuestNpcDialogGreeting(npc) : aviso,
                     FontSize = 12,
                     Font = FonteRegular,
                     Align = TextAnchor.MiddleLeft,
-                    Color = CorApagado
+                    Color = string.IsNullOrEmpty(aviso) ? CorApagado : CorVermelho
                 }
             };
 
@@ -9388,14 +9405,12 @@ namespace Oxide.Plugins
                 }
             }, card);
 
-            QuestAssignment andamento = QuestNpcOfferProgress(player, offer.Id);
-
+            List<QuestAssignment> andamento = QuestNpcOfferProgress(player, offer.Id);
             string objetivo = offer.Goal ?? string.Empty;
 
             if (andamento != null)
             {
-                objetivo = (objetivo == string.Empty ? "Em andamento" : objetivo) +
-                    "  -  " + andamento.Have + " / " + andamento.Need;
+                objetivo = QuestNpcProgressLine(andamento, objetivo);
             }
 
             container.Add(new CuiLabel
@@ -9437,8 +9452,6 @@ namespace Oxide.Plugins
             // pegar e o que o teste de 12/09/2026 estranhou: a caixa
             // nao sabia o que ele ja estava perseguindo. O `assign`
             // sabe - ver QuestAssignment.
-            bool pronta = andamento != null && andamento.Have >= andamento.Need;
-
             if (andamento == null)
             {
                 QuestNpcDialogButton(container, card, "ACEITAR", CorRelevo, CorTexto,
@@ -9446,27 +9459,82 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (pronta)
+            // ####  ENTREGAR VALE MESMO FALTANDO  ####
+            //
+            // O dono pediu assim: "mudar de aceitar para Entregar",
+            // e "caso nao termine, aparece um modal que falta x
+            // coisa". Um botao que some enquanto falta obriga o
+            // jogador a decorar o que ainda devia - e a caixa tem a
+            // conta na mao.
+            //
+            // Entao o botao existe sempre. Quem esta pronto resgata;
+            // quem nao esta le o que falta, na propria caixa.
+            long pq = andamento[0].PlayerQuestId;
+            bool pronta = QuestNpcOfferDone(andamento);
+
+            QuestNpcDialogButton(
+                container,
+                card,
+                pronta ? "RESGATAR" : "ENTREGAR",
+                pronta ? CorVermelho : CorRelevo,
+                pronta ? "1 1 1 1" : CorTexto,
+                QuestNpcClaimCommand + " " + npc.Id + " " +
+                    pq.ToString(CultureInfo.InvariantCulture) + " " + offer.Id);
+        }
+
+        /// <summary>Todos os objetivos daquela missao fecharam?</summary>
+        private static bool QuestNpcOfferDone(List<QuestAssignment> andamento)
+        {
+            for (int i = 0; i < andamento.Count; i++)
             {
-                QuestNpcDialogButton(container, card, "RESGATAR", CorVermelho, "1 1 1 1",
-                    QuestNpcClaimCommand + " " + npc.Id + " " +
-                    andamento.PlayerQuestId.ToString(CultureInfo.InvariantCulture));
-                return;
+                if (andamento[i].Have < andamento[i].Need)
+                {
+                    return false;
+                }
             }
 
-            container.Add(new CuiLabel
+            return true;
+        }
+
+        // "Matar 2 chicken  -  1 / 2", e com dois objetivos o pior
+        // deles: e o que ainda segura a entrega.
+        private static string QuestNpcProgressLine(List<QuestAssignment> andamento, string goal)
+        {
+            StringBuilder line = new StringBuilder(goal == string.Empty ? "Em andamento" : goal);
+
+            for (int i = 0; i < andamento.Count; i++)
             {
-                Text =
+                line.Append(i == 0 ? "  -  " : "  |  ");
+                line.Append(andamento[i].Have).Append(" / ").Append(andamento[i].Need);
+            }
+
+            return line.ToString();
+        }
+
+        // O que ainda falta, em uma frase. E o que o aviso mostra
+        // quando o jogador clica em ENTREGAR cedo demais.
+        private static string QuestNpcMissingLine(List<QuestAssignment> andamento)
+        {
+            StringBuilder line = new StringBuilder();
+
+            for (int i = 0; i < andamento.Count; i++)
+            {
+                QuestAssignment item = andamento[i];
+
+                if (item.Have >= item.Need)
                 {
-                    Text = "EM ANDAMENTO", FontSize = 10, Font = FonteBold,
-                    Align = TextAnchor.MiddleCenter, Color = CorApagado
-                },
-                RectTransform =
-                {
-                    AnchorMin = "1 0.5", AnchorMax = "1 0.5",
-                    OffsetMin = "-128 -14", OffsetMax = "-12 14"
+                    continue;
                 }
-            }, card);
+
+                if (line.Length > 0)
+                {
+                    line.Append(", ");
+                }
+
+                line.Append(item.Need - item.Have).Append(' ').Append(item.Target);
+            }
+
+            return line.ToString();
         }
 
         private void QuestNpcDialogButton(
@@ -9493,8 +9561,8 @@ namespace Oxide.Plugins
             }, card);
         }
 
-        /// <summary>O que ele ja esta perseguindo daquela missao. `null` = nada.</summary>
-        private QuestAssignment QuestNpcOfferProgress(BasePlayer player, string questId)
+        /// <summary>Os objetivos daquela missao que ele persegue. `null` = nenhum.</summary>
+        private List<QuestAssignment> QuestNpcOfferProgress(BasePlayer player, string questId)
         {
             List<QuestAssignment> assignments;
 
@@ -9504,30 +9572,30 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            // ####  O PIOR OBJETIVO E O QUE MANDA  ####
+            // ####  A MISSAO INTEIRA, E NAO O PRIMEIRO OBJETIVO  ####
             //
             // Uma missao com dois objetivos so esta pronta quando os
-            // DOIS fecharam. Mostrar o primeiro diria "2/2" com o
-            // segundo em zero, e o botao RESGATAR apareceria cedo -
-            // para o agente recusar em seguida.
-            QuestAssignment pior = null;
+            // DOIS fecharam. Guardar so o primeiro diria "2/2" com o
+            // segundo em zero, e o RESGATAR apareceria cedo - para o
+            // agente recusar em seguida.
+            List<QuestAssignment> dela = null;
 
             for (int i = 0; i < assignments.Count; i++)
             {
-                QuestAssignment item = assignments[i];
-
-                if (item.QuestId != questId)
+                if (assignments[i].QuestId != questId)
                 {
                     continue;
                 }
 
-                if (pior == null || (item.Have < item.Need && pior.Have >= pior.Need))
+                if (dela == null)
                 {
-                    pior = item;
+                    dela = new List<QuestAssignment>();
                 }
+
+                dela.Add(assignments[i]);
             }
 
-            return pior;
+            return dela;
         }
 
         // A fala de cima.
@@ -9645,6 +9713,22 @@ namespace Oxide.Plugins
 
                 if (!long.TryParse(arg.GetString(1), out playerQuestId))
                 {
+                    return;
+                }
+
+                // ####  O QUE FALTA E DITO AQUI, E NAO NO CHAT  ####
+                //
+                // O jogador clicou em ENTREGAR olhando para a caixa;
+                // a resposta tem de aparecer nela. Mandar ao agente
+                // para receber "ainda nao terminou" no chat custaria
+                // uma ida a rede para dizer o que o plugin ja sabe.
+                List<QuestAssignment> andamento = arg.HasArgs(3)
+                    ? QuestNpcOfferProgress(player, arg.GetString(2))
+                    : null;
+
+                if (andamento != null && !QuestNpcOfferDone(andamento))
+                {
+                    QuestNpcDialogOpen(player, npc, "Ainda falta: " + QuestNpcMissingLine(andamento));
                     return;
                 }
 
