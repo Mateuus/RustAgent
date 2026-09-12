@@ -8409,6 +8409,10 @@ namespace Oxide.Plugins
                 }
 
                 json.Append(",\"npcs\":").Append(_questNpcs.Count);
+                // Se os bonecos estao de pe e este campo e false, o
+                // TALK e o USE nunca chegam ao plugin - foi a
+                // pergunta que travou o teste de 12/09/2026.
+                json.Append(",\"npcHooked\":").Append(_questNpcInputHooked ? "true" : "false");
                 json.Append(",\"npcsAlive\":").Append(vivos);
                 json.Append(",\"npcDialogs\":").Append(_questNpcDialogs.Count);
                 json.Append('}');
@@ -9175,9 +9179,19 @@ namespace Oxide.Plugins
 
             CuiElementContainer container = new CuiElementContainer();
 
-            // Centrada na horizontal e ABAIXO do meio da tela: no
-            // centro ela cobriria justamente o boneco com quem se
+            // ####  ONDE ELA FICA  ####
+            //
+            // Centrada na horizontal, e com o TOPO um pouco acima do
+            // meio da tela. A primeira versao a punha 40 px abaixo do
+            // centro e o dono viu na hora: "esta em baixo, teria que
+            // subir mais o menu" - com a caixa quase encostando na
+            // barra de itens.
+            //
+            // O boneco continua visivel: o rosto dele fica acima
+            // deste topo, que e o que importa para saber com quem se
             // esta falando.
+            const int DialogAcimaDoCentro = 70;
+
             string root = container.Add(new CuiPanel
             {
                 Image = { Color = CorFundo },
@@ -9185,8 +9199,8 @@ namespace Oxide.Plugins
                 {
                     AnchorMin = "0.5 0.5",
                     AnchorMax = "0.5 0.5",
-                    OffsetMin = (-DialogLargura / 2) + " " + (-altura - 40),
-                    OffsetMax = (DialogLargura / 2) + " -40"
+                    OffsetMin = (-DialogLargura / 2) + " " + (DialogAcimaDoCentro - altura),
+                    OffsetMax = (DialogLargura / 2) + " " + DialogAcimaDoCentro
                 },
                 CursorEnabled = true
             }, "Overlay", QuestNpcDialogName);
