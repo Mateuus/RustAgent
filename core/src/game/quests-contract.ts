@@ -171,6 +171,14 @@ export interface QuestAssignPayload {
       readonly seq: number;
       readonly kind: string;
       readonly target: string;
+      /**
+       * O nome bonito do alvo, para a tela.
+       *
+       * O `target` é a CHAVE (`metal.fragments`), e é com ela que o
+       * plugin conta. Este é o nome que uma pessoa lê — e sem ele a
+       * caixa do NPC dizia "Ainda falta: 200 metal.fragments".
+       */
+      readonly label: string;
       readonly need: number;
       readonly have: number;
     }[];

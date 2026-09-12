@@ -617,6 +617,7 @@ export class QuestCollector {
           seq: objective.seq,
           kind: objective.kind,
           target: objective.target as string,
+          label: this.#deps.service.nameOfTarget(objective.target),
           need: objective.amount,
           have: attempt.progress[objective.seq] ?? 0,
         }));

@@ -1099,6 +1099,18 @@ export class QuestsService {
     return this.#deps.now?.() ?? Date.now();
   }
 
+  /**
+   * O nome bonito de um alvo (`metal.fragments` → Metal Fragments).
+   *
+   * Público porque a caixa do NPC precisa dele SOLTO, e não dentro
+   * de uma frase: ela monta "Ainda falta: 200 Metal Fragments" no
+   * próprio plugin, com o que o `assign` levou. Antes disso o
+   * jogador lia o shortname cru.
+   */
+  nameOfTarget(target: string | null): string {
+    return this.#nameOf(target);
+  }
+
   #nameOf(target: string | null): string {
     if (target === null) {
       return '?';

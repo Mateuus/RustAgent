@@ -1874,8 +1874,26 @@ async function main(): Promise<void> {
     // mexer em nada quando falta. Ver §7.4 do plano.
     // O coletor esquece o que mandou daquele jogador, e o `assign`
     // sai na rodada seguinte — que é em segundos, e não no minuto.
+    // ####  O PLUGIN PRECISA SABER AGORA, E NÃO NO CICLO  ####
+    //
+    // Esquecer sozinho marca "reenvia quando der" — e o "quando der"
+    // é a volta do relógio. Quem acabou de aceitar no balcão do NPC
+    // reabre a caixa no segundo seguinte, e ela ainda ofereceria
+    // ACEITAR na missão que ele tem na mão. Foi o que o teste de
+    // 12/09/2026 viu.
+    //
+    // O `onPlayerJoined` faz exatamente o trabalho certo para UM
+    // jogador: recalcula os derivados e manda o `assign`. Ele não
+    // lança, e o relógio de 50 ms mantém a regra de não falar com o
+    // jogo de dentro do caminho de escrita.
     onLiveChanged: ({ serverId, steamId }) => {
       questCollector?.forgetPlayer(serverId, steamId);
+
+      const timer = setTimeout(() => {
+        void questCollector?.onPlayerJoined(serverId, [steamId]);
+      }, 50);
+
+      timer.unref();
     },
     consumer: {
       take: async ({ serverId, steamId, items }) => {
@@ -1943,20 +1961,36 @@ async function main(): Promise<void> {
   // É o mesmo desenho do `UiSync` e do `#OZSTAT#`.
   const questSecret = randomUUID();
 
-  // O recibo no chat DELE. Usada pelo QuestEvents (conclusão) e
-  // pelo aceite no balcão do NPC — a mesma frase, o mesmo caminho.
+  // ####  O RECIBO NO CHAT DELE  ####
+  //
+  // Usado pelo QuestEvents (conclusão), pelo aceite no balcão do NPC
+  // e pelo resgate. Uma frase, um caminho.
+  //
+  // ####  O `origemz.chat.tell` NUNCA EXISTIU  ####
+  //
+  // Era o que esta função mandava — e o OrigemZChat não registra esse
+  // comando. O console do Rust não reclama de comando que não
+  // conhece: ele se cala. Então TODA mensagem de missão morria no
+  // caminho, em silêncio, desde que a frente foi escrita. Medido em
+  // 12/09/2026, com o jogador aceitando a missão e não vendo nada.
+  //
+  // Quem fala com um jogador só é o `origemz.chat.broadcast` com
+  // `steamId` — o mesmo caminho dos avisos do painel, e por isso a
+  // mensagem sai com a tag e a cor da rede em vez de texto pelado.
+  const questBroadcaster = new PluginBroadcaster({ servers: supervisor, logger });
+
   const tellPlayer = async (
     serverId: string,
     steamId: string,
     message: string,
   ): Promise<void> => {
-    const rcon = supervisor.contextOf(serverId)?.rcon;
-
-    if (rcon === undefined) {
-      return;
-    }
-
-    await rcon.send(`origemz.chat.tell ${steamId} ${JSON.stringify(message)}`);
+    await questBroadcaster.send({
+      serverId,
+      steamId,
+      text: message,
+      tag: '[MISSÃO]',
+      tagColor: '#C43F2C',
+    });
   };
 
   questEvents = new QuestEvents({
