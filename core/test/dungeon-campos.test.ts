@@ -97,7 +97,15 @@ const FULL = dungeonInputSchema.parse({
         mode: 'replace',
         rolls: { min: 3, max: 3 },
         entries: [
-          { shortname: 'rifle.ak', amount: { min: 1, max: 1 }, blueprint: true, skin: 12_345 },
+          // Dezesseis dígitos, e não os dez de uma skin do Workshop:
+          // as skins NOSSAS (moeda, troféu) nascem acima de 10^15,
+          // e o campo do painel já as truncou uma vez.
+          {
+            shortname: 'rifle.ak',
+            amount: { min: 1, max: 1 },
+            blueprint: true,
+            skin: 1_704_237_532_379_132,
+          },
         ],
       },
       ai: { aimConeScale: 0.7, fireInterval: 0.2, holdPosition: true },
@@ -295,7 +303,12 @@ describe('os campos das quatro frentes atravessam o sync', () => {
       mode: 'replace',
       rolls: { min: 3, max: 3 },
       entries: [
-        { shortname: 'rifle.ak', amount: { min: 1, max: 1 }, blueprint: true, skin: 12_345 },
+        {
+          shortname: 'rifle.ak',
+          amount: { min: 1, max: 1 },
+          blueprint: true,
+          skin: 1_704_237_532_379_132,
+        },
       ],
     });
   });
