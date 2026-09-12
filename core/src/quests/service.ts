@@ -161,6 +161,34 @@ export interface QuestsServiceDeps {
     readonly serverId: string;
     readonly steamId: string;
   }) => void;
+  /**
+   * A tentativa acabou de fechar todos os objetivos.
+   *
+   * ####  POR QUE ELE FICA AQUI, E NÃO NO PUSH  ####
+   *
+   * Uma missão fecha por quatro caminhos: o push do plugin, o lote
+   * de 60 s, o recálculo dos objetivos derivados (tempo online,
+   * métrica) e a mão do suporte. O `#completeIfDone` é o ÚNICO
+   * lugar por onde os quatro passam — e ele só devolve `true` na
+   * TRANSIÇÃO, o que dá a garantia de uma mensagem por conclusão.
+   *
+   * Pendurar isto no recibo do push, como era antes, deixava sem
+   * aviso justamente quem concluiu pelo lote.
+   *
+   * Não lança e não espera: quem fala com o jogo é o index.
+   */
+  readonly onCompleted?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly playerQuestId: number;
+    readonly questId: string;
+    /** O título do SNAPSHOT: o que ele aceitou, e não o de hoje. */
+    readonly title: string;
+    /** Onde resgatar, além do menu. `null` = só o menu. */
+    readonly npcName: string | null;
+    /** A missão dá alguma coisa? Ver o texto do aviso. */
+    readonly hasRewards: boolean;
+  }) => void;
   readonly now?: () => number;
 }
 
@@ -1335,6 +1363,7 @@ export class QuestsService {
     }
 
     const now = this.#now();
+    const quest = this.#deps.repository.get(attempt.questId);
 
     if (!this.#deps.repository.complete(playerQuestId, now)) {
       // O push e o lote trazem o mesmo fato de propósito. Chegar
@@ -1365,6 +1394,26 @@ export class QuestsService {
       },
       'quest concluída',
     );
+
+    // ####  O NPC É O DE HOJE, E O TÍTULO É O DE ONTEM  ####
+    //
+    // O título vem do snapshot porque é o que ele aceitou — uma
+    // missão renomeada no meio não pode virar outra no recibo. Já o
+    // NPC é lido AGORA: o aviso manda o jogador a um balcão, e o
+    // balcão que importa é o que existe neste instante. Um boneco
+    // apagado (ou desligado) deixa só o menu.
+    const npc =
+      quest === null || quest.npcId === null ? null : this.#deps.repository.getNpc(quest.npcId);
+
+    this.#deps.onCompleted?.({
+      serverId: attempt.serverId,
+      steamId: attempt.steamId,
+      playerQuestId: attempt.id,
+      questId: attempt.questId,
+      title: attempt.snapshot.title,
+      npcName: npc !== null && npc.enabled ? npc.name : null,
+      hasRewards: attempt.snapshot.rewards.length > 0,
+    });
 
     return true;
   }
