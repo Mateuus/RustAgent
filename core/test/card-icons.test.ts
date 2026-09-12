@@ -1,5 +1,5 @@
 // ============================================================
-//  Testes da ARTE PRÓPRIA da oferta.
+//  Testes da ARTE PRÓPRIA dos cards: oferta da loja e kit.
 //
 //  O que estes testes protegem, e não é óbvio:
 //
@@ -18,8 +18,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { StoreOffer } from '../src/db/store-repository.js';
-import { loadStoreIcons } from '../src/game/store-icons.js';
+import { kitIconKey, loadKitIcons, loadStoreIcons } from '../src/game/card-icons.js';
 import { buildStoreScreen } from '../src/game/ui-store-screens.js';
+import { kitBody, toKitInput } from '../src/http/routes/kits.js';
 import { storeOfferBody, toOfferInput } from '../src/http/routes/store.js';
 import type { Logger } from '../src/logger.js';
 
@@ -130,6 +131,57 @@ describe('as artes que sobem ao jogo', () => {
 
     expect(assets).toEqual([]);
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('a arte do kit', () => {
+  const kit = {
+    slug: 'kit-inicial',
+    name: 'Kit Inicial',
+    iconFile: null as string | null,
+    enabled: true,
+  };
+
+  it('a chave sai do SLUG, e não do id', () => {
+    // O id é um autoincrement desta máquina; o slug é o identificador
+    // estável. Um kit apagado e recriado com o mesmo slug mantém a
+    // chave — e, com ela, os bytes que o cliente já baixou.
+    expect(kitIconKey('kit-inicial')).toBe('kit.kit-inicial');
+  });
+
+  it('leva só o kit LIGADO que tem arte', () => {
+    const assets = loadKitIcons(
+      [
+        { ...kit, slug: 'com-arte', iconFile: 'kit.png' },
+        { ...kit, slug: 'sem-arte' },
+        { ...kit, slug: 'desligado', iconFile: 'kit.png', enabled: false },
+      ],
+      () => PNG,
+    );
+
+    expect(assets.map((asset) => asset.key)).toEqual(['kit.com-arte']);
+  });
+
+  it('arquivo que sumiu vira aviso, e o card cai no palpite de sempre', () => {
+    const logger = quietLogger();
+
+    const assets = loadKitIcons([{ ...kit, iconFile: 'sumiu.png' }], () => null, logger);
+
+    expect(assets).toEqual([]);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('`iconFile` OMITIDO conserva o que está gravado — é o que o site manda', () => {
+    const body = kitBody.parse({
+      slug: 'kit-inicial',
+      name: 'Kit Inicial',
+      kind: 'resgate',
+      items: [],
+    });
+
+    expect(toKitInput(body, { iconFile: 'kit.png' }).iconFile).toBe('kit.png');
+    // E `null` é a escolha de voltar ao ícone do primeiro item.
+    expect(toKitInput({ ...body, iconFile: null }, { iconFile: 'kit.png' }).iconFile).toBeNull();
   });
 });
 

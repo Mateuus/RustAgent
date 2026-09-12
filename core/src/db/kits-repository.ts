@@ -77,6 +77,13 @@ export interface KitRecord {
   readonly name: string;
   readonly description: string | null;
   /**
+   * A arte propria do card, em `Assets\kits\`.
+   *
+   * `null` = o palpite de sempre: o icone do PRIMEIRO item do kit.
+   * Ver a migracao 076 e game/card-icons.ts.
+   */
+  readonly iconFile: string | null;
+  /**
    * A aba em que ele aparece no jogo. `null` = sem categoria.
    *
    * Texto livre, e não uma tabela: aqui a categoria é um RÓTULO, e
@@ -138,6 +145,13 @@ export interface KitInput {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  /**
+   * A arte propria do card, em `Assets\kits\`.
+   *
+   * `null` = o palpite de sempre: o icone do PRIMEIRO item do kit.
+   * Ver a migracao 076 e game/card-icons.ts.
+   */
+  readonly iconFile: string | null;
   readonly category: string | null;
   readonly kind: KitKind;
   readonly cooldownSeconds: number | null;
@@ -172,6 +186,7 @@ interface KitRow {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  readonly icon_file: string | null;
   readonly category: string | null;
   readonly kind: string;
   readonly cooldown_seconds: number | null;
@@ -274,13 +289,13 @@ export class KitsRepository {
       const result = this.#db
         .prepare(
           `INSERT INTO kits
-             (slug, name, description, category, kind, cooldown_seconds, use_limit, use_reset_on,
-              wipe_delay_seconds, required_tier, required_tier_exact, items, enabled,
-              created_at, updated_at)
+             (slug, name, description, icon_file, category, kind, cooldown_seconds, use_limit,
+              use_reset_on, wipe_delay_seconds, required_tier, required_tier_exact, items,
+              enabled, created_at, updated_at)
            VALUES
-             (@slug, @name, @description, @category, @kind, @cooldown_seconds, @use_limit,
-              @use_reset_on, @wipe_delay_seconds, @required_tier, @required_tier_exact, @items,
-              @enabled, @created_at, @updated_at)`,
+             (@slug, @name, @description, @icon_file, @category, @kind, @cooldown_seconds,
+              @use_limit, @use_reset_on, @wipe_delay_seconds, @required_tier,
+              @required_tier_exact, @items, @enabled, @created_at, @updated_at)`,
         )
         .run({ ...toColumns(input), created_at: now, updated_at: now });
 
@@ -317,7 +332,8 @@ export class KitsRepository {
       const result = this.#db
         .prepare(
           `UPDATE kits
-              SET slug = @slug, name = @name, description = @description, category = @category,
+              SET slug = @slug, name = @name, description = @description,
+                  icon_file = @icon_file, category = @category,
                   kind = @kind, cooldown_seconds = @cooldown_seconds,
                   use_limit = @use_limit, use_reset_on = @use_reset_on,
                   wipe_delay_seconds = @wipe_delay_seconds,
@@ -590,6 +606,7 @@ function toColumns(input: KitInput): Record<string, string | number | null> {
     slug: input.slug,
     name: input.name,
     description: input.description,
+    icon_file: input.iconFile,
     category: input.category,
     kind: input.kind,
     // Cooldown só faz sentido em `cooldown`, e o limite de usos só
@@ -630,6 +647,9 @@ function toRecord(row: KitRow, servers: readonly string[], claimCount: number): 
     slug: row.slug,
     name: row.name,
     description: row.description,
+    // Coluna nova: kit gravado antes dela vem NULL, que e o palpite
+    // de sempre.
+    iconFile: row.icon_file === '' ? null : row.icon_file,
     category: row.category,
     // A migração 052 já converteu os `compra` que existiam; o
     // `CHECK` da tabela é que continua aceitando a palavra, e aqui

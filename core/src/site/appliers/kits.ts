@@ -27,7 +27,7 @@
 // ============================================================
 
 import type { KitInput, KitsRepository } from '../../db/kits-repository.js';
-import { kitBody } from '../../http/routes/kits.js';
+import { kitBody, toKitInput } from '../../http/routes/kits.js';
 import type { ConfigFieldError } from '../client.js';
 import {
   DOMAIN_ERROR_CODES,
@@ -114,7 +114,13 @@ export function kitsApplier(deps: KitsApplierDeps): DomainApplier<KitsWork> {
         }
 
         seen.add(kit.slug);
-        kits.push({ ...kit, servers });
+
+        // ####  O SITE NÃO CONHECE A ARTE PRÓPRIA  ####
+        //
+        // O `iconFile` não vem no payload dele, e é por isso que o
+        // schema o trata como OMITIDO e não como `null`: aplicar os
+        // kits do site apagaria a arte que alguém escolheu no painel.
+        kits.push({ ...toKitInput(kit, deps.repository.getBySlug(kit.slug)), servers });
       }
 
       // O servidor que não casou é erro DE LINHA, e não de lista: o

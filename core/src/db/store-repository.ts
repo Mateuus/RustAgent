@@ -99,7 +99,7 @@ export interface OfferItem {
  *
  * `file` NULL = usa o icone do jogo. Preenchido, manda: e o nome de
  * um PNG em `Assets\store\`, e os bytes vao ao jogo pelo
- * OrigemZImages (ver game/store-icons.ts).
+ * OrigemZImages (ver game/card-icons.ts).
  */
 export interface OfferIcon {
   readonly shortname: string;

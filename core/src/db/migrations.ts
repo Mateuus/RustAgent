@@ -6542,6 +6542,29 @@ const STORE_OFFER_ICON_FILE_SCHEMA = `
 ALTER TABLE store_offers ADD COLUMN icon_file TEXT;
 `;
 
+const KIT_ICON_FILE_SCHEMA = `
+-- ============================================================
+--  076  o card do kit com arte propria.
+--
+--  ####  O FALLBACK E O PRIMEIRO ITEM, E ELE FICA  ####
+--
+--  Sem arte, o card do kit desenha o icone do PRIMEIRO item da
+--  lista -- e sem catalogo lido, um retangulo vazio. E um palpite
+--  honesto (um kit de sucata mostra sucata), e continua valendo
+--  para todo kit ja gravado.
+--
+--  O que faltava era poder dizer outra coisa: "Kit Inicial" nao e
+--  uma pedra, e quem monta o kit sabe que arte o representa.
+--
+--  NULL = o palpite de sempre. Preenchido, manda.
+--
+--  Guarda o NOME do arquivo em \`Assets\\kits\\\`, como a loja faz com
+--  \`Assets\\store\\\` (migracao 075): os bytes vao ao jogo pelo
+--  OrigemZImages, e o CRC nasce do conteudo.
+-- ============================================================
+ALTER TABLE kits ADD COLUMN icon_file TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6742,6 +6765,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 74, name: 'player-timers', sql: PLAYER_TIMERS_SCHEMA },
   // 11/09/2026: o card da loja passa a aceitar arte propria.
   { id: 75, name: 'store-offer-icon-file', sql: STORE_OFFER_ICON_FILE_SCHEMA },
+  // 11/09/2026: o card do kit tambem.
+  { id: 76, name: 'kit-icon-file', sql: KIT_ICON_FILE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

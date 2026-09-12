@@ -62,7 +62,7 @@ import type { OfferBadge, StoreOffer } from '../db/store-repository.js';
 import { vehicleFuelOf, type StoreCatalogEntry } from '../store/service.js';
 import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
-import { storeIconKey } from './store-icons.js';
+import { storeIconKey } from './card-icons.js';
 import type { SlotValue } from './ui-template.js';
 import { SLOTS, fillTemplate } from './ui-store-template.js';
 import {
@@ -1617,7 +1617,7 @@ function itemImage(id: string, offer: StoreOffer, rect: Rect): UiElement {
  * um VIP de 30 dias, um pacote, um kit, que antes pegavam emprestado
  * o ícone de alguma coisa.
  *
- * Quem leva os bytes ao jogo é game/store-icons.ts; aqui sai só o
+ * Quem leva os bytes ao jogo é game/card-icons.ts; aqui sai só o
  * lugar reservado, que o plugin troca pelo CRC na hora de desenhar.
  */
 function offerImageSource(offer: StoreOffer): Extract<UiElement, { type: 'image' }>['source'] {
