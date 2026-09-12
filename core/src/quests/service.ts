@@ -164,6 +164,14 @@ export interface QuestsServiceDeps {
   readonly now?: () => number;
 }
 
+function npcTalkKey(input: {
+  readonly serverId: string;
+  readonly steamId: string;
+  readonly npcId: string;
+}): string {
+  return `${input.serverId}:${input.steamId}:${input.npcId}`;
+}
+
 // ------------------------------------------------------------
 //  §2  O VOCABULÁRIO DA TELA
 // ------------------------------------------------------------
@@ -219,11 +227,75 @@ export interface ClaimResult {
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
+/**
+ * Por quanto tempo uma conversa com o NPC continua valendo.
+ *
+ * O jogador aperta TALK, a tela abre, ele lê a descrição, pensa. Um
+ * minuto seria curto para quem lê devagar; uma hora faria a
+ * conversa valer de dentro de casa, longe do boneco — que é
+ * justamente o que a regra existe para impedir.
+ */
+const NPC_TALK_TTL_MS = 5 * MINUTE_MS;
+
 export class QuestsService {
   readonly #deps: QuestsServiceDeps;
 
+  /**
+   * Quem falou com qual NPC, e quando.
+   *
+   * ####  É ISTO QUE DÁ AUTORIDADE AO "FALE COM O MATEUS"  ####
+   *
+   * A quest de NPC aparece no menu (ver `offersFor`), e o botão de
+   * aceitar dela precisa de uma pergunta que o AGENTE saiba
+   * responder: este jogador esteve no balcão?
+   *
+   * A resposta não pode vir do clique — o alvo do botão é texto que
+   * chega do jogo, e um cliente adulterado mandaria o que quisesse.
+   * Ela vem do empurrão do plugin: o USE/TALK no NPC é medido lá,
+   * com distância, e chega aqui pelo `noteNpcTalk`.
+   *
+   * Memória, e não coluna: a conversa vale minutos, e um agente que
+   * reinicia deve mesmo pedir que o jogador fale de novo.
+   */
+  readonly #npcTalks = new Map<string, number>();
+
   constructor(deps: QuestsServiceDeps) {
     this.#deps = deps;
+  }
+
+  /**
+   * O jogador acabou de falar com aquele NPC.
+   *
+   * Chamado pelo `QuestNpcSync` quando o plugin grita o USE. A
+   * limpeza é oportunista: a cada anotação, o que venceu sai. Sem
+   * ela o mapa cresceria com um par por jogador e por NPC até o
+   * próximo boot.
+   */
+  noteNpcTalk(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly npcId: string;
+  }): void {
+    const now = this.#now();
+
+    for (const [key, at] of this.#npcTalks) {
+      if (now - at > NPC_TALK_TTL_MS) {
+        this.#npcTalks.delete(key);
+      }
+    }
+
+    this.#npcTalks.set(npcTalkKey(input), now);
+  }
+
+  /** Ele esteve no balcão nos últimos minutos? */
+  #talkedRecently(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly npcId: string;
+  }): boolean {
+    const at = this.#npcTalks.get(npcTalkKey(input));
+
+    return at !== undefined && this.#now() - at <= NPC_TALK_TTL_MS;
   }
 
   // ======================================================
@@ -296,7 +368,17 @@ export class QuestsService {
           ? undefined
           : quest.npcId;
 
-      if (npcId !== input.npcId) {
+      // ####  A TELA DO NPC MOSTRA SÓ AS DELE; O MENU MOSTRA TUDO  ####
+      //
+      // Decisão do dono em 11/09/2026, depois do teste que abriu o
+      // menu e leu "Disponíveis: 0" com uma missão cadastrada e
+      // ligada. Ela estava lá — escondida atrás de um boneco que o
+      // jogador não sabia que existia.
+      //
+      // Aparecer não é poder pegar: quem tem NPC continua só se
+      // aceitando NELE, e o bloqueio de `#whyNot` diz com quem
+      // falar. O menu vira o cartaz; o NPC continua sendo o balcão.
+      if (input.npcId !== undefined && npcId !== input.npcId) {
         continue;
       }
 
@@ -1153,6 +1235,37 @@ export class QuestsService {
 
       if (!allowed) {
         return { code: 'QUEST_LOCKED', reason: 'Você ainda não tem acesso a esta quest.' };
+      }
+    }
+
+    // ####  A MISSÃO DE NPC SÓ SE PEGA NO BALCÃO  ####
+    //
+    // Ela aparece no menu desde 11/09/2026 (ver `offersFor`), e é
+    // por isso que este bloqueio precisa existir: sem ele, o
+    // cartaz viraria balcão e o boneco perderia a função.
+    //
+    // Quem responde "ele esteve lá?" é o empurrão do plugin, e não
+    // o clique — ver `#npcTalks`. A frase diz o nome e as
+    // coordenadas porque um NPC que ninguém acha é a mesma coisa
+    // que um NPC que não existe.
+    if (quest.npcId !== null) {
+      const npc = this.#deps.repository.getNpc(quest.npcId);
+
+      if (
+        npc !== null &&
+        npc.enabled &&
+        !this.#talkedRecently({
+          serverId: input.serverId,
+          steamId: input.steamId,
+          npcId: npc.id,
+        })
+      ) {
+        return {
+          code: 'QUEST_NEEDS_NPC',
+          reason:
+            `Fale com ${npc.name} para pegar esta missão. ` +
+            `Ele fica em ${String(Math.round(npc.x))}, ${String(Math.round(npc.z))}.`,
+        };
       }
     }
 

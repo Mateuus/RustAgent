@@ -579,7 +579,7 @@ describe('a configuração', () => {
 // ------------------------------------------------------------
 
 describe('os NPCs', () => {
-  it('cria com 201, id derivado do nome e o prefab medido', async () => {
+  it('cria com 201, id derivado do nome e o boneco que fala', async () => {
     const response = await post('/quests/npcs', {
       serverId: 'pvp1',
       name: 'Velho do Outpost',
@@ -590,7 +590,7 @@ describe('os NPCs', () => {
 
     expect(response.statusCode).toBe(201);
     expect(response.json().npc.id).toBe('velho-do-outpost');
-    expect(response.json().npc.prefab).toContain('bandit_shopkeeper');
+    expect(response.json().npc.prefab).toContain('bandit_conversationalist');
   });
 
   it('a listagem diz quais quests dependem dele', async () => {

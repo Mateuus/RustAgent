@@ -709,8 +709,94 @@ describe('os NPCs', () => {
 
     expect(npc).toMatchObject({ serverId: 'pvp1', x: 120.5, z: -430.25, rotation: 90 });
     // O prefab e o raio saem dos padrões do contrato — medidos, não
-    // chutados: o `bandit_shopkeeper.prefab` está nos bundles.
-    expect(npc?.prefab).toContain('bandit_shopkeeper');
+    // chutados. E o padrão é o boneco que FALA: o prompt "TALK" do
+    // jogo é do `NPCTalking`, e o `bandit_shopkeeper` de antes não
+    // era um. Ver a migração 077.
+    expect(npc?.prefab).toContain('bandit_conversationalist');
+  });
+
+  it('o `/questnpc move` TRAZ o NPC, e não cria um segundo', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+
+    const handled = sync().handleLine(
+      'pvp1',
+      npcLine({ kind: 'move', npcId: 'velho', x: 500, y: 20, z: -80, rotation: 270 }),
+    );
+
+    expect(handled).toBe(true);
+    expect(h.repository.getNpc('velho')).toMatchObject({ x: 500, z: -80, rotation: 270 });
+    // O painel mandava usar o `add` de novo, e o admin terminava
+    // com "velho" e "velho-2". Este é o teste dessa diferença.
+    expect(h.repository.getNpc('velho-2')).toBeNull();
+  });
+
+  it('o `move` de outro servidor não mexe no NPC daqui', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+
+    sync().handleLine(
+      'pvp2',
+      npcLine({ kind: 'move', npcId: 'velho', x: 500, y: 20, z: -80, rotation: 270 }),
+    );
+
+    expect(h.repository.getNpc('velho')).toMatchObject({ x: 1, z: 1 });
+  });
+
+  it('o `/questnpc remove` apaga o NPC e deixa a quest dele de pé', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    h.repository.create(
+      'do-npc',
+      questInputSchema.parse({
+        title: 'Do NPC',
+        npcId: 'velho',
+        objectives: [{ seq: 0, kind: 'kill', target: 'bear', amount: 1 }],
+      }),
+    );
+
+    expect(sync().handleLine('pvp1', npcLine({ kind: 'remove', npcId: 'velho' }))).toBe(true);
+
+    expect(h.repository.getNpc('velho')).toBeNull();
+    // O progresso de quem estava fazendo não pode ir junto: a quest
+    // órfã volta ao menu. É a mesma regra da rota do painel.
+    expect(h.repository.get('do-npc')).not.toBeNull();
   });
 
   it('desce `clear` e um `set` por NPC — e só quando muda', async () => {
@@ -775,7 +861,7 @@ describe('os NPCs', () => {
     expect(opened[0]).toMatchObject({
       serverId: 'pvp1',
       steamId: FULANO,
-      screenId: 'tela-quest:npc:velho',
+      screenId: 'tela-missoes:npc:velho',
     });
   });
 
@@ -871,6 +957,10 @@ describe('a quest de entrega', () => {
         rewards: [{ kind: 'coins', perMeter: 0.5, min: 50, max: 2000 }],
       }),
     );
+
+    // A quest tem NPC de origem, e desde 11/09/2026 quem tem NPC só
+    // se pega no balcão. Aqui o jogador falou com ele.
+    h.service.noteNpcTalk({ serverId: 'pvp1', steamId: FULANO, npcId: 'outpost' });
 
     const view = await h.service.accept({
       serverId: 'pvp1',

@@ -1140,23 +1140,64 @@ Rodado com Mono.Cecil contra o `Assembly-CSharp.dll` da instalação real
 | `MapMarkerGenericRadius : MapMarker` | sim | o marcador de mapa, com `radius`, `color1`, `color2`, `alpha` |
 | `VendingMachineMapMarker` | sim | o marcador **com nome** — é o que dá o rótulo no mapa |
 | `BaseMission`, `MissionProvider` | sim | o sistema de missão vanilla. **Não serve**: `BaseMission : BaseScriptableObject`, e criar asset em Oxide não é caminho |
-| hook de conversa no Oxide | **não** | `grep` no `Oxide.Rust.dll`: só `OnNpcTarget` |
+| hook de conversa no Oxide | ~~não~~ **SIM** | ver 10.1.1 |
 
-### 10.2 A escolha, e a alternativa descartada
+#### 10.1.1 A remedição de 11/09/2026 — a linha do hook estava errada
 
-**Escolhido:** `NPCShopKeeper` spawnado parado, com a IA desligada e o dano
-bloqueado, mais detecção de USE por proximidade no `OnPlayerInput`.
+A linha acima dizia **não**, e a medição olhou o lugar errado: o `Oxide.Rust.dll`.
+Os hooks do Oxide para Rust são **injetados no `Assembly-CSharp.dll`**, e é lá que
+eles aparecem. Remedido com `ilspycmd` contra a instalação real:
 
-**Descartado:** `NPCTalking` com conversa nativa. Ele daria o "aperte E para
-falar" do jogo de graça — mas as falas são assets do jogo, e cancelar a conversa
-vanilla para abrir a nossa exigiria um hook que não existe nesta instalação. O
-resultado seria um NPC que abre duas telas.
+```
+NPCTalking.Server_BeginTalking(BasePlayer ply)
+  ...
+  if (Interface.CallHook("OnNpcConversationStart", this, ply, conversationFor) != null)
+  {
+      return;          // <- devolver não-nulo ABORTA a conversa vanilla
+  }
+```
 
-> **O custo da escolha, dito na cara:** `OnPlayerInput` dispara a cada quadro
-> para cada jogador. A contenção é a mesma do loot (§5.4): o hook **só é
-> registrado se aquele servidor tiver NPC**, e a primeira linha dele é uma
-> comparação de botão, antes de qualquer distância. O custo medido vai no
-> `origemz.quest.diag`, e a frente F **não fecha sem esse número**.
+Também existem `OnNpcConversationEnded`, `OnNpcConversationRespond` e
+`OnNpcConversationResponded`.
+
+**A consequência é grande:** o prompt **TALK** que o cliente desenha é do
+`NPCTalking`. Com um boneco dessa família, ele aparece de graça — e a conversa que
+viria atrás morre no hook.
+
+E a escolha antiga tinha um custo que só o teste mostrou: o `bandit_shopkeeper` é
+`NPCShopKeeper`, **uma classe acima** do `NPCTalking`. Ele é mudo. O jogador
+chegava perto, mirava e não via nada — relatado em 11/09/2026 como "o TALK não
+aparece".
+
+Os bonecos, spawnados um a um no `server01` e com o tipo lido de volta:
+
+| prefab | classe | serve? |
+|---|---|---|
+| `bandit_conversationalist` | `VehicleVendor : NPCTalking` | **o padrão** — fala, e o `spawnerRef` dele nasce inválido (não faz nada) |
+| `boat_shopkeeper`, `stables_shopkeeper` | `VehicleVendor : NPCTalking` | sim |
+| `apartment_vendor` | `ApartmentVendor : NPCTalking` | sim |
+| `bandit_shopkeeper`, `waterwell_shopkeeper` | `NPCShopKeeper` | **mudo** — sem TALK |
+| `missionprovider_*` | `NPCTalking` + `IMissionProvider` | **não**: o `ServerInit` deles spawna um `MapMarkerMissionProvider` que fica no mapa de todo mundo e não morre com o NPC. Medido: o mundo subiu de 16 para 21 marcadores na sondagem |
+
+### 10.2 A escolha — e os dois caminhos que ela deixou
+
+**Escolhido (11/09/2026):** boneco `NPCTalking`, o **TALK do jogo** como porta
+principal, e o hook `OnNpcConversationStart` abortando a conversa vanilla para
+abrir a nossa tela.
+
+**Mantido:** a detecção de USE por proximidade no `OnPlayerInput`. Ela não é
+redundância — o TALK do jogo tem alcance **fixo de 3 m** (`RPC_Server.MaxDistance(3f)`),
+e o raio do painel vai a 20. Acima de 3 m, só o USE alcança.
+
+Os dois desaguam no mesmo `QuestNpcTalk`, com o mesmo freio de 1,5 s: apertar E em
+cima do NPC dispara os dois no mesmo instante, e sem o freio a tela abriria duas
+vezes.
+
+> **O custo, dito na cara:** `OnPlayerInput` dispara a cada quadro para cada
+> jogador. A contenção é a mesma do loot (§5.4): o hook **só é registrado se
+> aquele servidor tiver NPC**, e a primeira linha dele é uma comparação de botão,
+> antes de qualquer distância. O custo medido vai no `origemz.quest.diag`, e a
+> frente F **não fecha sem esse número**.
 
 ### 10.3 Cadastrar é in-game; gerenciar é no painel
 
@@ -1169,6 +1210,10 @@ onde o NPC deve olhar, e digita:
 /questnpc remove <id>
 /questnpc list
 ```
+
+> Os quatro existem desde 11/09/2026. Antes só havia `add` e `list` — e o painel
+> mandava usar o `add` de novo para mover, o que criava um SEGUNDO NPC com o
+> sufixo `-2`.
 
 O plugin manda a posição ao agente, que grava. **O painel faz o resto**: renomear,
 ligar/desligar, escolher o prefab, o raio, o marcador, e ver todos no mapa
@@ -1285,7 +1330,9 @@ quando concluiu, se resgatou. Com os botões de suporte: ajustar contador,
 concluir à mão, reentregar recompensa.
 
 **NPCs** — a lista por servidor, **sobre o mapa** (o `map-view.tsx` já existe).
-Renomear, mover (só pelo jogo), ligar/desligar, respawnar.
+Renomear, escolher o boneco (§10.1.1 — e a lista avisa qual deles mostra "TALK"),
+ligar/desligar, e ver e mudar **quais missões cada um oferece**, pelo nome. Mover
+continua sendo só pelo jogo, com `/questnpc move <id>`.
 
 **Manutenção** — o wipe de progresso (§14), as entregas pendentes (§6.4) e a
 auditoria (`quest_events`).

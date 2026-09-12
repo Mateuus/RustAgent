@@ -6565,6 +6565,47 @@ const KIT_ICON_FILE_SCHEMA = `
 ALTER TABLE kits ADD COLUMN icon_file TEXT;
 `;
 
+const NPC_THAT_TALKS_SCHEMA = `
+-- ============================================================
+--  077  o NPC de missao passa a ser um boneco que FALA.
+--
+--  ####  O SINTOMA  ####
+--
+--  Teste de 11/09/2026: o NPC nasce no lugar certo, o jogador
+--  chega perto, mira -- e nao aparece nada. Nenhum "TALK", nenhum
+--  aviso. O boneco e uma estatua.
+--
+--  ####  A CAUSA, MEDIDA  ####
+--
+--  O prefab padrao era o \`bandit_shopkeeper\`, que o servidor
+--  instancia como \`NPCShopKeeper\`. O prompt de conversa do
+--  cliente e do \`NPCTalking\` -- uma classe ABAIXO dessa. Sem
+--  NPCTalking, nao ha prompt, e nunca houve.
+--
+--  Trocando para o \`bandit_conversationalist\` (medido:
+--  \`VehicleVendor : NPCTalking\`), o prompt aparece de graca e o
+--  plugin intercepta a conversa vanilla no hook
+--  \`OnNpcConversationStart\` -- que EXISTE nesta instalacao, ao
+--  contrario do que a medicao de 06/09 concluiu olhando o DLL
+--  errado.
+--
+--  ####  POR QUE A MIGRACAO MEXE NOS QUE JA EXISTEM  ####
+--
+--  Decisao do dono em 11/09/2026. O padrao novo so valeria para
+--  NPC cadastrado dali em diante, e os que ja estao no mundo
+--  continuariam mudos ate alguem abrir o painel e trocar um por
+--  um. Quem cadastrou "Mateus" escolheu o LUGAR, nao a roupa: a
+--  roupa era o padrao, e o padrao estava errado.
+--
+--  Quem tiver escolhido OUTRO boneco de proposito fica com o
+--  dele. So o valor antigo do padrao e reescrito.
+-- ============================================================
+UPDATE quest_npcs
+   SET prefab = 'assets/prefabs/npc/bandit/shopkeepers/bandit_conversationalist.prefab',
+       updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+ WHERE prefab = 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6767,6 +6808,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 75, name: 'store-offer-icon-file', sql: STORE_OFFER_ICON_FILE_SCHEMA },
   // 11/09/2026: o card do kit tambem.
   { id: 76, name: 'kit-icon-file', sql: KIT_ICON_FILE_SCHEMA },
+  // 11/09/2026: o NPC de missao ganha um boneco que mostra "TALK".
+  { id: 77, name: 'npc-that-talks', sql: NPC_THAT_TALKS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

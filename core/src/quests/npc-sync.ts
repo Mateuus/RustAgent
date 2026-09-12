@@ -35,6 +35,7 @@
 
 import type { QuestNpcRecord, QuestsRepository } from '../db/quests-repository.js';
 import { encodeQuestPayload, QUESTS_CONTRACT } from '../game/quests-contract.js';
+import { QUESTS_SCREEN_ID } from '../game/ui-quests-screen.js';
 import { DEFAULT_NPC_PREFAB } from '../types/quests.js';
 import type { Logger } from '../logger.js';
 import { slugify } from '../db/custom-items-repository.js';
@@ -62,6 +63,18 @@ export interface QuestNpcSyncDeps {
   readonly logger: Logger;
   /** O mesmo segredo do `#OZQUEST#`. Ver `parseQuestPush`. */
   readonly secret: string;
+  /**
+   * O jogador falou com aquele NPC.
+   *
+   * É a única testemunha que o agente tem de que alguém esteve no
+   * balcão — e é ela que libera o botão de aceitar da missão
+   * daquele NPC. Ver `#npcTalks` no serviço.
+   */
+  readonly onTalk?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly npcId: string;
+  }) => void;
   /** Abre a tela do NPC para aquele jogador. */
   readonly openScreen?: (input: {
     readonly serverId: string;
@@ -81,7 +94,25 @@ export type NpcPush =
       readonly z: number;
       readonly rotation: number;
     }
-  /** Um jogador apertou USE perto de um NPC. */
+  /**
+   * O admin foi até o lugar novo e chamou o NPC para lá.
+   *
+   * Mover é TRAZER, e por isso não pede coordenada: quem quer o
+   * boneco em outro lugar já está nele. Sem este empurrão o painel
+   * mandava usar o `add` de novo — e o admin terminava com dois
+   * bonecos, "mateus" e "mateus-2".
+   */
+  | {
+      readonly kind: 'move';
+      readonly npcId: string;
+      readonly x: number;
+      readonly y: number;
+      readonly z: number;
+      readonly rotation: number;
+    }
+  /** O admin apagou o NPC de dentro do jogo. */
+  | { readonly kind: 'remove'; readonly npcId: string }
+  /** Um jogador apertou USE (ou TALK) perto de um NPC. */
   | { readonly kind: 'use'; readonly steamId: string; readonly npcId: string };
 
 export class QuestNpcSync {
@@ -154,6 +185,10 @@ export class QuestNpcSync {
     try {
       if (push.kind === 'add') {
         this.#add(serverId, push);
+      } else if (push.kind === 'move') {
+        this.#move(serverId, push);
+      } else if (push.kind === 'remove') {
+        this.#remove(serverId, push.npcId);
       } else {
         this.#use(serverId, push);
       }
@@ -195,6 +230,54 @@ export class QuestNpcSync {
     this.#deps.logger.info({ server: serverId, npc: id, name: push.name }, 'NPC de missão criado');
   }
 
+  #move(serverId: string, push: Extract<NpcPush, { kind: 'move' }>): void {
+    const npc = this.#deps.repository.getNpc(push.npcId);
+
+    // A mesma conferência do `#use`, e pelo mesmo motivo: o id veio
+    // do jogo, e um NPC de outro servidor não se move daqui.
+    if (npc === null || npc.serverId !== serverId) {
+      return;
+    }
+
+    this.#deps.repository.updateNpc(push.npcId, {
+      ...npc,
+      x: push.x,
+      y: push.y,
+      z: push.z,
+      rotation: push.rotation,
+    });
+
+    this.forget(serverId);
+
+    this.#deps.logger.info(
+      { server: serverId, npc: push.npcId, x: push.x, z: push.z },
+      'NPC de missão mudou de lugar',
+    );
+  }
+
+  #remove(serverId: string, npcId: string): void {
+    const npc = this.#deps.repository.getNpc(npcId);
+
+    if (npc === null || npc.serverId !== serverId) {
+      return;
+    }
+
+    // ####  APAGAR O NPC NÃO APAGA A QUEST DELE  ####
+    //
+    // É a mesma regra da rota do painel: o progresso de quem estava
+    // fazendo não pode ir junto. A quest órfã volta ao menu — ver
+    // `listOffers` no serviço.
+    const orphaned = this.#deps.repository.questsOfNpc(npcId);
+
+    this.#deps.repository.removeNpc(npcId);
+    this.forget(serverId);
+
+    this.#deps.logger.info(
+      { server: serverId, npc: npcId, orphaned: orphaned.length },
+      'NPC de missão apagado de dentro do jogo',
+    );
+  }
+
   #use(serverId: string, push: Extract<NpcPush, { kind: 'use' }>): void {
     // ####  A CONFERÊNCIA QUE A IDA A MAIS PAGA  ####
     //
@@ -207,6 +290,13 @@ export class QuestNpcSync {
       return;
     }
 
+    // ####  A TESTEMUNHA VEM ANTES DA TELA  ####
+    //
+    // Ela é o que diferencia "abriu a tela do NPC" de "pode pegar a
+    // missão dele", e precisa estar gravada ANTES de a tela ser
+    // montada: o `offersFor` que desenha a tela é quem pergunta.
+    this.#deps.onTalk?.({ serverId, steamId: push.steamId, npcId: npc.id });
+
     const open = this.#deps.openScreen;
 
     if (open === undefined) {
@@ -218,7 +308,16 @@ export class QuestNpcSync {
       void open({
         serverId,
         steamId: push.steamId,
-        screenId: `tela-quest:npc:${npc.id}`,
+        // ####  O ID VEM DA TELA, E NÃO DE UMA CÓPIA  ####
+        //
+        // Esta linha dizia `tela-quest:npc:...` e a tela se chama
+        // `tela-missoes` desde 06/09. O endereço não casava com
+        // `parseQuestsScreenId`, caía no roteamento comum e o USE
+        // no NPC não abria NADA — o sintoma que o teste de
+        // 11/09/2026 relatou como "a missão não pode ser aceita".
+        //
+        // Importar a constante é o que impede a terceira cópia.
+        screenId: `${QUESTS_SCREEN_ID}:npc:${npc.id}`,
       }).catch((error: unknown) => {
         this.#deps.logger.debug(
           { server: serverId, npc: npc.id, err: error },
@@ -298,16 +397,19 @@ export function parseNpcLine(line: string, secret: string): NpcPush | null {
       return null;
     }
 
+    const npcId = typeof body.npcId === 'string' && body.npcId !== '' ? body.npcId : null;
+
     if (body.kind === 'use') {
-      return typeof body.steamId === 'string' &&
-        /^\d{17}$/.test(body.steamId) &&
-        typeof body.npcId === 'string' &&
-        body.npcId !== ''
-        ? { kind: 'use', steamId: body.steamId, npcId: body.npcId }
+      return npcId !== null && typeof body.steamId === 'string' && /^\d{17}$/.test(body.steamId)
+        ? { kind: 'use', steamId: body.steamId, npcId }
         : null;
     }
 
-    if (body.kind !== 'add') {
+    if (body.kind === 'remove') {
+      return npcId === null ? null : { kind: 'remove', npcId };
+    }
+
+    if (body.kind !== 'add' && body.kind !== 'move') {
       return null;
     }
 
@@ -319,15 +421,19 @@ export function parseNpcLine(line: string, secret: string): NpcPush | null {
       }
     }
 
+    const place = {
+      x: body.x as number,
+      y: body.y as number,
+      z: body.z as number,
+      rotation: body.rotation as number,
+    };
+
+    if (body.kind === 'move') {
+      return npcId === null ? null : { kind: 'move', npcId, ...place };
+    }
+
     return typeof body.name === 'string' && body.name.trim() !== ''
-      ? {
-          kind: 'add',
-          name: body.name.trim().slice(0, 60),
-          x: body.x as number,
-          y: body.y as number,
-          z: body.z as number,
-          rotation: body.rotation as number,
-        }
+      ? { kind: 'add', name: body.name.trim().slice(0, 60), ...place }
       : null;
   } catch {
     return null;

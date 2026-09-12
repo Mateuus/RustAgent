@@ -432,7 +432,12 @@ namespace Oxide.Plugins
             // Mesma razao, e este e o mais caro de todos: o
             // OnPlayerInput dispara a cada QUADRO, para cada
             // jogador. Quem o liga e o primeiro NPC.
+            //
+            // O de conversa vai junto pelo mesmo motivo de higiene -
+            // ele e barato (so dispara quando alguem aperta TALK),
+            // mas um servidor sem NPC nao tem por que ouvi-lo.
             Unsubscribe("OnPlayerInput");
+            Unsubscribe("OnNpcConversationStart");
             _questNpcInputHooked = false;
 
             // E o lote que o oxide.reload deixou no disco.
@@ -7486,6 +7491,7 @@ namespace Oxide.Plugins
         // perguntar quanto os ganchos custam neste servidor.
         private const string HookItemAdded = "OnItemAddedToContainer";
         private const string HookPlayerInput = "OnPlayerInput";
+        private const string HookNpcConversation = "OnNpcConversationStart";
         private const string QuestDataFile = "OrigemZAgentQuests";
         private const int QuestContract = 1;
 
@@ -8467,13 +8473,33 @@ namespace Oxide.Plugins
         //  ####  POR QUE ELES SAO CONSTRUIDOS AQUI  ####
         //
         //  O Quests.cs de referencia depende do HumanNPC, que nao
-        //  esta instalado nesta rede - e nao ha hook de conversa no
-        //  Oxide desta instalacao (CONFERIDO: grep no Oxide.Rust.dll
-        //  so devolve OnNpcTarget). O boneco e nosso.
+        //  esta instalado nesta rede. O boneco e nosso.
         //
-        //  MEDIDO com Mono.Cecil contra o Assembly-CSharp.dll real:
-        //  NPCShopKeeper existe, herda de NPCPlayer, e o prefab
-        //  `bandit_shopkeeper.prefab` esta nos bundles do servidor.
+        //  ####  O HOOK DE CONVERSA EXISTE, E ELE E QUEM DA O "TALK"  ####
+        //
+        //  A medicao de 06/09 disse que nao havia - ela olhou o
+        //  Oxide.Rust.dll, e o lugar errado. REMEDIDO em 11/09/2026
+        //  com o ilspycmd contra o Assembly-CSharp.dll DESTA
+        //  instalacao (o Oxide ja o patcheia): o
+        //  NPCTalking.Server_BeginTalking chama
+        //  `Interface.CallHook("OnNpcConversationStart", ...)` e
+        //  ABORTA quando a resposta nao e nula.
+        //
+        //  Isso muda o desenho: o prompt "TALK" do jogo aparece
+        //  sozinho em cima de qualquer NPCTalking - e a conversa
+        //  vanilla, que nao queremos, morre no hook. O jogador ve o
+        //  que o Rust ensinou a ver, e quem responde e a nossa tela.
+        //
+        //  MEDIDO no server01, spawnando cada prefab e lendo o tipo:
+        //
+        //    bandit_conversationalist   VehicleVendor : NPCTalking
+        //    boat_shopkeeper            VehicleVendor : NPCTalking
+        //    stables_shopkeeper         VehicleVendor : NPCTalking
+        //    apartment_vendor           ApartmentVendor : NPCTalking
+        //    bandit_shopkeeper          NPCShopKeeper  <- SEM talk
+        //    missionprovider_*          NPCTalking, mas IMissionProvider:
+        //                               spawna um MapMarkerMissionProvider
+        //                               que fica no mapa. Fora.
         //
         //  ####  O `OnPlayerInput` E O HOOK MAIS QUENTE QUE EXISTE  ####
         //
@@ -8485,10 +8511,22 @@ namespace Oxide.Plugins
         //    3. so depois disso ele mede distancia, e contra uma
         //       lista que tem tres ou quatro entradas.
         //
+        //  ####  DOIS CAMINHOS PARA A MESMA PORTA  ####
+        //
+        //  O TALK so alcanca 3 m - e o teto do RPC do jogo
+        //  (`RPC_Server.MaxDistance(3f)`), e nao uma escolha nossa.
+        //  O raio do painel vai a 20, entao o USE por proximidade
+        //  continua existindo para quem configurou mais que isso.
+        //
+        //  Os dois desaguam no `QuestNpcTalk`, e o mesmo freio de
+        //  1,5 s vale para ambos: apertar E em cima do NPC dispara o
+        //  TALK e o USE no mesmo instante, e sem o freio a tela
+        //  abriria duas vezes.
+        //
         //  ####  A TELA E DO AGENTE, E O TRANSPORTE JA EXISTE  ####
         //
         //  Apertar USE perto do NPC nao abre nada aqui: o plugin
-        //  manda o jogador abrir `tela-quest:npc:<id>` pelo mesmo
+        //  manda o jogador abrir `tela-missoes:npc:<id>` pelo mesmo
         //  caminho que o menu ja usa. Zero transporte novo, zero
         //  cache novo, zero tratamento de erro novo.
         //
@@ -8639,6 +8677,21 @@ namespace Oxide.Plugins
                 // O nome que aparece sobre a cabeca dele.
                 npc.displayName = info.Name;
 
+                // ####  O NPCTalking TEM UM SEGUNDO NOME  ####
+                //
+                // O `displayName` e o do jogador; o `NPCName` e o
+                // que a interface de conversa do jogo usa. Um
+                // boneco chamado "Mateus" que se apresenta como
+                // "Airwolf Vendor" - o nome que vem no prefab - e o
+                // tipo de detalhe que faz o jogador achar que
+                // entrou na tela errada.
+                NPCTalking talking = npc as NPCTalking;
+
+                if (talking != null)
+                {
+                    talking.NPCName = new Translate.Phrase(string.Empty, info.Name);
+                }
+
                 // ####  ELE NAO ANDA E NAO MORRE  ####
                 //
                 // Um vendedor que persegue jogador ou que morre para
@@ -8765,7 +8818,7 @@ namespace Oxide.Plugins
             }
         }
 
-        // Ver o cabecalho: o hook so entra se houver NPC.
+        // Ver o cabecalho: os hooks so entram se houver NPC.
         private void QuestNpcSyncInputHook()
         {
             bool wanted = _questNpcs.Count > 0;
@@ -8778,13 +8831,85 @@ namespace Oxide.Plugins
             if (wanted)
             {
                 Subscribe("OnPlayerInput");
+                Subscribe("OnNpcConversationStart");
             }
             else
             {
                 Unsubscribe("OnPlayerInput");
+                Unsubscribe("OnNpcConversationStart");
             }
 
             _questNpcInputHooked = wanted;
+        }
+
+        // ####  O "TALK" DO JOGO CHEGA AQUI  ####
+        //
+        // O cliente desenha o prompt sozinho em cima de qualquer
+        // NPCTalking e, ao apertar, manda o RPC que o jogo trata em
+        // `Server_BeginTalking`. Ele chama este hook ANTES de abrir
+        // a conversa vanilla - e devolver qualquer coisa nao nula a
+        // aborta.
+        //
+        // E e isso que queremos: o boneco e nosso, as falas do
+        // prefab nao sao. Abortamos e abrimos a nossa tela.
+        //
+        // Um NPC que NAO e nosso (um do Bandit Camp, num mapa que os
+        // tenha) devolve null e conversa como sempre.
+        private object OnNpcConversationStart(NPCTalking npc, BasePlayer player, ConversationData conversation)
+        {
+            if (npc == null || player == null || _questNpcs.Count == 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                QuestNpcInfo mine = QuestNpcOf(npc);
+
+                if (mine == null)
+                {
+                    return null;
+                }
+
+                QuestNpcTalk(player, mine);
+
+                // Nao nulo = a conversa do jogo nao comeca.
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ReportStatsHookError(HookNpcConversation, ex);
+
+                // ####  O ERRO NAO PODE DEVOLVER O JOGADOR A CONVERSA VANILLA  ####
+                //
+                // Se a nossa tela falhou, abrir as falas do prefab
+                // no lugar dela seria o pior dos dois mundos: o
+                // jogador veria o "Airwolf Vendor" oferecendo
+                // helicoptero. Melhor nao abrir nada.
+                return true;
+            }
+        }
+
+        // O NPC do jogo e um dos nossos? Devolve a definicao dele.
+        //
+        // A varredura e por valor e nao por chave porque a lista tem
+        // tres ou quatro entradas - um dicionario reverso por net.ID
+        // custaria mais manutencao que os microssegundos que economiza.
+        private QuestNpcInfo QuestNpcOf(BaseEntity entity)
+        {
+            foreach (KeyValuePair<string, BasePlayer> entry in _questNpcEntities)
+            {
+                if (!ReferenceEquals(entry.Value, entity))
+                {
+                    continue;
+                }
+
+                QuestNpcInfo info;
+
+                return _questNpcs.TryGetValue(entry.Key, out info) ? info : null;
+            }
+
+            return null;
         }
 
         // ####  O HOOK DE CADA QUADRO  ####
@@ -8807,15 +8932,6 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                // O freio do toque repetido. Ver `_questNpcLastUse`.
-                float last;
-
-                if (_questNpcLastUse.TryGetValue(player.userID, out last) &&
-                    UnityEngine.Time.realtimeSinceStartup - last < QuestNpcUseCooldown)
-                {
-                    return;
-                }
-
                 QuestNpcInfo nearest = QuestNpcNear(player);
 
                 if (nearest == null)
@@ -8823,38 +8939,54 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                _questNpcLastUse[player.userID] = UnityEngine.Time.realtimeSinceStartup;
-
-                // ####  A ENTREGA ACONTECE ANTES DA TELA  ####
-                //
-                // Se este NPC e o destino de uma entrega que o
-                // jogador esta fazendo, o pacote chega AQUI - e a
-                // tela que abre em seguida ja mostra a missao
-                // pronta para resgatar.
-                //
-                // A ordem importa: abrir a tela primeiro mostraria a
-                // entrega ainda pendente, e o jogador apertaria USE
-                // de novo achando que nao funcionou.
-                QuestTryDeliver(player, nearest.Id);
-
-                // ####  QUEM ABRE A TELA E O AGENTE  ####
-                //
-                // Nao ha CUI aqui, e o plugin TAMBEM nao manda o
-                // `origemz.ui.open`: aquele comando recusa o que vem
-                // do cliente (`arg.Connection != null`) - de
-                // proposito, para um jogador nao abrir a tela de
-                // outro.
-                //
-                // Entao este plugin GRITA, o agente le, confere que
-                // o NPC existe naquele servidor e manda o comando
-                // com a autoridade dele. Uma ida a mais, e a
-                // conferencia que ela paga vale.
-                QuestNpcPush(player, nearest.Id);
+                QuestNpcTalk(player, nearest);
             }
             catch (Exception ex)
             {
                 ReportStatsHookError(HookPlayerInput, ex);
             }
+        }
+
+        // ####  A PORTA UNICA: O TALK E O USE DESAGUAM AQUI  ####
+        //
+        // O freio esta DENTRO, e nao em cada caminho: apertar E em
+        // cima do NPC dispara os dois no mesmo instante, e o
+        // segundo a chegar precisa encontrar a porta fechada.
+        private void QuestNpcTalk(BasePlayer player, QuestNpcInfo npc)
+        {
+            float last;
+
+            if (_questNpcLastUse.TryGetValue(player.userID, out last) &&
+                UnityEngine.Time.realtimeSinceStartup - last < QuestNpcUseCooldown)
+            {
+                return;
+            }
+
+            _questNpcLastUse[player.userID] = UnityEngine.Time.realtimeSinceStartup;
+
+            // ####  A ENTREGA ACONTECE ANTES DA TELA  ####
+            //
+            // Se este NPC e o destino de uma entrega que o jogador
+            // esta fazendo, o pacote chega AQUI - e a tela que abre
+            // em seguida ja mostra a missao pronta para resgatar.
+            //
+            // A ordem importa: abrir a tela primeiro mostraria a
+            // entrega ainda pendente, e o jogador apertaria USE de
+            // novo achando que nao funcionou.
+            QuestTryDeliver(player, npc.Id);
+
+            // ####  QUEM ABRE A TELA E O AGENTE  ####
+            //
+            // Nao ha CUI aqui, e o plugin TAMBEM nao manda o
+            // `origemz.ui.open`: aquele comando recusa o que vem do
+            // cliente (`arg.Connection != null`) - de proposito,
+            // para um jogador nao abrir a tela de outro.
+            //
+            // Entao este plugin GRITA, o agente le, confere que o
+            // NPC existe naquele servidor e manda o comando com a
+            // autoridade dele. Uma ida a mais, e a conferencia que
+            // ela paga vale.
+            QuestNpcPush(player, npc.Id);
         }
 
         // O pacote chegou?
@@ -9011,7 +9143,9 @@ namespace Oxide.Plugins
 
             if (args == null || args.Length == 0)
             {
-                player.ChatMessage("/questnpc add <nome>  |  /questnpc list");
+                player.ChatMessage(
+                    "/questnpc add <nome>  |  /questnpc move <id>  |  " +
+                    "/questnpc remove <id>  |  /questnpc list");
                 return;
             }
 
@@ -9031,6 +9165,40 @@ namespace Oxide.Plugins
                 return;
             }
 
+            // ####  MOVER E TRAZER, E POR ISSO NAO PEDE COORDENADA  ####
+            //
+            // Quem quer mudar o NPC de lugar ja esta no lugar novo:
+            // e a mesma ideia do `add`. Antes disto, o painel mandava
+            // usar o `add` de novo - e o admin terminava com dois
+            // bonecos, "mateus" e "mateus-2".
+            if (args[0] == "move" || args[0] == "remove")
+            {
+                if (args.Length < 2)
+                {
+                    player.ChatMessage("Uso: /questnpc " + args[0] + " <id>   (veja os ids em /questnpc list)");
+                    return;
+                }
+
+                string id = args[1];
+
+                if (!_questNpcs.ContainsKey(id))
+                {
+                    player.ChatMessage("Nao ha NPC com o id \"" + id + "\" aqui. Veja /questnpc list.");
+                    return;
+                }
+
+                if (args[0] == "remove")
+                {
+                    QuestNpcChatPush("remove", id, null, Vector3.zero, 0f);
+                    player.ChatMessage("Pedi ao agente para apagar \"" + id + "\".");
+                    return;
+                }
+
+                QuestNpcChatPush("move", id, null, player.transform.position, QuestNpcEyesY(player));
+                player.ChatMessage("Pedi ao agente para trazer \"" + id + "\" para ca.");
+                return;
+            }
+
             if (args[0] != "add" || args.Length < 2)
             {
                 player.ChatMessage("Uso: /questnpc add <nome>");
@@ -9038,31 +9206,53 @@ namespace Oxide.Plugins
             }
 
             string name = string.Join(" ", args, 1, args.Length - 1);
-            Vector3 position = player.transform.position;
-            float rotation = player.eyes == null
-                ? 0f
-                : player.eyes.rotation.eulerAngles.y;
 
-            // O agente e quem grava: aqui so se REPORTA a posicao. Um
-            // NPC que existisse so na memoria do plugin sumiria no
-            // primeiro oxide.reload, e o painel nunca saberia dele.
+            QuestNpcChatPush("add", null, name, player.transform.position, QuestNpcEyesY(player));
+
+            player.ChatMessage("Pedi ao agente para cadastrar \"" + name +
+                "\" aqui. Ele aparece em instantes.");
+        }
+
+        private static float QuestNpcEyesY(BasePlayer player)
+        {
+            return player.eyes == null ? 0f : player.eyes.rotation.eulerAngles.y;
+        }
+
+        // O grito do cadastro in-game.
+        //
+        // O agente e quem grava: aqui so se REPORTA. Um NPC que
+        // existisse so na memoria do plugin sumiria no primeiro
+        // oxide.reload, e o painel nunca saberia dele.
+        private void QuestNpcChatPush(string kind, string id, string name, Vector3 position, float rotation)
+        {
             StringBuilder line = new StringBuilder();
 
             line.Append(QuestNpcMarker);
             line.Append("{\"contract\":").Append(QuestContract);
             line.Append(",\"secret\":\"").Append(_questSecret ?? string.Empty).Append('"');
-            line.Append(",\"kind\":\"add\"");
-            line.Append(",\"name\":").Append(JsonConvert.ToString(name));
-            line.Append(",\"x\":").Append(position.x.ToString("0.##", CultureInfo.InvariantCulture));
-            line.Append(",\"y\":").Append(position.y.ToString("0.##", CultureInfo.InvariantCulture));
-            line.Append(",\"z\":").Append(position.z.ToString("0.##", CultureInfo.InvariantCulture));
-            line.Append(",\"rotation\":").Append(rotation.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append(",\"kind\":\"").Append(kind).Append('"');
+
+            if (id != null)
+            {
+                line.Append(",\"npcId\":").Append(JsonConvert.ToString(id));
+            }
+
+            if (name != null)
+            {
+                line.Append(",\"name\":").Append(JsonConvert.ToString(name));
+            }
+
+            if (kind != "remove")
+            {
+                line.Append(",\"x\":").Append(position.x.ToString("0.##", CultureInfo.InvariantCulture));
+                line.Append(",\"y\":").Append(position.y.ToString("0.##", CultureInfo.InvariantCulture));
+                line.Append(",\"z\":").Append(position.z.ToString("0.##", CultureInfo.InvariantCulture));
+                line.Append(",\"rotation\":").Append(rotation.ToString("0.##", CultureInfo.InvariantCulture));
+            }
+
             line.Append('}');
 
             Puts(line.ToString());
-
-            player.ChatMessage("Pedi ao agente para cadastrar \"" + name +
-                "\" aqui. Ele aparece em instantes.");
         }
 
         private class QuestNpcInfo

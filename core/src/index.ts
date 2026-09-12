@@ -1981,6 +1981,9 @@ async function main(): Promise<void> {
     },
     logger,
     secret: questSecret,
+    // O USE no NPC é a testemunha de que o jogador esteve lá — e é
+    // ela que libera o botão de aceitar da missão daquele NPC.
+    onTalk: (talk) => questsService?.noteNpcTalk(talk),
     // ####  QUEM ABRE A TELA E O AGENTE, E NAO O PLUGIN  ####
     //
     // O `origemz.ui.open` recusa o que vem do cliente — de

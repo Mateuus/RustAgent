@@ -505,7 +505,7 @@ describe('quem pode pegar o quê', () => {
     );
   });
 
-  it('a lista do menu não traz as do NPC, e vice-versa', async () => {
+  it('o menu mostra a do NPC bloqueada; a tela dele mostra só a dele', async () => {
     h.repository.createNpc(
       'velho',
       {
@@ -527,15 +527,62 @@ describe('quem pode pegar o quê', () => {
     h.repository.create('no-menu', quest(), NOW);
     h.repository.create('no-npc', quest({ title: 'No NPC', npcId: 'velho' }), NOW);
 
-    expect(
-      (await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO })).map((i) => i.quest.id),
-    ).toEqual(['no-menu']);
+    // O menu é o cartaz: as duas aparecem, e a do NPC vem com o
+    // "fale com" no lugar do botão. Antes de 11/09/2026 ela sumia,
+    // e o jogador lia "Disponíveis: 0" com missão cadastrada.
+    const menu = await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO });
 
+    expect(menu.map((i) => i.quest.id)).toEqual(['no-menu', 'no-npc']);
+    expect(menu.find((i) => i.quest.id === 'no-menu')?.block).toBeNull();
+    expect(menu.find((i) => i.quest.id === 'no-npc')?.block?.reason).toContain('Fale com Velho');
+
+    // A tela do NPC é o balcão: só o que ELE oferece.
     expect(
       (await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' })).map(
         (i) => i.quest.id,
       ),
     ).toEqual(['no-npc']);
+  });
+
+  it('quem falou com o NPC pode aceitar; quem não falou, não', async () => {
+    h.repository.createNpc(
+      'velho',
+      {
+        serverId: 'pvp1',
+        name: 'Velho',
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      },
+      NOW,
+    );
+    h.repository.create('no-npc', quest({ npcId: 'velho' }), NOW);
+
+    // ####  A TESTEMUNHA NÃO É O CLIQUE  ####
+    //
+    // O alvo do botão chega do jogo e pode ser forjado. Quem diz
+    // que o jogador esteve no balcão é o empurrão do plugin, que
+    // mediu a distância lá.
+    await expect(
+      h.service.accept({ serverId: 'pvp1', steamId: FULANO, questId: 'no-npc' }),
+    ).rejects.toThrow(/Fale com Velho/);
+
+    h.service.noteNpcTalk({ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' });
+
+    const view = await h.service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'no-npc',
+    });
+
+    expect(view.questId).toBe('no-npc');
   });
 
   it('o módulo desligado no servidor não oferece nada', async () => {
@@ -1123,20 +1170,26 @@ describe('a quest órfã', () => {
     );
   }
 
-  it('volta ao menu quando o NPC dela é apagado', async () => {
+  it('perde o "fale com" quando o NPC dela é apagado', async () => {
     npc('velho');
     h.repository.create('do-npc', quest({ npcId: 'velho' }), NOW);
 
-    // Antes: só na tela do NPC.
-    expect(await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO })).toEqual([]);
+    // Com o NPC de pé, ela aparece no menu BLOQUEADA: o menu é o
+    // cartaz, o boneco é o balcão.
+    const antes = await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(antes.map((i) => i.quest.id)).toEqual(['do-npc']);
+    expect(antes[0]?.block?.code).toBe('QUEST_NEEDS_NPC');
 
     h.repository.removeNpc('velho');
 
-    // Depois: no menu. Ficar invisível para sempre — some do menu
-    // por ter `npcId`, e do NPC que não existe — é pior.
-    expect(
-      (await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO })).map((i) => i.quest.id),
-    ).toEqual(['do-npc']);
+    // Sem o NPC, não há a quem mandar o jogador falar: ela vira uma
+    // quest de menu como outra qualquer. Ficar pedindo conversa com
+    // um boneco que não existe seria a mesma coisa que sumir.
+    const depois = await h.service.offersFor({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(depois.map((i) => i.quest.id)).toEqual(['do-npc']);
+    expect(depois[0]?.block).toBeNull();
   });
 
   it('um NPC de ENTREGA não oferece missão nenhuma', async () => {
