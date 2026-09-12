@@ -33,7 +33,12 @@ import { parseQuestPush, QUEST_EVENT_MARKER } from '../src/game/quests-contract.
 import { createLogger } from '../src/logger.js';
 import { QuestCollector, type QuestCollectorRcon } from '../src/quests/collector.js';
 import { QuestEvents } from '../src/quests/events.js';
-import { NPC_MARKER, parseNpcLine, QuestNpcSync } from '../src/quests/npc-sync.js';
+import {
+  NPC_MARKER,
+  NPC_SET_COMMAND,
+  parseNpcLine,
+  QuestNpcSync,
+} from '../src/quests/npc-sync.js';
 import { QuestsService } from '../src/quests/service.js';
 import { questInputSchema, type QuestDraft } from '../src/types/quests.js';
 
@@ -672,9 +677,12 @@ describe('o `flushSeconds` de cada servidor', () => {
 // ------------------------------------------------------------
 
 describe('os NPCs', () => {
-  function sync(
-    open?: (input: { serverId: string; steamId: string; screenId: string }) => Promise<void>,
-  ) {
+  interface NpcSpy {
+    readonly talks: { serverId: string; steamId: string; npcId: string }[];
+    readonly accepts: { serverId: string; steamId: string; npcId: string; questId: string }[];
+  }
+
+  function sync(spy?: NpcSpy) {
     const rcon: QuestCollectorRcon = {
       isConnected: true,
       send: (command: string) => {
@@ -689,8 +697,13 @@ describe('os NPCs', () => {
       servers: { ids: () => ['pvp1'], contextOf: () => ({ rcon }) },
       logger,
       secret: SECRET,
-      openScreen: open === undefined ? undefined : (input) => open(input),
+      onTalk: (input) => spy?.talks.push(input),
+      onAccept: (input) => spy?.accepts.push(input),
     });
+  }
+
+  function spy(): NpcSpy {
+    return { talks: [], accepts: [] };
   }
 
   function npcLine(body: Record<string, unknown>): string {
@@ -799,6 +812,113 @@ describe('os NPCs', () => {
     expect(h.repository.get('do-npc')).not.toBeNull();
   });
 
+  it('as missões do NPC descem junto com ele, com a frase pronta', async () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    h.repository.create(
+      'lenhador',
+      questInputSchema.parse({
+        title: 'Lenhador',
+        description: 'Preciso de madeira.',
+        npcId: 'velho',
+        objectives: [{ seq: 0, kind: 'gather', target: 'wood', amount: 100 }],
+      }),
+    );
+    // Desligada não desce: o boneco não oferece o que o painel
+    // desligou.
+    h.repository.create(
+      'escondida',
+      questInputSchema.parse({
+        title: 'Escondida',
+        npcId: 'velho',
+        enabled: false,
+        objectives: [{ seq: 0, kind: 'gather', target: 'stones', amount: 1 }],
+      }),
+    );
+
+    await sync().push('pvp1');
+
+    const set = h.sent.find((command) => command.startsWith(NPC_SET_COMMAND));
+    const payload = JSON.parse(
+      Buffer.from((set ?? '').slice(NPC_SET_COMMAND.length + 1), 'base64').toString('utf8'),
+    ) as { offers: { id: string; title: string; description: string | null }[] };
+
+    // É isto que a caixa de conversa desenha sem ir à rede.
+    expect(payload.offers).toEqual([
+      { id: 'lenhador', title: 'Lenhador', description: 'Preciso de madeira.', goal: '', reward: '' },
+    ]);
+  });
+
+  it('o aceite no balcão vale pela testemunha, e só para a missão daquele NPC', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    h.repository.create(
+      'dele',
+      questInputSchema.parse({
+        title: 'Dele',
+        npcId: 'velho',
+        objectives: [{ seq: 0, kind: 'kill', target: 'bear', amount: 1 }],
+      }),
+    );
+    h.repository.create(
+      'do-menu',
+      questInputSchema.parse({
+        title: 'Do menu',
+        objectives: [{ seq: 0, kind: 'kill', target: 'bear', amount: 1 }],
+      }),
+    );
+
+    const visto = spy();
+    const npcSync = sync(visto);
+
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'accept', steamId: FULANO, npcId: 'velho', questId: 'dele' }),
+    );
+
+    expect(visto.accepts).toEqual([
+      { serverId: 'pvp1', steamId: FULANO, npcId: 'velho', questId: 'dele' },
+    ]);
+    // O aceite é testemunha: sem isto, o serviço recusaria a missão
+    // de balcão que ele acabou de conceder.
+    expect(visto.talks).toEqual([{ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' }]);
+
+    // ####  PEDIR NO BONECO ERRADO NÃO VALE  ####
+    //
+    // O clique nasce no cliente, e um cliente adulterado pediria no
+    // NPC da porta de casa a missão do outro lado do mapa.
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'accept', steamId: FULANO, npcId: 'velho', questId: 'do-menu' }),
+    );
+
+    expect(visto.accepts).toHaveLength(1);
+  });
+
   it('desce `clear` e um `set` por NPC — e só quando muda', async () => {
     h.repository.createNpc('velho', {
       serverId: 'pvp1',
@@ -828,7 +948,7 @@ describe('os NPCs', () => {
     expect(h.sent).toHaveLength(2);
   });
 
-  it('o USE abre a tela DAQUELE NPC, e por um relógio', async () => {
+  it('o USE registra que o jogador esteve no balcão daquele NPC', () => {
     h.repository.createNpc('velho', {
       serverId: 'pvp1',
       name: 'Velho',
@@ -844,25 +964,16 @@ describe('os NPCs', () => {
       wipePolicy: 'keep',
     });
 
-    const opened: { serverId: string; steamId: string; screenId: string }[] = [];
+    const visto = spy();
 
-    sync((input) => {
-      opened.push(input);
+    sync(visto).handleLine('pvp1', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
 
-      return Promise.resolve();
-    }).handleLine('pvp1', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
-
-    // Nenhum comando sai da pilha do gancho de console: o laço de
-    // RCON que este projeto já viveu.
-    expect(opened).toEqual([]);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    expect(opened[0]).toMatchObject({
-      serverId: 'pvp1',
-      steamId: FULANO,
-      screenId: 'tela-missoes:npc:velho',
-    });
+    // A caixa de conversa é desenhada PELO PLUGIN, com o que desceu
+    // no `npc.set`. O que o agente faz aqui é anotar a testemunha —
+    // e nenhum comando sai da pilha do gancho de console, que é o
+    // laço de RCON que este projeto já viveu.
+    expect(visto.talks).toEqual([{ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' }]);
+    expect(h.sent).toEqual([]);
   });
 
   it('o USE num NPC de OUTRO servidor não abre nada', async () => {
@@ -881,19 +992,13 @@ describe('os NPCs', () => {
       wipePolicy: 'keep',
     });
 
-    const opened: unknown[] = [];
+    const visto = spy();
 
     // É a conferência que a ida a mais paga: uma linha forjada não
-    // abre a tela de outro mundo.
-    sync((input) => {
-      opened.push(input);
+    // vale como visita ao balcão de outro mundo.
+    sync(visto).handleLine('pvp2', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
 
-      return Promise.resolve();
-    }).handleLine('pvp2', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    expect(opened).toEqual([]);
+    expect(visto.talks).toEqual([]);
   });
 
   it('o segredo errado e a linha torta são ignorados em silêncio', () => {

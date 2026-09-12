@@ -104,6 +104,7 @@ import { QuestsService } from './quests/service.js';
 import {
   createQuestsScreenProvider,
   parseQuestsScreenId,
+  rewardLine,
   type QuestsScreenProvider,
 } from './game/ui-quests-screen.js';
 import { createDiscordScreenProvider, withDiscordScreen } from './game/ui-discord-screen.js';
@@ -114,7 +115,7 @@ import {
   type HomeScreenProvider,
 } from './game/ui-home-screen.js';
 import { createRankingScreenProvider } from './game/ui-ranking-screen.js';
-import { buildMainMenu, MAIN_MENU_SLUG } from './game/ui-preset-main-menu.js';
+import { buildMainMenu } from './game/ui-preset-main-menu.js';
 import {
   buildResult,
   createHeaderProvider,
@@ -1878,30 +1879,35 @@ async function main(): Promise<void> {
     },
   });
 
+  // ####  O NOME E O ÍCONE NÃO SAEM DO CADASTRO DA MISSÃO  ####
+  //
+  // Ela guarda `metal.refined` e `trophy.bleik` — a chave que o
+  // admin digitou. Quem sabe que aquilo se chama "High Quality
+  // Metal" e tem qual ícone é o catálogo do JOGO, que muda a cada
+  // update do Rust; e quem sabe que `trophy.bleik` é a "Bleik
+  // Store" é o catálogo de rankings, que o admin edita.
+  //
+  // Lidos A CADA leitura: gravar o nome junto com a recompensa
+  // deixaria o nome velho no jogo para sempre.
+  //
+  // Ele é uma const porque tem DOIS leitores: a tela de missões e a
+  // caixa do NPC, que desce pronta para o plugin.
+  const questScreenCatalog = {
+    // O rótulo em português, pelo mesmo motivo da tela de kits:
+    // quem lê a missão está com o jogo traduzido. Ver
+    // game/ui-item-label.ts.
+    itemOf: (shortname: string) => {
+      const item = itemsRepository.get(shortname);
+
+      return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
+    },
+    rankingLabelOf: (metric: string) => rankingsRepository.getByMetric(metric)?.label ?? null,
+  };
+
   questScreens = createQuestsScreenProvider({
     quests: questsService,
     npcNameOf: (npcId) => questsRepository.getNpc(npcId)?.name ?? null,
-    // ####  O NOME E O ÍCONE NÃO SAEM DO CADASTRO DA MISSÃO  ####
-    //
-    // Ela guarda `metal.refined` e `trophy.bleik` — a chave que o
-    // admin digitou. Quem sabe que aquilo se chama "High Quality
-    // Metal" e tem qual ícone é o catálogo do JOGO, que muda a cada
-    // update do Rust; e quem sabe que `trophy.bleik` é a "Bleik
-    // Store" é o catálogo de rankings, que o admin edita.
-    //
-    // Lidos AQUI, a cada abertura da tela: gravar o nome junto com
-    // a recompensa deixaria o nome velho no jogo para sempre.
-    catalog: {
-      // O rótulo em português, pelo mesmo motivo da tela de kits:
-      // quem lê a missão está com o jogo traduzido. Ver
-      // game/ui-item-label.ts.
-      itemOf: (shortname) => {
-        const item = itemsRepository.get(shortname);
-
-        return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
-      },
-      rankingLabelOf: (metric) => rankingsRepository.getByMetric(metric)?.label ?? null,
-    },
+    catalog: questScreenCatalog,
     logger,
   });
 
@@ -1916,23 +1922,29 @@ async function main(): Promise<void> {
   // É o mesmo desenho do `UiSync` e do `#OZSTAT#`.
   const questSecret = randomUUID();
 
+  // O recibo no chat DELE. Usada pelo QuestEvents (conclusão) e
+  // pelo aceite no balcão do NPC — a mesma frase, o mesmo caminho.
+  const tellPlayer = async (
+    serverId: string,
+    steamId: string,
+    message: string,
+  ): Promise<void> => {
+    const rcon = supervisor.contextOf(serverId)?.rcon;
+
+    if (rcon === undefined) {
+      return;
+    }
+
+    await rcon.send(`origemz.chat.tell ${steamId} ${JSON.stringify(message)}`);
+  };
+
   questEvents = new QuestEvents({
     service: questsService,
     logger,
     secret: questSecret,
     // O recibo no chat DELE, e nunca no de todo mundo: a conclusão
     // de uma missão é assunto de quem a fez.
-    chat: {
-      tell: async (serverId, steamId, message) => {
-        const rcon = supervisor.contextOf(serverId)?.rcon;
-
-        if (rcon === undefined) {
-          return;
-        }
-
-        await rcon.send(`origemz.chat.tell ${steamId} ${JSON.stringify(message)}`);
-      },
-    },
+    chat: { tell: tellPlayer },
     // ####  O PUSH QUE NAO SE SUSTENTA MANDA BUSCAR  ####
     //
     // O plugin grita a conclusão, o agente confere com o número
@@ -1984,20 +1996,45 @@ async function main(): Promise<void> {
     // O USE no NPC é a testemunha de que o jogador esteve lá — e é
     // ela que libera o botão de aceitar da missão daquele NPC.
     onTalk: (talk) => questsService?.noteNpcTalk(talk),
-    // ####  QUEM ABRE A TELA E O AGENTE, E NAO O PLUGIN  ####
+    // ####  AS FRASES DA CAIXA NASCEM AQUI  ####
     //
-    // O `origemz.ui.open` recusa o que vem do cliente — de
-    // propósito, para um jogador não abrir a tela de outro. O
-    // terceiro argumento (a tela) é o que leva o jogador direto às
-    // missões DAQUELE NPC.
-    openScreen: async ({ serverId, steamId, screenId }) => {
-      const rcon = supervisor.contextOf(serverId)?.rcon;
+    // "Coletar 100 de Madeira" e "1x Sucata" precisam do catálogo
+    // do JOGO e do de rankings, que o plugin não tem. Elas descem
+    // prontas com o NPC — ver `#payloadOf`.
+    describeQuest: (quest) => ({
+      goal: quest.objectives
+        .map((objective) => questsService?.describeObjective(objective) ?? '')
+        .filter((text) => text !== '')
+        .join(' · '),
+      reward: rewardLine(quest.rewards, questScreenCatalog),
+    }),
+    // ####  O CLIQUE NO BALCÃO  ####
+    //
+    // O plugin conferiu a distância; o serviço confere a REGRA. O
+    // que o jogador lê é a frase que o serviço devolve — "esta
+    // quest volta em 4h" nasce lá, e reescrevê-la aqui daria duas
+    // explicações para o mesmo não.
+    onAccept: ({ serverId, steamId, npcId, questId }) => {
+      void (async () => {
+        try {
+          const view = await questsService?.accept({ serverId, steamId, questId });
 
-      if (rcon === undefined) {
-        return;
-      }
+          if (view !== undefined) {
+            await tellPlayer(serverId, steamId, `Missão aceita: ${view.title}.`);
+          }
+        } catch (error) {
+          await tellPlayer(
+            serverId,
+            steamId,
+            isApiError(error) ? error.message : 'Não deu para aceitar a missão agora.',
+          ).catch(() => undefined);
 
-      await rcon.send(`origemz.ui.open ${steamId} ${MAIN_MENU_SLUG} ${screenId}`);
+          logger.debug(
+            { server: serverId, npc: npcId, quest: questId, err: toError(error) },
+            'o aceite no balcão do NPC não passou',
+          );
+        }
+      })();
     },
   });
 
