@@ -1428,6 +1428,21 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // ####  A CAIXA DA MASMORRA PODE PAGAR OZCOIN  ####
+  //
+  // E quem credita é o agente, nunca o plugin: o saldo mora na
+  // carteira (banco local, ou o site quando o servidor está
+  // pareado), e o plugin não fala com nenhum dos dois. Ele sorteia o
+  // prêmio no nascimento da caixa, vê a mão do jogador chegar nela e
+  // grita `#OZDUNGEON#{"kind":"coins"…}`.
+  //
+  // O recibo no chat é o MESMO caminho do recibo da missão — o
+  // `origemz.chat.broadcast` com `steamId`, que é o único que sabe
+  // endereçar um jogador (o `origemz.chat.tell` nunca existiu; ver o
+  // comentário lá embaixo). Ele sai depois do crédito, e só quando
+  // ele deu certo.
+  const dungeonBroadcaster = new PluginBroadcaster({ servers: supervisor, logger });
+
   dungeonSync = new DungeonSync({
     dungeons: dungeonsRepository,
     events: worldEventsRepository,
@@ -1437,6 +1452,16 @@ async function main(): Promise<void> {
     },
     materializer: blueprintMaterializer,
     logger,
+    wallet: walletFor,
+    tell: async (serverId, steamId, message) => {
+      await dungeonBroadcaster.send({
+        serverId,
+        steamId,
+        text: message,
+        tag: '[MASMORRA]',
+        tagColor: '#C43F2C',
+      });
+    },
   });
 
   // ####  O BOTÃO DISCORD DOS MENUS QUE JÁ EXISTEM  ####

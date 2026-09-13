@@ -95,6 +95,15 @@ export const FAILURE_REASONS = [
   'wipe_window',
   /** Passou do teto de construção e desistiu. */
   'build_timeout',
+  /**
+   * O código de uma sala trancada não tinha onde nascer FORA dela.
+   *
+   * Só acontece com `lock.onUndelivered: 'abort'`, e é o único
+   * motivo de falha que o admin pediu: nos outros dois modos a
+   * masmorra sobe (destrancando a sala, ou deixando-a lacrada).
+   * Ver `LOCK_UNDELIVERED` em `types/dungeons.ts`.
+   */
+  'code_unreachable',
 ] as const;
 export type FailureReason = (typeof FAILURE_REASONS)[number];
 
@@ -108,6 +117,9 @@ export const FAILURE_MESSAGE: Record<FailureReason, string> = {
   already_active: 'Já havia um evento no ar naquele servidor.',
   wipe_window: 'O wipe estava em curso, ou perto demais.',
   build_timeout: 'A construção passou do tempo máximo e foi desfeita.',
+  code_unreachable:
+    'O código de uma porta trancada só teria onde nascer atrás dela mesma. ' +
+    'Abra caminho para o portador (NPC no corredor, ou "em qualquer lugar"), ou escolha destrancar.',
 };
 
 // ------------------------------------------------------------

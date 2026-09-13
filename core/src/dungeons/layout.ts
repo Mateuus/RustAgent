@@ -45,8 +45,14 @@ const COLOR_OF_CHAR: Readonly<Record<string, LayoutRoomColor>> = {
   R: 'red',
 };
 
-/** Os quatro vizinhos. Diagonal não conta: parede não nasce em diagonal. */
-const NEIGHBOURS: readonly (readonly [number, number])[] = [
+/**
+ * Os quatro vizinhos. Diagonal não conta: parede não nasce em diagonal.
+ *
+ * Exportado para o `lock-route.ts`, que anda pelas MESMAS células com
+ * as mesmas regras de vizinhança. Duas listas de vizinhos para o
+ * mesmo desenho é como uma das duas ganha a diagonal por descuido.
+ */
+export const NEIGHBOURS: readonly (readonly [number, number])[] = [
   [1, 0],
   [-1, 0],
   [0, 1],
@@ -54,9 +60,9 @@ const NEIGHBOURS: readonly (readonly [number, number])[] = [
 ];
 
 /** O que uma célula é. */
-type CellKind = 'corridor' | 'entrance' | 'room';
+export type CellKind = 'corridor' | 'entrance' | 'room';
 
-interface Cell {
+export interface Cell {
   readonly x: number;
   readonly z: number;
   readonly kind: CellKind;
@@ -78,7 +84,7 @@ export interface LayoutFacts {
   readonly height: number;
 }
 
-const key = (x: number, z: number): string => `${String(x)},${String(z)}`;
+export const key = (x: number, z: number): string => `${String(x)},${String(z)}`;
 
 /**
  * Lê as linhas para um mapa de células.
@@ -87,7 +93,7 @@ const key = (x: number, z: number): string => `${String(x)},${String(z)}`;
  * é lido. Inverter isso espelha a masmorra na vertical, e tudo
  * parece certo até alguém comparar o desenho com o jogo.
  */
-function readCells(grid: readonly string[]): Map<string, Cell> {
+export function readCells(grid: readonly string[]): Map<string, Cell> {
   const cells = new Map<string, Cell>();
 
   grid.forEach((row, index) => {
@@ -117,7 +123,7 @@ function readCells(grid: readonly string[]): Map<string, Cell> {
  *
  * Devolve, para cada célula de sala, o índice da sala dela.
  */
-function findRooms(cells: ReadonlyMap<string, Cell>): Map<string, number> {
+export function findRooms(cells: ReadonlyMap<string, Cell>): Map<string, number> {
   const room = new Map<string, number>();
   let next = 0;
 

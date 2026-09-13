@@ -6403,6 +6403,91 @@ CREATE TABLE dungeon_servers (
 );
 `;
 
+const DUNGEON_PLACEMENTS_SCHEMA = `
+-- ============================================================
+--  081  a masmorra deixa de sortear TUDO: o desenho passa a
+--       marcar onde nasce cada inimigo e cada caixa, o corredor
+--       ganha material proprio, e a caixa ganha conteudo proprio.
+--
+--  Pedido do dono em 13/09/2026, quatro frentes num so update.
+--
+--  ####  ELA NASCEU 079, VIROU 080, E ACABOU 081  ####
+--
+--  Duas outras frentes correram em paralelo nesta mesma semana, e
+--  as duas chegaram na main primeiro: o quest-progress-paid levou o
+--  079 e o message-rotation-and-commands levou o 080.
+--
+--  Escolher o id olhando so a main do dia em que a branch nasceu
+--  nao basta. Dois branches com o MESMO id produzem o pior defeito
+--  possivel aqui: o runner aplica a primeira, marca o id como
+--  aplicado, e a segunda e PULADA em silencio -- o banco fica sem a
+--  coluna e o codigo que a le sobe achando que ela existe.
+--
+--  Ou seja: renumerar no merge e parte do trabalho, e o numero so
+--  esta certo depois de um git fetch. (E a crase nao entra nem para
+--  citar o comando: ela FECHA o template literal deste SQL.)
+--
+--  ####  placements: A LISTA VAZIA E O SORTEIO DE SEMPRE  ####
+--
+--  Toda masmorra ja gravada nasce com '[]', e '[]' quer dizer
+--  "sorteia como sempre fez". Nenhuma delas muda de comportamento
+--  por causa desta coluna -- que e a unica forma aceitavel de
+--  mexer no que ja esta no ar.
+--
+--  As coordenadas sao em relacao a ENTRADA (a celula do E), e nao
+--  ao canto do desenho: o editor recorta as linhas vazias ao
+--  salvar, e um desenho que perde duas colunas a esquerda
+--  deslocaria todo marcador duas celulas -- para dentro da parede.
+--
+--  JSON em coluna de texto, como o grid e as tabelas de loot (063)
+--  ja sao: e uma lista pequena que ninguem consulta por dentro, e
+--  normaliza-la daria uma tabela com quatro colunas e um join a
+--  mais para montar uma masmorra que cabe numa linha.
+--
+--  ####  corridor_grade_*: OS TRES NULL SAO "HERDA"  ####
+--
+--  A sala ja tinha material proprio desde a 062; o corredor era o
+--  resto -- ele nascia com o structure da masmorra, junto com a
+--  entrada. Os tres NULL juntos continuam significando isso, e e
+--  o que toda linha anterior a esta migracao tem.
+--
+--  Anulavel, e nao NOT NULL com padrao: com padrao, trocar o
+--  structure da masmorra para metal deixaria o corredor em pedra
+--  sem ninguem ter pedido -- "nao escolhi" e "escolhi pedra"
+--  precisam ser distinguiveis.
+--
+--  ####  A CAIXA COM CONTEUDO PROPRIO NAO PRECISOU DE COLUNA  ####
+--
+--  crates (da sala e do corredor) guardava
+--  ["assets/.../crate_normal.prefab", ...] e passa a guardar
+--  [{"prefab":"...","table":null,"coins":null}, ...].
+--
+--  Nao ha UPDATE aqui, e isso e deliberado: quem converte e o
+--  preprocess do crateSpecSchema, na LEITURA. Um UPDATE com
+--  json_each reescrevendo trinta colunas de texto e uma ida so, e
+--  uma linha torta no meio dela derruba a subida do agente.
+--  Convertendo na leitura, a linha torta degrada sozinha -- ela
+--  vira lista vazia, com aviso, e as outras continuam de pe.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+ALTER TABLE dungeons ADD COLUMN placements TEXT NOT NULL DEFAULT '[]';
+
+-- O CHECK e o mesmo das colunas da sala (062): NULL passa, e e
+-- justamente ele que significa "herda o structure".
+ALTER TABLE dungeons ADD COLUMN corridor_grade_foundation TEXT
+  CHECK (corridor_grade_foundation IS NULL
+         OR corridor_grade_foundation IN ('twigs','wood','stone','metal','toptier'));
+ALTER TABLE dungeons ADD COLUMN corridor_grade_wall TEXT
+  CHECK (corridor_grade_wall IS NULL
+         OR corridor_grade_wall IN ('twigs','wood','stone','metal','toptier'));
+ALTER TABLE dungeons ADD COLUMN corridor_grade_ceiling TEXT
+  CHECK (corridor_grade_ceiling IS NULL
+         OR corridor_grade_ceiling IN ('twigs','wood','stone','metal','toptier'));
+`;
+
 const BETTERLOOT_JUNK_SCHEMA = `
 -- ============================================================
 --  073  o que e "lixo" no loot deste servidor.
@@ -6980,6 +7065,9 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'message-rotation-and-commands',
     sql: MESSAGE_ROTATION_AND_COMMANDS_SCHEMA,
   },
+  // 13/09/2026: o desenho passa a marcar onde nasce cada peca, o
+  // corredor ganha material proprio e a caixa ganha loot proprio.
+  { id: 81, name: 'dungeon-placements', sql: DUNGEON_PLACEMENTS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

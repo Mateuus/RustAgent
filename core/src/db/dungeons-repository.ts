@@ -40,7 +40,9 @@ import {
   ACCESS_WHO_ENTERS,
   aiSpecSchema,
   BUILD_GRADES,
+  crateSpecSchema,
   dungeonGridSchema,
+  dungeonPlacementSchema,
   ENTRANCE_ITEM_MODES,
   LOCK_CARRIER_SCOPES,
   LOCK_CARRIERS,
@@ -51,8 +53,10 @@ import {
   type AccessWhoEnters,
   type AiSpecInput,
   type BuildGrade,
+  type CrateSpecInput,
   type Dungeon,
   type DungeonInput,
+  type DungeonPlacementInput,
   type DungeonRoomInput,
   type DungeonSummary,
   type GradeSetInput,
@@ -94,7 +98,13 @@ interface DungeonRow {
   readonly corridor_crates: string;
   readonly corridor_loot_table: string;
   readonly corridor_ai: string;
+  /** Os três juntos em `NULL` são "herda o `structure`". Ver a migração 081. */
+  readonly corridor_grade_foundation: string | null;
+  readonly corridor_grade_wall: string | null;
+  readonly corridor_grade_ceiling: string | null;
   readonly grid: string | null;
+  /** Os marcadores do desenho, em JSON. `'[]'` é o sorteio de sempre. */
+  readonly placements: string;
   readonly npc_health_min: number;
   readonly npc_health_max: number;
   readonly npc_damage_scale: number;
@@ -248,7 +258,8 @@ export class DungeonsRepository {
                  size_min, size_max, weight_green, weight_blue, weight_red,
                  corridor_npc_density, corridor_loot_density, corridor_crates,
                  corridor_loot_table, corridor_ai,
-                 grid, npc_health_min, npc_health_max, npc_damage_scale,
+                 corridor_grade_foundation, corridor_grade_wall, corridor_grade_ceiling,
+                 grid, placements, npc_health_min, npc_health_max, npc_damage_scale,
                  npc_weapons, npc_names, npc_loot_table, npc_ai, time_of_day,
                  structure_foundation, structure_wall, structure_ceiling,
                  lock_enabled, lock_shared_code, lock_carrier, lock_carrier_scope,
@@ -266,7 +277,8 @@ export class DungeonsRepository {
                         @sizeMin, @sizeMax, @weightGreen, @weightBlue, @weightRed,
                         @corridorNpc, @corridorLoot, @corridorCrates,
                         @corridorTable, @corridorAi,
-                        @grid, @healthMin, @healthMax, @damageScale,
+                        @corridorGradeFoundation, @corridorGradeWall, @corridorGradeCeiling,
+                        @grid, @placements, @healthMin, @healthMax, @damageScale,
                         @weapons, @names, @npcTable, @npcAi, @timeOfDay,
                         @structureFoundation, @structureWall, @structureCeiling,
                         @lockEnabled, @lockSharedCode, @lockCarrier, @lockCarrierScope,
@@ -297,7 +309,11 @@ export class DungeonsRepository {
                 corridor_crates = excluded.corridor_crates,
                 corridor_loot_table = excluded.corridor_loot_table,
                 corridor_ai = excluded.corridor_ai,
+                corridor_grade_foundation = excluded.corridor_grade_foundation,
+                corridor_grade_wall = excluded.corridor_grade_wall,
+                corridor_grade_ceiling = excluded.corridor_grade_ceiling,
                 grid = excluded.grid,
+                placements = excluded.placements,
                 npc_health_min = excluded.npc_health_min,
                 npc_health_max = excluded.npc_health_max,
                 npc_damage_scale = excluded.npc_damage_scale,
@@ -367,7 +383,14 @@ export class DungeonsRepository {
           corridorCrates: JSON.stringify(input.corridor.crates),
           corridorTable: JSON.stringify(input.corridor.table),
           corridorAi: JSON.stringify(input.corridor.ai),
+          // Os tres juntos em NULL sao "herda o structure": e o que
+          // distingue "nao escolhi" de "escolhi pedra". Ver o campo
+          // `grade` do corredor em types/dungeons.ts.
+          corridorGradeFoundation: input.corridor.grade?.foundation ?? null,
+          corridorGradeWall: input.corridor.grade?.wall ?? null,
+          corridorGradeCeiling: input.corridor.grade?.ceiling ?? null,
           grid: input.grid === null ? null : JSON.stringify(input.grid),
+          placements: JSON.stringify(input.placements),
           healthMin: input.npc.health.min,
           healthMax: input.npc.health.max,
           damageScale: input.npc.damageScale,
@@ -585,11 +608,13 @@ export class DungeonsRepository {
       corridor: {
         npcDensity: row.corridor_npc_density,
         lootDensity: row.corridor_loot_density,
-        crates: this.#jsonArray(row.corridor_crates, row.id, 'corridor_crates'),
+        crates: this.#crateList(row.corridor_crates, row.id, 'corridor_crates'),
         table: this.#lootTable(row.corridor_loot_table, row.id, 'corridor_loot_table'),
         ai: this.#aiSpec(row.corridor_ai, row.id, 'corridor_ai'),
+        grade: this.#corridorGrade(row),
       },
       grid: this.#grid(row.grid, row.id),
+      placements: this.#placements(row.placements, row.id),
       npc: {
         health: { min: row.npc_health_min, max: row.npc_health_max },
         damageScale: row.npc_damage_scale,
@@ -648,7 +673,7 @@ export class DungeonsRepository {
         : 'green',
       npc: { min: row.npc_min, max: row.npc_max },
       loot: { min: row.loot_min, max: row.loot_max },
-      crates: this.#jsonArray(row.crates, row.dungeon_id, 'crates'),
+      crates: this.#crateList(row.crates, row.dungeon_id, 'crates'),
       door: (ROOM_DOORS as readonly string[]).includes(row.door) ? (row.door as RoomDoor) : 'wood',
       locked: row.locked === 1,
       wideDoor:
@@ -703,6 +728,126 @@ export class DungeonsRepository {
     this.#logger?.warn({ dungeon: dungeonId, column }, 'coluna JSON ilegível: tratada como vazia');
 
     return [];
+  }
+
+  /**
+   * As caixas cadastradas que vieram da coluna.
+   *
+   * ####  ELA LÊ OS DOIS FORMATOS, E NÃO HÁ MIGRAÇÃO DE DADOS  ####
+   *
+   * A coluna guardava `["assets/…/crate_normal.prefab", …]`, e
+   * passou a guardar `[{prefab, table, coins}, …]`. Quem converte é
+   * o `preprocess` do `crateSpecSchema`, linha a linha — então toda
+   * masmorra gravada antes de 13/09/2026 é lida certa, sem UPDATE
+   * nenhum no banco.
+   *
+   * Uma migração de dados seria a outra saída, e ela é pior por um
+   * motivo concreto: um `json_each` reescrevendo trinta colunas de
+   * texto é uma ida só, e se houver uma linha torta no meio ela
+   * derruba a subida do agente. Converter na leitura degrada por
+   * LINHA — a torta vira lista vazia, com aviso, e as outras
+   * continuam de pé.
+   *
+   * Linha que não é array, ou caixa que não passa na régua (um
+   * prefab sem `assets/`), é DESCARTADA com aviso. Descartar a
+   * caixa é melhor que descartar a lista: a sala nasce com as
+   * outras três em vez de nascer vazia.
+   */
+  #crateList(raw: string, dungeonId: string, column: string): CrateSpecInput[] {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+
+      if (Array.isArray(parsed)) {
+        const crates: CrateSpecInput[] = [];
+        let dropped = 0;
+
+        for (const item of parsed) {
+          const one = crateSpecSchema.safeParse(item);
+
+          if (one.success) crates.push(one.data);
+          else dropped += 1;
+        }
+
+        if (dropped > 0) {
+          this.#logger?.warn(
+            { dungeon: dungeonId, column, dropped },
+            'caixa ilegível na coluna: ela saiu da lista, e as outras continuam valendo',
+          );
+        }
+
+        return crates;
+      }
+    } catch {
+      // cai no aviso abaixo
+    }
+
+    this.#logger?.warn({ dungeon: dungeonId, column }, 'coluna JSON ilegível: tratada como vazia');
+
+    return [];
+  }
+
+  /**
+   * Os marcadores do desenho que vieram da coluna.
+   *
+   * Ilegível vira lista vazia, que é o SORTEIO de sempre — o
+   * comportamento que a masmorra tinha antes de o campo existir.
+   * Qualquer outro padrão inventaria posição que ninguém marcou.
+   */
+  #placements(raw: string, dungeonId: string): DungeonPlacementInput[] {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+
+      if (Array.isArray(parsed)) {
+        const marks: DungeonPlacementInput[] = [];
+
+        for (const item of parsed) {
+          const one = dungeonPlacementSchema.safeParse(item);
+
+          if (one.success) marks.push(one.data);
+        }
+
+        if (marks.length !== parsed.length) {
+          this.#logger?.warn(
+            { dungeon: dungeonId, dropped: parsed.length - marks.length },
+            'marcador ilegível no desenho: aquela posição volta ao sorteio',
+          );
+        }
+
+        return marks;
+      }
+    } catch {
+      // cai no aviso abaixo
+    }
+
+    this.#logger?.warn(
+      { dungeon: dungeonId },
+      'os marcadores do desenho estão ilegíveis: a masmorra volta ao sorteio',
+    );
+
+    return [];
+  }
+
+  /**
+   * O nível das peças do corredor.
+   *
+   * Os três `NULL` juntos são "herda o `structure`" — o padrão, e o
+   * que toda linha anterior à 081 tem. É a mesma leitura do
+   * `#grade` da sala, e pelo mesmo motivo.
+   */
+  #corridorGrade(row: DungeonRow): GradeSetInput | null {
+    if (
+      row.corridor_grade_foundation === null &&
+      row.corridor_grade_wall === null &&
+      row.corridor_grade_ceiling === null
+    ) {
+      return null;
+    }
+
+    return {
+      foundation: grade(row.corridor_grade_foundation),
+      wall: grade(row.corridor_grade_wall),
+      ceiling: grade(row.corridor_grade_ceiling),
+    };
   }
 
   /**

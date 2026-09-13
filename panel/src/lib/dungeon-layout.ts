@@ -784,6 +784,154 @@ export function checkLayout(grid: readonly string[]): string[] {
 //  MUDAR A REGRA AQUI EXIGE MUDAR NO PLUGIN JUNTO.
 // ------------------------------------------------------------
 
+// ------------------------------------------------------------
+//  O CODIGO NUNCA FICA ATRAS DA PROPRIA PORTA
+//
+//  ####  ESPELHO DE `core/src/dungeons/lock-route.ts`  ####
+//
+//  A mesma conta roda em tres lugares, e isso e deliberado: aqui
+//  (para o admin ver enquanto desenha), na rota de construir (que
+//  RECUSA, no modo "nao construir") e no plugin (que e quem decide,
+//  com a masmorra de pe).
+//
+//  Divergir entre elas e como a tela promete o que o jogo nao faz.
+//  Ver o cabecalho do arquivo do agente para a regra inteira e para
+//  por que ela e "zona publica" em vez de cadeia de codigos.
+// ------------------------------------------------------------
+
+export interface LockRouteInput {
+  readonly lock: {
+    readonly enabled: boolean;
+    readonly carrier: 'npc' | 'crate' | 'none';
+    readonly carrierScope: 'corridor' | 'anywhere';
+  };
+  readonly corridor: { readonly npcDensity: number; readonly lootDensity: number };
+  readonly rooms: readonly {
+    readonly color: 'green' | 'blue' | 'red';
+    readonly locked: boolean;
+    readonly npc: { readonly max: number };
+    readonly loot: { readonly max: number };
+  }[];
+  readonly placements: readonly {
+    readonly kind: 'npc' | 'crate';
+    readonly x: number;
+    readonly z: number;
+  }[];
+}
+
+/**
+ * O que esta errado na rota do codigo, em portugues.
+ *
+ * Lista vazia = ela fecha. Vale so no modo planta: no modo receita o
+ * tracado e sorteado dentro do servidor, e nao ha desenho para
+ * conferir.
+ */
+export function checkLockRoute(grid: readonly string[], input: LockRouteInput): string[] {
+  const problems: string[] = [];
+  const cells = readCells(grid);
+  const rooms = findRooms(cells);
+
+  const lockedColors = new Set(input.rooms.filter((room) => room.locked).map((room) => room.color));
+  const lockedRooms = new Set<number>();
+
+  for (const [id, index] of rooms) {
+    const cell = cells.get(id);
+
+    if (cell !== undefined && lockedColors.has(cell.color)) lockedRooms.add(index);
+  }
+
+  if (!input.lock.enabled || lockedRooms.size === 0 || input.lock.carrier === 'none') {
+    return problems;
+  }
+
+  const entrance = [...cells.values()].find((cell) => cell.kind === 'entrance');
+
+  // Sem entrada nao ha de onde partir, e o `checkLayout` ja reclama
+  // dela com a frase propria.
+  if (entrance === undefined) return problems;
+
+  // A zona publica: BFS da entrada com as salas trancadas como
+  // parede — e o que o jogador alcanca de maos vazias.
+  const reached = new Set<string>([key(entrance.x, entrance.z)]);
+  const queue: GridCell[] = [entrance];
+
+  while (queue.length > 0) {
+    const current = queue.pop();
+
+    if (current === undefined) break;
+
+    for (const [dx, dz] of NEIGHBOURS) {
+      const id = key(current.x + dx, current.z + dz);
+      const neighbour = cells.get(id);
+
+      if (neighbour === undefined || reached.has(id)) continue;
+
+      const index = rooms.get(id);
+
+      if (index !== undefined && lockedRooms.has(index)) continue;
+
+      reached.add(id);
+      queue.push(neighbour);
+    }
+  }
+
+  const marked = new Set(
+    input.placements
+      .filter((mark) => mark.kind === input.lock.carrier)
+      .map((mark) => key(mark.x + entrance.x, mark.z + entrance.z)),
+  );
+
+  const wantsNpc = input.lock.carrier === 'npc';
+  const density = wantsNpc ? input.corridor.npcDensity : input.corridor.lootDensity;
+
+  let carrierCells = 0;
+
+  for (const id of reached) {
+    const cell = cells.get(id);
+
+    if (cell === undefined || cell.kind === 'entrance') continue;
+
+    const index = rooms.get(id);
+    const inCorridor = index === undefined;
+
+    if (input.lock.carrierScope === 'corridor' && !inCorridor) continue;
+
+    if (marked.has(id)) {
+      carrierCells += 1;
+      continue;
+    }
+
+    if (inCorridor) {
+      if (density > 0) carrierCells += 1;
+      continue;
+    }
+
+    const room = input.rooms.find((candidate) => candidate.color === cell.color);
+    const max = wantsNpc ? (room?.npc.max ?? 0) : (room?.loot.max ?? 0);
+
+    if (max > 0) carrierCells += 1;
+  }
+
+  if (carrierCells === 0) {
+    const what = wantsNpc ? 'um inimigo' : 'uma caixa';
+    const where =
+      input.lock.carrierScope === 'corridor'
+        ? 'no corredor que se alcança sem abrir porta trancada'
+        : 'fora das salas trancadas';
+    const fix =
+      input.lock.carrierScope === 'corridor'
+        ? 'Suba a densidade do corredor, marque uma posição no desenho ou deixe o portador nascer em qualquer lugar.'
+        : 'Marque uma posição no desenho, ou deixe alguma sala aberta com conteúdo.';
+
+    problems.push(
+      `O código não teria onde nascer: não há ${what} ${where}. ` +
+        `Quem fosse buscá-lo precisaria abrir a porta que ele mesmo destranca. ${fix}`,
+    );
+  }
+
+  return problems;
+}
+
 export interface WideDoorStats {
   /** Quantas salas o traçado tem. */
   readonly rooms: number;

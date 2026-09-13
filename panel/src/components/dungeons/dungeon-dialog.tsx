@@ -51,6 +51,7 @@ import { Check, Copy, Dices, Loader2, Plus, RotateCcw, RotateCw, Save, Trash2 } 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { AiFields, resolveAi } from '@/components/dungeons/ai-fields';
+import { CrateFields } from '@/components/dungeons/crate-fields';
 import { DungeonGridEditor } from '@/components/dungeons/dungeon-grid-editor';
 import { DungeonPreviewPanel } from '@/components/dungeons/dungeon-preview';
 import { LayoutThumb } from '@/components/dungeons/layout-thumb';
@@ -62,6 +63,7 @@ import { Input } from '@/components/ui/input';
 import { StepBody, Steps, type Step } from '@/components/ui/steps';
 import { Toggle } from '@/components/ui/toggle';
 import {
+  checkLockRoute,
   previewFromGrid,
   previewLayout,
   wideDoorStats,
@@ -181,6 +183,12 @@ const SCOPE_LABEL: Readonly<Record<DungeonLock['carrierScope'], string>> = {
 const UNDELIVERED_LABEL: Readonly<Record<DungeonLock['onUndelivered'], string>> = {
   unlock: 'Destranca a sala',
   keep: 'Deixa trancada mesmo assim',
+  // ####  O TERCEIRO E O UNICO QUE NAO ERGUE A MASMORRA  ####
+  //
+  // Pedido do dono em 13/09/2026: "deve impedir a construcao ou
+  // destrancar a sala, conforme a configuracao escolhida". O texto
+  // diz o preco junto, porque o preco e um evento que nao acontece.
+  abort: 'Não constrói a masmorra',
 };
 
 /**
@@ -226,7 +234,7 @@ function room(
     color: key,
     npc,
     loot,
-    crates: [crate],
+    crates: [{ prefab: crate, table: null, coins: null }],
     door,
     locked,
     wideDoor: null,
@@ -254,11 +262,16 @@ const EMPTY: DungeonInput = {
   corridor: {
     npcDensity: 20,
     lootDensity: 10,
-    crates: ['assets/bundled/prefabs/radtown/crate_normal.prefab'],
+    crates: [{ prefab: CRATE_NORMAL, table: null, coins: null }],
     table: { ...SERVER_TABLE },
     ai: {},
+    // `null` = herda o material da masmorra, que e o que o corredor
+    // sempre fez. Ver `grauDoCorredor` na ajuda.
+    grade: null,
   },
   grid: null,
+  // Vazio = o sorteio de sempre. Ver `marcadores` na ajuda.
+  placements: [],
   npc: {
     health: { min: 100, max: 150 },
     damageScale: 1,
@@ -866,7 +879,21 @@ function StepDesenho({
     // edita a partir dali.
     const rooms = Math.round((draft.size.min + draft.size.max) / 2);
 
-    patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights) });
+    patch({ grid: sketchFromLayout(rooms, Date.now() % 100_000, draft.weights), placements: [] });
+  }
+
+  // ####  TROCAR O DESENHO LIMPA OS MARCADORES  ####
+  //
+  // A posição marcada é uma célula daquele desenho — "o guarda fica
+  // na porta da sala vermelha". Num traçado novo, aquela célula é
+  // outra coisa: no melhor caso o marcador cai no vazio (e a tela
+  // recusa salvar, dizendo isso), no pior ele cai numa sala qualquer
+  // e o admin encontra um inimigo onde nunca pôs um.
+  //
+  // Apagar é a única leitura honesta de "carreguei outro desenho". A
+  // lista fica vazia, visível, e remarcar são dois cliques.
+  function replaceGrid(grid: string[]): void {
+    patch({ grid, placements: [] });
   }
 
   const drawn = draft.grid !== null && draft.grid.length > 0;
@@ -881,7 +908,7 @@ function StepDesenho({
           <FieldLabel topic={DUNGEON_HELP.plantaPronta}>Começar de uma planta pronta</FieldLabel>
           <LayoutStrip
             layouts={layouts}
-            onPick={(layout) => patch({ grid: [...layout.grid] })}
+            onPick={(layout) => replaceGrid([...layout.grid])}
           />
         </div>
       )}
@@ -916,6 +943,14 @@ function StepDesenho({
         />
       )}
 
+      <div>
+        <FieldLabel topic={DUNGEON_HELP.marcadores}>Onde nasce cada peça</FieldLabel>
+        <p className="mt-1 text-2xs leading-relaxed text-muted">
+          Escolha <em>Inimigo</em> ou <em>Caixa</em> na paleta e clique numa célula para fixar a
+          posição. Sem nenhum marcador, tudo continua sendo sorteado dentro das salas.
+        </p>
+      </div>
+
       <DungeonGridEditor
         grid={draft.grid}
         onChange={(grid) => patch({ grid })}
@@ -924,6 +959,8 @@ function StepDesenho({
         // quarto de volta, e a quarta devolve o automático.
         facing={draft.entranceFacing}
         onFacing={(entranceFacing) => patch({ entranceFacing })}
+        placements={draft.placements}
+        onPlacements={(placements) => patch({ placements })}
       />
     </StepBody>
   );
@@ -1279,9 +1316,10 @@ function StepSalas({
               />
             )}
 
-            <CrateList
+            <CrateFields
               crates={room.crates}
               onChange={(crates) => update(index, { crates })}
+              scope="desta cor"
               className="mt-3"
             />
 
@@ -1306,11 +1344,55 @@ function StepSalas({
         <h4 className="mb-3 font-condensed text-xs font-bold uppercase tracking-wide">
           O corredor
         </h4>
-        <LootTableFields
-          title="O que cai nas caixas do corredor"
-          value={draft.corridor.table}
-          onChange={(table) => patch({ corridor: { ...draft.corridor, table } })}
+
+        {/* ####  O MATERIAL DO CORREDOR MORA AQUI, E NAO NO PASSO ②  ####
+
+            O `structure` daquele passo e o da MASMORRA — corredor,
+            entrada e tudo que nao tem dono de sala. Este e so do
+            caminho, e ele fica ao lado das caixas do corredor porque
+            e aqui que o admin esta pensando "como e o corredor". */}
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.grauDoCorredor}>Material do corredor</FieldLabel>
+          <div className="mt-1.5">
+            <Toggle
+              on={draft.corridor.grade !== null}
+              busy={false}
+              onChange={(on) =>
+                patch({
+                  corridor: {
+                    ...draft.corridor,
+                    grade: on ? { ...draft.structure } : null,
+                  },
+                })
+              }
+              labels={['Próprio', 'O da masmorra']}
+              label="Material do corredor"
+            />
+          </div>
+
+          {draft.corridor.grade !== null && (
+            <GradeRow
+              value={draft.corridor.grade}
+              onChange={(grade) => patch({ corridor: { ...draft.corridor, grade } })}
+              className="mt-3"
+            />
+          )}
+        </div>
+
+        <CrateFields
+          crates={draft.corridor.crates}
+          onChange={(crates) => patch({ corridor: { ...draft.corridor, crates } })}
+          scope="do corredor"
+          className="mt-3"
         />
+
+        <div className="mt-3">
+          <LootTableFields
+            title="O que cai nas caixas do corredor"
+            value={draft.corridor.table}
+            onChange={(table) => patch({ corridor: { ...draft.corridor, table } })}
+          />
+        </div>
       </div>
 
       <LockFields draft={draft} patch={patch} />
@@ -2717,27 +2799,6 @@ function TokenList({
   );
 }
 
-function CrateList({
-  crates,
-  onChange,
-  className,
-}: {
-  readonly crates: readonly string[];
-  readonly onChange: (crates: string[]) => void;
-  readonly className?: string;
-}) {
-  return (
-    <div className={className}>
-      <FieldLabel>Caixas desta cor</FieldLabel>
-      <TokenList
-        values={crates}
-        placeholder="assets/bundled/prefabs/radtown/crate_normal.prefab"
-        onChange={onChange}
-      />
-    </div>
-  );
-}
-
 function ModeCard({
   active,
   title,
@@ -2850,11 +2911,31 @@ function validate(draft: DungeonInput): Record<string, string | undefined> {
     } else if (
       draft.lock.carrier === 'npc' &&
       draft.lock.carrierScope === 'corridor' &&
-      draft.corridor.npcDensity === 0
+      draft.corridor.npcDensity === 0 &&
+      !draft.placements.some((mark) => mark.kind === 'npc')
     ) {
+      // O marcador de inimigo no desenho é um NPC de corredor tão bom
+      // quanto o sorteado — e com ele, densidade zero é justamente
+      // como se põe o guarda no lugar escolhido. Ver a mesma segunda
+      // pergunta no schema do agente.
       problems.salas =
-        'O código sai de um inimigo do corredor, e o corredor não tem nenhum: suba a densidade no passo Tamanho, ou permita o portador em qualquer lugar.';
+        'O código sai de um inimigo do corredor, e o corredor não tem nenhum: suba a densidade no passo Tamanho, marque um inimigo no desenho, ou permita o portador em qualquer lugar.';
     }
+  }
+
+  // ####  O CODIGO NUNCA FICA ATRAS DA PROPRIA PORTA  ####
+  //
+  // A mesma conta do agente (`dungeons/lock-route.ts`), rodando
+  // enquanto o admin desenha: no modo "não construir", a rota de
+  // construir RECUSA o comando — e descobrir isso no horário do
+  // evento é o pior momento possível.
+  //
+  // Só no modo planta: no modo receita o traçado é sorteado dentro do
+  // servidor, e não há desenho para conferir aqui.
+  if (draft.mode === 'blueprint' && draft.grid !== null && anyLocked) {
+    const route = checkLockRoute(draft.grid, draft);
+
+    if (route.length > 0) problems.salas = route[0];
   }
 
   // Uma tabela sem itens em "acrescenta" ou "substitui" não muda
@@ -2902,6 +2983,16 @@ function toInput(dungeon: Dungeon): DungeonInput {
       ...input.corridor,
       table: input.corridor.table ?? { ...SERVER_TABLE },
       ai: input.corridor.ai ?? {},
+      // ####  O `??` AQUI NAO E ZELO DE TIPO  ####
+      //
+      // A masmorra gravada antes da migracao 081 volta da API sem
+      // estes dois campos, e o rascunho os leria como `undefined`.
+      // Um `grade: undefined` no PUT e diferente de `null`: o zod
+      // aplica o default (que e null) e da no mesmo, mas o
+      // `placements: undefined` faria a tela renderizar
+      // `placements.length` e derrubar a pagina inteira — o defeito
+      // do "This page couldn't load".
+      grade: input.corridor.grade ?? null,
     },
     npc: {
       ...input.npc,
@@ -2919,6 +3010,7 @@ function toInput(dungeon: Dungeon): DungeonInput {
     access: input.access ?? { ...EMPTY.access },
     protection: input.protection ?? { ...EMPTY.protection },
     respawn: input.respawn ?? { ...EMPTY.respawn },
+    placements: input.placements ?? [],
     rooms: input.rooms.map((current) => ({
       ...current,
       wideDoor: current.wideDoor ?? null,
@@ -2926,6 +3018,14 @@ function toInput(dungeon: Dungeon): DungeonInput {
       grade: current.grade ?? null,
       table: current.table ?? { ...SERVER_TABLE },
       ai: current.ai ?? {},
+      // A caixa gravada como texto vira objeto AQUI tambem, e nao so
+      // no agente: a API devolve o que o repositorio leu, e ele ja
+      // converte — mas uma resposta de cache, ou um agente mais
+      // velho no ar, ainda traz a string. Sem isto, `crate.prefab`
+      // seria undefined e a lista de caixas renderizaria vazia.
+      crates: (current.crates ?? []).map((crate) =>
+        typeof crate === 'string' ? { prefab: crate, table: null, coins: null } : crate,
+      ),
     })),
   };
 }

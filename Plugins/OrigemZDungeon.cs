@@ -505,6 +505,16 @@ namespace Oxide.Plugins
             // que o jogador vê e não usa — e ele nunca saberia por que.
             /// <summary>A fechadura de cada sala trancada, por id de sala.</summary>
             public readonly Dictionary<int, RoomLock> locks = new Dictionary<int, RoomLock>();
+
+            /// <summary>
+            /// As celulas que se alcancam sem abrir porta trancada.
+            ///
+            /// `null` = ainda nao foi calculado. Ver `PublicCells`: e o
+            /// cache do BFS que decide onde o papel do codigo pode
+            /// nascer, e ele roda uma vez por construcao em vez de uma
+            /// vez por ponto de loot.
+            /// </summary>
+            public HashSet<(int, int)> publicCells;
             /// <summary>Os códigos já sorteados, para não repetir.</summary>
             public readonly HashSet<string> usedCodes = new HashSet<string>();
             /// <summary>O código único, quando a receita pede um só.</summary>
@@ -2466,20 +2476,59 @@ namespace Oxide.Plugins
                     ? DefaultCrates
                     : spec.crates;
 
+                // ####  O MARCADOR MANDA NESTA SALA, NAQUELE TIPO  ####
+                //
+                // Marcou caixa aqui? Entao as caixas desta sala sao as
+                // marcadas, e a faixa `loot` dela nao e sorteada. Os
+                // inimigos continuam sorteados se ninguem marcou
+                // inimigo -- as duas perguntas sao separadas, e e isso
+                // que deixa marcar so o chefe e deixar o resto no
+                // sorteio.
+                var markedCrates = MarksIn(dungeon, cells, "crate");
+                var markedNpcs = MarksIn(dungeon, cells, "npc");
+
+                foreach (var mark in markedCrates)
+                {
+                    var prefab = string.IsNullOrEmpty(mark.prefab)
+                        ? prefabs[rng.Next(prefabs.Count)]
+                        : mark.prefab;
+
+                    crates += SpawnMarked(dungeon, layout, floors, mark, prefab, spec, rng);
+                }
+
+                foreach (var mark in markedNpcs)
+                {
+                    var many = Mathf.Clamp(mark.amount <= 0 ? 1 : mark.amount, 1, MaxPerMark);
+
+                    for (var i = 0; i < many; i++)
+                    {
+                        if (SpawnNpc(dungeon, layout, floors, (mark.x, mark.z), color, rng, mark.prefab, i, many))
+                            npcs++;
+                    }
+                }
+
                 var forCrates = Shuffled(cells, rng);
                 var forNpcs = Shuffled(cells, rng);
 
-                for (var i = 0; i < wantedCrates && i < forCrates.Count; i++)
+                if (markedCrates.Count == 0)
                 {
-                    var table = spec == null ? null : spec.table;
+                    for (var i = 0; i < wantedCrates && i < forCrates.Count; i++)
+                    {
+                        var prefab = prefabs[rng.Next(prefabs.Count)];
+                        var table = TableFor(spec == null ? null : spec.crateContents, prefab, spec == null ? null : spec.table);
+                        var coins = CoinsFor(spec == null ? null : spec.crateContents, prefab);
 
-                    if (SpawnContainer(dungeon, layout, floors, forCrates[i], prefabs[rng.Next(prefabs.Count)], table, rng) != null)
-                        crates++;
+                        if (SpawnContainer(dungeon, layout, floors, forCrates[i], prefab, table, coins, rng) != null)
+                            crates++;
+                    }
                 }
 
-                for (var i = 0; i < wantedNpcs && i < forNpcs.Count; i++)
+                if (markedNpcs.Count == 0)
                 {
-                    if (SpawnNpc(dungeon, layout, floors, forNpcs[i], color, rng)) npcs++;
+                    for (var i = 0; i < wantedNpcs && i < forNpcs.Count; i++)
+                    {
+                        if (SpawnNpc(dungeon, layout, floors, forNpcs[i], color, rng, null, 0, 1)) npcs++;
+                    }
                 }
             }
 
@@ -2491,23 +2540,62 @@ namespace Oxide.Plugins
                 ? DefaultCrates
                 : corridorSpec.crates;
 
+            // ####  O CORREDOR CONTA COMO UMA UNIDADE  ####
+            //
+            // Marcador de caixa em qualquer celula de corredor desliga a
+            // `lootDensity` do corredor INTEIRO -- e nao so daquela
+            // celula. Desligar celula a celula daria uma densidade que
+            // continua espalhando caixa ao lado da que o admin
+            // escolheu, e a escolha dele viraria um palpite a mais.
+            //
+            // A `npcDensity` segue viva, pela mesma separacao das salas.
+            var markedCorridorCrates = MarksIn(dungeon, corridor, "crate");
+            var markedCorridorNpcs = MarksIn(dungeon, corridor, "npc");
+
+            foreach (var mark in markedCorridorCrates)
+            {
+                var prefab = string.IsNullOrEmpty(mark.prefab)
+                    ? corridorCrates[rng.Next(corridorCrates.Count)]
+                    : mark.prefab;
+
+                crates += SpawnMarked(dungeon, layout, floors, mark, prefab, corridorSpec, rng);
+            }
+
+            foreach (var mark in markedCorridorNpcs)
+            {
+                var many = Mathf.Clamp(mark.amount <= 0 ? 1 : mark.amount, 1, MaxPerMark);
+
+                for (var i = 0; i < many; i++)
+                {
+                    if (SpawnNpc(dungeon, layout, floors, (mark.x, mark.z), null, rng, mark.prefab, i, many))
+                        npcs++;
+                }
+            }
+
             foreach (var cell in corridor)
             {
                 // Uma celula de corredor recebe UMA coisa: com as duas,
                 // o inimigo nasce em cima da caixa e o jogador nao
                 // consegue abri-la sem matar alguem primeiro — o que
                 // parece bug, e nao desenho.
-                if (rng.Next(100) < lootDensity)
+                if (markedCorridorCrates.Count == 0 && rng.Next(100) < lootDensity)
                 {
-                    var table = corridorSpec == null ? null : corridorSpec.table;
+                    var prefab = corridorCrates[rng.Next(corridorCrates.Count)];
+                    var table = TableFor(
+                        corridorSpec == null ? null : corridorSpec.crateContents,
+                        prefab,
+                        corridorSpec == null ? null : corridorSpec.table);
+                    var coins = CoinsFor(corridorSpec == null ? null : corridorSpec.crateContents, prefab);
 
-                    if (SpawnContainer(dungeon, layout, floors, cell, corridorCrates[rng.Next(corridorCrates.Count)], table, rng) != null)
+                    if (SpawnContainer(dungeon, layout, floors, cell, prefab, table, coins, rng) != null)
                         crates++;
 
                     continue;
                 }
 
-                if (rng.Next(100) < npcDensity && SpawnNpc(dungeon, layout, floors, cell, null, rng)) npcs++;
+                if (markedCorridorNpcs.Count == 0
+                    && rng.Next(100) < npcDensity
+                    && SpawnNpc(dungeon, layout, floors, cell, null, rng, null, 0, 1)) npcs++;
             }
 
             // ####  O ACERTO DE CONTAS DAS FECHADURAS  ####
@@ -2521,6 +2609,123 @@ namespace Oxide.Plugins
             // O relogio do respawn e a ultima coisa: antes dele, nao ha
             // o que repor.
             StartRespawn(dungeon);
+        }
+
+        /// <summary>
+        /// Quantas pecas um marcador aceita no mesmo ponto.
+        ///
+        /// Uma celula e um quadrado de 3x3 m, e as pecas nascem num anel
+        /// dentro dela (`SpotInRing`). Acima de oito elas ficam
+        /// encostadas; e o mesmo teto que o painel oferece.
+        /// </summary>
+        private const int MaxPerMark = 8;
+
+        /// <summary>
+        /// Os marcadores daquele tipo que caem dentro deste conjunto de
+        /// celulas.
+        ///
+        /// Devolve lista VAZIA quando ninguem marcou nada -- e e essa
+        /// lista vazia que faz o sorteio continuar valendo, sala por
+        /// sala. Ver `PlacementSpec`.
+        ///
+        /// So no modo planta: `HasDrawing` e a mesma pergunta que o
+        /// construtor faz para decidir entre o desenho e o sorteio, e um
+        /// marcador de um desenho abandonado nao pode reger uma receita.
+        /// </summary>
+        private List<PlacementSpec> MarksIn(
+            ActiveDungeon dungeon, List<(int, int)> cells, string kind)
+        {
+            var found = new List<PlacementSpec>();
+
+            if (!HasDrawing(dungeon)) return found;
+            if (dungeon.spec.placements == null || dungeon.spec.placements.Count == 0) return found;
+
+            foreach (var mark in dungeon.spec.placements)
+            {
+                if (mark == null || mark.kind != kind) continue;
+                if (!cells.Contains((mark.x, mark.z))) continue;
+
+                found.Add(mark);
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// As caixas de um marcador: de uma a oito, no mesmo ponto.
+        ///
+        /// Devolve quantas nasceram. O conteudo vem do cadastro daquele
+        /// PREFAB na cor (ou no corredor) -- e e isso que liga o
+        /// marcador ao loot proprio sem duplicar campo nenhum: marcar
+        /// "caixa de elite aqui" e cadastrar o loot dela na sala sao
+        /// duas telas do mesmo desenho.
+        /// </summary>
+        private int SpawnMarked(
+            ActiveDungeon dungeon,
+            Layout layout,
+            Dictionary<(int, int), BuildingBlock> floors,
+            PlacementSpec mark,
+            string prefab,
+            object owner,
+            System.Random rng)
+        {
+            var contents = owner is RoomSpec room
+                ? room.crateContents
+                : owner is CorridorSpec corridor ? corridor.crateContents : null;
+
+            var fallback = owner is RoomSpec r
+                ? r.table
+                : owner is CorridorSpec c ? c.table : null;
+
+            var table = TableFor(contents, prefab, fallback);
+            var coins = CoinsFor(contents, prefab);
+
+            var many = Mathf.Clamp(mark.amount <= 0 ? 1 : mark.amount, 1, MaxPerMark);
+            var made = 0;
+
+            for (var i = 0; i < many; i++)
+            {
+                if (SpawnContainer(dungeon, layout, floors, (mark.x, mark.z), prefab, table, coins, rng, i, many) != null)
+                    made++;
+            }
+
+            return made;
+        }
+
+        /// <summary>
+        /// A tabela daquele prefab, ou a da cor.
+        ///
+        /// `crateContents` e a lista das caixas que tem conteudo
+        /// PROPRIO, chaveada pelo prefab -- ver `CrateSpec`. Quem nao
+        /// esta nela cai na tabela da cor, que e o comportamento de
+        /// sempre.
+        /// </summary>
+        private static LootTableSpec TableFor(
+            List<CrateSpec> contents, string prefab, LootTableSpec fallback)
+        {
+            if (contents == null) return fallback;
+
+            foreach (var crate in contents)
+            {
+                if (crate == null || crate.prefab != prefab) continue;
+
+                // A caixa cadastrada SEM tabela propria continua usando a
+                // da cor: ela pode estar ali so pelo OZCoin.
+                return crate.table ?? fallback;
+            }
+
+            return fallback;
+        }
+
+        /// <summary>O premio em OZCoin daquele prefab, ou `null`.</summary>
+        private static CoinsSpec CoinsFor(List<CrateSpec> contents, string prefab)
+        {
+            if (contents == null) return null;
+
+            foreach (var crate in contents)
+                if (crate != null && crate.prefab == prefab) return crate.coins;
+
+            return null;
         }
 
         /// <summary>
@@ -2589,6 +2794,41 @@ namespace Oxide.Plugins
                    + new Vector3(Mathf.Cos(angle) * radius, 0.1f, Mathf.Sin(angle) * radius);
         }
 
+        /// <summary>
+        /// Onde a peca numero <paramref name="index"/> de
+        /// <paramref name="total"/> nasce dentro da celula.
+        ///
+        /// ####  DUAS PECAS NO MESMO PONTO PRECISAM DE UM ANEL  ####
+        ///
+        /// O `SpotIn` sorteia angulo e raio, e sortear duas vezes dentro
+        /// de um circulo de um metro poe as duas em cima uma da outra
+        /// com frequencia -- que e exatamente o defeito que o dono
+        /// mediu dentro do labirinto em 09/09/2026 ("esta spawnando 3
+        /// NPC em cima do outro").
+        ///
+        /// Quando o admin MARCA quatro caixas num ponto, ele esta
+        /// pedindo as quatro ali. Entao os angulos sao divididos em
+        /// partes iguais e o raio cresce com a lotacao: uma peca fica
+        /// no meio, duas ou tres num circulo pequeno, oito num anel
+        /// largo. Continua sorteado o deslocamento inicial do anel, para
+        /// duas celulas marcadas nao ficarem identicas.
+        /// </summary>
+        private static Vector3 SpotInRing(
+            BuildingBlock floor, System.Random rng, int index, int total)
+        {
+            if (total <= 1) return SpotIn(floor, rng);
+
+            var turn = rng.Next(360) * Mathf.Deg2Rad;
+            var angle = turn + index * (Mathf.PI * 2f / total);
+
+            // 0,55 m com duas pecas, 1,05 m com oito: a celula tem 1,5 m
+            // do centro a parede, e a caixa mede uns 0,7 m.
+            var radius = Mathf.Min(0.45f + total * 0.08f, 1.05f);
+
+            return floor.transform.position
+                   + new Vector3(Mathf.Cos(angle) * radius, 0.1f, Mathf.Sin(angle) * radius);
+        }
+
         // O antigo `SpawnCrate` virou o `SpawnContainer` da secao "O QUE
         // O JOGADOR LEVA EMBORA": o nome mudou porque agora nasce
         // armario, barril e mochila por ali, e cada um deles tem
@@ -2616,17 +2856,52 @@ namespace Oxide.Plugins
             Dictionary<(int, int), BuildingBlock> floors,
             (int, int) cell,
             string color,
-            System.Random rng)
+            System.Random rng,
+            string prefab,
+            int index,
+            int total)
         {
             BuildingBlock floor;
             if (!floors.TryGetValue(cell, out floor) || floor == null) return false;
 
+            // ####  O TIPO DE INIMIGO VEM DO MARCADOR, QUANDO HA UM  ####
+            //
+            // E ele e sempre um `ScientistNPC`: o painel so oferece a
+            // pasta `Scientist/` do jogo, e a razao esta no
+            // `DUNGEON_NPCS` do agente -- a IA da masmorra e um
+            // componente pregado nessa classe, e o `OnEntityTakeDamage`
+            // que impede o inimigo de matar o colega tambem. Um
+            // `TunnelDweller` nasceria burro, sem coleira e matando os
+            // proprios.
+            //
+            // O `as ScientistNPC` devolvendo null e a rede de seguranca:
+            // um prefab de outra familia (editado a mao no banco) faz o
+            // inimigo NAO nascer, com aviso, em vez de nascer quebrado.
+            var wanted = string.IsNullOrEmpty(prefab) ? PrefabScientist : prefab;
+
+            // Duas pecas no mesmo ponto precisam de um anel: ver
+            // `SpotInRing`. Com uma, o comportamento e o de sempre.
+            var at = total > 1
+                ? SpotInRing(floor, rng, index, total)
+                : floor.transform.position + Vector3.up * 0.2f;
+
+            if (total > 1) at.y = floor.transform.position.y + 0.2f;
+
             var npc = GameManager.server.CreateEntity(
-                PrefabScientist,
-                floor.transform.position + Vector3.up * 0.2f,
+                wanted,
+                at,
                 Quaternion.Euler(0f, rng.Next(360), 0f)) as ScientistNPC;
 
-            if (npc == null) return false;
+            if (npc == null)
+            {
+                if (wanted != PrefabScientist)
+                {
+                    PrintWarning("o inimigo '" + wanted + "' nao existe ou nao e um cientista: "
+                                 + "esta posicao ficou vazia");
+                }
+
+                return false;
+            }
 
             npc.EnableSaving(false);
             npc.Spawn();
@@ -3117,9 +3392,32 @@ namespace Oxide.Plugins
 
             if (scope == "corridor" && !inCorridor) return null;
 
+            // ####  E O PAPEL NAO PODE NASCER ATRAS DE PORTA NENHUMA  ####
+            //
+            // Nao basta ele estar fora da sala que ele abre. Duas salas
+            // trancadas em fila produzem o mesmo lacre permanente sem
+            // que nenhuma das duas guarde o proprio codigo:
+            //
+            //     VERMELHA (trancada)   <- o codigo dela cai aqui
+            //        |
+            //     AZUL (trancada)       <- e para chegar la e preciso
+            //        |                     abrir esta, cujo codigo caiu
+            //     entrada                  na vermelha.
+            //
+            // Pedido do dono em 13/09/2026. A regra e "zona publica": o
+            // portador nasce onde se chega da entrada sem abrir porta
+            // trancada nenhuma. O agente valida a mesma coisa antes de
+            // mandar construir (`dungeons/lock-route.ts`), e as duas
+            // contas sao a mesma de proposito.
+            if (!PublicCells(dungeon, layout).Contains(cell)) return null;
+
             foreach (var entry in dungeon.locks.Values)
             {
                 if (entry.delivered) continue;
+
+                // A regra mais antiga desta secao, e a mais obvia: o
+                // papel nunca fica dentro da sala que ele abre. A da
+                // zona publica, acima, e a generalizacao dela.
                 if (entry.cells.Contains(cell)) continue;
 
                 var note = ItemManager.CreateByName("note", 1);
@@ -3150,6 +3448,84 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// As celulas que o jogador alcanca de maos vazias.
+        ///
+        /// ####  BFS DA ENTRADA, COM AS SALAS TRANCADAS COMO PAREDE  ####
+        ///
+        /// E a mesma conta do `checkLockRoute` do agente, e escreve-la
+        /// diferente aqui e o jeito de a tela prometer o que o jogo nao
+        /// faz -- o que a seta da entrada ja custou uma vez neste
+        /// projeto.
+        ///
+        /// ####  O RESULTADO E CACHEADO  ####
+        ///
+        /// `TakeCodeNote` roda uma vez por ponto de loot, e uma masmorra
+        /// tem dezenas. Refazer o BFS em cada um seria O(n^2) numa
+        /// construcao que ja e a parte lenta do evento.
+        ///
+        /// O cache vive na masmorra ativa e morre com ela. As fechaduras
+        /// nao mudam depois de a porta nascer -- e o `SettleLocks`, que
+        /// destranca, roda depois de todo papel ja ter sido entregue.
+        /// </summary>
+        private HashSet<(int, int)> PublicCells(ActiveDungeon dungeon, Layout layout)
+        {
+            if (dungeon.publicCells != null) return dungeon.publicCells;
+
+            var reached = new HashSet<(int, int)>();
+
+            // As celulas que estao atras de fechadura. `entry.cells` e o
+            // comodo inteiro daquela sala trancada.
+            var blocked = new HashSet<(int, int)>();
+
+            foreach (var entry in dungeon.locks.Values)
+            {
+                if (entry == null || entry.cells == null) continue;
+
+                foreach (var cell in entry.cells) blocked.Add(cell);
+            }
+
+            // A (0,0) e a chegada do alcapao, e o construtor a mantem
+            // livre: e dela que o jogador parte.
+            var start = (0, 0);
+
+            if (!layout.cells.Contains(start))
+            {
+                // Sem a celula de chegada nao ha de onde partir. Devolver
+                // TUDO seria pior que devolver nada: o papel voltaria a
+                // poder nascer atras da porta. Devolver vazio faz o
+                // `SettleLocks` destrancar (ou manter, conforme a
+                // escolha), que e um desfecho que o admin entende.
+                dungeon.publicCells = reached;
+                return reached;
+            }
+
+            var queue = new Queue<(int, int)>();
+
+            reached.Add(start);
+            queue.Enqueue(start);
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+
+                for (var d = 0; d < 4; d++)
+                {
+                    var next = (current.Item1 + Dirs[d].dx, current.Item2 + Dirs[d].dz);
+
+                    if (reached.Contains(next)) continue;
+                    if (!layout.cells.Contains(next)) continue;
+                    if (blocked.Contains(next)) continue;
+
+                    reached.Add(next);
+                    queue.Enqueue(next);
+                }
+            }
+
+            dungeon.publicCells = reached;
+            return reached;
+        }
+
+        /// <summary>
         /// O acerto de contas das fechaduras, no fim da construção.
         ///
         /// ####  UMA SALA QUE NINGUÉM ABRE E UM DEFEITO MUDO  ####
@@ -3172,6 +3548,41 @@ namespace Oxide.Plugins
             var settings = LockConfigOf(dungeon);
             var stranded = 0;
 
+            // ####  `abort` NAO DESTRANCA: ELE DERRUBA A MASMORRA  ####
+            //
+            // Pedido do dono em 13/09/2026: *"deve impedir a construcao
+            // ou destrancar a sala, conforme a configuracao escolhida"*.
+            //
+            // A conta so fecha aqui, no fim: a porta nasce trancada antes
+            // de o conteudo existir, e o portador so aparece no
+            // `Populate`. Erguer e derrubar custa um segundo de trabalho
+            // e uma implementacao so da regra -- e o caminho do painel
+            // nem chega neste ponto, porque a rota ja e conferida antes
+            // de o comando sair (`dungeons/lock-route.ts` no agente).
+            if (settings.onUndelivered == "abort")
+            {
+                var lacked = 0;
+
+                foreach (var entry in dungeon.locks.Values)
+                    if (!entry.delivered) lacked++;
+
+                if (lacked > 0)
+                {
+                    PrintWarning("a masmorra foi DESFEITA: " + lacked + " sala(s) trancada(s) so teriam "
+                                 + "onde esconder o codigo atras da propria porta, e esta masmorra esta "
+                                 + "marcada para nao nascer nesse caso (onUndelivered=abort)");
+
+                    Report("failed", new Dictionary<string, object>
+                    {
+                        ["slug"] = dungeon.slug,
+                        ["reason"] = "code_unreachable",
+                    });
+
+                    Demolish("code_unreachable");
+                    return;
+                }
+            }
+
             foreach (var entry in dungeon.locks.Values)
             {
                 if (entry.delivered) continue;
@@ -3193,8 +3604,9 @@ namespace Oxide.Plugins
                 }
 
                 PrintWarning("a sala " + ColorLabel(entry.color) + " foi DESTRANCADA: não havia onde pôr "
-                             + "o código " + entry.code + " fora dela. Ponha NPC no corredor, "
-                             + "troque `lock.carrier` ou ponha `lock.carrierScope` em 'anywhere'.");
+                             + "o código " + entry.code + " numa parte da masmorra que se alcance sem "
+                             + "abrir porta trancada. Ponha NPC no corredor, marque uma posição no "
+                             + "desenho, troque `lock.carrier` ou ponha `lock.carrierScope` em 'anywhere'.");
             }
 
             Debug("fechaduras: " + dungeon.locks.Count + " sala(s), " + stranded + " sem portador");
@@ -3242,8 +3654,14 @@ namespace Oxide.Plugins
         {
             var set = dungeon.spec == null ? null : dungeon.spec.structure;
 
-            int owner;
-            if (layout != null && layout.owner.TryGetValue(cell, out owner) && owner >= 0)
+            // `-1` e "corredor" no `layout.owner`, e serve de valor
+            // inicial: sem ele o compilador recusa a leitura de `owner`
+            // no `else if` abaixo, porque o `&&` pode ter pulado o
+            // `TryGetValue` (CS0165).
+            var owner = -1;
+            var known = layout != null && layout.owner.TryGetValue(cell, out owner);
+
+            if (known && owner >= 0)
             {
                 string color;
                 if (dungeon.roomColors.TryGetValue(owner, out color))
@@ -3251,6 +3669,21 @@ namespace Oxide.Plugins
                     var room = RoomSpecOf(dungeon, color);
                     if (room != null && room.grade != null) set = room.grade;
                 }
+            }
+            else if (known)
+            {
+                // ####  A CELULA DE CORREDOR PODE TER MATERIAL PROPRIO  ####
+                //
+                // `owner < 0` e corredor (e a entrada, que e corredor no
+                // layout). `null` aqui = herda o `structure`, que e o que
+                // o construtor sempre fez com tudo que nao e sala.
+                //
+                // A celula que nao esta no layout -- a entrada minima,
+                // que chama este metodo com `layout: null` -- continua no
+                // `structure`: a casinha nao e corredor.
+                var corridor = dungeon.spec == null ? null : dungeon.spec.corridor;
+
+                if (corridor != null && corridor.grade != null) set = corridor.grade;
             }
 
             if (set == null) return DefaultGrade;
@@ -4973,6 +5406,16 @@ namespace Oxide.Plugins
             public Weights weights;
             public CorridorSpec corridor;
             public List<string> grid;
+
+            /// <summary>
+            /// Onde nasce cada inimigo e cada caixa, marcado no desenho.
+            ///
+            /// `null` ou vazio = o sorteio de sempre, e e o caso de toda
+            /// masmorra anterior a 13/09/2026. So vale no modo planta:
+            /// no modo receita o tracado e sorteado a cada nascimento, e
+            /// nao existe celula `(3,-2)` para marcar.
+            /// </summary>
+            public List<PlacementSpec> placements;
             public NpcSpec npc;
             public float timeOfDay;
             public List<RoomSpec> rooms;
@@ -5005,6 +5448,112 @@ namespace Oxide.Plugins
             public List<string> crates;
             /// <summary>`null` = a tabela do servidor. Ver a secao do loot.</summary>
             public LootTableSpec table;
+
+            /// <summary>
+            /// O conteudo proprio de alguma das caixas acima.
+            ///
+            /// `null` = todas usam a tabela do corredor. Ver `CrateSpec`.
+            /// </summary>
+            public List<CrateSpec> crateContents;
+
+            /// <summary>
+            /// O nivel das pecas do CORREDOR. `null` = herda `structure`.
+            ///
+            /// Ate 13/09/2026 o corredor era "o resto": ele nascia com o
+            /// structure da masmorra, junto com a entrada e com o que a
+            /// planta colou. A sala ja tinha material proprio desde a
+            /// 062, e o corredor nao -- o que impedia a masmorra mais
+            /// pedida de todas, a de corredor de madeira com as salas
+            /// blindadas: aquela em que se entra pelo caminho, e nao
+            /// pela parede.
+            /// </summary>
+            public GradeSpec grade;
+        }
+
+        /// <summary>
+        /// O conteudo proprio de UM tipo de caixa.
+        ///
+        /// ####  A CHAVE E O PREFAB  ####
+        ///
+        /// O construtor sorteia POR PREFAB, e e por prefab que esta
+        /// lista e consultada (`ContentFor`). O agente recusa prefab
+        /// repetido na lista dele justamente porque duas regras para
+        /// `crate_elite` nao teriam resposta certa aqui.
+        ///
+        /// ####  E ELE E SEPARADO DE `crates`  ####
+        ///
+        /// `crates` continua sendo a lista de caminhos entre os quais a
+        /// cor sorteia, em texto pelado. Medido pelo agente: virar
+        /// objeto custa 12 bytes por caixa, a receita de fabrica tem
+        /// nove, e as 29 masmorras que cabiam nos 50 KB do comando de
+        /// RCON deixavam de caber. Quem nao configura conteudo proprio
+        /// nao paga por ele.
+        /// </summary>
+        private class CrateSpec
+        {
+            public string prefab;
+            /// <summary>`null` = a tabela da cor (ou do corredor).</summary>
+            public LootTableSpec table;
+            /// <summary>`null` = esta caixa nao paga OZCoin.</summary>
+            public CoinsSpec coins;
+        }
+
+        /// <summary>
+        /// O premio em OZCoin de uma caixa.
+        ///
+        /// ####  O PLUGIN NAO CREDITA NADA  ####
+        ///
+        /// OZCoin e SALDO, e o saldo mora na carteira -- o banco do
+        /// agente, ou o site quando o servidor esta pareado. Este plugin
+        /// nao fala com nenhum dos dois.
+        ///
+        /// O que ele faz e: sortear o valor quando a caixa NASCE
+        /// (`LootSpot.coins`), ver a mao do jogador chegar nela
+        /// (`OnLootEntity`) e GRITAR uma linha para o agente. Quem
+        /// credita, e quem avisa o jogador no chat, e o agente.
+        ///
+        /// Sortear no nascimento, e nao na abertura, tem duas
+        /// consequencias boas: o respawn re-sorteia (cada caixa nova e
+        /// uma chance nova) e duas pessoas abrindo a mesma caixa nao
+        /// produzem dois premios.
+        /// </summary>
+        private class CoinsSpec
+        {
+            public Range amount;
+            /// <summary>1 a 100. Ausente = 100.</summary>
+            public int chance = 100;
+        }
+
+        /// <summary>
+        /// Um marcador do desenho: onde nasce um inimigo ou uma caixa.
+        ///
+        /// ####  A COORDENADA E EM RELACAO A ENTRADA  ####
+        ///
+        /// `(0,0)` e a celula do `E`, que e a MESMA origem do
+        /// `LayoutFromGrid`: ele translada o desenho inteiro para que o
+        /// `E` caia ali. Entao a chave deste marcador e literalmente a
+        /// chave do `layout.owner`, sem conversao nenhuma.
+        ///
+        /// ####  E O MARCADOR MANDA NA SALA DELE, NAQUELE TIPO  ####
+        ///
+        /// Decidido com o dono em 13/09/2026. A sala que tem marcador de
+        /// CAIXA nasce so com as caixas marcadas -- a faixa `loot` dela
+        /// deixa de ser sorteada. Os inimigos da MESMA sala continuam
+        /// sorteados, se ninguem marcou inimigo ali.
+        ///
+        /// E o que deixa marcar so a sala do chefe e deixar o resto no
+        /// sorteio. Ver `Populate`.
+        /// </summary>
+        private class PlacementSpec
+        {
+            /// <summary>`npc` | `crate`.</summary>
+            public string kind;
+            public int x;
+            public int z;
+            /// <summary>Quantos nascem aqui. Ausente = 1.</summary>
+            public int amount = 1;
+            /// <summary>Vazio = o prefab que a cor (ou o corredor) ja usa.</summary>
+            public string prefab;
         }
 
         private class NpcSpec
@@ -5028,6 +5577,8 @@ namespace Oxide.Plugins
             public Range npc;
             public Range loot;
             public List<string> crates;
+            /// <summary>O conteudo proprio de alguma delas. Ver `CrateSpec`.</summary>
+            public List<CrateSpec> crateContents;
             public string door;
             public bool locked;
             /// <summary>`null` = a tabela do servidor. Ver a secao do loot.</summary>
@@ -6226,6 +6777,25 @@ namespace Oxide.Plugins
             public Quaternion rotation;
             public LootTableSpec table;
             public BaseEntity entity;
+
+            /// <summary>
+            /// A regra do premio: quanto, e com que chance.
+            ///
+            /// `null` = esta caixa nao paga OZCoin. Ela sobrevive a
+            /// peca, como o resto do ponto: e dela que sai o novo
+            /// sorteio quando o respawn repoe a caixa.
+            /// </summary>
+            public CoinsSpec coinsRule;
+
+            /// <summary>
+            /// Quanto OZCoin esta caixa paga a quem a abrir primeiro.
+            ///
+            /// Zero = nenhum, e e o caso de quase toda caixa. Sorteado
+            /// no `Furnish` (nascimento e reposicao) e zerado na
+            /// entrega (`OnLootEntity`), que e o que faz o premio ser
+            /// de UM jogador -- como o loot.
+            /// </summary>
+            public int coins;
         }
 
         // ------------------------------------------------------------
@@ -6260,7 +6830,10 @@ namespace Oxide.Plugins
             (int, int) cell,
             string prefab,
             LootTableSpec table,
-            System.Random rng)
+            CoinsSpec coins,
+            System.Random rng,
+            int index = 0,
+            int total = 1)
         {
             BuildingBlock floor;
             if (!floors.TryGetValue(cell, out floor) || floor == null) return null;
@@ -6269,9 +6842,13 @@ namespace Oxide.Plugins
             {
                 prefab = prefab,
                 cell = cell,
-                position = SpotIn(floor, rng),
+                position = SpotInRing(floor, rng, index, total),
                 rotation = Quaternion.Euler(0f, rng.Next(360), 0f),
                 table = table,
+                // A REGRA fica no ponto; quem sorteia e o `Furnish`,
+                // que roda no nascimento e a cada reposicao. Sortear
+                // aqui daria um premio que o respawn nunca renova.
+                coinsRule = coins,
             };
 
             if (!Furnish(dungeon, spot)) return null;
@@ -6364,6 +6941,14 @@ namespace Oxide.Plugins
 
             spot.entity = entity;
             Remember(dungeon, entity, spot);
+
+            // ####  O PREMIO E SORTEADO COM A PECA, E NAO NA ABERTURA  ####
+            //
+            // Aqui, e nao no `SpawnContainer`, porque este metodo roda
+            // nos DOIS casos: o nascimento e a reposicao do respawn.
+            // Cada caixa nova e uma chance nova, e duas pessoas abrindo
+            // a mesma caixa continuam produzindo um premio so.
+            spot.coins = RollCoins(spot.coinsRule, lootRng);
 
             ApplyTable(entity, spot.table, lootRng);
             return true;
@@ -6676,6 +7261,84 @@ namespace Oxide.Plugins
         }
 
         // ------------------------------------------------------------
+        //  O PREMIO EM OZCOIN
+        // ------------------------------------------------------------
+
+        /// <summary>
+        /// Sorteia o premio desta caixa, no nascimento dela.
+        ///
+        /// Zero = nao ganhou a chance, ou nao ha premio configurado. O
+        /// sorteio acontece UMA vez por caixa -- ver `CoinsSpec` sobre
+        /// por que aqui e nao na abertura.
+        /// </summary>
+        private static int RollCoins(CoinsSpec spec, System.Random rng)
+        {
+            if (spec == null || spec.amount == null) return 0;
+
+            var chance = Mathf.Clamp(spec.chance <= 0 ? 100 : spec.chance, 1, 100);
+
+            if (rng.Next(100) >= chance) return 0;
+
+            var amount = Roll(rng, spec.amount);
+
+            return amount <= 0 ? 0 : amount;
+        }
+
+        /// <summary>
+        /// Alguem abriu uma caixa nossa -- e ela pode ter premio.
+        ///
+        /// ####  ELE E DE QUEM CHEGA PRIMEIRO  ####
+        ///
+        /// `spot.coins` e zerado aqui, antes de qualquer coisa poder dar
+        /// errado. Dois jogadores abrindo a mesma caixa no mesmo tique,
+        /// ou um jogador abrindo e fechando cinco vezes, produzem UM
+        /// premio -- como o loot, que tambem e de quem chega primeiro.
+        ///
+        /// Zerar depois do `Report` seria a mesma corrida com dinheiro
+        /// dentro, e o agente e que pagaria por ela.
+        ///
+        /// ####  E O PLUGIN NAO DIZ NADA AO JOGADOR  ####
+        ///
+        /// Quem avisa e o agente, DEPOIS de a carteira aceitar. Uma
+        /// frase daqui sairia na hora e mentiria toda vez que o site
+        /// estivesse fora do ar -- e o jogador nao tem como saber a
+        /// diferenca entre "o site caiu" e "esse plugin me enganou".
+        ///
+        /// ####  A CHAVE VAI PRONTA, E ELA E ESTAVEL  ####
+        ///
+        /// `slug:netID` identifica ESTA caixa desta masmorra. Se a linha
+        /// chegar duas vezes ao agente -- um `oxide.reload` no meio do
+        /// caminho, um retry --, ele credita uma vez so, porque a
+        /// carteira responde `idempotent` sobre a mesma referencia.
+        /// </summary>
+        private void OnLootEntity(BasePlayer player, BaseEntity entity)
+        {
+            var dungeon = active;
+
+            if (dungeon == null || player == null || entity == null) return;
+            if (entity.net == null) return;
+
+            LootSpot spot;
+            if (!dungeon.spotByEntity.TryGetValue(entity.net.ID.Value, out spot)) return;
+            if (spot.coins <= 0) return;
+
+            var amount = spot.coins;
+            spot.coins = 0;
+
+            Report("coins", new Dictionary<string, object>
+            {
+                ["slug"] = dungeon.slug,
+                ["steamId"] = player.UserIDString,
+                ["amount"] = amount,
+                ["key"] = dungeon.slug + ":" + entity.net.ID.Value.ToString(CultureInfo.InvariantCulture),
+                ["prefab"] = spot.prefab ?? "",
+            });
+
+            Debug("premio de " + amount + " OZCoin entregue a " + player.UserIDString
+                  + " (" + (spot.prefab ?? "?") + ")");
+        }
+
+        // ------------------------------------------------------------
         //  O REFRESH
         // ------------------------------------------------------------
 
@@ -6701,6 +7364,24 @@ namespace Oxide.Plugins
 
             LootSpot spot;
             if (!dungeon.spotByEntity.TryGetValue(container.net.ID.Value, out spot)) return null;
+
+            // ####  LOOT NOVO, CHANCE NOVA  ####
+            //
+            // A caixa de radtown se repopula pelo cronometro dela, sem
+            // passar pelo `Furnish` -- entao e aqui que o premio dela
+            // renova. Sem isto, uma masmorra permanente pagaria OZCoin
+            // uma vez e nunca mais, com as caixas se enchendo de loot
+            // novo de hora em hora.
+            //
+            // ANTES da pergunta do modo: uma caixa que paga premio e
+            // usa a tabela do servidor e um caso comum, e o `return`
+            // logo abaixo a deixaria de fora.
+            //
+            // Este hook NAO dispara no nascimento da peca: o `Remember`
+            // acontece depois do `Spawn()`, e sem ele o netID nao esta
+            // no mapa. Por isso nao ha sorteio dobrado com o `Furnish`.
+            spot.coins = RollCoins(spot.coinsRule, lootRng);
+
             if (ModeOf(spot.table) == "server") return null;
 
             // O conserto é no tique seguinte, quando o `SpawnLoot`
@@ -6799,6 +7480,11 @@ namespace Oxide.Plugins
                 Wipe(inventory);
 
                 foreach (var item in items) GiveItem(inventory, item);
+
+                // O conteudo voltou: o premio volta com ele. E a mesma
+                // regra do refresh da caixa de radtown (`OnLootSpawn`)
+                // -- loot novo, chance nova.
+                spot.coins = RollCoins(spot.coinsRule, lootRng);
                 refilled++;
             }
 
