@@ -111,6 +111,13 @@ export interface PlayerQuestRecord {
   readonly snapshot: QuestSnapshot;
   /** `objective_seq` → quanto já foi feito. */
   readonly progress: Readonly<Record<number, number>>;
+  /**
+   * Quanto de cada objetivo já saiu do inventário no balcão do NPC.
+   *
+   * O resgate cobra a DIFERENÇA: quem entregou tudo não paga de
+   * novo. Ver a migração 079.
+   */
+  readonly paid: Readonly<Record<number, number>>;
 }
 
 export interface QuestNpcRecord extends QuestNpcInput {
@@ -873,6 +880,45 @@ export class QuestsRepository {
    * conserto de admin (que precisa de `actor` e motivo) ou o
    * recálculo de rotina de uma métrica.
    */
+  /**
+   * A entrega no balcão: soma ao contador E ao que já foi pago.
+   *
+   * Os dois andam juntos de propósito — o item saiu do inventário
+   * para virar progresso, e é isso que o resgate não pode cobrar de
+   * novo. Uma transação para os dois, pelo mesmo motivo de sempre.
+   */
+  payAtCounter(
+    playerQuestId: number,
+    entries: readonly { readonly objectiveSeq: number; readonly amount: number }[],
+    now: number = Date.now(),
+  ): void {
+    const pay = this.#db.prepare(
+      `INSERT INTO player_quest_progress (player_quest_id, objective_seq, value, paid, updated_at)
+            VALUES (@player_quest_id, @objective_seq, @amount, @amount, @at)
+       ON CONFLICT (player_quest_id, objective_seq) DO UPDATE SET
+            value      = player_quest_progress.value + @amount,
+            paid       = player_quest_progress.paid + @amount,
+            updated_at = @at`,
+    );
+
+    const run = this.#db.transaction(() => {
+      for (const entry of entries) {
+        if (entry.amount <= 0) {
+          continue;
+        }
+
+        pay.run({
+          player_quest_id: playerQuestId,
+          objective_seq: entry.objectiveSeq,
+          amount: Math.trunc(entry.amount),
+          at: now,
+        });
+      }
+    });
+
+    run();
+  }
+
   setProgress(
     playerQuestId: number,
     objectiveSeq: number,
@@ -1478,10 +1524,11 @@ export class QuestsRepository {
     const placeholders = ids.map(() => '?').join(', ');
 
     const byAttempt = new Map<number, Record<number, number>>();
+    const paidByAttempt = new Map<number, Record<number, number>>();
 
     for (const row of this.#db
       .prepare(
-        `SELECT player_quest_id, objective_seq, value
+        `SELECT player_quest_id, objective_seq, value, paid
            FROM player_quest_progress
           WHERE player_quest_id IN (${placeholders})`,
       )
@@ -1489,11 +1536,17 @@ export class QuestsRepository {
       player_quest_id: number;
       objective_seq: number;
       value: number;
+      paid: number;
     }[]) {
       const current = byAttempt.get(row.player_quest_id) ?? {};
 
       current[row.objective_seq] = row.value;
       byAttempt.set(row.player_quest_id, current);
+
+      const paid = paidByAttempt.get(row.player_quest_id) ?? {};
+
+      paid[row.objective_seq] = row.paid;
+      paidByAttempt.set(row.player_quest_id, paid);
     }
 
     return rows.map((row) => ({
@@ -1509,6 +1562,7 @@ export class QuestsRepository {
       cooldownUntil: row.cooldown_until,
       snapshot: parseSnapshot(row.snapshot),
       progress: byAttempt.get(row.id) ?? {},
+      paid: paidByAttempt.get(row.id) ?? {},
     }));
   }
 

@@ -1211,3 +1211,141 @@ describe('a quest órfã', () => {
     ).toEqual([]);
   });
 });
+
+// ------------------------------------------------------------
+//  O BALCÃO: ENTREGAR O QUE SE TEM
+// ------------------------------------------------------------
+
+describe('a entrega no balcão do NPC', () => {
+  function comEstoque(estoque: Record<string, number>) {
+    const tirado: { shortname: string; amount: number }[] = [];
+
+    return {
+      tirado,
+      consumer: {
+        take: (input: {
+          items: readonly { shortname: string; amount: number }[];
+          partial?: boolean;
+        }) => {
+          const taken = input.items.map((item) => {
+            const have = estoque[item.shortname] ?? 0;
+            const amount = input.partial === true ? Math.min(have, item.amount) : item.amount;
+
+            if (input.partial === true) {
+              estoque[item.shortname] = have - amount;
+              tirado.push({ shortname: item.shortname, amount });
+            }
+
+            return { shortname: item.shortname, amount };
+          });
+
+          const complete = taken.every((item, index) => item.amount >= input.items[index]!.amount);
+
+          return Promise.resolve({ complete, taken });
+        },
+      },
+    };
+  }
+
+  it('tira o que o jogador tem e soma ao contador, sem exigir tudo', async () => {
+    const estoque = comEstoque({ stones: 30 });
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: estoque.consumer,
+    });
+
+    h.repository.create(
+      'muro',
+      questInputSchema.parse({
+        title: 'Muro',
+        objectives: [{ seq: 0, kind: 'gather', target: 'stones', amount: 300 }],
+      }),
+    );
+
+    const view = await service.accept({ serverId: 'pvp1', steamId: FULANO, questId: 'muro' });
+
+    const entregue = await service.turnIn({ playerQuestId: view.playerQuestId, steamId: FULANO });
+
+    expect(entregue).toEqual([{ shortname: 'stones', amount: 30 }]);
+
+    const depois = h.repository.attempt(view.playerQuestId);
+
+    expect(depois?.progress[0]).toBe(30);
+    // O que saiu da mochila fica marcado: é o que o resgate não
+    // pode cobrar de novo.
+    expect(depois?.paid[0]).toBe(30);
+    expect(depois?.status).toBe('active');
+  });
+
+  it('a segunda viagem soma, e a que fecha conclui a missão', async () => {
+    const estoque = comEstoque({ stones: 200 });
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: estoque.consumer,
+    });
+
+    h.repository.create(
+      'muro',
+      questInputSchema.parse({
+        title: 'Muro',
+        objectives: [{ seq: 0, kind: 'gather', target: 'stones', amount: 300 }],
+      }),
+    );
+
+    const view = await service.accept({ serverId: 'pvp1', steamId: FULANO, questId: 'muro' });
+
+    await service.turnIn({ playerQuestId: view.playerQuestId, steamId: FULANO });
+    expect(h.repository.attempt(view.playerQuestId)?.progress[0]).toBe(200);
+
+    // Ele volta com mais do que falta: a mochila tem 500, e a
+    // missão só pode levar as 100 que restam.
+    const segunda = comEstoque({ stones: 500 });
+    const service2 = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: segunda.consumer,
+    });
+
+    await service2.turnIn({ playerQuestId: view.playerQuestId, steamId: FULANO });
+
+    expect(segunda.tirado).toEqual([{ shortname: 'stones', amount: 100 }]);
+
+    const depois = h.repository.attempt(view.playerQuestId);
+
+    expect(depois?.progress[0]).toBe(300);
+    expect(depois?.paid[0]).toBe(300);
+    expect(depois?.status).toBe('completed');
+  });
+
+  it('o que foi entregue no balcão não é cobrado de novo no resgate', async () => {
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: comEstoque({ stones: 300 }).consumer,
+      rewards: { deliver: () => Promise.resolve([]) },
+    });
+
+    h.repository.create(
+      'muro',
+      questInputSchema.parse({
+        title: 'Muro',
+        objectives: [
+          { seq: 0, kind: 'gather', target: 'stones', amount: 300, consume: true },
+        ],
+      }),
+    );
+
+    const view = await service.accept({ serverId: 'pvp1', steamId: FULANO, questId: 'muro' });
+
+    await service.turnIn({ playerQuestId: view.playerQuestId, steamId: FULANO });
+
+    // A mochila está vazia agora. Sem a marca do que foi pago, o
+    // resgate cobraria 300 pedras que o jogador acabou de entregar.
+    const result = await service.claim({ playerQuestId: view.playerQuestId });
+
+    expect(result.playerQuestId).toBe(view.playerQuestId);
+    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('claimed');
+  });
+});

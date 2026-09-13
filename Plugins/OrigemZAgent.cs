@@ -8932,6 +8932,55 @@ namespace Oxide.Plugins
             }
         }
 
+        // Tira o que der de cada item e diz quanto tirou.
+        //
+        // Sem primeira passada: aqui nao ha "tudo ou nada" a
+        // proteger - o que sair do inventario vira progresso na
+        // mesma resposta, e o que nao tinha simplesmente nao saiu.
+        private string QuestConsumePartial(BasePlayer player, List<string> names, List<int> amounts)
+        {
+            StringBuilder taken = new StringBuilder();
+            bool complete = true;
+
+            for (int i = 0; i < names.Count; i++)
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(names[i]);
+                int have = definition == null
+                    ? 0
+                    : player.inventory.GetAmount(definition.itemid);
+                int pego = Math.Min(have, amounts[i]);
+
+                if (pego > 0)
+                {
+                    player.inventory.Take(null, definition.itemid, pego);
+                }
+
+                if (pego < amounts[i])
+                {
+                    complete = false;
+                }
+
+                if (taken.Length > 0)
+                {
+                    taken.Append(',');
+                }
+
+                taken.Append("{\"shortname\":").Append(JsonConvert.ToString(names[i]))
+                    .Append(",\"amount\":").Append(pego).Append('}');
+            }
+
+            // O som de quem entregou alguma coisa. Sem ele o clique
+            // some itens do inventario sem aviso nenhum.
+            if (taken.Length > 0)
+            {
+                player.SendNetworkUpdate();
+            }
+
+            return "{\"ok\":true,\"contract\":" + QuestContract +
+                ",\"taken\":[" + taken + "],\"complete\":" +
+                (complete ? "true" : "false") + "}";
+        }
+
         private string HandleQuestConsume(ConsoleSystem.Arg arg)
         {
             if (!arg.HasArgs(2))
@@ -8992,6 +9041,23 @@ namespace Oxide.Plugins
 
                 names.Add(shortname);
                 amounts.Add(amount);
+            }
+
+            // ####  O MODO PARCIAL  ####
+            //
+            // O resgate e tudo-ou-nada: uma missao que cobra 300
+            // pedras nao pode levar 200 e deixar o jogador sem a
+            // recompensa E sem as pedras.
+            //
+            // A ENTREGA no balcao do NPC e o contrario: ele traz o
+            // que tem, o boneco fica com isso, e o contador anda. E
+            // o pedido do dono em 13/09/2026 -- "deveria aceitar
+            // entrega parcial ate completar tudo".
+            bool partial = (bool?)payload["partial"] ?? false;
+
+            if (partial)
+            {
+                return QuestConsumePartial(player, names, amounts);
             }
 
             // Primeira passada: da para pagar tudo?
