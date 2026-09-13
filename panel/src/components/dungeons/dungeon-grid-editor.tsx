@@ -296,6 +296,28 @@ export function DungeonGridEditor({
    */
   const mine = useRef<string>(signatureOf(grid));
 
+  /**
+   * Os marcadores que ESTE componente emitiu por ultimo.
+   *
+   * Ver `toggleMark`: sem ele, duas celulas marcadas no mesmo arrasto
+   * partiriam da mesma prop e a segunda apagaria a primeira.
+   */
+  const latest = useRef<readonly DungeonPlacement[]>(placements);
+
+  // A prop manda quando ela muda por fora — a lista embaixo do grid,
+  // um traçado carregado (que a limpa), o rascunho reaberto.
+  useEffect(() => {
+    latest.current = placements;
+  }, [placements]);
+
+  const emitMarks = useCallback(
+    (next: DungeonPlacement[]) => {
+      latest.current = next;
+      onPlacements?.(next);
+    },
+    [onPlacements],
+  );
+
   useEffect(() => {
     const incoming = signatureOf(grid);
 
@@ -360,6 +382,19 @@ export function DungeonGridEditor({
   function toggleMark(x: number, z: number, kind: DungeonPlacement['kind']) {
     if (onPlacements === undefined) return;
 
+    // ####  A LISTA VEM DO REF, E NAO DA PROP  ####
+    //
+    // Arrastar com o pincel de marcador chama isto uma vez por
+    // celula, e cada chamada emite a LISTA INTEIRA para o pai. Duas
+    // emissoes antes do re-render fariam a segunda partir da prop
+    // velha — e o primeiro marcador do arrasto desapareceria.
+    //
+    // O ref guarda o que ESTE componente emitiu por ultimo, que e o
+    // mesmo padrao do `mine` usado para o desenho, e pela mesma
+    // razao. Ver `useEffect` abaixo sobre o desenho que chega por
+    // fora.
+    const current = latest.current;
+
     // Célula vazia não tem chão: a peça não nasceria, e o agente
     // recusa salvar assim (ver `cellsOfGrid` no schema). Recusar aqui
     // é a mesma regra dita no lugar em que o clique aconteceu.
@@ -369,16 +404,15 @@ export function DungeonGridEditor({
     if (x === board.entrance.x && z === board.entrance.z) return;
 
     const at = { x: x - board.entrance.x, z: z - board.entrance.z };
-    const existing = placements.find(
+    const existing = current.find(
       (mark) => mark.kind === kind && mark.x === at.x && mark.z === at.z,
     );
 
-    if (existing !== undefined) {
-      onPlacements(placements.filter((mark) => mark !== existing));
-      return;
-    }
-
-    onPlacements([...placements, { kind, x: at.x, z: at.z, amount: 1, prefab: '' }]);
+    emitMarks(
+      existing === undefined
+        ? [...current, { kind, x: at.x, z: at.z, amount: 1, prefab: '' }]
+        : current.filter((mark) => mark !== existing),
+    );
   }
 
   function paint(x: number, z: number) {
@@ -409,9 +443,10 @@ export function DungeonGridEditor({
     // formulário.
     if (brush === 'empty' && onPlacements !== undefined) {
       const at = { x: x - board.entrance.x, z: z - board.entrance.z };
-      const kept = placements.filter((mark) => mark.x !== at.x || mark.z !== at.z);
+      const current = latest.current;
+      const kept = current.filter((mark) => mark.x !== at.x || mark.z !== at.z);
 
-      if (kept.length !== placements.length) onPlacements(kept);
+      if (kept.length !== current.length) emitMarks(kept);
     }
 
     setBoard((current) => {
