@@ -5636,6 +5636,67 @@ export interface LootTable {
 }
 
 /**
+ * O premio em OZCoin de uma caixa.
+ *
+ * ####  ELE NAO E UM ITEM DENTRO DA CAIXA  ####
+ *
+ * OZCoin e SALDO. A caixa sorteia o valor ao nascer; quando alguem a
+ * abre, o plugin avisa o agente, que credita na carteira e manda o
+ * recibo no chat. Ver `coinsDropSchema` em `core/src/types`.
+ */
+export interface CoinsDrop {
+  amount: { min: number; max: number };
+  /** 1 a 100. */
+  chance: number;
+}
+
+/**
+ * Uma caixa cadastrada numa cor de sala, ou no corredor.
+ *
+ * Era so o caminho do prefab, em texto. Agora cada caixa carrega o
+ * que ela quiser:
+ *
+ *   `table: null`  usa a tabela da cor (ou do corredor) — o padrao
+ *   `table: {…}`   esta caixa tem a dela, e a da cor nao a alcanca
+ *
+ * O prefab nao se repete na lista: o construtor sorteia POR PREFAB,
+ * e duas regras para a mesma caixa nao teriam resposta certa. A
+ * quantidade de caixas que nascem e a faixa da sala, nao a lista.
+ */
+export interface CrateSpec {
+  prefab: string;
+  table: LootTable | null;
+  coins: CoinsDrop | null;
+}
+
+export const PLACEMENT_KINDS = ['npc', 'crate'] as const;
+export type PlacementKind = (typeof PLACEMENT_KINDS)[number];
+
+/**
+ * Um marcador do desenho: onde nasce um inimigo ou uma caixa.
+ *
+ * As coordenadas sao em relacao a ENTRADA (a celula do `E`), e nao
+ * ao canto do desenho: o editor recorta as linhas vazias ao salvar, e
+ * um desenho que perde duas colunas a esquerda deslocaria todo
+ * marcador duas celulas — para dentro da parede.
+ *
+ * Vazio = o sorteio de sempre. Com marcador, ele manda na sala dele e
+ * naquele tipo: marcar caixa numa sala desliga o sorteio de caixa
+ * DELA, e os inimigos continuam sorteados.
+ */
+export interface DungeonPlacement {
+  kind: PlacementKind;
+  /** Celulas a leste da entrada; negativo e a oeste. */
+  x: number;
+  /** Celulas ao norte da entrada; negativo e ao sul. */
+  z: number;
+  /** Quantos nascem neste ponto. 1 a 8. */
+  amount: number;
+  /** Vazio = o que a sala ja usa. */
+  prefab: string;
+}
+
+/**
  * O comportamento do inimigo.
  *
  * ####  TODO CAMPO E OPCIONAL, E ISSO E O DESENHO INTEIRO  ####
@@ -5674,7 +5735,8 @@ export interface DungeonRoom {
   color: RoomColor;
   npc: { min: number; max: number };
   loot: { min: number; max: number };
-  crates: string[];
+  /** As caixas desta cor, cada uma com o conteudo dela. */
+  crates: CrateSpec[];
   door: RoomDoor;
   locked: boolean;
   /** A porta da sala grande. `null` = usa `door` sempre. */
@@ -5691,7 +5753,13 @@ export interface DungeonLock {
   sharedCode: boolean;
   carrier: 'npc' | 'crate' | 'none';
   carrierScope: 'corridor' | 'anywhere';
-  onUndelivered: 'unlock' | 'keep';
+  /**
+   * O que fazer com o codigo que nao achou portador.
+   *
+   * `unlock` destranca (o padrao), `keep` deixa lacrada, `abort` NAO
+   * constroi a masmorra. Ver `LOCK_UNDELIVERED` no agente.
+   */
+  onUndelivered: 'unlock' | 'keep' | 'abort';
   noteTitle: string;
   announceOpen: boolean;
   warnOnWrongCode: boolean;
@@ -5892,11 +5960,15 @@ export interface DungeonInput {
   corridor: {
     npcDensity: number;
     lootDensity: number;
-    crates: string[];
+    crates: CrateSpec[];
     table: LootTable;
     ai: AiSpec;
+    /** `null` = herda o `structure` da masmorra. */
+    grade: GradeSet | null;
   };
   grid: string[] | null;
+  /** Os marcadores do desenho. Vazio = o sorteio de sempre. */
+  placements: DungeonPlacement[];
   npc: {
     health: { min: number; max: number };
     damageScale: number;

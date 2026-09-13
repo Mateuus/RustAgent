@@ -166,12 +166,53 @@ const readySchema = z.object({
   version: z.string().max(20).optional(),
 });
 
+/**
+ * Alguém abriu uma caixa que tinha prêmio em OZCoin.
+ *
+ * ####  QUEM CREDITA É O AGENTE, E TEM DE SER ELE  ####
+ *
+ * OZCoin é saldo, e o saldo mora na carteira — o banco do agente,
+ * ou o site quando o servidor está pareado. O plugin não fala com
+ * nenhum dos dois: ele sorteou o valor no nascimento da caixa, viu
+ * a mão do jogador chegar nela, e GRITA. Quem credita é o
+ * `DungeonSync`, pelo mesmo `Wallet.credit` da recompensa de quest.
+ *
+ * ####  `key` É O QUE TORNA A LINHA REPETIDA INOFENSIVA  ####
+ *
+ * Ela nasce de (masmorra, netID da caixa) do lado do plugin, e é
+ * ESTÁVEL: a mesma caixa produz a mesma chave. Duas linhas iguais
+ * no console — um `oxide.reload` no meio, um retry — creditam UMA
+ * vez, porque a carteira do site responde `idempotent` sobre a
+ * mesma referência.
+ *
+ * O plugin manda a chave CRUA (`bunker:12345`), e quem a prefixa
+ * com `rust:<servidor>:dungeon:` é o agente, no `buildReference` —
+ * o prefixo depende do id do servidor NO SITE, que o plugin não
+ * conhece.
+ *
+ * Sem isso, um plugin que gritasse duas vezes daria dinheiro de
+ * graça, e ninguém descobriria olhando o saldo de um jogador só.
+ */
+const coinsSchema = z.object({
+  kind: z.literal('coins'),
+  secret: z.string().min(1),
+  slug: z.string().min(1),
+  steamId: z.string().min(1).max(32),
+  /** Já sorteado pelo plugin, dentro da faixa que o painel escolheu. */
+  amount: z.number().int().min(1).max(1_000_000),
+  /** A chave de idempotência, crua. Ver o comentário acima. */
+  key: z.string().min(1).max(60),
+  /** O prefab da caixa, para a frase do log dizer de onde saiu. */
+  prefab: z.string().max(200).default(''),
+});
+
 const dungeonPushSchema = z.discriminatedUnion('kind', [
   builtSchema,
   failedSchema,
   enteredSchema,
   leftSchema,
   endedSchema,
+  coinsSchema,
 ]);
 
 export type DungeonPushEvent = z.infer<typeof dungeonPushSchema>;
@@ -293,6 +334,70 @@ export interface AiPayload {
   readonly moveInterval?: number;
 }
 
+/**
+ * O conteúdo próprio de UM tipo de caixa, do jeito que o plugin lê.
+ *
+ * ####  POR QUE ESTE BLOCO É SEPARADO DE `crates`  ####
+ *
+ * `crates` continua sendo o que sempre foi: a lista de caminhos
+ * entre os quais aquela cor sorteia. Ela NÃO virou uma lista de
+ * objetos, e a razão é medida.
+ *
+ * Mandar `[{"prefab":"…"}]` em vez de `["…"]` custa 12 bytes por
+ * caixa. A receita de fábrica tem nove, e o teste que cobra o
+ * orçamento do comando de RCON mostrou o efeito: as 29 masmorras
+ * que cabiam nos 50 KB deixaram de caber. Uma frente que só quer
+ * poder dar loot próprio a UMA caixa não pode encolher o catálogo
+ * de quem não usa isso.
+ *
+ * Então o conteúdo próprio viaja à parte, e só para as caixas que
+ * têm algum: uma lista curta, chaveada pelo prefab. Quem não
+ * configurou nada não manda o campo.
+ *
+ * ####  A CHAVE É O PREFAB, E ISSO TEM CONSEQUÊNCIA  ####
+ *
+ * Duas caixas do mesmo prefab não podem ter conteúdos diferentes —
+ * e não podem mesmo: o construtor sorteia POR PREFAB, então duas
+ * regras para `crate_elite` seriam ambíguas no jogo. O schema
+ * recusa prefab repetido na lista, com a frase certa, em vez de
+ * deixar a ambiguidade chegar aqui.
+ */
+export interface CrateContentPayload {
+  readonly prefab: string;
+  /** Ausente = a tabela da cor de sala (ou do corredor). */
+  readonly table?: LootTablePayload;
+  /** Ausente = esta caixa não paga OZCoin. */
+  readonly coins?: {
+    readonly amount: { readonly min: number; readonly max: number };
+    /** 1 a 100. Ausente = 100, que é o `CoinsSpec` do plugin. */
+    readonly chance?: number;
+  };
+}
+
+/**
+ * Um marcador do desenho: onde nasce um inimigo ou uma caixa.
+ *
+ * ####  A COORDENADA É EM RELAÇÃO À ENTRADA  ####
+ *
+ * `(0,0)` é a célula do `E`, que é a MESMA origem que o
+ * `LayoutFromGrid` do plugin usa — ele translada o desenho inteiro
+ * para que o `E` caia ali. Então a chave deste marcador é
+ * literalmente a chave do `layout.owner`, sem conversão nenhuma nas
+ * duas pontas.
+ *
+ * `amount` ausente é 1 e `prefab` ausente é "o que a sala já usa":
+ * é o caso comum, e omiti-los deixa o marcador em 26 bytes.
+ */
+export interface PlacementPayload {
+  readonly kind: 'npc' | 'crate';
+  readonly x: number;
+  readonly z: number;
+  /** Ausente = 1. */
+  readonly amount?: number;
+  /** Ausente = o prefab que a cor da sala (ou o corredor) já usa. */
+  readonly prefab?: string;
+}
+
 /** O nível de construção, por tipo de peça. */
 export interface GradePayload {
   readonly foundation: string;
@@ -346,10 +451,30 @@ export interface DungeonPayload {
     readonly npcDensity: number;
     readonly lootDensity: number;
     readonly crates: readonly string[];
+    /** O conteúdo próprio de alguma delas. Ausente = todas usam a do corredor. */
+    readonly crateContents?: readonly CrateContentPayload[];
     readonly table?: LootTablePayload;
     readonly ai?: AiPayload;
+    /**
+     * O nível das peças do corredor.
+     *
+     * Ausente = herda o `structure`, que é o que o construtor
+     * sempre fez com tudo que não é sala. Ele NÃO é cortado por ser
+     * igual ao padrão do plugin: ver o comentário do `grade` da
+     * sala, no `sync.ts`, sobre por que "igual ao padrão" e
+     * "herda" não podem virar a mesma coisa.
+     */
+    readonly grade?: GradePayload;
   };
   readonly grid: readonly string[] | null;
+  /**
+   * Os marcadores do desenho.
+   *
+   * Ausente ou vazio = o sorteio de sempre. O construtor só os lê
+   * no modo planta: no modo receita não existe célula `(3,-2)`
+   * para marcar, porque o traçado é sorteado a cada nascimento.
+   */
+  readonly placements?: readonly PlacementPayload[];
   readonly npc: {
     readonly health: { readonly min: number; readonly max: number };
     readonly damageScale: number;
@@ -449,6 +574,8 @@ export interface DungeonPayload {
     readonly npc: { readonly min: number; readonly max: number };
     readonly loot: { readonly min: number; readonly max: number };
     readonly crates: readonly string[];
+    /** O conteúdo próprio de alguma delas. Ausente = todas usam a da cor. */
+    readonly crateContents?: readonly CrateContentPayload[];
     readonly door: string;
     readonly locked: boolean;
     /** Ausente = a sala grande usa a mesma porta das outras. */

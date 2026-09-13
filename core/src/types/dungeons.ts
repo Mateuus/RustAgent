@@ -106,9 +106,34 @@ export type LockCarrier = (typeof LOCK_CARRIERS)[number];
 export const LOCK_CARRIER_SCOPES = ['corridor', 'anywhere'] as const;
 export type LockCarrierScope = (typeof LOCK_CARRIER_SCOPES)[number];
 
-/** O que fazer com o código que não achou portador. */
-export const LOCK_UNDELIVERED = ['unlock', 'keep'] as const;
+/**
+ * O que fazer com o código que não achou portador.
+ *
+ * ####  `abort` EXISTE PORQUE DESTRANCAR TAMBÉM É UMA PERDA  ####
+ *
+ * Pedido do dono em 13/09/2026: *"o sistema deve validar a rota
+ * antes de construir a Dungeon. Se não existir um local acessível
+ * para o código, deve impedir a construção ou destrancar a sala,
+ * conforme a configuração escolhida."*
+ *
+ *   `unlock`  destranca e ergue (o padrão: uma masmorra com uma
+ *             porta aberta ainda é jogável);
+ *   `keep`    ergue com a sala lacrada — para o evento em que o
+ *             admin abre a porta na mão;
+ *   `abort`   NÃO ergue. É para quem prefere consertar o desenho a
+ *             entregar uma masmorra que promete o que não cumpre.
+ *
+ * Só `abort` é destrutivo para o evento (ninguém joga), e é por
+ * isso que ele não é o padrão: uma masmorra que não nasce no
+ * horário é um evento perdido, e o desenho continua errado do
+ * mesmo jeito.
+ */
+export const LOCK_UNDELIVERED = ['unlock', 'keep', 'abort'] as const;
 export type LockUndelivered = (typeof LOCK_UNDELIVERED)[number];
+
+/** O que um marcador do desenho põe naquela célula. */
+export const PLACEMENT_KINDS = ['npc', 'crate'] as const;
+export type PlacementKind = (typeof PLACEMENT_KINDS)[number];
 
 /**
  * Quem desce pelo alçapão.
@@ -332,13 +357,190 @@ export const lootTableSchema = z
 
 export type LootTableInput = z.infer<typeof lootTableSchema>;
 
+/**
+ * O prêmio em OZCoin de uma caixa.
+ *
+ * ####  ELE NÃO É UM ITEM DENTRO DA CAIXA  ####
+ *
+ * OZCoin é SALDO — mora na carteira (o banco do agente, ou o site
+ * quando o servidor está pareado), e não no inventário de ninguém.
+ * Então o que acontece aqui é o que já acontece na recompensa de
+ * quest: a caixa sorteia o valor ao nascer, e quando alguém a abre
+ * o plugin grita para o agente, que credita com `Wallet.credit`.
+ *
+ * Pôr a moeda como item seria a outra decisão possível, e ela
+ * perde: a moeda física da loja é um `researchpaper` marcado, e
+ * hoje nenhuma ação de item custom credita carteira — o jogador
+ * ficaria com um papel na mão e nada no saldo.
+ *
+ * ####  E A CHANCE É SORTEADA UMA VEZ POR CAIXA  ####
+ *
+ * No nascimento, e não na abertura: assim o respawn re-sorteia
+ * (cada caixa nova é uma chance nova) e duas pessoas abrindo a
+ * mesma caixa não produzem dois prêmios. Quem chega segundo não
+ * ganha nada — como acontece com o loot.
+ */
+export const coinsDropSchema = z.object({
+  /**
+   * Quanto. Um intervalo, porque prêmio fixo em toda caixa vira
+   * salário: o jogador soma de cabeça e para de abrir caixa.
+   */
+  amount: countRange('OZCoin', 1_000_000).default({ min: 50, max: 200 }),
+  /** A chance, em porcento, de esta caixa ter prêmio. */
+  chance: z.number().int().min(1).max(100).default(100),
+});
+
+export type CoinsDropInput = z.infer<typeof coinsDropSchema>;
+
+/**
+ * Uma caixa cadastrada numa cor de sala ou no corredor.
+ *
+ * ####  ERA UMA STRING, E UMA STRING NÃO TEM CONTEÚDO  ####
+ *
+ * `crates` era uma lista de caminhos: "esta cor sorteia entre estas
+ * quatro caixas". O que caía DENTRO delas vinha de uma tabela só, a
+ * da cor — então "a caixa de elite desta sala tem a AK, e as comuns
+ * têm sucata" não era escrevível. Pedido do dono em 13/09/2026:
+ * *"também deve ser possível selecionar uma caixa específica e
+ * personalizar seu conteúdo"*.
+ *
+ * Agora cada caixa carrega o que ela quiser:
+ *
+ *   `table: null`   usa a tabela da cor (ou do corredor). É o
+ *                   padrão, e é o que mantém de pé toda masmorra
+ *                   que já existia;
+ *   `table: {…}`    esta caixa tem a dela, e a da cor não a
+ *                   alcança. Os três modos são os mesmos —
+ *                   `server`, `add`, `replace`.
+ *
+ * ####  A STRING ANTIGA CONTINUA ENTRANDO  ####
+ *
+ * O `preprocess` transforma `"assets/…/crate_elite.prefab"` em
+ * `{ prefab: "assets/…/crate_elite.prefab" }`. Isso não é gentileza
+ * com JSON escrito à mão: é o que faz a masmorra gravada antes
+ * desta mudança ser LIDA pelo repositório sem migração de dados —
+ * e é o que faz a captura in-game e um PUT de painel antigo
+ * continuarem valendo.
+ */
+export const crateSpecSchema = z.preprocess(
+  (raw) => (typeof raw === 'string' ? { prefab: raw } : raw),
+  z.object({
+    prefab: cratePrefabSchema,
+    /** `null` = a tabela da cor de sala (ou do corredor). */
+    table: lootTableSchema.nullable().default(null),
+    /** `null` = esta caixa não paga OZCoin. */
+    coins: coinsDropSchema.nullable().default(null),
+  }),
+);
+
+export type CrateSpecInput = z.infer<typeof crateSpecSchema>;
+
+/**
+ * Vinte caixas cadastradas, no máximo, e sem prefab repetido.
+ *
+ * ####  O REPETIDO SERIA AMBÍGUO NO JOGO  ####
+ *
+ * O construtor sorteia POR PREFAB, e o conteúdo próprio viaja
+ * chaveado por ele (ver `CrateContentPayload`): duas linhas
+ * `crate_elite` com tabelas diferentes não têm resposta certa — o
+ * jogo obedeceria a uma das duas, e o admin veria a outra na tela.
+ *
+ * Recusar aqui é melhor que escolher uma: o admin queria DUAS
+ * caixas de elite na sala, e isso já é o que a faixa `loot` dela
+ * faz — a lista é o catálogo de TIPOS, não a contagem de peças.
+ *
+ * O teto de vinte é o de antes. Ele vale mais agora: vinte caixas
+ * com tabela própria de oito itens são uns 6 KB no comando de
+ * RCON, e o orçamento do `sync` é de 50 KB para TODAS as masmorras
+ * daquele servidor.
+ */
+const crateListSchema = z
+  .array(crateSpecSchema)
+  .max(20)
+  .default([])
+  .superRefine((crates, ctx) => {
+    const seen = new Set<string>();
+
+    for (const crate of crates) {
+      if (seen.has(crate.prefab)) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            'esta caixa já está na lista: o que decide quantas nascem é a faixa de caixas da sala, e não repetir o tipo',
+        });
+        return;
+      }
+
+      seen.add(crate.prefab);
+    }
+  });
+
+/**
+ * Um marcador do desenho: onde nasce um inimigo ou uma caixa.
+ *
+ * ####  A COORDENADA É EM RELAÇÃO À ENTRADA, E NÃO AO CANTO  ####
+ *
+ * `(0,0)` é a célula do `E` — a mesma origem que o construtor usa
+ * (ele translada o desenho inteiro para que o `E` caia ali) e a
+ * mesma que o alçapão conhece.
+ *
+ * Ancorar no canto do desenho seria mais fácil de calcular e
+ * erraria sozinho: o editor RECORTA as linhas vazias ao salvar, e
+ * um desenho que perde duas colunas à esquerda deslocaria todo
+ * marcador duas células — para dentro da parede.
+ *
+ * ####  E ELE VALE SÓ NO MODO PLANTA  ####
+ *
+ * No modo receita o traçado é sorteado no servidor, a cada
+ * nascimento: não existe célula `(3,-2)` para marcar. O campo é
+ * guardado de qualquer jeito (trocar de modo e voltar não pode
+ * apagar o trabalho de ninguém), e o construtor o ignora fora do
+ * desenho.
+ */
+export const dungeonPlacementSchema = z.object({
+  kind: z.enum(PLACEMENT_KINDS),
+  /** Células a leste da entrada; negativo é a oeste. */
+  x: z.number().int().min(-64).max(64),
+  /** Células ao norte da entrada; negativo é ao sul. */
+  z: z.number().int().min(-64).max(64),
+  /**
+   * Quantos nascem neste ponto.
+   *
+   * O teto é 8, e passar de 4 já começa a empilhar: uma célula é um
+   * quadrado de 3×3 m, e o construtor espalha as peças num anel
+   * dentro dela. Oito caixas ali ficam encostadas umas nas outras.
+   */
+  amount: z.number().int().min(1).max(8).default(1),
+  /**
+   * O prefab desta posição. Vazio = o que a sala já usa.
+   *
+   * Para `kind: 'crate'`, vazio sorteia entre as `crates` da cor —
+   * e um prefab escrito aqui que TAMBÉM está cadastrado na cor
+   * herda a tabela e o OZCoin daquele cadastro. É isso que liga o
+   * marcador ao loot sem duplicar campo nenhum.
+   */
+  prefab: z
+    .union([
+      z.literal(''),
+      z
+        .string()
+        .min(8)
+        .max(200)
+        .regex(/^assets\/.+\.prefab$/, 'informe o caminho completo do prefab'),
+    ])
+    .default(''),
+});
+
+export type DungeonPlacementInput = z.infer<typeof dungeonPlacementSchema>;
+
 export const dungeonRoomInputSchema = z.object({
   /** 'green'|'blue'|'red' no modo receita; 'A','B','C'… no modo planta. */
   key: z.string().min(1).max(16),
   color: z.enum(ROOM_COLORS).default('green'),
   npc: countRange('NPCs', 20).default({ min: 0, max: 1 }),
   loot: countRange('caixas', 20).default({ min: 1, max: 1 }),
-  crates: z.array(cratePrefabSchema).max(20).default([]),
+  /** As caixas desta cor, cada uma com o conteúdo dela. Ver `crateSpecSchema`. */
+  crates: crateListSchema,
   door: z.enum(ROOM_DOORS).default('wood'),
   locked: z.boolean().default(false),
 
@@ -453,16 +655,69 @@ const dungeonBodySchema = z
       .object({
         npcDensity: z.number().int().min(0).max(100).default(20),
         lootDensity: z.number().int().min(0).max(100).default(10),
-        crates: z.array(cratePrefabSchema).max(20).default([]),
+        crates: crateListSchema,
         /** O que cai nas caixas do corredor. */
         table: lootTableSchema.prefault({}),
         /** O inimigo do corredor. Campo ausente herda de `npc.ai`. */
         ai: aiSpecSchema.prefault({}),
+
+        /**
+         * O nível das peças do CORREDOR. `null` = herda `structure`.
+         *
+         * ####  O CORREDOR NÃO TINHA MATERIAL PRÓPRIO  ####
+         *
+         * A sala tinha (`rooms[].grade`), a masmorra tinha
+         * (`structure`) — e o corredor era o resto: tudo que não
+         * era sala nascia com o `structure`, junto com a entrada e
+         * com o que a planta colou.
+         *
+         * Pedido do dono em 13/09/2026: *"na seção 'O Corredor',
+         * adicionar seleção independente de material para piso,
+         * parede e teto"*. E ele tem consequência de jogo: o
+         * corredor de madeira com as salas blindadas é a masmorra
+         * em que se entra pelo caminho e não pela parede.
+         *
+         * `null` e não um `gradeSetSchema.prefault({})` porque
+         * "herda" e "escolhi pedra" precisam ser distinguíveis: com
+         * o prefault, trocar o `structure` da masmorra para metal
+         * deixaria o corredor em pedra sem ninguém ter pedido.
+         */
+        grade: gradeSetSchema.nullable().default(null),
       })
       .prefault({}),
 
     // ---- modo 'blueprint' ----
     grid: dungeonGridSchema.nullable().default(null),
+
+    /**
+     * Onde nasce cada inimigo e cada caixa, marcado no desenho.
+     *
+     * ####  VAZIO É O SORTEIO DE SEMPRE, E ISSO É O CONTRATO  ####
+     *
+     * "Atualmente, NPCs e caixas nascem aleatoriamente nas salas"
+     * — pedido do dono, 13/09/2026 — e o sorteio continua sendo o
+     * padrão: lista vazia é uma masmorra que se comporta exatamente
+     * como antes desta mudança. Nenhuma masmorra gravada muda de
+     * comportamento por causa deste campo.
+     *
+     * ####  O MARCADOR MANDA NA SALA DELE, E NAQUELE TIPO  ####
+     *
+     * Decidido com o dono em 13/09/2026, entre três leituras
+     * possíveis. A sala que tem marcador de CAIXA nasce só com as
+     * caixas marcadas — a faixa `loot` dela deixa de ser sorteada.
+     * Os inimigos da MESMA sala continuam sorteados, se ninguém
+     * marcou inimigo ali.
+     *
+     * É o que deixa marcar só a sala do chefe e deixar o resto da
+     * masmorra no sorteio. As outras duas leituras — "um marcador
+     * desliga o sorteio na masmorra inteira" e "o marcador soma ao
+     * sorteio" — obrigariam a marcar tudo, ou entregariam salas
+     * mais cheias do que a receita promete.
+     *
+     * O corredor conta como uma unidade: marcador de caixa no
+     * corredor desliga a `lootDensity`, e não a `npcDensity`.
+     */
+    placements: z.array(dungeonPlacementSchema).max(100).default([]),
 
     // ---- os dois modos ----
     npc: z
@@ -710,21 +965,119 @@ const dungeonBodySchema = z
       });
     }
 
+    // ####  "O CORREDOR NÃO TEM NPC" DEIXOU DE SER SÓ A DENSIDADE  ####
+    //
+    // Um marcador de inimigo no desenho é um NPC de corredor tão
+    // bom quanto o sorteado — e, se ele existe, densidade zero não
+    // é defeito nenhum: é justamente como se põe o guarda no lugar
+    // escolhido, e só nele.
+    //
+    // Sem esta segunda pergunta, a tela recusaria salvar exatamente
+    // a masmorra que o pedido de 13/09/2026 descreve.
+    const markedNpcs = value.placements.filter((mark) => mark.kind === 'npc').length;
+
     if (
       anyLocked &&
       value.lock.enabled &&
       value.lock.carrier === 'npc' &&
       value.lock.carrierScope === 'corridor' &&
-      value.corridor.npcDensity === 0
+      value.corridor.npcDensity === 0 &&
+      markedNpcs === 0
     ) {
       ctx.addIssue({
         code: 'custom',
         path: ['corridor', 'npcDensity'],
         message:
-          'o código sai de um NPC de corredor e o corredor não tem nenhum: suba a densidade ou use "em qualquer lugar"',
+          'o código sai de um NPC de corredor e o corredor não tem nenhum: suba a densidade, marque um inimigo no desenho ou use "em qualquer lugar"',
       });
     }
+
+    // ####  MARCADOR NO VAZIO É PEÇA QUE NÃO NASCE  ####
+    //
+    // O construtor põe a peça no CHÃO da célula, e célula que não
+    // está no desenho não tem chão: a caixa cairia noventa metros,
+    // ou simplesmente não nasceria — em silêncio, que é o modo de
+    // falha que esta tela existe para evitar.
+    //
+    // Acontece sozinho: marcar a sala, voltar ao desenho e apagar
+    // aquelas células. O editor limpa os marcadores órfãos quando o
+    // admin apaga a célula; esta régua é para o que chega por API,
+    // por captura ou por um acervo que mudou embaixo.
+    if (value.mode === 'blueprint' && value.grid !== null && value.placements.length > 0) {
+      const cells = cellsOfGrid(value.grid);
+      const stray = value.placements.filter((mark) => !cells.has(`${String(mark.x)},${String(mark.z)}`));
+
+      if (stray.length > 0) {
+        const first = stray[0];
+
+        ctx.addIssue({
+          code: 'custom',
+          path: ['placements'],
+          message:
+            stray.length === 1
+              ? `há um marcador numa célula que não existe no desenho (${String(first?.x)}, ${String(first?.z)}): sem chão ali, a peça não nasce`
+              : `há ${String(stray.length)} marcadores em células que não existem no desenho: sem chão ali, as peças não nascem`,
+        });
+      }
+
+      // A (0,0) e a (0,1) são a chegada do alçapão, e o construtor
+      // as deixa livres de propósito: uma caixa ali é onde o
+      // jogador materializa, e um inimigo ali atira nele antes de a
+      // tela terminar de carregar.
+      const atArrival = value.placements.filter(
+        (mark) => mark.x === 0 && (mark.z === 0 || mark.z === 1),
+      ).length;
+
+      if (atArrival > 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['placements'],
+          message:
+            'há marcador na chegada do alçapão: é onde o jogador materializa, e o construtor mantém as duas células livres',
+        });
+      }
+    }
   });
+
+/**
+ * As células que o desenho tem, em coordenadas de ENTRADA.
+ *
+ * A mesma translação do construtor e do editor: o `E` vira (0,0), a
+ * primeira linha é a de maior z. Escrever isso aqui de um jeito
+ * diferente faria a régua recusar marcador que o jogo aceita.
+ */
+function cellsOfGrid(grid: readonly string[]): Set<string> {
+  const cells = new Set<string>();
+  let originX = 0;
+  let originZ = 0;
+  let found = false;
+
+  grid.forEach((row, index) => {
+    const at = row.indexOf('E');
+
+    // O PRIMEIRO `E`, e não o último: é o que o construtor usa, e um
+    // desenho com duas entradas (que o verificador já reclama por
+    // outro caminho) não pode ancorar os marcadores num lugar e a
+    // masmorra em outro.
+    if (at >= 0 && !found) {
+      originX = at;
+      originZ = grid.length - 1 - index;
+      found = true;
+    }
+  });
+
+  grid.forEach((row, index) => {
+    const z = grid.length - 1 - index;
+
+    [...row].forEach((char, x) => {
+      if (char === '.' || char === ' ') return;
+
+      cells.add(`${String(x - originX)},${String(z - originZ)}`);
+    });
+  });
+
+  return cells;
+}
 
 /**
  * A criação: o corpo mais o slug.

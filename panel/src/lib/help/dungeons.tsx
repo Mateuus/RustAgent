@@ -625,6 +625,130 @@ export const DUNGEON_HELP = {
     ),
   },
 
+  caixas: {
+    title: 'Que caixas nascem aqui',
+    short: 'Os TIPOS entre os quais o servidor sorteia. Quantas nascem e a faixa de caixas.',
+    body: (
+      <>
+        <p>
+          Esta lista diz <strong>que caixa pode nascer</strong>, e nao quantas: o numero de caixas
+          vem da faixa la em cima. Com tres tipos na lista e &ldquo;de 1 a 2 caixas&rdquo;, cada
+          sala sorteia uma ou duas peças entre os tres tipos.
+        </p>
+        <p>
+          Lista vazia usa a <strong>caixa comum</strong>. O nome e o que vale: o caminho do prefab
+          fica guardado atras dele, e voce nunca precisa digita-lo — mas pode colar um, se quiser
+          um contêiner que nao esta na lista.
+        </p>
+        <HelpExample>
+          Caixa comum + Caixa de elite na sala vermelha: metade das peças sai boa, e o jogador nao
+          sabe qual e qual antes de abrir.
+        </HelpExample>
+        <HelpWarn>
+          O barril nao abre com E — o loot dele so sai quando ele se parte. E o armario, a caixa de
+          madeira e o esconderijo nascem VAZIOS: sem loot proprio, ficam vazios para sempre.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  caixaLootProprio: {
+    title: 'Loot so desta caixa',
+    short: 'Uma tabela para UM tipo de caixa, por cima da tabela da sala.',
+    body: (
+      <>
+        <p>
+          Sao tres camadas, e cada uma cobre a de cima:{' '}
+          <strong>a tabela do servidor</strong> (o BetterLoot),{' '}
+          <strong>a tabela da sala</strong> e <strong>a tabela desta caixa</strong>. Ligado, o que
+          cai aqui dentro nao passa mais pela tabela da sala.
+        </p>
+        <HelpExample>
+          A sala vermelha tem scrap garantido para todas as caixas; a de elite dela, e so ela, tem a
+          AK. Sem isto, ou todas tem a AK ou nenhuma tem.
+        </HelpExample>
+        <HelpWarn>
+          Cada tabela pesa no comando que o agente manda ao servidor. Uma por caixa, em quatro
+          cores, e o caminho mais rapido para o teto de 50 KB.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  caixaOzcoin: {
+    title: 'OZCoin nesta caixa',
+    short: 'Saldo na carteira de quem abrir primeiro. Nao e um item.',
+    body: (
+      <>
+        <p>
+          OZCoin e <strong>saldo</strong>, e nao um item: ele entra na carteira do jogador, como a
+          recompensa de uma missao. A caixa sorteia o valor quando NASCE; quem a abre primeiro
+          recebe, e o chat avisa.
+        </p>
+        <p>
+          A <strong>chance</strong> e por caixa. Com 25%, uma de cada quatro caixas daquele tipo
+          paga — e o respawn sorteia de novo, entao a caixa reposta e uma chance nova.
+        </p>
+        <HelpExample>
+          Caixa do Bradley na sala vermelha, de 500 a 1.500 OZCoin com 50% de chance: o jogador que
+          abre a porta trancada tem meia chance de sair com dinheiro.
+        </HelpExample>
+        <HelpWarn>
+          Quem chega segundo nao ganha nada — como o loot. E se o site da carteira estiver fora do
+          ar, o credito falha e fica no log do agente: o jogador nao e avisado de um premio que nao
+          entrou.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  marcadores: {
+    title: 'Marcar onde cada peça nasce',
+    short: 'Clique numa celula do desenho para pôr inimigo ou caixa ali.',
+    body: (
+      <>
+        <p>
+          Sem marcador nenhum, o servidor <strong>sorteia</strong> as posições dentro de cada sala —
+          e e assim que a masmorra sempre funcionou. Marcar e dizer &ldquo;aqui, e so aqui&rdquo;.
+        </p>
+        <p>
+          O marcador manda <strong>na sala dele e naquele tipo</strong>: marcar caixa numa sala
+          desliga o sorteio de CAIXA daquela sala, e os inimigos dela continuam sorteados. Assim da
+          para desenhar so a sala do chefe e deixar o resto no sorteio.
+        </p>
+        <HelpExample>
+          Dois guardas de escopeta na porta da sala vermelha e a caixa do Bradley no fundo dela: o
+          jogador ve a caixa e sabe o preço antes de entrar.
+        </HelpExample>
+        <HelpWarn>
+          Marcador em celula apagada nao nasce, e a tela recusa salvar nesse estado. A chegada do
+          alçapao tambem nao aceita marcador: e onde o jogador materializa.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  grauDoCorredor: {
+    title: 'Material do corredor',
+    short: 'Piso, parede e teto do caminho — independentes do resto.',
+    body: (
+      <>
+        <p>
+          O corredor era &ldquo;o resto&rdquo;: ele nascia com o material da masmorra, junto com a
+          entrada. Agora ele escolhe o proprio, e a sala continua com o dela.
+        </p>
+        <HelpExample>
+          Corredor de madeira com as salas blindadas: da para arrombar a parede do corredor, mas a
+          sala vermelha so abre pela porta. E uma masmorra em que o caminho importa.
+        </HelpExample>
+        <HelpWarn>
+          Parede entre corredor e sala tem DOIS donos, e vence o lado mais forte — a sala blindada
+          nao ganha parede de madeira por encostar no corredor.
+        </HelpWarn>
+      </>
+    ),
+  },
+
   sorteios: {
     title: 'Sorteios por caixa',
     short: 'Quantos itens da lista caem, por peso. Os marcados “Sempre” não contam aqui.',

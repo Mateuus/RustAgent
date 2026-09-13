@@ -59,6 +59,7 @@ import type { DungeonBuildAttempt } from '../../dungeons/sync.js';
 import { BLUEPRINT_PROBLEM_MESSAGE } from '../../dungeons/blueprint.js';
 import type { GroundReport } from '../../game/dungeon-contract.js';
 import { checkLayout } from '../../dungeons/layout.js';
+import { checkLockRoute } from '../../dungeons/lock-route.js';
 import { dungeonLayoutInputSchema } from '../../types/dungeon-layouts.js';
 import {
   dungeonInputSchema,
@@ -344,6 +345,40 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
         'Este agente subiu sem canal com os servidores: não há para quem mandar o comando.',
         503,
       );
+    }
+
+    // ####  A ROTA DO CÓDIGO É CONFERIDA ANTES DE MANDAR  ####
+    //
+    // Pedido do dono em 13/09/2026: *"o sistema deve validar a rota
+    // antes de construir a Dungeon. Se não existir um local
+    // acessível para o código, deve impedir a construção ou
+    // destrancar a sala, conforme a configuração escolhida."*
+    //
+    // Quem IMPEDE é esta linha, e só no modo `abort`. Nos outros
+    // dois a masmorra sobe: o plugin destranca a sala (`unlock`, o
+    // padrão) ou a deixa lacrada (`keep`), e a frase que explica o
+    // que aconteceu sai no log dele.
+    //
+    // Só no modo planta: no modo receita o traçado é sorteado dentro
+    // do servidor, a cada nascimento, e não há desenho para
+    // conferir aqui. Ver `dungeons/lock-route.ts`.
+    if (
+      dungeon !== null &&
+      dungeon.mode === 'blueprint' &&
+      dungeon.grid !== null &&
+      dungeon.lock.onUndelivered === 'abort'
+    ) {
+      const route = checkLockRoute(dungeon.grid, dungeon);
+
+      if (route.problems.length > 0) {
+        throw new ApiError(
+          'DUNGEON_CODE_UNREACHABLE',
+          `${route.problems[0] ?? ''} ` +
+            'Esta masmorra está marcada para NÃO nascer quando isso acontece ' +
+            '(a escolha "não construir", no passo das salas).',
+          409,
+        );
+      }
     }
 
     // ####  O PONTO DO ACERVO GANHA DA COORDENADA SOLTA  ####

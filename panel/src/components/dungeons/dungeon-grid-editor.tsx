@@ -34,16 +34,50 @@
 //  Ver Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §4.2 e §11.0.
 // ============================================================
 
-import { Dices, Eraser, Grid2x2, Maximize2, Minimize2, Redo2, Trash2, Undo2 } from 'lucide-react';
+import {
+  Dices,
+  Eraser,
+  Grid2x2,
+  Maximize2,
+  Minimize2,
+  Package,
+  Redo2,
+  Skull,
+  Trash2,
+  Undo2,
+} from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
-import type { RoomColor } from '@/lib/api';
+import { Input } from '@/components/ui/input';
+import type { DungeonPlacement, RoomColor } from '@/lib/api';
 import { analyzeLayout, checkLayout } from '@/lib/dungeon-layout';
 import { cn } from '@/lib/utils';
 
-/** O que se pode pintar. `.` e `#` são os do formato salvo. */
-type Brush = 'empty' | 'corridor' | RoomColor;
+import {
+  DUNGEON_CRATE_GROUPS,
+  DUNGEON_CRATES,
+  DUNGEON_NPC_GROUPS,
+  DUNGEON_NPCS,
+} from './crate-catalog';
+import { PrefabCombobox } from './prefab-combobox';
+
+/**
+ * O que se pode pintar, mais os dois que MARCAM.
+ *
+ * ####  MARCAR NAO E PINTAR, E O PINCEL E O MESMO GESTO  ####
+ *
+ * `mark-npc` e `mark-crate` nao trocam o que a celula E: eles
+ * penduram um marcador nela. Fica no mesmo lugar da paleta porque o
+ * gesto do admin e o mesmo — escolher uma ferramenta e clicar na
+ * celula —, e uma segunda barra de ferramentas obrigaria a aprender
+ * duas gramaticas para a mesma tela.
+ *
+ * `.` e `#` sao os do formato salvo; os marcadores viajam num campo
+ * separado (`placements`), porque carregam tipo e quantidade.
+ */
+type CellBrush = 'empty' | 'corridor' | RoomColor;
+type Brush = CellBrush | 'mark-npc' | 'mark-crate';
 
 const BRUSHES: readonly {
   readonly id: Brush;
@@ -66,7 +100,27 @@ const BRUSHES: readonly {
     color: 'var(--rust-red)',
     hint: 'Sala difícil: porta blindada, e o melhor loot',
   },
+  {
+    id: 'mark-npc',
+    label: 'Inimigo',
+    color: 'var(--rust)',
+    hint: 'Marca onde um inimigo nasce. Clique de novo para tirar.',
+  },
+  {
+    id: 'mark-crate',
+    label: 'Caixa',
+    color: 'var(--amber)',
+    hint: 'Marca onde uma caixa nasce. Clique de novo para tirar.',
+  },
 ];
+
+/** Os dois pincéis que marcam em vez de pintar. */
+const MARK_BRUSHES: readonly Brush[] = ['mark-npc', 'mark-crate'];
+
+const MARK_KIND: Readonly<Record<string, DungeonPlacement['kind']>> = {
+  'mark-npc': 'npc',
+  'mark-crate': 'crate',
+};
 
 /**
  * A letra de cada cor, no formato salvo.
@@ -115,7 +169,16 @@ const BASE_SIZE = 24;
  */
 const MAX_SIZE = 64;
 
-type Canvas = Brush[][];
+/**
+ * O que cada célula É. Sem os marcadores, de propósito.
+ *
+ * Eles não são estado da célula: viajam num campo separado da
+ * masmorra (`placements`), porque carregam tipo e quantidade. Deixar
+ * `Brush` inteiro aqui faria o tipo prometer um canvas que pode
+ * conter `mark-npc` — e a conversão para as linhas salvas não teria
+ * letra para ele.
+ */
+type Canvas = CellBrush[][];
 
 /**
  * A tela inteira: o tamanho, a entrada e as células.
@@ -174,6 +237,17 @@ export interface DungeonGridEditorProps {
   readonly facing?: 0 | 90 | 180 | 270 | null;
   /** Clicar na seta gira. `undefined` = a tela não oferece o gesto. */
   readonly onFacing?: (facing: 0 | 90 | 180 | 270 | null) => void;
+
+  /**
+   * Onde nasce cada inimigo e cada caixa, em coordenadas de ENTRADA.
+   *
+   * Vazio = o sorteio de sempre. `undefined` no `onPlacements` faz a
+   * tela esconder os dois pincéis: é o que mantém este editor
+   * utilizável por quem só quer o traçado (a aba Plantas salva
+   * traçado, e um traçado não tem marcador).
+   */
+  readonly placements?: readonly DungeonPlacement[];
+  readonly onPlacements?: (placements: DungeonPlacement[]) => void;
 }
 
 export function DungeonGridEditor({
@@ -182,6 +256,8 @@ export function DungeonGridEditor({
   onRandomize,
   facing = null,
   onFacing,
+  placements = [],
+  onPlacements,
 }: DungeonGridEditorProps) {
   const [board, setBoard] = useState<Board>(() => boardFromRows(grid));
   const [brush, setBrush] = useState<Brush>('corridor');
@@ -268,6 +344,43 @@ export function DungeonGridEditor({
     lastCell.current = '';
   }
 
+  /**
+   * Marca (ou desmarca) um inimigo/caixa naquela célula.
+   *
+   * ####  ELE NAO ENTRA NA PILHA DO DESFAZER  ####
+   *
+   * O `undoStack` guarda o BOARD, e o marcador não mora nele — ele é
+   * um campo separado da masmorra. Empurrar o board na pilha ao
+   * marcar faria o Ctrl+Z desfazer um traço de pincel que ninguém
+   * deu, e deixar o marcador no lugar.
+   *
+   * Marcador se desfaz clicando de novo, que é o gesto que o próprio
+   * pincel oferece.
+   */
+  function toggleMark(x: number, z: number, kind: DungeonPlacement['kind']) {
+    if (onPlacements === undefined) return;
+
+    // Célula vazia não tem chão: a peça não nasceria, e o agente
+    // recusa salvar assim (ver `cellsOfGrid` no schema). Recusar aqui
+    // é a mesma regra dita no lugar em que o clique aconteceu.
+    if ((board.cells[z]?.[x] ?? 'empty') === 'empty') return;
+
+    // A chegada do alçapão fica livre: é onde o jogador materializa.
+    if (x === board.entrance.x && z === board.entrance.z) return;
+
+    const at = { x: x - board.entrance.x, z: z - board.entrance.z };
+    const existing = placements.find(
+      (mark) => mark.kind === kind && mark.x === at.x && mark.z === at.z,
+    );
+
+    if (existing !== undefined) {
+      onPlacements(placements.filter((mark) => mark !== existing));
+      return;
+    }
+
+    onPlacements([...placements, { kind, x: at.x, z: at.z, amount: 1, prefab: '' }]);
+  }
+
   function paint(x: number, z: number) {
     const id = `${String(x)},${String(z)}`;
 
@@ -279,13 +392,40 @@ export function DungeonGridEditor({
     // jogador, e sem ela a masmorra não tem chegada.
     if (x === board.entrance.x && z === board.entrance.z) return;
 
+    if (MARK_BRUSHES.includes(brush)) {
+      const kind = MARK_KIND[brush];
+
+      if (kind !== undefined) toggleMark(x, z, kind);
+
+      return;
+    }
+
+    // ####  APAGAR A CELULA LEVA O MARCADOR JUNTO  ####
+    //
+    // Sem isto, apagar uma sala marcada deixa o marcador flutuando
+    // numa célula que não existe mais — e a masmorra passa a ser
+    // IRRESGATÁVEL pela tela: a régua do agente recusa salvar, e o
+    // campo que causa a recusa não aparece em lugar nenhum do
+    // formulário.
+    if (brush === 'empty' && onPlacements !== undefined) {
+      const at = { x: x - board.entrance.x, z: z - board.entrance.z };
+      const kept = placements.filter((mark) => mark.x !== at.x || mark.z !== at.z);
+
+      if (kept.length !== placements.length) onPlacements(kept);
+    }
+
     setBoard((current) => {
       const cells = current.cells.map((row) => [...row]);
       const row = cells[z];
 
-      if (row === undefined || row[x] === brush) return current;
+      // O pincel de marcador nunca chega aqui (ele volta antes, no
+      // `MARK_BRUSHES.includes`), e o `as` diz isso ao tipo — a
+      // alternativa seria um `if` que nunca é verdadeiro.
+      const painted = brush as CellBrush;
 
-      row[x] = brush;
+      if (row === undefined || row[x] === painted) return current;
+
+      row[x] = painted;
 
       const next: Board = { ...current, cells };
       const rows = rowsOfBoard(next);
@@ -563,6 +703,69 @@ export function DungeonGridEditor({
           }),
         )}
 
+        {/* ####  OS MARCADORES, POR CIMA DAS CELULAS  ####
+
+            Forma E cor, nunca cor sozinha: a caçamba amarela e o
+            losango do inimigo se distinguem em preto e branco, e num
+            desenho com sala verde e vermelha ao lado isso pesa.
+
+            `pointer-events-none` porque quem trata o clique é o SVG
+            inteiro (ver o `onPointerDown` acima): um handler aqui
+            roubaria o gesto do pincel e impediria de marcar duas
+            peças na mesma célula. */}
+        <g className="pointer-events-none">
+          {placements.map((mark) => {
+            const x = mark.x + board.entrance.x;
+            const z = mark.z + board.entrance.z;
+
+            if (x < 0 || x >= board.size || z < 0 || z >= board.size) return null;
+
+            const cx = x * CELL + CELL / 2;
+            const cy = (board.size - 1 - z) * CELL + CELL / 2;
+            const size = CELL * 0.3;
+
+            return (
+              <g key={`${mark.kind}-${String(mark.x)}-${String(mark.z)}`}>
+                {mark.kind === 'npc' ? (
+                  // Losango: o inimigo.
+                  <path
+                    d={`M ${String(cx)} ${String(cy - size)} L ${String(cx + size)} ${String(cy)} ` +
+                       `L ${String(cx)} ${String(cy + size)} L ${String(cx - size)} ${String(cy)} Z`}
+                    fill="var(--rust)"
+                    stroke="var(--bg)"
+                    strokeWidth={0.6}
+                  />
+                ) : (
+                  // Quadrado: a caixa.
+                  <rect
+                    x={cx - size * 0.85}
+                    y={cy - size * 0.85}
+                    width={size * 1.7}
+                    height={size * 1.7}
+                    fill="var(--amber)"
+                    stroke="var(--bg)"
+                    strokeWidth={0.6}
+                  />
+                )}
+
+                {/* A quantidade só aparece quando há mais de uma: um
+                    "1" em cada marcador seria ruído em todos eles. */}
+                {mark.amount > 1 && (
+                  <text
+                    x={cx}
+                    y={cy + size * 1.9}
+                    textAnchor="middle"
+                    fill="var(--fg)"
+                    style={{ fontSize: `${String(CELL * 0.34)}px`, fontWeight: 700 }}
+                  >
+                    {mark.amount}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </g>
+
         {/* ####  A SETA DIZ PARA ONDE A CASINHA FICA VIRADA  ####
 
             MEDIDO em 09/09/2026, pelo dono, comparando o desenho com
@@ -658,6 +861,15 @@ export function DungeonGridEditor({
           ))}
         </ul>
       )}
+
+      {onPlacements !== undefined && (
+        <MarkList
+          placements={placements}
+          onChange={onPlacements}
+          entrance={board.entrance}
+          board={board}
+        />
+      )}
     </div>
   );
 
@@ -689,6 +901,170 @@ export function DungeonGridEditor({
 }
 
 // ------------------------------------------------------------
+//  A LISTA DOS MARCADORES
+//
+//  ####  O DESENHO DIZ ONDE; A LISTA DIZ O QUE  ####
+//
+//  Marcar e um clique na celula, e isso resolve a posicao. O TIPO e
+//  a QUANTIDADE nao cabem num clique — e tentar resolve-los no
+//  proprio grid (um popover sobre uma celula de 20 pixels, num
+//  desenho que rola) e como se erra a celula ao mirar o campo.
+//
+//  Entao a lista fica embaixo do desenho, uma linha por marcador,
+//  com os campos abertos. Ela tambem e o unico lugar em que se
+//  enxerga a masmorra inteira de uma vez: "quatro inimigos e duas
+//  caixas marcados" e uma frase que o grid nao diz.
+// ------------------------------------------------------------
+
+function MarkList({
+  placements,
+  onChange,
+  entrance,
+  board,
+}: {
+  readonly placements: readonly DungeonPlacement[];
+  readonly onChange: (placements: DungeonPlacement[]) => void;
+  readonly entrance: Board['entrance'];
+  readonly board: Board;
+}) {
+  if (placements.length === 0) {
+    return (
+      <p className="border-l-2 border-border pl-2 text-2xs leading-relaxed text-muted">
+        Nenhuma posição marcada: os inimigos e as caixas nascem{' '}
+        <strong className="text-foreground">sorteados</strong> dentro de cada sala, como sempre.
+        Escolha <em>Inimigo</em> ou <em>Caixa</em> na paleta e clique numa célula para fixar uma
+        posição.
+      </p>
+    );
+  }
+
+  function update(index: number, change: Partial<DungeonPlacement>): void {
+    onChange(placements.map((mark, at) => (at === index ? { ...mark, ...change } : mark)));
+  }
+
+  const npcs = placements.filter((mark) => mark.kind === 'npc').length;
+  const crates = placements.length - npcs;
+
+  return (
+    <div className="border border-border bg-surface-2 p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-condensed text-xs font-bold uppercase tracking-wide">
+          Posições marcadas
+        </h4>
+
+        <p className="text-2xs text-muted">
+          {npcs} inimigo(s) · {crates} caixa(s) — as salas com marcador deixam de sortear aquele
+          tipo
+        </p>
+      </div>
+
+      <ul className="space-y-1">
+        {placements.map((mark, index) => {
+          const x = mark.x + entrance.x;
+          const z = mark.z + entrance.z;
+          const outside =
+            x < 0 || x >= board.size || z < 0 || z >= board.size ||
+            (board.cells[z]?.[x] ?? 'empty') === 'empty';
+
+          return (
+            <li
+              key={`${mark.kind}-${String(mark.x)}-${String(mark.z)}`}
+              className="border border-border bg-surface p-2"
+            >
+              <div className="flex flex-wrap items-end gap-2">
+                <span className="flex min-w-24 items-center gap-1.5 pb-2">
+                  {mark.kind === 'npc' ? (
+                    <Skull aria-hidden="true" className="h-3.5 w-3.5 text-rust" />
+                  ) : (
+                    <Package aria-hidden="true" className="h-3.5 w-3.5 text-amber" />
+                  )}
+                  <span className="font-condensed text-2xs uppercase tracking-wide text-foreground">
+                    {mark.kind === 'npc' ? 'Inimigo' : 'Caixa'}
+                  </span>
+                </span>
+
+                <label className="block">
+                  <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+                    Quantos
+                  </span>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={8}
+                    className="mt-1 w-16"
+                    value={mark.amount}
+                    onChange={(event) =>
+                      update(index, { amount: clampAmount(event.target.value) })
+                    }
+                  />
+                </label>
+
+                <div className="min-w-48 flex-1">
+                  <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+                    {mark.kind === 'npc' ? 'Tipo de inimigo' : 'Tipo de caixa'}
+                  </span>
+                  <div className="mt-1">
+                    <PrefabCombobox
+                      value={mark.prefab}
+                      onChange={(prefab) => update(index, { prefab })}
+                      entries={mark.kind === 'npc' ? DUNGEON_NPCS : DUNGEON_CRATES}
+                      groups={mark.kind === 'npc' ? DUNGEON_NPC_GROUPS : DUNGEON_CRATE_GROUPS}
+                      emptyLabel={
+                        mark.kind === 'npc'
+                          ? 'O inimigo padrão da masmorra'
+                          : 'Uma das caixas da sala'
+                      }
+                      ariaLabel={`Tipo do marcador em ${String(mark.x)}, ${String(mark.z)}`}
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => onChange(placements.filter((_unused, at) => at !== index))}
+                  aria-label={`Remover o marcador em ${String(mark.x)}, ${String(mark.z)}`}
+                  className="pb-2 text-muted hover:text-foreground"
+                >
+                  <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* ####  A CELULA APAGADA E UM ERRO QUE O SALVAR RECUSA  ####
+
+                  Ela só acontece quando o desenho chega de fora (um
+                  traçado carregado por cima), porque apagar com o
+                  pincel já leva o marcador junto. Dizer aqui é o que
+                  torna a recusa da API consertável nesta tela. */}
+              {outside && (
+                <p className="mt-1 border-l-2 border-amber pl-2 text-2xs leading-relaxed text-foreground">
+                  Esta posição não existe mais no desenho: sem chão ali, a peça não nasce, e a
+                  masmorra não salva. Apague o marcador, ou repinte a célula.
+                </p>
+              )}
+
+              {mark.amount > 4 && (
+                <p className="mt-1 border-l-2 border-border pl-2 text-2xs leading-relaxed text-muted">
+                  Acima de quatro no mesmo ponto elas ficam encostadas: a célula é um quadrado de
+                  3×3 metros.
+                </p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function clampAmount(raw: string): number {
+  const parsed = Number.parseInt(raw, 10);
+
+  if (Number.isNaN(parsed)) return 1;
+
+  return Math.min(8, Math.max(1, parsed));
+}
+
+// ------------------------------------------------------------
 //  O formato salvo
 // ------------------------------------------------------------
 
@@ -704,7 +1080,7 @@ function signatureOf(rows: readonly string[] | null): string {
 }
 
 function emptyCells(size: number): Canvas {
-  return Array.from({ length: size }, () => Array.from({ length: size }, (): Brush => 'empty'));
+  return Array.from({ length: size }, () => Array.from({ length: size }, (): CellBrush => 'empty'));
 }
 
 function cloneBoard(board: Board): Board {
@@ -869,7 +1245,7 @@ function labelOf(cell: Brush): string {
   return BRUSHES.find((brush) => brush.id === cell)?.label ?? 'Vazio';
 }
 
-function brushOf(char: string): Brush {
+function brushOf(char: string): CellBrush {
   if (char === '#' || char === 'E') return 'corridor';
   if (char === '.' || char === ' ') return 'empty';
 

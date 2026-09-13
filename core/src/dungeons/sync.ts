@@ -47,16 +47,22 @@ import {
   parseDungeonPush,
   parseDungeonReady,
   type AiPayload,
+  type CrateContentPayload,
   type DungeonPayload,
   type DungeonSyncPayload,
   type GradePayload,
   type GroundReport,
+  type DungeonPushEvent,
   type LootTablePayload,
+  type PlacementPayload,
 } from '../game/dungeon-contract.js';
 import type { Logger } from '../logger.js';
+import { buildReference } from '../store/reference.js';
 import type {
   AiSpecInput,
+  CrateSpecInput,
   Dungeon,
+  DungeonPlacementInput,
   GradeSetInput,
   LootTableInput,
 } from '../types/dungeons.js';
@@ -105,12 +111,47 @@ export interface DungeonSyncServers {
   ) => { readonly rcon: { readonly isConnected: boolean; send: (command: string) => Promise<string> } } | null;
 }
 
+/**
+ * A carteira daquele servidor, no mínimo que o prêmio precisa.
+ *
+ * Interface MÍNIMA, e não a `Wallet` inteira: é o padrão do
+ * `QuestWallet` em `quests/rewards.ts`. Em produção quem a satisfaz
+ * é a `LocalWallet` ou a `SiteWallet`; no teste, um objeto de cinco
+ * linhas que guarda o que foi creditado.
+ */
+export interface DungeonSyncWallet {
+  credit(input: {
+    readonly steamId: string;
+    readonly amount: number;
+    readonly reference: string;
+    readonly reason: string;
+  }): Promise<{ readonly status: string; readonly message?: string }>;
+}
+
 export interface DungeonSyncDeps {
   readonly dungeons: DungeonsRepository;
   readonly events: WorldEventsRepository;
   readonly servers: DungeonSyncServers;
   readonly materializer: BlueprintMaterializer;
   readonly logger: Logger;
+  /**
+   * A carteira, por servidor.
+   *
+   * Ausente = este agente subiu sem carteira, e o prêmio em OZCoin
+   * de uma caixa NÃO é pago — com um aviso no log dizendo isso. Não
+   * pagar em silêncio seria pior: o admin configuraria o prêmio, o
+   * jogador abriria a caixa e nada aconteceria em lugar nenhum.
+   */
+  readonly wallet?: (serverId: string) => DungeonSyncWallet;
+  /**
+   * O recibo no chat do jogador.
+   *
+   * Ausente = ele não é avisado, e o saldo muda sozinho. Quem
+   * avisa é o AGENTE, e não o plugin, e a ordem importa: o plugin
+   * não sabe se a carteira aceitou, e uma frase otimista na hora de
+   * abrir a caixa mentiria toda vez que o site estivesse fora.
+   */
+  readonly tell?: (serverId: string, steamId: string, message: string) => Promise<void>;
 }
 
 /**
@@ -458,11 +499,21 @@ export class DungeonSync {
       corridor: {
         npcDensity: dungeon.corridor.npcDensity,
         lootDensity: dungeon.corridor.lootDensity,
-        crates: dungeon.corridor.crates,
+        crates: leanCrates(dungeon.corridor.crates),
+        crateContents: leanCrateContents(dungeon.corridor.crates),
         table: leanTable(dungeon.corridor.table),
         ai: leanAi(dungeon.corridor.ai),
+
+        // ####  AQUI NÃO CABE O CORTE DO `leanStructure`  ####
+        //
+        // É a mesma regra do `grade` da sala, logo abaixo: omitir
+        // por ser igual ao padrão do PLUGIN faria o corredor herdar
+        // o `structure` da masmorra — e "escolhi pedra" viraria
+        // "herda", que é o oposto do que o admin marcou.
+        grade: dungeon.corridor.grade ?? undefined,
       },
       grid: dungeon.grid,
+      placements: leanPlacements(dungeon.placements),
       npc: {
         health: dungeon.npc.health,
         damageScale: dungeon.npc.damageScale,
@@ -484,7 +535,8 @@ export class DungeonSync {
         color: room.color,
         npc: room.npc,
         loot: room.loot,
-        crates: room.crates,
+        crates: leanCrates(room.crates),
+        crateContents: leanCrateContents(room.crates),
         door: room.door,
         locked: room.locked,
         wideDoor: room.wideDoor ?? undefined,
@@ -613,6 +665,16 @@ export class DungeonSync {
         return;
       }
 
+      case 'coins': {
+        // ####  FORA DO GANCHO, COMO TODO O RESTO DESTE ARQUIVO  ####
+        //
+        // Creditar é await, e o gancho é síncrono e não pode
+        // lançar. O `void` solta a promessa; quem trata tudo que
+        // der errado é o próprio `#payCoins`, que nunca rejeita.
+        void this.#payCoins(serverId, event);
+        return;
+      }
+
       case 'ended': {
         const runId = this.#runIdOf(serverId);
 
@@ -628,6 +690,92 @@ export class DungeonSync {
 
         return;
       }
+    }
+  }
+
+  /**
+   * Paga o prêmio em OZCoin de uma caixa aberta.
+   *
+   * ####  ELE NUNCA REJEITA  ####
+   *
+   * É chamado com `void` de dentro do gancho do console. Uma
+   * promessa rejeitada ali não tem quem a trate: viraria
+   * `unhandledRejection` e, com a configuração certa do Node,
+   * derrubaria o agente por causa de um site fora do ar.
+   *
+   * ####  A FRASE SÓ SAI DEPOIS DO CRÉDITO  ####
+   *
+   * E só quando ele deu certo. A ordem inversa — avisar e depois
+   * creditar — é a que produz o defeito que ninguém consegue
+   * diagnosticar: o jogador lê "+250 OZCoin", o saldo não muda, e
+   * não há nada no jogo dizendo por quê.
+   */
+  async #payCoins(
+    serverId: string,
+    event: Extract<DungeonPushEvent, { kind: 'coins' }>,
+  ): Promise<void> {
+    try {
+      if (this.#deps.wallet === undefined) {
+        this.#deps.logger.warn(
+          { server: serverId, dungeon: event.slug, steamId: event.steamId, amount: event.amount },
+          'uma caixa da masmorra tinha prêmio em OZCoin e este agente subiu sem carteira: nada foi creditado',
+        );
+        return;
+      }
+
+      const result = await this.#deps.wallet(serverId).credit({
+        steamId: event.steamId,
+        amount: event.amount,
+        // O prefixo é do agente: ele depende do id do servidor NO
+        // SITE, que o plugin não conhece. Ver `store/reference.ts`.
+        reference: buildReference(serverId, 'dungeon', event.key),
+        reason: `Masmorra: ${event.slug}`,
+      });
+
+      if (result.status !== 'ok' && result.status !== 'idempotent') {
+        this.#deps.logger.warn(
+          {
+            server: serverId,
+            dungeon: event.slug,
+            steamId: event.steamId,
+            amount: event.amount,
+            status: result.status,
+          },
+          `o prêmio em OZCoin da masmorra não foi creditado: ${result.message ?? result.status}`,
+        );
+        return;
+      }
+
+      this.#deps.logger.info(
+        {
+          server: serverId,
+          dungeon: event.slug,
+          steamId: event.steamId,
+          amount: event.amount,
+          prefab: event.prefab,
+          // `idempotent` é a linha repetida chegando de novo, e ela
+          // é um SUCESSO: o dinheiro já está lá. Registrar a
+          // diferença é o que permite ver, no log, que a proteção
+          // funcionou em vez de adivinhar.
+          repeated: result.status === 'idempotent',
+        },
+        'prêmio em OZCoin de uma caixa da masmorra creditado',
+      );
+
+      // O segundo aviso de uma linha repetida seria um segundo
+      // "+250 OZCoin" para quem recebeu uma vez.
+      if (result.status === 'idempotent' || this.#deps.tell === undefined) return;
+
+      await this.#deps.tell(
+        serverId,
+        event.steamId,
+        `Você achou ${event.amount.toLocaleString('pt-BR')} OZCoin nesta caixa.`,
+      );
+    } catch (cause) {
+      this.#deps.logger.warn(
+        { server: serverId, dungeon: event.slug, error: toError(cause).message },
+        'o prêmio em OZCoin de uma caixa da masmorra não pôde ser pago',
+      );
     }
   }
 
@@ -741,6 +889,68 @@ function leanTable(table: LootTableInput): LootTablePayload | undefined {
       condition: entry.condition === 0 ? undefined : entry.condition,
     })),
   };
+}
+
+/**
+ * Os caminhos das caixas de uma cor (ou do corredor).
+ *
+ * Exatamente o que este campo sempre levou: a lista entre a qual o
+ * construtor sorteia. O conteúdo próprio de cada uma vai à parte,
+ * no `leanCrateContents` — ver `CrateContentPayload` sobre por que
+ * os dois não viajam juntos.
+ */
+function leanCrates(crates: readonly CrateSpecInput[]): string[] {
+  return crates.map((crate) => crate.prefab);
+}
+
+/**
+ * O conteúdo próprio das caixas que têm algum.
+ *
+ * Nenhuma tem = o campo não viaja, e é o caso de toda masmorra que
+ * existia antes desta frente. `chance: 100` também fica de fora: é
+ * o `CoinsSpec` do plugin, e é o caso de quem quer prêmio em toda
+ * caixa daquele tipo.
+ */
+function leanCrateContents(
+  crates: readonly CrateSpecInput[],
+): CrateContentPayload[] | undefined {
+  const withContent = crates.filter((crate) => crate.table !== null || crate.coins !== null);
+
+  if (withContent.length === 0) return undefined;
+
+  return withContent.map((crate) => ({
+    prefab: crate.prefab,
+    table: crate.table === null ? undefined : leanTable(crate.table),
+    coins:
+      crate.coins === null
+        ? undefined
+        : {
+            amount: crate.coins.amount,
+            chance: crate.coins.chance === 100 ? undefined : crate.coins.chance,
+          },
+  }));
+}
+
+/**
+ * Os marcadores, sem o que é padrão.
+ *
+ * Lista vazia não viaja: é o sorteio de sempre, e é o caso de toda
+ * masmorra que ninguém marcou. `amount: 1` e `prefab: ''` também
+ * ficam de fora — são os dois campos que quase todo marcador tem, e
+ * omiti-los tira 26 bytes de cada um.
+ */
+function leanPlacements(
+  placements: readonly DungeonPlacementInput[],
+): PlacementPayload[] | undefined {
+  if (placements.length === 0) return undefined;
+
+  return placements.map((mark) => ({
+    kind: mark.kind,
+    x: mark.x,
+    z: mark.z,
+    amount: mark.amount === 1 ? undefined : mark.amount,
+    prefab: mark.prefab === '' ? undefined : mark.prefab,
+  }));
 }
 
 /**
