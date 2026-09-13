@@ -43,6 +43,8 @@ import { slugify } from '../db/custom-items-repository.js';
 export const NPC_CLEAR_COMMAND = 'origemz.quest.npc.clear';
 /** `origemz.quest.npc.set <base64>` — um NPC. */
 export const NPC_SET_COMMAND = 'origemz.quest.npc.set';
+/** `origemz.quest.npc.count` — quantos bonecos estão de pé lá. */
+export const NPC_COUNT_COMMAND = 'origemz.quest.npc.count';
 /** O marcador que o plugin grita. Ver o cabeçalho. */
 export const NPC_MARKER = '#OZQUESTNPC#';
 
@@ -229,7 +231,28 @@ export class QuestNpcSync {
     const fingerprint = JSON.stringify(payloads);
 
     if (this.#sent.get(serverId) === fingerprint) {
-      return;
+      // ####  A DIGITAL FALA DO AGENTE; O MAPA E QUE MANDA  ####
+      //
+      // "Nada mudou aqui" não é a mesma coisa que "está tudo lá". O
+      // plugin que recarregou despawnou os bonecos de propósito, e do
+      // lado de cá nada mudou — era assim que o servidor ficava sem
+      // NPC de missão até alguém salvar algo no painel. Medido em
+      // 13/09/2026, com o dono, depois de um update de plugin.
+      //
+      // Então a digital deixa de ser a última palavra: quando ela diz
+      // "já mandei", o agente PERGUNTA quantos estão de pé. É uma
+      // chamada de RCON por volta do relógio, e só no caminho que ia
+      // voltar sem fazer nada.
+      const alive = await this.#aliveCount(rcon);
+
+      if (alive === null || alive === payloads.length) {
+        return;
+      }
+
+      this.#deps.logger.warn(
+        { server: serverId, alive, esperado: payloads.length },
+        'o mundo tem menos NPCs de missão do que o agente mandou: reenviando',
+      );
     }
 
     await rcon.send(NPC_CLEAR_COMMAND);
@@ -241,6 +264,36 @@ export class QuestNpcSync {
     this.#sent.set(serverId, fingerprint);
 
     this.#deps.logger.info({ server: serverId, npcs: npcs.length }, 'NPCs de missão enviados');
+  }
+
+  /**
+   * Quantos bonecos estão de pé naquele servidor.
+   *
+   * `null` = não deu para saber, e aí a digital continua valendo: um
+   * plugin velho (que não conhece o comando) ou um RCON que engasgou
+   * não podem virar um reenvio a cada volta do relógio — isso
+   * despovoaria e repovoaria o mapa de minuto em minuto, que é pior
+   * que o defeito que este método existe para achar.
+   *
+   * O console do Rust NÃO reclama de comando que não conhece: ele
+   * responde vazio. É por isso que a leitura é tolerante e o `null`
+   * significa "não sei", e nunca "zero".
+   */
+  async #aliveCount(rcon: NpcSyncRcon): Promise<number | null> {
+    try {
+      const reply = await rcon.send(NPC_COUNT_COMMAND);
+      const parsed: unknown = JSON.parse(reply);
+
+      if (typeof parsed !== 'object' || parsed === null) return null;
+
+      const alive = (parsed as { alive?: unknown }).alive;
+
+      return typeof alive === 'number' && Number.isInteger(alive) && alive >= 0 ? alive : null;
+    } catch {
+      // Resposta vazia, JSON torto, RCON caindo no meio: nada disso é
+      // motivo para mexer no mundo.
+      return null;
+    }
   }
 
   /**

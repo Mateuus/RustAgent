@@ -37,11 +37,24 @@ describe('o formato do pedido', () => {
     expect(parseAgentRequest('[CHAT] Fulano : #OZAREQ#{"want":"loadouts"}')).toBeNull();
   });
 
+  it('as missões TAMBÉM são um pedido — e esta linha dizia o contrário', () => {
+    // ####  O TESTE ERA A PROVA DO DEFEITO  ####
+    //
+    // Ele afirmava `toBeNull()` para `quests`, e a afirmação estava
+    // errada: o `OnServerInitialized` do OrigemZAgent.cs pede os
+    // cinco assuntos, e este era o único que o agente jogava fora.
+    //
+    // O custo, medido em 13/09/2026 com o dono: ele atualizou os
+    // plugins e os NPCs de missão SUMIRAM do mapa. O plugin despawna
+    // os bonecos ao descarregar (eles não vão para o save do mundo) e
+    // conta com o agente os repor; o pedido de reposição morria aqui.
+    expect(parseAgentRequest('[OrigemZAgent] #OZAREQ#{"want":"quests"}')).toBe('quests');
+  });
+
   it('não responde por outro dono, nem por JSON que não é o do contrato', () => {
-    // O dos itens custom (custom-items-sync.ts) e o das missões
-    // (quests/collector.ts) têm dono próprio.
+    // O dos itens custom (custom-items-sync.ts) tem dono próprio, e
+    // não é JSON.
     expect(parseAgentRequest('[OrigemZ Items] #OZAREQ#items')).toBeNull();
-    expect(parseAgentRequest('[OrigemZAgent] #OZAREQ#{"want":"quests"}')).toBeNull();
 
     expect(parseAgentRequest('[OrigemZAgent] #OZAREQ#{"want":"timers","extra":1}')).toBeNull();
     expect(parseAgentRequest('[OrigemZAgent] #OZAREQ#{"want":7}')).toBeNull();
@@ -72,6 +85,7 @@ describe('a resposta', () => {
         loadouts: record('loadouts'),
         status: record('status'),
         timers: record('timers'),
+        quests: record('quests'),
       },
       logger: createLogger({ log: { level: 'silent', pretty: false } }),
     });
@@ -96,7 +110,7 @@ describe('a resposta', () => {
   });
 
   it('o boot do plugin pede tudo, e o pedido repetido vira um envio só', () => {
-    for (const want of ['vips', 'loadouts', 'status', 'timers', 'timers']) {
+    for (const want of ['vips', 'loadouts', 'status', 'timers', 'quests', 'timers']) {
       requests.handleLine('pvp1', `[OrigemZAgent] #OZAREQ#{"want":"${want}"}`);
     }
 
@@ -110,6 +124,10 @@ describe('a resposta', () => {
       { topic: 'loadouts', serverId: 'pvp1' },
       { topic: 'status', serverId: 'pvp1' },
       { topic: 'timers', serverId: 'pvp1' },
+      // Os cinco que o `OnServerInitialized` do plugin pede. Faltando
+      // um aqui, o servidor recarregado fica sem aquele assunto até
+      // alguém mexer no painel.
+      { topic: 'quests', serverId: 'pvp1' },
       { topic: 'timers', serverId: 'pve1' },
     ]);
   });

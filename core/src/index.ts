@@ -984,6 +984,24 @@ async function main(): Promise<void> {
       loadouts: async (serverId) => loadoutSync?.push(serverId, 'plugin-request'),
       status: async (serverId) => spawnStatusSync?.push(serverId, 'plugin-request'),
       timers: async (serverId) => playerTimersSync?.push(serverId, 'plugin-request'),
+
+      // ####  O PEDIDO DAS MISSOES ESQUECE DUAS DIGITAIS  ####
+      //
+      // O plugin que recarregou nao tem NPC nenhum no mundo nem
+      // catalogo de alvos — ele despawna os bonecos no `Unload` de
+      // proposito, porque eles nao vao para o save do mundo.
+      //
+      // Os dois envios sao guardados por impressao digital, e por
+      // isso um `push` cru aqui NAO faria nada: da perspectiva do
+      // agente nada mudou. O `forget` e o que conta ao agente que o
+      // outro lado comecou do zero — e e exatamente o que a
+      // reconexao do RCON ja faz, logo acima.
+      quests: async (serverId) => {
+        questCollector?.forget(serverId);
+        questNpcs?.forget(serverId);
+
+        await questNpcs?.push(serverId);
+      },
     },
     logger,
   });

@@ -1233,6 +1233,41 @@ usos:
 - **temporário e privado**, para o destino de uma entrega em andamento — só o
   jogador daquela entrega vê, e some quando ela fecha.
 
+### 10.5 Por que o boneco nunca mais sai do mapa
+
+**Medido em 13/09/2026, com o dono:** ele atualizou os plugins no servidor e os
+NPCs de missão **sumiram**. Não é bug de spawn — são três peças que, juntas,
+formavam um buraco:
+
+1. o plugin **despawna todos os bonecos no `Unload`**, de propósito: eles nascem
+   com `enableSaving = false`, e deixá-los seria boneco órfão no mapa que ninguém
+   consegue remover. O comentário de lá diz *"o agente os manda de volta na
+   próxima rodada"*;
+2. o agente **não manda**. Tanto o catálogo (`collector.#pushWatch`) quanto os
+   NPCs (`QuestNpcSync.push`) guardam uma **impressão digital** do que enviaram, e
+   um `oxide.reload` não muda nada do lado do agente. A cada volta do relógio ele
+   comparava, concluía "já está lá" e voltava;
+3. o plugin **pedia** o estado de volta — `#OZAREQ#{"want":"quests"}`, no
+   `OnServerInitialized` — e o `AGENT_REQUEST_TOPICS` conhecia quatro assuntos,
+   sem esse. O pedido morria no `parseAgentRequest`, em silêncio. Havia até um
+   teste afirmando `toBeNull()` para ele.
+
+O resultado era: servidor **sem NPC e sem catálogo de alvos** até alguém salvar
+uma missão no painel — o único caminho que chamava `forget`.
+
+O conserto tem duas camadas, e é de propósito que sejam duas:
+
+| camada | quem age | cobre |
+|---|---|---|
+| o pedido | o plugin grita ao carregar; o agente esquece as duas digitais e reenvia | o caso normal: reload de plugin, `oxide.reload`, update |
+| a conferência | o agente **pergunta** `origemz.quest.npc.count` quando a digital diz "já mandei" | o resto: a linha do grito que se perde no boot, o boneco destruído por fora, o spawn que falhou |
+
+A conferência só acontece no caminho que **ia voltar sem fazer nada** — uma
+chamada de RCON por servidor por volta do relógio. E `alive` desconhecido
+(plugin velho, resposta vazia, RCON engasgado) é **"não sei"**, nunca "zero": o
+console do Rust não reclama de comando que não conhece, e tratar o silêncio como
+mapa vazio faria o agente despovoar e repovoar o mundo de minuto em minuto.
+
 ---
 
 ## 11 — A API

@@ -555,6 +555,10 @@ function offer(id: string, block: QuestOffer['block'] = null): QuestOffer {
       sort: 0,
       requires: null,
       npcId: null,
+      // O balcão de ENTREGA, que a 078 separou de quem dá a missão.
+      // A fixture ficou para trás quando o campo nasceu, e o
+      // `npm run typecheck` estava vermelho por causa dela.
+      turnInNpcId: null,
       repeatMode: 'once',
       cooldownSeconds: 0,
       requiresQuest: null,
