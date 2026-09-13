@@ -732,6 +732,7 @@ describe('os NPCs', () => {
   interface NpcSpy {
     readonly talks: { serverId: string; steamId: string; npcId: string }[];
     readonly accepts: { serverId: string; steamId: string; npcId: string; questId: string }[];
+    readonly claims: { serverId: string; steamId: string; playerQuestId: number }[];
   }
 
   function sync(spy?: NpcSpy) {
@@ -751,11 +752,12 @@ describe('os NPCs', () => {
       secret: SECRET,
       onTalk: (input) => spy?.talks.push(input),
       onAccept: (input) => spy?.accepts.push(input),
+      onClaim: (input) => spy?.claims.push(input),
     });
   }
 
   function spy(): NpcSpy {
-    return { talks: [], accepts: [] };
+    return { talks: [], accepts: [], claims: [] };
   }
 
   function npcLine(body: Record<string, unknown>): string {
@@ -919,7 +921,116 @@ describe('os NPCs', () => {
         // cartão mostra só o título, e não um quadrado vazio.
         rewardItemId: null,
         rewardSkinId: 0,
+        // Ele OFERECE esta: sem `turnInNpcId`, dar e receber são o
+        // mesmo boneco.
+        offers: true,
       },
+    ]);
+  });
+
+  it('o NPC que só RECEBE não oferece a missão', async () => {
+    for (const id of ['zev', 'ferreiro']) {
+      h.repository.createNpc(id, {
+        serverId: 'pvp1',
+        name: id,
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      });
+    }
+
+    h.repository.create(
+      'entrega-longe',
+      questInputSchema.parse({
+        title: 'Entrega longe',
+        npcId: 'zev',
+        turnInNpcId: 'ferreiro',
+        objectives: [{ seq: 0, kind: 'gather', target: 'wood', amount: 10 }],
+      }),
+    );
+
+    await sync().push('pvp1');
+
+    const payloads = h.sent
+      .filter((command) => command.startsWith(NPC_SET_COMMAND))
+      .map(
+        (command) =>
+          JSON.parse(
+            Buffer.from(command.slice(NPC_SET_COMMAND.length + 1), 'base64').toString('utf8'),
+          ) as { id: string; offers: { id: string; offers: boolean }[] },
+      );
+
+    // O mesmo cartão desce nos dois bonecos, com papéis diferentes:
+    // no Zev ele oferece; no ferreiro, só espera a missão pronta.
+    expect(payloads.find((npc) => npc.id === 'zev')?.offers).toEqual([
+      expect.objectContaining({ id: 'entrega-longe', offers: true }),
+    ]);
+    expect(payloads.find((npc) => npc.id === 'ferreiro')?.offers).toEqual([
+      expect.objectContaining({ id: 'entrega-longe', offers: false }),
+    ]);
+  });
+
+  it('o resgate só vale no balcão daquela missão', () => {
+    for (const id of ['zev', 'ferreiro']) {
+      h.repository.createNpc(id, {
+        serverId: 'pvp1',
+        name: id,
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      });
+    }
+
+    h.repository.create(
+      'entrega-longe',
+      questInputSchema.parse({
+        title: 'Entrega longe',
+        npcId: 'zev',
+        turnInNpcId: 'ferreiro',
+        objectives: [{ seq: 0, kind: 'gather', target: 'wood', amount: 10 }],
+      }),
+    );
+
+    const attempt = h.repository.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'entrega-longe',
+      snapshot: { title: 'Entrega longe', objectives: [], rewards: [], baselines: {} },
+    });
+
+    const visto = spy();
+    const npcSync = sync(visto);
+
+    // No boneco errado, nada acontece: o cartão de RESGATAR só é
+    // desenhado no balcão certo, mas o clique nasce no cliente.
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'claim', steamId: FULANO, npcId: 'zev', pq: attempt.id }),
+    );
+
+    expect(visto.claims).toEqual([]);
+
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'claim', steamId: FULANO, npcId: 'ferreiro', pq: attempt.id }),
+    );
+
+    expect(visto.claims).toEqual([
+      { serverId: 'pvp1', steamId: FULANO, playerQuestId: attempt.id },
     ]);
   });
 

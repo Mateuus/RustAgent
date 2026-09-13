@@ -477,7 +477,7 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                 />
               </Field>
 
-              <Field label="NPC" hint="Vazio = aparece no menu para todos.">
+              <Field label="Quem oferece" hint="Vazio = aparece no menu para todos.">
                 <select
                   className={INPUT}
                   value={form.npcId ?? ''}
@@ -490,6 +490,34 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                     </option>
                   ))}
                 </select>
+              </Field>
+
+              {/* ####  DAR E RECEBER PODEM SER PESSOAS DIFERENTES  ####
+
+                  Vazio = entrega onde pegou, que é como tudo o que já
+                  existe se comporta. Preenchido, a missão vira uma
+                  cadeia: "leve isto ao ferreiro do outro lado". */}
+              <Field
+                label="Quem recebe"
+                hint="Vazio = no mesmo NPC que ofereceu (ou no menu)."
+              >
+                <select
+                  className={INPUT}
+                  value={form.turnInNpcId ?? ''}
+                  onChange={(event) => patch({ turnInNpcId: event.target.value || null })}
+                >
+                  <option value="">(quem ofereceu)</option>
+                  {npcs.map((npc) => (
+                    <option key={npc.id} value={npc.id}>
+                      {npc.name}
+                    </option>
+                  ))}
+                </select>
+                {form.turnInNpcId !== null && form.turnInNpcId !== form.npcId && (
+                  <span className="mt-1 block text-2xs text-muted">
+                    O jogador conclui e volta a este NPC para resgatar.
+                  </span>
+                )}
               </Field>
 
               <Field label="No wipe">
@@ -798,6 +826,7 @@ function toInput(quest: QuestDefinition | null): QuestInput {
       sort: 0,
       requires: null,
       npcId: null,
+      turnInNpcId: null,
       repeatMode: 'once',
       cooldownSeconds: 0,
       requiresQuest: null,

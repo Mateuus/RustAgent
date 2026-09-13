@@ -8560,6 +8560,31 @@ namespace Oxide.Plugins
                         continue;
                     }
 
+                    // ####  A CONCLUIDA SEM OBJETIVO DE PLUGIN AINDA CONTA  ####
+                    //
+                    // Uma missao so de tempo online ou de metrica nao
+                    // tem objetivo que o plugin conte - mas o balcao
+                    // do NPC precisa saber que ela fechou, senao ele
+                    // oferece ACEITAR nela. O marcador entra sem alvo
+                    // e sem contador: ele carrega o ESTADO.
+                    if (objectives.Count == 0)
+                    {
+                        assignments.Add(new QuestAssignment
+                        {
+                            PlayerQuestId = (long)quest["pq"],
+                            QuestId = (string)quest["id"],
+                            Status = (string)quest["status"] ?? "active",
+                            Seq = -1,
+                            Kind = string.Empty,
+                            Target = string.Empty,
+                            Label = string.Empty,
+                            Need = 0,
+                            Have = 0
+                        });
+
+                        continue;
+                    }
+
                     for (int j = 0; j < objectives.Count; j++)
                     {
                         JObject objective = objectives[j] as JObject;
@@ -8573,6 +8598,7 @@ namespace Oxide.Plugins
                         {
                             PlayerQuestId = (long)quest["pq"],
                             QuestId = (string)quest["id"],
+                            Status = (string)quest["status"] ?? "active",
                             Seq = (int)objective["seq"],
                             Kind = (string)objective["kind"],
                             Target = (string)objective["target"],
@@ -8760,6 +8786,14 @@ namespace Oxide.Plugins
                 QuestAssignment assignment = assignments[i];
 
                 if (assignment.Kind != kind || assignment.Target != target)
+                {
+                    continue;
+                }
+
+                // A concluida desce no assign so para o balcao do NPC
+                // saber que ela fechou. Contar nela somaria progresso
+                // numa missao que ja acabou.
+                if (assignment.Status == "completed")
                 {
                     continue;
                 }
@@ -9288,6 +9322,8 @@ namespace Oxide.Plugins
             public long PlayerQuestId;
             /// <summary>A quest do CATALOGO. Ver o contrato do assign.</summary>
             public string QuestId;
+            /// <summary>"active" conta; "completed" so espera o resgate.</summary>
+            public string Status;
             public int Seq;
             public string Kind;
             /// <summary>A CHAVE do alvo (`metal.fragments`). E com ela que se conta.</summary>
@@ -9518,6 +9554,7 @@ namespace Oxide.Plugins
                         // decide.
                         RewardItemId = (int?)offer["rewardItemId"] ?? 0,
                         RewardSkinId = (ulong?)offer["rewardSkinId"] ?? 0UL,
+                        Offers = (bool?)offer["offers"] ?? true,
                         Description = (string)offer["description"],
                         Goal = (string)offer["goal"],
                         Reward = (string)offer["reward"]
@@ -10222,6 +10259,18 @@ namespace Oxide.Plugins
             // sabe - ver QuestAssignment.
             if (andamento == null)
             {
+                // ####  QUEM SO RECEBE NAO OFERECE  ####
+                //
+                // O cartao de uma missao que este boneco apenas
+                // recebe nao tem botao enquanto o jogador nao a
+                // concluiu: mandar aceitar aqui o faria pegar a
+                // missao no lugar errado.
+                if (!offer.Offers)
+                {
+                    QuestNpcDialogNote(container, card, "ENTREGA AQUI");
+                    return;
+                }
+
                 QuestNpcDialogButton(container, card, "ACEITAR", CorRelevo, CorTexto,
                     QuestNpcPickCommand + " " + npc.Id + " " + offer.Id);
                 return;
@@ -10238,7 +10287,14 @@ namespace Oxide.Plugins
             // Entao o botao existe sempre. Quem esta pronto resgata;
             // quem nao esta le o que falta, na propria caixa.
             long pq = andamento[0].PlayerQuestId;
-            bool pronta = QuestNpcOfferDone(andamento);
+
+            // ####  QUEM DIZ QUE FECHOU E O AGENTE  ####
+            //
+            // O contador do plugin pode estar adiantado (o lote
+            // ainda nao subiu) ou atrasado (um reload esvaziou). O
+            // `status` vem do banco do agente e e a palavra final;
+            // os contadores locais so servem enquanto ela nao chega.
+            bool pronta = andamento[0].Status == "completed" || QuestNpcOfferDone(andamento);
 
             QuestNpcDialogButton(
                 container,
@@ -10270,10 +10326,19 @@ namespace Oxide.Plugins
         {
             StringBuilder line = new StringBuilder(goal == string.Empty ? "Em andamento" : goal);
 
+            bool primeiro = true;
+
             for (int i = 0; i < andamento.Count; i++)
             {
-                line.Append(i == 0 ? "  -  " : "  |  ");
+                // O marcador de estado (Seq -1) nao tem contador.
+                if (andamento[i].Need <= 0)
+                {
+                    continue;
+                }
+
+                line.Append(primeiro ? "  -  " : "  |  ");
                 line.Append(andamento[i].Have).Append(" / ").Append(andamento[i].Need);
+                primeiro = false;
             }
 
             return line.ToString();
@@ -10289,7 +10354,7 @@ namespace Oxide.Plugins
             {
                 QuestAssignment item = andamento[i];
 
-                if (item.Have >= item.Need)
+                if (item.Need <= 0 || item.Have >= item.Need)
                 {
                     continue;
                 }
@@ -10304,6 +10369,24 @@ namespace Oxide.Plugins
             }
 
             return line.ToString();
+        }
+
+        /// <summary>Um rotulo no lugar do botao, para o cartao sem acao.</summary>
+        private void QuestNpcDialogNote(CuiElementContainer container, string card, string text)
+        {
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = text, FontSize = 10, Font = FonteBold,
+                    Align = TextAnchor.MiddleCenter, Color = CorApagado
+                },
+                RectTransform =
+                {
+                    AnchorMin = "1 0.5", AnchorMax = "1 0.5",
+                    OffsetMin = "-128 -14", OffsetMax = "-12 14"
+                }
+            }, card);
         }
 
         private void QuestNpcDialogButton(
@@ -10927,6 +11010,8 @@ namespace Oxide.Plugins
             public int RewardItemId;
             /// <summary>A skin dele. 0 = a arte padrao do item.</summary>
             public ulong RewardSkinId;
+            /// <summary>Ele OFERECE, ou so recebe a missao pronta?</summary>
+            public bool Offers;
             /// <summary>A fala. Vazia = a caixa usa o objetivo.</summary>
             public string Description;
             /// <summary>"Coletar 100 de Madeira", pronto do agente.</summary>

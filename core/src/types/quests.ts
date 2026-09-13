@@ -465,6 +465,15 @@ export const questInputSchema = z
 
     /** `null` = aparece no menu; preenchido = só perto daquele NPC. */
     npcId: z.string().max(64).nullable().default(null),
+    /**
+     * Onde ela se ENTREGA. `null` = no mesmo NPC que a ofereceu — e,
+     * sem NPC nenhum, no menu.
+     *
+     * Não confundir com o objetivo `deliver`: aquele é uma TAREFA
+     * (chegar até um boneco conta como progresso). Este é o BALCÃO,
+     * onde a missão já concluída vira recompensa.
+     */
+    turnInNpcId: z.string().max(64).nullable().default(null),
 
     repeatMode: z.enum(['once', 'cooldown', 'daily', 'weekly']).default('once'),
     cooldownSeconds: z.number().int().min(0).max(31_536_000).default(0),
