@@ -497,7 +497,8 @@ describe('a rota do código', () => {
 
     const route = checkLockRoute(chain, {
       ...base,
-      carrierScope: 'anywhere',
+      // `anywhere` é o caso mais permissivo que existe: se nem ele
+      // acha lugar, a masmorra está de fato lacrada.
       lock: { ...base.lock, carrierScope: 'anywhere' },
       rooms: [
         { color: 'red', locked: true, npc: { max: 2 }, loot: { max: 2 } },

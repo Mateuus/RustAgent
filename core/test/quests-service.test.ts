@@ -38,6 +38,7 @@ import {
   humanDelay,
   nextReset,
   QuestsService,
+  type QuestsServiceDeps,
   type QuestStatsSource,
 } from '../src/quests/service.js';
 import type { DeliverRewardsInput, RewardOutcome } from '../src/quests/rewards.js';
@@ -1324,7 +1325,11 @@ describe('a entrega no balcão do NPC', () => {
       repository: h.repository,
       logger,
       consumer: comEstoque({ stones: 300 }).consumer,
-      rewards: { deliver: () => Promise.resolve([]) },
+      // O dublê entrega a lista vazia e nada mais: este teste é sobre
+      // o que o balcão já cobrou, e não sobre recompensa. O `as` é o
+      // mesmo dos outros dublês deste arquivo — a classe real tem
+      // campos privados, e um objeto literal nunca os satisfaz.
+      rewards: { deliver: () => Promise.resolve([]) } as unknown as QuestsServiceDeps['rewards'],
     });
 
     h.repository.create(

@@ -1117,8 +1117,134 @@ describe('os NPCs', () => {
     // no mundo para sempre.
     expect(h.sent[0]).toBe('origemz.quest.npc.clear');
     expect(h.sent[1]).toContain('origemz.quest.npc.set');
-    // A segunda rodada não repete: o mundo já está igual ao banco.
-    expect(h.sent).toHaveLength(2);
+
+    // A segunda rodada não repete o envio — mas PERGUNTA quantos
+    // bonecos estão de pé. Este harness responde `{"ok":true}` a
+    // tudo, ou seja "não sei", e o "não sei" preserva a digital.
+    expect(h.sent[2]).toBe('origemz.quest.npc.count');
+    expect(h.sent).toHaveLength(3);
+  });
+
+  // ------------------------------------------------------------
+  //  A GARANTIA DE QUE ELES ESTÃO NO MAPA
+  //
+  //  ####  A DIGITAL FALA DO AGENTE, NÃO DO MUNDO  ####
+  //
+  //  Pedido do dono em 13/09/2026, depois de atualizar os plugins e
+  //  achar o mapa sem NPC: *"resolva isso para nunca acontecer, os
+  //  npc sempre tem que está no mapa"*.
+  //
+  //  O `ready` do plugin (ver `agent-requests.test.ts`) cobre o caso
+  //  normal, e depende de uma linha de console chegar. Estes testes
+  //  cobrem o resto: o agente pergunta, e o que manda é a resposta.
+  // ------------------------------------------------------------
+
+  /**
+   * Um sync cujo RCON responde à contagem com o número dado.
+   *
+   * `null` = responde `{"ok":true}` sem `alive`, que é o plugin
+   * velho — o que não conhece o comando.
+   */
+  function syncCounting(alive: number | null) {
+    const rcon: QuestCollectorRcon = {
+      isConnected: true,
+      send: (command: string) => {
+        h.sent.push(command);
+
+        if (command === 'origemz.quest.npc.count') {
+          return Promise.resolve(
+            alive === null
+              ? '{"ok":true,"contract":1}'
+              : `{"ok":true,"contract":1,"known":${String(alive)},"alive":${String(alive)}}`,
+          );
+        }
+
+        return Promise.resolve('{"ok":true}');
+      },
+    };
+
+    return new QuestNpcSync({
+      repository: h.repository,
+      servers: { ids: () => ['pvp1'], contextOf: () => ({ rcon }) },
+      logger,
+      secret: SECRET,
+      onTalk: () => undefined,
+      onAccept: () => undefined,
+      onClaim: () => undefined,
+    });
+  }
+
+  function umNpc(): void {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 2,
+      z: 3,
+      rotation: 0,
+      prefab: 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab',
+      mapMarker: true,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+  }
+
+  it('o mundo vazio depois de um reload é repovoado, com a digital igual', async () => {
+    umNpc();
+
+    const npcSync = syncCounting(0);
+
+    await npcSync.push('pvp1');
+
+    const primeiraRodada = h.sent.length;
+
+    // Nada mudou no banco. O que mudou foi o MUNDO: o plugin
+    // recarregou e despawnou os bonecos — e era exatamente aqui que o
+    // agente voltava sem fazer nada, deixando o mapa vazio até
+    // alguém salvar uma missão no painel.
+    await npcSync.push('pvp1');
+
+    const depois = h.sent.slice(primeiraRodada);
+
+    expect(depois[0]).toBe('origemz.quest.npc.count');
+    expect(depois[1]).toBe('origemz.quest.npc.clear');
+    expect(depois[2]).toContain('origemz.quest.npc.set');
+  });
+
+  it('o mundo completo não é mexido: repovoar de minuto em minuto é pior', async () => {
+    umNpc();
+
+    const npcSync = syncCounting(1);
+
+    await npcSync.push('pvp1');
+
+    const primeiraRodada = h.sent.length;
+
+    await npcSync.push('pvp1');
+
+    // Só a pergunta. Despovoar e repovoar o mapa a cada volta do
+    // relógio faria o jogador ver o boneco piscar — e o `clear`
+    // apagaria a conversa de quem estivesse no balcão.
+    expect(h.sent.slice(primeiraRodada)).toEqual(['origemz.quest.npc.count']);
+  });
+
+  it('plugin que não conhece a pergunta mantém a digital valendo', async () => {
+    umNpc();
+
+    // O console do Rust NÃO reclama de comando desconhecido: ele
+    // responde vazio. Tratar isso como "zero bonecos" faria o agente
+    // reenviar tudo a cada volta do relógio contra um plugin velho.
+    const npcSync = syncCounting(null);
+
+    await npcSync.push('pvp1');
+
+    const primeiraRodada = h.sent.length;
+
+    await npcSync.push('pvp1');
+
+    expect(h.sent.slice(primeiraRodada)).toEqual(['origemz.quest.npc.count']);
   });
 
   it('o USE registra que o jogador esteve no balcão daquele NPC', () => {

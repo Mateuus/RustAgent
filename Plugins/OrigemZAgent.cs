@@ -9505,6 +9505,25 @@ namespace Oxide.Plugins
 
         private const string QuestNpcClearCommand = "origemz.quest.npc.clear";
         private const string QuestNpcSetCommand = "origemz.quest.npc.set";
+
+        // ####  A PERGUNTA QUE IMPEDE O MAPA DE FICAR VAZIO  ####
+        //
+        // O agente guarda uma impressao digital do que mandou e nao
+        // reenvia quando ela nao muda -- o que e certo para o caso
+        // normal e cego para o unico que importa: o plugin recarregou
+        // e o mundo esta vazio, sem nada ter mudado do lado dele.
+        //
+        // Entao o agente PERGUNTA, a cada volta do relogio: quantos
+        // bonecos voce tem de pe? Se a conta nao bate com a dele, ele
+        // reenvia, digital igual ou nao.
+        //
+        // A resposta vem casada, na resposta do proprio comando de
+        // RCON -- ela NAO passa pelo console. Ver
+        // Docs/OrigemZQuests, secao 10, e o `#aliveCount` do
+        // npc-sync.ts. (Sem acento e sem sinal de secao: este arquivo
+        // e ASCII puro, e o teste de ranking cobra isso -- o
+        // compilador do Oxide le com a codificacao da maquina.)
+        private const string QuestNpcCountCommand = "origemz.quest.npc.count";
         private const string QuestNpcMarker = "#OZQUESTNPC#";
 
         // O que o agente mandou spawnar. id -> definicao.
@@ -9542,6 +9561,37 @@ namespace Oxide.Plugins
             catch (Exception ex)
             {
                 PrintError(QuestNpcClearCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        [ConsoleCommand(QuestNpcCountCommand)]
+        private void CommandQuestNpcCount(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                int alive = 0;
+
+                foreach (KeyValuePair<string, BasePlayer> entry in _questNpcEntities)
+                {
+                    // `IsDestroyed` e o que separa "esta no mapa" de
+                    // "esta no dicionario": o boneco morto continua
+                    // sendo uma chave aqui ate alguem limpar, e contar
+                    // a chave faria o agente achar que o mundo esta
+                    // cheio enquanto o jogador nao ve ninguem.
+                    if (entry.Value != null && !entry.Value.IsDestroyed)
+                    {
+                        alive++;
+                    }
+                }
+
+                arg.ReplyWith("{\"ok\":true,\"contract\":" + QuestContract
+                              + ",\"known\":" + _questNpcs.Count
+                              + ",\"alive\":" + alive + "}");
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestNpcCountCommand + " falhou: " + ex);
                 arg.ReplyWith(BuildError(ErrorInternal));
             }
         }

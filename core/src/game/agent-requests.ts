@@ -61,7 +61,33 @@ export const AGENT_REQUEST_MARKER = '#OZAREQ#';
  * `RequestTimers`), e são contrato: mudar um lado sem o outro é o
  * pedido voltar a ficar sem resposta.
  */
-export const AGENT_REQUEST_TOPICS = ['vips', 'loadouts', 'status', 'timers'] as const;
+/**
+ * Os assuntos que um plugin pode pedir de volta.
+ *
+ * ####  `quests` FALTAVA, E O PEDIDO IA PARA O LIXO  ####
+ *
+ * MEDIDO em 13/09/2026, com o dono: ele atualizou os plugins no
+ * servidor e **os NPCs de missão sumiram do mapa**.
+ *
+ * O `OnServerInitialized` do `OrigemZAgent.cs` pede cinco assuntos
+ * (`vips`, `loadouts`, `status`, `timers` e `quests`), e esta lista
+ * conhecia quatro. O `parseAgentRequest` devolvia `null` para o
+ * quinto — em silêncio, como manda o desenho dele — e ninguém
+ * reenviava nada.
+ *
+ * Isso deixava o servidor **sem NPC de missão e sem catálogo de
+ * alvos** até alguém salvar uma missão no painel, porque os dois
+ * envios são guardados por impressão digital: da perspectiva do
+ * agente, nada havia mudado. O plugin, ao recarregar, despawna os
+ * bonecos de propósito (eles não vão para o save do mundo) contando
+ * com o agente os repor.
+ *
+ * O comentário antigo do `parseAgentRequest` dizia que `quests` era
+ * "de outro dono, e não JSON". Era verdade no dia em que foi
+ * escrito; o plugin passou a mandar `{"want":"quests"}` e a frase
+ * envelheceu sem que nada quebrasse alto.
+ */
+export const AGENT_REQUEST_TOPICS = ['vips', 'loadouts', 'status', 'timers', 'quests'] as const;
 
 export type AgentRequestTopic = (typeof AGENT_REQUEST_TOPICS)[number];
 
@@ -97,8 +123,9 @@ export function parseAgentRequest(line: string): AgentRequestTopic | null {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    // `#OZAREQ#items` e `#OZAREQ#quests`: pedidos de outros donos, e
-    // não JSON.
+    // `#OZAREQ#items`, do OrigemZItems: pedido de outro dono, e não
+    // JSON. (O `quests` chegava por aqui até 13/09/2026 — hoje ele é
+    // JSON como os outros, e é tratado. Ver `AGENT_REQUEST_TOPICS`.)
     return null;
   }
 
