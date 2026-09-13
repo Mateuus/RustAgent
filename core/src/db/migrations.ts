@@ -6457,6 +6457,110 @@ CREATE TABLE betterloot_junk (
 );
 `;
 
+const MESSAGE_ROTATION_AND_COMMANDS_SCHEMA = `
+-- ============================================================
+--  080  o rodizio de mensagens, e a mensagem que responde a um
+--       comando do jogador.
+--
+--  ####  O GATILHO E EXCLUSIVO  ####
+--
+--  \`trigger_kind\` diz o UNICO motivo de uma mensagem sair:
+--
+--      schedule  o relogio dela (o de sempre, e o padrao)
+--      rotation  a vez dela no rodizio de um grupo
+--      command   um jogador digitou o comando dela
+--
+--  Tudo que ja existe nasce \`schedule\`, que e a verdade: o que
+--  estava agendado continua agendado, e nenhuma linha muda de
+--  comportamento por causa desta migracao.
+--
+--  O \`next_at\` das outras duas fica NULL, e e por isso que a
+--  consulta do relogio (\`due\`) nao as enxerga: ela ja exigia
+--  \`next_at IS NOT NULL\`. Quem manda no rodizio e o grupo; quem
+--  manda no comando e o jogador.
+--
+--  ####  O GRUPO E DE REDE, COMO A MENSAGEM  ####
+--
+--  Mesma disciplina de \`message_targets\`: ha uma LISTA de
+--  servidores, e lista VAZIA quer dizer TODOS.
+--
+--  ####  \`deck\` E \`last_message_id\` SAO ESTADO  ####
+--
+--  E estado que precisa sobreviver ao reinicio do agente. Guardar
+--  o baralho so em memoria faria o ciclo aleatorio recomecar toda
+--  vez que alguem edita um arquivo do core -- e "todas antes de
+--  repetir" viraria promessa que so vale entre dois reinicios.
+--
+--  ####  A EXCLUSAO DO GRUPO NAO APAGA AS MENSAGENS  ####
+--
+--  \`ON DELETE SET NULL\`: as mensagens dele ficam na lista, orfas
+--  e sem sair, ate o admin escolher outro grupo ou outro gatilho.
+--  Uma cascata aqui apagaria em silencio o texto de cinco avisos
+--  porque alguem removeu o grupo errado.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS message_groups (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  name              TEXT    NOT NULL,
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  position          INTEGER NOT NULL DEFAULT 0,
+  -- De quantos em quantos segundos UMA mensagem do grupo sai.
+  every_seconds     INTEGER NOT NULL,
+  order_mode        TEXT    NOT NULL DEFAULT 'fixed'
+                            CHECK (order_mode IN ('fixed', 'random')),
+  time_zone         TEXT    NOT NULL DEFAULT 'America/Sao_Paulo',
+  window_from       TEXT,
+  window_to         TEXT,
+  only_with_players INTEGER NOT NULL DEFAULT 0,
+  min_players       INTEGER NOT NULL DEFAULT 1,
+  -- A ultima que saiu: a ordem fixa continua DEPOIS dela, e a
+  -- aleatoria nunca a repete em seguida.
+  last_message_id   INTEGER,
+  -- As que ainda nao sairam no ciclo aleatorio, como '12,7,3'.
+  deck              TEXT,
+  last_sent_at      INTEGER,
+  next_at           INTEGER,
+  sent_count        INTEGER NOT NULL DEFAULT 0,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+);
+
+-- A consulta do relogio, de 30 em 30 segundos, para sempre.
+CREATE INDEX IF NOT EXISTS idx_message_groups_due
+  ON message_groups (enabled, next_at);
+
+CREATE TABLE IF NOT EXISTS message_group_targets (
+  group_id  INTEGER NOT NULL REFERENCES message_groups(id) ON DELETE CASCADE,
+  server_id TEXT    NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, server_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_group_targets_server
+  ON message_group_targets (server_id);
+
+ALTER TABLE messages ADD COLUMN trigger_kind TEXT NOT NULL DEFAULT 'schedule';
+ALTER TABLE messages ADD COLUMN group_id INTEGER
+  REFERENCES message_groups(id) ON DELETE SET NULL;
+-- Sem a barra e em minusculas: a barra e do jogo, e nao do
+-- comando. O Oxide aceita os dois prefixos que ele mesmo conhece
+-- (a barra normal e a invertida), e gravar um deles aqui faria o
+-- outro parecer comando desconhecido.
+ALTER TABLE messages ADD COLUMN command TEXT;
+ALTER TABLE messages ADD COLUMN cooldown_seconds INTEGER NOT NULL DEFAULT 0;
+
+-- Quem sao as mensagens deste grupo, na ordem da tela.
+CREATE INDEX IF NOT EXISTS idx_messages_group
+  ON messages (group_id, position);
+
+-- E qual mensagem responde a este comando. Nao e UNIQUE: a
+-- unicidade e POR SERVIDOR, e os servidores estao na outra tabela
+-- (com lista vazia querendo dizer todos). Quem confere e a rota,
+-- que tem como explicar em portugues qual mensagem ja usa o
+-- comando.
+CREATE INDEX IF NOT EXISTS idx_messages_command
+  ON messages (command);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6653,6 +6757,19 @@ export const MIGRATIONS: readonly Migration[] = [
   // 09/09/2026: a masmorra deixa de nascer em todo servidor da rede.
   { id: 72, name: 'dungeon-servers', sql: DUNGEON_SERVERS_SCHEMA },
   { id: 73, name: 'betterloot-junk', sql: BETTERLOOT_JUNK_SCHEMA },
+  // 13/09/2026: o rodizio de mensagens e o gatilho por comando.
+  // Tudo que ja existia continua `schedule` -- ver o cabecalho.
+  //
+  // O 080 salta os ids 074-079, e isso e deliberado: eles ja estao
+  // tomados por migracoes de outras frentes que ainda nao chegaram
+  // aqui. O runner aplica por ID, uma vez para sempre -- reusar um
+  // numero ocupado daria merge limpo e banco sem estas tabelas,
+  // que e o erro que as migracoes 042 e 043 registram.
+  {
+    id: 80,
+    name: 'message-rotation-and-commands',
+    sql: MESSAGE_ROTATION_AND_COMMANDS_SCHEMA,
+  },
 ];
 
 /** Linha da tabela de controle. */

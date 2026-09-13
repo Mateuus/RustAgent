@@ -1754,6 +1754,68 @@ export interface AdsAudience {
  */
 export type ScheduleKind = 'interval' | 'daily' | 'weekly' | 'once';
 
+/**
+ * O que faz uma mensagem sair. Ver core/src/types/messages.ts §1.5.
+ *
+ * Ele é EXCLUSIVO: uma mensagem tem um motivo, e só um. É a única
+ * forma de a tela responder "por que isso apareceu?" com uma frase.
+ */
+export type MessageTrigger = 'schedule' | 'rotation' | 'command';
+
+/** Em que ordem o rodízio distribui as mensagens de um grupo. */
+export type RotationOrder = 'fixed' | 'random';
+
+/**
+ * Um grupo de rodízio: um intervalo, várias frases, uma por vez.
+ *
+ * O ritmo é DELE, e o texto é da mensagem da vez — inclusive os
+ * servidores e o filtro de gente online. Duas verdades sobre o mesmo
+ * assunto é o que faz o admin desligar as duas para descobrir qual
+ * valeu.
+ */
+export interface MessageGroup {
+  id: number;
+  name: string;
+  enabled: boolean;
+  position: number;
+  /** De quantos em quantos segundos UMA mensagem do grupo sai. */
+  everySeconds: number;
+  order: RotationOrder;
+  timeZone: string;
+  windowFrom: string | null;
+  windowTo: string | null;
+  onlyWithPlayers: boolean;
+  minPlayers: number;
+  /** A última que saiu. É de onde a ordem fixa continua. */
+  lastMessageId: number | null;
+  /** Quantas ainda faltam no ciclo embaralhado. */
+  remaining: number;
+  lastSentAt: string | null;
+  nextAt: string | null;
+  /** Quantas mensagens o grupo já mandou, somando todas. */
+  sentCount: number;
+  /** Em quais servidores ele sai. VAZIO = em TODOS. */
+  targets: string[];
+  /** A frase pronta da coluna REPETE, escrita pelo agente. */
+  schedule: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O que o formulário do grupo grava. */
+export interface MessageGroupInput {
+  name: string;
+  enabled: boolean;
+  everySeconds: number;
+  order: RotationOrder;
+  timeZone: string;
+  windowFrom: string | null;
+  windowTo: string | null;
+  onlyWithPlayers: boolean;
+  minPlayers: number;
+  targets: string[];
+}
+
 export interface Message {
   id: number;
   /** O nome na lista. É de quem administra; o jogador nunca o vê. */
@@ -1763,6 +1825,14 @@ export interface Message {
   enabled: boolean;
   /** A ordem na tela, de 10 em 10. */
   position: number;
+  /** O que faz esta mensagem sair. Ver `MessageTrigger`. */
+  trigger: MessageTrigger;
+  /** O grupo do rodízio. `null` fora do `rotation`. */
+  groupId: number | null;
+  /** O comando que a dispara, SEM barra: `pop`. `null` fora do `command`. */
+  command: string | null;
+  /** Quantos segundos um jogador espera para repetir. `0` = sem espera. */
+  cooldownSeconds: number;
   scheduleKind: ScheduleKind;
   /** Em SEGUNDOS, no ritmo `interval`. `null` nos outros. */
   everySeconds: number | null;
@@ -1800,6 +1870,11 @@ export interface MessageInput {
   name: string;
   text: string;
   enabled: boolean;
+  trigger: MessageTrigger;
+  groupId: number | null;
+  /** Com ou sem barra: o agente tira a barra na gravação. */
+  command: string | null;
+  cooldownSeconds: number;
   scheduleKind: ScheduleKind;
   everySeconds: number | null;
   timeOfDay: string | null;
@@ -4453,7 +4528,48 @@ export const agent = {
   // ---- AS MENSAGENS ----------------------------------------
 
   messages: () =>
-    api<{ ok: true; messages: Message[]; variables: MessageVariables }>('/api/messages'),
+    api<{
+      ok: true;
+      messages: Message[];
+      groups: MessageGroup[];
+      variables: MessageVariables;
+    }>('/api/messages'),
+
+  createMessageGroup: (input: MessageGroupInput) =>
+    api<{ ok: true; group: MessageGroup; detail: string }>('/api/messages/groups', {
+      method: 'POST',
+      body: input,
+    }),
+
+  updateMessageGroup: (id: number, patch: Partial<MessageGroupInput>) =>
+    api<{ ok: true; group: MessageGroup; detail: string }>(
+      `/api/messages/groups/${String(id)}`,
+      { method: 'PATCH', body: patch },
+    ),
+
+  removeMessageGroup: (id: number) =>
+    api<{ ok: true; detail: string }>(`/api/messages/groups/${String(id)}`, {
+      method: 'DELETE',
+    }),
+
+  /** A ordem DENTRO do grupo — que é a ordem em que as frases saem. */
+  reorderInGroup: (id: number, ids: number[]) =>
+    api<{ ok: true; messages: Message[] }>(`/api/messages/groups/${String(id)}/reorder`, {
+      method: 'POST',
+      body: { ids },
+    }),
+
+  /**
+   * Manda a mensagem DA VEZ, sem gastar a vez dela.
+   *
+   * Responde a pergunta que a lista não responde: qual das cinco sai
+   * agora? Consumir a vez faria conferir o rodízio mudá-lo.
+   */
+  testMessageGroup: (id: number, serverId?: string) =>
+    api<{ ok: true; messageId: number; reports: MessageSendReport[]; detail: string }>(
+      `/api/messages/groups/${String(id)}/test`,
+      { method: 'POST', body: serverId === undefined ? {} : { serverId } },
+    ),
 
   createMessage: (input: MessageInput) =>
     api<{ ok: true; message: Message; detail: string }>('/api/messages', {

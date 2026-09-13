@@ -48,9 +48,15 @@
 import type { MessageLogEntry, MessagesRepository } from '../db/messages-repository.js';
 import type { Broadcaster } from '../game/broadcast.js';
 import type { Logger } from '../logger.js';
-import type { MessageView } from '../types/messages.js';
+import type { MessageGroupView, MessageView } from '../types/messages.js';
 import { toError } from '../util.js';
-import { advanceAfterSend, isWithinWindow, nextOccurrence } from './schedule.js';
+import { pickNext, type RandomSource } from './rotation.js';
+import {
+  advanceAfterSend,
+  advanceInterval,
+  isWithinWindow,
+  nextOccurrence,
+} from './schedule.js';
 import type { VariableRegistry } from './variables.js';
 
 /** De quanto em quanto tempo o laço ACORDA. Ver o cabeçalho. */
@@ -94,6 +100,13 @@ export interface MessagesServiceDeps {
   readonly logger?: Logger | undefined;
   /** Injetável no teste — é como se atravessa uma virada de mês. */
   readonly now?: (() => number) | undefined;
+  /**
+   * A fonte de aleatoriedade do rodízio embaralhado.
+   *
+   * Injetável pelo mesmo motivo do relógio: "não repete duas vezes
+   * seguidas" só é testável com um sorteio conhecido.
+   */
+  readonly random?: RandomSource | undefined;
 }
 
 /** O que aconteceu com UMA mensagem numa volta do relógio. */
@@ -115,12 +128,33 @@ export interface MessageTickResult {
   readonly nextAt: number | null;
 }
 
+/** O que aconteceu com UM grupo de rodízio numa volta do relógio. */
+export interface GroupTickResult {
+  readonly groupId: number;
+  readonly name: string;
+  /**
+   * Qual mensagem do grupo foi a da vez. `null` = o grupo não tem
+   * nenhuma mensagem ligada, e não houve o que dizer.
+   */
+  readonly messageId: number | null;
+  readonly delivered: readonly string[];
+  readonly skipped: readonly { readonly serverId: string; readonly reason: string }[];
+  readonly failed: readonly { readonly serverId: string; readonly error: string }[];
+  readonly consumed: boolean;
+  readonly nextAt: number | null;
+  /** O baralho DEPOIS desta volta. Vazio na ordem fixa. */
+  readonly deck: readonly number[];
+}
+
 /** O resumo de uma volta inteira. */
 export interface TickSummary {
   readonly at: number;
   /** Quantas venceram. */
   readonly due: number;
   readonly results: readonly MessageTickResult[];
+  /** Quantos grupos de rodízio venceram nesta volta. */
+  readonly dueGroups: number;
+  readonly groups: readonly GroupTickResult[];
   /**
    * A volta quebrou de um jeito que ninguém previu.
    *
@@ -143,6 +177,7 @@ export interface MessageSendReport {
 export class MessagesService {
   readonly #deps: MessagesServiceDeps;
   readonly #now: () => number;
+  readonly #random: RandomSource;
 
   #timer: ReturnType<typeof setInterval> | null = null;
   #ticks = 0;
@@ -150,6 +185,7 @@ export class MessagesService {
   constructor(deps: MessagesServiceDeps) {
     this.#deps = deps;
     this.#now = deps.now ?? Date.now;
+    this.#random = deps.random ?? Math.random;
   }
 
   start(): void {
@@ -201,13 +237,35 @@ export class MessagesService {
         results.push(await this.#run(message, at));
       }
 
+      // ####  OS GRUPOS DEPOIS DAS AGENDADAS, E UM POR VEZ  ####
+      //
+      // Um por vez porque este laço é sequencial: dois grupos que
+      // vencem no mesmo segundo falam um DEPOIS do outro, e duas
+      // mensagens do MESMO grupo nunca saem juntas — o grupo manda
+      // uma e já grava o horário seguinte antes de o laço voltar.
+      // É o que o pedido chama de "não disparar simultaneamente", e
+      // ele sai de graça por não haver um relógio por mensagem.
+      const dueGroups = this.#deps.repository.dueGroups(at);
+      const groups: GroupTickResult[] = [];
+
+      for (const group of dueGroups) {
+        groups.push(await this.#runGroup(group, at));
+      }
+
       this.#ticks += 1;
 
       if (this.#ticks % PRUNE_EVERY_TICKS === 0) {
         this.#prune();
       }
 
-      return { at, due: due.length, results, error: null };
+      return {
+        at,
+        due: due.length,
+        results,
+        dueGroups: dueGroups.length,
+        groups,
+        error: null,
+      };
     } catch (error) {
       const err = toError(error);
 
@@ -218,7 +276,14 @@ export class MessagesService {
         'a volta do agendador de mensagens falhou; o laço continua e a próxima tenta de novo',
       );
 
-      return { at, due: 0, results: [], error: err.message };
+      return {
+        at,
+        due: 0,
+        results: [],
+        dueGroups: 0,
+        groups: [],
+        error: err.message,
+      };
     }
   }
 
@@ -294,7 +359,263 @@ export class MessagesService {
     return enabled ? nextOccurrence(shape, this.#now()) : null;
   }
 
+  /**
+   * O horário que um grupo recém-gravado deve ter.
+   *
+   * A primeira volta sai um intervalo DEPOIS de agora, e não
+   * imediatamente: criar "a cada 5 minutos" e ver uma frase no chat
+   * no mesmo segundo é o que faz o admin achar que criou errado.
+   */
+  nextAtForGroup(everySeconds: number, enabled: boolean): number | null {
+    if (!enabled || !Number.isFinite(everySeconds) || everySeconds <= 0) {
+      return null;
+    }
+
+    return this.#now() + Math.round(everySeconds * 1000);
+  }
+
+  /**
+   * Quem seria a próxima do grupo, SEM tirar a carta do baralho.
+   *
+   * É o que o botão de testar o rodízio usa, e o que a tela mostra
+   * na coluna "próxima". Consumir a vez aqui faria conferir o
+   * rodízio mudá-lo — a mesma razão de o teste de uma mensagem não
+   * tocar no `next_at`.
+   *
+   * `null` = o grupo não tem nenhuma mensagem ligada.
+   */
+  peekNext(group: MessageGroupView): MessageView | null {
+    const queue = this.#deps.repository.membersOf(group.id);
+
+    const pick = pickNext(
+      queue,
+      group.order,
+      { lastMessageId: group.lastMessageId, deck: group.deck },
+      // ####  O SORTEIO DA PRÉVIA É O DA VEZ, E NÃO OUTRO  ####
+      //
+      // Na ordem embaralhada, o baralho gravado já decide quem é a
+      // próxima — a aleatoriedade só entra quando ele esvazia. Com
+      // ele vazio, esta prévia sorteia UMA fila que não será a
+      // mesma do envio de verdade; é o preço de não gravar nada, e
+      // é o certo: gravar aqui faria testar consumir a vez.
+      this.#random,
+    );
+
+    return pick === null ? null : (queue.find((item) => item.id === pick.messageId) ?? null);
+  }
+
+  /**
+   * Responde a UM jogador, e conta o envio.
+   *
+   * É o caminho do comando de chat (messages/commands.ts). Ele
+   * grava o `message_log` e o `sent_count` como qualquer outro
+   * envio — a pergunta "isso está funcionando?" é a mesma —, mas
+   * não mexe no `next_at`: uma mensagem de comando não tem próxima
+   * saída, ela tem próximo jogador.
+   */
+  async reply(
+    message: MessageView,
+    serverId: string,
+    steamId: string,
+  ): Promise<MessageSendReport> {
+    const at = this.#now();
+    const report = await this.#deliver(message, serverId, at, steamId);
+
+    if (report.ok) {
+      this.#deps.repository.markSent(message.id, at, null);
+    }
+
+    return report;
+  }
+
   // ----------------------------------------------------------
+
+  /**
+   * Um grupo vencido: UMA mensagem, em todos os servidores dele.
+   *
+   * ####  QUEM MANDA NO QUANDO É O GRUPO  ####
+   *
+   * A janela de horário, o filtro de jogadores e a lista de
+   * servidores são dele, e não da mensagem da vez. Duas verdades
+   * sobre o mesmo assunto — o grupo pedindo "só com 5 online" e a
+   * mensagem pedindo "com 1" — é o defeito que faz o admin
+   * desligar as duas para descobrir qual valeu.
+   *
+   * ####  E O BARALHO SÓ ANDA SE A FRASE SAIU  ####
+   *
+   * Servidor parado não consome a vez de ninguém: a mesma mensagem
+   * é a da vez na próxima volta. Sem isso, uma noite de RCON fora
+   * queimaria o ciclo inteiro em silêncio, e o rodízio voltaria do
+   * meio quando o servidor voltasse.
+   */
+  async #runGroup(group: MessageGroupView, at: number): Promise<GroupTickResult> {
+    const idle = {
+      groupId: group.id,
+      name: group.name,
+      messageId: null,
+      delivered: [],
+      skipped: [],
+      failed: [],
+      consumed: false,
+      nextAt: group.nextAt,
+      deck: group.deck,
+    } as const;
+
+    if (!isWithinWindow(at, group.windowFrom, group.windowTo, group.timeZone)) {
+      return { ...idle, skipped: [{ serverId: '*', reason: 'fora-da-janela' }] };
+    }
+
+    const queue = this.#deps.repository.membersOf(group.id);
+
+    if (queue.length === 0) {
+      // Grupo sem nenhuma mensagem ligada. O horário ANDA — nada
+      // ficou por dizer, e deixá-lo vencido faria o grupo ser
+      // reprocessado de 30 em 30 segundos para sempre.
+      const nextAt = this.#advanceGroup(group, at);
+
+      this.#deps.repository.setGroupNextAt(group.id, nextAt, at);
+
+      return {
+        ...idle,
+        skipped: [{ serverId: '*', reason: 'grupo-sem-mensagem-ligada' }],
+        nextAt,
+      };
+    }
+
+    const pick = pickNext(
+      queue,
+      group.order,
+      { lastMessageId: group.lastMessageId, deck: group.deck },
+      this.#random,
+    );
+
+    if (pick === null) {
+      return { ...idle, skipped: [{ serverId: '*', reason: 'nao-consegui-escolher' }] };
+    }
+
+    const message = queue.find((item) => item.id === pick.messageId);
+
+    if (message === undefined) {
+      // A escolha veio de fora da fila. Não acontece — o `pickNext`
+      // só devolve ids dela —, e travar o grupo por isso seria pior
+      // que pular uma volta.
+      return { ...idle, skipped: [{ serverId: '*', reason: 'nao-consegui-escolher' }] };
+    }
+
+    const known = new Set(this.#deps.servers.ids());
+    const skipped: { serverId: string; reason: string }[] = [];
+    const failed: { serverId: string; error: string }[] = [];
+    const delivered: string[] = [];
+
+    for (const serverId of this.#groupTargetsOf(group)) {
+      if (!known.has(serverId)) {
+        skipped.push({ serverId, reason: 'servidor-desconhecido' });
+        continue;
+      }
+
+      const reason = await this.#whyGroupNotNow(group, serverId);
+
+      if (reason !== null) {
+        skipped.push({ serverId, reason });
+        continue;
+      }
+
+      const report = await this.#deliver(message, serverId, at);
+
+      if (report.ok) {
+        delivered.push(serverId);
+      } else {
+        failed.push({ serverId, error: report.error ?? 'falhou' });
+      }
+    }
+
+    if (delivered.length === 0) {
+      // Nada saiu: nem o horário nem o baralho andam. Ver o
+      // cabeçalho deste método.
+      return {
+        ...idle,
+        messageId: message.id,
+        skipped,
+        failed,
+      };
+    }
+
+    const nextAt = this.#advanceGroup(group, at);
+
+    this.#deps.repository.markGroupSent(group.id, message.id, pick.deck, at, nextAt);
+    // A mensagem também conta o envio dela: a coluna ENVIADAS da
+    // lista responde "esta frase está aparecendo?", e ela vale tanto
+    // para a agendada quanto para a do rodízio.
+    this.#deps.repository.markSent(message.id, at, null);
+
+    this.#deps.logger?.info(
+      {
+        group: group.id,
+        name: group.name,
+        message: message.id,
+        messageName: message.name,
+        servers: delivered,
+        failed: failed.length,
+        remaining: pick.deck.length,
+        nextAt,
+      },
+      'rodízio: mensagem da vez entregue',
+    );
+
+    return {
+      groupId: group.id,
+      name: group.name,
+      messageId: message.id,
+      delivered,
+      skipped,
+      failed,
+      consumed: true,
+      nextAt,
+      deck: pick.deck,
+    };
+  }
+
+  /**
+   * O horário seguinte do grupo, sem deriva acumulada.
+   *
+   * A conta parte do horário PREVISTO, e não do instante do envio —
+   * a mesma disciplina do `interval` das mensagens agendadas. E o
+   * salto é em um cálculo: o agente pode ter ficado horas fora, e o
+   * grupo não pode despejar cinquenta frases para "recuperar".
+   */
+  #advanceGroup(group: MessageGroupView, at: number): number | null {
+    const every = group.everySeconds;
+
+    if (!Number.isFinite(every) || every <= 0) {
+      return null;
+    }
+
+    return advanceInterval(group.nextAt ?? at, Math.round(every * 1000), at);
+  }
+
+  /** Por que este grupo não pode falar NESTE servidor agora. */
+  async #whyGroupNotNow(group: MessageGroupView, serverId: string): Promise<string | null> {
+    if (this.#deps.servers.contextOf(serverId)?.rcon.isConnected !== true) {
+      return 'rcon-offline';
+    }
+
+    if (!group.onlyWithPlayers) {
+      return null;
+    }
+
+    const online = await this.#deps.presence.online(serverId);
+
+    if (online === null) {
+      return 'nao-consegui-contar';
+    }
+
+    return online >= Math.max(1, group.minPlayers) ? null : 'servidor-vazio';
+  }
+
+  /** Lista vazia = TODOS os servidores, como nas mensagens. */
+  #groupTargetsOf(group: MessageGroupView): readonly string[] {
+    return group.targets.length === 0 ? this.#deps.servers.ids() : group.targets;
+  }
 
   /** Uma mensagem vencida, em todos os servidores dela. */
   async #run(message: MessageView, at: number): Promise<MessageTickResult> {
@@ -438,11 +759,19 @@ export class MessagesService {
    * `{online}` respondem coisas diferentes em cada um, e resolver
    * uma vez só faria a mensagem anunciar a lotação do vizinho.
    */
-  async #deliver(message: MessageView, serverId: string, at: number): Promise<MessageSendReport> {
+  async #deliver(
+    message: MessageView,
+    serverId: string,
+    at: number,
+    steamId?: string,
+  ): Promise<MessageSendReport> {
     let text = message.text;
 
     try {
-      text = await this.#deps.variables.resolve(message.text, { serverId });
+      // O `steamId` entra na resolução, e não só na entrega: é ele
+      // que permite uma variável de jogador existir um dia sem este
+      // caminho precisar mudar. Ver messages/variables.ts.
+      text = await this.#deps.variables.resolve(message.text, { serverId, steamId });
 
       const result = await this.#deps.broadcaster.send({
         serverId,
@@ -451,6 +780,7 @@ export class MessagesService {
         tagColor: message.tagColor ?? undefined,
         color: message.color ?? undefined,
         size: message.size ?? undefined,
+        steamId,
       });
 
       this.#deps.repository.log({

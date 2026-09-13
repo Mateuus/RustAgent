@@ -41,7 +41,15 @@
 //  `message_log`, com o motivo.
 // ============================================================
 
-import type { MessageInput, MessageView, ScheduleKind } from '../types/messages.js';
+import type {
+  MessageGroupInput,
+  MessageGroupView,
+  MessageInput,
+  MessageTrigger,
+  MessageView,
+  RotationOrder,
+  ScheduleKind,
+} from '../types/messages.js';
 import type { AgentDatabase } from './database.js';
 
 /** Uma linha do `message_log`: aquela mensagem, naquele servidor. */
@@ -69,6 +77,10 @@ interface MessageRow {
   readonly text: string;
   readonly enabled: number;
   readonly position: number;
+  readonly trigger_kind: string;
+  readonly group_id: number | null;
+  readonly command: string | null;
+  readonly cooldown_seconds: number;
   readonly schedule_kind: string;
   readonly every_seconds: number | null;
   readonly time_of_day: string | null;
@@ -83,6 +95,27 @@ interface MessageRow {
   readonly tag_color: string | null;
   readonly color: string | null;
   readonly size: number | null;
+  readonly last_sent_at: number | null;
+  readonly next_at: number | null;
+  readonly sent_count: number;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+interface MessageGroupRow {
+  readonly id: number;
+  readonly name: string;
+  readonly enabled: number;
+  readonly position: number;
+  readonly every_seconds: number;
+  readonly order_mode: string;
+  readonly time_zone: string;
+  readonly window_from: string | null;
+  readonly window_to: string | null;
+  readonly only_with_players: number;
+  readonly min_players: number;
+  readonly last_message_id: number | null;
+  readonly deck: string | null;
   readonly last_sent_at: number | null;
   readonly next_at: number | null;
   readonly sent_count: number;
@@ -154,10 +187,94 @@ export class MessagesRepository {
     const rows = this.#db
       .prepare(
         `SELECT * FROM messages
-          WHERE enabled = 1 AND next_at IS NOT NULL AND next_at <= @now
+          WHERE enabled = 1 AND trigger_kind = 'schedule'
+            AND next_at IS NOT NULL AND next_at <= @now
           ORDER BY next_at ASC, position ASC, id ASC`,
       )
       .all({ now }) as MessageRow[];
+
+    return this.#withTargets(rows);
+  }
+
+  /**
+   * As mensagens LIGADAS de um grupo, na ordem da tela.
+   *
+   * É a fila do rodízio. Desligada não entra: desligar uma
+   * mensagem do meio do rodízio é como se ela não estivesse ali —
+   * e não como "o grupo fica mudo na vez dela".
+   */
+  membersOf(groupId: number): readonly MessageView[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM messages
+          WHERE group_id = @group_id AND trigger_kind = 'rotation' AND enabled = 1
+          ORDER BY position ASC, id ASC`,
+      )
+      .all({ group_id: groupId }) as MessageRow[];
+
+    return this.#withTargets(rows);
+  }
+
+  /**
+   * Todas as mensagens de um grupo, LIGADAS OU NÃO.
+   *
+   * É o que a tela mostra dentro do grupo, e o que a remoção do
+   * grupo precisa contar. Diferente do `membersOf`, que é a fila
+   * de quem realmente sai.
+   */
+  allOfGroup(groupId: number): readonly MessageView[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM messages
+          WHERE group_id = @group_id
+          ORDER BY position ASC, id ASC`,
+      )
+      .all({ group_id: groupId }) as MessageRow[];
+
+    return this.#withTargets(rows);
+  }
+
+  /**
+   * As mensagens LIGADAS que respondem a este comando.
+   *
+   * Plural porque a unicidade é POR SERVIDOR: `/pop` pode existir
+   * duas vezes se uma sai no `server01` e a outra no `server02`.
+   * Quem escolhe entre elas é quem sabe de qual servidor veio o
+   * comando — ver messages/commands.ts.
+   */
+  byCommand(command: string): readonly MessageView[] {
+    const normalized = normalizeCommand(command);
+
+    if (normalized === null) {
+      return [];
+    }
+
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM messages
+          WHERE enabled = 1 AND trigger_kind = 'command' AND command = @command
+          ORDER BY position ASC, id ASC`,
+      )
+      .all({ command: normalized }) as MessageRow[];
+
+    return this.#withTargets(rows);
+  }
+
+  /**
+   * Todos os comandos ligados, com os servidores de cada um.
+   *
+   * É o que o agente empurra ao plugin: a lista do que ele deve
+   * interceptar no chat. Um comando fora dela o Oxide trata como
+   * desconhecido, que é o desfecho certo de uma mensagem removida.
+   */
+  commands(): readonly MessageView[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM messages
+          WHERE enabled = 1 AND trigger_kind = 'command' AND command IS NOT NULL
+          ORDER BY position ASC, id ASC`,
+      )
+      .all() as MessageRow[];
 
     return this.#withTargets(rows);
   }
@@ -179,11 +296,13 @@ export class MessagesRepository {
       const result = this.#db
         .prepare(
           `INSERT INTO messages
-             (name, text, enabled, position, schedule_kind, every_seconds, time_of_day, weekdays,
+             (name, text, enabled, position, trigger_kind, group_id, command, cooldown_seconds,
+              schedule_kind, every_seconds, time_of_day, weekdays,
               run_at, time_zone, window_from, window_to, only_with_players, min_players,
               tag, tag_color, color, size, last_sent_at, next_at, sent_count, created_at, updated_at)
            VALUES
-             (@name, @text, @enabled, @position, @schedule_kind, @every_seconds, @time_of_day, @weekdays,
+             (@name, @text, @enabled, @position, @trigger_kind, @group_id, @command, @cooldown_seconds,
+              @schedule_kind, @every_seconds, @time_of_day, @weekdays,
               @run_at, @time_zone, @window_from, @window_to, @only_with_players, @min_players,
               @tag, @tag_color, @color, @size, NULL, @next_at, 0, @created_at, @updated_at)`,
         )
@@ -232,6 +351,8 @@ export class MessagesRepository {
         .prepare(
           `UPDATE messages
               SET name = @name, text = @text, enabled = @enabled,
+                  trigger_kind = @trigger_kind, group_id = @group_id,
+                  command = @command, cooldown_seconds = @cooldown_seconds,
                   schedule_kind = @schedule_kind, every_seconds = @every_seconds,
                   time_of_day = @time_of_day, weekdays = @weekdays, run_at = @run_at,
                   time_zone = @time_zone, window_from = @window_from, window_to = @window_to,
@@ -352,6 +473,299 @@ export class MessagesRepository {
   }
 
   // ------------------------------------------------------
+  //  Os grupos de rodízio
+  //
+  //  ####  O RITMO É DO GRUPO, E O TEXTO É DA MENSAGEM  ####
+  //
+  //  Quem decide QUANDO, ONDE e COM QUANTA gente é o grupo. Quem
+  //  decide O QUE sai é a mensagem da vez. Ver types/messages.ts
+  //  §2.5.
+  // ------------------------------------------------------
+
+  /** Todos os grupos, na ordem da tela. */
+  listGroups(): readonly MessageGroupView[] {
+    const rows = this.#db
+      .prepare('SELECT * FROM message_groups ORDER BY position ASC, id ASC')
+      .all() as MessageGroupRow[];
+
+    return this.#withGroupTargets(rows);
+  }
+
+  getGroup(id: number): MessageGroupView | null {
+    const row = this.#db.prepare('SELECT * FROM message_groups WHERE id = @id').get({ id }) as
+      | MessageGroupRow
+      | undefined;
+
+    return row === undefined ? null : (this.#withGroupTargets([row])[0] ?? null);
+  }
+
+  /** Os grupos que já venceram: ligados, com `next_at` no passado. */
+  dueGroups(now: number): readonly MessageGroupView[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM message_groups
+          WHERE enabled = 1 AND next_at IS NOT NULL AND next_at <= @now
+          ORDER BY next_at ASC, position ASC, id ASC`,
+      )
+      .all({ now }) as MessageGroupRow[];
+
+    return this.#withGroupTargets(rows);
+  }
+
+  createGroup(
+    input: MessageGroupInput,
+    nextAt: number | null,
+    now: number = Date.now(),
+  ): MessageGroupView {
+    const run = this.#db.transaction((): number => {
+      const result = this.#db
+        .prepare(
+          `INSERT INTO message_groups
+             (name, enabled, position, every_seconds, order_mode, time_zone,
+              window_from, window_to, only_with_players, min_players,
+              last_message_id, deck, last_sent_at, next_at, sent_count, created_at, updated_at)
+           VALUES
+             (@name, @enabled, @position, @every_seconds, @order_mode, @time_zone,
+              @window_from, @window_to, @only_with_players, @min_players,
+              NULL, NULL, NULL, @next_at, 0, @created_at, @updated_at)`,
+        )
+        .run({
+          ...toGroupColumns(input),
+          position: this.#nextGroupPosition(),
+          next_at: nextAt,
+          created_at: now,
+          updated_at: now,
+        });
+
+      const id = Number(result.lastInsertRowid);
+
+      this.#replaceGroupTargets(id, input.targets);
+
+      return id;
+    });
+
+    const id = run();
+    const saved = this.getGroup(id);
+
+    if (saved === null) {
+      throw new Error(`o grupo "${input.name}" sumiu logo depois de ser gravado`);
+    }
+
+    return saved;
+  }
+
+  /**
+   * Reescreve o grupo inteiro.
+   *
+   * O histórico (`last_sent_at`, `sent_count`) e o estado do ciclo
+   * (`deck`, `last_message_id`) NÃO são tocados aqui: mudar a
+   * janela de horário não é motivo para o rodízio recomeçar do
+   * zero e repetir as três frases que acabaram de sair. Quem mexe
+   * neles é o `markGroupSent` — e o `resetGroupCycle`, que a troca
+   * de ORDEM chama de propósito.
+   */
+  updateGroup(
+    id: number,
+    input: MessageGroupInput,
+    nextAt: number | null,
+    now: number = Date.now(),
+  ): MessageGroupView | null {
+    const run = this.#db.transaction((): boolean => {
+      const result = this.#db
+        .prepare(
+          `UPDATE message_groups
+              SET name = @name, enabled = @enabled, every_seconds = @every_seconds,
+                  order_mode = @order_mode, time_zone = @time_zone,
+                  window_from = @window_from, window_to = @window_to,
+                  only_with_players = @only_with_players, min_players = @min_players,
+                  next_at = @next_at, updated_at = @updated_at
+            WHERE id = @id`,
+        )
+        .run({ ...toGroupColumns(input), id, next_at: nextAt, updated_at: now });
+
+      if (result.changes === 0) {
+        return false;
+      }
+
+      this.#replaceGroupTargets(id, input.targets);
+
+      return true;
+    });
+
+    return run() ? this.getGroup(id) : null;
+  }
+
+  /**
+   * Apaga o grupo. As mensagens dele NÃO vão junto.
+   *
+   * Elas ficam órfãs (`group_id` nulo, pela regra da coluna) e sem
+   * sair, até alguém escolher outro grupo ou outro gatilho. Uma
+   * cascata aqui apagaria o texto de cinco avisos porque o admin
+   * removeu o grupo errado.
+   */
+  removeGroup(id: number): boolean {
+    return this.#db.prepare('DELETE FROM message_groups WHERE id = @id').run({ id }).changes > 0;
+  }
+
+  /** Liga e desliga o grupo, refazendo o `next_at` junto. */
+  setGroupEnabled(
+    id: number,
+    enabled: boolean,
+    nextAt: number | null,
+    now: number = Date.now(),
+  ): void {
+    this.#db
+      .prepare(
+        `UPDATE message_groups
+            SET enabled = @enabled, next_at = @next_at, updated_at = @updated_at
+          WHERE id = @id`,
+      )
+      .run({ id, enabled: enabled ? 1 : 0, next_at: nextAt, updated_at: now });
+  }
+
+  /**
+   * O grupo FALOU: grava quem saiu, o baralho que sobrou e a
+   * próxima hora.
+   *
+   * Os quatro juntos numa escrita só porque eles são um estado
+   * só: um `deck` gravado sem o `last_message_id` faria a próxima
+   * volta poder repetir a frase que acabou de sair.
+   */
+  markGroupSent(
+    id: number,
+    messageId: number,
+    deck: readonly number[],
+    sentAt: number,
+    nextAt: number | null,
+  ): void {
+    this.#db
+      .prepare(
+        `UPDATE message_groups
+            SET last_message_id = @last_message_id, deck = @deck,
+                last_sent_at = @sent_at, next_at = @next_at,
+                sent_count = sent_count + 1, updated_at = @sent_at
+          WHERE id = @id`,
+      )
+      .run({
+        id,
+        last_message_id: messageId,
+        deck: serializeDeck(deck),
+        sent_at: sentAt,
+        next_at: nextAt,
+      });
+  }
+
+  /**
+   * Recomeça o ciclo: esquece o baralho e a última que saiu.
+   *
+   * É o que a troca de ORDEM chama. Um baralho sobrevivendo à
+   * mudança para ordem fixa não faria mal nenhum — mas a última
+   * mensagem sim: ela decide de onde a ordem fixa continua, e
+   * continuar de uma frase sorteada é começar no meio sem ninguém
+   * entender por quê.
+   */
+  resetGroupCycle(id: number, now: number = Date.now()): void {
+    this.#db
+      .prepare(
+        `UPDATE message_groups
+            SET last_message_id = NULL, deck = NULL, updated_at = @updated_at
+          WHERE id = @id`,
+      )
+      .run({ id, updated_at: now });
+  }
+
+  /** Só o horário do grupo. */
+  setGroupNextAt(id: number, nextAt: number | null, now: number = Date.now()): void {
+    this.#db
+      .prepare(
+        'UPDATE message_groups SET next_at = @next_at, updated_at = @updated_at WHERE id = @id',
+      )
+      .run({ id, next_at: nextAt, updated_at: now });
+  }
+
+  /** A ordem da lista de grupos, inteira. Mesma disciplina do `reorder`. */
+  reorderGroups(ids: readonly number[], now: number = Date.now()): void {
+    const run = this.#db.transaction((): void => {
+      const update = this.#db.prepare(
+        'UPDATE message_groups SET position = @position, updated_at = @updated_at WHERE id = @id',
+      );
+
+      let position = POSITION_STEP;
+
+      for (const id of ids) {
+        update.run({ id, position, updated_at: now });
+        position += POSITION_STEP;
+      }
+
+      const rest = this.#db
+        .prepare(
+          `SELECT id FROM message_groups
+            WHERE id NOT IN (SELECT value FROM json_each(@ids))
+            ORDER BY position ASC, id ASC`,
+        )
+        .all({ ids: JSON.stringify([...ids]) }) as { readonly id: number }[];
+
+      for (const row of rest) {
+        update.run({ id: row.id, position, updated_at: now });
+        position += POSITION_STEP;
+      }
+    });
+
+    run();
+  }
+
+  /**
+   * A ordem DENTRO de um grupo.
+   *
+   * ####  ELA NÃO MEXE EM QUEM NÃO É DO GRUPO  ####
+   *
+   * As posições que os membros já ocupavam são redistribuídas
+   * entre eles, na nova ordem. É o que permite reordenar o rodízio
+   * sem embaralhar a lista geral de mensagens — que é outra tela,
+   * com outra ordem, que ninguém pediu para mudar.
+   *
+   * @returns quantas mensagens mudaram de lugar.
+   */
+  reorderInGroup(groupId: number, ids: readonly number[], now: number = Date.now()): number {
+    const run = this.#db.transaction((): number => {
+      const rows = this.#db
+        .prepare(
+          `SELECT id, position FROM messages
+            WHERE group_id = @group_id
+            ORDER BY position ASC, id ASC`,
+        )
+        .all({ group_id: groupId }) as { readonly id: number; readonly position: number }[];
+
+      const mine = new Set(rows.map((row) => row.id));
+      // Id de fora do grupo é ignorado, e não é erro: a tela pode
+      // estar mostrando uma ordem de segundos atrás.
+      const wanted = [...new Set(ids)].filter((id) => mine.has(id));
+      const rest = rows.map((row) => row.id).filter((id) => !wanted.includes(id));
+      const order = [...wanted, ...rest];
+      const slots = rows.map((row) => row.position).sort((a, b) => a - b);
+
+      const update = this.#db.prepare(
+        'UPDATE messages SET position = @position, updated_at = @updated_at WHERE id = @id',
+      );
+
+      let moved = 0;
+
+      order.forEach((id, index) => {
+        const position = slots[index];
+
+        if (position !== undefined) {
+          update.run({ id, position, updated_at: now });
+          moved += 1;
+        }
+      });
+
+      return moved;
+    });
+
+    return run();
+  }
+
+  // ------------------------------------------------------
   //  O log
   // ------------------------------------------------------
 
@@ -426,6 +840,57 @@ export class MessagesRepository {
   //  Ajudantes
   // ------------------------------------------------------
 
+  /** A próxima posição livre de grupo, no passo de 10 em 10. */
+  #nextGroupPosition(): number {
+    const row = this.#db.prepare('SELECT max(position) AS top FROM message_groups').get() as {
+      readonly top: number | null;
+    };
+
+    return (row.top ?? 0) + POSITION_STEP;
+  }
+
+  /** Troca o conjunto de servidores de um grupo. Como o das mensagens. */
+  #replaceGroupTargets(groupId: number, targets: readonly string[]): void {
+    this.#db
+      .prepare('DELETE FROM message_group_targets WHERE group_id = @group_id')
+      .run({ group_id: groupId });
+
+    const link = this.#db.prepare(
+      'INSERT OR IGNORE INTO message_group_targets (group_id, server_id) VALUES (@group_id, @server_id)',
+    );
+
+    for (const serverId of new Set(targets)) {
+      link.run({ group_id: groupId, server_id: serverId });
+    }
+  }
+
+  /** Os alvos de um lote de grupos, numa consulta só. */
+  #withGroupTargets(rows: readonly MessageGroupRow[]): readonly MessageGroupView[] {
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const links = this.#db
+      .prepare(
+        'SELECT group_id, server_id FROM message_group_targets ORDER BY group_id, server_id',
+      )
+      .all() as { readonly group_id: number; readonly server_id: string }[];
+
+    const byGroup = new Map<number, string[]>();
+
+    for (const link of links) {
+      const list = byGroup.get(link.group_id);
+
+      if (list === undefined) {
+        byGroup.set(link.group_id, [link.server_id]);
+      } else {
+        list.push(link.server_id);
+      }
+    }
+
+    return rows.map((row) => toGroupView(row, byGroup.get(row.id) ?? []));
+  }
+
   /** A próxima posição livre, no passo de 10 em 10. */
   #nextPosition(): number {
     const row = this.#db.prepare('SELECT max(position) AS top FROM messages').get() as {
@@ -491,6 +956,18 @@ function toColumns(input: MessageInput): Record<string, string | number | null> 
     text: input.text,
     // 0/1: o better-sqlite3 recusa boolean como parâmetro.
     enabled: input.enabled ? 1 : 0,
+    // ####  O GATILHO MANDA NO QUE SOBREVIVE  ####
+    //
+    // O grupo só é gravado no `rotation`, e o comando só no
+    // `command`. Um `group_id` que sobrevivesse à troca de gatilho
+    // faria a mensagem reaparecer no rodízio no dia em que alguém
+    // a marcasse como `rotation` de novo — num grupo que ninguém
+    // lembra ter escolhido. Mesma disciplina dos campos de ritmo,
+    // logo abaixo.
+    trigger_kind: input.trigger,
+    group_id: input.trigger === 'rotation' ? input.groupId : null,
+    command: input.trigger === 'command' ? normalizeCommand(input.command) : null,
+    cooldown_seconds: input.trigger === 'command' ? Math.max(0, input.cooldownSeconds) : 0,
     schedule_kind: kind,
     // ####  O QUE NÃO SE APLICA VIRA NULL  ####
     //
@@ -513,6 +990,107 @@ function toColumns(input: MessageInput): Record<string, string | number | null> 
     color: input.color,
     size: input.size,
   };
+}
+
+/** O input do grupo vira colunas. */
+function toGroupColumns(input: MessageGroupInput): Record<string, string | number | null> {
+  return {
+    name: input.name,
+    enabled: input.enabled ? 1 : 0,
+    every_seconds: input.everySeconds,
+    order_mode: input.order,
+    time_zone: input.timeZone,
+    window_from: input.windowFrom,
+    window_to: input.windowTo,
+    only_with_players: input.onlyWithPlayers ? 1 : 0,
+    min_players: input.minPlayers,
+  };
+}
+
+function toGroupView(row: MessageGroupRow, targets: readonly string[]): MessageGroupView {
+  return {
+    id: row.id,
+    name: row.name,
+    enabled: row.enabled === 1,
+    position: row.position,
+    everySeconds: row.every_seconds,
+    order: toRotationOrder(row.order_mode),
+    timeZone: row.time_zone,
+    windowFrom: row.window_from,
+    windowTo: row.window_to,
+    onlyWithPlayers: row.only_with_players === 1,
+    minPlayers: row.min_players,
+    lastMessageId: row.last_message_id,
+    deck: parseDeck(row.deck),
+    lastSentAt: row.last_sent_at,
+    nextAt: row.next_at,
+    sentCount: row.sent_count,
+    targets,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A ordem da linha crua.
+ *
+ * Desconhecida vira `fixed`, como o `toTrigger` faz com o gatilho:
+ * uma linha de uma versão mais nova não pode impedir a tela de
+ * carregar. Quem garante os dois valores é o `CHECK` da tabela.
+ */
+function toRotationOrder(value: string): RotationOrder {
+  return value === 'random' ? 'random' : 'fixed';
+}
+
+/**
+ * `[12, 7]` -> `'12,7'`.
+ *
+ * Texto pelo mesmo motivo dos `weekdays`: são ids que só existem
+ * juntos, sempre lidos com o grupo e sempre gravados de uma vez.
+ * Lista vazia vira `NULL`, e não `''`, porque as duas coisas
+ * querem dizer o mesmo e uma delas é mais fácil de ler no console
+ * do SQLite.
+ */
+export function serializeDeck(deck: readonly number[]): string | null {
+  const clean = deck.filter((id) => Number.isInteger(id) && id > 0);
+
+  return clean.length === 0 ? null : clean.join(',');
+}
+
+/** `'12,7'` -> `[12, 7]`. Lixo no meio é descartado. */
+export function parseDeck(value: string | null): readonly number[] {
+  if (value === null || value.trim() === '') {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((id) => Number.isInteger(id) && id > 0);
+}
+
+/**
+ * `/POP` -> `pop`. `null` quando não sobra comando nenhum.
+ *
+ * ####  A BARRA NÃO É DO COMANDO  ####
+ *
+ * Ela é do jogo: o Oxide aceita `/pop` e também a barra invertida,
+ * e o que chega ao plugin já vem sem nenhuma das duas. Gravar a
+ * barra faria o comando digitado nunca bater com o cadastrado — e
+ * o sintoma seria "o comando não responde", sem nada no log.
+ *
+ * Minúsculas pelo mesmo motivo: quem digita `/POP` no jogo quer o
+ * mesmo `/pop`, e um comando que só funciona com a caixa certa é
+ * um comando que parece quebrado.
+ */
+export function normalizeCommand(command: string | null): string | null {
+  if (command === null) {
+    return null;
+  }
+
+  const clean = command.trim().replace(/^[/\\]+/, '').trim().toLowerCase();
+
+  return clean === '' ? null : clean;
 }
 
 /**
@@ -556,6 +1134,10 @@ function toView(row: MessageRow, targets: readonly string[]): MessageView {
     text: row.text,
     enabled: row.enabled === 1,
     position: row.position,
+    trigger: toTrigger(row.trigger_kind),
+    groupId: row.group_id,
+    command: row.command,
+    cooldownSeconds: row.cooldown_seconds,
     scheduleKind: toScheduleKind(row.schedule_kind),
     everySeconds: row.every_seconds,
     timeOfDay: row.time_of_day,
@@ -577,6 +1159,18 @@ function toView(row: MessageRow, targets: readonly string[]): MessageView {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * O gatilho da linha crua.
+ *
+ * Desconhecido vira `schedule`, e não uma exceção: uma linha
+ * gravada por uma versão mais nova do agente não pode impedir a
+ * TELA INTEIRA de carregar. Quem garante os três valores é o
+ * `DEFAULT 'schedule'` da coluna mais a rota.
+ */
+function toTrigger(value: string): MessageTrigger {
+  return value === 'rotation' || value === 'command' ? value : 'schedule';
 }
 
 function toScheduleKind(value: string): ScheduleKind {

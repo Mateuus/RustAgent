@@ -54,6 +54,32 @@ export const SCHEDULE_KINDS = ['interval', 'daily', 'weekly', 'once'] as const;
 export type ScheduleKind = (typeof SCHEDULE_KINDS)[number];
 
 // ------------------------------------------------------------
+//  §1.5  O QUE FAZ A MENSAGEM SAIR
+//
+//  ####  O GATILHO É EXCLUSIVO  ####
+//
+//  Uma mensagem tem UM motivo para sair, e só um:
+//
+//      schedule  o relógio dela (`scheduleKind`)
+//      rotation  a vez dela no rodízio de um grupo
+//      command   um jogador digitou o comando dela
+//
+//  Não é limitação: é a única forma de a tela responder "por que
+//  isso apareceu?" com uma frase. Uma mensagem que fosse agendada
+//  E de rodízio teria dois horários concorrendo, e o admin
+//  desligaria um deles sem saber qual.
+//
+//  Quem quer a mesma frase nos dois lugares escreve duas: são dois
+//  comportamentos diferentes com o mesmo texto, e não um só.
+// ------------------------------------------------------------
+
+/** Os três motivos de uma mensagem sair. Ver o bloco acima. */
+export const MESSAGE_TRIGGERS = ['schedule', 'rotation', 'command'] as const;
+
+/** Qual dos três faz esta mensagem sair. */
+export type MessageTrigger = (typeof MESSAGE_TRIGGERS)[number];
+
+// ------------------------------------------------------------
 //  §2  A MENSAGEM
 // ------------------------------------------------------------
 
@@ -78,6 +104,33 @@ export interface MessageView {
   readonly enabled: boolean;
   /** A ordem na tela, de 10 em 10 para caber alguém no meio. */
   readonly position: number;
+  /**
+   * O que faz esta mensagem sair. Ver §1.5.
+   *
+   * Fora do `schedule`, o `scheduleKind` e os campos de ritmo
+   * continuam gravados e NÃO valem: quem manda no rodízio é o
+   * grupo, e no comando é o jogador. Eles ficam para a mensagem
+   * poder voltar a ser agendada sem o admin redigitar o ritmo.
+   */
+  readonly trigger: MessageTrigger;
+  /**
+   * O grupo de rodízio a que ela pertence. `null` fora do
+   * `rotation`.
+   */
+  readonly groupId: number | null;
+  /**
+   * O comando que a dispara, SEM a barra e em minúsculas: `pop`.
+   *
+   * `null` fora do `command`. A barra não é guardada porque ela é
+   * do jogo, e não do comando: o Oxide aceita `/pop` e `\pop`, e
+   * gravar uma delas faria a outra parecer desconhecida.
+   */
+  readonly command: string | null;
+  /**
+   * Quantos segundos um jogador espera para repetir o comando.
+   * `0` = sem espera.
+   */
+  readonly cooldownSeconds: number;
   readonly scheduleKind: ScheduleKind;
   /** De quantos em quantos segundos, no ritmo `interval`. `null` nos outros. */
   readonly everySeconds: number | null;
@@ -151,6 +204,13 @@ export interface MessageInput {
   readonly name: string;
   readonly text: string;
   readonly enabled: boolean;
+  /** Ver §1.5: `schedule`, `rotation` ou `command`. */
+  readonly trigger: MessageTrigger;
+  /** O grupo do rodízio. `null` fora do `rotation`. */
+  readonly groupId: number | null;
+  /** O comando, sem barra. `null` fora do `command`. */
+  readonly command: string | null;
+  readonly cooldownSeconds: number;
   readonly scheduleKind: ScheduleKind;
   readonly everySeconds: number | null;
   readonly timeOfDay: string | null;
@@ -166,6 +226,109 @@ export interface MessageInput {
   readonly color: string | null;
   readonly size: number | null;
   /** Os servidores em que ela sai. Lista vazia = todos. */
+  readonly targets: readonly string[];
+}
+
+// ------------------------------------------------------------
+//  §2.5  O GRUPO DE RODÍZIO
+//
+//  ####  UM INTERVALO, VÁRIAS FRASES, UMA POR VEZ  ####
+//
+//  É o ritmo que o agente antigo tinha e este não: "de 5 em 5
+//  minutos, uma frase diferente". A diferença é que aqui ele é
+//  UM grupo entre vários, e não o ritmo do servidor inteiro — o
+//  rodízio de dicas de 5 em 5 minutos convive com o convite do
+//  Discord de meia em meia hora.
+//
+//  ####  O RITMO É DO GRUPO, E O TEXTO É DA MENSAGEM  ####
+//
+//  Quem decide QUANDO sair, EM QUAIS servidores e COM QUANTA
+//  gente online é o grupo. Quem decide O QUE sai — texto, tag,
+//  cor, tamanho — é a mensagem da vez. Duas verdades sobre o
+//  mesmo assunto (o grupo manda "só com 5 online" e a mensagem
+//  manda "com 1") é o defeito que faz o admin desligar as duas
+//  para descobrir qual valeu.
+//
+//  ####  A ORDEM ALEATÓRIA É UM BARALHO, E NÃO UM DADO  ####
+//
+//  Sortear a cada volta repetiria a mesma frase duas vezes
+//  seguidas com frequência constrangedora (1 em 5, num grupo de
+//  cinco) e deixaria uma delas sem sair por meia hora. O baralho
+//  embaralha UMA vez, distribui todas, e só então embaralha de
+//  novo — e o embaralhamento novo nunca começa pela carta que
+//  acabou de sair.
+// ------------------------------------------------------------
+
+/**
+ * Em que ordem o rodízio distribui as mensagens.
+ *
+ *   fixed   na ordem da lista, reiniciando o ciclo no fim
+ *   random  embaralhado, todas antes de repetir
+ */
+export const ROTATION_ORDERS = ['fixed', 'random'] as const;
+
+/** Qual das duas ordens este grupo segue. */
+export type RotationOrder = (typeof ROTATION_ORDERS)[number];
+
+/** Um grupo de rodízio como a tela o mostra. */
+export interface MessageGroupView {
+  readonly id: number;
+  /** O nome na lista. É de quem administra; o jogador nunca o vê. */
+  readonly name: string;
+  /** Desligado, ele fica na lista e nenhuma mensagem dele sai. */
+  readonly enabled: boolean;
+  /** A ordem na tela, de 10 em 10. */
+  readonly position: number;
+  /** De quantos em quantos segundos UMA mensagem do grupo sai. */
+  readonly everySeconds: number;
+  readonly order: RotationOrder;
+  /** A zona IANA em que a janela de horário é lida. */
+  readonly timeZone: string;
+  /** Só sai depois desta hora local `HH:MM`. `null` = a qualquer hora. */
+  readonly windowFrom: string | null;
+  /** Só sai até esta hora local `HH:MM`. `null` = a qualquer hora. */
+  readonly windowTo: string | null;
+  /** Não fala para servidor vazio: o horário fica de pé. */
+  readonly onlyWithPlayers: boolean;
+  /** Quantos jogadores online bastam, quando `onlyWithPlayers`. */
+  readonly minPlayers: number;
+  /**
+   * A última que saiu. É o que faz a ordem fixa saber de onde
+   * continuar, e a aleatória não repetir duas vezes seguidas.
+   */
+  readonly lastMessageId: number | null;
+  /**
+   * As mensagens que ainda não saíram no ciclo aleatório.
+   *
+   * Vazio = o ciclo acabou, e o próximo envio embaralha tudo de
+   * novo. Ele é ESTADO, e não configuração: sobreviver a um
+   * reinício do agente é o que impede o ciclo de recomeçar toda
+   * vez que alguém edita um plugin.
+   */
+  readonly deck: readonly number[];
+  readonly lastSentAt: number | null;
+  /** Quando o grupo fala de novo, em epoch ms. `null` = não há. */
+  readonly nextAt: number | null;
+  /** Quantas mensagens o grupo já mandou, somando todas. */
+  readonly sentCount: number;
+  /** Em quais servidores ele sai. VAZIO = em TODOS. */
+  readonly targets: readonly string[];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** O que a tela manda ao criar ou editar um grupo. */
+export interface MessageGroupInput {
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly everySeconds: number;
+  readonly order: RotationOrder;
+  readonly timeZone: string;
+  readonly windowFrom: string | null;
+  readonly windowTo: string | null;
+  readonly onlyWithPlayers: boolean;
+  readonly minPlayers: number;
+  /** Os servidores em que ele sai. Lista vazia = todos. */
   readonly targets: readonly string[];
 }
 
