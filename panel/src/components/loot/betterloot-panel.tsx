@@ -57,6 +57,7 @@ import {
 import { BetterLootGlobalsBar } from '@/components/loot/betterloot-globals-bar';
 import { BetterLootProfiles } from '@/components/loot/betterloot-profiles';
 import { BetterLootJunkDialog } from '@/components/loot/betterloot-junk-dialog';
+import { BetterLootRebuildDialog } from '@/components/loot/betterloot-rebuild-dialog';
 import { BetterLootTableProfiles } from '@/components/loot/betterloot-table-profiles';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -140,6 +141,8 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
    */
   const [junk, setJunk] = useState<readonly BetterLootJunkItem[]>([]);
   const [junkOpen, setJunkOpen] = useState(false);
+  /** A caixa de "refazer a base". Ela mexe no arquivo INTEIRO. */
+  const [rebuildOpen, setRebuildOpen] = useState(false);
 
   /**
    * Os perfis do servidor, para o bloco "Perfis desta caixa".
@@ -554,6 +557,7 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
         error={statusError}
         busy={saving}
         onSaveGlobals={saveGlobals}
+        onRebuild={() => setRebuildOpen(true)}
       />
 
       {status !== null && (
@@ -734,6 +738,27 @@ export function BetterLootPanel({ servers }: BetterLootPanelProps) {
         onAdd={(shortname) => void addJunk(shortname)}
         onRemove={(shortname) => void removeJunk(shortname)}
       />
+
+      {/* ####  DEPOIS DELE, NADA DO QUE ESTÁ NA TELA VALE  ####
+
+          O arquivo no disco é outro: a lista, os perfis e a caixa
+          aberta foram todos refeitos. Fechar a caixa aberta não é
+          zelo excessivo — o rascunho dela carrega a `revision` de
+          um arquivo que não existe mais, e gravá-lo seria pedir um
+          conflito ou, pior, escrever por cima da base nova. */}
+      <BetterLootRebuildDialog
+        open={rebuildOpen}
+        onClose={() => setRebuildOpen(false)}
+        serverId={serverId}
+        onDone={() => {
+          openRequest(tableSeq);
+          setSelected(null);
+          setSaved(null);
+          setDraft(null);
+          void loadStatus();
+          void loadProfiles();
+        }}
+      />
     </div>
   );
 }
@@ -841,6 +866,7 @@ function BetterLootHeader({
   error,
   busy,
   onSaveGlobals,
+  onRebuild,
 }: {
   readonly servers: readonly { id: string; name: string }[];
   readonly serverId: string;
@@ -849,6 +875,8 @@ function BetterLootHeader({
   readonly error: string | null;
   readonly busy: boolean;
   readonly onSaveGlobals: (input: BetterLootGlobalsInput) => Promise<void>;
+  /** Abre a caixa de "refazer a base". Ela mexe no arquivo inteiro. */
+  readonly onRebuild: () => void;
 }) {
   return (
     <div className="space-y-3">
@@ -859,20 +887,39 @@ function BetterLootHeader({
           nada.
         </p>
 
-        <label className="flex items-center gap-2 text-2xs text-muted">
-          Servidor
-          <select
-            value={serverId}
-            onChange={(event) => onServerChange(event.target.value)}
-            className="h-8 border border-border bg-surface-2 px-2 text-2xs text-foreground"
+        <div className="flex items-center gap-2">
+          {/* ####  ELE FICA AQUI EM CIMA, E NÃO NA CAIXA  ####
+
+              A operação é do SERVIDOR inteiro: ela refaz as 111
+              caixas de uma vez. Um botão dentro do editor de caixa
+              mentiria sobre o alcance — como o multiplicador, que
+              mora aqui pela mesma razão. */}
+          <Button
+            size="sm"
+            disabled={busy || status === null}
+            onClick={onRebuild}
+            className="flex items-center gap-1"
+            title="Mandar o BetterLoot gerar a base do loot outra vez, do jogo deste servidor"
           >
-            {servers.map((server) => (
-              <option key={server.id} value={server.id}>
-                {server.name}
-              </option>
-            ))}
-          </select>
-        </label>
+            <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+            Refazer a base
+          </Button>
+
+          <label className="flex items-center gap-2 text-2xs text-muted">
+            Servidor
+            <select
+              value={serverId}
+              onChange={(event) => onServerChange(event.target.value)}
+              className="h-8 border border-border bg-surface-2 px-2 text-2xs text-foreground"
+            >
+              {servers.map((server) => (
+                <option key={server.id} value={server.id}>
+                  {server.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       {error !== null && (

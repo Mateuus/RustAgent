@@ -2653,6 +2653,62 @@ export interface BetterLootStatusResponse {
   tables: BetterLootTableSummary[];
 }
 
+/**
+ * O que o `rebuild` faz com a tabela que está no disco.
+ *
+ * `merge` = a base nova do jogo com o que era da casa por cima.
+ * `factory` = a base nova, e nada mais — zera os perfis junto.
+ */
+export type BetterLootRebuildMode = 'merge' | 'factory';
+
+/** O que aconteceu com UMA caixa ao refazer a base. */
+export interface BetterLootRebuiltTable {
+  prefab: string;
+  nativeItems: number;
+  keptItems: string[];
+  keptGuaranteed: string[];
+  keptProfiles: string[];
+  orphanProfiles: string[];
+  adopted: boolean;
+  fresh: boolean;
+}
+
+/** O relatório do `rebuild`. É o que a tela mostra depois. */
+export interface BetterLootRebuildReport {
+  mode: BetterLootRebuildMode;
+  tables: number;
+  nativeItems: number;
+  keptItems: number;
+  keptProfiles: number;
+  adopted: string[];
+  fresh: string[];
+  /** Prefabs que existiam e que o jogo de hoje não tem mais. */
+  dropped: string[];
+  /**
+   * Prefabs que o plugin não gerou e que ficaram como estavam.
+   *
+   * O caso é o corpo de cientista fora da vigia: o BetterLoot pula
+   * a geração de NPC desligado. Adotar tudo esvazia esta lista.
+   */
+  preserved: string[];
+  orphanProfiles: string[];
+  changed: BetterLootRebuiltTable[];
+}
+
+/** `POST /api/servers/:id/betterloot/rebuild` */
+export interface BetterLootRebuildResponse {
+  ok: true;
+  serverId: string;
+  report: BetterLootRebuildReport;
+  /** Os caminhos das cópias, feitas antes de qualquer escrita. */
+  backups: string[];
+  revision: string;
+  /** Caixas postas na lista de vigia do `BetterLoot.json`. */
+  watchedAdded: number;
+  reloaded: boolean;
+  reloadOutput: string | null;
+}
+
 /** `GET /api/servers/:id/betterloot/table?prefab=…` — uma caixa. */
 export interface BetterLootTableResponse {
   ok: true;
@@ -5383,6 +5439,28 @@ export const agent = {
       { method: 'PUT', body: input },
     ),
 
+
+  /**
+   * Refaz a base do loot pelo próprio plugin.
+   *
+   * ####  É A CHAMADA MAIS DESTRUTIVA DESTA TELA  ####
+   *
+   * O agente apaga o `LootTables.json` para o BetterLoot gerá-lo
+   * de novo do jogo — e, no `factory`, apaga os perfis junto. A
+   * palavra de confirmação vai no corpo e é diferente por modo,
+   * justamente para não haver como disparar a errada por engano.
+   *
+   * Ela exige o servidor NO AR: quem gera a base é o plugin. O 503
+   * de "servidor parado" não é defeito da tela.
+   */
+  rebuildBetterLoot: (
+    serverId: string,
+    input: { mode: BetterLootRebuildMode; adopt: boolean; confirm: string },
+  ) =>
+    api<BetterLootRebuildResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/rebuild`,
+      { method: 'POST', body: input },
+    ),
 
   // ---- os PERFIS de loot (LootGroups.json) ------------------
   //

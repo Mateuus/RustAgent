@@ -106,6 +106,27 @@ const junkShortname = z
 
 const serverParams = z.object({ id: z.string().min(1) });
 
+/**
+ * A palavra que confirma cada modo do `rebuild`.
+ *
+ * Duas palavras diferentes de propósito: quem digita "REFAZER"
+ * achando que está refazendo a base não apaga os perfis por
+ * engano. É a mesma ideia do nome do repositório nos botões
+ * vermelhos do GitHub — a confirmação precisa CUSTAR alguma coisa.
+ */
+const REBUILD_CONFIRM = { merge: 'REFAZER', factory: 'RESETAR' } as const;
+
+const rebuildSchema = z.object({
+  /**
+   * `merge` = base nova do jogo com o que era da casa por cima.
+   * `factory` = a base nova, e nada mais: zera perfis junto.
+   */
+  mode: z.enum(['merge', 'factory']),
+  /** Ligar os DOIS interruptores de toda caixa — tirar o "JOGO". */
+  adopt: z.boolean(),
+  confirm: z.string().max(40),
+});
+
 const tableQuery = z.object({
   /**
    * O caminho inteiro do prefab.
@@ -396,6 +417,59 @@ export function registerBetterLootRoutes(app: FastifyInstance, deps: BetterLootR
       // salvamento errado reversível — e um caminho na resposta é
       // melhor que uma promessa no log.
       backup: result.backup,
+      reloaded: result.reloaded,
+      reloadOutput: result.reloadOutput,
+    };
+  });
+
+  /**
+   * Refaz a base inteira pelo próprio plugin.
+   *
+   * ####  É A OPERAÇÃO MAIS DESTRUTIVA DESTA TELA  ####
+   *
+   * Ela apaga o `LootTables.json` para que o BetterLoot o gere de
+   * novo do jogo — e, no `factory`, apaga os perfis junto. Por isso
+   * três travas, e não uma:
+   *
+   *   1. a palavra de confirmação vem no corpo, e é diferente por
+   *      modo. Sem ela o agente recusa antes de tocar em disco —
+   *      o bearer do `.env` abre a API inteira, e um `POST` sem
+   *      corpo não pode zerar o loot de um servidor;
+   *   2. os três arquivos são copiados antes de qualquer escrita;
+   *   3. se o plugin não gerar a base, o backup volta sozinho e a
+   *      rota responde 503 sem ter mudado nada.
+   *
+   * ####  E ELA EXIGE O SERVIDOR NO AR  ####
+   *
+   * Diferente de todo o resto daqui, que é disco. Quem lê o loot
+   * nativo do jogo é o plugin, e plugin parado não lê nada. O 503
+   * diz isso com todas as letras.
+   */
+  app.post('/servers/:id/betterloot/rebuild', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const body = rebuildSchema.parse(request.body);
+    const expected = REBUILD_CONFIRM[body.mode];
+
+    if (body.confirm !== expected) {
+      throw new ApiError(
+        'BETTERLOOT_CONFIRM_REQUIRED',
+        `Esta operação refaz o loot do servidor "${id}" inteiro. Para confirmar, mande ` +
+          `"confirm": "${expected}" no corpo. Nada foi alterado.`,
+        400,
+      );
+    }
+
+    const result = await deps.editor.rebuild(id, { mode: body.mode, adopt: body.adopt });
+
+    return {
+      ok: true,
+      serverId: id,
+      report: result.report,
+      // Os caminhos, e não uma promessa de que existe cópia. É o
+      // que o admin leva para o dono quando quiser desfazer.
+      backups: result.backups,
+      revision: result.revision,
+      watchedAdded: result.watchedAdded,
       reloaded: result.reloaded,
       reloadOutput: result.reloadOutput,
     };
