@@ -42,16 +42,19 @@
 // ============================================================
 
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { assertSteamId } from '../../bans/service.js';
+import { projectRoot } from '../../config.js';
 import {
   OFFER_BADGES,
   OFFER_KINDS,
   type StoreCategory,
   type StoreOffer,
+  type StoreOfferInput,
   type StorePurchase,
   type StoreRepository,
 } from '../../db/store-repository.js';
@@ -65,6 +68,7 @@ import {
 } from '../../store/service.js';
 import type { Wallet } from '../../store/wallet.js';
 import { ApiError } from '../error-response.js';
+import { listIcons, readIcon, saveIcon, uploadedIcon } from '../icon-files.js';
 import { operatorOf } from './admin.js';
 
 export interface StoreRoutesDeps {
@@ -81,6 +85,21 @@ export interface StoreRoutesDeps {
    * a integração com o site.
    */
   readonly onCatalogChanged?: (() => void) | undefined;
+  /**
+   * Alguem mexeu numa oferta, e a INTERFACE precisa saber.
+   *
+   * ####  A ARTE NAO VAI SOZINHA  ####
+   *
+   * A vitrine e gerada a cada clique, entao nome, preco e etiqueta
+   * aparecem na hora. A ARTE propria nao: os bytes dela viajam com a
+   * carga da interface, e sem este aviso a imagem so chegaria na
+   * volta periodica (5 min) -- quem acabou de salvar abre o jogo, ve
+   * o icone velho e conclui que nao funcionou.
+   *
+   * Chamado SEM `await` e dentro de try/catch, como o
+   * `onCatalogChanged`.
+   */
+  readonly onArtChanged?: (() => void) | undefined;
 }
 
 /**
@@ -90,6 +109,14 @@ export interface StoreRoutesDeps {
  * de gravar. O painel do site mostrar a loja de ontem é um
  * problema; a edição não salvar é outro, bem maior.
  */
+function notifyArt(deps: StoreRoutesDeps): void {
+  try {
+    deps.onArtChanged?.();
+  } catch {
+    // De proposito: o envio e consequencia, e a edicao ja aconteceu.
+  }
+}
+
 function notifyCatalog(deps: StoreRoutesDeps): void {
   try {
     deps.onCatalogChanged?.();
@@ -130,6 +157,65 @@ const offerItemSchema = z
   })
   .strict();
 
+// ============================================================
+//  A ARTE PRÓPRIA DA OFERTA
+//
+//  `Assets\store\` fica ao lado de `Assets\items\` e `Assets\ui\`:
+//  arquivos que quem administra a rede troca, e não código. A regra
+//  do upload é a mesma dos três — ver http/icon-files.ts.
+//
+//  Pasta separada de propósito: a lista de ícones de ITEM não deve
+//  encher de arte de pacote, nem o contrário. São acervos com donos
+//  diferentes na tela.
+// ============================================================
+
+/** Onde a arte das ofertas mora, na raiz do projeto. */
+export const STORE_ASSETS_DIR = join('Assets', 'store');
+
+/** A pasta, resolvida na hora: `projectRoot` é injetável. */
+function storeIconsDir(): string {
+  return join(projectRoot(), STORE_ASSETS_DIR);
+}
+
+/**
+ * Os bytes da arte de uma oferta, ou `null`.
+ *
+ * É a porta da sincronização com o jogo (game/card-icons.ts). A
+ * régua do nome mora no `readIcon`, e aqui ela protege o que vem do
+ * BANCO — `icon_file` só tem o tamanho conferido pelo zod.
+ */
+export function readStoreIcon(name: string): Buffer | null {
+  return readIcon(storeIconsDir(), name);
+}
+
+/**
+ * O corpo conferido, virado cadastro — resolvendo o ícone próprio.
+ *
+ * `file` omitido conserva o que estava gravado; `null` limpa. Ver o
+ * campo no schema.
+ *
+ * @param before a oferta como ela está, ou `null` quando é criação.
+ */
+export function toOfferInput(
+  body: z.infer<typeof storeOfferBody>,
+  before: StoreOffer | null,
+): StoreOfferInput {
+  return {
+    ...body,
+    icon: {
+      shortname: body.icon.shortname,
+      itemId: body.icon.itemId,
+      skinId: body.icon.skinId,
+      file:
+        body.icon.file === undefined
+          ? (before?.icon.file ?? null)
+          : body.icon.file === ''
+            ? null
+            : body.icon.file,
+    },
+  };
+}
+
 /**
  * O corpo de criação e de edição de uma oferta.
  *
@@ -151,13 +237,27 @@ export const storeOfferBody = z
     badge: z.enum(OFFER_BADGES).nullable().default(null),
     icon: z
       .object({
-        shortname: z.string().trim().min(1).max(64),
+        // Pode vir VAZIO desde que haja arte própria — ver o
+        // `superRefine`. Uma oferta de VIP não tem "o item".
+        shortname: z.string().trim().max(64),
         itemId: z.number().int(),
         skinId: z
           .string()
           .regex(/^\d+$/)
           .max(24)
           .default('0'),
+        /**
+         * O PNG próprio de `Assets\store\`.
+         *
+         * ####  OMITIDO NÃO É `null`  ####
+         *
+         * `null` é uma ESCOLHA — "usa o ícone do jogo" — e o painel a
+         * manda. Omitido é "não falei sobre isso", e é o que o site
+         * manda: ele aplica a loja pelo mesmo schema e não conhece
+         * este campo. Tratá-los igual faria uma sincronização do site
+         * apagar a arte que alguém escolheu no painel.
+         */
+        file: z.string().trim().max(120).nullable().optional(),
       })
       .strict(),
     items: z.array(offerItemSchema).max(40).default([]),
@@ -185,6 +285,24 @@ export const storeOfferBody = z
   })
   .strict()
   .superRefine((offer, ctx) => {
+    // ####  O CARD PRECISA DE UM DESENHO  ####
+    //
+    // São dois caminhos e basta um: o ícone do jogo (que o cliente já
+    // tem) ou a arte própria. Sem nenhum dos dois o card sai com um
+    // quadrado vazio, e o admin descobre isso no jogo.
+    if (
+      offer.icon.shortname === '' &&
+      (offer.icon.file === undefined || offer.icon.file === null || offer.icon.file === '')
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['icon'],
+        message:
+          'o card precisa de um desenho: escolha um ícone do jogo na lista ou envie uma arte ' +
+          'própria',
+      });
+    }
+
     if (offer.kind === 'vip' && offer.vip === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -350,6 +468,51 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
   //  As ofertas
   // ==========================================================
 
+  // ----------------------------------------------------------
+  //  A arte própria — ver STORE_ASSETS_DIR
+  // ----------------------------------------------------------
+
+  app.get('/store/icons', async () => {
+    return { ok: true, icons: listIcons(storeIconsDir()) };
+  });
+
+  /**
+   * Devolve o PNG, para a tela conseguir mostrá-lo.
+   *
+   * O arquivo mora na máquina do agente e o que o jogo tem é um CRC
+   * dentro do servidor de Rust — sem esta rota, o editor da oferta
+   * mostraria o nome do arquivo e pediria fé.
+   */
+  app.get('/store/icons/:name', async (request, reply) => {
+    const { name } = z.object({ name: z.string().min(1) }).parse(request.params);
+    const content = readStoreIcon(name);
+
+    if (content === null) {
+      throw new ApiError('ICON_NOT_FOUND', `Nenhuma arte chamada "${name}".`, 404);
+    }
+
+    return reply.type('image/png').header('cache-control', 'private, max-age=60').send(content);
+  });
+
+  /**
+   * Recebe um PNG e o grava em `Assets\store\`.
+   *
+   * Devolve o NOME, que é o que vai para `icon.file` da oferta. Os
+   * bytes só chegam ao jogo depois, pela sincronização da interface.
+   */
+  app.post('/store/icons', async (request) => {
+    const { filename, content } = await uploadedIcon(request);
+
+    saveIcon(storeIconsDir(), filename, content);
+
+    request.log.info(
+      { icon: filename, bytes: content.length, by: operatorOf(request) },
+      'arte de oferta da loja recebida',
+    );
+
+    return { ok: true, icon: { name: filename, bytes: content.length } };
+  });
+
   app.get('/store/offers', async (request) => {
     const query = z.object({ categoryId: z.string().min(1).optional() }).parse(request.query);
 
@@ -366,7 +529,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
 
     assertCategory(deps, body.categoryId);
 
-    const offer = deps.repository.saveOffer(randomUUID(), body);
+    const offer = deps.repository.saveOffer(randomUUID(), toOfferInput(body, null));
 
     deps.repository.audit({
       actor: operatorOf(request),
@@ -378,6 +541,8 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     // O painel do site precisa ver a loja de AGORA. Sem await e
     // sem poder derrubar a rota: a edição já foi gravada.
     notifyCatalog(deps);
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     request.log.info(
       { offer: offer.id, name: offer.name, kind: offer.kind, by: operatorOf(request) },
@@ -399,7 +564,7 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
 
     assertCategory(deps, body.categoryId);
 
-    const saved = deps.repository.saveOffer(id, body);
+    const saved = deps.repository.saveOffer(id, toOfferInput(body, before));
 
     deps.repository.audit({
       actor: operatorOf(request),
@@ -411,6 +576,8 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     // O painel do site precisa ver a loja de AGORA. Sem await e
     // sem poder derrubar a rota: a edição já foi gravada.
     notifyCatalog(deps);
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     return { ok: true, offer: toOfferView(saved) };
   });
@@ -435,6 +602,8 @@ export function registerStoreRoutes(app: FastifyInstance, deps: StoreRoutesDeps)
     // O painel do site precisa ver a loja de AGORA. Sem await e
     // sem poder derrubar a rota: a edição já foi gravada.
     notifyCatalog(deps);
+    // A arte do card viaja com a carga da interface — ver `notifyArt`.
+    notifyArt(deps);
 
     request.log.warn({ offer: id, name: offer.name, by: operatorOf(request) }, 'oferta removida');
 

@@ -36,6 +36,7 @@ function tableOf(prefab: string): BetterLootTable {
   return {
     prefab,
     enabled: true,
+    watched: true,
     itemCount: 0,
     guaranteedCount: 0,
     profileCount: 0,

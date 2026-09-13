@@ -144,7 +144,7 @@ function offer(id: string, categoryId: string, name: string): Record<string, unk
     kind: 'item',
     name,
     price: 100,
-    icon: { shortname: 'rifle.ak', itemId: 1545779598, skinId: '0' },
+    icon: { shortname: 'rifle.ak', itemId: 1545779598, skinId: '0', file: null },
     items: [{ shortname: 'rifle.ak', itemId: 1545779598, skinId: '0', amount: 1 }],
   };
 }
@@ -188,7 +188,7 @@ describe('a loja que vem do site', () => {
       position: 0,
       enabled: true,
       badge: null,
-      icon: { shortname: 'wood', itemId: -151838493, skinId: '0' },
+      icon: { shortname: 'wood', itemId: -151838493, skinId: '0', file: null },
       items: [{ shortname: 'wood', itemId: -151838493, skinId: '0', amount: 1 }],
       perks: [],
       vip: null,
@@ -412,6 +412,7 @@ describe('os kits que vêm do site', () => {
       slug: 'antigo',
       name: 'Antigo',
       description: null,
+      iconFile: null,
       category: null,
       kind: 'resgate',
       useLimit: null,
@@ -443,6 +444,7 @@ describe('os kits que vêm do site', () => {
       slug: 'antigo',
       name: 'Antigo',
       description: null,
+      iconFile: null,
       category: null,
       kind: 'resgate',
       useLimit: null,

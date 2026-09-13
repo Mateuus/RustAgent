@@ -1,10 +1,12 @@
 // Requires: OrigemZAgent
+// Reference: 0Harmony
 
 // ============================================================
 //  OrigemZPlayer.cs
 //
 //  O jogador dentro do jogo: o kit que ele recebe ao nascer, o
-//  inventario que ele tem agora, e as acoes de admin sobre ele.
+//  inventario que ele tem agora, as acoes de admin sobre ele e a
+//  velocidade com que as coisas andam para ele.
 //
 //  ------------------------------------------------------------
 //  #### O QUE ELE FAZ ####
@@ -20,6 +22,15 @@
 //   3. Executa as acoes de admin que hoje exigiriam entrar no
 //      jogo: matar (origemz.player.kill) e dar o kit agora
 //      (origemz.player.loadout).
+//
+//   4. Acelera, POR NIVEL, a fornalha, o craft, a pesquisa e o
+//      reciclador - a aba Configuracoes > Player > Timers. E o
+//      que o QuickSmelt fazia, mas preso ao nivel do jogador e sem
+//      reescrever o forno do jogo. Ver a secao OS TIMERS.
+//
+//  O `// Reference: 0Harmony` la em cima e do item 4: o craft e
+//  acelerado por um patch de Harmony, e o compilador de plugins do
+//  Oxide so enxerga o 0Harmony.dll quando o plugin pede.
 //
 //  ------------------------------------------------------------
 //  #### DE ONDE VEM O KIT ####
@@ -73,8 +84,12 @@ using Oxide.Core.Plugins;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZPlayer", "OrigemZ", "0.1.0")]
-    [Description("Kit por nivel ao nascer, inventario ao vivo e acoes de admin sobre o jogador")]
+    // 0.2.0: os timers por nivel (fornalha, craft, pesquisa e
+    // reciclador). Precisa do OrigemZAgent 0.5.0 - com o antigo, o
+    // GetTimers nao existe, a chamada volta null e todo mundo fica no
+    // x1, que e o jogo sem plugin.
+    [Info("OrigemZPlayer", "OrigemZ", "0.2.0")]
+    [Description("Kit por nivel ao nascer, inventario ao vivo, acoes de admin e timers por nivel")]
     public class OrigemZPlayer : RustPlugin
     {
         [PluginReference]
@@ -84,6 +99,7 @@ namespace Oxide.Plugins
         private const string HookGetVipTier = "GetVipTier";
         private const string HookGetLoadout = "GetLoadout";
         private const string HookGetSpawnStatus = "GetSpawnStatus";
+        private const string HookGetTimers = "GetTimers";
 
         private const int ExpectedAgentApiVersion = 1;
 
@@ -151,6 +167,12 @@ namespace Oxide.Plugins
         // ========================================================
         private void Init()
         {
+            // Os patches de Harmony do craft sao estaticos e precisam
+            // achar o plugin. O Oxide os aplica logo DEPOIS do Init.
+            _instance = this;
+
+            ResolveRecycleThink();
+
             Puts("Init() - comandos: " + InventoryCommand + ", " + KillCommand + ", " +
                  LoadoutCommand + ", " + TeleportCommand +
                  ". Contrato do agente esperado: v" + ExpectedAgentApiVersion + ".");
@@ -173,6 +195,38 @@ namespace Oxide.Plugins
             {
                 PrintError("OnServerInitialized falhou; o kit fica desligado ate um reload: " + ex);
             }
+
+            // Separado do bloco de cima de proposito: um erro nos
+            // timers nao pode levar o kit junto, e vice-versa.
+            try
+            {
+                StartTimers();
+            }
+            catch (Exception ex)
+            {
+                PrintError("Os timers nao subiram; fornalha, craft, pesquisa e reciclador ficam " +
+                           "no x1 ate um reload: " + ex);
+            }
+        }
+
+        // Devolve ao jogo o que os timers mexeram. O resto (o relogio
+        // da fornalha, os patches do craft) o Oxide desfaz sozinho ao
+        // descarregar o plugin.
+        private void Unload()
+        {
+            try
+            {
+                RestoreResearchTables();
+                RestoreRecyclers();
+            }
+            catch (Exception ex)
+            {
+                PrintError("Unload nao devolveu tudo ao jogo: " + ex);
+            }
+
+            _trackedOvens.Clear();
+            _craftingNow = null;
+            _instance = null;
         }
 
         // ========================================================
@@ -1415,6 +1469,831 @@ namespace Oxide.Plugins
         }
 
         // ========================================================
+        //  OS TIMERS - fornalha, craft, pesquisa e reciclador
+        //
+        //  A aba Configuracoes > Player > Timers do painel. Cada
+        //  NIVEL tem quatro multiplicadores de VELOCIDADE: x2 e duas
+        //  vezes mais rapido, metade do tempo. x1 e o jogo.
+        //
+        //  #### DE ONDE VEM ####
+        //
+        //  Do OrigemZAgent, pelo GetTimers(tier), no mesmo caminho do
+        //  kit e do status: o RustAgent empurra origemz.timers.sync, o
+        //  hub guarda, este plugin pergunta.
+        //
+        //  #### QUAL NIVEL VALE, CAMPO A CAMPO ####
+        //
+        //  admin (so para quem tem auth level) > VIP > normal, e o
+        //  primeiro que DEFINE aquele timer ganha. Nivel que deixa o
+        //  campo em branco cai para o de baixo - e so no fim de tudo
+        //  para o x1.
+        //
+        //  Nao e o que o kit faz (la o nivel troca o kit inteiro), e e
+        //  de proposito: sem cair para o de baixo, um servidor com
+        //  "normal: craft x2" e "gold: fornalha x3" deixaria o VIP
+        //  gold craftando MAIS DEVAGAR que o jogador comum - e ninguem
+        //  configura isso querendo.
+        //
+        //  #### O QUE CADA UM TOCA ####
+        //
+        //   fornalha    fornalha, fornalha grande, eletrica e
+        //               refinaria - as que fundem ou refinam. Vale o
+        //               MELHOR entre o dono e quem a acendeu.
+        //   craft       a fila de fabricacao do jogador.
+        //   pesquisa    a mesa de pesquisa, por quem apertou o botao.
+        //   reciclador  por quem o ligou.
+        //
+        //  #### POR QUE NAO REESCREVER O FORNO, COMO O QUICKSMELT ####
+        //
+        //  O QuickSmelt trocava o laco de cozimento do jogo por uma
+        //  copia dele. No Rust de setembro de 2026 o
+        //  CanBeCookedByAtTemperature mora no CookableItemInfo, e nao
+        //  mais no ItemModCookable - a copia deixou de compilar e a
+        //  fornalha do servidor voltou ao x1.
+        //
+        //  Aqui o forno continua sendo o do jogo: o que muda e QUANTAS
+        //  VEZES o Cook() do proprio jogo roda. A proxima mudanca da
+        //  Facepunch no forno vem junto, de graca.
+        //
+        //  #### NUNCA MAIS DEVAGAR QUE O JOGO ####
+        //
+        //  O minimo e x1: desacelerar a fornalha exigiria CANCELAR
+        //  ciclos do jogo, e ninguem pediu isso. O teto e x20, e o
+        //  RustAgent recusa o que passa dele antes de chegar aqui -
+        //  a trava deste lado e para o comando digitado a mao.
+        // ========================================================
+        private const float MinTimerSpeed = 1f;
+        private const float MaxTimerSpeed = 20f;
+
+        // De quanto em quanto tempo uma fornalha acesa refaz a conta
+        // da velocidade. E o que faz o VIP comprado no meio da
+        // fundicao valer sem ninguem apagar e acender.
+        private const float OvenRecheckSeconds = 30f;
+
+        // Teto de Cook() extras por fornalha a cada tique. Ver
+        // CookExtra.
+        private const int MaxExtraCookSteps = 8;
+
+        // Os patches do craft sao estaticos (Harmony) e chegam ao
+        // plugin por aqui. null = plugin descarregado.
+        private static OrigemZPlayer _instance;
+
+        // O ItemCrafter que esta rodando o ServerUpdate AGORA. Ver
+        // CraftQueuePatch.
+        private static ItemCrafter _craftingNow;
+
+        // O RecycleThink do jogo, que e privado. Ver
+        // ResolveRecycleThink.
+        private static System.Reflection.MethodInfo _recycleThinkMethod;
+
+        // Toda fornalha ACESA que funde ou refina, pela id de rede.
+        private readonly Dictionary<ulong, TrackedOven> _trackedOvens =
+            new Dictionary<ulong, TrackedOven>();
+
+        private readonly List<TrackedOven> _ovenSnapshot = new List<TrackedOven>();
+
+        // Quem apertou "ligar" na fornalha, entre o OnOvenToggle e o
+        // OnOvenStarted - os dois acontecem na mesma chamada do jogo.
+        private BaseOven _pendingToggleOven;
+        private ulong _pendingToggleBy;
+
+        // A duracao ORIGINAL das mesas de pesquisa que estao com o
+        // tempo mexido. Ver OnItemResearch.
+        private readonly Dictionary<ulong, ResearchOriginal> _researchOriginals =
+            new Dictionary<ulong, ResearchOriginal>();
+
+        // Os recicladores rodando acelerados, para o Unload devolver.
+        private readonly Dictionary<ulong, Recycler> _spedUpRecyclers =
+            new Dictionary<ulong, Recycler>();
+
+        // O JSON que o hub devolve, ja lido. A chave e o proprio
+        // texto: mudou o texto, mudou a entrada - sem precisar de
+        // aviso de que o cache do hub foi trocado.
+        private readonly Dictionary<string, TimersEntry> _timersParsed =
+            new Dictionary<string, TimersEntry>(StringComparer.Ordinal);
+
+        private bool _warnedCraftFailure;
+
+        private void StartTimers()
+        {
+            timer.Every(BaseOven.UpdateRate, SmeltTick);
+
+            // Fornalha que ja estava acesa quando o plugin subiu nao
+            // passa pelo OnOvenStarted: o reload do plugin, e o boot
+            // do servidor, que reacende as fornalhas ANTES de os
+            // plugins carregarem.
+            int tracked = 0;
+
+            foreach (BaseNetworkable entity in BaseNetworkable.serverEntities)
+            {
+                BaseOven oven = entity as BaseOven;
+
+                if (oven == null || !oven.IsOn() || !IsTimedOven(oven))
+                {
+                    continue;
+                }
+
+                TrackOven(oven, 0UL);
+                tracked++;
+            }
+
+            Puts("Timers ligados: " + tracked + " fornalha(s) acesa(s) agora." +
+                 (_recycleThinkMethod == null
+                     ? " O reciclador fica no x1 - ver o erro do Init."
+                     : ""));
+        }
+
+        // Os quatro timers de um jogador, ja resolvidos. Ver QUAL
+        // NIVEL VALE, no cabecalho da secao.
+        //
+        // `player` pode ser null - o dono offline de uma fornalha.
+        // Sem conexao nao ha auth level para ler, e o nivel admin
+        // fica de fora; o VIP e o normal continuam valendo, porque
+        // vem do cache do agente, por SteamID.
+        private TimerSpeeds TimersOf(ulong userId, BasePlayer player)
+        {
+            if (OrigemZAgent == null)
+            {
+                return TimerSpeeds.Vanilla;
+            }
+
+            TimersEntry admin = player != null && IsStaff(player) ? ReadTimers(TierAdmin) : null;
+            TimersEntry vip = null;
+
+            if (userId != 0UL)
+            {
+                string tier = OrigemZAgent.Call(HookGetVipTier, userId.ToString()) as string;
+
+                if (!string.IsNullOrEmpty(tier))
+                {
+                    vip = ReadTimers(tier.Trim().ToLowerInvariant());
+                }
+            }
+
+            return TimerSpeeds.Resolve(admin, vip, ReadTimers(TierNormal));
+        }
+
+        // Os timers de UM nivel, como o hub os guarda, ou null quando
+        // o nivel nao tem nenhum.
+        private TimersEntry ReadTimers(string tier)
+        {
+            // Regra 2 do cabecalho: [PluginReference] vira null quando
+            // o alvo e descarregado, e o TimersOf pode ter passado por
+            // aqui antes disso.
+            if (OrigemZAgent == null)
+            {
+                return null;
+            }
+
+            string json = OrigemZAgent.Call(HookGetTimers, tier) as string;
+
+            if (string.IsNullOrEmpty(json))
+            {
+                return null;
+            }
+
+            TimersEntry entry;
+
+            if (_timersParsed.TryGetValue(json, out entry))
+            {
+                return entry;
+            }
+
+            try
+            {
+                entry = JsonConvert.DeserializeObject<TimersEntry>(json);
+            }
+            catch (Exception ex)
+            {
+                PrintError("GetTimers devolveu JSON ilegivel para o nivel '" + tier + "': " +
+                           ex.Message);
+                entry = null;
+            }
+
+            // Um texto por nivel, e ele so muda quando o admin grava. O
+            // teto existe para uma sequencia de gravacoes nao fazer o
+            // dicionario crescer para sempre.
+            if (_timersParsed.Count >= 64)
+            {
+                _timersParsed.Clear();
+            }
+
+            _timersParsed[json] = entry;
+            return entry;
+        }
+
+        // Mesma regra do ResolveTier: o admin sai do auth level do
+        // Rust, e nao de grupo nosso.
+        private static bool IsStaff(BasePlayer player)
+        {
+            return player.net != null && player.net.connection != null &&
+                   player.net.connection.authLevel > 0;
+        }
+
+        // ========================================================
+        //  A FORNALHA
+        //
+        //  #### O TIQUE ####
+        //
+        //  O jogo cozinha cada fornalha acesa numa fila de trabalho,
+        //  em passos de BaseOven.UpdateRate (0,5 s): cada passo e um
+        //  Cook(0.5f), que queima combustivel, avanca o cozimento e
+        //  solta carvao. Este plugin roda o MESMO Cook(), no mesmo
+        //  ritmo, com (x - 1) vezes o passo do jogo. x3 = o jogo anda
+        //  meio segundo, nos andamos mais um.
+        //
+        //  Por isso o combustivel por minerio e o do jogo: a lenha
+        //  queima tres vezes mais rapido junto com o minerio. A
+        //  fornalha x3 e o tempo andando tres vezes mais rapido dentro
+        //  dela, e nao uma fornalha que tambem economiza lenha.
+        //
+        //  #### DE QUEM E A VELOCIDADE ####
+        //
+        //  A melhor entre a do DONO (quem a colocou) e a de quem a
+        //  ACENDEU. A fornalha do VIP e rapida para o time inteiro, e
+        //  o VIP que acende a fornalha de um amigo tambem leva a dele.
+        //  E a regra do QuickSmelt ("dono OU quem liga"), com nivel no
+        //  lugar de permissao.
+        //
+        //  Fornalha que acende sozinha (energia, reinicio do
+        //  servidor) so tem dono. E a conta e REFEITA a cada
+        //  OvenRecheckSeconds.
+        // ========================================================
+        private void OnOvenToggle(BaseOven oven, BasePlayer player)
+        {
+            try
+            {
+                // Acesa = o pedido e para apagar, e apagar nao precisa
+                // de nada nosso.
+                if (!_ready || oven == null || player == null || oven.IsOn())
+                {
+                    return;
+                }
+
+                // So ANOTA. Quem decide se acende e o jogo, logo em
+                // seguida (tranca, privilegio de construcao,
+                // combustivel) - e quem confirma e o OnOvenStarted.
+                _pendingToggleOven = oven;
+                _pendingToggleBy = player.userID;
+
+                // Se o jogo recusar, a anotacao nao pode sobrar para a
+                // proxima fornalha que acender sozinha.
+                NextTick(ClearPendingToggle);
+            }
+            catch (Exception ex)
+            {
+                PrintError("OnOvenToggle falhou: " + ex);
+            }
+        }
+
+        private void ClearPendingToggle()
+        {
+            _pendingToggleOven = null;
+            _pendingToggleBy = 0UL;
+        }
+
+        private void OnOvenStarted(BaseOven oven)
+        {
+            try
+            {
+                ulong litBy = _pendingToggleOven != null && _pendingToggleOven == oven
+                    ? _pendingToggleBy
+                    : 0UL;
+
+                ClearPendingToggle();
+
+                if (!_ready || !IsTimedOven(oven))
+                {
+                    return;
+                }
+
+                TrackOven(oven, litBy);
+            }
+            catch (Exception ex)
+            {
+                PrintError("OnOvenStarted falhou: " + ex);
+            }
+        }
+
+        // As que FUNDEM ou REFINAM. Fogueira, churrasqueira e barril
+        // (cozinhar e aquecer) ficam de fora - e a lanterna
+        // principalmente: acelerar a lanterna seria so queimar o oleo
+        // do jogador mais rapido.
+        private static bool IsTimedOven(BaseOven oven)
+        {
+            if (oven == null || oven is BaseFuelLightSource)
+            {
+                return false;
+            }
+
+            return oven.temperature == BaseOven.TemperatureType.Smelting ||
+                   oven.temperature == BaseOven.TemperatureType.Fractioning;
+        }
+
+        private void TrackOven(BaseOven oven, ulong litBy)
+        {
+            if (oven.net == null)
+            {
+                return;
+            }
+
+            TrackedOven tracked = new TrackedOven();
+            tracked.Key = oven.net.ID.Value;
+            tracked.Oven = oven;
+            tracked.LitBy = litBy;
+            tracked.Speed = SmeltSpeedOf(oven, litBy);
+            tracked.CheckedAt = Time.realtimeSinceStartup;
+
+            // TODA fornalha acesa entra, inclusive a de x1: e a reconta
+            // periodica que a promove quando o dono vira VIP.
+            _trackedOvens[tracked.Key] = tracked;
+        }
+
+        private float SmeltSpeedOf(BaseOven oven, ulong litBy)
+        {
+            ulong owner = oven.OwnerID;
+
+            // Dono 0 e fornalha do mundo: fica com o nivel normal, que
+            // e o "servidor inteiro x2" de quem configurar assim.
+            float speed = TimersOf(owner, owner == 0UL ? null : BasePlayer.FindByID(owner)).Smelt;
+
+            if (litBy != 0UL && litBy != owner)
+            {
+                speed = Mathf.Max(speed, TimersOf(litBy, BasePlayer.FindByID(litBy)).Smelt);
+            }
+
+            return speed;
+        }
+
+        private void SmeltTick()
+        {
+            if (_trackedOvens.Count == 0)
+            {
+                return;
+            }
+
+            float now = Time.realtimeSinceStartup;
+
+            // Uma COPIA: o Cook() chama hooks de outros plugins, e um
+            // deles acendendo outra fornalha poria uma entrada nova no
+            // dicionario no meio do laco.
+            _ovenSnapshot.Clear();
+            _ovenSnapshot.AddRange(_trackedOvens.Values);
+
+            for (int i = 0; i < _ovenSnapshot.Count; i++)
+            {
+                TrackedOven tracked = _ovenSnapshot[i];
+                BaseOven oven = tracked.Oven;
+
+                if (oven == null || oven.IsDestroyed || !oven.IsOn())
+                {
+                    _trackedOvens.Remove(tracked.Key);
+                    continue;
+                }
+
+                try
+                {
+                    if (now - tracked.CheckedAt >= OvenRecheckSeconds)
+                    {
+                        tracked.Speed = SmeltSpeedOf(oven, tracked.LitBy);
+                        tracked.CheckedAt = now;
+                    }
+
+                    if (tracked.Speed > MinTimerSpeed)
+                    {
+                        CookExtra(oven, tracked.Speed);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // A fornalha com problema sai da aceleracao, e so
+                    // ela: volta ao x1 do jogo, que e o que ela seria
+                    // sem este plugin.
+                    _trackedOvens.Remove(tracked.Key);
+                    PrintError("A fornalha " + tracked.Key + " voltou ao x1 depois de um erro: " + ex);
+                }
+            }
+
+            _ovenSnapshot.Clear();
+        }
+
+        // (x - 1) passos a mais, do tamanho do passo do jogo.
+        //
+        // #### O TETO DE PASSOS ####
+        //
+        // Ate x9, cada passo extra e EXATAMENTE o do jogo. Acima
+        // disso os passos crescem em vez de se multiplicarem - no
+        // maximo MaxExtraCookSteps Cook() extras por fornalha a cada
+        // meio segundo -, e e o que segura o custo num servidor
+        // cheio de fornalhas.
+        //
+        // O preco fica no combustivel, e so acima de x9: o jogo troca
+        // a lenha no maximo uma vez por Cook(), entao um passo maior
+        // que o do jogo pode queimar a sobra de uma lenha que ele
+        // mesmo jogaria fora - e o combustivel por minerio fica um
+        // pouco MENOR que o do jogo.
+        private static void CookExtra(BaseOven oven, float speed)
+        {
+            float extra = BaseOven.UpdateRate * (speed - 1f);
+            int steps = Mathf.Clamp(Mathf.CeilToInt(extra / BaseOven.UpdateRate), 1, MaxExtraCookSteps);
+            float step = extra / steps;
+
+            for (int i = 0; i < steps; i++)
+            {
+                // O Cook() apaga a fornalha quando acaba o combustivel
+                // ou a saida enche. Apagada, o resto dos passos nao tem
+                // o que fazer.
+                if (!oven.IsOn())
+                {
+                    return;
+                }
+
+                oven.Cook(step);
+            }
+        }
+
+        // ========================================================
+        //  O CRAFT
+        //
+        //  #### POR QUE HARMONY, E NAO UM HOOK ####
+        //
+        //  Nao existe hook no ponto que importa. O ItemCrafter decide
+        //  a duracao de cada unidade dentro do ServerUpdate, quando a
+        //  tarefa chega a frente da fila: chama o GetScaledDuration,
+        //  aplica o bonus da bancada, grava o endTime e manda ao
+        //  cliente o note.craft_start COM a duracao. O OnItemCraft
+        //  chega antes disso tudo, com o endTime ainda em zero.
+        //
+        //  Encurtar o endTime depois deixaria a barra do cliente
+        //  andando no tempo antigo - o item ficaria pronto com a barra
+        //  pela metade. O unico jeito de o cliente ver o tempo certo e
+        //  a duracao JA SAIR certa do GetScaledDuration.
+        //
+        //  #### OS DOIS PATCHES ####
+        //
+        //  O GetScaledDuration e estatico e nao sabe de QUEM e o
+        //  craft. Entao o ServerUpdate anota o ItemCrafter que esta
+        //  rodando (CraftQueuePatch), e a duracao e dividida pela
+        //  velocidade do dono dele (CraftDurationPatch). O
+        //  GetScaledDuration tem esse unico chamador no Assembly-CSharp
+        //  inteiro - conferido em 11/09/2026 -, entao a anotacao nao
+        //  vaza para outro lugar.
+        //
+        //  O Oxide aplica os dois pelo [AutoPatch], logo depois do
+        //  Init, e os desfaz ao descarregar o plugin. Patch que nao
+        //  acha o metodo (update da Facepunch) vira erro no log do
+        //  Oxide e o craft fica no x1 - nada mais para.
+        // ========================================================
+        [AutoPatch]
+        [HarmonyLib.HarmonyPatch(typeof(ItemCrafter), "ServerUpdate", new Type[] { typeof(float) })]
+        private static class CraftQueuePatch
+        {
+            private static void Prefix(ItemCrafter __instance)
+            {
+                _craftingNow = __instance;
+            }
+
+            private static void Postfix()
+            {
+                _craftingNow = null;
+            }
+        }
+
+        [AutoPatch]
+        [HarmonyLib.HarmonyPatch(typeof(ItemCrafter), "GetScaledDuration",
+            new Type[] { typeof(ItemBlueprint), typeof(float), typeof(bool) })]
+        private static class CraftDurationPatch
+        {
+            private static void Postfix(ref float __result)
+            {
+                ItemCrafter crafter = _craftingNow;
+                OrigemZPlayer plugin = _instance;
+
+                if (crafter == null || plugin == null)
+                {
+                    return;
+                }
+
+                __result = plugin.ScaleCraftDuration(crafter, __result);
+            }
+        }
+
+        // NUNCA lanca: roda dentro do ServerUpdate do jogo, e uma
+        // excecao aqui travaria a fila de craft do jogador.
+        private float ScaleCraftDuration(ItemCrafter crafter, float duration)
+        {
+            try
+            {
+                BasePlayer owner = crafter.owner;
+
+                if (!_ready || owner == null || owner.IsNpc)
+                {
+                    return duration;
+                }
+
+                float speed = TimersOf(owner.userID, owner).Craft;
+
+                return speed > MinTimerSpeed ? duration / speed : duration;
+            }
+            catch (Exception ex)
+            {
+                if (!_warnedCraftFailure)
+                {
+                    _warnedCraftFailure = true;
+                    PrintError("A aceleracao do craft falhou; o craft segue no tempo do jogo: " + ex);
+                }
+
+                return duration;
+            }
+        }
+
+        // ========================================================
+        //  A PESQUISA
+        //
+        //  O jogo chama o OnItemResearch e SO DEPOIS le o
+        //  researchDuration da mesa, para marcar o fim e agendar o
+        //  resultado - conferido no Assembly-CSharp de 11/09/2026.
+        //  Basta ajustar o campo aqui: o relogio que o cliente mostra
+        //  sai do mesmo numero e fica certo sozinho.
+        //
+        //  O campo e da MESA, e nao do jogador. Por isso o valor
+        //  original fica guardado e volta quando quem pesquisa em
+        //  seguida e x1 - e no Unload.
+        // ========================================================
+        private void OnItemResearch(ResearchTable table, Item item, BasePlayer player)
+        {
+            try
+            {
+                if (!_ready || table == null || table.net == null || player == null)
+                {
+                    return;
+                }
+
+                ulong key = table.net.ID.Value;
+                float speed = TimersOf(player.userID, player).Research;
+
+                ResearchOriginal original;
+                bool touched = _researchOriginals.TryGetValue(key, out original);
+
+                if (speed <= MinTimerSpeed)
+                {
+                    if (touched)
+                    {
+                        table.researchDuration = original.Duration;
+                        _researchOriginals.Remove(key);
+                    }
+
+                    return;
+                }
+
+                if (!touched)
+                {
+                    PruneResearchOriginals();
+
+                    original = new ResearchOriginal();
+                    original.Table = table;
+                    original.Duration = table.researchDuration;
+                    _researchOriginals[key] = original;
+                }
+
+                table.researchDuration = original.Duration / speed;
+            }
+            catch (Exception ex)
+            {
+                PrintError("OnItemResearch falhou: " + ex);
+            }
+        }
+
+        // Mesa destruida some da lista. So roda quando entra mesa
+        // nova, e a lista so tem as mesas com o tempo mexido agora.
+        private void PruneResearchOriginals()
+        {
+            List<ulong> gone = null;
+
+            foreach (KeyValuePair<ulong, ResearchOriginal> pair in _researchOriginals)
+            {
+                if (pair.Value.Table == null)
+                {
+                    if (gone == null)
+                    {
+                        gone = new List<ulong>();
+                    }
+
+                    gone.Add(pair.Key);
+                }
+            }
+
+            if (gone == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < gone.Count; i++)
+            {
+                _researchOriginals.Remove(gone[i]);
+            }
+        }
+
+        private void RestoreResearchTables()
+        {
+            foreach (ResearchOriginal original in _researchOriginals.Values)
+            {
+                if (original.Table != null)
+                {
+                    original.Table.researchDuration = original.Duration;
+                }
+            }
+
+            _researchOriginals.Clear();
+        }
+
+        // ========================================================
+        //  O RECICLADOR
+        //
+        //  O jogo liga o reciclador com um InvokeRepeating do
+        //  RecycleThink, no intervalo que o RecyclerConfig da para
+        //  aquele tipo de reciclador. O OnRecyclerToggle chega ANTES
+        //  de ligar, entao a troca e no quadro seguinte: cancelar o
+        //  agendamento do jogo e agendar o mesmo metodo, mais curto.
+        //
+        //  #### O RecycleThink E PRIVADO ####
+        //
+        //  Por isso o delegate sai por reflexao, como no
+        //  OrigemZLootRefresh. E ele e o MESMO para o jogo: o
+        //  InvokeHandler compara delegate por alvo e metodo, entao o
+        //  StopRecycling do proprio jogo cancela o nosso agendamento
+        //  sem saber que ele e nosso.
+        //
+        //  Se a Facepunch renomear o metodo, a reflexao volta null, o
+        //  Init avisa, e o reciclador fica no x1 - os outros tres
+        //  timers seguem funcionando.
+        // ========================================================
+        private void ResolveRecycleThink()
+        {
+            try
+            {
+                _recycleThinkMethod = typeof(Recycler).GetMethod(
+                    "RecycleThink",
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null);
+            }
+            catch (Exception ex)
+            {
+                _recycleThinkMethod = null;
+                PrintError("Nao consegui procurar o Recycler.RecycleThink: " + ex.Message);
+            }
+
+            if (_recycleThinkMethod == null)
+            {
+                PrintError("O Recycler.RecycleThink nao existe neste Rust (update da Facepunch?). " +
+                           "O reciclador fica no x1; fornalha, craft e pesquisa seguem valendo.");
+            }
+        }
+
+        private static Action RecycleThinkOf(Recycler recycler)
+        {
+            if (_recycleThinkMethod == null)
+            {
+                return null;
+            }
+
+            return Delegate.CreateDelegate(typeof(Action), recycler, _recycleThinkMethod, false) as Action;
+        }
+
+        private void OnRecyclerToggle(Recycler recycler, BasePlayer player)
+        {
+            try
+            {
+                // Ligado = o pedido e para desligar.
+                if (!_ready || recycler == null || player == null || recycler.IsOn() ||
+                    _recycleThinkMethod == null)
+                {
+                    return;
+                }
+
+                float speed = TimersOf(player.userID, player).Recycle;
+
+                if (speed <= MinTimerSpeed)
+                {
+                    return;
+                }
+
+                NextTick(delegate { SpeedUpRecycler(recycler, speed); });
+            }
+            catch (Exception ex)
+            {
+                PrintError("OnRecyclerToggle falhou: " + ex);
+            }
+        }
+
+        private void SpeedUpRecycler(Recycler recycler, float speed)
+        {
+            try
+            {
+                // O jogo pode ter recusado ligar (sem energia, sem nada
+                // reciclavel, outro jogador no reciclador).
+                if (recycler == null || recycler.IsDestroyed || !recycler.IsOn() ||
+                    recycler.net == null)
+                {
+                    return;
+                }
+
+                Action think = RecycleThinkOf(recycler);
+
+                if (think == null)
+                {
+                    return;
+                }
+
+                float efficiency;
+                float duration;
+                recycler.GetRecyclerStats(out efficiency, out duration);
+
+                if (duration <= 0f)
+                {
+                    return;
+                }
+
+                float interval = duration / speed;
+
+                recycler.CancelInvoke(think);
+                recycler.InvokeRepeating(think, interval, interval);
+
+                PruneRecyclers();
+                _spedUpRecyclers[recycler.net.ID.Value] = recycler;
+            }
+            catch (Exception ex)
+            {
+                PrintError("Nao consegui acelerar o reciclador: " + ex);
+            }
+        }
+
+        private void PruneRecyclers()
+        {
+            List<ulong> gone = null;
+
+            foreach (KeyValuePair<ulong, Recycler> pair in _spedUpRecyclers)
+            {
+                if (pair.Value == null || !pair.Value.IsOn())
+                {
+                    if (gone == null)
+                    {
+                        gone = new List<ulong>();
+                    }
+
+                    gone.Add(pair.Key);
+                }
+            }
+
+            if (gone == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < gone.Count; i++)
+            {
+                _spedUpRecyclers.Remove(gone[i]);
+            }
+        }
+
+        // O reciclador que ainda roda acelerado volta ao intervalo do
+        // jogo: sem isto ele seguiria rapido ate esvaziar, com o
+        // plugin ja fora do ar.
+        private void RestoreRecyclers()
+        {
+            foreach (Recycler recycler in _spedUpRecyclers.Values)
+            {
+                if (recycler == null || recycler.IsDestroyed || !recycler.IsOn())
+                {
+                    continue;
+                }
+
+                Action think = RecycleThinkOf(recycler);
+
+                if (think == null)
+                {
+                    continue;
+                }
+
+                float efficiency;
+                float duration;
+                recycler.GetRecyclerStats(out efficiency, out duration);
+
+                if (duration <= 0f)
+                {
+                    continue;
+                }
+
+                recycler.CancelInvoke(think);
+                recycler.InvokeRepeating(think, duration, duration);
+            }
+
+            _spedUpRecyclers.Clear();
+        }
+
+        // ========================================================
         //  AGENTE
         // ========================================================
         private void LogAgentApiVersion()
@@ -1775,6 +2654,111 @@ namespace Oxide.Plugins
 
             [JsonProperty("hydrationMax")]
             public float? HydrationMax { get; set; }
+        }
+
+        // Os timers de UM nivel, como o agente os manda.
+        //
+        // float? e nao float, e pelo mesmo motivo do SpawnStatus:
+        // ausente quer dizer "este nivel nao decide este timer", e o
+        // jogador cai para o nivel de baixo. Um float sem nullable
+        // viraria 0 - e 0 aqui nao e x1, e parar o tempo.
+        private class TimersEntry
+        {
+            [JsonProperty("smelt")]
+            public float? Smelt { get; set; }
+
+            [JsonProperty("craft")]
+            public float? Craft { get; set; }
+
+            [JsonProperty("research")]
+            public float? Research { get; set; }
+
+            [JsonProperty("recycle")]
+            public float? Recycle { get; set; }
+        }
+
+        // Os quatro timers de UM jogador, ja resolvidos: sempre um
+        // numero, sempre entre MinTimerSpeed e MaxTimerSpeed.
+        private class TimerSpeeds
+        {
+            public static readonly TimerSpeeds Vanilla = new TimerSpeeds(1f, 1f, 1f, 1f);
+
+            public readonly float Smelt;
+            public readonly float Craft;
+            public readonly float Research;
+            public readonly float Recycle;
+
+            private TimerSpeeds(float smelt, float craft, float research, float recycle)
+            {
+                Smelt = smelt;
+                Craft = craft;
+                Research = research;
+                Recycle = recycle;
+            }
+
+            // Campo a campo, o primeiro nivel que DEFINE o timer ganha.
+            // Ver QUAL NIVEL VALE, no cabecalho da secao OS TIMERS.
+            public static TimerSpeeds Resolve(TimersEntry admin, TimersEntry vip, TimersEntry normal)
+            {
+                return new TimerSpeeds(
+                    Pick(admin == null ? null : admin.Smelt, vip == null ? null : vip.Smelt,
+                         normal == null ? null : normal.Smelt),
+                    Pick(admin == null ? null : admin.Craft, vip == null ? null : vip.Craft,
+                         normal == null ? null : normal.Craft),
+                    Pick(admin == null ? null : admin.Research, vip == null ? null : vip.Research,
+                         normal == null ? null : normal.Research),
+                    Pick(admin == null ? null : admin.Recycle, vip == null ? null : vip.Recycle,
+                         normal == null ? null : normal.Recycle));
+            }
+
+            private static float Pick(float? first, float? second, float? third)
+            {
+                if (first.HasValue)
+                {
+                    return Clamp(first.Value);
+                }
+
+                if (second.HasValue)
+                {
+                    return Clamp(second.Value);
+                }
+
+                return third.HasValue ? Clamp(third.Value) : MinTimerSpeed;
+            }
+
+            // A trava deste lado, para o comando digitado a mao: o
+            // agente ja recusa fora da faixa antes de gravar.
+            private static float Clamp(float value)
+            {
+                if (float.IsNaN(value) || value < MinTimerSpeed)
+                {
+                    return MinTimerSpeed;
+                }
+
+                return value > MaxTimerSpeed ? MaxTimerSpeed : value;
+            }
+        }
+
+        // Uma fornalha acesa. Ver A FORNALHA.
+        private class TrackedOven
+        {
+            public ulong Key;
+            public BaseOven Oven;
+
+            // Quem apertou "ligar". 0 = acendeu sozinha.
+            public ulong LitBy;
+
+            public float Speed;
+
+            // Time.realtimeSinceStartup da ultima conta da velocidade.
+            public float CheckedAt;
+        }
+
+        // A duracao de uma mesa de pesquisa ANTES de ser mexida.
+        private class ResearchOriginal
+        {
+            public ResearchTable Table;
+            public float Duration;
         }
 
         // O que SAI no evento de sessao. Nomes curtos de proposito:

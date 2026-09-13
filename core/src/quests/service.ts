@@ -133,7 +133,20 @@ export interface QuestConsumer {
     readonly serverId: string;
     readonly steamId: string;
     readonly items: readonly { readonly shortname: string; readonly amount: number }[];
-  }): Promise<{ readonly complete: boolean; readonly missing?: string }>;
+    /**
+     * Tire o que der, em vez de tudo ou nada.
+     *
+     * É o balcão do NPC: o jogador traz 30 das 300 pedras, o boneco
+     * fica com as 30 e o contador anda. `taken` diz quanto saiu de
+     * cada item — e é dele que o progresso é feito.
+     */
+    readonly partial?: boolean;
+  }): Promise<{
+    readonly complete: boolean;
+    readonly missing?: string;
+    /** Quanto saiu de cada item. Só o modo parcial precisa disto. */
+    readonly taken?: readonly { readonly shortname: string; readonly amount: number }[];
+  }>;
 }
 
 export interface QuestsServiceDeps {
@@ -161,7 +174,43 @@ export interface QuestsServiceDeps {
     readonly serverId: string;
     readonly steamId: string;
   }) => void;
+  /**
+   * A tentativa acabou de fechar todos os objetivos.
+   *
+   * ####  POR QUE ELE FICA AQUI, E NÃO NO PUSH  ####
+   *
+   * Uma missão fecha por quatro caminhos: o push do plugin, o lote
+   * de 60 s, o recálculo dos objetivos derivados (tempo online,
+   * métrica) e a mão do suporte. O `#completeIfDone` é o ÚNICO
+   * lugar por onde os quatro passam — e ele só devolve `true` na
+   * TRANSIÇÃO, o que dá a garantia de uma mensagem por conclusão.
+   *
+   * Pendurar isto no recibo do push, como era antes, deixava sem
+   * aviso justamente quem concluiu pelo lote.
+   *
+   * Não lança e não espera: quem fala com o jogo é o index.
+   */
+  readonly onCompleted?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly playerQuestId: number;
+    readonly questId: string;
+    /** O título do SNAPSHOT: o que ele aceitou, e não o de hoje. */
+    readonly title: string;
+    /** Onde resgatar, além do menu. `null` = só o menu. */
+    readonly npcName: string | null;
+    /** A missão dá alguma coisa? Ver o texto do aviso. */
+    readonly hasRewards: boolean;
+  }) => void;
   readonly now?: () => number;
+}
+
+function npcTalkKey(input: {
+  readonly serverId: string;
+  readonly steamId: string;
+  readonly npcId: string;
+}): string {
+  return `${input.serverId}:${input.steamId}:${input.npcId}`;
 }
 
 // ------------------------------------------------------------
@@ -216,14 +265,86 @@ export interface ClaimResult {
 //  §3  O SERVIÇO
 // ------------------------------------------------------------
 
+/**
+ * Os objetivos que se pagam com item do inventário.
+ *
+ * `kill` não se entrega, `deliver` é chegar num lugar, e `playtime`
+ * e `metric` são números que o agente calcula. Ver `turnIn`.
+ */
+const TURN_IN_KINDS: readonly string[] = ['gather', 'craft', 'loot'];
+
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
+
+/**
+ * Por quanto tempo uma conversa com o NPC continua valendo.
+ *
+ * O jogador aperta TALK, a tela abre, ele lê a descrição, pensa. Um
+ * minuto seria curto para quem lê devagar; uma hora faria a
+ * conversa valer de dentro de casa, longe do boneco — que é
+ * justamente o que a regra existe para impedir.
+ */
+const NPC_TALK_TTL_MS = 5 * MINUTE_MS;
 
 export class QuestsService {
   readonly #deps: QuestsServiceDeps;
 
+  /**
+   * Quem falou com qual NPC, e quando.
+   *
+   * ####  É ISTO QUE DÁ AUTORIDADE AO "FALE COM O MATEUS"  ####
+   *
+   * A quest de NPC aparece no menu (ver `offersFor`), e o botão de
+   * aceitar dela precisa de uma pergunta que o AGENTE saiba
+   * responder: este jogador esteve no balcão?
+   *
+   * A resposta não pode vir do clique — o alvo do botão é texto que
+   * chega do jogo, e um cliente adulterado mandaria o que quisesse.
+   * Ela vem do empurrão do plugin: o USE/TALK no NPC é medido lá,
+   * com distância, e chega aqui pelo `noteNpcTalk`.
+   *
+   * Memória, e não coluna: a conversa vale minutos, e um agente que
+   * reinicia deve mesmo pedir que o jogador fale de novo.
+   */
+  readonly #npcTalks = new Map<string, number>();
+
   constructor(deps: QuestsServiceDeps) {
     this.#deps = deps;
+  }
+
+  /**
+   * O jogador acabou de falar com aquele NPC.
+   *
+   * Chamado pelo `QuestNpcSync` quando o plugin grita o USE. A
+   * limpeza é oportunista: a cada anotação, o que venceu sai. Sem
+   * ela o mapa cresceria com um par por jogador e por NPC até o
+   * próximo boot.
+   */
+  noteNpcTalk(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly npcId: string;
+  }): void {
+    const now = this.#now();
+
+    for (const [key, at] of this.#npcTalks) {
+      if (now - at > NPC_TALK_TTL_MS) {
+        this.#npcTalks.delete(key);
+      }
+    }
+
+    this.#npcTalks.set(npcTalkKey(input), now);
+  }
+
+  /** Ele esteve no balcão nos últimos minutos? */
+  #talkedRecently(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly npcId: string;
+  }): boolean {
+    const at = this.#npcTalks.get(npcTalkKey(input));
+
+    return at !== undefined && this.#now() - at <= NPC_TALK_TTL_MS;
   }
 
   // ======================================================
@@ -296,7 +417,17 @@ export class QuestsService {
           ? undefined
           : quest.npcId;
 
-      if (npcId !== input.npcId) {
+      // ####  A TELA DO NPC MOSTRA SÓ AS DELE; O MENU MOSTRA TUDO  ####
+      //
+      // Decisão do dono em 11/09/2026, depois do teste que abriu o
+      // menu e leu "Disponíveis: 0" com uma missão cadastrada e
+      // ligada. Ela estava lá — escondida atrás de um boneco que o
+      // jogador não sabia que existia.
+      //
+      // Aparecer não é poder pegar: quem tem NPC continua só se
+      // aceitando NELE, e o bloqueio de `#whyNot` diz com quem
+      // falar. O menu vira o cartaz; o NPC continua sendo o balcão.
+      if (input.npcId !== undefined && npcId !== input.npcId) {
         continue;
       }
 
@@ -415,6 +546,108 @@ export class QuestsService {
   // ======================================================
   //  ESCRITA
   // ======================================================
+
+  /**
+   * O balcão do NPC: ele entrega o que tem, e o contador anda.
+   *
+   * ####  ENTREGAR NÃO É CONFERIR  ####
+   *
+   * Pedido do dono em 13/09/2026, com 30 pedras no inventário e uma
+   * missão de 300: "deveria aceitar entrega parcial até completar
+   * tudo". Antes disso o botão só olhava o contador e dizia o que
+   * faltava — e o que estava na mochila não servia para nada.
+   *
+   * Agora o que ele tem SAI do inventário e vira progresso, item a
+   * item, até o que falta. O que ele minerar continua contando
+   * sozinho, e os dois se somam.
+   *
+   * ####  SÓ OS OBJETIVOS DE ITEM  ####
+   *
+   * `kill` não se entrega, e `deliver` é chegar num lugar. Sobram
+   * `gather`, `craft` e `loot` — os três cujo alvo é um shortname
+   * que existe no inventário.
+   *
+   * @returns o que saiu, por objetivo. Vazio = não tinha nada.
+   */
+  async turnIn(input: {
+    readonly playerQuestId: number;
+    readonly steamId: string;
+  }): Promise<readonly { readonly shortname: string; readonly amount: number }[]> {
+    const attempt = this.#deps.repository.attempt(input.playerQuestId);
+
+    if (
+      attempt === null ||
+      attempt.steamId !== input.steamId ||
+      attempt.status !== 'active' ||
+      this.#deps.consumer === undefined
+    ) {
+      return [];
+    }
+
+    const wanted = attempt.snapshot.objectives
+      .filter(
+        (objective) =>
+          objective.target !== null &&
+          TURN_IN_KINDS.includes(objective.kind) &&
+          (attempt.progress[objective.seq] ?? 0) < objective.amount,
+      )
+      .map((objective) => ({
+        seq: objective.seq,
+        shortname: objective.target as string,
+        amount: objective.amount - (attempt.progress[objective.seq] ?? 0),
+      }));
+
+    if (wanted.length === 0) {
+      return [];
+    }
+
+    const result = await this.#deps.consumer.take({
+      serverId: attempt.serverId,
+      steamId: attempt.steamId,
+      items: wanted.map(({ shortname, amount }) => ({ shortname, amount })),
+      partial: true,
+    });
+
+    // ####  O QUE SAIU, E NÃO O QUE FOI PEDIDO  ####
+    //
+    // O plugin é quem sabe quanto havia na mochila. Somar o pedido
+    // daria progresso por item que nunca saiu.
+    const taken = result.taken ?? [];
+    const entries: { objectiveSeq: number; amount: number }[] = [];
+    const receipt: { shortname: string; amount: number }[] = [];
+
+    for (const [index, item] of wanted.entries()) {
+      const amount = taken[index]?.amount ?? 0;
+
+      if (amount <= 0) {
+        continue;
+      }
+
+      entries.push({ objectiveSeq: item.seq, amount });
+      receipt.push({ shortname: item.shortname, amount });
+    }
+
+    if (entries.length === 0) {
+      return [];
+    }
+
+    this.#deps.repository.payAtCounter(input.playerQuestId, entries, this.#now());
+    this.#completeIfDone(input.playerQuestId, 'agent', null);
+    this.#deps.onLiveChanged?.({ serverId: attempt.serverId, steamId: attempt.steamId });
+
+    this.#deps.logger.info(
+      {
+        serverId: attempt.serverId,
+        steamId: attempt.steamId,
+        questId: attempt.questId,
+        pq: input.playerQuestId,
+        taken: receipt,
+      },
+      'entrega no balcão do NPC',
+    );
+
+    return receipt;
+  }
 
   /**
    * O jogador aceita.
@@ -829,14 +1062,26 @@ export class QuestsService {
         );
       }
 
-      const taken = await this.#deps.consumer.take({
-        serverId: attempt.serverId,
-        steamId: attempt.steamId,
-        items: toConsume.map((objective) => ({
+      // ####  O QUE JÁ FOI ENTREGUE NO BALCÃO NÃO SE COBRA DE NOVO  ####
+      //
+      // Quem levou as 300 pedras ao NPC não as tem mais. Cobrar o
+      // total no resgate o obrigaria a juntar tudo outra vez para
+      // receber o prêmio do que já entregou. Ver a migração 079.
+      const pending = toConsume
+        .map((objective) => ({
           shortname: objective.target as string,
-          amount: objective.amount,
-        })),
-      });
+          amount: objective.amount - (attempt.paid[objective.seq] ?? 0),
+        }))
+        .filter((item) => item.amount > 0);
+
+      const taken =
+        pending.length === 0
+          ? { complete: true }
+          : await this.#deps.consumer.take({
+              serverId: attempt.serverId,
+              steamId: attempt.steamId,
+              items: pending,
+            });
 
       if (!taken.complete) {
         throw new ApiError(
@@ -1017,6 +1262,18 @@ export class QuestsService {
     return this.#deps.now?.() ?? Date.now();
   }
 
+  /**
+   * O nome bonito de um alvo (`metal.fragments` → Metal Fragments).
+   *
+   * Público porque a caixa do NPC precisa dele SOLTO, e não dentro
+   * de uma frase: ela monta "Ainda falta: 200 Metal Fragments" no
+   * próprio plugin, com o que o `assign` levou. Antes disso o
+   * jogador lia o shortname cru.
+   */
+  nameOfTarget(target: string | null): string {
+    return this.#nameOf(target);
+  }
+
   #nameOf(target: string | null): string {
     if (target === null) {
       return '?';
@@ -1156,6 +1413,37 @@ export class QuestsService {
       }
     }
 
+    // ####  A MISSÃO DE NPC SÓ SE PEGA NO BALCÃO  ####
+    //
+    // Ela aparece no menu desde 11/09/2026 (ver `offersFor`), e é
+    // por isso que este bloqueio precisa existir: sem ele, o
+    // cartaz viraria balcão e o boneco perderia a função.
+    //
+    // Quem responde "ele esteve lá?" é o empurrão do plugin, e não
+    // o clique — ver `#npcTalks`. A frase diz o nome e as
+    // coordenadas porque um NPC que ninguém acha é a mesma coisa
+    // que um NPC que não existe.
+    if (quest.npcId !== null) {
+      const npc = this.#deps.repository.getNpc(quest.npcId);
+
+      if (
+        npc !== null &&
+        npc.enabled &&
+        !this.#talkedRecently({
+          serverId: input.serverId,
+          steamId: input.steamId,
+          npcId: npc.id,
+        })
+      ) {
+        return {
+          code: 'QUEST_NEEDS_NPC',
+          reason:
+            `Fale com ${npc.name} para pegar esta missão. ` +
+            `Ele fica em ${String(Math.round(npc.x))}, ${String(Math.round(npc.z))}.`,
+        };
+      }
+    }
+
     // ####  O TETO É O ÚLTIMO DE TODOS  ####
     //
     // Porque ele não é sobre ESTA quest: dizer "você está no limite"
@@ -1210,6 +1498,7 @@ export class QuestsService {
     }
 
     const now = this.#now();
+    const quest = this.#deps.repository.get(attempt.questId);
 
     if (!this.#deps.repository.complete(playerQuestId, now)) {
       // O push e o lote trazem o mesmo fato de propósito. Chegar
@@ -1240,6 +1529,26 @@ export class QuestsService {
       },
       'quest concluída',
     );
+
+    // ####  O NPC É O DE HOJE, E O TÍTULO É O DE ONTEM  ####
+    //
+    // O título vem do snapshot porque é o que ele aceitou — uma
+    // missão renomeada no meio não pode virar outra no recibo. Já o
+    // NPC é lido AGORA: o aviso manda o jogador a um balcão, e o
+    // balcão que importa é o que existe neste instante. Um boneco
+    // apagado (ou desligado) deixa só o menu.
+    const npc =
+      quest === null || quest.npcId === null ? null : this.#deps.repository.getNpc(quest.npcId);
+
+    this.#deps.onCompleted?.({
+      serverId: attempt.serverId,
+      steamId: attempt.steamId,
+      playerQuestId: attempt.id,
+      questId: attempt.questId,
+      title: attempt.snapshot.title,
+      npcName: npc !== null && npc.enabled ? npc.name : null,
+      hasRewards: attempt.snapshot.rewards.length > 0,
+    });
 
     return true;
   }

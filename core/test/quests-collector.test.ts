@@ -33,7 +33,12 @@ import { parseQuestPush, QUEST_EVENT_MARKER } from '../src/game/quests-contract.
 import { createLogger } from '../src/logger.js';
 import { QuestCollector, type QuestCollectorRcon } from '../src/quests/collector.js';
 import { QuestEvents } from '../src/quests/events.js';
-import { NPC_MARKER, parseNpcLine, QuestNpcSync } from '../src/quests/npc-sync.js';
+import {
+  NPC_MARKER,
+  NPC_SET_COMMAND,
+  parseNpcLine,
+  QuestNpcSync,
+} from '../src/quests/npc-sync.js';
 import { QuestsService } from '../src/quests/service.js';
 import { questInputSchema, type QuestDraft } from '../src/types/quests.js';
 
@@ -552,43 +557,95 @@ describe('o canal do "agora"', () => {
     events.stop();
   });
 
-  it('o recibo NÃO sai de dentro do gancho', async () => {
-    h.repository.create('minerador', quest());
+  it('o aviso de conclusão sai UMA vez, com o nome da missão e o balcão', async () => {
+    const repository = h.repository;
+    const avisos: {
+      title: string;
+      npcName: string | null;
+      hasRewards: boolean;
+      steamId: string;
+    }[] = [];
+    const service = new QuestsService({
+      repository,
+      logger,
+      onCompleted: (input) => avisos.push(input),
+    });
 
-    const view = await h.service.accept({
+    repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho do Outpost',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    repository.create(
+      'minerador',
+      quest({
+        npcId: 'velho',
+        rewards: [{ kind: 'item', shortname: 'scrap', amount: 50, skinId: '0' }],
+      }),
+    );
+    service.noteNpcTalk({ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' });
+
+    const view = await service.accept({
       serverId: 'pvp1',
       steamId: FULANO,
       questId: 'minerador',
     });
 
-    h.repository.setProgress(view.playerQuestId, 0, 5000);
+    repository.setProgress(view.playerQuestId, 0, 5000);
 
-    const tell = vi.fn((_server: string, _steam: string, _message: string) =>
-      Promise.resolve(),
-    );
-    const events = new QuestEvents({
-      service: h.service,
-      logger,
-      secret: SECRET,
-      chat: { tell },
-      replyDelayMs: 1,
-    });
+    const events = new QuestEvents({ service, logger, secret: SECRET });
 
     events.handleLine('pvp1', push({ pq: view.playerQuestId }));
 
-    // A conclusão é IMEDIATA (SQLite não fala com o jogo)…
-    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('completed');
-    // …mas o comando ao jogo espera o relógio. Um comando mandado
-    // de dentro do `onConsoleLine` volta pelo mesmo caminho e
-    // dispara de novo — o paredão que este projeto já viveu.
-    expect(tell).not.toHaveBeenCalled();
+    // A conclusão é IMEDIATA (SQLite não fala com o jogo), e o aviso
+    // nasce junto dela — é o `#completeIfDone` que o dispara, e não
+    // o push, para que quem fecha pelo lote também seja avisado.
+    expect(repository.attempt(view.playerQuestId)?.status).toBe('completed');
+    expect(avisos).toMatchObject([
+      { title: 'Minerador', npcName: 'Velho do Outpost', hasRewards: true, steamId: FULANO },
+    ]);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // ####  UMA VEZ POR CONCLUSÃO  ####
+    //
+    // O push e o lote trazem o mesmo fato de propósito. O segundo a
+    // chegar não encontra mais a transição — e não avisa de novo.
+    events.handleLine('pvp1', push({ pq: view.playerQuestId }));
 
-    expect(tell).toHaveBeenCalledOnce();
-    expect(tell.mock.calls[0]?.[2]).toContain('Minerador');
+    expect(avisos).toHaveLength(1);
 
     events.stop();
+  });
+
+  it('sem NPC vinculado, o aviso manda só ao menu', async () => {
+    const repository = h.repository;
+    const avisos: { npcName: string | null }[] = [];
+    const service = new QuestsService({
+      repository,
+      logger,
+      onCompleted: (input) => avisos.push(input),
+    });
+
+    repository.create('minerador', quest());
+
+    const view = await service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+    });
+
+    repository.setProgress(view.playerQuestId, 0, 5000);
+    service.reportCompletion({ playerQuestId: view.playerQuestId });
+
+    expect(avisos.map((aviso) => aviso.npcName)).toEqual([null]);
   });
 
   it('o `progress` não escreve nada — o número vem no lote', async () => {
@@ -672,9 +729,13 @@ describe('o `flushSeconds` de cada servidor', () => {
 // ------------------------------------------------------------
 
 describe('os NPCs', () => {
-  function sync(
-    open?: (input: { serverId: string; steamId: string; screenId: string }) => Promise<void>,
-  ) {
+  interface NpcSpy {
+    readonly talks: { serverId: string; steamId: string; npcId: string }[];
+    readonly accepts: { serverId: string; steamId: string; npcId: string; questId: string }[];
+    readonly claims: { serverId: string; steamId: string; playerQuestId: number }[];
+  }
+
+  function sync(spy?: NpcSpy) {
     const rcon: QuestCollectorRcon = {
       isConnected: true,
       send: (command: string) => {
@@ -689,8 +750,14 @@ describe('os NPCs', () => {
       servers: { ids: () => ['pvp1'], contextOf: () => ({ rcon }) },
       logger,
       secret: SECRET,
-      openScreen: open === undefined ? undefined : (input) => open(input),
+      onTalk: (input) => spy?.talks.push(input),
+      onAccept: (input) => spy?.accepts.push(input),
+      onClaim: (input) => spy?.claims.push(input),
     });
+  }
+
+  function spy(): NpcSpy {
+    return { talks: [], accepts: [], claims: [] };
   }
 
   function npcLine(body: Record<string, unknown>): string {
@@ -709,8 +776,320 @@ describe('os NPCs', () => {
 
     expect(npc).toMatchObject({ serverId: 'pvp1', x: 120.5, z: -430.25, rotation: 90 });
     // O prefab e o raio saem dos padrões do contrato — medidos, não
-    // chutados: o `bandit_shopkeeper.prefab` está nos bundles.
-    expect(npc?.prefab).toContain('bandit_shopkeeper');
+    // chutados. E o padrão é o boneco que FALA: o prompt "TALK" do
+    // jogo é do `NPCTalking`, e o `bandit_shopkeeper` de antes não
+    // era um. Ver a migração 077.
+    expect(npc?.prefab).toContain('bandit_conversationalist');
+  });
+
+  it('o `/questnpc move` TRAZ o NPC, e não cria um segundo', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+
+    const handled = sync().handleLine(
+      'pvp1',
+      npcLine({ kind: 'move', npcId: 'velho', x: 500, y: 20, z: -80, rotation: 270 }),
+    );
+
+    expect(handled).toBe(true);
+    expect(h.repository.getNpc('velho')).toMatchObject({ x: 500, z: -80, rotation: 270 });
+    // O painel mandava usar o `add` de novo, e o admin terminava
+    // com "velho" e "velho-2". Este é o teste dessa diferença.
+    expect(h.repository.getNpc('velho-2')).toBeNull();
+  });
+
+  it('o `move` de outro servidor não mexe no NPC daqui', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+
+    sync().handleLine(
+      'pvp2',
+      npcLine({ kind: 'move', npcId: 'velho', x: 500, y: 20, z: -80, rotation: 270 }),
+    );
+
+    expect(h.repository.getNpc('velho')).toMatchObject({ x: 1, z: 1 });
+  });
+
+  it('o `/questnpc remove` apaga o NPC e deixa a quest dele de pé', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    h.repository.create(
+      'do-npc',
+      questInputSchema.parse({
+        title: 'Do NPC',
+        npcId: 'velho',
+        objectives: [{ seq: 0, kind: 'kill', target: 'bear', amount: 1 }],
+      }),
+    );
+
+    expect(sync().handleLine('pvp1', npcLine({ kind: 'remove', npcId: 'velho' }))).toBe(true);
+
+    expect(h.repository.getNpc('velho')).toBeNull();
+    // O progresso de quem estava fazendo não pode ir junto: a quest
+    // órfã volta ao menu. É a mesma regra da rota do painel.
+    expect(h.repository.get('do-npc')).not.toBeNull();
+  });
+
+  it('as missões do NPC descem junto com ele, com a frase pronta', async () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    h.repository.create(
+      'lenhador',
+      questInputSchema.parse({
+        title: 'Lenhador',
+        description: 'Preciso de madeira.',
+        npcId: 'velho',
+        objectives: [{ seq: 0, kind: 'gather', target: 'wood', amount: 100 }],
+      }),
+    );
+    // Desligada não desce: o boneco não oferece o que o painel
+    // desligou.
+    h.repository.create(
+      'escondida',
+      questInputSchema.parse({
+        title: 'Escondida',
+        npcId: 'velho',
+        enabled: false,
+        objectives: [{ seq: 0, kind: 'gather', target: 'stones', amount: 1 }],
+      }),
+    );
+
+    await sync().push('pvp1');
+
+    const set = h.sent.find((command) => command.startsWith(NPC_SET_COMMAND));
+    const payload = JSON.parse(
+      Buffer.from((set ?? '').slice(NPC_SET_COMMAND.length + 1), 'base64').toString('utf8'),
+    ) as { offers: { id: string; title: string; description: string | null }[] };
+
+    // É isto que a caixa de conversa desenha sem ir à rede.
+    expect(payload.offers).toEqual([
+      {
+        id: 'lenhador',
+        title: 'Lenhador',
+        description: 'Preciso de madeira.',
+        goal: '',
+        reward: '',
+        // Sem `describeQuest` ligado não há frase nem ícone: o
+        // cartão mostra só o título, e não um quadrado vazio.
+        rewardItemId: null,
+        rewardSkinId: 0,
+        // Ele OFERECE esta: sem `turnInNpcId`, dar e receber são o
+        // mesmo boneco.
+        offers: true,
+      },
+    ]);
+  });
+
+  it('o NPC que só RECEBE não oferece a missão', async () => {
+    for (const id of ['zev', 'ferreiro']) {
+      h.repository.createNpc(id, {
+        serverId: 'pvp1',
+        name: id,
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      });
+    }
+
+    h.repository.create(
+      'entrega-longe',
+      questInputSchema.parse({
+        title: 'Entrega longe',
+        npcId: 'zev',
+        turnInNpcId: 'ferreiro',
+        objectives: [{ seq: 0, kind: 'gather', target: 'wood', amount: 10 }],
+      }),
+    );
+
+    await sync().push('pvp1');
+
+    const payloads = h.sent
+      .filter((command) => command.startsWith(NPC_SET_COMMAND))
+      .map(
+        (command) =>
+          JSON.parse(
+            Buffer.from(command.slice(NPC_SET_COMMAND.length + 1), 'base64').toString('utf8'),
+          ) as { id: string; offers: { id: string; offers: boolean }[] },
+      );
+
+    // O mesmo cartão desce nos dois bonecos, com papéis diferentes:
+    // no Zev ele oferece; no ferreiro, só espera a missão pronta.
+    expect(payloads.find((npc) => npc.id === 'zev')?.offers).toEqual([
+      expect.objectContaining({ id: 'entrega-longe', offers: true }),
+    ]);
+    expect(payloads.find((npc) => npc.id === 'ferreiro')?.offers).toEqual([
+      expect.objectContaining({ id: 'entrega-longe', offers: false }),
+    ]);
+  });
+
+  it('o resgate só vale no balcão daquela missão', () => {
+    for (const id of ['zev', 'ferreiro']) {
+      h.repository.createNpc(id, {
+        serverId: 'pvp1',
+        name: id,
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      });
+    }
+
+    h.repository.create(
+      'entrega-longe',
+      questInputSchema.parse({
+        title: 'Entrega longe',
+        npcId: 'zev',
+        turnInNpcId: 'ferreiro',
+        objectives: [{ seq: 0, kind: 'gather', target: 'wood', amount: 10 }],
+      }),
+    );
+
+    const attempt = h.repository.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'entrega-longe',
+      snapshot: { title: 'Entrega longe', objectives: [], rewards: [], baselines: {} },
+    });
+
+    const visto = spy();
+    const npcSync = sync(visto);
+
+    // No boneco errado, nada acontece: o cartão de RESGATAR só é
+    // desenhado no balcão certo, mas o clique nasce no cliente.
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'claim', steamId: FULANO, npcId: 'zev', pq: attempt.id }),
+    );
+
+    expect(visto.claims).toEqual([]);
+
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'claim', steamId: FULANO, npcId: 'ferreiro', pq: attempt.id }),
+    );
+
+    expect(visto.claims).toEqual([
+      { serverId: 'pvp1', steamId: FULANO, playerQuestId: attempt.id },
+    ]);
+  });
+
+  it('o aceite no balcão vale pela testemunha, e só para a missão daquele NPC', () => {
+    h.repository.createNpc('velho', {
+      serverId: 'pvp1',
+      name: 'Velho',
+      kind: 'quest',
+      x: 1,
+      y: 1,
+      z: 1,
+      rotation: 0,
+      prefab: 'p',
+      mapMarker: false,
+      useRadius: 3,
+      enabled: true,
+      wipePolicy: 'keep',
+    });
+    h.repository.create(
+      'dele',
+      questInputSchema.parse({
+        title: 'Dele',
+        npcId: 'velho',
+        objectives: [{ seq: 0, kind: 'kill', target: 'bear', amount: 1 }],
+      }),
+    );
+    h.repository.create(
+      'do-menu',
+      questInputSchema.parse({
+        title: 'Do menu',
+        objectives: [{ seq: 0, kind: 'kill', target: 'bear', amount: 1 }],
+      }),
+    );
+
+    const visto = spy();
+    const npcSync = sync(visto);
+
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'accept', steamId: FULANO, npcId: 'velho', questId: 'dele' }),
+    );
+
+    expect(visto.accepts).toEqual([
+      { serverId: 'pvp1', steamId: FULANO, npcId: 'velho', questId: 'dele' },
+    ]);
+    // O aceite é testemunha: sem isto, o serviço recusaria a missão
+    // de balcão que ele acabou de conceder.
+    expect(visto.talks).toEqual([{ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' }]);
+
+    // ####  PEDIR NO BONECO ERRADO NÃO VALE  ####
+    //
+    // O clique nasce no cliente, e um cliente adulterado pediria no
+    // NPC da porta de casa a missão do outro lado do mapa.
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'accept', steamId: FULANO, npcId: 'velho', questId: 'do-menu' }),
+    );
+
+    expect(visto.accepts).toHaveLength(1);
   });
 
   it('desce `clear` e um `set` por NPC — e só quando muda', async () => {
@@ -742,7 +1121,7 @@ describe('os NPCs', () => {
     expect(h.sent).toHaveLength(2);
   });
 
-  it('o USE abre a tela DAQUELE NPC, e por um relógio', async () => {
+  it('o USE registra que o jogador esteve no balcão daquele NPC', () => {
     h.repository.createNpc('velho', {
       serverId: 'pvp1',
       name: 'Velho',
@@ -758,25 +1137,16 @@ describe('os NPCs', () => {
       wipePolicy: 'keep',
     });
 
-    const opened: { serverId: string; steamId: string; screenId: string }[] = [];
+    const visto = spy();
 
-    sync((input) => {
-      opened.push(input);
+    sync(visto).handleLine('pvp1', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
 
-      return Promise.resolve();
-    }).handleLine('pvp1', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
-
-    // Nenhum comando sai da pilha do gancho de console: o laço de
-    // RCON que este projeto já viveu.
-    expect(opened).toEqual([]);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    expect(opened[0]).toMatchObject({
-      serverId: 'pvp1',
-      steamId: FULANO,
-      screenId: 'tela-quest:npc:velho',
-    });
+    // A caixa de conversa é desenhada PELO PLUGIN, com o que desceu
+    // no `npc.set`. O que o agente faz aqui é anotar a testemunha —
+    // e nenhum comando sai da pilha do gancho de console, que é o
+    // laço de RCON que este projeto já viveu.
+    expect(visto.talks).toEqual([{ serverId: 'pvp1', steamId: FULANO, npcId: 'velho' }]);
+    expect(h.sent).toEqual([]);
   });
 
   it('o USE num NPC de OUTRO servidor não abre nada', async () => {
@@ -795,19 +1165,13 @@ describe('os NPCs', () => {
       wipePolicy: 'keep',
     });
 
-    const opened: unknown[] = [];
+    const visto = spy();
 
     // É a conferência que a ida a mais paga: uma linha forjada não
-    // abre a tela de outro mundo.
-    sync((input) => {
-      opened.push(input);
+    // vale como visita ao balcão de outro mundo.
+    sync(visto).handleLine('pvp2', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
 
-      return Promise.resolve();
-    }).handleLine('pvp2', npcLine({ kind: 'use', steamId: FULANO, npcId: 'velho' }));
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    expect(opened).toEqual([]);
+    expect(visto.talks).toEqual([]);
   });
 
   it('o segredo errado e a linha torta são ignorados em silêncio', () => {
@@ -871,6 +1235,10 @@ describe('a quest de entrega', () => {
         rewards: [{ kind: 'coins', perMeter: 0.5, min: 50, max: 2000 }],
       }),
     );
+
+    // A quest tem NPC de origem, e desde 11/09/2026 quem tem NPC só
+    // se pega no balcão. Aqui o jogador falou com ele.
+    h.service.noteNpcTalk({ serverId: 'pvp1', steamId: FULANO, npcId: 'outpost' });
 
     const view = await h.service.accept({
       serverId: 'pvp1',

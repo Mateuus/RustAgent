@@ -74,6 +74,13 @@ export interface SlotValue {
   readonly text?: string;
   readonly action?: UiAction;
   readonly item?: { readonly itemId: number; readonly skinId: string };
+  /**
+   * A arte PRÓPRIA, pela chave no OrigemZImages.
+   *
+   * Ganha do `item` quando os dois vêm: quem preenche os dois é o
+   * card da loja, que sabe qual dos dois desenhos a oferta escolheu.
+   */
+  readonly stored?: { readonly key: string };
   readonly color?: string;
   readonly hide?: boolean;
   /**
@@ -167,6 +174,10 @@ function applyValue(element: UiElement, slot: SlotValue | undefined): UiElement 
       };
 
     case 'image':
+      if (slot.stored !== undefined) {
+        return { ...element, source: { kind: 'stored', key: slot.stored.key } };
+      }
+
       return slot.item === undefined
         ? element
         : {

@@ -116,6 +116,8 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 // Interface.Oxide.DataFileSystem, que guarda a fila de pontos.
 using Oxide.Core;
+// [PluginReference] e o tipo Plugin, para falar com o OrigemZImages.
+using Oxide.Core.Plugins;
 
 namespace Oxide.Plugins
 {
@@ -141,10 +143,6 @@ namespace Oxide.Plugins
         private const string RemoveCommand = "origemz.item.remove";
         private const string ClearCommand = "origemz.item.clear";
         private const string ListCommand = "origemz.item.list";
-        private const string IconCommand = "origemz.item.icon";
-        private const string IconBeginCommand = "origemz.item.icon.begin";
-        private const string IconPartCommand = "origemz.item.icon.part";
-        private const string IconEndCommand = "origemz.item.icon.end";
         private const string DiagCommand = "origemz.item.diag";
         private const string InspectCommand = "origemz.item.inspect";
         private const string AckCommand = "origemz.item.ack";
@@ -191,9 +189,6 @@ namespace Oxide.Plugins
         private const string ErrorZeroSkin = "SKIN_ID_ZERO";
         private const string ErrorDuplicateMark = "DUPLICATE_MARK";
         private const string ErrorUnknownItem = "UNKNOWN_ITEM";
-        private const string ErrorServerNotReady = "SERVER_NOT_READY";
-        private const string ErrorImageTooLarge = "IMAGE_TOO_LARGE";
-        private const string ErrorMissingParts = "MISSING_PARTS";
         private const string ErrorPlayerNotFound = "PLAYER_NOT_FOUND";
         private const string ErrorInternal = "INTERNAL_ERROR";
 
@@ -370,34 +365,6 @@ namespace Oxide.Plugins
         private const int MaxPendingBytes = 60000;
 
         // ========================================================
-        //  TETOS
-        // ========================================================
-
-        /// <summary>
-        /// Teto do icone numa linha so, em bytes de PNG.
-        ///
-        /// O frame do WebRCON aguenta ~50 KB e base64 infla 4/3 -
-        /// medido em OrigemZUI.cs:2513. 33 KB de PNG dao ~45.000
-        /// caracteres, que e o mesmo teto que o
-        /// UI_IMAGE_MAX_BYTES do agente ja aplica.
-        ///
-        /// Um icone de 128x128 pesa ~17 KB: o teto tem folga de
-        /// sobra, e quem passar dele esta mandando uma foto onde
-        /// cabia um icone. Acima disso existe o caminho fatiado.
-        /// </summary>
-        private const int MaxIconBytes = 33000;
-
-        /// <summary>
-        /// Quantos pedacos um icone fatiado pode ter.
-        ///
-        /// 32 pedacos de ~24 KB dao ~780 KB, muito acima de
-        /// qualquer icone honesto. O limite existe para um `begin`
-        /// com numero absurdo nao alocar um array gigante antes de
-        /// um byte sequer chegar.
-        /// </summary>
-        private const int MaxIconParts = 32;
-
-        // ========================================================
         //  ESTADO
         //
         //  Tudo aqui e COPIA DE TRABALHO. Some no reload, e e o
@@ -426,25 +393,34 @@ namespace Oxide.Plugins
             new Dictionary<string, CustomItem>();
 
         /// <summary>
-        /// A imagem de cada item: id -> CRC do FileStorage.
+        /// Quem guarda o icone de cada item: o OrigemZImages.
         ///
-        /// So o MAPA: os bytes ficam no FileStorage do servidor. E
-        /// o CRC nasce dos BYTES, entao reenviar a mesma imagem
-        /// devolve o mesmo numero e nao acumula lixo.
+        /// O agente manda o PNG de `Assets\items\` para la com a
+        /// chave `item.<id>` (IconKeyPrefix + id), e aqui so se
+        /// pergunta o CRC na hora de vestir o item. Antes este plugin
+        /// tinha o proprio mapa e os proprios comandos de envio - e o
+        /// agente nunca os chamava: o icone ficava no disco do agente.
+        ///
+        /// Dependencia MOLE: sem a biblioteca o item continua com
+        /// nome, descricao e acao, so com o icone do item base. Um
+        /// "// Requires:" derrubaria a conversao em ponto por causa
+        /// de uma imagem. O painel avisa quando falta.
+        ///
+        /// [PluginReference] vira null quando o alvo e descarregado,
+        /// entao o null-check esta em toda chamada. Ver IconCrc.
         /// </summary>
-        private readonly Dictionary<string, uint> _icons =
-            new Dictionary<string, uint>();
+        [PluginReference]
+        private Plugin OrigemZImages;
+
+        private const string HookGetImage = "GetImage";
 
         /// <summary>
-        /// Icones chegando em pedacos, ate o `end`.
+        /// O prefixo da chave do icone no OrigemZImages.
         ///
-        /// Meio arquivo nunca vira imagem: o `end` confere a
-        /// contagem antes de guardar. Um PNG cortado no meio e um
-        /// arquivo invalido, e o sintoma seria um quadrado vazio
-        /// sem nada dizendo por que.
+        /// PRECISA BATER COM `itemIconKey` em
+        /// core\src\game\custom-items-sync.ts.
         /// </summary>
-        private readonly Dictionary<string, byte[][]> _iconParts =
-            new Dictionary<string, byte[][]>();
+        private const string IconKeyPrefix = "item.";
 
         // ========================================================
         //  O ESTADO DA REGRA DE LOOT
@@ -657,8 +633,6 @@ namespace Oxide.Plugins
             // plugin recarrega e o agente reenvia.
             _items.Clear();
             _byMark.Clear();
-            _icons.Clear();
-            _iconParts.Clear();
 
             // ####  A MEDICAO NAO PODE MORRER NO RELOAD  ####
             //
@@ -871,11 +845,10 @@ namespace Oxide.Plugins
 
                 Forget(id);
 
-                // O icone NAO e apagado do FileStorage: outro item
-                // pode estar usando a mesma imagem, e o CRC e o
-                // mesmo para bytes iguais. Lixo de imagem e barato;
-                // apagar a imagem de quem ainda a usa nao e.
-                _icons.Remove(id);
+                // O icone fica no OrigemZImages: outro item pode estar
+                // usando a mesma imagem, e o CRC e o mesmo para bytes
+                // iguais. Lixo de imagem e barato; apagar a imagem de
+                // quem ainda a usa nao e.
 
                 arg.ReplyWith("{\"ok\":true}");
             }
@@ -1004,8 +977,7 @@ namespace Oxide.Plugins
                 {
                     CustomItem item = entry.Value;
 
-                    uint crc;
-                    bool hasIcon = _icons.TryGetValue(item.Id, out crc);
+                    uint crc = IconCrc(item.Id);
 
                     ItemSummary summary = new ItemSummary();
                     summary.Id = item.Id;
@@ -1014,7 +986,7 @@ namespace Oxide.Plugins
                     summary.BaseItemId = item.BaseItemId;
                     summary.Skin = item.Skin.ToString(CultureInfo.InvariantCulture);
                     summary.Action = item.Action == null ? "none" : item.Action.Kind;
-                    summary.IconCrc = hasIcon ? crc : 0U;
+                    summary.IconCrc = crc;
 
                     list.Add(summary);
                 }
@@ -1038,8 +1010,9 @@ namespace Oxide.Plugins
         //
         //  ####  O CLIENTE BAIXA UMA VEZ  ####
         //
-        //  Os bytes vao para o FileStorage do SERVIDOR, que devolve
-        //  um CRC. O que viaja para o cliente dentro do item sao os
+        //  Os bytes vao para o FileStorage do SERVIDOR, pelas maos
+        //  do OrigemZImages, que devolve um CRC. O que viaja para o
+        //  cliente dentro do item sao os
         //  QUATRO BYTES do CRC - nunca o PNG. O cliente pede a
         //  imagem so na primeira vez que encontra um CRC que nao
         //  conhece, e a guarda.
@@ -1049,190 +1022,56 @@ namespace Oxide.Plugins
         //  baixa a nova. Nao ha versao a incrementar nem cache a
         //  limpar: trocar a arte de um item e substituir o PNG.
         // ========================================================
-        [ConsoleCommand(IconCommand)]
-        private void CommandIcon(ConsoleSystem.Arg arg)
+        /// <summary>
+        /// O CRC do icone do item, ou 0 quando ele nao tem (ainda).
+        ///
+        /// 0 e o valor que o ApplyIdentity ja trata como "fica o
+        /// icone do item base".
+        /// </summary>
+        private uint IconCrc(string id)
         {
-            if (arg.Connection != null)
+            if (OrigemZImages == null || string.IsNullOrEmpty(id))
             {
-                return;
+                return 0U;
             }
 
-            try
-            {
-                if (!arg.HasArgs(2))
-                {
-                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
-                    return;
-                }
-
-                string id = arg.GetString(0, "");
-                byte[] bytes = DecodeBase64(arg.GetString(1, ""));
-
-                if (string.IsNullOrEmpty(id) || bytes == null || bytes.Length == 0)
-                {
-                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
-                    return;
-                }
-
-                if (bytes.Length > MaxIconBytes)
-                {
-                    // Recusado, e nao cortado: meio PNG e um arquivo
-                    // invalido, e o sintoma seria um quadrado vazio.
-                    arg.ReplyWith(BuildError(ErrorImageTooLarge));
-                    return;
-                }
-
-                StoreIcon(arg, id, bytes);
-            }
-            catch (Exception ex)
-            {
-                PrintError(IconCommand + " falhou: " + ex);
-                arg.ReplyWith(BuildError(ErrorInternal));
-            }
-        }
-
-        [ConsoleCommand(IconBeginCommand)]
-        private void CommandIconBegin(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null || !arg.HasArgs(2))
-            {
-                return;
-            }
-
-            string id = arg.GetString(0, "");
-            int parts = arg.GetInt(1, 0);
-
-            if (string.IsNullOrEmpty(id) || parts <= 0 || parts > MaxIconParts)
-            {
-                arg.ReplyWith(BuildError(ErrorInvalidArgs));
-                return;
-            }
-
-            _iconParts[id] = new byte[parts][];
-            arg.ReplyWith("{\"ok\":true}");
-        }
-
-        [ConsoleCommand(IconPartCommand)]
-        private void CommandIconPart(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null || !arg.HasArgs(3))
-            {
-                return;
-            }
-
-            string id = arg.GetString(0, "");
-            int index = arg.GetInt(1, -1);
-
-            byte[][] parts;
-
-            if (!_iconParts.TryGetValue(id, out parts) || index < 0 || index >= parts.Length)
-            {
-                arg.ReplyWith(BuildError(ErrorInvalidArgs));
-                return;
-            }
-
-            byte[] chunk = DecodeBase64(arg.GetString(2, ""));
-
-            if (chunk == null)
-            {
-                arg.ReplyWith(BuildError(ErrorInvalidArgs));
-                return;
-            }
-
-            parts[index] = chunk;
-            arg.ReplyWith("{\"ok\":true}");
-        }
-
-        [ConsoleCommand(IconEndCommand)]
-        private void CommandIconEnd(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null || !arg.HasArgs(1))
-            {
-                return;
-            }
-
-            try
-            {
-                string id = arg.GetString(0, "");
-
-                byte[][] parts;
-
-                if (!_iconParts.TryGetValue(id, out parts))
-                {
-                    arg.ReplyWith(BuildError(ErrorInvalidArgs));
-                    return;
-                }
-
-                _iconParts.Remove(id);
-
-                // A contagem e conferida ANTES de guardar. Um pedaco
-                // que se perdeu no caminho viraria um PNG cortado, e
-                // guardar um PNG cortado daria um CRC valido para um
-                // arquivo invalido - o pior desfecho possivel,
-                // porque parece que deu certo.
-                int total = 0;
-
-                for (int i = 0; i < parts.Length; i++)
-                {
-                    if (parts[i] == null)
-                    {
-                        arg.ReplyWith(BuildError(ErrorMissingParts));
-                        return;
-                    }
-
-                    total += parts[i].Length;
-                }
-
-                byte[] bytes = new byte[total];
-                int offset = 0;
-
-                for (int i = 0; i < parts.Length; i++)
-                {
-                    Buffer.BlockCopy(parts[i], 0, bytes, offset, parts[i].Length);
-                    offset += parts[i].Length;
-                }
-
-                StoreIcon(arg, id, bytes);
-            }
-            catch (Exception ex)
-            {
-                PrintError(IconEndCommand + " falhou: " + ex);
-                arg.ReplyWith(BuildError(ErrorInternal));
-            }
+            object raw = OrigemZImages.Call(HookGetImage, IconKeyPrefix + id);
+            return raw is uint ? (uint)raw : 0U;
         }
 
         /// <summary>
-        /// Guarda os bytes no FileStorage e anota o CRC.
+        /// O OrigemZImages acabou de guardar uma imagem.
         ///
-        /// O terceiro argumento do Store e a entidade dona do
-        /// arquivo. Usamos a CommunityEntity - a mesma que o
-        /// OrigemZUI ja usa para as imagens do menu - porque ela
-        /// existe enquanto o servidor existir. Amarrar a imagem de
-        /// um item a uma entidade que pode ser destruida faria a
-        /// arte sumir junto com ela.
+        /// ####  SEM ISTO, O ICONE SO APARECIA NO RELOGIN  ####
+        ///
+        /// O ApplyIdentity roda quando o item ENTRA num container e
+        /// quando o jogador conecta. Um icone que chega com gente
+        /// online - o admin trocou a arte no painel - nao passaria
+        /// por nenhum dos dois: o trofeu no inventario ficaria com o
+        /// icone velho ate ser movido de slot.
+        ///
+        /// Varrer os inventarios aqui e barato porque isto e raro:
+        /// dispara uma vez por icone enviado, e o agente so envia o
+        /// que mudou.
         /// </summary>
-        private void StoreIcon(ConsoleSystem.Arg arg, string id, byte[] bytes)
+        private void OnOrigemZImageStored(string key, uint crc)
         {
-            if (CommunityEntity.ServerInstance == null)
+            try
             {
-                // O servidor ainda nao terminou de subir. O agente
-                // reenvia na proxima sincronizacao, entao isto se
-                // resolve sozinho.
-                arg.ReplyWith(BuildError(ErrorServerNotReady));
-                return;
+                if (key == null || !key.StartsWith(IconKeyPrefix, StringComparison.Ordinal) || _byMark.Count == 0)
+                {
+                    return;
+                }
+
+                foreach (BasePlayer player in BasePlayer.activePlayerList)
+                {
+                    RefreshInventory(player);
+                }
             }
-
-            uint crc = FileStorage.server.Store(
-                bytes,
-                FileStorage.Type.png,
-                CommunityEntity.ServerInstance.net.ID);
-
-            _icons[id] = crc;
-
-            Puts("icone " + id + ": " + bytes.Length.ToString(CultureInfo.InvariantCulture) +
-                 " bytes, crc " + crc.ToString(CultureInfo.InvariantCulture));
-
-            arg.ReplyWith("{\"ok\":true,\"crc\":" + crc.ToString(CultureInfo.InvariantCulture) + "}");
+            catch (Exception ex)
+            {
+                PrintError("OnOrigemZImageStored falhou: " + ex);
+            }
         }
 
         // ========================================================
@@ -1311,9 +1150,9 @@ namespace Oxide.Plugins
                 changed = true;
             }
 
-            uint crc;
+            uint crc = IconCrc(custom.Id);
 
-            if (_icons.TryGetValue(custom.Id, out crc) && crc != 0U && item.iconImageId != crc)
+            if (crc != 0U && item.iconImageId != crc)
             {
                 item.iconImageId = crc;
                 changed = true;
@@ -4142,10 +3981,9 @@ namespace Oxide.Plugins
                 // inventario.
                 ulong skinAfterCreate = item.skin;
 
-                uint crc;
-                bool hasIcon = _icons.TryGetValue(custom.Id, out crc);
+                uint crc = IconCrc(custom.Id);
 
-                if (hasIcon)
+                if (crc != 0U)
                 {
                     item.iconImageId = crc;
                 }
@@ -4186,13 +4024,13 @@ namespace Oxide.Plugins
                 response.SkinAfterCreate = skinAfterCreate.ToString(CultureInfo.InvariantCulture);
                 response.SkinFinal = skinFinal.ToString(CultureInfo.InvariantCulture);
                 response.SkinSurvived = skinFinal == custom.Skin;
-                response.IconCrc = hasIcon ? crc : 0U;
-                response.IconApplied = hasIcon && iconFinal == crc;
+                response.IconCrc = crc;
+                response.IconApplied = crc != 0U && iconFinal == crc;
                 response.NameApplied = nameFinal == custom.Name;
 
                 Puts("diag " + custom.Id + ": skin pedida " + custom.Skin +
                      ", gravada " + skinAfterCreate +
-                     ", icone crc " + (hasIcon ? crc.ToString(CultureInfo.InvariantCulture) : "nenhum"));
+                     ", icone crc " + (crc != 0U ? crc.ToString(CultureInfo.InvariantCulture) : "nenhum"));
 
                 arg.ReplyWith(JsonConvert.SerializeObject(response));
             }

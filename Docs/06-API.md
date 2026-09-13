@@ -432,6 +432,12 @@ Disso saem os dois campos por servidor:
   assim mesmo é **permitido** (o Oxide segura o plugin até elas aparecerem), e a
   resposta do `PUT` avisa. O que não pode é a tela dizer "ativo" e nada
   acontecer no jogo, sem explicação.
+- **`missingReferences`** — dependências **moles** que estão no acervo daquele
+  servidor e não estão ligadas ali. O plugin carrega e roda, com a parte que
+  usa o outro morta — o OrigemZUI sem o OrigemZImages abre o menu, mas sem as
+  imagens próprias. Só entra o que está no acervo: integração opcional de
+  terceiro (Friends, Clans…) que ninguém instalou não vira aviso. A resposta do
+  `PUT` avisa, e a tela oferece o botão de ligar.
 - **`dependents`** — `{ hard, soft }`: quem **depende deste** e está ligado ali.
 
 Desligar um plugin com dependentes responde **`409 PLUGIN_HAS_DEPENDENTS`**

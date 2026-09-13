@@ -39,6 +39,7 @@ import { apiErrorToResponse, isApiError } from '../src/http/error-response.js';
 import {
   ITEM_ASSETS_DIR,
   MAX_ICON_BYTES,
+  readItemIcon,
   RECOMMENDED_ICON_SIZE,
   registerCustomItemRoutes,
 } from '../src/http/routes/custom-items.js';
@@ -170,6 +171,26 @@ describe('o teto do ícone', () => {
     const written = readFileSync(join(projectRoot(), ITEM_ASSETS_DIR, WRITTEN_ICON));
 
     expect(written.length).toBe(MAX_ICON_BYTES);
+  });
+});
+
+// ------------------------------------------------------------
+//  A leitura que leva o ícone ao jogo
+// ------------------------------------------------------------
+
+describe('a leitura do ícone para a sincronização', () => {
+  it('lê o que o upload gravou', async () => {
+    await upload(WRITTEN_ICON, fileOf(PNG_HEAD, 100));
+
+    expect(readItemIcon(WRITTEN_ICON)?.length).toBe(100);
+  });
+
+  it('recusa nome que sai da pasta, sem tocar no disco', () => {
+    // `icon_file` vem do banco, e o PUT só confere o tamanho dele.
+    // Sem a régua, isto seria lido e mandado ao RCON.
+    expect(readItemIcon('../../.env')).toBeNull();
+    expect(readItemIcon('..\\..\\.env')).toBeNull();
+    expect(readItemIcon('nao-existe.png')).toBeNull();
   });
 });
 

@@ -16,11 +16,19 @@
 //      DELETE /servers/:id/spawn-status/:group   apaga e empurra
 //      POST   /servers/:id/spawn-status/sync     reempurra agora
 //
-//  Os dois moram no mesmo arquivo porque compartilham a lista de
+//  E os TIMERS — quão rápido a fornalha, o craft, a pesquisa e o
+//  reciclador andam para aquele grupo:
+//
+//      GET    /servers/:id/timers          os grupos + os timers
+//      PUT    /servers/:id/timers/:group   grava e empurra
+//      DELETE /servers/:id/timers/:group   apaga e empurra
+//      POST   /servers/:id/timers/sync     reempurra agora
+//
+//  Os três moram no mesmo arquivo porque compartilham a lista de
 //  grupos e todas as regras abaixo. No JOGO eles são separados: vão
-//  em comandos diferentes (`origemz.loadout.sync` e
-//  `origemz.status.sync`), para caches diferentes do plugin — e por
-//  isso desligar um não mexe no outro.
+//  em comandos diferentes (`origemz.loadout.sync`,
+//  `origemz.status.sync` e `origemz.timers.sync`), para caches
+//  diferentes do plugin — e por isso desligar um não mexe no outro.
 //
 //  ####  A LISTA VEM DOS GRUPOS, E NÃO DA NOSSA TABELA  ####
 //
@@ -47,6 +55,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import type { LoadoutsRepository } from '../../db/loadouts-repository.js';
+import { hasAnyTimer, type PlayerTimersRepository } from '../../db/player-timers-repository.js';
 import {
   hasAnyAttribute,
   type SpawnStatusRepository,
@@ -59,8 +68,16 @@ import {
   type SpawnStatusSync,
 } from '../../loadouts/status.js';
 import type { LoadoutSync } from '../../loadouts/sync.js';
+import {
+  normalizePlayerTimers,
+  playerTimersValuesSchema,
+  timerTierOf,
+  timerTierOrder,
+  type PlayerTimersSync,
+} from '../../loadouts/timers.js';
 import { assertOxideName, readPermissions } from '../../oxide/permissions.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
+import { readVipTiers } from '../../vip/tiers.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
 
@@ -70,6 +87,9 @@ export interface LoadoutRoutesDeps {
   /** O status de nascimento daquele grupo. Ver o cabeçalho. */
   readonly statusRepository: SpawnStatusRepository;
   readonly statusSync: SpawnStatusSync;
+  /** Os timers daquele grupo. Ver o cabeçalho. */
+  readonly timersRepository: PlayerTimersRepository;
+  readonly timersSync: PlayerTimersSync;
   readonly supervisor: ServerSupervisor;
 }
 
@@ -88,6 +108,8 @@ const saveBody = z
   .strict();
 
 const saveStatusBody = spawnStatusValuesSchema.extend({ enabled: z.boolean().default(true) });
+
+const saveTimersBody = playerTimersValuesSchema.extend({ enabled: z.boolean().default(true) });
 
 /**
  * @throws {ApiError} 404 quando o servidor não existe.
@@ -519,6 +541,204 @@ export function registerLoadoutRoutes(app: FastifyInstance, deps: LoadoutRoutesD
       message:
         sync.skipped ??
         `${String(sync.tiers)} chave(s) de status empurradas para ${id}; o plugin guardou ` +
+          `${String(sync.cachedTiers)}.`,
+    };
+  });
+
+  // ==========================================================
+  //  OS TIMERS — fornalha, craft, pesquisa e reciclador
+  //
+  //  Mesma lista de grupos, mesmas regras de servidor parado e de
+  //  órfão. O que a lista ganha aqui é o NÍVEL de cada grupo: o
+  //  plugin só pergunta por admin, pelos VIPs e por normal, e a tela
+  //  precisa dizer quando um grupo não é nível nenhum — os timers
+  //  dele iriam no payload e nunca seriam consultados.
+  // ==========================================================
+
+  app.get('/servers/:id/timers', async (request) => {
+    const { id } = serverParams.parse(request.params);
+
+    assertServer(deps, id);
+
+    const saved = new Map(
+      deps.timersRepository.list(id).map((timers) => [timers.groupName, timers] as const),
+    );
+
+    const { connected, rows, truncated, orphans } = await groupsOf(deps, id, [...saved.keys()]);
+
+    // Os níveis de VIP vêm do OrigemZVip.json daquele servidor. Sem
+    // eles, o grupo `origemz.vip.gold` não vira `gold` no payload — e
+    // o jogador gold cai para o `default` sem ninguém entender. O
+    // `levelsProblem` é o que deixa a tela dizer isso.
+    const config = deps.supervisor.configOf(id);
+    const view =
+      config === null
+        ? { levels: [], problem: null }
+        : await readVipTiers(config.paths.oxideConfigDir);
+
+    const groups = rows.map((row) => {
+      const timers = saved.get(row.name);
+
+      return {
+        ...row,
+        tier: timerTierOf(row.name, view.levels),
+        // `null` é resposta, e não ausência: quer dizer "este grupo
+        // não decide este timer", e quem é dele cai para o nível de
+        // baixo.
+        smelt: timers?.smelt ?? null,
+        craft: timers?.craft ?? null,
+        research: timers?.research ?? null,
+        recycle: timers?.recycle ?? null,
+        enabled: timers?.enabled ?? true,
+        updatedAt: timers === undefined ? null : new Date(timers.updatedAt).toISOString(),
+        updatedBy: timers?.updatedBy ?? null,
+      };
+    });
+
+    // Na ordem da HIERARQUIA, e não na do Oxide. Ver `timerTierOrder`.
+    groups.sort(
+      (a, b) =>
+        timerTierOrder(a.tier, view.levels) - timerTierOrder(b.tier, view.levels) ||
+        a.name.localeCompare(b.name),
+    );
+
+    return {
+      ok: true,
+      connected,
+      groups,
+      truncated,
+      levelsProblem: view.problem,
+      message: !connected
+        ? offlineMessage(id, 'o que já foi gravado')
+        : orphans === 0
+          ? undefined
+          : `${String(orphans)} configuração(ões) de timers apontam para grupos que não existem ` +
+            'mais no Oxide deste servidor. Elas continuam guardadas e NÃO vão para o jogo.',
+    };
+  });
+
+  /**
+   * Grava os timers daquele grupo e empurra o estado completo.
+   *
+   * ####  OS QUATRO EM ×1 SÃO RECUSADOS AQUI  ####
+   *
+   * Pelo mesmo motivo dos três nulos do status: gravar uma linha que
+   * não faz nada é a forma mais fácil de alguém achar que configurou.
+   * Quem quer "este grupo não decide nada" tem o DELETE.
+   */
+  app.put('/servers/:id/timers/:group', async (request) => {
+    const { id, group } = groupParams.parse(request.params);
+    const body = saveTimersBody.parse(request.body);
+
+    assertServer(deps, id);
+
+    // O mesmo alfabeto dos grupos do Oxide, e pelo mesmo motivo do
+    // loadout: o nome viaja dentro do payload que vai para a linha de
+    // comando do console.
+    assertOxideName(group, 'grupo');
+
+    const values = normalizePlayerTimers(body);
+
+    if (!hasAnyTimer(values)) {
+      throw new ApiError(
+        'EMPTY_PLAYER_TIMERS',
+        `Os quatro timers de "${group}" ficariam em ×1 — fornalha, craft, pesquisa e reciclador. ` +
+          'Isso é o mesmo que não ter configuração: apague os timers deste grupo, e quem é dele ' +
+          'segue o nível de baixo.',
+        400,
+      );
+    }
+
+    const timers = deps.timersRepository.save({
+      serverId: id,
+      groupName: group,
+      smelt: values.smelt,
+      craft: values.craft,
+      research: values.research,
+      recycle: values.recycle,
+      enabled: values.enabled,
+      updatedBy: operatorOf(request),
+    });
+
+    const sync = await deps.timersSync.push(id, 'player-timers-changed');
+
+    request.log.info(
+      { server: id, group, by: operatorOf(request) },
+      'timers gravados pelo painel',
+    );
+
+    return {
+      ok: true,
+      timers: {
+        name: timers.groupName,
+        smelt: timers.smelt,
+        craft: timers.craft,
+        research: timers.research,
+        recycle: timers.recycle,
+        enabled: timers.enabled,
+        updatedAt: new Date(timers.updatedAt).toISOString(),
+        updatedBy: timers.updatedBy,
+      },
+      sync,
+      message:
+        sync.skipped ??
+        `Timers de "${group}" gravados e empurrados para ${id}. O craft e a pesquisa já valem ` +
+          'no próximo item; o reciclador, na próxima vez que for ligado; e as fornalhas acesas ' +
+          'pegam a velocidade nova em até 30 segundos.' +
+          (body.enabled
+            ? ''
+            : ' Eles estão DESLIGADOS: continuam guardados aqui e não vão para o jogo.'),
+    };
+  });
+
+  /**
+   * Apaga os timers daquele grupo.
+   *
+   * O payload seguinte é o estado COMPLETO e o grupo não estará nele:
+   * quem é daquele nível cai para o de baixo. Sem o envio, a
+   * configuração continuaria valendo no jogo até o próximo reinício.
+   */
+  app.delete('/servers/:id/timers/:group', async (request) => {
+    const { id, group } = groupParams.parse(request.params);
+
+    assertServer(deps, id);
+
+    if (!deps.timersRepository.remove(id, group)) {
+      throw new ApiError(
+        'PLAYER_TIMERS_NOT_FOUND',
+        `Não há timers gravados para o grupo "${group}" em "${id}".`,
+        404,
+      );
+    }
+
+    const sync = await deps.timersSync.push(id, 'player-timers-removed');
+
+    request.log.warn({ server: id, group, by: operatorOf(request) }, 'timers removidos pelo painel');
+
+    return {
+      ok: true,
+      sync,
+      message:
+        sync.skipped ??
+        `Timers de "${group}" apagados. Quem é desse grupo em ${id} segue o nível de baixo — ` +
+          'e, sem nível que decida, o tempo do Rust.',
+    };
+  });
+
+  /** Reempurra o estado completo agora. */
+  app.post('/servers/:id/timers/sync', async (request) => {
+    const { id } = serverParams.parse(request.params);
+
+    assertServer(deps, id);
+
+    const sync = await deps.timersSync.push(id, 'manual');
+
+    return {
+      ok: true,
+      ...sync,
+      message:
+        sync.skipped ??
+        `${String(sync.tiers)} chave(s) de timers empurradas para ${id}; o plugin guardou ` +
           `${String(sync.cachedTiers)}.`,
     };
   });

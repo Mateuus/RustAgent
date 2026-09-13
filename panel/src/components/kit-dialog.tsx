@@ -33,7 +33,7 @@
 //  daquele nível, que ninguém acima leva junto.
 // ============================================================
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { itemsProblem, LoadoutEditor } from '@/components/loadout-editor';
 import { Button } from '@/components/ui/button';
@@ -43,12 +43,14 @@ import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
 import {
   agent,
+  kitIconUrl,
   type Kit,
   type KitKind,
   type KitUseReset,
   type LoadoutItem,
   type VipTier,
 } from '@/lib/api';
+import { toIconFile } from '@/lib/icon-image';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -117,6 +119,41 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
   const [slug, setSlug] = useState(kit?.slug ?? '');
   const [name, setName] = useState(kit?.name ?? '');
   const [description, setDescription] = useState(kit?.description ?? '');
+
+  /**
+   * A arte propria do card. `null` = o desenho padrao.
+   *
+   * Sem ela o card mostra o icone do PRIMEIRO item do kit -- um
+   * palpite honesto, e o que todo kit gravado antes disto faz. Mas
+   * "Kit Inicial" nao e uma pedra.
+   */
+  const [iconFile, setIconFile] = useState<string | null>(kit?.iconFile ?? null);
+  const [enviandoArte, setEnviandoArte] = useState(false);
+  const [arteSummary, setArteSummary] = useState<string | null>(null);
+
+  /** A previa do arquivo escolhido. Revogada ao trocar e ao fechar. */
+  const [artePreview, setArtePreview] = useState<string | null>(null);
+  const artePreviewRef = useRef<string | null>(null);
+
+  const showArtePreview = useCallback((file: File | null): void => {
+    const previous = artePreviewRef.current;
+    const next = file === null ? null : URL.createObjectURL(file);
+
+    artePreviewRef.current = next;
+    setArtePreview(next);
+
+    if (previous !== null) {
+      URL.revokeObjectURL(previous);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      showArtePreview(null);
+    };
+  }, [showArtePreview]);
+
+  const arteSrc = artePreview ?? (iconFile === null ? null : kitIconUrl(iconFile));
   const [category, setCategory] = useState(kit?.category ?? '');
   // Em HORAS na tela, em segundos no banco: quem administra pensa em
   // "duas horas depois do wipe", não em 7200.
@@ -161,6 +198,41 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
     })();
   }, []);
 
+  /**
+   * Reduz a arte no navegador e a envia.
+   *
+   * O agente recusa acima de ~33 KB, e a arte que alguém exporta tem
+   * megabytes. Quem reduz é a tela, pelo mesmo motivo do cadastro de
+   * item custom e da oferta da loja — e com o mesmo `toIconFile`.
+   */
+  async function enviarArte(file: File): Promise<void> {
+    setEnviandoArte(true);
+
+    try {
+      const resized = await toIconFile(file);
+
+      showArtePreview(resized.file);
+      setArteSummary(resized.summary);
+
+      const response = await agent.uploadKitIcon(resized.file);
+
+      setIconFile(response.icon.name);
+
+      toast.success('Arte enviada', { description: response.icon.name });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      // A prévia cai junto: deixá-la na tela depois de o envio falhar
+      // faria parecer que a arte está valendo.
+      showArtePreview(null);
+      setArteSummary(null);
+
+      toast.error('Não consegui enviar a arte', { description: message });
+    } finally {
+      setEnviandoArte(false);
+    }
+  }
+
   async function submit(): Promise<void> {
     const problem = itemsProblem(items);
 
@@ -177,6 +249,7 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
       slug: slug.trim(),
       name: name.trim(),
       description: description.trim() === '' ? null : description.trim(),
+      iconFile,
       category: category.trim() === '' ? null : category.trim(),
       wipeDelaySeconds:
         wipeHours.trim() === '' ? null : Math.max(1, Math.round(Number(wipeHours) * 3600)),
@@ -271,6 +344,84 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
             <p className="mt-1 text-2xs text-muted">
               Aparece na aba <strong>Geral</strong> do kit, dentro do jogo.
             </p>
+
+            {/* ####  O CARD TEM UM PALPITE, E ELE NEM SEMPRE SERVE  ####
+
+                Sem arte, o card mostra o ícone do PRIMEIRO item do
+                kit — um kit de sucata mostra sucata, e está ótimo.
+                Mas "Kit Inicial" não é uma pedra, e quem monta o kit
+                sabe que arte o representa. */}
+            <div className="mt-3">
+              <Label>Arte do card</Label>
+
+              <div className="flex items-center gap-3 border border-border bg-surface-2 p-2">
+                {arteSrc === null ? (
+                  <p className="min-w-0 flex-1 text-2xs leading-relaxed text-muted">
+                    Sem arte própria — o card usa o ícone do primeiro item do kit.
+                  </p>
+                ) : (
+                  <>
+                    {/* O <img> cru, e não o next/image: a imagem vem
+                        do AGENTE, que não passa pelo otimizador. */}
+                    <img
+                      src={arteSrc}
+                      alt=""
+                      className="h-12 w-12 shrink-0 border border-border bg-surface object-contain"
+                    />
+
+                    <div className="min-w-0 flex-1 text-2xs leading-relaxed">
+                      <p className="truncate font-mono text-foreground">{iconFile}</p>
+
+                      {arteSummary !== null && (
+                        <p className="mt-0.5 text-muted">Reduzida aqui: {arteSummary}.</p>
+                      )}
+                    </div>
+
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      type="button"
+                      disabled={busy || enviandoArte}
+                      onClick={() => {
+                        setIconFile(null);
+                        showArtePreview(null);
+                        setArteSummary(null);
+                      }}
+                    >
+                      Tirar
+                    </Button>
+                  </>
+                )}
+
+                <label
+                  className={cn(
+                    'cursor-pointer border border-border px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide text-foreground hover:bg-surface',
+                    (busy || enviandoArte) && 'pointer-events-none opacity-60',
+                  )}
+                >
+                  {enviandoArte ? 'Enviando…' : iconFile === null ? 'Enviar PNG' : 'Trocar'}
+                  <input
+                    type="file"
+                    accept="image/png"
+                    className="sr-only"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+
+                      // O input é limpo sempre: sem isso, escolher o
+                      // MESMO arquivo duas vezes seguidas não dispara
+                      // o evento, e o segundo envio parece travado.
+                      event.target.value = '';
+
+                      if (file !== undefined) void enviarArte(file);
+                    }}
+                  />
+                </label>
+              </div>
+
+              <p className="mt-1 text-2xs leading-relaxed text-muted">
+                O painel reduz a imagem antes de enviar, e cada jogador a baixa uma vez.
+              </p>
+            </div>
           </div>
 
           <div>

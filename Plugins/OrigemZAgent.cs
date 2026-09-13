@@ -55,6 +55,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+
+// System.Reflection e do origemz.loot.native: o corpo do cientista
+// novo guarda os slots de loot num campo que so e publico quando o
+// Oxide compila com o publicizer. Ver ReflectedLootSlots.
+using System.Reflection;
 using System.Text;
 using Newtonsoft.Json;
 
@@ -72,6 +77,7 @@ using Oxide.Core;
 // Oxide.CSharp). Sao namespaces diferentes e nao ha nome repetido
 // entre os dois, entao este using nao cria ambiguidade.
 using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -81,7 +87,16 @@ namespace Oxide.Plugins
     // 0.4.0: o origemz.items passou a responder "displayNamePtBr".
     // O campo e OPCIONAL, entao o agente antigo continua lendo este
     // plugin, e este plugin continua servindo o agente antigo.
-    [Info("OrigemZAgent", "OrigemZ", "0.4.0")]
+    // 0.5.0: o origemz.timers.sync e o hook GetTimers - a velocidade
+    // de fornalha, craft, pesquisa e reciclador por nivel, que quem
+    // aplica e o OrigemZPlayer. Um agente antigo nunca manda o
+    // comando, e o hook responde null: todo mundo fica no x1.
+    // 0.6.0: o origemz.loot.native - a tabela de loot que o JOGO
+    // poe naquela caixa, sem escrever nada. Comando novo, entao um
+    // agente antigo nunca o manda e nada muda para ele; um agente
+    // novo contra um plugin velho leva "comando desconhecido" e a
+    // tela diz que aquele servidor ainda nao sabe responder.
+    [Info("OrigemZAgent", "OrigemZ", "0.6.0")]
     [Description("Ponta no jogo do RustAgent: lista jogadores, publica o catalogo de itens, entrega itens via RCON e expoe o estado de VIP por hook")]
     public class OrigemZAgent : RustPlugin
     {
@@ -110,6 +125,15 @@ namespace Oxide.Plugins
         private const string ErrorItemCreateFailed = "ITEM_CREATE_FAILED";
         private const string ErrorInventoryFull = "INVENTORY_FULL";
         private const string ErrorDropFailed = "DROP_FAILED";
+
+        // Os dois do origemz.loot.native, e sao diagnosticos
+        // diferentes: NOT_FOUND e "este caminho nao existe neste
+        // build" - erro de quem pediu, provavelmente prefab velho
+        // depois de um update. NOT_LOOT e "existe, e nao e caixa" -
+        // o caminho esta certo e a pergunta e que nao cabe.
+        private const string ErrorPrefabNotFound = "PREFAB_NOT_FOUND";
+        private const string ErrorPrefabNotLoot = "PREFAB_NOT_LOOT";
+
         private const string ErrorInternal = "INTERNAL_ERROR";
 
         // O que o chamador PEDE (5o argumento do give).
@@ -163,6 +187,18 @@ namespace Oxide.Plugins
         private const string VipSyncCommand = "origemz.vip.sync";
         private const string LoadoutSyncCommand = "origemz.loadout.sync";
         private const string SpawnStatusSyncCommand = "origemz.status.sync";
+        private const string TimersSyncCommand = "origemz.timers.sync";
+
+        /// <summary>
+        /// `origemz.loot.native &lt;prefab&gt;`
+        ///
+        /// O que o JOGO poe naquela caixa, antes de qualquer
+        /// plugin. Existe porque o BetterLoot le essa tabela UMA
+        /// vez - quando gera o LootTables.json - e nunca mais: uma
+        /// caixa que virou "so perfis" perdeu a lista padrao e nao
+        /// tem como recupera-la. Ver HandleLootNative.
+        /// </summary>
+        private const string LootNativeCommand = "origemz.loot.native";
 
         /// <summary>
         /// `origemz.vehicle.spawn <steamId> <prefab> [combustivel]`
@@ -220,6 +256,7 @@ namespace Oxide.Plugins
         // AGENTE continuaria achando que ja mandou.
         private const string RequestQuests = "quests";
         private const string RequestSpawnStatus = "status";
+        private const string RequestTimers = "timers";
 
         // Paginacao do origemz.items.
         //
@@ -236,6 +273,19 @@ namespace Oxide.Plugins
         // esse ponto continua NAO medido.
         private const int DefaultItemsLimit = 250;
         private const int MaxItemsLimit = 500;
+
+        // Paginacao do origemz.loot.native.
+        //
+        // O padrao e o TETO aqui, ao contrario dos dois de cima, e
+        // e de proposito: a maior tabela nativa medida no server01
+        // tem 211 itens (os cientistas), ~10 KB pela linha curta
+        // deste comando - contra os 70 KB que o origemz.items ja
+        // atravessa inteiro. Ou seja, 500 faz TODA caixa que existe
+        // hoje caber numa pagina so, e a paginacao fica como rede:
+        // ela so entra em cena se um update do jogo mais que dobrar
+        // a maior tabela.
+        private const int DefaultNativeLootLimit = 500;
+        private const int MaxNativeLootLimit = 500;
 
         // Paginacao do origemz.players - mesma medida, mesmo teto.
         //
@@ -360,6 +410,15 @@ namespace Oxide.Plugins
         private Dictionary<string, string> _spawnStatusCache =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        // A VELOCIDADE das coisas, por nivel, JA SERIALIZADA: fornalha,
+        // craft, pesquisa e reciclador.
+        //
+        // Quarto cache, e separado pelo mesmo motivo do de status: e
+        // outra aba da tela, com outro ciclo de edicao. Quem consome e
+        // o OrigemZPlayer, pelo hook GetTimers.
+        private Dictionary<string, string> _timersCache =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         // ========================================================
         //  CICLO DE VIDA
         // ========================================================
@@ -367,6 +426,10 @@ namespace Oxide.Plugins
         {
             Puts("Init() - comandos: " + PlayersCommand + ", " + ItemsCommand + ", " +
                  GiveCommand + ", " + VipSyncCommand + ". API de hook v" + ApiVersion + ".");
+
+            // Sem registro, `UserHasPermission` devolve false para
+            // todo mundo e a permissao nao aparece no /grant.
+            permission.RegisterPermission(QuestNpcPermission, this);
         }
 
         // Montar o catalogo aqui, e nao na primeira consulta, tira
@@ -389,6 +452,7 @@ namespace Oxide.Plugins
                 RequestSync(RequestVips);
                 RequestSync(RequestLoadouts);
                 RequestSync(RequestSpawnStatus);
+                RequestSync(RequestTimers);
                 RequestSync(RequestQuests);
             });
 
@@ -416,8 +480,30 @@ namespace Oxide.Plugins
             // Mesma razao, e este e o mais caro de todos: o
             // OnPlayerInput dispara a cada QUADRO, para cada
             // jogador. Quem o liga e o primeiro NPC.
+            //
+            // O de conversa vai junto pelo mesmo motivo de higiene -
+            // ele e barato (so dispara quando alguem aperta TALK),
+            // mas um servidor sem NPC nao tem por que ouvi-lo.
             Unsubscribe("OnPlayerInput");
+            Unsubscribe("OnNpcConversationStart");
             _questNpcInputHooked = false;
+
+            // ####  O RCON ABRE ANTES DESTE PONTO  ####
+            //
+            // E ai os dois Unsubscribe acima desligam hooks que os
+            // NPCs JA tinham ligado: o WebRCON aceita comando antes
+            // de o servidor terminar de inicializar, entao o
+            // `npc.set` do agente pode chegar primeiro.
+            //
+            // O sintoma e cruel porque nada parece errado: os
+            // bonecos estao de pe, com o "CONVERSAR" na tela, e
+            // apertar E nao faz NADA. Foi assim que o teste de
+            // 12/09/2026 travou, e o `npcHooked` do diag existe por
+            // causa dele.
+            //
+            // Religar aqui e barato e nao tem caso ruim: sem NPC ele
+            // nao faz nada.
+            QuestNpcSyncInputHook();
 
             // E o lote que o oxide.reload deixou no disco.
             QuestLoad();
@@ -774,6 +860,645 @@ namespace Oxide.Plugins
             }
 
             return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+
+        // ========================================================
+        //  O LOOT QUE O JOGO POE NA CAIXA
+        //
+        //      origemz.loot.native <offset> <limit> <prefab>
+        //
+        //  #### OS NUMEROS VEM ANTES DO PREFAB  ####
+        //
+        //  Fora de ordem de proposito. O caminho do prefab tem
+        //  ESPACO em dezessete casos medidos ("dmloot/dm
+        //  ammo.prefab"), e o console do Rust quebra argumento no
+        //  espaco: com o prefab na frente, nada distingue o ultimo
+        //  pedaco dele de um offset. Com os numeros na frente, o
+        //  resto da linha e o prefab, inteiro, sem depender de
+        //  aspas.
+        //
+        //  #### POR QUE ISTO EXISTE ####
+        //
+        //  O BetterLoot le a tabela nativa do jogo UMA vez: quando
+        //  cria a entrada daquele prefab no LootTables.json
+        //  (LoadAllContainers). Dali em diante o arquivo e a unica
+        //  verdade que ele conhece. Quem apagou a lista de itens -
+        //  ou montou a caixa so com perfis - nao tem como pedir o
+        //  padrao de volta, e o painel nao tem como dizer o que e
+        //  item do jogo e o que alguem acrescentou a mao.
+        //
+        //  Este comando responde isso, e nao escreve nada.
+        //
+        //  #### E POR QUE ELE REPETE O BETTERLOOT ####
+        //
+        //  A leitura abaixo e o GetLootSpawn do BetterLoot 4.4.0
+        //  (BetterLoot.cs:1701-1760) portado. Nao e preguica: se o
+        //  agente resolvesse a arvore de LootSpawn com regra
+        //  propria, a lista "padrao" do painel divergiria da que o
+        //  plugin gerou no primeiro boot - e a comparacao entre as
+        //  duas e justamente o produto.
+        //
+        //  Os tres cuidados que a arvore exige, todos medidos la:
+        //
+        //    1. subSpawn e recursivo, e cada galho tem PESO. Galho
+        //       com peso zero nunca sai; na lista, ele mente.
+        //    2. restrictedEras: o mesmo prefab entrega coisas
+        //       diferentes conforme ConVar.Server.Era.
+        //    3. o item que aparece em TODOS os galhos e garantido,
+        //       e nao sorteado - por isso ele sai da lista de itens
+        //       e vai para a de garantidos.
+        //
+        //  #### A RESPOSTA ####
+        //
+        //      {"ok":true,
+        //       "prefab":"assets/bundled/prefabs/radtown/crate_elite.prefab",
+        //       "source":"container","slotsMin":8,"slotsMax":8,"scrap":25,
+        //       "count":145,"offset":0,"limit":500,
+        //       "items":[{"shortname":"riflebody","min":1,"max":1}],
+        //       "guaranteed":[]}
+        //
+        //  `slotsMin`/`slotsMax` sao quantos itens a caixa entrega
+        //  por vez e `scrap` e o scrap do prefab: os tres alimentam
+        //  o "Quanto sai" do painel, que hoje nao tem de onde tirar
+        //  o padrao.
+        //
+        //  #### A PAGINACAO EXISTE, E NUNCA PAGINA  ####
+        //
+        //  Regra 4 do cabecalho deste arquivo: lista de tamanho
+        //  aberto e paginada, porque resposta truncada chega ao
+        //  agente como JSON invalido - e isso parece bug do plugin,
+        //  nao limite de transporte.
+        //
+        //  A maior tabela nativa medida no server01 tem 211 itens
+        //  (os cientistas), ~10 KB - um quinto do que o
+        //  origemz.items ja trafega numa pagina. Com o limite
+        //  padrao em 500, toda caixa que existe hoje cabe de uma
+        //  vez, e a paginacao so entra em cena se um update do jogo
+        //  dobrar a maior delas.
+        //
+        //  `guaranteed` vai INTEIRO em toda pagina: o maior medido
+        //  tem 6 itens, e reparti-lo custaria mais do que repeti-lo.
+        //
+        //  MUDAR QUALQUER COISA AQUI EXIGE MUDAR
+        //  core/src/game/loot-native.ts JUNTO.
+        // ========================================================
+
+        /// <summary>O prefixo sintetico do presente e do ovo. Nao e pasta.</summary>
+        private const string UnwrapPrefix = "unwrap/";
+
+        [ConsoleCommand(LootNativeCommand)]
+        private void CommandLootNative(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleLootNative(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(LootNativeCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleLootNative(ConsoleSystem.Arg arg)
+        {
+            int offset;
+
+            if (!TryReadInt(arg, 0, 0, out offset) || offset < 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            int limit;
+
+            if (!TryReadInt(arg, 1, DefaultNativeLootLimit, out limit) || limit < 1)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            // Teto silencioso, como no origemz.items: isto e
+            // leitura, e o limit normalizado volta na resposta -
+            // quem chamou ve o que aconteceu.
+            if (limit > MaxNativeLootLimit)
+            {
+                limit = MaxNativeLootLimit;
+            }
+
+            // Do terceiro argumento em diante e tudo prefab, com os
+            // espacos de volta. Ver o cabecalho: e por isso que os
+            // numeros vem antes.
+            string prefab = RestOfArgs(arg, 2);
+
+            if (prefab.Length == 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            Dictionary<string, NativeLootItem> items = new Dictionary<string, NativeLootItem>();
+            Dictionary<string, NativeLootItem> guaranteed = new Dictionary<string, NativeLootItem>();
+
+            NativeLootOkResponse response = new NativeLootOkResponse();
+            response.Prefab = prefab;
+
+            if (prefab.StartsWith(UnwrapPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(prefab.Substring(UnwrapPrefix.Length));
+                ItemModUnwrap unwrap = definition == null ? null : definition.GetComponentInChildren<ItemModUnwrap>();
+
+                if (unwrap == null || unwrap.revealList == null)
+                {
+                    return BuildError(ErrorPrefabNotFound);
+                }
+
+                int minTries = Math.Max(1, Math.Min(unwrap.minTries, unwrap.maxTries));
+                int maxTries = Math.Max(minTries, Math.Max(unwrap.minTries, unwrap.maxTries));
+
+                CollectLootSpawn(unwrap.revealList, items, guaranteed, unwrap.minTries > 0);
+
+                // Cada abertura entrega o garantido de novo, e o
+                // presente abre varias vezes. E assim que o
+                // BetterLoot grava; a lista do painel tem de casar
+                // com o arquivo dele, nao com a arvore crua.
+                foreach (NativeLootItem entry in guaranteed.Values)
+                {
+                    entry.Min *= minTries;
+                    entry.Max *= maxTries;
+                }
+
+                response.Source = "unwrap";
+                response.SlotsMin = minTries;
+                response.SlotsMax = maxTries;
+                response.Scrap = 0;
+                return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+            }
+
+            GameObject basePrefab = GameManager.server.FindPrefab(prefab);
+
+            if (basePrefab == null)
+            {
+                // O caminho vai JUNTO do codigo, ao contrario do
+                // resto do arquivo: "nao achei" sem dizer o que se
+                // procurou nao se diagnostica - e o suspeito numero
+                // um e o proprio caminho, remontado a partir de
+                // pedacos que o console quebrou no espaco.
+                PrintWarning(LootNativeCommand + ": prefab nao encontrado: [" + prefab + "]");
+                return BuildError(ErrorPrefabNotFound);
+            }
+
+            // A ordem e a do BetterLoot (LoadAllContainers): o
+            // mesmo GameObject pode ter mais de um componente, e
+            // trocar a ordem troca a tabela.
+            HumanNPC npc = basePrefab.GetComponent<HumanNPC>();
+            LootContainer.LootSpawnSlot[] slots = npc == null ? ReflectedLootSlots(basePrefab) : npc.LootSpawnSlots;
+
+            if (slots != null)
+            {
+                int slotItemCount = 0;
+
+                foreach (LootContainer.LootSpawnSlot slot in slots)
+                {
+                    // O `onlyWithLoadoutNamed` e o que separa o
+                    // slot que TODO corpo entrega daquele que so
+                    // sai com um loadout especifico: o segundo nao
+                    // e garantido, por mais que a probabilidade
+                    // seja 1.
+                    CollectLootSpawn(slot.definition, items, guaranteed,
+                        slot.numberToSpawn > 0 && slot.probability >= 1f && string.IsNullOrEmpty(slot.onlyWithLoadoutNamed));
+                    slotItemCount += slot.numberToSpawn;
+                }
+
+                response.Source = "npc";
+                response.SlotsMin = slotItemCount;
+                response.SlotsMax = slotItemCount;
+                response.Scrap = 0;
+                return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+            }
+
+            LootFill fill = basePrefab.GetComponent<LootFill>();
+
+            if (fill != null)
+            {
+                CollectContainerSlots(fill.LootSpawnSlots, fill.LootDefinition, fill.MaxDefinitionsToSpawn,
+                    items, guaranteed);
+
+                response.Source = "lootfill";
+                response.SlotsMin = response.SlotsMax = SlotCountOf(fill.LootSpawnSlots, fill.MaxDefinitionsToSpawn);
+                response.Scrap = 0;
+                return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+            }
+
+            LootContainer loot = basePrefab.GetComponent<LootContainer>();
+
+            if (loot == null)
+            {
+                return BuildError(ErrorPrefabNotLoot);
+            }
+
+            CollectContainerSlots(loot.LootSpawnSlots, loot.lootDefinition, loot.maxDefinitionsToSpawn,
+                items, guaranteed);
+
+            response.Source = "container";
+            response.SlotsMin = response.SlotsMax = SlotCountOf(loot.LootSpawnSlots, loot.maxDefinitionsToSpawn);
+            response.Scrap = loot.scrapAmount;
+
+            return PaginatedNativeLoot(response, items, guaranteed, offset, limit);
+        }
+
+        /// <summary>
+        /// Fecha a resposta com a pagina pedida de `items`.
+        ///
+        /// `count` e o TOTAL da caixa, e nao o tamanho da pagina -
+        /// mesma regra do origemz.items. Offset alem do fim devolve
+        /// lista vazia com ok:true, que e como o agente sabe que
+        /// acabou.
+        /// </summary>
+        private static string PaginatedNativeLoot(NativeLootOkResponse response,
+            Dictionary<string, NativeLootItem> items, Dictionary<string, NativeLootItem> guaranteed,
+            int offset, int limit)
+        {
+            List<NativeLootItem> sorted = Sorted(items);
+
+            int available = sorted.Count - offset;
+
+            if (available < 0)
+            {
+                available = 0;
+            }
+
+            int take = available < limit ? available : limit;
+
+            response.Count = sorted.Count;
+            response.Offset = offset;
+            response.Limit = limit;
+            response.Items = take > 0 ? sorted.GetRange(offset, take) : new List<NativeLootItem>();
+            response.Guaranteed = Sorted(guaranteed);
+
+            return JsonConvert.SerializeObject(response);
+        }
+
+        /// <summary>
+        /// Do argumento `first` em diante, com os espacos de volta.
+        ///
+        /// O console do Rust quebra a linha no espaco e nao ha como
+        /// pedir o resto cru - o caminho do prefab, que tem espaco,
+        /// precisa ser remontado aqui.
+        ///
+        /// #### arg.Args NAO E string[] ####
+        ///
+        /// MEDIDO nesta build: ele e `Facepunch.StringView[]`. E a
+        /// descoberta custou uma sessao, porque ela nao da erro de
+        /// compilacao - `string.Join(" ", arg.Args, 2, 1)` casa com
+        /// o overload `Join(string, params object[])` e devolve a
+        /// string "Facepunch.StringView[] 2 1", que e o array
+        /// impresso pelo ToString junto dos dois numeros.
+        ///
+        /// Ou seja: compila, roda, e monta um caminho de prefab que
+        /// nao existe. Por isso a leitura aqui e SEMPRE pelo
+        /// `arg.GetString(index, "")`, que e a API que o jogo
+        /// oferece para isso. Indexar `arg.Args` direto e a
+        /// armadilha.
+        /// </summary>
+        private static string RestOfArgs(ConsoleSystem.Arg arg, int first)
+        {
+            if (arg.Args == null || first >= arg.Args.Length)
+            {
+                return "";
+            }
+
+            // Concatenacao, e nao StringBuilder: com as DLLs do jogo
+            // na mesa, `Append(" ")` fica ambiguo entre
+            // Append(object) e Append(ReadOnlySpan<char>) - o
+            // literal converte para os dois. Sao poucos pedacos.
+            string joined = "";
+
+            for (int index = first; index < arg.Args.Length; index++)
+            {
+                if (joined.Length > 0)
+                {
+                    joined = joined + " ";
+                }
+
+                joined = joined + arg.GetString(index, "");
+            }
+
+            return joined.Trim();
+        }
+
+        /// <summary>
+        /// Os slots do prefab, ou a definicao unica quando ele nao
+        /// tem slot nenhum. E a bifurcacao do BetterLoot, e ela
+        /// existe porque `LootSpawnSlots` vazio NAO quer dizer
+        /// caixa vazia: quer dizer que o loot mora em
+        /// `lootDefinition`.
+        /// </summary>
+        private static void CollectContainerSlots(LootContainer.LootSpawnSlot[] slots, LootSpawn single,
+            int maxDefinitions, Dictionary<string, NativeLootItem> items,
+            Dictionary<string, NativeLootItem> guaranteed)
+        {
+            if (slots != null && slots.Length > 0)
+            {
+                foreach (LootContainer.LootSpawnSlot slot in slots)
+                {
+                    // A era do servidor decide se o slot vale. Um
+                    // slot de outra era entra na lista e nunca sai
+                    // no jogo.
+                    if (slot.eras != null && slot.eras.Length > 0 && Array.IndexOf(slot.eras, ConVar.Server.Era) < 0)
+                    {
+                        continue;
+                    }
+
+                    CollectLootSpawn(slot.definition, items, guaranteed,
+                        slot.numberToSpawn > 0 && slot.probability >= 1f);
+                }
+
+                return;
+            }
+
+            if (single != null)
+            {
+                CollectLootSpawn(single, items, guaranteed, maxDefinitions > 0);
+            }
+        }
+
+        private static int SlotCountOf(LootContainer.LootSpawnSlot[] slots, int maxDefinitions)
+        {
+            if (slots == null || slots.Length == 0)
+            {
+                return maxDefinitions;
+            }
+
+            int total = 0;
+
+            foreach (LootContainer.LootSpawnSlot slot in slots)
+            {
+                total += slot.numberToSpawn;
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// Anda a arvore de LootSpawn e separa sorteado de garantido.
+        /// </summary>
+        private static void CollectLootSpawn(LootSpawn spawn, Dictionary<string, NativeLootItem> items,
+            Dictionary<string, NativeLootItem> guaranteed, bool guaranteedCall)
+        {
+            if (spawn == null)
+            {
+                return;
+            }
+
+            List<LootSpawn.Entry> selectable = SelectableEntriesOf(spawn);
+
+            if (selectable.Count > 0)
+            {
+                // Galho: o que importa sao as folhas dele, e
+                // nenhuma delas e garantida por si so.
+                foreach (LootSpawn.Entry entry in selectable)
+                {
+                    CollectLootSpawn(entry.category, items, guaranteed, false);
+                }
+            }
+            else if (spawn.items != null)
+            {
+                foreach (ItemAmount amount in spawn.items)
+                {
+                    if (amount == null || amount.itemDef == null || !amount.itemDef.IsAllowed(Rust.EraRestriction.Loot))
+                    {
+                        continue;
+                    }
+
+                    string key = KeyOf(amount.itemDef);
+
+                    // O primeiro que aparece manda: o mesmo item em
+                    // dois galhos e UMA entrada na tabela, e e
+                    // assim que o BetterLoot grava.
+                    if (items.ContainsKey(key) || guaranteed.ContainsKey(key))
+                    {
+                        continue;
+                    }
+
+                    items.Add(key, AmountsOf(amount, key));
+                }
+            }
+
+            if (!guaranteedCall)
+            {
+                return;
+            }
+
+            // O que sai de TODOS os galhos sai sempre - e garantido,
+            // e nao sorteado. Ele sai da lista de itens para nao
+            // roubar sorteio de quem depende dele.
+            foreach (string key in CommonItemsOf(spawn))
+            {
+                NativeLootItem entry;
+
+                if (guaranteed.ContainsKey(key) || !items.TryGetValue(key, out entry))
+                {
+                    continue;
+                }
+
+                items.Remove(key);
+                guaranteed.Add(key, entry);
+            }
+        }
+
+        /// <summary>
+        /// Os galhos que PODEM sair: com spawn, na era do servidor,
+        /// e com peso maior que zero.
+        /// </summary>
+        private static List<LootSpawn.Entry> SelectableEntriesOf(LootSpawn spawn)
+        {
+            List<LootSpawn.Entry> selectable = new List<LootSpawn.Entry>();
+
+            if (spawn.subSpawn == null)
+            {
+                return selectable;
+            }
+
+            foreach (LootSpawn.Entry entry in spawn.subSpawn)
+            {
+                if (entry.category == null || !entry.category.HasAnySpawns())
+                {
+                    continue;
+                }
+
+                if (entry.restrictedEras != null && entry.restrictedEras.Length > 0 &&
+                    Array.IndexOf(entry.restrictedEras, ConVar.Server.Era) < 0)
+                {
+                    continue;
+                }
+
+                if (entry.weight + entry.RuntimeWeightBonus() <= 0)
+                {
+                    continue;
+                }
+
+                selectable.Add(entry);
+            }
+
+            return selectable;
+        }
+
+        /// <summary>
+        /// Os itens que aparecem em TODOS os galhos deste no - a
+        /// intersecao. Sao os garantidos.
+        /// </summary>
+        private static HashSet<string> CommonItemsOf(LootSpawn spawn)
+        {
+            List<LootSpawn.Entry> selectable = SelectableEntriesOf(spawn);
+
+            if (selectable.Count > 0)
+            {
+                HashSet<string> common = null;
+
+                foreach (LootSpawn.Entry entry in selectable)
+                {
+                    HashSet<string> branch = CommonItemsOf(entry.category);
+
+                    if (common == null)
+                    {
+                        common = branch;
+                    }
+                    else
+                    {
+                        common.IntersectWith(branch);
+                    }
+                }
+
+                return common ?? new HashSet<string>();
+            }
+
+            HashSet<string> leaf = new HashSet<string>();
+
+            if (spawn.items != null)
+            {
+                foreach (ItemAmount amount in spawn.items)
+                {
+                    if (amount != null && amount.itemDef != null && amount.itemDef.IsAllowed(Rust.EraRestriction.Loot))
+                    {
+                        leaf.Add(KeyOf(amount.itemDef));
+                    }
+                }
+            }
+
+            return leaf;
+        }
+
+        /// <summary>
+        /// A chave daquele item no LootTables.json.
+        ///
+        /// O sufixo ".blueprint" faz PARTE da chave: e assim que o
+        /// BetterLoot grava o item que nasce como projeto, e e por
+        /// essa chave que o painel casa a tabela com o padrao.
+        /// </summary>
+        private static string KeyOf(ItemDefinition definition)
+        {
+            return definition.spawnAsBlueprint ? definition.shortname + ".blueprint" : definition.shortname;
+        }
+
+        private static NativeLootItem AmountsOf(ItemAmount amount, string key)
+        {
+            int min = (int)amount.amount;
+            int max = min;
+
+            ItemAmountRanged ranged = amount as ItemAmountRanged;
+
+            if (ranged != null && ranged.maxAmount > 0 && ranged.maxAmount > amount.amount)
+            {
+                max = (int)ranged.maxAmount;
+            }
+
+            NativeLootItem entry = new NativeLootItem();
+            entry.Shortname = key;
+            entry.Min = min;
+            entry.Max = max;
+
+            return entry;
+        }
+
+        /// <summary>
+        /// Por nome, e nao na ordem da arvore.
+        ///
+        /// A arvore nao tem ordem estavel entre dois boots, e a
+        /// resposta e comparada com o arquivo do lado do agente:
+        /// uma lista que troca de ordem sozinha viraria diferenca
+        /// onde nao ha nenhuma.
+        /// </summary>
+        private static List<NativeLootItem> Sorted(Dictionary<string, NativeLootItem> entries)
+        {
+            List<NativeLootItem> list = new List<NativeLootItem>(entries.Values);
+            list.Sort(delegate (NativeLootItem left, NativeLootItem right)
+            {
+                return string.CompareOrdinal(left.Shortname, right.Shortname);
+            });
+
+            return list;
+        }
+
+        /// <summary>
+        /// Os slots de loot de um corpo que nao e HumanNPC.
+        ///
+        /// O cientista novo (Scientist2FSM) guarda os dele num
+        /// campo `dead` que so existe publico quando o Oxide compila
+        /// com o publicizer - o proprio BetterLoot so cobre esse
+        /// caso atras de `#if OXIDE_PUBLICIZED`. Por reflexao
+        /// funciona dos dois jeitos, e quando nao houver nada a
+        /// resposta e PREFAB_NOT_LOOT, que e a verdade.
+        /// </summary>
+        private static LootContainer.LootSpawnSlot[] ReflectedLootSlots(GameObject prefab)
+        {
+            foreach (Component component in prefab.GetComponents<Component>())
+            {
+                if (component == null || component is LootContainer || component is LootFill)
+                {
+                    continue;
+                }
+
+                LootContainer.LootSpawnSlot[] direct = ReadLootSlots(component);
+
+                if (direct != null && direct.Length > 0)
+                {
+                    return direct;
+                }
+
+                object dead = ReadMember(component, "dead");
+
+                if (dead != null)
+                {
+                    LootContainer.LootSpawnSlot[] nested = ReadLootSlots(dead);
+
+                    if (nested != null && nested.Length > 0)
+                    {
+                        return nested;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static LootContainer.LootSpawnSlot[] ReadLootSlots(object target)
+        {
+            return ReadMember(target, "LootSpawnSlots") as LootContainer.LootSpawnSlot[];
+        }
+
+        private static object ReadMember(object target, string name)
+        {
+            Type type = target.GetType();
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            FieldInfo field = type.GetField(name, flags);
+
+            if (field != null)
+            {
+                return field.GetValue(target);
+            }
+
+            PropertyInfo property = type.GetProperty(name, flags);
+
+            return property == null || !property.CanRead ? null : property.GetValue(target, null);
         }
 
         // ========================================================
@@ -3056,6 +3781,76 @@ namespace Oxide.Plugins
             public int Players { get; set; }
         }
 
+        /// <summary>
+        /// A resposta do origemz.loot.native. Ver HandleLootNative.
+        /// </summary>
+        private class NativeLootOkResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok { get { return true; } }
+
+            /// <summary>O caminho pedido, de volta como veio.</summary>
+            [JsonProperty("prefab")]
+            public string Prefab { get; set; }
+
+            /// <summary>
+            /// De onde a tabela saiu: "container", "npc",
+            /// "lootfill" ou "unwrap".
+            ///
+            /// Vai para o painel porque muda o que os numeros
+            /// significam - corpo de cientista nao tem scrap, e
+            /// presente conta TENTATIVAS, nao itens.
+            /// </summary>
+            [JsonProperty("source")]
+            public string Source { get; set; }
+
+            /// <summary>Quantos itens a caixa entrega por vez.</summary>
+            [JsonProperty("slotsMin")]
+            public int SlotsMin { get; set; }
+
+            [JsonProperty("slotsMax")]
+            public int SlotsMax { get; set; }
+
+            /// <summary>O scrap do prefab. Zero fora de container.</summary>
+            [JsonProperty("scrap")]
+            public int Scrap { get; set; }
+
+            /// <summary>O total de itens da caixa, nao o da pagina.</summary>
+            [JsonProperty("count")]
+            public int Count { get; set; }
+
+            [JsonProperty("offset")]
+            public int Offset { get; set; }
+
+            [JsonProperty("limit")]
+            public int Limit { get; set; }
+
+            [JsonProperty("items")]
+            public List<NativeLootItem> Items { get; set; }
+
+            /// <summary>Inteiro em toda pagina - o maior medido tem 6.</summary>
+            [JsonProperty("guaranteed")]
+            public List<NativeLootItem> Guaranteed { get; set; }
+        }
+
+        /// <summary>
+        /// Um item da tabela nativa.
+        ///
+        /// `shortname` pode terminar em ".blueprint": e a CHAVE do
+        /// LootTables.json, e nao o shortname do catalogo. Ver KeyOf.
+        /// </summary>
+        private class NativeLootItem
+        {
+            [JsonProperty("shortname")]
+            public string Shortname { get; set; }
+
+            [JsonProperty("min")]
+            public int Min { get; set; }
+
+            [JsonProperty("max")]
+            public int Max { get; set; }
+        }
+
         private class ItemsOkResponse
         {
             [JsonProperty("ok")]
@@ -3590,6 +4385,186 @@ namespace Oxide.Plugins
             }
         }
 
+        // ========================================================
+        //  origemz.timers.sync <base64>
+        //
+        //  A VELOCIDADE de fornalha, craft, pesquisa e reciclador,
+        //  por nivel. Quarto membro da familia empurrada, e com o
+        //  mesmo desenho: base64, estado COMPLETO, cache trocado
+        //  inteiro. Nivel que sumiu do payload volta ao x1.
+        //
+        //      {"tiers":{"gold":{"smelt":3,"craft":2}}}
+        //
+        //  Campo ausente e x1 NAQUELE nivel - e quem decide o que
+        //  isso vira no jogador e o OrigemZPlayer, que cai para o
+        //  nivel de baixo antes de cair para o x1. Este plugin so
+        //  guarda e repassa.
+        //
+        //      {"ok":true,"tiers":3}
+        //      {"ok":false,"error":"INVALID_ARGS"}
+        // ========================================================
+        // O log adiado um frame pelo mesmo motivo medido no
+        // CommandVipSync: o Puts sai antes da resposta e seria
+        // casado como se FOSSE a resposta.
+        [ConsoleCommand(TimersSyncCommand)]
+        private void CommandTimersSync(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                string logLine;
+                string response = HandleTimersSync(arg, out logLine);
+
+                arg.ReplyWith(response);
+
+                if (logLine != null)
+                {
+                    string line = logLine;
+                    timer.Once(0f, delegate { Puts(line); });
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintError(TimersSyncCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleTimersSync(ConsoleSystem.Arg arg, out string logLine)
+        {
+            logLine = null;
+
+            if (arg.Args == null || arg.Args.Length == 0)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            string raw = JoinConsoleArgs(arg);
+            string payload = DecodeBase64Payload(raw);
+
+            if (payload == null)
+            {
+                payload = raw;
+            }
+
+            int tiers;
+            string error = ApplyTimersCache(payload, out tiers);
+
+            if (error != null)
+            {
+                return BuildError(error);
+            }
+
+            logLine = TimersSyncCommand + ": " + tiers + " nivel(is) no cache de timers.";
+
+            return JsonConvert.SerializeObject(new TimersSyncOkResponse
+            {
+                Tiers = tiers
+            });
+        }
+
+        // Le o JSON e TROCA o cache - mesma regra do
+        // ApplySpawnStatusCache: dicionario novo, atribuido ao campo
+        // so na ultima linha. Payload vazio e legitimo, e e assim que
+        // "apaguei o ultimo timer" chega aqui.
+        private string ApplyTimersCache(string json, out int tierCount)
+        {
+            tierCount = 0;
+
+            if (string.IsNullOrEmpty(json))
+            {
+                return ErrorInvalidArgs;
+            }
+
+            TimersSyncPayload payload;
+
+            try
+            {
+                payload = JsonConvert.DeserializeObject<TimersSyncPayload>(json);
+            }
+            catch (Exception ex)
+            {
+                PrintWarning("Cache de timers recusado: JSON ilegivel. " + ex.Message);
+                return ErrorInvalidArgs;
+            }
+
+            if (payload == null || payload.Tiers == null)
+            {
+                return ErrorInvalidArgs;
+            }
+
+            Dictionary<string, string> rebuilt =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            int discarded = 0;
+
+            foreach (KeyValuePair<string, TimersPayload> entry in payload.Tiers)
+            {
+                string tier = NormalizeLoadoutTier(entry.Key);
+
+                if (tier == null || entry.Value == null)
+                {
+                    discarded++;
+                    continue;
+                }
+
+                // Os quatro ausentes nao viram entrada: e o mesmo que o
+                // nivel nao estar no payload.
+                if (!entry.Value.Smelt.HasValue &&
+                    !entry.Value.Craft.HasValue &&
+                    !entry.Value.Research.HasValue &&
+                    !entry.Value.Recycle.HasValue)
+                {
+                    discarded++;
+                    continue;
+                }
+
+                rebuilt[tier] = JsonConvert.SerializeObject(entry.Value);
+            }
+
+            _timersCache = rebuilt;
+            tierCount = rebuilt.Count;
+
+            if (discarded > 0)
+            {
+                PrintWarning("Cache de timers: " + discarded + " entrada(s) descartada(s) por " +
+                             "nivel invalido ou sem nenhum timer definido.");
+            }
+
+            return null;
+        }
+
+        // Os timers de um nivel, em JSON, ou null quando o nivel nao
+        // tem configuracao. null e a resposta comum, como no
+        // GetSpawnStatus: nivel sem timers e o estado de todo
+        // servidor recem-instalado.
+        [HookMethod(nameof(GetTimers))]
+        private string GetTimers(string tier)
+        {
+            try
+            {
+                string normalized = NormalizeLoadoutTier(tier);
+
+                if (normalized == null)
+                {
+                    return null;
+                }
+
+                string json;
+
+                if (!_timersCache.TryGetValue(normalized, out json))
+                {
+                    return null;
+                }
+
+                return json;
+            }
+            catch (Exception ex)
+            {
+                PrintError("GetTimers falhou para '" + tier + "': " + ex);
+                return null;
+            }
+        }
+
         // Pede ao RustAgent que reenvie um estado.
         //
         // Nao ha resposta a esperar: o agente reage empurrando o
@@ -3734,6 +4709,44 @@ namespace Oxide.Plugins
         }
 
         private class SpawnStatusSyncOkResponse
+        {
+            [JsonProperty("ok")]
+            public bool Ok { get { return true; } }
+
+            [JsonProperty("tiers")]
+            public int Tiers { get; set; }
+        }
+
+        private class TimersSyncPayload
+        {
+            [JsonProperty("tiers")]
+            public Dictionary<string, TimersPayload> Tiers { get; set; }
+        }
+
+        // Repassado ADIANTE como veio - mesma regra do
+        // SpawnStatusPayload: este plugin e o hub, e quem entende de
+        // fornalha e bancada e o OrigemZPlayer.
+        //
+        // float? e nao float: ausente quer dizer "este nivel nao
+        // decide este timer", e o OrigemZPlayer cai para o nivel de
+        // baixo. Um float sem nullable viraria 0 na desserializacao,
+        // e 0 aqui nao e x1 - e parar o tempo.
+        private class TimersPayload
+        {
+            [JsonProperty("smelt", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Smelt { get; set; }
+
+            [JsonProperty("craft", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Craft { get; set; }
+
+            [JsonProperty("research", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Research { get; set; }
+
+            [JsonProperty("recycle", NullValueHandling = NullValueHandling.Ignore)]
+            public float? Recycle { get; set; }
+        }
+
+        private class TimersSyncOkResponse
         {
             [JsonProperty("ok")]
             public bool Ok { get { return true; } }
@@ -4699,7 +5712,25 @@ namespace Oxide.Plugins
 
             try
             {
-                if (dispenser == null || dispenser.gatherType != ResourceDispenser.GatherType.Ore)
+                if (dispenser == null)
+                {
+                    return;
+                }
+
+                // ####  A MISSAO CONTA ARVORE; O RANKING, SO PEDRA  ####
+                //
+                // O filtro de `GatherType.Ore` logo abaixo e do
+                // RANKING, que mede minerio. Ele estava ANTES desta
+                // linha, e por isso "colete 100 wood" nunca saia do
+                // zero: madeira e `GatherType.Tree`, e o golpe
+                // voltava daqui sem que a missao visse o item.
+                //
+                // MEDIDO no Assembly-CSharp: o enum tem Tree, Ore,
+                // Flesh. A missao quer os tres - quem decide o que
+                // conta e o `target` dela, e nao a familia do no.
+                QuestGatherItem(entity as BasePlayer, item);
+
+                if (dispenser.gatherType != ResourceDispenser.GatherType.Ore)
                 {
                     return;
                 }
@@ -4730,7 +5761,16 @@ namespace Oxide.Plugins
 
             try
             {
-                if (dispenser == null || dispenser.gatherType != ResourceDispenser.GatherType.Ore)
+                if (dispenser == null)
+                {
+                    return;
+                }
+
+                // Ver o comentario do OnDispenserGather: derrubar a
+                // arvore inteira tambem conta para a missao.
+                QuestGatherItem(player, item);
+
+                if (dispenser.gatherType != ResourceDispenser.GatherType.Ore)
                 {
                     return;
                 }
@@ -4779,6 +5819,7 @@ namespace Oxide.Plugins
                         continue;
                     }
 
+                    QuestGatherItem(player, slot.itemDef, (int)slot.amount);
                     AddOre(player, slot.itemDef, (int)slot.amount);
                 }
             }
@@ -4790,6 +5831,33 @@ namespace Oxide.Plugins
             {
                 StatsHookStop(HookCollectiblePickup, started);
             }
+        }
+
+        // ####  A COLETA, DO PONTO DE VISTA DA MISSAO  ####
+        //
+        // As missoes contam o recurso PELO NOME, e nao pela familia:
+        // o ranking soma `ore.total`, a missao pede `wood` ou
+        // `sulfur.ore`. O mesmo golpe serve aos dois, mas o filtro
+        // de familia e so do ranking - ver OnDispenserGather.
+        //
+        // As mesmas recusas do AddOre: NPC, entidade sem dono, id
+        // que nao e SteamID64.
+        private void QuestGatherItem(BasePlayer player, Item item)
+        {
+            if (item != null)
+            {
+                QuestGatherItem(player, item.info, item.amount);
+            }
+        }
+
+        private void QuestGatherItem(BasePlayer player, ItemDefinition info, int amount)
+        {
+            if (player == null || info == null || amount <= 0 || player.IsNpc)
+            {
+                return;
+            }
+
+            QuestOnGather(player, info.shortname, amount);
         }
 
         private void AddOreFromItem(BasePlayer player, Item item)
@@ -4814,11 +5882,6 @@ namespace Oxide.Plugins
             {
                 return;
             }
-
-            // As missoes contam o recurso PELO NOME, e nao pela
-            // familia: o ranking soma `ore.total`, a missao pede
-            // enxofre. O mesmo golpe de picareta serve aos dois.
-            QuestOnGather(player, info.shortname, amount);
 
             string metric;
 
@@ -6883,6 +7946,14 @@ namespace Oxide.Plugins
             // pode custar o progresso de missao de ninguem.
             QuestSave(true);
 
+            // ####  A CAIXA ABERTA PRENDE O CURSOR  ####
+            //
+            // Ela tem `CursorEnabled`, e um `oxide.reload` com
+            // alguem conversando deixaria essa pessoa sem mirar,
+            // correr ou sair - com um painel que nenhum botao
+            // fecha, porque o plugin que os atende acabou de sumir.
+            QuestNpcDialogCloseAll();
+
             // Os NPCs sao `enableSaving = false`: eles nao vao para o
             // save do mundo, e um oxide.reload sem esta linha
             // deixaria bonecos orfaos no mapa que ninguem consegue
@@ -7252,6 +8323,7 @@ namespace Oxide.Plugins
         // perguntar quanto os ganchos custam neste servidor.
         private const string HookItemAdded = "OnItemAddedToContainer";
         private const string HookPlayerInput = "OnPlayerInput";
+        private const string HookNpcConversation = "OnNpcConversationStart";
         private const string QuestDataFile = "OrigemZAgentQuests";
         private const int QuestContract = 1;
 
@@ -7488,6 +8560,31 @@ namespace Oxide.Plugins
                         continue;
                     }
 
+                    // ####  A CONCLUIDA SEM OBJETIVO DE PLUGIN AINDA CONTA  ####
+                    //
+                    // Uma missao so de tempo online ou de metrica nao
+                    // tem objetivo que o plugin conte - mas o balcao
+                    // do NPC precisa saber que ela fechou, senao ele
+                    // oferece ACEITAR nela. O marcador entra sem alvo
+                    // e sem contador: ele carrega o ESTADO.
+                    if (objectives.Count == 0)
+                    {
+                        assignments.Add(new QuestAssignment
+                        {
+                            PlayerQuestId = (long)quest["pq"],
+                            QuestId = (string)quest["id"],
+                            Status = (string)quest["status"] ?? "active",
+                            Seq = -1,
+                            Kind = string.Empty,
+                            Target = string.Empty,
+                            Label = string.Empty,
+                            Need = 0,
+                            Have = 0
+                        });
+
+                        continue;
+                    }
+
                     for (int j = 0; j < objectives.Count; j++)
                     {
                         JObject objective = objectives[j] as JObject;
@@ -7500,9 +8597,14 @@ namespace Oxide.Plugins
                         assignments.Add(new QuestAssignment
                         {
                             PlayerQuestId = (long)quest["pq"],
+                            QuestId = (string)quest["id"],
+                            Status = (string)quest["status"] ?? "active",
                             Seq = (int)objective["seq"],
                             Kind = (string)objective["kind"],
                             Target = (string)objective["target"],
+                            Label = objective["label"] == null
+                                ? (string)objective["target"]
+                                : (string)objective["label"],
                             Need = (int)objective["need"],
                             Have = (int)objective["have"]
                         });
@@ -7564,6 +8666,7 @@ namespace Oxide.Plugins
             if (player != null)
             {
                 _questAssigned.Remove(player.userID);
+                _questNpcDialogs.Remove(player.userID);
             }
         }
 
@@ -7683,6 +8786,14 @@ namespace Oxide.Plugins
                 QuestAssignment assignment = assignments[i];
 
                 if (assignment.Kind != kind || assignment.Target != target)
+                {
+                    continue;
+                }
+
+                // A concluida desce no assign so para o balcao do NPC
+                // saber que ela fechou. Contar nela somaria progresso
+                // numa missao que ja acabou.
+                if (assignment.Status == "completed")
                 {
                     continue;
                 }
@@ -7821,6 +8932,55 @@ namespace Oxide.Plugins
             }
         }
 
+        // Tira o que der de cada item e diz quanto tirou.
+        //
+        // Sem primeira passada: aqui nao ha "tudo ou nada" a
+        // proteger - o que sair do inventario vira progresso na
+        // mesma resposta, e o que nao tinha simplesmente nao saiu.
+        private string QuestConsumePartial(BasePlayer player, List<string> names, List<int> amounts)
+        {
+            StringBuilder taken = new StringBuilder();
+            bool complete = true;
+
+            for (int i = 0; i < names.Count; i++)
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(names[i]);
+                int have = definition == null
+                    ? 0
+                    : player.inventory.GetAmount(definition.itemid);
+                int pego = Math.Min(have, amounts[i]);
+
+                if (pego > 0)
+                {
+                    player.inventory.Take(null, definition.itemid, pego);
+                }
+
+                if (pego < amounts[i])
+                {
+                    complete = false;
+                }
+
+                if (taken.Length > 0)
+                {
+                    taken.Append(',');
+                }
+
+                taken.Append("{\"shortname\":").Append(JsonConvert.ToString(names[i]))
+                    .Append(",\"amount\":").Append(pego).Append('}');
+            }
+
+            // O som de quem entregou alguma coisa. Sem ele o clique
+            // some itens do inventario sem aviso nenhum.
+            if (taken.Length > 0)
+            {
+                player.SendNetworkUpdate();
+            }
+
+            return "{\"ok\":true,\"contract\":" + QuestContract +
+                ",\"taken\":[" + taken + "],\"complete\":" +
+                (complete ? "true" : "false") + "}";
+        }
+
         private string HandleQuestConsume(ConsoleSystem.Arg arg)
         {
             if (!arg.HasArgs(2))
@@ -7881,6 +9041,23 @@ namespace Oxide.Plugins
 
                 names.Add(shortname);
                 amounts.Add(amount);
+            }
+
+            // ####  O MODO PARCIAL  ####
+            //
+            // O resgate e tudo-ou-nada: uma missao que cobra 300
+            // pedras nao pode levar 200 e deixar o jogador sem a
+            // recompensa E sem as pedras.
+            //
+            // A ENTREGA no balcao do NPC e o contrario: ele traz o
+            // que tem, o boneco fica com isso, e o contador anda. E
+            // o pedido do dono em 13/09/2026 -- "deveria aceitar
+            // entrega parcial ate completar tudo".
+            bool partial = (bool?)payload["partial"] ?? false;
+
+            if (partial)
+            {
+                return QuestConsumePartial(player, names, amounts);
             }
 
             // Primeira passada: da para pagar tudo?
@@ -8085,6 +9262,31 @@ namespace Oxide.Plugins
                 json.Append(",\"openEntries\":").Append(_questOpen.Count);
                 json.Append(",\"pending\":").Append(
                     _questPending == null ? 0 : _questPending.Entries.Count);
+
+                // ####  "O NPC NASCEU?" E A SEGUNDA PERGUNTA QUE SE FAZ  ####
+                //
+                // O agente sabe o que MANDOU spawnar; so o jogo sabe
+                // o que esta de pe. Quando um boneco nao aparece no
+                // mundo, a resposta e a diferenca entre estes dois
+                // numeros - e sem eles a unica saida era entrar no
+                // jogo e ir ate as coordenadas.
+                int vivos = 0;
+
+                foreach (KeyValuePair<string, BasePlayer> entry in _questNpcEntities)
+                {
+                    if (entry.Value != null && !entry.Value.IsDestroyed)
+                    {
+                        vivos++;
+                    }
+                }
+
+                json.Append(",\"npcs\":").Append(_questNpcs.Count);
+                // Se os bonecos estao de pe e este campo e false, o
+                // TALK e o USE nunca chegam ao plugin - foi a
+                // pergunta que travou o teste de 12/09/2026.
+                json.Append(",\"npcHooked\":").Append(_questNpcInputHooked ? "true" : "false");
+                json.Append(",\"npcsAlive\":").Append(vivos);
+                json.Append(",\"npcDialogs\":").Append(_questNpcDialogs.Count);
                 json.Append('}');
 
                 arg.ReplyWith(json.ToString());
@@ -8184,9 +9386,16 @@ namespace Oxide.Plugins
         private class QuestAssignment
         {
             public long PlayerQuestId;
+            /// <summary>A quest do CATALOGO. Ver o contrato do assign.</summary>
+            public string QuestId;
+            /// <summary>"active" conta; "completed" so espera o resgate.</summary>
+            public string Status;
             public int Seq;
             public string Kind;
+            /// <summary>A CHAVE do alvo (`metal.fragments`). E com ela que se conta.</summary>
             public string Target;
+            /// <summary>O nome que uma pessoa le. Vem pronto do agente.</summary>
+            public string Label;
             public int Need;
             public int Have;
         }
@@ -8233,13 +9442,33 @@ namespace Oxide.Plugins
         //  ####  POR QUE ELES SAO CONSTRUIDOS AQUI  ####
         //
         //  O Quests.cs de referencia depende do HumanNPC, que nao
-        //  esta instalado nesta rede - e nao ha hook de conversa no
-        //  Oxide desta instalacao (CONFERIDO: grep no Oxide.Rust.dll
-        //  so devolve OnNpcTarget). O boneco e nosso.
+        //  esta instalado nesta rede. O boneco e nosso.
         //
-        //  MEDIDO com Mono.Cecil contra o Assembly-CSharp.dll real:
-        //  NPCShopKeeper existe, herda de NPCPlayer, e o prefab
-        //  `bandit_shopkeeper.prefab` esta nos bundles do servidor.
+        //  ####  O HOOK DE CONVERSA EXISTE, E ELE E QUEM DA O "TALK"  ####
+        //
+        //  A medicao de 06/09 disse que nao havia - ela olhou o
+        //  Oxide.Rust.dll, e o lugar errado. REMEDIDO em 11/09/2026
+        //  com o ilspycmd contra o Assembly-CSharp.dll DESTA
+        //  instalacao (o Oxide ja o patcheia): o
+        //  NPCTalking.Server_BeginTalking chama
+        //  `Interface.CallHook("OnNpcConversationStart", ...)` e
+        //  ABORTA quando a resposta nao e nula.
+        //
+        //  Isso muda o desenho: o prompt "TALK" do jogo aparece
+        //  sozinho em cima de qualquer NPCTalking - e a conversa
+        //  vanilla, que nao queremos, morre no hook. O jogador ve o
+        //  que o Rust ensinou a ver, e quem responde e a nossa tela.
+        //
+        //  MEDIDO no server01, spawnando cada prefab e lendo o tipo:
+        //
+        //    bandit_conversationalist   VehicleVendor : NPCTalking
+        //    boat_shopkeeper            VehicleVendor : NPCTalking
+        //    stables_shopkeeper         VehicleVendor : NPCTalking
+        //    apartment_vendor           ApartmentVendor : NPCTalking
+        //    bandit_shopkeeper          NPCShopKeeper  <- SEM talk
+        //    missionprovider_*          NPCTalking, mas IMissionProvider:
+        //                               spawna um MapMarkerMissionProvider
+        //                               que fica no mapa. Fora.
         //
         //  ####  O `OnPlayerInput` E O HOOK MAIS QUENTE QUE EXISTE  ####
         //
@@ -8251,10 +9480,22 @@ namespace Oxide.Plugins
         //    3. so depois disso ele mede distancia, e contra uma
         //       lista que tem tres ou quatro entradas.
         //
+        //  ####  DOIS CAMINHOS PARA A MESMA PORTA  ####
+        //
+        //  O TALK so alcanca 3 m - e o teto do RPC do jogo
+        //  (`RPC_Server.MaxDistance(3f)`), e nao uma escolha nossa.
+        //  O raio do painel vai a 20, entao o USE por proximidade
+        //  continua existindo para quem configurou mais que isso.
+        //
+        //  Os dois desaguam no `QuestNpcTalk`, e o mesmo freio de
+        //  1,5 s vale para ambos: apertar E em cima do NPC dispara o
+        //  TALK e o USE no mesmo instante, e sem o freio a tela
+        //  abriria duas vezes.
+        //
         //  ####  A TELA E DO AGENTE, E O TRANSPORTE JA EXISTE  ####
         //
         //  Apertar USE perto do NPC nao abre nada aqui: o plugin
-        //  manda o jogador abrir `tela-quest:npc:<id>` pelo mesmo
+        //  manda o jogador abrir `tela-missoes:npc:<id>` pelo mesmo
         //  caminho que o menu ja usa. Zero transporte novo, zero
         //  cache novo, zero tratamento de erro novo.
         //
@@ -8346,6 +9587,47 @@ namespace Oxide.Plugins
                 UseRadius = (float)payload["useRadius"]
             };
 
+            JArray offers = payload["offers"] as JArray;
+
+            if (offers != null)
+            {
+                for (int i = 0; i < offers.Count; i++)
+                {
+                    JObject offer = offers[i] as JObject;
+
+                    if (offer == null)
+                    {
+                        continue;
+                    }
+
+                    info.Offers.Add(new QuestNpcOffer
+                    {
+                        Id = (string)offer["id"],
+                        Title = (string)offer["title"],
+                        // ####  `null` NO JSON NAO E `null` EM C#  ####
+                        //
+                        // `offer["rewardItemId"]` com o campo em null
+                        // devolve um JValue do tipo Null - o `== null`
+                        // da false, e o cast para int estoura com
+                        // "Can not convert Null to Int32". O `npc.set`
+                        // inteiro falhava e o boneco SUMIA do mapa:
+                        // medido em producao em 12/09/2026, ao
+                        // adicionar a um NPC uma missao cujo premio
+                        // nao e item.
+                        //
+                        // O cast para o tipo ANULAVEL e o que o
+                        // Newtonsoft trata: devolve null, e o `??`
+                        // decide.
+                        RewardItemId = (int?)offer["rewardItemId"] ?? 0,
+                        RewardSkinId = (ulong?)offer["rewardSkinId"] ?? 0UL,
+                        Offers = (bool?)offer["offers"] ?? true,
+                        Description = (string)offer["description"],
+                        Goal = (string)offer["goal"],
+                        Reward = (string)offer["reward"]
+                    });
+                }
+            }
+
             if (string.IsNullOrEmpty(info.Id) || string.IsNullOrEmpty(info.Prefab))
             {
                 return BuildError(ErrorInvalidArgs);
@@ -8404,6 +9686,21 @@ namespace Oxide.Plugins
 
                 // O nome que aparece sobre a cabeca dele.
                 npc.displayName = info.Name;
+
+                // ####  O NPCTalking TEM UM SEGUNDO NOME  ####
+                //
+                // O `displayName` e o do jogador; o `NPCName` e o
+                // que a interface de conversa do jogo usa. Um
+                // boneco chamado "Mateus" que se apresenta como
+                // "Airwolf Vendor" - o nome que vem no prefab - e o
+                // tipo de detalhe que faz o jogador achar que
+                // entrou na tela errada.
+                NPCTalking talking = npc as NPCTalking;
+
+                if (talking != null)
+                {
+                    talking.NPCName = new Translate.Phrase(string.Empty, info.Name);
+                }
 
                 // ####  ELE NAO ANDA E NAO MORRE  ####
                 //
@@ -8531,7 +9828,7 @@ namespace Oxide.Plugins
             }
         }
 
-        // Ver o cabecalho: o hook so entra se houver NPC.
+        // Ver o cabecalho: os hooks so entram se houver NPC.
         private void QuestNpcSyncInputHook()
         {
             bool wanted = _questNpcs.Count > 0;
@@ -8544,13 +9841,85 @@ namespace Oxide.Plugins
             if (wanted)
             {
                 Subscribe("OnPlayerInput");
+                Subscribe("OnNpcConversationStart");
             }
             else
             {
                 Unsubscribe("OnPlayerInput");
+                Unsubscribe("OnNpcConversationStart");
             }
 
             _questNpcInputHooked = wanted;
+        }
+
+        // ####  O "TALK" DO JOGO CHEGA AQUI  ####
+        //
+        // O cliente desenha o prompt sozinho em cima de qualquer
+        // NPCTalking e, ao apertar, manda o RPC que o jogo trata em
+        // `Server_BeginTalking`. Ele chama este hook ANTES de abrir
+        // a conversa vanilla - e devolver qualquer coisa nao nula a
+        // aborta.
+        //
+        // E e isso que queremos: o boneco e nosso, as falas do
+        // prefab nao sao. Abortamos e abrimos a nossa tela.
+        //
+        // Um NPC que NAO e nosso (um do Bandit Camp, num mapa que os
+        // tenha) devolve null e conversa como sempre.
+        private object OnNpcConversationStart(NPCTalking npc, BasePlayer player, ConversationData conversation)
+        {
+            if (npc == null || player == null || _questNpcs.Count == 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                QuestNpcInfo mine = QuestNpcOf(npc);
+
+                if (mine == null)
+                {
+                    return null;
+                }
+
+                QuestNpcTalk(player, mine);
+
+                // Nao nulo = a conversa do jogo nao comeca.
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ReportStatsHookError(HookNpcConversation, ex);
+
+                // ####  O ERRO NAO PODE DEVOLVER O JOGADOR A CONVERSA VANILLA  ####
+                //
+                // Se a nossa tela falhou, abrir as falas do prefab
+                // no lugar dela seria o pior dos dois mundos: o
+                // jogador veria o "Airwolf Vendor" oferecendo
+                // helicoptero. Melhor nao abrir nada.
+                return true;
+            }
+        }
+
+        // O NPC do jogo e um dos nossos? Devolve a definicao dele.
+        //
+        // A varredura e por valor e nao por chave porque a lista tem
+        // tres ou quatro entradas - um dicionario reverso por net.ID
+        // custaria mais manutencao que os microssegundos que economiza.
+        private QuestNpcInfo QuestNpcOf(BaseEntity entity)
+        {
+            foreach (KeyValuePair<string, BasePlayer> entry in _questNpcEntities)
+            {
+                if (!ReferenceEquals(entry.Value, entity))
+                {
+                    continue;
+                }
+
+                QuestNpcInfo info;
+
+                return _questNpcs.TryGetValue(entry.Key, out info) ? info : null;
+            }
+
+            return null;
         }
 
         // ####  O HOOK DE CADA QUADRO  ####
@@ -8573,15 +9942,6 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                // O freio do toque repetido. Ver `_questNpcLastUse`.
-                float last;
-
-                if (_questNpcLastUse.TryGetValue(player.userID, out last) &&
-                    UnityEngine.Time.realtimeSinceStartup - last < QuestNpcUseCooldown)
-                {
-                    return;
-                }
-
                 QuestNpcInfo nearest = QuestNpcNear(player);
 
                 if (nearest == null)
@@ -8589,38 +9949,823 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                _questNpcLastUse[player.userID] = UnityEngine.Time.realtimeSinceStartup;
-
-                // ####  A ENTREGA ACONTECE ANTES DA TELA  ####
-                //
-                // Se este NPC e o destino de uma entrega que o
-                // jogador esta fazendo, o pacote chega AQUI - e a
-                // tela que abre em seguida ja mostra a missao
-                // pronta para resgatar.
-                //
-                // A ordem importa: abrir a tela primeiro mostraria a
-                // entrega ainda pendente, e o jogador apertaria USE
-                // de novo achando que nao funcionou.
-                QuestTryDeliver(player, nearest.Id);
-
-                // ####  QUEM ABRE A TELA E O AGENTE  ####
-                //
-                // Nao ha CUI aqui, e o plugin TAMBEM nao manda o
-                // `origemz.ui.open`: aquele comando recusa o que vem
-                // do cliente (`arg.Connection != null`) - de
-                // proposito, para um jogador nao abrir a tela de
-                // outro.
-                //
-                // Entao este plugin GRITA, o agente le, confere que
-                // o NPC existe naquele servidor e manda o comando
-                // com a autoridade dele. Uma ida a mais, e a
-                // conferencia que ela paga vale.
-                QuestNpcPush(player, nearest.Id);
+                QuestNpcTalk(player, nearest);
             }
             catch (Exception ex)
             {
                 ReportStatsHookError(HookPlayerInput, ex);
             }
+        }
+
+        // ============================================================
+        //  A CAIXA DE CONVERSA
+        //
+        //  ####  POR QUE ELA E DESENHADA AQUI, E NAO PEDIDA  ####
+        //
+        //  Ate 12/09/2026 o TALK mandava o AGENTE abrir a tela de
+        //  missoes daquele NPC. Eram cinco saltos antes de o jogador
+        //  ver qualquer coisa: o plugin gritava, o agente lia o
+        //  console, mandava abrir, o plugin pedia a tela, o agente
+        //  respondia. Qualquer tropeco no caminho virava "Nao
+        //  consegui carregar essa pagina" - que foi o que o teste de
+        //  12/09/2026 relatou com o NPC "Wood".
+        //
+        //  Agora a caixa e local: o que ela mostra desceu junto com
+        //  o NPC (ver `Offers`), e o TALK a desenha no quadro
+        //  seguinte. Nenhuma ida a rede, nenhum "carregando".
+        //
+        //  ####  O DESENHO E O DO /menu, E NAO O DO JOGO  ####
+        //
+        //  A primeira versao copiou a caixa do CZ-721 do Outpost, em
+        //  verde. O dono olhou e pediu o contrario: "traga o mesmo
+        //  designer que temos em nosso /menu". Entao as cores sao as
+        //  do ui-widgets.ts do agente - bg #0F0F0F, surface #1B1B1B,
+        //  surface-2 #262626, texto #E8E8E8, apagado #9A9A9A e o
+        //  vermelho #C43F2C -, e o card de missao e o mesmo da aba
+        //  MISSOES: titulo, objetivo com contador, premio em
+        //  vermelho, e o botao a direita.
+        //
+        //  ####  O QUE CONTINUA SENDO DO AGENTE  ####
+        //
+        //  A DECISAO. O plugin sabe o que o jogador esta PERSEGUINDO
+        //  (o `assign` diz), e e so isso: se a missao pode ser pega,
+        //  se esta em cooldown, se a cadeia permite, quem responde e
+        //  o agente. O clique grita, ele decide, e a frase que o
+        //  jogador le nasce la.
+        //
+        //  ####  A CONVERSA NATIVA NAO SERVIA  ####
+        //
+        //  As falas dela sao asset do CLIENTE e o servidor so manda
+        //  indices: o NPC falaria as frases do vendedor de
+        //  helicoptero, em ingles.
+        // ============================================================
+
+        /// <summary>Quem cuida das missoes sem ser dono do servidor.</summary>
+        private const string QuestNpcPermission = "origemzagent.questnpc";
+
+        private const string QuestNpcDialogName = "OZQuestNpcDialog";
+        private const string QuestNpcPickCommand = "origemz.quest.npc.pick";
+        private const string QuestNpcClaimCommand = "origemz.quest.npc.claim";
+        private const string QuestNpcCloseCommand = "origemz.quest.npc.close";
+
+        // A paleta do /menu. Ver ui-widgets.ts (C).
+        private const string CorFundo = "0.059 0.059 0.059 0.98";
+        private const string CorCartao = "0.106 0.106 0.106 1";
+        private const string CorRelevo = "0.149 0.149 0.149 1";
+        private const string CorLinha = "0.180 0.180 0.180 1";
+        private const string CorTexto = "0.910 0.910 0.910 1";
+        private const string CorApagado = "0.604 0.604 0.604 1";
+        private const string CorVermelho = "0.769 0.247 0.173 1";
+
+        private const string FonteBold = "robotocondensed-bold.ttf";
+        private const string FonteRegular = "robotocondensed-regular.ttf";
+
+        // A caixa em pixels, e nao em fracao da tela: card de altura
+        // fixa com ancora relativa encolhe em monitor pequeno e o
+        // texto vaza. Ver `QuestNpcDialogOpen`.
+        private const int DialogLargura = 660;
+        private const int DialogCabecalho = 42;
+        private const int DialogFala = 34;
+        private const int DialogCartao = 62;
+        private const int DialogRodape = 42;
+
+        /// <summary>Quem esta com a caixa aberta, e de qual NPC.</summary>
+        private Dictionary<ulong, string> _questNpcDialogs = new Dictionary<ulong, string>();
+
+        /// <summary>O icone do item, sem o `skinid` que derruba o cliente.</summary>
+        private class QuestItemIcon : ICuiComponent
+        {
+            public string Type { get { return "UnityEngine.UI.Image"; } }
+
+            [JsonProperty("itemid")]
+            public int ItemId { get; set; }
+
+            // ####  skinid 0 DERRUBA O JOGADOR  ####
+            //
+            // O cliente procura a skin pedida na lista do item; com
+            // 0 num item SEM skins o FirstOrDefault devolve o
+            // default do struct (id 0), o `if` passa, `invItem` e
+            // null e o AddUI lanca NullReference - o jogador CAI do
+            // servidor. Omitir o campo faz o cliente pular o bloco
+            // e usar o icone padrao, que e o que se quer.
+            //
+            // E a mesma pegadinha documentada em game/ui-cui.ts.
+            [JsonProperty("skinid", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public ulong SkinId { get; set; }
+
+            [JsonProperty("color")]
+            public string Color { get { return "1 1 1 1"; } }
+        }
+
+        private void QuestNpcDialogOpen(BasePlayer player, QuestNpcInfo npc, string aviso = null)
+        {
+            QuestNpcDialogClose(player);
+
+            List<QuestNpcOffer> ofertas = npc.Offers ?? new List<QuestNpcOffer>();
+            int linhas = Math.Max(ofertas.Count, 1);
+            int altura = DialogCabecalho + DialogFala + (linhas * DialogCartao) + DialogRodape + 16;
+
+            CuiElementContainer container = new CuiElementContainer();
+
+            // ####  ONDE ELA FICA  ####
+            //
+            // Centrada na horizontal, e com o TOPO um pouco acima do
+            // meio da tela. A primeira versao a punha 40 px abaixo do
+            // centro e o dono viu na hora: "esta em baixo, teria que
+            // subir mais o menu" - com a caixa quase encostando na
+            // barra de itens.
+            //
+            // O boneco continua visivel: o rosto dele fica acima
+            // deste topo, que e o que importa para saber com quem se
+            // esta falando.
+            const int DialogAcimaDoCentro = 70;
+
+            string root = container.Add(new CuiPanel
+            {
+                Image = { Color = CorFundo },
+                RectTransform =
+                {
+                    AnchorMin = "0.5 0.5",
+                    AnchorMax = "0.5 0.5",
+                    OffsetMin = (-DialogLargura / 2) + " " + (DialogAcimaDoCentro - altura),
+                    OffsetMax = (DialogLargura / 2) + " " + DialogAcimaDoCentro
+                },
+                CursorEnabled = true
+            }, "Overlay", QuestNpcDialogName);
+
+            // --- o cabecalho, com a barra vermelha do /menu
+            CuiPanel faixa = new CuiPanel { Image = { Color = CorRelevo } };
+
+            QuestNpcFaixa(faixa.RectTransform, 0, DialogCabecalho);
+            container.Add(faixa, root);
+
+            container.Add(new CuiPanel
+            {
+                Image = { Color = CorVermelho },
+                RectTransform =
+                {
+                    AnchorMin = "0 1", AnchorMax = "0 1",
+                    OffsetMin = "0 " + (-DialogCabecalho), OffsetMax = "3 0"
+                }
+            }, root);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = string.IsNullOrEmpty(npc.Name) ? "NPC" : npc.Name.ToUpperInvariant(),
+                    FontSize = 15,
+                    Font = FonteBold,
+                    Align = TextAnchor.MiddleLeft,
+                    Color = CorTexto
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 1", AnchorMax = "1 1",
+                    OffsetMin = "16 " + (-DialogCabecalho), OffsetMax = "-52 0"
+                }
+            }, root);
+
+            container.Add(new CuiButton
+            {
+                Button = { Color = CorRelevo, Command = QuestNpcCloseCommand },
+                Text =
+                {
+                    Text = "X", FontSize = 13, Font = FonteBold,
+                    Align = TextAnchor.MiddleCenter, Color = CorApagado
+                },
+                RectTransform =
+                {
+                    AnchorMin = "1 1", AnchorMax = "1 1",
+                    OffsetMin = "-40 " + (-DialogCabecalho + 8), OffsetMax = "-8 -8"
+                }
+            }, root);
+
+            // --- a fala
+            CuiLabel fala = new CuiLabel
+            {
+                Text =
+                {
+                    Text = string.IsNullOrEmpty(aviso) ? QuestNpcDialogGreeting(npc) : aviso,
+                    FontSize = 12,
+                    Font = FonteRegular,
+                    Align = TextAnchor.MiddleLeft,
+                    Color = string.IsNullOrEmpty(aviso) ? CorApagado : CorVermelho
+                }
+            };
+
+            QuestNpcFaixa(fala.RectTransform, DialogCabecalho + 4, DialogFala, 16, 16);
+            container.Add(fala, root);
+
+            // --- os cartoes, um por missao
+            int topo = DialogCabecalho + DialogFala + 8;
+
+            if (ofertas.Count == 0)
+            {
+                CuiLabel vazio = new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = "Nao tenho trabalho para voce agora.",
+                        FontSize = 12, Font = FonteRegular,
+                        Align = TextAnchor.MiddleLeft, Color = CorApagado
+                    }
+                };
+
+                QuestNpcFaixa(vazio.RectTransform, topo, DialogCartao, 16, 16);
+                container.Add(vazio, root);
+            }
+
+            for (int i = 0; i < ofertas.Count; i++)
+            {
+                QuestNpcDialogCard(container, root, player, npc, ofertas[i], topo);
+                topo += DialogCartao;
+            }
+
+            // --- o rodape: fechar
+            container.Add(new CuiButton
+            {
+                Button = { Color = CorRelevo, Command = QuestNpcCloseCommand },
+                Text =
+                {
+                    Text = "FECHAR", FontSize = 11, Font = FonteBold,
+                    Align = TextAnchor.MiddleCenter, Color = CorTexto
+                },
+                RectTransform =
+                {
+                    AnchorMin = "1 0", AnchorMax = "1 0",
+                    OffsetMin = "-126 10", OffsetMax = "-16 38"
+                }
+            }, root);
+
+            CuiHelper.AddUi(player, container);
+            _questNpcDialogs[player.userID] = npc.Id;
+        }
+
+        // Uma faixa colada no topo, medida em pixels.
+        //
+        // Preenche em vez de devolver: `CuiPanel.RectTransform` e
+        // somente leitura, e so aceita o inicializador aninhado.
+        private static void QuestNpcFaixa(
+            CuiRectTransform rect, int fromTop, int height, int left = 0, int right = 0)
+        {
+            rect.AnchorMin = "0 1";
+            rect.AnchorMax = "1 1";
+            rect.OffsetMin = left + " " + (-(fromTop + height));
+            rect.OffsetMax = (-right) + " " + (-fromTop);
+        }
+
+        // ####  O CARTAO E O MESMO DA ABA MISSOES  ####
+        //
+        // Icone do premio a esquerda, titulo, o objetivo com o
+        // contador quando ele ja esta correndo, o premio em
+        // vermelho, e o botao a direita.
+        private void QuestNpcDialogCard(
+            CuiElementContainer container,
+            string root,
+            BasePlayer player,
+            QuestNpcInfo npc,
+            QuestNpcOffer offer,
+            int fromTop)
+        {
+            CuiPanel fundo = new CuiPanel { Image = { Color = CorCartao } };
+
+            QuestNpcFaixa(fundo.RectTransform, fromTop, DialogCartao - 6, 12, 12);
+
+            string card = container.Add(fundo, root);
+
+            // A regua de baixo, como no /menu.
+            container.Add(new CuiPanel
+            {
+                Image = { Color = CorLinha },
+                RectTransform = { AnchorMin = "0 0", AnchorMax = "1 0", OffsetMax = "0 1" }
+            }, card);
+
+            // O icone do item do premio, quando o premio e item.
+            if (offer.RewardItemId != 0)
+            {
+                container.Add(new CuiElement
+                {
+                    Parent = card,
+                    Components =
+                    {
+                        new QuestItemIcon { ItemId = offer.RewardItemId, SkinId = offer.RewardSkinId },
+                        new CuiRectTransformComponent
+                        {
+                            AnchorMin = "0 0.5", AnchorMax = "0 0.5",
+                            OffsetMin = "10 -19", OffsetMax = "48 19"
+                        }
+                    }
+                });
+            }
+
+            int textoEsquerda = offer.RewardItemId != 0 ? 58 : 14;
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = string.IsNullOrEmpty(offer.Title) ? offer.Id : offer.Title,
+                    FontSize = 13, Font = FonteBold,
+                    Align = TextAnchor.UpperLeft, Color = CorTexto
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0", AnchorMax = "1 1",
+                    OffsetMin = textoEsquerda + " 28", OffsetMax = "-140 -8"
+                }
+            }, card);
+
+            List<QuestAssignment> andamento = QuestNpcOfferProgress(player, offer.Id);
+            string objetivo = offer.Goal ?? string.Empty;
+
+            if (andamento != null)
+            {
+                objetivo = QuestNpcProgressLine(andamento, objetivo);
+            }
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = objetivo,
+                    FontSize = 11, Font = FonteRegular,
+                    Align = TextAnchor.UpperLeft, Color = CorApagado
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0", AnchorMax = "1 1",
+                    OffsetMin = textoEsquerda + " 12", OffsetMax = "-140 -26"
+                }
+            }, card);
+
+            if (!string.IsNullOrEmpty(offer.Reward))
+            {
+                container.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = offer.Reward,
+                        FontSize = 11, Font = FonteRegular,
+                        Align = TextAnchor.UpperLeft, Color = CorVermelho
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0 0", AnchorMax = "1 1",
+                        OffsetMin = textoEsquerda + " -2", OffsetMax = "-140 -40"
+                    }
+                }, card);
+            }
+
+            // ####  O BOTAO DIZ O ESTADO, E NAO SO A ACAO  ####
+            //
+            // Oferecer "ACEITAR" numa missao que o jogador acabou de
+            // pegar e o que o teste de 12/09/2026 estranhou: a caixa
+            // nao sabia o que ele ja estava perseguindo. O `assign`
+            // sabe - ver QuestAssignment.
+            if (andamento == null)
+            {
+                // ####  QUEM SO RECEBE NAO OFERECE  ####
+                //
+                // O cartao de uma missao que este boneco apenas
+                // recebe nao tem botao enquanto o jogador nao a
+                // concluiu: mandar aceitar aqui o faria pegar a
+                // missao no lugar errado.
+                if (!offer.Offers)
+                {
+                    QuestNpcDialogNote(container, card, "ENTREGA AQUI");
+                    return;
+                }
+
+                QuestNpcDialogButton(container, card, "ACEITAR", CorRelevo, CorTexto,
+                    QuestNpcPickCommand + " " + npc.Id + " " + offer.Id);
+                return;
+            }
+
+            // ####  ENTREGAR VALE MESMO FALTANDO  ####
+            //
+            // O dono pediu assim: "mudar de aceitar para Entregar",
+            // e "caso nao termine, aparece um modal que falta x
+            // coisa". Um botao que some enquanto falta obriga o
+            // jogador a decorar o que ainda devia - e a caixa tem a
+            // conta na mao.
+            //
+            // Entao o botao existe sempre. Quem esta pronto resgata;
+            // quem nao esta le o que falta, na propria caixa.
+            long pq = andamento[0].PlayerQuestId;
+
+            // ####  QUEM DIZ QUE FECHOU E O AGENTE  ####
+            //
+            // O contador do plugin pode estar adiantado (o lote
+            // ainda nao subiu) ou atrasado (um reload esvaziou). O
+            // `status` vem do banco do agente e e a palavra final;
+            // os contadores locais so servem enquanto ela nao chega.
+            bool pronta = andamento[0].Status == "completed" || QuestNpcOfferDone(andamento);
+
+            QuestNpcDialogButton(
+                container,
+                card,
+                pronta ? "RESGATAR" : "ENTREGAR",
+                pronta ? CorVermelho : CorRelevo,
+                pronta ? "1 1 1 1" : CorTexto,
+                QuestNpcClaimCommand + " " + npc.Id + " " +
+                    pq.ToString(CultureInfo.InvariantCulture) + " " + offer.Id);
+        }
+
+        /// <summary>Todos os objetivos daquela missao fecharam?</summary>
+        private static bool QuestNpcOfferDone(List<QuestAssignment> andamento)
+        {
+            for (int i = 0; i < andamento.Count; i++)
+            {
+                if (andamento[i].Have < andamento[i].Need)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // "Matar 2 chicken  -  1 / 2", e com dois objetivos o pior
+        // deles: e o que ainda segura a entrega.
+        private static string QuestNpcProgressLine(List<QuestAssignment> andamento, string goal)
+        {
+            StringBuilder line = new StringBuilder(goal == string.Empty ? "Em andamento" : goal);
+
+            bool primeiro = true;
+
+            for (int i = 0; i < andamento.Count; i++)
+            {
+                // O marcador de estado (Seq -1) nao tem contador.
+                if (andamento[i].Need <= 0)
+                {
+                    continue;
+                }
+
+                line.Append(primeiro ? "  -  " : "  |  ");
+                line.Append(andamento[i].Have).Append(" / ").Append(andamento[i].Need);
+                primeiro = false;
+            }
+
+            return line.ToString();
+        }
+
+        // O que ainda falta, em uma frase. E o que o aviso mostra
+        // quando o jogador clica em ENTREGAR cedo demais.
+        private static string QuestNpcMissingLine(List<QuestAssignment> andamento)
+        {
+            StringBuilder line = new StringBuilder();
+
+            for (int i = 0; i < andamento.Count; i++)
+            {
+                QuestAssignment item = andamento[i];
+
+                if (item.Need <= 0 || item.Have >= item.Need)
+                {
+                    continue;
+                }
+
+                if (line.Length > 0)
+                {
+                    line.Append(", ");
+                }
+
+                line.Append(item.Need - item.Have).Append(' ')
+                    .Append(string.IsNullOrEmpty(item.Label) ? item.Target : item.Label);
+            }
+
+            return line.ToString();
+        }
+
+        /// <summary>Um rotulo no lugar do botao, para o cartao sem acao.</summary>
+        private void QuestNpcDialogNote(CuiElementContainer container, string card, string text)
+        {
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = text, FontSize = 10, Font = FonteBold,
+                    Align = TextAnchor.MiddleCenter, Color = CorApagado
+                },
+                RectTransform =
+                {
+                    AnchorMin = "1 0.5", AnchorMax = "1 0.5",
+                    OffsetMin = "-128 -14", OffsetMax = "-12 14"
+                }
+            }, card);
+        }
+
+        private void QuestNpcDialogButton(
+            CuiElementContainer container,
+            string card,
+            string text,
+            string color,
+            string textColor,
+            string command)
+        {
+            container.Add(new CuiButton
+            {
+                Button = { Color = color, Command = command },
+                Text =
+                {
+                    Text = text, FontSize = 11, Font = FonteBold,
+                    Align = TextAnchor.MiddleCenter, Color = textColor
+                },
+                RectTransform =
+                {
+                    AnchorMin = "1 0.5", AnchorMax = "1 0.5",
+                    OffsetMin = "-128 -14", OffsetMax = "-12 14"
+                }
+            }, card);
+        }
+
+        /// <summary>Os objetivos daquela missao que ele persegue. `null` = nenhum.</summary>
+        private List<QuestAssignment> QuestNpcOfferProgress(BasePlayer player, string questId)
+        {
+            List<QuestAssignment> assignments;
+
+            if (string.IsNullOrEmpty(questId) ||
+                !_questAssigned.TryGetValue(player.userID, out assignments))
+            {
+                return null;
+            }
+
+            // ####  A MISSAO INTEIRA, E NAO O PRIMEIRO OBJETIVO  ####
+            //
+            // Uma missao com dois objetivos so esta pronta quando os
+            // DOIS fecharam. Guardar so o primeiro diria "2/2" com o
+            // segundo em zero, e o RESGATAR apareceria cedo - para o
+            // agente recusar em seguida.
+            List<QuestAssignment> dela = null;
+
+            for (int i = 0; i < assignments.Count; i++)
+            {
+                if (assignments[i].QuestId != questId)
+                {
+                    continue;
+                }
+
+                if (dela == null)
+                {
+                    dela = new List<QuestAssignment>();
+                }
+
+                dela.Add(assignments[i]);
+            }
+
+            return dela;
+        }
+
+        // A fala de cima.
+        //
+        // A descricao da missao quando ha uma so - e o texto que o
+        // admin escreveu justamente para ser lido antes de aceitar.
+        // Com varias, uma frase neutra: escolher a descricao de uma
+        // delas seria anunciar a errada.
+        private string QuestNpcDialogGreeting(QuestNpcInfo npc)
+        {
+            if (npc.Offers.Count == 1 && !string.IsNullOrEmpty(npc.Offers[0].Description))
+            {
+                return npc.Offers[0].Description;
+            }
+
+            if (npc.Offers.Count == 0)
+            {
+                return "Nao tenho trabalho para voce hoje.";
+            }
+
+            return "Tenho trabalho para voce. O que vai ser?";
+        }
+
+        private void QuestNpcDialogCloseAll()
+        {
+            List<ulong> abertas = new List<ulong>(_questNpcDialogs.Keys);
+
+            for (int i = 0; i < abertas.Count; i++)
+            {
+                QuestNpcDialogClose(BasePlayer.FindByID(abertas[i]));
+            }
+
+            _questNpcDialogs.Clear();
+        }
+
+        private void QuestNpcDialogClose(BasePlayer player)
+        {
+            if (player == null)
+            {
+                return;
+            }
+
+            CuiHelper.DestroyUi(player, QuestNpcDialogName);
+            _questNpcDialogs.Remove(player.userID);
+        }
+
+        [ConsoleCommand(QuestNpcCloseCommand)]
+        private void CommandQuestNpcClose(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = arg == null ? null : arg.Player();
+
+            if (player != null)
+            {
+                QuestNpcDialogClose(player);
+            }
+        }
+
+        // ####  O CLIQUE VEM DO CLIENTE, ENTAO ELE E CONFERIDO  ####
+        //
+        // O comando chega com o npcId e o questId escritos pelo
+        // cliente. O plugin confere a unica coisa que so ele sabe -
+        // que o jogador esta MESMO ao lado daquele boneco -, e o
+        // agente confere o resto: se a missao e daquele NPC, se ela
+        // pode ser pega, se ja foi feita.
+        [ConsoleCommand(QuestNpcPickCommand)]
+        private void CommandQuestNpcPick(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                BasePlayer player = arg == null ? null : arg.Player();
+
+                if (player == null || !arg.HasArgs(2))
+                {
+                    return;
+                }
+
+                QuestNpcInfo npc = QuestNpcReachable(player, arg.GetString(0));
+
+                if (npc == null)
+                {
+                    return;
+                }
+
+                QuestNpcDialogClose(player);
+                QuestNpcPushAccept(player, npc.Id, arg.GetString(1));
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestNpcPickCommand + " falhou: " + ex);
+            }
+        }
+
+        // Resgatar no balcao: o jogador voltou ao NPC com a missao
+        // pronta. O numero da tentativa e o que o `assign` trouxe.
+        [ConsoleCommand(QuestNpcClaimCommand)]
+        private void CommandQuestNpcClaim(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                BasePlayer player = arg == null ? null : arg.Player();
+
+                if (player == null || !arg.HasArgs(2))
+                {
+                    return;
+                }
+
+                QuestNpcInfo npc = QuestNpcReachable(player, arg.GetString(0));
+
+                if (npc == null)
+                {
+                    return;
+                }
+
+                long playerQuestId;
+
+                if (!long.TryParse(arg.GetString(1), out playerQuestId))
+                {
+                    return;
+                }
+
+                // ####  O QUE FALTA E DITO AQUI, E NAO NO CHAT  ####
+                //
+                // O jogador clicou em ENTREGAR olhando para a caixa;
+                // a resposta tem de aparecer nela. Mandar ao agente
+                // para receber "ainda nao terminou" no chat custaria
+                // uma ida a rede para dizer o que o plugin ja sabe.
+                List<QuestAssignment> andamento = arg.HasArgs(3)
+                    ? QuestNpcOfferProgress(player, arg.GetString(2))
+                    : null;
+
+                if (andamento != null && !QuestNpcOfferDone(andamento))
+                {
+                    QuestNpcDialogOpen(player, npc, "Ainda falta: " + QuestNpcMissingLine(andamento));
+                    return;
+                }
+
+                QuestNpcDialogClose(player);
+                QuestNpcPushClaim(player, npc.Id, playerQuestId);
+            }
+            catch (Exception ex)
+            {
+                PrintError(QuestNpcClaimCommand + " falhou: " + ex);
+            }
+        }
+
+        /// <summary>O NPC pedido, se o jogador estiver perto dele.</summary>
+        private QuestNpcInfo QuestNpcReachable(BasePlayer player, string npcId)
+        {
+            QuestNpcInfo npc;
+
+            if (string.IsNullOrEmpty(npcId) || !_questNpcs.TryGetValue(npcId, out npc))
+            {
+                return null;
+            }
+
+            BasePlayer boneco;
+
+            if (!_questNpcEntities.TryGetValue(npc.Id, out boneco) ||
+                boneco == null || boneco.IsDestroyed)
+            {
+                return null;
+            }
+
+            // O alcance do clique e um pouco maior que o do USE: o
+            // jogador da um passo enquanto le, e perder a missao por
+            // isso seria absurdo.
+            if (Vector3.Distance(player.transform.position, boneco.transform.position) >
+                npc.UseRadius + 2f)
+            {
+                player.ChatMessage("Voce se afastou do NPC.");
+                QuestNpcDialogClose(player);
+                return null;
+            }
+
+            return npc;
+        }
+
+        private void QuestNpcPushAccept(BasePlayer player, string npcId, string questId)
+        {
+            QuestNpcPushChoice(player, "accept", npcId, ",\"questId\":" + JsonConvert.ToString(questId));
+        }
+
+        private void QuestNpcPushClaim(BasePlayer player, string npcId, long playerQuestId)
+        {
+            QuestNpcPushChoice(player, "claim", npcId,
+                ",\"pq\":" + playerQuestId.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private void QuestNpcPushChoice(BasePlayer player, string kind, string npcId, string extra)
+        {
+            if (string.IsNullOrEmpty(_questSecret))
+            {
+                return;
+            }
+
+            StringBuilder line = new StringBuilder();
+
+            line.Append(QuestNpcMarker);
+            line.Append("{\"contract\":").Append(QuestContract);
+            line.Append(",\"secret\":\"").Append(_questSecret).Append('"');
+            line.Append(",\"kind\":\"").Append(kind).Append('"');
+            line.Append(",\"steamId\":\"").Append(player.UserIDString).Append('"');
+            line.Append(",\"npcId\":").Append(JsonConvert.ToString(npcId));
+            line.Append(extra);
+            line.Append('}');
+
+            Puts(line.ToString());
+        }
+
+        // ####  A PORTA UNICA: O TALK E O USE DESAGUAM AQUI  ####
+        //
+        // O freio esta DENTRO, e nao em cada caminho: apertar E em
+        // cima do NPC dispara os dois no mesmo instante, e o
+        // segundo a chegar precisa encontrar a porta fechada.
+        private void QuestNpcTalk(BasePlayer player, QuestNpcInfo npc)
+        {
+            float last;
+
+            if (_questNpcLastUse.TryGetValue(player.userID, out last) &&
+                UnityEngine.Time.realtimeSinceStartup - last < QuestNpcUseCooldown)
+            {
+                return;
+            }
+
+            _questNpcLastUse[player.userID] = UnityEngine.Time.realtimeSinceStartup;
+
+            // ####  A ENTREGA ACONTECE ANTES DA TELA  ####
+            //
+            // Se este NPC e o destino de uma entrega que o jogador
+            // esta fazendo, o pacote chega AQUI - e a tela que abre
+            // em seguida ja mostra a missao pronta para resgatar.
+            //
+            // A ordem importa: abrir a tela primeiro mostraria a
+            // entrega ainda pendente, e o jogador apertaria USE de
+            // novo achando que nao funcionou.
+            QuestTryDeliver(player, npc.Id);
+
+            // ####  A CAIXA E LOCAL; O GRITO E SO O RECADO  ####
+            //
+            // O desenho acontece AGORA, com o que ja esta na
+            // memoria - ver o cabecalho da caixa de conversa. O
+            // grito segue existindo por dois motivos, e nenhum
+            // deles atrasa o jogador:
+            //
+            //   1. ele e a TESTEMUNHA de que este jogador esteve no
+            //      balcao, e e ela que o agente exige antes de
+            //      conceder a missao daquele NPC;
+            //   2. ele e a linha que se procura no console quando
+            //      alguem diz "falei com o NPC e nao aconteceu
+            //      nada".
+            QuestNpcDialogOpen(player, npc);
+            QuestNpcPush(player, npc.Id);
         }
 
         // O pacote chegou?
@@ -8770,14 +10915,16 @@ namespace Oxide.Plugins
         [ChatCommand("questnpc")]
         private void ChatQuestNpc(BasePlayer player, string command, string[] args)
         {
-            if (player == null || !player.IsAdmin)
+            if (player == null || !QuestNpcMayManage(player))
             {
                 return;
             }
 
             if (args == null || args.Length == 0)
             {
-                player.ChatMessage("/questnpc add <nome>  |  /questnpc list");
+                player.ChatMessage(
+                    "/questnpc add <nome>  |  /questnpc move <id>  |  " +
+                    "/questnpc remove <id>  |  /questnpc list");
                 return;
             }
 
@@ -8797,6 +10944,40 @@ namespace Oxide.Plugins
                 return;
             }
 
+            // ####  MOVER E TRAZER, E POR ISSO NAO PEDE COORDENADA  ####
+            //
+            // Quem quer mudar o NPC de lugar ja esta no lugar novo:
+            // e a mesma ideia do `add`. Antes disto, o painel mandava
+            // usar o `add` de novo - e o admin terminava com dois
+            // bonecos, "mateus" e "mateus-2".
+            if (args[0] == "move" || args[0] == "remove")
+            {
+                if (args.Length < 2)
+                {
+                    player.ChatMessage("Uso: /questnpc " + args[0] + " <id>   (veja os ids em /questnpc list)");
+                    return;
+                }
+
+                string id = args[1];
+
+                if (!_questNpcs.ContainsKey(id))
+                {
+                    player.ChatMessage("Nao ha NPC com o id \"" + id + "\" aqui. Veja /questnpc list.");
+                    return;
+                }
+
+                if (args[0] == "remove")
+                {
+                    QuestNpcChatPush("remove", id, null, Vector3.zero, 0f);
+                    player.ChatMessage("Pedi ao agente para apagar \"" + id + "\".");
+                    return;
+                }
+
+                QuestNpcChatPush("move", id, null, player.transform.position, QuestNpcEyesY(player));
+                player.ChatMessage("Pedi ao agente para trazer \"" + id + "\" para ca.");
+                return;
+            }
+
             if (args[0] != "add" || args.Length < 2)
             {
                 player.ChatMessage("Uso: /questnpc add <nome>");
@@ -8804,31 +10985,70 @@ namespace Oxide.Plugins
             }
 
             string name = string.Join(" ", args, 1, args.Length - 1);
-            Vector3 position = player.transform.position;
-            float rotation = player.eyes == null
-                ? 0f
-                : player.eyes.rotation.eulerAngles.y;
 
-            // O agente e quem grava: aqui so se REPORTA a posicao. Um
-            // NPC que existisse so na memoria do plugin sumiria no
-            // primeiro oxide.reload, e o painel nunca saberia dele.
+            QuestNpcChatPush("add", null, name, player.transform.position, QuestNpcEyesY(player));
+
+            player.ChatMessage("Pedi ao agente para cadastrar \"" + name +
+                "\" aqui. Ele aparece em instantes.");
+        }
+
+        // ####  QUEM PODE MEXER NOS BONECOS  ####
+        //
+        // O `IsAdmin` do jogo e o auth level do `users.cfg` - e um
+        // servidor pode nao ter NINGUEM ali, com a administracao
+        // inteira feita por grupo do Oxide. Foi o que aconteceu em
+        // 12/09/2026: o dono, com [God] e Vanish, digitava
+        // `/questnpc move` e o comando voltava em silencio.
+        //
+        // Entao valem os dois caminhos: o auth level do jogo OU a
+        // permissao `origemzagent.questnpc`, que o admin da a quem
+        // cuida das missoes sem precisar entregar o servidor.
+        private bool QuestNpcMayManage(BasePlayer player)
+        {
+            return player.IsAdmin ||
+                permission.UserHasPermission(player.UserIDString, QuestNpcPermission);
+        }
+
+        private static float QuestNpcEyesY(BasePlayer player)
+        {
+            return player.eyes == null ? 0f : player.eyes.rotation.eulerAngles.y;
+        }
+
+        // O grito do cadastro in-game.
+        //
+        // O agente e quem grava: aqui so se REPORTA. Um NPC que
+        // existisse so na memoria do plugin sumiria no primeiro
+        // oxide.reload, e o painel nunca saberia dele.
+        private void QuestNpcChatPush(string kind, string id, string name, Vector3 position, float rotation)
+        {
             StringBuilder line = new StringBuilder();
 
             line.Append(QuestNpcMarker);
             line.Append("{\"contract\":").Append(QuestContract);
             line.Append(",\"secret\":\"").Append(_questSecret ?? string.Empty).Append('"');
-            line.Append(",\"kind\":\"add\"");
-            line.Append(",\"name\":").Append(JsonConvert.ToString(name));
-            line.Append(",\"x\":").Append(position.x.ToString("0.##", CultureInfo.InvariantCulture));
-            line.Append(",\"y\":").Append(position.y.ToString("0.##", CultureInfo.InvariantCulture));
-            line.Append(",\"z\":").Append(position.z.ToString("0.##", CultureInfo.InvariantCulture));
-            line.Append(",\"rotation\":").Append(rotation.ToString("0.##", CultureInfo.InvariantCulture));
+            line.Append(",\"kind\":\"").Append(kind).Append('"');
+
+            if (id != null)
+            {
+                line.Append(",\"npcId\":").Append(JsonConvert.ToString(id));
+            }
+
+            if (name != null)
+            {
+                line.Append(",\"name\":").Append(JsonConvert.ToString(name));
+            }
+
+            if (kind != "remove")
+            {
+                line.Append(",\"x\":").Append(position.x.ToString("0.##", CultureInfo.InvariantCulture));
+                line.Append(",\"y\":").Append(position.y.ToString("0.##", CultureInfo.InvariantCulture));
+                line.Append(",\"z\":").Append(position.z.ToString("0.##", CultureInfo.InvariantCulture));
+                line.Append(",\"rotation\":").Append(rotation.ToString("0.##", CultureInfo.InvariantCulture));
+            }
+
             line.Append('}');
 
             Puts(line.ToString());
-
-            player.ChatMessage("Pedi ao agente para cadastrar \"" + name +
-                "\" aqui. Ele aparece em instantes.");
         }
 
         private class QuestNpcInfo
@@ -8842,6 +11062,28 @@ namespace Oxide.Plugins
             public string Prefab;
             public bool MapMarker;
             public float UseRadius;
+
+            // O que ele oferece. Desce com o NPC, no `npc.set`, e e
+            // o que permite desenhar a caixa sem ida a rede.
+            public List<QuestNpcOffer> Offers = new List<QuestNpcOffer>();
+        }
+
+        private class QuestNpcOffer
+        {
+            public string Id;
+            public string Title;
+            /// <summary>O item da recompensa, para o icone. 0 = sem icone.</summary>
+            public int RewardItemId;
+            /// <summary>A skin dele. 0 = a arte padrao do item.</summary>
+            public ulong RewardSkinId;
+            /// <summary>Ele OFERECE, ou so recebe a missao pronta?</summary>
+            public bool Offers;
+            /// <summary>A fala. Vazia = a caixa usa o objetivo.</summary>
+            public string Description;
+            /// <summary>"Coletar 100 de Madeira", pronto do agente.</summary>
+            public string Goal;
+            /// <summary>"1x Sucata", pronto do agente.</summary>
+            public string Reward;
         }
 
         #endregion

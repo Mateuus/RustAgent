@@ -22,6 +22,20 @@
 //  esteja certo — digitado à mão, o erro só aparece como quadrado
 //  vazio na tela do jogador.
 //
+//  ####  OU UMA ARTE PRÓPRIA  ####
+//
+//  O ícone do jogo é o padrão e continua sendo o melhor para uma
+//  oferta que É um item: o cliente já o tem, não custa download
+//  nenhum e o jogador o reconhece. O que ele não resolve é o resto —
+//  um VIP de 30 dias, um pacote, um kit — que antes pegava
+//  emprestado o ícone de alguma coisa (a caixa de madeira, quase
+//  sempre).
+//
+//  Para esses, o PNG é enviado aqui e o painel o REDUZ antes de
+//  subir, como no cadastro de item custom: cada jogador baixa o
+//  arquivo na primeira vez que vê o card, e 96×96 é o que um card
+//  desenha.
+//
 //  ####  UM ITEM NOSSO TAMBÉM PODE SER VENDIDO  ####
 //
 //  O seletor lista `custom_items` junto com o catálogo do jogo, e
@@ -43,7 +57,7 @@
 // ============================================================
 
 import { Plus, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { findOurItem, NO_SKIN, type ItemChoice } from '@/components/item-choice';
 import { ItemCombobox } from '@/components/item-combobox';
@@ -55,6 +69,7 @@ import { Label } from '@/components/ui/label';
 import { Toggle } from '@/components/ui/toggle';
 import {
   agent,
+  storeIconUrl,
   type CustomItem,
   type OfferBadge,
   type OfferItem,
@@ -63,6 +78,7 @@ import {
   type StoreOffer,
 } from '@/lib/api';
 import { useCustomItems } from '@/lib/hooks/use-custom-items';
+import { toIconFile } from '@/lib/icon-image';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -119,7 +135,55 @@ export function StoreOfferDialog({
   const [position, setPosition] = useState(offer?.position ?? 0);
   const [enabled, setEnabled] = useState(offer?.enabled ?? true);
 
-  const [icon, setIcon] = useState(offer?.icon ?? { shortname: '', itemId: 0, skinId: '0' });
+  const [icon, setIcon] = useState<{
+    shortname: string;
+    itemId: number;
+    skinId: string;
+    file: string | null;
+  }>({
+    shortname: offer?.icon.shortname ?? '',
+    itemId: offer?.icon.itemId ?? 0,
+    skinId: offer?.icon.skinId ?? '0',
+    // Oferta gravada antes da arte própria vem sem o campo: é "usa o
+    // ícone do jogo", o padrão de sempre.
+    file: offer?.icon.file ?? null,
+  });
+
+  const [enviandoArte, setEnviandoArte] = useState(false);
+
+  /** O que a redução fez, em uma linha. Ver `enviarArte`. */
+  const [arteSummary, setArteSummary] = useState<string | null>(null);
+
+  /**
+   * A prévia do arquivo que acabou de ser escolhido.
+   *
+   * Sem ela, quem envia a arte vê o NOME do arquivo e nada mais —
+   * inclusive quando mandou a imagem errada. O `URL.createObjectURL`
+   * é revogado ao trocar e ao fechar: cada um segura o blob na
+   * memória da aba até alguém soltá-lo.
+   */
+  const [artePreview, setArtePreview] = useState<string | null>(null);
+  const artePreviewRef = useRef<string | null>(null);
+
+  const showArtePreview = useCallback((file: File | null): void => {
+    const previous = artePreviewRef.current;
+    const next = file === null ? null : URL.createObjectURL(file);
+
+    artePreviewRef.current = next;
+    setArtePreview(next);
+
+    if (previous !== null) {
+      URL.revokeObjectURL(previous);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      showArtePreview(null);
+    };
+  }, [showArtePreview]);
+
+  const arteSrc = artePreview ?? (icon.file === null ? null : storeIconUrl(icon.file));
 
   const [items, setItems] = useState<OfferItem[]>(offer === null ? [] : [...offer.items]);
   const [perks, setPerks] = useState<string[]>(offer === null ? [] : [...offer.perks]);
@@ -150,6 +214,45 @@ export function StoreOfferDialog({
    * itemId de um item nosso desenharia na vitrine o CORPO
    * emprestado — a taça de discord — no lugar da nossa arte.
    */
+  /**
+   * Reduz a arte no navegador e a envia.
+   *
+   * ####  QUEM REDUZ É A TELA  ####
+   *
+   * O agente recusa acima de ~33 KB, e a arte que alguém exporta tem
+   * megabytes. Exigir que quem cadastra abra um editor de imagem para
+   * descobrir isso seria transferir a ele um detalhe que não é
+   * problema dele — o mesmo motivo do cadastro de item custom, e o
+   * mesmo `toIconFile`.
+   */
+  async function enviarArte(file: File): Promise<void> {
+    setEnviandoArte(true);
+
+    try {
+      const resized = await toIconFile(file);
+
+      showArtePreview(resized.file);
+      setArteSummary(resized.summary);
+
+      const response = await agent.uploadStoreIcon(resized.file);
+
+      setIcon((current) => ({ ...current, file: response.icon.name }));
+
+      toast.success('Arte enviada', { description: response.icon.name });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+
+      // A prévia cai junto: deixá-la na tela depois de o envio falhar
+      // faria parecer que a arte está valendo.
+      showArtePreview(null);
+      setArteSummary(null);
+
+      toast.error('Não consegui enviar a arte', { description: message });
+    } finally {
+      setEnviandoArte(false);
+    }
+  }
+
   function chooseIcon(choice: ItemChoice | null): void {
     if (choice === null) {
       return;
@@ -157,7 +260,10 @@ export function StoreOfferDialog({
 
     const itemId = choice.itemId ?? 0;
 
-    setIcon({ shortname: choice.shortname, itemId, skinId: choice.skinId });
+    // A arte própria é preservada: escolher o item aqui também
+    // preenche a primeira linha do pacote, e não quer dizer "troque o
+    // desenho do card". Quem troca é o botão "usar o ícone do jogo".
+    setIcon((current) => ({ ...current, shortname: choice.shortname, itemId, skinId: choice.skinId }));
 
     if (kind === 'item' && items.length === 0) {
       setItems([{ shortname: choice.shortname, itemId, skinId: choice.skinId, amount: 1 }]);
@@ -305,17 +411,96 @@ export function StoreOfferDialog({
         <div>
           <Label>Ícone na vitrine</Label>
 
-          <ItemCombobox
-            value={icon.shortname}
-            disabled={busy}
-            onValueChange={(shortname) => setIcon((current) => ({ ...current, shortname }))}
-            onChoiceChange={chooseIcon}
-          />
+          {icon.file === null ? (
+            <>
+              <ItemCombobox
+                value={icon.shortname}
+                disabled={busy}
+                onValueChange={(shortname) => setIcon((current) => ({ ...current, shortname }))}
+                onChoiceChange={chooseIcon}
+              />
 
-          <p className="mt-1 text-2xs leading-relaxed text-muted">
-            É o desenho que o jogo mostra no card. Um kit não tem &ldquo;o item&rdquo; — escolha o
-            que representa melhor o pacote.
-          </p>
+              <p className="mt-1 text-2xs leading-relaxed text-muted">
+                É o desenho que o jogo mostra no card, e ele vem do próprio cliente — não custa
+                download nenhum ao jogador.
+              </p>
+            </>
+          ) : (
+            <div className="flex items-center gap-3 border border-border bg-surface-2 p-2">
+              {/* A arte, do tamanho em que o card a desenha. */}
+              {arteSrc !== null && (
+                // O <img> cru, e não o next/image: a imagem vem do
+                // AGENTE, que não passa pelo otimizador do Next.
+                <img
+                  src={arteSrc}
+                  alt=""
+                  className="h-12 w-12 shrink-0 border border-border bg-surface object-contain"
+                />
+              )}
+
+              <div className="min-w-0 flex-1 text-2xs leading-relaxed">
+                <p className="truncate font-mono text-foreground">{icon.file}</p>
+
+                {/* ####  O QUE O RESIZE FEZ, ESCRITO  ####
+
+                    O arquivo que subiu não é o que a pessoa escolheu,
+                    e ela precisa saber disso — senão a conclusão, ao
+                    ver a arte menor no card, é que o jogo a estragou. */}
+                {arteSummary !== null && (
+                  <p className="mt-0.5 text-muted">Reduzida aqui: {arteSummary}.</p>
+                )}
+              </div>
+
+              <Button
+                size="sm"
+                variant="outline"
+                type="button"
+                disabled={busy || enviandoArte}
+                onClick={() => {
+                  setIcon((current) => ({ ...current, file: null }));
+                  showArtePreview(null);
+                  setArteSummary(null);
+                }}
+              >
+                Usar o ícone do jogo
+              </Button>
+            </div>
+          )}
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <label
+              className={cn(
+                'cursor-pointer border border-border px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide text-foreground hover:bg-surface',
+                (busy || enviandoArte) && 'pointer-events-none opacity-60',
+              )}
+            >
+              {enviandoArte
+                ? 'Enviando…'
+                : icon.file === null
+                  ? 'Enviar arte própria'
+                  : 'Trocar a arte'}
+              <input
+                type="file"
+                accept="image/png"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+
+                  // O input é limpo sempre: sem isso, escolher o MESMO
+                  // arquivo duas vezes seguidas não dispara o evento, e
+                  // o segundo envio parece travado.
+                  event.target.value = '';
+
+                  if (file !== undefined) void enviarArte(file);
+                }}
+              />
+            </label>
+
+            <p className="min-w-0 flex-1 text-2xs leading-relaxed text-muted">
+              Um kit ou um VIP não têm &ldquo;o item&rdquo;: mande a arte do pacote e ela vira o
+              card. O painel reduz a imagem antes de enviar, e cada jogador a baixa uma vez.
+            </p>
+          </div>
         </div>
 
         {/* ---- preço ---- */}
@@ -632,7 +817,11 @@ export function StoreOfferDialog({
 function offerProblem(input: {
   readonly kind: OfferKind;
   readonly name: string;
-  readonly icon: { readonly shortname: string; readonly itemId: number };
+  readonly icon: {
+    readonly shortname: string;
+    readonly itemId: number;
+    readonly file: string | null;
+  };
   readonly items: readonly OfferItem[];
   readonly tier: string;
   readonly prefab: string;
@@ -643,10 +832,13 @@ function offerProblem(input: {
     return 'a oferta precisa de um nome — é o que aparece no card.';
   }
 
-  if (input.icon.shortname.trim() === '' || input.icon.itemId === 0) {
+  // Com arte própria o ícone do jogo não importa: quem desenha o card
+  // é o PNG. Sem ela, o itemId precisa ter vindo da lista — digitado à
+  // mão ele sai como um quadrado vazio na tela do jogador.
+  if (input.icon.file === null && (input.icon.shortname.trim() === '' || input.icon.itemId === 0)) {
     return (
-      'escolha o ícone na lista: o jogo desenha o card pelo itemId, e digitado à mão ele sai como ' +
-      'um quadrado vazio.'
+      'o card precisa de um desenho: escolha o ícone na lista (o jogo o desenha pelo itemId) ou ' +
+      'envie uma arte própria.'
     );
   }
 

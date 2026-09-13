@@ -210,7 +210,7 @@ function offer(): StoreOfferInput {
     price: 250,
     position: 1,
     enabled: true,
-    icon: { shortname: 'metal.refined', itemId: 69_511_070, skinId: '0' },
+    icon: { shortname: 'metal.refined', itemId: 69_511_070, skinId: '0', file: null },
     items: [{ shortname: 'metal.refined', itemId: 69_511_070, skinId: '0', amount: 100 }],
     vip: null,
     vehicle: null,

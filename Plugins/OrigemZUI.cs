@@ -59,6 +59,8 @@ using System.Collections.Generic;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+// [PluginReference] e o tipo Plugin, para falar com o OrigemZImages.
+using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
@@ -79,9 +81,6 @@ namespace Oxide.Plugins
 
         /// <summary>O desfecho de uma compra, vindo do agente.</summary>
         private const string BuyResultCommand = "origemz.ui.buyresult";
-
-        /// <summary>Uma imagem nossa, em base64, vinda do agente.</summary>
-        private const string ImageCommand = "origemz.ui.image";
 
         /// <summary>O saldo de um jogador, para o cabecalho.</summary>
         private const string BalanceCommand = "origemz.ui.balance";
@@ -132,7 +131,7 @@ namespace Oxide.Plugins
         private const string LoadingName = "OrigemZUI.loading";
 
         /// <summary>
-        /// Chave da imagem -> o CRC dela no FileStorage.
+        /// Quem guarda as imagens: chave -> o CRC no FileStorage.
         ///
         /// #### POR QUE O AGENTE NAO PODE SABER ISTO ####
         ///
@@ -141,18 +140,35 @@ namespace Oxide.Plugins
         /// os bytes sao guardados, e guardar so o servidor de Rust
         /// pode - o agente esta noutro processo.
         ///
-        /// Entao o agente manda os BYTES e desenha a tela com um
-        /// lugar reservado (`{img:ozcoin}`); aqui os bytes viram
-        /// CRC, e o lugar reservado e trocado na hora de desenhar.
-        /// O mesmo mecanismo do token da sessao, pelo mesmo
-        /// motivo: o valor so existe em tempo de execucao.
+        /// Entao o agente desenha a tela com um lugar reservado
+        /// (`{img:ozcoin}`) e manda os BYTES ao OrigemZImages; aqui
+        /// o lugar reservado vira o CRC na hora de desenhar. O mesmo
+        /// mecanismo do token da sessao, pelo mesmo motivo: o valor
+        /// so existe em tempo de execucao.
         ///
-        /// Vazio ate a primeira carga. Uma tela desenhada antes
-        /// dela sai com o quadrado vazio, e a proxima ja vem
-        /// certa - e por isso as imagens sao enviadas ANTES dos
-        /// documentos.
+        /// #### DEPENDENCIA MOLE, DE PROPOSITO ####
+        ///
+        /// Sem o OrigemZImages o menu continua abrindo e comprando -
+        /// so as imagens proprias ficam de fora. Um "// Requires:"
+        /// tiraria o menu inteiro do ar por causa de um icone. O
+        /// painel avisa quando este plugin esta ligado sem ele.
+        ///
+        /// [PluginReference] vira null quando o alvo e descarregado,
+        /// entao o null-check esta em toda chamada. Ver ImageCrc.
         /// </summary>
-        private readonly Dictionary<string, uint> _images = new Dictionary<string, uint>();
+        [PluginReference]
+        private Plugin OrigemZImages;
+
+        private const string HookGetImage = "GetImage";
+
+        /// <summary>
+        /// Ja avisamos que o OrigemZImages falta?
+        ///
+        /// Um aviso por carga do plugin: `Personalize` roda a cada
+        /// tela desenhada, e repetir a frase a cada clique so
+        /// ensinaria a ignorar o log.
+        /// </summary>
+        private bool _warnedNoImages;
 
         /// <summary>
         /// O segredo que autentica os pedidos de compra.
@@ -705,61 +721,84 @@ namespace Oxide.Plugins
         }
 
         // ====================================================
-        //  origemz.ui.image  -  uma imagem nossa
+        //  AS IMAGENS PROPRIAS
         //
-        //  Vem do AGENTE (arg.Connection == null), como os
-        //  documentos. Os bytes vao para o FileStorage do
-        //  servidor, e o CRC devolvido e o que o cliente usa.
+        //  Os bytes chegam ao OrigemZImages, e nao aqui - ver
+        //  `OrigemZImages`, la em cima. Este plugin so pergunta o
+        //  CRC na hora de desenhar.
         // ====================================================
-        [ConsoleCommand(ImageCommand)]
-        private void CmdImage(ConsoleSystem.Arg arg)
+
+        /// <summary>O CRC da imagem, ou 0 quando ela nao existe (ainda).</summary>
+        private uint ImageCrc(string key)
         {
-            if (arg.Connection != null || !arg.HasArgs(2))
+            if (OrigemZImages == null)
             {
-                return;
+                if (!_warnedNoImages)
+                {
+                    _warnedNoImages = true;
+                    PrintWarning("o OrigemZImages nao esta carregado: as imagens proprias do menu e das " +
+                                 "propagandas nao aparecem. Ligue-o no painel, em Plugins.");
+                }
+
+                return 0U;
             }
 
-            string key = arg.GetString(0);
-            if (string.IsNullOrEmpty(key))
+            object raw = OrigemZImages.Call(HookGetImage, key);
+            return raw is uint ? (uint)raw : 0U;
+        }
+
+        /// <summary>
+        /// Troca cada `{img:chave}` pelo CRC da imagem.
+        ///
+        /// Uma chave que a biblioteca nao tem fica como esta: e o
+        /// que acontecia antes, com o mapa proprio, e o desfecho e
+        /// o quadrado vazio ate a imagem chegar - nao um elemento
+        /// com CRC inventado.
+        /// </summary>
+        private string ResolveImages(string json)
+        {
+            const string open = "{img:";
+
+            int at = json.IndexOf(open, StringComparison.Ordinal);
+
+            if (at < 0)
             {
-                return;
+                // A maioria das telas nao usa imagem nossa, e sai aqui.
+                return json;
             }
 
-            byte[] bytes;
-            try
+            StringBuilder builder = new StringBuilder(json.Length);
+            int copied = 0;
+
+            while (at >= 0)
             {
-                bytes = Convert.FromBase64String(arg.GetString(1));
+                int close = json.IndexOf('}', at + open.Length);
+
+                if (close < 0)
+                {
+                    break;
+                }
+
+                string key = json.Substring(at + open.Length, close - at - open.Length);
+                uint crc = ImageCrc(key);
+
+                if (crc != 0U)
+                {
+                    builder.Append(json, copied, at - copied);
+                    builder.Append(crc.ToString());
+                    copied = close + 1;
+                }
+
+                at = json.IndexOf(open, close + 1, StringComparison.Ordinal);
             }
-            catch (Exception)
+
+            if (copied == 0)
             {
-                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_BASE64\"}");
-                return;
+                return json;
             }
 
-            if (bytes.Length == 0)
-            {
-                return;
-            }
-
-            if (CommunityEntity.ServerInstance == null)
-            {
-                // O servidor ainda nao terminou de subir. A carga
-                // periodica reenvia, entao isto se resolve sozinho.
-                arg.ReplyWith("{\"ok\":false,\"error\":\"SERVER_NOT_READY\"}");
-                return;
-            }
-
-            // O CRC sai dos BYTES, entao reenviar a mesma imagem
-            // devolve o mesmo numero e nao acumula lixo.
-            uint crc = FileStorage.server.Store(
-                bytes,
-                FileStorage.Type.png,
-                CommunityEntity.ServerInstance.net.ID);
-
-            _images[key] = crc;
-
-            Puts("imagem " + key + ": " + bytes.Length + " bytes, crc " + crc);
-            arg.ReplyWith("{\"ok\":true,\"crc\":" + crc + "}");
+            builder.Append(json, copied, json.Length - copied);
+            return builder.ToString();
         }
 
         private DocumentCache BuildDocument(JObject item)
@@ -1473,18 +1512,8 @@ namespace Oxide.Plugins
         {
             string json = elements.ToString(Formatting.None).Replace(TokenPlaceholder, token);
 
-            // As imagens proprias: `{img:ozcoin}` vira o CRC. So
-            // percorre o mapa se houver o que trocar - a maioria
-            // das telas nao usa imagem nossa.
-            if (_images.Count > 0 && json.IndexOf("{img:") >= 0)
-            {
-                foreach (KeyValuePair<string, uint> image in _images)
-                {
-                    json = json.Replace("{img:" + image.Key + "}", image.Value.ToString());
-                }
-            }
-
-            return json;
+            // As imagens proprias: `{img:ozcoin}` vira o CRC.
+            return ResolveImages(json);
         }
 
         // ====================================================
@@ -2471,7 +2500,7 @@ namespace Oxide.Plugins
         //   todo mundo, e o que ele faz e se MEXER.
         //
         //   O que ele reaproveita deste plugin e o resto — o
-        //   canal de RCON, o FileStorage das imagens e a mesma
+        //   canal de RCON, a consulta ao OrigemZImages e a mesma
         //   troca de lugares reservados. Um plugin separado
         //   duplicaria as tres coisas.
         //
@@ -2504,10 +2533,6 @@ namespace Oxide.Plugins
         private const string AdsShowCommand = "origemz.ads.show";
         private const string AdsHideCommand = "origemz.ads.hide";
         private const string AdsTestCommand = "origemz.ads.test";
-
-        private const string AdsImageBeginCommand = "origemz.ads.image.begin";
-        private const string AdsImagePartCommand = "origemz.ads.image.part";
-        private const string AdsImageEndCommand = "origemz.ads.image.end";
 
         /// <summary>O marcador do pedido de recarga. Ver ads-sync.ts.</summary>
         private const string AdsRequestMarker = "#OZADSREQ#";
@@ -2575,8 +2600,8 @@ namespace Oxide.Plugins
         /// <summary>
         /// Quem baixa a imagem: "stored" ou "url".
         ///
-        /// So decide UMA coisa aqui: se vale a pena pre-carregar.
-        /// Ver AdsPreload.
+        /// So decide UMA coisa aqui: com que campo pre-carregar
+        /// (`url` ou `png`). Ver AdsPreload.
         /// </summary>
         private string _adsImageMode = "stored";
 
@@ -2647,159 +2672,6 @@ namespace Oxide.Plugins
 
         /// <summary>Um ciclo esta em curso? Impede dois ao mesmo tempo.</summary>
         private bool _adsCycleRunning;
-
-        /// <summary>
-        /// As imagens chegando em pedacos.
-        ///
-        /// ####  POR QUE EM PEDACOS  ####
-        ///
-        /// O frame do WebRCON aguenta ~50 KB, e base64 infla o
-        /// arquivo em 4/3. Uma propaganda de 600x200 nao cabe num
-        /// comando so — o `origemz.ui.image` serve ao icone de 17
-        /// KB do menu e nao a isto.
-        ///
-        /// Os pedacos ficam aqui ate o `end`, que confere a
-        /// contagem antes de guardar. Meio arquivo nunca vira
-        /// imagem: um PNG cortado no meio e um arquivo invalido, e
-        /// o sintoma seria um quadrado vazio sem nada dizer por
-        /// que.
-        /// </summary>
-        private readonly Dictionary<string, byte[][]> _adsImageParts =
-            new Dictionary<string, byte[][]>();
-
-        // ----------------------------------------------------
-        //  origemz.ads.image.begin / .part / .end
-        // ----------------------------------------------------
-        [ConsoleCommand(AdsImageBeginCommand)]
-        private void CmdAdsImageBegin(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null || !arg.HasArgs(2))
-            {
-                return;
-            }
-
-            string key = arg.GetString(0);
-            int parts = arg.GetInt(1);
-
-            // 128 pedacos de 27 KB dao ~3,4 MB — bem acima do teto
-            // do agente (1,5 MB). O que este limite impede e um
-            // `begin` com um numero absurdo alocando um array
-            // gigante antes de qualquer byte chegar.
-            if (string.IsNullOrEmpty(key) || parts <= 0 || parts > 128)
-            {
-                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_ARGS\"}");
-                return;
-            }
-
-            _adsImageParts[key] = new byte[parts][];
-            arg.ReplyWith("{\"ok\":true}");
-        }
-
-        [ConsoleCommand(AdsImagePartCommand)]
-        private void CmdAdsImagePart(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null || !arg.HasArgs(3))
-            {
-                return;
-            }
-
-            string key = arg.GetString(0);
-            int index = arg.GetInt(1);
-
-            byte[][] parts;
-            if (!_adsImageParts.TryGetValue(key, out parts))
-            {
-                // Chegou sem o `begin`: o agente reiniciou no meio,
-                // ou a ordem se perdeu. Descartar e o certo — a
-                // proxima carga reenvia tudo.
-                arg.ReplyWith("{\"ok\":false,\"error\":\"NO_BEGIN\"}");
-                return;
-            }
-
-            if (index < 0 || index >= parts.Length)
-            {
-                arg.ReplyWith("{\"ok\":false,\"error\":\"BAD_INDEX\"}");
-                return;
-            }
-
-            try
-            {
-                parts[index] = Convert.FromBase64String(arg.GetString(2));
-            }
-            catch (Exception)
-            {
-                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_BASE64\"}");
-                return;
-            }
-
-            arg.ReplyWith("{\"ok\":true}");
-        }
-
-        [ConsoleCommand(AdsImageEndCommand)]
-        private void CmdAdsImageEnd(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null || !arg.HasArgs(1))
-            {
-                return;
-            }
-
-            string key = arg.GetString(0);
-
-            byte[][] parts;
-            if (!_adsImageParts.TryGetValue(key, out parts))
-            {
-                arg.ReplyWith("{\"ok\":false,\"error\":\"NO_BEGIN\"}");
-                return;
-            }
-
-            _adsImageParts.Remove(key);
-
-            // ####  FALTOU PEDACO: DESCARTA  ####
-            //
-            // Guardar um PNG incompleto no FileStorage daria um CRC
-            // valido para um arquivo que o cliente nao monta — o
-            // pior desfecho, porque parece que funcionou.
-            int total = 0;
-            for (int i = 0; i < parts.Length; i++)
-            {
-                if (parts[i] == null)
-                {
-                    PrintWarning("imagem " + key + ": faltou o pedaco " + i + ", descartada");
-                    arg.ReplyWith("{\"ok\":false,\"error\":\"MISSING_PART\"}");
-                    return;
-                }
-
-                total += parts[i].Length;
-            }
-
-            byte[] bytes = new byte[total];
-            int offset = 0;
-
-            for (int i = 0; i < parts.Length; i++)
-            {
-                Buffer.BlockCopy(parts[i], 0, bytes, offset, parts[i].Length);
-                offset += parts[i].Length;
-            }
-
-            if (CommunityEntity.ServerInstance == null)
-            {
-                arg.ReplyWith("{\"ok\":false,\"error\":\"SERVER_NOT_READY\"}");
-                return;
-            }
-
-            // O CRC sai dos BYTES, entao reenviar a mesma imagem
-            // devolve o mesmo numero e nao acumula lixo.
-            uint crc = FileStorage.server.Store(
-                bytes,
-                FileStorage.Type.png,
-                CommunityEntity.ServerInstance.net.ID);
-
-            _images[key] = crc;
-
-            Puts("propaganda " + key + ": " + bytes.Length + " bytes em " +
-                 parts.Length + " pedaco(s), crc " + crc);
-            arg.ReplyWith("{\"ok\":true,\"crc\":" + crc + "}");
-        }
 
         // ----------------------------------------------------
         //  origemz.ads.config  -  a carga do overlay
@@ -3221,13 +3093,38 @@ namespace Oxide.Plugins
         /// nao aparece para ninguem, nao recebe clique e nao pesa —
         /// e e o suficiente para o cliente ir buscar o arquivo.
         ///
-        /// No modo `stored` isto nao existe: la a imagem vem pelo
-        /// canal do jogo, do FileStorage do proprio servidor, e nao
-        /// ha download nenhum para adiantar.
+        /// ####  NO MODO `stored` TAMBEM HA DOWNLOAD  ####
+        ///
+        /// Este comentario dizia o contrario, e estava errado. Com
+        /// `png`, o cliente procura o CRC no cache DELE; na primeira
+        /// vez nao acha, pede os bytes ao servidor e espera o
+        /// `CL_ReceiveFilePng` voltar - com a propaganda de 575 KB
+        /// ja na tela, vazia. O mesmo pixel invisivel, com `png` no
+        /// lugar de `url`, faz o pedido sair durante o repouso.
+        ///
+        /// ####  POR QUE PEDIR, E NAO EMPURRAR  ####
+        ///
+        /// O ImageLibrary resolve isto empurrando os bytes pelo RPC
+        /// (`SendImage`). Nao copiamos: ele usa ClientRPCStart, API
+        /// interna do Rust que ja mudou uma vez, e manda o arquivo
+        /// INTEIRO a cada chamada, mesmo para quem ja o tem. Aqui o
+        /// cliente pede pelo caminho dele, e so se o cache nao tiver.
+        /// Ver Docs\ImageLibrary\README.md.
         /// </summary>
         private void AdsPreload(BasePlayer player)
         {
-            if (_adsImageMode != "url" || _adsItems.Count == 0)
+            if (_adsItems.Count == 0)
+            {
+                return;
+            }
+
+            bool stored = _adsImageMode != "url";
+
+            // No modo PARADO a propaganda e desenhada agora mesmo, no
+            // mesmo instante do logo: nao ha repouso para adiantar, e
+            // dois elementos pedindo o mesmo CRC no mesmo tick seria
+            // testar o cliente a toa.
+            if (stored && _adsStatic)
             {
                 return;
             }
@@ -3249,6 +3146,23 @@ namespace Oxide.Plugins
                     continue;
                 }
 
+                // No `stored` a chave vira o CRC. 0 = o OrigemZImages
+                // ainda nao tem a imagem (ou nao esta carregado): nao
+                // ha o que pedir, e o desenho normal cuida dela depois.
+                string value = ad.Image;
+
+                if (stored)
+                {
+                    uint crc = ImageCrc(ad.Image);
+
+                    if (crc == 0U)
+                    {
+                        continue;
+                    }
+
+                    value = crc.ToString();
+                }
+
                 if (written > 0)
                 {
                     builder.Append(',');
@@ -3257,8 +3171,9 @@ namespace Oxide.Plugins
                 builder.Append("{\"name\":\"").Append(AdsPreloadName(i));
                 builder.Append("\",\"parent\":\"").Append(AdsRoot);
                 builder.Append("\",\"components\":[");
-                builder.Append("{\"type\":\"UnityEngine.UI.RawImage\",\"color\":\"1 1 1 0\",\"url\":\"");
-                builder.Append(ad.Image);
+                builder.Append("{\"type\":\"UnityEngine.UI.RawImage\",\"color\":\"1 1 1 0\",\"");
+                builder.Append(stored ? "png" : "url").Append("\":\"");
+                builder.Append(value);
                 builder.Append("\"},");
                 builder.Append("{\"type\":\"RectTransform\",\"anchormin\":\"0 0\",\"anchormax\":\"0 0\",");
                 builder.Append("\"offsetmin\":\"0 0\",\"offsetmax\":\"1 1\"}");
@@ -3826,13 +3741,11 @@ namespace Oxide.Plugins
             {
                 if (json.IndexOf(AdImagePlaceholder, StringComparison.Ordinal) >= 0)
                 {
-                    // Modo `stored`: a chave vira o CRC que so este
-                    // plugin conhece. Modo `url`: o endereco passa
-                    // cru para o cliente.
-                    uint crc;
-                    string value = _images.TryGetValue(ad.Image, out crc)
-                        ? crc.ToString()
-                        : ad.Image;
+                    // Modo `stored`: a chave vira o CRC que so o
+                    // OrigemZImages conhece. Modo `url`: o endereco
+                    // passa cru para o cliente.
+                    uint crc = ImageCrc(ad.Image);
+                    string value = crc != 0U ? crc.ToString() : ad.Image;
 
                     json = json.Replace(AdImagePlaceholder, value);
                 }
@@ -3868,15 +3781,7 @@ namespace Oxide.Plugins
 
             // As imagens do MENU tambem valem aqui: o logo pode ser
             // uma delas.
-            if (_images.Count > 0 && json.IndexOf("{img:", StringComparison.Ordinal) >= 0)
-            {
-                foreach (KeyValuePair<string, uint> image in _images)
-                {
-                    json = json.Replace("{img:" + image.Key + "}", image.Value.ToString());
-                }
-            }
-
-            return json;
+            return ResolveImages(json);
         }
 
         // ----------------------------------------------------
@@ -4114,27 +4019,6 @@ namespace Oxide.Plugins
 
             AdsAskForConfig();
             arg.ReplyWith("{\"ok\":true}");
-        }
-
-        /// <summary>
-        /// Esquece as imagens guardadas.
-        ///
-        /// So o MAPA chave->CRC: os bytes continuam no FileStorage
-        /// do servidor. A proxima carga reenvia o que faltar.
-        /// </summary>
-        [ConsoleCommand("origemz.ads.clearcache")]
-        private void CmdAdsClearCache(ConsoleSystem.Arg arg)
-        {
-            if (arg.Connection != null)
-            {
-                return;
-            }
-
-            int count = _images.Count;
-            _images.Clear();
-            _adsImageParts.Clear();
-
-            arg.ReplyWith("{\"ok\":true,\"cleared\":" + count + "}");
         }
 
         protected override void LoadDefaultMessages()

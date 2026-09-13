@@ -31,7 +31,7 @@
 // ============================================================
 
 import type { StoreCategoryInput, StoreOfferInput, StoreRepository } from '../../db/store-repository.js';
-import { storeCategoryBody, storeOfferBody } from '../../http/routes/store.js';
+import { storeCategoryBody, storeOfferBody, toOfferInput } from '../../http/routes/store.js';
 import type { ConfigFieldError } from '../client.js';
 import {
   DOMAIN_ERROR_CODES,
@@ -190,7 +190,17 @@ export function storeApplier(deps: StoreApplierDeps): DomainApplier<StoreWork> {
         }
 
         seenOffers.add(id);
-        offers.push({ id, input: parsed.data });
+
+        // ####  O SITE NÃO CONHECE A ARTE PRÓPRIA  ####
+        //
+        // O `icon.file` não vem no payload dele, e é por isso que o
+        // schema o trata como OMITIDO e não como `null`: aplicar a
+        // loja do site apagaria o PNG que alguém escolheu no painel.
+        // `toOfferInput` conserva o que está gravado.
+        offers.push({
+          id,
+          input: toOfferInput(parsed.data, deps.repository.getOffer(id)),
+        });
       }
 
       return { work: { categories, offers, prune: errors.length === 0 }, errors };

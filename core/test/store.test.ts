@@ -176,7 +176,7 @@ function offer(over: Partial<StoreOfferInput> = {}): StoreOfferInput {
     position: 0,
     enabled: true,
     badge: null,
-    icon: { shortname: 'rifle.ak', itemId: 1_545_779_598, skinId: '0' },
+    icon: { shortname: 'rifle.ak', itemId: 1_545_779_598, skinId: '0', file: null },
     items: [{ shortname: 'rifle.ak', itemId: 1_545_779_598, skinId: '0', amount: 1 }],
     perks: [],
     vip: null,

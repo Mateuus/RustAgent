@@ -40,6 +40,7 @@
 // ============================================================
 
 import type { KitOfferView } from '../kits/service.js';
+import { kitIconKey } from './card-icons.js';
 import type { UiElement, UiScreen } from '../types/ui-document.js';
 
 import {
@@ -58,6 +59,7 @@ import {
   paginateRows,
   panel,
   rowsPager,
+  storedImage,
   tabsRow,
   type ContentRow,
   type Rect,
@@ -474,12 +476,23 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
   };
 
   const children: UiElement[] = [
-    icon === null
-      ? // Sem catálogo lido não há itemId, e sem itemId não há ícone.
-        // Um retângulo vazio é honesto: ele não finge ser um item que
-        // não sabemos qual é.
-        panel(`${id}-i`, iconRect, C.surface2)
-      : itemImage(`${id}-i`, { itemId: icon.itemId, skinId: first?.skinId ?? '0' }, iconRect),
+    // ####  A ARTE PRÓPRIA GANHA DO PALPITE  ####
+    //
+    // Sem ela, o card mostra o PRIMEIRO item do kit — um palpite
+    // honesto (um kit de sucata mostra sucata) e o que todo kit
+    // gravado antes disto continua fazendo. Mas "Kit Inicial" não é
+    // uma pedra, e quem monta o kit sabe que arte o representa.
+    //
+    // Quem leva os bytes ao jogo é game/card-icons.ts; aqui sai só o
+    // lugar reservado, que o plugin troca pelo CRC ao desenhar.
+    kit.iconFile !== null
+      ? storedImage(`${id}-i`, kitIconKey(kit.slug), iconRect)
+      : icon === null
+        ? // Sem catálogo lido não há itemId, e sem itemId não há
+          // ícone. Um retângulo vazio é honesto: ele não finge ser um
+          // item que não sabemos qual é.
+          panel(`${id}-i`, iconRect, C.surface2)
+        : itemImage(`${id}-i`, { itemId: icon.itemId, skinId: first?.skinId ?? '0' }, iconRect),
 
     label(
       `${id}-n`,

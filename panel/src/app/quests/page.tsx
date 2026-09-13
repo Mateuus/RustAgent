@@ -3,11 +3,15 @@
 // ============================================================
 //  /quests  -  as missões da REDE.
 //
-//  ####  TRÊS PERGUNTAS, TRÊS ABAS  ####
+//  ####  QUATRO PERGUNTAS, QUATRO ABAS  ####
 //
 //    Catálogo     o que existe para ser feito
+//    NPCs         quem entrega a missão, e onde ele está
 //    Progresso    quem está fazendo o quê — a aba do suporte
-//    Manutenção   NPCs, pendências e o botão de zerar
+//    Manutenção   pendências, wipe e o botão de zerar
+//
+//  Os NPCs moravam dentro de Manutenção — caixa onde se vai quando
+//  algo quebrou. Pedido do dono em 11/09/2026: eles são rotina.
 //
 //  ####  O CATÁLOGO É LIDO UMA VEZ, AQUI  ####
 //
@@ -28,13 +32,14 @@ import { PageHeader } from '@/components/page-header';
 import { QuestCatalog } from '@/components/quests/quest-catalog';
 import { QuestDialog } from '@/components/quests/quest-dialog';
 import { QuestMaintenance } from '@/components/quests/quest-maintenance';
+import { QuestNpcsPanel } from '@/components/quests/quest-npcs';
 import { QuestProgressPanel } from '@/components/quests/quest-progress';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { agent, type QuestDefinition, type QuestNpc } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-type Tab = 'catalogo' | 'progresso' | 'manutencao';
+type Tab = 'catalogo' | 'npcs' | 'progresso' | 'manutencao';
 
 export default function QuestsPage() {
   return (
@@ -138,6 +143,9 @@ function Quests() {
         <TabButton active={tab === 'catalogo'} onClick={() => setTab('catalogo')}>
           Catálogo {quests === null ? '' : `(${String(quests.length)})`}
         </TabButton>
+        <TabButton active={tab === 'npcs'} onClick={() => setTab('npcs')}>
+          NPCs {npcs.length === 0 ? '' : `(${String(npcs.length)})`}
+        </TabButton>
         <TabButton active={tab === 'progresso'} onClick={() => setTab('progresso')}>
           Progresso
         </TabButton>
@@ -181,12 +189,16 @@ function Quests() {
           />
         )}
 
+        {quests !== null && tab === 'npcs' && (
+          <QuestNpcsPanel quests={quests} servers={servers} onChanged={() => void load()} />
+        )}
+
         {quests !== null && tab === 'progresso' && (
           <QuestProgressPanel quests={quests} servers={servers} />
         )}
 
         {quests !== null && tab === 'manutencao' && (
-          <QuestMaintenance servers={servers} onChanged={() => void load()} />
+          <QuestMaintenance servers={servers} />
         )}
       </div>
 

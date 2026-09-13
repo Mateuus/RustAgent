@@ -90,9 +90,60 @@ interface Harness {
    * aqui, o teste nunca veria o defeito.
    */
   onReload: (() => Promise<void>) | null;
+  /**
+   * O que o "servidor no ar" responde ao `origemz.loot.native`.
+   *
+   * ####  É A ÚNICA PARTE DESTE EDITOR QUE NÃO É DISCO  ####
+   *
+   * A tabela nativa do jogo não está em arquivo nenhum: o
+   * BetterLoot a lê uma vez, no primeiro boot. Por isso ela vem
+   * por RCON — e por isso o teste precisa de um servidor de
+   * mentira que possa estar desligado, responder fora do contrato
+   * ou não conhecer o comando.
+   *
+   * `null` = não há servidor operado (o agente não cuida dele).
+   */
+  rcon: { isConnected: boolean; reply: string } | null;
+  /** Os comandos que chegaram ao RCON, na ordem. */
+  readonly commands: string[];
 }
 
 let harness: Harness;
+
+/**
+ * O que o servidor responde ao `origemz.loot.native` da ELITE.
+ *
+ * ####  ELE DISCORDA DO ARQUIVO DE PROPÓSITO  ####
+ *
+ * A caixa do `lootTables()` tem `rifle.ak`, `trophy{1}` e `sticks`.
+ * O jogo põe ali `rifle.ak`, `metal.refined` e o garantido `scrap`.
+ *
+ * Ou seja: `sticks` e `trophy{1}` são da casa, `metal.refined`
+ * falta, e `rifle.ak` é dos dois. Uma resposta que casasse com o
+ * arquivo não exercitaria nenhuma das três respostas que a tela dá.
+ *
+ * Uma LINHA só, como o plugin responde — o agente lê a primeira
+ * linha que faz parse (`firstJsonLine`).
+ */
+function nativeReply(patch: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    ok: true,
+    prefab: ELITE,
+    source: 'container',
+    slotsMin: 8,
+    slotsMax: 8,
+    scrap: 25,
+    count: 2,
+    offset: 0,
+    limit: 500,
+    items: [
+      { shortname: 'rifle.ak', min: 1, max: 1 },
+      { shortname: 'metal.refined', min: 2, max: 8 },
+    ],
+    guaranteed: [{ shortname: 'scrap', min: 1, max: 1 }],
+    ...patch,
+  });
+}
 
 /**
  * Um `LootTables.json` pequeno, com as três formas de chave.
@@ -189,6 +240,20 @@ function betterLootConfig(): unknown {
   return {
     'General Configuration': {
       'Blueprint Weight (0.0 = min bias, 1.0 = max bias, 0.5 = balanced)': 0.11,
+      // ####  A LISTA DE VIGIA MORA AQUI, E NÃO NA TABELA  ####
+      //
+      // É o SEGUNDO interruptor de cada caixa, e o que de fato
+      // decide: com `false`, o `OnLootSpawn` do plugin sai sem
+      // tocar nela e o jogo entrega o loot nativo — mesmo com o
+      // `Is Prefab Enabled?` da tabela em `true`.
+      //
+      // No `server01` medido são 111 chaves. Duas bastam para o
+      // teste, desde que uma delas seja a caixa que os testes
+      // abrem.
+      'Watched Container Prefabs (true = monitor container loot, false = disabled)': {
+        [ELITE]: true,
+        [SPACED_PREFAB]: true,
+      },
     },
     'Loot Configuration': {
       'Loot Multiplier': 2,
@@ -271,6 +336,26 @@ beforeEach(async () => {
   const servers = {
     configOf: (id: string) =>
       id === SERVER ? { paths: { oxideConfigDir: configDir, oxideDataDir: dataDir, backupsDir } } : null,
+    // O `contextOf` é o que a rota do loot NATIVO usa: ela é a
+    // única aqui que fala com o servidor, e não com o disco.
+    contextOf: (id: string) => {
+      const fake = harness?.rcon ?? null;
+
+      if (id !== SERVER || fake === null) {
+        return null;
+      }
+
+      return {
+        rcon: {
+          isConnected: fake.isConnected,
+          send: async (command: string) => {
+            harness.commands.push(command);
+
+            return fake.reply;
+          },
+        },
+      };
+    },
   };
 
   const editor = new BetterLootEditor({
@@ -312,7 +397,11 @@ beforeEach(async () => {
   });
 
   await app.register(async (api) => {
-    registerBetterLootRoutes(api, { editor, junk: new BetterLootJunkRepository(db) });
+    registerBetterLootRoutes(api, {
+      editor,
+      junk: new BetterLootJunkRepository(db),
+      servers,
+    });
     registerLootRoutes(api, {
       repository: new LootRulesRepository(db),
       customItems: new CustomItemsRepository(db),
@@ -347,7 +436,21 @@ beforeEach(async () => {
     });
   }
 
-  harness = { db, app, dataDir, configDir, backupsDir, reloads, onReload: null };
+  harness = {
+    db,
+    app,
+    dataDir,
+    configDir,
+    backupsDir,
+    reloads,
+    onReload: null,
+    // Servidor NO AR por padrão, respondendo a tabela nativa de
+    // `lootTables()`: é o estado em que a tela mostra tudo, e o
+    // que cada teste do loot do jogo ajusta quando precisa de
+    // outro.
+    rcon: { isConnected: true, reply: nativeReply() },
+    commands: [],
+  };
 });
 
 /** Põe os três arquivos no lugar. Sem isto, o plugin "nunca rodou". */
@@ -2041,5 +2144,262 @@ describe('nomes de perfil que o disco já tem', () => {
     });
 
     expect(response.statusCode).toBe(400);
+  });
+});
+
+// ============================================================
+//  O SEGUNDO INTERRUPTOR — a lista de vigia do BetterLoot.json
+//
+//  ####  ELE É O QUE DECIDE, E A TELA NÃO O CONHECIA  ####
+//
+//  `Is Prefab Enabled?` diz se o plugin PREENCHE a caixa;
+//  `Watched Container Prefabs` diz se ele chega a OLHAR para ela
+//  (BetterLoot.cs:1620-1622). Com o segundo em `false`, o jogo
+//  entrega o loot nativo mesmo com o primeiro em `true` — e a tela
+//  afirmava "BetterLoot" numa caixa que o servidor não tocava.
+//
+//  O que este bloco guarda:
+//
+//    1. os dois estados chegam separados até a tela;
+//    2. gravar mexe em UMA chave do outro arquivo e deixa as
+//       outras — e os multiplicadores — como estavam;
+//    3. gravar sem mexer no interruptor NÃO reescreve aquele
+//       arquivo, senão o `configRevision` da faixa de globais
+//       envelheceria a cada caixa salva.
+// ============================================================
+describe('a lista de vigia', () => {
+  beforeEach(seedFiles);
+
+  const WATCHED_KEY =
+    'Watched Container Prefabs (true = monitor container loot, false = disabled)';
+
+  /** A lista de vigia como está no disco agora. */
+  async function watchedOnDisk(): Promise<Record<string, boolean>> {
+    const text = await readFile(join(harness.configDir, 'BetterLoot.json'), 'utf8');
+    const root = JSON.parse(text) as Record<string, Record<string, Record<string, boolean>>>;
+
+    return root['General Configuration']?.[WATCHED_KEY] ?? {};
+  }
+
+  async function openElite(): Promise<{ table: Record<string, unknown>; tableRevision: string }> {
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/servers/${SERVER}/betterloot/table?prefab=${encodeURIComponent(ELITE)}`,
+    });
+
+    return response.json();
+  }
+
+  it('chega à tela ao lado do outro interruptor', async () => {
+    const { table } = await openElite();
+
+    expect(table.enabled).toBe(true);
+    expect(table.watched).toBe(true);
+  });
+
+  it('a caixa fora da lista é lida como não vigiada, e não como ausente', async () => {
+    await writeFile(
+      join(harness.configDir, 'BetterLoot.json'),
+      JSON.stringify({ 'General Configuration': { [WATCHED_KEY]: { [SPACED_PREFAB]: true } } }),
+      'utf8',
+    );
+
+    // É o que o plugin faz: o `TryGetValue` dele falha e o hook sai
+    // sem tocar na caixa. Para o jogo, ela não é vigiada.
+    expect((await openElite()).table.watched).toBe(false);
+  });
+
+  it('sem BetterLoot.json, ela é NULA — e isso não é "desligada"', async () => {
+    await rm(join(harness.configDir, 'BetterLoot.json'));
+
+    expect((await openElite()).table.watched).toBeNull();
+  });
+
+  it('gravar liga a caixa e preserva as outras chaves do arquivo', async () => {
+    const before = JSON.parse(
+      await readFile(join(harness.configDir, 'BetterLoot.json'), 'utf8'),
+    ) as Record<string, unknown>;
+
+    const { table, tableRevision } = await openElite();
+
+    const saved = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: { baseRevision: tableRevision, table: { ...table, enabled: false, watched: false } },
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().watchedChanged).toBe(true);
+    expect((await watchedOnDisk())[ELITE]).toBe(false);
+
+    // O resto da configuração é do admin, e não desta gravação:
+    // montá-la do zero devolveria os multiplicadores ao padrão sem
+    // ninguém pedir.
+    const after = JSON.parse(
+      await readFile(join(harness.configDir, 'BetterLoot.json'), 'utf8'),
+    ) as Record<string, unknown>;
+
+    expect(after['Loot Configuration']).toEqual(before['Loot Configuration']);
+  });
+
+  it('e não reescreve o outro arquivo quando o interruptor não mudou', async () => {
+    const { table, tableRevision } = await openElite();
+    const before = await readFile(join(harness.configDir, 'BetterLoot.json'), 'utf8');
+
+    const saved = await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: { baseRevision: tableRevision, table },
+    });
+
+    expect(saved.json().watchedChanged).toBe(false);
+    // Byte a byte: qualquer reescrita mudaria o `configRevision`, e
+    // a faixa de globais aberta na mesma tela recusaria o próximo
+    // salvamento por um conflito que não existiu.
+    expect(await readFile(join(harness.configDir, 'BetterLoot.json'), 'utf8')).toBe(before);
+  });
+
+  it('a tela que não sabe do interruptor não cria o arquivo de configuração', async () => {
+    await rm(join(harness.configDir, 'BetterLoot.json'));
+
+    const { table, tableRevision } = await openElite();
+
+    await harness.app.inject({
+      method: 'PUT',
+      url: `/servers/${SERVER}/betterloot/table`,
+      payload: { baseRevision: tableRevision, table },
+    });
+
+    // `watched: null` é "não mexa". Tratá-lo como `false` faria a
+    // gravação de uma caixa CRIAR a configuração do plugin e
+    // desligar o prefab — o oposto do que se pediu.
+    expect(existsSync(join(harness.configDir, 'BetterLoot.json'))).toBe(false);
+  });
+});
+
+// ============================================================
+//  O LOOT QUE O JOGO PÕE NA CAIXA
+//
+//  ####  É A ÚNICA ROTA DO EDITOR QUE PRECISA DO JOGO NO AR  ####
+//
+//  E por isso ela tem tantos estados: o servidor pode estar
+//  desligado, o plugin pode ser velho demais para conhecer o
+//  comando, e o prefab pode ter saído num update do Rust. Nenhum
+//  dos três é defeito da tela, e cada um precisa de uma frase
+//  diferente — senão o admin vai procurar o problema no lugar
+//  errado.
+// ============================================================
+describe('o loot do jogo', () => {
+  beforeEach(seedFiles);
+
+  const url = `/servers/${SERVER}/betterloot/native?prefab=${encodeURIComponent(ELITE)}`;
+
+  it('devolve a tabela nativa, e o prefab vai DEPOIS dos números', async () => {
+    const response = await harness.app.inject({ method: 'GET', url });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(body.native.items).toHaveLength(2);
+    expect(body.native.guaranteed).toEqual([{ shortname: 'scrap', min: 1, max: 1 }]);
+    expect(body.native.slotsMin).toBe(8);
+
+    // A ordem do comando não é capricho: o caminho do prefab tem
+    // espaço em dezessete casos medidos, e o console do Rust quebra
+    // argumento no espaço. Com o prefab na frente, nada distinguiria
+    // o último pedaço dele de um offset.
+    expect(harness.commands).toEqual([`origemz.loot.native 0 500 ${ELITE}`]);
+  });
+
+  it('o prefab com ESPAÇO chega inteiro ao comando', async () => {
+    harness.rcon = {
+      isConnected: true,
+      reply: nativeReply({ prefab: SPACED_PREFAB, count: 0, items: [] }),
+    };
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: `/servers/${SERVER}/betterloot/native?prefab=${encodeURIComponent(SPACED_PREFAB)}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(harness.commands[0]).toBe(`origemz.loot.native 0 500 ${SPACED_PREFAB}`);
+  });
+
+  it('servidor parado é 503, e o resto da tela continua funcionando', async () => {
+    harness.rcon = { isConnected: false, reply: '' };
+
+    const response = await harness.app.inject({ method: 'GET', url });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error).toBe('RCON_UNAVAILABLE');
+  });
+
+  it('servidor que o agente não opera é 409', async () => {
+    harness.rcon = null;
+
+    const response = await harness.app.inject({ method: 'GET', url });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toBe('SERVER_NOT_OPERATED');
+  });
+
+  it('resposta VAZIA vira a frase do plugin velho, e não um erro genérico', async () => {
+    // O console do Rust não reclama de comando que não conhece: ele
+    // simplesmente não responde. Sem esta mensagem, o admin caçaria
+    // um defeito que não existe.
+    harness.rcon = { isConnected: true, reply: '' };
+
+    const response = await harness.app.inject({ method: 'GET', url });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(502);
+    expect(body.error).toBe('PLUGIN_INVALID_RESPONSE');
+    expect(body.message).toContain('0.6.0');
+  });
+
+  it('prefab que o jogo não conhece é 404, e não erro de plugin', async () => {
+    // O plugin funcionou e respondeu certo — quem errou foi a
+    // pergunta. Um 502 aqui mandaria olhar o servidor.
+    harness.rcon = {
+      isConnected: true,
+      reply: JSON.stringify({ ok: false, error: 'PREFAB_NOT_FOUND' }),
+    };
+
+    const response = await harness.app.inject({ method: 'GET', url });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error).toBe('PREFAB_NOT_FOUND');
+  });
+
+  it('prefab que existe e não é caixa é 409', async () => {
+    harness.rcon = {
+      isConnected: true,
+      reply: JSON.stringify({ ok: false, error: 'PREFAB_NOT_LOOT' }),
+    };
+
+    const response = await harness.app.inject({ method: 'GET', url });
+
+    expect(response.statusCode).toBe(409);
+  });
+
+  it('recusa a leitura que não fecha, em vez de entregar meia tabela', async () => {
+    // Meia tabela nativa faria a tela marcar item do jogo como
+    // acrescentado — e o admin apagaria loot original achando que
+    // limpava o que ele mesmo pôs.
+    harness.rcon = { isConnected: true, reply: nativeReply({ count: 90 }) };
+
+    const response = await harness.app.inject({ method: 'GET', url });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error).toBe('LOOT_NATIVE_INCOMPLETE');
+  });
+
+  it('e a resposta fora do contrato não vira tabela vazia', async () => {
+    harness.rcon = { isConnected: true, reply: '{"ok":true,"items":"nao e lista"}' };
+
+    const response = await harness.app.inject({ method: 'GET', url });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error).toBe('PLUGIN_INVALID_RESPONSE');
   });
 });

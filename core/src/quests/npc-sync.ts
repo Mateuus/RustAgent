@@ -33,7 +33,7 @@
 //  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §10.
 // ============================================================
 
-import type { QuestNpcRecord, QuestsRepository } from '../db/quests-repository.js';
+import type { QuestNpcRecord, QuestRecord, QuestsRepository } from '../db/quests-repository.js';
 import { encodeQuestPayload, QUESTS_CONTRACT } from '../game/quests-contract.js';
 import { DEFAULT_NPC_PREFAB } from '../types/quests.js';
 import type { Logger } from '../logger.js';
@@ -56,18 +56,92 @@ export interface NpcSyncServers {
   contextOf(id: string): { readonly rcon: NpcSyncRcon } | null;
 }
 
+/** Uma missão daquele NPC, como o boneco a apresenta. */
+export interface QuestNpcOffer {
+  readonly id: string;
+  readonly title: string;
+  /** A fala. `null` = o plugin monta uma a partir do objetivo. */
+  readonly description: string | null;
+  /** "Colete 100 wood", já em português. */
+  readonly goal: string;
+  /** "100 scrap", já em português. `''` = a missão não dá nada. */
+  readonly reward: string;
+  /**
+   * O item do prêmio, para o ícone do cartão.
+   *
+   * `null` = o prêmio não é item (moeda, VIP, ponto de ranking) ou
+   * o catálogo do jogo não conhece aquele shortname. O cartão fica
+   * sem ícone, e não com um quadrado vazio.
+   */
+  readonly rewardItemId: number | null;
+  /** A skin dele. `0` = a arte padrão do item. */
+  readonly rewardSkinId: number;
+  /**
+   * Este boneco OFERECE esta missão, ou só a recebe?
+   *
+   * `false` = ele é o balcão de entrega e nada mais: o cartão dela
+   * só aparece para quem já a concluiu, com RESGATAR. Oferecer
+   * ACEITAR aqui mandaria o jogador pegar no lugar errado.
+   */
+  readonly offers: boolean;
+}
+
 export interface QuestNpcSyncDeps {
   readonly repository: QuestsRepository;
   readonly servers: NpcSyncServers;
   readonly logger: Logger;
   /** O mesmo segredo do `#OZQUEST#`. Ver `parseQuestPush`. */
   readonly secret: string;
-  /** Abre a tela do NPC para aquele jogador. */
-  readonly openScreen?: (input: {
+  /**
+   * As frases da missão, prontas.
+   *
+   * ####  ELAS NÃO PODEM NASCER NO PLUGIN  ####
+   *
+   * "Colete 100 wood" e "100 scrap" precisam do catálogo do JOGO
+   * (que sabe que `wood` se chama Madeira) e do de rankings. Nada
+   * disso mora no plugin, e mandá-lo montar texto seria a segunda
+   * versão da mesma frase — a pobre.
+   *
+   * `undefined` = ninguém ligou, e a caixa do NPC mostra só o
+   * título da missão.
+   */
+  readonly describeQuest?: (quest: QuestRecord) => {
+    readonly goal: string;
+    readonly reward: string;
+    readonly rewardItemId: number | null;
+    readonly rewardSkinId: number;
+  };
+  /**
+   * O jogador clicou em aceitar dentro da caixa do NPC.
+   *
+   * O plugin já conferiu que ele está perto do boneco — a distância
+   * é medida no jogo, que é o único lugar onde ela existe. Quem
+   * decide se a missão pode ser aceita continua sendo o agente.
+   */
+  readonly onAccept?: (input: {
     readonly serverId: string;
     readonly steamId: string;
-    readonly screenId: string;
-  }) => Promise<void>;
+    readonly npcId: string;
+    readonly questId: string;
+  }) => void;
+  /** Ele clicou em resgatar, no balcão, com a missão pronta. */
+  readonly onClaim?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly playerQuestId: number;
+  }) => void;
+  /**
+   * O jogador falou com aquele NPC.
+   *
+   * É a única testemunha que o agente tem de que alguém esteve no
+   * balcão — e é ela que libera o botão de aceitar da missão
+   * daquele NPC. Ver `#npcTalks` no serviço.
+   */
+  readonly onTalk?: (input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly npcId: string;
+  }) => void;
 }
 
 /** O que o plugin grita. Ver `parseNpcLine`. */
@@ -81,8 +155,52 @@ export type NpcPush =
       readonly z: number;
       readonly rotation: number;
     }
-  /** Um jogador apertou USE perto de um NPC. */
-  | { readonly kind: 'use'; readonly steamId: string; readonly npcId: string };
+  /**
+   * O admin foi até o lugar novo e chamou o NPC para lá.
+   *
+   * Mover é TRAZER, e por isso não pede coordenada: quem quer o
+   * boneco em outro lugar já está nele. Sem este empurrão o painel
+   * mandava usar o `add` de novo — e o admin terminava com dois
+   * bonecos, "mateus" e "mateus-2".
+   */
+  | {
+      readonly kind: 'move';
+      readonly npcId: string;
+      readonly x: number;
+      readonly y: number;
+      readonly z: number;
+      readonly rotation: number;
+    }
+  /** O admin apagou o NPC de dentro do jogo. */
+  | { readonly kind: 'remove'; readonly npcId: string }
+  /** Um jogador apertou USE (ou TALK) perto de um NPC. */
+  | { readonly kind: 'use'; readonly steamId: string; readonly npcId: string }
+  /**
+   * Ele clicou em aceitar dentro da caixa do NPC.
+   *
+   * A caixa é desenhada pelo plugin, e o clique nasce no CLIENTE —
+   * mas quem o reporta é o plugin, que antes confere a distância
+   * até o boneco. O agente decide o resto.
+   */
+  | {
+      readonly kind: 'accept';
+      readonly steamId: string;
+      readonly npcId: string;
+      readonly questId: string;
+    }
+  /**
+   * Ele voltou ao balcão com a missão pronta e clicou em resgatar.
+   *
+   * O número da tentativa é o que o `assign` levou até o plugin —
+   * mas ele chega de volta pelo cliente, e por isso o agente
+   * confere de quem aquela tentativa é.
+   */
+  | {
+      readonly kind: 'claim';
+      readonly steamId: string;
+      readonly npcId: string;
+      readonly playerQuestId: number;
+    };
 
 export class QuestNpcSync {
   readonly #deps: QuestNpcSyncDeps;
@@ -107,7 +225,8 @@ export class QuestNpcSync {
     }
 
     const npcs = this.#deps.repository.listNpcsToSpawn(serverId);
-    const fingerprint = JSON.stringify(npcs.map(toPayload));
+    const payloads = npcs.map((npc) => this.#payloadOf(npc));
+    const fingerprint = JSON.stringify(payloads);
 
     if (this.#sent.get(serverId) === fingerprint) {
       return;
@@ -115,13 +234,103 @@ export class QuestNpcSync {
 
     await rcon.send(NPC_CLEAR_COMMAND);
 
-    for (const npc of npcs) {
-      await rcon.send(`${NPC_SET_COMMAND} ${encodeQuestPayload(toPayload(npc))}`);
+    for (const payload of payloads) {
+      await rcon.send(`${NPC_SET_COMMAND} ${encodeQuestPayload(payload)}`);
     }
 
     this.#sent.set(serverId, fingerprint);
 
     this.#deps.logger.info({ server: serverId, npcs: npcs.length }, 'NPCs de missão enviados');
+  }
+
+  /**
+   * O NPC, como o plugin o recebe — com as missões dele dentro.
+   *
+   * ####  POR QUE AS OFERTAS DESCEM JUNTO  ####
+   *
+   * A caixa que o jogador vê ao apertar TALK é desenhada PELO
+   * PLUGIN, na hora, sem ida à rede. Para isso ele precisa ter em
+   * mãos o que aquele boneco oferece — título, fala, objetivo e
+   * prêmio — antes de alguém chegar perto.
+   *
+   * O que NÃO desce é o estado do jogador: se ele já pegou, se está
+   * em cooldown, se a cadeia permite. Isso é do agente, e continua
+   * sendo respondido no clique — ver `onAccept`.
+   *
+   * Elas entram no payload do `npc.set` em vez de num comando
+   * próprio porque assim a impressão digital do `push` já as cobre:
+   * mudar o título de uma missão reenvia o NPC dela sozinho.
+   */
+  #payloadOf(npc: QuestNpcRecord) {
+    return { ...toPayload(npc), offers: this.#offersOf(npc) };
+  }
+
+  #offersOf(npc: QuestNpcRecord): readonly QuestNpcOffer[] {
+    const offers: QuestNpcOffer[] = [];
+
+    for (const quest of this.#deps.repository.listForServer(npc.serverId)) {
+      if (!quest.enabled) {
+        continue;
+      }
+
+      // ####  DUAS PONTAS, E ELAS PODEM SER O MESMO BONECO  ####
+      //
+      // `npcId` é onde a missão se PEGA; `turnInNpcId` é onde ela
+      // se ENTREGA. Sem o segundo, entrega-se onde se pegou — que
+      // é como tudo o que já existe se comporta.
+      //
+      // Um NPC `delivery` nunca oferece: ele existe para receber, e
+      // uma vitrine nele confundiria quem chegou para entregar.
+      const dele = quest.npcId === npc.id && npc.kind !== 'delivery';
+      const recebe =
+        quest.turnInNpcId === null ? quest.npcId === npc.id : quest.turnInNpcId === npc.id;
+
+      if (!dele && !recebe) {
+        continue;
+      }
+
+      const described = this.#deps.describeQuest?.(quest);
+
+      offers.push({
+        id: quest.id,
+        title: quest.title,
+        description: quest.description,
+        goal: described?.goal ?? '',
+        reward: described?.reward ?? '',
+        rewardItemId: described?.rewardItemId ?? null,
+        rewardSkinId: described?.rewardSkinId ?? 0,
+        offers: dele,
+      });
+    }
+
+    return offers;
+  }
+
+  /**
+   * Manda de novo, agora — sem esperar a volta do relógio.
+   *
+   * ####  UM `move` QUE DEMORA UM MINUTO NÃO E UM `move`  ####
+   *
+   * O admin digita `/questnpc move`, olha para o chão e espera o
+   * boneco aparecer. Até 12/09/2026 ele esperava até o `flushSeconds`
+   * daquele servidor — 60 s por padrão —, e no meio disso digitava o
+   * comando de novo achando que não tinha funcionado.
+   *
+   * O relógio de 50 ms existe pela regra que vale para o arquivo
+   * inteiro: nenhum comando de RCON sai de dentro do gancho que lê
+   * o console. `unref` para não segurar o processo no desligamento.
+   */
+  #pushSoon(serverId: string, reason: string): void {
+    const timer = setTimeout(() => {
+      void this.push(serverId).catch((error: unknown) => {
+        this.#deps.logger.warn(
+          { server: serverId, reason, err: error },
+          'não deu para reenviar os NPCs agora; a próxima volta do relógio tenta',
+        );
+      });
+    }, 50);
+
+    timer.unref();
   }
 
   /** Força o reenvio: a rota do painel chama isto depois de gravar. */
@@ -154,6 +363,14 @@ export class QuestNpcSync {
     try {
       if (push.kind === 'add') {
         this.#add(serverId, push);
+      } else if (push.kind === 'move') {
+        this.#move(serverId, push);
+      } else if (push.kind === 'remove') {
+        this.#remove(serverId, push.npcId);
+      } else if (push.kind === 'accept') {
+        this.#accept(serverId, push);
+      } else if (push.kind === 'claim') {
+        this.#claim(serverId, push);
       } else {
         this.#use(serverId, push);
       }
@@ -191,8 +408,158 @@ export class QuestNpcSync {
     });
 
     this.forget(serverId);
+    this.#pushSoon(serverId, 'npc criado no jogo');
 
     this.#deps.logger.info({ server: serverId, npc: id, name: push.name }, 'NPC de missão criado');
+  }
+
+  #move(serverId: string, push: Extract<NpcPush, { kind: 'move' }>): void {
+    const npc = this.#deps.repository.getNpc(push.npcId);
+
+    // A mesma conferência do `#use`, e pelo mesmo motivo: o id veio
+    // do jogo, e um NPC de outro servidor não se move daqui.
+    if (npc === null || npc.serverId !== serverId) {
+      return;
+    }
+
+    this.#deps.repository.updateNpc(push.npcId, {
+      ...npc,
+      x: push.x,
+      y: push.y,
+      z: push.z,
+      rotation: push.rotation,
+    });
+
+    this.forget(serverId);
+    this.#pushSoon(serverId, 'npc movido no jogo');
+
+    this.#deps.logger.info(
+      { server: serverId, npc: push.npcId, x: push.x, z: push.z },
+      'NPC de missão mudou de lugar',
+    );
+  }
+
+  #remove(serverId: string, npcId: string): void {
+    const npc = this.#deps.repository.getNpc(npcId);
+
+    if (npc === null || npc.serverId !== serverId) {
+      return;
+    }
+
+    // ####  APAGAR O NPC NÃO APAGA A QUEST DELE  ####
+    //
+    // É a mesma regra da rota do painel: o progresso de quem estava
+    // fazendo não pode ir junto. A quest órfã volta ao menu — ver
+    // `listOffers` no serviço.
+    const orphaned = this.#deps.repository.questsOfNpc(npcId);
+
+    this.#deps.repository.removeNpc(npcId);
+    this.forget(serverId);
+    this.#pushSoon(serverId, 'npc apagado no jogo');
+
+    this.#deps.logger.info(
+      { server: serverId, npc: npcId, orphaned: orphaned.length },
+      'NPC de missão apagado de dentro do jogo',
+    );
+  }
+
+  #accept(serverId: string, push: Extract<NpcPush, { kind: 'accept' }>): void {
+    const npc = this.#deps.repository.getNpc(push.npcId);
+
+    // A mesma conferência do `#use`: um NPC de outro servidor não
+    // entrega missão neste.
+    if (npc === null || npc.serverId !== serverId || !npc.enabled) {
+      return;
+    }
+
+    const quest = this.#deps.repository.get(push.questId);
+
+    // ####  A MISSÃO TEM DE SER DAQUELE BONECO  ####
+    //
+    // Sem isto, um cliente adulterado pediria no NPC do lado de
+    // casa a missão que só se pega do outro lado do mapa — e o
+    // `accept` a concederia, porque o serviço confia no balcão.
+    if (quest === null || quest.npcId !== npc.id) {
+      this.#deps.logger.warn(
+        { server: serverId, npc: npc.id, quest: push.questId },
+        'o aceite pedia uma missão que não é deste NPC',
+      );
+
+      return;
+    }
+
+    this.#deps.logger.info(
+      { server: serverId, npc: npc.id, quest: quest.id, steamId: push.steamId },
+      'aceite pedido no balcão do NPC',
+    );
+
+    // O plugin mediu a distância no jogo, e é isso que a testemunha
+    // significa. O que pode ou não ser aceito continua sendo do
+    // serviço — ver `#whyNot`.
+    this.#deps.onTalk?.({ serverId, steamId: push.steamId, npcId: npc.id });
+    this.#deps.onAccept?.({
+      serverId,
+      steamId: push.steamId,
+      npcId: npc.id,
+      questId: quest.id,
+    });
+  }
+
+  #claim(serverId: string, push: Extract<NpcPush, { kind: 'claim' }>): void {
+    const npc = this.#deps.repository.getNpc(push.npcId);
+
+    if (npc === null || npc.serverId !== serverId || !npc.enabled) {
+      return;
+    }
+
+    const attempt = this.#deps.repository.attempt(push.playerQuestId);
+
+    // ####  A TENTATIVA TEM DE SER DELE  ####
+    //
+    // O número veio do `assign` daquele jogador, mas voltou pelo
+    // CLIENTE — e um cliente adulterado mandaria o número do
+    // vizinho para resgatar a missão dos outros. O `claim` do
+    // serviço não pergunta de quem é: quem pergunta é aqui.
+    if (
+      attempt === null ||
+      attempt.serverId !== serverId ||
+      attempt.steamId !== push.steamId
+    ) {
+      this.#deps.logger.warn(
+        { server: serverId, npc: npc.id, pq: push.playerQuestId, steamId: push.steamId },
+        'resgate pedido no balcão para uma tentativa que não é daquele jogador',
+      );
+
+      return;
+    }
+
+    // ####  E O BALCÃO TEM DE SER O DESTA MISSÃO  ####
+    //
+    // O cartão de RESGATAR só é desenhado no boneco certo, mas o
+    // clique nasce no cliente: sem esta conferência, resgatar-se-ia
+    // no NPC da porta de casa a missão que o cadastro manda entregar
+    // do outro lado do mapa.
+    //
+    // `turnInNpcId` vazio = entrega onde se pegou. Missão sem NPC
+    // nenhum é de menu, e não se resgata em balcão.
+    const quest = this.#deps.repository.get(attempt.questId);
+    const balcao = quest === null ? null : (quest.turnInNpcId ?? quest.npcId);
+
+    if (balcao !== npc.id) {
+      this.#deps.logger.warn(
+        { server: serverId, npc: npc.id, quest: attempt.questId, balcao },
+        'resgate pedido num NPC que não é o balcão desta missão',
+      );
+
+      return;
+    }
+
+    this.#deps.logger.info(
+      { server: serverId, npc: npc.id, pq: push.playerQuestId, steamId: push.steamId },
+      'resgate pedido no balcão do NPC',
+    );
+
+    this.#deps.onClaim?.({ serverId, steamId: push.steamId, playerQuestId: push.playerQuestId });
   }
 
   #use(serverId: string, push: Extract<NpcPush, { kind: 'use' }>): void {
@@ -207,27 +574,33 @@ export class QuestNpcSync {
       return;
     }
 
-    const open = this.#deps.openScreen;
+    // ####  ESTA LINHA É O QUE SE PROCURA NO CONSOLE  ####
+    //
+    // O TALK atravessa três pontos — o plugin grita, o agente lê, o
+    // agente manda abrir — e, quando o jogador vê "não consegui
+    // carregar essa página", só um deles falhou. Sem este registro,
+    // descobrir qual exige instrumentar o servidor de produção.
+    //
+    // Se ela aparece, o grito chegou: o que falhou está adiante.
+    // Se não aparece, o agente não está lendo o console daquele
+    // servidor — e isso acontece quando o agente reinicia sem que o
+    // servidor do jogo reinicie junto.
+    this.#deps.logger.info(
+      { server: serverId, npc: npc.id, steamId: push.steamId },
+      'um jogador falou com o NPC de missão',
+    );
 
-    if (open === undefined) {
-      return;
-    }
-
-    // O relógio: nenhum comando sai da pilha do gancho de console.
-    const timer = setTimeout(() => {
-      void open({
-        serverId,
-        steamId: push.steamId,
-        screenId: `tela-quest:npc:${npc.id}`,
-      }).catch((error: unknown) => {
-        this.#deps.logger.debug(
-          { server: serverId, npc: npc.id, err: error },
-          'não deu para abrir a tela do NPC',
-        );
-      });
-    }, 50);
-
-    timer.unref();
+    // ####  A TESTEMUNHA, E NADA MAIS  ####
+    //
+    // Ela é o que diferencia "chegou no boneco" de "pode pegar a
+    // missão dele" — ver `#npcTalks` no serviço.
+    //
+    // Até 12/09/2026 este ponto também mandava o jogo ABRIR a tela
+    // de missões daquele NPC. Não manda mais: a caixa de conversa é
+    // desenhada pelo próprio plugin, com o que desceu no `npc.set`,
+    // e por isso ela aparece no quadro seguinte ao TALK em vez de
+    // depender de uma ida e uma volta pelo console.
+    this.#deps.onTalk?.({ serverId, steamId: push.steamId, npcId: npc.id });
   }
 
   /**
@@ -298,16 +671,40 @@ export function parseNpcLine(line: string, secret: string): NpcPush | null {
       return null;
     }
 
+    const npcId = typeof body.npcId === 'string' && body.npcId !== '' ? body.npcId : null;
+
     if (body.kind === 'use') {
-      return typeof body.steamId === 'string' &&
-        /^\d{17}$/.test(body.steamId) &&
-        typeof body.npcId === 'string' &&
-        body.npcId !== ''
-        ? { kind: 'use', steamId: body.steamId, npcId: body.npcId }
+      return npcId !== null && typeof body.steamId === 'string' && /^\d{17}$/.test(body.steamId)
+        ? { kind: 'use', steamId: body.steamId, npcId }
         : null;
     }
 
-    if (body.kind !== 'add') {
+    if (body.kind === 'remove') {
+      return npcId === null ? null : { kind: 'remove', npcId };
+    }
+
+    if (body.kind === 'claim') {
+      return npcId !== null &&
+        typeof body.steamId === 'string' &&
+        /^\d{17}$/.test(body.steamId) &&
+        typeof body.pq === 'number' &&
+        Number.isInteger(body.pq) &&
+        body.pq > 0
+        ? { kind: 'claim', steamId: body.steamId, npcId, playerQuestId: body.pq }
+        : null;
+    }
+
+    if (body.kind === 'accept') {
+      return npcId !== null &&
+        typeof body.steamId === 'string' &&
+        /^\d{17}$/.test(body.steamId) &&
+        typeof body.questId === 'string' &&
+        body.questId !== ''
+        ? { kind: 'accept', steamId: body.steamId, npcId, questId: body.questId }
+        : null;
+    }
+
+    if (body.kind !== 'add' && body.kind !== 'move') {
       return null;
     }
 
@@ -319,15 +716,19 @@ export function parseNpcLine(line: string, secret: string): NpcPush | null {
       }
     }
 
+    const place = {
+      x: body.x as number,
+      y: body.y as number,
+      z: body.z as number,
+      rotation: body.rotation as number,
+    };
+
+    if (body.kind === 'move') {
+      return npcId === null ? null : { kind: 'move', npcId, ...place };
+    }
+
     return typeof body.name === 'string' && body.name.trim() !== ''
-      ? {
-          kind: 'add',
-          name: body.name.trim().slice(0, 60),
-          x: body.x as number,
-          y: body.y as number,
-          z: body.z as number,
-          rotation: body.rotation as number,
-        }
+      ? { kind: 'add', name: body.name.trim().slice(0, 60), ...place }
       : null;
   } catch {
     return null;

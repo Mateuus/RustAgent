@@ -158,10 +158,34 @@ export interface QuestAssignPayload {
   readonly contract: number;
   readonly quests: readonly {
     readonly pq: number;
+    /**
+     * A quest do catálogo, e não a tentativa.
+     *
+     * É o que permite a caixa do NPC dizer "você já está nesta" em
+     * vez de oferecer de novo o que o jogador acabou de pegar — o
+     * boneco conhece as missões DELE pelo id, e o `pq` sozinho não
+     * casa com nenhum.
+     */
+    readonly id: string;
+    /**
+     * `active` = ele ainda está perseguindo, e o plugin conta.
+     * `completed` = fechou e falta resgatar — o plugin NÃO conta
+     * mais, e é isto que faz o balcão do NPC trocar ACEITAR por
+     * RESGATAR em vez de oferecer de novo o que já foi feito.
+     */
+    readonly status: 'active' | 'completed';
     readonly objectives: readonly {
       readonly seq: number;
       readonly kind: string;
       readonly target: string;
+      /**
+       * O nome bonito do alvo, para a tela.
+       *
+       * O `target` é a CHAVE (`metal.fragments`), e é com ela que o
+       * plugin conta. Este é o nome que uma pessoa lê — e sem ele a
+       * caixa do NPC dizia "Ainda falta: 200 metal.fragments".
+       */
+      readonly label: string;
       readonly need: number;
       readonly have: number;
     }[];

@@ -331,6 +331,17 @@ export interface ServerPlugin extends LibraryPlugin {
    */
   missingRequires: string[];
   /**
+   * Dependências MOLES que estão no acervo e não estão ligadas aqui.
+   *
+   * O plugin carrega assim mesmo, e a parte que usa o outro fica
+   * morta sem erro nenhum — o OrigemZUI sem o OrigemZImages abre o
+   * menu, mas sem as imagens próprias.
+   *
+   * Opcional porque um agente anterior a este campo não o manda, e
+   * ler `.length` de `undefined` derrubaria a tela inteira.
+   */
+  missingReferences?: string[];
+  /**
    * Quem, ligado aqui, depende deste plugin.
    *
    * `hard` sai do ar junto se este for tirado; `soft` continua no ar
@@ -966,6 +977,53 @@ export interface SpawnStatusInput {
   enabled: boolean;
 }
 
+/**
+ * Quão RÁPIDO as coisas andam para quem está naquele grupo.
+ *
+ * Mesma lista de grupos do loadout e do status, e as mesmas regras de
+ * órfão e de servidor fora do ar. A diferença: a lista vem na ordem
+ * da HIERARQUIA (normal, os VIPs, admin, e por fim quem não é nível),
+ * porque é nessa ordem que o plugin desce quando um campo está em
+ * branco.
+ *
+ * Cada timer é um multiplicador de velocidade (×2 = metade do tempo).
+ * `null` NÃO é ×1: é "este grupo não decide", e quem é dele cai para o
+ * nível de baixo — ver core/src/loadouts/timers.ts.
+ */
+export interface ServerPlayerTimers {
+  name: string;
+  exists: boolean | null;
+  members: number | null;
+  /**
+   * O nível que o grupo é para o plugin: `normal`, o tier do VIP,
+   * `admin` — ou `null`, quando o plugin nunca o consulta.
+   */
+  tier: string | null;
+  smelt: number | null;
+  craft: number | null;
+  research: number | null;
+  recycle: number | null;
+  enabled: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface PlayerTimersSyncResult {
+  serverId: string;
+  tiers: number;
+  cachedTiers: number;
+  skipped: string | null;
+}
+
+/** O que o formulário grava. O 1 vira `null` do lado do agente. */
+export interface PlayerTimersInput {
+  smelt: number | null;
+  craft: number | null;
+  research: number | null;
+  recycle: number | null;
+  enabled: boolean;
+}
+
 export type KitKind = 'resgate' | 'cooldown';
 
 /**
@@ -982,6 +1040,13 @@ export interface Kit {
   slug: string;
   name: string;
   description: string | null;
+  /**
+   * A arte própria do card, em `Assets/kits/`.
+   *
+   * `null` = o desenho padrão: o ícone do PRIMEIRO item do kit.
+   * Opcional porque um agente anterior a este campo não o manda.
+   */
+  iconFile?: string | null;
   /** A aba em que ele aparece no menu do jogo. `null` = sem aba. */
   category: string | null;
   kind: KitKind;
@@ -1097,8 +1162,13 @@ export interface StoreOffer {
   position: number;
   enabled: boolean;
   badge: OfferBadge | null;
-  /** O desenho da oferta. De campo próprio: um kit não tem "o item". */
-  icon: { shortname: string; itemId: number; skinId: string };
+  /**
+   * O desenho da oferta. De campo próprio: um kit não tem "o item".
+   *
+   * `file` é a arte própria, em `Assets/store/`. `null` = usa o ícone
+   * do jogo, que é o padrão e não custa download ao jogador.
+   */
+  icon: { shortname: string; itemId: number; skinId: string; file?: string | null };
   items: OfferItem[];
   /** As vantagens listadas, só em `vip`. */
   perks: string[];
@@ -1369,6 +1439,22 @@ export interface CustomItem {
  */
 export function iconUrl(name: string): string {
   return agentUrl('/api/custom-items/icons/' + encodeURIComponent(name));
+}
+
+/**
+ * A URL da arte de uma oferta da loja.
+ *
+ * Mesma ideia do `iconUrl`, outro acervo: a arte do card mora em
+ * `Assets/store/`, separada da dos itens — a lista de uma não deve
+ * encher da outra.
+ */
+export function storeIconUrl(name: string): string {
+  return agentUrl('/api/store/icons/' + encodeURIComponent(name));
+}
+
+/** A URL da arte de um kit. Mesma ideia, outro acervo. */
+export function kitIconUrl(name: string): string {
+  return agentUrl('/api/kits/icons/' + encodeURIComponent(name));
 }
 
 export interface CustomItemInput {
@@ -2435,6 +2521,25 @@ export interface BetterLootTableSummary {
   prefab: string;
   /** Desligado devolve a caixa ao loot NATIVO, e não a caixa vazia. */
   enabled: boolean;
+  /**
+   * A caixa está na lista de vigia do `BetterLoot.json`?
+   *
+   * ####  SÃO DOIS INTERRUPTORES, EM DOIS ARQUIVOS  ####
+   *
+   * O `enabled` acima é o `Is Prefab Enabled?` do
+   * `LootTables.json`: ele decide se o plugin PREENCHE a caixa.
+   * Este é o `Watched Container Prefabs` do `BetterLoot.json`: ele
+   * decide se o plugin chega a OLHAR para ela.
+   *
+   * O plugin exige os dois. A tela mostrava só o primeiro, e por
+   * isso podia dizer "BetterLoot" numa caixa que o servidor
+   * entregava do jogo — foi assim que a `crate_elite` ficou presa
+   * em "jogo" sem ter como sair.
+   *
+   * `null` = aquele servidor não tem `BetterLoot.json`, então não
+   * há lista para consultar. É diferente de `false`.
+   */
+  watched: boolean | null;
   itemCount: number;
   guaranteedCount: number;
   profileCount: number;
@@ -2584,6 +2689,61 @@ export interface BetterLootSaveInput {
    */
   baseRevision: string | null;
   table: BetterLootTable;
+}
+
+// ------------------------------------------------------------
+//  O LOOT QUE O JOGO PÕE NA CAIXA
+// ------------------------------------------------------------
+//
+//  ####  ELE NÃO ESTÁ EM ARQUIVO NENHUM  ####
+//
+//  O BetterLoot lê a tabela nativa do jogo UMA vez, quando cria a
+//  entrada daquele prefab no `LootTables.json`. Dali em diante o
+//  arquivo é a única verdade que ele conhece — e quem apagou a
+//  lista, ou montou a caixa só com perfis, não tem como pedir o
+//  padrão de volta.
+//
+//  Por isso esta parte da tela é a única que precisa do servidor NO
+//  AR: a tabela nativa vive na memória dele, e é lida por RCON.
+//
+//  ####  E É ELA QUE SEPARA "DO JOGO" DE "SEU"  ####
+//
+//  O `LootTables.json` guarda os dois no mesmo dicionário, sem
+//  marca nenhuma. A separação que a tela mostra é o cruzamento
+//  entre a tabela e esta lista — ver `components/loot/betterloot-native.ts`.
+
+/** De onde o plugin tirou a tabela nativa. */
+export type BetterLootNativeSource = 'container' | 'npc' | 'lootfill' | 'unwrap';
+
+/**
+ * Um item da tabela nativa.
+ *
+ * O `shortname` é a CHAVE do `LootTables.json`: item que nasce como
+ * projeto vem com o sufixo `.blueprint` grudado.
+ */
+export interface BetterLootNativeItem {
+  shortname: string;
+  min: number;
+  max: number;
+}
+
+/** O loot que o jogo põe naquela caixa, lido ao vivo. */
+export interface BetterLootNativeTable {
+  prefab: string;
+  source: BetterLootNativeSource;
+  /** Quantos itens a caixa entrega por vez, no jogo. */
+  slotsMin: number;
+  slotsMax: number;
+  /** O scrap do prefab. Zero fora de contêiner. */
+  scrap: number;
+  items: BetterLootNativeItem[];
+  guaranteed: BetterLootNativeItem[];
+}
+
+export interface BetterLootNativeResponse {
+  ok: true;
+  serverId: string;
+  native: BetterLootNativeTable;
 }
 
 
@@ -2814,6 +2974,8 @@ export interface QuestDefinition {
   requires: string | null;
   /** `null` = aparece no menu; preenchido = so perto daquele NPC. */
   npcId: string | null;
+  /** Onde ela se ENTREGA. `null` = no mesmo NPC que ofereceu. */
+  turnInNpcId: string | null;
   repeatMode: QuestRepeatMode;
   cooldownSeconds: number;
   requiresQuest: string | null;
@@ -3884,6 +4046,49 @@ export const agent = {
     });
   },
 
+  /** As artes de kit que já estão em `Assets\kits\`. */
+  kitIcons: () => api<{ ok: true; icons: { name: string; bytes: number }[] }>('/api/kits/icons'),
+
+  /**
+   * Envia a arte de um kit e devolve o NOME dela.
+   *
+   * O nome é o que vai para `iconFile` do kit; os bytes só chegam ao
+   * jogo depois, pela sincronização da interface.
+   */
+  uploadKitIcon: (file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/kits/icons', {
+      method: 'POST',
+      form,
+    });
+  },
+
+  /** As artes que já estão em `Assets\store\`. */
+  storeIcons: () =>
+    api<{ ok: true; icons: { name: string; bytes: number }[] }>('/api/store/icons'),
+
+  /**
+   * Envia a arte de um card e devolve o NOME dela.
+   *
+   * O nome é o que vai para `icon.file` da oferta; os bytes só chegam
+   * ao jogo depois, pela sincronização da interface. O teto é o mesmo
+   * do ícone de item (~33 KB), e o painel reduz a imagem antes de
+   * enviar.
+   */
+  uploadStoreIcon: (file: File) => {
+    const form = new FormData();
+
+    form.append('file', file);
+
+    return api<{ ok: true; icon: { name: string; bytes: number } }>('/api/store/icons', {
+      method: 'POST',
+      form,
+    });
+  },
+
   // ----------------------------------------------------------
   //  INTERFACE
   //
@@ -4299,6 +4504,46 @@ export const agent = {
   syncSpawnStatus: (id: string) =>
     api<{ ok: true } & SpawnStatusSyncResult & { message: string }>(
       `/api/servers/${encodeURIComponent(id)}/spawn-status/sync`,
+      { method: 'POST' },
+    ),
+
+  // ---- Os timers daquele servidor ---------------------------
+  //
+  // A terceira pergunta sobre a mesma pessoa: quão RÁPIDO a
+  // fornalha, o craft, a pesquisa e o reciclador andam para ela.
+
+  playerTimers: (id: string) =>
+    api<{
+      ok: true;
+      connected: boolean;
+      groups: ServerPlayerTimers[];
+      truncated: number;
+      /** Por que os níveis de VIP não foram lidos. `null` = foram. */
+      levelsProblem: string | null;
+      message?: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/timers`),
+
+  savePlayerTimers: (id: string, group: string, input: PlayerTimersInput) =>
+    api<{
+      ok: true;
+      timers: Omit<ServerPlayerTimers, 'exists' | 'members' | 'tier'>;
+      sync: PlayerTimersSyncResult;
+      message: string;
+    }>(`/api/servers/${encodeURIComponent(id)}/timers/${encodeURIComponent(group)}`, {
+      method: 'PUT',
+      body: input,
+    }),
+
+  /** Apaga. Quem é desse grupo passa a seguir o nível de baixo. */
+  removePlayerTimers: (id: string, group: string) =>
+    api<{ ok: true; sync: PlayerTimersSyncResult; message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/timers/${encodeURIComponent(group)}`,
+      { method: 'DELETE' },
+    ),
+
+  syncPlayerTimers: (id: string) =>
+    api<{ ok: true } & PlayerTimersSyncResult & { message: string }>(
+      `/api/servers/${encodeURIComponent(id)}/timers/sync`,
       { method: 'POST' },
     ),
 
@@ -5105,6 +5350,24 @@ export const agent = {
   betterLootTable: (serverId: string, prefab: string) =>
     api<BetterLootTableResponse>(
       `/api/servers/${encodeURIComponent(serverId)}/betterloot/table?prefab=${encodeURIComponent(prefab)}`,
+    ),
+
+  /**
+   * O loot que o JOGO põe naquela caixa.
+   *
+   * ####  É A ÚNICA CHAMADA DAQUI QUE EXIGE O JOGO NO AR  ####
+   *
+   * O resto do editor é arquivo no disco e funciona com tudo
+   * parado. Esta não tem como: a tabela nativa vive na memória do
+   * servidor, e o BetterLoot a lê uma vez só, no primeiro boot.
+   *
+   * 409/503 aqui não são defeito da tela — são "o servidor está
+   * parado". Quem chama trata como falta de informação, nunca como
+   * erro que impeça editar a caixa.
+   */
+  betterLootNative: (serverId: string, prefab: string) =>
+    api<BetterLootNativeResponse>(
+      `/api/servers/${encodeURIComponent(serverId)}/betterloot/native?prefab=${encodeURIComponent(prefab)}`,
     ),
 
   /**

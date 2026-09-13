@@ -6457,6 +6457,210 @@ CREATE TABLE betterloot_junk (
 );
 `;
 
+const PLAYER_TIMERS_SCHEMA = `
+-- ============================================================
+--  074  quao RAPIDO as coisas andam para cada grupo.
+--
+--  A aba Configuracoes > Player > Timers, que ate aqui era
+--  maquete. Quatro multiplicadores de VELOCIDADE por grupo do
+--  Oxide: fornalha, craft, pesquisa e reciclador. x2 e duas vezes
+--  mais rapido - metade do tempo.
+--
+--  Quem aplica e o OrigemZPlayer, a partir do
+--  origemz.timers.sync (loadouts/timers.ts). Nasceu para tirar do
+--  servidor o QuickSmelt, que parou de compilar no Rust de
+--  setembro de 2026 e so sabia de permissao, nao de nivel.
+--
+--  ####  POR QUE NAO E COLUNA DA spawn_status  ####
+--
+--  Pelo mesmo motivo que a 022 deu para nao ser coluna da
+--  loadouts: sao abas diferentes da mesma tela, com comandos e
+--  caches diferentes no jogo. Desligar os timers de um grupo nao
+--  pode levar o status de nascimento junto.
+--
+--  ####  NULL E "ESTE GRUPO NAO DECIDE ESTE TIMER"  ####
+--
+--  E nao x1. O plugin resolve campo a campo: admin, depois o VIP,
+--  depois o normal, e o primeiro que DEFINE o timer ganha. Um NULL
+--  no grupo do VIP deixa o jogador cair para o que o default
+--  disser - e so no fim de tudo para o x1 do jogo.
+--
+--  Por isso o 1 nunca chega aqui: a rota o grava como NULL. Um 1
+--  gravado no VIP travaria a queda, e o VIP perderia o x2 que o
+--  servidor inteiro tem - configuracao que ninguem faz querendo.
+--
+--  REAL, e nao INTEGER: x1.5 e configuracao legitima. A faixa
+--  (1 a 20) e conferida na rota, e nao num CHECK: o teto e regra
+--  do plugin, e mudar a regra nao pode exigir recriar a tabela.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE player_timers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  group_name TEXT NOT NULL,
+
+  smelt_speed    REAL,
+  craft_speed    REAL,
+  research_speed REAL,
+  recycle_speed  REAL,
+
+  -- Desligado e diferente de apagado, como no loadout e no status:
+  -- continua guardado aqui e some do payload empurrado.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  updated_at INTEGER NOT NULL,
+  updated_by TEXT,
+
+  UNIQUE (server_id, group_name)
+);
+`;
+
+const STORE_OFFER_ICON_FILE_SCHEMA = `
+-- ============================================================
+--  075  o card da loja com arte propria.
+--
+--  ####  O ICONE DO JOGO CONTINUA SENDO O PADRAO  ####
+--
+--  \`icon_shortname\`/\`icon_item_id\`/\`icon_skin_id\` desenham o card
+--  com o icone que o CLIENTE ja tem: nao custa download nenhum e o
+--  jogador reconhece a arte. Isso nao muda.
+--
+--  O que faltava era o outro caso: um VIP, um pacote, um kit -- o
+--  que nao E "o item" -- desenhado hoje com a caixa de madeira
+--  emprestada. Para esses, o admin envia um PNG pelo painel.
+--
+--  NULL = usa o icone do jogo, e e o padrao de toda oferta que ja
+--  existe. Preenchido, manda.
+--
+--  Guarda o NOME do arquivo em \`Assets\\store\\\`, e nao os bytes nem
+--  o CRC: os bytes vao ao jogo pelo OrigemZImages, que devolve um
+--  CRC que nasce do conteudo -- grava-lo aqui seria uma segunda
+--  verdade sobre a mesma imagem. Ver http/icon-files.ts.
+-- ============================================================
+ALTER TABLE store_offers ADD COLUMN icon_file TEXT;
+`;
+
+const KIT_ICON_FILE_SCHEMA = `
+-- ============================================================
+--  076  o card do kit com arte propria.
+--
+--  ####  O FALLBACK E O PRIMEIRO ITEM, E ELE FICA  ####
+--
+--  Sem arte, o card do kit desenha o icone do PRIMEIRO item da
+--  lista -- e sem catalogo lido, um retangulo vazio. E um palpite
+--  honesto (um kit de sucata mostra sucata), e continua valendo
+--  para todo kit ja gravado.
+--
+--  O que faltava era poder dizer outra coisa: "Kit Inicial" nao e
+--  uma pedra, e quem monta o kit sabe que arte o representa.
+--
+--  NULL = o palpite de sempre. Preenchido, manda.
+--
+--  Guarda o NOME do arquivo em \`Assets\\kits\\\`, como a loja faz com
+--  \`Assets\\store\\\` (migracao 075): os bytes vao ao jogo pelo
+--  OrigemZImages, e o CRC nasce do conteudo.
+-- ============================================================
+ALTER TABLE kits ADD COLUMN icon_file TEXT;
+`;
+
+const NPC_THAT_TALKS_SCHEMA = `
+-- ============================================================
+--  077  o NPC de missao passa a ser um boneco que FALA.
+--
+--  ####  O SINTOMA  ####
+--
+--  Teste de 11/09/2026: o NPC nasce no lugar certo, o jogador
+--  chega perto, mira -- e nao aparece nada. Nenhum "TALK", nenhum
+--  aviso. O boneco e uma estatua.
+--
+--  ####  A CAUSA, MEDIDA  ####
+--
+--  O prefab padrao era o \`bandit_shopkeeper\`, que o servidor
+--  instancia como \`NPCShopKeeper\`. O prompt de conversa do
+--  cliente e do \`NPCTalking\` -- uma classe ABAIXO dessa. Sem
+--  NPCTalking, nao ha prompt, e nunca houve.
+--
+--  Trocando para o \`bandit_conversationalist\` (medido:
+--  \`VehicleVendor : NPCTalking\`), o prompt aparece de graca e o
+--  plugin intercepta a conversa vanilla no hook
+--  \`OnNpcConversationStart\` -- que EXISTE nesta instalacao, ao
+--  contrario do que a medicao de 06/09 concluiu olhando o DLL
+--  errado.
+--
+--  ####  POR QUE A MIGRACAO MEXE NOS QUE JA EXISTEM  ####
+--
+--  Decisao do dono em 11/09/2026. O padrao novo so valeria para
+--  NPC cadastrado dali em diante, e os que ja estao no mundo
+--  continuariam mudos ate alguem abrir o painel e trocar um por
+--  um. Quem cadastrou "Mateus" escolheu o LUGAR, nao a roupa: a
+--  roupa era o padrao, e o padrao estava errado.
+--
+--  Quem tiver escolhido OUTRO boneco de proposito fica com o
+--  dele. So o valor antigo do padrao e reescrito.
+-- ============================================================
+UPDATE quest_npcs
+   SET prefab = 'assets/prefabs/npc/bandit/shopkeepers/bandit_conversationalist.prefab',
+       updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+ WHERE prefab = 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab';
+`;
+
+const QUEST_TURN_IN_NPC_SCHEMA = `
+-- ============================================================
+--  078  quem RECEBE a missao pronta.
+--
+--  ####  DAR E RECEBER ERAM A MESMA PESSOA  ####
+--
+--  O \`npc_id\` diz onde a missao se PEGA. Nao havia como dizer onde
+--  ela se ENTREGA: quem concluia voltava ao mesmo boneco, ou ia ao
+--  menu.
+--
+--  O pedido do dono em 12/09/2026 e de uma cadeia com dois lados:
+--  o Zev oferece, e quem recebe pode ser ele mesmo ou outro. "Leve
+--  isto ao ferreiro do outro lado do mapa" e uma missao inteira que
+--  nao cabia no cadastro.
+--
+--  ####  NAO CONFUNDIR COM O OBJETIVO \`deliver\`  ####
+--
+--  Aquele e uma TAREFA: chegar ate um boneco conta como progresso,
+--  e o alvo dele e o \`target\` do objetivo. Este e o BALCAO: onde a
+--  missao ja concluida vira recompensa.
+--
+--  NULL = resgata no mesmo NPC que ofereceu; e, se ela nao tem NPC
+--  nenhum, no menu. E o comportamento de tudo o que ja existe.
+--
+--  Sem REFERENCES pela mesma razao do \`npc_id\`: a integridade e
+--  cobrada na rota, que sabe em que servidor cada boneco esta.
+-- ============================================================
+ALTER TABLE quests ADD COLUMN turn_in_npc_id TEXT;
+`;
+
+const QUEST_PROGRESS_PAID_SCHEMA = `
+-- ============================================================
+--  079  quanto daquele objetivo o jogador ja PAGOU no balcao.
+--
+--  ####  ENTREGAR E PAGAR ANTES  ####
+--
+--  Desde 13/09/2026 o botao ENTREGAR do NPC tira do inventario o
+--  que o jogador tem e soma ao contador -- "estou com 30 pedras,
+--  deveria aceitar entrega parcial ate completar tudo", pedido do
+--  dono olhando o balcao da Bia.
+--
+--  O problema que esta coluna resolve: um objetivo com \`consume\`
+--  ligado cobra os itens NO RESGATE. Quem entregou as 300 pedras no
+--  balcao nao as tem mais -- e seria obrigado a juntar tudo de novo
+--  para receber o premio do que ja entregou.
+--
+--  Aqui fica o que ja saiu por entrega. O resgate cobra a
+--  diferenca; entregou tudo, nao cobra nada.
+--
+--  Zero para todo mundo que ja existe, que e a verdade: nada foi
+--  entregue em balcao antes desta coluna existir.
+-- ============================================================
+ALTER TABLE player_quest_progress ADD COLUMN paid INTEGER NOT NULL DEFAULT 0;
+`;
+
 const MESSAGE_ROTATION_AND_COMMANDS_SCHEMA = `
 -- ============================================================
 --  080  o rodizio de mensagens, e a mensagem que responde a um
@@ -6757,14 +6961,20 @@ export const MIGRATIONS: readonly Migration[] = [
   // 09/09/2026: a masmorra deixa de nascer em todo servidor da rede.
   { id: 72, name: 'dungeon-servers', sql: DUNGEON_SERVERS_SCHEMA },
   { id: 73, name: 'betterloot-junk', sql: BETTERLOOT_JUNK_SCHEMA },
+  // 11/09/2026: a aba Timers deixa de ser maquete, e o QuickSmelt sai.
+  { id: 74, name: 'player-timers', sql: PLAYER_TIMERS_SCHEMA },
+  // 11/09/2026: o card da loja passa a aceitar arte propria.
+  { id: 75, name: 'store-offer-icon-file', sql: STORE_OFFER_ICON_FILE_SCHEMA },
+  // 11/09/2026: o card do kit tambem.
+  { id: 76, name: 'kit-icon-file', sql: KIT_ICON_FILE_SCHEMA },
+  // 11/09/2026: o NPC de missao ganha um boneco que mostra "TALK".
+  { id: 77, name: 'npc-that-talks', sql: NPC_THAT_TALKS_SCHEMA },
+  // 12/09/2026: dar e receber deixam de ser a mesma pessoa.
+  { id: 78, name: 'quest-turn-in-npc', sql: QUEST_TURN_IN_NPC_SCHEMA },
+  // 13/09/2026: o balcao do NPC aceita entrega parcial.
+  { id: 79, name: 'quest-progress-paid', sql: QUEST_PROGRESS_PAID_SCHEMA },
   // 13/09/2026: o rodizio de mensagens e o gatilho por comando.
   // Tudo que ja existia continua `schedule` -- ver o cabecalho.
-  //
-  // O 080 salta os ids 074-079, e isso e deliberado: eles ja estao
-  // tomados por migracoes de outras frentes que ainda nao chegaram
-  // aqui. O runner aplica por ID, uma vez para sempre -- reusar um
-  // numero ocupado daria merge limpo e banco sem estas tabelas,
-  // que e o erro que as migracoes 042 e 043 registram.
   {
     id: 80,
     name: 'message-rotation-and-commands',

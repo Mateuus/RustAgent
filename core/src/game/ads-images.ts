@@ -11,24 +11,15 @@
 //             o peso da imagem deixa de importar — mas o endereço
 //             precisa ser público e o cliente precisa alcançá-lo.
 //
-//    stored   o AGENTE baixa, confere, e manda os bytes ao plugin;
-//             o plugin os guarda no FileStorage do servidor e o
-//             cliente pede a imagem pelo canal do jogo. É o
-//             padrão, porque não depende de nada fora da nossa
-//             máquina.
+//    stored   o AGENTE baixa, confere, e manda os bytes ao
+//             OrigemZImages (ver game/image-library.ts), que os
+//             guarda no FileStorage do servidor; o cliente pede a
+//             imagem pelo canal do jogo. É o padrão, porque não
+//             depende de nada fora da nossa máquina.
 //
-//  ------------------------------------------------------------
-//  ####  POR QUE OS BYTES VAO EM PEDACOS  ####
-//
-//  O frame do WebRCON aguenta ~50.000 bytes (medido neste
-//  projeto), e base64 infla o arquivo em 4/3. Uma propaganda de
-//  600x200 passa disso com facilidade — o `origemz.ui.image`
-//  existente, de um comando só, serve para o ícone de 17 KB do
-//  OZCoin e não para isto.
-//
-//  Então a imagem vai em pedaços numerados, o plugin os junta e
-//  só então chama o FileStorage. Meio arquivo nunca vira imagem:
-//  o `end` confere a contagem antes de guardar.
+//  Este arquivo cuida do que vem ANTES do envio: baixar, conferir
+//  formato e tamanho, encolher. O transporte em pedaços é da
+//  biblioteca, e é o mesmo do menu e dos ícones de item.
 //
 //  ------------------------------------------------------------
 //  ####  A CHAVE SAI DO CONTEUDO  ####
@@ -59,23 +50,14 @@
 //  que fazer.
 // ============================================================
 
-import { createHash } from 'node:crypto';
-
 import {
-  ADS_CHUNK_BYTES,
   ADS_DOWNLOAD_MAX_BYTES,
   ADS_MAX_HEIGHT,
   ADS_MAX_WIDTH,
   ADS_STORED_MAX_BYTES,
 } from '../types/ads.js';
+import { sha256Hex } from './image-library.js';
 import { shrinkPngToFit } from './png-resize.js';
-
-/** `origemz.ads.image.begin <chave> <partes>` */
-export const ADS_IMAGE_BEGIN_COMMAND = 'origemz.ads.image.begin';
-/** `origemz.ads.image.part <chave> <indice> <base64>` */
-export const ADS_IMAGE_PART_COMMAND = 'origemz.ads.image.part';
-/** `origemz.ads.image.end <chave>` */
-export const ADS_IMAGE_END_COMMAND = 'origemz.ads.image.end';
 
 /**
  * O lugar reservado que o plugin troca pelo CRC (ou pela URL).
@@ -352,7 +334,9 @@ export async function fetchAdImage(
     throw new AdImageError('TOO_LARGE', tooLargeMessage(content.length, maxBytes, resizedFrom));
   }
 
-  const sha = createHash('sha256').update(content).digest('hex');
+  // O MESMO sha do manifesto do OrigemZImages: é por ele que a
+  // biblioteca decide se o plugin já tem esta imagem.
+  const sha = sha256Hex(content);
 
   return {
     bytes: content,
@@ -399,39 +383,6 @@ function tooLargeMessage(
  */
 export function imageKeyOf(sha: string): string {
   return `ad${sha.slice(0, 12)}`;
-}
-
-/**
- * Os bytes em pedaços de base64, prontos para o RCON.
- *
- * O corte é feito nos BYTES e não no base64: cortar base64 no
- * meio de um grupo de quatro produziria pedaços que não decodificam
- * sozinhos, e o plugin teria de saber remontar antes de decodificar.
- * Assim cada pedaço é um base64 válido por si.
- */
-export function chunkImage(
-  bytes: Buffer,
-  chunkBytes: number = ADS_CHUNK_BYTES,
-): readonly string[] {
-  const parts: string[] = [];
-
-  for (let offset = 0; offset < bytes.length; offset += chunkBytes) {
-    parts.push(bytes.subarray(offset, offset + chunkBytes).toString('base64'));
-  }
-
-  return parts;
-}
-
-export function buildImageBeginCommand(key: string, parts: number): string {
-  return `${ADS_IMAGE_BEGIN_COMMAND} ${key} ${String(parts)}`;
-}
-
-export function buildImagePartCommand(key: string, index: number, part: string): string {
-  return `${ADS_IMAGE_PART_COMMAND} ${key} ${String(index)} ${part}`;
-}
-
-export function buildImageEndCommand(key: string): string {
-  return `${ADS_IMAGE_END_COMMAND} ${key}`;
 }
 
 function formatBytes(value: number): string {

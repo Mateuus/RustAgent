@@ -191,6 +191,26 @@ export function deadButton(
 }
 
 /** O ícone de um item do jogo, resolvido pelo CLIENTE. */
+/**
+ * Uma imagem NOSSA, pela chave no OrigemZImages.
+ *
+ * O CRC só existe do lado do plugin, então aqui sai o lugar
+ * reservado — o mesmo mecanismo do token da sessão. Ver
+ * game/image-library.ts.
+ */
+export function storedImage(id: string, key: string, rect: Rect): UiElement {
+  return {
+    id,
+    name: id,
+    type: 'image',
+    rect,
+    source: { kind: 'stored', key },
+    // Branco pelo mesmo motivo do `itemImage`: `color` TINGE.
+    color: C.white,
+    children: [],
+  };
+}
+
 export function itemImage(
   id: string,
   item: { readonly itemId: number; readonly skinId: string },

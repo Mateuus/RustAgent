@@ -7,9 +7,6 @@
 //      Content-Type. Um servidor que jura ser PNG e manda outra
 //      coisa produziria um retângulo vazio no jogo, sem erro
 //      nenhum em lugar nenhum;
-//    - o corte em pedaços é feito nos BYTES. Cortado no base64,
-//      cada pedaço deixaria de decodificar sozinho e o plugin
-//      teria de saber remontar antes de decodificar;
 //    - a chave sai do CONTEÚDO. É o que faz a mesma imagem em
 //      duas propagandas ocupar uma entrada só.
 // ============================================================
@@ -20,9 +17,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   AdImageError,
-  buildImageBeginCommand,
-  buildImagePartCommand,
-  chunkImage,
   fetchAdImage,
   imageKeyOf,
   probeImage,
@@ -307,31 +301,5 @@ describe('fetchAdImage', () => {
         expect((error as AdImageError).code).toBe('FETCH_FAILED');
       },
     );
-  });
-});
-
-describe('o corte em pedaços', () => {
-  it('cada pedaço decodifica SOZINHO', () => {
-    const bytes = Buffer.from(Array.from({ length: 1000 }, (_, i) => i % 256));
-    const parts = chunkImage(bytes, 300);
-
-    expect(parts).toHaveLength(4);
-
-    // É esta propriedade que permite ao plugin decodificar pedaço
-    // a pedaço em vez de juntar strings antes.
-    const remontado = Buffer.concat(parts.map((part) => Buffer.from(part, 'base64')));
-    expect(remontado.equals(bytes)).toBe(true);
-  });
-
-  it('imagem menor que um pedaço vira um pedaço só', () => {
-    expect(chunkImage(Buffer.alloc(10), 300)).toHaveLength(1);
-  });
-
-  it('os comandos não têm espaço fora dos separadores', () => {
-    const begin = buildImageBeginCommand('adabc123', 3);
-    expect(begin.split(' ')).toHaveLength(3);
-
-    const part = buildImagePartCommand('adabc123', 0, 'AAAA');
-    expect(part.split(' ')).toHaveLength(4);
   });
 });

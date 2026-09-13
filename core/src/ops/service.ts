@@ -56,7 +56,12 @@ import {
   type OperationStore,
 } from './operations.js';
 import { BootLogWatcher } from './boot-watch.js';
-import { findServerProcess, killServerProcess, startServer } from './server-process.js';
+import {
+  findServerProcess,
+  killServerProcess,
+  startServer,
+  waitForPortsFree,
+} from './server-process.js';
 import type { WipeExecutor, WipeServerControl } from '../wipe/run.js';
 
 /**
@@ -845,6 +850,7 @@ export class OperationsService {
     while (Date.now() < deadline) {
       if ((await this.#processInfo()) === null) {
         operation.log('[agente] servidor parado.');
+        await this.#waitPortsReleased(operation);
         return;
       }
 
@@ -861,6 +867,27 @@ export class OperationsService {
     operation.log(`[agente] matando o processo à força (PID ${String(info.pid)})...`);
     await killServerProcess(info.pid);
     operation.log('[agente] processo morto. O mundo desde o último save foi perdido.');
+    await this.#waitPortsReleased(operation);
+  }
+
+  /**
+   * Parar só termina quando as portas voltam.
+   *
+   * Sem isto, um restart (e o wipe, e o auto-update, que param e
+   * sobem na mesma operação) esbarrava na porta que o processo morto
+   * ainda segurava — ver `waitForPortsFree`. Quando elas continuam
+   * presas depois do teto, a espera desiste e diz quais: aí é outro
+   * programa, e o `startServer` recusa com a frase de sempre.
+   */
+  async #waitPortsReleased(operation: Operation): Promise<void> {
+    const busy = await waitForPortsFree(Object.values(this.#options.server.ports), 30_000);
+
+    if (busy.length > 0) {
+      operation.log(
+        `[agente] as portas ${busy.join(', ')} continuam ocupadas 30 s depois de o servidor ` +
+          'parar. Outro programa pode estar usando alguma delas.',
+      );
+    }
   }
 
   /**

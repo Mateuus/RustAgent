@@ -831,7 +831,7 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
  * respeito a qual? Os ícones ficam no detalhe, onde há uma linha
  * para cada.
  */
-function rewardLine(rewards: readonly QuestReward[], catalog: QuestsCatalog): string {
+export function rewardLine(rewards: readonly QuestReward[], catalog: QuestsCatalog): string {
   if (rewards.length === 0) {
     return '';
   }
@@ -1640,6 +1640,14 @@ export interface QuestsScreenProviderOptions {
    * apagar o item do cadastro depois de a missão prometê-lo.
    */
   readonly catalog?: QuestsCatalog;
+  /**
+   * Puxa o lote do plugin antes de montar a tela.
+   *
+   * É o que faz o contador mostrar 1.300/5.000 em vez do número do
+   * ciclo anterior. Ausente = serve o que está no banco, que é o
+   * que os testes fazem.
+   */
+  readonly refresh?: (serverId: string) => Promise<unknown>;
   readonly logger?: Logger;
 }
 
@@ -1660,6 +1668,28 @@ export function createQuestsScreenProvider(
 
     if (target === null) {
       return null;
+    }
+
+    // ####  O NÚMERO FRESCO, E NÃO O DO ÚLTIMO CICLO  ####
+    //
+    // O contador vive no PLUGIN entre um lote e outro, e o lote sai
+    // a cada `flushSeconds` — 60 s por padrão. Quem cortou 1.300 de
+    // 5.000 e abriu o menu via o número de um minuto atrás, ou
+    // zero; e como a CONCLUSÃO tem canal próprio (o push), a tela
+    // parecia só saber contar até o fim. Foi o que o teste de
+    // 12/09/2026 relatou.
+    //
+    // Abrir a tela é raro e já espera o agente: uma ida a mais ao
+    // RCON aqui compra o número certo. Falhar não pode custar a
+    // tela — sem servidor, o que está no banco ainda é a melhor
+    // resposta que existe.
+    try {
+      await options.refresh?.(input.serverId);
+    } catch (error) {
+      options.logger?.debug(
+        { server: input.serverId, err: toError(error) },
+        'não deu para atualizar o contador antes de montar a tela; sirvo o do banco',
+      );
     }
 
     const pack = (view: QuestsView): UiScreenBundle =>

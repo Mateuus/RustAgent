@@ -160,6 +160,11 @@ export interface KitView {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
+  /**
+   * A arte propria do card. `null` = o icone do PRIMEIRO item, que e
+   * o palpite de sempre. Ver game/card-icons.ts.
+   */
+  readonly iconFile: string | null;
   /** A aba em que ele aparece no jogo. `null` = sem categoria. */
   readonly category: string | null;
   readonly kind: KitRecord['kind'];
@@ -802,6 +807,7 @@ function toKitView(kit: KitRecord): KitView {
     slug: kit.slug,
     name: kit.name,
     description: kit.description,
+    iconFile: kit.iconFile,
     category: kit.category,
     kind: kit.kind,
     cooldownSeconds: kit.cooldownSeconds,

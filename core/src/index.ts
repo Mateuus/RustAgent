@@ -50,6 +50,7 @@ import { PlayersRepository } from './db/players-repository.js';
 import { PluginsRepository } from './db/plugins-repository.js';
 import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
+import { PlayerTimersRepository } from './db/player-timers-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
 import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
 import { DungeonLayoutsRepository } from './db/dungeon-layouts-repository.js';
@@ -62,12 +63,19 @@ import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
+import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
+import { loadKitIcons, loadStoreIcons } from './game/card-icons.js';
+import { readItemIcon } from './http/routes/custom-items.js';
+import { readKitIcon } from './http/routes/kits.js';
+import { readStoreIcon } from './http/routes/store.js';
 import { LootStatsCollector } from './game/loot-stats.js';
 import { ItemCatalog } from './game/item-catalog.js';
 import { VipsRepository } from './db/vips-repository.js';
 import { KitStore } from './kits/service.js';
 import { SpawnStatusSync } from './loadouts/status.js';
 import { LoadoutSync } from './loadouts/sync.js';
+import { PlayerTimersSync } from './loadouts/timers.js';
+import { AgentRequests } from './game/agent-requests.js';
 import { VipExpiryWatcher } from './vip/expiry-watcher.js';
 import { VipList } from './vip/service.js';
 import { VipSiteMirror } from './vip/site-mirror.js';
@@ -96,6 +104,7 @@ import { QuestsService } from './quests/service.js';
 import {
   createQuestsScreenProvider,
   parseQuestsScreenId,
+  rewardLine,
   type QuestsScreenProvider,
 } from './game/ui-quests-screen.js';
 import { createDiscordScreenProvider, withDiscordScreen } from './game/ui-discord-screen.js';
@@ -106,7 +115,7 @@ import {
   type HomeScreenProvider,
 } from './game/ui-home-screen.js';
 import { createRankingScreenProvider } from './game/ui-ranking-screen.js';
-import { buildMainMenu, MAIN_MENU_SLUG } from './game/ui-preset-main-menu.js';
+import { buildMainMenu } from './game/ui-preset-main-menu.js';
 import {
   buildResult,
   createHeaderProvider,
@@ -300,6 +309,11 @@ async function main(): Promise<void> {
   // o RCON de cada servidor.
   let lootStats: LootStatsCollector | null = null;
   let spawnStatusSync: SpawnStatusSync | null = null;
+  // Os timers são o quarto cache do hub, e nascem ao lado do status.
+  let playerTimersSync: PlayerTimersSync | null = null;
+  // Quem responde ao `#OZAREQ#` do hub. Ver game/agent-requests.ts:
+  // o pedido existia e ninguém o atendia.
+  let agentRequests: AgentRequests | null = null;
   // As MISSÕES, pela mesma razão do calendário: a entrega delas
   // depende do `kits`, que nasce bem abaixo. `null` = ainda não
   // montadas, e aí a tela responde o aviso em vez de ficar muda.
@@ -396,6 +410,30 @@ async function main(): Promise<void> {
       // O status de nascimento é o terceiro cache do plugin, e ele
       // esvazia junto com os outros dois.
       void spawnStatusSync?.push(serverId, 'rcon-connected');
+      // E os timers são o quarto — sem eles, fornalha e craft voltam
+      // ao ×1 a cada queda do RCON.
+      void playerTimersSync?.push(serverId, 'rcon-connected');
+      // ####  E AS MISSÕES, QUE FALTAVAM NESTA LISTA  ####
+      //
+      // O plugin PEDE o catálogo de volta quando (re)carrega — mas
+      // esse pedido acontece uma vez, no boot dele, e se o agente
+      // ainda estivesse reconectando o RCON naquele instante a
+      // linha se perdia e ninguém repetia. O servidor ficava sem
+      // contar nada e sem NPC nenhum até alguém salvar uma missão
+      // no painel. Medido em 12/09/2026.
+      //
+      // A reconexão não depende de ninguém gritar: ela é o próprio
+      // sinal de que o outro lado começou do zero.
+      questCollector?.forget(serverId);
+      questNpcs?.forget(serverId);
+
+      void questNpcs?.push(serverId).catch((error: unknown) => {
+        logger.warn(
+          { server: serverId, err: toError(error) },
+          'os NPCs de missão não subiram na reconexão; a volta do relógio tenta',
+        );
+      });
+
       // E o cadastro de itens custom, pelo mesmo motivo: o cache
       // do plugin esvazia junto com os outros.
       void customItemsSync?.push(serverId, 'rcon-connected');
@@ -454,6 +492,10 @@ async function main(): Promise<void> {
       // `oxide.reload` esvazia o cache dele. Recusa na primeira
       // comparação de string, como o de cima.
       customItemsSync?.handleLine(serverId, line);
+      // E o hub grita `#OZAREQ#{"want":"loadouts"}` (e vips, status,
+      // timers) pelo mesmo motivo. Só arma um relógio — o reenvio sai
+      // dele, e não daqui. Ver game/agent-requests.ts.
+      agentRequests?.handleLine(serverId, line);
       // E o `#OZSTAT#`, que é o troféu virando ponto. Ele APLICA
       // aqui (escrita em SQLite, que não fala com o jogo) e confirma
       // ao plugin por um relógio — mandar o `ack` daqui seria o laço
@@ -687,6 +729,7 @@ async function main(): Promise<void> {
   const vipsRepository = new VipsRepository(db);
   const loadoutsRepository = new LoadoutsRepository(db);
   const spawnStatusRepository = new SpawnStatusRepository(db);
+  const playerTimersRepository = new PlayerTimersRepository(db);
   const kitsRepository = new KitsRepository(db);
 
   // Ele só nasce lá embaixo, junto com os clientes do site — e a
@@ -752,6 +795,15 @@ async function main(): Promise<void> {
   // Store" em vez de `trophy.bleik`. Ver `RankingLabels`.
   const rankingsRepository = new RankingsRepository(db);
 
+  // ####  UMA BIBLIOTECA DE IMAGENS PARA OS TRÊS  ####
+  //
+  // O menu, as propagandas e os ícones de item levam imagem ao
+  // mesmo OrigemZImages. A instância é UMA porque é ela que enfileira
+  // os envios por servidor: duas mandariam a mesma chave ao mesmo
+  // tempo, e o `begin` de uma recomeçaria o envio da outra. Ver
+  // game/image-library.ts.
+  const imageLibrary = new ImageLibrary({ logger });
+
   customItemsSync = new CustomItemsSync({
     repository: customItemsRepository,
     servers: supervisor,
@@ -765,6 +817,9 @@ async function main(): Promise<void> {
     lootRules: lootRulesRepository,
     logger,
     secret: statChannelSecret,
+    // O PNG de `Assets\items\` que o painel gravou. Sem isto ele
+    // nunca chegava ao jogo — ver `CustomItemsSyncDeps.icons`.
+    icons: { library: imageLibrary, read: readItemIcon },
   });
 
   // ####  A OUTRA METADE DO ITEM CUSTOM: O PONTO  ####
@@ -911,6 +966,25 @@ async function main(): Promise<void> {
   spawnStatusSync = new SpawnStatusSync({
     repository: spawnStatusRepository,
     servers: supervisor,
+    logger,
+  });
+
+  playerTimersSync = new PlayerTimersSync({
+    repository: playerTimersRepository,
+    servers: supervisor,
+    logger,
+  });
+
+  // O reenvio de cada assunto é o MESMO da reconexão do RCON, logo
+  // acima: uma verdade só sobre "o que mandar quando o hub esquece".
+  // Os closures leem as variáveis na hora do pedido.
+  agentRequests = new AgentRequests({
+    resend: {
+      vips: async (serverId) => vips?.reconcile(serverId),
+      loadouts: async (serverId) => loadoutSync?.push(serverId, 'plugin-request'),
+      status: async (serverId) => spawnStatusSync?.push(serverId, 'plugin-request'),
+      timers: async (serverId) => playerTimersSync?.push(serverId, 'plugin-request'),
+    },
     logger,
   });
 
@@ -1638,10 +1712,27 @@ async function main(): Promise<void> {
     // disco vazaria junto com qualquer backup, e não há nada aqui
     // que precise sobreviver a um restart.
     secret: randomUUID(),
-    // Lidas UMA vez, no boot: são bytes de PNG que não mudam
-    // enquanto o processo vive, e relê-las a cada envio seria ler
-    // disco para mandar o mesmo conteúdo.
-    images: loadUiImages(agent.paths.root, logger),
+    // Lidas a CADA envio: um PNG novo em `Assets\ui` vale sem
+    // reiniciar o agente. O manifesto do OrigemZImages é que impede
+    // o reenvio do que não mudou — ver `loadUiImages`.
+    //
+    // A arte das ofertas e a dos kits vão junto porque é a MESMA
+    // carga: a vitrine e a página KITS são telas da interface, e o
+    // card precisa do CRC na mão quando elas forem desenhadas.
+    //
+    // A poda cobre as duas famílias: a oferta (ou o kit) apagada não
+    // pode deixar a arte dela na tabela do plugin para sempre. As
+    // imagens de `Assets\ui` ficam de fora — a chave delas é o nome
+    // do arquivo, sem família que as separe do que é de outro dono.
+    images: {
+      library: imageLibrary,
+      load: () => [
+        ...loadUiImages(agent.paths.root, logger),
+        ...loadStoreIcons(storeRepository.listOffers(), readStoreIcon, logger),
+        ...loadKitIcons(kitsRepository.list(), readKitIcon, logger),
+      ],
+      prune: { owns: (key) => IMAGE_FAMILIES.store(key) || IMAGE_FAMILIES.kit(key) },
+    },
   });
 
   uiSync.start();
@@ -1661,6 +1752,7 @@ async function main(): Promise<void> {
     ads: adsRepository,
     servers: supervisor,
     logger,
+    images: imageLibrary,
   });
 
   adsSync.start();
@@ -1671,6 +1763,7 @@ async function main(): Promise<void> {
   // sem isso, o plugin só os conheceria na próxima reconexão.
   void customItemsSync.pushAll('boot');
   void spawnStatusSync.pushAll('boot');
+  void playerTimersSync.pushAll('boot');
 
   // ####  E A FILA DE PONTOS É RECOLHIDA NO BOOT  ####
   //
@@ -1801,18 +1894,73 @@ async function main(): Promise<void> {
     // mexer em nada quando falta. Ver §7.4 do plano.
     // O coletor esquece o que mandou daquele jogador, e o `assign`
     // sai na rodada seguinte — que é em segundos, e não no minuto.
+    // ####  O AVISO DE QUE A MISSÃO FECHOU  ####
+    //
+    // Pedido do dono em 12/09/2026, com os critérios dele: a frase
+    // sai no instante em que o último objetivo fecha, diz o nome
+    // certo da missão, conta ONDE resgatar — e só para quem a fez.
+    //
+    // Ela é montada aqui, e não no serviço, porque falar com o jogo
+    // é trabalho deste arquivo. O serviço só avisa que aconteceu.
+    onCompleted: ({ serverId, steamId, title, npcName, hasRewards }) => {
+      // ####  O RELÓGIO, PELA REGRA DE SEMPRE  ####
+      //
+      // A conclusão pode nascer do gancho que lê o console (o push
+      // do plugin), e um comando de RCON disparado dali volta pelo
+      // mesmo caminho e dispara de novo — o paredão que este projeto
+      // já viveu. 50 ms bastam para sair da pilha, e o jogador não
+      // percebe a diferença.
+      const timer = setTimeout(() => {
+        // Sem prêmio não há o que resgatar — e prometer resgate numa
+        // missão que não dá nada faria o jogador procurar um botão
+        // que não vale nada. Mesmo assim ela precisa ser fechada no
+        // menu, e é isso que a frase diz.
+        const onde =
+          npcName === null
+            ? 'Resgate no menu, em MISSÕES.'
+            : `Resgate no menu, em MISSÕES, ou fale com ${npcName}.`;
+
+        void tellPlayer(
+          serverId,
+          steamId,
+          hasRewards
+            ? `Missão concluída: ${title}. ${onde}`
+            : `Missão concluída: ${title}. Feche no menu, em MISSÕES.`,
+        ).catch(() => undefined);
+      }, 50);
+
+      timer.unref();
+    },
+    // ####  O PLUGIN PRECISA SABER AGORA, E NÃO NO CICLO  ####
+    //
+    // Esquecer sozinho marca "reenvia quando der" — e o "quando der"
+    // é a volta do relógio. Quem acabou de aceitar no balcão do NPC
+    // reabre a caixa no segundo seguinte, e ela ainda ofereceria
+    // ACEITAR na missão que ele tem na mão. Foi o que o teste de
+    // 12/09/2026 viu.
+    //
+    // O `onPlayerJoined` faz exatamente o trabalho certo para UM
+    // jogador: recalcula os derivados e manda o `assign`. Ele não
+    // lança, e o relógio de 50 ms mantém a regra de não falar com o
+    // jogo de dentro do caminho de escrita.
     onLiveChanged: ({ serverId, steamId }) => {
       questCollector?.forgetPlayer(serverId, steamId);
+
+      const timer = setTimeout(() => {
+        void questCollector?.onPlayerJoined(serverId, [steamId]);
+      }, 50);
+
+      timer.unref();
     },
     consumer: {
-      take: async ({ serverId, steamId, items }) => {
+      take: async ({ serverId, steamId, items, partial }) => {
         const rcon = supervisor.contextOf(serverId)?.rcon;
 
         if (rcon === undefined) {
           return { complete: false, missing: 'O servidor não está respondendo agora.' };
         }
 
-        const payload = Buffer.from(JSON.stringify({ items }), 'utf8').toString('base64');
+        const payload = Buffer.from(JSON.stringify({ items, partial }), 'utf8').toString('base64');
         const raw = firstJsonLine(await rcon.send(`origemz.quest.consume ${steamId} ${payload}`));
         const parsed = questConsumeSchema.safeParse(raw);
 
@@ -1822,35 +1970,44 @@ async function main(): Promise<void> {
           return { complete: false, missing: 'Não deu para conferir os seus itens agora.' };
         }
 
-        return { complete: parsed.data.complete };
+        return { complete: parsed.data.complete, taken: parsed.data.taken };
       },
     },
   });
 
+  // ####  O NOME E O ÍCONE NÃO SAEM DO CADASTRO DA MISSÃO  ####
+  //
+  // Ela guarda `metal.refined` e `trophy.bleik` — a chave que o
+  // admin digitou. Quem sabe que aquilo se chama "High Quality
+  // Metal" e tem qual ícone é o catálogo do JOGO, que muda a cada
+  // update do Rust; e quem sabe que `trophy.bleik` é a "Bleik
+  // Store" é o catálogo de rankings, que o admin edita.
+  //
+  // Lidos A CADA leitura: gravar o nome junto com a recompensa
+  // deixaria o nome velho no jogo para sempre.
+  //
+  // Ele é uma const porque tem DOIS leitores: a tela de missões e a
+  // caixa do NPC, que desce pronta para o plugin.
+  const questScreenCatalog = {
+    // O rótulo em português, pelo mesmo motivo da tela de kits:
+    // quem lê a missão está com o jogo traduzido. Ver
+    // game/ui-item-label.ts.
+    itemOf: (shortname: string) => {
+      const item = itemsRepository.get(shortname);
+
+      return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
+    },
+    rankingLabelOf: (metric: string) => rankingsRepository.getByMetric(metric)?.label ?? null,
+  };
+
   questScreens = createQuestsScreenProvider({
     quests: questsService,
     npcNameOf: (npcId) => questsRepository.getNpc(npcId)?.name ?? null,
-    // ####  O NOME E O ÍCONE NÃO SAEM DO CADASTRO DA MISSÃO  ####
-    //
-    // Ela guarda `metal.refined` e `trophy.bleik` — a chave que o
-    // admin digitou. Quem sabe que aquilo se chama "High Quality
-    // Metal" e tem qual ícone é o catálogo do JOGO, que muda a cada
-    // update do Rust; e quem sabe que `trophy.bleik` é a "Bleik
-    // Store" é o catálogo de rankings, que o admin edita.
-    //
-    // Lidos AQUI, a cada abertura da tela: gravar o nome junto com
-    // a recompensa deixaria o nome velho no jogo para sempre.
-    catalog: {
-      // O rótulo em português, pelo mesmo motivo da tela de kits:
-      // quem lê a missão está com o jogo traduzido. Ver
-      // game/ui-item-label.ts.
-      itemOf: (shortname) => {
-        const item = itemsRepository.get(shortname);
-
-        return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
-      },
-      rankingLabelOf: (metric) => rankingsRepository.getByMetric(metric)?.label ?? null,
-    },
+    catalog: questScreenCatalog,
+    // O contador vive no plugin entre um lote e outro. Abrir a tela
+    // é raro o bastante para pagar uma ida ao RCON — e é ela que
+    // mostra "1.300 / 5.000" em vez do número do ciclo passado.
+    refresh: async (serverId) => questCollector?.flushNow(serverId),
     logger,
   });
 
@@ -1865,23 +2022,53 @@ async function main(): Promise<void> {
   // É o mesmo desenho do `UiSync` e do `#OZSTAT#`.
   const questSecret = randomUUID();
 
+  // ####  O RECIBO NO CHAT DELE  ####
+  //
+  // Usado pelo QuestEvents (conclusão), pelo aceite no balcão do NPC
+  // e pelo resgate. Uma frase, um caminho.
+  //
+  // ####  O `origemz.chat.tell` NUNCA EXISTIU  ####
+  //
+  // Era o que esta função mandava — e o OrigemZChat não registra esse
+  // comando. O console do Rust não reclama de comando que não
+  // conhece: ele se cala. Então TODA mensagem de missão morria no
+  // caminho, em silêncio, desde que a frente foi escrita. Medido em
+  // 12/09/2026, com o jogador aceitando a missão e não vendo nada.
+  //
+  // Quem fala com um jogador só é o `origemz.chat.broadcast` com
+  // `steamId` — o mesmo caminho dos avisos do painel, e por isso a
+  // mensagem sai com a tag e a cor da rede em vez de texto pelado.
+  const questBroadcaster = new PluginBroadcaster({ servers: supervisor, logger });
+
+  // O nome que uma pessoa lê, para o recibo da entrega. O catálogo
+  // do jogo é quem sabe que `stones` se chama Pedra.
+  const itemLabelOf = (shortname: string): string => {
+    const item = itemsRepository.get(shortname);
+
+    return item === null ? shortname : screenLabelOf(item);
+  };
+
+  const tellPlayer = async (
+    serverId: string,
+    steamId: string,
+    message: string,
+  ): Promise<void> => {
+    await questBroadcaster.send({
+      serverId,
+      steamId,
+      text: message,
+      tag: '[MISSÃO]',
+      tagColor: '#C43F2C',
+    });
+  };
+
   questEvents = new QuestEvents({
     service: questsService,
     logger,
     secret: questSecret,
     // O recibo no chat DELE, e nunca no de todo mundo: a conclusão
     // de uma missão é assunto de quem a fez.
-    chat: {
-      tell: async (serverId, steamId, message) => {
-        const rcon = supervisor.contextOf(serverId)?.rcon;
-
-        if (rcon === undefined) {
-          return;
-        }
-
-        await rcon.send(`origemz.chat.tell ${steamId} ${JSON.stringify(message)}`);
-      },
-    },
+    chat: { tell: tellPlayer },
     // ####  O PUSH QUE NAO SE SUSTENTA MANDA BUSCAR  ####
     //
     // O plugin grita a conclusão, o agente confere com o número
@@ -1915,7 +2102,10 @@ async function main(): Promise<void> {
     // A referência é tardia porque o `questNpcs` nasce logo abaixo —
     // e os dois precisam um do outro: o coletor chama o push, e o
     // push precisa do RCON que o coletor já sabe achar.
-    npcs: { push: async (serverId) => questNpcs?.push(serverId) },
+    npcs: {
+      push: async (serverId) => questNpcs?.push(serverId),
+      forget: (serverId) => questNpcs?.forget(serverId),
+    },
   });
 
   questNpcs = new QuestNpcSync({
@@ -1930,20 +2120,105 @@ async function main(): Promise<void> {
     },
     logger,
     secret: questSecret,
-    // ####  QUEM ABRE A TELA E O AGENTE, E NAO O PLUGIN  ####
+    // O USE no NPC é a testemunha de que o jogador esteve lá — e é
+    // ela que libera o botão de aceitar da missão daquele NPC.
+    onTalk: (talk) => questsService?.noteNpcTalk(talk),
+    // ####  AS FRASES DA CAIXA NASCEM AQUI  ####
     //
-    // O `origemz.ui.open` recusa o que vem do cliente — de
-    // propósito, para um jogador não abrir a tela de outro. O
-    // terceiro argumento (a tela) é o que leva o jogador direto às
-    // missões DAQUELE NPC.
-    openScreen: async ({ serverId, steamId, screenId }) => {
-      const rcon = supervisor.contextOf(serverId)?.rcon;
+    // "Coletar 100 de Madeira" e "1x Sucata" precisam do catálogo
+    // do JOGO e do de rankings, que o plugin não tem. Elas descem
+    // prontas com o NPC — ver `#payloadOf`.
+    describeQuest: (quest) => {
+      // ####  O ÍCONE É O DO PRIMEIRO PRÊMIO QUE FOR ITEM  ####
+      //
+      // Uma missão pode pagar moeda, ponto de ranking e item na
+      // mesma entrega. O cartão tem UM ícone, e o item é o único
+      // desses que o cliente sabe desenhar a partir de um número —
+      // os outros ficam sem, e não com um quadrado vazio.
+      const item = quest.rewards.find((reward) => reward.kind === 'item');
+      const found = item === undefined ? null : itemsRepository.get(item.shortname);
 
-      if (rcon === undefined) {
-        return;
-      }
+      return {
+        goal: quest.objectives
+          .map((objective) => questsService?.describeObjective(objective) ?? '')
+          .filter((text) => text !== '')
+          .join(' · '),
+        reward: rewardLine(quest.rewards, questScreenCatalog),
+        rewardItemId: found?.itemId ?? null,
+        // O skinId viaja como string no cadastro (ids de workshop
+        // passam de 2^31): aqui ele vira número para o CUI, e um
+        // valor que não couber volta a ser "a arte padrão".
+        rewardSkinId: Number(item?.skinId ?? 0) || 0,
+      };
+    },
+    // Resgatar no balcão: o jogador voltou ao NPC com a missão
+    // pronta. Quem confere que a tentativa é dele é o `#claim`; o
+    // que pode ou não ser resgatado é do serviço.
+    onClaim: ({ serverId, steamId, playerQuestId }) => {
+      void (async () => {
+        try {
+          // ####  ENTREGAR PRIMEIRO, RESGATAR DEPOIS  ####
+          //
+          // O mesmo botão faz as duas coisas, e nessa ordem: o que
+          // o jogador tem na mochila vira progresso, e se isso
+          // fechar a missão o resgate acontece no mesmo clique.
+          //
+          // Quem não tinha nada cai direto no resgate — e recebe do
+          // serviço a frase certa se ainda faltar.
+          const entregue = (await questsService?.turnIn({ playerQuestId, steamId })) ?? [];
 
-      await rcon.send(`origemz.ui.open ${steamId} ${MAIN_MENU_SLUG} ${screenId}`);
+          if (entregue.length > 0) {
+            const lista = entregue
+              .map((item) => `${String(item.amount)} ${itemLabelOf(item.shortname)}`)
+              .join(', ');
+
+            await tellPlayer(serverId, steamId, `Você entregou ${lista}.`).catch(() => undefined);
+          }
+
+          const result = await questsService?.claim({ playerQuestId });
+          const message = (result?.outcomes ?? []).map((outcome) => outcome.message).join(' ');
+
+          await tellPlayer(
+            serverId,
+            steamId,
+            message === '' ? 'Missão resgatada.' : message,
+          );
+        } catch (error) {
+          await tellPlayer(
+            serverId,
+            steamId,
+            isApiError(error) ? error.message : 'Não deu para resgatar agora.',
+          ).catch(() => undefined);
+        }
+      })();
+    },
+    // ####  O CLIQUE NO BALCÃO  ####
+    //
+    // O plugin conferiu a distância; o serviço confere a REGRA. O
+    // que o jogador lê é a frase que o serviço devolve — "esta
+    // quest volta em 4h" nasce lá, e reescrevê-la aqui daria duas
+    // explicações para o mesmo não.
+    onAccept: ({ serverId, steamId, npcId, questId }) => {
+      void (async () => {
+        try {
+          const view = await questsService?.accept({ serverId, steamId, questId });
+
+          if (view !== undefined) {
+            await tellPlayer(serverId, steamId, `Missão aceita: ${view.title}.`);
+          }
+        } catch (error) {
+          await tellPlayer(
+            serverId,
+            steamId,
+            isApiError(error) ? error.message : 'Não deu para aceitar a missão agora.',
+          ).catch(() => undefined);
+
+          logger.debug(
+            { server: serverId, npc: npcId, quest: questId, err: toError(error) },
+            'o aceite no balcão do NPC não passou',
+          );
+        }
+      })();
     },
   });
 
@@ -2651,6 +2926,7 @@ async function main(): Promise<void> {
       await vips?.reconcile(serverId);
       await loadoutSync?.push(serverId, 'rcon-connected');
       await spawnStatusSync?.push(serverId, 'rcon-connected');
+      await playerTimersSync?.push(serverId, 'rcon-connected');
       uiSync?.pushSoon(serverId, 'rcon-connected');
     },
     logger,
@@ -2809,8 +3085,17 @@ async function main(): Promise<void> {
       sync: loadoutSync,
       statusRepository: spawnStatusRepository,
       statusSync: spawnStatusSync,
+      timersRepository: playerTimersRepository,
+      timersSync: playerTimersSync,
     },
-    kits: { store: kits, repository: kitsRepository },
+    kits: {
+      store: kits,
+      repository: kitsRepository,
+      // A arte do card do kit viaja com a carga da interface: sem
+      // isto, ela só chegaria na volta periódica (5 min), e quem
+      // acabou de salvar abriria o jogo com o ícone velho.
+      onArtChanged: () => uiSync.pushAllSoon('arte-salva'),
+    },
     store: {
       repository: storeRepository,
       wallets: walletsRepository,
@@ -2819,6 +3104,8 @@ async function main(): Promise<void> {
       // Uma edição de catálogo avisa o espelho. Sem site,
       // `undefined`, e as rotas não mudam de comportamento.
       ...(catalogMirror === null ? {} : { onCatalogChanged: () => catalogMirror.notifyChanged() }),
+      // A arte do card da oferta, pela mesma razão do kit.
+      onArtChanged: () => uiSync.pushAllSoon('arte-salva'),
     },
     site: {
       baseUrl: siteBaseUrl,
@@ -2934,8 +3221,21 @@ async function main(): Promise<void> {
       onCatalogChanged: () => {
         questCollector?.forget();
       },
+      // ####  O PAINEL TAMBÉM EMPURRA NA HORA  ####
+      //
+      // Esquecer sozinho só marca "manda de novo quando der" — e o
+      // "quando der" é a volta do relógio, até 60 s depois. Quem
+      // clicou em salvar está olhando para o mundo esperando o
+      // boneco mudar.
       onNpcsChanged: (serverId) => {
         questNpcs?.forget(serverId);
+
+        void questNpcs?.push(serverId).catch((error: unknown) => {
+          logger.warn(
+            { server: serverId, err: toError(error) },
+            'não deu para reenviar os NPCs agora; a próxima volta do relógio tenta',
+          );
+        });
       },
     },
     // A masmorra, o acervo de plantas e o que nasce no mapa. Do
@@ -3061,6 +3361,11 @@ async function main(): Promise<void> {
         // um servidor que já está sendo desligado — e o plugin
         // ficaria sem lista sem nunca receber a de volta.
         customItemsSync.stop();
+        // E as imagens que esperavam o boot de um servidor: a nova
+        // tentativa sairia para um RCON que já não existe.
+        imageLibrary.stop();
+        // E os reenvios pedidos pelo hub, pela mesma razão.
+        agentRequests?.stop();
         // E o relógio da contagem de loot: uma leitura que começasse
         // agora falaria com um RCON que já não existe. Nada se perde:
         // o número continua no `oxide/data` do plugin.
