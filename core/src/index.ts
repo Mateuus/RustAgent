@@ -180,6 +180,7 @@ import { WipeScheduler } from './wipe/scheduler.js';
 // ---- as mensagens agendadas ----
 import { MessagesRepository } from './db/messages-repository.js';
 import { PluginBroadcaster } from './game/broadcast.js';
+import { ChatCommands } from './messages/commands.js';
 import { MessagesService } from './messages/service.js';
 import { VariableRegistry, registerCoreVariables } from './messages/variables.js';
 // ---- o wipe: a prévia do mapa (RustMaps) ----
@@ -321,6 +322,11 @@ async function main(): Promise<void> {
   let questEvents: QuestEvents | null = null;
   let questCollector: QuestCollector | null = null;
   let questNpcs: QuestNpcSync | null = null;
+  // Os COMANDOS DE CHAT (`/pop`), pela mesma razão: eles dependem do
+  // `MessagesService`, que nasce bem abaixo. `null` = ainda não
+  // montados, e aí a linha do plugin é ignorada — que é o certo,
+  // porque não haveria com o que responder.
+  let chatCommands: ChatCommands | null = null;
   // A página CALENDÁRIO do menu do jogo, pela mesma razão: ela lê a
   // agenda e a fila de mapas, que nascem bem abaixo, e quem a chama
   // é o `generatedScreens` do `UiSync`, que só corre no clique do
@@ -447,6 +453,12 @@ async function main(): Promise<void> {
       // é uma noite de medição que só volta se alguém pedir. Ler não
       // consome — ver game/loot-stats.ts.
       void lootStats?.sweep(serverId, 'rcon-connected');
+
+      // E a lista de comandos de chat (`/pop`): o plugin acabou de
+      // subir com ela vazia, e sem este empurrão o comando só
+      // voltaria a responder quando alguém gravasse a mensagem de
+      // novo. Ver game/chat-commands.ts.
+      void chatCommands?.sync(serverId, 'rcon-connected');
     },
     // ####  É POR AQUI QUE O PLUGIN DA INTERFACE PEDE UMA TELA  ####
     //
@@ -501,6 +513,14 @@ async function main(): Promise<void> {
       // dele. Sem esta linha, nada seria contado até alguém
       // aceitar uma missão nova.
       questCollector?.handleLine(serverId, line);
+      // E o `#OZCHATCMD#`: um jogador digitou `/pop`. Uma frase
+      // começada por `/` nunca chega ao `OnPlayerChat` do Oxide —
+      // ela vira `OnPlayerCommand`, e é o OrigemZChat que a
+      // intercepta e grita aqui. Recusa na primeira comparação de
+      // string, e a resposta sai por um relógio: falar de dentro
+      // deste gancho é o laço descrito lá em cima. Ver
+      // messages/commands.ts.
+      chatCommands?.handleLine(serverId, line);
     },
     // Ver o comentário do `let wipeRunner`, logo acima.
     wipeRunner: {
@@ -2596,6 +2616,22 @@ async function main(): Promise<void> {
 
   messages.start();
 
+  // ####  O `/pop` DO JOGADOR  ####
+  //
+  // Uma frase começada por `/` NUNCA chega ao `OnPlayerChat` do
+  // Oxide (MEDIDO no Oxide.Rust.dll deste servidor): ela vira
+  // `OnPlayerCommand`. Por isso o agente não descobre o comando
+  // lendo o console — quem intercepta é o OrigemZChat, e para isso
+  // ele precisa da LISTA de comandos cadastrados, que é o que este
+  // objeto empurra. Ver game/chat-commands.ts.
+  chatCommands = new ChatCommands({
+    repository: messagesRepository,
+    service: messages,
+    servers: supervisor,
+    presence: { online: (serverId) => onlinePlayersOf(serverId) },
+    logger,
+  });
+
   // ---- a prévia do mapa (RustMaps) --------------------------
   //
   // ####  A ÚNICA PEÇA DO AGENTE QUE PODE FALTAR SEM CONSEQUÊNCIA  ####
@@ -3127,6 +3163,7 @@ async function main(): Promise<void> {
       repository: messagesRepository,
       service: messages,
       variables: messageVariables,
+      commands: chatCommands,
     },
     servers: () =>
       supervisor.list().map((server) => ({

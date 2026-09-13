@@ -130,6 +130,44 @@ namespace Oxide.Plugins
         private const string CmdAddGroup = "origemz.chat.addgroup";
         private const string CmdBroadcast = "origemz.chat.broadcast";
 
+        // ========================================================
+        //  OS COMANDOS DE CHAT DO AGENTE  (`/pop`)
+        //
+        //  #### POR QUE ESTA PARTE EXISTE AQUI ####
+        //
+        //  Uma frase comecada por `/` NUNCA chega ao OnPlayerChat: o
+        //  Oxide a desvia para OnPlayerCommand antes (ver
+        //  RustCore.IOnPlayerChat, no Oxide.Rust.dll). Entao o agente
+        //  nao tem como descobrir o comando lendo o console - a linha
+        //  simplesmente nao existe.
+        //
+        //  Quem intercepta e este plugin. E para interceptar SO o que
+        //  e do agente, ele recebe a LISTA de comandos cadastrados
+        //  pelo `origemz.chat.commands`. Engolir todo comando
+        //  quebraria o /kit, o /remove e o resto do servidor.
+        //
+        //  #### O TEXTO NAO ESTA AQUI, E NAO PODE ESTAR ####
+        //
+        //  `{online}`, `{max}` e `{wipe.faltam}` sao resolvidos no
+        //  AGENTE, no instante do envio. Guardar o texto pronto aqui
+        //  faria o /pop responder a lotacao de quando a lista foi
+        //  empurrada. Por isso o plugin so AVISA, e a resposta volta
+        //  pelo `origemz.chat.broadcast` de sempre, dirigida.
+        // ========================================================
+        private const string CmdCommands = "origemz.chat.commands";
+
+        // O marcador do aviso. PROTOCOLO com o agente
+        // (core/src/game/chat-commands.ts): mudar um lado sem o outro
+        // e o comando parar de responder, em silencio.
+        private const string ChatCommandMarker = "#OZCHATCMD#";
+
+        // O pedido que este plugin grita quando sobe sem a lista.
+        // Mesmo desenho do `#OZAREQ#items` do OrigemZItems: depois de
+        // um `oxide.reload` o agente nao percebe nada, e sem este
+        // grito o comando so voltaria a responder na proxima queda do
+        // RCON.
+        private const string CommandsRequest = "#OZAREQ#chatcommands";
+
         private const string PermAdmin = "origemzchat.admin";
 
         // Chaves do lang.
@@ -164,6 +202,13 @@ namespace Oxide.Plugins
             new Dictionary<Plugin, Func<string, string>>();
 
         private bool _ready;
+
+        // Os comandos que o agente mandou interceptar, ja sem barra e
+        // em minusculas. Vazio ate o primeiro `origemz.chat.commands`
+        // - e vazio quer dizer "nao intercepto nada", que e o certo:
+        // um plugin que adivinhasse comandos engoliria os dos outros.
+        private readonly HashSet<string> _comandosDoAgente =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // ========================================================
         //  A FAXINA DO TEXTO DO JOGADOR
@@ -204,7 +249,7 @@ namespace Oxide.Plugins
             permission.RegisterPermission(PermAdmin, this);
 
             Puts("Init() - comandos de console: " + CmdGroups + ", " + CmdSet + ", " + CmdAddGroup +
-                 ", " + CmdBroadcast + ". Hook emitido: " + HookChat + ".");
+                 ", " + CmdBroadcast + ", " + CmdCommands + ". Hook emitido: " + HookChat + ".");
         }
 
         private void OnServerInitialized()
@@ -224,6 +269,15 @@ namespace Oxide.Plugins
                 _ready = true;
 
                 Puts("Pronto: " + _grupos.Count + " grupo(s) de chat carregado(s).");
+
+                // #### O GRITO QUE TRAZ A LISTA DE VOLTA ####
+                //
+                // Um `oxide.reload OrigemZChat` esvazia o
+                // `_comandosDoAgente` sem derrubar o RCON: para o
+                // agente nada aconteceu, e o `onRconConnected` dele
+                // nao roda. Sem esta linha, todo `/pop` cadastrado
+                // ficaria mudo ate alguem gravar a mensagem de novo.
+                Puts(CommandsRequest);
             }
             catch (Exception ex)
             {
@@ -1370,6 +1424,149 @@ namespace Oxide.Plugins
         //  quem chamou e o agente, e ele precisa de codigo, nao de
         //  frase.
         // ========================================================
+        // ========================================================
+        //  O `/pop` DO JOGADOR
+        //
+        //  #### RETORNAR NAO-NULO AQUI CANCELA O COMANDO ####
+        //
+        //  E e o que queremos nos comandos QUE SAO NOSSOS: sem o
+        //  cancelamento, o Oxide segue adiante e responde "Unknown
+        //  command: pop" ao jogador - logo antes de a resposta de
+        //  verdade chegar pelo agente. Duas mensagens, uma delas
+        //  dizendo que o comando nao existe.
+        //
+        //  Comando que NAO esta na lista devolve null: ele e do /kit,
+        //  do /remove, de qualquer outro plugin. Engoli-lo aqui
+        //  quebraria o servidor inteiro.
+        // ========================================================
+        private object OnPlayerCommand(BasePlayer player, string command, string[] args)
+        {
+            if (player == null || string.IsNullOrEmpty(command))
+            {
+                return null;
+            }
+
+            // A comparacao e a PRIMEIRA coisa, e e num HashSet: este
+            // hook roda em todo comando de todo jogador.
+            if (_comandosDoAgente.Count == 0 || !_comandosDoAgente.Contains(command))
+            {
+                return null;
+            }
+
+            try
+            {
+                // #### O AVISO SAI COMO LINHA DE CONSOLE ####
+                //
+                // Mesmo cano do #OZSTAT# e do #OZQUEST#: o agente
+                // escuta o console pelo RCON. O JSON e montado com o
+                // JsonConvert, e nao com concatenacao, porque o NOME
+                // do jogador entra nele - e nome de jogador tem aspa,
+                // barra invertida e o que mais o dono da conta quiser
+                // digitar.
+                Dictionary<string, object> aviso = new Dictionary<string, object>();
+
+                aviso["cmd"] = command.ToLower();
+                aviso["steamId"] = player.UserIDString;
+                aviso["name"] = player.displayName == null ? string.Empty : player.displayName;
+
+                Puts(ChatCommandMarker + JsonConvert.SerializeObject(aviso));
+            }
+            catch (Exception ex)
+            {
+                // O aviso falhou, mas o comando JA foi cancelado
+                // logo abaixo. Deixar o Oxide responder "comando
+                // desconhecido" seria pior: o jogador leria que o
+                // comando nao existe num servidor onde ele existe.
+                PrintError("nao consegui avisar o agente sobre /" + command + ": " + ex.Message);
+            }
+
+            // Verdadeiro, e nao null: o comando e nosso, e a resposta
+            // vem pelo agente.
+            return true;
+        }
+
+        // ========================================================
+        //  A LISTA DE COMANDOS, EMPURRADA PELO AGENTE
+        //
+        //  #### ESTADO COMPLETO, NUNCA UM DELTA ####
+        //
+        //  O conjunto e TROCADO inteiro. E assim que "apaguei a
+        //  mensagem" chega ao jogo: o comando some da lista e volta a
+        //  ser desconhecido para o Oxide. Um delta deixaria comandos
+        //  fantasmas sendo engolidos para sempre.
+        // ========================================================
+        [ConsoleCommand(CmdCommands)]
+        private void CmdCommandsHandler(ConsoleSystem.Arg arg)
+        {
+            // So do console do servidor e do RCON. Um jogador que
+            // descobrisse este comando esvaziaria a lista - ou
+            // sequestraria o /kit, mandando o plugin engoli-lo.
+            if (arg.Connection != null)
+            {
+                return;
+            }
+
+            string json = DecodeBase64(arg.GetString(0, string.Empty));
+
+            if (json == null)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_ARGS\"}");
+                return;
+            }
+
+            CommandsPayload payload;
+
+            try
+            {
+                payload = JsonConvert.DeserializeObject<CommandsPayload>(json);
+            }
+            catch (Exception ex)
+            {
+                PrintError(CmdCommands + ": JSON ilegivel. " + ex.Message);
+                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_ARGS\"}");
+                return;
+            }
+
+            if (payload == null)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_ARGS\"}");
+                return;
+            }
+
+            _comandosDoAgente.Clear();
+
+            if (payload.Commands != null)
+            {
+                for (int i = 0; i < payload.Commands.Count; i++)
+                {
+                    string comando = payload.Commands[i];
+
+                    if (string.IsNullOrEmpty(comando))
+                    {
+                        continue;
+                    }
+
+                    // A barra e do jogo, e nao do comando. O agente ja
+                    // manda sem ela; tirar de novo aqui e barato e
+                    // fecha a porta para um agente antigo.
+                    _comandosDoAgente.Add(comando.Trim().TrimStart('/', '\\').ToLower());
+                }
+            }
+
+            int total = _comandosDoAgente.Count;
+
+            arg.ReplyWith("{\"ok\":true,\"count\":" + total + "}");
+
+            // O log DEPOIS da resposta, pela mesma razao do
+            // CmdBroadcastHandler: um Puts de dentro de um comando de
+            // console sai com o Identifier do pedido e chega NO LUGAR
+            // da resposta.
+            timer.Once(0f, delegate
+            {
+                Puts("O agente registrou " + total + " comando(s) de chat.");
+            });
+        }
+
         [ConsoleCommand(CmdBroadcast)]
         private void CmdBroadcastHandler(ConsoleSystem.Arg arg)
         {
@@ -2072,6 +2269,19 @@ namespace Oxide.Plugins
             /// <summary>Vazio = todo mundo. Preenchido = so ele.</summary>
             [JsonProperty("steamId")]
             public string SteamId { get; set; }
+        }
+
+        /// <summary>
+        /// A lista de comandos que o agente empurra.
+        ///
+        /// Os nomes sao em ingles pela mesma razao do
+        /// BroadcastPayload: isto e PROTOCOLO com o RustAgent (ver
+        /// core/src/game/chat-commands.ts).
+        /// </summary>
+        private class CommandsPayload
+        {
+            [JsonProperty("commands")]
+            public List<string> Commands { get; set; }
         }
 
         private class PluginConfig

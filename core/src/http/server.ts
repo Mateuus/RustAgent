@@ -286,6 +286,14 @@ export interface BuildServerOptions {
     readonly repository: MessagesRepository;
     readonly service: MessagesService;
     readonly variables: VariableRegistry;
+    /**
+     * Quem empurra ao plugin a lista de comandos de chat.
+     *
+     * Cadastrar um `/pop` tem de publicá-lo na hora: sem isto, ele
+     * só passaria a responder na próxima reconexão do RCON, e o
+     * admin que acabou de gravar concluiria que não funciona.
+     */
+    readonly commands?: { syncAll(trigger: string): Promise<void> } | undefined;
   };
 
   /**
@@ -691,6 +699,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         service: options.messages.service,
         variables: options.messages.variables,
         supervisor: options.supervisor,
+        commands: options.messages.commands,
       });
 
       // A prévia do mapa, por último: ela é a única aqui que fala

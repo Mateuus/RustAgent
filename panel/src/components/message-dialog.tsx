@@ -3,7 +3,20 @@
 // ============================================================
 //  message-dialog.tsx  -  criar e editar uma fala do servidor.
 //
-//  ####  O RITMO É A DECISÃO CENTRAL DESTA CAIXA  ####
+//  ####  O GATILHO É A PRIMEIRA DECISÃO  ####
+//
+//  Três motivos, e a mensagem tem UM:
+//
+//      No horário   o ritmo dela (os quatro modos abaixo)
+//      No rodízio   a vez dela na fila de um grupo
+//      Por comando  um jogador digitou `/pop`
+//
+//  Cada um mostra SÓ os campos dele, e esconde os que passam a ser
+//  de outro: no rodízio, o intervalo, os servidores e o mínimo de
+//  gente são do GRUPO. Um campo que fica na tela sem valer é pior
+//  que campo nenhum — ele é preenchido e ignorado em silêncio.
+//
+//  ####  O RITMO É A DECISÃO CENTRAL DE QUEM É AGENDADA  ####
 //
 //  Os quatro modos são exclusivos, e por isso são um grupo de
 //  rádio — não abas, não um select. Cada um mostra SÓ os campos
@@ -41,7 +54,9 @@ import { CHAT_COLORS, parseChatMarkup } from '@/lib/chat-markup';
 import {
   agent,
   type Message,
+  type MessageGroup,
   type MessageInput,
+  type MessageTrigger,
   type MessageVariables,
   type ScheduleKind,
 } from '@/lib/api';
@@ -53,6 +68,33 @@ const MAX_TEXT = 512;
 
 /** O fuso padrão do projeto. Ver Docs/16 §14, decisão 7. */
 const DEFAULT_TIME_ZONE = 'America/Sao_Paulo';
+
+/**
+ * Os três gatilhos, na ordem em que se pensa neles.
+ *
+ * ####  ELES SÃO EXCLUSIVOS, E POR ISSO SÃO UMA FILEIRA SÓ  ####
+ *
+ * Uma mensagem tem UM motivo para sair. Deixar marcar dois faria o
+ * admin preencher um ritmo E um grupo, e não saber qual valeu — e a
+ * tela não teria como responder "por que isso apareceu?".
+ */
+const TRIGGERS: readonly { value: MessageTrigger; label: string; hint: string }[] = [
+  {
+    value: 'schedule',
+    label: 'No horário',
+    hint: 'Ela tem o ritmo dela: de meia em meia hora, todo dia às 20:00, uma vez só.',
+  },
+  {
+    value: 'rotation',
+    label: 'No rodízio',
+    hint: 'Ela entra na fila de um grupo. Quem manda no intervalo, nos servidores e no mínimo de gente é o GRUPO — sai uma frase por vez.',
+  },
+  {
+    value: 'command',
+    label: 'Por comando',
+    hint: 'Ela responde a quem digitar o comando no chat — e só a ele.',
+  },
+];
 
 const KINDS: readonly { value: ScheduleKind; label: string }[] = [
   { value: 'interval', label: 'A cada' },
@@ -102,6 +144,16 @@ interface MessageDialogProps {
   readonly message: Message | null;
   /** Os nomes que o agente sabe trocar, vindos do REGISTRO. */
   readonly variables: MessageVariables | null;
+  /** Os grupos de rodízio, para o seletor. */
+  readonly groups?: readonly MessageGroup[];
+  /**
+   * O grupo já escolhido, quando a caixa abre de dentro de um.
+   *
+   * É o "adicionar mensagem" da lista do grupo: quem clicou ali já
+   * disse em qual grupo ela entra, e pedir de novo seria um passo a
+   * mais para dizer o que já está na tela.
+   */
+  readonly intoGroup?: number | null;
   readonly onClose: () => void;
   readonly onDone: () => void;
 }
@@ -110,6 +162,8 @@ export function MessageDialog({
   open,
   message,
   variables,
+  groups = [],
+  intoGroup = null,
   onClose,
   onDone,
 }: MessageDialogProps) {
@@ -118,6 +172,16 @@ export function MessageDialog({
   const [name, setName] = useState(message?.name ?? '');
   const [text, setText] = useState(message?.text ?? '');
   const [enabled, setEnabled] = useState(message?.enabled ?? true);
+
+  // Abrindo de dentro de um grupo, o gatilho já nasce rodízio: quem
+  // clicou em "adicionar mensagem" ali dentro já disse isso.
+  const [trigger, setTrigger] = useState<MessageTrigger>(
+    message?.trigger ?? (intoGroup === null ? 'schedule' : 'rotation'),
+  );
+  const [groupId, setGroupId] = useState<number | null>(message?.groupId ?? intoGroup);
+  const [command, setCommand] = useState(message?.command ?? '');
+  const [cooldown, setCooldown] = useState(String(message?.cooldownSeconds ?? 30));
+
   const [kind, setKind] = useState<ScheduleKind>(message?.scheduleKind ?? 'interval');
 
   const initial = splitInterval(message?.everySeconds ?? 1800);
@@ -228,6 +292,13 @@ export function MessageDialog({
       name: name.trim(),
       text: text.trim(),
       enabled,
+      trigger,
+      // O que não é do gatilho escolhido vai como `null`: é o agente
+      // que limpa, mas mandar o resto daqui faria o corpo afirmar um
+      // grupo que a tela já não mostra.
+      groupId: trigger === 'rotation' ? groupId : null,
+      command: trigger === 'command' ? command.trim() : null,
+      cooldownSeconds: trigger === 'command' ? Math.max(0, Number(cooldown) || 0) : 0,
       scheduleKind: kind,
       everySeconds: kind === 'interval' ? intervalSeconds(every, unit) : null,
       timeOfDay: kind === 'daily' || kind === 'weekly' ? timeOfDay : null,
@@ -254,9 +325,29 @@ export function MessageDialog({
   async function submit(): Promise<void> {
     const input = buildInput();
 
-    if (kind === 'once' && input.runAt === null) {
+    if (trigger === 'schedule' && kind === 'once' && input.runAt === null) {
       toast.error('Falta a data', {
         description: 'Uma mensagem de uma vez só precisa da data e da hora em que ela sai.',
+      });
+      return;
+    }
+
+    // As duas conferências abaixo o agente também faz, e com a mesma
+    // frase. Elas existem aqui porque o erro é de UM campo visível na
+    // tela, e um toast de 422 depois de gravar faria o admin procurar
+    // o que está errado no formulário inteiro.
+    if (trigger === 'rotation' && input.groupId === null) {
+      toast.error('Falta o grupo', {
+        description:
+          'Uma mensagem de rodízio precisa de um grupo. Sem ele, ela ficaria na lista sem ritmo nenhum.',
+      });
+      return;
+    }
+
+    if (trigger === 'command' && (input.command ?? '').trim() === '') {
+      toast.error('Falta o comando', {
+        description:
+          'Uma mensagem por comando precisa do comando que a dispara, como /pop. Sem ele, não haveria o que digitar.',
       });
       return;
     }
@@ -451,8 +542,127 @@ export function MessageDialog({
           </p>
         </div>
 
-        {/* ---- QUANDO ---- */}
+        {/* ---- O QUE FAZ ELA SAIR ----
+
+            Três motivos, e a mensagem tem UM. Deixar marcar dois
+            faria o admin preencher um ritmo E um grupo, e não saber
+            qual valeu. */}
         <div className="border-t border-border pt-3">
+          <Label>O que faz ela sair</Label>
+
+          <div className="flex flex-wrap items-stretch border border-border">
+            {TRIGGERS.map((option, index) => (
+              <div key={option.value} className="flex items-stretch">
+                {index > 0 && <span aria-hidden className="my-1.5 w-px bg-border" />}
+
+                <button
+                  type="button"
+                  aria-pressed={trigger === option.value}
+                  disabled={busy}
+                  onClick={() => setTrigger(option.value)}
+                  className={cn(
+                    'px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
+                    trigger === option.value
+                      ? 'bg-surface-2 text-foreground'
+                      : 'text-muted hover:text-foreground',
+                  )}
+                >
+                  {option.label}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <p className="mt-1 text-2xs leading-relaxed text-muted">
+            {TRIGGERS.find((option) => option.value === trigger)?.hint}
+          </p>
+        </div>
+
+        {/* ---- O RODÍZIO ---- */}
+        {trigger === 'rotation' && (
+          <div className="border-t border-border pt-3">
+            <Label>Em qual grupo</Label>
+
+            {groups.length === 0 ? (
+              <p className="text-2xs leading-relaxed text-amber">
+                Nenhum grupo de rodízio ainda. Feche esta caixa e crie um na tela de mensagens —
+                sem grupo, esta mensagem ficaria na lista <strong>sem sair nunca</strong>.
+              </p>
+            ) : (
+              <>
+                <select
+                  value={groupId === null ? '' : String(groupId)}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setGroupId(event.target.value === '' ? null : Number(event.target.value))
+                  }
+                  className="h-9 w-72 border border-border bg-surface-2 px-3 text-sm text-foreground"
+                >
+                  <option value="">escolha um grupo…</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name} — {group.schedule}
+                    </option>
+                  ))}
+                </select>
+
+                <p className="mt-1 text-2xs leading-relaxed text-muted">
+                  O <strong>intervalo</strong>, os <strong>servidores</strong>, a{' '}
+                  <strong>janela de horário</strong> e o <strong>mínimo de gente</strong> são do
+                  grupo. Aqui ficam o texto, a tag e as cores desta frase — e a ordem dela na fila
+                  se ajusta na lista do grupo.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ---- O COMANDO ---- */}
+        {trigger === 'command' && (
+          <div className="border-t border-border pt-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <Label>Comando</Label>
+                <Input
+                  value={command}
+                  placeholder="/pop"
+                  disabled={busy}
+                  onChange={(event) => setCommand(event.target.value)}
+                  className="w-44"
+                />
+              </div>
+
+              <div>
+                <Label>Espera entre usos</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    value={cooldown}
+                    disabled={busy}
+                    onChange={(event) => setCooldown(event.target.value)}
+                    className="w-24"
+                  />
+                  <span className="text-2xs text-muted">segundos</span>
+                </div>
+              </div>
+            </div>
+
+            <p className="mt-2 text-2xs leading-relaxed text-muted">
+              Pode cadastrar com ou sem a barra — o agente tira. A resposta vai{' '}
+              <strong>só para quem digitou</strong>, com as variáveis resolvidas na hora. Zero
+              segundos = sem espera; com espera, quem repetir antes do tempo recebe quanto falta.
+            </p>
+            <p className="mt-1 text-2xs leading-relaxed text-muted">
+              Dois comandos iguais no <strong>mesmo servidor</strong> não podem existir: o agente
+              recusa a gravação dizendo de quem é o comando. Em servidores diferentes, convivem.
+            </p>
+          </div>
+        )}
+
+        {/* ---- QUANDO ---- */}
+        <div className={cn('border-t border-border pt-3', trigger !== 'schedule' && 'hidden')}>
           <Label>Quando</Label>
 
           <div className="flex flex-wrap items-stretch border border-border">
@@ -609,9 +819,25 @@ export function MessageDialog({
           </div>
         </div>
 
-        {/* ---- SÓ ENTRE / SÓ COM JOGADORES ---- */}
+        {/* ---- SÓ ENTRE / SÓ COM JOGADORES ----
+
+            No RODÍZIO os dois são do grupo, e por isso somem daqui:
+            duas verdades sobre o mesmo assunto (o grupo pedindo "só
+            com 5 online" e a mensagem pedindo "com 1") é o que faz o
+            admin desligar as duas para descobrir qual valeu.
+
+            No COMANDO a janela de horário some por outro motivo: ela
+            não é conferida no caminho do comando. Um campo que não
+            faz nada é pior que campo nenhum. */}
+        {trigger === 'rotation' ? (
+          <p className="border-t border-border pt-3 text-2xs leading-relaxed text-muted">
+            A <strong>janela de horário</strong>, o <strong>mínimo de gente</strong> e os{' '}
+            <strong>servidores</strong> desta mensagem são os do grupo de rodízio — é lá que se
+            ajusta.
+          </p>
+        ) : (
         <div className="grid gap-3 border-t border-border pt-3 sm:grid-cols-2">
-          <div>
+          <div className={cn(trigger === 'command' && 'hidden')}>
             <Label>Só entre</Label>
             <div className="flex items-center gap-2">
               <Input
@@ -661,14 +887,16 @@ export function MessageDialog({
               )}
             </div>
             <p className="mt-1 text-2xs leading-relaxed text-muted">
-              Com o servidor vazio o horário <strong>não é consumido</strong>: o primeiro jogador
-              que entrar recebe a mensagem logo, em vez de esperar meia hora.
+              {trigger === 'command'
+                ? 'Sem gente suficiente, o comando não responde — e o motivo fica no histórico da mensagem.'
+                : 'Com o servidor vazio o horário não é consumido: o primeiro jogador que entrar recebe a mensagem logo, em vez de esperar meia hora.'}
             </p>
           </div>
         </div>
+        )}
 
         {/* ---- ONDE ---- */}
-        <div className="border-t border-border pt-3">
+        <div className={cn('border-t border-border pt-3', trigger === 'rotation' && 'hidden')}>
           <Label>Onde ela sai</Label>
 
           <div className="flex flex-wrap items-center gap-4">
