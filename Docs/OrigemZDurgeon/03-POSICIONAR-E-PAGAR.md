@@ -22,8 +22,9 @@ existir, onde cada coisa mora, as decisões que não são óbvias e — no §6 �
 | §3 | o código nunca atrás da própria porta | **feito** | `lock-route.ts` no agente, `PublicCells` no plugin, `onUndelivered: 'abort'` |
 | §4 | material do corredor | **feito** | `corridor.grade`; o `GradeOf` do plugin passou a olhar a célula de corredor |
 
-**Migração:** `080 dungeon-placements`. Ela pula o 79 de propósito — ver o
-cabeçalho dela.
+**Migração:** `081 dungeon-placements`. Ela nasceu 79, virou 80 e acabou 81:
+duas outras frentes chegaram na main primeiro, e renumerar no merge é parte do
+trabalho — ver o cabeçalho dela.
 
 **Nada muda para quem não mexer em nada.** Lista de marcadores vazia é o sorteio
 de sempre; `corridor.grade` nulo é herdar o material da masmorra; caixa sem

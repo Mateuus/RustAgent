@@ -98,7 +98,7 @@ interface DungeonRow {
   readonly corridor_crates: string;
   readonly corridor_loot_table: string;
   readonly corridor_ai: string;
-  /** Os três juntos em `NULL` são "herda o `structure`". Ver a migração 080. */
+  /** Os três juntos em `NULL` são "herda o `structure`". Ver a migração 081. */
   readonly corridor_grade_foundation: string | null;
   readonly corridor_grade_wall: string | null;
   readonly corridor_grade_ceiling: string | null;
@@ -831,7 +831,7 @@ export class DungeonsRepository {
    * O nível das peças do corredor.
    *
    * Os três `NULL` juntos são "herda o `structure`" — o padrão, e o
-   * que toda linha anterior à 080 tem. É a mesma leitura do
+   * que toda linha anterior à 081 tem. É a mesma leitura do
    * `#grade` da sala, e pelo mesmo motivo.
    */
   #corridorGrade(row: DungeonRow): GradeSetInput | null {

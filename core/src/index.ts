@@ -1958,14 +1958,14 @@ async function main(): Promise<void> {
       timer.unref();
     },
     consumer: {
-      take: async ({ serverId, steamId, items }) => {
+      take: async ({ serverId, steamId, items, partial }) => {
         const rcon = supervisor.contextOf(serverId)?.rcon;
 
         if (rcon === undefined) {
           return { complete: false, missing: 'O servidor não está respondendo agora.' };
         }
 
-        const payload = Buffer.from(JSON.stringify({ items }), 'utf8').toString('base64');
+        const payload = Buffer.from(JSON.stringify({ items, partial }), 'utf8').toString('base64');
         const raw = firstJsonLine(await rcon.send(`origemz.quest.consume ${steamId} ${payload}`));
         const parsed = questConsumeSchema.safeParse(raw);
 
@@ -1975,7 +1975,7 @@ async function main(): Promise<void> {
           return { complete: false, missing: 'Não deu para conferir os seus itens agora.' };
         }
 
-        return { complete: parsed.data.complete };
+        return { complete: parsed.data.complete, taken: parsed.data.taken };
       },
     },
   });
@@ -2044,6 +2044,14 @@ async function main(): Promise<void> {
   // `steamId` — o mesmo caminho dos avisos do painel, e por isso a
   // mensagem sai com a tag e a cor da rede em vez de texto pelado.
   const questBroadcaster = new PluginBroadcaster({ servers: supervisor, logger });
+
+  // O nome que uma pessoa lê, para o recibo da entrega. O catálogo
+  // do jogo é quem sabe que `stones` se chama Pedra.
+  const itemLabelOf = (shortname: string): string => {
+    const item = itemsRepository.get(shortname);
+
+    return item === null ? shortname : screenLabelOf(item);
+  };
 
   const tellPlayer = async (
     serverId: string,
@@ -2154,6 +2162,24 @@ async function main(): Promise<void> {
     onClaim: ({ serverId, steamId, playerQuestId }) => {
       void (async () => {
         try {
+          // ####  ENTREGAR PRIMEIRO, RESGATAR DEPOIS  ####
+          //
+          // O mesmo botão faz as duas coisas, e nessa ordem: o que
+          // o jogador tem na mochila vira progresso, e se isso
+          // fechar a missão o resgate acontece no mesmo clique.
+          //
+          // Quem não tinha nada cai direto no resgate — e recebe do
+          // serviço a frase certa se ainda faltar.
+          const entregue = (await questsService?.turnIn({ playerQuestId, steamId })) ?? [];
+
+          if (entregue.length > 0) {
+            const lista = entregue
+              .map((item) => `${String(item.amount)} ${itemLabelOf(item.shortname)}`)
+              .join(', ');
+
+            await tellPlayer(serverId, steamId, `Você entregou ${lista}.`).catch(() => undefined);
+          }
+
           const result = await questsService?.claim({ playerQuestId });
           const message = (result?.outcomes ?? []).map((outcome) => outcome.message).join(' ');
 

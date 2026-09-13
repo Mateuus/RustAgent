@@ -2985,7 +2985,7 @@ function toInput(dungeon: Dungeon): DungeonInput {
       ai: input.corridor.ai ?? {},
       // ####  O `??` AQUI NAO E ZELO DE TIPO  ####
       //
-      // A masmorra gravada antes da migracao 080 volta da API sem
+      // A masmorra gravada antes da migracao 081 volta da API sem
       // estes dois campos, e o rascunho os leria como `undefined`.
       // Um `grade: undefined` no PUT e diferente de `null`: o zod
       // aplica o default (que e null) e da no mesmo, mas o

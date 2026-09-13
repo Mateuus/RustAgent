@@ -133,7 +133,20 @@ export interface QuestConsumer {
     readonly serverId: string;
     readonly steamId: string;
     readonly items: readonly { readonly shortname: string; readonly amount: number }[];
-  }): Promise<{ readonly complete: boolean; readonly missing?: string }>;
+    /**
+     * Tire o que der, em vez de tudo ou nada.
+     *
+     * É o balcão do NPC: o jogador traz 30 das 300 pedras, o boneco
+     * fica com as 30 e o contador anda. `taken` diz quanto saiu de
+     * cada item — e é dele que o progresso é feito.
+     */
+    readonly partial?: boolean;
+  }): Promise<{
+    readonly complete: boolean;
+    readonly missing?: string;
+    /** Quanto saiu de cada item. Só o modo parcial precisa disto. */
+    readonly taken?: readonly { readonly shortname: string; readonly amount: number }[];
+  }>;
 }
 
 export interface QuestsServiceDeps {
@@ -251,6 +264,14 @@ export interface ClaimResult {
 // ------------------------------------------------------------
 //  §3  O SERVIÇO
 // ------------------------------------------------------------
+
+/**
+ * Os objetivos que se pagam com item do inventário.
+ *
+ * `kill` não se entrega, `deliver` é chegar num lugar, e `playtime`
+ * e `metric` são números que o agente calcula. Ver `turnIn`.
+ */
+const TURN_IN_KINDS: readonly string[] = ['gather', 'craft', 'loot'];
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
@@ -525,6 +546,108 @@ export class QuestsService {
   // ======================================================
   //  ESCRITA
   // ======================================================
+
+  /**
+   * O balcão do NPC: ele entrega o que tem, e o contador anda.
+   *
+   * ####  ENTREGAR NÃO É CONFERIR  ####
+   *
+   * Pedido do dono em 13/09/2026, com 30 pedras no inventário e uma
+   * missão de 300: "deveria aceitar entrega parcial até completar
+   * tudo". Antes disso o botão só olhava o contador e dizia o que
+   * faltava — e o que estava na mochila não servia para nada.
+   *
+   * Agora o que ele tem SAI do inventário e vira progresso, item a
+   * item, até o que falta. O que ele minerar continua contando
+   * sozinho, e os dois se somam.
+   *
+   * ####  SÓ OS OBJETIVOS DE ITEM  ####
+   *
+   * `kill` não se entrega, e `deliver` é chegar num lugar. Sobram
+   * `gather`, `craft` e `loot` — os três cujo alvo é um shortname
+   * que existe no inventário.
+   *
+   * @returns o que saiu, por objetivo. Vazio = não tinha nada.
+   */
+  async turnIn(input: {
+    readonly playerQuestId: number;
+    readonly steamId: string;
+  }): Promise<readonly { readonly shortname: string; readonly amount: number }[]> {
+    const attempt = this.#deps.repository.attempt(input.playerQuestId);
+
+    if (
+      attempt === null ||
+      attempt.steamId !== input.steamId ||
+      attempt.status !== 'active' ||
+      this.#deps.consumer === undefined
+    ) {
+      return [];
+    }
+
+    const wanted = attempt.snapshot.objectives
+      .filter(
+        (objective) =>
+          objective.target !== null &&
+          TURN_IN_KINDS.includes(objective.kind) &&
+          (attempt.progress[objective.seq] ?? 0) < objective.amount,
+      )
+      .map((objective) => ({
+        seq: objective.seq,
+        shortname: objective.target as string,
+        amount: objective.amount - (attempt.progress[objective.seq] ?? 0),
+      }));
+
+    if (wanted.length === 0) {
+      return [];
+    }
+
+    const result = await this.#deps.consumer.take({
+      serverId: attempt.serverId,
+      steamId: attempt.steamId,
+      items: wanted.map(({ shortname, amount }) => ({ shortname, amount })),
+      partial: true,
+    });
+
+    // ####  O QUE SAIU, E NÃO O QUE FOI PEDIDO  ####
+    //
+    // O plugin é quem sabe quanto havia na mochila. Somar o pedido
+    // daria progresso por item que nunca saiu.
+    const taken = result.taken ?? [];
+    const entries: { objectiveSeq: number; amount: number }[] = [];
+    const receipt: { shortname: string; amount: number }[] = [];
+
+    for (const [index, item] of wanted.entries()) {
+      const amount = taken[index]?.amount ?? 0;
+
+      if (amount <= 0) {
+        continue;
+      }
+
+      entries.push({ objectiveSeq: item.seq, amount });
+      receipt.push({ shortname: item.shortname, amount });
+    }
+
+    if (entries.length === 0) {
+      return [];
+    }
+
+    this.#deps.repository.payAtCounter(input.playerQuestId, entries, this.#now());
+    this.#completeIfDone(input.playerQuestId, 'agent', null);
+    this.#deps.onLiveChanged?.({ serverId: attempt.serverId, steamId: attempt.steamId });
+
+    this.#deps.logger.info(
+      {
+        serverId: attempt.serverId,
+        steamId: attempt.steamId,
+        questId: attempt.questId,
+        pq: input.playerQuestId,
+        taken: receipt,
+      },
+      'entrega no balcão do NPC',
+    );
+
+    return receipt;
+  }
 
   /**
    * O jogador aceita.
@@ -939,14 +1062,26 @@ export class QuestsService {
         );
       }
 
-      const taken = await this.#deps.consumer.take({
-        serverId: attempt.serverId,
-        steamId: attempt.steamId,
-        items: toConsume.map((objective) => ({
+      // ####  O QUE JÁ FOI ENTREGUE NO BALCÃO NÃO SE COBRA DE NOVO  ####
+      //
+      // Quem levou as 300 pedras ao NPC não as tem mais. Cobrar o
+      // total no resgate o obrigaria a juntar tudo outra vez para
+      // receber o prêmio do que já entregou. Ver a migração 079.
+      const pending = toConsume
+        .map((objective) => ({
           shortname: objective.target as string,
-          amount: objective.amount,
-        })),
-      });
+          amount: objective.amount - (attempt.paid[objective.seq] ?? 0),
+        }))
+        .filter((item) => item.amount > 0);
+
+      const taken =
+        pending.length === 0
+          ? { complete: true }
+          : await this.#deps.consumer.take({
+              serverId: attempt.serverId,
+              steamId: attempt.steamId,
+              items: pending,
+            });
 
       if (!taken.complete) {
         throw new ApiError(
