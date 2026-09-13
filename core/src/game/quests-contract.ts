@@ -167,6 +167,13 @@ export interface QuestAssignPayload {
      * casa com nenhum.
      */
     readonly id: string;
+    /**
+     * `active` = ele ainda está perseguindo, e o plugin conta.
+     * `completed` = fechou e falta resgatar — o plugin NÃO conta
+     * mais, e é isto que faz o balcão do NPC trocar ACEITAR por
+     * RESGATAR em vez de oferecer de novo o que já foi feito.
+     */
+    readonly status: 'active' | 'completed';
     readonly objectives: readonly {
       readonly seq: number;
       readonly kind: string;

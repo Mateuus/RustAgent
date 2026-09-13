@@ -1984,6 +1984,10 @@ async function main(): Promise<void> {
     quests: questsService,
     npcNameOf: (npcId) => questsRepository.getNpc(npcId)?.name ?? null,
     catalog: questScreenCatalog,
+    // O contador vive no plugin entre um lote e outro. Abrir a tela
+    // é raro o bastante para pagar uma ida ao RCON — e é ela que
+    // mostra "1.300 / 5.000" em vez do número do ciclo passado.
+    refresh: async (serverId) => questCollector?.flushNow(serverId),
     logger,
   });
 

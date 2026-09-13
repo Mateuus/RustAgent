@@ -2899,6 +2899,8 @@ export interface QuestDefinition {
   requires: string | null;
   /** `null` = aparece no menu; preenchido = so perto daquele NPC. */
   npcId: string | null;
+  /** Onde ela se ENTREGA. `null` = no mesmo NPC que ofereceu. */
+  turnInNpcId: string | null;
   repeatMode: QuestRepeatMode;
   cooldownSeconds: number;
   requiresQuest: string | null;

@@ -6606,6 +6606,36 @@ UPDATE quest_npcs
  WHERE prefab = 'assets/prefabs/npc/bandit/shopkeepers/bandit_shopkeeper.prefab';
 `;
 
+const QUEST_TURN_IN_NPC_SCHEMA = `
+-- ============================================================
+--  078  quem RECEBE a missao pronta.
+--
+--  ####  DAR E RECEBER ERAM A MESMA PESSOA  ####
+--
+--  O \`npc_id\` diz onde a missao se PEGA. Nao havia como dizer onde
+--  ela se ENTREGA: quem concluia voltava ao mesmo boneco, ou ia ao
+--  menu.
+--
+--  O pedido do dono em 12/09/2026 e de uma cadeia com dois lados:
+--  o Zev oferece, e quem recebe pode ser ele mesmo ou outro. "Leve
+--  isto ao ferreiro do outro lado do mapa" e uma missao inteira que
+--  nao cabia no cadastro.
+--
+--  ####  NAO CONFUNDIR COM O OBJETIVO \`deliver\`  ####
+--
+--  Aquele e uma TAREFA: chegar ate um boneco conta como progresso,
+--  e o alvo dele e o \`target\` do objetivo. Este e o BALCAO: onde a
+--  missao ja concluida vira recompensa.
+--
+--  NULL = resgata no mesmo NPC que ofereceu; e, se ela nao tem NPC
+--  nenhum, no menu. E o comportamento de tudo o que ja existe.
+--
+--  Sem REFERENCES pela mesma razao do \`npc_id\`: a integridade e
+--  cobrada na rota, que sabe em que servidor cada boneco esta.
+-- ============================================================
+ALTER TABLE quests ADD COLUMN turn_in_npc_id TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -6810,6 +6840,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 76, name: 'kit-icon-file', sql: KIT_ICON_FILE_SCHEMA },
   // 11/09/2026: o NPC de missao ganha um boneco que mostra "TALK".
   { id: 77, name: 'npc-that-talks', sql: NPC_THAT_TALKS_SCHEMA },
+  // 12/09/2026: dar e receber deixam de ser a mesma pessoa.
+  { id: 78, name: 'quest-turn-in-npc', sql: QUEST_TURN_IN_NPC_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

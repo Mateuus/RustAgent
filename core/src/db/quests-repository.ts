@@ -78,6 +78,8 @@ export interface QuestRecord {
   readonly sort: number;
   readonly requires: string | null;
   readonly npcId: string | null;
+  /** Onde ela se ENTREGA. `null` = no mesmo NPC, ou no menu. */
+  readonly turnInNpcId: string | null;
   readonly repeatMode: QuestRepeatMode;
   readonly cooldownSeconds: number;
   readonly requiresQuest: string | null;
@@ -194,6 +196,7 @@ interface QuestRow {
   readonly sort: number;
   readonly requires: string | null;
   readonly npc_id: string | null;
+  readonly turn_in_npc_id: string | null;
   readonly repeat_mode: string;
   readonly cooldown_seconds: number;
   readonly requires_quest: string | null;
@@ -473,12 +476,12 @@ export class QuestsRepository {
         .prepare(
           `INSERT INTO quests
              (id, title, description, category, enabled, sort, requires, npc_id,
-              repeat_mode, cooldown_seconds, requires_quest, available_from, available_to,
-              auto_accept, wipe_policy, created_at, updated_at)
+              turn_in_npc_id, repeat_mode, cooldown_seconds, requires_quest,
+              available_from, available_to, auto_accept, wipe_policy, created_at, updated_at)
            VALUES
              (@id, @title, @description, @category, @enabled, @sort, @requires, @npc_id,
-              @repeat_mode, @cooldown_seconds, @requires_quest, @available_from, @available_to,
-              @auto_accept, @wipe_policy, @created_at, @updated_at)`,
+              @turn_in_npc_id, @repeat_mode, @cooldown_seconds, @requires_quest,
+              @available_from, @available_to, @auto_accept, @wipe_policy, @created_at, @updated_at)`,
         )
         .run({ id, ...toQuestColumns(input), created_at: now, updated_at: now });
 
@@ -529,6 +532,7 @@ export class QuestsRepository {
              sort             = @sort,
              requires         = @requires,
              npc_id           = @npc_id,
+             turn_in_npc_id   = @turn_in_npc_id,
              repeat_mode      = @repeat_mode,
              cooldown_seconds = @cooldown_seconds,
              requires_quest   = @requires_quest,
@@ -1366,11 +1370,22 @@ export class QuestsRepository {
     return this.#db.prepare('DELETE FROM quest_npcs WHERE id = @id').run({ id }).changes > 0;
   }
 
-  /** As quests que apontam para aquele NPC. É o aviso antes de apagar. */
+  /**
+   * As quests que apontam para aquele NPC — como balcão de origem OU
+   * de entrega. É o aviso antes de apagar.
+   *
+   * As duas pontas juntas de propósito: apagar o boneco quebra as
+   * duas do mesmo jeito, e quem está olhando o botão de apagar quer
+   * saber o que vai ficar órfão, não de qual coluna.
+   */
   questsOfNpc(npcId: string): readonly string[] {
     return (
       this.#db
-        .prepare('SELECT id FROM quests WHERE npc_id = @npc_id ORDER BY id ASC')
+        .prepare(
+          `SELECT id FROM quests
+            WHERE npc_id = @npc_id OR turn_in_npc_id = @npc_id
+            ORDER BY id ASC`,
+        )
         .all({ npc_id: npcId }) as { id: string }[]
     ).map((row) => row.id);
   }
@@ -1438,6 +1453,7 @@ export class QuestsRepository {
       sort: row.sort,
       requires: row.requires,
       npcId: row.npc_id,
+      turnInNpcId: row.turn_in_npc_id,
       repeatMode: row.repeat_mode as QuestRepeatMode,
       cooldownSeconds: row.cooldown_seconds,
       requiresQuest: row.requires_quest,
@@ -1591,6 +1607,7 @@ function toQuestColumns(input: QuestInput): Record<string, unknown> {
     sort: input.sort,
     requires: input.requires,
     npc_id: input.npcId,
+    turn_in_npc_id: input.turnInNpcId,
     repeat_mode: input.repeatMode,
     cooldown_seconds: input.cooldownSeconds,
     requires_quest: input.requiresQuest,

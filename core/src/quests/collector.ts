@@ -602,8 +602,17 @@ export class QuestCollector {
   ): Promise<void> {
     const quests: QuestAssignPayload['quests'][number][] = [];
 
+    // ####  AS CONCLUÍDAS VÃO JUNTO  ####
+    //
+    // O plugin precisa delas para o balcão do NPC: sem saber que a
+    // missão fechou, ele oferece ACEITAR na que o jogador acabou de
+    // terminar — e o agente responde "você já está fazendo". Foi o
+    // que o teste de 12/09/2026 encontrou.
+    //
+    // Elas descem com `status: 'completed'`, e o plugin não conta
+    // progresso nelas.
     for (const attempt of this.#deps.repository.liveFor(serverId, steamId)) {
-      if (attempt.status !== 'active') {
+      if (attempt.status !== 'active' && attempt.status !== 'completed') {
         continue;
       }
 
@@ -622,8 +631,15 @@ export class QuestCollector {
           have: attempt.progress[objective.seq] ?? 0,
         }));
 
-      if (objectives.length > 0) {
-        quests.push({ pq: attempt.id, id: attempt.questId, objectives });
+      // A concluída entra mesmo sem objetivo de plugin: o que ela
+      // leva é o ESTADO, e é dele que o balcão precisa.
+      if (objectives.length > 0 || attempt.status === 'completed') {
+        quests.push({
+          pq: attempt.id,
+          id: attempt.questId,
+          status: attempt.status === 'completed' ? 'completed' : 'active',
+          objectives,
+        });
       }
     }
 

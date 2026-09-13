@@ -792,6 +792,15 @@ function assertNpc(deps: QuestRoutesDeps, body: QuestInput): void {
     }
   }
 
+  // ####  O BALCÃO PODE SER DE ENTREGA, E MUITAS VEZES É  ####
+  //
+  // Ao contrário do NPC de origem, este só precisa RECEBER: a
+  // missão pronta vira recompensa nele. Um boneco `delivery` serve
+  // perfeitamente — é para isso que aquele papel existe.
+  if (body.turnInNpcId !== null) {
+    targets.push({ id: body.turnInNpcId, what: 'O NPC que recebe esta quest' });
+  }
+
   for (const objective of body.objectives) {
     if (objective.kind === 'deliver' && objective.target !== null) {
       targets.push({ id: objective.target, what: 'O NPC de destino da entrega' });

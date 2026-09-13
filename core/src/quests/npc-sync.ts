@@ -76,6 +76,14 @@ export interface QuestNpcOffer {
   readonly rewardItemId: number | null;
   /** A skin dele. `0` = a arte padrão do item. */
   readonly rewardSkinId: number;
+  /**
+   * Este boneco OFERECE esta missão, ou só a recebe?
+   *
+   * `false` = ele é o balcão de entrega e nada mais: o cartão dela
+   * só aparece para quem já a concluiu, com RESGATAR. Oferecer
+   * ACEITAR aqui mandaria o jogador pegar no lugar errado.
+   */
+  readonly offers: boolean;
 }
 
 export interface QuestNpcSyncDeps {
@@ -258,16 +266,26 @@ export class QuestNpcSync {
   }
 
   #offersOf(npc: QuestNpcRecord): readonly QuestNpcOffer[] {
-    // Um NPC de entrega não tem vitrine: ele existe para RECEBER o
-    // pacote. É a mesma regra do serviço.
-    if (npc.kind === 'delivery') {
-      return [];
-    }
-
     const offers: QuestNpcOffer[] = [];
 
     for (const quest of this.#deps.repository.listForServer(npc.serverId)) {
-      if (quest.npcId !== npc.id || !quest.enabled) {
+      if (!quest.enabled) {
+        continue;
+      }
+
+      // ####  DUAS PONTAS, E ELAS PODEM SER O MESMO BONECO  ####
+      //
+      // `npcId` é onde a missão se PEGA; `turnInNpcId` é onde ela
+      // se ENTREGA. Sem o segundo, entrega-se onde se pegou — que
+      // é como tudo o que já existe se comporta.
+      //
+      // Um NPC `delivery` nunca oferece: ele existe para receber, e
+      // uma vitrine nele confundiria quem chegou para entregar.
+      const dele = quest.npcId === npc.id && npc.kind !== 'delivery';
+      const recebe =
+        quest.turnInNpcId === null ? quest.npcId === npc.id : quest.turnInNpcId === npc.id;
+
+      if (!dele && !recebe) {
         continue;
       }
 
@@ -281,6 +299,7 @@ export class QuestNpcSync {
         reward: described?.reward ?? '',
         rewardItemId: described?.rewardItemId ?? null,
         rewardSkinId: described?.rewardSkinId ?? 0,
+        offers: dele,
       });
     }
 
@@ -509,6 +528,27 @@ export class QuestNpcSync {
       this.#deps.logger.warn(
         { server: serverId, npc: npc.id, pq: push.playerQuestId, steamId: push.steamId },
         'resgate pedido no balcão para uma tentativa que não é daquele jogador',
+      );
+
+      return;
+    }
+
+    // ####  E O BALCÃO TEM DE SER O DESTA MISSÃO  ####
+    //
+    // O cartão de RESGATAR só é desenhado no boneco certo, mas o
+    // clique nasce no cliente: sem esta conferência, resgatar-se-ia
+    // no NPC da porta de casa a missão que o cadastro manda entregar
+    // do outro lado do mapa.
+    //
+    // `turnInNpcId` vazio = entrega onde se pegou. Missão sem NPC
+    // nenhum é de menu, e não se resgata em balcão.
+    const quest = this.#deps.repository.get(attempt.questId);
+    const balcao = quest === null ? null : (quest.turnInNpcId ?? quest.npcId);
+
+    if (balcao !== npc.id) {
+      this.#deps.logger.warn(
+        { server: serverId, npc: npc.id, quest: attempt.questId, balcao },
+        'resgate pedido num NPC que não é o balcão desta missão',
       );
 
       return;
