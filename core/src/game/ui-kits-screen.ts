@@ -44,6 +44,11 @@ import { kitIconKey } from './card-icons.js';
 import type { UiElement, UiScreen } from '../types/ui-document.js';
 
 import {
+  CONTAINER_LABEL,
+  inventoryBlocks,
+  type InventoryEntry,
+} from './ui-inventory.js';
+import {
   button,
   C,
   deadButton,
@@ -101,18 +106,36 @@ const CARD = {
   buttonTop: 34,
 } as const;
 
+/**
+ * O modal de um kit.
+ *
+ * ####  ELE CRESCEU PARA CABER UM INVENTÁRIO  ####
+ *
+ * Era 440x330, e isso bastava enquanto a aba ITENS era uma lista de
+ * texto. Ela deixou de ser: agora é a GRADE do jogo, e uma grade tem
+ * uma largura que não se negocia — a vestimenta são sete casinhas
+ * lado a lado, e sete de 44 pedem 320 px antes das margens.
+ *
+ * A altura veio junto porque um kit completo desenha três
+ * contêineres empilhados, e recortá-los pela metade devolveria o
+ * problema que a grade existe para resolver: o jogador não saberia
+ * onde o resto cai.
+ */
+const KIT_MODAL = { width: 520, height: 440 } as const;
+
 /** Onde a área da lista começa, no modal — logo abaixo das abas. */
 const LIST_TOP = 84;
 
-/** A altura da área da lista, no modal. */
-const LIST_VIEWPORT = 168;
-
 /**
- * A faixa do "‹ 1 / 2 ›", entre a lista e o rodapé do modal.
+ * A altura da área da lista, no modal.
  *
- * Ela cabe no vão que já existia: a lista acaba em 252 e os botões
- * começam em 286 (16 do fundo de um modal de 330).
+ * Sai da caixa, e não de um número solto: o rodapé reserva 60 (os
+ * botões a 16 do fundo, mais 28 de altura, mais ar) e o pager mais
+ * 24. O que sobra é da lista.
  */
+const LIST_VIEWPORT = KIT_MODAL.height - LIST_TOP - 60 - 24;
+
+/** A faixa do "‹ 1 / 2 ›", entre a lista e o rodapé do modal. */
 const LIST_PAGER = { top: LIST_TOP + LIST_VIEWPORT + 2, height: 22 } as const;
 
 // ------------------------------------------------------------
@@ -123,10 +146,19 @@ const LIST_PAGER = { top: LIST_TOP + LIST_VIEWPORT + 2, height: 22 } as const;
  * O que o modal de um kit mostra.
  *
  *   geral      a regra, e o que já houve entre ele e este kit
- *   itens      o que vem dentro, com ícone
+ *   itens      o que vem dentro, na grade do inventário
+ *   item       o detalhe de UM item da grade
  *   confirmar  a última parada antes de gastar o resgate
+ *
+ * ####  "item" USA A PÁGINA COMO ÍNDICE  ####
+ *
+ * `ozkit:kit-x:item:3` é o detalhe do quarto item. Seria mais
+ * explícito um campo próprio, e custaria um quinto pedaço no id —
+ * que o parser, o gerador e o plugin teriam de aprender juntos. A
+ * página já é um número livre nessa posição, e numa aba que mostra
+ * UM item não há o que paginar.
  */
-export type KitTab = 'geral' | 'itens' | 'confirmar';
+export type KitTab = 'geral' | 'itens' | 'item' | 'confirmar';
 
 /** O grupo dos kits SEM categoria. Ver `categorySlug`. */
 export const NO_CATEGORY = '-';
@@ -181,7 +213,7 @@ export function parseKitScreenId(screenId: string): KitScreenTarget | null {
     return {
       kind: 'info',
       slug,
-      tab: tab === 'itens' || tab === 'confirmar' ? tab : 'geral',
+      tab: tab === 'itens' || tab === 'confirmar' || tab === 'item' ? tab : 'geral',
       page: Math.max(0, Number.parseInt(parts[3] ?? '0', 10) || 0),
     };
   }
@@ -197,7 +229,15 @@ export function parseKitScreenId(screenId: string): KitScreenTarget | null {
  * número.
  */
 export function kitInfoScreenId(slug: string, tab: KitTab = 'geral', page = 0): string {
-  if (page > 0) {
+  // ####  NA ABA "item" O ZERO É CONTEÚDO, E NÃO O PADRÃO  ####
+  //
+  // Ali o número não é a página: é QUAL item. Omiti-lo por ser zero
+  // mandava o primeiro item da grade para `ozkit:kit-x:item`, que o
+  // parser lê como índice 0 por sorte — e o botão do primeiro item
+  // ficava com um endereço diferente em forma do dos outros doze.
+  // Basta alguém passar a tratar a ausência como "nenhum" para o
+  // primeiro item parar de abrir.
+  if (page > 0 || tab === 'item') {
     return `${KIT_INFO_PREFIX}:${slug}:${tab}:${String(page)}`;
   }
 
@@ -693,7 +733,18 @@ function buildInfo(
       id,
       name: kit.name,
       kind: 'modal',
-      elements: [modalFrame(420, 250, confirmBody(kit, itemOf))],
+      elements: [modalFrame(460, 260, confirmBody(kit, itemOf))],
+    };
+  }
+
+  // O detalhe de UMA casinha da grade. Também sem abas, e pelo mesmo
+  // motivo da confirmação: daqui só se volta para a grade.
+  if (target.tab === 'item') {
+    return {
+      id,
+      name: kit.name,
+      kind: 'modal',
+      elements: [modalFrame(420, 270, itemDetail(kit, itemOf, target.page ?? 0))],
     };
   }
 
@@ -717,9 +768,7 @@ function buildInfo(
       52,
     ),
 
-    ...(target.tab === 'geral'
-      ? generalTab(kit, target.page ?? 0)
-      : itemsTab(kit, itemOf, target.page ?? 0)),
+    ...(target.tab === 'geral' ? generalTab(kit, target.page ?? 0) : itemsTab(kit, itemOf)),
 
     closeButton('FECHAR'),
   ];
@@ -766,7 +815,7 @@ function buildInfo(
     id,
     name: kit.name,
     kind: 'modal',
-    elements: [modalFrame(440, 330, body)],
+    elements: [modalFrame(KIT_MODAL.width, KIT_MODAL.height, body)],
   };
 }
 
@@ -932,22 +981,230 @@ function generalTab(kit: KitOfferView, page: number): UiElement[] {
 }
 
 /** A aba ITENS: o que vem dentro, com o ícone de cada um. */
-function itemsTab(kit: KitOfferView, itemOf: ItemLookup, page: number): UiElement[] {
-  const lines: ContentRow[] = kit.items.map((item) => {
-    const known = itemOf(item.shortname);
-    const name = known?.displayName ?? item.shortname;
+/**
+ * O que vem no kit, desenhado como o inventário do jogo.
+ *
+ * ####  POR QUE ISTO DEIXOU DE SER UMA LISTA  ####
+ *
+ * A lista respondia "o que vem". Ela não respondia a pergunta que o
+ * jogador realmente faz antes de gastar um resgate ÚNICO: onde isso
+ * cai. Um kit com a AK na barra rápida e o colete no corpo é outro
+ * kit — e pela lista os dois eram idênticos.
+ *
+ * A grade responde as duas de uma vez, porque é o mesmo desenho que
+ * ele vê ao apertar TAB. O `slot` e a `position` já estavam no
+ * cadastro desde sempre; o que faltava era a tela mostrá-los.
+ */
+function itemsTab(kit: KitOfferView, itemOf: ItemLookup): UiElement[] {
+  const entries = inventoryEntriesOf(kit, itemOf);
 
-    return {
-      text: item.amount > 1 ? `${formatNumber(item.amount)}x ${name}` : name,
-      item: known === null ? null : { itemId: known.itemId, skinId: item.skinId },
-    };
-  });
-
-  if (lines.length === 0) {
-    lines.push({ text: 'Este kit está vazio.', item: null });
+  if (entries.length === 0) {
+    return [
+      label('kivazio', 'Este kit está vazio.', listArea(), {
+        size: 12,
+        color: C.textMuted,
+      }),
+    ];
   }
 
-  return listBody(kit, 'itens', lines, page, 'kitens', 'ki');
+  const width = KIT_MODAL.width - 44;
+
+  const blocks = inventoryBlocks(entries, {
+    prefix: 'ki',
+    width,
+    height: LIST_VIEWPORT,
+    // O clique abre o detalhe daquele item. O CUI não tem tooltip —
+    // ver o cabeçalho de ui-inventory.ts.
+    screenIdOf: (entry) => kitInfoScreenId(kit.slug, 'item', entry.index),
+  });
+
+  const elements: UiElement[] = [panel('kitens', listArea(), C.none, blocks.elements)];
+
+  // O que não coube é CONTADO, nunca cortado em silêncio: um kit de
+  // trinta itens não pode dizer que tem dez.
+  if (blocks.hidden > 0) {
+    elements.push(
+      label(
+        'kimais',
+        `e mais ${formatNumber(blocks.hidden)} ${blocks.hidden === 1 ? 'item' : 'itens'} que não coube na tela`,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 22, y: -(LIST_PAGER.top + LIST_PAGER.height) },
+          offsetMax: { x: -22, y: -LIST_PAGER.top },
+        },
+        { size: 10, color: C.amber, align: 'MiddleLeft' },
+      ),
+    );
+  }
+
+  return elements;
+}
+
+/** A área onde a lista (ou a grade) é desenhada. */
+function listArea(): Rect {
+  return {
+    anchorMin: { x: 0, y: 1 },
+    anchorMax: { x: 1, y: 1 },
+    offsetMin: { x: 22, y: -(LIST_TOP + LIST_VIEWPORT) },
+    offsetMax: { x: -22, y: -LIST_TOP },
+  };
+}
+
+/** Um item do kit, já resolvido, mais o índice que o endereça. */
+interface KitEntry extends InventoryEntry {
+  /** A posição no array do kit — é ela que vai no id do detalhe. */
+  readonly index: number;
+}
+
+/**
+ * Os itens do kit no formato da grade.
+ *
+ * ####  O SLOT DO CADASTRO É A VERDADE  ####
+ *
+ * Ele sempre foi `wear`, `belt` ou `main` — o zod da borda HTTP não
+ * aceita outra coisa. O que mudou é que agora alguém OLHA para ele.
+ */
+function inventoryEntriesOf(kit: KitOfferView, itemOf: ItemLookup): readonly KitEntry[] {
+  return kit.items.map((item, index) => {
+    const known = itemOf(item.shortname);
+
+    return {
+      index,
+      container: item.slot,
+      position: item.position,
+      itemId: known?.itemId ?? null,
+      skinId: item.skinId,
+      amount: item.amount,
+      name: known?.displayName ?? item.shortname,
+    };
+  });
+}
+
+/**
+ * O detalhe de um item da grade.
+ *
+ * ####  ELE EXISTE PORQUE O CUI NÃO TEM TOOLTIP  ####
+ *
+ * Não há evento de hover: um `CuiButton` conhece a cor normal e a de
+ * mouse em cima, e nada mais. O nome de um item não cabe numa
+ * casinha de 44 px, e escrevê-lo embaixo de cada uma transformaria a
+ * grade numa parede de texto.
+ *
+ * Então a casinha clica. É um clique a mais que um tooltip, e em
+ * troca cabe o nome inteiro, a quantidade exata e o contêiner.
+ */
+function itemDetail(kit: KitOfferView, itemOf: ItemLookup, index: number): UiElement[] {
+  const entries = inventoryEntriesOf(kit, itemOf);
+  const entry = entries[index];
+
+  // Índice fora da lista: o admin mexeu no kit enquanto o modal
+  // estava aberto. Voltar para a grade é melhor que um modal vazio.
+  if (entry === undefined) {
+    return [
+      label('kdt', 'Item indisponível', modalHeader(), {
+        size: 15,
+        font: 'RobotoCondensed-Bold.ttf',
+      }),
+      label('kdm', 'Este item saiu do kit.', fill(22, 60, 22, 60), {
+        size: 12,
+        color: C.textMuted,
+      }),
+      backToItems(kit),
+      closeButton(),
+    ];
+  }
+
+  const body: UiElement[] = [
+    label('kdt', entry.name, modalHeader(), { size: 15, font: 'RobotoCondensed-Bold.ttf' }),
+  ];
+
+  if (entry.itemId !== null) {
+    body.push(
+      itemImage(
+        'kdi',
+        { itemId: entry.itemId, skinId: entry.skinId },
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 0, y: 1 },
+          offsetMin: { x: 22, y: -160 },
+          offsetMax: { x: 118, y: -64 },
+        },
+      ),
+    );
+  }
+
+  const facts: readonly (readonly [string, string])[] = [
+    ['QUANTIDADE', formatNumber(entry.amount)],
+    ['VAI PARA', CONTAINER_LABEL[entry.container]],
+    [
+      'CASINHA',
+      entry.position >= 0
+        ? String(entry.position + 1)
+        : // Sem posição escolhida o jogo decide, e dizer "0" seria
+          // inventar uma casinha que ninguém pediu.
+          'a primeira livre',
+    ],
+  ];
+
+  for (const [index_, [name, value]] of facts.entries()) {
+    const top = 70 + index_ * 34;
+
+    body.push(
+      label(
+        `kdf${String(index_)}`,
+        name,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 136, y: -(top + 14) },
+          offsetMax: { x: -22, y: -top },
+        },
+        { size: 10, color: C.textMuted, align: 'MiddleLeft' },
+      ),
+      label(
+        `kdv${String(index_)}`,
+        value,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 136, y: -(top + 32) },
+          offsetMax: { x: -22, y: -(top + 15) },
+        },
+        { size: 13, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
+      ),
+    );
+  }
+
+  if (entry.skinId !== '0' && entry.skinId !== '') {
+    body.push(
+      label('kdsk', `Skin ${entry.skinId}`, fill(22, 186, 22, 60), {
+        size: 10,
+        color: C.textMuted,
+        align: 'MiddleLeft',
+      }),
+    );
+  }
+
+  body.push(backToItems(kit), closeButton());
+
+  return body;
+}
+
+/** A volta para a grade. Sem ela o detalhe é um beco. */
+function backToItems(kit: KitOfferView): UiElement {
+  return button(
+    'kdvolta',
+    '‹ VOLTAR',
+    {
+      anchorMin: { x: 1, y: 0 },
+      anchorMax: { x: 1, y: 0 },
+      offsetMin: { x: -150, y: 16 },
+      offsetMax: { x: -22, y: 44 },
+    },
+    { id: `kdv-${kit.slug}`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug, 'itens') },
+    { color: C.surface2, textColor: C.text, hoverColor: C.border, fontSize: 12 },
+  );
 }
 
 /**
