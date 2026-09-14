@@ -6883,6 +6883,91 @@ CREATE INDEX IF NOT EXISTS idx_messages_command
   ON messages (command);
 `;
 
+const SERVER_RULES_SCHEMA = `
+-- ============================================================
+--  083  as regras do servidor, que o jogador le no /menu.
+--
+--  Pedido do dono em 14/09/2026: "criar a pagina regras e ela ser
+--  totalmente editavel ate paginacao, com sidebar como o ranking".
+--
+--  ####  A REDE ESCREVE; O SERVIDOR SOBRESCREVE  ####
+--
+--  Perguntado na mesma data ("cada servidor tem sua regra ou pode
+--  ser geral") e respondido: as duas coisas. O desenho que sai
+--  disso tem duas metades:
+--
+--      server_id IS NULL    a regra da REDE -- e o que todo
+--                           servidor le enquanto nao disser o
+--                           contrario
+--      server_id = X        o conjunto PROPRIO daquele servidor
+--
+--  E quem decide qual das duas vale e a terceira tabela, NUNCA a
+--  presenca de linhas. A diferenca importa: sem \`rules_scopes\`,
+--  criar a primeira secao de um servidor apagaria as da rede da
+--  tela dele no mesmo instante -- um efeito colateral que o admin
+--  nao pediu e nao veria ate abrir o jogo.
+--
+--  Servidor sem linha aqui HERDA. E o estado de todo servidor que
+--  ja existe, e e o que faz esta migracao nao mudar nada para
+--  ninguem.
+--
+--  ####  A SECAO E O ITEM SAO DUAS TABELAS  ####
+--
+--  A secao e o que a barra lateral lista ("Equipes e Aliancas");
+--  o item e cada regra dentro dela. Guardar o corpo inteiro num
+--  TEXT so faria a paginacao ter de cortar texto corrido no meio
+--  -- e cortar frase pela metade e o unico jeito de uma pagina de
+--  regras ficar pior do que nao existir.
+--
+--  Com uma linha por regra, a pagina e um numero de LINHAS, e a
+--  quebra sempre cai entre duas regras.
+--
+--  ####  O \`tone\` E DO OLHO, NAO DA REGRA  ####
+--
+--  'normal', 'alerta' e 'proibido' mudam a cor da linha no jogo, e
+--  nada mais. O CHECK existe para o dia em que alguem inventar um
+--  quarto valor no painel: melhor a escrita falhar aqui do que a
+--  tela cair no jogo com uma cor que ninguem definiu.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS rules_sections (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- NULL = da rede. Preenchido = so daquele servidor.
+  server_id  TEXT    REFERENCES servers(id) ON DELETE CASCADE,
+  title      TEXT    NOT NULL,
+  -- A ordem na barra lateral. Empate desempata por id.
+  position   INTEGER NOT NULL DEFAULT 0,
+  enabled    INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- A leitura do jogo e sempre "as secoes deste escopo, em ordem".
+CREATE INDEX IF NOT EXISTS idx_rules_sections_scope
+  ON rules_sections (server_id, position);
+
+CREATE TABLE IF NOT EXISTS rules_items (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  section_id INTEGER NOT NULL REFERENCES rules_sections(id) ON DELETE CASCADE,
+  text       TEXT    NOT NULL,
+  position   INTEGER NOT NULL DEFAULT 0,
+  tone       TEXT    NOT NULL DEFAULT 'normal'
+                       CHECK (tone IN ('normal', 'alerta', 'proibido')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rules_items_section
+  ON rules_items (section_id, position);
+
+-- Quem NAO herda. A ausencia de linha e o padrao, e e por isso que
+-- esta tabela nasce vazia.
+CREATE TABLE IF NOT EXISTS rules_scopes (
+  server_id  TEXT    PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+  mode       TEXT    NOT NULL CHECK (mode IN ('inherit', 'own')),
+  updated_at INTEGER NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7103,6 +7188,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 81, name: 'dungeon-placements', sql: DUNGEON_PLACEMENTS_SCHEMA },
   // 13/09/2026: a entrega ao NPC passa a poder cobrar um item.
   { id: 82, name: 'quest-deliver-item', sql: QUEST_DELIVER_ITEM_SCHEMA },
+  // 14/09/2026: a aba REGRAS do menu ganha conteudo, e ele e do
+  // painel -- da rede, ou proprio daquele servidor.
+  { id: 83, name: 'server-rules', sql: SERVER_RULES_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

@@ -59,14 +59,21 @@ import {
   DISCORD_COMMAND,
   DISCORD_SCREEN_ID,
 } from './ui-discord-screen.js';
-import { buildHomeScreen, emptyHomeView } from './ui-home-screen.js';
+import { CALENDAR_SCREEN_ID } from './ui-calendar-screen.js';
+import { buildHomeScreen, emptyHomeView, HOME_SCREEN_ID } from './ui-home-screen.js';
+import { KITS_SCREEN_ID } from './ui-kits-screen.js';
 import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
+import { buildRulesScreen, emptyRulesView, RULES_COMMAND, RULES_SCREEN_ID } from './ui-rules-screen.js';
 import {
   BUNDLE_TEMPLATE_ID,
   BUY_TEMPLATE_ID,
   RESULT_TEMPLATE_ID,
 } from './ui-store-template.js';
+// A régua do texto é a mesma do resto do menu: uma segunda
+// estimativa aqui daria abas com largura diferente das etiquetas
+// das telas, medidas pela mesma fonte.
+import { textWidth } from './ui-widgets.js';
 
 /** O identificador do Menu Principal. É o `slug` no banco. */
 export const MAIN_MENU_SLUG = 'menu-principal';
@@ -111,16 +118,73 @@ const C = {
 const OVERLAY = '#000000D1';
 const BLUR_MATERIAL = 'assets/content/ui/uibackgroundblur.mat';
 
-/** Medidas, na base 1280x720 do CUI. */
+/**
+ * Medidas, na base 1280x720 do CUI.
+ *
+ * ####  O CABEÇALHO TEM DUAS FAIXAS DESDE 14/09/2026  ####
+ *
+ * Ele era uma faixa só, com as abas à esquerda e o saldo, o VIP e
+ * o fechar à direita — tudo na mesma linha, disputando o mesmo
+ * olhar. Quem abria o menu para ver o saldo passava pelas oito
+ * abas, e quem queria uma aba passava pelo saldo.
+ *
+ * Agora são duas: em cima a MARCA e o que é do jogador (VIP,
+ * moeda, fechar); embaixo, a barra de navegação, num tom mais
+ * escuro que a separa do resto.
+ *
+ * A soma continua sendo os mesmos 76, e isso não é estética: a
+ * altura do cabeçalho decide onde começa o slot de conteúdo, e o
+ * slot decide quantas linhas cabem numa página do ranking e das
+ * regras. Mudá-la repagina cinco telas de uma vez.
+ */
 const LAYOUT = {
   headerHeight: 76,
+  /** A faixa de cima: marca, VIP, moeda e fechar. */
+  brandHeight: 44,
+  /** A faixa de baixo: só as abas. Fecha os 76 com a de cima. */
+  navBarHeight: 32,
   /** A barra de acento vermelha sob o cabeçalho. */
   accentHeight: 2,
   contentPadding: 30,
-  navButtonHeight: 36,
-  navGap: 4,
+  navButtonHeight: 26,
+  navGap: 6,
   edgePadding: 16,
+  /**
+   * A altura da marca na faixa de cima.
+   *
+   * A LARGURA sai daqui pela proporção do logo — ver `BRAND_RATIO`.
+   */
+  brandMark: 30,
 } as const;
+
+/**
+ * O ar dos dois lados do rótulo de uma aba.
+ *
+ * ####  A LARGURA DEIXOU DE SER UM NÚMERO ESCRITO À MÃO  ####
+ *
+ * Cada aba trazia a largura dela no cadastro (`width: 108`), e
+ * eram nove números medidos a olho. Renomear uma aba no editor não
+ * mexia nela — o rótulo ficava apertado ou sobrava fundo —, e
+ * ninguém tinha como saber qual era o número certo.
+ *
+ * Agora ela sai do texto, pela mesma régua estimada que o resto do
+ * menu usa (`textWidth`). Erra alguns pixels para mais, que é o
+ * lado seguro: sobra ar, nunca corta letra.
+ */
+const NAV_PADDING = 20;
+
+/**
+ * A proporção da arte da marca (largura ÷ altura).
+ *
+ * ####  O LOGO NÃO É QUADRADO, E ESTICÁ-LO SE VÊ  ####
+ *
+ * O da rede tem 4048x1735 — dois e um terço de largura para cada
+ * altura. Desenhá-lo num quadrado o achataria, e num retângulo
+ * chutado o deformaria de outro jeito. O número é o da arte que
+ * está em `Assets` hoje; trocar o PNG por outro de proporção
+ * diferente pede trocar este número junto.
+ */
+const BRAND_RATIO = 2.34;
 
 // ------------------------------------------------------------
 //  Construtores de retângulo
@@ -292,7 +356,6 @@ function button(
 interface NavEntry {
   readonly id: string;
   readonly label: string;
-  readonly width: number;
   /** O que a página mostra enquanto ninguém a preencheu. */
   readonly hint: string;
 }
@@ -300,36 +363,35 @@ interface NavEntry {
 const HOME: NavEntry = {
   id: 'home',
   label: 'HOME',
-  width: 60,
   hint: 'O banner e as novidades da rede.',
 };
 
 const NAV: readonly NavEntry[] = [
-  { id: 'loja', label: 'LOJA', width: 74, hint: 'As ofertas da loja entram aqui.' },
+  { id: 'loja', label: 'LOJA', hint: 'As ofertas da loja entram aqui.' },
   {
     id: 'calendario',
     label: 'CALENDÁRIO',
-    width: 108,
     hint: 'Wipes e eventos programados entram aqui.',
   },
-  { id: 'eventos', label: 'EVENTOS', width: 90, hint: 'Os eventos ativos entram aqui.' },
-  { id: 'regras', label: 'REGRAS', width: 84, hint: 'As regras do servidor entram aqui.' },
-  { id: 'kits', label: 'KITS', width: 66, hint: 'Os kits disponíveis por nível entram aqui.' },
+  { id: 'eventos', label: 'EVENTOS', hint: 'Os eventos ativos entram aqui.' },
+  { id: 'regras', label: 'REGRAS', hint: 'As regras do servidor entram aqui.' },
+  { id: 'kits', label: 'KITS', hint: 'Os kits disponíveis por nível entram aqui.' },
   // A dica desta não é desenhada: a página RANKING é montada pelo
   // agente (ver `buildMainMenu`). Ela fica para o dia em que
   // alguém apagar a tela e o botão precisar dizer alguma coisa.
-  { id: 'ranking', label: 'RANKING', width: 90, hint: 'O ranking de jogadores entra aqui.' },
+  { id: 'ranking', label: 'RANKING', hint: 'O ranking de jogadores entra aqui.' },
   // A dica desta também não é desenhada: a página é montada pelo
   // agente, como a do ranking. Ver `buildMainMenu`.
   //
   // O `id` é `missoes` e não `quest` porque dele sai o id da tela
   // (`tela-missoes`), e ele fica numa lista de sete portugueses.
-  { id: 'missoes', label: 'MISSÕES', width: 84, hint: 'As missões do servidor entram aqui.' },
+  { id: 'missoes', label: 'MISSÕES', hint: 'As missões do servidor entram aqui.' },
 ];
 
 /** As entradas cuja página o AGENTE monta. Ver `buildMainMenu`. */
 const RANKING_NAV_ID = 'ranking';
 const QUESTS_NAV_ID = 'missoes';
+const RULES_NAV_ID = 'regras';
 
 /**
  * O comando que abre o menu JÁ nas missões.
@@ -359,7 +421,9 @@ function buildShell(): UiElement[] {
   // proporção (ultrawide, 4K).
   let cursor = LAYOUT.edgePadding;
 
-  const navRect = (width: number): Rect => {
+  const navRect = (label: string): Rect => {
+    const width = textWidth(label, 12) + NAV_PADDING;
+
     const rect: Rect = {
       anchorMin: { x: 0, y: 0.5 },
       anchorMax: { x: 0, y: 0.5 },
@@ -377,7 +441,7 @@ function buildShell(): UiElement[] {
       button(
         `nav-${entry.id}`,
         entry.label,
-        navRect(entry.width),
+        navRect(entry.label),
         entry.label,
         { id: `ir-${entry.id}`, kind: 'navigate', screenId: SCREEN_ID(entry.id) },
         'nav',
@@ -392,7 +456,7 @@ function buildShell(): UiElement[] {
     button(
       'nav-discord',
       'DISCORD',
-      navRect(88),
+      navRect('DISCORD'),
       'DISCORD',
       { id: 'ir-discord', kind: 'navigate', screenId: DISCORD_SCREEN_ID },
       'nav',
@@ -401,6 +465,46 @@ function buildShell(): UiElement[] {
       // resto da barra.
       DISCORD_SCREEN_ID,
     ),
+  );
+
+  // ------------------------------------------------------------
+  //  A FAIXA DE CIMA: a marca, e o que é de quem abriu
+  //
+  //  ####  A MARCA VEM ANTES DE TUDO  ####
+  //
+  //  O menu abria direto nas abas, sem dizer de quem ele é. Agora
+  //  ele abre com o logo da rede — a mesma arte que o overlay de
+  //  propagandas já põe no alto da tela, guardada na pasta de
+  //  interface sob a chave `ozlogo`.
+  //
+  //  Não há texto ao lado: o logo TEM o nome escrito dentro dele, e
+  //  repeti-lo em rótulo era dizer duas vezes a mesma coisa.
+  //
+  //  Trocar o PNG na pasta troca a marca no próximo envio, sem
+  //  reiniciar nada. Arte AUSENTE é um estado previsto: sem o
+  //  arquivo a imagem não desenha e o cabeçalho segue inteiro — é o
+  //  mesmo caminho da moeda.
+  // ------------------------------------------------------------
+  const brand: UiElement[] = [
+    {
+      id: 'marca-logo',
+      name: 'Marca (arte)',
+      type: 'image',
+      rect: {
+        anchorMin: { x: 0, y: 0.5 },
+        anchorMax: { x: 0, y: 0.5 },
+        offsetMin: { x: LAYOUT.edgePadding, y: -LAYOUT.brandMark / 2 },
+        offsetMax: {
+          x: LAYOUT.edgePadding + LAYOUT.brandMark * BRAND_RATIO,
+          y: LAYOUT.brandMark / 2,
+        },
+      },
+      source: { kind: 'stored', key: 'ozlogo' },
+      // Branco: o `color` de uma imagem TINGE, e qualquer outra cor
+      // aqui pintaria a arte por cima.
+      color: C.white,
+      children: [],
+    },
 
     // ####  O VIP DO JOGADOR  ####
     //
@@ -518,7 +622,7 @@ function buildShell(): UiElement[] {
       'close',
       15,
     ),
-  );
+  ];
 
   const contentTop = LAYOUT.headerHeight + LAYOUT.accentHeight + LAYOUT.contentPadding;
 
@@ -538,7 +642,24 @@ function buildShell(): UiElement[] {
       },
       C.surface,
       [
-        panel('cabecalho', 'Cabeçalho', topBar(LAYOUT.headerHeight), C.surface2, nav),
+        panel('cabecalho', 'Cabeçalho', topBar(LAYOUT.headerHeight), C.surface2, [
+          // Em cima: a marca à esquerda, o jogador à direita.
+          panel('marca', 'Marca', topBar(LAYOUT.brandHeight), '#00000000', brand),
+
+          // ####  E EMBAIXO A BARRA DE NAVEGAÇÃO, MAIS ESCURA  ####
+          //
+          // O tom de `--bg` sob as abas é o que as separa do resto
+          // do cabeçalho sem gastar uma régua de 1 px: a barra lê
+          // como uma faixa própria, e a aba ATIVA — vermelha — salta
+          // dela em vez de competir com o saldo ao lado.
+          panel(
+            'nav-barra',
+            'Barra de navegação',
+            topBar(LAYOUT.navBarHeight, LAYOUT.brandHeight),
+            C.bg,
+            nav,
+          ),
+        ]),
         // A barra de acento. O painel usa vermelho como acento (a
         // barra vertical antes de cada título); aqui ela é
         // horizontal e fecha o cabeçalho.
@@ -1115,6 +1236,26 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
         };
       }
 
+      // ####  A PÁGINA REGRAS TAMBÉM É MONTADA  ####
+      //
+      // O desenho é da rede; o TEXTO é do banco daquele servidor —
+      // igual ao convite do Discord, e pelo mesmo motivo: regras
+      // escritas dentro do documento obrigariam um menu por
+      // servidor. Ver game/ui-rules-screen.ts.
+      //
+      // `skeleton: true` põe a coluna e a caixa das regras no
+      // desenho, transparentes: `fillTemplate` preenche o que
+      // existe e não cria o que falta, e sem elas o admin não teria
+      // o que mover no editor. `generated: true` é o de sempre —
+      // sem a marca o plugin desenha o esqueleto e nunca pede o
+      // texto, e a aba abriria vazia para sempre.
+      if (entry.id === RULES_NAV_ID) {
+        return {
+          ...buildRulesScreen({ view: emptyRulesView(), skeleton: true }),
+          generated: true,
+        };
+      }
+
       return {
         id: SCREEN_ID(entry.id),
         name: entry.label,
@@ -1192,9 +1333,24 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     // quem digita no chat. O botão do cabeçalho não depende dela —
     // ele navega direto —, mas o jogador que aprendeu `/discord`
     // em outro servidor depende.
+    // ####  E OS OUTROS QUATRO SÃO A MESMA IDEIA  ####
+    //
+    // Pedido do dono em 14/09/2026: "/info, /kits, /discord e
+    // /wipe — cada comando deve abrir corretamente sua respectiva
+    // informação". Nenhum deles é um segundo menu: são endereços
+    // dentro deste, e por isso não custam um byte a mais na carga.
+    //
+    // `/info` abre a HOME, que é onde a informação do servidor já
+    // mora — o pódio, a oferta em destaque, o próximo wipe e as
+    // missões de quem abriu. `/wipe` abre o CALENDÁRIO, que é a
+    // tela que responde "quando vira".
     shortcuts: [
       { command: QUESTS_COMMAND, screenId: QUESTS_SCREEN_ID },
       { command: DISCORD_COMMAND, screenId: DISCORD_SCREEN_ID },
+      { command: RULES_COMMAND, screenId: RULES_SCREEN_ID },
+      { command: 'info', screenId: HOME_SCREEN_ID },
+      { command: 'kits', screenId: KITS_SCREEN_ID },
+      { command: 'wipe', screenId: CALENDAR_SCREEN_ID },
     ],
     screens,
   };

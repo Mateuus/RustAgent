@@ -3148,7 +3148,107 @@ export interface QuestClaimResult {
   pending: boolean;
 }
 
+// ============================================================
+//  AS REGRAS DO SERVIDOR
+//
+//  A aba REGRAS do menu do jogo. Um conjunto da REDE, e o conjunto
+//  PROPRIO de quem quis o seu -- quem decide qual vale e o `mode`,
+//  nunca a existencia de secoes. Ver core/src/types/rules.ts.
+// ============================================================
+
+export type RuleTone = 'normal' | 'alerta' | 'proibido';
+export type RulesScopeMode = 'inherit' | 'own';
+
+export interface RuleItem {
+  id: number;
+  text: string;
+  tone: RuleTone;
+  position: number;
+}
+
+export interface RuleSection {
+  id: number;
+  title: string;
+  enabled: boolean;
+  position: number;
+  items: RuleItem[];
+}
+
 export const agent = {
+  // ---- as regras ----
+
+  /** O conjunto da REDE, e os servidores que existem. */
+  rules: () => api<{ sections: RuleSection[]; servers: string[] }>('/api/rules'),
+
+  /**
+   * O que AQUELE servidor mostra, e de onde.
+   *
+   * `sections` e o que vale no jogo; `own` e o conjunto proprio
+   * dele. Sao listas diferentes quando ele herda, e a tela precisa
+   * das duas para poder dizer "isto aqui e da rede".
+   */
+  serverRules: (serverId: string) =>
+    api<{ mode: RulesScopeMode; sections: RuleSection[]; own: RuleSection[] }>(
+      `/api/rules/servers/${encodeURIComponent(serverId)}`,
+    ),
+
+  setServerRulesMode: (serverId: string, mode: RulesScopeMode) =>
+    api<{ mode: RulesScopeMode; sections: RuleSection[] }>(
+      `/api/rules/servers/${encodeURIComponent(serverId)}/mode`,
+      { method: 'PUT', body: { mode } },
+    ),
+
+  /** Copia o conjunto da rede para o servidor. ACRESCENTA, nao troca. */
+  copyNetworkRules: (serverId: string) =>
+    api<{ copied: number; own: RuleSection[] }>(
+      `/api/rules/servers/${encodeURIComponent(serverId)}/copy`,
+      { method: 'POST', body: {} },
+    ),
+
+  createRuleSection: (body: { server: string | null; title: string; enabled: boolean }) =>
+    api<{ id: number; sections: RuleSection[] }>('/api/rules/sections', {
+      method: 'POST',
+      body,
+    }),
+
+  updateRuleSection: (id: number, body: { server: string | null; title: string; enabled: boolean }) =>
+    api<{ sections: RuleSection[] }>(`/api/rules/sections/${String(id)}`, {
+      method: 'PATCH',
+      body,
+    }),
+
+  deleteRuleSection: (id: number) =>
+    api<{ sections: RuleSection[] }>(`/api/rules/sections/${String(id)}`, { method: 'DELETE' }),
+
+  /** A ordem vai INTEIRA: uma lista parcial deixaria o resto no fim. */
+  reorderRuleSections: (server: string | null, ids: number[]) =>
+    api<{ sections: RuleSection[] }>('/api/rules/sections/reorder', {
+      method: 'POST',
+      body: { server, ids },
+    }),
+
+  /** O modelo de fabrica. So entra num conjunto vazio. */
+  seedRulesTemplate: (server: string | null) =>
+    api<{ sections: RuleSection[] }>('/api/rules/template', { method: 'POST', body: { server } }),
+
+  createRule: (sectionId: number, body: { text: string; tone: RuleTone }) =>
+    api<{ sections: RuleSection[] }>(`/api/rules/sections/${String(sectionId)}/items`, {
+      method: 'POST',
+      body,
+    }),
+
+  reorderRules: (sectionId: number, ids: number[]) =>
+    api<{ sections: RuleSection[] }>(`/api/rules/sections/${String(sectionId)}/items/reorder`, {
+      method: 'POST',
+      body: { ids },
+    }),
+
+  updateRule: (id: number, body: { text: string; tone: RuleTone }) =>
+    api<Record<string, never>>(`/api/rules/items/${String(id)}`, { method: 'PATCH', body }),
+
+  deleteRule: (id: number) =>
+    api<Record<string, never>>(`/api/rules/items/${String(id)}`, { method: 'DELETE' }),
+
   // ---- as missoes ----
 
   quests: (options: { category?: string; serverId?: string } = {}) => {

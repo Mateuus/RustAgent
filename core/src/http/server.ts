@@ -118,6 +118,7 @@ import { registerDungeonRoutes, type DungeonRoutesDeps } from './routes/dungeons
 import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
 import { registerWorldEventRoutes, type WorldEventRoutesDeps } from './routes/world-events.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
+import { registerRuleRoutes, type RuleRoutesDeps } from './routes/rules.js';
 
 export interface BuildServerOptions {
   readonly config: AgentConfig;
@@ -350,6 +351,15 @@ export interface BuildServerOptions {
   readonly rankings: RankingRoutesDeps;
 
   /**
+   * As regras do servidor, que o jogador le na aba REGRAS.
+   *
+   * Nao e opcional: a aba existe no menu desde o primeiro preset, e
+   * um agente sem estas rotas deixaria o painel sem como escrever o
+   * texto que a tela ja pede.
+   */
+  readonly rules: RuleRoutesDeps;
+
+  /**
    * As quests.
    *
    * Opcional porque o módulo inteiro pode não estar montado — e um
@@ -514,6 +524,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // continuam de pé com os servidores parados, e é o
       // `coverage` de cada lista que diz quem estava coletando.
       registerRankingRoutes(api, options.rankings);
+
+      // As regras. Elas tambem respondem do BANCO: escrever a
+      // pagina de regras com os servidores parados e o caso normal.
+      registerRuleRoutes(api, options.rules);
 
       // As quests. Elas respondem do BANCO, como o ranking: o
       // catálogo, o progresso e a auditoria continuam de pé com os

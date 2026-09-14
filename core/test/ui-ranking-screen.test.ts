@@ -48,6 +48,7 @@ import {
 import { screenContentToCui } from '../src/game/ui-cui.js';
 import { screenViewport } from '../src/game/ui-geometry.js';
 import { buildMainMenu, MAIN_MENU_SLUG } from '../src/game/ui-preset-main-menu.js';
+import { textWidth } from '../src/game/ui-widgets.js';
 import { createLogger } from '../src/logger.js';
 import {
   COVERAGE_MESSAGES,
@@ -1149,8 +1150,17 @@ describe('a página RANKING dentro do documento', () => {
       kind: 'navigate',
       screenId: RANKING_SCREEN_ID,
     });
-    // A largura é a mesma: mexer nela empurraria a barra inteira.
-    expect(botao?.rect.offsetMax.x).toBe((botao?.rect.offsetMin.x ?? 0) + 90);
+    // ####  A LARGURA SAI DO RÓTULO DESDE 14/09/2026  ####
+    //
+    // Ela era um número escrito à mão no cadastro da aba (90), e o
+    // redesign do cabeçalho a trocou pela régua estimada do resto
+    // do menu: o texto, mais o ar dos dois lados. O que este teste
+    // protege continua sendo o mesmo — que o botão não fique
+    // apertado nem sobre fundo demais quando alguém renomear a aba.
+    const largura = (botao?.rect.offsetMax.x ?? 0) - (botao?.rect.offsetMin.x ?? 0);
+
+    expect(largura).toBeGreaterThan(textWidth('RANKING', 12));
+    expect(largura).toBeLessThan(textWidth('RANKING', 12) + 40);
   });
 
   it('a tela em repouso é gravável: sem `:` em id nenhum', () => {
