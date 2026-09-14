@@ -1028,7 +1028,7 @@ describe('a página de kits', () => {
     expect(JSON.stringify(screenContentToCui(buildMainMenu(), screen))).toContain('JÁ PEGOU');
   });
 
-  it('pagina depois de oito kits, em vez de sumir com o resto', () => {
+  it('pagina quando a grade enche, em vez de sumir com o resto', () => {
     const many = Array.from({ length: 9 }, (_unused, index) =>
       offer({ slug: `kit-${String(index)}`, name: `Kit ${String(index)}` }),
     );
@@ -1036,6 +1036,50 @@ describe('a página de kits', () => {
     const json = JSON.stringify(screenContentToCui(buildMainMenu(), grid(many)));
 
     expect(json).toContain('1 / 2');
+
+    // E o nono está na segunda página, e não perdido.
+    const segunda = buildKitsScreen({
+      offers: many,
+      target: { kind: 'grid', category: null, page: 1 },
+    });
+
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), segunda))).toContain('Kit 8');
+  });
+
+  // ####  O TETO QUE DECIDIU O TAMANHO DA GRADE  ####
+  //
+  // Cada card custa ~3.100 bytes no CUI: são oito elementos, e o CUI
+  // repete `name`, `parent` e o `RectTransform` inteiro em cada um.
+  //
+  // Três fileiras cabiam na altura (3 x 162 = 506 dos 516
+  // disponíveis) e foram MEDIDAS em 41.756 bytes com a coluna de
+  // categorias — 84% do frame de 50.000 do RCON. Acima do teto o
+  // envio é recusado inteiro, e o jogador fica com o menu anterior
+  // sem nada dizendo por quê.
+  //
+  // Duas fileiras com cards maiores usam a mesma altura e cabem com
+  // folga. Este teste existe para que a próxima pessoa que quiser
+  // uma fileira a mais descubra o custo AQUI, e não no jogo.
+  it('a grade cheia cabe no frame do RCON, com margem', () => {
+    const many = Array.from({ length: 40 }, (_unused, index) =>
+      offer({
+        slug: `kit-${String(index)}`,
+        // Nome longo de propósito: ele é do admin, e um mural de
+        // nomes compridos é o pior caso realista.
+        name: `Kit Muito Comprido Numero ${String(index)}`,
+        category: `Categoria ${String(index % 5)}`,
+      }),
+    );
+
+    const screen = buildKitsScreen({
+      offers: many,
+      target: { kind: 'grid', category: 'categoria-0', page: 0 },
+      itemOf,
+    });
+
+    const bytes = JSON.stringify(screenContentToCui(buildMainMenu(), screen)).length;
+
+    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.7);
   });
 
   it('o "i" abre o modal, e as abas são ENDEREÇOS', () => {

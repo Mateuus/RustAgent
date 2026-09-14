@@ -86,7 +86,30 @@ export const KIT_INFO_PREFIX = 'ozkit';
 const GRID = {
   columns: 4,
   gap: 10,
-  cardHeight: 160,
+  /**
+   * 240, e não 160.
+   *
+   * ####  A ALTURA ESTAVA SOBRANDO, E O CARD ERA APERTADO  ####
+   *
+   * A área da grade tem ~516 px. Duas fileiras de 160 usavam 330 e
+   * deixavam 186 de vazio embaixo — enquanto o ícone do kit cabia em
+   * 58 px e o nome disputava espaço com a regra e o botão.
+   *
+   * Duas de 240 usam 490. O ícone dobrou, o nome ganhou faixa
+   * própria, e o rodapé comporta duas ações lado a lado.
+   *
+   * ####  E POR QUE NÃO TRÊS FILEIRAS  ####
+   *
+   * Cabiam: 3 x 162 = 506. Mas cada card custa ~3.100 bytes no CUI
+   * (oito elementos, e o CUI repete `name`, `parent` e o
+   * `RectTransform` inteiro em cada um). MEDIDO: doze cards mais a
+   * coluna dão 41.756 bytes, 84% do frame de 50.000 do RCON.
+   *
+   * Oito dão ~28.000 — 56%. A margem importa porque o nome do kit é
+   * do admin, e um mural de nomes longos empurra o número para cima
+   * sem ninguém mexer em código.
+   */
+  cardHeight: 240,
   rows: 2,
 } as const;
 
@@ -137,16 +160,39 @@ const SIDEBAR_HEIGHT = 516;
 
 const PER_PAGE = GRID.columns * GRID.rows;
 
-/** O que fica onde DENTRO do card. Ver ui-store-screens.ts. */
+/**
+ * O que fica onde DENTRO do card.
+ *
+ * ####  O NOME SUBIU PARA UMA FAIXA PRÓPRIA  ####
+ *
+ * Ele ficava sob o ícone, na mesma cor de fundo do resto — nome,
+ * regra e botão empilhados sem nada separando. Num mural de doze
+ * cards iguais, o olho não tinha onde pousar primeiro.
+ *
+ * Agora ele é uma FAIXA, no topo, com fundo próprio: é a primeira
+ * coisa que se lê em cada card, e é o que se procura quando se
+ * varre a tela atrás de um kit pelo nome.
+ *
+ * ####  E O ACENTO DIZ O ESTADO ANTES DA LEITURA  ####
+ *
+ * Dois pixels de cor no topo do card. Verde = dá para pegar;
+ * vermelho = não; âmbar = espera. À distância de um olhar isso
+ * responde "o que está disponível agora?" sem ler doze rodapés.
+ */
 const CARD = {
-  iconTop: 10,
-  iconBottom: 68,
-  nameTop: 72,
-  nameBottom: 92,
-  ruleTop: 94,
-  ruleBottom: 110,
-  buttonBottom: 8,
-  buttonTop: 34,
+  /** A barra de estado, colada no topo. */
+  accent: 2,
+  /** A faixa do nome, logo abaixo dela. */
+  nameTop: 2,
+  nameBottom: 30,
+  iconTop: 50,
+  iconBottom: 166,
+  ruleTop: 176,
+  ruleBottom: 194,
+  buttonBottom: 10,
+  buttonTop: 40,
+  /** A largura do botão que abre os detalhes, no rodapé. */
+  peek: 50,
 } as const;
 
 /**
@@ -660,11 +706,40 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
   const iconRect: Rect = {
     anchorMin: { x: 0.5, y: 1 },
     anchorMax: { x: 0.5, y: 1 },
-    offsetMin: { x: -29, y: -CARD.iconBottom },
-    offsetMax: { x: 29, y: -CARD.iconTop },
+    offsetMin: { x: -58, y: -CARD.iconBottom },
+    offsetMax: { x: 58, y: -CARD.iconTop },
   };
 
   const children: UiElement[] = [
+    // ####  A BARRA DE ESTADO  ####
+    //
+    // Dois pixels no topo. É o que responde "o que dá para pegar
+    // agora?" num mural de doze cards, sem ler doze rodapés.
+    panel(`${id}-a`, topBarRect(CARD.accent), accentColor(kit)),
+
+    // ####  A FAIXA DO NOME  ####
+    //
+    // O nome já esteve solto sob o ícone, na mesma cor do resto do
+    // card. Numa parede de cards iguais, o olho não tinha onde
+    // pousar primeiro — e é pelo nome que se procura um kit.
+    panel(
+      `${id}-nb`,
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 0, y: -CARD.nameBottom },
+        offsetMax: { x: 0, y: -CARD.nameTop },
+      },
+      C.surface2,
+      [
+        label(`${id}-n`, kit.name, fill(8, 0, 8, 0), {
+          size: 13,
+          color: C.text,
+          font: 'RobotoCondensed-Bold.ttf',
+        }),
+      ],
+    ),
+
     // ####  A ARTE PRÓPRIA GANHA DO PALPITE  ####
     //
     // Sem ela, o card mostra o PRIMEIRO item do kit — um palpite
@@ -684,18 +759,6 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
         : itemImage(`${id}-i`, { itemId: icon.itemId, skinId: first?.skinId ?? '0' }, iconRect),
 
     label(
-      `${id}-n`,
-      kit.name,
-      {
-        anchorMin: { x: 0, y: 1 },
-        anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 8, y: -CARD.nameBottom },
-        offsetMax: { x: -8, y: -CARD.nameTop },
-      },
-      { size: 12, color: C.text, font: 'RobotoCondensed-Bold.ttf' },
-    ),
-
-    label(
       `${id}-r`,
       `${String(kit.items.length)} ${kit.items.length === 1 ? 'item' : 'itens'} · ${ruleOf(kit)}`,
       {
@@ -707,30 +770,35 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       { size: 10, color: C.textMuted },
     ),
 
-    // ####  O "i" ABRE O QUE NÃO CABE NO CARD  ####
+    // ####  "VER" ABRE O QUE NÃO CABE NO CARD  ####
     //
-    // A lista do que vem dentro, quando ele pegou pela última vez e
-    // quantas vezes já pegou. Num card de 160px isso não entra — e
+    // A grade do que vem dentro, quando ele pegou pela última vez e
+    // quantas vezes já pegou. Num card de 162 px isso não entra — e
     // sem isso o jogador clica em RESGATAR para descobrir o que
     // ganha, o que num resgate único não dá para desfazer.
+    //
+    // Ele era um "i" de 20 px flutuando no canto superior, sobre o
+    // nada. Aqui está no RODAPÉ, ao lado da ação, com o tamanho de
+    // um alvo de clique — o mesmo arranjo de qualquer card que
+    // ofereça "olhar" e "fazer".
     button(
       `${id}-info`,
-      'i',
+      'VER',
       {
-        anchorMin: { x: 1, y: 1 },
-        anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: -24, y: -24 },
-        offsetMax: { x: -4, y: -4 },
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 8, y: CARD.buttonBottom },
+        offsetMax: { x: 8 + CARD.peek, y: CARD.buttonTop },
       },
       { id: `a${id}info`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug) },
-      { color: C.none, textColor: C.textMuted, hoverColor: C.surface2, fontSize: 12 },
+      { color: C.surface2, textColor: C.textMuted, hoverColor: C.border, fontSize: 11 },
     ),
   ];
 
   const buttonRect: Rect = {
     anchorMin: { x: 0, y: 0 },
     anchorMax: { x: 1, y: 0 },
-    offsetMin: { x: 8, y: CARD.buttonBottom },
+    offsetMin: { x: 8 + CARD.peek + 4, y: CARD.buttonBottom },
     offsetMax: { x: -8, y: CARD.buttonTop },
   };
 
@@ -747,7 +815,7 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
           // sete. A confirmação é a diferença entre "peguei o que
           // queria" e "gastei minha única chance sem querer".
           { id: `pedir-${kit.slug}`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug, 'confirmar') },
-          { color: C.rust, textColor: C.white, hoverColor: '#D4553FFF', fontSize: 11 },
+          { color: C.rust, textColor: C.white, hoverColor: '#D4553FFF', fontSize: 12 },
         )
       : // ####  QUEM NÃO PODE PEGAR VÊ O MOTIVO, NÃO UM BOTÃO MORTO  ####
         //
@@ -834,6 +902,30 @@ function shortReason(kit: KitOfferView): string {
 /** Âmbar para o que é só ESPERAR; cinza para o que não muda. */
 function stateColor(kit: KitOfferView): string {
   return kit.nextAt === null ? C.textMuted : C.amber;
+}
+
+/**
+ * A cor da barra de estado do card.
+ *
+ * ####  POR QUE NÃO REAPROVEITAR `stateColor`  ####
+ *
+ * Ela responde outra pergunta: que cor dar ao TEXTO de um botão que
+ * já se sabe morto — âmbar para "espera", cinza para "acabou". Ela
+ * nunca precisou de uma cor para "dá para pegar", porque nesse caso
+ * não há botão morto nenhum.
+ *
+ * A barra pergunta as TRÊS de uma vez, e é lida à distância, sem
+ * texto ao lado. Verde é o que diz "vá" sem precisar de legenda.
+ */
+function accentColor(kit: KitOfferView): string {
+  if (kit.available) {
+    return C.olive;
+  }
+
+  // Esperando o cooldown é diferente de esgotado: um volta sozinho,
+  // o outro não. Misturá-los faria o jogador desistir de um kit que
+  // estará dele em duas horas.
+  return kit.nextAt === null ? C.rust : C.amber;
 }
 
 // ============================================================

@@ -198,3 +198,105 @@ describe('a lista de kits', () => {
     }
   });
 });
+
+// ============================================================
+//  O CARD, MEDIDO CONTRA ELE MESMO
+//
+//  ####  A MESMA LIÇÃO DO MODAL DO VIP  ####
+//
+//  Lá, a lista era ancorada no topo e o TOTAL no fundo, e ninguém
+//  obrigava os dois a concordarem — o resultado foi uma palavra
+//  escrita por cima de outra, visível só a partir da quarta linha.
+//
+//  O card tem a mesma forma de risco: faixa do nome, ícone e regra
+//  contados do TOPO, e os dois botões do FUNDO. Uma mudança de
+//  altura mexe nos dois lados de uma vez.
+//
+//  Aqui isso é medido, e não confiado.
+// ============================================================
+
+describe('o card de um kit', () => {
+  const elements = grid([offer({ slug: 'kit-x', name: 'Kit X' })]);
+
+  /** A caixa de uma peça do card, medida DENTRO do card. */
+  function pieceOf(id: string): Box {
+    const card = boxOf(elements, 'kkit-x-c');
+
+    if (card === null) {
+      throw new Error('o card sumiu da grade');
+    }
+
+    const found = boxOf(elements, id);
+
+    if (found === null) {
+      throw new Error(`a peça "${id}" sumiu do card`);
+    }
+
+    return found;
+  }
+
+  it('empilha nome, ícone e regra sem um invadir o outro', () => {
+    const nome = pieceOf('kkit-x-nb');
+    const icone = pieceOf('kkit-x-i');
+    const regra = pieceOf('kkit-x-r');
+
+    expect(nome.top + nome.height).toBeLessThanOrEqual(icone.top);
+    expect(icone.top + icone.height).toBeLessThanOrEqual(regra.top);
+  });
+
+  it('não deixa a regra encostar no rodapé', () => {
+    const regra = pieceOf('kkit-x-r');
+    const ver = pieceOf('kkit-x-info');
+    const acao = pieceOf('kkit-x-b');
+
+    expect(regra.top + regra.height).toBeLessThanOrEqual(ver.top);
+    expect(regra.top + regra.height).toBeLessThanOrEqual(acao.top);
+  });
+
+  it('põe as duas ações lado a lado, sem sobreposição', () => {
+    const ver = pieceOf('kkit-x-info');
+    const acao = pieceOf('kkit-x-b');
+
+    // "VER" à esquerda, a ação ocupando o resto. Sobrepostos, os
+    // dois continuariam clicáveis — pior que feio.
+    expect(ver.left + ver.width).toBeLessThanOrEqual(acao.left);
+  });
+
+  it('mantém tudo dentro do card', () => {
+    const card = boxOf(elements, 'kkit-x-c');
+
+    expect(card).not.toBeNull();
+
+    if (card === null) {
+      return;
+    }
+
+    for (const id of ['kkit-x-nb', 'kkit-x-i', 'kkit-x-r', 'kkit-x-info', 'kkit-x-b']) {
+      const piece = boxOf(elements, id);
+
+      expect(piece).not.toBeNull();
+
+      if (piece !== null) {
+        // As peças resolvem DENTRO do card, então a origem é o card:
+        // o que se compara é o fundo de cada uma com a altura dele.
+        expect(piece.top).toBeGreaterThanOrEqual(0);
+        expect(piece.top + piece.height).toBeLessThanOrEqual(card.height);
+      }
+    }
+  });
+
+  it('a barra de estado diz o que o rodapé diz', () => {
+    // Verde quando dá para pegar. Sem isso, saber o que está
+    // disponível exige ler oito rodapés.
+    const livre = grid([offer({ slug: 'a', available: true })]);
+    const preso = grid([offer({ slug: 'b', available: false, reason: 'Já pegou este kit.' })]);
+
+    const corDe = (els: readonly UiElement[], id: string): string => {
+      const found = walk(els).find((element) => element.id === id);
+
+      return found !== undefined && found.type === 'panel' ? found.color : '';
+    };
+
+    expect(corDe(livre, 'ka-a')).not.toBe(corDe(preso, 'kb-a'));
+  });
+});
