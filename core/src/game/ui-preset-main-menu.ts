@@ -186,6 +186,59 @@ const NAV_PADDING = 20;
  */
 const BRAND_RATIO = 2.34;
 
+/**
+ * As medidas do modal de kit, VIP e veiculo.
+ *
+ * ####  ELAS SAO UMA SO PORQUE JA DIVERGIRAM  ####
+ *
+ * A caixa tinha 340 de altura escritos num lugar, e o slot da lista
+ * terminava a 304 do topo escritos em outro. Trinta e seis pixels de
+ * folga sob uma lista que cresce com o pacote — e o "TOTAL", colado
+ * a 78 do fundo, ficava DENTRO dela. No jogo, um VIP de cinco
+ * vantagens escrevia a quarta por cima da palavra TOTAL.
+ *
+ * Nada no desenho estava errado isoladamente; errada estava a
+ * relacao entre dois numeros que ninguem obrigava a concordar.
+ * Aqui a altura do slot e CALCULADA a partir da altura da caixa e do
+ * rodape, e a conta nao tem como sair do lugar sozinha.
+ *
+ *   topo                       0
+ *   +-- cabecalho (icone, resumo)
+ *   +-- regua ..................... listTop - 34
+ *   +-- titulo da lista ........... listTop - 22
+ *   +-- SLOT ...................... listTop .. listTop + listHeight
+ *   +-- regua ..................... footer (contada do FUNDO)
+ *   +-- total, saldo, botoes
+ *   fundo                          height
+ */
+const BUNDLE_MODAL = {
+  /**
+   * 520, e nao 420.
+   *
+   * A largura antiga cabia "FORNALHA DIVIDE OS ITENS AUTOMATICO."
+   * por poucos pixels, e qualquer vantagem uma palavra mais longa
+   * quebrava. Ela tambem nao comportava uma grade de inventario:
+   * seis casinhas de 44 pedem 274, e sobravam 376 uteis contra as
+   * margens — apertado demais para o rotulo do conteiner ao lado.
+   */
+  width: 520,
+  height: 500,
+  /** Onde o slot da lista comeca, contado do TOPO. */
+  listTop: 186,
+  /** Quanto o rodape reserva, contado do FUNDO. */
+  footer: 122,
+} as const;
+
+/**
+ * A altura do slot: o que sobra entre o cabecalho e o rodape.
+ *
+ * Os 12 px sao o ar entre a ultima linha da lista e a regua do
+ * preco. Sem eles a lista encosta na regua, que e o mesmo defeito
+ * de antes com um pixel de diferenca.
+ */
+const BUNDLE_LIST_HEIGHT = BUNDLE_MODAL.height - BUNDLE_MODAL.footer - 12 - BUNDLE_MODAL.listTop;
+
+
 // ------------------------------------------------------------
 //  Construtores de retângulo
 // ------------------------------------------------------------
@@ -972,7 +1025,7 @@ function buildBuyModal(): UiElement[] {
  * dias ou dois VIPs?
  */
 function buildBundleModal(): UiElement[] {
-  return modalBox('mb', 420, 340, C.rust, [
+  return modalBox('mb', BUNDLE_MODAL.width, BUNDLE_MODAL.height, C.rust, [
     label('mbnome', 'Nome', modalHeader(), 'Nome do pacote', { size: 16 }),
 
     {
@@ -996,11 +1049,29 @@ function buildBundleModal(): UiElement[] {
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 116, y: -86 },
+        // Ate -100, e nao -86: "VIP BRONZE por 30 dias" cabe numa
+        // linha, mas o resumo de um kit longo precisa de duas, e
+        // uma caixa de 24 px de altura corta a segunda.
+        offsetMin: { x: 116, y: -100 },
         offsetMax: { x: -22, y: -62 },
       },
       '3 itens no kit',
       { size: 12, color: C.textMuted, align: 'MiddleLeft', font: 'RobotoCondensed-Regular.ttf' },
+    ),
+
+    // A régua que fecha o cabeçalho. Sem ela o ícone e a lista são
+    // duas coisas soltas no mesmo retângulo; com ela, o modal tem
+    // "quem é este pacote" em cima e "o que vem nele" embaixo.
+    panel(
+      'mb-regua-topo',
+      'Régua do cabeçalho',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 22, y: -(BUNDLE_MODAL.listTop - 34) },
+        offsetMax: { x: -22, y: -(BUNDLE_MODAL.listTop - 33) },
+      },
+      C.border,
     ),
 
     label(
@@ -1009,8 +1080,8 @@ function buildBundleModal(): UiElement[] {
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 22, y: -168 },
-        offsetMax: { x: -22, y: -152 },
+        offsetMin: { x: 22, y: -(BUNDLE_MODAL.listTop - 6) },
+        offsetMax: { x: -22, y: -(BUNDLE_MODAL.listTop - 22) },
       },
       'O QUE VEM NO KIT',
       { size: 10, color: C.textMuted, align: 'MiddleLeft' },
@@ -1022,16 +1093,42 @@ function buildBundleModal(): UiElement[] {
     // área que o agente preenche com o conteúdo do pacote, e um
     // desenho fixo não teria como abrir espaço para três itens hoje e
     // sete amanhã.
+    //
+    // ####  ELE TERMINA ACIMA DO RODAPÉ, E ISSO NÃO É DETALHE  ####
+    //
+    // Ele já foi de -172 a -304 numa caixa de 340 de altura: a lista
+    // ia até 36 px do fundo, e o "TOTAL" mora a 78. Um VIP com cinco
+    // vantagens escrevia a quarta POR CIMA da palavra TOTAL — visível
+    // no jogo, e não em nenhum teste, porque o desenho estava certo
+    // para as três primeiras.
+    //
+    // A altura da caixa e a do slot saem as duas de BUNDLE_MODAL,
+    // justamente para não voltarem a divergir.
     panel(
       'mblista',
       'Lista (preenchida pelo agente)',
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 22, y: -304 },
-        offsetMax: { x: -22, y: -172 },
+        offsetMin: { x: 22, y: -(BUNDLE_MODAL.listTop + BUNDLE_LIST_HEIGHT) },
+        offsetMax: { x: -22, y: -BUNDLE_MODAL.listTop },
       },
       '#00000000',
+    ),
+
+    // A régua que separa o pacote do preço — o pedido é literal:
+    // "exibir o TOTAL junto ao valor da compra, SEPARADO dos
+    // benefícios".
+    panel(
+      'mb-regua-preco',
+      'Régua do preço',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 1, y: 0 },
+        offsetMin: { x: 22, y: BUNDLE_MODAL.footer },
+        offsetMax: { x: -22, y: BUNDLE_MODAL.footer + 1 },
+      },
+      C.border,
     ),
 
     label(
@@ -1040,23 +1137,28 @@ function buildBundleModal(): UiElement[] {
       {
         anchorMin: { x: 0, y: 0 },
         anchorMax: { x: 0, y: 0 },
-        offsetMin: { x: 22, y: 78 },
-        offsetMax: { x: 120, y: 104 },
+        offsetMin: { x: 22, y: 84 },
+        offsetMax: { x: 140, y: 110 },
       },
       'TOTAL',
       { size: 11, color: C.textMuted, align: 'MiddleLeft' },
     ),
 
-    ...coinValue('mbtotal', 'Total', 78, 26, 18, C.amber),
+    ...coinValue('mbtotal', 'Total', 84, 26, 18, C.amber),
 
+    // ####  O SALDO GANHOU DUAS LINHAS DE ALTURA  ####
+    //
+    // "Saldo insuficiente — você tem 1.085" em 18 px de caixa ficava
+    // encostado no valor em cima e no botão embaixo. Aqui ele tem a
+    // sua faixa, entre a régua e os botões.
     label(
       'mbsaldo',
       'Saldo',
       {
         anchorMin: { x: 0, y: 0 },
         anchorMax: { x: 1, y: 0 },
-        offsetMin: { x: 22, y: 54 },
-        offsetMax: { x: -22, y: 72 },
+        offsetMin: { x: 22, y: 58 },
+        offsetMax: { x: -22, y: 78 },
       },
       'Seu saldo: 0',
       { size: 11, color: C.textMuted, align: 'MiddleRight' },
@@ -1068,8 +1170,8 @@ function buildBundleModal(): UiElement[] {
       {
         anchorMin: { x: 0, y: 0 },
         anchorMax: { x: 0, y: 0 },
-        offsetMin: { x: 22, y: 16 },
-        offsetMax: { x: 110, y: 46 },
+        offsetMin: { x: 22, y: 18 },
+        offsetMax: { x: 120, y: 48 },
       },
       'CANCELAR',
       { id: 'mbcancelar-a', kind: 'modal.close' },
@@ -1083,8 +1185,8 @@ function buildBundleModal(): UiElement[] {
       {
         anchorMin: { x: 1, y: 0 },
         anchorMax: { x: 1, y: 0 },
-        offsetMin: { x: -170, y: 16 },
-        offsetMax: { x: -22, y: 46 },
+        offsetMin: { x: -180, y: 18 },
+        offsetMax: { x: -22, y: 48 },
       },
       'CONFIRMAR COMPRA',
       { id: 'mbcomprar-a', kind: 'modal.close' },
