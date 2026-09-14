@@ -174,8 +174,40 @@ describe('a HOME desenhada', () => {
     // mesmo peso — quem abre o menu não está lendo a saudação, está
     // se reconhecendo nela. Separado, o nome fica no tamanho e na
     // cor em que é a primeira coisa vista.
-    expect(textOf(screen, 'hm-ola')).toBe('BEM-VINDO DE VOLTA,');
+    expect(textOf(screen, 'hm-ola')).toBe('BEM-VINDO DE VOLTA');
     expect(textOf(screen, 'hm-titulo')).toBe('Mateuus');
+  });
+
+  // ####  O CAMINHO QUE IMPORTA É O DO MODELO  ####
+  //
+  // O teste acima mede o layout EMBUTIDO, e no jogo ele quase nunca
+  // roda: o preset gera a tela-home chamando este mesmo gerador, o
+  // resultado vai para o documento, e daí em diante ele volta como
+  // TEMPLATE — só os slots são preenchidos.
+  //
+  // O texto do banner não era slot. Ele ia para o documento com o
+  // `{jogador}` JÁ RESOLVIDO, e resolvido para vazio, porque no
+  // preset não há jogador: o que ficava gravado era "BEM-VINDO",
+  // sem variável, e não havia mais o que substituir.
+  //
+  // O nome de quem abria o menu NUNCA aparecia. Medido em
+  // 14/09/2026 percorrendo preset -> documento -> preenchimento.
+  it('o nome chega ao jogador pelo caminho do MODELO, que é o do jogo', () => {
+    const congelada = buildMainMenu().screens.find((screen) => screen.id === HOME_SCREEN_ID);
+
+    expect(congelada).toBeDefined();
+
+    if (congelada === undefined) {
+      return;
+    }
+
+    const vista = buildHomeScreen({
+      view: view({ player: 'Mateuus' }),
+      template: congelada,
+    });
+
+    expect(textOf(vista, 'hm-titulo')).toBe('Mateuus');
+    expect(textOf(vista, 'hm-ola')).toBe('BEM-VINDO DE VOLTA');
   });
 
   /**
@@ -183,14 +215,23 @@ describe('a HOME desenhada', () => {
    * antigo não manda o `steamId`. Sem este cuidado, o banner abria
    * com "BEM-VINDO," e a vírgula pendurada.
    */
-  it('sem nome, a vírgula vai junto — e a linha dele não fica vazia', () => {
-    const screen = buildHomeScreen({ view: view({ player: '' }) });
+  it('sem nome, a saudação toma o lugar dele em vez de deixar um buraco', () => {
+    // A carga inicial vai ao servidor sem jogador nenhum, e plugin
+    // antigo não manda o `steamId`.
+    const congelada = buildMainMenu().screens.find((screen) => screen.id === HOME_SCREEN_ID);
 
-    // Com a saudação e o nome em linhas separadas, a vírgula está
-    // numa e a variável na outra: sem este caso a tela mostraria
-    // "BEM-VINDO DE VOLTA," e um buraco embaixo.
-    expect(textOf(screen, 'hm-titulo')).toBe('BEM-VINDO');
-    expect(textOf(screen, 'hm-ola')).toBe('');
+    expect(congelada).toBeDefined();
+
+    if (congelada === undefined) {
+      return;
+    }
+
+    const vista = buildHomeScreen({ view: view({ player: '' }), template: congelada });
+
+    expect(textOf(vista, 'hm-titulo')).toBe('BEM-VINDO');
+    // A linha de cima some inteira: uma linha em branco sobre outra
+    // é pior que uma linha só.
+    expect(find(vista, 'hm-ola')).toBeUndefined();
   });
 
   it('a variável vale em qualquer texto, e nas duas pontas', () => {

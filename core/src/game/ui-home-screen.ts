@@ -143,6 +143,28 @@ export const HOME_SLOTS = {
   wipeNote: 'hm-wipe-nota',
   wipeButton: 'hm-wipe-btn',
 
+  /**
+   * A saudação e o nome de quem abriu.
+   *
+   * ####  ELES PRECISAM SER SLOTS, E NÃO ERAM  ####
+   *
+   * O preset gera a tela-home CHAMANDO este mesmo gerador, sem
+   * jogador, e guarda o resultado no documento. Depois, quando
+   * alguém abre o menu, esse resultado volta como TEMPLATE e só os
+   * slots são preenchidos.
+   *
+   * O texto do banner não era slot: ele ia para o documento com o
+   * `{jogador}` JÁ RESOLVIDO — e resolvido para vazio, porque no
+   * preset não há jogador. O que ficou gravado foi "BEM-VINDO",
+   * sem variável nenhuma, e daí em diante não havia mais o que
+   * substituir. **O nome de quem abria o menu nunca aparecia.**
+   *
+   * Medido em 14/09/2026 percorrendo a cadeia inteira: preset ->
+   * documento -> template preenchido. Os três dão "BEM-VINDO".
+   */
+  welcome: 'hm-ola',
+  player: 'hm-titulo',
+
   /** A caixa das missões em andamento. */
   questList: 'hm-quest-lista',
   questNote: 'hm-quest-nota',
@@ -936,7 +958,7 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
         //
         // Duas linhas, e não um texto com duas cores: o CUI não tem
         // marcação dentro de um `Text` — cor é do elemento inteiro.
-        ...welcomeLines(view.player),
+        ...welcomeLines(),
         label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(78, 20, 20), {
           size: 12,
           color: C.textMuted,
@@ -971,26 +993,20 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
  * vírgula está numa linha e a variável em outra: sem este caso, a
  * tela mostraria "BEM-VINDO DE VOLTA," e uma linha vazia embaixo.
  */
-function welcomeLines(player: string): UiElement[] {
-  if (player === '') {
-    // Uma linha só, centrada na altura das duas — senão ela ficaria
-    // colada no topo, com o buraco do nome embaixo.
-    return [
-      label('hm-titulo', 'BEM-VINDO', band(30, 34, 20), {
-        size: 24,
-        align: 'MiddleLeft',
-        font: 'RobotoCondensed-Bold.ttf',
-      }),
-    ];
-  }
-
+function welcomeLines(): UiElement[] {
   return [
-    label('hm-ola', 'BEM-VINDO DE VOLTA,', band(22, 20, 20), {
+    // ####  SEM VÍRGULA, DE PROPÓSITO  ####
+    //
+    // "BEM-VINDO DE VOLTA," pede um nome depois dela, e sem jogador
+    // (a carga inicial vai sem `steamId`) a linha ficaria com a
+    // vírgula pendurada sobre um vazio. Sem ela, a saudação se lê
+    // inteira sozinha e o nome é um acréscimo quando existe.
+    label(HOME_SLOTS.welcome, 'BEM-VINDO DE VOLTA', band(22, 20, 20), {
       size: 14,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
-    label('hm-titulo', PLAYER_VARIABLE, band(40, 34, 20), {
+    label(HOME_SLOTS.player, PLAYER_VARIABLE, band(40, 34, 20), {
       size: 28,
       color: C.rust,
       align: 'MiddleLeft',
@@ -1347,6 +1363,23 @@ function slotsOf(options: BuildHomeScreenOptions): Record<string, SlotValue> {
     // id e devolve a primeira chave que bater, e `hm-rk` precisa
     // ganhar de qualquer coisa que caia dentro dele.
     ...hiddenCards,
+
+    // ####  O BANNER É PREENCHIDO, E NÃO HERDADO  ####
+    //
+    // Sem isto o modelo traz o texto CONGELADO do preset — que
+    // nasce sem jogador. Ver o comentário de `HOME_SLOTS.welcome`.
+    //
+    // O nome vai direto, e não pela variável: no caminho do modelo,
+    // o que está escrito no documento é do admin, e ele pode ter
+    // apagado o `{jogador}` sem querer. Preencher o slot funciona
+    // dos dois jeitos.
+    [HOME_SLOTS.welcome]: view.player === '' ? { hide: true } : { text: 'BEM-VINDO DE VOLTA' },
+    [HOME_SLOTS.player]:
+      view.player === ''
+        ? // Sem jogador, a saudação toma o lugar do nome: uma linha
+          // só, e não uma linha em branco sob outra.
+          { text: 'BEM-VINDO', color: C.text }
+        : { text: view.player, color: C.rust },
 
     [HOME_SLOTS.rankMetric]: { text: view.rank.metric ?? '' },
     [HOME_SLOTS.rankList]: { children: rankRows(view.rank.top, room(HOME_SLOTS.rankList)) },
