@@ -164,8 +164,8 @@ describe('o modal de kit, VIP e veículo', () => {
 //      50 000 para a carga inteira.
 // ============================================================
 
-/** Um VIP com N vantagens, que é o que enche a lista. */
-function vipWith(perks: number): readonly StoreCatalogEntry[] {
+/** Um VIP com N vantagens e M itens. */
+function vipWith(perks: number, items = 0): readonly StoreCatalogEntry[] {
   return [
     {
       category: { id: 'cat', name: 'VIP' },
@@ -174,7 +174,12 @@ function vipWith(perks: number): readonly StoreCatalogEntry[] {
           id: 'vip-bronze',
           categoryId: 'cat',
           kind: 'vip',
-          items: [],
+          items: Array.from({ length: items }, (_unused, index) => ({
+            shortname: `item-${String(index)}`,
+            itemId: 1000 + index,
+            skinId: '0',
+            amount: 128,
+          })),
           perks: Array.from({ length: perks }, (_unused, index) => `VANTAGEM ${String(index)}`),
           vip: { tier: 'bronze', days: 30 },
           vehicle: null,
@@ -280,5 +285,121 @@ describe('a lista do modal desenhado', () => {
     });
 
     expect(linesOf(screen).length).toBeLessThan(10);
+  });
+});
+
+// ============================================================
+//  OS ITENS DO PACOTE SÃO UMA GRADE
+//
+//  ####  O NOME NÃO CABE, E ISSO NÃO É MOTIVO PARA ESCONDÊ-LO  ####
+//
+//  Uma casinha tem 44 px. "Munição de Rifle 5.56" não cabe nela em
+//  corpo nenhum que alguém consiga ler, e escrever o nome sob cada
+//  casinha transformaria a grade numa parede de texto.
+//
+//  O CUI também não tem tooltip: um `CuiButton` conhece a cor
+//  normal e a de mouse em cima, e nada mais. Não existe "mostrar
+//  este texto enquanto o cursor está aqui".
+//
+//  Então a casinha CLICA, e o nome está a um clique. É o que se
+//  mede aqui — junto com a garantia de que essa tela não é o modal
+//  do pacote com outro texto dentro.
+// ============================================================
+
+function idsOf(screen: UiScreen): string[] {
+  const all: UiElement[] = [];
+
+  const visit = (list: readonly UiElement[]): void => {
+    for (const element of list) {
+      all.push(element);
+      visit(element.children);
+    }
+  };
+
+  visit(screen.elements);
+
+  return all.map((element) => element.id);
+}
+
+describe('os itens de um pacote', () => {
+  const VIEWPORT = { width: 1220, height: 584 };
+
+  const open = (tab: 'geral' | 'itens' | 'item', page = 0): UiScreen =>
+    buildStoreScreen({
+      catalog: vipWith(3, 4),
+      target: { kind: 'item', offerId: 'vip-bronze', quantity: 1, tab, page },
+      bundleTemplate: templateWithList(220),
+      viewport: VIEWPORT,
+    });
+
+  it('ganham abas quando o pacote também promete vantagens', () => {
+    // Um VIP que promete vantagens E entrega itens tem dois
+    // assuntos. Numa lista só, "fila prioritária" e "128x Munição"
+    // viram a mesma coisa.
+    const json = JSON.stringify(open('geral'));
+
+    expect(json).toContain('GERAL');
+    expect(json).toContain('ITENS');
+  });
+
+  it('a aba ITENS desenha casinhas, e não linhas de texto', () => {
+    const ids = idsOf(open('itens'));
+
+    // Quatro itens, quatro casinhas com ícone.
+    expect(ids).toContain('ozgmainc0i');
+    expect(ids).toContain('ozgmainc3i');
+    // E as vantagens não estão ali junto.
+    expect(JSON.stringify(open('itens'))).not.toContain('VANTAGEM 0');
+  });
+
+  it('cada casinha abre o detalhe daquele item', () => {
+    const ids = idsOf(open('itens'));
+
+    expect(ids).toContain('ozgmainc0b');
+    expect(JSON.stringify(open('itens'))).toContain('ozitem:vip-bronze:1:item:0');
+  });
+
+  it('o detalhe traz o nome inteiro e a quantidade', () => {
+    const json = JSON.stringify(open('item', 2));
+
+    expect(json).toContain('item-2');
+    expect(json).toContain('QUANTIDADE');
+    // Ninguém entra num beco: daqui se volta para a grade.
+    expect(json).toContain('ozitem:vip-bronze:1:itens');
+  });
+
+  it('o detalhe NÃO é o modal do pacote com outro texto dentro', () => {
+    // ####  POR QUE ISTO PRECISA DE TESTE  ####
+    //
+    // Preenchendo o modelo do pacote com um item de dentro dele, a
+    // tela sairia dizendo "BRONZE" com o preço do VIP e a figura de
+    // uma bala — e com um CONFIRMAR COMPRA que compraria o VIP
+    // inteiro. O detalhe tem desenho próprio por isso.
+    const json = JSON.stringify(open('item', 0));
+
+    expect(json).not.toContain('CONFIRMAR COMPRA');
+    expect(json).not.toContain('1.280');
+  });
+
+  it('o detalhe de um item que saiu da oferta não vira modal vazio', () => {
+    const json = JSON.stringify(open('item', 99));
+
+    expect(json).toContain('Item indisponível');
+    expect(json).toContain('ozitem:vip-bronze:1:itens');
+  });
+
+  it('sem vantagem nenhuma, a grade não ganha abas para uma coisa só', () => {
+    const screen = buildStoreScreen({
+      catalog: vipWith(0, 4),
+      target: { kind: 'item', offerId: 'vip-bronze', quantity: 1, tab: 'geral' },
+      bundleTemplate: templateWithList(220),
+      viewport: VIEWPORT,
+    });
+
+    const json = JSON.stringify(screen);
+
+    // Uma aba solitária é um clique que não leva a lugar nenhum.
+    expect(json).not.toContain('"text":"ITENS"');
+    expect(idsOf(screen)).toContain('ozgmainc0i');
   });
 });
