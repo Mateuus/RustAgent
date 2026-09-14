@@ -149,8 +149,12 @@ const LAYOUT = {
   navButtonHeight: 26,
   navGap: 6,
   edgePadding: 16,
-  /** O lado do quadrado da marca, na faixa de cima. */
-  brandMark: 26,
+  /**
+   * A altura da marca na faixa de cima.
+   *
+   * A LARGURA sai daqui pela proporção do logo — ver `BRAND_RATIO`.
+   */
+  brandMark: 30,
 } as const;
 
 /**
@@ -168,6 +172,19 @@ const LAYOUT = {
  * lado seguro: sobra ar, nunca corta letra.
  */
 const NAV_PADDING = 20;
+
+/**
+ * A proporção da arte da marca (largura ÷ altura).
+ *
+ * ####  O LOGO NÃO É QUADRADO, E ESTICÁ-LO SE VÊ  ####
+ *
+ * O da rede tem 4048x1735 — dois e um terço de largura para cada
+ * altura. Desenhá-lo num quadrado o achataria, e num retângulo
+ * chutado o deformaria de outro jeito. O número é o da arte que
+ * está em `Assets` hoje; trocar o PNG por outro de proporção
+ * diferente pede trocar este número junto.
+ */
+const BRAND_RATIO = 2.34;
 
 // ------------------------------------------------------------
 //  Construtores de retângulo
@@ -455,15 +472,18 @@ function buildShell(): UiElement[] {
   //
   //  ####  A MARCA VEM ANTES DE TUDO  ####
   //
-  //  O menu abria direto nas abas, sem dizer de quem ele é. A marca
-  //  é um quadrado com a arte da pasta de interface (a chave
-  //  `ozlogo`) e o nome ao lado — os dois editáveis, como o resto:
-  //  trocar o PNG na pasta troca a arte no próximo envio, sem
-  //  reiniciar nada.
+  //  O menu abria direto nas abas, sem dizer de quem ele é. Agora
+  //  ele abre com o logo da rede — a mesma arte que o overlay de
+  //  propagandas já põe no alto da tela, guardada na pasta de
+  //  interface sob a chave `ozlogo`.
   //
-  //  Arte AUSENTE é um estado previsto: sem o arquivo a imagem não
-  //  desenha, e o que fica é o nome ao lado. É o mesmo caminho da
-  //  moeda.
+  //  Não há texto ao lado: o logo TEM o nome escrito dentro dele, e
+  //  repeti-lo em rótulo era dizer duas vezes a mesma coisa.
+  //
+  //  Trocar o PNG na pasta troca a marca no próximo envio, sem
+  //  reiniciar nada. Arte AUSENTE é um estado previsto: sem o
+  //  arquivo a imagem não desenha e o cabeçalho segue inteiro — é o
+  //  mesmo caminho da moeda.
   // ------------------------------------------------------------
   const brand: UiElement[] = [
     {
@@ -474,7 +494,10 @@ function buildShell(): UiElement[] {
         anchorMin: { x: 0, y: 0.5 },
         anchorMax: { x: 0, y: 0.5 },
         offsetMin: { x: LAYOUT.edgePadding, y: -LAYOUT.brandMark / 2 },
-        offsetMax: { x: LAYOUT.edgePadding + LAYOUT.brandMark, y: LAYOUT.brandMark / 2 },
+        offsetMax: {
+          x: LAYOUT.edgePadding + LAYOUT.brandMark * BRAND_RATIO,
+          y: LAYOUT.brandMark / 2,
+        },
       },
       source: { kind: 'stored', key: 'ozlogo' },
       // Branco: o `color` de uma imagem TINGE, e qualquer outra cor
@@ -482,18 +505,6 @@ function buildShell(): UiElement[] {
       color: C.white,
       children: [],
     },
-    label(
-      'marca-nome',
-      'Marca (nome)',
-      {
-        anchorMin: { x: 0, y: 0.5 },
-        anchorMax: { x: 0, y: 0.5 },
-        offsetMin: { x: LAYOUT.edgePadding + LAYOUT.brandMark + 10, y: -11 },
-        offsetMax: { x: LAYOUT.edgePadding + LAYOUT.brandMark + 220, y: 11 },
-      },
-      'ORIGEM Z',
-      { size: 17, align: 'MiddleLeft' },
-    ),
 
     // ####  O VIP DO JOGADOR  ####
     //

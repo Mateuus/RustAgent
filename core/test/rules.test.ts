@@ -413,19 +413,37 @@ describe('o provedor', () => {
     expect(view.sections.map((item) => item.id)).toEqual([1]);
   });
 
-  it('o subtítulo diz de onde as regras vêm', () => {
-    const rede = readRulesView({
-      rules: rulesView([{ id: 1, title: 'A', enabled: true, position: 10, items: [] }]),
-      target: { sectionId: null, page: 0 },
+  it('o título da tela NÃO cai em cima do título da coluna', () => {
+    // ####  ISTO ACONTECEU, E O DONO VIU NO JOGO  ####
+    //
+    // 14/09/2026: o título da tela nascia na largura inteira, no
+    // x=0, e "APLICAÇÃO DAS REGRAS" era desenhado sobre o "REGRAS"
+    // da coluna — os dois ilegíveis. É a divisão que o ranking e as
+    // missões já faziam: o nome da tela à esquerda, o do que está
+    // aberto à direita.
+    const screen = buildRulesScreen({
+      view: {
+        ...emptyRulesView(),
+        sections: [{ id: 1, title: 'Aplicação das Regras', count: 1 }],
+        activeId: 1,
+        lines: [{ text: 'A administração decide.', tone: 'normal' }],
+        emptyMessage: null,
+      },
     });
 
-    const propria = readRulesView({
-      rules: rulesView([{ id: 1, title: 'A', enabled: true, position: 10, items: [] }], 'own'),
-      target: { sectionId: null, page: 0 },
-    });
+    const titulo = find(screen, RULES_SLOTS.title);
+    const coluna = find(screen, RULES_SLOTS.column);
 
-    expect(rede.subtitle).toContain('rede');
-    expect(propria.subtitle).not.toContain('rede');
+    expect(titulo?.rect.offsetMin.x).toBeGreaterThanOrEqual(coluna?.rect.offsetMax.x ?? 0);
+  });
+
+  it('a tela NÃO tem mais a linha de "de onde vêm as regras"', () => {
+    // Pedido do dono, vendo no jogo: "isso não precisa mostrar". De
+    // onde o texto vem é assunto de quem administra.
+    const screen = buildRulesScreen({ view: emptyRulesView() });
+
+    expect(find(screen, RULES_SLOTS.subtitle)).toBeUndefined();
+    expect(JSON.stringify(screen)).not.toContain('rede');
   });
 
   it('responde com o id PEDIDO, e não com o da tela', () => {

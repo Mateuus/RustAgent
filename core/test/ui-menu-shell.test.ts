@@ -98,14 +98,21 @@ describe('o cabeçalho do Menu Principal', () => {
   });
 
   it('a marca não invade o que é do jogador', () => {
-    const nome = requireBox(shell, 'marca-nome');
     const vip = requireBox(shell, 'vip-word');
     const logo = requireBox(shell, 'marca-logo');
 
-    expect(logo.left + logo.width).toBeLessThanOrEqual(nome.left);
-    // O nome tem largura de sobra reservada — o que não pode é a
-    // faixa dele COMEÇAR depois do VIP.
-    expect(nome.left).toBeLessThan(vip.left);
+    expect(logo.left).toBeGreaterThan(0);
+    expect(logo.left + logo.width).toBeLessThan(vip.left);
+  });
+
+  it('o logo é desenhado na proporção da arte, e não num quadrado', () => {
+    // A arte da rede tem 4048x1735. Num quadrado ela chegaria
+    // achatada ao jogo — e achatamento de logo é a primeira coisa
+    // que quem fez a marca enxerga.
+    const logo = requireBox(shell, 'marca-logo');
+
+    expect(logo.width / logo.height).toBeGreaterThan(2);
+    expect(logo.width / logo.height).toBeLessThan(3);
   });
 
   it('as duas faixas somam a altura do cabeçalho', () => {

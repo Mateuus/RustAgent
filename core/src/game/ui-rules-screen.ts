@@ -56,7 +56,6 @@ import {
   panel,
   rowsPager,
   textWidth,
-  topBar,
   type Rect,
 } from './ui-widgets.js';
 
@@ -82,6 +81,17 @@ export const RULES_COMMAND = 'regras';
  */
 export const RULES_SLOTS = {
   title: 'rg-titulo',
+  /**
+   * A linha sob o título. ELA NÃO É MAIS DESENHADA.
+   *
+   * Ela dizia "as regras valem em todos os servidores da rede" — e
+   * o dono, vendo no jogo em 14/09/2026: "isso não precisa
+   * mostrar". Ele tem razão: de onde o texto vem é assunto de quem
+   * ADMINISTRA, e quem está lendo as regras só quer as regras.
+   *
+   * O sufixo continua aqui porque o desenho gravado naquele dia o
+   * tem, e o preenchimento precisa saber ESCONDÊ-LO.
+   */
   subtitle: 'rg-sub',
   /** A coluna de seções. O agente derrama os itens dentro. */
   column: 'rg-col',
@@ -122,9 +132,6 @@ const COLUMN = {
 const BADGE = 34;
 
 const CONTENT_LEFT = COLUMN.width + COLUMN.gap;
-
-/** A altura da faixa do subtítulo, logo abaixo do corpo. */
-const SUBTITLE_HEIGHT = 18;
 
 /** O rodapé onde o "‹ 1 / 2 ›" mora. */
 const PAGER_HEIGHT = 26;
@@ -233,8 +240,6 @@ export interface RulesScreenView {
   readonly lines: readonly RulesLine[];
   /** A página pedida. O que existe de verdade é aparado no desenho. */
   readonly page: number;
-  /** A frase sob o título. */
-  readonly subtitle: string;
   /** O aviso no lugar da lista. `null` = há regras para mostrar. */
   readonly emptyMessage: string | null;
 }
@@ -245,7 +250,6 @@ export function emptyRulesView(): RulesScreenView {
     activeId: null,
     lines: [],
     page: 0,
-    subtitle: 'As regras deste servidor.',
     emptyMessage: 'Este servidor ainda não publicou as regras.',
   };
 }
@@ -281,10 +285,6 @@ export function readRulesView(input: {
     activeId: active?.id ?? null,
     lines,
     page: input.target.page,
-    subtitle:
-      input.rules.mode === 'own'
-        ? 'As regras deste servidor.'
-        : 'As regras valem em todos os servidores da rede.',
     // Seção existente e vazia é diferente de servidor sem regras: a
     // primeira é o admin no meio de escrever, e a frase diz isso.
     emptyMessage: lines.length === 0 ? 'Esta seção ainda não tem regras.' : null,
@@ -416,8 +416,16 @@ export function buildRulesScreen(options: BuildRulesScreenOptions): UiScreen {
   const hasColumn = view.sections.length > 0 || skeleton;
   const left = hasColumn ? CONTENT_LEFT : 0;
 
+  // ####  O TÍTULO DA TELA COMEÇA DEPOIS DA COLUNA  ####
+  //
+  // MEDIDO no jogo em 14/09/2026: ele nascia na largura inteira, no
+  // x=0, e caía EM CIMA do título da coluna — "REGRAS" e "APLICAÇÃO
+  // DAS REGRAS" desenhados um sobre o outro, ilegíveis os dois.
+  //
+  // É a divisão que o ranking e as missões já fazem: à esquerda o
+  // nome da tela, à direita o nome do que está aberto.
   const elements: UiElement[] = [
-    label(RULES_SLOTS.title, titleOf(view), topBar(Y.title), {
+    label(RULES_SLOTS.title, titleOf(view), band(left, 0, Y.title), {
       size: 20,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
@@ -428,14 +436,7 @@ export function buildRulesScreen(options: BuildRulesScreenOptions): UiScreen {
     elements.push(...rulesColumn(view, skeleton));
   }
 
-  elements.push(
-    label(RULES_SLOTS.subtitle, view.subtitle, band(left, Y.body, SUBTITLE_HEIGHT), {
-      size: 11,
-      align: 'MiddleLeft',
-      color: C.textMuted,
-    }),
-    listBox(view, left, options.viewport ?? FALLBACK_VIEWPORT),
-  );
+  elements.push(listBox(view, left, options.viewport ?? FALLBACK_VIEWPORT));
 
   return {
     id: options.screenId ?? RULES_SCREEN_ID,
@@ -486,7 +487,9 @@ function fillRulesTemplate(template: UiScreen, options: BuildRulesScreenOptions)
 
   const values: Record<string, SlotValue> = {
     [RULES_SLOTS.title]: { text: titleOf(view) },
-    [RULES_SLOTS.subtitle]: { text: view.subtitle },
+    // Ver `RULES_SLOTS.subtitle`: ele só existe em desenho gravado
+    // antes de 14/09/2026, e o que se faz com ele é escondê-lo.
+    [RULES_SLOTS.subtitle]: { hide: true },
     // A cor vem daqui porque no esqueleto a coluna é transparente.
     [RULES_SLOTS.column]:
       view.sections.length === 0
@@ -650,7 +653,7 @@ function columnAccent(): Rect {
 
 /** A caixa inteira: do corpo até o fundo, à direita da coluna. */
 function listBox(view: RulesScreenView, left: number, viewport: Size): UiElement {
-  const top = Y.body + SUBTITLE_HEIGHT + 8;
+  const top = Y.body;
 
   const rect: Rect = {
     anchorMin: { x: 0, y: 0 },
