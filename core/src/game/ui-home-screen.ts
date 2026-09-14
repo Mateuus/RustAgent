@@ -68,6 +68,7 @@ import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transp
 import { toError } from '../util.js';
 import { nextWipe, type NextWipeDeps } from '../wipe/next-wipe.js';
 
+import { storeIconKey } from './card-icons.js';
 import { CALENDAR_SCREEN_ID } from './ui-calendar-screen.js';
 import { screenViewport, type Size } from './ui-geometry.js';
 import {
@@ -277,7 +278,12 @@ export interface HomeOfferView {
   readonly price: number;
   /** O preço riscado. `null` = não há promoção. */
   readonly oldPrice: number | null;
-  readonly icon: { readonly itemId: number; readonly skinId: string };
+  readonly icon: {
+    readonly itemId: number;
+    readonly skinId: string;
+    /** A arte propria do admin. `null` = o icone do jogo. */
+    readonly file?: string | null;
+  };
   readonly badge: OfferBadge | null;
 }
 
@@ -361,7 +367,27 @@ export interface HomeStoreOffer {
   readonly price: number;
   readonly oldPrice: number | null;
   readonly badge: OfferBadge | null;
-  readonly icon: { readonly itemId: number; readonly skinId: string };
+  /**
+   * O desenho da oferta, como a LOJA o conhece.
+   *
+   * ####  `file` E O QUE FAZ O ITEM CUSTOM APARECER  ####
+   *
+   * `itemId`/`skinId` sao o icone do JOGO, que o cliente resolve
+   * sozinho. Mas uma oferta pode ser um VIP de 30 dias, um pacote ou
+   * um item nosso -- e para esses o admin escolhe uma arte, que sobe
+   * ao OrigemZImages com a chave `store.<id>` (ver
+   * game/card-icons.ts).
+   *
+   * Ate 14/09/2026 este campo nao chegava aqui, e o cartao da HOME
+   * caia sempre no icone do jogo: a arte que o admin escolheu
+   * aparecia na loja e sumia na entrada. `null` = sem arte propria,
+   * e o icone do jogo e o certo.
+   */
+  readonly icon: {
+    readonly itemId: number;
+    readonly skinId: string;
+    readonly file?: string | null;
+  };
   /** Epoch ms. É por ele que "a novidade" é escolhida. */
   readonly createdAt: number;
 }
@@ -548,6 +574,8 @@ function readOffer(input: ReadHomeViewInput): Pick<HomeView, 'offer' | 'offerNot
         name: best.name,
         price: best.price,
         oldPrice: best.oldPrice,
+        // O ícone INTEIRO, com o `file`: é ele que diz se a oferta
+        // tem arte própria. Ver `HomeStoreOffer.icon`.
         icon: best.icon,
         badge: best.badge,
       },
@@ -1300,17 +1328,12 @@ function offerCard(view: HomeView): UiElement[] {
       ],
     ),
 
-    itemImage('hm-loja-icone', offer?.icon ?? PLACEHOLDER_ICON, {
-      anchorMin: { x: 0.5, y: 1 },
-      anchorMax: { x: 0.5, y: 1 },
-      offsetMin: { x: -44, y: -136 },
-      offsetMax: { x: 44, y: -48 },
-    }),
+    offerImage('hm-loja-icone', offer, offerIconRect()),
 
     // Sem oferta, este rótulo é quem fala: o cartão vira a frase, e
     // ícone, preço e botão somem. Um botão COMPRAR sobre nada é
     // pior que um cartão que explica o vazio.
-    label('hm-loja-nome', offer?.name ?? view.offerNote, band(142, 34), {
+    label('hm-loja-nome', offer?.name ?? view.offerNote, offerBand(OFFER.name, 34), {
       size: 13,
       align: 'UpperCenter',
       font: 'RobotoCondensed-Bold.ttf',
@@ -1318,7 +1341,7 @@ function offerCard(view: HomeView): UiElement[] {
     label(
       'hm-loja-preco',
       offer === null ? '' : `${formatNumber(offer.price)} OZ`,
-      band(178, 22),
+      offerBand(OFFER.price, 24),
       { size: 15, color: C.amber, align: 'MiddleCenter', font: 'RobotoCondensed-Bold.ttf' },
     ),
     label(
@@ -1326,7 +1349,7 @@ function offerCard(view: HomeView): UiElement[] {
       offer?.oldPrice === undefined || offer.oldPrice === null
         ? ''
         : `de ${formatNumber(offer.oldPrice)} OZ`,
-      band(200, 16),
+      offerBand(OFFER.old, 16),
       { size: 11, color: C.textMuted, align: 'MiddleCenter' },
     ),
 
@@ -1357,6 +1380,114 @@ function offerCard(view: HomeView): UiElement[] {
  * item que ninguém pôs à venda.
  */
 const PLACEHOLDER_ICON = { itemId: 0, skinId: '0' } as const;
+
+// ------------------------------------------------------------
+//  O BLOCO DA OFERTA
+// ------------------------------------------------------------
+
+/**
+ * As medidas do miolo do cartão da loja, do TOPO DO BLOCO.
+ *
+ * ####  ELE ERA ANCORADO NO TOPO, E ISSO ERA DOIS DEFEITOS  ####
+ *
+ * O ícone começava a 48 px do topo do cartão e a régua do cabeçalho
+ * está a 58: ele passava POR CIMA dela, encostado no subtítulo. E
+ * como todo o miolo pendurava do topo, o cartão terminava com um
+ * terço de vazio embaixo, entre o preço e o botão.
+ *
+ * Agora o bloco inteiro é centrado no cartão. O corpo vai da régua
+ * (58 do topo) ao rodapé (`FOOTER_ROOM` do pé), e a diferença entre
+ * o centro do CARTÃO e o centro do CORPO é de 1 px — perto demais
+ * para justificar uma segunda âncora.
+ *
+ * ####  A ALTURA DO CARTÃO É DA TELA, E NÃO NOSSA  ####
+ *
+ * As colunas esticam de `y: 0` a `y: 1` (ver `columnRect`): num
+ * monitor alto o cartão é alto. Centrar é o que faz o miolo
+ * acompanhar isso; medir do topo, não.
+ */
+const OFFER = {
+  /** O lado do ícone. Era 88 até 14/09/2026. */
+  icon: 108,
+  /** O topo de cada linha, medido do topo do bloco. */
+  name: 120,
+  price: 154,
+  old: 178,
+  /** A altura do bloco inteiro: o `old` mais os 16 px dele. */
+  block: 194,
+} as const;
+
+/** O ícone da oferta, quadrado e centrado nos dois eixos. */
+function offerIconRect(): Rect {
+  const half = OFFER.block / 2;
+
+  return {
+    anchorMin: { x: 0.5, y: 0.5 },
+    anchorMax: { x: 0.5, y: 0.5 },
+    offsetMin: { x: -OFFER.icon / 2, y: half - OFFER.icon },
+    offsetMax: { x: OFFER.icon / 2, y: half },
+  };
+}
+
+/** Uma faixa do bloco centrado, medida do topo DELE. */
+function offerBand(top: number, height: number): Rect {
+  const half = OFFER.block / 2;
+
+  return {
+    anchorMin: { x: 0, y: 0.5 },
+    anchorMax: { x: 1, y: 0.5 },
+    offsetMin: { x: PAD, y: half - (top + height) },
+    offsetMax: { x: -PAD, y: half - top },
+  };
+}
+
+/**
+ * O desenho da oferta: a arte própria do admin, ou o ícone do jogo.
+ *
+ * ####  A MESMA REGRA DA LOJA, E DE PROPÓSITO  ####
+ *
+ * É o `offerImageSource` de `ui-store-screens.ts`, com a mesma chave
+ * (`store.<id>`): os bytes já subiram ao OrigemZImages para a tela
+ * da loja, então o cartão da entrada não custa download nenhum.
+ *
+ * Duas réguas para "qual é o desenho desta oferta" dariam uma arte
+ * na loja e outra na HOME — e o admin não teria como saber qual das
+ * duas ele configurou.
+ */
+function offerImage(id: string, offer: HomeOfferView | null, rect: Rect): UiElement {
+  const key = offerArtKey(offer);
+
+  if (key !== null) {
+    return storedImage(id, key, rect);
+  }
+
+  const icon = offer?.icon ?? PLACEHOLDER_ICON;
+
+  return itemImage(id, { itemId: icon.itemId, skinId: icon.skinId }, rect);
+}
+
+/**
+ * A chave da arte própria daquela oferta, ou `null`.
+ *
+ * `null` quer dizer "use o ícone do jogo", e é o caso comum: só o
+ * que NÃO é um item do jogo — VIP, pacote, kit — precisa de arte.
+ */
+function offerArtKey(offer: HomeOfferView | null): string | null {
+  if (offer === null || offer.icon.file === undefined || offer.icon.file === null) {
+    return null;
+  }
+
+  return storeIconKey(offer.offerId);
+}
+
+/** O mesmo desenho, na forma que o preenchimento de modelo entende. */
+function offerIconSlot(offer: HomeOfferView): SlotValue {
+  const key = offerArtKey(offer);
+
+  return key === null
+    ? { item: { itemId: offer.icon.itemId, skinId: offer.icon.skinId } }
+    : { stored: { key } };
+}
 
 const BADGE_STYLE: Record<OfferBadge, { readonly bg: string; readonly text: string }> = {
   promo: { bg: C.rust, text: C.white },
@@ -1599,8 +1730,11 @@ function slotsOf(options: BuildHomeScreenOptions): Record<string, SlotValue> {
 
     // O ícone só é trocado quando há oferta; sem ela o elemento
     // inteiro some, junto do preço e do botão.
-    [HOME_SLOTS.offerIcon]:
-      offer === null ? { hide: true } : { item: offer.icon },
+    // A mesma bifurcação do esqueleto: arte própria quando existe,
+    // ícone do jogo quando não. Sem isto o preenchimento
+    // sobrescreveria a arte do admin pelo ícone do jogo — e o
+    // esqueleto estaria certo por um instante, até o primeiro slot.
+    [HOME_SLOTS.offerIcon]: offer === null ? { hide: true } : offerIconSlot(offer),
     [HOME_SLOTS.offerName]: { text: offer?.name ?? view.offerNote },
     [HOME_SLOTS.offerPrice]:
       offer === null ? { hide: true } : { text: `${formatNumber(offer.price)} OZ` },

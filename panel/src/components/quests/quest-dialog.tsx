@@ -29,6 +29,7 @@ import { Plus, Trash2, X } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
+import { ContainerPicker } from '@/components/quests/container-picker';
 import { Section } from '@/components/section';
 import {
   agent,
@@ -70,7 +71,14 @@ const OBJECTIVE_LABELS: Readonly<Record<QuestObjectiveKind, string>> = {
   kill: 'Matar',
   gather: 'Coletar (minerar/colher)',
   craft: 'Fabricar',
-  loot: 'Saquear de caixas',
+  // ####  OS DOIS SAQUES SAO PERGUNTAS DIFERENTES  ####
+  //
+  // O `loot` conta ITEM ("pegue 200 de scrap, de onde vier"), e o
+  // rotulo dele dizia "Saquear de caixas" -- que e o que o
+  // `container` faz. O dono procurou barril aqui dentro em
+  // 14/09/2026 e nao achou, porque nunca esteve.
+  loot: 'Pegar um item (de caixa ou do chao)',
+  container: 'Saquear caixas e barris',
   deliver: 'Entregar a um NPC',
   playtime: 'Ficar online (minutos)',
   metric: 'Chegar a um número num ranking',
@@ -89,7 +97,13 @@ function blankObjective(seq: number, kind: QuestObjectiveKind): QuestObjective {
   return {
     seq,
     kind,
-    target: kind === 'playtime' || kind === 'metric' ? null : '',
+    target: kind === 'playtime' || kind === 'metric' || kind === 'container' ? null : '',
+    // ####  ELE NASCE COM UMA ESCOLHA, E NAO VAZIO  ####
+    //
+    // "Qualquer barril" e o caso do pedido ("Limpeza da Estrada"), e
+    // um objetivo que nasce sem alvo nenhum e um objetivo que so
+    // recusa no salvar -- depois de o admin ter escrito o resto.
+    targets: kind === 'container' ? ['@barrel'] : null,
     metric: kind === 'metric' ? '' : null,
     item: null,
     amount: 1,
@@ -136,6 +150,10 @@ function previewOf(objective: QuestObjective): string {
       return `Fabricar ${amount} ${target}`;
     case 'loot':
       return `Saquear ${amount} de ${target}`;
+    // Aqui o numero conta CAIXA, e nao unidade -- por isso sem o
+    // "de", que no `loot` acima quer dizer "vinte daquilo".
+    case 'container':
+      return `Saquear ${amount} ${describeTargets(objective.targets ?? [])}`;
     case 'deliver':
       // Sem item é o correio: o que se leva é figurado, e o que a
       // missão paga é o caminho. Ver o campo `item`.
@@ -147,6 +165,32 @@ function previewOf(objective: QuestObjective): string {
     case 'metric':
       return `Chegar a ${amount} em ${objective.metric ?? '?'}`;
   }
+}
+
+/**
+ * O resumo dos alvos do saque, para a frase de previa.
+ *
+ * A de verdade e montada pelo agente
+ * (`describeContainerSelectors`), que conhece o nome bonito de cada
+ * prefab; esta e a aproximacao do painel, pela mesma razao que a
+ * previa do item mostra o shortname -- ver o cabecalho.
+ */
+function describeTargets(targets: readonly string[]): string {
+  if (targets.length === 0) {
+    return 'contêineres';
+  }
+
+  if (targets.length === 1) {
+    const only = targets[0] ?? '';
+
+    if (only === '@barrel') return 'barris';
+    if (only === '@crate') return 'caixas';
+    if (only === '@any') return 'contêineres';
+
+    return only;
+  }
+
+  return `${targets.length} tipos de contêiner`;
 }
 
 export interface QuestDialogProps {
@@ -169,6 +213,24 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
   };
 
   async function save() {
+    // ####  A UNICA CONFERENCIA QUE MORA AQUI  ####
+    //
+    // O zod da API recusaria isto de qualquer jeito, mas com
+    // "Too small: expected array to have >=1 items" -- uma frase
+    // que nao diz QUAL objetivo nem o que fazer. O resto continua
+    // sendo respondido pela API, que e quem conhece as regras.
+    const semAlvo = form.objectives.find(
+      (objective) => objective.kind === 'container' && (objective.targets?.length ?? 0) === 0,
+    );
+
+    if (semAlvo !== undefined) {
+      setError(
+        `O objetivo ${semAlvo.seq + 1} é de saque e não tem contêiner nenhum escolhido.`,
+      );
+
+      return;
+    }
+
     setSaving(true);
     setError(null);
 
@@ -274,6 +336,23 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                   </button>
                 </div>
 
+                {/* ####  O SAQUE ESCOLHE UMA LISTA, E ELA NAO CABE NUMA COLUNA  #### */}
+                {objective.kind === 'container' && (
+                  <div className="mt-2">
+                    <Field
+                      label="Contêineres que contam"
+                      hint="Todos os escolhidos somam no MESMO contador. Para exigir uma quantidade por tipo, acrescente um objetivo para cada um."
+                    >
+                      <ContainerPicker
+                        value={objective.targets ?? []}
+                        onChange={(targets) =>
+                          patchObjective(form, patch, index, { targets })
+                        }
+                      />
+                    </Field>
+                  </div>
+                )}
+
                 <div className="mt-2 grid gap-3 sm:grid-cols-3">
                   {objective.kind === 'metric' ? (
                     <Field label="Métrica do ranking">
@@ -286,7 +365,7 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                         }
                       />
                     </Field>
-                  ) : objective.kind === 'playtime' ? null : (
+                  ) : objective.kind === 'playtime' || objective.kind === 'container' ? null : (
                     <Field label={objective.kind === 'deliver' ? 'NPC de destino' : 'Alvo'}>
                       {objective.kind === 'kill' ? (
                         <select

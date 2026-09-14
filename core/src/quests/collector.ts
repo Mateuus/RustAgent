@@ -46,6 +46,10 @@
 import type { QuestsRepository } from '../db/quests-repository.js';
 import { firstJsonLine } from '../game/plugin-contract.js';
 import {
+  containerSetsOf,
+  describeContainerSelectors,
+} from '../game/quest-containers.js';
+import {
   buildAckCommand,
   buildAssignCommand,
   buildFlushCommand,
@@ -56,6 +60,7 @@ import {
   QUESTS_CONTRACT,
   questErrorSchema,
   questFlushSchema,
+  questWatchReplySchema,
   type QuestAssignPayload,
   type QuestWatchPayload,
 } from '../game/quests-contract.js';
@@ -410,23 +415,81 @@ export class QuestCollector {
       secret: this.#deps.secret,
       watch,
       alias: CREATURE_ALIASES,
+      // Só as categorias em uso. Um servidor sem missão de saque
+      // recebe `{}` e não paga por nada disto.
+      sets: containerSetsOf(this.#deps.repository.containerSelectorsFor(serverId)),
     };
 
     // A comparação é do JSON, e não da lista: o `watchFor` já
     // ordena, então o mesmo catálogo produz sempre a mesma string.
-    const fingerprint = JSON.stringify(payload.watch);
+    //
+    // Os conjuntos entram na conta porque eles TAMBÉM mudam sozinhos
+    // — um contêiner novo no catálogo do agente muda o que
+    // `@barrel` alcança, e o plugin precisa saber.
+    const fingerprint = JSON.stringify({ watch: payload.watch, sets: payload.sets });
 
     if (this.#sent.get(serverId) === fingerprint) {
       return;
     }
 
-    await rcon.send(buildWatchCommand(payload));
+    const reply = await rcon.send(buildWatchCommand(payload));
+
     this.#sent.set(serverId, fingerprint);
 
     this.#deps.logger.info(
       { server: serverId, alvos: Object.values(watch).flat().length },
       'catálogo de missões enviado ao plugin',
     );
+
+    this.#warnIfPluginCannotCount(serverId, reply, watch);
+  }
+
+  /**
+   * O plugin daquele servidor sabe contar o que foi pedido?
+   *
+   * ####  UM RECURSO INERTE PRECISA GRITAR  ####
+   *
+   * O objetivo `container` é aditivo no contrato: um
+   * `OrigemZAgent.cs` anterior a 14/09/2026 recebe a chave nova,
+   * guarda-a e nunca a usa. Nada quebra — e é justamente esse o
+   * problema: a missão fica cadastrada, o jogador quebra barril, e o
+   * contador não anda sem que nada explique por quê.
+   *
+   * Só o log, e nunca uma exceção: a rodada tem de seguir. E só
+   * quando há o que contar — um servidor sem missão de saque não
+   * precisa ouvir sobre um plugin que ele nunca vai usar.
+   */
+  #warnIfPluginCannotCount(
+    serverId: string,
+    reply: string,
+    watch: Readonly<Record<string, readonly string[]>>,
+  ): void {
+    if ((watch.container?.length ?? 0) === 0) {
+      return;
+    }
+
+    const parsed = questWatchReplySchema.safeParse(firstJsonLine(reply));
+
+    // Resposta ilegível não vira alarme: o RCON pode ter cortado a
+    // linha, e o `flush` da mesma rodada já denuncia um plugin que
+    // não responde de verdade.
+    if (!parsed.success || parsed.data.kinds === undefined) {
+      this.#deps.logger.warn(
+        { server: serverId },
+        'este servidor tem missão de saque de contêiner, mas o plugin não diz que sabe contá-la; ' +
+          'copie o OrigemZAgent.cs desta versão para o servidor',
+      );
+
+      return;
+    }
+
+    if (!parsed.data.kinds.includes('container')) {
+      this.#deps.logger.warn(
+        { server: serverId, kinds: parsed.data.kinds },
+        'o plugin deste servidor não conta saque de contêiner; a missão não vai progredir até ' +
+          'o OrigemZAgent.cs ser atualizado',
+      );
+    }
   }
 
   /**
@@ -619,13 +682,21 @@ export class QuestCollector {
       const objectives = attempt.snapshot.objectives
         .filter(
           (objective) =>
-            objective.target !== null &&
+            // O saque de contêiner é o único que não tem alvo
+            // ÚNICO: o que ele persegue é a lista. Sem esta
+            // exceção ele seria descartado aqui, e a missão
+            // desceria ao plugin sem o objetivo que a define.
+            (objective.target !== null ||
+              (objective.kind === 'container' && (objective.targets?.length ?? 0) > 0)) &&
             PLUGIN_OBJECTIVE_KINDS.includes(objective.kind),
         )
         .map((objective) => ({
           seq: objective.seq,
           kind: objective.kind,
-          target: objective.target as string,
+          target: objective.target ?? '',
+          // Só no saque, e cru: `@barrel` continua `@barrel`, e
+          // quem o resolve é o plugin, contra o `sets` do `watch`.
+          ...(objective.targets === null ? {} : { targets: objective.targets }),
           // ####  A ENCOMENDA VIAJA, E NADA MAIS MUDA  ####
           //
           // O campo só aparece quando existe. Assim o payload de
@@ -635,8 +706,12 @@ export class QuestCollector {
           ...(objective.item === null ? {} : { item: objective.item }),
           // O que falta numa encomenda é o ITEM, e não o boneco:
           // "Ainda falta: 1 Mateus" foi o que a primeira versão
-          // escreveu.
-          label: this.#deps.service.nameOfTarget(objective.item ?? objective.target),
+          // escreveu. E o que falta num saque é o CONTÊINER, que
+          // não tem shortname para procurar no catálogo de itens.
+          label:
+            objective.kind === 'container'
+              ? describeContainerSelectors(objective.targets ?? [])
+              : this.#deps.service.nameOfTarget(objective.item ?? objective.target),
           need: objective.amount,
           have: attempt.progress[objective.seq] ?? 0,
         }));

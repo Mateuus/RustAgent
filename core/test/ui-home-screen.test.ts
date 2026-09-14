@@ -31,6 +31,7 @@ import {
   type HomeStoreOffer,
   type HomeView,
 } from '../src/game/ui-home-screen.js';
+import { CANVAS, measureElement, type Box } from '../src/game/ui-geometry.js';
 import { buildMainMenu } from '../src/game/ui-preset-main-menu.js';
 import {
   applyHidden,
@@ -498,5 +499,95 @@ describe('o provedor da HOME', () => {
     expect(json).toContain('Não consegui ler a loja agora.');
     // E o cartão do wipe continua lá, com a frase dele.
     expect(json).toContain('Não consegui ler a agenda agora.');
+  });
+});
+
+// ------------------------------------------------------------
+//  O CARTÃO DA LOJA
+// ------------------------------------------------------------
+
+describe('o cartão NOVO NA LOJA', () => {
+  /** A caixa de um elemento dentro do cartão da loja, em pixels. */
+  function boxOf(screen: UiScreen, suffix: string): Box {
+    const box = measureElement(screen.elements, (id) => id.endsWith(suffix), CANVAS);
+
+    if (box === null) {
+      throw new Error(`o elemento "${suffix}" não está no desenho`);
+    }
+
+    return box;
+  }
+
+  it('o ícone do item não encosta na régua do cabeçalho', () => {
+    const screen = buildHomeScreen({ view: view() });
+
+    const regua = boxOf(screen, 'hm-loja-titulo-regua');
+    const icone = boxOf(screen, HOME_SLOTS.offerIcon);
+
+    // ####  ELE PASSAVA POR CIMA DELA  ####
+    //
+    // Até 14/09/2026 o ícone começava a 48 px do topo do cartão e a
+    // régua está a 58: o desenho entregue tinha a arma cortando a
+    // linha, encostada no subtítulo. O dono viu na tela e pediu.
+    //
+    // A folga é medida, e não olhada: o cartão estica com a altura
+    // do canvas, e "parece certo aqui" não diz nada sobre a próxima
+    // resolução.
+    expect(icone.top).toBeGreaterThan(regua.top + regua.height + 20);
+  });
+
+  it('o miolo fica CENTRADO, e não pendurado no topo', () => {
+    const screen = buildHomeScreen({ view: view() });
+
+    const cartao = boxOf(screen, 'hm-loja');
+    const icone = boxOf(screen, HOME_SLOTS.offerIcon);
+    const antes = boxOf(screen, HOME_SLOTS.offerOld);
+
+    // O `measureElement` devolve a caixa RELATIVA ao pai, e ícone e
+    // preço são filhos do cartão: o meio deles se compara com a
+    // metade da ALTURA do cartão, e não com o topo dele no canvas.
+    const meioDoBloco = (icone.top + antes.top + antes.height) / 2;
+
+    // O corpo vai da régua ao rodapé, e o centro dele fica 1 px
+    // acima do centro do cartão — perto demais para justificar uma
+    // segunda âncora. A folga de 4 px é para essa diferença.
+    expect(Math.abs(meioDoBloco - cartao.height / 2)).toBeLessThan(4);
+  });
+
+  it('a oferta com ARTE PRÓPRIA usa a arte, e não o ícone do jogo', () => {
+    // ####  O VIP DE 30 DIAS NÃO TEM ÍCONE NO JOGO  ####
+    //
+    // Nem o pacote, nem o kit, nem o item nosso. Para esses o admin
+    // escolhe uma arte, que sobe ao OrigemZImages com a chave
+    // `store.<id>` — e até 14/09/2026 ela aparecia na loja e sumia
+    // na entrada, porque o `file` não chegava até aqui.
+    const comArte = view({
+      offer: {
+        offerId: 'vip-30-dias',
+        name: 'VIP 30 dias',
+        price: 3000,
+        oldPrice: null,
+        icon: { itemId: 0, skinId: '0', file: 'vip.png' },
+        badge: null,
+      },
+    });
+
+    const desenho = find(buildHomeScreen({ view: comArte }), HOME_SLOTS.offerIcon);
+
+    expect(desenho?.type).toBe('image');
+    expect(desenho?.type === 'image' ? desenho.source : null).toEqual({
+      kind: 'stored',
+      key: 'store.vip-30-dias',
+    });
+  });
+
+  it('e sem arte própria continua no ícone do jogo, que não custa download', () => {
+    const desenho = find(buildHomeScreen({ view: view() }), HOME_SLOTS.offerIcon);
+
+    expect(desenho?.type === 'image' ? desenho.source : null).toEqual({
+      kind: 'item',
+      itemId: OFFER.icon.itemId,
+      skinId: OFFER.icon.skinId,
+    });
   });
 });
