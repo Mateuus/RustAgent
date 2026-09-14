@@ -64,6 +64,8 @@ import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
 import { storeIconKey } from './card-icons.js';
 import type { SlotValue } from './ui-template.js';
+import { type Size } from './ui-geometry.js';
+import { measureSlot } from './ui-template.js';
 import { SLOTS, fillTemplate } from './ui-store-template.js';
 import {
   itemRows,
@@ -328,6 +330,25 @@ export interface BuildStoreScreenOptions {
    * o botão: recusar sem certeza seria pior.
    */
   readonly vehicleSpace?: boolean | null;
+  /**
+   * O tamanho da tela em que o modal é desenhado.
+   *
+   * ####  SEM ELE, A LISTA PAGINA PELO NÚMERO ERRADO  ####
+   *
+   * No layout embutido a área da lista é conhecida (LIST_VIEWPORT).
+   * No modelo DESENHADO ela é do admin — ele pode ter feito o slot
+   * o dobro do tamanho, ou a metade.
+   *
+   * Paginar sempre por 132 px dava os dois erros de uma vez: num
+   * slot maior, o modal mostrava cinco linhas e um "‹ 1 / 3 ›" com
+   * meia caixa vazia embaixo; num slot menor, mandava pelo RCON
+   * linhas que ninguém veria — e o teto de 50 000 bytes é do frame
+   * inteiro.
+   *
+   * Ausente = vale a régua embutida, que é o que mantém funcionando
+   * quem chama isto de um teste.
+   */
+  readonly viewport?: Size;
 }
 
 /**
@@ -348,6 +369,7 @@ export function buildStoreScreen(options: BuildStoreScreenOptions): UiScreen {
         options.nameOf ?? ((shortname): string => shortname),
         options.vehicleSpace ?? null,
         options.bundleTemplate ?? null,
+        options.viewport,
       );
 }
 
@@ -680,6 +702,7 @@ function buildItemScreen(
   nameOf: NameResolver,
   vehicleSpace: boolean | null,
   bundleTemplate: UiScreen | null,
+  viewport: Size | undefined,
 ): UiScreen {
   // A página entra no id que VOLTA: o plugin compara com o que
   // pediu e descarta o que não bate — ver `screenId` em
@@ -809,7 +832,22 @@ function buildItemScreen(
       [SLOTS.pacoteLista]:
         lines.length === 0
           ? { hide: true }
-          : { children: listChildren(lines, offer.id, quantity, target.tab, page) },
+          : {
+              // ####  A ALTURA É A DO SLOT QUE O ADMIN DESENHOU  ####
+              //
+              // E não a régua embutida: num slot maior, paginar por
+              // 132 px deixava meia caixa vazia sob um "‹ 1 / 3 ›";
+              // num menor, mandava pelo RCON linhas que ninguém
+              // veria. Ver `viewport` em BuildStoreScreenOptions.
+              children: listChildren(
+                lines,
+                offer.id,
+                quantity,
+                target.tab,
+                page,
+                bundleListHeight(bundleTemplate, viewport),
+              ),
+            },
       [SLOTS.pacoteTotal]: { text: formatNumber(total), color: canBuy ? C.amber : C.rust },
       [SLOTS.pacoteSaldo]: noSpace
         ? { text: 'Sem espaço aqui — vá para um lugar aberto', color: C.rust }
@@ -1251,16 +1289,17 @@ function listChildren(
   quantity: number,
   tab: StoreTab,
   page: number,
+  height = LIST_VIEWPORT,
 ): UiElement[] {
   // Cabendo inteira, ela ocupa a área inteira: nada de gastar uma
   // linha com um "1 / 1".
-  const whole = paginateRows(rows, LIST_VIEWPORT, page);
+  const whole = paginateRows(rows, height, page);
 
   if (whole.pages === 1) {
-    return itemRows(whole.rows, LIST_VIEWPORT, 'oz');
+    return itemRows(whole.rows, height, 'oz');
   }
 
-  const viewport = LIST_VIEWPORT - LIST_LINE;
+  const viewport = height - LIST_LINE;
   const slice = paginateRows(rows, viewport, page);
 
   return [
@@ -1270,7 +1309,7 @@ function listChildren(
       rect: {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 0, y: -LIST_VIEWPORT },
+        offsetMin: { x: 0, y: -height },
         offsetMax: { x: 0, y: -viewport },
       },
       page: slice.page,
@@ -1280,6 +1319,28 @@ function listChildren(
       kind: 'modal.open',
     }),
   ];
+}
+
+/**
+ * A altura do slot da lista no modelo desenhado.
+ *
+ * `null` em qualquer ponto da cadeia devolve a régua embutida: um
+ * documento sem o slot (alguém o apagou no editor) não tem onde a
+ * lista ser derramada de qualquer jeito, e um modal sem `viewport`
+ * é o caso de quem chama isto de um teste.
+ */
+function bundleListHeight(template: UiScreen | null, viewport: Size | undefined): number {
+  if (template === null || viewport === undefined) {
+    return LIST_VIEWPORT;
+  }
+
+  const box = measureSlot(template, SLOTS.pacoteLista, viewport);
+
+  // Altura não-positiva é um estado legítimo do modelo (os offsets
+  // se cruzaram no editor). Paginar por ela daria zero linha por
+  // página para sempre — a régua embutida ao menos mostra alguma
+  // coisa, e o desenho torto é visível.
+  return box === null || box.height < LIST_LINE ? LIST_VIEWPORT : box.height;
 }
 
 /** Só os ITENS, com o ícone de cada um. */
