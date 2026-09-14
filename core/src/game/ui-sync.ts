@@ -39,6 +39,8 @@
 //  tem teste.
 // ============================================================
 
+import { createHash } from 'node:crypto';
+
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { Logger } from '../logger.js';
 import { applyHidden, type UiDocument } from '../types/ui-document.js';
@@ -59,6 +61,7 @@ import {
   UI_BALANCE_MARKER,
   UI_BUY_MARKER,
   UI_DOC_MAX_BYTES,
+  encodeUiScreenUnchanged,
   UI_REQUEST_MARKER,
   type UiDocumentPayload,
   type UiScreenBundle,
@@ -178,6 +181,15 @@ export interface UiSyncDeps {
     readonly document: UiDocument;
     readonly screenId: string;
     readonly steamId: string | undefined;
+    /**
+     * O relógio da tela, e não um clique.
+     *
+     * Quem monta a tela usa isto para pular o que é caro: a de
+     * missões vai ao RCON buscar o contador quentinho quando
+     * alguém ABRE a tela, e fazer isso a cada volta do relógio
+     * seria pagar o preço de abrir sem ninguém ter aberto nada.
+     */
+    readonly refresh?: boolean;
   }) => Promise<UiScreenBundle | null>;
   /**
    * O clique de COMPRAR ou RESGATAR, já autenticado pelo segredo.
@@ -245,6 +257,14 @@ export class UiSync {
 
   /** id do servidor -> o timer de debounce dele. */
   readonly #timers = new Map<string, NodeJS.Timeout>();
+
+  /**
+   * (servidor, jogador, tela) -> a digital do que foi servido.
+   *
+   * É o que permite responder "nada mudou" a um relógio. Ver
+   * `#remember`.
+   */
+  readonly #lastServed = new Map<string, string>();
   /** id do servidor -> há um envio em voo? Um por vez. */
   readonly #running = new Set<string>();
 
@@ -729,6 +749,7 @@ export class UiSync {
       readonly documentId: string;
       readonly screenId: string;
       readonly steamId?: string;
+      readonly refresh?: boolean;
     },
   ): Promise<void> {
     const context = this.#deps.servers.contextOf(serverId);
@@ -785,6 +806,7 @@ export class UiSync {
           document,
           screenId: request.screenId,
           steamId: request.steamId,
+          ...(request.refresh === true ? { refresh: true } : {}),
         });
       } catch (error) {
         // Falhar ao gerar não pode virar espera eterna: cai para o
@@ -815,6 +837,31 @@ export class UiSync {
       return;
     }
 
+    // ####  O RELÓGIO NÃO REDESENHA O QUE NÃO MUDOU  ####
+    //
+    // Ver `UiScreenUnchangedPayload`. A digital é do DESENHO — o
+    // CUI e os updates —, e não do bundle inteiro: o resto dele
+    // (id, nome, tabela de ações) é igual a cada volta e não muda
+    // um pixel na tela de ninguém.
+    const key = screenKey(serverId, request);
+    const fingerprint = fingerprintOf(screen);
+
+    if (request.refresh === true && this.#lastServed.get(key) === fingerprint) {
+      await context.rcon.send(
+        buildUiScreenCommand(
+          encodeUiScreenUnchanged({
+            requestId: request.requestId,
+            documentId: request.documentId,
+            unchanged: true,
+          }),
+        ),
+      );
+
+      return;
+    }
+
+    this.#remember(key, fingerprint);
+
     await context.rcon.send(
       buildUiScreenCommand(
         encodeUiScreenPayload({
@@ -830,6 +877,66 @@ export class UiSync {
       'tela servida',
     );
   }
+
+  /**
+   * Guarda a digital da última tela servida àquele jogador.
+   *
+   * ####  O MAPA TEM TETO, E ELE É PEQUENO DE PROPÓSITO  ####
+   *
+   * Uma entrada por (servidor, jogador, tela) nunca é apagada por
+   * um evento — o plugin não avisa quando o jogador fecha o menu, e
+   * inventar um aviso para isso seria protocolo novo para um mapa
+   * de strings. Com teto, o mais antigo sai quando o próximo entra,
+   * e o pior que acontece é uma tela ser mandada inteira uma vez a
+   * mais do que precisava.
+   */
+  #remember(key: string, fingerprint: string): void {
+    // A reinserção põe a chave no fim da ordem do `Map`, que é a de
+    // inserção — é o que torna o `next()` abaixo o mais ANTIGO, e
+    // não um qualquer.
+    this.#lastServed.delete(key);
+    this.#lastServed.set(key, fingerprint);
+
+    while (this.#lastServed.size > LAST_SERVED_LIMIT) {
+      const oldest = this.#lastServed.keys().next();
+
+      if (oldest.done === true) {
+        return;
+      }
+
+      this.#lastServed.delete(oldest.value);
+    }
+  }
+}
+
+/**
+ * Quantas digitais de tela ficam guardadas.
+ *
+ * Duzentas telas em memória são alguns kilobytes, e um servidor de
+ * 200 jogadores com o menu aberto ao mesmo tempo não existe.
+ */
+const LAST_SERVED_LIMIT = 200;
+
+/**
+ * A chave da digital.
+ *
+ * Sem `steamId` ela seria por SERVIDOR, e a tela de um jogador
+ * calaria a do outro — as duas dizem coisas diferentes sobre
+ * pessoas diferentes. Pedido sem `steamId` cai num balde só, que é
+ * o que ele merece: não há para quem repetir.
+ */
+function screenKey(
+  serverId: string,
+  request: { readonly screenId: string; readonly steamId?: string },
+): string {
+  return `${serverId}:${request.steamId ?? '-'}:${request.screenId}`;
+}
+
+/** A digital do DESENHO daquela tela. */
+function fingerprintOf(screen: UiScreenBundle): string {
+  return createHash('sha1')
+    .update(JSON.stringify({ cui: screen.cui, updates: screen.updates }))
+    .digest('hex');
 }
 
 /**

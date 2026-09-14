@@ -1255,6 +1255,56 @@ manda um `#OZUIREQ#` com `screenId = tela-quest:npc:<npcId>`, pelo caminho que o
 tem transporte próprio, não tem cache próprio, não tem tratamento de erro
 próprio: ela é uma tela do menu como qualquer outra, com um endereço diferente.
 
+### 8.7 A tela de missões tem RELÓGIO — a barra anda com o menu aberto
+
+Acrescentado em **14/09/2026**, no mesmo dia em que o contador de tempo online
+passou a andar (§5.7). O dono, com a missão aceita e o menu aberto:
+
+> "o progress bar tem que correr tá"
+
+Ele estava certo: o número andava no banco e a tela ficava parada. Uma tela é
+desenhada quando o jogador chega nela e não se mexe até ele clicar em outra
+coisa — e numa que mostra "47/90 minutos online", isso é um contador congelado na
+frente de quem está justamente esperando ele subir.
+
+#### Quem repete é o PLUGIN
+
+O agente não sabe quem está com o menu aberto, em que tela, nem se há um modal
+por cima. Um empurrão daqui chegaria para quem fechou o menu há dez minutos.
+
+Então a tela gerada carrega `refreshSeconds` (10, em `QUESTS_REFRESH_SECONDS`), e
+é o `OrigemZUI` que agenda a próxima volta ao desenhá-la. Ele **só pede** — nunca
+desenha por conta própria — e desiste em três casos:
+
+| Situação | O que ele faz |
+|---|---|
+| o jogador navegou para outra tela | para: quem desenhou a nova já agendou o relógio dela |
+| há um modal por cima | espera a próxima volta — redesenhar a página **fecha** o modal |
+| já há um pedido em voo | espera a próxima volta |
+
+O pedido do relógio é **silencioso**: sem o aviso de "carregando", que piscando de
+dez em dez segundos seria pior que o número congelado.
+
+#### E ele quase não custa nada
+
+Duas contenções, e as duas importam porque isto roda por jogador com o menu
+aberto, seis vezes por minuto:
+
+1. **Nada mudou, nada é redesenhado.** O agente guarda a digital do desenho que
+   serviu àquele jogador naquela tela; se a volta seguinte produz a mesma, a
+   resposta é `{"unchanged":true}` — cerca de 100 bytes contra os ~47 KB da tela
+   inteira, e o conteúdo do slot não é destruído nem recriado. Só um pedido
+   marcado com `refresh` recebe essa resposta: num clique o plugin não tem
+   desenho nenhum para manter, e mandá-la deixaria o slot vazio para sempre.
+2. **O relógio não vai ao RCON.** Abrir a tela dispara um `flush` do plugin para
+   trazer o contador quentinho (§13); fazer isso a cada volta seria pagar o preço
+   de abrir a tela sem ninguém ter aberto nada. O lote do coletor já traz o
+   número, atrasado no máximo por um `flushSeconds`.
+
+O campo é aditivo nos dois sentidos: um plugin anterior a esta data ignora o
+`refreshSeconds` que não conhece, e um agente anterior não manda a chave — nos
+dois casos a tela volta a ser o que era, parada.
+
 ---
 
 ## 9 — O caminho da escrita, inteiro
