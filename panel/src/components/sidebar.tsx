@@ -36,6 +36,7 @@ import {
   Package,
   Package2,
   Puzzle,
+  Scale,
   ScrollText,
   Server,
   Settings,
@@ -177,6 +178,16 @@ const NAV: readonly NavItem[] = [
     label: 'Missões',
     hint: 'O que os jogadores têm para fazer, o que ganham, e como está o progresso de cada um',
     Icon: ScrollText,
+  },
+  // As regras são de REDE, com exceção por servidor — o mesmo
+  // desenho do kit e do ranking. Elas ficam antes das duas de
+  // baixo porque são CONTEÚDO do menu, e não o desenho dele: o
+  // texto se escreve aqui, e onde ele aparece é com a Interface.
+  {
+    href: '/regras/',
+    label: 'Regras',
+    hint: 'O que vale no servidor, do jeito que o jogador lê na aba REGRAS do menu',
+    Icon: Scale,
   },
   // As duas de baixo desenham na tela de quem joga, e é por isso
   // que ficam lado a lado. O que as separa é quem pede: o menu o

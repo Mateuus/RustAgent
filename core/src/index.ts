@@ -39,6 +39,7 @@ import { CustomItemsRepository } from './db/custom-items-repository.js';
 import { LootRulesRepository } from './db/loot-rules-repository.js';
 import { ItemsRepository } from './db/items-repository.js';
 import { RankingsRepository } from './db/rankings-repository.js';
+import { RulesRepository } from './db/rules-repository.js';
 import { StatEventsConsumer } from './rankings/stat-events.js';
 import { StatsCollector } from './rankings/collector.js';
 import {
@@ -115,6 +116,7 @@ import {
   type HomeScreenProvider,
 } from './game/ui-home-screen.js';
 import { createRankingScreenProvider } from './game/ui-ranking-screen.js';
+import { createRulesScreenProvider } from './game/ui-rules-screen.js';
 import { buildMainMenu } from './game/ui-preset-main-menu.js';
 import {
   buildResult,
@@ -731,6 +733,7 @@ async function main(): Promise<void> {
   const spawnStatusRepository = new SpawnStatusRepository(db);
   const playerTimersRepository = new PlayerTimersRepository(db);
   const kitsRepository = new KitsRepository(db);
+  const rulesRepository = new RulesRepository(db);
 
   // Ele só nasce lá embaixo, junto com os clientes do site — e a
   // `VipList` precisa existir ANTES deles. O closure resolve a
@@ -1539,6 +1542,17 @@ async function main(): Promise<void> {
     inviteOf: (serverId) => supervisor.configOf(serverId)?.discord ?? '',
   });
 
+  // ####  E A PÁGINA REGRAS, QUE VAI AO BANCO E É SÍNCRONA  ####
+  //
+  // O texto é do painel, e quem resolve se aquele servidor lê as
+  // regras da rede ou as próprias é o repositório (`viewFor`). A
+  // leitura é SQLite local: não há promessa nenhuma no caminho, e
+  // por isso este provedor é o único do grupo que não é `async`.
+  const rulesScreens = createRulesScreenProvider({
+    viewOf: (serverId) => rulesRepository.viewFor(serverId, { onlyEnabled: true }),
+    logger,
+  });
+
   uiSync = new UiSync({
     repository: uiDocuments,
     servers: supervisor,
@@ -1628,6 +1642,19 @@ async function main(): Promise<void> {
 
         if (fromDiscord !== null) {
           return fromDiscord;
+        }
+
+        // ####  E A PÁGINA REGRAS  ####
+        //
+        // Id exato (`tela-regras`) mais a família da seção e da
+        // página (`tela-regras:12:1`), e por isso ela é perguntada
+        // pelo prefixo. Nunca devolve `null` para um endereço seu:
+        // cair no caminho normal serviria o ESQUELETO gravado — a
+        // coluna transparente e vazia —, e ele não é volátil.
+        const fromRules = rulesScreens(input);
+
+        if (fromRules !== null) {
+          return fromRules;
         }
 
         // ####  E, POR ÚLTIMO, O CALENDÁRIO  ####
@@ -3296,6 +3323,10 @@ async function main(): Promise<void> {
       servers: { ids: () => supervisor.ids() },
       customItems: customItemsRepository,
     },
+    // As regras da aba REGRAS. O supervisor entra para a rota poder
+    // recusar um escopo inventado: uma secao gravada num servidor
+    // que nao existe ficaria invisivel no painel e no jogo.
+    rules: { rules: rulesRepository, supervisor },
     // As missões. Como o ranking, elas respondem do BANCO: o
     // catálogo, o progresso e a auditoria continuam de pé com os
     // servidores parados — que é justamente quando se cadastra uma

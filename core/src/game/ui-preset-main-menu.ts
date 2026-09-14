@@ -59,9 +59,12 @@ import {
   DISCORD_COMMAND,
   DISCORD_SCREEN_ID,
 } from './ui-discord-screen.js';
-import { buildHomeScreen, emptyHomeView } from './ui-home-screen.js';
+import { CALENDAR_SCREEN_ID } from './ui-calendar-screen.js';
+import { buildHomeScreen, emptyHomeView, HOME_SCREEN_ID } from './ui-home-screen.js';
+import { KITS_SCREEN_ID } from './ui-kits-screen.js';
 import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
+import { buildRulesScreen, emptyRulesView, RULES_COMMAND, RULES_SCREEN_ID } from './ui-rules-screen.js';
 import {
   BUNDLE_TEMPLATE_ID,
   BUY_TEMPLATE_ID,
@@ -330,6 +333,7 @@ const NAV: readonly NavEntry[] = [
 /** As entradas cuja página o AGENTE monta. Ver `buildMainMenu`. */
 const RANKING_NAV_ID = 'ranking';
 const QUESTS_NAV_ID = 'missoes';
+const RULES_NAV_ID = 'regras';
 
 /**
  * O comando que abre o menu JÁ nas missões.
@@ -1115,6 +1119,26 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
         };
       }
 
+      // ####  A PÁGINA REGRAS TAMBÉM É MONTADA  ####
+      //
+      // O desenho é da rede; o TEXTO é do banco daquele servidor —
+      // igual ao convite do Discord, e pelo mesmo motivo: regras
+      // escritas dentro do documento obrigariam um menu por
+      // servidor. Ver game/ui-rules-screen.ts.
+      //
+      // `skeleton: true` põe a coluna e a caixa das regras no
+      // desenho, transparentes: `fillTemplate` preenche o que
+      // existe e não cria o que falta, e sem elas o admin não teria
+      // o que mover no editor. `generated: true` é o de sempre —
+      // sem a marca o plugin desenha o esqueleto e nunca pede o
+      // texto, e a aba abriria vazia para sempre.
+      if (entry.id === RULES_NAV_ID) {
+        return {
+          ...buildRulesScreen({ view: emptyRulesView(), skeleton: true }),
+          generated: true,
+        };
+      }
+
       return {
         id: SCREEN_ID(entry.id),
         name: entry.label,
@@ -1192,9 +1216,24 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     // quem digita no chat. O botão do cabeçalho não depende dela —
     // ele navega direto —, mas o jogador que aprendeu `/discord`
     // em outro servidor depende.
+    // ####  E OS OUTROS QUATRO SÃO A MESMA IDEIA  ####
+    //
+    // Pedido do dono em 14/09/2026: "/info, /kits, /discord e
+    // /wipe — cada comando deve abrir corretamente sua respectiva
+    // informação". Nenhum deles é um segundo menu: são endereços
+    // dentro deste, e por isso não custam um byte a mais na carga.
+    //
+    // `/info` abre a HOME, que é onde a informação do servidor já
+    // mora — o pódio, a oferta em destaque, o próximo wipe e as
+    // missões de quem abriu. `/wipe` abre o CALENDÁRIO, que é a
+    // tela que responde "quando vira".
     shortcuts: [
       { command: QUESTS_COMMAND, screenId: QUESTS_SCREEN_ID },
       { command: DISCORD_COMMAND, screenId: DISCORD_SCREEN_ID },
+      { command: RULES_COMMAND, screenId: RULES_SCREEN_ID },
+      { command: 'info', screenId: HOME_SCREEN_ID },
+      { command: 'kits', screenId: KITS_SCREEN_ID },
+      { command: 'wipe', screenId: CALENDAR_SCREEN_ID },
     ],
     screens,
   };
