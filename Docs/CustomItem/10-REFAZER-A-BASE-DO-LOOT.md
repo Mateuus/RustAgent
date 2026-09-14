@@ -221,9 +221,57 @@ merge contra os 111 prefabs e 6.824 entradas do arquivo real do
   diz o que vai acontecer, o backup é feito antes, e o relatório diz o
   que aconteceu.
 - **Mexer na `Blacklist.json`.** Ver §4.
-- **Rodar contra um servidor de verdade.** O `server01` tem o
-  BetterLoot instalado e desligado (`07 §4`), e subir o jogo para
-  testar mexeria no mundo dele. A premissa foi conferida no FONTE do
-  plugin (`:767`, `:1834`, `:1934`, `:2040`) e a orquestração, nos
-  testes. **Vale rodar uma vez com o jogo no ar antes de usar em
-  produção.**
+---
+
+## 8 — A medição ao vivo
+
+Rodado no `server01` em 13/09/2026, com o jogo no ar e o BetterLoot
+4.4.0 carregado. A configuração foi estropiada de propósito antes,
+com os três estragos dos prints.
+
+| o que foi medido | resultado |
+| --- | --- |
+| tempo da operação inteira | **8 s** (dois reloads do plugin inclusos) |
+| caixas na base nova | 111, com 6.824 itens do jogo |
+| `crate_tools`, esvaziada à mão | voltou com os **39 itens**, e com os dois perfis ligados nela |
+| troféu da casa na `crate_elite` (`trophy{1}`) | preservado, com a skin |
+| `smgbody`, que eu tinha posto em 50-99 | voltou a **1-1**, o do jogo (§3.1) |
+| `Enable Loot Pool Locking` que eu liguei | preservado |
+| perfil órfão (`PerfilQueNaoExiste`) | denunciado no relatório |
+| segunda passada | **arquivo idêntico, byte a byte** |
+| reset (`factory`) | 111 caixas do jogo, zero da casa, `LootGroups` com só o `example_group` |
+
+O console do servidor fecha a conta:
+
+```
+[BetterLoot] Using '109' active of '111' supported container types   <- antes
+[BetterLoot] Using '111' active of '111' supported container types   <- depois
+[BetterLoot] Populated (6355) supported loot containers.
+```
+
+Nenhum erro, e o plugin repovoou os 6.355 contêineres do mundo com a
+base nova.
+
+### 8.1 As duas caixas que o teste revelou
+
+As únicas duas adotadas de 111 foram `bradley_crate` e `heli_crate` —
+e não por acaso: o plugin as gera **sempre** desligadas.
+
+```csharp
+container.Enabled = !lootPrefab.Contains(bradleyCrate, ...) &&
+                    !lootPrefab.Contains(heliCrate, ...);
+```
+
+"Adotar todas" as liga junto, que é o que o pedido descreve — nada
+pode ficar preso em "JOGO". Mas é uma mudança de comportamento no loot
+de evento, e por isso a tela avisa em amarelo, ao lado do
+interruptor: quem quiser o loot do jogo no Bradley e no heli desliga as
+duas na lista depois.
+
+---
+
+## 9 — O que NÃO foi feito, e por quê (continuação)
+
+- **Adoção seletiva por natureza de caixa** ("adotar tudo menos as de
+  evento"). São duas caixas em 111, e um interruptor a mais na
+  confirmação para um caso que se resolve com dois cliques na lista.

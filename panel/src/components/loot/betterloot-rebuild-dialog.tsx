@@ -172,6 +172,19 @@ export function BetterLootRebuildDialog({
                 Desligado, a caixa que o plugin cadastrou como &quot;jogo&quot; continua fora do
                 painel.
               </p>
+              {/* ####  AS DUAS DE EVENTO SÃO O CASO A AVISAR  ####
+
+                  O BetterLoot gera a caixa do Bradley e a do heli
+                  SEMPRE desligadas (`container.Enabled = !contains
+                  (bradley_crate) && !contains(heli_crate)`), e
+                  "adotar todas" as liga junto. Medido no server01:
+                  foram as duas únicas adotadas de 111. Quem não
+                  quiser o BetterLoot no loot de evento desliga as
+                  duas depois, na lista. */}
+              <p className="mt-1 text-[10px] leading-snug text-amber">
+                Isto inclui a caixa do Bradley e a do helicóptero, que o plugin sempre gera
+                desligadas. Para deixar o loot delas com o jogo, desligue as duas na lista depois.
+              </p>
             </div>
             <Toggle
               on={adopt}
