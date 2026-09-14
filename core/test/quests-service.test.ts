@@ -38,6 +38,7 @@ import {
   humanDelay,
   nextReset,
   QuestsService,
+  type QuestPlaytimeSource,
   type QuestsServiceDeps,
   type QuestStatsSource,
 } from '../src/quests/service.js';
@@ -67,6 +68,24 @@ class FakeStats implements QuestStatsSource {
   }
 }
 
+/**
+ * Um `playtime` que o teste controla.
+ *
+ * Em produção quem o satisfaz é o `player_servers`, com a sessão
+ * aberta somada — ver `PlayersRepository.onlineSecondsOf`.
+ */
+class FakePlaytime implements QuestPlaytimeSource {
+  readonly seconds = new Map<string, number>();
+
+  secondsOf(serverId: string, steamId: string): number {
+    return this.seconds.get(`${serverId}:${steamId}`) ?? 0;
+  }
+
+  set(value: number, serverId = 'pvp1', steamId = FULANO): void {
+    this.seconds.set(`${serverId}:${steamId}`, value);
+  }
+}
+
 /** Um entregador que registra o que lhe pediram e obedece ao roteiro. */
 class FakeRewards {
   readonly calls: DeliverRewardsInput[] = [];
@@ -84,6 +103,7 @@ interface Harness {
   readonly db: AgentDatabase;
   readonly repository: QuestsRepository;
   readonly stats: FakeStats;
+  readonly playtime: FakePlaytime;
   readonly rewards: FakeRewards;
   service: QuestsService;
   now: number;
@@ -105,6 +125,7 @@ function quest(overrides: Partial<QuestDraft> = {}): QuestInput {
 function build(options: {
   readonly permissions?: { can: () => boolean | Promise<boolean> };
   readonly stats?: QuestStatsSource;
+  readonly playtime?: QuestPlaytimeSource | undefined;
   readonly rewards?: FakeRewards | undefined;
   readonly items?: { displayNameOf: (shortname: string) => string | null };
 } = {}): QuestsService {
@@ -112,6 +133,7 @@ function build(options: {
     repository: h.repository,
     logger,
     stats: options.stats ?? h.stats,
+    playtime: 'playtime' in options ? options.playtime : h.playtime,
     rewards: 'rewards' in options ? (options.rewards as never) : (h.rewards as never),
     permissions: options.permissions,
     items: options.items,
@@ -145,6 +167,7 @@ beforeEach(() => {
     db,
     repository: new QuestsRepository(db),
     stats: new FakeStats(),
+    playtime: new FakePlaytime(),
     rewards: new FakeRewards(),
     service: undefined as never,
     now: NOW,
@@ -302,25 +325,160 @@ describe('os objetivos que o plugin não conta', () => {
   });
 
   it('`playtime` converte segundos em minutos num lugar só', async () => {
-    h.stats.set('time.played', 3600);
+    // Ele já estava online há uma hora QUANDO ACEITOU. Esta hora é
+    // a linha de partida, e não progresso.
+    h.playtime.set(3600);
     h.repository.create(
       'presenca',
       quest({ objectives: [{ seq: 0, kind: 'playtime', amount: 60 }] }),
       NOW,
     );
 
-    const id = await accept('presenca');
+    await accept('presenca');
 
-    // `time.played` é em SEGUNDOS (rankings/collector.ts); o
-    // objetivo é em minutos, que é o que o admin digita no painel.
-    h.stats.set('time.played', 3600 + 1800);
+    // A fonte é em SEGUNDOS; o objetivo é em minutos, que é o que o
+    // admin digita no painel.
+    h.playtime.set(3600 + 1800);
     expect(h.service.liveFor({ serverId: 'pvp1', steamId: FULANO })[0]?.objectives[0]?.have).toBe(30);
+  });
 
-    h.stats.set('time.played', 3600 + 3600);
-    h.service.liveFor({ serverId: 'pvp1', steamId: FULANO });
-    h.service.reportCompletion({ playerQuestId: id });
+  it('o contador anda com a sessão ABERTA, sem ninguém empurrar', async () => {
+    // ####  O DEFEITO QUE ESTE TESTE FIXA  ####
+    //
+    // Antes de 14/09/2026 o `playtime` lia `time.played` do
+    // ranking, que é a diferença do `played_seconds` entre duas
+    // rodadas — e aquela coluna só cresce quando a sessão FECHA. O
+    // jogador passava a sessão inteira em 0/90 e o número só
+    // pulava depois de ele desconectar.
+    h.repository.create(
+      'vigilia',
+      quest({ objectives: [{ seq: 0, kind: 'playtime', amount: 90 }] }),
+      NOW,
+    );
+
+    await accept('vigilia');
+
+    for (const [minutes, expected] of [
+      [1, 1],
+      [2, 2],
+      [45, 45],
+    ] as const) {
+      h.playtime.set(minutes * 60);
+      h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+      expect(h.service.liveFor({ serverId: 'pvp1', steamId: FULANO })[0]?.objectives[0]?.have).toBe(
+        expected,
+      );
+    }
+  });
+
+  it('o recálculo CONCLUI a missão de tempo online, e avisa', async () => {
+    // ####  O SEGUNDO DEFEITO, E O PIOR DELES  ####
+    //
+    // O `#completeIfDone` só era chamado pelo push e pelo lote do
+    // plugin — e o plugin não conta `playtime`. O número chegava a
+    // 90/90 e a tentativa ficava `active` para sempre: sem aviso no
+    // chat, sem resgate.
+    const avisos: { readonly questId: string; readonly title: string }[] = [];
+
+    h.service = new QuestsService({
+      repository: h.repository,
+      logger,
+      stats: h.stats,
+      playtime: h.playtime,
+      rewards: h.rewards as never,
+      onCompleted: (input) => avisos.push({ questId: input.questId, title: input.title }),
+      now: () => h.now,
+    });
+
+    h.repository.create(
+      'vigilia',
+      quest({ title: 'Turno da Vigília', objectives: [{ seq: 0, kind: 'playtime', amount: 90 }] }),
+      NOW,
+    );
+
+    const id = await accept('vigilia');
+
+    h.playtime.set(90 * 60);
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
 
     expect(h.repository.attempt(id)?.status).toBe('completed');
+    expect(avisos).toEqual([{ questId: 'vigilia', title: 'Turno da Vigília' }]);
+
+    // E uma conclusão, uma linha: o ciclo do coletor chama isto a
+    // cada 15 s, e um aviso por rodada encheria o chat do jogador.
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+    expect(avisos).toHaveLength(1);
+  });
+
+  it('o tempo já contado sobrevive à queda do total', async () => {
+    // Entre a saída do jogador e a consolidação da sessão, a fonte
+    // pode devolver um número MENOR do que o que já está gravado —
+    // e um reset de admin no ranking faz o mesmo com o `metric`.
+    // "Reconectar não apaga o tempo já contabilizado" é pedido do
+    // dono; aqui ele vira regra.
+    h.repository.create(
+      'vigilia',
+      quest({ objectives: [{ seq: 0, kind: 'playtime', amount: 90 }] }),
+      NOW,
+    );
+
+    await accept('vigilia');
+
+    h.playtime.set(40 * 60);
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+    h.playtime.set(0);
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(h.service.liveFor({ serverId: 'pvp1', steamId: FULANO })[0]?.objectives[0]?.have).toBe(40);
+
+    // E volta a andar de onde parou quando a fonte se recompõe.
+    h.playtime.set(41 * 60);
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(h.service.liveFor({ serverId: 'pvp1', steamId: FULANO })[0]?.objectives[0]?.have).toBe(41);
+  });
+
+  it('a missão que repete começa a contar do zero a cada tentativa', async () => {
+    // O tempo online é um total que nunca zera. Quem garante que a
+    // diária de amanhã não nasce concluída é o baseline da NOVA
+    // tentativa — e é por isso que ele é lido no aceite, e não uma
+    // vez só por jogador.
+    h.repository.create(
+      'vigilia',
+      quest({
+        repeatMode: 'cooldown',
+        cooldownSeconds: 3600,
+        objectives: [{ seq: 0, kind: 'playtime', amount: 90 }],
+      }),
+      NOW,
+    );
+
+    h.playtime.set(10 * 3600);
+
+    const primeira = await accept('vigilia');
+
+    h.playtime.set(10 * 3600 + 90 * 60);
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(h.repository.attempt(primeira)?.status).toBe('completed');
+
+    await h.service.claim({ playerQuestId: primeira });
+
+    h.now = NOW + 3_600_001;
+
+    const segunda = await accept('vigilia');
+
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(h.repository.attempt(segunda)?.progress[0] ?? 0).toBe(0);
+
+    // E ela anda como a primeira, dali para a frente.
+    h.playtime.set(10 * 3600 + 90 * 60 + 5 * 60);
+    h.service.refreshDerived({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(h.repository.attempt(segunda)?.progress[0]).toBe(5);
   });
 
   it('sem `stats`, os derivados ficam parados em vez de derrubar a leitura', async () => {
@@ -986,8 +1144,12 @@ describe('a auditoria que o serviço escreve', () => {
 
     const id = await accept('cacador');
 
-    h.stats.set('pvp.kills', 5);
-    h.service.liveFor({ serverId: 'pvp1', steamId: FULANO });
+    // O número entra direto, e não pelo recálculo: desde 14/09/2026
+    // o próprio recálculo conclui o que fecha, e a tentativa já
+    // chegaria `completed` ao push. O que se prova aqui é outra
+    // coisa — que QUANDO é o push que conclui, o `eventId` dele vai
+    // para a auditoria.
+    h.repository.setProgress(id, 0, 5, NOW);
 
     expect(h.service.reportCompletion({ playerQuestId: id, eventId: 'pvp1-42' })).toBe(true);
 
