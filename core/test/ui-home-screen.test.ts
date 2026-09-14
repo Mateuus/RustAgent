@@ -356,18 +356,42 @@ describe('a HOME dentro do menu', () => {
    * O terceiro passo não era economia: era conserto. Ver
    * `CARD_ICON` em ui-home-screen.ts.
    *
-   * ####  E O QUE CORTAR SE ELA SOAR  ####
+   * ####  14/09/2026, DEPOIS: A BORDA DOS CARTÕES  ####
    *
-   * As linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
-   * "CALENDÁRIO DO SERVIDOR") são texto fixo: enfeitam e não
-   * informam. Valem ~780 bytes e saem sem perder nada. As do
-   * ranking e das missões NÃO — a primeira diz qual ranking, a
-   * segunda quantas missões, e as duas mudam com o estado.
+   * 44.104 bytes, 88%. O CUI não tem borda — ela custa um painel
+   * por cartão, e são cinco. Pedida pelo dono depois de ver a tela
+   * no jogo, e com o custo autorizado.
+   *
+   * ####  ESTA É A TERCEIRA VEZ QUE A TRAVA SOBE. O LIMITE  ####
+   *
+   * O critério que venho usando é: ela existe para pegar
+   * crescimento que ESCALA COM OS DADOS, e nada do que subiu até
+   * aqui escala — são elementos de ESQUELETO, o mesmo número com um
+   * jogador ou com quatro mil.
+   *
+   * O critério continua valendo, mas ele tem um fim. Restam 5.896
+   * bytes, e a partir daqui:
+   *
+   *   - **nenhum elemento novo entra sem tirar outro.** A tela está
+   *     desenhada; o que vier agora é troca, não acréscimo;
+   *   - se um dia for preciso mesmo assim, o que sai primeiro são
+   *     as linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
+   *     "CALENDÁRIO DO SERVIDOR"): são texto fixo, enfeitam e não
+   *     informam, e valem ~780 bytes. As do ranking e das missões
+   *     NÃO — a primeira diz qual ranking, a segunda quantas
+   *     missões, e as duas mudam com o estado;
+   *   - depois delas, a borda. Ela é a peça mais cara da tela
+   *     (~1.950 bytes) e a única puramente decorativa.
+   *
+   * E se algum dia o crescimento vier de DADOS — uma lista a mais,
+   * um cartão a mais —, a trava não sobe: encurta-se a lista. Essa
+   * regra não tem exceção, porque o pior caso do teste é sempre
+   * menor que o pior caso do mundo.
    */
   it('a carga inicial fica com folga confortável', () => {
     const bytes = encodeUiDocPayload({ documents: [toDocumentPayload(buildMainMenu())] }).length;
 
-    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.85);
+    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.9);
   });
 
   it('nenhuma ação gravada tem `:` no destino', () => {

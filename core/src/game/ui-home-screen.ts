@@ -707,23 +707,36 @@ function plural(count: number, one: string, many: string): string {
 // ------------------------------------------------------------
 
 /**
- * Um cartão: painel em `--surface` sobre o fundo do conteúdo.
+ * Um cartão: `--surface` com uma borda de 1 px, sobre o `--bg` do
+ * conteúdo.
  *
- * ####  SEM A MOLDURA DE 1px, E DE PROPÓSITO  ####
+ * ####  A BORDA CUSTA UM ELEMENTO POR CARTÃO  ####
  *
- * O menu desenha borda com dois painéis (um na cor da borda, outro
- * 1px menor por cima) — o CUI não tem borda. São CINCO cartões
- * aqui, ou dez elementos só de moldura, e esta tela é a de ENTRADA:
- * ela viaja inteira na carga inicial, que tem teto de 50.000 bytes
- * (ver types/ui-transport.ts).
+ * O CUI não tem borda: ela se faz com dois painéis, um na cor da
+ * borda e outro 1 px menor por cima. São cinco cartões aqui, e esta
+ * é a tela de ENTRADA — ela viaja inteira na carga inicial, cujo
+ * teto é 50.000 bytes (ver types/ui-transport.ts).
  *
- * A grade da loja já resolve assim — `offerCard`, em
- * ui-store-screens.ts, é um painel só. O contraste entre
- * `--surface` e o `--bg` do conteúdo separa os cartões sem gastar
- * um elemento por linha.
+ * Por muito tempo ela ficou de fora por isso, e o contraste entre
+ * os tons fazia o trabalho sozinho. Deixou de fazer quando o
+ * interior da moldura era `--surface` — a mesma cor do cartão —, e
+ * aí a HOME virou um bloco único com texto espalhado.
+ *
+ * O conserto de verdade foi escurecer a moldura (ver o preset): é
+ * ele que devolve a separação, e não custa elemento nenhum. A borda
+ * vem POR CIMA disso, e é o que dá ao cartão o contorno nítido do
+ * conceito — o mesmo papel do `1px solid #343839` de lá.
+ *
+ * ####  OS FILHOS FICAM NO PAINEL DE DENTRO  ####
+ *
+ * Isso muda a hierarquia, e não quebra os slots: eles são
+ * procurados por SUFIXO do id, em qualquer profundidade. O
+ * `measureSlot` também desce a árvore inteira.
  */
 function card(id: string, rect: Rect, children: readonly UiElement[]): UiElement {
-  return panel(id, rect, C.surface, children);
+  return panel(id, rect, C.border, [
+    panel(`${id}-i`, fill(1, 1, 1, 1), C.surface, children),
+  ]);
 }
 
 /** Faixa horizontal com a margem interna do cartão. */
