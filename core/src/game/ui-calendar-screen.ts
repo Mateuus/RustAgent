@@ -109,7 +109,7 @@ import {
   itemRows,
   label,
   panel,
-  topBar,
+  titleBar,
   urlImage,
   type ContentRow,
   type Rect,
@@ -631,10 +631,8 @@ export function buildCalendarScreen(options: BuildCalendarScreenOptions): UiScre
   const { calendar } = options;
 
   const elements: UiElement[] = [
-    label('cal-titulo', 'CALENDÁRIO', topBar(Y.title), {
-      size: 20,
-      align: 'MiddleLeft',
-      font: 'RobotoCondensed-Bold.ttf',
+    ...titleBar('cal', 'CALENDÁRIO', {
+      subtitle: 'O ciclo de wipes, e o que cada reinício leva.',
     }),
 
     ...section('cal-s1', 'PRÓXIMO WIPE', COLUMN.leftMin, COLUMN.leftMax, Y.section),

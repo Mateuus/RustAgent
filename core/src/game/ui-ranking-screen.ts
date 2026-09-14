@@ -123,7 +123,7 @@ import {
   panel,
   rowsPager,
   textWidth,
-  topBar,
+  titleBar,
   type Rect,
 } from './ui-widgets.js';
 
@@ -946,11 +946,10 @@ export function buildRankingScreen(options: BuildRankingScreenOptions): UiScreen
   const left = hasColumn ? CONTENT_LEFT : 0;
 
   const elements: UiElement[] = [
-    label('rk-titulo', 'RANKING', topBar(Y.title), {
-      size: 20,
-      align: 'MiddleLeft',
-      font: 'RobotoCondensed-Bold.ttf',
-    }),
+    // Sem `subtitle`: o desta tela diz QUANDO a coleta rodou e
+    // quantos jogadores entraram, e isso é do conteúdo — ele mora à
+    // direita da coluna, junto da lista que descreve.
+    ...titleBar('rk', 'RANKING'),
   ];
 
   if (hasColumn) {

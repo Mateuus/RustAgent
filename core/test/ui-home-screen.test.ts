@@ -31,6 +31,7 @@ import {
   type HomeStoreOffer,
   type HomeView,
 } from '../src/game/ui-home-screen.js';
+import { CANVAS, measureElement, type Box } from '../src/game/ui-geometry.js';
 import { buildMainMenu } from '../src/game/ui-preset-main-menu.js';
 import {
   applyHidden,
@@ -154,7 +155,10 @@ describe('a HOME desenhada', () => {
     });
 
     expect(textOf(screen, HOME_SLOTS.offerName)).toBe('A loja ainda não tem oferta ligada.');
-    expect(textOf(screen, HOME_SLOTS.offerButton)).toBe('VER A LOJA');
+    // A seta vai DENTRO do texto: no conceito ela é um `<span>`
+    // vermelho à direita, e aqui seria um segundo elemento por
+    // cartão, numa tela que viaja inteira na carga inicial.
+    expect(textOf(screen, HOME_SLOTS.offerButton)).toBe('VER A LOJA   ›');
     // Um COMPRAR sobre coisa nenhuma é pior que um cartão honesto.
     expect(textOf(screen, HOME_SLOTS.offerPrice)).toBe('');
   });
@@ -168,7 +172,46 @@ describe('a HOME desenhada', () => {
   it('troca `{jogador}` pelo nome de quem abriu', () => {
     const screen = buildHomeScreen({ view: view({ player: 'Mateuus' }) });
 
-    expect(textOf(screen, 'hm-titulo')).toBe('BEM-VINDO, Mateuus');
+    // ####  O NOME TEM UMA LINHA SÓ PARA ELE  ####
+    //
+    // Ele e a saudação eram um texto único, e isso dava aos dois o
+    // mesmo peso — quem abre o menu não está lendo a saudação, está
+    // se reconhecendo nela. Separado, o nome fica no tamanho e na
+    // cor em que é a primeira coisa vista.
+    expect(textOf(screen, 'hm-ola')).toBe('BEM-VINDO DE VOLTA');
+    expect(textOf(screen, 'hm-titulo')).toBe('Mateuus');
+  });
+
+  // ####  O CAMINHO QUE IMPORTA É O DO MODELO  ####
+  //
+  // O teste acima mede o layout EMBUTIDO, e no jogo ele quase nunca
+  // roda: o preset gera a tela-home chamando este mesmo gerador, o
+  // resultado vai para o documento, e daí em diante ele volta como
+  // TEMPLATE — só os slots são preenchidos.
+  //
+  // O texto do banner não era slot. Ele ia para o documento com o
+  // `{jogador}` JÁ RESOLVIDO, e resolvido para vazio, porque no
+  // preset não há jogador: o que ficava gravado era "BEM-VINDO",
+  // sem variável, e não havia mais o que substituir.
+  //
+  // O nome de quem abria o menu NUNCA aparecia. Medido em
+  // 14/09/2026 percorrendo preset -> documento -> preenchimento.
+  it('o nome chega ao jogador pelo caminho do MODELO, que é o do jogo', () => {
+    const congelada = buildMainMenu().screens.find((screen) => screen.id === HOME_SCREEN_ID);
+
+    expect(congelada).toBeDefined();
+
+    if (congelada === undefined) {
+      return;
+    }
+
+    const vista = buildHomeScreen({
+      view: view({ player: 'Mateuus' }),
+      template: congelada,
+    });
+
+    expect(textOf(vista, 'hm-titulo')).toBe('Mateuus');
+    expect(textOf(vista, 'hm-ola')).toBe('BEM-VINDO DE VOLTA');
   });
 
   /**
@@ -176,10 +219,23 @@ describe('a HOME desenhada', () => {
    * antigo não manda o `steamId`. Sem este cuidado, o banner abria
    * com "BEM-VINDO," e a vírgula pendurada.
    */
-  it('sem nome, a variável sai junto com a vírgula', () => {
-    const screen = buildHomeScreen({ view: view({ player: '' }) });
+  it('sem nome, a saudação toma o lugar dele em vez de deixar um buraco', () => {
+    // A carga inicial vai ao servidor sem jogador nenhum, e plugin
+    // antigo não manda o `steamId`.
+    const congelada = buildMainMenu().screens.find((screen) => screen.id === HOME_SCREEN_ID);
 
-    expect(textOf(screen, 'hm-titulo')).toBe('BEM-VINDO');
+    expect(congelada).toBeDefined();
+
+    if (congelada === undefined) {
+      return;
+    }
+
+    const vista = buildHomeScreen({ view: view({ player: '' }), template: congelada });
+
+    expect(textOf(vista, 'hm-titulo')).toBe('BEM-VINDO');
+    // A linha de cima some inteira: uma linha em branco sobre outra
+    // é pior que uma linha só.
+    expect(find(vista, 'hm-ola')).toBeUndefined();
   });
 
   it('a variável vale em qualquer texto, e nas duas pontas', () => {
@@ -282,11 +338,73 @@ describe('a HOME dentro do menu', () => {
    * avisa antes. Uma tela a 98% passa hoje e estoura no dia em que
    * alguém acrescentar um cartão — e uma carga estourada não dá
    * erro no jogo: o menu não abre.
+   *
+   * ####  14/09/2026: O CABEÇALHO DO CONCEITO COUBE EM 85%  ####
+   *
+   * Os cartões ganharam ícone e linha de apoio, e o caminho até
+   * caber vale mais que o número final:
+   *
+   *   - FIEL ao protótipo (traço no canto, quadrado vazado,
+   *     símbolo, título, apoio e régua = 6 elementos por cartão):
+   *     **45.552 bytes, 91% do frame**. Passaria da trava;
+   *   - sem a régua (o respiro separa igual) e com o traço fundido
+   *     ao quadrado: 42.692, 85,4%. Ainda acima;
+   *   - com o símbolo trocado por ARTE — `image` em vez de
+   *     `panel`+`label` —: **42.368, 85%**. Coube, e de quebra o
+   *     ícone deixou de depender de um glifo que a
+   *     RobotoCondensed não tem.
+   *
+   * O terceiro passo não era economia: era conserto. Ver
+   * `CARD_ICON` em ui-home-screen.ts.
+   *
+   * ####  14/09/2026: A BORDA E A RÉGUA  ####
+   *
+   * 46.900 bytes, 94%. Os cartões ganharam borda (um painel cada,
+   * porque o CUI não tem borda) e a régua que fecha o cabeçalho
+   * (mais um cada). Oito elementos, pedidos depois de ver a tela no
+   * jogo e com o custo autorizado.
+   *
+   * ####  ONDE A GORDURA NÃO ESTÁ  ####
+   *
+   * Procurei antes de aceitar o número, e o palpite óbvio estava
+   * errado: os três MODELOS de modal da loja somam 13.031 bytes no
+   * documento, e cheguei a escrever uma poda para tirá-los do
+   * envio.
+   *
+   * Eles já não viajavam. `toDocumentPayload` manda o shell, o
+   * ÍNDICE e **só a tela de entrada** — medido: o payload tem uma
+   * tela, não doze. A poda rendeu 216 bytes (os ids no índice) e
+   * foi desfeita.
+   *
+   * O peso é o que tem de ser: shell 9.091 e HOME 15.313 em JSON,
+   * que viram 46.900 em base64. Não há o que cortar sem cortar
+   * desenho.
+   *
+   * ####  A PARTIR DAQUI, TROCA — NÃO ACRÉSCIMO  ####
+   *
+   * Restam 3.100 bytes. O critério que permitiu subir a trava três
+   * vezes — ela existe para pegar crescimento que ESCALA COM OS
+   * DADOS, e esqueleto não escala — chegou ao fim útil dele.
+   *
+   * Nenhum elemento novo entra sem tirar outro. Na ordem de saída:
+   *
+   *   1. as linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
+   *      "CALENDÁRIO DO SERVIDOR"): texto fixo, enfeitam e não
+   *      informam, ~1.040 bytes. As do ranking e das missões NÃO —
+   *      a primeira diz qual ranking, a segunda quantas missões, e
+   *      as duas mudam com o estado;
+   *   2. a régua dos cartões, ~1.400;
+   *   3. a borda, ~1.950 — a peça mais cara e a única puramente
+   *      decorativa.
+   *
+   * E se o crescimento vier de DADOS, a trava não sobe: encurta-se
+   * a lista. Essa não tem exceção, porque o pior caso do teste é
+   * sempre menor que o pior caso do mundo.
    */
   it('a carga inicial fica com folga confortável', () => {
     const bytes = encodeUiDocPayload({ documents: [toDocumentPayload(buildMainMenu())] }).length;
 
-    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.85);
+    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.95);
   });
 
   it('nenhuma ação gravada tem `:` no destino', () => {
@@ -381,5 +499,95 @@ describe('o provedor da HOME', () => {
     expect(json).toContain('Não consegui ler a loja agora.');
     // E o cartão do wipe continua lá, com a frase dele.
     expect(json).toContain('Não consegui ler a agenda agora.');
+  });
+});
+
+// ------------------------------------------------------------
+//  O CARTÃO DA LOJA
+// ------------------------------------------------------------
+
+describe('o cartão NOVO NA LOJA', () => {
+  /** A caixa de um elemento dentro do cartão da loja, em pixels. */
+  function boxOf(screen: UiScreen, suffix: string): Box {
+    const box = measureElement(screen.elements, (id) => id.endsWith(suffix), CANVAS);
+
+    if (box === null) {
+      throw new Error(`o elemento "${suffix}" não está no desenho`);
+    }
+
+    return box;
+  }
+
+  it('o ícone do item não encosta na régua do cabeçalho', () => {
+    const screen = buildHomeScreen({ view: view() });
+
+    const regua = boxOf(screen, 'hm-loja-titulo-regua');
+    const icone = boxOf(screen, HOME_SLOTS.offerIcon);
+
+    // ####  ELE PASSAVA POR CIMA DELA  ####
+    //
+    // Até 14/09/2026 o ícone começava a 48 px do topo do cartão e a
+    // régua está a 58: o desenho entregue tinha a arma cortando a
+    // linha, encostada no subtítulo. O dono viu na tela e pediu.
+    //
+    // A folga é medida, e não olhada: o cartão estica com a altura
+    // do canvas, e "parece certo aqui" não diz nada sobre a próxima
+    // resolução.
+    expect(icone.top).toBeGreaterThan(regua.top + regua.height + 20);
+  });
+
+  it('o miolo fica CENTRADO, e não pendurado no topo', () => {
+    const screen = buildHomeScreen({ view: view() });
+
+    const cartao = boxOf(screen, 'hm-loja');
+    const icone = boxOf(screen, HOME_SLOTS.offerIcon);
+    const antes = boxOf(screen, HOME_SLOTS.offerOld);
+
+    // O `measureElement` devolve a caixa RELATIVA ao pai, e ícone e
+    // preço são filhos do cartão: o meio deles se compara com a
+    // metade da ALTURA do cartão, e não com o topo dele no canvas.
+    const meioDoBloco = (icone.top + antes.top + antes.height) / 2;
+
+    // O corpo vai da régua ao rodapé, e o centro dele fica 1 px
+    // acima do centro do cartão — perto demais para justificar uma
+    // segunda âncora. A folga de 4 px é para essa diferença.
+    expect(Math.abs(meioDoBloco - cartao.height / 2)).toBeLessThan(4);
+  });
+
+  it('a oferta com ARTE PRÓPRIA usa a arte, e não o ícone do jogo', () => {
+    // ####  O VIP DE 30 DIAS NÃO TEM ÍCONE NO JOGO  ####
+    //
+    // Nem o pacote, nem o kit, nem o item nosso. Para esses o admin
+    // escolhe uma arte, que sobe ao OrigemZImages com a chave
+    // `store.<id>` — e até 14/09/2026 ela aparecia na loja e sumia
+    // na entrada, porque o `file` não chegava até aqui.
+    const comArte = view({
+      offer: {
+        offerId: 'vip-30-dias',
+        name: 'VIP 30 dias',
+        price: 3000,
+        oldPrice: null,
+        icon: { itemId: 0, skinId: '0', file: 'vip.png' },
+        badge: null,
+      },
+    });
+
+    const desenho = find(buildHomeScreen({ view: comArte }), HOME_SLOTS.offerIcon);
+
+    expect(desenho?.type).toBe('image');
+    expect(desenho?.type === 'image' ? desenho.source : null).toEqual({
+      kind: 'stored',
+      key: 'store.vip-30-dias',
+    });
+  });
+
+  it('e sem arte própria continua no ícone do jogo, que não custa download', () => {
+    const desenho = find(buildHomeScreen({ view: view() }), HOME_SLOTS.offerIcon);
+
+    expect(desenho?.type === 'image' ? desenho.source : null).toEqual({
+      kind: 'item',
+      itemId: OFFER.icon.itemId,
+      skinId: OFFER.icon.skinId,
+    });
   });
 });

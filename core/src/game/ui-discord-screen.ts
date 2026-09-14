@@ -55,7 +55,7 @@ import {
 } from '../types/ui-document.js';
 import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transport.js';
 
-import { C, fill, label, panel, topBar, type Rect } from './ui-widgets.js';
+import { C, fill, label, panel, titleBar, type Rect } from './ui-widgets.js';
 
 /** O endereço desta tela no documento. */
 export const DISCORD_SCREEN_ID = 'tela-discord';
@@ -133,11 +133,7 @@ export function buildDiscordScreen(options: BuildDiscordScreenOptions): UiScreen
     name: 'DISCORD',
     kind: 'page',
     elements: [
-      label('dc-titulo', 'DISCORD', topBar(30), {
-        size: 20,
-        align: 'MiddleLeft',
-        font: 'RobotoCondensed-Bold.ttf',
-      }),
+      ...titleBar('dc', 'DISCORD', { subtitle: 'O ponto central da comunidade.' }),
       panel('dc-corpo', fill(0, 42, 0, 0), C.surface, invite === '' ? empty() : withInvite(invite)),
     ],
   };

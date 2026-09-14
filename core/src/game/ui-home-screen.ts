@@ -68,6 +68,7 @@ import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transp
 import { toError } from '../util.js';
 import { nextWipe, type NextWipeDeps } from '../wipe/next-wipe.js';
 
+import { storeIconKey } from './card-icons.js';
 import { CALENDAR_SCREEN_ID } from './ui-calendar-screen.js';
 import { screenViewport, type Size } from './ui-geometry.js';
 import {
@@ -81,7 +82,10 @@ import { QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 // `ozitem:<id>:1` aqui criaria um segundo lugar de onde ele sai — e
 // o plugin descarta a resposta cujo id não bate com o pedido, então
 // a divergência apareceria como um botão que não faz nada.
-import { itemScreenId, STORE_SCREEN_ID } from './ui-store-screens.js';
+//
+// A chave da moeda vem do mesmo lugar e pelo mesmo motivo: duas
+// chaves para a mesma arte divergiriam no dia em que o PNG mudasse.
+import { COIN_IMAGE_KEY, itemScreenId, STORE_SCREEN_ID } from './ui-store-screens.js';
 import { fillTemplate, findTemplate, measureSlot, type SlotValue } from './ui-template.js';
 import {
   button,
@@ -92,6 +96,7 @@ import {
   label,
   LIST_LINE,
   panel,
+  storedImage,
   topBar,
   type Rect,
 } from './ui-widgets.js';
@@ -142,6 +147,28 @@ export const HOME_SLOTS = {
   wipeCountdown: 'hm-wipe-falta',
   wipeNote: 'hm-wipe-nota',
   wipeButton: 'hm-wipe-btn',
+
+  /**
+   * A saudação e o nome de quem abriu.
+   *
+   * ####  ELES PRECISAM SER SLOTS, E NÃO ERAM  ####
+   *
+   * O preset gera a tela-home CHAMANDO este mesmo gerador, sem
+   * jogador, e guarda o resultado no documento. Depois, quando
+   * alguém abre o menu, esse resultado volta como TEMPLATE e só os
+   * slots são preenchidos.
+   *
+   * O texto do banner não era slot: ele ia para o documento com o
+   * `{jogador}` JÁ RESOLVIDO — e resolvido para vazio, porque no
+   * preset não há jogador. O que ficou gravado foi "BEM-VINDO",
+   * sem variável nenhuma, e daí em diante não havia mais o que
+   * substituir. **O nome de quem abria o menu nunca aparecia.**
+   *
+   * Medido em 14/09/2026 percorrendo a cadeia inteira: preset ->
+   * documento -> template preenchido. Os três dão "BEM-VINDO".
+   */
+  welcome: 'hm-ola',
+  player: 'hm-titulo',
 
   /** A caixa das missões em andamento. */
   questList: 'hm-quest-lista',
@@ -251,7 +278,12 @@ export interface HomeOfferView {
   readonly price: number;
   /** O preço riscado. `null` = não há promoção. */
   readonly oldPrice: number | null;
-  readonly icon: { readonly itemId: number; readonly skinId: string };
+  readonly icon: {
+    readonly itemId: number;
+    readonly skinId: string;
+    /** A arte propria do admin. `null` = o icone do jogo. */
+    readonly file?: string | null;
+  };
   readonly badge: OfferBadge | null;
 }
 
@@ -335,7 +367,27 @@ export interface HomeStoreOffer {
   readonly price: number;
   readonly oldPrice: number | null;
   readonly badge: OfferBadge | null;
-  readonly icon: { readonly itemId: number; readonly skinId: string };
+  /**
+   * O desenho da oferta, como a LOJA o conhece.
+   *
+   * ####  `file` E O QUE FAZ O ITEM CUSTOM APARECER  ####
+   *
+   * `itemId`/`skinId` sao o icone do JOGO, que o cliente resolve
+   * sozinho. Mas uma oferta pode ser um VIP de 30 dias, um pacote ou
+   * um item nosso -- e para esses o admin escolhe uma arte, que sobe
+   * ao OrigemZImages com a chave `store.<id>` (ver
+   * game/card-icons.ts).
+   *
+   * Ate 14/09/2026 este campo nao chegava aqui, e o cartao da HOME
+   * caia sempre no icone do jogo: a arte que o admin escolheu
+   * aparecia na loja e sumia na entrada. `null` = sem arte propria,
+   * e o icone do jogo e o certo.
+   */
+  readonly icon: {
+    readonly itemId: number;
+    readonly skinId: string;
+    readonly file?: string | null;
+  };
   /** Epoch ms. É por ele que "a novidade" é escolhida. */
   readonly createdAt: number;
 }
@@ -522,6 +574,8 @@ function readOffer(input: ReadHomeViewInput): Pick<HomeView, 'offer' | 'offerNot
         name: best.name,
         price: best.price,
         oldPrice: best.oldPrice,
+        // O ícone INTEIRO, com o `file`: é ele que diz se a oferta
+        // tem arte própria. Ver `HomeStoreOffer.icon`.
         icon: best.icon,
         badge: best.badge,
       },
@@ -681,23 +735,36 @@ function plural(count: number, one: string, many: string): string {
 // ------------------------------------------------------------
 
 /**
- * Um cartão: painel em `--surface` sobre o fundo do conteúdo.
+ * Um cartão: `--surface` com uma borda de 1 px, sobre o `--bg` do
+ * conteúdo.
  *
- * ####  SEM A MOLDURA DE 1px, E DE PROPÓSITO  ####
+ * ####  A BORDA CUSTA UM ELEMENTO POR CARTÃO  ####
  *
- * O menu desenha borda com dois painéis (um na cor da borda, outro
- * 1px menor por cima) — o CUI não tem borda. São CINCO cartões
- * aqui, ou dez elementos só de moldura, e esta tela é a de ENTRADA:
- * ela viaja inteira na carga inicial, que tem teto de 50.000 bytes
- * (ver types/ui-transport.ts).
+ * O CUI não tem borda: ela se faz com dois painéis, um na cor da
+ * borda e outro 1 px menor por cima. São cinco cartões aqui, e esta
+ * é a tela de ENTRADA — ela viaja inteira na carga inicial, cujo
+ * teto é 50.000 bytes (ver types/ui-transport.ts).
  *
- * A grade da loja já resolve assim — `offerCard`, em
- * ui-store-screens.ts, é um painel só. O contraste entre
- * `--surface` e o `--bg` do conteúdo separa os cartões sem gastar
- * um elemento por linha.
+ * Por muito tempo ela ficou de fora por isso, e o contraste entre
+ * os tons fazia o trabalho sozinho. Deixou de fazer quando o
+ * interior da moldura era `--surface` — a mesma cor do cartão —, e
+ * aí a HOME virou um bloco único com texto espalhado.
+ *
+ * O conserto de verdade foi escurecer a moldura (ver o preset): é
+ * ele que devolve a separação, e não custa elemento nenhum. A borda
+ * vem POR CIMA disso, e é o que dá ao cartão o contorno nítido do
+ * conceito — o mesmo papel do `1px solid #343839` de lá.
+ *
+ * ####  OS FILHOS FICAM NO PAINEL DE DENTRO  ####
+ *
+ * Isso muda a hierarquia, e não quebra os slots: eles são
+ * procurados por SUFIXO do id, em qualquer profundidade. O
+ * `measureSlot` também desce a árvore inteira.
  */
 function card(id: string, rect: Rect, children: readonly UiElement[]): UiElement {
-  return panel(id, rect, C.surface, children);
+  return panel(id, rect, C.border, [
+    panel(`${id}-i`, fill(1, 1, 1, 1), C.surface, children),
+  ]);
 }
 
 /** Faixa horizontal com a margem interna do cartão. */
@@ -812,25 +879,179 @@ export function cardsOf(document: UiDocument): HomeCards {
 }
 
 /** O título de um cartão, no estilo dos títulos do painel. */
-function cardTitle(id: string, text: string): UiElement[] {
+/**
+ * O cabeçalho de um cartão, como no conceito de 14/09/2026.
+ *
+ * ####  QUATRO PEÇAS, E CADA UMA RESPONDE UMA COISA  ####
+ *
+ * A MARCA no canto (46x3 em vermelho) é a assinatura que se repete
+ * nos quatro cartões e na faixa de título das páginas — é ela que
+ * faz a tela parecer uma coisa só.
+ *
+ * O SÍMBOLO num quadrado dá ao cartão uma silhueta reconhecível à
+ * distância: num mural de quatro cabeçalhos com o mesmo tipo e o
+ * mesmo tamanho, é o que diferencia antes da leitura.
+ *
+ * O TÍTULO diz o assunto, e a LINHA DE APOIO diz o recorte — "TOP
+ * RANKING" e, embaixo, QUAL ranking. Antes eram duas frases do
+ * mesmo peso empilhadas, sem nada dizendo qual mandava.
+ *
+ * A RÉGUA fecha o bloco. Sem ela o subtítulo e a primeira linha do
+ * corpo encostam, e as duas se leem como uma lista só.
+ *
+ * ####  A MARCA É CURTA, E NÃO DE LARGURA TOTAL  ####
+ *
+ * Ela já foi uma barra de 2 px de ponta a ponta. Numa tela com
+ * quatro cartões lado a lado, quatro barras inteiras viram uma
+ * faixa listrada — o vermelho deixa de marcar e passa a ser fundo.
+ *
+ * ####  E NÃO HÁ MOLDURA DE 1 px EM NADA  ####
+ *
+ * O CUI não tem borda: ela se faz com dois painéis, um por cima do
+ * outro. São quatro cartões, e esta é a tela de ENTRADA — ela viaja
+ * inteira na carga inicial, cujo teto é 50.000 bytes. O contraste
+ * entre `--bg` e `--surface` separa o quadrado do cartão sem gastar
+ * um elemento por lado.
+ */
+function cardHeader(
+  id: string,
+  icon: (rect: Rect) => UiElement,
+  title: string,
+  subtitleId: string,
+  subtitle: string,
+): UiElement[] {
   return [
-    panel(`${id}-acento`, topBar(2), C.rust),
-    label(id, text, band(14, 22), {
-      size: 14,
+    // ####  ARTE, E NÃO UM CARACTERE  ####
+    //
+    // O conceito usa ♛ ▾ ▦ ◎ — símbolos Unicode, que num HTML a
+    // fonte do sistema resolve. No jogo o texto sai em
+    // RobotoCondensed, e ela NÃO tem os blocos Geometric Shapes
+    // (U+25xx) nem Miscellaneous Symbols (U+26xx): o que apareceria
+    // é o retângulo vazio do glifo ausente, em quatro cartões.
+    //
+    // E o modo de falha é mudo — ninguém vê erro nenhum, a tela só
+    // fica com quatro quadradinhos. Ver a mesma armadilha em
+    // types/ui-document.ts sobre o que o cliente resolve sozinho.
+    //
+    // Então o ícone é arte de verdade: item do jogo (o cliente já
+    // tem, custo zero de download) ou imagem nossa pelo
+    // OrigemZImages.
+    panel(
+      `${id}-ib`,
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: PAD, y: -(HEAD.iconTop + HEAD.icon) },
+        offsetMax: { x: PAD + HEAD.icon, y: -HEAD.iconTop },
+      },
+      // Escuro, e não vermelho: a arte tem cor própria, e um fundo
+      // vermelho brigaria com ela. O vermelho da identidade está na
+      // faixa de título da página e nos botões.
+      C.bg,
+      [icon(fill(5, 5, 5, 5))],
+    ),
+
+    label(id, title, band(HEAD.titleTop, 20, PAD + HEAD.icon + 10), {
+      size: 15,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
+
+    label(subtitleId, subtitle, band(HEAD.subTop, 14, PAD + HEAD.icon + 10), {
+      size: 11,
+      color: C.textMuted,
+      align: 'MiddleLeft',
+    }),
+
+    // ####  A RÉGUA FECHA O CABEÇALHO  ####
+    //
+    // Sem ela, o subtítulo e a primeira linha do corpo são dois
+    // textos cinza a 14 px um do outro — e se leem como uma lista
+    // só, com o subtítulo virando o primeiro item dela.
+    //
+    // Ela ficou de fora na primeira volta por custar quatro
+    // elementos numa tela com teto. Entrou depois, pedida, e o que
+    // pagou por ela está no comentário da trava em
+    // test/ui-home-screen.test.ts.
+    panel(`${id}-regua`, band(HEAD.rule, 1), C.border),
   ];
 }
 
-/** O botão do pé de cartão: leva à tela inteira daquele assunto. */
+/**
+ * Os ícones dos quatro cartões.
+ *
+ * ####  DE ONDE VEM CADA UM  ####
+ *
+ * Três são ITEM DO JOGO: o cliente já tem a arte, então não há
+ * download nenhum e o jogador reconhece a figura de imediato. O da
+ * loja é NOSSO — o OZCoin, pelo OrigemZImages —, porque é a moeda
+ * que a loja cobra, e nenhum item do jogo diz isso.
+ *
+ * Os ids foram lidos do catálogo do agente em 14/09/2026; um item
+ * que o jogo remova vira um quadrado vazio, e não um erro.
+ */
+const CARD_ICON = {
+  /** `discord.trophy` — o troféu. */
+  rank: (rect: Rect): UiElement =>
+    itemImage('hm-rk-titulo-is', { itemId: 1_494_014_226, skinId: '0' }, rect),
+  /** O OZCoin, da nossa biblioteca de imagens. */
+  offer: (rect: Rect): UiElement => storedImage('hm-loja-titulo-is', COIN_IMAGE_KEY, rect),
+  /** `map` — o mapa, que é o que o wipe troca. */
+  wipe: (rect: Rect): UiElement =>
+    itemImage('hm-wipe-titulo-is', { itemId: 696_029_452, skinId: '0' }, rect),
+  /** `note` — o bilhete de uma missão. */
+  quest: (rect: Rect): UiElement =>
+    itemImage('hm-quest-titulo-is', { itemId: 1_414_245_162, skinId: '0' }, rect),
+} as const;
+
+/** As medidas do cabeçalho de um cartão. */
+const HEAD = {
+  icon: 38,
+  iconTop: 14,
+  titleTop: 16,
+  subTop: 36,
+  /** A régua que fecha o cabeçalho, com respiro dos dois lados. */
+  rule: 58,
+  /** Onde o corpo começa, depois do respiro sob a régua. */
+  body: 70,
+} as const;
+
+/**
+ * O botão do pé de cartão: leva à tela inteira daquele assunto.
+ *
+ * ####  A SETA VAI DENTRO DO TEXTO  ####
+ *
+ * No conceito ela é um `<span>` vermelho à direita do rótulo. Aqui
+ * seria um segundo elemento por cartão — quatro ao todo, numa tela
+ * que viaja inteira na carga inicial.
+ *
+ * Dentro do texto ela custa zero e diz a mesma coisa: que o botão
+ * LEVA a algum lugar, em vez de fazer algo ali mesmo. O que se
+ * perde é a cor separada dela, e isso ninguém nota.
+ */
 function cardButton(id: string, text: string, action: UiAction, accent = false): UiElement {
-  return button(id, text, footer(BUTTON_HEIGHT), action, {
-    color: accent ? C.rust : C.surface2,
-    textColor: accent ? C.white : C.text,
-    hoverColor: accent ? '#D4553FFF' : C.rust,
-    fontSize: 11,
-  });
+  // ####  A BORDA VERMELHA, COMO NO CONCEITO  ####
+  //
+  // Lá o botão é `background:#171313` com `border:1px solid var(--red)`:
+  // escuro por dentro, contornado por fora. É o desenho que diz
+  // "isto é uma ação" sem pintar quatro retângulos vermelhos numa
+  // tela que já tem vermelho no cabeçalho e nos acentos.
+  //
+  // O CUI não tem borda: o painel é a moldura, e o botão vive
+  // dentro dele 1 px menor. Custa um elemento por botão — ver a
+  // trava em test/ui-home-screen.test.ts, que diz o que pagou por
+  // ele.
+  return panel(`${id}-b`, footer(BUTTON_HEIGHT), C.rust, [
+    button(id, `${text}   ›`, fill(1, 1, 1, 1), action, {
+      // Um vermelho bem escuro, e não `--surface-2`: é o que faz o
+      // contorno ler como contorno, e não como um painel cinza com
+      // uma linha em volta.
+      color: accent ? C.rust : '#1B1211FF',
+      textColor: accent ? C.white : C.text,
+      hoverColor: accent ? '#D4553FFF' : C.rust,
+      fontSize: 11,
+    }),
+  ]);
 }
 
 export interface BuildHomeScreenOptions {
@@ -925,13 +1146,20 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
       // e não por um rótulo nosso ao lado. Ver `applyVariables`.
       card('hm-banner', topBar(BANNER_HEIGHT), [
         panel('hm-banner-acento', leftBar(3), C.rust),
-        label('hm-titulo', `BEM-VINDO, ${PLAYER_VARIABLE}`, band(26, 34, 20), {
-          size: 24,
-          align: 'MiddleLeft',
-          font: 'RobotoCondensed-Bold.ttf',
-        }),
-        label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(62, 22, 20), {
-          size: 13,
+
+        // ####  O NOME EM DUAS LINHAS, E A SEGUNDA EM VERMELHO  ####
+        //
+        // "BEM-VINDO, FULANO" numa linha só faz a saudação e o nome
+        // terem o mesmo peso — e quem abre o menu não está lendo a
+        // saudação, está se reconhecendo nela. Separá-los põe o nome
+        // no tamanho e na cor em que ele é a primeira coisa vista,
+        // que é o que o conceito de 14/09/2026 faz.
+        //
+        // Duas linhas, e não um texto com duas cores: o CUI não tem
+        // marcação dentro de um `Text` — cor é do elemento inteiro.
+        ...welcomeLines(),
+        label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(78, 20, 20), {
+          size: 12,
           color: C.textMuted,
           align: 'MiddleLeft',
         }),
@@ -944,15 +1172,57 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
   };
 }
 
+/**
+ * A saudação do banner, em duas linhas.
+ *
+ * ####  O NOME NÃO É UM PEDAÇO DA FRASE  ####
+ *
+ * "BEM-VINDO, FULANO" numa linha só dá à saudação e ao nome o mesmo
+ * peso — e quem abre o menu não está lendo a saudação, está se
+ * reconhecendo nela. Separados, o nome fica no tamanho e na cor em
+ * que é a primeira coisa vista.
+ *
+ * São dois labels, e não um texto de duas cores: o CUI não tem
+ * marcação dentro de um `Text` — a cor é do elemento inteiro.
+ *
+ * ####  SEM NOME, A VÍRGULA VAI JUNTO  ####
+ *
+ * O `applyPlayerName` já tira a variável e o separador ao redor
+ * dela quando não há nome, mas ele trabalha sobre UM texto. Aqui a
+ * vírgula está numa linha e a variável em outra: sem este caso, a
+ * tela mostraria "BEM-VINDO DE VOLTA," e uma linha vazia embaixo.
+ */
+function welcomeLines(): UiElement[] {
+  return [
+    // ####  SEM VÍRGULA, DE PROPÓSITO  ####
+    //
+    // "BEM-VINDO DE VOLTA," pede um nome depois dela, e sem jogador
+    // (a carga inicial vai sem `steamId`) a linha ficaria com a
+    // vírgula pendurada sobre um vazio. Sem ela, a saudação se lê
+    // inteira sozinha e o nome é um acréscimo quando existe.
+    label(HOME_SLOTS.welcome, 'BEM-VINDO DE VOLTA', band(22, 20, 20), {
+      size: 14,
+      align: 'MiddleLeft',
+      font: 'RobotoCondensed-Bold.ttf',
+    }),
+    label(HOME_SLOTS.player, PLAYER_VARIABLE, band(40, 34, 20), {
+      size: 28,
+      color: C.rust,
+      align: 'MiddleLeft',
+      font: 'RobotoCondensed-Bold.ttf',
+    }),
+  ];
+}
+
 function rankCard(rank: HomeRankView): UiElement[] {
   return [
-    ...cardTitle('hm-rk-titulo', 'TOP RANKING'),
-    label('hm-rk-sub', rank.metric ?? '', band(40, 16), {
-      size: 11,
-      color: C.textMuted,
-      align: 'MiddleLeft',
-    }),
-    panel('hm-rk-lista', fill(PAD, 62, PAD, FOOTER_ROOM), C.none, rankRows(rank.top, MAX_LINES)),
+    ...cardHeader('hm-rk-titulo', CARD_ICON.rank, 'TOP RANKING', 'hm-rk-sub', rank.metric ?? ''),
+    panel(
+      'hm-rk-lista',
+      fill(PAD, HEAD.body, PAD, FOOTER_ROOM),
+      C.none,
+      rankRows(rank.top, MAX_LINES),
+    ),
     label('hm-rk-voce', rank.self, footer(18, BUTTON_HEIGHT + PAD + 2), {
       size: 11,
       color: C.textMuted,
@@ -1023,7 +1293,13 @@ function offerCard(view: HomeView): UiElement[] {
   const offer = view.offer;
 
   return [
-    ...cardTitle('hm-loja-titulo', 'NOVO NA LOJA'),
+    ...cardHeader(
+      'hm-loja-titulo',
+      CARD_ICON.offer,
+      'NOVO NA LOJA',
+      'hm-loja-sub',
+      'DESTAQUE DO MÊS',
+    ),
 
     // A etiqueta, no canto — o mesmo lugar em que a loja a desenha.
     panel(
@@ -1052,17 +1328,12 @@ function offerCard(view: HomeView): UiElement[] {
       ],
     ),
 
-    itemImage('hm-loja-icone', offer?.icon ?? PLACEHOLDER_ICON, {
-      anchorMin: { x: 0.5, y: 1 },
-      anchorMax: { x: 0.5, y: 1 },
-      offsetMin: { x: -44, y: -136 },
-      offsetMax: { x: 44, y: -48 },
-    }),
+    offerImage('hm-loja-icone', offer, offerIconRect()),
 
     // Sem oferta, este rótulo é quem fala: o cartão vira a frase, e
     // ícone, preço e botão somem. Um botão COMPRAR sobre nada é
     // pior que um cartão que explica o vazio.
-    label('hm-loja-nome', offer?.name ?? view.offerNote, band(142, 34), {
+    label('hm-loja-nome', offer?.name ?? view.offerNote, offerBand(OFFER.name, 34), {
       size: 13,
       align: 'UpperCenter',
       font: 'RobotoCondensed-Bold.ttf',
@@ -1070,7 +1341,7 @@ function offerCard(view: HomeView): UiElement[] {
     label(
       'hm-loja-preco',
       offer === null ? '' : `${formatNumber(offer.price)} OZ`,
-      band(178, 22),
+      offerBand(OFFER.price, 24),
       { size: 15, color: C.amber, align: 'MiddleCenter', font: 'RobotoCondensed-Bold.ttf' },
     ),
     label(
@@ -1078,7 +1349,7 @@ function offerCard(view: HomeView): UiElement[] {
       offer?.oldPrice === undefined || offer.oldPrice === null
         ? ''
         : `de ${formatNumber(offer.oldPrice)} OZ`,
-      band(200, 16),
+      offerBand(OFFER.old, 16),
       { size: 11, color: C.textMuted, align: 'MiddleCenter' },
     ),
 
@@ -1110,6 +1381,114 @@ function offerCard(view: HomeView): UiElement[] {
  */
 const PLACEHOLDER_ICON = { itemId: 0, skinId: '0' } as const;
 
+// ------------------------------------------------------------
+//  O BLOCO DA OFERTA
+// ------------------------------------------------------------
+
+/**
+ * As medidas do miolo do cartão da loja, do TOPO DO BLOCO.
+ *
+ * ####  ELE ERA ANCORADO NO TOPO, E ISSO ERA DOIS DEFEITOS  ####
+ *
+ * O ícone começava a 48 px do topo do cartão e a régua do cabeçalho
+ * está a 58: ele passava POR CIMA dela, encostado no subtítulo. E
+ * como todo o miolo pendurava do topo, o cartão terminava com um
+ * terço de vazio embaixo, entre o preço e o botão.
+ *
+ * Agora o bloco inteiro é centrado no cartão. O corpo vai da régua
+ * (58 do topo) ao rodapé (`FOOTER_ROOM` do pé), e a diferença entre
+ * o centro do CARTÃO e o centro do CORPO é de 1 px — perto demais
+ * para justificar uma segunda âncora.
+ *
+ * ####  A ALTURA DO CARTÃO É DA TELA, E NÃO NOSSA  ####
+ *
+ * As colunas esticam de `y: 0` a `y: 1` (ver `columnRect`): num
+ * monitor alto o cartão é alto. Centrar é o que faz o miolo
+ * acompanhar isso; medir do topo, não.
+ */
+const OFFER = {
+  /** O lado do ícone. Era 88 até 14/09/2026. */
+  icon: 108,
+  /** O topo de cada linha, medido do topo do bloco. */
+  name: 120,
+  price: 154,
+  old: 178,
+  /** A altura do bloco inteiro: o `old` mais os 16 px dele. */
+  block: 194,
+} as const;
+
+/** O ícone da oferta, quadrado e centrado nos dois eixos. */
+function offerIconRect(): Rect {
+  const half = OFFER.block / 2;
+
+  return {
+    anchorMin: { x: 0.5, y: 0.5 },
+    anchorMax: { x: 0.5, y: 0.5 },
+    offsetMin: { x: -OFFER.icon / 2, y: half - OFFER.icon },
+    offsetMax: { x: OFFER.icon / 2, y: half },
+  };
+}
+
+/** Uma faixa do bloco centrado, medida do topo DELE. */
+function offerBand(top: number, height: number): Rect {
+  const half = OFFER.block / 2;
+
+  return {
+    anchorMin: { x: 0, y: 0.5 },
+    anchorMax: { x: 1, y: 0.5 },
+    offsetMin: { x: PAD, y: half - (top + height) },
+    offsetMax: { x: -PAD, y: half - top },
+  };
+}
+
+/**
+ * O desenho da oferta: a arte própria do admin, ou o ícone do jogo.
+ *
+ * ####  A MESMA REGRA DA LOJA, E DE PROPÓSITO  ####
+ *
+ * É o `offerImageSource` de `ui-store-screens.ts`, com a mesma chave
+ * (`store.<id>`): os bytes já subiram ao OrigemZImages para a tela
+ * da loja, então o cartão da entrada não custa download nenhum.
+ *
+ * Duas réguas para "qual é o desenho desta oferta" dariam uma arte
+ * na loja e outra na HOME — e o admin não teria como saber qual das
+ * duas ele configurou.
+ */
+function offerImage(id: string, offer: HomeOfferView | null, rect: Rect): UiElement {
+  const key = offerArtKey(offer);
+
+  if (key !== null) {
+    return storedImage(id, key, rect);
+  }
+
+  const icon = offer?.icon ?? PLACEHOLDER_ICON;
+
+  return itemImage(id, { itemId: icon.itemId, skinId: icon.skinId }, rect);
+}
+
+/**
+ * A chave da arte própria daquela oferta, ou `null`.
+ *
+ * `null` quer dizer "use o ícone do jogo", e é o caso comum: só o
+ * que NÃO é um item do jogo — VIP, pacote, kit — precisa de arte.
+ */
+function offerArtKey(offer: HomeOfferView | null): string | null {
+  if (offer === null || offer.icon.file === undefined || offer.icon.file === null) {
+    return null;
+  }
+
+  return storeIconKey(offer.offerId);
+}
+
+/** O mesmo desenho, na forma que o preenchimento de modelo entende. */
+function offerIconSlot(offer: HomeOfferView): SlotValue {
+  const key = offerArtKey(offer);
+
+  return key === null
+    ? { item: { itemId: offer.icon.itemId, skinId: offer.icon.skinId } }
+    : { stored: { key } };
+}
+
 const BADGE_STYLE: Record<OfferBadge, { readonly bg: string; readonly text: string }> = {
   promo: { bg: C.rust, text: C.white },
   novo: { bg: C.olive, text: C.bg },
@@ -1126,23 +1505,32 @@ function wipeCard(view: HomeView): UiElement[] {
   const wipe = view.wipe;
 
   return [
-    ...cardTitle('hm-wipe-titulo', 'PRÓXIMO WIPE'),
-    label('hm-wipe-data', wipe?.when ?? '', band(44, 24), {
+    ...cardHeader(
+      'hm-wipe-titulo',
+      CARD_ICON.wipe,
+      'PRÓXIMO WIPE',
+      'hm-wipe-sub',
+      'CALENDÁRIO DO SERVIDOR',
+    ),
+    label('hm-wipe-data', wipe?.when ?? '', band(HEAD.body + 6, 24), {
       size: 15,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
-    label('hm-wipe-falta', wipe?.countdown ?? '', band(70, 20), {
-      size: 13,
+    // Em âmbar, e maior que a data: a contagem é o que decide se
+    // vale correr para guardar o que está na base.
+    label('hm-wipe-falta', wipe?.countdown ?? '', band(HEAD.body + 32, 22), {
+      size: 15,
       color: C.amber,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
-    label('hm-wipe-nota', wipe?.note ?? view.wipeNote, fill(PAD, 96, PAD, FOOTER_ROOM), {
-      size: 11,
-      color: C.textMuted,
-      align: 'UpperLeft',
-    }),
+    label(
+      'hm-wipe-nota',
+      wipe?.note ?? view.wipeNote,
+      fill(PAD, HEAD.body + 60, PAD, FOOTER_ROOM),
+      { size: 11, color: C.textMuted, align: 'UpperLeft' },
+    ),
     cardButton('hm-wipe-btn', 'VER CALENDÁRIO', {
       id: 'hm-wipe-a',
       kind: 'navigate',
@@ -1151,12 +1539,35 @@ function wipeCard(view: HomeView): UiElement[] {
   ];
 }
 
+/**
+ * Quantas missões estão em andamento, para a linha de apoio.
+ *
+ * O conceito escreve "1 EM ANDAMENTO" sob o título — é o recorte do
+ * cartão, do mesmo jeito que o do ranking diz QUAL ranking. Sem
+ * ele, "SUAS MISSÕES" sozinho não diz se há alguma.
+ */
+function questCountOf(view: HomeView): string {
+  const count = view.quests.length;
+
+  if (count === 0) {
+    return 'NENHUMA EM ANDAMENTO';
+  }
+
+  return `${String(count)} EM ANDAMENTO`;
+}
+
 function questCard(view: HomeView): UiElement[] {
   return [
-    ...cardTitle('hm-quest-titulo', 'SUAS MISSÕES'),
+    ...cardHeader(
+      'hm-quest-titulo',
+      CARD_ICON.quest,
+      'SUAS MISSÕES',
+      'hm-quest-sub',
+      questCountOf(view),
+    ),
     panel(
       'hm-quest-lista',
-      fill(PAD, 44, PAD, FOOTER_ROOM),
+      fill(PAD, HEAD.body, PAD, FOOTER_ROOM),
       C.none,
       questRows(view, MAX_LINES),
     ),
@@ -1293,6 +1704,23 @@ function slotsOf(options: BuildHomeScreenOptions): Record<string, SlotValue> {
     // ganhar de qualquer coisa que caia dentro dele.
     ...hiddenCards,
 
+    // ####  O BANNER É PREENCHIDO, E NÃO HERDADO  ####
+    //
+    // Sem isto o modelo traz o texto CONGELADO do preset — que
+    // nasce sem jogador. Ver o comentário de `HOME_SLOTS.welcome`.
+    //
+    // O nome vai direto, e não pela variável: no caminho do modelo,
+    // o que está escrito no documento é do admin, e ele pode ter
+    // apagado o `{jogador}` sem querer. Preencher o slot funciona
+    // dos dois jeitos.
+    [HOME_SLOTS.welcome]: view.player === '' ? { hide: true } : { text: 'BEM-VINDO DE VOLTA' },
+    [HOME_SLOTS.player]:
+      view.player === ''
+        ? // Sem jogador, a saudação toma o lugar do nome: uma linha
+          // só, e não uma linha em branco sob outra.
+          { text: 'BEM-VINDO', color: C.text }
+        : { text: view.player, color: C.rust },
+
     [HOME_SLOTS.rankMetric]: { text: view.rank.metric ?? '' },
     [HOME_SLOTS.rankList]: { children: rankRows(view.rank.top, room(HOME_SLOTS.rankList)) },
     [HOME_SLOTS.rankSelf]: { text: view.rank.self },
@@ -1302,8 +1730,11 @@ function slotsOf(options: BuildHomeScreenOptions): Record<string, SlotValue> {
 
     // O ícone só é trocado quando há oferta; sem ela o elemento
     // inteiro some, junto do preço e do botão.
-    [HOME_SLOTS.offerIcon]:
-      offer === null ? { hide: true } : { item: offer.icon },
+    // A mesma bifurcação do esqueleto: arte própria quando existe,
+    // ícone do jogo quando não. Sem isto o preenchimento
+    // sobrescreveria a arte do admin pelo ícone do jogo — e o
+    // esqueleto estaria certo por um instante, até o primeiro slot.
+    [HOME_SLOTS.offerIcon]: offer === null ? { hide: true } : offerIconSlot(offer),
     [HOME_SLOTS.offerName]: { text: offer?.name ?? view.offerNote },
     [HOME_SLOTS.offerPrice]:
       offer === null ? { hide: true } : { text: `${formatNumber(offer.price)} OZ` },

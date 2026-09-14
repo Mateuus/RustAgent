@@ -860,6 +860,91 @@ Ele existe como `kind` próprio, e não como `metric` disfarçado, por uma razã
 painel: "ficar 60 minutos online" é a quest que todo servidor cadastra primeiro,
 e obrigar o admin a saber o nome da métrica para isso seria mesquinho.
 
+### 5.8 `container` — saquear a CAIXA, e não o que vem dentro
+
+Acrescentado em **14/09/2026**, a pedido do dono:
+
+> "Ao criar uma missão com o objetivo 'Saquear caixas', os barris e contêineres
+> encontrados nas estradas não aparecem como opções de alvo. Também não
+> conseguimos encontrá-los nos outros tipos de objetivo."
+
+Não apareciam porque não existiam. O `loot` do §5.4 conta **item** — o alvo dele
+é um shortname, e a caixa de onde ele veio nunca importou. O rótulo dele no
+editor dizia "Saquear de caixas", que é exatamente o que ele não faz; ele passou
+a se chamar **"Pegar um item (de caixa ou do chão)"**, e este `container` é o que
+o nome antigo prometia.
+
+#### O alvo é uma LISTA, e é ela que faz o contador compartilhado
+
+O pedido tem dois modos de contagem, e só um deles era código novo:
+
+| Modo | Como se escreve | O que já existia |
+|------|-----------------|------------------|
+| Total compartilhado | **um** objetivo, N alvos, um `amount` | não existia |
+| Quantidade por tipo | **N** objetivos de um alvo cada | a tabela é multi-objetivo desde o §3.2 |
+
+"Saqueie 20 contêineres entre barris azuis, vermelhos, amarelos e caixas comuns"
+é um contador que quatro tipos alimentam — e com um alvo por objetivo isso
+viraria quatro contadores de cinco, que é uma missão diferente. Daí a coluna
+`targets` (JSON) da migração 084.
+
+#### Cada alvo é um prefab ou uma CATEGORIA
+
+    crate_elite    aquele `ShortPrefabName`, e só ele
+    @barrel        qualquer barril
+    @crate         qualquer caixa
+    @any           qualquer contêiner de loot
+
+**A categoria é gravada como categoria, e nunca expandida no cadastro.** Um
+barril novo do Rust entra no catálogo do agente numa linha
+(`game/loot-containers.ts`) e as missões de "qualquer barril" já escritas passam
+a alcançá-lo — sem ninguém reeditar nada. É a mesma razão pela qual o
+`CREATURE_ALIASES` mora no agente e não no C#.
+
+Quem decide o que cada categoria alcança é `game/quest-containers.ts`. A regra é
+curta: a família sai do **grupo** do catálogo, e "Barris e lixo" é o único grupo
+que mistura duas coisas — os cinco barris e o entulho de estrada (lixo, placa,
+vagonete), que é a lista de exceção do arquivo. Entulho não é caixa, e enfiá-lo
+em `@crate` faria "qualquer caixa" contar o que ninguém chama de caixa.
+
+#### Como o plugin conta, e as duas portas
+
+    caixa    se ABRE   → OnLootEntity
+    barril   se QUEBRA → OnEntityDeath
+
+As duas desembocam no mesmo lugar, e é o **dedupe por `net.ID`, por jogador**,
+que cumpre "o mesmo contêiner conta só uma vez". Abrir e fechar a mesma caixa
+dez vezes soma um; um barril que fosse saqueável **e** quebrável contaria uma
+vez, e não duas.
+
+Duas regras a mais, e as duas vieram do pedido:
+
+- **contêiner vazio não conta.** "Saquear" é levar alguma coisa, e abrir dez
+  caixas que outro jogador já esvaziou não é a missão que o admin cadastrou;
+- **o barril conta na pancada** (decisão do dono em 14/09/2026), desde que
+  tivesse loot dentro. O hook do Oxide roda **antes** do `OnDied` que dropa os
+  itens — medido no `Assembly-CSharp` deste build —, e é por isso que dá para
+  perguntar se ele estava cheio.
+
+O custo é o de dois hooks frios, e eles são registrados em runtime pela mesma
+regra do §5.4: só quando há alvo `container` no catálogo. O `OnEntityDeath` é o
+mais caro dos dois porque dispara para toda entidade que morre (árvore, pedra,
+parede), e por isso a primeira linha dele é um `as LootContainer`.
+
+#### O plugin velho não quebra — ele denuncia
+
+O `container` é **aditivo** no contrato: um `OrigemZAgent.cs` anterior a
+14/09/2026 recebe a chave nova no `watch`, guarda-a e nunca a consulta. Nada
+quebra, e as outras missões continuam contando.
+
+O preço disso seria o pior defeito possível — a missão cadastrada, o jogador
+quebrando barril, e o contador parado sem uma linha dizendo por quê. Por isso o
+plugin passou a **anunciar o que sabe contar**, no campo `kinds` da resposta do
+`watch`, e o agente avisa no log quando falta:
+
+> este servidor tem missão de saque de contêiner, mas o plugin não diz que sabe
+> contá-la; copie o OrigemZAgent.cs desta versão para o servidor
+
 ---
 
 ## 6 — A recompensa, e por que ela é um plano congelado
