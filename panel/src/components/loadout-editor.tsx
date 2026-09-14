@@ -23,18 +23,28 @@
 //  para o navegador a cada abertura de tela seria pagar por uma
 //  lista que ninguém lê.
 //
-//  ####  O SLOT VALE PARA O LOADOUT; A LOJA ENTREGA NO
-//        INVENTÁRIO  ####
+//  ####  O SLOT VALE NOS DOIS CAMINHOS DESDE 14/09/2026  ####
 //
 //  `wear`, `belt` e `main` são os contêineres que o OrigemZPlayer
-//  monta no NASCIMENTO. O kit da loja sai pelo `origemz.give`, que
-//  não recebe slot — o dado continua guardado, e a tela diz isso
-//  onde importa (o editor do kit).
+//  monta no NASCIMENTO — e, desde que o `origemz.give` passou a
+//  aceitar slot e casinha, também o que o resgate de um kit
+//  respeita. Até então o editor guardava os dois campos e ninguém
+//  os lia; a tela dizia isso num aviso, que saiu junto.
+//
+//  ####  A GRADE É O MAPA; A LISTA É O FORMULÁRIO  ####
+//
+//  Onde o item nasce se decide arrastando, na grade — "belt,
+//  posição 3" só quer dizer alguma coisa para quem monta a barra
+//  rápida de cabeça. O que ele É (qual item, quanto, qual skin)
+//  continua na lista: são campos de texto, e campo de texto numa
+//  casinha de 48 px é pior nos dois lugares.
 // ============================================================
+
+import { useState } from 'react';
 
 import { Plus, Trash2 } from 'lucide-react';
 
-
+import { InventoryGrid } from '@/components/inventory-grid';
 import { findOurItem, NO_SKIN } from '@/components/item-choice';
 import { Button } from '@/components/ui/button';
 import { ItemCombobox } from '@/components/item-combobox';
@@ -88,6 +98,10 @@ export function LoadoutEditor({
   // skin dela. Ver `findOurItem`.
   const { items: customItems } = useCustomItems();
 
+  // Qual linha a grade está apontando. É só destaque: o dado mora
+  // em `items`, e recarregar a tela não perde nada de verdade.
+  const [selected, setSelected] = useState<number | null>(null);
+
   function update(index: number, patch: Partial<LoadoutItem>): void {
     onChange(items.map((item, position) => (position === index ? { ...item, ...patch } : item)));
   }
@@ -117,10 +131,35 @@ export function LoadoutEditor({
         </p>
       )}
 
+      {/* ####  O MAPA VEM ANTES DA LISTA  ####
+
+          Quem abre este editor está montando um kit, e a primeira
+          pergunta é "como ele fica". A lista responde "o que ele
+          tem" — importante, e depois. */}
+      {items.length > 0 && (
+        <div className="border border-border bg-surface-2 p-3">
+          <p className="mb-3 text-2xs leading-relaxed text-muted">
+            Arraste para escolher onde cada item nasce. Soltar sobre uma casinha ocupada{' '}
+            <strong>troca</strong> os dois de lugar, como no inventário do jogo. Clique numa
+            casinha para abrir a linha dele abaixo.
+          </p>
+
+          <InventoryGrid
+            items={items}
+            onChange={onChange}
+            disabled={disabled}
+            selected={selected}
+            onSelect={setSelected}
+          />
+        </div>
+      )}
+
       {items.map((item, index) => (
         <div
           key={`item-${String(index)}`}
-          className="grid grid-cols-[1fr_auto] gap-2 border border-border bg-surface-2 p-2"
+          className={`grid grid-cols-[1fr_auto] gap-2 border bg-surface-2 p-2 ${
+            selected === index ? 'border-rust' : 'border-border'
+          }`}
         >
           <div className="grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,0.8fr)]">
             <div>
@@ -212,7 +251,14 @@ export function LoadoutEditor({
             size="sm"
             aria-label={`Remover ${item.shortname === '' ? 'este item' : item.shortname}`}
             disabled={disabled}
-            onClick={() => onChange(items.filter((_, position) => position !== index))}
+            onClick={() => {
+              // A seleção é um ÍNDICE, e remover uma linha renumera
+              // todas as seguintes. Sem isto, apagar a linha 2
+              // deixaria a grade apontando para o que era a 3 —
+              // destaque na casinha errada, sem nada explicando.
+              setSelected(null);
+              onChange(items.filter((_, position) => position !== index));
+            }}
             className="self-start text-muted"
           >
             <Trash2 aria-hidden="true" className="h-4 w-4" />
@@ -250,10 +296,11 @@ export function LoadoutEditor({
       </p>
 
       {!slotApplies && (
-        <p className="border border-amber bg-surface-2 px-3 py-2 text-2xs leading-relaxed">
-          <strong>O slot não vale para a entrega da loja.</strong> O comando que entrega item a um
-          jogador conectado põe tudo no inventário — quem monta roupa e barra rápida é o caminho do
-          nascimento, que é o do loadout. O slot fica guardado do mesmo jeito.
+        <p className="border border-border bg-surface-2 px-3 py-2 text-2xs leading-relaxed text-muted">
+          A casinha é uma <strong>preferência</strong>, e não uma exigência: o inventário é do
+          jogador, e ele pode ter enchido a barra rápida antes de resgatar. Ocupada a casinha, o
+          jogo põe o item em outra do mesmo contêiner — e, se não houver nenhuma, na mochila.
+          Ninguém perde item por causa disso.
         </p>
       )}
     </div>
