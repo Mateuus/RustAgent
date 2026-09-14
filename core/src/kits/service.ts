@@ -613,15 +613,26 @@ export class KitStore {
    *
    * ####  O SLOT NÃO ATRAVESSA A ENTREGA, E ISSO É DO PLUGIN  ####
    *
-   * O `origemz.give` recebe `<steamId> <shortname> <amount>
-   * <skinId> <mode>` e nada mais: quem entende de slot e posição é o
-   * `OrigemZPlayer`, e só no caminho do NASCIMENTO (o hook
-   * `GetLoadout`). Então um kit da loja chega ao inventário, e não
-   * montado na barra rápida como o loadout de quem renasce.
+   * ####  O KIT CHEGA MONTADO  ####
    *
-   * O editor guarda `slot` e `position` do mesmo jeito — é o mesmo
-   * componente do loadout, e o dado continua certo para o dia em que
-   * o plugin ganhar um comando que os aceite.
+   * O `origemz.give` recebia `<steamId> <shortname> <amount>
+   * <skinId> <mode>` e nada mais: quem entendia de slot e posição
+   * era o `OrigemZPlayer`, e só no caminho do NASCIMENTO (o hook
+   * `GetLoadout`). Um kit da loja chegava DESPEJADO no inventário —
+   * e o `slot` que o admin escolheu no editor ficava guardado sem
+   * ninguém para lê-lo.
+   *
+   * Desde 14/09/2026 o comando aceita `slot` e `position` no fim, e
+   * é por isso que eles viajam daqui: a AK nasce na casinha da barra
+   * que o admin desenhou, e a tela do jogador (a grade da aba ITENS)
+   * passa a dizer a verdade sobre onde o item cai.
+   *
+   * ####  A CASINHA É PREFERÊNCIA, NUNCA EXIGÊNCIA  ####
+   *
+   * O inventário é do jogador: ele pode ter enchido a barra rápida
+   * antes de resgatar. Ocupada a casinha, o plugin tenta outra do
+   * mesmo contêiner, e depois onde couber — ninguém perde item por
+   * causa disso, e é por isso que o modo continua sendo `auto`.
    *
    * ####  UM ITEM QUE FALHA NÃO INTERROMPE OS OUTROS  ####
    *
@@ -644,7 +655,7 @@ export class KitStore {
     for (const item of items) {
       const command =
         `${GIVE_COMMAND} ${steamId} ${item.shortname} ${String(item.amount)} ` +
-        `${item.skinId} ${GIVE_MODE}`;
+        `${item.skinId} ${GIVE_MODE} ${item.slot} ${String(item.position)}`;
 
       try {
         const response = firstJsonLine(await rcon.send(command));

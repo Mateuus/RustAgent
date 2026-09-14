@@ -741,10 +741,37 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            // Nem no conteiner do slot, nem em lugar nenhum dele.
-            // O item PRECISA ser removido: um Item criado e nao
-            // colocado em cont\u00eainer nenhum fica pendurado no mundo,
-            // sem dono.
+            // ####  CONTEINER CHEIO NAO PODE APAGAR O ITEM  ####
+            //
+            // Ate aqui a linha seguinte era o item.Remove(): barra
+            // rapida cheia e o item do loadout SUMIA, sem aviso
+            // nenhum. E acontece no caso mais comum que existe --
+            // quem renasce ainda carregando o que pegou antes de
+            // morrer.
+            //
+            // "belt" quer dizer "de preferencia na barra", e nao
+            // "na barra ou no lixo". A mochila e a segunda escolha
+            // obvia; a barra, a terceira, para quem pediu wear ou
+            // main. Item no lugar errado e aborrecimento; item que
+            // nao chega e bug.
+            if (container != player.inventory.containerMain &&
+                item.MoveToContainer(player.inventory.containerMain, -1, true))
+            {
+                return true;
+            }
+
+            if (container != player.inventory.containerBelt &&
+                item.MoveToContainer(player.inventory.containerBelt, -1, true))
+            {
+                return true;
+            }
+
+            // Inventario inteiro cheio. AGORA o item precisa ser
+            // removido: um Item criado e nao colocado em conteiner
+            // nenhum fica pendurado no mundo, sem dono.
+            PrintWarning("Loadout: o item '" + entry.Shortname + "' nao coube em lugar " +
+                         "nenhum do inventario de " + player.UserIDString +
+                         "; ele foi descartado.");
             item.Remove();
             return false;
         }

@@ -200,7 +200,16 @@ describe('resgate único', () => {
 
     expect(primeira.status).toBe('entregue');
     expect(primeira.delivered).toBe(1);
-    expect(harness.server.commands).toContain(`origemz.give ${STEAM_ID} rifle.ak 1 0 auto`);
+    // ####  O SLOT E A CASINHA VIAJAM NO COMANDO  ####
+    //
+    // Eles estavam no cadastro desde sempre e morriam aqui: o
+    // comando não tinha onde recebê-los, e o kit chegava despejado
+    // no inventário. Com eles, a AK nasce na primeira casinha da
+    // barra rápida — que é o que o admin desenhou, e o que a grade
+    // da aba ITENS promete ao jogador.
+    expect(harness.server.commands).toContain(
+      `origemz.give ${STEAM_ID} rifle.ak 1 0 auto belt 0`,
+    );
 
     await expect(
       harness.store.claim({ kitId: kit.id, steamId: STEAM_ID, serverId: 'pvp1', actor: 'admin' }),

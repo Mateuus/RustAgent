@@ -178,6 +178,24 @@ namespace Oxide.Plugins
         private const int GiveArgCount = 5;
         private const int SteamId64Length = 17;
 
+        // ========================================================
+        //  OS CONTEINERES DO JOGADOR
+        //
+        //  Sao os mesmos tres nomes que o OrigemZPlayer ja usa no
+        //  loadout do respawn, e os mesmos que o zod da borda HTTP
+        //  aceita (core/src/loadouts/items.ts). Um quarto nome
+        //  inventado aqui viraria um item entregue em lugar
+        //  diferente do que a tela prometeu.
+        // ========================================================
+        private const string SlotWear = "wear";
+        private const string SlotBelt = "belt";
+        private const string SlotMain = "main";
+
+        /// <summary>
+        /// "Nao escolheram casinha" - o -1 que o jogo entende.
+        /// </summary>
+        private const int AnyPosition = -1;
+
         // Prefixo "origemz." porque comando de console no Oxide e
         // global: sem namespace, dois plugins com um comando
         // "players" colidiriam.
@@ -1812,10 +1830,36 @@ namespace Oxide.Plugins
 
         // ========================================================
         //  origemz.give <steamId> <shortname> <amount> <skinId> <mode>
+        //                [slot] [position]
         //
-        //  Cinco argumentos posicionais, todos obrigatorios.
-        //  Resposta de sucesso:
+        //  Cinco argumentos posicionais obrigatorios, e dois
+        //  OPCIONAIS no fim. Resposta de sucesso:
         //  {"ok":true,"delivered":"inventory","given":500,"dropped":0}
+        //
+        //  ####  OS DOIS OPCIONAIS, E POR QUE NO FIM  ####
+        //
+        //  `slot` e wear, belt ou main; `position` e a casinha
+        //  dentro dele, ou -1 para "a primeira livre". Juntos, eles
+        //  sao o que faz um kit chegar MONTADO - a AK na terceira
+        //  casinha da barra, o colete no corpo - em vez de despejado
+        //  no inventario.
+        //
+        //  Ate aqui esse dado existia no cadastro (o editor guarda
+        //  slot e position desde o primeiro dia) e morria na
+        //  fronteira: o comando nao tinha onde recebe-lo, e o
+        //  comentario do kits/service.ts dizia, literalmente, que
+        //  ficava guardado "para o dia em que o plugin ganhar um
+        //  comando que os aceite".
+        //
+        //  Eles entraram no FIM e opcionais porque a loja, o site e
+        //  o painel mandam cinco argumentos desde sempre. Um
+        //  argumento no meio mudaria a posicao de `mode` e quebraria
+        //  os tres de uma vez, em silencio - `mode` invalido vira
+        //  INVALID_ARGS, que ninguem leria como "a ordem mudou".
+        //
+        //  A casinha e PREFERENCIA, nao exigencia: ocupada, o item
+        //  vai para outra do mesmo conteiner, e depois para onde
+        //  couber. Ver TryPlaceAtSlot.
         //
         //  ENTREGA EM PILHAS - o ponto delicado deste comando.
         //
@@ -2290,6 +2334,41 @@ namespace Oxide.Plugins
             string shortname = arg.GetString(1, "").Trim();
             string mode = arg.GetString(4, "").Trim().ToLowerInvariant();
 
+            // ####  SLOT E CASINHA SAO OPCIONAIS  ####
+            //
+            // Quem nao os manda continua caindo no GiveItem de
+            // sempre, e e por isso que eles vieram DEPOIS do modo em
+            // vez de no meio: a loja, o site e o painel mandam cinco
+            // argumentos desde o primeiro dia, e um comando com
+            // ordem nova quebraria os tres de uma vez.
+            //
+            // Quem os manda e o resgate de kit, onde o admin
+            // escolheu que a AK nasce na terceira casinha da barra.
+            string slot = arg.GetString(5, "").Trim().ToLowerInvariant();
+            int position = AnyPosition;
+
+            if (slot.Length > 0 && !IsKnownSlot(slot))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            if (arg.Args.Length > 6)
+            {
+                if (!int.TryParse(arg.GetString(6, ""), NumberStyles.Integer,
+                                  CultureInfo.InvariantCulture, out position))
+                {
+                    return BuildError(ErrorInvalidArgs);
+                }
+
+                // Casinha negativa e um jeito legitimo de dizer "a
+                // primeira livre" - e o que a tela manda quando o
+                // admin nao escolheu.
+                if (position < 0)
+                {
+                    position = AnyPosition;
+                }
+            }
+
             // Cultura invariante porque isto e protocolo, nao
             // texto de tela: o servidor pode estar em pt-BR e nao
             // e o separador local que decide como o numero chega.
@@ -2398,12 +2477,21 @@ namespace Oxide.Plugins
                 }
                 else if (mode == ModeInventory)
                 {
-                    outcome = GiveToInventoryOnly(player, item, piece);
+                    outcome = GiveToInventoryOnly(player, item, piece, slot, position);
                 }
                 else
                 {
-                    outcome = GiveAuto(player, item, piece);
+                    outcome = GiveAuto(player, item, piece, slot, position);
                 }
+
+                // ####  A CASINHA VALE PARA O PRIMEIRO PEDACO SO  ####
+                //
+                // 3500 de madeira viram quatro pedacos. "A casinha 3"
+                // e um lugar, e so cabe um la: os outros tres
+                // precisam ir para onde couber, senao cada um
+                // tentaria a mesma casinha ja ocupada pelo anterior e
+                // os tres cairiam no chao.
+                position = AnyPosition;
 
                 if (outcome.Error != null)
                 {
@@ -2573,9 +2661,10 @@ namespace Oxide.Plugins
         //  PrintWarning existe para o admin saber que a conta
         //  falhou.
         // ========================================================
-        private GiveOutcome GiveToInventoryOnly(BasePlayer player, Item item, int amount)
+        private GiveOutcome GiveToInventoryOnly(BasePlayer player, Item item, int amount,
+                                                string slot, int position)
         {
-            int given = InsertIntoInventory(player, item);
+            int given = InsertIntoInventory(player, item, slot, position);
             int leftover = amount - given;
 
             if (leftover <= 0)
@@ -2595,9 +2684,10 @@ namespace Oxide.Plugins
         //  Tenta o inventario e joga no chao o que nao couber. O
         //  jogador nunca fica sem o que pagou por falta de espaco.
         // ========================================================
-        private GiveOutcome GiveAuto(BasePlayer player, Item item, int amount)
+        private GiveOutcome GiveAuto(BasePlayer player, Item item, int amount,
+                                     string slot, int position)
         {
-            int given = InsertIntoInventory(player, item);
+            int given = InsertIntoInventory(player, item, slot, position);
             int leftover = amount - given;
 
             if (leftover <= 0)
@@ -2659,9 +2749,116 @@ namespace Oxide.Plugins
         //   - item.amount e a unica fonte para o caso parcial,
         //     onde o bool e false e a diferenca diz o que entrou.
         // ========================================================
-        private static int InsertIntoInventory(BasePlayer player, Item item)
+        // ========================================================
+        //  A CASINHA PEDIDA, E O QUE ACONTECE QUANDO ELA ESTA
+        //  OCUPADA
+        //
+        //  ####  O INVENTARIO E DO JOGADOR, NAO DO KIT  ####
+        //
+        //  O admin desenha o kit com a AK na terceira casinha da
+        //  barra. Na hora do resgate a terceira casinha pode estar
+        //  com a picareta dele - e ninguem quer que o resgate
+        //  substitua, recuse, ou pior, jogue a AK no chao.
+        //
+        //  A cascata e esta, em ordem:
+        //
+        //    1. a casinha pedida, no conteiner pedido;
+        //    2. qualquer casinha livre DAQUELE conteiner - a barra
+        //       rapida cheia na 3 mas vazia na 5 ainda e barra
+        //       rapida, e era isso que o admin queria dizer;
+        //    3. nada aqui: quem chama segue para o GiveItem, que
+        //       tenta a mochila e redireciona sozinho.
+        //
+        //  ####  VESTIMENTA NAO ACEITA QUALQUER COISA  ####
+        //
+        //  containerWear so recebe o que tem ItemModWearable, e
+        //  ainda assim um item por parte do corpo. Tentar mover
+        //  madeira para la falha silenciosamente, e sem a checagem
+        //  o metodo devolveria false depois de duas tentativas
+        //  inuteis. Com ela, o item vai direto para a mochila, que
+        //  e onde ele sempre deveria ter ido.
+        //
+        //  ####  O FALSE AQUI NAO E ERRO  ####
+        //
+        //  "Nao consegui na casinha pedida" e um desfecho NORMAL, e
+        //  o unico efeito dele e o item seguir para o caminho de
+        //  sempre. Nada e removido, nada e logado: um aviso por
+        //  casinha ocupada encheria o console de quem tem um kit
+        //  popular.
+        // ========================================================
+        private static bool TryPlaceAtSlot(BasePlayer player, Item item, string slot, int position)
+        {
+            if (string.IsNullOrEmpty(slot))
+            {
+                return false;
+            }
+
+            ItemContainer container = ResolveSlotContainer(player, slot);
+
+            if (container == null)
+            {
+                return false;
+            }
+
+            // Vestivel e coisa de ItemModWearable. Sem ele, o
+            // containerWear recusa - e a recusa aqui e mais barata
+            // que a recusa la.
+            if (container == player.inventory.containerWear &&
+                item.info.GetComponent<ItemModWearable>() == null)
+            {
+                return false;
+            }
+
+            // allowStack:true porque empilhar com o que ja esta la e
+            // exatamente o que o jogador espera de 500 de madeira
+            // caindo sobre outras 200.
+            if (position >= 0 && position < container.capacity &&
+                item.MoveToContainer(container, position, true))
+            {
+                return true;
+            }
+
+            return item.MoveToContainer(container, AnyPosition, true);
+        }
+
+        /// <summary>
+        /// O conteiner de um nome de slot. <c>null</c> = nome que
+        /// nao e nosso.
+        /// </summary>
+        private static ItemContainer ResolveSlotContainer(BasePlayer player, string slot)
+        {
+            if (slot == SlotWear)
+            {
+                return player.inventory.containerWear;
+            }
+
+            if (slot == SlotBelt)
+            {
+                return player.inventory.containerBelt;
+            }
+
+            if (slot == SlotMain)
+            {
+                return player.inventory.containerMain;
+            }
+
+            return null;
+        }
+
+        private static int InsertIntoInventory(BasePlayer player, Item item, string slot, int position)
         {
             int before = item.amount;
+
+            // ####  A CASINHA PEDIDA VEM PRIMEIRO  ####
+            //
+            // Ela e uma PREFERENCIA, nunca uma exigencia: o
+            // inventario e do jogador, e ele pode ter enchido a barra
+            // rapida antes de resgatar o kit. O que a cascata
+            // garante e que ninguem perca item por causa disso.
+            if (TryPlaceAtSlot(player, item, slot, position))
+            {
+                return before;
+            }
 
             // GiveItem pode redirecionar para a barra ou para as
             // roupas se o container principal recusar - da no
@@ -3555,6 +3752,18 @@ namespace Oxide.Plugins
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// O slot e um dos tres do jogador?
+        ///
+        /// A recusa e ANTES de criar item nenhum, como a do modo: um
+        /// slot digitado errado nao pode virar item entregue em
+        /// lugar diferente do que a tela prometeu.
+        /// </summary>
+        private static bool IsKnownSlot(string slot)
+        {
+            return slot == SlotWear || slot == SlotBelt || slot == SlotMain;
         }
 
         private static bool IsKnownMode(string mode)
