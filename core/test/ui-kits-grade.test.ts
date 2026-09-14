@@ -235,24 +235,37 @@ describe('o card de um kit', () => {
     return found;
   }
 
-  it('empilha ícone, nome e regra sem um invadir o outro', () => {
-    // A ordem é a do conceito de 14/09/2026: o ícone em cima, numa
-    // moldura à esquerda, e o texto descendo por baixo dele na
-    // mesma margem. Antes o ícone era centralizado e o texto
-    // alinhado à esquerda, e o olho ia ao centro e voltava.
-    const moldura = pieceOf('kkit-x-ib');
-    const nome = pieceOf('kkit-x-n');
+  it('empilha nome, arte e regra sem um invadir o outro', () => {
+    const faixa = pieceOf('kkit-x-nb');
+    const arte = pieceOf('kkit-x-i');
     const regra = pieceOf('kkit-x-r');
 
-    expect(moldura.top + moldura.height).toBeLessThanOrEqual(nome.top);
-    expect(nome.top + nome.height).toBeLessThanOrEqual(regra.top);
+    expect(faixa.top + faixa.height).toBeLessThanOrEqual(arte.top);
+    expect(arte.top + arte.height).toBeLessThanOrEqual(regra.top);
   });
 
-  it('alinha tudo pela mesma margem', () => {
-    // É o que faz o card se ler de cima para baixo numa coluna só.
-    const margens = ['kkit-x-ib', 'kkit-x-n', 'kkit-x-r'].map((id) => pieceOf(id).left);
+  // ####  DUAS COISAS QUE JÁ SE PERDERAM UMA VEZ  ####
+  //
+  // O cabeçalho deste card já foi alinhado à esquerda, com um ícone
+  // de 64 px numa moldura — copiado do conceito. Ficou ruim por
+  // motivos que só existem NESTA tela, e os dois testes abaixo são
+  // o que impede a cópia de voltar.
 
-    expect(new Set(margens).size).toBe(1);
+  it('a arte do kit é grande, porque é ela que o identifica', () => {
+    // O admin sobe um PNG por kit. Reduzida a um selo de canto, ela
+    // deixa de ser a figura do kit.
+    const arte = pieceOf('kkit-x-i');
+
+    expect(arte.height).toBeGreaterThanOrEqual(100);
+  });
+
+  it('o card se destaca do fundo do menu', () => {
+    // A moldura do menu é `--surface`. Um card da mesma cor não tem
+    // borda contra ela — e o CUI não tem borda de verdade para dar.
+    const card = walk(elements).find((element) => element.id === 'kkit-x-c');
+
+    expect(card).toBeDefined();
+    expect(card !== undefined && card.type === 'panel' && card.color).not.toBe('#1B1B1B');
   });
 
   it('a exigência de VIP é uma linha própria, e some quando não há', () => {
@@ -315,7 +328,7 @@ describe('o card de um kit', () => {
       return;
     }
 
-    for (const id of ['kkit-x-ib', 'kkit-x-i', 'kkit-x-n', 'kkit-x-r', 'kkit-x-info', 'kkit-x-b']) {
+    for (const id of ['kkit-x-nb', 'kkit-x-i', 'kkit-x-r', 'kkit-x-info', 'kkit-x-b']) {
       const piece = boxOf(elements, id);
 
       expect(piece).not.toBeNull();

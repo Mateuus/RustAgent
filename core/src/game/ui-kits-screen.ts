@@ -183,27 +183,39 @@ const PER_PAGE = GRID.columns * GRID.rows;
 const CARD = {
   /** A barra de estado, colada no topo. */
   accent: 3,
-  /** A margem interna. O conceito de 14/09/2026 usa 20; aqui, 14. */
-  pad: 14,
+  /** A margem interna. */
+  pad: 12,
   /**
-   * O ícone, num quadrado com moldura, à ESQUERDA.
+   * A faixa do nome, no TOPO.
    *
-   * ####  ELE ERA CENTRALIZADO, E O CARD LIA-SE EM ZIGUE-ZAGUE  ####
+   * ####  ELA SAIU UMA VEZ, E O CARD PIOROU  ####
    *
-   * Ícone no meio, nome embaixo à esquerda, regra à esquerda,
-   * botões à esquerda: o olho ia ao centro e voltava. O conceito
-   * alinha tudo pela mesma margem, e o card passa a se ler de cima
-   * para baixo numa coluna só.
+   * O conceito de 14/09/2026 alinha o cabeçalho do cartão à
+   * esquerda, com um ícone pequeno numa moldura. Copiei isso aqui e
+   * ficou ruim por duas razões que só aparecem NESTA tela:
+   *
+   *   1. o kit tem ARTE PRÓPRIA — o admin sobe um PNG por kit — e
+   *      ela é o que identifica o kit à distância. Reduzida a 64 px
+   *      e encostada num canto, ela deixa de ser a figura do kit e
+   *      vira um selo;
+   *   2. o card ficou SEM CONTRASTE. Ele é `--surface`, e a moldura
+   *      do menu também: era a faixa do nome, em `--surface-2`, que
+   *      dava a ele uma borda visível. Sem ela, oito cards sumiram
+   *      no fundo.
+   *
+   * O conceito tem razão para os cartões DELE, que não têm arte
+   * própria e vivem sobre um fundo mais escuro. Aqui o desenho
+   * certo é o de antes: nome em faixa no topo, arte grande no meio.
    */
-  iconTop: 16,
-  iconSize: 64,
-  nameTop: 92,
-  nameBottom: 112,
-  ruleTop: 114,
-  ruleBottom: 132,
+  nameTop: 3,
+  nameBottom: 31,
+  iconTop: 50,
+  iconBottom: 166,
+  ruleTop: 174,
+  ruleBottom: 192,
   /** A linha em âmbar, quando o kit exige VIP. */
-  tierTop: 136,
-  tierBottom: 152,
+  tierTop: 194,
+  tierBottom: 210,
   buttonBottom: 10,
   buttonTop: 40,
   /** A largura do botão que abre os detalhes, no rodapé. */
@@ -714,14 +726,13 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
   const first = kit.items[0];
   const icon = first === undefined ? null : itemOf(first.shortname);
 
-  // O ícone vai num quadrado com moldura, encostado na margem
-  // esquerda — é o desenho do conceito, e é o que faz o card se ler
-  // numa coluna só.
+  // A arte do kit, grande e no meio. Ela é o que identifica o kit à
+  // distância — ver `CARD`.
   const iconRect: Rect = {
-    anchorMin: { x: 0, y: 1 },
-    anchorMax: { x: 0, y: 1 },
-    offsetMin: { x: CARD.pad + 6, y: -(CARD.iconTop + CARD.iconSize - 6) },
-    offsetMax: { x: CARD.pad + CARD.iconSize - 6, y: -(CARD.iconTop + 6) },
+    anchorMin: { x: 0.5, y: 1 },
+    anchorMax: { x: 0.5, y: 1 },
+    offsetMin: { x: -58, y: -CARD.iconBottom },
+    offsetMax: { x: 58, y: -CARD.iconTop },
   };
 
   const children: UiElement[] = [
@@ -731,32 +742,28 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
     // agora?" num mural de doze cards, sem ler doze rodapés.
     panel(`${id}-a`, topBarRect(CARD.accent), accentColor(kit)),
 
-    // ####  A MOLDURA DO ÍCONE  ####
+    // ####  A FAIXA DO NOME  ####
     //
-    // Um quadrado com fundo próprio, como no conceito. Sem ele o
-    // ícone flutua no card — e itens escuros (a maioria das armas)
-    // somem contra o fundo quase preto.
+    // Ela é a primeira coisa que se lê em cada card — e é também o
+    // que dá ao card uma borda visível contra a moldura do menu,
+    // que é da mesma cor dele. Ver `CARD`.
     panel(
-      `${id}-ib`,
-      {
-        anchorMin: { x: 0, y: 1 },
-        anchorMax: { x: 0, y: 1 },
-        offsetMin: { x: CARD.pad, y: -(CARD.iconTop + CARD.iconSize) },
-        offsetMax: { x: CARD.pad + CARD.iconSize, y: -CARD.iconTop },
-      },
-      C.surface2,
-    ),
-
-    label(
-      `${id}-n`,
-      kit.name,
+      `${id}-nb`,
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: CARD.pad, y: -CARD.nameBottom },
-        offsetMax: { x: -CARD.pad, y: -CARD.nameTop },
+        offsetMin: { x: 0, y: -CARD.nameBottom },
+        offsetMax: { x: 0, y: -CARD.nameTop },
       },
-      { size: 14, color: C.text, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
+      C.bg,
+      [
+        label(`${id}-n`, kit.name, fill(10, 0, 10, 0), {
+          size: 13,
+          color: C.text,
+          align: 'MiddleLeft',
+          font: 'RobotoCondensed-Bold.ttf',
+        }),
+      ],
     ),
 
     // ####  A ARTE PRÓPRIA GANHA DO PALPITE  ####
@@ -786,7 +793,7 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
         offsetMin: { x: CARD.pad, y: -CARD.ruleBottom },
         offsetMax: { x: -CARD.pad, y: -CARD.ruleTop },
       },
-      { size: 11, color: C.textMuted, align: 'MiddleLeft' },
+      { size: 11, color: C.textMuted },
     ),
 
     // ####  "VER" ABRE O QUE NÃO CABE NO CARD  ####
@@ -827,7 +834,7 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
           offsetMin: { x: CARD.pad, y: -CARD.tierBottom },
           offsetMax: { x: -CARD.pad, y: -CARD.tierTop },
         },
-        { size: 11, color: C.amber, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
+        { size: 11, color: C.amber, font: 'RobotoCondensed-Bold.ttf' },
       ),
     );
   }
@@ -871,7 +878,13 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       offsetMin: { x: column === 0 ? 0 : half, y: -(y + GRID.cardHeight) },
       offsetMax: { x: column === GRID.columns - 1 ? 0 : -half, y: -y },
     },
-    C.surface,
+    // ####  `--surface-2`, E NÃO `--surface`  ####
+    //
+    // A moldura do menu é `--surface` (ver o preset). Um card da
+    // mesma cor não tem borda contra ela — e o CUI não tem borda de
+    // verdade para dar. Um tom acima é o que o separa do fundo, que
+    // é o mesmo recurso que a coluna de categorias já usa.
+    C.surface2,
     children,
   );
 }
