@@ -88,9 +88,52 @@ const GRID = {
   gap: 10,
   cardHeight: 160,
   rows: 2,
-  /** A altura da barra de categorias, quando ela existe. */
-  categoryHeight: 30,
 } as const;
+
+/**
+ * A coluna de categorias, à esquerda.
+ *
+ * ####  ELA ERA UMA FILEIRA DE ABAS, E A FILEIRA NÃO CRESCE  ####
+ *
+ * As categorias ficavam numa faixa horizontal sob o título, cada
+ * uma com a largura do próprio nome. Funcionava com três; com
+ * sete, a última saía pela borda da tela — e saía em silêncio, sem
+ * seta, sem reticências, sem nada dizendo que existia mais.
+ *
+ * A coluna cresce para BAIXO, que é a direção em que há espaço, e
+ * é o mesmo desenho que o ranking já usa para a mesma pergunta
+ * ("qual destes eu quero ver?"). Duas telas do mesmo menu
+ * respondendo isso de dois jeitos diferentes é o tipo de diferença
+ * que ninguém explica depois.
+ *
+ * A largura sai do mesmo raciocínio da coluna do ranking: 190 px
+ * comportam ~25 caracteres no corpo 12, e nome de categoria maior
+ * que isso já não cabia na fileira antiga também.
+ */
+const SIDEBAR = {
+  width: 190,
+  /** O respiro entre a coluna e a grade. */
+  gap: 16,
+  /** A altura de um item. Alvo de clique confortável, e não mais. */
+  item: 32,
+} as const;
+
+/**
+ * A altura útil da coluna, estimada.
+ *
+ * ####  ESTIMADA, E O ERRO É PARA O LADO SEGURO  ####
+ *
+ * A altura real é a do slot de conteúdo do shell, que esta função
+ * não conhece — ela desenha uma tela, e quem a encaixa é o
+ * documento. 516 px é o que sobra numa tela de 720 com o cabeçalho
+ * de 76 e as margens de 30 do preset.
+ *
+ * Errar para MENOS deixa uma categoria de fora com um "e mais 1..."
+ * visível. Errar para mais a desenharia fora da tela, em silêncio —
+ * que é exatamente o defeito da fileira de abas que esta coluna
+ * substituiu.
+ */
+const SIDEBAR_HEIGHT = 516;
 
 const PER_PAGE = GRID.columns * GRID.rows;
 
@@ -371,36 +414,10 @@ function buildGrid(
       ? offers.filter((kit) => categorySlug(kit.category) === active.slug)
       : offers;
 
-  const top = grouped ? 42 + GRID.categoryHeight + 8 : 42;
+  const top = 42;
 
   if (grouped) {
-    let cursor = 0;
-
-    for (const entry of categories) {
-      const isActive = active !== null && entry.slug === active.slug;
-      const width = Math.min(150, Math.max(60, entry.name.length * 7 + 22));
-
-      elements.push(
-        button(
-          `kcat${entry.slug}`,
-          entry.name.toUpperCase(),
-          {
-            anchorMin: { x: 0, y: 1 },
-            anchorMax: { x: 0, y: 1 },
-            offsetMin: { x: cursor, y: -(42 + GRID.categoryHeight) },
-            offsetMax: { x: cursor + width, y: -42 },
-          },
-          { id: `akcat${entry.slug}`, kind: 'navigate', screenId: gridScreenId(entry.slug, 0) },
-          {
-            color: isActive ? C.surface2 : C.none,
-            textColor: isActive ? C.text : C.textMuted,
-            fontSize: 11,
-          },
-        ),
-      );
-
-      cursor += width + 4;
-    }
+    elements.push(...sidebar(categories, active));
   }
 
   const pages = Math.max(1, Math.ceil(shown.length / PER_PAGE));
@@ -410,7 +427,10 @@ function buildGrid(
   elements.push(
     panel(
       'kits-grade',
-      fill(0, top, 0, 26),
+      // A grade encolhe pela ESQUERDA quando há coluna. Os cards
+      // são ancorados em fração do pai (ver `kitCard`), então eles
+      // se reacomodam sozinhos — nenhuma medida de card muda aqui.
+      fill(grouped ? SIDEBAR.width + SIDEBAR.gap : 0, top, 0, 26),
       C.none,
       slice.map((kit, index) =>
         kitCard(kit, index % GRID.columns, Math.floor(index / GRID.columns), itemOf),
@@ -497,6 +517,135 @@ function pager(category: string, page: number, pages: number): UiElement[] {
   }
 
   return elements;
+}
+
+/**
+ * A coluna de categorias.
+ *
+ * ####  O ATIVO É PAINEL; OS OUTROS SÃO BOTÃO  ####
+ *
+ * Clicar no que já está aberto navegaria para onde já se está — um
+ * clique que não faz nada, que é o que parece defeito. É a mesma
+ * regra das abas dos modais e da coluna do ranking.
+ *
+ * ####  E ELES `navigate`, E NÃO `modal.open`  ####
+ *
+ * Esta é uma PÁGINA. `modal.open` abriria a tela de kits por cima
+ * da tela de kits, empilhando um modal a cada troca de categoria.
+ */
+function sidebar(
+  categories: readonly { readonly slug: string; readonly name: string }[],
+  active: { readonly slug: string; readonly name: string } | null,
+): UiElement[] {
+  // ####  QUANTAS CABEM  ####
+  //
+  // A área útil vai de 42 (sob o título) até 26 do fundo (o pager).
+  // Numa tela de 720 com o cabeçalho e as margens do shell, sobram
+  // ~516 px — dezesseis categorias. Passar disso é improvável, e
+  // "improvável" não é o mesmo que "impossível": o que não couber é
+  // CONTADO, como em todo o resto deste menu.
+  const room = Math.max(1, Math.floor((SIDEBAR_HEIGHT - SIDEBAR.item) / SIDEBAR.item));
+  const visible = categories.length > room ? categories.slice(0, room) : categories;
+  const rest = categories.length - visible.length;
+
+  const items: UiElement[] = [];
+
+  for (const [index, entry] of visible.entries()) {
+    const id = `kcat${entry.slug}`;
+    const text = entry.name.toUpperCase();
+    const isActive = active !== null && entry.slug === active.slug;
+
+    const rect: Rect = {
+      anchorMin: { x: 0, y: 1 },
+      anchorMax: { x: 1, y: 1 },
+      offsetMin: { x: 0, y: -((index + 1) * SIDEBAR.item) },
+      offsetMax: { x: 0, y: -(index * SIDEBAR.item) },
+    };
+
+    if (isActive) {
+      items.push(
+        // Mais ESCURO que a coluna, e não mais claro: sobre fundo
+        // escuro o buraco lê como "aberto", e a barra vermelha diz
+        // qual é. Clarear seria o mesmo efeito do hover, e aí o
+        // item aberto e o item sob o cursor pareceriam iguais.
+        panel(id, rect, C.bg, [
+          panel(`${id}b`, accentRect(), C.rust),
+          label(`${id}l`, text, fill(14, 0, 10, 0), {
+            size: 12,
+            align: 'MiddleLeft',
+            font: 'RobotoCondensed-Bold.ttf',
+          }),
+        ]),
+      );
+
+      continue;
+    }
+
+    items.push(
+      button(
+        id,
+        text,
+        // O retângulo começa onde o texto do ativo começa: o texto
+        // de um `CuiButton` preenche o botão inteiro, e não há
+        // margem interna para dar. Recuado, o rótulo cai sob o do
+        // item aberto, e a coluna se lê de cima para baixo.
+        { ...rect, offsetMin: { x: 14, y: rect.offsetMin.y } },
+        { id: `a${id}`, kind: 'navigate', screenId: gridScreenId(entry.slug, 0) },
+        {
+          color: C.none,
+          textColor: C.textMuted,
+          hoverColor: C.surface2,
+          fontSize: 12,
+          align: 'MiddleLeft',
+        },
+      ),
+    );
+  }
+
+  if (rest > 0) {
+    items.push(
+      label(
+        'kcatmais',
+        `e mais ${String(rest)}...`,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 14, y: -((visible.length + 1) * SIDEBAR.item) },
+          offsetMax: { x: 0, y: -(visible.length * SIDEBAR.item) },
+        },
+        { size: 11, color: C.amber, align: 'MiddleLeft' },
+      ),
+    );
+  }
+
+  return [
+    // ####  O FUNDO DA COLUNA É A DIVISÓRIA  ####
+    //
+    // Pintar a coluna faz o trabalho de uma régua de 1 px ao lado
+    // com UM elemento a menos — e num documento cujo teto é o frame
+    // do RCON, cada elemento a menos é espaço para um card a mais.
+    panel(
+      'kits-col',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: 0, y: 26 },
+        offsetMax: { x: SIDEBAR.width, y: -42 },
+      },
+      C.surface2,
+      items,
+    ),
+  ];
+}
+
+/** A barra de acento do item aberto, colada na borda esquerda. */
+function accentRect(): Rect {
+  return {
+    anchorMin: { x: 0, y: 0 },
+    anchorMax: { x: 0, y: 1 },
+    offsetMin: { x: 0, y: 3 },
+    offsetMax: { x: 3, y: -3 },
+  };
 }
 
 function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLookup): UiElement {
