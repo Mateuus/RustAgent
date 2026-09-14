@@ -66,6 +66,7 @@ import {
   rowsPager,
   storedImage,
   tabsRow,
+  titleBar,
   type ContentRow,
   type Rect,
 } from './ui-widgets.js';
@@ -181,14 +182,28 @@ const PER_PAGE = GRID.columns * GRID.rows;
  */
 const CARD = {
   /** A barra de estado, colada no topo. */
-  accent: 2,
-  /** A faixa do nome, logo abaixo dela. */
-  nameTop: 2,
-  nameBottom: 30,
-  iconTop: 50,
-  iconBottom: 166,
-  ruleTop: 176,
-  ruleBottom: 194,
+  accent: 3,
+  /** A margem interna. O conceito de 14/09/2026 usa 20; aqui, 14. */
+  pad: 14,
+  /**
+   * O ícone, num quadrado com moldura, à ESQUERDA.
+   *
+   * ####  ELE ERA CENTRALIZADO, E O CARD LIA-SE EM ZIGUE-ZAGUE  ####
+   *
+   * Ícone no meio, nome embaixo à esquerda, regra à esquerda,
+   * botões à esquerda: o olho ia ao centro e voltava. O conceito
+   * alinha tudo pela mesma margem, e o card passa a se ler de cima
+   * para baixo numa coluna só.
+   */
+  iconTop: 16,
+  iconSize: 64,
+  nameTop: 92,
+  nameBottom: 112,
+  ruleTop: 114,
+  ruleBottom: 132,
+  /** A linha em âmbar, quando o kit exige VIP. */
+  tierTop: 136,
+  tierBottom: 152,
   buttonBottom: 10,
   buttonTop: 40,
   /** A largura do botão que abre os detalhes, no rodapé. */
@@ -427,11 +442,7 @@ function buildGrid(
   const id = screenId ?? KITS_SCREEN_ID;
 
   const elements: UiElement[] = [
-    label('kits-titulo', 'KITS', topBarRect(30), {
-      size: 20,
-      align: 'MiddleLeft',
-      font: 'RobotoCondensed-Bold.ttf',
-    }),
+    ...titleBar('kits', 'KITS', { subtitle: 'O que a rede entrega, e a regra de cada um.' }),
   ];
 
   if (offers.length === 0) {
@@ -703,11 +714,14 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
   const first = kit.items[0];
   const icon = first === undefined ? null : itemOf(first.shortname);
 
+  // O ícone vai num quadrado com moldura, encostado na margem
+  // esquerda — é o desenho do conceito, e é o que faz o card se ler
+  // numa coluna só.
   const iconRect: Rect = {
-    anchorMin: { x: 0.5, y: 1 },
-    anchorMax: { x: 0.5, y: 1 },
-    offsetMin: { x: -58, y: -CARD.iconBottom },
-    offsetMax: { x: 58, y: -CARD.iconTop },
+    anchorMin: { x: 0, y: 1 },
+    anchorMax: { x: 0, y: 1 },
+    offsetMin: { x: CARD.pad + 6, y: -(CARD.iconTop + CARD.iconSize - 6) },
+    offsetMax: { x: CARD.pad + CARD.iconSize - 6, y: -(CARD.iconTop + 6) },
   };
 
   const children: UiElement[] = [
@@ -717,27 +731,32 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
     // agora?" num mural de doze cards, sem ler doze rodapés.
     panel(`${id}-a`, topBarRect(CARD.accent), accentColor(kit)),
 
-    // ####  A FAIXA DO NOME  ####
+    // ####  A MOLDURA DO ÍCONE  ####
     //
-    // O nome já esteve solto sob o ícone, na mesma cor do resto do
-    // card. Numa parede de cards iguais, o olho não tinha onde
-    // pousar primeiro — e é pelo nome que se procura um kit.
+    // Um quadrado com fundo próprio, como no conceito. Sem ele o
+    // ícone flutua no card — e itens escuros (a maioria das armas)
+    // somem contra o fundo quase preto.
     panel(
-      `${id}-nb`,
+      `${id}-ib`,
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: CARD.pad, y: -(CARD.iconTop + CARD.iconSize) },
+        offsetMax: { x: CARD.pad + CARD.iconSize, y: -CARD.iconTop },
+      },
+      C.surface2,
+    ),
+
+    label(
+      `${id}-n`,
+      kit.name,
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 0, y: -CARD.nameBottom },
-        offsetMax: { x: 0, y: -CARD.nameTop },
+        offsetMin: { x: CARD.pad, y: -CARD.nameBottom },
+        offsetMax: { x: -CARD.pad, y: -CARD.nameTop },
       },
-      C.surface2,
-      [
-        label(`${id}-n`, kit.name, fill(8, 0, 8, 0), {
-          size: 13,
-          color: C.text,
-          font: 'RobotoCondensed-Bold.ttf',
-        }),
-      ],
+      { size: 14, color: C.text, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
     ),
 
     // ####  A ARTE PRÓPRIA GANHA DO PALPITE  ####
@@ -764,10 +783,10 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 8, y: -CARD.ruleBottom },
-        offsetMax: { x: -8, y: -CARD.ruleTop },
+        offsetMin: { x: CARD.pad, y: -CARD.ruleBottom },
+        offsetMax: { x: -CARD.pad, y: -CARD.ruleTop },
       },
-      { size: 10, color: C.textMuted },
+      { size: 11, color: C.textMuted, align: 'MiddleLeft' },
     ),
 
     // ####  "VER" ABRE O QUE NÃO CABE NO CARD  ####
@@ -794,6 +813,24 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       { color: C.surface2, textColor: C.textMuted, hoverColor: C.border, fontSize: 11 },
     ),
   ];
+
+  const tier = tierLineOf(kit);
+
+  if (tier !== null) {
+    children.push(
+      label(
+        `${id}-t`,
+        tier,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: CARD.pad, y: -CARD.tierBottom },
+          offsetMax: { x: -CARD.pad, y: -CARD.tierTop },
+        },
+        { size: 11, color: C.amber, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
+      ),
+    );
+  }
 
   const buttonRect: Rect = {
     anchorMin: { x: 0, y: 0 },
@@ -846,25 +883,47 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
  * não escondida atrás do "i".
  */
 function ruleOf(kit: KitOfferView): string {
-  // "SÓ VIP OURO" e "VIP OURO" dizem coisas diferentes para quem
-  // está acima do nível — e é justamente ele quem clica no kit de
-  // baixo e é recusado.
-  const tier =
-    kit.requiredTier === null
-      ? ''
-      : ` · ${kit.requiredTierExact ? 'SÓ ' : ''}VIP ${kit.requiredTier.toUpperCase()}`;
-
+  // ####  O NÍVEL SAIU DAQUI  ####
+  //
+  // Ele vinha grudado no fim ("uma vez · SÓ VIP OURO"), e as duas
+  // coisas competiam pela mesma linha em corpo 10. São perguntas
+  // diferentes — "com que frequência?" e "posso?" — e a segunda é a
+  // que faz alguém parar de olhar. Ela virou uma linha própria, em
+  // âmbar: ver `tierLineOf`.
   if (kit.kind === 'cooldown') {
-    return `a cada ${describeWait((kit.cooldownSeconds ?? 0) * 1000)}${tier}`;
+    return `a cada ${describeWait((kit.cooldownSeconds ?? 0) * 1000)}`;
   }
 
   const limit = kit.useLimit ?? 1;
 
   if (limit === 1) {
-    return `uma vez${kit.useResetOn === 'never' ? '' : ' por wipe'}${tier}`;
+    return `uma vez${kit.useResetOn === 'never' ? '' : ' por wipe'}`;
   }
 
-  return `${String(limit)} usos${kit.useResetOn === 'never' ? '' : ' por wipe'}${tier}`;
+  return `${String(limit)} usos${kit.useResetOn === 'never' ? '' : ' por wipe'}`;
+}
+
+/**
+ * A exigência de VIP, quando existe.
+ *
+ * ####  "EXCLUSIVO" E "EXIGE" DIZEM COISAS DIFERENTES  ####
+ *
+ * `requiredTierExact` quer dizer AQUELE nível e nenhum outro — quem
+ * está acima também é recusado, e é justamente ele quem clica no
+ * kit de baixo achando que o nível melhor dá acesso a tudo.
+ *
+ * Em âmbar porque é a cor do que é premium na paleta, a mesma do
+ * OZCoin. É a única linha colorida do card, e é a que decide se
+ * vale continuar olhando.
+ */
+function tierLineOf(kit: KitOfferView): string | null {
+  if (kit.requiredTier === null) {
+    return null;
+  }
+
+  const tier = kit.requiredTier.toUpperCase();
+
+  return kit.requiredTierExact ? `EXCLUSIVO VIP ${tier}` : `EXIGE VIP ${tier}`;
 }
 
 /**

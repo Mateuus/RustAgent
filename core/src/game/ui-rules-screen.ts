@@ -56,6 +56,7 @@ import {
   panel,
   rowsPager,
   textWidth,
+  titleBar,
   type Rect,
 } from './ui-widgets.js';
 
@@ -425,11 +426,9 @@ export function buildRulesScreen(options: BuildRulesScreenOptions): UiScreen {
   // É a divisão que o ranking e as missões já fazem: à esquerda o
   // nome da tela, à direita o nome do que está aberto.
   const elements: UiElement[] = [
-    label(RULES_SLOTS.title, titleOf(view), band(left, 0, Y.title), {
-      size: 20,
-      align: 'MiddleLeft',
-      font: 'RobotoCondensed-Bold.ttf',
-    }),
+    // O acento vai JUNTO com o título, no `left`: parado no zero ele
+    // apareceria sobre a coluna de categorias.
+    ...titleBar('rg', titleOf(view), { left }),
   ];
 
   if (hasColumn) {
@@ -513,16 +512,6 @@ function titleOf(view: RulesScreenView): string {
   const active = view.sections.find((section) => section.id === view.activeId);
 
   return active === undefined ? 'REGRAS' : active.title.toUpperCase();
-}
-
-/** Uma faixa que vai do `left` até a borda direita, contada do topo. */
-function band(left: number, top: number, height: number): Rect {
-  return {
-    anchorMin: { x: 0, y: 1 },
-    anchorMax: { x: 1, y: 1 },
-    offsetMin: { x: left, y: -(top + height) },
-    offsetMax: { x: 0, y: -top },
-  };
 }
 
 // ------------------------------------------------------------

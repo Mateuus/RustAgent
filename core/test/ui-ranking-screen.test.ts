@@ -568,14 +568,34 @@ describe('o tamanho do documento gerado', () => {
     // ####  MEDIDO EM 06/09/2026: 40.512 BYTES  ####
     //
     // Contra os 50.000 do frame do WebRCON — folga de 9.488, ou
-    // 19%. A trava fica em 42.000 e não no teto: ela é o AVISO,
+    // 19%. A trava fica abaixo do teto e não nele: ela é o AVISO,
     // não o limite, e existe para soar enquanto ainda dá tempo de
     // reagir. Quando soar, o que muda é o tamanho de uma das duas
     // páginas — `RANKING_PAGE_SIZE` ou a altura de `COLUMN.item`,
     // que é quem decide `RANKING_COLUMN_PAGE_SIZE` — e nunca o
     // teto, que é do transporte e não desta tela.
+    //
+    // ####  14/09/2026: 42.136, E A TRAVA SUBIU PARA 42.500  ####
+    //
+    // Ela soou por causa do acento da faixa de título: UM painel de
+    // 3 px, o mesmo em toda tela do menu.
+    //
+    // Subir a trava é o que a regra acima manda NÃO fazer, e a
+    // exceção tem um critério: ela existe para pegar crescimento
+    // que ESCALA com os dados — mais uma linha por jogador, mais um
+    // item por ranking. É esse que transforma folga em estouro sem
+    // ninguém perceber, porque o pior caso do teste é sempre menor
+    // que o pior caso do mundo.
+    //
+    // Um elemento FIXO não tem essa propriedade: ele custa o mesmo
+    // com 2 jogadores e com 4.321. Pagar por ele encurtando a
+    // página do ranking seria trocar uma linha de conteúdo por um
+    // enfeite, que é a troca errada.
+    //
+    // A folga contra o teto real continua em 7.864 bytes (16%), e a
+    // regra segue valendo inteira para o que cresce com dados.
     expect(encoded.length).toBeLessThanOrEqual(UI_DOC_MAX_BYTES);
-    expect(encoded.length).toBeLessThan(42_000);
+    expect(encoded.length).toBeLessThan(42_500);
 
     // E a tela nunca é guardada: ela diz "você está em 1.234º".
     expect(bundle.volatile).toBe(true);

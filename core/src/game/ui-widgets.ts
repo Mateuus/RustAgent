@@ -65,12 +65,17 @@ export function fill(left = 0, top = 0, right = 0, bottom = 0): Rect {
   };
 }
 
-/** Faixa colada no topo do pai, com altura fixa. */
-export function topBar(height: number, offsetFromTop = 0): Rect {
+/**
+ * Faixa colada no topo do pai, com altura fixa.
+ *
+ * `left` recua o começo dela — é o que dá lugar ao acento da faixa
+ * de título sem precisar de um retângulo próprio para cada texto.
+ */
+export function topBar(height: number, offsetFromTop = 0, left = 0): Rect {
   return {
     anchorMin: { x: 0, y: 1 },
     anchorMax: { x: 1, y: 1 },
-    offsetMin: { x: 0, y: -(offsetFromTop + height) },
+    offsetMin: { x: left, y: -(offsetFromTop + height) },
     offsetMax: { x: 0, y: -offsetFromTop },
   };
 }
@@ -293,6 +298,111 @@ export function modalHeader(): Rect {
     offsetMin: { x: 22, y: -46 },
     offsetMax: { x: -22, y: -14 },
   };
+}
+
+// ============================================================
+//  A FAIXA DE TÍTULO
+//
+//  ####  UMA TELA DIZ O QUE É E PARA QUE SERVE  ####
+//
+//  As sete páginas do menu escreviam só o nome, em 20 px, colado no
+//  canto: "KITS", "DISCORD", "CALENDÁRIO". Quem chega numa aba pela
+//  primeira vez lê o nome e continua sem saber o que ela responde —
+//  e o nome já estava na aba de cima, que é por onde a pessoa veio.
+//
+//  A faixa acrescenta duas coisas do conceito de 14/09/2026:
+//
+//    1. um ACENTO vertical vermelho, à esquerda. É a marca que se
+//       repete em toda tela e amarra as sete numa coisa só;
+//    2. uma LINHA DE APOIO sob o nome, em cinza, dizendo o que ali
+//       se faz.
+//
+//  ####  ELA CABE NA ALTURA QUE JÁ ESTAVA RESERVADA  ####
+//
+//  As telas reservavam 42 px para o título (`topBar(30)` mais 12 de
+//  respiro) e começavam o conteúdo em 42. A faixa usa os mesmos 42:
+//  trocar o título por ela não repagina nada — nenhuma lista perde
+//  uma linha, nenhuma grade perde um card.
+//
+//  Sem linha de apoio, o nome ocupa a faixa inteira e o desenho
+//  fica igual ao de antes, com o acento a mais.
+// ============================================================
+
+/** A altura que a faixa de título ocupa, com o respiro. */
+export const TITLE_BAR = 42;
+
+/** A largura do acento vertical. */
+const TITLE_ACCENT = 3;
+
+/** Onde o texto começa, depois do acento. */
+const TITLE_INDENT = 13;
+
+export interface TitleBarOptions {
+  /** A linha de apoio sob o nome. Ausente = só o nome. */
+  readonly subtitle?: string | undefined;
+  /**
+   * Onde a faixa COMEÇA, contado da esquerda do pai.
+   *
+   * Telas com coluna (ranking, regras, missões) põem o título à
+   * direita dela, e o acento tem de ir junto — parado no zero, ele
+   * apareceria sobre a coluna, apontando para o nada.
+   */
+  readonly left?: number;
+  readonly accent?: string;
+}
+
+export function titleBar(
+  prefix: string,
+  title: string,
+  options: TitleBarOptions = {},
+): UiElement[] {
+  const left = options.left ?? 0;
+  const indent = left + TITLE_INDENT;
+
+  const out: UiElement[] = [
+    // O acento não vai do topo ao fim da faixa: ele acompanha o
+    // TEXTO, e a faixa tem 12 px de respiro embaixo. Esticá-lo até
+    // o fim o faria apontar para o vão.
+    panel(
+      `${prefix}-ac`,
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: left, y: -(TITLE_BAR - 12) },
+        offsetMax: { x: left + TITLE_ACCENT, y: 0 },
+      },
+      options.accent ?? C.rust,
+    ),
+  ];
+
+  const subtitle = options.subtitle;
+
+  if (subtitle === undefined || subtitle === '') {
+    out.push(
+      label(`${prefix}-titulo`, title, topBar(30, 0, indent), {
+        size: 20,
+        align: 'MiddleLeft',
+        font: 'RobotoCondensed-Bold.ttf',
+      }),
+    );
+
+    return out;
+  }
+
+  out.push(
+    label(`${prefix}-titulo`, title, topBar(20, 0, indent), {
+      size: 18,
+      align: 'MiddleLeft',
+      font: 'RobotoCondensed-Bold.ttf',
+    }),
+    label(`${prefix}-sub`, subtitle, topBar(14, 20, indent), {
+      size: 11,
+      color: C.textMuted,
+      align: 'MiddleLeft',
+    }),
+  );
+
+  return out;
 }
 
 // ============================================================

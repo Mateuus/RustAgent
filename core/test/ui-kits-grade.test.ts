@@ -235,13 +235,57 @@ describe('o card de um kit', () => {
     return found;
   }
 
-  it('empilha nome, ícone e regra sem um invadir o outro', () => {
-    const nome = pieceOf('kkit-x-nb');
-    const icone = pieceOf('kkit-x-i');
+  it('empilha ícone, nome e regra sem um invadir o outro', () => {
+    // A ordem é a do conceito de 14/09/2026: o ícone em cima, numa
+    // moldura à esquerda, e o texto descendo por baixo dele na
+    // mesma margem. Antes o ícone era centralizado e o texto
+    // alinhado à esquerda, e o olho ia ao centro e voltava.
+    const moldura = pieceOf('kkit-x-ib');
+    const nome = pieceOf('kkit-x-n');
     const regra = pieceOf('kkit-x-r');
 
-    expect(nome.top + nome.height).toBeLessThanOrEqual(icone.top);
-    expect(icone.top + icone.height).toBeLessThanOrEqual(regra.top);
+    expect(moldura.top + moldura.height).toBeLessThanOrEqual(nome.top);
+    expect(nome.top + nome.height).toBeLessThanOrEqual(regra.top);
+  });
+
+  it('alinha tudo pela mesma margem', () => {
+    // É o que faz o card se ler de cima para baixo numa coluna só.
+    const margens = ['kkit-x-ib', 'kkit-x-n', 'kkit-x-r'].map((id) => pieceOf(id).left);
+
+    expect(new Set(margens).size).toBe(1);
+  });
+
+  it('a exigência de VIP é uma linha própria, e some quando não há', () => {
+    // "uma vez · SÓ VIP OURO" punha duas perguntas na mesma linha em
+    // corpo 10: "com que frequência?" e "posso?". A segunda é a que
+    // faz alguém parar de olhar.
+    const comVip = grid([offer({ slug: 'v', requiredTier: 'ouro', requiredTierExact: true })]);
+    const semVip = grid([offer({ slug: 'w', requiredTier: null })]);
+
+    const texto = walk(comVip)
+      .filter((element) => element.type === 'label')
+      .map((element) => (element.type === 'label' ? element.text : ''));
+
+    expect(texto).toContain('EXCLUSIVO VIP OURO');
+    // Sem exigência, nenhuma linha em branco ocupando o lugar.
+    expect(idsOf(semVip)).not.toContain('kw-t');
+  });
+
+  it('"exclusivo" e "exige" não são a mesma frase', () => {
+    // `requiredTierExact` recusa quem está ACIMA do nível também, e
+    // é justamente ele quem clica achando que o nível melhor dá
+    // acesso a tudo.
+    const exato = grid([offer({ slug: 'a', requiredTier: 'prata', requiredTierExact: true })]);
+    const minimo = grid([offer({ slug: 'b', requiredTier: 'prata', requiredTierExact: false })]);
+
+    const textoDe = (els: readonly UiElement[], id: string): string => {
+      const found = walk(els).find((element) => element.id === id);
+
+      return found !== undefined && found.type === 'label' ? found.text : '';
+    };
+
+    expect(textoDe(exato, 'ka-t')).toBe('EXCLUSIVO VIP PRATA');
+    expect(textoDe(minimo, 'kb-t')).toBe('EXIGE VIP PRATA');
   });
 
   it('não deixa a regra encostar no rodapé', () => {
@@ -271,7 +315,7 @@ describe('o card de um kit', () => {
       return;
     }
 
-    for (const id of ['kkit-x-nb', 'kkit-x-i', 'kkit-x-r', 'kkit-x-info', 'kkit-x-b']) {
+    for (const id of ['kkit-x-ib', 'kkit-x-i', 'kkit-x-n', 'kkit-x-r', 'kkit-x-info', 'kkit-x-b']) {
       const piece = boxOf(elements, id);
 
       expect(piece).not.toBeNull();
