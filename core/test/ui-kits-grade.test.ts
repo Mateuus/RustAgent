@@ -235,13 +235,70 @@ describe('o card de um kit', () => {
     return found;
   }
 
-  it('empilha nome, ícone e regra sem um invadir o outro', () => {
-    const nome = pieceOf('kkit-x-nb');
-    const icone = pieceOf('kkit-x-i');
+  it('empilha nome, arte e regra sem um invadir o outro', () => {
+    const faixa = pieceOf('kkit-x-nb');
+    const arte = pieceOf('kkit-x-i');
     const regra = pieceOf('kkit-x-r');
 
-    expect(nome.top + nome.height).toBeLessThanOrEqual(icone.top);
-    expect(icone.top + icone.height).toBeLessThanOrEqual(regra.top);
+    expect(faixa.top + faixa.height).toBeLessThanOrEqual(arte.top);
+    expect(arte.top + arte.height).toBeLessThanOrEqual(regra.top);
+  });
+
+  // ####  DUAS COISAS QUE JÁ SE PERDERAM UMA VEZ  ####
+  //
+  // O cabeçalho deste card já foi alinhado à esquerda, com um ícone
+  // de 64 px numa moldura — copiado do conceito. Ficou ruim por
+  // motivos que só existem NESTA tela, e os dois testes abaixo são
+  // o que impede a cópia de voltar.
+
+  it('a arte do kit é grande, porque é ela que o identifica', () => {
+    // O admin sobe um PNG por kit. Reduzida a um selo de canto, ela
+    // deixa de ser a figura do kit.
+    const arte = pieceOf('kkit-x-i');
+
+    expect(arte.height).toBeGreaterThanOrEqual(100);
+  });
+
+  it('o card se destaca do fundo do menu', () => {
+    // A moldura do menu é `--surface`. Um card da mesma cor não tem
+    // borda contra ela — e o CUI não tem borda de verdade para dar.
+    const card = walk(elements).find((element) => element.id === 'kkit-x-c');
+
+    expect(card).toBeDefined();
+    expect(card !== undefined && card.type === 'panel' && card.color).not.toBe('#1B1B1B');
+  });
+
+  it('a exigência de VIP é uma linha própria, e some quando não há', () => {
+    // "uma vez · SÓ VIP OURO" punha duas perguntas na mesma linha em
+    // corpo 10: "com que frequência?" e "posso?". A segunda é a que
+    // faz alguém parar de olhar.
+    const comVip = grid([offer({ slug: 'v', requiredTier: 'ouro', requiredTierExact: true })]);
+    const semVip = grid([offer({ slug: 'w', requiredTier: null })]);
+
+    const texto = walk(comVip)
+      .filter((element) => element.type === 'label')
+      .map((element) => (element.type === 'label' ? element.text : ''));
+
+    expect(texto).toContain('EXCLUSIVO VIP OURO');
+    // Sem exigência, nenhuma linha em branco ocupando o lugar.
+    expect(idsOf(semVip)).not.toContain('kw-t');
+  });
+
+  it('"exclusivo" e "exige" não são a mesma frase', () => {
+    // `requiredTierExact` recusa quem está ACIMA do nível também, e
+    // é justamente ele quem clica achando que o nível melhor dá
+    // acesso a tudo.
+    const exato = grid([offer({ slug: 'a', requiredTier: 'prata', requiredTierExact: true })]);
+    const minimo = grid([offer({ slug: 'b', requiredTier: 'prata', requiredTierExact: false })]);
+
+    const textoDe = (els: readonly UiElement[], id: string): string => {
+      const found = walk(els).find((element) => element.id === id);
+
+      return found !== undefined && found.type === 'label' ? found.text : '';
+    };
+
+    expect(textoDe(exato, 'ka-t')).toBe('EXCLUSIVO VIP PRATA');
+    expect(textoDe(minimo, 'kb-t')).toBe('EXIGE VIP PRATA');
   });
 
   it('não deixa a regra encostar no rodapé', () => {

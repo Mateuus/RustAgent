@@ -52,6 +52,7 @@ import type {
   QuestRecord,
   QuestsRepository,
 } from '../db/quests-repository.js';
+import { describeContainerSelectors } from '../game/quest-containers.js';
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import {
@@ -568,6 +569,13 @@ export class QuestsService {
         return `Fabricar ${amount} ${this.#nameOf(objective.target)}`;
       case 'loot':
         return `Saquear ${amount} de ${this.#nameOf(objective.target)}`;
+      // ####  AQUI O NÚMERO CONTA CAIXA, E NÃO UNIDADE  ####
+      //
+      // Por isso "Saquear 20 barris" e não "Saquear 20 DE barril":
+      // a preposição do `loot` diz "vinte unidades daquilo", que é
+      // o oposto do que este objetivo mede.
+      case 'container':
+        return `Saquear ${amount} ${describeContainerSelectors(objective.targets ?? [])}`;
       case 'deliver':
         // ####  O PACOTE SÓ É "O PACOTE" QUANDO NÃO É NADA  ####
         //

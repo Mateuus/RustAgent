@@ -683,7 +683,24 @@ function buildShell(): UiElement[] {
     // O véu, com o desfoque. Ele é o fundo de tudo.
     panel('veu', 'Véu', inset(0, 0, 0, 0), OVERLAY, [], BLUR_MATERIAL),
 
-    // A moldura: o menu ocupa 88% da tela.
+    // ####  A MOLDURA: O MENU OCUPA 88% DA TELA  ####
+    //
+    // O interior dela é `--bg`, e não `--surface`. Isso não é
+    // estética: é o que faz os cartões EXISTIREM.
+    //
+    // O CUI não tem borda — ela se faz com dois painéis, um por
+    // cima do outro, e a esta tela não sobram elementos para isso.
+    // Então o que separa um cartão do fundo é a DIFERENÇA DE TOM, e
+    // ela só existe se os dois tons forem diferentes.
+    //
+    // Enquanto o interior foi `--surface`, os cartões — também
+    // `--surface` — não tinham contorno nenhum: a HOME parecia um
+    // bloco único com texto espalhado, e a grade de kits, oito
+    // retângulos invisíveis. Visto no jogo em 14/09/2026.
+    //
+    // Com `--bg` embaixo, `--surface` vira o cartão e `--surface-2`
+    // vira o destaque dentro dele. Três tons, nenhum elemento a
+    // mais.
     borderedPanel(
       'moldura',
       'Moldura',
@@ -693,7 +710,7 @@ function buildShell(): UiElement[] {
         offsetMin: { x: 0, y: 0 },
         offsetMax: { x: 0, y: 0 },
       },
-      C.surface,
+      C.bg,
       [
         panel('cabecalho', 'Cabeçalho', topBar(LAYOUT.headerHeight), C.surface2, [
           // Em cima: a marca à esquerda, o jogador à direita.

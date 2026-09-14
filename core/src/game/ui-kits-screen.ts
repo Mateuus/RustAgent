@@ -66,6 +66,7 @@ import {
   rowsPager,
   storedImage,
   tabsRow,
+  titleBar,
   type ContentRow,
   type Rect,
 } from './ui-widgets.js';
@@ -181,14 +182,40 @@ const PER_PAGE = GRID.columns * GRID.rows;
  */
 const CARD = {
   /** A barra de estado, colada no topo. */
-  accent: 2,
-  /** A faixa do nome, logo abaixo dela. */
-  nameTop: 2,
-  nameBottom: 30,
+  accent: 3,
+  /** A margem interna. */
+  pad: 12,
+  /**
+   * A faixa do nome, no TOPO.
+   *
+   * ####  ELA SAIU UMA VEZ, E O CARD PIOROU  ####
+   *
+   * O conceito de 14/09/2026 alinha o cabeçalho do cartão à
+   * esquerda, com um ícone pequeno numa moldura. Copiei isso aqui e
+   * ficou ruim por duas razões que só aparecem NESTA tela:
+   *
+   *   1. o kit tem ARTE PRÓPRIA — o admin sobe um PNG por kit — e
+   *      ela é o que identifica o kit à distância. Reduzida a 64 px
+   *      e encostada num canto, ela deixa de ser a figura do kit e
+   *      vira um selo;
+   *   2. o card ficou SEM CONTRASTE. Ele é `--surface`, e a moldura
+   *      do menu também: era a faixa do nome, em `--surface-2`, que
+   *      dava a ele uma borda visível. Sem ela, oito cards sumiram
+   *      no fundo.
+   *
+   * O conceito tem razão para os cartões DELE, que não têm arte
+   * própria e vivem sobre um fundo mais escuro. Aqui o desenho
+   * certo é o de antes: nome em faixa no topo, arte grande no meio.
+   */
+  nameTop: 3,
+  nameBottom: 31,
   iconTop: 50,
   iconBottom: 166,
-  ruleTop: 176,
-  ruleBottom: 194,
+  ruleTop: 174,
+  ruleBottom: 192,
+  /** A linha em âmbar, quando o kit exige VIP. */
+  tierTop: 194,
+  tierBottom: 210,
   buttonBottom: 10,
   buttonTop: 40,
   /** A largura do botão que abre os detalhes, no rodapé. */
@@ -427,11 +454,7 @@ function buildGrid(
   const id = screenId ?? KITS_SCREEN_ID;
 
   const elements: UiElement[] = [
-    label('kits-titulo', 'KITS', topBarRect(30), {
-      size: 20,
-      align: 'MiddleLeft',
-      font: 'RobotoCondensed-Bold.ttf',
-    }),
+    ...titleBar('kits', 'KITS', { subtitle: 'O que a rede entrega, e a regra de cada um.' }),
   ];
 
   if (offers.length === 0) {
@@ -703,6 +726,8 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
   const first = kit.items[0];
   const icon = first === undefined ? null : itemOf(first.shortname);
 
+  // A arte do kit, grande e no meio. Ela é o que identifica o kit à
+  // distância — ver `CARD`.
   const iconRect: Rect = {
     anchorMin: { x: 0.5, y: 1 },
     anchorMax: { x: 0.5, y: 1 },
@@ -719,9 +744,9 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
 
     // ####  A FAIXA DO NOME  ####
     //
-    // O nome já esteve solto sob o ícone, na mesma cor do resto do
-    // card. Numa parede de cards iguais, o olho não tinha onde
-    // pousar primeiro — e é pelo nome que se procura um kit.
+    // Ela é a primeira coisa que se lê em cada card — e é também o
+    // que dá ao card uma borda visível contra a moldura do menu,
+    // que é da mesma cor dele. Ver `CARD`.
     panel(
       `${id}-nb`,
       {
@@ -730,11 +755,12 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
         offsetMin: { x: 0, y: -CARD.nameBottom },
         offsetMax: { x: 0, y: -CARD.nameTop },
       },
-      C.surface2,
+      C.bg,
       [
-        label(`${id}-n`, kit.name, fill(8, 0, 8, 0), {
+        label(`${id}-n`, kit.name, fill(10, 0, 10, 0), {
           size: 13,
           color: C.text,
+          align: 'MiddleLeft',
           font: 'RobotoCondensed-Bold.ttf',
         }),
       ],
@@ -764,10 +790,10 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 8, y: -CARD.ruleBottom },
-        offsetMax: { x: -8, y: -CARD.ruleTop },
+        offsetMin: { x: CARD.pad, y: -CARD.ruleBottom },
+        offsetMax: { x: -CARD.pad, y: -CARD.ruleTop },
       },
-      { size: 10, color: C.textMuted },
+      { size: 11, color: C.textMuted },
     ),
 
     // ####  "VER" ABRE O QUE NÃO CABE NO CARD  ####
@@ -794,6 +820,24 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       { color: C.surface2, textColor: C.textMuted, hoverColor: C.border, fontSize: 11 },
     ),
   ];
+
+  const tier = tierLineOf(kit);
+
+  if (tier !== null) {
+    children.push(
+      label(
+        `${id}-t`,
+        tier,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: CARD.pad, y: -CARD.tierBottom },
+          offsetMax: { x: -CARD.pad, y: -CARD.tierTop },
+        },
+        { size: 11, color: C.amber, font: 'RobotoCondensed-Bold.ttf' },
+      ),
+    );
+  }
 
   const buttonRect: Rect = {
     anchorMin: { x: 0, y: 0 },
@@ -834,7 +878,13 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       offsetMin: { x: column === 0 ? 0 : half, y: -(y + GRID.cardHeight) },
       offsetMax: { x: column === GRID.columns - 1 ? 0 : -half, y: -y },
     },
-    C.surface,
+    // ####  `--surface-2`, E NÃO `--surface`  ####
+    //
+    // A moldura do menu é `--surface` (ver o preset). Um card da
+    // mesma cor não tem borda contra ela — e o CUI não tem borda de
+    // verdade para dar. Um tom acima é o que o separa do fundo, que
+    // é o mesmo recurso que a coluna de categorias já usa.
+    C.surface2,
     children,
   );
 }
@@ -846,25 +896,47 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
  * não escondida atrás do "i".
  */
 function ruleOf(kit: KitOfferView): string {
-  // "SÓ VIP OURO" e "VIP OURO" dizem coisas diferentes para quem
-  // está acima do nível — e é justamente ele quem clica no kit de
-  // baixo e é recusado.
-  const tier =
-    kit.requiredTier === null
-      ? ''
-      : ` · ${kit.requiredTierExact ? 'SÓ ' : ''}VIP ${kit.requiredTier.toUpperCase()}`;
-
+  // ####  O NÍVEL SAIU DAQUI  ####
+  //
+  // Ele vinha grudado no fim ("uma vez · SÓ VIP OURO"), e as duas
+  // coisas competiam pela mesma linha em corpo 10. São perguntas
+  // diferentes — "com que frequência?" e "posso?" — e a segunda é a
+  // que faz alguém parar de olhar. Ela virou uma linha própria, em
+  // âmbar: ver `tierLineOf`.
   if (kit.kind === 'cooldown') {
-    return `a cada ${describeWait((kit.cooldownSeconds ?? 0) * 1000)}${tier}`;
+    return `a cada ${describeWait((kit.cooldownSeconds ?? 0) * 1000)}`;
   }
 
   const limit = kit.useLimit ?? 1;
 
   if (limit === 1) {
-    return `uma vez${kit.useResetOn === 'never' ? '' : ' por wipe'}${tier}`;
+    return `uma vez${kit.useResetOn === 'never' ? '' : ' por wipe'}`;
   }
 
-  return `${String(limit)} usos${kit.useResetOn === 'never' ? '' : ' por wipe'}${tier}`;
+  return `${String(limit)} usos${kit.useResetOn === 'never' ? '' : ' por wipe'}`;
+}
+
+/**
+ * A exigência de VIP, quando existe.
+ *
+ * ####  "EXCLUSIVO" E "EXIGE" DIZEM COISAS DIFERENTES  ####
+ *
+ * `requiredTierExact` quer dizer AQUELE nível e nenhum outro — quem
+ * está acima também é recusado, e é justamente ele quem clica no
+ * kit de baixo achando que o nível melhor dá acesso a tudo.
+ *
+ * Em âmbar porque é a cor do que é premium na paleta, a mesma do
+ * OZCoin. É a única linha colorida do card, e é a que decide se
+ * vale continuar olhando.
+ */
+function tierLineOf(kit: KitOfferView): string | null {
+  if (kit.requiredTier === null) {
+    return null;
+  }
+
+  const tier = kit.requiredTier.toUpperCase();
+
+  return kit.requiredTierExact ? `EXCLUSIVO VIP ${tier}` : `EXIGE VIP ${tier}`;
 }
 
 /**

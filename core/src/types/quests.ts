@@ -37,6 +37,8 @@
 
 import { z } from 'zod';
 
+import { isValidContainerSelector } from '../game/quest-containers.js';
+
 // ------------------------------------------------------------
 //  §1  VOCABULÁRIO
 // ------------------------------------------------------------
@@ -61,26 +63,33 @@ export type QuestWipePolicy = 'reset' | 'keep';
 /**
  * De onde o número de um objetivo vem.
  *
- *   kill     matar. `target` é o nome curto normalizado da criatura
- *   gather   colher. `target` é o shortname do recurso
- *   craft    fabricar. `target` é o shortname do item
- *   loot     pegar de container ou do chão. `target` é o shortname
- *   deliver  levar até um NPC. `target` é o id do NPC DESTINO, e o
- *            `item` diz O QUE se leva — vazio, é o correio antigo,
- *            em que só a chegada conta e a distância é que paga
- *   playtime tempo online NAQUELE servidor, em MINUTOS. Sem alvo
- *            — quem mede é o agente, pela sessão do jogador
- *   metric   qualquer métrica do ranking. `metric` preenchido
+ *   kill      matar. `target` é o nome curto normalizado da criatura
+ *   gather    colher. `target` é o shortname do recurso
+ *   craft     fabricar. `target` é o shortname do item
+ *   loot      pegar ITEM de container ou do chão. `target` é o
+ *             shortname do item — o que vale é o que entra na
+ *             mochila, e a caixa de onde ele veio não importa
+ *   container saquear a CAIXA. `targets` é a lista de contêineres
+ *             que contam, e o que vem dentro é que não importa
+ *   deliver   levar até um NPC. `target` é o id do NPC DESTINO, e o
+ *             `item` diz O QUE se leva — vazio, é o correio antigo,
+ *             em que só a chegada conta e a distância é que paga
+ *   playtime  tempo online NAQUELE servidor, em MINUTOS. Sem alvo
+ *             — quem mede é o agente, pela sessão do jogador
+ *   metric    qualquer métrica do ranking. `metric` preenchido
  *
  * Os três primeiros e o `metric` custam zero em performance: o
  * `OrigemZAgent` já roda esses hooks para o ranking. O `loot` é o
- * único caro, e §5.4 do plano descreve as três contenções dele.
+ * único caro, e §5.4 do plano descreve as três contenções dele; o
+ * `container` custa dois hooks frios — abrir caixa e quebrar barril
+ * são eventos raros perto de "todo item que entra num container".
  */
 export type QuestObjectiveKind =
   | 'kill'
   | 'gather'
   | 'craft'
   | 'loot'
+  | 'container'
   | 'deliver'
   | 'playtime'
   | 'metric';
@@ -134,6 +143,7 @@ export const PLUGIN_OBJECTIVE_KINDS: readonly QuestObjectiveKind[] = [
   'gather',
   'craft',
   'loot',
+  'container',
   'deliver',
 ];
 
@@ -183,6 +193,35 @@ const questTargetSchema = z
   .max(64)
   .regex(/^[a-z0-9][a-z0-9._-]*$/, 'o alvo usa só minúscula, dígito, ponto, hífen e sublinhado');
 
+/**
+ * Um alvo do objetivo `container`: prefab ou categoria.
+ *
+ * ####  A CATEGORIA É CONFERIDA; O PREFAB, NÃO  ####
+ *
+ * `@barrel` só passa se existir — um `@` errado seria um objetivo
+ * que nunca conta, e o admin não teria como desconfiar. Já o prefab
+ * digitado à mão passa com a régua de formato e nada mais, pela
+ * mesma razão que a tela de loot aceita: o Rust ganha contêiner a
+ * cada update, e recusar o que não está no nosso catálogo seria
+ * travar o admin pelo envelhecimento de uma lista nossa.
+ */
+const questContainerSelectorSchema = z
+  .string()
+  .min(1)
+  .max(80)
+  .superRefine((value, ctx) => {
+    if (isValidContainerSelector(value)) {
+      return;
+    }
+
+    ctx.addIssue({
+      code: 'custom',
+      message: value.startsWith('@')
+        ? `"${value}" não é uma categoria de contêiner conhecida`
+        : `"${value}" não parece um prefab: use só minúscula, dígito, ponto, hífen e sublinhado`,
+    });
+  });
+
 // ------------------------------------------------------------
 //  §3  O OBJETIVO
 // ------------------------------------------------------------
@@ -200,8 +239,40 @@ const questTargetSchema = z
 const questObjectiveSchema = z
   .object({
     seq: z.number().int().min(0).max(31),
-    kind: z.enum(['kill', 'gather', 'craft', 'loot', 'deliver', 'playtime', 'metric']),
+    kind: z.enum([
+      'kill',
+      'gather',
+      'craft',
+      'loot',
+      'container',
+      'deliver',
+      'playtime',
+      'metric',
+    ]),
     target: questTargetSchema.nullable().default(null),
+    /**
+     * Os contêineres que contam. Só em `container`.
+     *
+     * ####  UMA LISTA, E NÃO N OBJETIVOS  ####
+     *
+     * Os dois modos de contagem que o dono pediu saem daqui:
+     *
+     *   total compartilhado  um objetivo, N alvos, um contador
+     *                        ("20 entre barris e caixas comuns")
+     *   quantidade por tipo  N objetivos de um alvo cada, e a
+     *                        quest fecha quando todos fecharem
+     *                        ("10 barris E 5 caixas")
+     *
+     * O segundo já era possível antes — a tabela é multi-objetivo
+     * desde o primeiro dia. O que faltava era o primeiro, e é ele
+     * que esta lista traz.
+     *
+     * Cada item é um `ShortPrefabName` (`crate_elite`) ou uma
+     * categoria (`@barrel`, `@crate`, `@any`). O teto de 32 é
+     * generoso de propósito: o catálogo inteiro tem 65, e quem
+     * quiser todos usa `@any` em vez de escolher um a um.
+     */
+    targets: z.array(questContainerSelectorSchema).min(1).max(32).nullable().default(null),
     metric: questMetricSchema.nullable().default(null),
     /**
      * O que o jogador leva na mochila até o NPC. Só em `deliver`.
@@ -243,6 +314,66 @@ const questObjectiveSchema = z
         code: 'custom',
         path: ['item'],
         message: `só a entrega ("deliver") cobra um item na mochila — "${value.kind}" não`,
+      });
+    }
+
+    // ####  POR QUE ISTO É ERRO, E NÃO UM CAMPO IGNORADO  ####
+    //
+    // `consume` marcado num objetivo de matar não teria o que
+    // retirar do inventário, e o resgate falharia com uma frase
+    // sem sentido para quem jogou. Recusar no cadastro custa um
+    // aviso no painel; deixar passar custa um jogador travado.
+    //
+    // Aqui em cima junto com o `item`, e não no fim: os ramos
+    // abaixo saem cedo, e o `container` — que também não tem o que
+    // consumir — passaria batido.
+    if (value.consume && value.kind !== 'loot' && value.kind !== 'gather') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['consume'],
+        message: 'só objetivos de "loot" e "gather" podem consumir os itens no resgate',
+      });
+    }
+
+    // ####  QUEM TEM `targets` NÃO TEM `target`, E VICE-VERSA  ####
+    //
+    // As duas colunas preenchidas seriam duas respostas para "o que
+    // conta?", e a contagem obedeceria a uma delas em silêncio. O
+    // `container` é o único que usa a lista; e ele SÓ usa a lista,
+    // porque um alvo único é a lista de um item.
+    if (value.kind === 'container') {
+      if (value.targets === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['targets'],
+          message: 'um objetivo de saque precisa de pelo menos um contêiner',
+        });
+      }
+
+      if (value.target !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['target'],
+          message: 'o saque de contêiner usa a lista de alvos, e não o alvo único',
+        });
+      }
+
+      if (value.metric !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['metric'],
+          message: 'só o tipo "metric" usa o campo metric',
+        });
+      }
+
+      return;
+    }
+
+    if (value.targets !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['targets'],
+        message: `só o saque de contêiner ("container") tem lista de alvos — "${value.kind}" não`,
       });
     }
 
@@ -298,19 +429,6 @@ const questObjectiveSchema = z
       });
     }
 
-    // ####  POR QUE ISTO É ERRO, E NÃO UM CAMPO IGNORADO  ####
-    //
-    // `consume` marcado num objetivo de matar não teria o que
-    // retirar do inventário, e o resgate falharia com uma frase
-    // sem sentido para quem jogou. Recusar no cadastro custa um
-    // aviso no painel; deixar passar custa um jogador travado.
-    if (value.consume && value.kind !== 'loot' && value.kind !== 'gather') {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['consume'],
-        message: 'só objetivos de "loot" e "gather" podem consumir os itens no resgate',
-      });
-    }
   });
 
 export type QuestObjective = z.infer<typeof questObjectiveSchema>;

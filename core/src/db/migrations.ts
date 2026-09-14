@@ -6521,6 +6521,105 @@ const QUEST_DELIVER_ITEM_SCHEMA = `
 ALTER TABLE quest_objectives ADD COLUMN item TEXT;
 `;
 
+const QUEST_CONTAINER_OBJECTIVE_SCHEMA = `
+-- ============================================================
+--  084  saquear a CAIXA, e nao o que vem dentro dela.
+--
+--  ####  O \`loot\` CONTA ITEM, E ISSO NUNCA FOI O PEDIDO  ####
+--
+--  O objetivo \`loot\` conta unidades de um shortname: "pegue 200 de
+--  scrap". O editor o chamava de "Saquear de caixas" e era so isso
+--  que existia -- nao havia como pedir "saqueie 20 barris", porque
+--  o alvo de um objetivo era sempre um item.
+--
+--  Pedido do dono em 14/09/2026: "os barris e conteineres
+--  encontrados nas estradas nao aparecem como opcoes de alvo.
+--  Tambem nao conseguimos encontra-los nos outros tipos de
+--  objetivo". Nao apareciam porque nao existiam.
+--
+--  ####  DUAS MUDANCAS, E A PRIMEIRA CUSTA UMA TABELA NOVA  ####
+--
+--  O CHECK do \`kind\` foi escrito com sete valores, e o SQLite nao
+--  altera restricao: a tabela e renomeada, recriada com
+--  'container' na lista, copiada e a velha dropada. E o mesmo
+--  caminho da 062, e ele vem PRIMEIRO -- se algo falhar aqui, nada
+--  mais foi escrito.
+--
+--  ####  \`targets\` E LISTA PORQUE O CONTADOR E COMPARTILHADO  ####
+--
+--  "Saqueie 20 conteineres entre barris azuis, vermelhos, amarelos
+--  e caixas comuns" e UM contador que quatro tipos alimentam. Com
+--  um alvo por objetivo isso seria quatro contadores de cinco, que
+--  e uma missao diferente -- e a outra metade do pedido ("permitir
+--  definir uma quantidade separada para cada alvo") ja e o que a
+--  tabela faz desde sempre, com um objetivo por tipo.
+--
+--  Cada item da lista e um \`ShortPrefabName\` ou uma CATEGORIA
+--  (\`@barrel\`, \`@crate\`, \`@any\`). A categoria fica guardada como
+--  categoria, e nao expandida: um barril novo do Rust entra no
+--  catalogo do agente e as missoes de "qualquer barril" ja
+--  cadastradas passam a alcanca-lo, sem ninguem reeditar nada.
+--
+--  Sem CHECK de formato, pela mesma razao da 082: quem confere e o
+--  zod, e um CHECK aqui seria a segunda regua a divergir.
+--
+--  Ver core/src/game/quest-containers.ts.
+-- ============================================================
+
+ALTER TABLE quest_objectives RENAME TO quest_objectives_084;
+
+CREATE TABLE quest_objectives (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  quest_id TEXT NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+
+  seq INTEGER NOT NULL,
+
+  -- ####  DE ONDE O NUMERO VEM  ####
+  --   'kill'      - matar. target = 'scientist', 'bear', 'player'
+  --   'gather'    - colher. target = shortname do recurso
+  --   'craft'     - fabricar. target = shortname do item
+  --   'loot'      - pegar ITEM de container/chao. target = shortname
+  --   'container' - saquear a CAIXA. targets = lista de prefabs
+  --   'deliver'   - levar de um NPC a outro. target = id do NPC
+  --   'playtime'  - tempo online, em minutos. target = NULL
+  --   'metric'    - qualquer metrica do ranking. metric preenchido
+  kind TEXT NOT NULL
+    CHECK (kind IN ('kill','gather','craft','loot','container',
+                    'deliver','playtime','metric')),
+
+  -- O alvo unico. NULL em 'playtime', 'metric' e 'container'.
+  target TEXT,
+
+  -- Os alvos do 'container', em JSON: ["@barrel","crate_elite"].
+  -- NULL em todos os outros tipos -- duas colunas dizendo de onde o
+  -- alvo vem e nenhuma mandando e o defeito que o zod recusa.
+  targets TEXT,
+
+  metric TEXT,
+
+  item TEXT,
+
+  amount INTEGER NOT NULL CHECK (amount > 0),
+
+  label TEXT,
+
+  consume INTEGER NOT NULL DEFAULT 0 CHECK (consume IN (0, 1)),
+
+  UNIQUE (quest_id, seq)
+);
+
+INSERT INTO quest_objectives
+  (id, quest_id, seq, kind, target, metric, item, amount, label, consume)
+SELECT id, quest_id, seq, kind, target, metric, item, amount, label, consume
+FROM quest_objectives_084;
+
+DROP TABLE quest_objectives_084;
+
+CREATE INDEX idx_quest_objectives_quest ON quest_objectives (quest_id, seq);
+CREATE INDEX idx_quest_objectives_watch ON quest_objectives (kind, target);
+`;
+
 const BETTERLOOT_JUNK_SCHEMA = `
 -- ============================================================
 --  073  o que e "lixo" no loot deste servidor.
@@ -7308,9 +7407,12 @@ export const MIGRATIONS: readonly Migration[] = [
   // 14/09/2026: a aba REGRAS do menu ganha conteudo, e ele e do
   // painel -- da rede, ou proprio daquele servidor.
   { id: 83, name: 'server-rules', sql: SERVER_RULES_SCHEMA },
-  // A 84 esta reservada para a frente do saque de conteineres, que
-  // corre em outra branch. Colidir o id faria UMA das duas ser
-  // PULADA em silencio no merge.
+  // 14/09/2026: a missao passa a poder pedir a CAIXA, e nao o que
+  // vem dentro dela -- com varios alvos no mesmo contador.
+  { id: 84, name: 'quest-container-objective', sql: QUEST_CONTAINER_OBJECTIVE_SCHEMA },
+  // 14/09/2026: o `playtime` troca de regua -- passa a ler o tempo
+  // online com a sessao ABERTA somada, e a partida das tentativas
+  // que ja estavam em andamento precisa acompanhar.
   { id: 85, name: 'quest-playtime-rebase', run: rebaseActivePlaytimeObjectives },
 ];
 
