@@ -356,42 +356,54 @@ describe('a HOME dentro do menu', () => {
    * O terceiro passo não era economia: era conserto. Ver
    * `CARD_ICON` em ui-home-screen.ts.
    *
-   * ####  14/09/2026, DEPOIS: A BORDA DOS CARTÕES  ####
+   * ####  14/09/2026: A BORDA E A RÉGUA  ####
    *
-   * 44.104 bytes, 88%. O CUI não tem borda — ela custa um painel
-   * por cartão, e são cinco. Pedida pelo dono depois de ver a tela
-   * no jogo, e com o custo autorizado.
+   * 46.900 bytes, 94%. Os cartões ganharam borda (um painel cada,
+   * porque o CUI não tem borda) e a régua que fecha o cabeçalho
+   * (mais um cada). Oito elementos, pedidos depois de ver a tela no
+   * jogo e com o custo autorizado.
    *
-   * ####  ESTA É A TERCEIRA VEZ QUE A TRAVA SOBE. O LIMITE  ####
+   * ####  ONDE A GORDURA NÃO ESTÁ  ####
    *
-   * O critério que venho usando é: ela existe para pegar
-   * crescimento que ESCALA COM OS DADOS, e nada do que subiu até
-   * aqui escala — são elementos de ESQUELETO, o mesmo número com um
-   * jogador ou com quatro mil.
+   * Procurei antes de aceitar o número, e o palpite óbvio estava
+   * errado: os três MODELOS de modal da loja somam 13.031 bytes no
+   * documento, e cheguei a escrever uma poda para tirá-los do
+   * envio.
    *
-   * O critério continua valendo, mas ele tem um fim. Restam 5.896
-   * bytes, e a partir daqui:
+   * Eles já não viajavam. `toDocumentPayload` manda o shell, o
+   * ÍNDICE e **só a tela de entrada** — medido: o payload tem uma
+   * tela, não doze. A poda rendeu 216 bytes (os ids no índice) e
+   * foi desfeita.
    *
-   *   - **nenhum elemento novo entra sem tirar outro.** A tela está
-   *     desenhada; o que vier agora é troca, não acréscimo;
-   *   - se um dia for preciso mesmo assim, o que sai primeiro são
-   *     as linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
-   *     "CALENDÁRIO DO SERVIDOR"): são texto fixo, enfeitam e não
-   *     informam, e valem ~780 bytes. As do ranking e das missões
-   *     NÃO — a primeira diz qual ranking, a segunda quantas
-   *     missões, e as duas mudam com o estado;
-   *   - depois delas, a borda. Ela é a peça mais cara da tela
-   *     (~1.950 bytes) e a única puramente decorativa.
+   * O peso é o que tem de ser: shell 9.091 e HOME 15.313 em JSON,
+   * que viram 46.900 em base64. Não há o que cortar sem cortar
+   * desenho.
    *
-   * E se algum dia o crescimento vier de DADOS — uma lista a mais,
-   * um cartão a mais —, a trava não sobe: encurta-se a lista. Essa
-   * regra não tem exceção, porque o pior caso do teste é sempre
-   * menor que o pior caso do mundo.
+   * ####  A PARTIR DAQUI, TROCA — NÃO ACRÉSCIMO  ####
+   *
+   * Restam 3.100 bytes. O critério que permitiu subir a trava três
+   * vezes — ela existe para pegar crescimento que ESCALA COM OS
+   * DADOS, e esqueleto não escala — chegou ao fim útil dele.
+   *
+   * Nenhum elemento novo entra sem tirar outro. Na ordem de saída:
+   *
+   *   1. as linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
+   *      "CALENDÁRIO DO SERVIDOR"): texto fixo, enfeitam e não
+   *      informam, ~1.040 bytes. As do ranking e das missões NÃO —
+   *      a primeira diz qual ranking, a segunda quantas missões, e
+   *      as duas mudam com o estado;
+   *   2. a régua dos cartões, ~1.400;
+   *   3. a borda, ~1.950 — a peça mais cara e a única puramente
+   *      decorativa.
+   *
+   * E se o crescimento vier de DADOS, a trava não sobe: encurta-se
+   * a lista. Essa não tem exceção, porque o pior caso do teste é
+   * sempre menor que o pior caso do mundo.
    */
   it('a carga inicial fica com folga confortável', () => {
     const bytes = encodeUiDocPayload({ documents: [toDocumentPayload(buildMainMenu())] }).length;
 
-    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.9);
+    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.95);
   });
 
   it('nenhuma ação gravada tem `:` no destino', () => {

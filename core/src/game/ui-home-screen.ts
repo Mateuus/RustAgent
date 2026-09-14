@@ -934,6 +934,18 @@ function cardHeader(
       color: C.textMuted,
       align: 'MiddleLeft',
     }),
+
+    // ####  A RÉGUA FECHA O CABEÇALHO  ####
+    //
+    // Sem ela, o subtítulo e a primeira linha do corpo são dois
+    // textos cinza a 14 px um do outro — e se leem como uma lista
+    // só, com o subtítulo virando o primeiro item dela.
+    //
+    // Ela ficou de fora na primeira volta por custar quatro
+    // elementos numa tela com teto. Entrou depois, pedida, e o que
+    // pagou por ela está no comentário da trava em
+    // test/ui-home-screen.test.ts.
+    panel(`${id}-regua`, band(HEAD.rule, 1), C.border),
   ];
 }
 
@@ -970,14 +982,10 @@ const HEAD = {
   iconTop: 14,
   titleTop: 16,
   subTop: 36,
-  /**
-   * Onde o corpo começa.
-   *
-   * A régua do conceito não entrou — seriam mais quatro elementos
-   * numa tela com teto, e o que ela faz (separar o cabeçalho do
-   * corpo) estes 12 px de respiro já fazem.
-   */
-  body: 64,
+  /** A régua que fecha o cabeçalho, com respiro dos dois lados. */
+  rule: 58,
+  /** Onde o corpo começa, depois do respiro sob a régua. */
+  body: 70,
 } as const;
 
 /**
@@ -994,12 +1002,28 @@ const HEAD = {
  * perde é a cor separada dela, e isso ninguém nota.
  */
 function cardButton(id: string, text: string, action: UiAction, accent = false): UiElement {
-  return button(id, `${text}   ›`, footer(BUTTON_HEIGHT), action, {
-    color: accent ? C.rust : C.surface2,
-    textColor: accent ? C.white : C.text,
-    hoverColor: accent ? '#D4553FFF' : C.rust,
-    fontSize: 11,
-  });
+  // ####  A BORDA VERMELHA, COMO NO CONCEITO  ####
+  //
+  // Lá o botão é `background:#171313` com `border:1px solid var(--red)`:
+  // escuro por dentro, contornado por fora. É o desenho que diz
+  // "isto é uma ação" sem pintar quatro retângulos vermelhos numa
+  // tela que já tem vermelho no cabeçalho e nos acentos.
+  //
+  // O CUI não tem borda: o painel é a moldura, e o botão vive
+  // dentro dele 1 px menor. Custa um elemento por botão — ver a
+  // trava em test/ui-home-screen.test.ts, que diz o que pagou por
+  // ele.
+  return panel(`${id}-b`, footer(BUTTON_HEIGHT), C.rust, [
+    button(id, `${text}   ›`, fill(1, 1, 1, 1), action, {
+      // Um vermelho bem escuro, e não `--surface-2`: é o que faz o
+      // contorno ler como contorno, e não como um painel cinza com
+      // uma linha em volta.
+      color: accent ? C.rust : '#1B1211FF',
+      textColor: accent ? C.white : C.text,
+      hoverColor: accent ? '#D4553FFF' : C.rust,
+      fontSize: 11,
+    }),
+  ]);
 }
 
 export interface BuildHomeScreenOptions {
