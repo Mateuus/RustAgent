@@ -925,13 +925,20 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
       // e não por um rótulo nosso ao lado. Ver `applyVariables`.
       card('hm-banner', topBar(BANNER_HEIGHT), [
         panel('hm-banner-acento', leftBar(3), C.rust),
-        label('hm-titulo', `BEM-VINDO, ${PLAYER_VARIABLE}`, band(26, 34, 20), {
-          size: 24,
-          align: 'MiddleLeft',
-          font: 'RobotoCondensed-Bold.ttf',
-        }),
-        label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(62, 22, 20), {
-          size: 13,
+
+        // ####  O NOME EM DUAS LINHAS, E A SEGUNDA EM VERMELHO  ####
+        //
+        // "BEM-VINDO, FULANO" numa linha só faz a saudação e o nome
+        // terem o mesmo peso — e quem abre o menu não está lendo a
+        // saudação, está se reconhecendo nela. Separá-los põe o nome
+        // no tamanho e na cor em que ele é a primeira coisa vista,
+        // que é o que o conceito de 14/09/2026 faz.
+        //
+        // Duas linhas, e não um texto com duas cores: o CUI não tem
+        // marcação dentro de um `Text` — cor é do elemento inteiro.
+        ...welcomeLines(view.player),
+        label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(78, 20, 20), {
+          size: 12,
           color: C.textMuted,
           align: 'MiddleLeft',
         }),
@@ -942,6 +949,54 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
       view.player,
     ),
   };
+}
+
+/**
+ * A saudação do banner, em duas linhas.
+ *
+ * ####  O NOME NÃO É UM PEDAÇO DA FRASE  ####
+ *
+ * "BEM-VINDO, FULANO" numa linha só dá à saudação e ao nome o mesmo
+ * peso — e quem abre o menu não está lendo a saudação, está se
+ * reconhecendo nela. Separados, o nome fica no tamanho e na cor em
+ * que é a primeira coisa vista.
+ *
+ * São dois labels, e não um texto de duas cores: o CUI não tem
+ * marcação dentro de um `Text` — a cor é do elemento inteiro.
+ *
+ * ####  SEM NOME, A VÍRGULA VAI JUNTO  ####
+ *
+ * O `applyPlayerName` já tira a variável e o separador ao redor
+ * dela quando não há nome, mas ele trabalha sobre UM texto. Aqui a
+ * vírgula está numa linha e a variável em outra: sem este caso, a
+ * tela mostraria "BEM-VINDO DE VOLTA," e uma linha vazia embaixo.
+ */
+function welcomeLines(player: string): UiElement[] {
+  if (player === '') {
+    // Uma linha só, centrada na altura das duas — senão ela ficaria
+    // colada no topo, com o buraco do nome embaixo.
+    return [
+      label('hm-titulo', 'BEM-VINDO', band(30, 34, 20), {
+        size: 24,
+        align: 'MiddleLeft',
+        font: 'RobotoCondensed-Bold.ttf',
+      }),
+    ];
+  }
+
+  return [
+    label('hm-ola', 'BEM-VINDO DE VOLTA,', band(22, 20, 20), {
+      size: 14,
+      align: 'MiddleLeft',
+      font: 'RobotoCondensed-Bold.ttf',
+    }),
+    label('hm-titulo', PLAYER_VARIABLE, band(40, 34, 20), {
+      size: 28,
+      color: C.rust,
+      align: 'MiddleLeft',
+      font: 'RobotoCondensed-Bold.ttf',
+    }),
+  ];
 }
 
 function rankCard(rank: HomeRankView): UiElement[] {

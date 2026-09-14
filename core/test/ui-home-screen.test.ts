@@ -168,7 +168,14 @@ describe('a HOME desenhada', () => {
   it('troca `{jogador}` pelo nome de quem abriu', () => {
     const screen = buildHomeScreen({ view: view({ player: 'Mateuus' }) });
 
-    expect(textOf(screen, 'hm-titulo')).toBe('BEM-VINDO, Mateuus');
+    // ####  O NOME TEM UMA LINHA SÓ PARA ELE  ####
+    //
+    // Ele e a saudação eram um texto único, e isso dava aos dois o
+    // mesmo peso — quem abre o menu não está lendo a saudação, está
+    // se reconhecendo nela. Separado, o nome fica no tamanho e na
+    // cor em que é a primeira coisa vista.
+    expect(textOf(screen, 'hm-ola')).toBe('BEM-VINDO DE VOLTA,');
+    expect(textOf(screen, 'hm-titulo')).toBe('Mateuus');
   });
 
   /**
@@ -176,10 +183,14 @@ describe('a HOME desenhada', () => {
    * antigo não manda o `steamId`. Sem este cuidado, o banner abria
    * com "BEM-VINDO," e a vírgula pendurada.
    */
-  it('sem nome, a variável sai junto com a vírgula', () => {
+  it('sem nome, a vírgula vai junto — e a linha dele não fica vazia', () => {
     const screen = buildHomeScreen({ view: view({ player: '' }) });
 
+    // Com a saudação e o nome em linhas separadas, a vírgula está
+    // numa e a variável na outra: sem este caso a tela mostraria
+    // "BEM-VINDO DE VOLTA," e um buraco embaixo.
     expect(textOf(screen, 'hm-titulo')).toBe('BEM-VINDO');
+    expect(textOf(screen, 'hm-ola')).toBe('');
   });
 
   it('a variável vale em qualquer texto, e nas duas pontas', () => {
