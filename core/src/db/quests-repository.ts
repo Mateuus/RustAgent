@@ -659,6 +659,34 @@ export class QuestsRepository {
     return row === undefined ? null : (this.#withProgress([row])[0] ?? null);
   }
 
+  /**
+   * As quests que este jogador já RESGATOU naquele servidor.
+   *
+   * ####  PARA O BALCÃO NÃO OFERECER O QUE ACABOU  ####
+   *
+   * A caixa do NPC é desenhada pelo plugin, sem ida à rede, com a
+   * lista de ofertas daquele boneco — que é igual para todo mundo.
+   * Quem sabe o que cada um já fez é o agente, e era só no CLIQUE
+   * que ele respondia "esta quest só pode ser feita uma vez".
+   *
+   * Medido no server01 em 14/09/2026: o dono resgatou a missão e o
+   * cartão continuou lá, com ACEITAR, até ele clicar de novo.
+   *
+   * Uma consulta só, e não um `lastAttempt` por quest: isto roda a
+   * cada ciclo do coletor, para cada jogador conectado.
+   */
+  claimedQuestIds(serverId: string, steamId: string): readonly string[] {
+    return (
+      this.#db
+        .prepare(
+          `SELECT DISTINCT quest_id FROM player_quests
+            WHERE server_id = @server_id AND steam_id = @steam_id AND status = 'claimed'
+            ORDER BY quest_id`,
+        )
+        .all({ server_id: serverId, steam_id: steamId }) as { quest_id: string }[]
+    ).map((row) => row.quest_id);
+  }
+
   /** Quantas tentativas vivas ele tem. É o número do teto (`maxActive`). */
   liveCountFor(serverId: string, steamId: string): number {
     const row = this.#db

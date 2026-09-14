@@ -2208,7 +2208,7 @@ async function main(): Promise<void> {
     // Resgatar no balcão: o jogador voltou ao NPC com a missão
     // pronta. Quem confere que a tentativa é dele é o `#claim`; o
     // que pode ou não ser resgatado é do serviço.
-    onClaim: ({ serverId, steamId, playerQuestId, npcId, atTurnIn }) => {
+    onClaim: ({ serverId, steamId, playerQuestId, npcId, atTurnIn, turnInName }) => {
       void (async () => {
         try {
           // ####  ENTREGAR PRIMEIRO, RESGATAR DEPOIS  ####
@@ -2241,10 +2241,24 @@ async function main(): Promise<void> {
           // destino apagaria a volta.
           if (!atTurnIn) {
             if (entregue.length === 0) {
+              // ####  "NÃO TEM O QUE ENTREGAR" NÃO EXPLICA NADA  ####
+              //
+              // Medido no server01 em 14/09/2026: o dono entregou o
+              // cartão na Zefa, clicou de novo e leu isso. Era
+              // verdade — e não dizia que o prêmio estava com o
+              // Tião, do outro lado.
+              const jaEntregue =
+                questsService?.viewById(playerQuestId)?.complete === true;
+
+              const onde =
+                turnInName === null ? 'no balcão da missão' : `com ${turnInName}`;
+
               await tellPlayer(
                 serverId,
                 steamId,
-                'Você não tem o que entregar aqui.',
+                jaEntregue
+                  ? `Você já entregou. Resgate ${onde}.`
+                  : 'Você não tem o que entregar aqui.',
               ).catch(() => undefined);
             }
 

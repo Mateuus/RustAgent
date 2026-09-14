@@ -86,6 +86,21 @@ export interface QuestNpcOffer {
    * ACEITAR aqui mandaria o jogador pegar no lugar errado.
    */
   readonly offers: boolean;
+  /**
+   * Aqui a missão pronta vira PRÊMIO?
+   *
+   * ####  RECEBER A ENCOMENDA NÃO É PAGAR POR ELA  ####
+   *
+   * O destino de uma encomenda pode não ser o balcão: "leve o
+   * cartão à Zefa e volte ao Tião". Sem este campo o plugin
+   * desenhava RESGATAR na Zefa assim que a entrega fechava — e o
+   * clique voltava com "você não tem o que entregar aqui", que é
+   * verdade e não ajuda ninguém. Medido no server01 em
+   * 14/09/2026, com o dono diante da boneca.
+   */
+  readonly turnIn: boolean;
+  /** O nome de quem paga, para o plugin dizer onde resgatar. */
+  readonly turnInName: string | null;
 }
 
 export interface QuestNpcSyncDeps {
@@ -147,6 +162,14 @@ export interface QuestNpcSyncDeps {
      * exatamente o que o `turnInNpcId` existe para escolher.
      */
     readonly atTurnIn: boolean;
+    /**
+     * O nome de quem paga, quando não é este boneco.
+     *
+     * Vai junto porque a frase que o jogador lê nasce lá no
+     * `index`, longe do repositório de NPCs — e "volte ao Tião" é
+     * o que falta em "você não tem o que entregar aqui".
+     */
+    readonly turnInName: string | null;
   }) => void;
   /**
    * O jogador falou com aquele NPC.
@@ -374,6 +397,14 @@ export class QuestNpcSync {
 
       const described = this.#deps.describeQuest?.(quest);
 
+      // Quem paga: o `turnInNpcId`, ou quem ofereceu. Missão de
+      // menu não tem balcão — ela se resgata na tela.
+      const pagador = quest.turnInNpcId ?? quest.npcId;
+      const nomeDoPagador =
+        pagador === null || pagador === npc.id
+          ? null
+          : (this.#deps.repository.getNpc(pagador)?.name ?? null);
+
       offers.push({
         id: quest.id,
         title: quest.title,
@@ -383,6 +414,8 @@ export class QuestNpcSync {
         rewardItemId: described?.rewardItemId ?? null,
         rewardSkinId: described?.rewardSkinId ?? 0,
         offers: dele,
+        turnIn: balcao,
+        turnInName: nomeDoPagador,
       });
     }
 
@@ -662,6 +695,10 @@ export class QuestNpcSync {
       playerQuestId: push.playerQuestId,
       npcId: npc.id,
       atTurnIn: balcao === npc.id,
+      turnInName:
+        balcao === null || balcao === npc.id
+          ? null
+          : (this.#deps.repository.getNpc(balcao)?.name ?? null),
     });
   }
 

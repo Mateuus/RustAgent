@@ -156,6 +156,23 @@ export interface QuestWatchPayload {
  */
 export interface QuestAssignPayload {
   readonly contract: number;
+  /**
+   * As missões que este jogador NÃO PODE MAIS aceitar, nunca.
+   *
+   * ####  É A LISTA QUE O BALCÃO ESCONDE  ####
+   *
+   * A caixa do NPC é desenhada pelo plugin com as ofertas daquele
+   * boneco, que são iguais para todo mundo — e o estado de QUEM
+   * chegou nunca descia. O cartão de uma missão "uma vez só" já
+   * resgatada continuava ali, com ACEITAR, e o agente só respondia
+   * "esta quest só pode ser feita uma vez" DEPOIS do clique.
+   *
+   * Só o definitivo entra: `once` já resgatada. Cooldown, diária e
+   * cadeia continuam sendo respondidos no clique, e de propósito —
+   * "volta em 4h" é informação, e some junto com o cartão seria
+   * pior do que o clique que explica.
+   */
+  readonly done?: readonly string[];
   readonly quests: readonly {
     readonly pq: number;
     /**
