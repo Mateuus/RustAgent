@@ -635,9 +635,16 @@ export function KitDialog({ open, kit, onClose, onDone }: KitDialogProps) {
 
         <div className="border-t border-border pt-3">
           <Label>Itens</Label>
-          {/* O slot é guardado, mas não vale para a entrega da loja:
-              o comando que entrega a um jogador conectado põe tudo
-              no inventário. O editor diz isso. */}
+          {/* ####  O SLOT PASSOU A VALER AQUI  ####
+
+              O `origemz.give` aceita slot e casinha desde
+              14/09/2026, e o resgate os manda. `slotApplies={false}`
+              continua, e agora quer dizer outra coisa: no resgate a
+              casinha é uma PREFERÊNCIA (o inventário é do jogador,
+              e pode estar cheio), enquanto no loadout do nascimento
+              ela é o que o plugin monta antes de haver qualquer
+              coisa lá dentro. É essa diferença que o editor
+              explica. */}
           <LoadoutEditor items={items} onChange={setItems} disabled={busy} slotApplies={false} />
         </div>
 

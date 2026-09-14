@@ -39,6 +39,7 @@ import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { ConfirmButton } from '@/components/ui/confirm-button';
 import { agent, type Kit, type KitClaim } from '@/lib/api';
 import { EM_DASH, formatWhen } from '@/lib/format';
@@ -64,10 +65,112 @@ function HeaderCell({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Quantos kits por página.
+ *
+ * ####  A PAGINAÇÃO É DO CLIENTE, E NÃO DO AGENTE  ####
+ *
+ * `GET /api/kits` devolve a rede inteira numa resposta — é a mesma
+ * lista que a tela do jogo consome para montar as categorias, e
+ * parti-la em páginas no agente obrigaria as duas a paginar igual.
+ *
+ * Kits são dezenas, não milhares: a resposta inteira é barata, e
+ * paginar aqui dá busca INSTANTÂNEA, sem uma ida ao servidor por
+ * letra digitada. Se um dia forem milhares, a conta muda e a
+ * paginação desce para a rota — como em `/jogadores`.
+ */
+const PAGE_SIZE = 20;
+
+/** O valor do filtro que quer dizer "todas". */
+const ALL = '';
+
+/**
+ * O grupo dos kits sem categoria, no filtro.
+ *
+ * Um texto comum, e não um sentinela exótico: a categoria de um kit
+ * é escrita por gente, e nenhuma pessoa batiza uma categoria de
+ * "(sem categoria)". Um caractere de controle no lugar seria
+ * infalível e ilegível no `value` do `<option>`.
+ */
+const NO_CATEGORY = '(sem categoria)';
+
+/** As categorias que existem, em ordem, com "sem categoria" junto. */
+export function categoriesOf(kits: readonly Kit[]): string[] {
+  return [...new Set(kits.map((kit) => kit.category ?? NO_CATEGORY))].sort((a, b) =>
+    a.localeCompare(b, 'pt-BR'),
+  );
+}
+
+export interface KitsPage {
+  /** Tudo o que passou no filtro. */
+  readonly filtered: readonly Kit[];
+  /** Só o pedaço desta página. */
+  readonly shown: readonly Kit[];
+  readonly pages: number;
+  /** A página de fato mostrada — pode não ser a pedida. Ver abaixo. */
+  readonly current: number;
+  readonly inicio: number;
+  readonly fim: number;
+}
+
+/**
+ * Filtra e pagina, num lugar só.
+ *
+ * ####  A PÁGINA PEDIDA PODE NÃO EXISTIR MAIS  ####
+ *
+ * Alguém apaga um kit, ou digita mais uma letra na busca, e a lista
+ * encolhe sob os pés — a página 3 de uma lista que agora tem uma.
+ * Aparar para a última é melhor que mostrar uma tela vazia, que
+ * pareceria a lista ter sumido.
+ */
+export function pageOf(
+  kits: readonly Kit[],
+  search: string,
+  category: string,
+  page: number,
+): KitsPage {
+  const needle = search.trim().toLowerCase();
+
+  const filtered = kits.filter((kit) => {
+    if (category !== ALL && (kit.category ?? NO_CATEGORY) !== category) {
+      return false;
+    }
+
+    if (needle === '') {
+      return true;
+    }
+
+    // O slug entra na busca porque é o que aparece no log e no
+    // suporte — quem chega com "kit-inicial" na mão precisa achá-lo
+    // por ele.
+    return (
+      kit.name.toLowerCase().includes(needle) ||
+      kit.slug.toLowerCase().includes(needle) ||
+      (kit.category ?? '').toLowerCase().includes(needle)
+    );
+  });
+
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const current = Math.min(Math.max(0, page), pages - 1);
+
+  return {
+    filtered,
+    shown: filtered.slice(current * PAGE_SIZE, current * PAGE_SIZE + PAGE_SIZE),
+    pages,
+    current,
+    inicio: filtered.length === 0 ? 0 : current * PAGE_SIZE + 1,
+    fim: Math.min((current + 1) * PAGE_SIZE, filtered.length),
+  };
+}
+
 function Kits() {
   const [kits, setKits] = useState<Kit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const [search, setSearch] = useState('');
+  const [category, setCategory] = useState<string>(ALL);
+  const [page, setPage] = useState(0);
 
   /** `undefined` = fechado; `null` = criando; um kit = editando. */
   const [editing, setEditing] = useState<Kit | null | undefined>(undefined);
@@ -127,6 +230,23 @@ function Kits() {
     }
   }
 
+  // ####  O FILTRO ZERA A PÁGINA  ####
+  //
+  // Buscar com a página 3 aberta deixaria a tela vazia sem
+  // explicação: o resultado novo pode nem ter três páginas. É a
+  // mesma regra de /jogadores.
+  useEffect(() => {
+    setPage(0);
+  }, [search, category]);
+
+  const categories = categoriesOf(kits ?? []);
+  const { filtered, shown, pages, current, inicio, fim } = pageOf(
+    kits ?? [],
+    search,
+    category,
+    page,
+  );
+
   return (
     <div>
       <PageHeader
@@ -154,7 +274,59 @@ function Kits() {
           />
         )}
 
+        {/* ####  A BARRA DE FILTROS  ####
+
+            Ela só aparece com kits na tela: um campo de busca sobre
+            uma lista vazia é um controle que não controla nada. */}
         {kits !== null && kits.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="search"
+              value={search}
+              placeholder="Buscar por nome, slug ou categoria"
+              aria-label="Buscar kits"
+              onChange={(event) => setSearch(event.target.value)}
+              className="w-full sm:w-80"
+            />
+
+            {/* Uma categoria só não é escolha: o seletor diria o que
+                a lista inteira já diz. */}
+            {categories.length > 1 && (
+              <select
+                value={category}
+                aria-label="Filtrar por categoria"
+                onChange={(event) => setCategory(event.target.value)}
+                className="h-9 border border-border bg-surface px-2 text-sm text-foreground"
+              >
+                <option value={ALL}>Todas as categorias</option>
+                {categories.map((name) => (
+                  <option key={name} value={name}>
+                    {name === NO_CATEGORY ? 'Sem categoria' : name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <span className="text-2xs text-muted">
+              {filtered.length === kits.length
+                ? `${String(kits.length)} ${kits.length === 1 ? 'kit' : 'kits'}`
+                : `${String(filtered.length)} de ${String(kits.length)}`}
+            </span>
+          </div>
+        )}
+
+        {/* Busca sem resultado NÃO é o mesmo que não haver kit
+            nenhum — e o bloco de "nenhum kit ainda" convidaria a
+            criar um que já existe, escondido pelo filtro. */}
+        {kits !== null && kits.length > 0 && filtered.length === 0 && (
+          <StateBlock
+            variant="empty"
+            title="Nenhum kit com esse filtro"
+            detail="Os kits continuam lá — o que não bateu foi a busca. Limpe o campo ou escolha outra categoria."
+          />
+        )}
+
+        {kits !== null && filtered.length > 0 && (
           <div className="overflow-x-auto border border-border bg-surface">
             <table className="w-full text-sm">
               <thead className="border-b border-border">
@@ -176,7 +348,7 @@ function Kits() {
               </thead>
 
               <tbody className="divide-y divide-border">
-                {kits.map((kit) => (
+                {shown.map((kit) => (
                   <tr key={kit.id} className={cn(!kit.enabled && 'text-muted')}>
                     <td className="px-3 py-2">
                       <p className="truncate">{kit.name}</p>
@@ -269,6 +441,41 @@ function Kits() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* ####  A PAGINAÇÃO SÓ APARECE QUANDO PAGINA  ####
+
+            Dois botões desligados sob uma lista de três kits são
+            dois controles dizendo "não há para onde ir" — ruído com
+            aparência de defeito. */}
+        {kits !== null && pages > 1 && (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-2xs text-muted">
+              {String(inicio)}–{String(fim)} de {String(filtered.length)}
+              <span className="ml-2">
+                (página {String(current + 1)} de {String(pages)})
+              </span>
+            </p>
+
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={current === 0}
+                onClick={() => setPage(Math.max(0, current - 1))}
+              >
+                Anterior
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={current >= pages - 1}
+                onClick={() => setPage(current + 1)}
+              >
+                Próxima
+              </Button>
+            </div>
           </div>
         )}
 

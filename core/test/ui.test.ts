@@ -1028,7 +1028,7 @@ describe('a página de kits', () => {
     expect(JSON.stringify(screenContentToCui(buildMainMenu(), screen))).toContain('JÁ PEGOU');
   });
 
-  it('pagina depois de oito kits, em vez de sumir com o resto', () => {
+  it('pagina quando a grade enche, em vez de sumir com o resto', () => {
     const many = Array.from({ length: 9 }, (_unused, index) =>
       offer({ slug: `kit-${String(index)}`, name: `Kit ${String(index)}` }),
     );
@@ -1036,6 +1036,50 @@ describe('a página de kits', () => {
     const json = JSON.stringify(screenContentToCui(buildMainMenu(), grid(many)));
 
     expect(json).toContain('1 / 2');
+
+    // E o nono está na segunda página, e não perdido.
+    const segunda = buildKitsScreen({
+      offers: many,
+      target: { kind: 'grid', category: null, page: 1 },
+    });
+
+    expect(JSON.stringify(screenContentToCui(buildMainMenu(), segunda))).toContain('Kit 8');
+  });
+
+  // ####  O TETO QUE DECIDIU O TAMANHO DA GRADE  ####
+  //
+  // Cada card custa ~3.100 bytes no CUI: são oito elementos, e o CUI
+  // repete `name`, `parent` e o `RectTransform` inteiro em cada um.
+  //
+  // Três fileiras cabiam na altura (3 x 162 = 506 dos 516
+  // disponíveis) e foram MEDIDAS em 41.756 bytes com a coluna de
+  // categorias — 84% do frame de 50.000 do RCON. Acima do teto o
+  // envio é recusado inteiro, e o jogador fica com o menu anterior
+  // sem nada dizendo por quê.
+  //
+  // Duas fileiras com cards maiores usam a mesma altura e cabem com
+  // folga. Este teste existe para que a próxima pessoa que quiser
+  // uma fileira a mais descubra o custo AQUI, e não no jogo.
+  it('a grade cheia cabe no frame do RCON, com margem', () => {
+    const many = Array.from({ length: 40 }, (_unused, index) =>
+      offer({
+        slug: `kit-${String(index)}`,
+        // Nome longo de propósito: ele é do admin, e um mural de
+        // nomes compridos é o pior caso realista.
+        name: `Kit Muito Comprido Numero ${String(index)}`,
+        category: `Categoria ${String(index % 5)}`,
+      }),
+    );
+
+    const screen = buildKitsScreen({
+      offers: many,
+      target: { kind: 'grid', category: 'categoria-0', page: 0 },
+      itemOf,
+    });
+
+    const bytes = JSON.stringify(screenContentToCui(buildMainMenu(), screen)).length;
+
+    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.7);
   });
 
   it('o "i" abre o modal, e as abas são ENDEREÇOS', () => {
@@ -1081,7 +1125,7 @@ describe('a página de kits', () => {
     expect(json).toContain('Última vez');
   });
 
-  it('a aba ITENS mostra o ícone do jogo, e não o shortname', () => {
+  it('a aba ITENS é a GRADE do inventário, com o ícone do jogo', () => {
     const info = buildKitsScreen({
       offers: [offer()],
       target: { kind: 'info', slug: 'kit-inicial', tab: 'itens' },
@@ -1090,18 +1134,59 @@ describe('a página de kits', () => {
 
     const json = JSON.stringify(screenContentToCui(buildMainMenu(), info));
 
-    expect(json).toContain('Assault Rifle');
     // O ícone vem do JOGO, pelo itemId — sem download, sem URL.
     expect(json).toContain('"itemid":1545779598');
+
+    // ####  E ELA DIZ ONDE O ITEM CAI  ####
+    //
+    // Era uma lista de texto, e por isso um kit com a AK na barra
+    // rápida e outro com ela na mochila saíam idênticos na tela. O
+    // rótulo do contêiner é a diferença.
+    expect(json).toContain('BARRA RÁPIDA');
   });
 
-  it('a aba ITENS pagina o kit comprido, em vez de parar em "e mais 7..."', () => {
-    // ####  VISTO NO JOGO  ####
+  it('a casinha da grade clica e abre o detalhe, porque o CUI não tem tooltip', () => {
+    const info = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens' },
+      itemOf,
+    });
+
+    // O nome não cabe numa casinha de 44 px. Ele está a um clique.
+    expect(Object.values(collectScreenActions(info))).toContainEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:item:0',
+    });
+
+    const detalhe = buildKitsScreen({
+      offers: [offer()],
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'item', page: 0 },
+      itemOf,
+    });
+
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), detalhe));
+
+    expect(json).toContain('Assault Rifle');
+    expect(json).toContain('VAI PARA');
+    expect(json).toContain('BARRA RÁPIDA');
+
+    // Ninguém entra num beco: do detalhe se volta para a grade.
+    expect(Object.values(collectScreenActions(detalhe))).toContainEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:itens',
+    });
+  });
+
+  it('treze itens numa barra rápida de seis: os sete que sobram são CONTADOS', () => {
+    // ####  UM ESTADO QUE O CADASTRO PERMITE  ####
     //
-    // Um kit de treze itens mostrava seis e "- e mais 7...", e ali
-    // acabava: o jogador ficava sabendo que existiam mais sete e sem
-    // nenhuma forma de ver QUAIS — dentro da aba a que ele foi
-    // exatamente para isso.
+    // O teto de um kit é 60 itens; a barra rápida tem 6 casinhas.
+    // Nada impede o admin de pôr treze no `belt`, e o jogo põe os
+    // sete que sobram onde couber.
+    //
+    // O que a tela não pode fazer é engoli-los calada — é o mesmo
+    // defeito que a lista paginada tinha ("e mais 7..." e acabou),
+    // por um caminho diferente: a grade não tem onde desenhá-los.
     const many = Array.from({ length: 13 }, (_unused, index) => ({
       slot: 'belt',
       shortname: `item-${String(index)}`,
@@ -1115,51 +1200,23 @@ describe('a página de kits', () => {
       displayName: `Item ${shortname.split('-')[1] ?? ''}`,
     });
 
-    const primeira = buildKitsScreen({
+    const tela = buildKitsScreen({
       offers: [offer({ items: many })],
       target: { kind: 'info', slug: 'kit-inicial', tab: 'itens' },
       itemOf: nomes,
     });
 
-    const jsonPrimeira = JSON.stringify(screenContentToCui(buildMainMenu(), primeira));
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), tela));
 
-    expect(jsonPrimeira).not.toContain('e mais');
-    expect(jsonPrimeira).toContain('1 / 2');
-    expect(jsonPrimeira).toContain('Item 0');
-    // A sétima linha é um ITEM, e não uma contagem no lugar dele.
-    expect(jsonPrimeira).toContain('Item 6');
+    // Seis desenhados, sete contados. A conta fecha.
+    expect(json).toContain('e mais 7');
 
-    // A seta é um ENDEREÇO, como as abas: `modal.open` no mesmo modal
-    // com o número no fim.
-    expect(Object.values(collectScreenActions(primeira))).toContainEqual({
-      kind: 'modal.open',
-      screenId: 'ozkit:kit-inicial:itens:1',
-    });
-
-    const segunda = buildKitsScreen({
-      offers: [offer({ items: many })],
-      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens', page: 1 },
-      itemOf: nomes,
-    });
-
-    // ####  O ID QUE VOLTA É O ID QUE FOI PEDIDO  ####
+    // ####  E A GRADE NÃO INVENTA CASINHA  ####
     //
-    // O plugin descarta a tela cujo id não bate com o que ele pediu,
-    // e o "carregando" fica preso até o timeout: a seta pareceria
-    // não funcionar.
-    expect(segunda.id).toBe('ozkit:kit-inicial:itens:1');
-
-    const jsonSegunda = JSON.stringify(screenContentToCui(buildMainMenu(), segunda));
-
-    // E o décimo terceiro item, que antes não existia para o jogador,
-    // está na tela.
-    expect(jsonSegunda).toContain('Item 12');
-    expect(jsonSegunda).toContain('2 / 2');
-    // A volta também: ninguém entra numa página sem saída.
-    expect(Object.values(collectScreenActions(segunda))).toContainEqual({
-      kind: 'modal.open',
-      screenId: 'ozkit:kit-inicial:itens',
-    });
+    // A barra rápida do jogo tem UMA fileira de seis. Desenhar três
+    // fileiras porque o kit pediu treze mostraria doze casinhas que
+    // não existem — e o jogador confiaria nelas.
+    expect(json).not.toContain('kibeltc6');
   });
 
   it('a aba GERAL pagina do mesmo jeito, e não corta a última linha', () => {
@@ -1189,15 +1246,23 @@ describe('a página de kits', () => {
     expect(json).toContain('Você pode pegar de novo em 1 h');
   });
 
-  it('uma página que não existe mais mostra a última, e não uma tela vazia', () => {
-    // O admin tirou itens do kit depois que o jogador abriu o menu.
+  it('o detalhe de um item que saiu do kit não vira modal vazio', () => {
+    // O admin mexeu no kit enquanto o jogador estava com o modal
+    // aberto. O índice no endereço deixou de existir.
     const info = buildKitsScreen({
       offers: [offer()],
-      target: { kind: 'info', slug: 'kit-inicial', tab: 'itens', page: 9 },
+      target: { kind: 'info', slug: 'kit-inicial', tab: 'item', page: 9 },
       itemOf,
     });
 
-    expect(JSON.stringify(screenContentToCui(buildMainMenu(), info))).toContain('Assault Rifle');
+    const json = JSON.stringify(screenContentToCui(buildMainMenu(), info));
+
+    expect(json).toContain('Item indisponível');
+    // E a saída continua existindo: daqui se volta para a grade.
+    expect(Object.values(collectScreenActions(info))).toContainEqual({
+      kind: 'modal.open',
+      screenId: 'ozkit:kit-inicial:itens',
+    });
   });
 
   it('sem catálogo lido, a lista mostra o shortname e NÃO finge um ícone', () => {

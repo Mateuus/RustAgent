@@ -64,9 +64,14 @@ import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
 import { storeIconKey } from './card-icons.js';
 import type { SlotValue } from './ui-template.js';
+import { type Size } from './ui-geometry.js';
+import { measureSlot } from './ui-template.js';
 import { SLOTS, fillTemplate } from './ui-store-template.js';
+import { CELL, inventoryBlocks } from './ui-inventory.js';
 import {
+  itemImage as gameItemImage,
   itemRows,
+  label as styledLabel,
   LIST_LINE,
   paginateRows,
   rowsPager,
@@ -207,7 +212,7 @@ const LIST_VIEWPORT = 132;
  * exatamente como o `+` da quantidade. Nada é lembrado do lado do
  * plugin.
  */
-export type StoreTab = 'geral' | 'itens';
+export type StoreTab = 'geral' | 'itens' | 'item';
 
 export type StoreScreenTarget =
   | { readonly kind: 'catalog'; readonly categoryId: string | null; readonly page: number }
@@ -255,7 +260,13 @@ export function parseStoreScreenId(screenId: string): StoreScreenTarget | null {
       kind: 'item',
       offerId,
       quantity: clamp(Number.isFinite(parsed) ? parsed : 1, 1, MAX_QUANTITY),
-      tab: parts[3] === 'itens' ? 'itens' : 'geral',
+      // ####  "item" É A CASINHA ABERTA, E NÃO UMA TERCEIRA ABA  ####
+      //
+      // Ela não aparece na fileira: chega-se nela clicando numa
+      // casinha da grade, e sai-se dela pelo VOLTAR. O número que
+      // vem depois é o ÍNDICE do item, e não a página — numa tela
+      // que mostra um item só não há o que paginar.
+      tab: parts[3] === 'itens' || parts[3] === 'item' ? parts[3] : 'geral',
       page: Math.max(0, Number.parseInt(parts[4] ?? '0', 10) || 0),
     };
   }
@@ -328,6 +339,25 @@ export interface BuildStoreScreenOptions {
    * o botão: recusar sem certeza seria pior.
    */
   readonly vehicleSpace?: boolean | null;
+  /**
+   * O tamanho da tela em que o modal é desenhado.
+   *
+   * ####  SEM ELE, A LISTA PAGINA PELO NÚMERO ERRADO  ####
+   *
+   * No layout embutido a área da lista é conhecida (LIST_VIEWPORT).
+   * No modelo DESENHADO ela é do admin — ele pode ter feito o slot
+   * o dobro do tamanho, ou a metade.
+   *
+   * Paginar sempre por 132 px dava os dois erros de uma vez: num
+   * slot maior, o modal mostrava cinco linhas e um "‹ 1 / 3 ›" com
+   * meia caixa vazia embaixo; num slot menor, mandava pelo RCON
+   * linhas que ninguém veria — e o teto de 50 000 bytes é do frame
+   * inteiro.
+   *
+   * Ausente = vale a régua embutida, que é o que mantém funcionando
+   * quem chama isto de um teste.
+   */
+  readonly viewport?: Size;
 }
 
 /**
@@ -348,6 +378,7 @@ export function buildStoreScreen(options: BuildStoreScreenOptions): UiScreen {
         options.nameOf ?? ((shortname): string => shortname),
         options.vehicleSpace ?? null,
         options.bundleTemplate ?? null,
+        options.viewport,
       );
 }
 
@@ -662,7 +693,11 @@ export function itemScreenId(
 
   // A primeira página fica de fora pelo mesmo motivo da aba padrão:
   // só quem virou a página carrega o número.
-  if (page > 0) {
+  //
+  // Na aba `item` o zero é CONTEÚDO, e não o padrão: ali o número
+  // diz QUAL item, e omiti-lo daria ao primeiro da grade um
+  // endereço de forma diferente da dos outros.
+  if (page > 0 || tab === 'item') {
     return `${base}:${tab}:${String(page)}`;
   }
 
@@ -680,6 +715,7 @@ function buildItemScreen(
   nameOf: NameResolver,
   vehicleSpace: boolean | null,
   bundleTemplate: UiScreen | null,
+  viewport: Size | undefined,
 ): UiScreen {
   // A página entra no id que VOLTA: o plugin compara com o que
   // pediu e descarta o que não bate — ver `screenId` em
@@ -712,6 +748,22 @@ function buildItemScreen(
           closeButton('FECHAR'),
         ]),
       ],
+    };
+  }
+
+  // ####  O DETALHE DE UMA CASINHA NÃO USA O MODELO  ####
+  //
+  // O modelo é "o modal do PACOTE": ele tem nome, ícone, resumo,
+  // preço e os dois botões de compra. Preenchê-lo com um item de
+  // dentro do pacote daria uma tela dizendo "BRONZE" com o preço do
+  // VIP e a figura de uma bala — e um CONFIRMAR COMPRA que compraria
+  // o VIP inteiro. Esta é outra tela, e tem o desenho dela.
+  if (target.tab === 'item') {
+    return {
+      id,
+      name: offer.name,
+      kind: 'modal',
+      elements: [modalFrame(400, 250, offerItemDetail(offer, nameOf, target))],
     };
   }
 
@@ -802,14 +854,39 @@ function buildItemScreen(
       [SLOTS.pacoteTitulo]:
         lines.length === 0
           ? { hide: true }
-          : { text: offer.kind === 'vip' ? 'O QUE VOCÊ GANHA' : 'O QUE VEM NO KIT' },
+          : {
+              text:
+                offer.perks.length > 0 && offer.items.length > 0
+                  ? // Com abas, o título viraria um terceiro rótulo
+                    // dizendo o que as abas já dizem.
+                    ''
+                  : offer.kind === 'vip'
+                    ? 'O QUE VOCÊ GANHA'
+                    : 'O QUE VEM NO KIT',
+            },
       // A lista entra no elemento que o admin posicionou — e as setas
       // vão DENTRO dele, que é o único lugar cujo tamanho este
       // arquivo conhece num layout desenhado por outra pessoa.
       [SLOTS.pacoteLista]:
         lines.length === 0
           ? { hide: true }
-          : { children: listChildren(lines, offer.id, quantity, target.tab, page) },
+          : {
+              // ####  A ALTURA É A DO SLOT QUE O ADMIN DESENHOU  ####
+              //
+              // E não a régua embutida: num slot maior, paginar por
+              // 132 px deixava meia caixa vazia sob um "‹ 1 / 3 ›";
+              // num menor, mandava pelo RCON linhas que ninguém
+              // veria. Ver `viewport` em BuildStoreScreenOptions.
+              children: bundleBody(
+                offer,
+                nameOf,
+                quantity,
+                target.tab,
+                page,
+                bundleListHeight(bundleTemplate, viewport),
+                bundleListWidth(bundleTemplate, viewport),
+              ),
+            },
       [SLOTS.pacoteTotal]: { text: formatNumber(total), color: canBuy ? C.amber : C.rust },
       [SLOTS.pacoteSaldo]: noSpace
         ? { text: 'Sem espaço aqui — vá para um lugar aberto', color: C.rust }
@@ -1251,16 +1328,17 @@ function listChildren(
   quantity: number,
   tab: StoreTab,
   page: number,
+  height = LIST_VIEWPORT,
 ): UiElement[] {
   // Cabendo inteira, ela ocupa a área inteira: nada de gastar uma
   // linha com um "1 / 1".
-  const whole = paginateRows(rows, LIST_VIEWPORT, page);
+  const whole = paginateRows(rows, height, page);
 
   if (whole.pages === 1) {
-    return itemRows(whole.rows, LIST_VIEWPORT, 'oz');
+    return itemRows(whole.rows, height, 'oz');
   }
 
-  const viewport = LIST_VIEWPORT - LIST_LINE;
+  const viewport = height - LIST_LINE;
   const slice = paginateRows(rows, viewport, page);
 
   return [
@@ -1270,7 +1348,7 @@ function listChildren(
       rect: {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 0, y: -LIST_VIEWPORT },
+        offsetMin: { x: 0, y: -height },
         offsetMax: { x: 0, y: -viewport },
       },
       page: slice.page,
@@ -1280,6 +1358,240 @@ function listChildren(
       kind: 'modal.open',
     }),
   ];
+}
+
+/**
+ * A altura do slot da lista no modelo desenhado.
+ *
+ * `null` em qualquer ponto da cadeia devolve a régua embutida: um
+ * documento sem o slot (alguém o apagou no editor) não tem onde a
+ * lista ser derramada de qualquer jeito, e um modal sem `viewport`
+ * é o caso de quem chama isto de um teste.
+ */
+function bundleListHeight(template: UiScreen | null, viewport: Size | undefined): number {
+  if (template === null || viewport === undefined) {
+    return LIST_VIEWPORT;
+  }
+
+  const box = measureSlot(template, SLOTS.pacoteLista, viewport);
+
+  // Altura não-positiva é um estado legítimo do modelo (os offsets
+  // se cruzaram no editor). Paginar por ela daria zero linha por
+  // página para sempre — a régua embutida ao menos mostra alguma
+  // coisa, e o desenho torto é visível.
+  return box === null || box.height < LIST_LINE ? LIST_VIEWPORT : box.height;
+}
+
+/**
+ * A largura do slot, que decide quantas casinhas cabem na fileira.
+ *
+ * O padrão é o do preset (520 de caixa menos 22 de margem de cada
+ * lado): num slot que não dá para medir, seis casinhas de 44 ainda
+ * é a aposta certa, e a grade quebra a fileira sozinha se errar
+ * para mais.
+ */
+function bundleListWidth(template: UiScreen | null, viewport: Size | undefined): number {
+  const fallback = 476;
+
+  if (template === null || viewport === undefined) {
+    return fallback;
+  }
+
+  const box = measureSlot(template, SLOTS.pacoteLista, viewport);
+
+  return box === null || box.width < CELL ? fallback : box.width;
+}
+
+/**
+ * O conteúdo do slot da lista, no modelo desenhado.
+ *
+ * ####  AS ABAS MORAM DENTRO DO SLOT  ####
+ *
+ * O modelo tem UM lugar para o conteúdo do pacote, e um VIP que
+ * promete vantagens E entrega itens tem dois assuntos. Misturá-los
+ * numa lista só faz "fila prioritária" e "500x Sucata" virarem a
+ * mesma coisa — foi por isso que o layout embutido ganhou abas.
+ *
+ * Dar ao modelo um slot próprio para elas obrigaria o admin a
+ * desenhar mais uma peça, e quebraria todo documento gravado antes
+ * disto. Desenhá-las DENTRO do slot custa 30 px do topo dele e
+ * funciona em qualquer layout que já exista.
+ *
+ * ####  E OS ITENS SÃO UMA GRADE  ####
+ *
+ * Uma linha de texto por item responde "o que vem". A grade
+ * responde isso com o ícone no tamanho em que se reconhece a arma —
+ * e o nome, que não cabe numa casinha de 44 px, fica a um clique.
+ * Ver `inventoryBlocks` e a aba `item`.
+ */
+function bundleBody(
+  offer: StoreOffer,
+  nameOf: NameResolver,
+  quantity: number,
+  tab: StoreTab,
+  page: number,
+  height: number,
+  width: number,
+): UiElement[] {
+  const tabbed = offer.perks.length > 0 && offer.items.length > 0;
+  const showingItems = offer.items.length > 0 && (!tabbed || tab === 'itens');
+
+  const head = tabbed ? TAB_STRIP : 0;
+  const room = height - head;
+
+  // ####  O PAGER COME UMA LINHA, E ELA PRECISA SER DESCONTADA  ####
+  //
+  // Ele é ancorado na base da área. Paginar pela área INTEIRA e
+  // desenhá-lo depois o punha por cima da última linha — duas
+  // coisas escritas no mesmo lugar, que é exatamente o defeito que
+  // este modal acabou de deixar de ter.
+  //
+  // Então a conta é feita duas vezes: uma para saber SE pagina, e
+  // outra, com uma linha a menos, para saber o que mostrar.
+  const rows = perkRows(offer);
+  const whole = showingItems ? null : paginateRows(rows, room, page);
+  const paged = whole !== null && whole.pages > 1;
+  const viewport = paged ? room - LIST_LINE : room;
+  const slice = whole === null ? null : paginateRows(rows, viewport, page);
+
+  const body = showingItems
+    ? inventoryChildren(offer, nameOf, room, width, quantity)
+    : itemRows(slice?.rows ?? [], viewport, 'oz');
+
+  const elements: UiElement[] = [];
+
+  if (tabbed) {
+    elements.push(
+      ...tabsRow(
+        'ozb',
+        [
+          {
+            label: 'GERAL',
+            screenId: itemScreenId(offer.id, quantity, 'geral'),
+            active: tab !== 'itens',
+          },
+          {
+            label: 'ITENS',
+            screenId: itemScreenId(offer.id, quantity, 'itens'),
+            active: tab === 'itens',
+          },
+        ],
+        0,
+      ),
+    );
+  }
+
+  elements.push(
+    panel(
+      'ozbody',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 0, y: -height },
+        offsetMax: { x: 0, y: -head },
+      },
+      C.none,
+      body,
+    ),
+  );
+
+  // A paginação é das VANTAGENS: elas são texto de tamanho
+  // desconhecido. A grade não pagina — ela CONTA o que não coube, e
+  // o número aparece dentro dela.
+  if (paged && slice !== null) {
+    elements.push(
+      rowsPager({
+        prefix: 'ozb',
+        rect: {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 0, y: -height },
+          offsetMax: { x: 0, y: -(height - LIST_LINE) },
+        },
+        page: slice.page,
+        pages: slice.pages,
+        screenIdOf: (next) => itemScreenId(offer.id, quantity, tab, next),
+        // `navigate` fecharia o modal — ver as abas.
+        kind: 'modal.open',
+      }),
+    );
+  }
+
+  return elements;
+}
+
+/** A altura que a fileira de abas ocupa dentro do slot. */
+const TAB_STRIP = 30;
+
+/** As vantagens, como linhas de texto. */
+function perkRows(offer: StoreOffer): ContentRow[] {
+  return offer.perks.map((text) => ({ text, item: null }));
+}
+
+/**
+ * Os itens da oferta, na grade.
+ *
+ * ####  TODOS EM "main", E ISSO É A VERDADE  ####
+ *
+ * A oferta da loja não guarda contêiner: ela sai pelo
+ * `origemz.give` em modo `auto`, que põe tudo no inventário e
+ * derruba no chão o que não couber. Desenhá-los na barra rápida
+ * seria uma promessa que a entrega não cumpre.
+ *
+ * O kit, esse sim, tem `slot` por item — e é na tela de kits que a
+ * grade mostra os três contêineres. Ver ui-kits-screen.ts.
+ */
+function inventoryChildren(
+  offer: StoreOffer,
+  nameOf: NameResolver,
+  height: number,
+  width: number,
+  quantity: number,
+): UiElement[] {
+  const blocks = inventoryBlocks(
+    offer.items.map((item, index) => ({
+      index,
+      container: 'main' as const,
+      // Sem casinha escolhida: elas se acomodam em ordem, e a
+      // entrega faz o mesmo.
+      position: index,
+      itemId: item.itemId,
+      skinId: item.skinId,
+      amount: item.amount,
+      name: nameOf(item.shortname),
+    })),
+    {
+      prefix: 'ozg',
+      width,
+      height,
+      screenIdOf: (entry) => itemScreenId(offer.id, quantity, 'item', entry.index),
+    },
+  );
+
+  const elements: UiElement[] = [...blocks.elements];
+
+  if (blocks.hidden > 0) {
+    elements.push(
+      label(
+        'ozgmais',
+        `e mais ${formatNumber(blocks.hidden)}...`,
+        {
+          anchorMin: { x: 0, y: 0 },
+          anchorMax: { x: 1, y: 0 },
+          offsetMin: { x: 0, y: 0 },
+          offsetMax: { x: 0, y: LIST_LINE },
+        },
+        { size: 10, color: C.amber, align: 'MiddleLeft' },
+      ),
+    );
+  }
+
+  // O rótulo "MOCHILA" acima de uma grade de itens de LOJA diria uma
+  // coisa que não interessa aqui: a compra vai para o inventário de
+  // qualquer jeito, e não há outro contêiner com que comparar. Ele é
+  // removido em vez de nunca desenhado porque a mesma função serve à
+  // tela de kits, onde ele é o ponto.
+  return elements.filter((element) => element.id !== 'ozgmaint');
 }
 
 /** Só os ITENS, com o ícone de cada um. */
@@ -1725,4 +2037,121 @@ function formatNumber(value: number): string {
  */
 function textWidth(text: string, fontSize: number): number {
   return Math.ceil(text.length * fontSize * 0.55);
+}
+
+/**
+ * Uma casinha da grade, aberta.
+ *
+ * ####  ELA EXISTE PORQUE O CUI NÃO TEM TOOLTIP  ####
+ *
+ * Não há evento de hover: um `CuiButton` conhece a cor normal e a
+ * de mouse em cima, e nada mais. O nome de um item não cabe numa
+ * casinha de 44 px, e escrevê-lo sob cada uma transformaria a grade
+ * numa parede de texto.
+ *
+ * Então a casinha clica. É um clique a mais que um tooltip, e em
+ * troca cabe o nome inteiro e a quantidade exata.
+ */
+function offerItemDetail(
+  offer: StoreOffer,
+  nameOf: NameResolver,
+  target: Extract<StoreScreenTarget, { kind: 'item' }>,
+): UiElement[] {
+  const index = target.page ?? 0;
+  const item = offer.items[index];
+
+  const back = button(
+    'ozdv',
+    '‹ VOLTAR',
+    {
+      anchorMin: { x: 1, y: 0 },
+      anchorMax: { x: 1, y: 0 },
+      offsetMin: { x: -150, y: 16 },
+      offsetMax: { x: -22, y: 44 },
+    },
+    {
+      id: 'aozdv',
+      kind: 'modal.open',
+      screenId: itemScreenId(offer.id, target.quantity, 'itens'),
+    },
+    { color: C.surface2, textColor: C.text, hoverColor: C.border, fontSize: 12 },
+  );
+
+  // O admin mexeu na oferta enquanto o modal estava aberto. Voltar
+  // para a grade é melhor que um modal vazio.
+  if (item === undefined) {
+    return [
+      label('ozdt', 'Item indisponível', header(), { size: 15 }),
+      label('ozdm', 'Este item saiu da oferta.', fill(22, 60, 22, 60), {
+        size: 12,
+        color: C.textMuted,
+      }),
+      back,
+      closeButton('FECHAR'),
+    ];
+  }
+
+  const body: UiElement[] = [
+    label('ozdt', nameOf(item.shortname), header(), { size: 15 }),
+
+    gameItemImage('ozdi', item, {
+      anchorMin: { x: 0, y: 1 },
+      anchorMax: { x: 0, y: 1 },
+      offsetMin: { x: 22, y: -150 },
+      offsetMax: { x: 110, y: -62 },
+    }),
+
+    label(
+      'ozdq',
+      'QUANTIDADE',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 128, y: -76 },
+        offsetMax: { x: -22, y: -62 },
+      },
+      { size: 10, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+
+    styledLabel(
+      'ozdqv',
+      // A quantidade do PACOTE já multiplicada: quem comprou dois
+      // pacotes de 128 balas recebe 256, e é esse o número que
+      // interessa aqui.
+      formatNumber(item.amount * target.quantity),
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 128, y: -98 },
+        offsetMax: { x: -22, y: -78 },
+      },
+      { size: 14, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
+    ),
+
+    label(
+      'ozdw',
+      'Vai para o seu inventário.',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 128, y: -124 },
+        offsetMax: { x: -22, y: -106 },
+      },
+      { size: 11, color: C.textMuted, align: 'MiddleLeft' },
+    ),
+  ];
+
+  if (item.skinId !== '0' && item.skinId !== '') {
+    body.push(
+      label('ozdsk', `Skin ${item.skinId}`, fill(22, 166, 22, 60), {
+        size: 10,
+        color: C.textMuted,
+        align: 'MiddleLeft',
+      }),
+    );
+  }
+
+  body.push(back, closeButton('FECHAR'));
+
+  return body;
 }

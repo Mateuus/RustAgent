@@ -44,6 +44,11 @@ import { kitIconKey } from './card-icons.js';
 import type { UiElement, UiScreen } from '../types/ui-document.js';
 
 import {
+  CONTAINER_LABEL,
+  inventoryBlocks,
+  type InventoryEntry,
+} from './ui-inventory.js';
+import {
   button,
   C,
   deadButton,
@@ -81,38 +86,145 @@ export const KIT_INFO_PREFIX = 'ozkit';
 const GRID = {
   columns: 4,
   gap: 10,
-  cardHeight: 160,
+  /**
+   * 240, e não 160.
+   *
+   * ####  A ALTURA ESTAVA SOBRANDO, E O CARD ERA APERTADO  ####
+   *
+   * A área da grade tem ~516 px. Duas fileiras de 160 usavam 330 e
+   * deixavam 186 de vazio embaixo — enquanto o ícone do kit cabia em
+   * 58 px e o nome disputava espaço com a regra e o botão.
+   *
+   * Duas de 240 usam 490. O ícone dobrou, o nome ganhou faixa
+   * própria, e o rodapé comporta duas ações lado a lado.
+   *
+   * ####  E POR QUE NÃO TRÊS FILEIRAS  ####
+   *
+   * Cabiam: 3 x 162 = 506. Mas cada card custa ~3.100 bytes no CUI
+   * (oito elementos, e o CUI repete `name`, `parent` e o
+   * `RectTransform` inteiro em cada um). MEDIDO: doze cards mais a
+   * coluna dão 41.756 bytes, 84% do frame de 50.000 do RCON.
+   *
+   * Oito dão ~28.000 — 56%. A margem importa porque o nome do kit é
+   * do admin, e um mural de nomes longos empurra o número para cima
+   * sem ninguém mexer em código.
+   */
+  cardHeight: 240,
   rows: 2,
-  /** A altura da barra de categorias, quando ela existe. */
-  categoryHeight: 30,
 } as const;
+
+/**
+ * A coluna de categorias, à esquerda.
+ *
+ * ####  ELA ERA UMA FILEIRA DE ABAS, E A FILEIRA NÃO CRESCE  ####
+ *
+ * As categorias ficavam numa faixa horizontal sob o título, cada
+ * uma com a largura do próprio nome. Funcionava com três; com
+ * sete, a última saía pela borda da tela — e saía em silêncio, sem
+ * seta, sem reticências, sem nada dizendo que existia mais.
+ *
+ * A coluna cresce para BAIXO, que é a direção em que há espaço, e
+ * é o mesmo desenho que o ranking já usa para a mesma pergunta
+ * ("qual destes eu quero ver?"). Duas telas do mesmo menu
+ * respondendo isso de dois jeitos diferentes é o tipo de diferença
+ * que ninguém explica depois.
+ *
+ * A largura sai do mesmo raciocínio da coluna do ranking: 190 px
+ * comportam ~25 caracteres no corpo 12, e nome de categoria maior
+ * que isso já não cabia na fileira antiga também.
+ */
+const SIDEBAR = {
+  width: 190,
+  /** O respiro entre a coluna e a grade. */
+  gap: 16,
+  /** A altura de um item. Alvo de clique confortável, e não mais. */
+  item: 32,
+} as const;
+
+/**
+ * A altura útil da coluna, estimada.
+ *
+ * ####  ESTIMADA, E O ERRO É PARA O LADO SEGURO  ####
+ *
+ * A altura real é a do slot de conteúdo do shell, que esta função
+ * não conhece — ela desenha uma tela, e quem a encaixa é o
+ * documento. 516 px é o que sobra numa tela de 720 com o cabeçalho
+ * de 76 e as margens de 30 do preset.
+ *
+ * Errar para MENOS deixa uma categoria de fora com um "e mais 1..."
+ * visível. Errar para mais a desenharia fora da tela, em silêncio —
+ * que é exatamente o defeito da fileira de abas que esta coluna
+ * substituiu.
+ */
+const SIDEBAR_HEIGHT = 516;
 
 const PER_PAGE = GRID.columns * GRID.rows;
 
-/** O que fica onde DENTRO do card. Ver ui-store-screens.ts. */
+/**
+ * O que fica onde DENTRO do card.
+ *
+ * ####  O NOME SUBIU PARA UMA FAIXA PRÓPRIA  ####
+ *
+ * Ele ficava sob o ícone, na mesma cor de fundo do resto — nome,
+ * regra e botão empilhados sem nada separando. Num mural de doze
+ * cards iguais, o olho não tinha onde pousar primeiro.
+ *
+ * Agora ele é uma FAIXA, no topo, com fundo próprio: é a primeira
+ * coisa que se lê em cada card, e é o que se procura quando se
+ * varre a tela atrás de um kit pelo nome.
+ *
+ * ####  E O ACENTO DIZ O ESTADO ANTES DA LEITURA  ####
+ *
+ * Dois pixels de cor no topo do card. Verde = dá para pegar;
+ * vermelho = não; âmbar = espera. À distância de um olhar isso
+ * responde "o que está disponível agora?" sem ler doze rodapés.
+ */
 const CARD = {
-  iconTop: 10,
-  iconBottom: 68,
-  nameTop: 72,
-  nameBottom: 92,
-  ruleTop: 94,
-  ruleBottom: 110,
-  buttonBottom: 8,
-  buttonTop: 34,
+  /** A barra de estado, colada no topo. */
+  accent: 2,
+  /** A faixa do nome, logo abaixo dela. */
+  nameTop: 2,
+  nameBottom: 30,
+  iconTop: 50,
+  iconBottom: 166,
+  ruleTop: 176,
+  ruleBottom: 194,
+  buttonBottom: 10,
+  buttonTop: 40,
+  /** A largura do botão que abre os detalhes, no rodapé. */
+  peek: 50,
 } as const;
+
+/**
+ * O modal de um kit.
+ *
+ * ####  ELE CRESCEU PARA CABER UM INVENTÁRIO  ####
+ *
+ * Era 440x330, e isso bastava enquanto a aba ITENS era uma lista de
+ * texto. Ela deixou de ser: agora é a GRADE do jogo, e uma grade tem
+ * uma largura que não se negocia — a vestimenta são sete casinhas
+ * lado a lado, e sete de 44 pedem 320 px antes das margens.
+ *
+ * A altura veio junto porque um kit completo desenha três
+ * contêineres empilhados, e recortá-los pela metade devolveria o
+ * problema que a grade existe para resolver: o jogador não saberia
+ * onde o resto cai.
+ */
+const KIT_MODAL = { width: 520, height: 440 } as const;
 
 /** Onde a área da lista começa, no modal — logo abaixo das abas. */
 const LIST_TOP = 84;
 
-/** A altura da área da lista, no modal. */
-const LIST_VIEWPORT = 168;
-
 /**
- * A faixa do "‹ 1 / 2 ›", entre a lista e o rodapé do modal.
+ * A altura da área da lista, no modal.
  *
- * Ela cabe no vão que já existia: a lista acaba em 252 e os botões
- * começam em 286 (16 do fundo de um modal de 330).
+ * Sai da caixa, e não de um número solto: o rodapé reserva 60 (os
+ * botões a 16 do fundo, mais 28 de altura, mais ar) e o pager mais
+ * 24. O que sobra é da lista.
  */
+const LIST_VIEWPORT = KIT_MODAL.height - LIST_TOP - 60 - 24;
+
+/** A faixa do "‹ 1 / 2 ›", entre a lista e o rodapé do modal. */
 const LIST_PAGER = { top: LIST_TOP + LIST_VIEWPORT + 2, height: 22 } as const;
 
 // ------------------------------------------------------------
@@ -123,10 +235,19 @@ const LIST_PAGER = { top: LIST_TOP + LIST_VIEWPORT + 2, height: 22 } as const;
  * O que o modal de um kit mostra.
  *
  *   geral      a regra, e o que já houve entre ele e este kit
- *   itens      o que vem dentro, com ícone
+ *   itens      o que vem dentro, na grade do inventário
+ *   item       o detalhe de UM item da grade
  *   confirmar  a última parada antes de gastar o resgate
+ *
+ * ####  "item" USA A PÁGINA COMO ÍNDICE  ####
+ *
+ * `ozkit:kit-x:item:3` é o detalhe do quarto item. Seria mais
+ * explícito um campo próprio, e custaria um quinto pedaço no id —
+ * que o parser, o gerador e o plugin teriam de aprender juntos. A
+ * página já é um número livre nessa posição, e numa aba que mostra
+ * UM item não há o que paginar.
  */
-export type KitTab = 'geral' | 'itens' | 'confirmar';
+export type KitTab = 'geral' | 'itens' | 'item' | 'confirmar';
 
 /** O grupo dos kits SEM categoria. Ver `categorySlug`. */
 export const NO_CATEGORY = '-';
@@ -181,7 +302,7 @@ export function parseKitScreenId(screenId: string): KitScreenTarget | null {
     return {
       kind: 'info',
       slug,
-      tab: tab === 'itens' || tab === 'confirmar' ? tab : 'geral',
+      tab: tab === 'itens' || tab === 'confirmar' || tab === 'item' ? tab : 'geral',
       page: Math.max(0, Number.parseInt(parts[3] ?? '0', 10) || 0),
     };
   }
@@ -197,7 +318,15 @@ export function parseKitScreenId(screenId: string): KitScreenTarget | null {
  * número.
  */
 export function kitInfoScreenId(slug: string, tab: KitTab = 'geral', page = 0): string {
-  if (page > 0) {
+  // ####  NA ABA "item" O ZERO É CONTEÚDO, E NÃO O PADRÃO  ####
+  //
+  // Ali o número não é a página: é QUAL item. Omiti-lo por ser zero
+  // mandava o primeiro item da grade para `ozkit:kit-x:item`, que o
+  // parser lê como índice 0 por sorte — e o botão do primeiro item
+  // ficava com um endereço diferente em forma do dos outros doze.
+  // Basta alguém passar a tratar a ausência como "nenhum" para o
+  // primeiro item parar de abrir.
+  if (page > 0 || tab === 'item') {
     return `${KIT_INFO_PREFIX}:${slug}:${tab}:${String(page)}`;
   }
 
@@ -331,36 +460,10 @@ function buildGrid(
       ? offers.filter((kit) => categorySlug(kit.category) === active.slug)
       : offers;
 
-  const top = grouped ? 42 + GRID.categoryHeight + 8 : 42;
+  const top = 42;
 
   if (grouped) {
-    let cursor = 0;
-
-    for (const entry of categories) {
-      const isActive = active !== null && entry.slug === active.slug;
-      const width = Math.min(150, Math.max(60, entry.name.length * 7 + 22));
-
-      elements.push(
-        button(
-          `kcat${entry.slug}`,
-          entry.name.toUpperCase(),
-          {
-            anchorMin: { x: 0, y: 1 },
-            anchorMax: { x: 0, y: 1 },
-            offsetMin: { x: cursor, y: -(42 + GRID.categoryHeight) },
-            offsetMax: { x: cursor + width, y: -42 },
-          },
-          { id: `akcat${entry.slug}`, kind: 'navigate', screenId: gridScreenId(entry.slug, 0) },
-          {
-            color: isActive ? C.surface2 : C.none,
-            textColor: isActive ? C.text : C.textMuted,
-            fontSize: 11,
-          },
-        ),
-      );
-
-      cursor += width + 4;
-    }
+    elements.push(...sidebar(categories, active));
   }
 
   const pages = Math.max(1, Math.ceil(shown.length / PER_PAGE));
@@ -370,7 +473,10 @@ function buildGrid(
   elements.push(
     panel(
       'kits-grade',
-      fill(0, top, 0, 26),
+      // A grade encolhe pela ESQUERDA quando há coluna. Os cards
+      // são ancorados em fração do pai (ver `kitCard`), então eles
+      // se reacomodam sozinhos — nenhuma medida de card muda aqui.
+      fill(grouped ? SIDEBAR.width + SIDEBAR.gap : 0, top, 0, 26),
       C.none,
       slice.map((kit, index) =>
         kitCard(kit, index % GRID.columns, Math.floor(index / GRID.columns), itemOf),
@@ -459,6 +565,135 @@ function pager(category: string, page: number, pages: number): UiElement[] {
   return elements;
 }
 
+/**
+ * A coluna de categorias.
+ *
+ * ####  O ATIVO É PAINEL; OS OUTROS SÃO BOTÃO  ####
+ *
+ * Clicar no que já está aberto navegaria para onde já se está — um
+ * clique que não faz nada, que é o que parece defeito. É a mesma
+ * regra das abas dos modais e da coluna do ranking.
+ *
+ * ####  E ELES `navigate`, E NÃO `modal.open`  ####
+ *
+ * Esta é uma PÁGINA. `modal.open` abriria a tela de kits por cima
+ * da tela de kits, empilhando um modal a cada troca de categoria.
+ */
+function sidebar(
+  categories: readonly { readonly slug: string; readonly name: string }[],
+  active: { readonly slug: string; readonly name: string } | null,
+): UiElement[] {
+  // ####  QUANTAS CABEM  ####
+  //
+  // A área útil vai de 42 (sob o título) até 26 do fundo (o pager).
+  // Numa tela de 720 com o cabeçalho e as margens do shell, sobram
+  // ~516 px — dezesseis categorias. Passar disso é improvável, e
+  // "improvável" não é o mesmo que "impossível": o que não couber é
+  // CONTADO, como em todo o resto deste menu.
+  const room = Math.max(1, Math.floor((SIDEBAR_HEIGHT - SIDEBAR.item) / SIDEBAR.item));
+  const visible = categories.length > room ? categories.slice(0, room) : categories;
+  const rest = categories.length - visible.length;
+
+  const items: UiElement[] = [];
+
+  for (const [index, entry] of visible.entries()) {
+    const id = `kcat${entry.slug}`;
+    const text = entry.name.toUpperCase();
+    const isActive = active !== null && entry.slug === active.slug;
+
+    const rect: Rect = {
+      anchorMin: { x: 0, y: 1 },
+      anchorMax: { x: 1, y: 1 },
+      offsetMin: { x: 0, y: -((index + 1) * SIDEBAR.item) },
+      offsetMax: { x: 0, y: -(index * SIDEBAR.item) },
+    };
+
+    if (isActive) {
+      items.push(
+        // Mais ESCURO que a coluna, e não mais claro: sobre fundo
+        // escuro o buraco lê como "aberto", e a barra vermelha diz
+        // qual é. Clarear seria o mesmo efeito do hover, e aí o
+        // item aberto e o item sob o cursor pareceriam iguais.
+        panel(id, rect, C.bg, [
+          panel(`${id}b`, accentRect(), C.rust),
+          label(`${id}l`, text, fill(14, 0, 10, 0), {
+            size: 12,
+            align: 'MiddleLeft',
+            font: 'RobotoCondensed-Bold.ttf',
+          }),
+        ]),
+      );
+
+      continue;
+    }
+
+    items.push(
+      button(
+        id,
+        text,
+        // O retângulo começa onde o texto do ativo começa: o texto
+        // de um `CuiButton` preenche o botão inteiro, e não há
+        // margem interna para dar. Recuado, o rótulo cai sob o do
+        // item aberto, e a coluna se lê de cima para baixo.
+        { ...rect, offsetMin: { x: 14, y: rect.offsetMin.y } },
+        { id: `a${id}`, kind: 'navigate', screenId: gridScreenId(entry.slug, 0) },
+        {
+          color: C.none,
+          textColor: C.textMuted,
+          hoverColor: C.surface2,
+          fontSize: 12,
+          align: 'MiddleLeft',
+        },
+      ),
+    );
+  }
+
+  if (rest > 0) {
+    items.push(
+      label(
+        'kcatmais',
+        `e mais ${String(rest)}...`,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 14, y: -((visible.length + 1) * SIDEBAR.item) },
+          offsetMax: { x: 0, y: -(visible.length * SIDEBAR.item) },
+        },
+        { size: 11, color: C.amber, align: 'MiddleLeft' },
+      ),
+    );
+  }
+
+  return [
+    // ####  O FUNDO DA COLUNA É A DIVISÓRIA  ####
+    //
+    // Pintar a coluna faz o trabalho de uma régua de 1 px ao lado
+    // com UM elemento a menos — e num documento cujo teto é o frame
+    // do RCON, cada elemento a menos é espaço para um card a mais.
+    panel(
+      'kits-col',
+      {
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: 0, y: 26 },
+        offsetMax: { x: SIDEBAR.width, y: -42 },
+      },
+      C.surface2,
+      items,
+    ),
+  ];
+}
+
+/** A barra de acento do item aberto, colada na borda esquerda. */
+function accentRect(): Rect {
+  return {
+    anchorMin: { x: 0, y: 0 },
+    anchorMax: { x: 0, y: 1 },
+    offsetMin: { x: 0, y: 3 },
+    offsetMax: { x: 3, y: -3 },
+  };
+}
+
 function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLookup): UiElement {
   const columnWidth = 1 / GRID.columns;
   const half = GRID.gap / 2;
@@ -471,11 +706,40 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
   const iconRect: Rect = {
     anchorMin: { x: 0.5, y: 1 },
     anchorMax: { x: 0.5, y: 1 },
-    offsetMin: { x: -29, y: -CARD.iconBottom },
-    offsetMax: { x: 29, y: -CARD.iconTop },
+    offsetMin: { x: -58, y: -CARD.iconBottom },
+    offsetMax: { x: 58, y: -CARD.iconTop },
   };
 
   const children: UiElement[] = [
+    // ####  A BARRA DE ESTADO  ####
+    //
+    // Dois pixels no topo. É o que responde "o que dá para pegar
+    // agora?" num mural de doze cards, sem ler doze rodapés.
+    panel(`${id}-a`, topBarRect(CARD.accent), accentColor(kit)),
+
+    // ####  A FAIXA DO NOME  ####
+    //
+    // O nome já esteve solto sob o ícone, na mesma cor do resto do
+    // card. Numa parede de cards iguais, o olho não tinha onde
+    // pousar primeiro — e é pelo nome que se procura um kit.
+    panel(
+      `${id}-nb`,
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: 0, y: -CARD.nameBottom },
+        offsetMax: { x: 0, y: -CARD.nameTop },
+      },
+      C.surface2,
+      [
+        label(`${id}-n`, kit.name, fill(8, 0, 8, 0), {
+          size: 13,
+          color: C.text,
+          font: 'RobotoCondensed-Bold.ttf',
+        }),
+      ],
+    ),
+
     // ####  A ARTE PRÓPRIA GANHA DO PALPITE  ####
     //
     // Sem ela, o card mostra o PRIMEIRO item do kit — um palpite
@@ -495,18 +759,6 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
         : itemImage(`${id}-i`, { itemId: icon.itemId, skinId: first?.skinId ?? '0' }, iconRect),
 
     label(
-      `${id}-n`,
-      kit.name,
-      {
-        anchorMin: { x: 0, y: 1 },
-        anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: 8, y: -CARD.nameBottom },
-        offsetMax: { x: -8, y: -CARD.nameTop },
-      },
-      { size: 12, color: C.text, font: 'RobotoCondensed-Bold.ttf' },
-    ),
-
-    label(
       `${id}-r`,
       `${String(kit.items.length)} ${kit.items.length === 1 ? 'item' : 'itens'} · ${ruleOf(kit)}`,
       {
@@ -518,30 +770,35 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       { size: 10, color: C.textMuted },
     ),
 
-    // ####  O "i" ABRE O QUE NÃO CABE NO CARD  ####
+    // ####  "VER" ABRE O QUE NÃO CABE NO CARD  ####
     //
-    // A lista do que vem dentro, quando ele pegou pela última vez e
-    // quantas vezes já pegou. Num card de 160px isso não entra — e
+    // A grade do que vem dentro, quando ele pegou pela última vez e
+    // quantas vezes já pegou. Num card de 162 px isso não entra — e
     // sem isso o jogador clica em RESGATAR para descobrir o que
     // ganha, o que num resgate único não dá para desfazer.
+    //
+    // Ele era um "i" de 20 px flutuando no canto superior, sobre o
+    // nada. Aqui está no RODAPÉ, ao lado da ação, com o tamanho de
+    // um alvo de clique — o mesmo arranjo de qualquer card que
+    // ofereça "olhar" e "fazer".
     button(
       `${id}-info`,
-      'i',
+      'VER',
       {
-        anchorMin: { x: 1, y: 1 },
-        anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: -24, y: -24 },
-        offsetMax: { x: -4, y: -4 },
+        anchorMin: { x: 0, y: 0 },
+        anchorMax: { x: 0, y: 0 },
+        offsetMin: { x: 8, y: CARD.buttonBottom },
+        offsetMax: { x: 8 + CARD.peek, y: CARD.buttonTop },
       },
       { id: `a${id}info`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug) },
-      { color: C.none, textColor: C.textMuted, hoverColor: C.surface2, fontSize: 12 },
+      { color: C.surface2, textColor: C.textMuted, hoverColor: C.border, fontSize: 11 },
     ),
   ];
 
   const buttonRect: Rect = {
     anchorMin: { x: 0, y: 0 },
     anchorMax: { x: 1, y: 0 },
-    offsetMin: { x: 8, y: CARD.buttonBottom },
+    offsetMin: { x: 8 + CARD.peek + 4, y: CARD.buttonBottom },
     offsetMax: { x: -8, y: CARD.buttonTop },
   };
 
@@ -558,7 +815,7 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
           // sete. A confirmação é a diferença entre "peguei o que
           // queria" e "gastei minha única chance sem querer".
           { id: `pedir-${kit.slug}`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug, 'confirmar') },
-          { color: C.rust, textColor: C.white, hoverColor: '#D4553FFF', fontSize: 11 },
+          { color: C.rust, textColor: C.white, hoverColor: '#D4553FFF', fontSize: 12 },
         )
       : // ####  QUEM NÃO PODE PEGAR VÊ O MOTIVO, NÃO UM BOTÃO MORTO  ####
         //
@@ -647,6 +904,30 @@ function stateColor(kit: KitOfferView): string {
   return kit.nextAt === null ? C.textMuted : C.amber;
 }
 
+/**
+ * A cor da barra de estado do card.
+ *
+ * ####  POR QUE NÃO REAPROVEITAR `stateColor`  ####
+ *
+ * Ela responde outra pergunta: que cor dar ao TEXTO de um botão que
+ * já se sabe morto — âmbar para "espera", cinza para "acabou". Ela
+ * nunca precisou de uma cor para "dá para pegar", porque nesse caso
+ * não há botão morto nenhum.
+ *
+ * A barra pergunta as TRÊS de uma vez, e é lida à distância, sem
+ * texto ao lado. Verde é o que diz "vá" sem precisar de legenda.
+ */
+function accentColor(kit: KitOfferView): string {
+  if (kit.available) {
+    return C.olive;
+  }
+
+  // Esperando o cooldown é diferente de esgotado: um volta sozinho,
+  // o outro não. Misturá-los faria o jogador desistir de um kit que
+  // estará dele em duas horas.
+  return kit.nextAt === null ? C.rust : C.amber;
+}
+
 // ============================================================
 //  O MODAL DE DETALHES
 // ============================================================
@@ -693,7 +974,18 @@ function buildInfo(
       id,
       name: kit.name,
       kind: 'modal',
-      elements: [modalFrame(420, 250, confirmBody(kit, itemOf))],
+      elements: [modalFrame(460, 260, confirmBody(kit, itemOf))],
+    };
+  }
+
+  // O detalhe de UMA casinha da grade. Também sem abas, e pelo mesmo
+  // motivo da confirmação: daqui só se volta para a grade.
+  if (target.tab === 'item') {
+    return {
+      id,
+      name: kit.name,
+      kind: 'modal',
+      elements: [modalFrame(420, 270, itemDetail(kit, itemOf, target.page ?? 0))],
     };
   }
 
@@ -717,9 +1009,7 @@ function buildInfo(
       52,
     ),
 
-    ...(target.tab === 'geral'
-      ? generalTab(kit, target.page ?? 0)
-      : itemsTab(kit, itemOf, target.page ?? 0)),
+    ...(target.tab === 'geral' ? generalTab(kit, target.page ?? 0) : itemsTab(kit, itemOf)),
 
     closeButton('FECHAR'),
   ];
@@ -766,7 +1056,7 @@ function buildInfo(
     id,
     name: kit.name,
     kind: 'modal',
-    elements: [modalFrame(440, 330, body)],
+    elements: [modalFrame(KIT_MODAL.width, KIT_MODAL.height, body)],
   };
 }
 
@@ -932,22 +1222,230 @@ function generalTab(kit: KitOfferView, page: number): UiElement[] {
 }
 
 /** A aba ITENS: o que vem dentro, com o ícone de cada um. */
-function itemsTab(kit: KitOfferView, itemOf: ItemLookup, page: number): UiElement[] {
-  const lines: ContentRow[] = kit.items.map((item) => {
-    const known = itemOf(item.shortname);
-    const name = known?.displayName ?? item.shortname;
+/**
+ * O que vem no kit, desenhado como o inventário do jogo.
+ *
+ * ####  POR QUE ISTO DEIXOU DE SER UMA LISTA  ####
+ *
+ * A lista respondia "o que vem". Ela não respondia a pergunta que o
+ * jogador realmente faz antes de gastar um resgate ÚNICO: onde isso
+ * cai. Um kit com a AK na barra rápida e o colete no corpo é outro
+ * kit — e pela lista os dois eram idênticos.
+ *
+ * A grade responde as duas de uma vez, porque é o mesmo desenho que
+ * ele vê ao apertar TAB. O `slot` e a `position` já estavam no
+ * cadastro desde sempre; o que faltava era a tela mostrá-los.
+ */
+function itemsTab(kit: KitOfferView, itemOf: ItemLookup): UiElement[] {
+  const entries = inventoryEntriesOf(kit, itemOf);
 
-    return {
-      text: item.amount > 1 ? `${formatNumber(item.amount)}x ${name}` : name,
-      item: known === null ? null : { itemId: known.itemId, skinId: item.skinId },
-    };
-  });
-
-  if (lines.length === 0) {
-    lines.push({ text: 'Este kit está vazio.', item: null });
+  if (entries.length === 0) {
+    return [
+      label('kivazio', 'Este kit está vazio.', listArea(), {
+        size: 12,
+        color: C.textMuted,
+      }),
+    ];
   }
 
-  return listBody(kit, 'itens', lines, page, 'kitens', 'ki');
+  const width = KIT_MODAL.width - 44;
+
+  const blocks = inventoryBlocks(entries, {
+    prefix: 'ki',
+    width,
+    height: LIST_VIEWPORT,
+    // O clique abre o detalhe daquele item. O CUI não tem tooltip —
+    // ver o cabeçalho de ui-inventory.ts.
+    screenIdOf: (entry) => kitInfoScreenId(kit.slug, 'item', entry.index),
+  });
+
+  const elements: UiElement[] = [panel('kitens', listArea(), C.none, blocks.elements)];
+
+  // O que não coube é CONTADO, nunca cortado em silêncio: um kit de
+  // trinta itens não pode dizer que tem dez.
+  if (blocks.hidden > 0) {
+    elements.push(
+      label(
+        'kimais',
+        `e mais ${formatNumber(blocks.hidden)} ${blocks.hidden === 1 ? 'item' : 'itens'} que não coube na tela`,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 22, y: -(LIST_PAGER.top + LIST_PAGER.height) },
+          offsetMax: { x: -22, y: -LIST_PAGER.top },
+        },
+        { size: 10, color: C.amber, align: 'MiddleLeft' },
+      ),
+    );
+  }
+
+  return elements;
+}
+
+/** A área onde a lista (ou a grade) é desenhada. */
+function listArea(): Rect {
+  return {
+    anchorMin: { x: 0, y: 1 },
+    anchorMax: { x: 1, y: 1 },
+    offsetMin: { x: 22, y: -(LIST_TOP + LIST_VIEWPORT) },
+    offsetMax: { x: -22, y: -LIST_TOP },
+  };
+}
+
+/** Um item do kit, já resolvido, mais o índice que o endereça. */
+interface KitEntry extends InventoryEntry {
+  /** A posição no array do kit — é ela que vai no id do detalhe. */
+  readonly index: number;
+}
+
+/**
+ * Os itens do kit no formato da grade.
+ *
+ * ####  O SLOT DO CADASTRO É A VERDADE  ####
+ *
+ * Ele sempre foi `wear`, `belt` ou `main` — o zod da borda HTTP não
+ * aceita outra coisa. O que mudou é que agora alguém OLHA para ele.
+ */
+function inventoryEntriesOf(kit: KitOfferView, itemOf: ItemLookup): readonly KitEntry[] {
+  return kit.items.map((item, index) => {
+    const known = itemOf(item.shortname);
+
+    return {
+      index,
+      container: item.slot,
+      position: item.position,
+      itemId: known?.itemId ?? null,
+      skinId: item.skinId,
+      amount: item.amount,
+      name: known?.displayName ?? item.shortname,
+    };
+  });
+}
+
+/**
+ * O detalhe de um item da grade.
+ *
+ * ####  ELE EXISTE PORQUE O CUI NÃO TEM TOOLTIP  ####
+ *
+ * Não há evento de hover: um `CuiButton` conhece a cor normal e a de
+ * mouse em cima, e nada mais. O nome de um item não cabe numa
+ * casinha de 44 px, e escrevê-lo embaixo de cada uma transformaria a
+ * grade numa parede de texto.
+ *
+ * Então a casinha clica. É um clique a mais que um tooltip, e em
+ * troca cabe o nome inteiro, a quantidade exata e o contêiner.
+ */
+function itemDetail(kit: KitOfferView, itemOf: ItemLookup, index: number): UiElement[] {
+  const entries = inventoryEntriesOf(kit, itemOf);
+  const entry = entries[index];
+
+  // Índice fora da lista: o admin mexeu no kit enquanto o modal
+  // estava aberto. Voltar para a grade é melhor que um modal vazio.
+  if (entry === undefined) {
+    return [
+      label('kdt', 'Item indisponível', modalHeader(), {
+        size: 15,
+        font: 'RobotoCondensed-Bold.ttf',
+      }),
+      label('kdm', 'Este item saiu do kit.', fill(22, 60, 22, 60), {
+        size: 12,
+        color: C.textMuted,
+      }),
+      backToItems(kit),
+      closeButton(),
+    ];
+  }
+
+  const body: UiElement[] = [
+    label('kdt', entry.name, modalHeader(), { size: 15, font: 'RobotoCondensed-Bold.ttf' }),
+  ];
+
+  if (entry.itemId !== null) {
+    body.push(
+      itemImage(
+        'kdi',
+        { itemId: entry.itemId, skinId: entry.skinId },
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 0, y: 1 },
+          offsetMin: { x: 22, y: -160 },
+          offsetMax: { x: 118, y: -64 },
+        },
+      ),
+    );
+  }
+
+  const facts: readonly (readonly [string, string])[] = [
+    ['QUANTIDADE', formatNumber(entry.amount)],
+    ['VAI PARA', CONTAINER_LABEL[entry.container]],
+    [
+      'CASINHA',
+      entry.position >= 0
+        ? String(entry.position + 1)
+        : // Sem posição escolhida o jogo decide, e dizer "0" seria
+          // inventar uma casinha que ninguém pediu.
+          'a primeira livre',
+    ],
+  ];
+
+  for (const [index_, [name, value]] of facts.entries()) {
+    const top = 70 + index_ * 34;
+
+    body.push(
+      label(
+        `kdf${String(index_)}`,
+        name,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 136, y: -(top + 14) },
+          offsetMax: { x: -22, y: -top },
+        },
+        { size: 10, color: C.textMuted, align: 'MiddleLeft' },
+      ),
+      label(
+        `kdv${String(index_)}`,
+        value,
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: 136, y: -(top + 32) },
+          offsetMax: { x: -22, y: -(top + 15) },
+        },
+        { size: 13, align: 'MiddleLeft', font: 'RobotoCondensed-Bold.ttf' },
+      ),
+    );
+  }
+
+  if (entry.skinId !== '0' && entry.skinId !== '') {
+    body.push(
+      label('kdsk', `Skin ${entry.skinId}`, fill(22, 186, 22, 60), {
+        size: 10,
+        color: C.textMuted,
+        align: 'MiddleLeft',
+      }),
+    );
+  }
+
+  body.push(backToItems(kit), closeButton());
+
+  return body;
+}
+
+/** A volta para a grade. Sem ela o detalhe é um beco. */
+function backToItems(kit: KitOfferView): UiElement {
+  return button(
+    'kdvolta',
+    '‹ VOLTAR',
+    {
+      anchorMin: { x: 1, y: 0 },
+      anchorMax: { x: 1, y: 0 },
+      offsetMin: { x: -150, y: 16 },
+      offsetMax: { x: -22, y: 44 },
+    },
+    { id: `kdv-${kit.slug}`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug, 'itens') },
+    { color: C.surface2, textColor: C.text, hoverColor: C.border, fontSize: 12 },
+  );
 }
 
 /**

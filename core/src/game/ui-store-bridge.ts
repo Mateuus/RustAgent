@@ -24,6 +24,7 @@
 // ============================================================
 
 import type { Logger } from '../logger.js';
+import { screenViewport } from './ui-geometry.js';
 import { describePurchase, type StoreService } from '../store/service.js';
 import type { Wallet } from '../store/wallet.js';
 import type { UiDocument } from '../types/ui-document.js';
@@ -128,11 +129,22 @@ export function createStoreScreenProvider(
       }
     }
 
+    const bundleTemplate = findTemplate(input.document.screens, BUNDLE_TEMPLATE_ID);
+
     const screen = buildStoreScreen({
       catalog,
       target,
       balance,
       vehicleSpace,
+      // ####  O TAMANHO DA TELA, PARA MEDIR O SLOT DA LISTA  ####
+      //
+      // Com shell, é o slot de CONTEÚDO, e não a tela do jogo — é o
+      // que `screenViewport` resolve. Sem ele, a lista de um pacote
+      // paginava sempre por 132 px, independentemente do tamanho
+      // que o admin tivesse dado ao slot no editor.
+      ...(bundleTemplate === null
+        ? {}
+        : { viewport: screenViewport(input.document, bundleTemplate) }),
       // O id volta IDÊNTICO ao pedido: o plugin descarta a resposta
       // cujo id não bate com o que ele pediu.
       screenId: input.screenId,
@@ -140,7 +152,7 @@ export function createStoreScreenProvider(
       template: findTemplate(input.document.screens, BUY_TEMPLATE_ID),
       // Kit, VIP e veículo têm modelo PRÓPRIO: o deles hospeda uma
       // lista, e o de item não tem onde pô-la.
-      bundleTemplate: findTemplate(input.document.screens, BUNDLE_TEMPLATE_ID),
+      bundleTemplate,
       ...(options.nameOf === undefined ? {} : { nameOf: options.nameOf }),
     });
 
