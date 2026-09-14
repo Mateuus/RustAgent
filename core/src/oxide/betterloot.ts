@@ -99,6 +99,7 @@ import { reloadFailed } from './plugins.js';
 import { sha256Of } from './plugin-metadata.js';
 import {
   backupPluginDataFile,
+  deletePluginDataFile,
   pluginDataPath,
   readPluginDataFile,
   writePluginDataFile,
@@ -391,6 +392,8 @@ const KEY_DURABILITY = 'Item Durability';
 const KEY_DURABILITY_MIN = 'Minimum Durability';
 const KEY_DURABILITY_MAX = 'Maximum Durability';
 const KEY_WEAPON_PROPERTIES = 'Item Properties';
+/** O nome do perfil DENTRO do vínculo, na lista `Loot Profiles`. */
+const KEY_PROFILE_NAME = 'Loot Profile Name';
 
 /**
  * O sufixo que deixa o mesmo item entrar várias vezes.
@@ -657,7 +660,7 @@ function toProfiles(raw: unknown): readonly BetterLootProfileLink[] {
     const profile = asObject(value) ?? {};
 
     return {
-      name: typeof profile['Loot Profile Name'] === 'string' ? profile['Loot Profile Name'] : '',
+      name: typeof profile[KEY_PROFILE_NAME] === 'string' ? profile[KEY_PROFILE_NAME] : '',
       enabled: asBoolean(profile['Group Enabled?'], false),
       probability: asNumber(profile['Loot Profile Probability (1% - 100%)'], 0),
       maxItems: asNumber(profile['Max Items From Profile (0 = unlimited)'], 0),
@@ -825,6 +828,46 @@ export function applyWatched(
         // Daqui pra baixo é o contrato do BetterLoot: o nome da
         // chave e o do prefab são dele.
         [KEY_WATCHED]: { ...current, [prefab]: watched },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Liga (ou desliga) VÁRIAS caixas de uma vez na lista de vigia.
+ *
+ * ####  ELE EXISTE PORQUE A ADOÇÃO EM MASSA É UMA ESCRITA SÓ  ####
+ *
+ * Chamar o `applyWatched` 111 vezes faria 111 backups e 111
+ * gravações do mesmo arquivo de 10 KB, e cada uma com a chance de
+ * o agente morrer no meio e deixar metade das caixas adotadas. O
+ * `rebuild` decide o conjunto inteiro antes e grava uma vez.
+ *
+ * O merge é o mesmo do irmão: o que não está no mapa continua como
+ * estava, e os outros blocos do arquivo não são tocados.
+ *
+ * @throws {ApiError} 400 quando o arquivo do disco não é JSON de
+ * objeto.
+ */
+export function applyWatchedAll(
+  text: string | null,
+  watched: ReadonlyMap<string, boolean>,
+  where: string,
+): string {
+  const root = text === null ? {} : parseConfigRoot(text, where);
+  const general = asObject(root['General Configuration']) ?? {};
+  const current = asObject(general[KEY_WATCHED]) ?? {};
+
+  return JSON.stringify(
+    {
+      ...root,
+      'General Configuration': {
+        ...general,
+        // Daqui pra baixo é o contrato do BetterLoot: o nome da
+        // chave e o dos prefabs são dele.
+        [KEY_WATCHED]: { ...current, ...Object.fromEntries(watched) },
       },
     },
     null,
@@ -1393,6 +1436,342 @@ export function tableRevisionOf(raw: RawObject | null): string {
  * resposta por causa disso seria trocar um conflito falso por uma
  * tela pendurada.
  */
+// ------------------------------------------------------------
+//  ####  REFAZER A BASE  ####
+//
+//  O BetterLoot lê a tabela nativa do jogo UMA vez: quando cria a
+//  entrada daquele prefab no `LootTables.json`
+//  (`LoadAllContainers`, BetterLoot.cs:1833-2040). Dali em diante o
+//  arquivo é a única verdade que ele conhece, e ele nunca regenera
+//  sozinho.
+//
+//  A consequência aparece meses depois, e foi o que chegou como
+//  reclamação: caixa que alguém deixou só com perfis perdeu a lista
+//  de itens do jogo; caixa que entrou num update do Rust depois da
+//  instalação ficou em "JOGO" para sempre; e não há como saber o
+//  que ainda é do jogo naquele arquivo.
+//
+//  Consertar isso caixa a caixa é o que o editor já faz desde o
+//  Docs/CustomItem/09 — e é retrabalho de 111 caixas. O `rebuild`
+//  faz o contrário: manda o PLUGIN gerar a base outra vez, do jogo
+//  de agora, e devolve por cima dela o que era da casa.
+//
+//  ####  A BASE NOVA VEM DO PLUGIN, E NÃO DE UM ARQUIVO NOSSO  ####
+//
+//  Guardar uma cópia "limpa" no repositório envelheceria no
+//  primeiro update do Rust que mexesse em loot, e passaria a mentir
+//  sem nenhum sintoma. O único gerador que nunca diverge do que o
+//  servidor entrega é o próprio BetterLoot, lendo o jogo daquele
+//  build. Ver `BetterLootEditor.rebuild`.
+// ------------------------------------------------------------
+
+/** O que o `rebuild` faz com a tabela que estava no disco. */
+export type BetterLootRebuildMode = 'merge' | 'factory';
+
+/** O que aconteceu com UMA caixa. */
+export interface BetterLootRebuiltTable {
+  readonly prefab: string;
+  /** Quantos itens do jogo a base nova trouxe para ela. */
+  readonly nativeItems: number;
+  /** As chaves da casa que foram devolvidas à caixa. */
+  readonly keptItems: readonly string[];
+  /** As chaves da casa devolvidas à lista de garantidos. */
+  readonly keptGuaranteed: readonly string[];
+  /** Os perfis que continuaram ligados a ela. */
+  readonly keptProfiles: readonly string[];
+  /** Perfis que ela cita e que não existem no `LootGroups.json`. */
+  readonly orphanProfiles: readonly string[];
+  /** Ela estava em "JOGO" e passou a ser do BetterLoot. */
+  readonly adopted: boolean;
+  /** O prefab não existia na configuração anterior. */
+  readonly fresh: boolean;
+}
+
+/** O que o `rebuild` fez, por extenso. É o que a tela mostra. */
+export interface BetterLootRebuildReport {
+  readonly mode: BetterLootRebuildMode;
+  /** Caixas na base nova. */
+  readonly tables: number;
+  /** Itens do jogo que a base nova trouxe, somando todas. */
+  readonly nativeItems: number;
+  /** Itens da casa devolvidos, somando todas. */
+  readonly keptItems: number;
+  /** Vínculos com perfil devolvidos, somando todas. */
+  readonly keptProfiles: number;
+  /** Caixas que saíram de "JOGO". */
+  readonly adopted: readonly string[];
+  /** Prefabs que a configuração anterior não tinha. */
+  readonly fresh: readonly string[];
+  /**
+   * Prefabs que existiam, que o plugin não gerou e que o jogo não
+   * conhece mais.
+   *
+   * Caixa que saiu num update do Rust, ou entrada que alguém
+   * escreveu à mão. Elas NÃO entram na base nova — e continuam no
+   * backup, que é o único lugar onde ainda fazem sentido.
+   */
+  readonly dropped: readonly string[];
+  /**
+   * Prefabs que o plugin não gerou e que ficaram COMO ESTAVAM.
+   *
+   * ####  O CORPO DE CIENTISTA DESLIGADO É O CASO  ####
+   *
+   * O `LoadAllContainers` pula a geração de NPC cujo prefab está na
+   * lista de vigia como `false` (BetterLoot.cs:1934-1941) — e só a
+   * de NPC; contêiner e presente ele gera de qualquer jeito. Sem
+   * esta lista, a entrada daquele NPC seria tratada como prefab
+   * extinto e sumiria junto com o que alguém configurou nela.
+   *
+   * O que separa um do outro é a lista de vigia depois do reload: o
+   * plugin REMOVE dela o prefab que o jogo não tem mais
+   * (`:2040-2046`). Continuar lá é o que prova que ele existe.
+   *
+   * Adotar tudo antes de gerar (o caminho recomendado) esvazia esta
+   * lista: com a vigia ligada, o NPC é gerado como qualquer caixa.
+   */
+  readonly preserved: readonly string[];
+  /** Nomes de perfil citados por alguma caixa e que não existem. */
+  readonly orphanProfiles: readonly string[];
+  /** As caixas que têm algo a contar. Caixa intacta fica de fora. */
+  readonly changed: readonly BetterLootRebuiltTable[];
+}
+
+/**
+ * As chaves da caixa velha que a base nova NÃO tem.
+ *
+ * ####  É A DEFINIÇÃO DE "ITEM DA CASA", E ELA É POR CHAVE  ####
+ *
+ * A mesma do cruzamento da tela (Docs/CustomItem/09 §3.1): chave
+ * exata, e não shortname. A chave nativa nunca tem sufixo
+ * (`rifle.ak`), e a segunda AK com skin da casa nasce `rifle.ak{1}`
+ * — casar pelo shortname base faria o troféu da casa passar por
+ * item original do Rust e sumir no primeiro rebuild.
+ *
+ * As duas listas da base entram na conta porque o plugin move
+ * entradas entre elas sozinho: o item que sai de todos os galhos
+ * vira garantido. Olhar só uma faria o mesmo item ser devolvido
+ * como "da casa" e aparecer duas vezes na caixa.
+ */
+function houseKeysOf(
+  previous: RawObject | null,
+  nativeItems: RawObject,
+  nativeGuaranteed: RawObject,
+): readonly [string, unknown][] {
+  if (previous === null) {
+    return [];
+  }
+
+  return Object.entries(previous).filter(
+    ([key]) => !(key in nativeItems) && !(key in nativeGuaranteed),
+  );
+}
+
+/** Os nomes de perfil de uma lista `Loot Profiles` crua. */
+function profileNamesOf(raw: unknown): readonly string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const names: string[] = [];
+
+  for (const value of raw as unknown[]) {
+    const name = asObject(value)?.[KEY_PROFILE_NAME];
+
+    if (typeof name === 'string' && name !== '') {
+      names.push(name);
+    }
+  }
+
+  return names;
+}
+
+/**
+ * A base nova, com o que era da casa devolvido por cima.
+ *
+ * ####  O QUE SOBREVIVE, E O QUE NÃO  ####
+ *
+ * | sobrevive | volta ao do jogo |
+ * | --- | --- |
+ * | item da casa (chave que o jogo não tem) | a lista de itens do jogo |
+ * | garantido da casa | a quantidade de um item do jogo |
+ * | os perfis ligados à caixa, com chance e teto | o "quanto sai" (itens, scrap, blueprints) |
+ * | o travamento de pool e o "ignorar raridade" | |
+ *
+ * A quantidade editada de um item DO JOGO não sobrevive, e isso é
+ * decisão do dono: um servidor que multiplicou 145 linhas à mão
+ * volta ao 1x e reaplica o multiplicador, que é um clique. O
+ * contrário — preservar cada mín./máx. — faria o "refazer a base"
+ * devolver a mesma tabela torta de onde se veio.
+ *
+ * ####  NADA AQUI DUPLICA, POR CONSTRUÇÃO  ####
+ *
+ * Caixa, item e perfil são CHAVE de dicionário nos dois lados; o
+ * que a base nova já tem não é devolvido, e o que ela não tem entra
+ * uma vez só. Rodar duas vezes seguidas dá o mesmo arquivo — que é
+ * o que o pedido chama de "repetir a importação sem duplicar".
+ */
+export function mergeRebuiltTables(
+  previous: Record<string, RawObject>,
+  baseline: Record<string, RawObject>,
+  options: {
+    /** Ligar `Is Prefab Enabled?` em toda caixa da base nova. */
+    readonly adopt: boolean;
+    /** Os perfis que existem no `LootGroups.json`, para achar órfão. */
+    readonly profiles: ReadonlySet<string>;
+    /**
+     * Os prefabs que continuam na lista de vigia depois do reload.
+     *
+     * É o que separa "o jogo não tem mais este prefab" de "o plugin
+     * não o gerou desta vez". Ver `preserved`.
+     */
+    readonly watched: ReadonlySet<string>;
+  },
+): { readonly tables: Record<string, RawObject>; readonly report: BetterLootRebuildReport } {
+  const tables: Record<string, RawObject> = {};
+  const changed: BetterLootRebuiltTable[] = [];
+  const adopted: string[] = [];
+  const fresh: string[] = [];
+  const orphanProfiles = new Set<string>();
+
+  let nativeItems = 0;
+  let keptItems = 0;
+  let keptProfiles = 0;
+
+  for (const [prefab, base] of Object.entries(baseline)) {
+    const old = previous[prefab] ?? null;
+    const next: RawObject = { ...base };
+
+    const baseUngrouped = asObject(base[KEY_UNGROUPED]) ?? {};
+    const baseGuaranteed = asObject(base[KEY_GUARANTEED]) ?? {};
+
+    const houseItems = houseKeysOf(asObject(old?.[KEY_UNGROUPED]), baseUngrouped, baseGuaranteed);
+    const houseGuaranteed = houseKeysOf(
+      asObject(old?.[KEY_GUARANTEED]),
+      baseUngrouped,
+      baseGuaranteed,
+    );
+
+    if (houseItems.length > 0) {
+      next[KEY_UNGROUPED] = { ...baseUngrouped, ...Object.fromEntries(houseItems) };
+    }
+
+    if (houseGuaranteed.length > 0) {
+      next[KEY_GUARANTEED] = { ...baseGuaranteed, ...Object.fromEntries(houseGuaranteed) };
+    }
+
+    // ####  O VÍNCULO COM O PERFIL É DA CASA, SEMPRE  ####
+    //
+    // O plugin gera a base com a lista vazia (e, num caso medido,
+    // com o `example_group` que ele mesmo criou). Quem ligou perfil
+    // numa caixa foi gente, e é o trabalho que mais custa refazer:
+    // são treze perfis por caixa nos prints que abriram este
+    // pedido. Caixa que a configuração anterior não tinha fica com
+    // o que a base trouxe.
+    const links = old === null ? base[KEY_PROFILES] : (old[KEY_PROFILES] ?? []);
+
+    next[KEY_PROFILES] = links;
+
+    const names = profileNamesOf(links);
+    const orphans = names.filter((name) => !options.profiles.has(name));
+
+    for (const name of orphans) {
+      orphanProfiles.add(name);
+    }
+
+    // ####  A ADOÇÃO É METADE DA CONTA; A OUTRA ESTÁ NO OUTRO ARQUIVO  ####
+    //
+    // Aqui vai o `Is Prefab Enabled?`. O `Watched Container
+    // Prefabs` é do `BetterLoot.json` e quem o grava é o `rebuild`,
+    // no mesmo passo — desligado, ele devolve a caixa ao loot do
+    // jogo mesmo com este `true`. Ver `KEY_WATCHED`.
+    const wasEnabled = old === null ? null : asBoolean(old[KEY_ENABLED], false);
+    const enabled = options.adopt ? true : (wasEnabled ?? asBoolean(base[KEY_ENABLED], true));
+
+    next[KEY_ENABLED] = enabled;
+
+    // Preferências da caixa que a base nova não tem como saber: o
+    // plugin as gera no padrão dele. Não são "quanto sai" nem item,
+    // e perdê-las em silêncio mudaria o sorteio de quem as ligou.
+    if (old !== null) {
+      next[KEY_POOL_LOCKING] = asBoolean(old[KEY_POOL_LOCKING], asBoolean(base[KEY_POOL_LOCKING], false));
+      next[KEY_IGNORE_RARITY] = asBoolean(
+        old[KEY_IGNORE_RARITY],
+        asBoolean(base[KEY_IGNORE_RARITY], false),
+      );
+    }
+
+    tables[prefab] = next;
+
+    const becameAdopted = wasEnabled === false && enabled;
+
+    if (becameAdopted) {
+      adopted.push(prefab);
+    }
+
+    if (old === null) {
+      fresh.push(prefab);
+    }
+
+    nativeItems += Object.keys(baseUngrouped).length;
+    keptItems += houseItems.length + houseGuaranteed.length;
+    keptProfiles += names.length;
+
+    if (
+      houseItems.length > 0 ||
+      houseGuaranteed.length > 0 ||
+      names.length > 0 ||
+      becameAdopted ||
+      old === null
+    ) {
+      changed.push({
+        prefab,
+        nativeItems: Object.keys(baseUngrouped).length,
+        keptItems: houseItems.map(([key]) => key),
+        keptGuaranteed: houseGuaranteed.map(([key]) => key),
+        keptProfiles: names,
+        orphanProfiles: orphans,
+        adopted: becameAdopted,
+        fresh: old === null,
+      });
+    }
+  }
+
+  // O que o plugin não gerou. Continuar na lista de vigia é o que
+  // prova que o prefab existe — ver `preserved`.
+  const dropped: string[] = [];
+  const preserved: string[] = [];
+
+  for (const prefab of Object.keys(previous)) {
+    if (prefab in baseline) {
+      continue;
+    }
+
+    if (options.watched.has(prefab)) {
+      tables[prefab] = previous[prefab] as RawObject;
+      preserved.push(prefab);
+    } else {
+      dropped.push(prefab);
+    }
+  }
+
+  return {
+    tables,
+    report: {
+      mode: 'merge',
+      tables: Object.keys(tables).length,
+      nativeItems,
+      keptItems,
+      keptProfiles,
+      adopted,
+      fresh,
+      dropped,
+      preserved,
+      orphanProfiles: [...orphanProfiles],
+      changed,
+    },
+  };
+}
+
 export interface RewriteWait {
   /** De quanto em quanto tempo o disco é perguntado. */
   readonly pollMs: number;
@@ -1493,6 +1872,70 @@ async function waitForRewrite(
   }
 }
 
+/**
+ * A paciência do `rebuild`, que é outra ordem de grandeza.
+ *
+ * ####  AQUI NÃO É REESCREVER: É GERAR DO ZERO  ####
+ *
+ * O `LoadAllContainers` varre os prefabs do jogo, resolve a árvore
+ * de `LootSpawn` de cada um e serializa 2,5 MB. O reload comum
+ * reescreve o que já está na memória em menos de um segundo; este
+ * passo é o boot do plugin inteiro, e desistir aos 2 s deixaria o
+ * servidor sem `LootTables.json` por engano — que é o único estado
+ * de verdade ruim desta operação.
+ *
+ * O `graceMs` é a espera ATÉ o arquivo nascer, e ele é generoso de
+ * propósito: o Oxide ainda pode estar recompilando o plugin.
+ */
+const REBUILD_WAIT: RewriteWait = {
+  pollMs: 200,
+  quietMs: 1_000,
+  graceMs: 30_000,
+  timeoutMs: 120_000,
+};
+
+/**
+ * Espera o arquivo NASCER, e parar de crescer.
+ *
+ * Irmão do `waitForRewrite`, para o caso em que o arquivo não
+ * existe: `false` = ele não apareceu dentro do tempo, e quem chama
+ * tem de devolver o backup.
+ */
+async function waitForBirth(path: string, wait: RewriteWait): Promise<boolean> {
+  const started = Date.now();
+  const deadline = started + wait.timeoutMs;
+  let last: FileMark | null = null;
+  let changedAt: number | null = null;
+
+  while (Date.now() < deadline) {
+    await delay(wait.pollMs);
+
+    const now = await markOf(path);
+
+    if (now === null) {
+      // Ainda não nasceu. Passada a paciência, ele não vai nascer.
+      if (Date.now() - started >= wait.graceMs) {
+        return false;
+      }
+
+      continue;
+    }
+
+    if (last === null || !sameMark(now, last)) {
+      last = now;
+      changedAt = Date.now();
+
+      continue;
+    }
+
+    if (changedAt !== null && Date.now() - changedAt >= wait.quietMs) {
+      return true;
+    }
+  }
+
+  return last !== null;
+}
+
 // ------------------------------------------------------------
 //  O serviço
 // ------------------------------------------------------------
@@ -1570,6 +2013,19 @@ export interface BetterLootSaveResult {
   readonly watchedChanged: boolean;
   /** Onde ficou a cópia do arquivo anterior. `null` = não havia. */
   readonly backup: string | null;
+  readonly reloaded: boolean;
+  readonly reloadOutput: string | null;
+}
+
+/** O que o `rebuild` devolve. */
+export interface BetterLootRebuildResult {
+  readonly report: BetterLootRebuildReport;
+  /** Onde ficaram as cópias dos três arquivos, antes de tudo. */
+  readonly backups: readonly string[];
+  /** A revisão do `LootTables.json` como ele ficou. */
+  readonly revision: string;
+  /** Caixas postas na lista de vigia do `BetterLoot.json`. */
+  readonly watchedAdded: number;
   readonly reloaded: boolean;
   readonly reloadOutput: string | null;
 }
@@ -1821,6 +2277,349 @@ export class BetterLootEditor {
       reloaded: reload.sent,
       reloadOutput: reload.output,
     };
+  }
+
+  /**
+   * Refaz a base inteira, pelo próprio plugin.
+   *
+   * ####  OS PASSOS, E POR QUE NESTA ORDEM  ####
+   *
+   *   1. lê o que está no disco — é o que vai ser preservado;
+   *   2. copia os três arquivos para `Backups\<id>\`;
+   *   3. LIGA a lista de vigia, se for para adotar (ver abaixo);
+   *   4. APAGA o `LootTables.json` (e o `LootGroups.json`, no
+   *      `factory`);
+   *   5. recarrega o plugin, que o gera de novo do jogo de agora;
+   *   6. devolve por cima o que era da casa (`mergeRebuiltTables`);
+   *   7. grava, completa a lista de vigia e recarrega outra vez,
+   *      para o plugin validar o que foi escrito.
+   *
+   * ####  O PASSO 3 VEM ANTES DE GERAR, E NÃO DEPOIS  ####
+   *
+   * O `LoadAllContainers` percorre a LISTA DE VIGIA, e não o mundo:
+   * prefab que não está lá não é gerado. Pior, ele pula a geração
+   * de NPC cujo prefab está lá como `false` (BetterLoot.cs:1934) —
+   * e é justamente a caixa marcada "JOGO" que este botão existe
+   * para consertar. Adotar depois faria a base nova nascer sem
+   * exatamente aquilo que se foi buscar.
+   *
+   * O passo 7 ainda é preciso porque o `CheckWatchedPrefabs` roda
+   * no load e pode ACRESCENTAR prefab novo à lista, desligado.
+   *
+   * ####  O PASSO 4 É O ÚNICO CAMINHO QUE EXISTE  ####
+   *
+   * O BetterLoot não tem comando de "regenerar": ele só lê a tabela
+   * nativa quando NÃO encontra a entrada ao carregar. Por isso o
+   * arquivo sai da frente — e por isso o passo 2 não é opcional. Se
+   * o reload não for, ou o plugin não gerar nada, o backup volta
+   * para o lugar antes de esta função lançar.
+   *
+   * ####  E POR ISSO ELE EXIGE O SERVIDOR NO AR  ####
+   *
+   * É a segunda operação desta tela que exige (a outra é ler o loot
+   * nativo de uma caixa). Todo o resto é disco. Quem gera a base é
+   * o plugin, e plugin parado não gera nada.
+   *
+   * @throws {ApiError} 404 servidor desconhecido; 503 quando o
+   * plugin não recarregou ou não gerou a base — e aí nada mudou.
+   */
+  async rebuild(
+    serverId: string,
+    input: { readonly mode: BetterLootRebuildMode; readonly adopt: boolean },
+  ): Promise<BetterLootRebuildResult> {
+    const paths = this.#pathsOf(serverId);
+    const wait = this.#deps.rewriteWait ?? REBUILD_WAIT;
+    const tablesPath = pluginDataPath(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE);
+
+    const beforeTables = await readPluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+    );
+    const beforeGroups = await readPluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_GROUPS_FILE,
+    );
+
+    // O que vai ser devolvido por cima da base nova. Lido ANTES de
+    // qualquer escrita: depois do passo 3 ele não existe mais em
+    // lugar nenhum além do backup.
+    const previous =
+      beforeTables === null
+        ? {}
+        : parseLootTables(beforeTables.text, this.#whereTables(serverId)).tables;
+    const profiles = new Set(
+      beforeGroups === null
+        ? []
+        : Object.keys(parseLootGroups(beforeGroups.text, this.#whereGroups(serverId)).groups),
+    );
+
+    const at = Date.now();
+    const backups: string[] = [];
+
+    for (const file of [LOOT_TABLES_FILE, LOOT_GROUPS_FILE]) {
+      const copy = await backupPluginDataFile(
+        paths.oxideDataDir,
+        paths.backupsDir,
+        BETTERLOOT_PLUGIN,
+        file,
+        at,
+      );
+
+      if (copy !== null) {
+        backups.push(copy);
+      }
+    }
+
+    const beforeConfig = await readPluginConfig(paths.oxideConfigDir, BETTERLOOT_PLUGIN);
+    const configCopy = await backupPluginConfig(
+      paths.oxideConfigDir,
+      paths.backupsDir,
+      BETTERLOOT_PLUGIN,
+      at,
+    );
+
+    if (configCopy !== null) {
+      backups.push(configCopy);
+    }
+
+    // ####  A VIGIA ANTES DE GERAR, E SÓ QUEM JÁ ESTÁ NELA  ####
+    //
+    // É ela que o `LoadAllContainers` percorre — ver o cabeçalho.
+    // Acrescentar aqui os prefabs da TABELA velha seria tentador e
+    // estaria errado: o `CheckWatchedPrefabs` mantém esta lista
+    // sincronizada com o mundo, então prefab que está na tabela e
+    // não está aqui é prefab que o jogo não tem mais. Ele voltaria
+    // à lista só para o plugin removê-lo de novo no mesmo load — e,
+    // no caminho, seria contado como caixa adotada.
+    const watchedBefore = input.adopt
+      ? await this.#adoptAll(
+          serverId,
+          paths,
+          beforeConfig === null ? [] : [...(toWatched(beforeConfig.text)?.keys() ?? [])],
+        )
+      : 0;
+
+    await deletePluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE);
+
+    if (input.mode === 'factory') {
+      // Os perfis também. É a diferença inteira entre os dois
+      // modos, e o que o dono chamou de "zerar e editar do zero".
+      await deletePluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_GROUPS_FILE);
+    }
+
+    const reload = await this.#deps.reload(serverId);
+    const failed = reloadFailed(reload.output);
+    const born = reload.sent && !failed ? await waitForBirth(tablesPath, wait) : false;
+
+    if (!born) {
+      await this.#restore(
+        paths,
+        [
+          [LOOT_TABLES_FILE, beforeTables?.text ?? null],
+          [LOOT_GROUPS_FILE, input.mode === 'factory' ? (beforeGroups?.text ?? null) : null],
+        ],
+        // A adoção do passo 3 também desfaz: "nada foi alterado"
+        // precisa valer para os TRÊS arquivos, e não só para os
+        // dois que a frase lembra.
+        watchedBefore > 0 ? (beforeConfig?.text ?? null) : null,
+      );
+
+      throw new ApiError(
+        'BETTERLOOT_REBUILD_FAILED',
+        !reload.sent
+          ? `Não deu para recarregar o BetterLoot em "${serverId}" — o servidor precisa estar no ` +
+              'ar, porque quem gera a base nova é o plugin lendo o jogo. Os arquivos foram ' +
+              `devolvidos como estavam; a cópia também está em ${backups[0] ?? '(não havia)'}.`
+          : failed
+            ? `O BetterLoot não recarregou em "${serverId}": ${(reload.output ?? '').trim().slice(0, 300)}. ` +
+              'Os arquivos foram devolvidos como estavam.'
+            : `O BetterLoot recarregou em "${serverId}" e não gerou o LootTables.json em ` +
+              `${String(Math.round(wait.graceMs / 1000))} s. Os arquivos foram devolvidos como ` +
+              'estavam — confira se o plugin está carregado e tente de novo.',
+        503,
+      );
+    }
+
+    const after = await readPluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+    );
+
+    if (after === null) {
+      await this.#restore(
+        paths,
+        [[LOOT_TABLES_FILE, beforeTables?.text ?? null]],
+        watchedBefore > 0 ? (beforeConfig?.text ?? null) : null,
+      );
+
+      throw new ApiError(
+        'BETTERLOOT_REBUILD_FAILED',
+        `O BetterLoot gerou ${this.#whereTables(serverId)} e ele sumiu na leitura. Os arquivos ` +
+          'foram devolvidos como estavam.',
+        503,
+      );
+    }
+
+    const baseline = parseLootTables(after.text, this.#whereTables(serverId));
+
+    // A lista de vigia DEPOIS do reload: o plugin acabou de tirar
+    // dela os prefabs que o jogo não tem mais, e é essa diferença
+    // que separa "caixa extinta" de "caixa que ele não gerou".
+    const afterConfig = await readPluginConfig(paths.oxideConfigDir, BETTERLOOT_PLUGIN);
+    const stillWatched = new Set(
+      afterConfig === null ? [] : [...(toWatched(afterConfig.text)?.keys() ?? [])],
+    );
+
+    // No `factory` nada é devolvido: a base nova é a resposta
+    // inteira. O merge ainda passa por aqui porque é ele quem liga
+    // o `Is Prefab Enabled?` de todas.
+    const merged = mergeRebuiltTables(
+      input.mode === 'factory' ? {} : previous,
+      baseline.tables,
+      {
+        adopt: input.adopt,
+        profiles: input.mode === 'factory' ? new Set<string>() : profiles,
+        watched: stillWatched,
+      },
+    );
+
+    const text = JSON.stringify({ ...baseline.root, [KEY_TABLES]: merged.tables }, null, 2);
+
+    if (Buffer.byteLength(text, 'utf8') > MAX_LOOT_TABLES_BYTES) {
+      await this.#restore(
+        paths,
+        [[LOOT_TABLES_FILE, beforeTables?.text ?? null]],
+        watchedBefore > 0 ? (beforeConfig?.text ?? null) : null,
+      );
+
+      throw new ApiError(
+        'BETTERLOOT_FILE_TOO_LARGE',
+        `A base nova ficaria com ${String(
+          Math.round(Buffer.byteLength(text, 'utf8') / 1024 / 1024),
+        )} MB e o limite é ${String(MAX_LOOT_TABLES_BYTES / 1024 / 1024)} MB. Os arquivos foram ` +
+          'devolvidos como estavam.',
+        400,
+      );
+    }
+
+    await writePluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, LOOT_TABLES_FILE, text);
+
+    const written = await markOf(tablesPath);
+
+    // A vigia outra vez, agora com os prefabs que o plugin
+    // ACRESCENTOU à lista ao carregar (`CheckWatchedPrefabs`) — ele
+    // os cadastra desligados quando a configuração já existia. É o
+    // que deixa a caixa nova gerenciável sem um segundo clique.
+    const watchedAdded =
+      watchedBefore +
+      (input.adopt ? await this.#adoptAll(serverId, paths, Object.keys(merged.tables)) : 0);
+
+    const settle = await this.#deps.reload(serverId);
+
+    if (settle.sent && !reloadFailed(settle.output)) {
+      await waitForRewrite(tablesPath, written, this.#rewriteWait());
+    }
+
+    const final = await readPluginDataFile(
+      paths.oxideDataDir,
+      BETTERLOOT_PLUGIN,
+      LOOT_TABLES_FILE,
+    );
+
+    return {
+      report:
+        input.mode === 'factory'
+          ? {
+              ...merged.report,
+              mode: 'factory',
+              // No `factory` não existe "preservado" nem "adotado":
+              // não havia de onde preservar, e toda caixa é nova por
+              // definição. Contá-las encheria a tela de ruído.
+              keptItems: 0,
+              keptProfiles: 0,
+              adopted: [],
+              fresh: [],
+              dropped: [],
+              preserved: [],
+              orphanProfiles: [],
+              changed: [],
+            }
+          : merged.report,
+      backups,
+      revision:
+        final === null
+          ? baseline.revision
+          : parseLootTables(final.text, this.#whereTables(serverId)).revision,
+      watchedAdded,
+      reloaded: settle.sent,
+      reloadOutput: settle.output,
+    };
+  }
+
+  /**
+   * Devolve ao disco o que estava lá antes do `rebuild`.
+   *
+   * Só é chamado quando a operação abortou no meio. Texto `null` =
+   * o arquivo não existia antes, e então não existir agora é o
+   * estado certo.
+   */
+  async #restore(
+    paths: BetterLootPaths,
+    files: readonly (readonly [string, string | null])[],
+    config: string | null,
+  ): Promise<void> {
+    for (const [file, text] of files) {
+      if (text !== null) {
+        await writePluginDataFile(paths.oxideDataDir, BETTERLOOT_PLUGIN, file, text);
+      }
+    }
+
+    if (config !== null) {
+      await writePluginConfig(paths.oxideConfigDir, BETTERLOOT_PLUGIN, config);
+    }
+  }
+
+  /**
+   * Põe TODAS as caixas na lista de vigia, numa escrita só.
+   *
+   * Devolve quantas entraram. Zero = já estavam todas lá, e aí o
+   * arquivo não é tocado — reescrevê-lo por nada mudaria o
+   * `configRevision` que a faixa de globais está segurando.
+   */
+  async #adoptAll(
+    serverId: string,
+    paths: BetterLootPaths,
+    prefabs: readonly string[],
+  ): Promise<number> {
+    const current = await readPluginConfig(paths.oxideConfigDir, BETTERLOOT_PLUGIN);
+    const list = current === null ? null : toWatched(current.text);
+    const missing = prefabs.filter((prefab) => (list?.get(prefab) ?? false) !== true);
+
+    if (missing.length === 0) {
+      return 0;
+    }
+
+    await backupPluginConfig(
+      paths.oxideConfigDir,
+      paths.backupsDir,
+      BETTERLOOT_PLUGIN,
+      Date.now(),
+    );
+
+    await writePluginConfig(
+      paths.oxideConfigDir,
+      BETTERLOOT_PLUGIN,
+      applyWatchedAll(
+        current?.text ?? null,
+        new Map(missing.map((prefab) => [prefab, true])),
+        this.#whereConfig(serverId),
+      ),
+    );
+
+    return missing.length;
   }
 
   /**

@@ -37,7 +37,7 @@
 //  for procurar a tabela de ontem procura onde ela mora.
 // ============================================================
 
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { ApiError } from '../http/error-response.js';
@@ -192,6 +192,48 @@ export async function backupPluginDataFile(
   }
 
   return target;
+}
+
+/**
+ * Apaga o arquivo. Devolve `false` quando ele já não estava lá.
+ *
+ * ####  APAGAR É PEDIR AO PLUGIN QUE REFAÇA  ####
+ *
+ * É a única serventia disto, e ela é do `rebuild` do BetterLoot: o
+ * plugin regenera o `LootTables.json` do loot nativo quando NÃO o
+ * encontra ao carregar (`LoadAllContainers`), e não existe comando
+ * que peça isso com o arquivo no lugar.
+ *
+ * Quem chama é responsável por ter o texto anterior na mão — o
+ * `backupPluginDataFile` acabou de copiá-lo — porque um reload que
+ * não vem deixaria o servidor sem tabela nenhuma.
+ *
+ * @throws {ApiError} 500 quando existe e não sai.
+ */
+export async function deletePluginDataFile(
+  dataDir: string,
+  plugin: string,
+  file: string,
+): Promise<boolean> {
+  const target = pluginDataPath(dataDir, plugin, file);
+
+  try {
+    await stat(target);
+  } catch {
+    return false;
+  }
+
+  try {
+    await rm(target, { force: true });
+  } catch (error) {
+    throw new ApiError(
+      'PLUGIN_DATA_DELETE_FAILED',
+      `Não consegui apagar ${target}: ${toError(error).message}. Nada foi alterado.`,
+      500,
+    );
+  }
+
+  return true;
 }
 
 /** Grava o texto. A subpasta do plugin nasce se não existir. */
