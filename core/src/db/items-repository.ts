@@ -321,7 +321,13 @@ export class ItemsRepository {
     };
 
     const where = `
-      WHERE (@q IS NULL OR shortname LIKE @q ESCAPE '\\' OR display_name LIKE @q ESCAPE '\\')
+      WHERE (@q IS NULL
+             OR shortname LIKE @q ESCAPE '\\'
+             OR unaccent(display_name) LIKE @q ESCAPE '\\'
+             -- O nome em português do content.bundle (migração 055).
+             -- Sem ele a busca só entendia inglês, numa tela que é
+             -- toda em português.
+             OR unaccent(display_name_ptbr) LIKE @q ESCAPE '\\')
         AND (@category IS NULL OR category = @category)
         AND (@removed IS NULL OR @scanned_at IS NULL
              OR (CASE WHEN last_seen < @scanned_at THEN 1 ELSE 0 END) = @removed)

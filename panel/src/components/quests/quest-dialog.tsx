@@ -91,6 +91,7 @@ function blankObjective(seq: number, kind: QuestObjectiveKind): QuestObjective {
     kind,
     target: kind === 'playtime' || kind === 'metric' ? null : '',
     metric: kind === 'metric' ? '' : null,
+    item: null,
     amount: 1,
     label: null,
     consume: false,
@@ -136,7 +137,11 @@ function previewOf(objective: QuestObjective): string {
     case 'loot':
       return `Saquear ${amount} de ${target}`;
     case 'deliver':
-      return `Entregar o pacote para ${target}`;
+      // Sem item é o correio: o que se leva é figurado, e o que a
+      // missão paga é o caminho. Ver o campo `item`.
+      return objective.item === null || objective.item === ''
+        ? `Entregar o pacote para ${target}`
+        : `Entregar ${amount} ${objective.item} para ${target}`;
     case 'playtime':
       return `Ficar ${amount} minuto(s) online`;
     case 'metric':
@@ -328,6 +333,26 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                           }
                         />
                       )}
+                    </Field>
+                  )}
+
+                  {objective.kind === 'deliver' && (
+                    // ####  O QUE ELE LEVA NA MOCHILA  ####
+                    //
+                    // Vazio é o correio de sempre: chegar ao boneco
+                    // conclui. Com um item, a missão passa a cobrar
+                    // a coisa — "consiga um cartão verde e entregue
+                    // ao NPC", o pedido do dono em 13/09/2026.
+                    <Field
+                      label="Item a entregar"
+                      hint="Vazio = só chegar ao NPC já conclui."
+                    >
+                      <ItemCombobox
+                        value={objective.item ?? ''}
+                        onValueChange={(shortname) =>
+                          patchObjective(form, patch, index, { item: shortname || null })
+                        }
+                      />
                     </Field>
                   )}
 

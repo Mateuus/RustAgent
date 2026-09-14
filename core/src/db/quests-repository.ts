@@ -221,6 +221,8 @@ interface ObjectiveRow {
   readonly kind: string;
   readonly target: string | null;
   readonly metric: string | null;
+  /** So em `deliver`: o shortname que o jogador leva na mochila. */
+  readonly item: string | null;
   readonly amount: number;
   readonly label: string | null;
   readonly consume: number;
@@ -655,6 +657,34 @@ export class QuestsRepository {
       | undefined;
 
     return row === undefined ? null : (this.#withProgress([row])[0] ?? null);
+  }
+
+  /**
+   * As quests que este jogador já RESGATOU naquele servidor.
+   *
+   * ####  PARA O BALCÃO NÃO OFERECER O QUE ACABOU  ####
+   *
+   * A caixa do NPC é desenhada pelo plugin, sem ida à rede, com a
+   * lista de ofertas daquele boneco — que é igual para todo mundo.
+   * Quem sabe o que cada um já fez é o agente, e era só no CLIQUE
+   * que ele respondia "esta quest só pode ser feita uma vez".
+   *
+   * Medido no server01 em 14/09/2026: o dono resgatou a missão e o
+   * cartão continuou lá, com ACEITAR, até ele clicar de novo.
+   *
+   * Uma consulta só, e não um `lastAttempt` por quest: isto roda a
+   * cada ciclo do coletor, para cada jogador conectado.
+   */
+  claimedQuestIds(serverId: string, steamId: string): readonly string[] {
+    return (
+      this.#db
+        .prepare(
+          `SELECT DISTINCT quest_id FROM player_quests
+            WHERE server_id = @server_id AND steam_id = @steam_id AND status = 'claimed'
+            ORDER BY quest_id`,
+        )
+        .all({ server_id: serverId, steam_id: steamId }) as { quest_id: string }[]
+    ).map((row) => row.quest_id);
   }
 
   /** Quantas tentativas vivas ele tem. É o número do teto (`maxActive`). */
@@ -1572,8 +1602,10 @@ export class QuestsRepository {
     this.#db.prepare('DELETE FROM quest_servers WHERE quest_id = @id').run({ id: questId });
 
     const objective = this.#db.prepare(
-      `INSERT INTO quest_objectives (quest_id, seq, kind, target, metric, amount, label, consume)
-            VALUES (@quest_id, @seq, @kind, @target, @metric, @amount, @label, @consume)`,
+      `INSERT INTO quest_objectives
+              (quest_id, seq, kind, target, metric, item, amount, label, consume)
+            VALUES
+              (@quest_id, @seq, @kind, @target, @metric, @item, @amount, @label, @consume)`,
     );
 
     for (const item of input.objectives) {
@@ -1583,6 +1615,7 @@ export class QuestsRepository {
         kind: item.kind,
         target: item.target,
         metric: item.metric,
+        item: item.item,
         amount: item.amount,
         label: item.label,
         consume: item.consume ? 1 : 0,
@@ -1678,6 +1711,7 @@ function toObjective(row: ObjectiveRow): QuestObjective {
     kind: row.kind as QuestObjectiveKind,
     target: row.target,
     metric: row.metric,
+    item: row.item,
     amount: row.amount,
     label: row.label,
     consume: row.consume === 1,

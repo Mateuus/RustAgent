@@ -8354,6 +8354,18 @@ namespace Oxide.Plugins
         private Dictionary<ulong, List<QuestAssignment>> _questAssigned =
             new Dictionary<ulong, List<QuestAssignment>>();
 
+        // O que cada um JA FEZ e nao faz mais: steamId -> ids de
+        // missao "uma vez so" ja resgatadas.
+        //
+        // ####  A CAIXA E IGUAL PARA TODOS; O JOGADOR NAO  ####
+        //
+        // As ofertas de um NPC descem uma vez e valem para quem
+        // chegar. Sem esta lista, o cartao de uma missao acabada
+        // continuava no balcao, com ACEITAR - e so o clique dizia
+        // "esta quest so pode ser feita uma vez".
+        private Dictionary<ulong, HashSet<string>> _questDone =
+            new Dictionary<ulong, HashSet<string>>();
+
         // O buffer aberto: (pq, seq) -> delta acumulado.
         private Dictionary<string, QuestEntryInfo> _questOpen =
             new Dictionary<string, QuestEntryInfo>();
@@ -8577,6 +8589,7 @@ namespace Oxide.Plugins
                             Seq = -1,
                             Kind = string.Empty,
                             Target = string.Empty,
+                            Item = null,
                             Label = string.Empty,
                             Need = 0,
                             Have = 0
@@ -8602,6 +8615,7 @@ namespace Oxide.Plugins
                             Seq = (int)objective["seq"],
                             Kind = (string)objective["kind"],
                             Target = (string)objective["target"],
+                            Item = (string)objective["item"],
                             Label = objective["label"] == null
                                 ? (string)objective["target"]
                                 : (string)objective["label"],
@@ -8619,6 +8633,32 @@ namespace Oxide.Plugins
             else
             {
                 _questAssigned[steamId] = assignments;
+            }
+
+            // Ausente = nada acabado (ou agente antigo, que nao manda
+            // o campo). Nos dois casos a caixa volta a ser a de antes,
+            // que oferece e deixa o clique recusar.
+            JArray done = payload["done"] as JArray;
+
+            if (done == null || done.Count == 0)
+            {
+                _questDone.Remove(steamId);
+            }
+            else
+            {
+                HashSet<string> acabadas = new HashSet<string>();
+
+                for (int i = 0; i < done.Count; i++)
+                {
+                    string id = (string)done[i];
+
+                    if (!string.IsNullOrEmpty(id))
+                    {
+                        acabadas.Add(id);
+                    }
+                }
+
+                _questDone[steamId] = acabadas;
             }
 
             // O anunciado e limpo junto: uma tentativa nova precisa
@@ -8647,6 +8687,7 @@ namespace Oxide.Plugins
                 }
 
                 _questAssigned.Remove(steamId);
+                _questDone.Remove(steamId);
                 arg.ReplyWith("{\"ok\":true,\"contract\":" + QuestContract + "}");
             }
             catch (Exception ex)
@@ -8666,6 +8707,7 @@ namespace Oxide.Plugins
             if (player != null)
             {
                 _questAssigned.Remove(player.userID);
+                _questDone.Remove(player.userID);
                 _questNpcDialogs.Remove(player.userID);
             }
         }
@@ -9394,6 +9436,14 @@ namespace Oxide.Plugins
             public string Kind;
             /// <summary>A CHAVE do alvo (`metal.fragments`). E com ela que se conta.</summary>
             public string Target;
+            /// <summary>
+            /// So na entrega que cobra item: o shortname da ENCOMENDA.
+            ///
+            /// Vazio e o correio antigo, em que chegar ao NPC ja conclui.
+            /// Preenchido, quem conclui e o botao ENTREGAR -- ver
+            /// QuestTryDeliver.
+            /// </summary>
+            public string Item;
             /// <summary>O nome que uma pessoa le. Vem pronto do agente.</summary>
             public string Label;
             public int Need;
@@ -9671,6 +9721,11 @@ namespace Oxide.Plugins
                         RewardItemId = (int?)offer["rewardItemId"] ?? 0,
                         RewardSkinId = (ulong?)offer["rewardSkinId"] ?? 0UL,
                         Offers = (bool?)offer["offers"] ?? true,
+                        // O padrao e `true` para o agente antigo, que
+                        // nao manda o campo: ali dar e receber eram
+                        // sempre o mesmo boneco.
+                        TurnIn = (bool?)offer["turnIn"] ?? true,
+                        TurnInName = (string)offer["turnInName"],
                         Description = (string)offer["description"],
                         Goal = (string)offer["goal"],
                         Reward = (string)offer["reward"]
@@ -10111,7 +10166,19 @@ namespace Oxide.Plugins
         {
             QuestNpcDialogClose(player);
 
-            List<QuestNpcOffer> ofertas = npc.Offers ?? new List<QuestNpcOffer>();
+            // ####  O QUE ELE JA FEZ NAO APARECE  ####
+            //
+            // As ofertas do boneco sao iguais para todo mundo; o que
+            // cada um ja fez vem no `assign`. Sem este filtro o
+            // cartao de uma missao "uma vez so" resgatada ficava no
+            // balcao com ACEITAR, e o agente so recusava DEPOIS do
+            // clique - "esta quest so pode ser feita uma vez", que o
+            // dono leu no server01 em 14/09/2026.
+            //
+            // Filtrado ANTES da altura: a caixa encolhe junto, e o
+            // boneco sem nada a oferecer cai no "Nao tenho trabalho
+            // para voce agora" que ja existe abaixo.
+            List<QuestNpcOffer> ofertas = QuestNpcVisibleOffers(player, npc);
             int linhas = Math.Max(ofertas.Count, 1);
             int altura = DialogCabecalho + DialogFala + (linhas * DialogCartao) + DialogRodape + 16;
 
@@ -10412,6 +10479,22 @@ namespace Oxide.Plugins
             // os contadores locais so servem enquanto ela nao chega.
             bool pronta = andamento[0].Status == "completed" || QuestNpcOfferDone(andamento);
 
+            // ####  QUEM SO RECEBE NAO PAGA  ####
+            //
+            // O destino de uma encomenda pode nao ser o balcao: "leve
+            // o cartao a Zefa e volte ao Tiao". Com a entrega feita,
+            // este boneco nao tem mais nada a fazer - e um RESGATAR
+            // aqui so devolve "voce nao tem o que entregar aqui", que
+            // e verdade e nao ajuda ninguem. Medido no server01 em
+            // 14/09/2026, com o dono diante da boneca.
+            if (pronta && !offer.TurnIn)
+            {
+                QuestNpcDialogNote(container, card, string.IsNullOrEmpty(offer.TurnInName)
+                    ? "ENTREGUE"
+                    : "RESGATE COM " + offer.TurnInName.ToUpperInvariant());
+                return;
+            }
+
             QuestNpcDialogButton(
                 container,
                 card,
@@ -10434,6 +10517,104 @@ namespace Oxide.Plugins
             }
 
             return true;
+        }
+
+        /// <summary>As ofertas deste boneco que ESTE jogador ainda pode ver.</summary>
+        ///
+        /// Uma missao acabada ("uma vez so" ja resgatada) sai da
+        /// lista. Cooldown e diaria FICAM: ali o cartao ainda
+        /// informa, e e o clique que diz quando ela volta.
+        private List<QuestNpcOffer> QuestNpcVisibleOffers(BasePlayer player, QuestNpcInfo npc)
+        {
+            List<QuestNpcOffer> todas = npc == null || npc.Offers == null
+                ? new List<QuestNpcOffer>()
+                : npc.Offers;
+
+            HashSet<string> acabadas;
+
+            if (player == null || !_questDone.TryGetValue(player.userID, out acabadas) ||
+                acabadas.Count == 0)
+            {
+                return todas;
+            }
+
+            List<QuestNpcOffer> visiveis = new List<QuestNpcOffer>();
+
+            for (int i = 0; i < todas.Count; i++)
+            {
+                if (!acabadas.Contains(todas[i].Id))
+                {
+                    visiveis.Add(todas[i]);
+                }
+            }
+
+            return visiveis;
+        }
+
+        /// <summary>Ha na mochila alguma coisa que este balcao aceite?</summary>
+        ///
+        /// ####  FALSO POSITIVO CUSTA UMA IDA; FALSO NEGATIVO TRAVA  ####
+        ///
+        /// Quem decide o que cada clique paga e o agente, que conhece
+        /// o balcao da missao e o destino de cada encomenda. Aqui a
+        /// pergunta e menor de proposito: vale a pena chamar?
+        ///
+        /// Um "sim" que o agente depois nao cobre custa uma ida ao
+        /// RCON e uma frase no chat. Um "nao" errado deixa o jogador
+        /// diante do NPC com o item na mao e um botao que nao faz
+        /// nada -- e foi assim ate 13/09/2026.
+        private bool QuestNpcCanPay(BasePlayer player, QuestNpcInfo npc, List<QuestAssignment> andamento)
+        {
+            if (player == null || player.inventory == null || npc == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < andamento.Count; i++)
+            {
+                QuestAssignment assignment = andamento[i];
+
+                if (assignment.Have >= assignment.Need)
+                {
+                    continue;
+                }
+
+                string shortname = QuestPayableShortname(assignment, npc);
+
+                if (string.IsNullOrEmpty(shortname))
+                {
+                    continue;
+                }
+
+                ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
+
+                if (definition != null && player.inventory.GetAmount(definition.itemid) > 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>O shortname que ESTE objetivo cobra neste boneco, ou null.</summary>
+        private static string QuestPayableShortname(QuestAssignment assignment, QuestNpcInfo npc)
+        {
+            if (assignment.Kind == "deliver")
+            {
+                // A encomenda so e aceita no destino dela. O correio
+                // sem item nao cobra nada: quem o marca e a chegada.
+                return !string.IsNullOrEmpty(assignment.Item) && assignment.Target == npc.Id
+                    ? assignment.Item
+                    : null;
+            }
+
+            // Nos outros, o alvo JA e o shortname -- e e por isso que
+            // matar nao entra: "scientist" nao existe na mochila.
+            return assignment.Kind == "gather" || assignment.Kind == "craft" ||
+                   assignment.Kind == "loot"
+                ? assignment.Target
+                : null;
         }
 
         // "Matar 2 chicken  -  1 / 2", e com dois objetivos o pior
@@ -10690,11 +10871,24 @@ namespace Oxide.Plugins
                 // a resposta tem de aparecer nela. Mandar ao agente
                 // para receber "ainda nao terminou" no chat custaria
                 // uma ida a rede para dizer o que o plugin ja sabe.
+                //
+                // ####  MAS FALTAR NAO E NAO TER O QUE ENTREGAR  ####
+                //
+                // O balcao aceita entrega parcial desde 13/09/2026:
+                // quem chega com 30 das 300 pedras deixa as 30 e o
+                // contador anda. Enquanto este `if` olhava so o
+                // contador, o clique morria AQUI -- e o agente, que
+                // sabe tirar da mochila, nunca era chamado.
+                //
+                // Entao a pergunta deixou de ser "ja terminou?" e
+                // passou a ser "ha o que entregar?". So quem chega
+                // de maos vazias le o que falta.
                 List<QuestAssignment> andamento = arg.HasArgs(3)
                     ? QuestNpcOfferProgress(player, arg.GetString(2))
                     : null;
 
-                if (andamento != null && !QuestNpcOfferDone(andamento))
+                if (andamento != null && !QuestNpcOfferDone(andamento) &&
+                    !QuestNpcCanPay(player, npc, andamento))
                 {
                     QuestNpcDialogOpen(player, npc, "Ainda falta: " + QuestNpcMissingLine(andamento));
                     return;
@@ -10845,6 +11039,20 @@ namespace Oxide.Plugins
                 QuestAssignment assignment = assignments[i];
 
                 if (assignment.Kind != "deliver" || assignment.Target != npcId)
+                {
+                    continue;
+                }
+
+                // ####  A ENCOMENDA NAO SE ENTREGA CHEGANDO  ####
+                //
+                // Com item, o que conclui e o botao ENTREGAR da
+                // caixa: e la que o cartao sai da mochila. Gritar a
+                // chegada aqui fecharia a missao com o item ainda
+                // no bolso -- o premio pago por ter caminhado.
+                //
+                // O agente recusa esse grito de qualquer jeito (ver
+                // `reportDelivery`); nao manda-lo poupa a ida.
+                if (!string.IsNullOrEmpty(assignment.Item))
                 {
                     continue;
                 }
@@ -11128,6 +11336,17 @@ namespace Oxide.Plugins
             public ulong RewardSkinId;
             /// <summary>Ele OFERECE, ou so recebe a missao pronta?</summary>
             public bool Offers;
+            /// <summary>
+            /// Aqui a missao pronta vira PREMIO?
+            ///
+            /// Falso no destino de uma encomenda que se paga em outro
+            /// balcao: "leve o cartao a Zefa e volte ao Tiao". Sem
+            /// isto o cartao dizia RESGATAR na Zefa e o clique
+            /// voltava com "voce nao tem o que entregar aqui".
+            /// </summary>
+            public bool TurnIn;
+            /// <summary>O nome de quem paga. Vazio = e este mesmo.</summary>
+            public string TurnInName;
             /// <summary>A fala. Vazia = a caixa usa o objetivo.</summary>
             public string Description;
             /// <summary>"Coletar 100 de Madeira", pronto do agente.</summary>

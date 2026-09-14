@@ -2993,6 +2993,13 @@ export interface QuestObjective {
   target: string | null;
   /** So em `metric`. */
   metric: string | null;
+  /**
+   * So em `deliver`: o shortname que o jogador leva ate o NPC.
+   *
+   * `null` e o correio antigo -- chegar ao boneco conclui, e nada
+   * sai da mochila. Preenchido, o `amount` e a quantidade DELE.
+   */
+  item: string | null;
   amount: number;
   /** Sobrescreve a frase montada pelo agente. */
   label: string | null;

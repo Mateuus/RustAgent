@@ -156,6 +156,23 @@ export interface QuestWatchPayload {
  */
 export interface QuestAssignPayload {
   readonly contract: number;
+  /**
+   * As missões que este jogador NÃO PODE MAIS aceitar, nunca.
+   *
+   * ####  É A LISTA QUE O BALCÃO ESCONDE  ####
+   *
+   * A caixa do NPC é desenhada pelo plugin com as ofertas daquele
+   * boneco, que são iguais para todo mundo — e o estado de QUEM
+   * chegou nunca descia. O cartão de uma missão "uma vez só" já
+   * resgatada continuava ali, com ACEITAR, e o agente só respondia
+   * "esta quest só pode ser feita uma vez" DEPOIS do clique.
+   *
+   * Só o definitivo entra: `once` já resgatada. Cooldown, diária e
+   * cadeia continuam sendo respondidos no clique, e de propósito —
+   * "volta em 4h" é informação, e some junto com o cartão seria
+   * pior do que o clique que explica.
+   */
+  readonly done?: readonly string[];
   readonly quests: readonly {
     readonly pq: number;
     /**
@@ -179,11 +196,26 @@ export interface QuestAssignPayload {
       readonly kind: string;
       readonly target: string;
       /**
+       * Só na entrega que cobra item: o shortname da ENCOMENDA.
+       *
+       * Ausente é o correio antigo, e a diferença muda o que o
+       * plugin faz ao ver o jogador no destino: sem encomenda,
+       * chegar é o bastante e ele grita a entrega; com ela, quem
+       * conclui é o botão ENTREGAR, que tira o item.
+       *
+       * O `target` continua sendo o NPC — é por ele que o plugin
+       * reconhece o destino.
+       */
+      readonly item?: string;
+      /**
        * O nome bonito do alvo, para a tela.
        *
        * O `target` é a CHAVE (`metal.fragments`), e é com ela que o
        * plugin conta. Este é o nome que uma pessoa lê — e sem ele a
        * caixa do NPC dizia "Ainda falta: 200 metal.fragments".
+       *
+       * Na encomenda ele é o nome do ITEM, e não o do boneco: o que
+       * falta ali é o cartão, e não o NPC.
        */
       readonly label: string;
       readonly need: number;

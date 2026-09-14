@@ -1927,8 +1927,19 @@ async function main(): Promise<void> {
     // O nome bonito do catálogo do JOGO, para a frase do objetivo.
     // Ele muda a cada update do Rust — é por isso que a frase é
     // montada, e não gravada.
+    //
+    // ####  E EM PORTUGUÊS, COMO O RESTO DA TELA  ####
+    //
+    // O `screenLabelOf` é o mesmo que a loja, o kit e o recibo do
+    // balcão usam — pt-BR do content.bundle, com o inglês de
+    // reserva. Sem ele o objetivo dizia "Entregar 1 Green Keycard"
+    // numa tela em português, medido no agente vivo em 13/09/2026.
     items: {
-      displayNameOf: (shortname) => itemsRepository.get(shortname)?.displayName ?? null,
+      displayNameOf: (shortname) => {
+        const item = itemsRepository.get(shortname);
+
+        return item === null ? null : screenLabelOf(item);
+      },
     },
     // ####  QUEM TIRA OS ITENS QUE A MISSÃO COBRA  ####
     //
@@ -2197,7 +2208,7 @@ async function main(): Promise<void> {
     // Resgatar no balcão: o jogador voltou ao NPC com a missão
     // pronta. Quem confere que a tentativa é dele é o `#claim`; o
     // que pode ou não ser resgatado é do serviço.
-    onClaim: ({ serverId, steamId, playerQuestId }) => {
+    onClaim: ({ serverId, steamId, playerQuestId, npcId, atTurnIn, turnInName }) => {
       void (async () => {
         try {
           // ####  ENTREGAR PRIMEIRO, RESGATAR DEPOIS  ####
@@ -2208,7 +2219,12 @@ async function main(): Promise<void> {
           //
           // Quem não tinha nada cai direto no resgate — e recebe do
           // serviço a frase certa se ainda faltar.
-          const entregue = (await questsService?.turnIn({ playerQuestId, steamId })) ?? [];
+          //
+          // O `npcId` decide o que este clique paga: no balcão, os
+          // objetivos de mochila; no destino de uma encomenda, a
+          // encomenda dele. Ver o `turnIn`.
+          const entregue =
+            (await questsService?.turnIn({ playerQuestId, steamId, npcId })) ?? [];
 
           if (entregue.length > 0) {
             const lista = entregue
@@ -2216,6 +2232,37 @@ async function main(): Promise<void> {
               .join(', ');
 
             await tellPlayer(serverId, steamId, `Você entregou ${lista}.`).catch(() => undefined);
+          }
+
+          // ####  QUEM SÓ RECEBE A ENCOMENDA NÃO PAGA O PRÊMIO  ####
+          //
+          // O cadastro separa os dois bonecos de propósito — "leve
+          // o cartão ao ferreiro e volte para receber". Resgatar no
+          // destino apagaria a volta.
+          if (!atTurnIn) {
+            if (entregue.length === 0) {
+              // ####  "NÃO TEM O QUE ENTREGAR" NÃO EXPLICA NADA  ####
+              //
+              // Medido no server01 em 14/09/2026: o dono entregou o
+              // cartão na Zefa, clicou de novo e leu isso. Era
+              // verdade — e não dizia que o prêmio estava com o
+              // Tião, do outro lado.
+              const jaEntregue =
+                questsService?.viewById(playerQuestId)?.complete === true;
+
+              const onde =
+                turnInName === null ? 'no balcão da missão' : `com ${turnInName}`;
+
+              await tellPlayer(
+                serverId,
+                steamId,
+                jaEntregue
+                  ? `Você já entregou. Resgate ${onde}.`
+                  : 'Você não tem o que entregar aqui.',
+              ).catch(() => undefined);
+            }
+
+            return;
           }
 
           const result = await questsService?.claim({ playerQuestId });

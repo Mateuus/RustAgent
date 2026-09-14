@@ -796,7 +796,7 @@ describe('o detalhe', () => {
       ...offer('minerador'),
       quest: {
         ...offer('minerador').quest,
-        objectives: [{ seq: 0, kind: 'gather', target: 'sulfur.ore', amount: 100, label: null, metric: null, consume: false }],
+        objectives: [{ seq: 0, kind: 'gather', target: 'sulfur.ore', amount: 100, label: null, metric: null, item: null, consume: false }],
         rewards: [{ kind: 'coins', amount: 500, perMeter: null, min: null, max: null }],
       },
     };

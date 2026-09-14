@@ -626,7 +626,17 @@ export class QuestCollector {
           seq: objective.seq,
           kind: objective.kind,
           target: objective.target as string,
-          label: this.#deps.service.nameOfTarget(objective.target),
+          // ####  A ENCOMENDA VIAJA, E NADA MAIS MUDA  ####
+          //
+          // O campo só aparece quando existe. Assim o payload de
+          // quem não usa encomenda continua byte a byte o mesmo —
+          // e a impressão digital do `assign` não reenvia o mundo
+          // inteiro por uma coluna nova.
+          ...(objective.item === null ? {} : { item: objective.item }),
+          // O que falta numa encomenda é o ITEM, e não o boneco:
+          // "Ainda falta: 1 Mateus" foi o que a primeira versão
+          // escreveu.
+          label: this.#deps.service.nameOfTarget(objective.item ?? objective.target),
           need: objective.amount,
           have: attempt.progress[objective.seq] ?? 0,
         }));
@@ -643,9 +653,35 @@ export class QuestCollector {
       }
     }
 
-    const payload: QuestAssignPayload = { contract: QUESTS_CONTRACT, quests };
+    // ####  O QUE ELE JÁ FEZ, E NÃO FAZ DE NOVO  ####
+    //
+    // Só as `once` resgatadas: elas nunca mais voltam, e o cartão
+    // delas no balcão só servia para o jogador clicar e ouvir que
+    // não pode. Cooldown e diária ficam de fora — ali o cartão
+    // ainda informa, e é o clique que diz quando ela volta.
+    //
+    // A interseção mora aqui, e não numa consulta com JOIN, porque
+    // o catálogo do servidor já está em memória neste ponto: o SQL
+    // seria uma segunda régua para "o que é definitivo".
+    const claimed = new Set(this.#deps.repository.claimedQuestIds(serverId, steamId));
+    const done =
+      claimed.size === 0
+        ? []
+        : this.#deps.repository
+            .listForServer(serverId)
+            .filter((quest) => quest.repeatMode === 'once' && claimed.has(quest.id))
+            .map((quest) => quest.id);
+
+    const payload: QuestAssignPayload = {
+      contract: QUESTS_CONTRACT,
+      quests,
+      ...(done.length === 0 ? {} : { done }),
+    };
     const key = `${serverId}:${steamId}`;
-    const fingerprint = JSON.stringify(quests);
+    // A digital cobre as duas listas: sem o `done` aqui, resgatar a
+    // última missão de um NPC não reenviaria nada, e o cartão dela
+    // ficaria na caixa até o próximo motivo de reenvio.
+    const fingerprint = JSON.stringify({ quests, done });
 
     if (this.#assigned.get(key) === fingerprint) {
       return;

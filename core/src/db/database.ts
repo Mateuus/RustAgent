@@ -100,6 +100,32 @@ export function openDatabase(options: OpenDatabaseOptions): AgentDatabase {
   // pragma está desligado, que é o pior jeito de descobrir.
   db.pragma('foreign_keys = ON');
 
+  // ####  BUSCAR SEM ACENTO E SEM CASE  ####
+  //
+  // O SQLite só sabe ignorar maiúscula em ASCII, e não sabe nada
+  // sobre acento: "cartao" não acha "Cartão de Acesso Verde", e
+  // quem digita no painel digita em português, sem acento, com
+  // pressa. Medido em 13/09/2026 no catálogo do jogo.
+  //
+  // Uma função em vez de uma coluna normalizada porque o catálogo
+  // tem ~1.200 linhas: a varredura é mais barata que a migração,
+  // e não há um segundo lugar para manter em dia.
+  //
+  // `deterministic` é o que autoriza o SQLite a usar a função em
+  // índice e a repetir o resultado; ela é pura, então é verdade.
+  db.function('unaccent', { deterministic: true }, (value: unknown) =>
+    typeof value !== 'string'
+      ? value === null || value === undefined
+        ? null
+        : String(value)
+      : value
+          .normalize('NFD')
+          // U+0300–U+036F são os diacríticos, já separados da letra
+          // pelo NFD. É a mesma conta do `slugify`.
+          .replace(/[̀-ͯ]/g, '')
+          .toLowerCase(),
+  );
+
   if (!inMemory) {
     // ------------------------------------------------------
     //  WAL: leitor não bloqueia escritor, escritor não bloqueia

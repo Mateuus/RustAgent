@@ -266,10 +266,12 @@ export interface ClaimResult {
 // ------------------------------------------------------------
 
 /**
- * Os objetivos que se pagam com item do inventário.
+ * Os objetivos cujo ALVO é um shortname na mochila.
  *
- * `kill` não se entrega, `deliver` é chegar num lugar, e `playtime`
- * e `metric` são números que o agente calcula. Ver `turnIn`.
+ * `kill` não se entrega, e `playtime` e `metric` são números que o
+ * agente calcula. `deliver` fica de fora desta lista sem ficar de
+ * fora do balcão: nela o shortname mora em `item`, e não em
+ * `target` — quem sabe disso é o `#turnInItemOf`.
  */
 const TURN_IN_KINDS: readonly string[] = ['gather', 'craft', 'loot'];
 
@@ -535,7 +537,14 @@ export class QuestsService {
       case 'loot':
         return `Saquear ${amount} de ${this.#nameOf(objective.target)}`;
       case 'deliver':
-        return `Entregar o pacote para ${this.#nameOf(objective.target)}`;
+        // ####  O PACOTE SÓ É "O PACOTE" QUANDO NÃO É NADA  ####
+        //
+        // Com item, a frase tem de dizer O QUE ele carrega: "vá
+        // até o Mateus" não conta ao jogador que ele precisa ter o
+        // cartão na mochila, e ele chega lá de mãos vazias.
+        return objective.item === null
+          ? `Entregar o pacote para ${this.#npcNameOf(objective.target)}`
+          : `Entregar ${amount} ${this.#nameOf(objective.item)} para ${this.#npcNameOf(objective.target)}`;
       case 'playtime':
         return `Ficar ${amount} minuto(s) online`;
       case 'metric':
@@ -561,17 +570,34 @@ export class QuestsService {
    * item, até o que falta. O que ele minerar continua contando
    * sozinho, e os dois se somam.
    *
-   * ####  SÓ OS OBJETIVOS DE ITEM  ####
+   * ####  OS OBJETIVOS QUE SE PAGAM COM A MOCHILA  ####
    *
-   * `kill` não se entrega, e `deliver` é chegar num lugar. Sobram
-   * `gather`, `craft` e `loot` — os três cujo alvo é um shortname
-   * que existe no inventário.
+   * `gather`, `craft` e `loot`, cujo alvo é um shortname; e, desde
+   * 13/09/2026, a `deliver` que cobra um item — nela o shortname
+   * mora em `item`, porque o `target` é o boneco.
+   *
+   * `kill` não se entrega, e a `deliver` SEM item é o correio
+   * antigo: chegar é que conclui, e não há o que tirar da mochila.
+   *
+   * ####  CADA OBJETIVO TEM O SEU BALCÃO  ####
+   *
+   * `npcId` é o boneco em que o jogador clicou. Sem ele, tudo o que
+   * pode ser pago é pago — é o resgate pelo menu, que não acontece
+   * diante de ninguém.
+   *
+   * Com ele, a regra separa dois lugares que o cadastro deixa
+   * diferentes: a encomenda só é aceita pelo NPC de DESTINO dela, e
+   * o resto, só no balcão da missão. Sem essa separação, um clique
+   * no destino da encomenda levaria também as 300 pedras do outro
+   * objetivo — num boneco que não tem nada com elas.
    *
    * @returns o que saiu, por objetivo. Vazio = não tinha nada.
    */
   async turnIn(input: {
     readonly playerQuestId: number;
     readonly steamId: string;
+    /** Em que boneco ele clicou. `undefined` = fora de balcão. */
+    readonly npcId?: string | null;
   }): Promise<readonly { readonly shortname: string; readonly amount: number }[]> {
     const attempt = this.#deps.repository.attempt(input.playerQuestId);
 
@@ -584,16 +610,24 @@ export class QuestsService {
       return [];
     }
 
+    const npcId = input.npcId ?? null;
+    const quest = this.#deps.repository.get(attempt.questId);
+    // `turnInNpcId` vazio = entrega onde se pegou. É a mesma conta
+    // do `npc-sync`, e ela mora lá e aqui porque as duas perguntas
+    // são diferentes: lá se decide QUEM desenha o cartão, aqui,
+    // QUAL objetivo aquele clique paga.
+    const balcao = quest === null ? null : (quest.turnInNpcId ?? quest.npcId);
+
     const wanted = attempt.snapshot.objectives
+      .filter((objective) => (attempt.progress[objective.seq] ?? 0) < objective.amount)
+      .map((objective) => ({ objective, shortname: this.#turnInItemOf(objective, npcId, balcao) }))
       .filter(
-        (objective) =>
-          objective.target !== null &&
-          TURN_IN_KINDS.includes(objective.kind) &&
-          (attempt.progress[objective.seq] ?? 0) < objective.amount,
+        (entry): entry is { objective: QuestObjective; shortname: string } =>
+          entry.shortname !== null,
       )
-      .map((objective) => ({
+      .map(({ objective, shortname }) => ({
         seq: objective.seq,
-        shortname: objective.target as string,
+        shortname,
         amount: objective.amount - (attempt.progress[objective.seq] ?? 0),
       }));
 
@@ -912,6 +946,20 @@ export class QuestsService {
       // O plugin mandou uma entrega que esta tentativa não pediu.
       // Não é erro — o jogador pode ter apertado USE num NPC que é
       // destino de OUTRA missão dele.
+      return false;
+    }
+
+    // ####  CHEGAR NÃO PAGA UMA ENCOMENDA  ####
+    //
+    // Quando a entrega cobra um item, quem a conclui é o balcão
+    // (`turnIn`), que tira o item e conta o que SAIU. Marcar aqui
+    // fecharia a missão com o cartão ainda na mochila — e o prêmio
+    // sairia por ter caminhado até o boneco.
+    //
+    // A recusa mora AQUI, e não só no plugin: um servidor com o
+    // OrigemZAgent.cs velho continua gritando a chegada, e o agente
+    // é quem tem de saber que aquele grito não vale mais.
+    if (objective.item !== null) {
       return false;
     }
 
@@ -1280,6 +1328,64 @@ export class QuestsService {
     }
 
     return this.#deps.items?.displayNameOf(target) ?? target;
+  }
+
+  /**
+   * O nome do BONECO (`zefa-a-ferreira` → "Zefa, a Ferreira").
+   *
+   * ####  O DESTINO NÃO ESTÁ NO CATÁLOGO DE ITENS  ####
+   *
+   * O `#nameOf` procura o alvo entre os itens do jogo, e um id de
+   * NPC nunca vai estar lá: a frase saia com o slug cru —
+   * "Entregar 1 Green Keycard para zefa-a-ferreira", medido no
+   * agente vivo em 13/09/2026.
+   *
+   * O id de volta quando o boneco foi apagado: a tentativa já
+   * aceita continua válida, e "para ?" não ajudaria ninguém a
+   * entender o que sobrou dela.
+   */
+  #npcNameOf(npcId: string | null): string {
+    if (npcId === null) {
+      return '?';
+    }
+
+    return this.#deps.repository.getNpc(npcId)?.name ?? npcId;
+  }
+
+  /**
+   * Que shortname ESTE clique paga daquele objetivo.
+   *
+   * `null` = nenhum: ou o objetivo não se paga com a mochila, ou o
+   * jogador está no boneco errado. Ver o cabeçalho do `turnIn`.
+   */
+  #turnInItemOf(
+    objective: QuestObjective,
+    npcId: string | null,
+    balcao: string | null,
+  ): string | null {
+    if (objective.kind === 'deliver') {
+      // Correio antigo: não há o que tirar da mochila, e quem marca
+      // é a chegada (`reportDelivery`).
+      if (objective.item === null) {
+        return null;
+      }
+
+      // ####  A ENCOMENDA SÓ VALE NO DESTINO  ####
+      //
+      // E por isso o `npcId` ausente também recusa: entregar um
+      // cartão "pelo menu", de dentro de casa, esvaziaria a única
+      // coisa que a entrega pede — estar lá.
+      return objective.target === npcId ? objective.item : null;
+    }
+
+    if (!TURN_IN_KINDS.includes(objective.kind) || objective.target === null) {
+      return null;
+    }
+
+    // Fora de balcão (npcId nulo) tudo o que se paga com a mochila
+    // vale: é o resgate pelo menu, que não acontece diante de
+    // ninguém. Diante de um boneco, só o balcão desta missão cobra.
+    return npcId === null || npcId === balcao ? objective.target : null;
   }
 
   #objectiveView(objective: QuestObjective, have: number): ObjectiveView {
