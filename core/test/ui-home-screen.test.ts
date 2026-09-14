@@ -154,7 +154,10 @@ describe('a HOME desenhada', () => {
     });
 
     expect(textOf(screen, HOME_SLOTS.offerName)).toBe('A loja ainda não tem oferta ligada.');
-    expect(textOf(screen, HOME_SLOTS.offerButton)).toBe('VER A LOJA');
+    // A seta vai DENTRO do texto: no conceito ela é um `<span>`
+    // vermelho à direita, e aqui seria um segundo elemento por
+    // cartão, numa tela que viaja inteira na carga inicial.
+    expect(textOf(screen, HOME_SLOTS.offerButton)).toBe('VER A LOJA   ›');
     // Um COMPRAR sobre coisa nenhuma é pior que um cartão honesto.
     expect(textOf(screen, HOME_SLOTS.offerPrice)).toBe('');
   });
@@ -334,6 +337,32 @@ describe('a HOME dentro do menu', () => {
    * avisa antes. Uma tela a 98% passa hoje e estoura no dia em que
    * alguém acrescentar um cartão — e uma carga estourada não dá
    * erro no jogo: o menu não abre.
+   *
+   * ####  14/09/2026: O CABEÇALHO DO CONCEITO COUBE EM 85%  ####
+   *
+   * Os cartões ganharam ícone e linha de apoio, e o caminho até
+   * caber vale mais que o número final:
+   *
+   *   - FIEL ao protótipo (traço no canto, quadrado vazado,
+   *     símbolo, título, apoio e régua = 6 elementos por cartão):
+   *     **45.552 bytes, 91% do frame**. Passaria da trava;
+   *   - sem a régua (o respiro separa igual) e com o traço fundido
+   *     ao quadrado: 42.692, 85,4%. Ainda acima;
+   *   - com o símbolo trocado por ARTE — `image` em vez de
+   *     `panel`+`label` —: **42.368, 85%**. Coube, e de quebra o
+   *     ícone deixou de depender de um glifo que a
+   *     RobotoCondensed não tem.
+   *
+   * O terceiro passo não era economia: era conserto. Ver
+   * `CARD_ICON` em ui-home-screen.ts.
+   *
+   * ####  E O QUE CORTAR SE ELA SOAR  ####
+   *
+   * As linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
+   * "CALENDÁRIO DO SERVIDOR") são texto fixo: enfeitam e não
+   * informam. Valem ~780 bytes e saem sem perder nada. As do
+   * ranking e das missões NÃO — a primeira diz qual ranking, a
+   * segunda quantas missões, e as duas mudam com o estado.
    */
   it('a carga inicial fica com folga confortável', () => {
     const bytes = encodeUiDocPayload({ documents: [toDocumentPayload(buildMainMenu())] }).length;

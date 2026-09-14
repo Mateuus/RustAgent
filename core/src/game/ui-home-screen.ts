@@ -81,7 +81,10 @@ import { QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 // `ozitem:<id>:1` aqui criaria um segundo lugar de onde ele sai — e
 // o plugin descarta a resposta cujo id não bate com o pedido, então
 // a divergência apareceria como um botão que não faz nada.
-import { itemScreenId, STORE_SCREEN_ID } from './ui-store-screens.js';
+//
+// A chave da moeda vem do mesmo lugar e pelo mesmo motivo: duas
+// chaves para a mesma arte divergiriam no dia em que o PNG mudasse.
+import { COIN_IMAGE_KEY, itemScreenId, STORE_SCREEN_ID } from './ui-store-screens.js';
 import { fillTemplate, findTemplate, measureSlot, type SlotValue } from './ui-template.js';
 import {
   button,
@@ -92,6 +95,7 @@ import {
   label,
   LIST_LINE,
   panel,
+  storedImage,
   topBar,
   type Rect,
 } from './ui-widgets.js';
@@ -834,20 +838,150 @@ export function cardsOf(document: UiDocument): HomeCards {
 }
 
 /** O título de um cartão, no estilo dos títulos do painel. */
-function cardTitle(id: string, text: string): UiElement[] {
+/**
+ * O cabeçalho de um cartão, como no conceito de 14/09/2026.
+ *
+ * ####  QUATRO PEÇAS, E CADA UMA RESPONDE UMA COISA  ####
+ *
+ * A MARCA no canto (46x3 em vermelho) é a assinatura que se repete
+ * nos quatro cartões e na faixa de título das páginas — é ela que
+ * faz a tela parecer uma coisa só.
+ *
+ * O SÍMBOLO num quadrado dá ao cartão uma silhueta reconhecível à
+ * distância: num mural de quatro cabeçalhos com o mesmo tipo e o
+ * mesmo tamanho, é o que diferencia antes da leitura.
+ *
+ * O TÍTULO diz o assunto, e a LINHA DE APOIO diz o recorte — "TOP
+ * RANKING" e, embaixo, QUAL ranking. Antes eram duas frases do
+ * mesmo peso empilhadas, sem nada dizendo qual mandava.
+ *
+ * A RÉGUA fecha o bloco. Sem ela o subtítulo e a primeira linha do
+ * corpo encostam, e as duas se leem como uma lista só.
+ *
+ * ####  A MARCA É CURTA, E NÃO DE LARGURA TOTAL  ####
+ *
+ * Ela já foi uma barra de 2 px de ponta a ponta. Numa tela com
+ * quatro cartões lado a lado, quatro barras inteiras viram uma
+ * faixa listrada — o vermelho deixa de marcar e passa a ser fundo.
+ *
+ * ####  E NÃO HÁ MOLDURA DE 1 px EM NADA  ####
+ *
+ * O CUI não tem borda: ela se faz com dois painéis, um por cima do
+ * outro. São quatro cartões, e esta é a tela de ENTRADA — ela viaja
+ * inteira na carga inicial, cujo teto é 50.000 bytes. O contraste
+ * entre `--bg` e `--surface` separa o quadrado do cartão sem gastar
+ * um elemento por lado.
+ */
+function cardHeader(
+  id: string,
+  icon: (rect: Rect) => UiElement,
+  title: string,
+  subtitleId: string,
+  subtitle: string,
+): UiElement[] {
   return [
-    panel(`${id}-acento`, topBar(2), C.rust),
-    label(id, text, band(14, 22), {
-      size: 14,
+    // ####  ARTE, E NÃO UM CARACTERE  ####
+    //
+    // O conceito usa ♛ ▾ ▦ ◎ — símbolos Unicode, que num HTML a
+    // fonte do sistema resolve. No jogo o texto sai em
+    // RobotoCondensed, e ela NÃO tem os blocos Geometric Shapes
+    // (U+25xx) nem Miscellaneous Symbols (U+26xx): o que apareceria
+    // é o retângulo vazio do glifo ausente, em quatro cartões.
+    //
+    // E o modo de falha é mudo — ninguém vê erro nenhum, a tela só
+    // fica com quatro quadradinhos. Ver a mesma armadilha em
+    // types/ui-document.ts sobre o que o cliente resolve sozinho.
+    //
+    // Então o ícone é arte de verdade: item do jogo (o cliente já
+    // tem, custo zero de download) ou imagem nossa pelo
+    // OrigemZImages.
+    panel(
+      `${id}-ib`,
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: PAD, y: -(HEAD.iconTop + HEAD.icon) },
+        offsetMax: { x: PAD + HEAD.icon, y: -HEAD.iconTop },
+      },
+      // Escuro, e não vermelho: a arte tem cor própria, e um fundo
+      // vermelho brigaria com ela. O vermelho da identidade está na
+      // faixa de título da página e nos botões.
+      C.bg,
+      [icon(fill(5, 5, 5, 5))],
+    ),
+
+    label(id, title, band(HEAD.titleTop, 20, PAD + HEAD.icon + 10), {
+      size: 15,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
+    }),
+
+    label(subtitleId, subtitle, band(HEAD.subTop, 14, PAD + HEAD.icon + 10), {
+      size: 11,
+      color: C.textMuted,
+      align: 'MiddleLeft',
     }),
   ];
 }
 
-/** O botão do pé de cartão: leva à tela inteira daquele assunto. */
+/**
+ * Os ícones dos quatro cartões.
+ *
+ * ####  DE ONDE VEM CADA UM  ####
+ *
+ * Três são ITEM DO JOGO: o cliente já tem a arte, então não há
+ * download nenhum e o jogador reconhece a figura de imediato. O da
+ * loja é NOSSO — o OZCoin, pelo OrigemZImages —, porque é a moeda
+ * que a loja cobra, e nenhum item do jogo diz isso.
+ *
+ * Os ids foram lidos do catálogo do agente em 14/09/2026; um item
+ * que o jogo remova vira um quadrado vazio, e não um erro.
+ */
+const CARD_ICON = {
+  /** `discord.trophy` — o troféu. */
+  rank: (rect: Rect): UiElement =>
+    itemImage('hm-rk-titulo-is', { itemId: 1_494_014_226, skinId: '0' }, rect),
+  /** O OZCoin, da nossa biblioteca de imagens. */
+  offer: (rect: Rect): UiElement => storedImage('hm-loja-titulo-is', COIN_IMAGE_KEY, rect),
+  /** `map` — o mapa, que é o que o wipe troca. */
+  wipe: (rect: Rect): UiElement =>
+    itemImage('hm-wipe-titulo-is', { itemId: 696_029_452, skinId: '0' }, rect),
+  /** `note` — o bilhete de uma missão. */
+  quest: (rect: Rect): UiElement =>
+    itemImage('hm-quest-titulo-is', { itemId: 1_414_245_162, skinId: '0' }, rect),
+} as const;
+
+/** As medidas do cabeçalho de um cartão. */
+const HEAD = {
+  icon: 38,
+  iconTop: 14,
+  titleTop: 16,
+  subTop: 36,
+  /**
+   * Onde o corpo começa.
+   *
+   * A régua do conceito não entrou — seriam mais quatro elementos
+   * numa tela com teto, e o que ela faz (separar o cabeçalho do
+   * corpo) estes 12 px de respiro já fazem.
+   */
+  body: 64,
+} as const;
+
+/**
+ * O botão do pé de cartão: leva à tela inteira daquele assunto.
+ *
+ * ####  A SETA VAI DENTRO DO TEXTO  ####
+ *
+ * No conceito ela é um `<span>` vermelho à direita do rótulo. Aqui
+ * seria um segundo elemento por cartão — quatro ao todo, numa tela
+ * que viaja inteira na carga inicial.
+ *
+ * Dentro do texto ela custa zero e diz a mesma coisa: que o botão
+ * LEVA a algum lugar, em vez de fazer algo ali mesmo. O que se
+ * perde é a cor separada dela, e isso ninguém nota.
+ */
 function cardButton(id: string, text: string, action: UiAction, accent = false): UiElement {
-  return button(id, text, footer(BUTTON_HEIGHT), action, {
+  return button(id, `${text}   ›`, footer(BUTTON_HEIGHT), action, {
     color: accent ? C.rust : C.surface2,
     textColor: accent ? C.white : C.text,
     hoverColor: accent ? '#D4553FFF' : C.rust,
@@ -1017,13 +1151,13 @@ function welcomeLines(): UiElement[] {
 
 function rankCard(rank: HomeRankView): UiElement[] {
   return [
-    ...cardTitle('hm-rk-titulo', 'TOP RANKING'),
-    label('hm-rk-sub', rank.metric ?? '', band(40, 16), {
-      size: 11,
-      color: C.textMuted,
-      align: 'MiddleLeft',
-    }),
-    panel('hm-rk-lista', fill(PAD, 62, PAD, FOOTER_ROOM), C.none, rankRows(rank.top, MAX_LINES)),
+    ...cardHeader('hm-rk-titulo', CARD_ICON.rank, 'TOP RANKING', 'hm-rk-sub', rank.metric ?? ''),
+    panel(
+      'hm-rk-lista',
+      fill(PAD, HEAD.body, PAD, FOOTER_ROOM),
+      C.none,
+      rankRows(rank.top, MAX_LINES),
+    ),
     label('hm-rk-voce', rank.self, footer(18, BUTTON_HEIGHT + PAD + 2), {
       size: 11,
       color: C.textMuted,
@@ -1094,7 +1228,13 @@ function offerCard(view: HomeView): UiElement[] {
   const offer = view.offer;
 
   return [
-    ...cardTitle('hm-loja-titulo', 'NOVO NA LOJA'),
+    ...cardHeader(
+      'hm-loja-titulo',
+      CARD_ICON.offer,
+      'NOVO NA LOJA',
+      'hm-loja-sub',
+      'DESTAQUE DO MÊS',
+    ),
 
     // A etiqueta, no canto — o mesmo lugar em que a loja a desenha.
     panel(
@@ -1197,23 +1337,32 @@ function wipeCard(view: HomeView): UiElement[] {
   const wipe = view.wipe;
 
   return [
-    ...cardTitle('hm-wipe-titulo', 'PRÓXIMO WIPE'),
-    label('hm-wipe-data', wipe?.when ?? '', band(44, 24), {
+    ...cardHeader(
+      'hm-wipe-titulo',
+      CARD_ICON.wipe,
+      'PRÓXIMO WIPE',
+      'hm-wipe-sub',
+      'CALENDÁRIO DO SERVIDOR',
+    ),
+    label('hm-wipe-data', wipe?.when ?? '', band(HEAD.body + 6, 24), {
       size: 15,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
-    label('hm-wipe-falta', wipe?.countdown ?? '', band(70, 20), {
-      size: 13,
+    // Em âmbar, e maior que a data: a contagem é o que decide se
+    // vale correr para guardar o que está na base.
+    label('hm-wipe-falta', wipe?.countdown ?? '', band(HEAD.body + 32, 22), {
+      size: 15,
       color: C.amber,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
-    label('hm-wipe-nota', wipe?.note ?? view.wipeNote, fill(PAD, 96, PAD, FOOTER_ROOM), {
-      size: 11,
-      color: C.textMuted,
-      align: 'UpperLeft',
-    }),
+    label(
+      'hm-wipe-nota',
+      wipe?.note ?? view.wipeNote,
+      fill(PAD, HEAD.body + 60, PAD, FOOTER_ROOM),
+      { size: 11, color: C.textMuted, align: 'UpperLeft' },
+    ),
     cardButton('hm-wipe-btn', 'VER CALENDÁRIO', {
       id: 'hm-wipe-a',
       kind: 'navigate',
@@ -1222,12 +1371,35 @@ function wipeCard(view: HomeView): UiElement[] {
   ];
 }
 
+/**
+ * Quantas missões estão em andamento, para a linha de apoio.
+ *
+ * O conceito escreve "1 EM ANDAMENTO" sob o título — é o recorte do
+ * cartão, do mesmo jeito que o do ranking diz QUAL ranking. Sem
+ * ele, "SUAS MISSÕES" sozinho não diz se há alguma.
+ */
+function questCountOf(view: HomeView): string {
+  const count = view.quests.length;
+
+  if (count === 0) {
+    return 'NENHUMA EM ANDAMENTO';
+  }
+
+  return `${String(count)} EM ANDAMENTO`;
+}
+
 function questCard(view: HomeView): UiElement[] {
   return [
-    ...cardTitle('hm-quest-titulo', 'SUAS MISSÕES'),
+    ...cardHeader(
+      'hm-quest-titulo',
+      CARD_ICON.quest,
+      'SUAS MISSÕES',
+      'hm-quest-sub',
+      questCountOf(view),
+    ),
     panel(
       'hm-quest-lista',
-      fill(PAD, 44, PAD, FOOTER_ROOM),
+      fill(PAD, HEAD.body, PAD, FOOTER_ROOM),
       C.none,
       questRows(view, MAX_LINES),
     ),
