@@ -55,6 +55,13 @@ function buttonById(document: UiDocument, id: string): UiElement {
   throw new Error(`O botão "${id}" não está no cabeçalho.`);
 }
 
+/** A árvore do shell sem um elemento, em qualquer profundidade. */
+function withoutElement(elements: readonly UiElement[], id: string): UiElement[] {
+  return elements
+    .filter((element) => element.id !== id)
+    .map((element) => ({ ...element, children: withoutElement(element.children, id) }) as UiElement);
+}
+
 describe('o convite, como o jogador vai digitar', () => {
   it('tira o esquema, a barra do fim e o rich text', () => {
     // O admin cola o que o navegador dele copiou.
@@ -200,9 +207,15 @@ describe('o menu que já estava gravado', () => {
       ...menu,
       shortcuts: menu.shortcuts.filter((shortcut) => shortcut.command !== 'discord'),
       screens: menu.screens.filter((screen) => screen.id !== DISCORD_SCREEN_ID),
-      shell: JSON.parse(
-        JSON.stringify(menu.shell).replace(/\{"id":"nav-discord".*?\},\{"id":"vip-word"/, '{"id":"vip-word"'),
-      ) as unknown,
+      // ####  A PODA É ESTRUTURAL, E NÃO POR TEXTO  ####
+      //
+      // Ela já foi um `replace` no JSON do shell, apoiado em o
+      // botão do Discord ser o irmão anterior do `vip-word`. O
+      // redesign do cabeçalho (14/09/2026) separou as abas do que é
+      // do jogador em duas faixas, os dois deixaram de ser irmãos,
+      // e a regex passou a não casar com nada — o teste continuava
+      // verde do lado errado, com o botão ainda no documento.
+      shell: withoutElement(menu.shell, 'nav-discord'),
     });
 
     expect(withDiscordScreen(semBotao)).toBeNull();
