@@ -8577,6 +8577,7 @@ namespace Oxide.Plugins
                             Seq = -1,
                             Kind = string.Empty,
                             Target = string.Empty,
+                            Item = null,
                             Label = string.Empty,
                             Need = 0,
                             Have = 0
@@ -8602,6 +8603,7 @@ namespace Oxide.Plugins
                             Seq = (int)objective["seq"],
                             Kind = (string)objective["kind"],
                             Target = (string)objective["target"],
+                            Item = (string)objective["item"],
                             Label = objective["label"] == null
                                 ? (string)objective["target"]
                                 : (string)objective["label"],
@@ -9394,6 +9396,14 @@ namespace Oxide.Plugins
             public string Kind;
             /// <summary>A CHAVE do alvo (`metal.fragments`). E com ela que se conta.</summary>
             public string Target;
+            /// <summary>
+            /// So na entrega que cobra item: o shortname da ENCOMENDA.
+            ///
+            /// Vazio e o correio antigo, em que chegar ao NPC ja conclui.
+            /// Preenchido, quem conclui e o botao ENTREGAR -- ver
+            /// QuestTryDeliver.
+            /// </summary>
+            public string Item;
             /// <summary>O nome que uma pessoa le. Vem pronto do agente.</summary>
             public string Label;
             public int Need;
@@ -10436,6 +10446,72 @@ namespace Oxide.Plugins
             return true;
         }
 
+        /// <summary>Ha na mochila alguma coisa que este balcao aceite?</summary>
+        ///
+        /// ####  FALSO POSITIVO CUSTA UMA IDA; FALSO NEGATIVO TRAVA  ####
+        ///
+        /// Quem decide o que cada clique paga e o agente, que conhece
+        /// o balcao da missao e o destino de cada encomenda. Aqui a
+        /// pergunta e menor de proposito: vale a pena chamar?
+        ///
+        /// Um "sim" que o agente depois nao cobre custa uma ida ao
+        /// RCON e uma frase no chat. Um "nao" errado deixa o jogador
+        /// diante do NPC com o item na mao e um botao que nao faz
+        /// nada -- e foi assim ate 13/09/2026.
+        private bool QuestNpcCanPay(BasePlayer player, QuestNpcInfo npc, List<QuestAssignment> andamento)
+        {
+            if (player == null || player.inventory == null || npc == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < andamento.Count; i++)
+            {
+                QuestAssignment assignment = andamento[i];
+
+                if (assignment.Have >= assignment.Need)
+                {
+                    continue;
+                }
+
+                string shortname = QuestPayableShortname(assignment, npc);
+
+                if (string.IsNullOrEmpty(shortname))
+                {
+                    continue;
+                }
+
+                ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
+
+                if (definition != null && player.inventory.GetAmount(definition.itemid) > 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>O shortname que ESTE objetivo cobra neste boneco, ou null.</summary>
+        private static string QuestPayableShortname(QuestAssignment assignment, QuestNpcInfo npc)
+        {
+            if (assignment.Kind == "deliver")
+            {
+                // A encomenda so e aceita no destino dela. O correio
+                // sem item nao cobra nada: quem o marca e a chegada.
+                return !string.IsNullOrEmpty(assignment.Item) && assignment.Target == npc.Id
+                    ? assignment.Item
+                    : null;
+            }
+
+            // Nos outros, o alvo JA e o shortname -- e e por isso que
+            // matar nao entra: "scientist" nao existe na mochila.
+            return assignment.Kind == "gather" || assignment.Kind == "craft" ||
+                   assignment.Kind == "loot"
+                ? assignment.Target
+                : null;
+        }
+
         // "Matar 2 chicken  -  1 / 2", e com dois objetivos o pior
         // deles: e o que ainda segura a entrega.
         private static string QuestNpcProgressLine(List<QuestAssignment> andamento, string goal)
@@ -10690,11 +10766,24 @@ namespace Oxide.Plugins
                 // a resposta tem de aparecer nela. Mandar ao agente
                 // para receber "ainda nao terminou" no chat custaria
                 // uma ida a rede para dizer o que o plugin ja sabe.
+                //
+                // ####  MAS FALTAR NAO E NAO TER O QUE ENTREGAR  ####
+                //
+                // O balcao aceita entrega parcial desde 13/09/2026:
+                // quem chega com 30 das 300 pedras deixa as 30 e o
+                // contador anda. Enquanto este `if` olhava so o
+                // contador, o clique morria AQUI -- e o agente, que
+                // sabe tirar da mochila, nunca era chamado.
+                //
+                // Entao a pergunta deixou de ser "ja terminou?" e
+                // passou a ser "ha o que entregar?". So quem chega
+                // de maos vazias le o que falta.
                 List<QuestAssignment> andamento = arg.HasArgs(3)
                     ? QuestNpcOfferProgress(player, arg.GetString(2))
                     : null;
 
-                if (andamento != null && !QuestNpcOfferDone(andamento))
+                if (andamento != null && !QuestNpcOfferDone(andamento) &&
+                    !QuestNpcCanPay(player, npc, andamento))
                 {
                     QuestNpcDialogOpen(player, npc, "Ainda falta: " + QuestNpcMissingLine(andamento));
                     return;
@@ -10845,6 +10934,20 @@ namespace Oxide.Plugins
                 QuestAssignment assignment = assignments[i];
 
                 if (assignment.Kind != "deliver" || assignment.Target != npcId)
+                {
+                    continue;
+                }
+
+                // ####  A ENCOMENDA NAO SE ENTREGA CHEGANDO  ####
+                //
+                // Com item, o que conclui e o botao ENTREGAR da
+                // caixa: e la que o cartao sai da mochila. Gritar a
+                // chegada aqui fecharia a missao com o item ainda
+                // no bolso -- o premio pago por ter caminhado.
+                //
+                // O agente recusa esse grito de qualquer jeito (ver
+                // `reportDelivery`); nao manda-lo poupa a ida.
+                if (!string.IsNullOrEmpty(assignment.Item))
                 {
                     continue;
                 }

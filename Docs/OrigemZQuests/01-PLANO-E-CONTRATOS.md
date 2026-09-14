@@ -342,7 +342,8 @@ CREATE TABLE quest_objectives (
   --   'gather'   — colher. target = shortname do recurso
   --   'craft'    — fabricar. target = shortname do item
   --   'loot'     — pegar de container/chão. target = shortname
-  --   'deliver'  — levar de um NPC a outro. target = id do NPC
+  --   'deliver'  — levar até um NPC. target = id do NPC, e o `item`
+  --                diz O QUE se leva (vazio = correio, §5.6)
   --   'playtime' — tempo online, em minutos. target = NULL
   --   'metric'   — qualquer métrica do ranking. metric preenchido
   kind TEXT NOT NULL
@@ -799,7 +800,12 @@ subiu **desde o aceite**. O agente grava o valor de partida no `snapshot`
 
 ### 5.6 `deliver` — o que dá vida ao mapa
 
-O `target` é o **id do NPC de destino**; a origem é o `quests.npc_id`. O plugin:
+O `target` é o **id do NPC de destino**. Desde 13/09/2026 há **dois modos**, e
+quem os separa é a coluna `item` (migração 082).
+
+#### O correio — `item` vazio
+
+O que viaja é figurado, e a origem é o `quests.npc_id`. O plugin:
 
 1. no aceite, marca o destino no mapa daquele jogador (§10.4) e guarda a
    distância inicial;
@@ -810,7 +816,40 @@ O `target` é o **id do NPC de destino**; a origem é o `quests.npc_id`. O plugi
 **A recompensa por distância** (o `Multiplier` do `Quests.cs`, `:114`) entra
 como um campo do payload de recompensa: `{"kind":"coins","perMeter":0.5}`. O
 agente calcula com a distância que ELE mediu entre os dois NPCs — nunca com a
-que o plugin mandou.
+que o plugin mandou. É por causa dela que o correio **exige** NPC de origem:
+sem o primeiro boneco não há trajeto a medir.
+
+#### A encomenda — `item` preenchido
+
+Pedido do dono em 13/09/2026: *"a missão é conseguir um cartão verde e entregar
+ao npc, não tem a opção de qual item pegar/entregar"*. O `item` é o shortname
+que o jogador precisa ter na mochila, e o `amount` passa a ser a quantidade
+DELE.
+
+```jsonc
+{ "kind": "deliver", "target": "zefa-a-ferreira", "item": "keycard_green", "amount": 1 }
+// no jogo:  "Entregar 1 Cartão de Acesso Verde para Zefa, a Ferreira"
+```
+
+O que muda em relação ao correio:
+
+| | correio | encomenda |
+|---|---|---|
+| o que conclui | chegar ao NPC (o push) | o botão **ENTREGAR** da caixa |
+| o item | não existe | sai do inventário, pelo `origemz.quest.consume` |
+| entrega parcial | não se aplica | sim — 3 de 5 hoje, 2 amanhã |
+| NPC de origem | obrigatório | opcional: ela pode nascer no menu |
+| onde se entrega | — | **só no destino**; o balcão segue sendo o `turn_in_npc_id` |
+
+O destino de uma encomenda passa a receber o cartão dela na caixa de conversa
+(`offers: false`, como todo boneco que só recebe), mesmo não sendo o balcão —
+senão o jogador chegaria ao boneco certo, com o item na mão, e sem botão para
+entregá-lo. Entregar lá **não resgata**: o prêmio continua saindo no balcão.
+
+E a chegada deixa de fechar a encomenda nas DUAS pontas — o plugin não grita, e
+o `reportDelivery` recusa se gritarem. Um servidor com o `OrigemZAgent.cs` velho
+continua mandando o push da chegada, e ele não pode fechar a missão com o cartão
+ainda no bolso.
 
 ### 5.7 `playtime` — o único que não passa pelo plugin
 
@@ -1380,7 +1419,8 @@ Um diálogo, no padrão do `custom-item-dialog.tsx`. Quatro seções:
 2. **Objetivos** — lista, com o seletor de tipo mudando o campo do alvo. O alvo
    de `kill` é uma lista fechada; o de `gather`/`craft`/`loot` é o
    `item-combobox.tsx` que já existe, com ícone; o de `metric` é a lista de
-   rankings; o de `deliver` é a lista de NPCs;
+   rankings; o de `deliver` é a lista de NPCs, mais um `item-combobox.tsx`
+   para a encomenda (vazio = correio);
 3. **Recompensas** — lista, com o mesmo `item-picker-dialog.tsx` da loja;
 4. **Regras** — repetição, cooldown, pré-requisito, janela de evento,
    `auto_accept`, `wipe_policy`, NPC, servidores.

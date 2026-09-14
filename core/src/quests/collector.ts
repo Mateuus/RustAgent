@@ -626,7 +626,17 @@ export class QuestCollector {
           seq: objective.seq,
           kind: objective.kind,
           target: objective.target as string,
-          label: this.#deps.service.nameOfTarget(objective.target),
+          // ####  A ENCOMENDA VIAJA, E NADA MAIS MUDA  ####
+          //
+          // O campo só aparece quando existe. Assim o payload de
+          // quem não usa encomenda continua byte a byte o mesmo —
+          // e a impressão digital do `assign` não reenvia o mundo
+          // inteiro por uma coluna nova.
+          ...(objective.item === null ? {} : { item: objective.item }),
+          // O que falta numa encomenda é o ITEM, e não o boneco:
+          // "Ainda falta: 1 Mateus" foi o que a primeira versão
+          // escreveu.
+          label: this.#deps.service.nameOfTarget(objective.item ?? objective.target),
           need: objective.amount,
           have: attempt.progress[objective.seq] ?? 0,
         }));

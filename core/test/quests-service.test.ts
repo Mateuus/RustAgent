@@ -42,7 +42,12 @@ import {
   type QuestStatsSource,
 } from '../src/quests/service.js';
 import type { DeliverRewardsInput, RewardOutcome } from '../src/quests/rewards.js';
-import { questInputSchema, type QuestDraft, type QuestInput } from '../src/types/quests.js';
+import {
+  questInputSchema,
+  questNpcInputSchema,
+  type QuestDraft,
+  type QuestInput,
+} from '../src/types/quests.js';
 
 const NOW = 1_757_000_000_000;
 const FULANO = '76561198000000001';
@@ -845,6 +850,7 @@ describe('a frase do objetivo', () => {
         kind: 'gather',
         target: 'sulfur.ore',
         metric: null,
+        item: null,
         amount: 5000,
         label: null,
         consume: false,
@@ -859,6 +865,7 @@ describe('a frase do objetivo', () => {
         kind: 'kill',
         target: 'scientist',
         metric: null,
+        item: null,
         amount: 20,
         label: null,
         consume: false,
@@ -873,6 +880,7 @@ describe('a frase do objetivo', () => {
         kind: 'gather',
         target: 'sulfur.ore',
         metric: null,
+        item: null,
         amount: 5000,
         label: 'Encher o baú de enxofre',
         consume: false,
@@ -1352,5 +1360,297 @@ describe('a entrega no balcão do NPC', () => {
 
     expect(result.playerQuestId).toBe(view.playerQuestId);
     expect(h.repository.attempt(view.playerQuestId)?.status).toBe('claimed');
+  });
+});
+
+// ============================================================
+//  A ENCOMENDA
+//
+//  A entrega nasceu como CORREIO: chegar ao boneco concluia, e o
+//  que a recompensa pagava era a distancia. Desde 13/09/2026 ela
+//  pode cobrar uma COISA -- "consiga um cartao verde e entregue ao
+//  NPC" --, e a diferenca entre os dois modos e o `item` do
+//  objetivo.
+//
+//  O que estes testes seguram: a encomenda sai da mochila NO
+//  DESTINO, e so nele; e chegar de maos vazias nao paga nada.
+// ============================================================
+describe('a encomenda: a entrega que cobra um item', () => {
+  const CARTAO = 'keycard_green';
+
+  function boneco(id: string, name: string): void {
+    h.repository.createNpc(
+      id,
+      questNpcInputSchema.parse({ serverId: 'pvp1', name, x: 10, y: 5, z: 20 }),
+      NOW,
+    );
+  }
+
+  /** Um consumidor de mentira, com a mochila que o teste escolheu. */
+  function comMochila(mochila: Record<string, number>) {
+    const tirado: { shortname: string; amount: number }[] = [];
+
+    return {
+      tirado,
+      consumer: {
+        take: (input: {
+          items: readonly { shortname: string; amount: number }[];
+          partial?: boolean;
+        }) => {
+          const taken = input.items.map((item) => {
+            const have = mochila[item.shortname] ?? 0;
+            const amount = Math.min(have, item.amount);
+
+            mochila[item.shortname] = have - amount;
+            tirado.push({ shortname: item.shortname, amount });
+
+            return { shortname: item.shortname, amount };
+          });
+
+          return Promise.resolve({
+            complete: taken.every((item, index) => item.amount >= input.items[index]!.amount),
+            taken,
+          });
+        },
+      },
+    };
+  }
+
+  function comEncomenda(amount = 1): void {
+    boneco('mateus', 'Mateus');
+
+    h.repository.create(
+      'cartao-verde',
+      questInputSchema.parse({
+        title: 'O cartao verde',
+        objectives: [{ seq: 0, kind: 'deliver', target: 'mateus', item: CARTAO, amount }],
+      }),
+      NOW,
+    );
+  }
+
+  it('o item sai da mochila no destino, e a missao fecha', async () => {
+    const mochila = comMochila({ [CARTAO]: 1 });
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: mochila.consumer,
+      now: () => h.now,
+    });
+
+    comEncomenda();
+
+    const view = await service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'cartao-verde',
+    });
+
+    const entregue = await service.turnIn({
+      playerQuestId: view.playerQuestId,
+      steamId: FULANO,
+      npcId: 'mateus',
+    });
+
+    expect(entregue).toEqual([{ shortname: CARTAO, amount: 1 }]);
+
+    const depois = h.repository.attempt(view.playerQuestId);
+
+    expect(depois?.progress[0]).toBe(1);
+    expect(depois?.status).toBe('completed');
+  });
+
+  it('no boneco errado nao sai nada da mochila', async () => {
+    const mochila = comMochila({ [CARTAO]: 1 });
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: mochila.consumer,
+      now: () => h.now,
+    });
+
+    comEncomenda();
+    boneco('bia', 'Bia');
+
+    const view = await service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'cartao-verde',
+    });
+
+    // A Bia nao e o destino: o cartao continua no bolso, e o
+    // contador nao anda.
+    expect(
+      await service.turnIn({
+        playerQuestId: view.playerQuestId,
+        steamId: FULANO,
+        npcId: 'bia',
+      }),
+    ).toEqual([]);
+
+    expect(mochila.tirado).toEqual([]);
+    expect(h.repository.attempt(view.playerQuestId)?.progress[0] ?? 0).toBe(0);
+  });
+
+  it('a entrega parcial soma, e a viagem que fecha conclui', async () => {
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: comMochila({ [CARTAO]: 2 }).consumer,
+      now: () => h.now,
+    });
+
+    comEncomenda(3);
+
+    const view = await service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'cartao-verde',
+    });
+
+    await service.turnIn({ playerQuestId: view.playerQuestId, steamId: FULANO, npcId: 'mateus' });
+
+    expect(h.repository.attempt(view.playerQuestId)?.progress[0]).toBe(2);
+    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('active');
+
+    // Ele volta com mais do que falta: a mochila tem 5, e a missao
+    // so pode levar o 1 que resta.
+    const segunda = comMochila({ [CARTAO]: 5 });
+    const service2 = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: segunda.consumer,
+      now: () => h.now,
+    });
+
+    await service2.turnIn({ playerQuestId: view.playerQuestId, steamId: FULANO, npcId: 'mateus' });
+
+    expect(segunda.tirado).toEqual([{ shortname: CARTAO, amount: 1 }]);
+    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('completed');
+  });
+
+  it('chegar ao NPC nao paga a encomenda', async () => {
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      consumer: comMochila({ [CARTAO]: 1 }).consumer,
+      now: () => h.now,
+    });
+
+    comEncomenda();
+
+    const view = await service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'cartao-verde',
+    });
+
+    // ####  ISTO E O QUE SEPARA O CORREIO DA ENCOMENDA  ####
+    //
+    // O push da chegada e o mesmo dos dois; num servidor com o
+    // plugin velho ele continua vindo. Se ele marcasse, a missao
+    // fecharia com o cartao ainda no bolso.
+    expect(service.reportDelivery({ playerQuestId: view.playerQuestId, npcId: 'mateus' })).toBe(
+      false,
+    );
+
+    expect(h.repository.attempt(view.playerQuestId)?.progress[0] ?? 0).toBe(0);
+    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('active');
+  });
+
+  it('o correio sem item continua fechando com a chegada', async () => {
+    boneco('zev', 'Zev');
+    boneco('ferreiro', 'Ferreiro');
+
+    h.repository.create(
+      'correio',
+      questInputSchema.parse({
+        title: 'Leve isto ao ferreiro',
+        npcId: 'zev',
+        objectives: [{ seq: 0, kind: 'deliver', target: 'ferreiro', amount: 1 }],
+      }),
+      NOW,
+    );
+
+    // `force` porque a quest tem NPC de origem, e o aceite normal
+    // exige a testemunha de que ele esteve no balcao -- o que este
+    // teste nao esta medindo.
+    const view = await h.service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'correio',
+      force: true,
+    });
+
+    expect(h.service.reportDelivery({ playerQuestId: view.playerQuestId, npcId: 'ferreiro' })).toBe(
+      true,
+    );
+
+    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('completed');
+  });
+
+  it('a frase diz o que ele carrega, e chama o boneco pelo nome', () => {
+    // O NPC existe no banco: o nome do destino sai DELE, e nao do
+    // catalogo de itens -- onde um id de boneco nunca estaria.
+    boneco('mateus', 'Mateus, o Ferreiro');
+
+    const service = build({
+      items: { displayNameOf: (shortname) => (shortname === CARTAO ? 'Cartao Verde' : null) },
+    });
+
+    expect(
+      service.describeObjective({
+        seq: 0,
+        kind: 'deliver',
+        target: 'mateus',
+        metric: null,
+        item: CARTAO,
+        amount: 1,
+        label: null,
+        consume: false,
+      }),
+    ).toBe('Entregar 1 Cartao Verde para Mateus, o Ferreiro');
+
+    // Sem item, a frase antiga fica de pe: o que viaja e figurado.
+    expect(
+      service.describeObjective({
+        seq: 0,
+        kind: 'deliver',
+        target: 'mateus',
+        metric: null,
+        item: null,
+        amount: 1,
+        label: null,
+        consume: false,
+      }),
+    ).toBe('Entregar o pacote para Mateus, o Ferreiro');
+  });
+
+  it('o cadastro recusa item fora da entrega, e cobra origem so do correio', () => {
+    // Um `item` num objetivo de matar nao teria o que tirar da
+    // mochila -- e ficaria gravado parecendo que vale.
+    expect(() =>
+      questInputSchema.parse({
+        title: 'Errada',
+        objectives: [{ seq: 0, kind: 'kill', target: 'scientist', item: CARTAO, amount: 1 }],
+      }),
+    ).toThrow();
+
+    // O correio mede um trajeto: sem origem nao ha o que medir.
+    expect(() =>
+      questInputSchema.parse({
+        title: 'Correio sem origem',
+        objectives: [{ seq: 0, kind: 'deliver', target: 'mateus', amount: 1 }],
+      }),
+    ).toThrow();
+
+    // A encomenda comeca no menu sem problema nenhum: o que ela
+    // pede e o item, e nao a caminhada.
+    expect(() =>
+      questInputSchema.parse({
+        title: 'Encomenda do menu',
+        objectives: [{ seq: 0, kind: 'deliver', target: 'mateus', item: CARTAO, amount: 1 }],
+      }),
+    ).not.toThrow();
   });
 });

@@ -6488,6 +6488,39 @@ ALTER TABLE dungeons ADD COLUMN corridor_grade_ceiling TEXT
          OR corridor_grade_ceiling IN ('twigs','wood','stone','metal','toptier'));
 `;
 
+const QUEST_DELIVER_ITEM_SCHEMA = `
+-- ============================================================
+--  082  o que se entrega ao NPC.
+--
+--  ####  O PACOTE ERA FIGURADO  ####
+--
+--  O objetivo \`deliver\` nasceu como CORREIO: o \`target\` e o NPC de
+--  destino, a origem e o \`npc_id\` da quest, e o que viaja entre os
+--  dois e uma abstracao -- o que a recompensa \`perMeter\` paga e a
+--  DISTANCIA, nao a carga. Nada era conferido no inventario, e
+--  nada saia dele.
+--
+--  Pedido do dono em 13/09/2026, olhando o cadastro: "a missao e
+--  conseguir um cartao verde e entregar ao npc, nao tem a opcao de
+--  qual item pegar/entregar".
+--
+--  Com esta coluna o pacote passa a poder ser uma COISA: o
+--  shortname do que o jogador precisa ter na mochila, e o
+--  \`amount\` do objetivo passa a ser a quantidade dele.
+--
+--  ####  NULL CONTINUA SENDO O CORREIO  ####
+--
+--  Toda entrega que ja existe fica exatamente como estava: chegar
+--  ao boneco conclui, e ninguem perde item nenhum. A coluna vazia
+--  NAO e um cadastro pela metade -- ela e o outro modo.
+--
+--  Sem CHECK de formato: quem confere que o shortname existe no
+--  jogo e a rota, com o catalogo de itens na mao. Um CHECK aqui
+--  repetiria a regra do zod e seria o que divergiria primeiro.
+-- ============================================================
+ALTER TABLE quest_objectives ADD COLUMN item TEXT;
+`;
+
 const BETTERLOOT_JUNK_SCHEMA = `
 -- ============================================================
 --  073  o que e "lixo" no loot deste servidor.
@@ -7068,6 +7101,8 @@ export const MIGRATIONS: readonly Migration[] = [
   // 13/09/2026: o desenho passa a marcar onde nasce cada peca, o
   // corredor ganha material proprio e a caixa ganha loot proprio.
   { id: 81, name: 'dungeon-placements', sql: DUNGEON_PLACEMENTS_SCHEMA },
+  // 13/09/2026: a entrega ao NPC passa a poder cobrar um item.
+  { id: 82, name: 'quest-deliver-item', sql: QUEST_DELIVER_ITEM_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

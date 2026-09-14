@@ -126,11 +126,27 @@ export interface QuestNpcSyncDeps {
     readonly npcId: string;
     readonly questId: string;
   }) => void;
-  /** Ele clicou em resgatar, no balcão, com a missão pronta. */
+  /**
+   * Ele clicou no botão do cartão — ENTREGAR ou RESGATAR.
+   *
+   * `npcId` diz em QUE boneco, e isso decide o que aquele clique
+   * paga: o balcão da missão cobra os objetivos de mochila, e o
+   * destino de uma encomenda cobra a encomenda dele. Ver o
+   * `turnIn` do serviço.
+   */
   readonly onClaim?: (input: {
     readonly serverId: string;
     readonly steamId: string;
     readonly playerQuestId: number;
+    readonly npcId: string;
+    /**
+     * Aquele boneco é o balcão desta missão?
+     *
+     * `false` = ele só recebe a encomenda. Aí o clique entrega e
+     * para: resgatar ali daria o prêmio no boneco errado, e é
+     * exatamente o que o `turnInNpcId` existe para escolher.
+     */
+    readonly atTurnIn: boolean;
   }) => void;
   /**
    * O jogador falou com aquele NPC.
@@ -335,10 +351,24 @@ export class QuestNpcSync {
       // Um NPC `delivery` nunca oferece: ele existe para receber, e
       // uma vitrine nele confundiria quem chegou para entregar.
       const dele = quest.npcId === npc.id && npc.kind !== 'delivery';
-      const recebe =
+      const balcao =
         quest.turnInNpcId === null ? quest.npcId === npc.id : quest.turnInNpcId === npc.id;
 
-      if (!dele && !recebe) {
+      // ####  O DESTINO DA ENCOMENDA TAMBÉM RECEBE  ####
+      //
+      // Uma entrega que cobra item sai da mochila NO DESTINO, e o
+      // destino pode não ser o balcão. Sem o cartão dele aqui, o
+      // jogador chegaria ao boneco certo, com o cartão verde na
+      // mão, e a caixa não teria botão nenhum para entregá-lo.
+      //
+      // A entrega SEM item continua de fora: nela quem marca é a
+      // chegada, e um botão ali só duplicaria o que o USE já fez.
+      const destino = quest.objectives.some(
+        (objective) =>
+          objective.kind === 'deliver' && objective.item !== null && objective.target === npc.id,
+      );
+
+      if (!dele && !balcao && !destino) {
         continue;
       }
 
@@ -586,22 +616,36 @@ export class QuestNpcSync {
       return;
     }
 
-    // ####  E O BALCÃO TEM DE SER O DESTA MISSÃO  ####
+    // ####  E O BONECO TEM DE SER UM DOS DESTA MISSÃO  ####
     //
-    // O cartão de RESGATAR só é desenhado no boneco certo, mas o
-    // clique nasce no cliente: sem esta conferência, resgatar-se-ia
-    // no NPC da porta de casa a missão que o cadastro manda entregar
-    // do outro lado do mapa.
+    // O cartão só é desenhado nos bonecos certos, mas o clique
+    // nasce no cliente: sem esta conferência, resgatar-se-ia no NPC
+    // da porta de casa a missão que o cadastro manda entregar do
+    // outro lado do mapa.
     //
-    // `turnInNpcId` vazio = entrega onde se pegou. Missão sem NPC
-    // nenhum é de menu, e não se resgata em balcão.
+    // São DOIS os lugares legítimos, e por razões diferentes:
+    //
+    //   o BALCÃO   onde a missão pronta vira recompensa
+    //               (`turnInNpcId` vazio = entrega onde se pegou;
+    //               missão sem NPC nenhum é de menu)
+    //   o DESTINO   de uma entrega que cobra item — é lá que a
+    //               encomenda sai da mochila, e ele pode ser outro
+    //               boneco
+    //
+    // Quem separa o que cada clique paga é o `turnIn`, com o
+    // `npcId` que vai daqui. Esta conferência só barra o boneco
+    // que não tem nada com esta missão.
     const quest = this.#deps.repository.get(attempt.questId);
     const balcao = quest === null ? null : (quest.turnInNpcId ?? quest.npcId);
+    const destino = attempt.snapshot.objectives.some(
+      (objective) =>
+        objective.kind === 'deliver' && objective.item !== null && objective.target === npc.id,
+    );
 
-    if (balcao !== npc.id) {
+    if (balcao !== npc.id && !destino) {
       this.#deps.logger.warn(
         { server: serverId, npc: npc.id, quest: attempt.questId, balcao },
-        'resgate pedido num NPC que não é o balcão desta missão',
+        'clique pedido num NPC que não é balcão nem destino desta missão',
       );
 
       return;
@@ -609,10 +653,16 @@ export class QuestNpcSync {
 
     this.#deps.logger.info(
       { server: serverId, npc: npc.id, pq: push.playerQuestId, steamId: push.steamId },
-      'resgate pedido no balcão do NPC',
+      balcao === npc.id ? 'resgate pedido no balcão do NPC' : 'entrega pedida no destino',
     );
 
-    this.#deps.onClaim?.({ serverId, steamId: push.steamId, playerQuestId: push.playerQuestId });
+    this.#deps.onClaim?.({
+      serverId,
+      steamId: push.steamId,
+      playerQuestId: push.playerQuestId,
+      npcId: npc.id,
+      atTurnIn: balcao === npc.id,
+    });
   }
 
   #use(serverId: string, push: Extract<NpcPush, { kind: 'use' }>): void {

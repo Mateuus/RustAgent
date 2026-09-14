@@ -179,11 +179,26 @@ export interface QuestAssignPayload {
       readonly kind: string;
       readonly target: string;
       /**
+       * Só na entrega que cobra item: o shortname da ENCOMENDA.
+       *
+       * Ausente é o correio antigo, e a diferença muda o que o
+       * plugin faz ao ver o jogador no destino: sem encomenda,
+       * chegar é o bastante e ele grita a entrega; com ela, quem
+       * conclui é o botão ENTREGAR, que tira o item.
+       *
+       * O `target` continua sendo o NPC — é por ele que o plugin
+       * reconhece o destino.
+       */
+      readonly item?: string;
+      /**
        * O nome bonito do alvo, para a tela.
        *
        * O `target` é a CHAVE (`metal.fragments`), e é com ela que o
        * plugin conta. Este é o nome que uma pessoa lê — e sem ele a
        * caixa do NPC dizia "Ainda falta: 200 metal.fragments".
+       *
+       * Na encomenda ele é o nome do ITEM, e não o do boneco: o que
+       * falta ali é o cartão, e não o NPC.
        */
       readonly label: string;
       readonly need: number;

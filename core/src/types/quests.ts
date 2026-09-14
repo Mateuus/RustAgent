@@ -65,7 +65,9 @@ export type QuestWipePolicy = 'reset' | 'keep';
  *   gather   colher. `target` é o shortname do recurso
  *   craft    fabricar. `target` é o shortname do item
  *   loot     pegar de container ou do chão. `target` é o shortname
- *   deliver  levar de um NPC a outro. `target` é o id do NPC DESTINO
+ *   deliver  levar até um NPC. `target` é o id do NPC DESTINO, e o
+ *            `item` diz O QUE se leva — vazio, é o correio antigo,
+ *            em que só a chegada conta e a distância é que paga
  *   playtime tempo online, em MINUTOS. Sem alvo — o agente mede
  *   metric   qualquer métrica do ranking. `metric` preenchido
  *
@@ -201,6 +203,22 @@ const questObjectiveSchema = z
     target: questTargetSchema.nullable().default(null),
     metric: questMetricSchema.nullable().default(null),
     /**
+     * O que o jogador leva na mochila até o NPC. Só em `deliver`.
+     *
+     * ####  O PACOTE PODE SER UMA COISA, OU NÃO SER  ####
+     *
+     * `null` é o correio de sempre: chegar ao boneco conclui, e é
+     * a DISTÂNCIA que a recompensa `perMeter` paga. Preenchido, o
+     * `amount` do objetivo passa a ser a quantidade DESTE item, e
+     * ele sai do inventário no balcão.
+     *
+     * Só o shortname, sem skin: quem tira é o
+     * `origemz.quest.consume`, e ele retira por `itemid` — pedir
+     * uma skin aqui seria prometer uma conferência que o outro
+     * lado não faz.
+     */
+    item: questTargetSchema.nullable().default(null),
+    /**
      * Zero é recusado de propósito: um objetivo de zero conclui
      * sozinho, e a quest inteira vira um botão de recompensa
      * grátis que ninguém queria ter cadastrado.
@@ -216,6 +234,17 @@ const questObjectiveSchema = z
     consume: z.boolean().default(false),
   })
   .superRefine((value, ctx) => {
+    // A conferência do `item` vem ANTES de tudo porque os ramos
+    // abaixo saem cedo: um `item` pendurado num objetivo `metric`
+    // passaria batido, e ficaria gravado parecendo que vale.
+    if (value.item !== null && value.kind !== 'deliver') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['item'],
+        message: `só a entrega ("deliver") cobra um item na mochila — "${value.kind}" não`,
+      });
+    }
+
     // `metric` é o único que usa a coluna `metric`; para todos os
     // outros ela precisa estar vazia, senão duas colunas dizem de
     // onde o número vem e nenhuma delas manda.
@@ -535,16 +564,27 @@ export const questInputSchema = z
       seen.add(objective.seq);
     }
 
-    // ####  A ENTREGA PRECISA DE ORIGEM  ####
+    // ####  O CORREIO PRECISA DE ORIGEM; A ENCOMENDA, NÃO  ####
     //
-    // O destino é o `target` do objetivo; a origem é o `npcId` da
-    // quest. Sem origem, a entrega não teria de onde sair — e a
-    // quest apareceria no menu sem que ninguém pudesse concluí-la.
-    if (value.objectives.some((item) => item.kind === 'deliver') && value.npcId === null) {
+    // O destino é o `target` do objetivo. Numa entrega SEM item, a
+    // origem é o que dá sentido ao trajeto: o que se mede é o
+    // caminho entre os dois bonecos, e sem o primeiro deles não há
+    // o que medir nem o que pagar por metro.
+    //
+    // Com item é outra coisa. "Consiga um cartão verde e leve ao
+    // Mateus" é uma missão inteira que começa no menu, e exigir um
+    // boneco de origem só para cadastrá-la seria pedir um NPC que
+    // não faz nada na história.
+    const semOrigem = value.objectives.some(
+      (item) => item.kind === 'deliver' && item.item === null,
+    );
+
+    if (semOrigem && value.npcId === null) {
       ctx.addIssue({
         code: 'custom',
         path: ['npcId'],
-        message: 'uma quest de entrega precisa de um NPC de origem',
+        message:
+          'uma entrega sem item é um trajeto: ela precisa de um NPC de origem, ou de um item a levar',
       });
     }
   });

@@ -977,6 +977,134 @@ describe('os NPCs', () => {
     ]);
   });
 
+  it('o destino da encomenda recebe o cartão, mesmo sem ser o balcão', async () => {
+    for (const id of ['zev', 'mateus']) {
+      h.repository.createNpc(id, {
+        serverId: 'pvp1',
+        name: id,
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      });
+    }
+
+    // O Zev dá e recebe; o Mateus só leva o cartão. Sem o cartão
+    // dele na caixa do Mateus, o jogador chegaria ao boneco certo,
+    // com o item na mão, e não teria botão nenhum para entregá-lo.
+    h.repository.create(
+      'cartao-verde',
+      questInputSchema.parse({
+        title: 'O cartão verde',
+        npcId: 'zev',
+        objectives: [
+          { seq: 0, kind: 'deliver', target: 'mateus', item: 'keycard_green', amount: 1 },
+        ],
+      }),
+    );
+
+    await sync().push('pvp1');
+
+    const payloads = h.sent
+      .filter((command) => command.startsWith(NPC_SET_COMMAND))
+      .map(
+        (command) =>
+          JSON.parse(
+            Buffer.from(command.slice(NPC_SET_COMMAND.length + 1), 'base64').toString('utf8'),
+          ) as { id: string; offers: { id: string; offers: boolean }[] },
+      );
+
+    expect(payloads.find((npc) => npc.id === 'zev')?.offers).toEqual([
+      expect.objectContaining({ id: 'cartao-verde', offers: true }),
+    ]);
+    // Ele recebe, e não oferece: aceitar a missão no destino dela
+    // seria pegá-la no lugar errado.
+    expect(payloads.find((npc) => npc.id === 'mateus')?.offers).toEqual([
+      expect.objectContaining({ id: 'cartao-verde', offers: false }),
+    ]);
+  });
+
+  it('o clique no destino da encomenda vale, e ele NÃO é balcão', () => {
+    for (const id of ['zev', 'mateus']) {
+      h.repository.createNpc(id, {
+        serverId: 'pvp1',
+        name: id,
+        kind: 'quest',
+        x: 1,
+        y: 1,
+        z: 1,
+        rotation: 0,
+        prefab: 'p',
+        mapMarker: false,
+        useRadius: 3,
+        enabled: true,
+        wipePolicy: 'keep',
+      });
+    }
+
+    h.repository.create(
+      'cartao-verde',
+      questInputSchema.parse({
+        title: 'O cartão verde',
+        npcId: 'zev',
+        objectives: [
+          { seq: 0, kind: 'deliver', target: 'mateus', item: 'keycard_green', amount: 1 },
+        ],
+      }),
+    );
+
+    const attempt = h.repository.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'cartao-verde',
+      snapshot: {
+        title: 'O cartão verde',
+        objectives: [
+          {
+            seq: 0,
+            kind: 'deliver',
+            target: 'mateus',
+            metric: null,
+            item: 'keycard_green',
+            amount: 1,
+            label: null,
+            consume: false,
+          },
+        ],
+        rewards: [],
+        baselines: {},
+      },
+    });
+
+    const visto = spy();
+    const npcSync = sync(visto);
+
+    npcSync.handleLine(
+      'pvp1',
+      npcLine({ kind: 'claim', steamId: FULANO, npcId: 'mateus', pq: attempt.id }),
+    );
+
+    // ####  `atTurnIn: false` É O QUE SEGURA O PRÊMIO  ####
+    //
+    // O Mateus recebe a encomenda; quem paga é o Zev. Resgatar
+    // aqui apagaria a volta que o cadastro pediu.
+    expect(visto.claims).toEqual([
+      {
+        serverId: 'pvp1',
+        steamId: FULANO,
+        playerQuestId: attempt.id,
+        npcId: 'mateus',
+        atTurnIn: false,
+      },
+    ]);
+  });
+
   it('o resgate só vale no balcão daquela missão', () => {
     for (const id of ['zev', 'ferreiro']) {
       h.repository.createNpc(id, {
@@ -1030,7 +1158,13 @@ describe('os NPCs', () => {
     );
 
     expect(visto.claims).toEqual([
-      { serverId: 'pvp1', steamId: FULANO, playerQuestId: attempt.id },
+      {
+        serverId: 'pvp1',
+        steamId: FULANO,
+        playerQuestId: attempt.id,
+        npcId: 'ferreiro',
+        atTurnIn: true,
+      },
     ]);
   });
 

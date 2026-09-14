@@ -130,11 +130,21 @@ export function QuestCatalog({ quests, npcNames, onEdit, onChanged }: QuestCatal
 
               <p className="mt-1 text-2xs text-muted">
                 {quest.objectives
-                  .map((objective) =>
-                    objective.kind === 'playtime'
-                      ? `${String(objective.amount)} min online`
-                      : `${objective.kind} · ${String(objective.amount)} ${objective.target ?? objective.metric ?? ''}`,
-                  )
+                  .map((objective) => {
+                    if (objective.kind === 'playtime') {
+                      return `${String(objective.amount)} min online`;
+                    }
+
+                    // A encomenda tem DOIS alvos, e o que importa
+                    // aqui é o item: "deliver · 1 mateus" não diz o
+                    // que a missão cobra.
+                    const alvo =
+                      objective.item === null
+                        ? (objective.target ?? objective.metric ?? '')
+                        : `${objective.item} → ${objective.target ?? '?'}`;
+
+                    return `${objective.kind} · ${String(objective.amount)} ${alvo}`;
+                  })
                   .join('  +  ')}
               </p>
 

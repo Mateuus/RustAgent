@@ -221,6 +221,8 @@ interface ObjectiveRow {
   readonly kind: string;
   readonly target: string | null;
   readonly metric: string | null;
+  /** So em `deliver`: o shortname que o jogador leva na mochila. */
+  readonly item: string | null;
   readonly amount: number;
   readonly label: string | null;
   readonly consume: number;
@@ -1572,8 +1574,10 @@ export class QuestsRepository {
     this.#db.prepare('DELETE FROM quest_servers WHERE quest_id = @id').run({ id: questId });
 
     const objective = this.#db.prepare(
-      `INSERT INTO quest_objectives (quest_id, seq, kind, target, metric, amount, label, consume)
-            VALUES (@quest_id, @seq, @kind, @target, @metric, @amount, @label, @consume)`,
+      `INSERT INTO quest_objectives
+              (quest_id, seq, kind, target, metric, item, amount, label, consume)
+            VALUES
+              (@quest_id, @seq, @kind, @target, @metric, @item, @amount, @label, @consume)`,
     );
 
     for (const item of input.objectives) {
@@ -1583,6 +1587,7 @@ export class QuestsRepository {
         kind: item.kind,
         target: item.target,
         metric: item.metric,
+        item: item.item,
         amount: item.amount,
         label: item.label,
         consume: item.consume ? 1 : 0,
@@ -1678,6 +1683,7 @@ function toObjective(row: ObjectiveRow): QuestObjective {
     kind: row.kind as QuestObjectiveKind,
     target: row.target,
     metric: row.metric,
+    item: row.item,
     amount: row.amount,
     label: row.label,
     consume: row.consume === 1,
