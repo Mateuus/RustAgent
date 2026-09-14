@@ -2978,6 +2978,7 @@ export type QuestObjectiveKind =
   | 'gather'
   | 'craft'
   | 'loot'
+  | 'container'
   | 'deliver'
   | 'playtime'
   | 'metric';
@@ -3005,6 +3006,36 @@ export interface QuestObjective {
   label: string | null;
   /** Tira os itens do inventario no resgate. So em loot/gather. */
   consume: boolean;
+  /**
+   * So em `container`: os conteineres que contam no mesmo contador.
+   *
+   * Cada item e um `ShortPrefabName` (`crate_elite`) ou uma
+   * categoria (`@barrel`, `@crate`, `@any`). `null` em todos os
+   * outros tipos.
+   *
+   * ####  OPCIONAL NA LEITURA, E ISSO NAO E DESLEIXO  ####
+   *
+   * Uma quest gravada antes de 14/09/2026 volta da API sem o campo,
+   * e `undefined` aqui viraria `objective.targets.map` no editor --
+   * o TypeError que derruba a pagina inteira. O `?? null` de quem le
+   * e o que impede isso.
+   */
+  targets?: string[] | null;
+}
+
+/** Um conteiner que o objetivo de saque pode perseguir. */
+export interface QuestContainerEntry {
+  prefab: string;
+  label: string;
+  group: string;
+  family: 'barrel' | 'crate' | 'debris';
+}
+
+/** Uma categoria: "qualquer barril" e as outras duas. */
+export interface QuestContainerCategory {
+  id: string;
+  label: string;
+  hint: string;
 }
 
 /**
@@ -3269,6 +3300,18 @@ export const agent = {
 
   questCategories: () =>
     api<{ categories: { category: string; total: number }[] }>('/api/quests/categories'),
+
+  /**
+   * O catalogo de conteineres do objetivo de saque.
+   *
+   * Vem da API, e nao de uma lista local, porque o painel nao pode
+   * ter uma segunda opiniao sobre o que "qualquer barril" alcanca:
+   * ele ofereceria uma coisa e o agente contaria outra.
+   */
+  questContainers: () =>
+    api<{ categories: QuestContainerCategory[]; containers: QuestContainerEntry[] }>(
+      '/api/quests/containers',
+    ),
 
   // ####  NÃO HÁ `quest(id)` NEM `questOffers()` AQUI  ####
   //

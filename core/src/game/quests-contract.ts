@@ -146,7 +146,48 @@ export interface QuestWatchPayload {
    * exigir um release de plugin.
    */
   readonly alias: Readonly<Record<string, string>>;
+  /**
+   * O que cada categoria de contêiner alcança: `@barrel` → prefabs.
+   *
+   * ####  A LISTA DESCE UMA VEZ, E NÃO POR JOGADOR  ####
+   *
+   * O objetivo guarda `@barrel`, e é `@barrel` que viaja no
+   * `assign`. Se a expansão fosse feita aqui, cada jogador com uma
+   * missão de "qualquer contêiner" receberia 65 prefabs dentro do
+   * comando de console dele — por rodada, por servidor.
+   *
+   * Assim o plugin resolve a categoria contra este mapa, que é
+   * global e só muda quando o catálogo muda.
+   *
+   * Só as categorias EM USO entram: um servidor sem missão de saque
+   * recebe `{}`.
+   */
+  readonly sets: Readonly<Record<string, readonly string[]>>;
 }
+
+/**
+ * A resposta do `watch`, como o plugin a devolve.
+ *
+ * ####  ELA EXISTE PARA DENUNCIAR O PLUGIN VELHO  ####
+ *
+ * O `container` é ADITIVO: um `OrigemZAgent.cs` anterior a
+ * 14/09/2026 recebe a chave nova no catálogo, guarda-a e nunca a
+ * consulta — nada quebra, e as outras missões continuam contando.
+ *
+ * O preço disso seria o pior defeito possível: a missão de saque
+ * cadastrada, o jogador quebrando barril, e o contador parado sem
+ * uma linha de log dizendo por quê. Por isso o plugin passa a
+ * ANUNCIAR o que sabe contar, e o agente avisa quando falta.
+ *
+ * Tudo opcional de propósito — a ausência é a informação.
+ */
+export const questWatchReplySchema = z.object({
+  ok: z.literal(true),
+  contract: z.number().int(),
+  targets: z.number().int().min(0).optional(),
+  /** Os `kind` que aquele plugin conta. Ausente = plugin anterior. */
+  kinds: z.array(z.string()).optional(),
+});
 
 /**
  * O que um jogador persegue, como o `assign` o manda.
@@ -195,6 +236,17 @@ export interface QuestAssignPayload {
       readonly seq: number;
       readonly kind: string;
       readonly target: string;
+      /**
+       * Só em `container`: os contêineres que contam.
+       *
+       * Cada item é um `ShortPrefabName` ou uma categoria
+       * (`@barrel`). A categoria vai CRUA — quem a resolve é o
+       * plugin, contra o `sets` que desceu no `watch`.
+       *
+       * Quando ele vem, o `target` vai vazio: são duas respostas
+       * para a mesma pergunta, e o plugin obedece a esta.
+       */
+      readonly targets?: readonly string[];
       /**
        * Só na entrega que cobra item: o shortname da ENCOMENDA.
        *

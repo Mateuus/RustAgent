@@ -75,6 +75,7 @@ import { z } from 'zod';
 
 import { slugify } from '../../db/custom-items-repository.js';
 import type { PlayerQuestRecord, QuestsRepository } from '../../db/quests-repository.js';
+import { questContainerCatalog } from '../../game/quest-containers.js';
 import type { QuestsService } from '../../quests/service.js';
 import {
   questInputSchema,
@@ -144,6 +145,23 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
    */
   app.get('/quests/categories', async () => {
     return { ok: true, categories: deps.repository.categories() };
+  });
+
+  /**
+   * Os contêineres que o objetivo de saque alcança.
+   *
+   * ####  O PAINEL NÃO PODE TER UMA SEGUNDA OPINIÃO SOBRE BARRIL  ####
+   *
+   * A tela precisa oferecer "qualquer barril" e precisa saber o que
+   * isso quer dizer — e se ela tivesse a própria lista, ofereceria
+   * uma coisa enquanto o agente contaria outra. Ela vem daqui pelo
+   * mesmo motivo que o catálogo de itens vem: a régua é uma só.
+   *
+   * Sem `serverId`: o catálogo é do JOGO, e não daquele mundo. O que
+   * é por servidor é onde a quest aparece, e isso já mora na quest.
+   */
+  app.get('/quests/containers', async () => {
+    return { ok: true, ...questContainerCatalog() };
   });
 
   app.get('/quests', async (request) => {

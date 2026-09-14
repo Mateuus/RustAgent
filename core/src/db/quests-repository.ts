@@ -42,6 +42,7 @@
 //  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §3, §4 e §9.
 // ============================================================
 
+import { expandContainerSelectors } from '../game/quest-containers.js';
 import { ApiError } from '../http/error-response.js';
 import {
   DEFAULT_QUEST_SETTINGS,
@@ -220,6 +221,8 @@ interface ObjectiveRow {
   readonly seq: number;
   readonly kind: string;
   readonly target: string | null;
+  /** So em `container`: o JSON com os prefabs e categorias. */
+  readonly targets: string | null;
   readonly metric: string | null;
   /** So em `deliver`: o shortname que o jogador leva na mochila. */
   readonly item: string | null;
@@ -436,7 +439,60 @@ export class QuestsRepository {
       )
       .all({ server_id: serverId }) as { kind: string; target: string }[];
 
-    return rows.map((row) => ({ kind: row.kind as QuestObjectiveKind, target: row.target }));
+    const entries: WatchEntry[] = rows.map((row) => ({
+      kind: row.kind as QuestObjectiveKind,
+      target: row.target,
+    }));
+
+    // ####  O `container` ENTRA EXPANDIDO, E SÓ AQUI  ####
+    //
+    // O que desce no `watch` é o CORTE RÁPIDO do plugin: "este
+    // prefab interessa a alguém?". Uma categoria não serve para
+    // isso — ela é resolvida do lado de lá, contra os conjuntos que
+    // o coletor manda junto. Aqui viram prefabs, ordenados, sem
+    // repetição: é a mesma string a cada rodada, e é isso que faz o
+    // `watch` não sair de novo quando nada mudou.
+    for (const prefab of expandContainerSelectors(this.containerSelectorsFor(serverId))) {
+      entries.push({ kind: 'container', target: prefab });
+    }
+
+    return entries;
+  }
+
+  /**
+   * Os seletores de contêiner CRUS daquele servidor.
+   *
+   * Crus — `@barrel` continua `@barrel` — porque é deles que sai o
+   * mapa de conjuntos do `watch`: o plugin recebe a lista de cada
+   * categoria uma vez, por servidor, em vez de recebê-la repetida
+   * dentro do `assign` de cada jogador.
+   */
+  containerSelectorsFor(serverId: string): readonly string[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT DISTINCT o.targets
+           FROM quest_objectives o
+           JOIN quests q ON q.id = o.quest_id
+          WHERE q.enabled = 1
+            AND o.kind = 'container'
+            AND o.targets IS NOT NULL
+            AND (
+              NOT EXISTS (SELECT 1 FROM quest_servers s WHERE s.quest_id = q.id)
+              OR EXISTS (SELECT 1 FROM quest_servers s
+                          WHERE s.quest_id = q.id AND s.server_id = @server_id)
+            )`,
+      )
+      .all({ server_id: serverId }) as { targets: string }[];
+
+    const selectors = new Set<string>();
+
+    for (const row of rows) {
+      for (const selector of parseTargets(row.targets) ?? []) {
+        selectors.add(selector);
+      }
+    }
+
+    return [...selectors].sort();
   }
 
   /**
@@ -1603,9 +1659,10 @@ export class QuestsRepository {
 
     const objective = this.#db.prepare(
       `INSERT INTO quest_objectives
-              (quest_id, seq, kind, target, metric, item, amount, label, consume)
+              (quest_id, seq, kind, target, targets, metric, item, amount, label, consume)
             VALUES
-              (@quest_id, @seq, @kind, @target, @metric, @item, @amount, @label, @consume)`,
+              (@quest_id, @seq, @kind, @target, @targets, @metric, @item, @amount, @label,
+               @consume)`,
     );
 
     for (const item of input.objectives) {
@@ -1614,6 +1671,11 @@ export class QuestsRepository {
         seq: item.seq,
         kind: item.kind,
         target: item.target,
+        // A lista vira JSON; `null` continua `null`, e não `'[]'` —
+        // "não tem lista" e "tem uma lista vazia" precisam ser
+        // distinguíveis na leitura, e o `watchFor` filtra por
+        // `targets IS NOT NULL`.
+        targets: item.targets === null ? null : JSON.stringify(item.targets),
         metric: item.metric,
         item: item.item,
         amount: item.amount,
@@ -1710,12 +1772,40 @@ function toObjective(row: ObjectiveRow): QuestObjective {
     seq: row.seq,
     kind: row.kind as QuestObjectiveKind,
     target: row.target,
+    targets: parseTargets(row.targets),
     metric: row.metric,
     item: row.item,
     amount: row.amount,
     label: row.label,
     consume: row.consume === 1,
   };
+}
+
+/**
+ * O JSON da coluna vira a lista de alvos.
+ *
+ * ####  UMA LISTA ILEGÍVEL VIRA NENHUMA, E A QUEST FICA  ####
+ *
+ * Mesma escolha do `parseAction` do item custom e do `toReward` aqui
+ * embaixo: a coluna é escrita por nós, então um valor quebrado ali é
+ * defeito nosso — e derrubar a listagem inteira do painel por causa
+ * de um objetivo esconderia as outras trinta quests que estão boas.
+ *
+ * O objetivo com lista vazia simplesmente não conta nada, e aparece
+ * assim no editor, onde dá para consertá-lo.
+ */
+function parseTargets(raw: string | null): string[] | null {
+  if (raw === null) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

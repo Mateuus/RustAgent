@@ -135,6 +135,19 @@ export function QuestCatalog({ quests, npcNames, onEdit, onChanged }: QuestCatal
                       return `${String(objective.amount)} min online`;
                     }
 
+                    // O saque nao tem alvo unico: o dele e a lista.
+                    // Sem esta linha o cartao dizia "container · 20 "
+                    // e parava ali, com o alvo vazio.
+                    if (objective.kind === 'container') {
+                      const alvos = objective.targets ?? [];
+                      const resumo =
+                        alvos.length === 1
+                          ? (alvos[0] ?? '?')
+                          : `${alvos.length} tipos`;
+
+                      return `saque · ${String(objective.amount)} ${resumo}`;
+                    }
+
                     // A encomenda tem DOIS alvos, e o que importa
                     // aqui é o item: "deliver · 1 mateus" não diz o
                     // que a missão cobra.

@@ -495,6 +495,17 @@ namespace Oxide.Plugins
             Unsubscribe("OnItemAddedToContainer");
             _questLootHooked = false;
 
+            // ####  E OS DOIS DO SAQUE, PELA MESMA RAZAO  ####
+            //
+            // `OnEntityDeath` dispara para TODA entidade que morre no
+            // servidor - arvore, pedra, parede, animal. Ele sai na
+            // primeira comparacao (`as LootContainer`), mas nao ha
+            // por que pagar nem isso num servidor sem missao de
+            // saque. Quem os liga e o QuestSyncContainerHook.
+            Unsubscribe("OnLootEntity");
+            Unsubscribe("OnEntityDeath");
+            _questContainerHooked = false;
+
             // Mesma razao, e este e o mais caro de todos: o
             // OnPlayerInput dispara a cada QUADRO, para cada
             // jogador. Quem o liga e o primeiro NPC.
@@ -8531,8 +8542,22 @@ namespace Oxide.Plugins
         // MESMA medicao dos hooks do ranking: um so lugar para
         // perguntar quanto os ganchos custam neste servidor.
         private const string HookItemAdded = "OnItemAddedToContainer";
+        private const string HookLootEntity = "OnLootEntity";
+        private const string HookEntityDeath = "OnEntityDeath";
         private const string HookPlayerInput = "OnPlayerInput";
         private const string HookNpcConversation = "OnNpcConversationStart";
+
+        // ####  O QUE ESTE PLUGIN SABE CONTAR  ####
+        //
+        // Ele sai na resposta do `watch`, e o agente o le para
+        // avisar quando uma missao foi cadastrada num servidor cujo
+        // plugin e mais velho do que ela. Sem isto o recurso novo
+        // ficaria INERTE em silencio: a missao cadastrada, o jogador
+        // quebrando barril, e o contador parado sem explicacao.
+        //
+        // Uma linha aqui por tipo novo. E a unica manutencao.
+        private const string QuestKinds =
+            "[\"kill\",\"gather\",\"craft\",\"loot\",\"container\",\"deliver\"]";
         private const string QuestDataFile = "OrigemZAgentQuests";
         private const int QuestContract = 1;
 
@@ -8579,10 +8604,51 @@ namespace Oxide.Plugins
         private Dictionary<string, QuestEntryInfo> _questOpen =
             new Dictionary<string, QuestEntryInfo>();
 
+        // O que cada categoria de conteiner alcanca: "@barrel" ->
+        // prefabs. Desce no `watch`, uma vez por servidor.
+        //
+        // ####  A CATEGORIA E RESOLVIDA AQUI, E NAO NO ASSIGN  ####
+        //
+        // O agente poderia mandar os 65 prefabs dentro do assign de
+        // cada jogador. Mandar a lista UMA vez e deixar o objetivo
+        // carregar so "@barrel" e a diferenca entre um comando de
+        // console de 200 bytes e um de 1,5 KB por jogador, por
+        // rodada.
+        private Dictionary<string, HashSet<string>> _questSets =
+            new Dictionary<string, HashSet<string>>();
+
+        // ####  O CONTEINER QUE ESTE JOGADOR JA SAQUEOU  ####
+        //
+        // steamId -> net.ID dos conteineres que ja contaram para
+        // ele. E o que cumpre "o mesmo conteiner conta so uma vez
+        // por jogador": abrir e fechar a mesma caixa dez vezes soma
+        // um, e o barril que ja foi quebrado nao conta de novo pelo
+        // hook de saque.
+        //
+        // Por JOGADOR, e nao global: a mesma caixa conta para cada
+        // um que a abrir, e e assim que tem de ser - dois jogadores
+        // fazendo a mesma missao nao competem pelo mesmo barril.
+        private Dictionary<ulong, HashSet<ulong>> _questLooted =
+            new Dictionary<ulong, HashSet<ulong>>();
+
+        // O teto por jogador. Estourou, esquece tudo dele.
+        //
+        // ####  ESQUECER E MELHOR QUE CRESCER SEM FIM  ####
+        //
+        // Uma sessao longa de farm passa por centenas de caixas, e
+        // um servidor de meses guardaria isso para sempre. Quatro
+        // mil ids sao ~64 KB por jogador e cobrem de sobra uma
+        // sessao inteira; o preco de estourar e que uma caixa muito
+        // antiga poderia contar de novo - e ela, a essa altura, ja
+        // foi respawnada pelo jogo com outro net.ID de qualquer
+        // jeito.
+        private const int MaxQuestLooted = 4000;
+
         private QuestBatch _questPending;
         private int _questSeq;
         private bool _questDirty;
         private bool _questLootHooked;
+        private bool _questContainerHooked;
 
         // O que ja foi proposto ao agente, para nao gritar duas vezes
         // a mesma conclusao a cada golpe de picareta depois de ela
@@ -8672,11 +8738,47 @@ namespace Oxide.Plugins
                 }
             }
 
+            // Os conjuntos das categorias de conteiner. Mesma regra
+            // do `watch`: o que chega SUBSTITUI o que havia, inteiro.
+            Dictionary<string, HashSet<string>> sets =
+                new Dictionary<string, HashSet<string>>();
+
+            JObject setsRaw = payload["sets"] as JObject;
+
+            if (setsRaw != null)
+            {
+                foreach (KeyValuePair<string, JToken> entry in setsRaw)
+                {
+                    JArray list = entry.Value as JArray;
+
+                    if (list == null)
+                    {
+                        continue;
+                    }
+
+                    HashSet<string> prefabs = new HashSet<string>();
+
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        string prefab = (string)list[i];
+
+                        if (!string.IsNullOrEmpty(prefab))
+                        {
+                            prefabs.Add(prefab);
+                        }
+                    }
+
+                    sets[entry.Key] = prefabs;
+                }
+            }
+
             _questWatch = watch;
             _questAlias = alias;
+            _questSets = sets;
             _questSecret = (string)payload["secret"];
 
             QuestSyncLootHook();
+            QuestSyncContainerHook();
 
             int total = 0;
 
@@ -8689,9 +8791,14 @@ namespace Oxide.Plugins
             // RCON e nao fica no log do Oxide. Sem esta linha, "a
             // missao nao progride" nao teria como ser diagnosticado.
             Puts("Missoes: catalogo com " + total + " alvo(s); loot " +
-                (_questLootHooked ? "LIGADO" : "desligado"));
+                (_questLootHooked ? "LIGADO" : "desligado") + "; saque " +
+                (_questContainerHooked ? "LIGADO" : "desligado"));
 
-            return "{\"ok\":true,\"contract\":" + QuestContract + ",\"targets\":" + total + "}";
+            // O `kinds` e o que permite ao agente avisar quando este
+            // plugin e mais velho que a missao cadastrada. Ver o
+            // comentario de QuestKinds.
+            return "{\"ok\":true,\"contract\":" + QuestContract + ",\"targets\":" + total +
+                ",\"kinds\":" + QuestKinds + "}";
         }
 
         // ####  O HOOK MAIS QUENTE DO JOGO SO ENTRA SE PRECISAR  ####
@@ -8719,6 +8826,46 @@ namespace Oxide.Plugins
             }
 
             _questLootHooked = wanted;
+        }
+
+        // ####  DOIS HOOKS FRIOS, E SO QUANDO ALGUEM PEDE  ####
+        //
+        // `OnLootEntity` dispara quando um jogador ABRE alguma coisa
+        // - caixa, forno, a propria mochila de um morto. E raro perto
+        // do hook de loot: o jogador abre dezenas de conteineres por
+        // hora, e coloca milhares de itens em caixas.
+        //
+        // `OnEntityDeath` e o caro dos dois, porque dispara para TODA
+        // entidade que morre: arvore, pedra, parede, animal, jogador.
+        // O corpo dele sai na primeira comparacao - `as LootContainer`
+        // devolve null para tudo isso -, mas registra-lo num servidor
+        // sem missao de saque seria cobrar de todo mundo por um
+        // recurso que so alguns usam. E a mesma regra do loot.
+        private void QuestSyncContainerHook()
+        {
+            bool wanted = _questWatch.ContainsKey("container");
+
+            if (wanted == _questContainerHooked)
+            {
+                return;
+            }
+
+            if (wanted)
+            {
+                Subscribe(HookLootEntity);
+                Subscribe(HookEntityDeath);
+            }
+            else
+            {
+                Unsubscribe(HookLootEntity);
+                Unsubscribe(HookEntityDeath);
+
+                // Sem missao de saque nao ha o que deduplicar, e a
+                // lista so ocuparia memoria ate o proximo restart.
+                _questLooted.Clear();
+            }
+
+            _questContainerHooked = wanted;
         }
 
         // ------------------------------------------------------
@@ -8816,6 +8963,34 @@ namespace Oxide.Plugins
                             continue;
                         }
 
+                        // ####  A LISTA DO SAQUE, CRUA  ####
+                        //
+                        // Ela guarda o que o agente mandou -
+                        // `crate_elite` e `@barrel` misturados -, e
+                        // e o QuestTargetMatches que resolve a
+                        // categoria contra o `_questSets`. Resolver
+                        // aqui seria congelar a categoria no momento
+                        // do assign: um `watch` novo, com um barril
+                        // a mais, nao alcancaria quem ja esta
+                        // jogando.
+                        HashSet<string> targets = null;
+                        JArray rawTargets = objective["targets"] as JArray;
+
+                        if (rawTargets != null && rawTargets.Count > 0)
+                        {
+                            targets = new HashSet<string>();
+
+                            for (int t = 0; t < rawTargets.Count; t++)
+                            {
+                                string selector = (string)rawTargets[t];
+
+                                if (!string.IsNullOrEmpty(selector))
+                                {
+                                    targets.Add(selector);
+                                }
+                            }
+                        }
+
                         assignments.Add(new QuestAssignment
                         {
                             PlayerQuestId = (long)quest["pq"],
@@ -8824,6 +8999,7 @@ namespace Oxide.Plugins
                             Seq = (int)objective["seq"],
                             Kind = (string)objective["kind"],
                             Target = (string)objective["target"],
+                            Targets = targets,
                             Item = (string)objective["item"],
                             Label = objective["label"] == null
                                 ? (string)objective["target"]
@@ -8918,6 +9094,12 @@ namespace Oxide.Plugins
                 _questAssigned.Remove(player.userID);
                 _questDone.Remove(player.userID);
                 _questNpcDialogs.Remove(player.userID);
+
+                // Os conteineres que ele ja saqueou saem junto: o
+                // dedupe vale por SESSAO, e quem volta depois de um
+                // wipe de mapa encontra caixas com outro net.ID de
+                // qualquer jeito.
+                _questLooted.Remove(player.userID);
             }
         }
 
@@ -8992,6 +9174,190 @@ namespace Oxide.Plugins
             }
         }
 
+        // ------------------------------------------------------
+        //  O SAQUE DE CONTEINER
+        // ------------------------------------------------------
+
+        // ####  DUAS PORTAS, UM CONTADOR  ####
+        //
+        // O jogo tem duas formas de esvaziar um conteiner, e o
+        // pedido do dono descreve as duas:
+        //
+        //   caixa   se ABRE. Entra por OnLootEntity.
+        //   barril  se QUEBRA. Entra por OnEntityDeath.
+        //
+        // As duas desembocam aqui, e e o dedupe por `net.ID` que faz
+        // "o mesmo conteiner conta so uma vez por jogador" valer sem
+        // que este metodo precise saber qual das duas portas o
+        // trouxe. Um barril que fosse saqueavel E quebravel contaria
+        // uma vez, e nao duas.
+        //
+        // ####  O VAZIO NAO CONTA  ####
+        //
+        // "Saquear" e levar alguma coisa. Uma caixa que outro jogador
+        // ja esvaziou nao vira progresso - abrir e fechar dez caixas
+        // vazias nao e a missao que o admin cadastrou.
+        private void QuestOnContainer(BasePlayer player, LootContainer container)
+        {
+            if (player == null || player.IsNpc || container == null)
+            {
+                return;
+            }
+
+            if (container.inventory == null ||
+                container.inventory.itemList == null ||
+                container.inventory.itemList.Count == 0)
+            {
+                return;
+            }
+
+            string prefab = container.ShortPrefabName;
+
+            // O corte rapido, antes de tudo: um HashSet de string e
+            // mais barato que o dicionario por jogador, e num
+            // servidor onde a missao pede so barril isto descarta
+            // toda caixa aberta no mundo na primeira comparacao.
+            HashSet<string> watched;
+
+            if (!_questWatch.TryGetValue("container", out watched) || !watched.Contains(prefab))
+            {
+                return;
+            }
+
+            // ####  SO MARCA O QUE IA CONTAR  ####
+            //
+            // Marcar antes de saber se algum objetivo dele persegue
+            // esta caixa gastaria a "primeira vez" dela num jogador
+            // que nem tem missao de saque - e ela nao contaria mais
+            // se ele aceitasse uma depois.
+            if (!QuestWantsContainer(player, prefab))
+            {
+                return;
+            }
+
+            if (container.net == null || !QuestMarkLooted(player.userID, container.net.ID.Value))
+            {
+                return;
+            }
+
+            QuestCount(player, "container", prefab, 1);
+        }
+
+        // Algum objetivo VIVO dele persegue este conteiner?
+        private bool QuestWantsContainer(BasePlayer player, string prefab)
+        {
+            List<QuestAssignment> assignments;
+
+            if (!_questAssigned.TryGetValue(player.userID, out assignments))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < assignments.Count; i++)
+            {
+                QuestAssignment assignment = assignments[i];
+
+                if (assignment.Kind == "container" &&
+                    assignment.Status != "completed" &&
+                    assignment.Have < assignment.Need &&
+                    QuestTargetMatches(assignment, prefab))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // Primeira vez deste conteiner para este jogador?
+        //
+        // `false` = ja contou antes, e nao conta de novo.
+        private bool QuestMarkLooted(ulong steamId, ulong entityId)
+        {
+            HashSet<ulong> seen;
+
+            if (!_questLooted.TryGetValue(steamId, out seen))
+            {
+                seen = new HashSet<ulong>();
+                _questLooted[steamId] = seen;
+            }
+
+            // Estourou o teto: esquece tudo dele. Ver MaxQuestLooted -
+            // a essa altura o jogo ja respawnou aquelas caixas com
+            // outro net.ID, e lembra-las nao protege mais nada.
+            if (seen.Count >= MaxQuestLooted)
+            {
+                seen.Clear();
+            }
+
+            return seen.Add(entityId);
+        }
+
+        /// <summary>
+        /// A caixa foi aberta.
+        ///
+        /// void, e nenhuma excecao escapa: ver o cabecalho.
+        /// </summary>
+        private void OnLootEntity(BasePlayer player, BaseEntity entity)
+        {
+            long started = StatsHookStart();
+
+            try
+            {
+                QuestOnContainer(player, entity as LootContainer);
+            }
+            catch (Exception ex)
+            {
+                ReportStatsHookError(HookLootEntity, ex);
+            }
+            finally
+            {
+                StatsHookStop(HookLootEntity, started);
+            }
+        }
+
+        /// <summary>
+        /// Alguma coisa morreu. Se foi um barril, ele conta.
+        ///
+        /// ####  O INVENTARIO AINDA ESTA CHEIO AQUI  ####
+        ///
+        /// MEDIDO no Assembly-CSharp deste build: `BaseCombatEntity.Die`
+        /// chama o hook ANTES de `OnDied`, e e o `OnDied` do
+        /// StorageContainer que dropa os itens. Ou seja: neste ponto
+        /// da para perguntar se o barril tinha loot -- que e
+        /// exatamente a regra que o dono pediu ("barris contam quando
+        /// forem destruidos e tiverem seu loot").
+        ///
+        /// Depois do OnDied a pergunta seria sempre "estava vazio", e
+        /// nenhum barril contaria.
+        /// </summary>
+        private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
+        {
+            long started = StatsHookStart();
+
+            try
+            {
+                LootContainer container = entity as LootContainer;
+
+                if (container == null || info == null)
+                {
+                    return;
+                }
+
+                // Quem quebrou. Explosivo, arma ou machado: o jogo
+                // resolve a cadeia e entrega o jogador aqui.
+                QuestOnContainer(info.InitiatorPlayer, container);
+            }
+            catch (Exception ex)
+            {
+                ReportStatsHookError(HookEntityDeath, ex);
+            }
+            finally
+            {
+                StatsHookStop(HookEntityDeath, started);
+            }
+        }
+
         // A criatura, com o nome que o admin cadastrou.
         //
         // `scientistnpc_heavy` vira `scientist`. A tabela desce do
@@ -9006,6 +9372,52 @@ namespace Oxide.Plugins
             string mapped;
 
             return _questAlias.TryGetValue(raw, out mapped) ? mapped : raw;
+        }
+
+        // ####  UM ALVO OU UMA LISTA, E O `null` E QUEM DECIDE  ####
+        //
+        // Os objetivos de sempre tem UM alvo, e a comparacao e uma
+        // igualdade de string. O saque de conteiner tem uma LISTA, e
+        // e ela que faz o contador compartilhado do pedido do dono:
+        // barril azul, vermelho, amarelo e caixa comum somando no
+        // mesmo 20/20.
+        //
+        // A categoria (`@barrel`) e resolvida AQUI, contra o
+        // `_questSets` que desceu no watch, e nao no assign: assim um
+        // conteiner novo no catalogo do agente passa a valer para
+        // quem ja esta com a missao aceita, sem reatribuir nada.
+        //
+        // O laco pelas categorias so roda quando o prefab nao estava
+        // na lista literal, e a lista tem no maximo 32 entradas das
+        // quais quase sempre uma e categoria.
+        private bool QuestTargetMatches(QuestAssignment assignment, string target)
+        {
+            if (assignment.Targets == null)
+            {
+                return assignment.Target == target;
+            }
+
+            if (assignment.Targets.Contains(target))
+            {
+                return true;
+            }
+
+            foreach (string selector in assignment.Targets)
+            {
+                if (string.IsNullOrEmpty(selector) || selector[0] != '@')
+                {
+                    continue;
+                }
+
+                HashSet<string> set;
+
+                if (_questSets.TryGetValue(selector, out set) && set.Contains(target))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // O coracao. Ele sai na PRIMEIRA comparacao quando ninguem
@@ -9036,7 +9448,7 @@ namespace Oxide.Plugins
             {
                 QuestAssignment assignment = assignments[i];
 
-                if (assignment.Kind != kind || assignment.Target != target)
+                if (assignment.Kind != kind || !QuestTargetMatches(assignment, target))
                 {
                     continue;
                 }
@@ -9508,6 +9920,11 @@ namespace Oxide.Plugins
 
                 json.Append("{\"ok\":true,\"contract\":").Append(QuestContract);
                 json.Append(",\"lootHooked\":").Append(_questLootHooked ? "true" : "false");
+                // Os dois do saque andam juntos, e por isso um campo
+                // so: se um estiver ligado e o outro nao, e defeito.
+                json.Append(",\"containerHooked\":")
+                    .Append(_questContainerHooked ? "true" : "false");
+                json.Append(",\"containerSets\":").Append(_questSets.Count);
                 json.Append(",\"watchedKinds\":").Append(_questWatch.Count);
                 json.Append(",\"assignedPlayers\":").Append(_questAssigned.Count);
                 json.Append(",\"openEntries\":").Append(_questOpen.Count);
@@ -9645,6 +10062,17 @@ namespace Oxide.Plugins
             public string Kind;
             /// <summary>A CHAVE do alvo (`metal.fragments`). E com ela que se conta.</summary>
             public string Target;
+            /// <summary>
+            /// So no saque de conteiner: os alvos, CRUS.
+            ///
+            /// Cada item e um `ShortPrefabName` ou uma categoria
+            /// (`@barrel`), e quem resolve a segunda e o
+            /// QuestTargetMatches, contra o `_questSets` do watch.
+            ///
+            /// `null` em todos os outros tipos -- e e por `null` que
+            /// a contagem sabe qual das duas comparacoes usar.
+            /// </summary>
+            public HashSet<string> Targets;
             /// <summary>
             /// So na entrega que cobra item: o shortname da ENCOMENDA.
             ///
