@@ -121,6 +121,23 @@ export const uiScreenRequestSchema = z.object({
     .string()
     .regex(/^\d{17}$/)
     .optional(),
+  /**
+   * Este pedido é o RELÓGIO da tela, e não um clique.
+   *
+   * ####  ELE MUDA DUAS COISAS NO ATENDIMENTO  ####
+   *
+   * 1. a tela IDÊNTICA à última servida volta como `unchanged`, e
+   *    o plugin não redesenha nada — sem isto, um menu aberto na
+   *    frente de um jogador custaria 50 KB de RCON a cada volta
+   *    para trocar um desenho pelo mesmo desenho;
+   * 2. o que for CARO de apurar pode ser pulado. A tela de missões
+   *    vai ao RCON buscar o contador quentinho quando alguém a
+   *    abre; fazer isso dez vezes por minuto, por jogador, seria
+   *    pagar o preço de abrir a tela sem ninguém ter aberto nada.
+   *
+   * Ausente = pedido normal, que sempre traz a tela inteira.
+   */
+  refresh: z.boolean().optional(),
 });
 
 export type UiScreenRequest = z.infer<typeof uiScreenRequestSchema>;
@@ -209,6 +226,26 @@ export interface UiScreenBundle {
    * admin edita, e o cache é o que faz navegar ser instantâneo.
    */
   readonly volatile?: boolean;
+  /**
+   * De quantos em quantos segundos esta tela se PEDE DE NOVO.
+   *
+   * ####  A BARRA TEM DE ANDAR COM O MENU ABERTO  ####
+   *
+   * Uma tela é desenhada quando o jogador chega nela e fica
+   * parada até ele clicar em outra coisa. Numa que mostra
+   * contador — "47/90 minutos online" — isso quer dizer um número
+   * congelado na frente de quem está justamente esperando ele
+   * andar. Pedido do dono em 14/09/2026: "o progress bar tem que
+   * correr".
+   *
+   * Quem repete é o PLUGIN, e não o agente: só ele sabe se o
+   * jogador ainda está naquela tela, se o menu continua aberto e
+   * se não há um modal por cima. Um empurrão do agente chegaria
+   * para quem fechou o menu há dez minutos.
+   *
+   * Ausente/`0` = tela parada, que é o caso de quase todas.
+   */
+  readonly refreshSeconds?: number;
 }
 
 /** Modelo -> o pacote que o jogo consome. `null` = tela não existe. */
@@ -259,6 +296,7 @@ export function toGeneratedScreenBundle(
   document: UiDocument,
   screen: UiScreen,
   activeScreenId: string,
+  refreshSeconds?: number,
 ): UiScreenBundle {
   const shell = documentUsesShell(document);
 
@@ -273,6 +311,9 @@ export function toGeneratedScreenBundle(
     // jogador estivesse na lista de kits.
     actions: collectScreenActions(screen, document.shell),
     volatile: true,
+    // Só quem pede aparece: uma tela parada não carrega a chave, e
+    // o plugin antigo ignora a que não conhece.
+    ...(refreshSeconds === undefined || refreshSeconds <= 0 ? {} : { refreshSeconds }),
   };
 }
 
@@ -498,6 +539,34 @@ export interface UiScreenPayload {
   readonly requestId: string;
   readonly documentId: string;
   readonly screen: UiScreenBundle;
+}
+
+/**
+ * A resposta de um REFRESH cuja tela não mudou nada.
+ *
+ * ####  POR QUE ELA EXISTE  ####
+ *
+ * A tela de missões pesa dezenas de KB em base64. Redesenhá-la de
+ * dez em dez segundos para trocar um desenho por outro idêntico
+ * gastaria o cano do RCON — que é o mesmo por onde passam o chat,
+ * a loja e todo o resto — e faria o conteúdo do slot ser destruído
+ * e recriado sem necessidade.
+ *
+ * O plugin, ao receber isto, só reagenda o próximo relógio. O que
+ * está na tela dele continua exatamente como estava.
+ *
+ * Ela só é respondida a um pedido marcado com `refresh`: um pedido
+ * normal (o jogador CHEGANDO na tela) sempre leva a tela inteira,
+ * porque ali o plugin não tem desenho nenhum para manter.
+ */
+export interface UiScreenUnchangedPayload {
+  readonly requestId: string;
+  readonly documentId: string;
+  readonly unchanged: true;
+}
+
+export function encodeUiScreenUnchanged(payload: UiScreenUnchangedPayload): string {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
 }
 
 export function encodeUiScreenPayload(payload: UiScreenPayload): string {

@@ -239,6 +239,23 @@ namespace Oxide.Plugins
             /// O que veio gravado continua servindo de REPOUSO: e
             /// o que aparece enquanto a resposta nao chega.
             public bool Generated;
+
+            /// <summary>
+            /// De quantos em quantos segundos esta tela se pede de
+            /// novo. 0 = tela parada, que e o caso de quase todas.
+            ///
+            /// ####  A BARRA TEM DE ANDAR COM O MENU ABERTO  ####
+            ///
+            /// Uma tela fica parada ate o jogador clicar em outra
+            /// coisa. Numa que mostra contador - "47/90 minutos
+            /// online" - isso e um numero congelado na frente de
+            /// quem esta justamente esperando ele andar.
+            ///
+            /// Quem repete e o PLUGIN, e nao o agente: so aqui se
+            /// sabe se o jogador continua naquela tela, se o menu
+            /// segue aberto e se nao ha modal por cima.
+            /// </summary>
+            public float RefreshSeconds;
         }
 
         private class DocumentCache
@@ -362,6 +379,18 @@ namespace Oxide.Plugins
             public string PendingScreenId;
             public Timer LoadingTimer;
             public Timer TimeoutTimer;
+
+            /// <summary>
+            /// O relogio da tela desenhada, se ela pedir um.
+            ///
+            /// Ele NAO morre no CancelPending: aquele cancela um
+            /// pedido em voo, e este e o proximo. Quem o desliga e
+            /// fechar o menu, sair do servidor, ou o Draw da tela
+            /// seguinte - que agenda o dela por cima.
+            /// </summary>
+            public Timer RefreshTimer;
+            public string RefreshScreenId;
+            public float RefreshSeconds;
         }
 
         private readonly Dictionary<ulong, Session> _sessions = new Dictionary<ulong, Session>();
@@ -911,6 +940,11 @@ namespace Oxide.Plugins
             JToken isGenerated = item["generated"];
             screen.Generated = isGenerated != null && (bool)isGenerated;
 
+            // Ausente = tela parada. Um agente anterior a 14/09/2026
+            // nao manda a chave, e nada aqui muda de comportamento.
+            JToken refreshSeconds = item["refreshSeconds"];
+            screen.RefreshSeconds = refreshSeconds == null ? 0f : (float)refreshSeconds;
+
             return screen;
         }
 
@@ -1402,6 +1436,107 @@ namespace Oxide.Plugins
             {
                 CuiHelper.AddUi(player, Personalize(screen.Updates, session.Token));
             }
+
+            // ####  E O RELOGIO DA TELA QUE ACABOU DE ENTRAR  ####
+            //
+            // So daqui, que e o caminho COM SHELL: sem ele cada
+            // volta refaria a raiz inteira, e o menu piscaria de
+            // dez em dez segundos na cara do jogador.
+            ScheduleRefresh(session, player.userID, screen);
+        }
+
+        // ====================================================
+        //  O RELOGIO DE UMA TELA
+        // ====================================================
+
+        /// <summary>
+        /// Agenda a proxima volta da tela, se ela pedir uma.
+        ///
+        /// Idempotente: cancela a anterior antes. Tela sem relogio
+        /// apenas desliga o que houver.
+        /// </summary>
+        private void ScheduleRefresh(Session session, ulong userId, ScreenCache screen)
+        {
+            CancelRefresh(session);
+
+            if (screen == null || screen.RefreshSeconds <= 0f)
+            {
+                return;
+            }
+
+            session.RefreshScreenId = screen.Id;
+            session.RefreshSeconds = screen.RefreshSeconds;
+            session.RefreshTimer = timer.Once(screen.RefreshSeconds, delegate
+            {
+                RefreshTick(userId);
+            });
+        }
+
+        private void CancelRefresh(Session session)
+        {
+            if (session.RefreshTimer != null)
+            {
+                session.RefreshTimer.Destroy();
+                session.RefreshTimer = null;
+            }
+        }
+
+        /// <summary>
+        /// Uma volta do relogio. NUNCA desenha nada por conta
+        /// propria - ela so PEDE.
+        ///
+        /// ####  TRES MOTIVOS PARA SO REAGENDAR  ####
+        ///
+        ///   1. o jogador navegou para outra tela - quem desenhou a
+        ///      nova ja agendou o relogio DELA, e este morre aqui;
+        ///   2. ha um modal por cima - redesenhar a pagina de tras
+        ///      FECHA o modal (ver Draw), e o jogador perderia a
+        ///      caixa de confirmacao no meio de um clique;
+        ///   3. ja ha um pedido em voo - empilhar outro so daria
+        ///      dois desenhos para a mesma tela.
+        ///
+        /// Nos casos 2 e 3 o relogio continua: e uma espera, nao um
+        /// fim.
+        /// </summary>
+        private void RefreshTick(ulong userId)
+        {
+            Session session;
+            if (!_sessions.TryGetValue(userId, out session))
+            {
+                return;
+            }
+
+            session.RefreshTimer = null;
+
+            BasePlayer player = BasePlayer.FindByID(userId);
+            if (player == null)
+            {
+                return;
+            }
+
+            if (session.CurrentScreen == null ||
+                session.CurrentScreen.Id != session.RefreshScreenId)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(session.ModalScreenId) ||
+                !string.IsNullOrEmpty(session.PendingRequestId))
+            {
+                session.RefreshTimer = timer.Once(session.RefreshSeconds, delegate
+                {
+                    RefreshTick(userId);
+                });
+                return;
+            }
+
+            DocumentCache document;
+            if (!_documents.TryGetValue(session.DocumentId, out document))
+            {
+                return;
+            }
+
+            RequestScreen(player, session, document.Id, session.RefreshScreenId, true);
         }
 
         /// <summary>
@@ -1519,11 +1654,16 @@ namespace Oxide.Plugins
         // ====================================================
         //  PEDIR UMA TELA AO AGENTE
         // ====================================================
-        private void RequestScreen(BasePlayer player, Session session, string documentId, string screenId)
+        private void RequestScreen(
+            BasePlayer player,
+            Session session,
+            string documentId,
+            string screenId,
+            bool refresh = false)
         {
             CancelPending(session);
 
-            Trace("pedindo tela " + screenId +
+            Trace("pedindo tela " + screenId + (refresh ? " (relogio)" : "") +
                   (document_ScreenKnown(documentId, screenId) ? "" : " (gerada: nao esta no documento)"));
 
             string requestId = NewToken();
@@ -1531,13 +1671,23 @@ namespace Oxide.Plugins
             session.PendingScreenId = screenId;
             _pending[requestId] = player.userID;
 
-            // O aviso de carregando so aparece se DEMORAR. Ver
-            // LoadingDelaySeconds.
             ulong userId = player.userID;
-            session.LoadingTimer = timer.Once(LoadingDelaySeconds, delegate
+
+            // ####  O RELOGIO NAO MOSTRA "CARREGANDO"  ####
+            //
+            // O jogador nao pediu nada: ele esta parado, olhando a
+            // tela que ja tem. Um aviso de carregando piscando de
+            // dez em dez segundos seria pior do que o numero
+            // congelado que este relogio veio consertar.
+            if (!refresh)
             {
-                ShowLoading(userId, requestId);
-            });
+                // O aviso so aparece se DEMORAR. Ver
+                // LoadingDelaySeconds.
+                session.LoadingTimer = timer.Once(LoadingDelaySeconds, delegate
+                {
+                    ShowLoading(userId, requestId);
+                });
+            }
 
             session.TimeoutTimer = timer.Once(RequestTimeoutSeconds, delegate
             {
@@ -1558,7 +1708,17 @@ namespace Oxide.Plugins
             builder.Append(screenId);
             builder.Append("\",\"steamId\":\"");
             builder.Append(player.UserIDString);
-            builder.Append("\"}");
+            builder.Append("\"");
+
+            // O agente responde "nada mudou" a este, e nunca a um
+            // clique: no clique o plugin nao tem desenho nenhum
+            // para manter.
+            if (refresh)
+            {
+                builder.Append(",\"refresh\":true");
+            }
+
+            builder.Append("}");
 
             Puts(builder.ToString());
         }
@@ -1849,6 +2009,20 @@ namespace Oxide.Plugins
                 CancelPending(session);
                 CuiHelper.DestroyUi(player, LoadingName);
                 player.ChatMessage(lang.GetMessage("ScreenUnavailable", this, player.UserIDString));
+                return;
+            }
+
+            // ####  NADA MUDOU: NAO SE TOCA NA TELA  ####
+            //
+            // Resposta do agente a uma volta do relogio cujo desenho
+            // e identico ao ultimo servido. Redesenhar seria destruir
+            // e recriar o conteudo do slot para pintar exatamente os
+            // mesmos pixels. So o proximo relogio e agendado.
+            JToken unchanged = payload["unchanged"];
+            if (unchanged != null && (bool)unchanged)
+            {
+                CancelPending(session);
+                ScheduleRefresh(session, userId, session.CurrentScreen);
                 return;
             }
 
@@ -2415,6 +2589,7 @@ namespace Oxide.Plugins
             if (_sessions.TryGetValue(userId, out session))
             {
                 CancelPending(session);
+                CancelRefresh(session);
 
                 // A compra em curso perde o dono. O agente ainda
                 // vai responder, e a resposta cai no vazio - o que

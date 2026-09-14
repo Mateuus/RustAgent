@@ -846,6 +846,96 @@ describe('o envio ao servidor', () => {
     );
   });
 
+  // ------------------------------------------------------------
+  //  O RELÓGIO DA TELA
+  // ------------------------------------------------------------
+
+  /** Um pedido do plugin, como ele chega no console. */
+  const ask = (input: {
+    readonly requestId: string;
+    readonly screenId: string;
+    readonly steamId?: string;
+    readonly refresh?: boolean;
+  }): string =>
+    `[OrigemZUI] ${UI_REQUEST_MARKER}${JSON.stringify({
+      requestId: input.requestId,
+      documentId: MAIN_MENU_SLUG,
+      screenId: input.screenId,
+      ...(input.steamId === undefined ? {} : { steamId: input.steamId }),
+      ...(input.refresh === true ? { refresh: true } : {}),
+    })}`;
+
+  const PLAYER = '76561198000000001';
+
+  const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  const decode = (command: string): string =>
+    Buffer.from(command.split(' ')[1] ?? '', 'base64').toString('utf8');
+
+  it('o relógio não redesenha a tela que não mudou', async () => {
+    await harness.sync.push('pvp1', 'manual');
+    harness.server.sent.length = 0;
+
+    // O jogador CHEGOU na tela: ela vai inteira, porque o plugin não
+    // tem desenho nenhum para manter.
+    harness.sync.handleLine('pvp1', ask({ requestId: 'r1', screenId: 'tela-kits', steamId: PLAYER }));
+    await settle();
+
+    expect(decode(harness.server.sent[0] ?? '')).toContain('"cui"');
+
+    // A volta do relógio, com a tela idêntica: só o aviso.
+    harness.sync.handleLine(
+      'pvp1',
+      ask({ requestId: 'r2', screenId: 'tela-kits', steamId: PLAYER, refresh: true }),
+    );
+    await settle();
+
+    const second = decode(harness.server.sent[1] ?? '');
+
+    expect(JSON.parse(second)).toEqual({
+      requestId: 'r2',
+      documentId: MAIN_MENU_SLUG,
+      unchanged: true,
+    });
+    // O que importa é o tamanho: a tela inteira são dezenas de KB,
+    // e é isso que deixa de atravessar o RCON a cada dez segundos.
+    expect(second.length).toBeLessThan(200);
+  });
+
+  it('um CLIQUE sempre traz a tela inteira, mesmo idêntica', async () => {
+    await harness.sync.push('pvp1', 'manual');
+    harness.server.sent.length = 0;
+
+    harness.sync.handleLine('pvp1', ask({ requestId: 'r1', screenId: 'tela-kits', steamId: PLAYER }));
+    await settle();
+
+    // Sem `refresh`: o jogador saiu da tela e voltou, e o plugin
+    // destruiu o conteúdo. Responder "nada mudou" o deixaria com o
+    // slot vazio para sempre.
+    harness.sync.handleLine('pvp1', ask({ requestId: 'r2', screenId: 'tela-kits', steamId: PLAYER }));
+    await settle();
+
+    expect(decode(harness.server.sent[1] ?? '')).toContain('"cui"');
+  });
+
+  it('a tela de um jogador não cala a do outro', async () => {
+    await harness.sync.push('pvp1', 'manual');
+    harness.server.sent.length = 0;
+
+    harness.sync.handleLine('pvp1', ask({ requestId: 'r1', screenId: 'tela-kits', steamId: PLAYER }));
+    await settle();
+
+    // Outro jogador, mesma tela, e o relógio dele. A digital é por
+    // pessoa: a tela dele nunca foi servida.
+    harness.sync.handleLine(
+      'pvp1',
+      ask({ requestId: 'r2', screenId: 'tela-kits', steamId: '76561198000000002', refresh: true }),
+    );
+    await settle();
+
+    expect(decode(harness.server.sent[1] ?? '')).toContain('"cui"');
+  });
+
   it('ignora uma linha com o marcador que NÃO veio do plugin', () => {
     // O agente lê o console inteiro, e isso inclui o chat dos
     // jogadores. Sem o controle de origem, alguém digitando o

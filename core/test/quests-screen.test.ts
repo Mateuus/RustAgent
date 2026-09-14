@@ -30,6 +30,7 @@ import {
   emptyQuestsView,
   parseQuestsScreenId,
   QUESTS_PAGE_SIZE,
+  QUESTS_REFRESH_SECONDS,
   QUESTS_SCREEN_ID,
   questsScreenId,
   readQuestsView,
@@ -1123,5 +1124,51 @@ describe('o provedor', () => {
     // Ela diz "você tem 3.240 de 5.000"; em cache, diria isso para
     // o servidor inteiro e por até cinco minutos.
     expect(bundle?.volatile).toBe(true);
+  });
+
+  it('a tela pede o próprio relógio, para a barra andar parada', async () => {
+    const bundle = await quests({})({
+      serverId: 'pvp1',
+      document: DOCUMENT,
+      screenId: QUESTS_SCREEN_ID,
+      steamId: '76561198000000001',
+    });
+
+    // Sem isto, "47/90 minutos online" fica congelado na frente de
+    // quem está justamente esperando o número subir.
+    expect(bundle?.refreshSeconds).toBe(QUESTS_REFRESH_SECONDS);
+  });
+
+  it('o relógio NÃO vai ao RCON buscar o contador; o clique vai', async () => {
+    const idas: string[] = [];
+    const provider = createQuestsScreenProvider({
+      quests: reader({}) as never,
+      logger,
+      refresh: (serverId) => {
+        idas.push(serverId);
+
+        return Promise.resolve();
+      },
+    });
+
+    const input = {
+      serverId: 'pvp1',
+      document: DOCUMENT,
+      screenId: QUESTS_SCREEN_ID,
+      steamId: '76561198000000001',
+    };
+
+    // Abrir a tela é raro e já espera o agente: ali a ida compra o
+    // número quentinho.
+    await provider(input);
+
+    expect(idas).toEqual(['pvp1']);
+
+    // O relógio bate de dez em dez segundos, por jogador com o menu
+    // aberto. Ir ao RCON ali seria pagar o preço de abrir a tela
+    // sem ninguém ter aberto nada.
+    await provider({ ...input, refresh: true });
+
+    expect(idas).toEqual(['pvp1']);
   });
 });
