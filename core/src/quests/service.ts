@@ -181,6 +181,26 @@ export interface QuestConsumer {
   }>;
 }
 
+/**
+ * A tentativa acabou de fechar todos os objetivos.
+ *
+ * Tem nome próprio porque quem o recebe precisa GUARDÁ-LO: o aviso
+ * de uma missão que fecha dentro do balcão do NPC espera o resgate
+ * do mesmo clique antes de virar frase. Ver `index.ts`.
+ */
+export interface QuestCompletedEvent {
+  readonly serverId: string;
+  readonly steamId: string;
+  readonly playerQuestId: number;
+  readonly questId: string;
+  /** O título do SNAPSHOT: o que ele aceitou, e não o de hoje. */
+  readonly title: string;
+  /** Onde resgatar, além do menu. `null` = só o menu. */
+  readonly npcName: string | null;
+  /** A missão dá alguma coisa? Ver o texto do aviso. */
+  readonly hasRewards: boolean;
+}
+
 export interface QuestsServiceDeps {
   readonly repository: QuestsRepository;
   readonly logger: Logger;
@@ -223,18 +243,7 @@ export interface QuestsServiceDeps {
    *
    * Não lança e não espera: quem fala com o jogo é o index.
    */
-  readonly onCompleted?: (input: {
-    readonly serverId: string;
-    readonly steamId: string;
-    readonly playerQuestId: number;
-    readonly questId: string;
-    /** O título do SNAPSHOT: o que ele aceitou, e não o de hoje. */
-    readonly title: string;
-    /** Onde resgatar, além do menu. `null` = só o menu. */
-    readonly npcName: string | null;
-    /** A missão dá alguma coisa? Ver o texto do aviso. */
-    readonly hasRewards: boolean;
-  }) => void;
+  readonly onCompleted?: (input: QuestCompletedEvent) => void;
   readonly now?: () => number;
 }
 
