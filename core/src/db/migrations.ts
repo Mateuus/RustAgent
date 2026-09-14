@@ -6968,6 +6968,123 @@ CREATE TABLE IF NOT EXISTS rules_scopes (
 );
 `;
 
+// ------------------------------------------------------------
+//  085 — a linha de partida das missoes de TEMPO ONLINE
+//
+//  ####  ELA NAO MUDA O SCHEMA; ACERTA UM NUMERO  ####
+//
+//  Ate hoje o objetivo `playtime` lia a metrica `time.played` do
+//  ranking. A partir desta versao ele le `player_servers` — tempo
+//  acumulado NAQUELE servidor, com a sessao aberta somada (ver
+//  `PlayersRepository.onlineSecondsOf` e `QuestPlaytimeSource`).
+//
+//  As duas contam a mesma coisa, mas de origens diferentes: o
+//  ranking comecou a somar no dia em que foi ligado, e o
+//  `played_seconds` existe desde a primeira vez que o jogador
+//  entrou. Em quem ja joga ha meses a diferenca e de HORAS.
+//
+//  E o `baselines` do aceite foi gravado na regua velha. Sem este
+//  acerto, toda tentativa ja aceita subtrairia uma partida pequena
+//  de um total grande e concluiria sozinha no primeiro ciclo do
+//  coletor — a missao de 90 minutos daria por cumprida sem ninguem
+//  jogar um minuto.
+//
+//  ####  O QUE ELE PRESERVA E O PROGRESSO, NAO A PARTIDA  ####
+//
+//      baseline_novo = tempo_online_agora - minutos_ja_contados * 60
+//
+//  Quem estava em 0/90 continua em 0/90 e comeca a contar daqui;
+//  quem ja tivesse 12/90 mantem os 12. E o que o dono pediu em
+//  14/09/2026: "reconectar nao apaga o tempo ja contabilizado".
+//
+//  So as tentativas `active` entram. Uma `completed` ja fechou e
+//  uma `claimed` ja pagou: mexer no baseline delas seria reabrir
+//  conta encerrada.
+// ------------------------------------------------------------
+interface LegacyPlaytimeRow {
+  readonly id: number;
+  readonly server_id: string;
+  readonly steam_id: string;
+  readonly snapshot: string;
+}
+
+function rebaseActivePlaytimeObjectives(db: AgentDatabase, logger?: Logger): void {
+  const rows = db
+    .prepare(`SELECT id, server_id, steam_id, snapshot FROM player_quests WHERE status = 'active'`)
+    .all() as LegacyPlaytimeRow[];
+
+  // A MESMA conta do `onlineSecondsOf`. Repetida aqui de proposito:
+  // uma migracao que importasse o repositorio passaria a mudar de
+  // comportamento junto com ele — e uma migracao ja aplicada nao
+  // roda de novo para se corrigir.
+  const onlineSeconds = db.prepare(
+    `SELECT played_seconds
+            + CASE
+                WHEN joined_at IS NOT NULL AND left_at IS NULL
+                THEN CAST(MAX(0, last_seen - joined_at) / 1000 AS INTEGER)
+                ELSE 0
+              END AS seconds
+       FROM player_servers
+      WHERE server_id = @server_id AND steam_id = @steam_id`,
+  );
+
+  const progress = db.prepare(
+    `SELECT value FROM player_quest_progress
+      WHERE player_quest_id = @id AND objective_seq = @seq`,
+  );
+
+  const update = db.prepare('UPDATE player_quests SET snapshot = @snapshot WHERE id = @id');
+
+  let touched = 0;
+
+  for (const row of rows) {
+    // Um snapshot ilegivel nao pode derrubar a subida do agente: o
+    // que esta migracao faz e opcional para quem nao tem missao de
+    // tempo online, e obrigatorio para ninguem.
+    let snapshot: {
+      objectives?: { seq?: number; kind?: string }[];
+      baselines?: Record<string, number>;
+    };
+
+    try {
+      snapshot = JSON.parse(row.snapshot) as typeof snapshot;
+    } catch {
+      logger?.warn({ playerQuest: row.id }, 'snapshot de quest ilegivel; baseline nao acertado');
+      continue;
+    }
+
+    const seqs = (snapshot.objectives ?? [])
+      .filter((objective) => objective.kind === 'playtime')
+      .map((objective) => objective.seq)
+      .filter((seq): seq is number => typeof seq === 'number');
+
+    if (seqs.length === 0) {
+      continue;
+    }
+
+    const seconds =
+      (onlineSeconds.get({ server_id: row.server_id, steam_id: row.steam_id }) as
+        | { seconds: number }
+        | undefined)?.seconds ?? 0;
+
+    const baselines = { ...(snapshot.baselines ?? {}) };
+
+    for (const seq of seqs) {
+      const have =
+        (progress.get({ id: row.id, seq }) as { value: number } | undefined)?.value ?? 0;
+
+      baselines[String(seq)] = Math.max(0, seconds - have * 60);
+    }
+
+    update.run({ id: row.id, snapshot: JSON.stringify({ ...snapshot, baselines }) });
+    touched += 1;
+  }
+
+  if (touched > 0) {
+    logger?.info({ attempts: touched }, 'linha de partida das missoes de tempo online acertada');
+  }
+}
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7191,6 +7308,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // 14/09/2026: a aba REGRAS do menu ganha conteudo, e ele e do
   // painel -- da rede, ou proprio daquele servidor.
   { id: 83, name: 'server-rules', sql: SERVER_RULES_SCHEMA },
+  // A 84 esta reservada para a frente do saque de conteineres, que
+  // corre em outra branch. Colidir o id faria UMA das duas ser
+  // PULADA em silencio no merge.
+  { id: 85, name: 'quest-playtime-rebase', run: rebaseActivePlaytimeObjectives },
 ];
 
 /** Linha da tabela de controle. */

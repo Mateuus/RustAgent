@@ -68,7 +68,8 @@ export type QuestWipePolicy = 'reset' | 'keep';
  *   deliver  levar até um NPC. `target` é o id do NPC DESTINO, e o
  *            `item` diz O QUE se leva — vazio, é o correio antigo,
  *            em que só a chegada conta e a distância é que paga
- *   playtime tempo online, em MINUTOS. Sem alvo — o agente mede
+ *   playtime tempo online NAQUELE servidor, em MINUTOS. Sem alvo
+ *            — quem mede é o agente, pela sessão do jogador
  *   metric   qualquer métrica do ranking. `metric` preenchido
  *
  * Os três primeiros e o `metric` custam zero em performance: o
@@ -789,19 +790,27 @@ export interface QuestSnapshot {
    * ####  SÓ OS OBJETIVOS `metric` E `playtime` TÊM UM  ####
    *
    * Os outros cinco são contados pelo plugin, que zera junto com a
-   * tentativa. Estes dois são lidos de `player_stats`, que é um
-   * TOTAL acumulado e não sabe que a quest existe: sem a linha de
-   * partida, quem já tinha 4.000 abates concluiria "mate 20"
-   * instantaneamente.
+   * tentativa. Estes dois leem um TOTAL acumulado que não sabe que
+   * a quest existe — `player_stats` no `metric`, `player_servers`
+   * no `playtime` — e sem a linha de partida quem já tinha 4.000
+   * abates concluiria "mate 20" instantaneamente.
    *
    * Ele mora no snapshot — e não numa coluna — porque é a mesma
    * coisa que o resto dele: o que ficou congelado no aceite. Uma
    * coluna nova custaria uma migração para guardar um dado que já
    * tem lugar.
    *
-   * `playtime` é gravado em SEGUNDOS aqui, que é a unidade de
-   * `time.played`; o objetivo é em minutos, e a divisão acontece
-   * num lugar só, no serviço.
+   * `playtime` é gravado em SEGUNDOS aqui, que é a unidade da
+   * `QuestPlaytimeSource`; o objetivo é em minutos, e a divisão
+   * acontece num lugar só, no serviço.
+   *
+   * ####  E A RÉGUA DO `playtime` MUDOU EM 14/09/2026  ####
+   *
+   * Ela era o `time.played` do ranking, que só anda quando a sessão
+   * FECHA — a missão de tempo online passava a sessão inteira em
+   * 0/90. Hoje é o tempo daquele jogador naquele servidor, com a
+   * sessão aberta somada. A migração 085 acertou a partida das
+   * tentativas que já estavam em andamento.
    */
   readonly baselines?: Readonly<Record<number, number>>;
 }

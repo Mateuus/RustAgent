@@ -728,7 +728,7 @@ CREATE INDEX idx_quest_npcs_server ON quest_npcs (server_id, enabled);
 | `craft` | `OnItemCraftFinished` | **já existe** (`:5558`) | zero |
 | `loot` | `OnItemAddedToContainer` | **novo** | o mais alto — §5.4 |
 | `deliver` | posição do jogador vs. NPC destino | **novo**, mas raro | baixo — §5.6 |
-| `playtime` | o agente, sem passar pelo plugin | nenhum | zero |
+| `playtime` | o agente, sem passar pelo plugin (`player_servers`, com a sessão aberta) | nenhum | zero |
 | `metric` | `player_stats`, do ranking | nenhum | zero |
 
 ### 5.1 `kill` — o alvo é o nome curto da entidade
@@ -853,12 +853,61 @@ ainda no bolso.
 
 ### 5.7 `playtime` — o único que não passa pelo plugin
 
-O agente já mede tempo online para o ranking. O objetivo é em **minutos**, e a
-conta é a mesma do `metric` com `time.played`: diferença desde o aceite.
+O agente já mede tempo online. O objetivo é em **minutos**, e a conta é a
+diferença desde o aceite.
 
 Ele existe como `kind` próprio, e não como `metric` disfarçado, por uma razão de
 painel: "ficar 60 minutos online" é a quest que todo servidor cadastra primeiro,
 e obrigar o admin a saber o nome da métrica para isso seria mesquinho.
+
+#### A régua mudou em 14/09/2026 — e por quê
+
+Até essa data ele lia a métrica `time.played` do ranking. **Ela não serve**, e o
+motivo está em `player_servers`:
+
+```
+played_seconds   só cresce quando a sessão FECHA (closeSession)
+time.played      é a diferença dessa coluna entre duas rodadas do coletor
+```
+
+Ou seja: enquanto o jogador está conectado, o total do ranking fica **parado**.
+Medido no servidor de teste em 14/09/2026 — jogador online havia quase três
+horas, `time.played` congelado desde a última vez que ele havia desconectado. A
+missão "fique 90 minutos online" passava a sessão inteira em **0/90** e só
+pulava depois da desconexão.
+
+Hoje a fonte é a `QuestPlaytimeSource`, e quem a satisfaz é
+`PlayersRepository.onlineSecondsOf`:
+
+```
+tempo online = played_seconds + (sessão aberta ? last_seen - joined_at : 0)
+```
+
+Três propriedades que o caminho do ranking não tinha:
+
+| | |
+|---|---|
+| **Não depende de ninguém** | nem do plugin, nem do RCON, nem de o coletor do ranking ter rodado |
+| **Não anda para trás** | o fechamento da sessão soma exatamente o pedaço que já estava sendo contado vivo — por isso a conta viva vai até o `last_seen`, e não até "agora" |
+| **Atravessa o reinício** | está no banco, e a sessão reaberta no boot começa na hora em que o jogador de fato conectou |
+
+O ranking de tempo online **não mudou**: ele continua sendo o delta consolidado,
+que é o que uma disputa por período precisa.
+
+A migração **085** acertou a linha de partida das tentativas que já estavam em
+andamento — as duas réguas medem a mesma coisa de origens diferentes, e sem o
+acerto toda missão de tempo online já aceita concluiria sozinha no primeiro
+ciclo do coletor. O que ela preserva é o **progresso**, e não a partida:
+`baseline_novo = tempo_online_agora − minutos_já_contados × 60`.
+
+#### E quem FECHA a missão de tempo online
+
+O `refreshDerived`, e só ele. O `#completeIfDone` era chamado pelo push e pelo
+lote do plugin — e o plugin não conta `playtime` nem `metric`
+(`PLUGIN_OBJECTIVE_KINDS`). O número chegava a 90/90 e a tentativa ficava
+`active` para sempre: sem aviso no chat, sem resgate. Desde 14/09/2026 o próprio
+recálculo conclui o que fechou, e é de lá que saem o recibo e a liberação do
+resgate.
 
 ---
 
@@ -1648,6 +1697,10 @@ Construída em 06/09/2026. Suíte do `core` verde: **1 542 testes, 77 arquivos**
 > para sempre, e a quest jamais conclui. O ciclo do coletor precisa chamá-lo para
 > os jogadores online, junto com o flush. Sem isso o buraco é **silencioso**: o
 > módulo funciona inteiro, menos os objetivos `metric` e `playtime`.
+>
+> **E ele também CONCLUI** (14/09/2026). Chamar o recálculo não bastava: ele
+> gravava o número e ia embora, e nenhum outro caminho fecha um objetivo que o
+> plugin não conta. Ver §5.7.
 
 **O que a frente B deliberadamente NÃO fez:** nenhum comando de RCON, nenhuma
 leitura de console. Ela recebe um contador e devolve um desfecho; quem fala com

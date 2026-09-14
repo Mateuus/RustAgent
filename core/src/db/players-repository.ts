@@ -376,6 +376,49 @@ export class PlayersRepository {
     return new Map(rows.map((row) => [row.steam_id, row.played_seconds]));
   }
 
+  /**
+   * Quanto tempo ele já esteve online NAQUELE servidor, contando a
+   * sessão que ainda está aberta.
+   *
+   * ####  É O `played_seconds` QUE FALTA UM PEDAÇO  ####
+   *
+   * Aquela coluna só cresce no FECHAMENTO da sessão (ver
+   * `closeSession`). Lida crua, ela responde "quanto ele jogou até
+   * a última vez que saiu" — e quem está conectado agora há três
+   * horas aparece com o número de ontem. Foi assim que a missão de
+   * tempo online ficou em 0/90 a sessão inteira.
+   *
+   * ####  A SESSÃO VIVA VALE ATÉ O `last_seen`, E NÃO ATÉ AGORA  ####
+   *
+   * Porque é exatamente isso que o `closeSession` vai somar quando
+   * ela terminar. Contar até "agora" daria um número maior do que o
+   * que ficaria gravado, e o contador andaria para trás no instante
+   * da saída. Com o `last_seen` — carimbado a cada varredura, 15 s
+   * — os dois lados fecham no mesmo valor: nenhum minuto se perde,
+   * nenhum conta duas vezes.
+   *
+   * `0` quando ele nunca esteve ali. Não é erro: é a resposta.
+   */
+  onlineSecondsOf(serverId: string, steamId: string): number {
+    const row = this.#db
+      .prepare(
+        `SELECT played_seconds
+                + CASE
+                    WHEN joined_at IS NOT NULL AND left_at IS NULL
+                    -- MAX(0, …) pelo mesmo motivo do fechamento: um
+                    -- relógio que andou para trás não pode subtrair
+                    -- tempo que já foi contado.
+                    THEN CAST(MAX(0, last_seen - joined_at) / 1000 AS INTEGER)
+                    ELSE 0
+                  END AS seconds
+           FROM player_servers
+          WHERE server_id = @server_id AND steam_id = @steam_id`,
+      )
+      .get({ server_id: serverId, steam_id: steamId }) as { seconds: number } | undefined;
+
+    return row?.seconds ?? 0;
+  }
+
   /** Os N últimos eventos daquele jogador, do mais novo ao mais velho. */
   events(steamId: string, limit: number): readonly PlayerEventRecord[] {
     const rows = this.#db

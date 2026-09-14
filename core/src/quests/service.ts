@@ -84,6 +84,37 @@ export interface QuestStatsSource {
 }
 
 /**
+ * De onde vem o número do objetivo `playtime`.
+ *
+ * ####  POR QUE ELE NÃO SAI DO RANKING, COMO O `metric`  ####
+ *
+ * Porque o `time.played` do ranking é a DIFERENÇA do
+ * `played_seconds` entre duas rodadas do coletor — e aquela coluna
+ * só cresce quando a sessão FECHA. Enquanto o jogador está
+ * conectado, o total do ranking fica parado: foi exatamente assim
+ * que "fique 90 minutos online" passou uma sessão inteira em 0/90,
+ * medido no servidor de teste em 14/09/2026.
+ *
+ * A sessão aberta só aparece em `player_servers`, e é de lá que
+ * este número vem (`PlayersRepository.onlineSecondsOf`). Ele é o
+ * tempo daquele jogador NAQUELE servidor, acumulado desde sempre, e
+ * tem três propriedades que o caminho do ranking não tinha:
+ *
+ *   - **não depende de ninguém** — nem do plugin, nem do RCON, nem
+ *     de o coletor do ranking ter rodado naquele minuto;
+ *   - **nunca anda para trás** — o fechamento da sessão soma
+ *     exatamente o pedaço que já estava sendo contado vivo;
+ *   - **atravessa o reinicio** — está no banco, e a sessão reaberta
+ *     no boot começa na hora em que o jogador de fato conectou.
+ *
+ * Ausente = o objetivo fica parado, como o `metric` sem `stats`.
+ */
+export interface QuestPlaytimeSource {
+  /** Segundos online ali, com a sessão aberta incluída. */
+  secondsOf(serverId: string, steamId: string): number;
+}
+
+/**
  * Quem responde ao campo `requires` da quest.
  *
  * O valor é opaco para o serviço — `'origemzquests.vip'`,
@@ -154,6 +185,7 @@ export interface QuestsServiceDeps {
   readonly logger: Logger;
   readonly rewards?: QuestRewardService;
   readonly stats?: QuestStatsSource;
+  readonly playtime?: QuestPlaytimeSource;
   readonly permissions?: QuestPermissions;
   readonly items?: QuestItemNames;
   readonly consumer?: QuestConsumer;
@@ -1260,12 +1292,6 @@ export class QuestsService {
    * módulo funciona inteiro, menos esses dois tipos de objetivo.
    */
   refreshDerived(input: { readonly serverId: string; readonly steamId: string }): void {
-    const stats = this.#deps.stats;
-
-    if (stats === undefined) {
-      return;
-    }
-
     const now = this.#now();
     const cache = new Map<string, number>();
 
@@ -1274,32 +1300,88 @@ export class QuestsService {
         continue;
       }
 
-      for (const objective of attempt.snapshot.objectives) {
-        const metric = metricOf(objective);
+      let changed = false;
 
-        if (metric === null) {
+      for (const objective of attempt.snapshot.objectives) {
+        const key = derivedKeyOf(objective);
+
+        if (key === null) {
           continue;
         }
 
-        let total = cache.get(metric);
+        let total = cache.get(key);
 
         if (total === undefined) {
-          total = stats.totalOf(input.serverId, input.steamId, metric);
-          cache.set(metric, total);
+          const read = this.#derivedTotalOf(objective, input);
+
+          // Fonte ausente é fonte ausente: o objetivo fica parado,
+          // e não zerado. Zerar apagaria progresso real por causa
+          // de uma dependência que nem foi ligada.
+          if (read === null) {
+            continue;
+          }
+
+          total = read;
+          cache.set(key, total);
         }
 
         const baseline = attempt.snapshot.baselines?.[objective.seq] ?? 0;
-        // `Math.max(0, …)` porque o total pode ter sido zerado por
-        // um reset de admin no ranking: o progresso para de andar,
-        // mas nunca anda para trás.
         const raw = Math.max(0, total - baseline);
         const value = objective.kind === 'playtime' ? Math.floor(raw / 60) : raw;
+        const have = attempt.progress[objective.seq] ?? 0;
 
-        if ((attempt.progress[objective.seq] ?? 0) !== value) {
-          this.#deps.repository.setProgress(attempt.id, objective.seq, value, now);
+        // ####  PARA CIMA, E SÓ PARA CIMA  ####
+        //
+        // O total pode CAIR debaixo do progresso já gravado: um
+        // reset de admin no ranking zera a métrica, e nos segundos
+        // entre a saída do jogador e a consolidação da sessão o
+        // tempo vivo some do total. Gravar a queda faria o contador
+        // andar para trás por algo que o jogador não fez — e
+        // "reconectar não apaga o tempo já contabilizado" é pedido
+        // do dono, não detalhe de implementação.
+        if (value <= have) {
+          continue;
         }
+
+        this.#deps.repository.setProgress(attempt.id, objective.seq, value, now);
+        changed = true;
+      }
+
+      // ####  E É AQUI QUE A MISSÃO DE TEMPO ONLINE FECHA  ####
+      //
+      // Sem esta linha o número chegava a 90/90 e a tentativa
+      // continuava `active` para sempre: o `#completeIfDone` só era
+      // chamado pelo push e pelo lote do plugin, e o plugin não
+      // conta `playtime` nem `metric` (ver PLUGIN_OBJECTIVE_KINDS).
+      // O aviso no chat e a liberação do resgate saem de lá.
+      if (changed) {
+        this.#completeIfDone(attempt.id, 'agent', null);
       }
     }
+  }
+
+  /**
+   * O total acumulado de um objetivo derivado, na unidade em que
+   * ele é medido.
+   *
+   * `null` tem dois sentidos, e os dois dão no mesmo: ou o objetivo
+   * não é derivado, ou a fonte dele não foi ligada.
+   */
+  #derivedTotalOf(
+    objective: QuestObjective,
+    input: { readonly serverId: string; readonly steamId: string },
+  ): number | null {
+    if (objective.kind === 'playtime') {
+      return this.#deps.playtime?.secondsOf(input.serverId, input.steamId) ?? null;
+    }
+
+    const metric = metricOf(objective);
+
+    if (metric === null) {
+      return null;
+    }
+
+    return this.#deps.stats?.totalOf(input.serverId, input.steamId, metric) ?? null;
   }
 
   // ======================================================
@@ -1412,10 +1494,14 @@ export class QuestsService {
     const baselines: Record<number, number> = {};
 
     for (const objective of quest.objectives) {
-      const metric = metricOf(objective);
+      // A MESMA fonte que o `refreshDerived` vai ler depois. Duas
+      // réguas para a partida e para a chegada dariam um contador
+      // que nasce torto — no `playtime`, torto pelo tempo que ele
+      // já estava online antes de aceitar.
+      const total = this.#derivedTotalOf(objective, { serverId, steamId });
 
-      if (metric !== null) {
-        baselines[objective.seq] = this.#deps.stats?.totalOf(serverId, steamId, metric) ?? 0;
+      if (total !== null) {
+        baselines[objective.seq] = total;
       }
     }
 
@@ -1756,16 +1842,35 @@ export class QuestsService {
 //  §4  FUNÇÕES PURAS
 // ------------------------------------------------------------
 
-/** A métrica de um objetivo que o AGENTE conta. `null` nos do plugin. */
+/**
+ * A métrica de RANKING de um objetivo. `null` em todo o resto.
+ *
+ * ####  O `playtime` SAIU DAQUI EM 14/09/2026  ####
+ *
+ * Ele apontava para `time.played`, a métrica do ranking — e aquela
+ * só anda quando a sessão do jogador FECHA. Hoje o tempo online vem
+ * da `QuestPlaytimeSource`, que enxerga a sessão aberta; o ranking
+ * de tempo online continua exatamente como estava.
+ */
 function metricOf(objective: QuestObjective): string | null {
-  if (objective.kind === 'metric') {
-    return objective.metric;
+  return objective.kind === 'metric' ? objective.metric : null;
+}
+
+/**
+ * A chave de cache do total daquele objetivo. `null` nos do plugin.
+ *
+ * Dois objetivos `metric` da mesma métrica, na mesma rodada, leem o
+ * banco uma vez só; e o `playtime` tem chave própria porque a fonte
+ * dele é outra.
+ */
+function derivedKeyOf(objective: QuestObjective): string | null {
+  if (objective.kind === 'playtime') {
+    return 'playtime';
   }
 
-  // `time.played` é o mesmo nome que o coletor do ranking usa
-  // (rankings/collector.ts). Duas constantes para a mesma métrica
-  // divergiriam no dia em que uma delas fosse renomeada.
-  return objective.kind === 'playtime' ? 'time.played' : null;
+  const metric = metricOf(objective);
+
+  return metric === null ? null : `metric:${metric}`;
 }
 
 /**

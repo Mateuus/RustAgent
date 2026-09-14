@@ -1916,7 +1916,7 @@ async function main(): Promise<void> {
         hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
       },
     }),
-    // ####  O NÚMERO DOS OBJETIVOS `metric` E `playtime`  ####
+    // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
     // Sai do período `lifetime`, o único que NUNCA zera: um wipe no
     // meio de uma quest faria o total cair, e a subtração
@@ -1928,6 +1928,21 @@ async function main(): Promise<void> {
 
         return period === null ? 0 : rankingsRepository.valueOf(period.id, steamId, metric);
       },
+    },
+    // ####  E O DO `playtime` NÃO SAI DO RANKING  ####
+    //
+    // O `time.played` de lá é a diferença do `played_seconds` entre
+    // duas rodadas do coletor, e aquela coluna só cresce quando a
+    // sessão FECHA: quem está conectado há três horas tem, no
+    // ranking, o número de ontem. A missão de tempo online passava a
+    // sessão inteira em 0/90 por causa disso.
+    //
+    // `onlineSecondsOf` soma a sessão aberta — e soma até o
+    // `last_seen`, que é o mesmo instante que o fechamento vai
+    // gravar. Nenhum minuto se perde na virada, nenhum conta duas
+    // vezes. Ver `QuestPlaytimeSource`.
+    playtime: {
+      secondsOf: (serverId, steamId) => playersRepository.onlineSecondsOf(serverId, steamId),
     },
     // ####  QUEM RESPONDE AO `requires` DA QUEST  ####
     //
