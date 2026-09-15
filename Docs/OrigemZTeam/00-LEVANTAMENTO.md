@@ -38,8 +38,9 @@ A classe `RelationshipManager.PlayerTeam` já tem:
 | `joinKey` | Código de entrada |
 | `teamStartTime`, `teamLifetime` | Desde quando ela existe |
 | `AddPlayer` / `RemovePlayer(playerID)` | Entrar e sair |
-| `SetPlayerAsLeader(newTeamLeader)` | Passar a liderança |
-| `Disband()` | Desfazer |
+| `SetTeamLeader(newTeamLeader)` | Passar a liderança. Chama `MarkDirty` sozinho |
+| `Disband()` | Desfazer. Cai em `DisbandTeam`, que dispara os hooks |
+| `MarkDirty()` | Propaga a mudança aos clientes. Sem ele, o nome novo não sai do servidor |
 | `RelationshipManager.maxTeamSize` | ServerVar; padrão **8**. `0` desliga equipes |
 
 E mais duas coisas que importam:
@@ -55,6 +56,25 @@ O jogo **não** batiza a equipe. Na criação e no reset, `teamName = string.Emp
 guardado. Ou seja: o campo está lá, vazio, esperando alguém escrever nele.
 
 Isso é a favor do plano — não há nome do jogo para brigar com o nosso.
+
+### O que a primeira implementação MEDIU no servidor (15/09/2026)
+
+O plugin `OrigemZTeam.cs` subiu no server01 e as rotas foram exercitadas contra o jogo
+rodando. O que se aprendeu, e que nenhum teste de mesa mostraria:
+
+- **`teamName` nasce vazio mesmo.** A primeira leitura de uma equipe real (a do dono, criada
+  no jogo horas antes) devolveu `name: ""`. A suposição do §2 está confirmada em campo.
+- **O `Puts` de um plugin entra na resposta CASADA do comando.** Um aviso disparado de
+  dentro do handler foi anexado ao JSON da resposta, e o agente recebeu
+  `{"ok":true,…}[OrigemZ Team] #OZTEAM#{…}` — que não é JSON. O rename tinha funcionado; o
+  agente é que não conseguia ler o que ele mesmo mandara fazer. Conserto nos dois lados: o
+  aviso sai num `timer.Once` (fora do frame do comando), e o agente descarta linhas com o
+  marcador antes de parsear.
+- **O hook cobre o disband por dentro.** Uma equipe desfeita SEM passar pela rota (o próprio
+  jogo, quando o último membro sai) chegou ao agente pelo `OnTeamDisbanded`, e os cargos
+  dela foram apagados. É a regra do §4 funcionando pelo caminho difícil.
+- **Membro offline não atrapalha.** `RemovePlayer`, `SetTeamLeader` e `MarkDirty` passam por
+  `FindByID`, que devolve `null` para quem não está online, e pulam só a parte do cliente.
 
 ### O que ainda não foi verificado
 

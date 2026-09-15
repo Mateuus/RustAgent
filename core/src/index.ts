@@ -64,6 +64,8 @@ import { WorldEventsRepository } from './db/world-events-repository.js';
 import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
+import { TeamsService } from './game/teams.js';
+import { TeamRanksRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
 import { loadKitIcons, loadStoreIcons } from './game/card-icons.js';
@@ -405,6 +407,11 @@ async function main(): Promise<void> {
       // memoria do plugin, e um servidor que subiu agora nao
       // conhece nenhuma planta ate alguem mandar.
       dungeonSync?.pushSoon(serverId, 'rcon-connected');
+
+      // O segredo do OrigemZTeam. Sem ele o plugin fica MUDO: os
+      // avisos sairiam sem assinatura e o agente os descartaria — e
+      // o cargo de uma equipe desfeita ficaria para tras.
+      void teamsService.sync(serverId);
       // E o overlay de propagandas, que perdeu MAIS que o cache: o
       // mapa chave->CRC das imagens vive na memória do plugin, e
       // sem esquecê-lo aqui a carga desceria apontando para bytes
@@ -501,6 +508,10 @@ async function main(): Promise<void> {
       // quando precisa responder, sai por um relogio - mandar o
       // comando daqui seria o laco descrito logo acima.
       dungeonSync?.handleLine(serverId, line);
+
+      // A equipe: o `handleLine` recusa numa comparacao de string a
+      // linha que nao tem `#OZTEAM#`, que e a esmagadora maioria.
+      teamsService.handleLine(serverId, line);
       // O overlay grita `#OZADSREQ#` quando o plugin sobe sem a
       // configuração. Recusa na primeira comparação de string,
       // como o de cima.
@@ -1500,6 +1511,21 @@ async function main(): Promise<void> {
   // comentário lá embaixo). Ele sai depois do crédito, e só quando
   // ele deu certo.
   const dungeonBroadcaster = new PluginBroadcaster({ servers: supervisor, logger, mutedPlayers: mutedByStreamerMode });
+
+  // ####  A EQUIPE DO JOGO  ####
+  //
+  // Ela nao tem repositorio proprio de equipes, e isso e de
+  // proposito: quem sabe quem esta em qual time e o
+  // RelationshipManager do Rust. O agente guarda so o CARGO, que o
+  // jogo nao tem. Ver Docs/OrigemZTeam/00-LEVANTAMENTO.md.
+  const teamsService = new TeamsService({
+    ranks: new TeamRanksRepository(db),
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      contextOf: (serverId) => supervisor.contextOf(serverId),
+    },
+    logger,
+  });
 
   dungeonSync = new DungeonSync({
     dungeons: dungeonsRepository,
@@ -3612,6 +3638,10 @@ async function main(): Promise<void> {
 
         return world === null ? null : `${String(world.worldSize)}:${String(world.seed)}`;
       },
+    },
+    teams: {
+      teams: teamsService,
+      servers: repository,
     },
     worldEvents: {
       events: worldEventsRepository,

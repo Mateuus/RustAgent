@@ -7331,6 +7331,71 @@ CREATE TABLE IF NOT EXISTS player_quest_rewards (
 );
 `;
 
+const TEAM_RANKS_SCHEMA = `
+-- ============================================================
+--  088  o cargo dentro da equipe.
+--
+--  Pedido do dono em 15/09/2026: "promover um jogador da team ter
+--  tipo um nivel dentro da team para no futuro ser usado para
+--  outras coisa como sertas permissao na base".
+--
+--  ####  A EQUIPE E DO JOGO; O CARGO E NOSSO  ####
+--
+--  Quem esta na equipe, quem e lider, convites e tamanho maximo
+--  moram no RelationshipManager do Rust e persistem no save dele.
+--  Nada disso e copiado para ca: uma copia velha e pior que
+--  nenhuma, e no proximo restart o jogo ganharia a discussao.
+--
+--  O que o Rust NAO tem e um nivel entre membro e lider. Isso e
+--  nosso, e e a unica coisa que esta tabela guarda.
+--
+--  ####  A EQUIPE DESFEITA APAGA TUDO  ####
+--
+--  Regra do dono, mesmo dia. O \`team_id\` vem de um contador do
+--  jogo (\`Database.IncrementLastTeamIndex\`) e NUNCA e reusado
+--  dentro de um wipe -- mas o wipe zera o save, e ai a contagem
+--  recomeca. Um cargo sobrevivente viraria cargo de OUTRA equipe,
+--  dado a alguem que nunca foi promovido.
+--
+--  Por isso o apagar e por \`team_id\`, no hook de dissolucao, e a
+--  limpeza do boot varre o que sobrou de um agente que estava fora
+--  na hora.
+--
+--  ####  server_id PORQUE A EQUIPE E DE UM MUNDO  ####
+--
+--  Ao contrario do VIP e do streamer, que sao da PESSOA. O
+--  \`team_id\` 3 do server01 nao tem nada a ver com o 3 do server02,
+--  e sem esta coluna os dois se misturariam no mesmo cargo.
+-- ============================================================
+
+CREATE TABLE team_ranks (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- O id da equipe no jogo. TEXTO, e nao INTEGER: ele e ulong e
+  -- passa de 2^53, onde o JSON do painel o arredondaria em
+  -- silencio. Mesma escolha do steam_id.
+  team_id TEXT NOT NULL,
+  steam_id TEXT NOT NULL,
+
+  -- 'officer' hoje. TEXTO LIVRE como world_events.kind: um cargo
+  -- novo nao pode custar uma migracao. Quem e LIDER nao aparece
+  -- aqui -- isso e do jogo, e perguntar a ele e a unica resposta
+  -- que nao envelhece.
+  rank TEXT NOT NULL,
+
+  -- Quem promoveu, para a auditoria responder "quem deu isso a
+  -- ele?". Vazio = o agente, por regra automatica.
+  granted_by TEXT NOT NULL DEFAULT '',
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (server_id, team_id, steam_id)
+);
+
+CREATE INDEX idx_team_ranks_team ON team_ranks (server_id, team_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7575,7 +7640,9 @@ export const MIGRATIONS: readonly Migration[] = [
   // merge, a migracao que chegasse depois seria PULADA em
   // silencio, porque o id dela ja estaria gravado como
   // aplicado.
+
   { id: 87, name: 'player-streamer', sql: PLAYER_STREAMER_SCHEMA },
+  { id: 88, name: 'team-ranks', sql: TEAM_RANKS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
