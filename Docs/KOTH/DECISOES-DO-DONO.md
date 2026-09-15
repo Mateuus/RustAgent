@@ -69,8 +69,6 @@ Enquanto isso não for medido, a bandeira é decoração e marcação — já va
 
 ---
 
----
-
 ## O que ficou pronto na noite de 15/09/2026
 
 Medido no server01, com o ciclo inteiro rodando:
