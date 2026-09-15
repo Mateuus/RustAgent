@@ -70,6 +70,10 @@ namespace Oxide.Plugins
         private const string PrefabRadiusMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string PrefabVendingMarker = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
 
+        /// O lado de uma célula da grade do mapa, em metros. Constante
+        /// do Rust: vale para qualquer tamanho de mundo.
+        private const float GridCellMeters = 146.3f;
+
         private const string Marker = "#OZKOTH#";
         private const string UiRoot = "origemz.koth.hud";
 
@@ -339,6 +343,7 @@ namespace Oxide.Plugins
                 // progresso fica onde está, e a barra diz por quê.
 
                 Draw(run, inside, sides.Count > 1);
+                RefreshMarker(run, sides.Count > 1);
             }
             catch (Exception cause)
             {
@@ -492,43 +497,92 @@ namespace Oxide.Plugins
             return true;
         }
 
+        /// <summary>
+        /// O que aparece no mapa do jogador.
+        ///
+        /// ####  O CARRINHO DE COMPRAS  ####
+        ///
+        /// O jeito de um marcador ter NOME no mapa do Rust é pendurá-lo
+        /// num `VendingMachineMapMarker` — e o cliente desenha o ícone
+        /// de LOJA junto, que não dá para trocar. VISTO no servidor em
+        /// 15/09/2026: um carrinho de compras laranja no meio do
+        /// território, com o círculo do evento como um pontinho ao lado.
+        ///
+        /// Por isso o rótulo é OPCIONAL: sem ele, nasce só o círculo, e
+        /// o mapa mostra a ÁREA — que é o que importa num evento de
+        /// domínio de território.
+        ///
+        /// ####  O RAIO NÃO É EM METROS  ####
+        ///
+        /// O servidor manda o número cru e quem o interpreta é o
+        /// CLIENTE, que não está no assembly do servidor: não dá para
+        /// ler a escala, só medir. Por isso ela vem do agente em
+        /// `markerRadius` — calibrar não pode custar uma recompilação.
+        /// </summary>
         private void SpawnMarker(Run next, JObject body)
         {
             try
             {
+                // ####  O CARRINHO É O PREÇO DO NOME  ####
+                //
+                // O único jeito de um marcador ter TEXTO no mapa do
+                // Rust é pendurá-lo num `VendingMachineMapMarker`, e o
+                // cliente desenha o ícone de loja junto — não dá para
+                // trocar. O dono viu e pediu assim mesmo: clicar e ler
+                // quem está dominando vale o carrinho.
+                //
+                // O texto é o estado do evento, e ele MUDA: ver
+                // `RefreshMarker`.
                 var vending = GameManager.server.CreateEntity(PrefabVendingMarker, next.center)
                     as VendingMachineMapMarker;
 
-                if (vending == null) return;
-
-                vending.markerShopName = next.name;
-                vending.enableSaving = false;
-                vending.Spawn();
+                if (vending != null)
+                {
+                    vending.markerShopName = MarkerLabel(next, false);
+                    vending.enableSaving = false;
+                    vending.Spawn();
+                }
 
                 var marker = GameManager.server.CreateEntity(PrefabRadiusMarker, next.center)
                     as MapMarkerGenericRadius;
 
                 if (marker == null)
                 {
-                    vending.Kill();
+                    if (vending != null) vending.Kill();
                     return;
                 }
 
-                // O raio do marcador é em FRAÇÃO do mapa, e não em
-                // metros: 0.5 é meio mapa. A conta abaixo o deixa do
-                // tamanho real da zona.
-                var world = TerrainMeta.Size.x <= 0f ? 4000f : TerrainMeta.Size.x;
-
-                marker.radius = Mathf.Clamp(next.radius / world * 8f, 0.1f, 2f);
-                marker.alpha = 0.6f;
+                // ####  A ESCALA, MEDIDA CONTRA A GRADE  ####
+                //
+                // O servidor manda o raio cru e quem o desenha é o
+                // CLIENTE — a escala não está no assembly do servidor.
+                // Medida no server01 em 15/09/2026, comparando o
+                // círculo com a grade do mapa: 1.0 é UMA CÉLULA.
+                //
+                // A grade do Rust é sempre de 146,3 m, em qualquer
+                // tamanho de mapa. Então o raio em metros divide por
+                // ela, e o círculo passa a ser a área DE VERDADE.
+                //
+                // `markerRadius` no corpo continua existindo para
+                // calibrar sem recompilar, se um update mudar isso.
+                marker.radius = Mathf.Clamp(
+                    Number(body, "markerRadius", next.radius / GridCellMeters),
+                    0.01f,
+                    10f);
+                marker.alpha = 0.5f;
                 marker.color1 = ParseColor(Text(body, "color", "#C4B454"));
                 marker.color2 = marker.color1;
                 marker.enableSaving = false;
                 marker.Spawn();
-                marker.SetParent(vending);
-                marker.transform.localPosition = Vector3.zero;
+
+                if (vending != null)
+                {
+                    marker.SetParent(vending);
+                    marker.transform.localPosition = Vector3.zero;
+                    vending.SendNetworkUpdate();
+                }
+
                 marker.SendUpdate();
-                vending.SendNetworkUpdate();
 
                 next.mapMarker = marker;
                 next.mapLabel = vending;
@@ -722,6 +776,45 @@ namespace Oxide.Plugins
             }, trilho);
 
             return container.ToJson();
+        }
+
+        /// <summary>
+        /// O texto do marcador no mapa.
+        ///
+        /// É o que o jogador lê ao clicar no ícone, sem sair do mapa:
+        /// de quem é o território e quanto falta. Sem isso ele teria de
+        /// ir até lá para saber se vale a pena ir até lá.
+        /// </summary>
+        private string MarkerLabel(Run current, bool contested)
+        {
+            var pct = Mathf.RoundToInt(Percent(current));
+
+            if (contested) return current.name + " — DISPUTADO " + pct + "%";
+            if (current.holder == 0UL || pct <= 0) return current.name + " — sem dono";
+
+            return current.name + " — " + current.holderName + " " + pct + "%";
+        }
+
+        /// <summary>
+        /// Atualiza o texto do marcador, e só quando ele muda.
+        ///
+        /// ####  UM SendNetworkUpdate POR SEGUNDO É REDE JOGADA FORA  ####
+        ///
+        /// O tick roda a cada segundo, e na maior parte deles o texto é
+        /// o mesmo (a porcentagem só muda de ponto em ponto). Mandar
+        /// mesmo assim custaria um update para todo mundo no alcance da
+        /// rede, o tempo inteiro.
+        /// </summary>
+        private void RefreshMarker(Run current, bool contested)
+        {
+            if (current.mapLabel == null || current.mapLabel.IsDestroyed) return;
+
+            var label = MarkerLabel(current, contested);
+
+            if (current.mapLabel.markerShopName == label) return;
+
+            current.mapLabel.markerShopName = label;
+            current.mapLabel.SendNetworkUpdate();
         }
 
         // ============================================================

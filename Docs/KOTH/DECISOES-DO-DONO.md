@@ -97,6 +97,29 @@ com masmorras" da spec, aplicada no lugar mais barato.
 
 ---
 
+## O marcador no mapa — o que o cliente do Rust permite
+
+Medido no server01 em 15/09/2026, com prints do mapa:
+
+**A escala do círculo.** O servidor manda o raio cru e quem desenha é o cliente — a escala não
+está no assembly do servidor. Comparando o círculo com a grade do mapa (146,3 m por célula):
+**1.0 = uma célula**. Então o raio em metros divide por 146,3, e o círculo passa a ser a área de
+verdade. A grade do Rust é sempre 146,3 m, em qualquer tamanho de mundo.
+
+**O texto custa um carrinho de compras.** O único marcador do Rust que carrega texto é o
+`VendingMachineMapMarker`, e o cliente desenha junto: o ícone de loja, o título "LOJA" e a caixa
+"Este fornecedor não tem anúncios". Nada disso vem do servidor — não há campo para mudar.
+
+A alternativa seria o pin que o jogador cria no mapa (`State.pointsOfInterest`), e ela não serve:
+`MaxMapNoteLabelLength = 10` no jogo (caberia "Colina do"), o pin ocupa um dos slots do próprio
+jogador (`maximumMapMarkers`) e teria de ser empurrado e removido um por jogador.
+
+**Decisão do dono, 15/09/2026:** fica o `VendingMachineMapMarker`, com o carrinho. O texto dele é
+o estado do evento — `Colina do Norte — Alcateia do Norte 45%`, ou `— DISPUTADO 45%`, ou
+`— sem dono` — e só é reenviado quando muda, para não gastar um update de rede por segundo.
+
+---
+
 ## Ordem de dependência
 
 1. `OrigemZTeam` — equipe com nome, líder e cargo.
