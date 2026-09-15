@@ -355,25 +355,87 @@ export class KothService {
   }
 
   /**
-   * Fecha o que sobrou de uma vida anterior deste processo.
+   * Acerta o que o agente sabe com o que está no chão.
    *
-   * Um KOTH não sobrevive a um agente parado pelo mesmo motivo da
-   * masmorra: nada dele entra no save, e o plugin o derruba ao
-   * descarregar. Mantê-lo aberto no banco faria o painel dizer "1 no
-   * ar" com o mapa vazio, para sempre.
+   * ####  O KOTH SOBREVIVE A UM AGENTE PARADO — A MASMORRA NÃO  ####
+   *
+   * Esta é a diferença que quase virou bug. A masmorra morre quando o
+   * plugin descarrega, então a run dela é lixo garantido no boot
+   * seguinte. O KOTH, não: reiniciar o AGENTE não toca no servidor de
+   * jogo, e lá o território continua de pé, com o relógio do plugin
+   * correndo e a bandeira plantada.
+   *
+   * Fechar a run cegamente deixaria a bandeira órfã no mapa e o
+   * histórico mentindo. Então o agente PERGUNTA, e há três respostas:
+   *
+   *   de pé, e a run bate     readota — o evento segue, e o desfecho
+   *                           ainda vai chegar pelo console
+   *   de pé, e ninguém sabe   manda parar: uma bandeira de dono
+   *                           desconhecido não some sozinha
+   *   nada de pé, run aberta  fecha a run (o servidor reiniciou)
+   *
+   * Roda no `sync`, e não no boot do agente: é quando o RCON conecta
+   * que existe alguém a quem perguntar.
    */
-  recover(): void {
-    for (const serverId of this.#deps.servers.ids()) {
-      const active = this.#deps.events.activeRun(serverId);
+  async reconcile(serverId: string): Promise<void> {
+    if (this.#stopped) return;
 
-      if (active === null || this.#live.has(serverId)) continue;
-      if (active.dungeonId !== null) continue;
+    const open = this.#deps.events.activeRun(serverId);
+    // Uma run de masmorra não é nossa: ela tem `dungeonId`.
+    const mine = open !== null && open.dungeonId === null ? open : null;
 
-      this.#deps.events.endRun(active.id, 'ended');
+    let status: KothStatus;
+
+    try {
+      status = await this.status(serverId);
+    } catch (cause) {
+      // Sem resposta não se decide nada. Fechar a run aqui seria
+      // apagar o registro de um evento que pode estar acontecendo.
+      this.#deps.logger.warn(
+        { server: serverId, error: toError(cause).message },
+        'não consegui conferir o KOTH do servidor',
+      );
+
+      return;
+    }
+
+    if (status.active === true) {
+      const runId = Number(status.runId ?? '0');
+
+      if (mine !== null && runId === mine.id) {
+        this.#live.set(serverId, {
+          runId: mine.id,
+          arenaId: 0,
+          eventId: mine.eventId,
+          startedAt: mine.startedAt ?? Date.now(),
+        });
+
+        this.#deps.logger.info(
+          { server: serverId, run: mine.id },
+          'KOTH readotado: ele continuou de pé enquanto o agente reiniciava',
+        );
+
+        return;
+      }
+
+      // De pé sem dono conhecido. Parar é o certo: ninguém mais vai
+      // fechá-lo, e a bandeira ficaria no mapa até o wipe.
+      await this.stopRun(serverId, 'orfao');
+
+      this.#deps.logger.warn(
+        { server: serverId, runId: status.runId },
+        'havia um KOTH de pé que este agente não conhecia: derrubado',
+      );
+
+      return;
+    }
+
+    if (mine !== null) {
+      this.#deps.events.endRun(mine.id, 'ended');
 
       this.#deps.logger.info(
-        { server: serverId, run: active.id },
-        'run de KOTH fechada no boot: nada dele sobrevive a um agente parado',
+        { server: serverId, run: mine.id },
+        'run de KOTH fechada: não há território de pé no servidor',
       );
     }
   }
@@ -389,6 +451,10 @@ export class KothService {
       await this.#command(serverId, `origemz.koth sync {"secret":"${this.#secret}"}`);
 
       this.#deps.logger.info({ server: serverId }, 'o OrigemZKoth recebeu o segredo');
+
+      // Com o canal aberto, acerta o que o agente sabe com o que está
+      // no chão. Ver `reconcile`.
+      await this.reconcile(serverId);
     } catch (cause) {
       this.#deps.logger.warn(
         { server: serverId, error: toError(cause).message },

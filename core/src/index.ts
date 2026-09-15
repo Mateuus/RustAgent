@@ -1568,7 +1568,6 @@ async function main(): Promise<void> {
     },
   });
 
-  kothService.recover();
 
   dungeonSync = new DungeonSync({
     dungeons: dungeonsRepository,

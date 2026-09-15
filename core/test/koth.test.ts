@@ -70,11 +70,20 @@ function harness(): Harness {
     events,
     sent: [],
     said: [],
+    // ####  O `status` NÃO ESTÁ AQUI, E ISSO É DE PROPÓSITO  ####
+    //
+    // Ele é derivado do banco lá embaixo: o "jogo" deste teste
+    // responde que há um território de pé quando um foi erguido. Uma
+    // resposta fixa faria a reconciliação fechar, no teste, uma run
+    // que o próprio teste acabou de abrir — e o teste passaria a
+    // medir o harness, não o código.
+    //
+    // Quem precisa de outra resposta a escreve no `replies`, e ela
+    // ganha: é o caso do KOTH órfão.
     replies: new Map([
       ['origemz.koth start', JSON.stringify({ ok: true, runId: '1', grid: 'E7', y: 12 })],
       ['origemz.koth stop', JSON.stringify({ ok: true })],
       ['origemz.koth sync', JSON.stringify({ ok: true, active: false })],
-      ['origemz.koth status', JSON.stringify({ ok: true, active: false })],
     ]),
     connected: true,
     world: WORLD,
@@ -96,6 +105,18 @@ function harness(): Harness {
 
             for (const [prefix, reply] of state.replies) {
               if (command.startsWith(prefix)) return Promise.resolve(reply);
+            }
+
+            if (command.startsWith('origemz.koth status')) {
+              const open = events.activeRun(SERVER);
+
+              return Promise.resolve(
+                JSON.stringify(
+                  open === null
+                    ? { ok: true, active: false }
+                    : { ok: true, active: true, runId: String(open.id) },
+                ),
+              );
             }
 
             return Promise.resolve('');
@@ -363,27 +384,71 @@ describe('o desfecho', () => {
     expect(h.events.run(started.runId)?.status).toBe('cancelled');
   });
 
-  it('o boot fecha o que sobrou de uma vida anterior', async () => {
+  it('o agente que volta READOTA o KOTH que continuou de pé', async () => {
     const h = harness();
 
     arena(h);
 
     const started = await h.service.start({ serverId: SERVER });
 
-    // Um agente novo: o serviço não sabe de nada, mas a run está lá.
-    const outro = new KothService({
-      arenas: h.arenas,
-      events: h.events,
-      servers: {
-        ids: () => [SERVER],
-        worldKey: () => WORLD,
-        contextOf: () => null,
-      },
-      logger: silent,
-    });
+    // ####  ELE NÃO MORRE COM O AGENTE  ####
+    //
+    // Reiniciar o agente não toca no servidor de jogo: lá o
+    // território segue de pé, com a bandeira plantada — e o harness
+    // responde isso, porque a run está aberta.
+    await h.service.reconcile(SERVER);
 
-    outro.recover();
+    // A run continua aberta — e é isso que faz o desfecho, quando
+    // chegar pelo console, encontrar a linha certa.
+    expect(h.events.run(started.runId)?.status).toBe('active');
+  });
+
+  it('um KOTH de pé que o agente não conhece é derrubado', async () => {
+    const h = harness();
+
+    arena(h);
+
+    // Nada foi erguido por este agente, e o plugin diz que há algo de
+    // pé: bandeira sem dono, que não sairia do mapa até o wipe.
+    h.replies.set(
+      'origemz.koth status',
+      JSON.stringify({ ok: true, active: true, runId: '999' }),
+    );
+
+    await h.service.reconcile(SERVER);
+
+    expect(h.sent.some((command) => command.startsWith('origemz.koth stop'))).toBe(true);
+  });
+
+  it('sem nada de pé, a run aberta é fechada', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+
+    // O servidor reiniciou: o plugin subiu limpo e não há território,
+    // mesmo com a run aberta no banco.
+    h.replies.set('origemz.koth status', JSON.stringify({ ok: true, active: false }));
+
+    await h.service.reconcile(SERVER);
 
     expect(h.events.run(started.runId)?.status).toBe('ended');
+  });
+
+  it('sem resposta do servidor, NÃO decide nada', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+
+    h.connected = false;
+
+    await h.service.reconcile(SERVER);
+
+    // Fechar a run aqui apagaria o registro de um evento que pode
+    // estar acontecendo agora.
+    expect(h.events.run(started.runId)?.status).toBe('active');
   });
 });
