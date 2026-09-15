@@ -454,6 +454,12 @@ namespace Oxide.Plugins
             // simplesmente nao ve propaganda nenhuma e ninguem
             // percebe.
             timer.Once(2f, AdsAskForConfig);
+
+            // E o modo streamer, pela MESMA razao: o plugin nasce
+            // sem saber quem esta em live, e sem este pedido o
+            // overlay voltaria a tela de quem esta transmitindo
+            // agora -- ate a proxima reconexao de RCON.
+            timer.Once(3f, StreamerAskForConfig);
         }
 
         private void ScheduleAsk(float delay)
@@ -2920,6 +2926,339 @@ namespace Oxide.Plugins
             return permission.UserHasPermission(player.UserIDString, groupOrPermission);
         }
 
+
+        // ----------------------------------------------------
+        //  O MODO STREAMER
+        //
+        //  ####  DUAS CHAVES, E ELAS TEM DONOS DIFERENTES  ####
+        //
+        //  O ADMIN libera, no painel: e a lista que desce aqui.
+        //  O JOGADOR liga e desliga, com /streamer, quando a live
+        //  comeca e quando ela acaba.
+        //
+        //  Quem nao esta na lista nao tem o comando -- ele responde
+        //  que nao ha acesso, e nada e alterado.
+        //
+        //  ####  POR QUE ESTE LADO DECIDE, E NAO O AGENTE  ####
+        //
+        //  Porque uma frase comecada por `/` NUNCA chega ao agente:
+        //  ela vira OnPlayerCommand e morre aqui (ver
+        //  core/src/game/chat-commands.ts). E porque o jogador esta
+        //  AO VIVO -- esperar uma ida e volta pelo console faria o
+        //  comando parecer mudo na tela de quem esta transmitindo.
+        //
+        //  Este lado alterna e responde na hora; o agente GRAVA
+        //  quando a linha do console chega ate ele. Divergiu? Vale
+        //  o banco: a proxima carga sobrescreve o que esta aqui.
+        // ----------------------------------------------------
+
+        private const string StreamerConfigCommand = "origemz.streamer.config";
+
+        /// <summary>O marcador do aviso. Ver types/streamer-transport.ts.</summary>
+        private const string StreamerMarker = "#OZSTREAMER#";
+
+        /// <summary>O pedido de recarga, no mesmo cano do #OZAREQ#.</summary>
+        private const string StreamerRequestMarker = "#OZAREQ#streamer";
+
+        /// <summary>O que o agente diz sobre um streamer.</summary>
+        private class StreamerState
+        {
+            /// <summary>Ligado AGORA. So o jogador muda isto.</summary>
+            public bool Active;
+            /// <summary>O que some quando ele liga. Escolha do admin.</summary>
+            public bool HideLogo;
+            public bool HideAds;
+            public bool HideChat;
+        }
+
+        /// <summary>
+        /// SteamID -> o estado dele. So os LIBERADOS moram aqui.
+        ///
+        /// A chave e string porque e assim que ela viaja e e assim
+        /// que o Oxide identifica jogador (UserIDString): 17 digitos
+        /// nao cabem em nada menor que um ulong, e converter de ida
+        /// e volta so cria lugar para errar.
+        /// </summary>
+        private readonly Dictionary<string, StreamerState> _streamers =
+            new Dictionary<string, StreamerState>();
+
+        private StreamerState StreamerOf(BasePlayer player)
+        {
+            if (player == null)
+            {
+                return null;
+            }
+
+            StreamerState state;
+            return _streamers.TryGetValue(player.UserIDString, out state) ? state : null;
+        }
+
+        /// <summary>O logo some da tela dele?</summary>
+        private bool StreamerHidesLogo(BasePlayer player)
+        {
+            StreamerState state = StreamerOf(player);
+            return state != null && state.Active && state.HideLogo;
+        }
+
+        /// <summary>A propaganda some da tela dele?</summary>
+        private bool StreamerHidesAds(BasePlayer player)
+        {
+            StreamerState state = StreamerOf(player);
+            return state != null && state.Active && state.HideAds;
+        }
+
+        // ----------------------------------------------------
+        //  origemz.streamer.config  -  quem pode, e o que some
+        // ----------------------------------------------------
+        [ConsoleCommand(StreamerConfigCommand)]
+        private void CmdStreamerConfig(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null || !arg.HasArgs(1))
+            {
+                return;
+            }
+
+            string json = DecodeBase64(arg.GetString(0));
+            if (json == null)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_BASE64\"}");
+                return;
+            }
+
+            JObject payload;
+            try
+            {
+                payload = JObject.Parse(json);
+            }
+            catch (Exception)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"INVALID_JSON\"}");
+                return;
+            }
+
+            // ####  SO QUEM MUDOU E REDESENHADO  ####
+            //
+            // Redesenhar o overlay do servidor inteiro a cada carga
+            // faria o painel de todo mundo piscar porque UM streamer
+            // ligou a live dele.
+            Dictionary<string, string> before = new Dictionary<string, string>();
+            foreach (KeyValuePair<string, StreamerState> entry in _streamers)
+            {
+                before[entry.Key] = StreamerFingerprint(entry.Value);
+            }
+
+            _streamers.Clear();
+
+            JArray players = payload["players"] as JArray;
+
+            if (players != null)
+            {
+                for (int i = 0; i < players.Count; i++)
+                {
+                    JObject item = players[i] as JObject;
+                    if (item == null)
+                    {
+                        continue;
+                    }
+
+                    string steamId = (string)item["id"];
+                    if (string.IsNullOrEmpty(steamId))
+                    {
+                        continue;
+                    }
+
+                    StreamerState state = new StreamerState();
+                    state.Active = AdsBool(item["on"]);
+                    state.HideLogo = AdsBool(item["logo"]);
+                    state.HideAds = AdsBool(item["ads"]);
+                    state.HideChat = AdsBool(item["chat"]);
+
+                    _streamers[steamId] = state;
+                }
+            }
+
+            // A diferenca nos DOIS sentidos: quem entrou, quem mudou
+            // de estado, e quem SAIU da lista -- esse ultimo e o que
+            // faz o overlay voltar para quem perdeu a liberacao.
+            HashSet<string> touched = new HashSet<string>();
+
+            foreach (KeyValuePair<string, string> entry in before)
+            {
+                StreamerState now;
+                string current = _streamers.TryGetValue(entry.Key, out now)
+                    ? StreamerFingerprint(now)
+                    : string.Empty;
+
+                if (current != entry.Value)
+                {
+                    touched.Add(entry.Key);
+                }
+            }
+
+            foreach (KeyValuePair<string, StreamerState> entry in _streamers)
+            {
+                if (!before.ContainsKey(entry.Key))
+                {
+                    touched.Add(entry.Key);
+                }
+            }
+
+            foreach (string steamId in touched)
+            {
+                ulong userId;
+                if (!ulong.TryParse(steamId, out userId))
+                {
+                    continue;
+                }
+
+                BasePlayer player = BasePlayer.FindByID(userId);
+                if (player == null || !player.IsConnected)
+                {
+                    continue;
+                }
+
+                AdsRedrawPlayer(player);
+            }
+
+            arg.ReplyWith("{\"ok\":true,\"players\":" + _streamers.Count.ToString() + "}");
+        }
+
+        /// <summary>
+        /// Le um booleano do JSON sem estourar com o que nao e um.
+        ///
+        /// Um campo ausente e `false`, e nao uma excecao: uma carga
+        /// de um agente mais velho (sem o campo novo) precisa
+        /// continuar aplicavel -- o contrario derrubaria o modo
+        /// inteiro por causa de uma chave que ninguem mandou.
+        /// </summary>
+        private static bool AdsBool(JToken token)
+        {
+            if (token == null)
+            {
+                return false;
+            }
+
+            if (token.Type == JTokenType.Boolean)
+            {
+                return (bool)token;
+            }
+
+            bool parsed;
+            return bool.TryParse(token.ToString(), out parsed) && parsed;
+        }
+
+        /// <summary>
+        /// O estado num texto, para comparar duas cargas.
+        ///
+        /// Vazio quando o jogador SAIU da lista -- e por isso ele
+        /// nunca colide com um estado de verdade, que sempre tem
+        /// quatro caracteres.
+        /// </summary>
+        private string StreamerFingerprint(StreamerState state)
+        {
+            return (state.Active ? "1" : "0")
+                + (state.HideLogo ? "1" : "0")
+                + (state.HideAds ? "1" : "0")
+                + (state.HideChat ? "1" : "0");
+        }
+
+        /// <summary>
+        /// /streamer  -  o jogador liga e desliga a propria live.
+        ///
+        /// Um comando so, que alterna: no meio de uma transmissao
+        /// ninguem quer lembrar de subcomando.
+        /// </summary>
+        [ChatCommand("streamer")]
+        private void CmdStreamerToggle(BasePlayer player, string command, string[] args)
+        {
+            if (player == null)
+            {
+                return;
+            }
+
+            StreamerState state = StreamerOf(player);
+
+            if (state == null)
+            {
+                player.ChatMessage(lang.GetMessage("StreamerDenied", this, player.UserIDString));
+                return;
+            }
+
+            state.Active = !state.Active;
+
+            AdsRedrawPlayer(player);
+
+            player.ChatMessage(lang.GetMessage(
+                state.Active ? "StreamerOn" : "StreamerOff", this, player.UserIDString));
+
+            // O agente GRAVA a partir desta linha. O Puts leva o
+            // prefixo do plugin, que e o controle de origem que ele
+            // exige -- ver types/streamer-transport.ts.
+            Puts(StreamerMarker + "{\"steamId\":\"" + player.UserIDString
+                + "\",\"on\":" + (state.Active ? "true" : "false")
+                + ",\"name\":" + JsonConvert.ToString(player.displayName ?? string.Empty) + "}");
+        }
+
+        private void StreamerAskForConfig()
+        {
+            Puts(StreamerRequestMarker);
+        }
+
+        // ----------------------------------------------------
+        //  origemz.streamer.status  -  o que ESTE lado sabe
+        //
+        //  ####  SEM ELE, SO ABRINDO O JOGO  ####
+        //
+        //  A carga desce pelo RCON e a resposta volta CASADA com o
+        //  comando -- ela nao fica no console (ver a licao em
+        //  core/src/game/rcon). Entao, depois de salvar no painel,
+        //  nao havia como saber se o plugin recebeu: a unica prova
+        //  era entrar no servidor e olhar a tela de outra pessoa.
+        //
+        //  Este comando e o mesmo papel do `origemz.ui.audience`:
+        //  perguntar ao jogo, em vez de deduzir.
+        // ----------------------------------------------------
+        [ConsoleCommand("origemz.streamer.status")]
+        private void CmdStreamerStatus(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null)
+            {
+                return;
+            }
+
+            StringBuilder builder = new StringBuilder();
+            builder.Append("{\"ok\":true,\"players\":[");
+
+            bool first = true;
+
+            foreach (KeyValuePair<string, StreamerState> entry in _streamers)
+            {
+                if (!first) builder.Append(',');
+                first = false;
+
+                BasePlayer player = null;
+                ulong userId;
+                if (ulong.TryParse(entry.Key, out userId))
+                {
+                    player = BasePlayer.FindByID(userId);
+                }
+
+                builder.Append("{\"id\":\"").Append(entry.Key).Append("\"")
+                    .Append(",\"on\":").Append(entry.Value.Active ? "true" : "false")
+                    .Append(",\"logo\":").Append(entry.Value.HideLogo ? "true" : "false")
+                    .Append(",\"ads\":").Append(entry.Value.HideAds ? "true" : "false")
+                    .Append(",\"chat\":").Append(entry.Value.HideChat ? "true" : "false")
+                    // Online importa: o que o jogador VE so muda na
+                    // tela de quem esta conectado.
+                    .Append(",\"online\":")
+                    .Append(player != null && player.IsConnected ? "true" : "false")
+                    .Append('}');
+            }
+
+            builder.Append("]}");
+            arg.ReplyWith(builder.ToString());
+        }
+
         // ----------------------------------------------------
         //  origemz.ui.audience  -  os grupos e as permissoes
         //
@@ -2994,6 +3333,43 @@ namespace Oxide.Plugins
             }
         }
 
+        /// <summary>
+        /// Refaz o overlay de UM jogador, do zero.
+        ///
+        /// ####  ELE APAGA ANTES DE PERGUNTAR  ####
+        ///
+        /// Porque o motivo de chamar isto e quase sempre "o que ele
+        /// deve ver MUDOU" -- o modo streamer entrando ou saindo. Se
+        /// a resposta nova for "nada", o apagar e o trabalho todo; e
+        /// se for "tudo de novo", desenhar por cima do que ja estava
+        /// deixaria dois logos na tela.
+        ///
+        /// O ciclo em curso nao e interrompido: ele itera sobre
+        /// `_adsInCycle`, e sair dali e o bastante para os quadros
+        /// pararem de chegar a este jogador.
+        /// </summary>
+        private void AdsRedrawPlayer(BasePlayer player)
+        {
+            if (player == null || !player.IsConnected)
+            {
+                return;
+            }
+
+            CuiHelper.DestroyUi(player, AdsRoot);
+            CuiHelper.DestroyUi(player, AdsLogoName);
+
+            _adsDrawn.Remove(player.userID);
+            _adsInCycle.Remove(player.userID);
+            _adsQueue.Remove(player.userID);
+
+            if (!_adsEnabled || !AdsCanSee(player))
+            {
+                return;
+            }
+
+            AdsDrawRoot(player);
+        }
+
         private void AdsDrawRoot(BasePlayer player)
         {
             if (_adsRoot == null || _adsRoot.Count == 0)
@@ -3001,7 +3377,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            CuiHelper.AddUi(player, PersonalizeAds(_adsRoot, null));
+            CuiHelper.AddUi(player, PersonalizeAds(_adsRoot, null, StreamerHidesLogo(player)));
             _adsDrawn.Add(player.userID);
 
             AdsPreload(player);
@@ -3366,6 +3742,18 @@ namespace Oxide.Plugins
         {
             List<int> allowed = new List<int>();
 
+            // ####  O MODO STREAMER ENTRA AQUI, E SO AQUI  ####
+            //
+            // Fila vazia e um estado que o ciclo JA trata: quem nao
+            // tem propaganda para ver fica de fora dele e continua
+            // com o logo na tela. Esconder a propaganda de um
+            // streamer e exatamente isso, e por isso nao ha um `if`
+            // novo em nenhum outro lugar do ciclo.
+            if (StreamerHidesAds(player))
+            {
+                return allowed;
+            }
+
             for (int i = 0; i < _adsItems.Count; i++)
             {
                 if (AdsCanSeeItem(player, _adsItems[i]))
@@ -3700,10 +4088,19 @@ namespace Oxide.Plugins
             JArray destroy = frame["destroy"] as JArray;
             JArray cui = frame["cui"] as JArray;
 
+            // ####  DOIS TEXTOS, E O SEGUNDO SO SE ALGUEM PRECISAR  ####
+            //
+            // Montar o JSON e o caro daqui (serializar, trocar os
+            // lugares reservados, resolver imagem). Um quadro custa
+            // isso UMA vez para a plateia inteira -- e a versao sem
+            // logo so e montada se houver um streamer entre eles,
+            // que e o caso raro.
             string json = null;
+            string jsonNoLogo = null;
+
             if (cui != null && cui.Count > 0)
             {
-                json = PersonalizeAds(cui, ad);
+                json = PersonalizeAds(cui, ad, false);
             }
 
             for (int i = 0; i < audience.Count; i++)
@@ -3718,10 +4115,23 @@ namespace Oxide.Plugins
                     }
                 }
 
-                if (json != null)
+                if (json == null)
+                {
+                    continue;
+                }
+
+                if (!StreamerHidesLogo(player))
                 {
                     CuiHelper.AddUi(player, json);
+                    continue;
                 }
+
+                if (jsonNoLogo == null)
+                {
+                    jsonNoLogo = PersonalizeAds(cui, ad, true);
+                }
+
+                CuiHelper.AddUi(player, jsonNoLogo);
             }
         }
 
@@ -3733,8 +4143,34 @@ namespace Oxide.Plugins
         /// execucao, deste lado. O agente monta o quadro UMA vez, e
         /// ele serve a todas as propagandas.
         /// </summary>
-        private string PersonalizeAds(JArray elements, AdItem ad)
+        private string PersonalizeAds(JArray elements, AdItem ad, bool dropLogo)
         {
+            // ####  O LOGO E TIRADO ANTES DE VIRAR TEXTO  ####
+            //
+            // Ele aparece em mais de um lugar: na raiz, e de volta
+            // no ultimo quadro do `closing` (o painel fecha e o logo
+            // reaparece). Filtrar aqui, no caminho por onde TODO
+            // desenho passa, e o que garante que ele nao volte
+            // sozinho no meio de uma transmissao.
+            if (dropLogo)
+            {
+                JArray kept = new JArray();
+
+                for (int i = 0; i < elements.Count; i++)
+                {
+                    JObject element = elements[i] as JObject;
+
+                    if (element != null && (string)element["name"] == AdsLogoName)
+                    {
+                        continue;
+                    }
+
+                    kept.Add(elements[i]);
+                }
+
+                elements = kept;
+            }
+
             string json = elements.ToString(Formatting.None);
 
             if (ad != null)
@@ -4029,12 +4465,18 @@ namespace Oxide.Plugins
                 { "Loading", "CARREGANDO..." },
                 { "ScreenUnavailable", "Nao consegui carregar essa pagina. Tente de novo." },
                 { "StoreUnavailable", "A loja ainda nao esta disponivel." },
-                { "BuyTimeout", "Nao recebi a confirmacao da compra. Confira seu inventario e o saldo antes de tentar de novo." }
+                { "BuyTimeout", "Nao recebi a confirmacao da compra. Confira seu inventario e o saldo antes de tentar de novo." },
+                { "StreamerOn", "Modo streamer LIGADO. A marca do servidor sai da sua tela ate voce digitar /streamer de novo." },
+                { "StreamerOff", "Modo streamer desligado. Bem-vindo de volta." },
+                { "StreamerDenied", "O modo streamer nao esta liberado para voce. Fale com a administracao." }
             }, this);
 
             lang.RegisterMessages(new Dictionary<string, string>
             {
                 { "NoPermission", "You don't have permission to open this." },
+                { "StreamerOn", "Streamer mode ON. The server branding is off your screen until you type /streamer again." },
+                { "StreamerOff", "Streamer mode off. Welcome back." },
+                { "StreamerDenied", "Streamer mode is not enabled for you. Talk to an admin." },
                 { "Loading", "LOADING..." },
                 { "ScreenUnavailable", "Could not load that page. Try again." },
                 { "StoreUnavailable", "The store is not available yet." },

@@ -7067,6 +7067,84 @@ CREATE TABLE IF NOT EXISTS rules_scopes (
 );
 `;
 
+const PLAYER_STREAMER_SCHEMA = `
+-- ============================================================
+--  087  o modo streamer: o que some da tela de quem transmite.
+--
+--  Pedido do dono em 14/09/2026: "alguns streamer faz live e grava
+--  video; precisamos na parte do jogador algumas variaveis que
+--  podemos ativar ou desativar para usuarios especificos -- como
+--  desativar a logo para esse usuario, desativar propaganda para
+--  esse usuario". E, no mesmo dia: "o proprio jogador, se tiver
+--  como streamer ativado, pode mandar um comando para desativar ou
+--  ativar".
+--
+--  ####  TABELA PROPRIA, E NAO COLUNAS EM \`players\`  ####
+--
+--  Porque isto e ESPARSO: meia duzia de linhas numa base que tem
+--  dezenas de milhares de jogadores. Cinco colunas em \`players\`
+--  seriam cinco valores gravados para todo mundo que ja entrou no
+--  servidor, para responder a uma pergunta que quase sempre e
+--  "nao".
+--
+--  A ausencia de linha e o padrao, e ela ja diz tudo: nao
+--  liberado, nao ativo. Ver \`defaultStreamerProfile\` em
+--  types/streamer.ts -- e la, e nao aqui, que esse padrao mora,
+--  porque a tela precisa dele para um jogador que nunca teve
+--  linha nenhuma.
+--
+--  ####  E NAO HA \`server_id\`  ####
+--
+--  Como o VIP, e pela mesma razao: quem esta em live e a PESSOA.
+--  Ela troca de servidor no meio da transmissao, e a logo nao pode
+--  voltar a aparecer na tela dela por causa disso.
+--
+--  ####  SEM FOREIGN KEY PARA \`players\`  ####
+--
+--  Liberar um streamer que ainda nao entrou em servidor nenhum e
+--  um pedido legitimo -- e o caso de quem combinou a parceria
+--  antes de jogar. A chave estrangeira transformaria isso num erro
+--  de banco, e a ficha de um SteamID desconhecido ja existe no
+--  painel por outro motivo (ver o 200 com \`known: false\` em
+--  routes/players.ts).
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS player_streamer (
+  steam_id      TEXT PRIMARY KEY,
+
+  -- O ADMIN liberou. Sem isso o comando responde que nao tem acesso.
+  allowed       INTEGER NOT NULL DEFAULT 0 CHECK (allowed IN (0, 1)),
+
+  -- O JOGADOR ligou, com /streamer. As duas chaves tem donos
+  -- diferentes de proposito -- ver o cabecalho de types/streamer.ts.
+  active        INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1)),
+
+  -- O que some. Independentes: um parceiro pode esconder a
+  -- propaganda e MANTER a logo, que e o acordo que se faz com quem
+  -- divulga o servidor.
+  hide_logo     INTEGER NOT NULL DEFAULT 1 CHECK (hide_logo IN (0, 1)),
+  hide_ads      INTEGER NOT NULL DEFAULT 1 CHECK (hide_ads IN (0, 1)),
+  hide_messages INTEGER NOT NULL DEFAULT 1 CHECK (hide_messages IN (0, 1)),
+
+  -- Quando foi LIGADO pela ultima vez. Serve a pergunta do
+  -- suporte: "ele esta em live desde quando?".
+  activated_at  INTEGER,
+
+  -- Quem liberou. Texto livre porque o painel nao tem usuarios --
+  -- e o mesmo campo \`actor\` do resto da ficha.
+  granted_by    TEXT,
+
+  updated_at    INTEGER NOT NULL
+);
+
+-- A leitura quente e "quem esta escondendo alguma coisa agora",
+-- feita a cada carga que desce aos plugins e a cada broadcast do
+-- chat. Com a base de jogadores crescendo, ela nao pode virar uma
+-- varredura.
+CREATE INDEX IF NOT EXISTS idx_player_streamer_allowed
+  ON player_streamer (allowed, active);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7293,6 +7371,16 @@ export const MIGRATIONS: readonly Migration[] = [
   // 14/09/2026: a missao passa a poder pedir a CAIXA, e nao o que
   // vem dentro dela -- com varios alvos no mesmo contador.
   { id: 84, name: 'quest-container-objective', sql: QUEST_CONTAINER_OBJECTIVE_SCHEMA },
+
+  // ####  O 85 E O 86 NAO EXISTEM AQUI, E ISSO E DE PROPOSITO  ####
+  //
+  // Eles estao sendo usados por outra arvore de trabalho neste
+  // mesmo repositorio. O runner aplica todo id AUSENTE da
+  // `schema_migrations`, em qualquer ordem -- entao pular numero
+  // nao custa nada, e REPETIR um numero custa caro: no merge, a
+  // migracao que chegasse depois seria PULADA em silencio, porque
+  // o id dela ja estaria gravado como aplicado.
+  { id: 87, name: 'player-streamer', sql: PLAYER_STREAMER_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

@@ -12,7 +12,7 @@
 //
 //  ####  TRÊS ABAS, TRÊS PERGUNTAS  ####
 //
-//    Identidade   quem é, desde quando, e está banido?
+//    Identidade   quem é, desde quando, está banido, e é streamer?
 //    Servidores   onde ele joga, e há quanto tempo em cada um
 //    Histórico    o que aconteceu com ele
 //
@@ -43,6 +43,7 @@ import { PageHeader } from '@/components/page-header';
 import { Section } from '@/components/section';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
+import { StreamerCard } from '@/components/streamer-card';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Input } from '@/components/ui/input';
@@ -449,6 +450,11 @@ function Identidade({
           )}
         </div>
       </section>
+
+      {/* O modo streamer fica aqui, e não numa aba própria, porque
+          é da mesma natureza do banimento: uma decisão do admin
+          sobre a PESSOA, que vale na rede inteira. */}
+      <StreamerCard steamId={player.steamId} />
     </div>
   );
 }

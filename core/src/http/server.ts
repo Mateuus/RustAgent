@@ -36,6 +36,7 @@ import type { PlayerTimersRepository } from '../db/player-timers-repository.js';
 import type { SpawnStatusRepository } from '../db/spawn-status-repository.js';
 import type { ServersRepository } from '../db/servers-repository.js';
 import type { AdsRepository } from '../db/ads-repository.js';
+import type { StreamerRepository } from '../db/streamer-repository.js';
 import type { UiDocumentsRepository } from '../db/ui-documents-repository.js';
 import type { ItemCatalog } from '../game/item-catalog.js';
 import type { KitStore } from '../kits/service.js';
@@ -45,6 +46,7 @@ import type { PlayerTimersSync } from '../loadouts/timers.js';
 import type { VipList } from '../vip/service.js';
 import type { MonumentReader } from '../game/monuments.js';
 import type { AdsSync } from '../game/ads-sync.js';
+import type { StreamerSync } from '../game/streamer-sync.js';
 import type { UiSync } from '../game/ui-sync.js';
 import type { PlayersReader } from '../game/players.js';
 import type { Logger } from '../logger.js';
@@ -146,6 +148,16 @@ export interface BuildServerOptions {
    * do banco. Os dois convivem porque as duas telas existem.
    */
   readonly directory: PlayerDirectory;
+  /**
+   * O modo streamer, na ficha do jogador. Ver types/streamer.ts.
+   *
+   * Fica ao lado do `directory` porque é a mesma ficha vista de
+   * outro ângulo — quem transmite é a PESSOA, e não a sessão dela
+   * num servidor.
+   */
+  readonly streamer: StreamerRepository;
+  /** Quem leva o modo streamer ao jogo. Ver game/streamer-sync.ts. */
+  readonly streamerSync: StreamerSync | null;
   /** Os monumentos do mundo. Ver game/monuments.ts. */
   readonly monuments: MonumentReader;
 
@@ -516,7 +528,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // servidor porque é o caminho `/players` da raiz — o
       // `/servers/:id/players`, que é outra coisa, já foi
       // registrado por `registerAdminRoutes`.
-      registerPlayerRoutes(api, { directory: options.directory });
+      registerPlayerRoutes(api, {
+        directory: options.directory,
+        streamer: options.streamer,
+        streamerSync: options.streamerSync,
+      });
 
       // O ranking, junto do jogador porque é dele que ele fala — e
       // porque `/players/:steamId/rankings` é a ficha dele vista

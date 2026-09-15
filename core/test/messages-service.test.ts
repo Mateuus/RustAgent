@@ -389,6 +389,10 @@ describe('o transporte', () => {
       color: '#ffffff',
       size: 14,
       steamId: '',
+      // Quem esta em MODO STREAMER nao recebe o anuncio global.
+      // Vazio aqui porque este agente de teste nao conhece
+      // nenhum -- ver core/test/streamer.test.ts.
+      skip: [],
     });
   });
 
