@@ -83,10 +83,10 @@ Medido no server01, com o ciclo inteiro rodando:
 | Run no histórico do guarda-chuva | pronto — a mesma tabela da masmorra |
 | **Nascer sozinho** | pronto — relógio próprio (`game/koth-scheduler.ts`) |
 | Recompensa | **falta** — o agente registra quem venceu e não paga nada |
-| Caixa no lugar da bandeira | **falta** — §8 |
+| Fumaça e caixa no lugar da bandeira | **falta** — §8 |
 | Pontos de ranking (Super KOTH) | **falta** — §10 |
 | Aba Eventos no /menu, com sidebar | **falta** — §9 |
-| Vários KOTH ao mesmo tempo | **falta** — §9, e mexe no que já existe |
+| Vários KOTH (vagas) | **falta** — §9, e mexe no que já existe |
 | Contestação pausando | pronto — §7, e já era assim |
 | Progresso que não volta a zero | **falta** — §7; hoje ele ZERA na troca de grupo |
 | Perfis reutilizáveis | falta — hoje cada território carrega os próprios números |
@@ -151,41 +151,67 @@ regra é "a porcentagem permanece salva", o padrão do KOTH normal passa a ser *
 (zero), e o campo continua existindo para quem quiser o contrário. Quem fecha o evento sem
 vencedor é o teto de duração.
 
-## 8. No fim, a bandeira cai e nasce a caixa
+## 8. No fim: fumaça, e a caixa no lugar da bandeira
 
-Quando o tempo acaba ou alguém conquista, a bandeira é destruída e **nasce uma caixa no
-lugar** — podendo ser mais de uma.
+Quando o evento acaba — capturado ou expirado — a bandeira é destruída e no lugar dela:
 
-Tudo configurado na tela do KOTH, e por evento:
+1. **sobe uma fumaça** (smoke), que é o que faz alguém longe olhar para lá;
+2. **nasce a caixa**, podendo ser mais de uma.
 
-- **quais tipos de caixa** podem nascer (o catálogo de prefabs que o agente já conhece do
-  loot da masmorra);
-- **a chance de cada tipo** — nem toda vitória rende a caixa boa;
-- **quantas caixas** podem nascer;
-- **o loot de dentro**, com a mesma régua do loot do resto do projeto.
+Tudo configurado pelo administrador, por evento:
+
+- **quais tipos de caixa** podem nascer;
+- **a chance de cada tipo** — o sorteio é dele, e nem toda vitória rende a caixa boa;
+- **quantas caixas**;
+- **o loot de dentro**, com a régua do loot do resto do projeto.
 
 A §13.7 da spec continua valendo: o prêmio físico só nasce depois do resultado persistido, e
 o BetterLoot não pode sobrescrever nem duplicar o que o evento pôs lá.
 
-## 9. A aba Eventos no /menu, com sidebar
+## 9. A aba Eventos no /menu
 
-No menu que o jogador abre no jogo, uma aba **Eventos** mostra o que está acontecendo — o
-KOTH incluído — com **uma sidebar à esquerda** listando os eventos em curso, e o detalhe à
-direita: quem está participando, qual equipe está capturando, quanto falta.
+```
+ ┌─────────────┬──────────────────────────────────────┐
+ │  EVENTOS    │   ┌────────────┐  ┌────────────┐     │
+ │  ─────────  │   │ KOTH  N14  │  │ KOTH  E7   │     │
+ │ ▸ KOTH  (2) │   │ Alcateia   │  │ sem dono   │     │
+ │   Masmorra  │   │ 45%        │  │ 0%         │     │
+ │   …         │   │ [detalhes] │  │ [detalhes] │     │
+ │             │   └────────────┘  └────────────┘     │
+ │             │              ‹ 1 2 ›                 │
+ └─────────────┴──────────────────────────────────────┘
+```
 
-**A sidebar existe porque vai haver mais de um KOTH ao mesmo tempo.** E isso é a mudança mais
-cara da lista, porque o que existe hoje assume o contrário:
+- **sidebar à esquerda** com os tipos de evento; clicar em KOTH abre o conteúdo dele;
+- **um card por KOTH**, com **paginação** — porque podem ser vários;
+- o card mostra **o estado** e, se houver quem domine, **a equipe que está dominando**;
+- **"mais informações" abre um modal** com o detalhe daquele evento.
+
+### O card do evento encerrado FICA
+
+Terminado o KOTH, o card **continua na tela** mostrando quem levou — é o histórico recente —
+e só sai quando **outro KOTH nasce e toma o lugar dele**.
+
+Isso define o desenho: o que a tela lista não são "eventos ativos", e sim **vagas**. Cada vaga
+tem o evento que está nela agora ou o último que esteve. Quantas vagas existem é a
+configuração de **máximo de KOTH no mapa**.
+
+    vaga 1: KOTH de pé em N14, Alcateia dominando, 45%
+    vaga 2: encerrado — "Os Corvos venceram" (fica até outro nascer aqui)
+
+### O custo: hoje é UM por servidor
+
+O que existe assume o contrário, e passar para vários é mexer nos quatro:
 
 | Onde | O que assume hoje |
 |---|---|
-| `OrigemZKoth.cs` | um `run` único por servidor; `start` recusa o segundo |
+| `OrigemZKoth.cs` | um `run` único; `start` recusa o segundo |
 | `KothService` | um `#live` por servidor |
-| `KothScheduler` | adia se houver QUALQUER run aberta naquele servidor |
+| `KothScheduler` | adia se houver QUALQUER run aberta |
 | Rotas `/koth/start`, `/stop`, `/status` | sem id de instância |
 
-Passar para vários é mexer nos quatro. O limite de um foi escolhido de propósito (dois
-eventos dividem a população e os dois ficam vazios); com vários, quem decide quantos cabem
-passa a ser o administrador.
+O limite de um foi escolhido de propósito (dois eventos dividem a população). Com vagas, quem
+decide quantas cabem é o administrador.
 
 ## 10. O ranking é do Super KOTH — e ele tem uma pergunta aberta
 
