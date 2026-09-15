@@ -484,13 +484,6 @@ namespace Oxide.Plugins
             banner.enableSaving = false;
             banner.Spawn();
 
-            // Indestrutível: a bandeira é a marca do evento, e um
-            // foguete nela no primeiro minuto apagaria o único ponto de
-            // referência que o jogador tem no meio do mato.
-            var combat = banner as BaseCombatEntity;
-
-            if (combat != null) combat.baseProtection = null;
-
             next.banner = banner;
 
             return true;
@@ -542,6 +535,40 @@ namespace Oxide.Plugins
                 // Sem marcador o evento funciona — só fica escondido.
                 PrintWarning("o marcador do KOTH não nasceu: " + cause.Message);
             }
+        }
+
+        /// <summary>
+        /// A bandeira não morre.
+        ///
+        /// ####  O PRIMEIRO JEITO ESTAVA ERRADO  ####
+        ///
+        /// A primeira versão zerava o `baseProtection` da bandeira
+        /// achando que isso a tornava indestrutível. Faz o CONTRÁRIO:
+        /// conferido no BaseCombatEntity do jogo, `baseProtection`
+        /// nulo é tratado com segurança (`if (!baseProtection)`) e
+        /// significa proteção NENHUMA — a bandeira ficava mais frágil.
+        ///
+        /// O jeito certo é recusar o dano. Ela é a marca do evento e o
+        /// único ponto de referência de quem chega no meio do mato; um
+        /// foguete nela no primeiro minuto apagaria o evento do mapa.
+        ///
+        /// O hook é global e roda a cada tiro do servidor: a primeira
+        /// comparação recusa tudo que não é a nossa bandeira.
+        /// </summary>
+        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
+        {
+            if (run == null || run.banner == null) return null;
+            if (entity == null || entity.net == null || run.banner.net == null) return null;
+            if (entity.net.ID != run.banner.net.ID) return null;
+
+            if (info != null)
+            {
+                info.damageTypes.ScaleAll(0f);
+                info.HitMaterial = 0;
+                info.PointStart = Vector3.zero;
+            }
+
+            return true;
         }
 
         private void Teardown(string why)
