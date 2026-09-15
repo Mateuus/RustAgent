@@ -5941,6 +5941,43 @@ export const agent = {
   // parado elas devolvem 503 — e isso é informação, não falha da
   // tela: "esse jogador não tem equipe" e "não consegui perguntar"
   // são respostas diferentes.
+  // ####  O KOTH  ####
+  //
+  // O CADASTRO dos territórios responde do banco — é com o servidor
+  // parado que se desenha um território novo. Erguer e derrubar
+  // perguntam ao jogo.
+  kothArenas: (serverId: string) =>
+    api<{ arenas: KothArena[] }>(`/api/servers/${encodeURIComponent(serverId)}/koth/arenas`),
+
+  createKothArena: (serverId: string, body: KothArenaInput) =>
+    api<{ arena: KothArena }>(`/api/servers/${encodeURIComponent(serverId)}/koth/arenas`, {
+      method: 'POST',
+      body,
+    }),
+
+  updateKothArena: (serverId: string, arenaId: number, body: KothArenaInput) =>
+    api<{ arena: KothArena }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/arenas/${String(arenaId)}`,
+      { method: 'PUT', body },
+    ),
+
+  removeKothArena: (serverId: string, arenaId: number) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/koth/arenas/${String(arenaId)}`, {
+      method: 'DELETE',
+    }),
+
+  kothStatus: (serverId: string) =>
+    api<{ status: KothStatus }>(`/api/servers/${encodeURIComponent(serverId)}/koth/status`),
+
+  startKoth: (serverId: string, arenaId?: number) =>
+    api<{ runId: number; grid: string; arena: KothArena }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/start`,
+      { method: 'POST', body: arenaId === undefined ? {} : { arenaId } },
+    ),
+
+  stopKoth: (serverId: string) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/koth/stop`, { method: 'POST' }),
+
   teamSettings: (serverId: string) =>
     api<{ settings: { maxSize: number }; live: number | null }>(
       `/api/servers/${encodeURIComponent(serverId)}/team-settings`,
@@ -6246,6 +6283,48 @@ export interface DungeonAccess {
  * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
  * a este bloco: a masmorra nao apodrece nem com ele desligado.
  */
+/** Um território do KOTH. Espelha `core/src/types/koth.ts`. */
+export interface KothArenaInput {
+  label: string;
+  x: number;
+  z: number;
+  /** `null` = o servidor resolve lendo o terreno na hora de erguer. */
+  y?: number | null;
+  radius: number;
+  height: number;
+  captureSeconds: number;
+  durationSeconds: number;
+  decayPerSecond?: number;
+  color?: string;
+  enabled?: boolean;
+}
+
+export interface KothArena extends KothArenaInput {
+  id: number;
+  serverId: string;
+  y: number | null;
+  decayPerSecond: number;
+  color: string;
+  enabled: boolean;
+  worldKey: string | null;
+  grid: string | null;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** O que o plugin responde quando se pergunta o estado. */
+export interface KothStatus {
+  active: boolean;
+  runId?: string;
+  name?: string;
+  grid?: string;
+  percent?: number;
+  holderName?: string;
+  elapsed?: number;
+  inside?: number;
+}
+
 /**
  * A equipe do jogo, como o agente a devolve.
  *

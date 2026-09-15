@@ -3,18 +3,19 @@
 // ============================================================
 //  /eventos/koth  -  O DOMÍNIO DE TERRITÓRIO.
 //
-//  ####  ESTA TELA NÃO CONFIGURA NADA AINDA, E DIZ ISSO  ####
+//  ####  DUAS ABAS, E A PRIMEIRA JÁ FUNCIONA  ####
 //
-//  Ela existe antes do evento de propósito: a rota é o lugar em que
-//  a família mora, e o hub já aponta para cá. O que ela NÃO tem é
-//  um formulário de mentira — campo que salva numa tabela que
-//  ninguém lê é pior que campo nenhum, porque alguém preenche,
-//  fecha, e espera o evento acontecer.
+//    Territórios   onde o KOTH pode acontecer, marcados no mapa
+//    O que falta   as frentes que ainda não existem, na ordem
 //
-//  O que ela faz é responder a pergunta de quem clicou no cartão:
-//  o que vai ser isto, o que já existe (a agenda e o histórico são
-//  do guarda-chuva e já funcionam) e o que falta para o primeiro
-//  KOTH nascer.
+//  A segunda aba não é enfeite: metade desta família ainda não foi
+//  escrita, e uma tela que escondesse isso faria o admin cadastrar
+//  territórios esperando recompensa automática — que não existe.
+//
+//  ####  NADA DE FORMULÁRIO DE MENTIRA  ####
+//
+//  Campo que salva numa tabela que ninguém lê é pior que campo
+//  nenhum: alguém preenche, fecha, e espera o evento acontecer.
 //
 //  ####  A ORDEM DA LISTA NÃO É DECORATIVA  ####
 //
@@ -26,9 +27,14 @@
 
 import { ArrowLeft, Flag } from 'lucide-react';
 import Link from 'next/link';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
+import { ArenasPanel } from '@/components/koth/arenas-panel';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
+import { StateBlock } from '@/components/state-block';
+import { agent } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 export default function KothPage() {
   return (
@@ -50,90 +56,177 @@ const FRENTES: readonly Frente[] = [
   {
     title: 'Equipe com nome (OrigemZTeam)',
     detail:
-      'O KOTH pontua por LADO, e um lado sem nome não aparece em placar nenhum. O jogo já tem equipe; falta dar nome a ela, deixar editar no /menu e saber quem é líder.',
-    done: false,
+      'O KOTH pontua por LADO, e um lado sem nome não aparece em placar nenhum. O nome da equipe já é do agente, editável na aba Equipes do servidor.',
+    done: true,
   },
   {
     title: 'Territórios no mapa',
     detail:
-      'Onde o domínio acontece: centro, volume de captura (raio e altura, ou caixa orientada), peso do sorteio e cooldown. É o cadastro próprio desta família — o ponto da masmorra não serve, ele não tem volume.',
-    done: false,
-  },
-  {
-    title: 'Perfis',
-    detail:
-      'Dificuldade, tempo de domínio, contestação, abandono e duração máxima, reutilizáveis entre territórios. Uma execução leva uma cópia congelada do perfil.',
-    done: false,
+      'Onde o domínio acontece: centro, raio, altura, tempo de captura e duração. É o cadastro próprio desta família — o ponto da masmorra não serve, ele não tem volume.',
+    done: true,
   },
   {
     title: 'A captura, no servidor do jogo',
     detail:
       'Quem está dentro, quem contesta, quanto o progresso sobe e quanto ele decai. É conta do plugin — painel e cliente só mostram.',
-    done: false,
+    done: true,
   },
   {
     title: 'A barra na tela de quem joga',
     detail:
-      'Sem ela o jogador não sabe que está capturando, nem quanto falta, nem quem está na frente. Entra pelo CUI, junto do que o OrigemZUI já desenha.',
-    done: false,
+      'Ela enche para quem está dentro, diz quem domina e avisa quem está sem equipe. Falta o placar dos lados quando há disputa.',
+    done: true,
   },
   {
     title: 'A bandeira do território',
     detail:
-      'Um Large Banner on pole no centro, que mostra de quem é o domínio agora. Depende da equipe ter nome.',
+      'Um Large Banner on pole no centro, indestrutível. Falta trocar a textura dela pela da equipe que domina — o que depende de medir se dá para fazer isso sem recriar a bandeira.',
+    done: true,
+  },
+  {
+    title: 'A agenda própria',
+    detail:
+      'Hoje o KOTH nasce pelo botão. Para nascer sozinho ele precisa entrar no relógio do agente, que por enquanto só sabe erguer masmorra.',
     done: false,
   },
   {
     title: 'Recompensas e entrega',
     detail:
-      'OZCoins, troféus, kits, VIP e itens, com registro de entrega individual para não pagar duas vezes nem esquecer ninguém.',
+      'OZCoins, troféus, kits, VIP e itens, com registro de entrega individual para não pagar duas vezes nem esquecer ninguém. Hoje o agente registra quem venceu e não paga nada.',
     done: false,
   },
   {
-    title: 'Agenda e histórico',
+    title: 'Perfis',
     detail:
-      'Já existem, e são do guarda-chuva: assim que houver KOTH para erguer, ele entra na mesma agenda e aparece no mesmo histórico, sem tela nova.',
-    done: true,
+      'Dificuldade, tempo de domínio e contestação reutilizáveis entre territórios. Hoje cada território carrega os próprios números, o que basta enquanto forem poucos.',
+    done: false,
   },
 ];
 
 function Koth() {
+  const [tab, setTab] = useState<'territorios' | 'falta'>('territorios');
+  const [servers, setServers] = useState<readonly { id: string; name: string }[] | null>(null);
+  const [serverId, setServerId] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const response = await agent.servers();
+
+      setServers(response.servers.map((server) => ({ id: server.id, name: server.name })));
+    } catch {
+      setServers([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // ####  O TERRITÓRIO É DE UM MAPA  ####
+  //
+  // E um mapa é de um servidor — a mesma razão pela qual a aba
+  // "Onde nasce" da masmorra também pergunta o servidor antes de
+  // qualquer outra coisa.
+  const current = serverId === '' ? (servers?.[0]?.id ?? '') : serverId;
+
   return (
     <div>
       <PageHeader
         title="KOTH"
         description="Um território no mapa aberto, e quem aguentar ficar nele"
         aside={
-          <Link
-            href="/eventos/"
-            className="flex items-center gap-1 font-condensed text-2xs uppercase tracking-wide text-muted hover:text-foreground"
-          >
-            <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
-            Eventos
-          </Link>
+          <div className="flex items-center gap-3">
+            {servers !== null && servers.length > 1 && (
+              <label className="flex items-center gap-2">
+                <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+                  Servidor
+                </span>
+                <select
+                  value={current}
+                  onChange={(event) => setServerId(event.target.value)}
+                  className="h-8 border border-border bg-background px-2 text-sm"
+                >
+                  {servers.map((server) => (
+                    <option key={server.id} value={server.id}>
+                      {server.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            <Link
+              href="/eventos/"
+              className="flex items-center gap-1 font-condensed text-2xs uppercase tracking-wide text-muted hover:text-foreground"
+            >
+              <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+              Eventos
+            </Link>
+          </div>
         }
       />
 
-      <div className="mt-4 border border-border bg-surface p-6">
+      <div className="mt-4 border-b border-border">
+        <div className="flex">
+          <TabButton active={tab === 'territorios'} onClick={() => setTab('territorios')}>
+            Territórios
+          </TabButton>
+          <TabButton active={tab === 'falta'} onClick={() => setTab('falta')}>
+            O que falta
+          </TabButton>
+        </div>
+      </div>
+
+      <div className="mt-4">
+        {tab === 'territorios' &&
+          (servers === null ? (
+            <StateBlock variant="loading" title="Lendo os servidores…" />
+          ) : current === '' ? (
+            <StateBlock
+              variant="empty"
+              title="Nenhum servidor cadastrado"
+              detail="Um território é um lugar no mapa, e um mapa é de um servidor."
+            />
+          ) : (
+            <ArenasPanel key={current} serverId={current} />
+          ))}
+
+        {tab === 'falta' && <Falta />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * O que ainda não existe.
+ *
+ * Ela continua aqui depois de os territórios funcionarem porque a
+ * família NÃO está pronta: sem recompensa e sem agenda própria, um
+ * admin que só visse a primeira aba concluiria que basta cadastrar.
+ */
+function Falta() {
+  return (
+    <div className="space-y-4">
+      <div className="border border-border bg-surface p-6">
         <h2 className="flex items-center gap-2 font-condensed text-lg font-bold uppercase tracking-wide">
           <Flag aria-hidden="true" className="h-5 w-5 text-rust" />
-          Ainda não há o que configurar aqui
+          O que o KOTH já faz
         </h2>
         <p className="mt-2 max-w-3xl text-sm text-muted">
-          O KOTH escolhe uma região do mapa, anuncia, e quem ficar dentro dela tempo suficiente —
-          defendendo de quem chegar — leva o prêmio. Os jogadores vão a pé, com o inventário que
-          têm; não há arena, teleporte nem inventário emprestado.
+          O território nasce no mapa com uma bandeira e um círculo, quem está dentro dele é contado
+          por equipe, a barra enche na tela de quem participa, e a captura fecha o evento e entra no
+          histórico com o nome da equipe que venceu.
         </p>
         <p className="mt-2 max-w-3xl text-sm text-muted">
-          A agenda e o histórico da tela anterior já valem para ele: são do guarda-chuva, e não da
-          masmorra. O que falta é o evento em si.
+          Quem entra <strong className="text-foreground">sem equipe</strong> vê um aviso e não faz a
+          barra andar — é a regra da casa, e é o que faz o placar ter nome.
         </p>
       </div>
 
-      <section className="mt-4">
+      <section>
         <h3 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
           <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
-          O que falta, na ordem
+          As frentes, na ordem
         </h3>
 
         <ul className="mt-3 space-y-2">
@@ -141,22 +234,20 @@ function Koth() {
             <li key={frente.title} className="flex gap-3 border border-border bg-surface p-3">
               <span
                 aria-hidden="true"
-                className={
-                  frente.done
-                    ? 'mt-0.5 h-4 w-[3px] shrink-0 bg-olive'
-                    : 'mt-0.5 h-4 w-[3px] shrink-0 bg-border'
-                }
+                className={cn(
+                  'mt-0.5 h-4 w-[3px] shrink-0',
+                  frente.done ? 'bg-olive' : 'bg-border',
+                )}
               />
 
               <div className="min-w-0">
                 <p className="font-condensed text-sm font-bold">
                   {frente.title}
                   <span
-                    className={
-                      frente.done
-                        ? 'ml-2 font-normal text-2xs uppercase tracking-wide text-olive'
-                        : 'ml-2 font-normal text-2xs uppercase tracking-wide text-muted'
-                    }
+                    className={cn(
+                      'ml-2 text-2xs font-normal uppercase tracking-wide',
+                      frente.done ? 'text-olive' : 'text-muted',
+                    )}
                   >
                     {frente.done ? 'já existe' : 'a fazer'}
                   </span>
@@ -168,5 +259,31 @@ function Koth() {
         </ul>
       </section>
     </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  readonly active: boolean;
+  readonly onClick: () => void;
+  readonly children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        '-mb-px border-b-2 px-4 py-2 font-condensed text-2xs font-bold uppercase tracking-wide',
+        active
+          ? 'border-rust text-foreground'
+          : 'border-transparent text-muted hover:text-foreground',
+      )}
+    >
+      {children}
+    </button>
   );
 }
