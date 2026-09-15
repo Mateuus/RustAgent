@@ -31,9 +31,16 @@ import { ServersRepository } from '../src/db/servers-repository.js';
 import { StreamerRepository } from '../src/db/streamer-repository.js';
 import { PluginBroadcaster } from '../src/game/broadcast.js';
 import { StreamerSync } from '../src/game/streamer-sync.js';
+import {
+  buildStreamerScreen,
+  STREAMER_TAB_ID,
+  withStreamerTab,
+} from '../src/game/ui-streamer-screen.js';
 import { apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
 import { registerPlayerRoutes } from '../src/http/routes/players.js';
 import type { PlayerDirectory } from '../src/players/service.js';
+import { defaultStreamerProfile } from '../src/types/streamer.js';
+import type { UiDocument, UiElement } from '../src/types/ui-document.js';
 import {
   STREAMER_MARKER,
   STREAMER_PUSH,
@@ -485,5 +492,156 @@ describe('a rota da ficha', () => {
     });
 
     expect(response.statusCode).toBe(400);
+  });
+});
+
+// ------------------------------------------------------------
+//  A ABA DO MENU
+// ------------------------------------------------------------
+
+describe('a aba CONFIGURAÇÕES do menu', () => {
+  /** Todo botão da tela, com o comando que ele roda. */
+  function buttonsOf(elements: readonly UiElement[]): { id: string; command: string }[] {
+    const out: { id: string; command: string }[] = [];
+
+    const walk = (list: readonly UiElement[]): void => {
+      for (const element of list) {
+        if (element.type === 'button' && element.action.kind === 'chat') {
+          out.push({ id: element.id, command: element.action.command });
+        }
+
+        walk(element.children);
+      }
+    };
+
+    walk(elements);
+    return out;
+  }
+
+  it('o liberado vê os quatro interruptores, e cada um roda o seu comando', () => {
+    const screen = buildStreamerScreen({
+      profile: { ...defaultStreamerProfile(STREAMER), allowed: true, active: true },
+    });
+
+    const commands = buttonsOf(screen.elements).map((entry) => entry.command);
+
+    // O geral e os três itens. São `chat` de propósito: o mesmo
+    // caminho de quem digita, e por isso a tela não precisa de
+    // nenhuma ação nova do lado do plugin.
+    expect(commands).toEqual(['/streamer', '/streamer logo', '/streamer ads', '/streamer chat']);
+  });
+
+  it('quem não foi liberado não tem botão nenhum para clicar', () => {
+    const screen = buildStreamerScreen({ profile: defaultStreamerProfile(STREAMER) });
+
+    expect(buttonsOf(screen.elements)).toEqual([]);
+    // E a tela não fica vazia: ela diz o que fazer.
+    expect(JSON.stringify(screen.elements)).toContain('liberado pela administração');
+  });
+
+  it('a carga diz ao plugin qual botão só os liberados enxergam', async () => {
+    const { repository, sync, sent } = buildHarness();
+
+    repository.save(STREAMER, { allowed: true });
+
+    await sync.push(SERVER, 'manual');
+
+    expect(lastPayload(sent).tab).toBe(STREAMER_TAB_ID);
+  });
+});
+
+describe('o menu que já estava gravado', () => {
+  /** Um documento com barra de navegação, como o preset monta. */
+  function menuWithNav(): UiDocument {
+    const navButton = (id: string, x: number): UiElement => ({
+      id,
+      name: id,
+      type: 'button',
+      rect: {
+        anchorMin: { x: 0, y: 0.5 },
+        anchorMax: { x: 0, y: 0.5 },
+        offsetMin: { x, y: -12 },
+        offsetMax: { x: x + 60, y: 12 },
+      },
+      color: '#1B1B1B',
+      sprite: null,
+      text: id.toUpperCase(),
+      fontSize: 12,
+      font: 'RobotoCondensed-Bold.ttf',
+      textColor: '#E8E8E8',
+      align: 'MiddleCenter',
+      action: { id: `ir-${id}`, kind: 'navigate', screenId: `tela-${id}` },
+      hoverColor: null,
+      pressedColor: null,
+      activeColor: null,
+      activeTextColor: null,
+      activeOnScreenId: null,
+      children: [],
+    });
+
+    return {
+      id: 'menu',
+      slug: 'menu',
+      name: 'Menu',
+      command: 'menu',
+      permission: null,
+      layer: 'Overlay',
+      cursor: true,
+      blur: true,
+      shortcuts: [],
+      shell: [
+        {
+          id: 'barra',
+          name: 'barra',
+          type: 'panel',
+          rect: {
+            anchorMin: { x: 0, y: 1 },
+            anchorMax: { x: 1, y: 1 },
+            offsetMin: { x: 0, y: -40 },
+            offsetMax: { x: 0, y: 0 },
+          },
+          color: '#1B1B1B',
+          sprite: null,
+          imageType: 'Simple',
+          material: null,
+          children: [navButton('nav-home', 0), navButton('nav-discord', 70)],
+        },
+      ],
+      screens: [],
+    } as unknown as UiDocument;
+  }
+
+  it('a aba entra depois do último botão da barra, copiando o vizinho', () => {
+    const upgraded = withStreamerTab(menuWithNav());
+
+    expect(upgraded).not.toBe(null);
+
+    const bar = upgraded?.shell[0];
+    const ids = bar?.children.map((child) => child.id);
+
+    // Depois do DISCORD, e não no meio da barra.
+    expect(ids).toEqual(['nav-home', 'nav-discord', STREAMER_TAB_ID]);
+
+    const tab = bar?.children[2];
+
+    // À direita do vizinho, nunca por cima dele.
+    expect(tab?.rect.offsetMin.x).toBeGreaterThan(130);
+    expect(upgraded?.screens.some((screen) => screen.id === 'tela-config')).toBe(true);
+  });
+
+  it('rodar duas vezes não duplica a aba', () => {
+    const once = withStreamerTab(menuWithNav());
+
+    expect(once).not.toBe(null);
+    // O boot roda isto em TODO documento, a cada subida.
+    expect(withStreamerTab(once as UiDocument)).toBe(null);
+  });
+
+  it('menu sem barra de navegação fica intocado', () => {
+    const document = { ...menuWithNav(), shell: [] } as unknown as UiDocument;
+
+    // Desenhar uma barra onde ninguém pediu seria escrever por cima
+    // do trabalho de quem fez o menu.
+    expect(withStreamerTab(document)).toBe(null);
   });
 });

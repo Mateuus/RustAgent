@@ -54,6 +54,7 @@ import {
   type StreamerPayload,
 } from '../types/streamer-transport.js';
 import { pushState, type PushOutcome } from './plugin-push.js';
+import { STREAMER_TAB_ID } from './ui-streamer-screen.js';
 
 /** O que o transporte precisa saber dos servidores. */
 export interface StreamerSyncServers {
@@ -232,17 +233,32 @@ export class StreamerSync {
       return { status: 'not-allowed', profile: before };
     }
 
-    if (before.active === notice.active) {
+    // ####  O AVISO TRAZ O ESTADO INTEIRO  ####
+    //
+    // Desde que a aba do menu existe, o jogador mexe em quatro
+    // coisas: o modo e cada um dos três itens. O `undefined` de um
+    // campo é "o plugin não disse" — um `.cs` da versão anterior,
+    // que só mandava `on` —, e ali o `COALESCE` do repositório
+    // preserva o que já estava gravado.
+    const patch = {
+      active: notice.active,
+      ...(notice.hideLogo === null ? {} : { hideLogo: notice.hideLogo }),
+      ...(notice.hideAds === null ? {} : { hideAds: notice.hideAds }),
+      ...(notice.hideMessages === null ? {} : { hideMessages: notice.hideMessages }),
+    };
+
+    if (
+      before.active === patch.active &&
+      (patch.hideLogo === undefined || before.hideLogo === patch.hideLogo) &&
+      (patch.hideAds === undefined || before.hideAds === patch.hideAds) &&
+      (patch.hideMessages === undefined || before.hideMessages === patch.hideMessages)
+    ) {
       // O plugin e o banco já concordam. Acontece no reenvio de uma
       // linha repetida, e não é erro.
       return { status: 'unchanged', profile: before };
     }
 
-    const profile = this.#deps.repository.save(
-      notice.steamId,
-      { active: notice.active },
-      this.#now(),
-    );
+    const profile = this.#deps.repository.save(notice.steamId, patch, this.#now());
 
     this.#deps.logger?.info(
       {
@@ -250,8 +266,11 @@ export class StreamerSync {
         steamId: notice.steamId,
         name: notice.name,
         active: profile.active,
+        hideLogo: profile.hideLogo,
+        hideAds: profile.hideAds,
+        hideMessages: profile.hideMessages,
       },
-      profile.active ? 'modo streamer LIGADO pelo jogador' : 'modo streamer DESLIGADO pelo jogador',
+      'o jogador mexeu no modo streamer',
     );
 
     // Em todos, e não só neste: o modo é da rede. O servidor onde
@@ -327,6 +346,10 @@ export class StreamerSync {
    */
   #buildPayload(): StreamerPayload {
     return {
+      // O botão que só os liberados enxergam na barra do menu. Ver
+      // types/streamer-transport.ts: a regra é do agente, que é
+      // quem monta o menu e sabe o id.
+      tab: STREAMER_TAB_ID,
       players: this.#deps.repository.allowed().map((profile) => ({
         id: profile.steamId,
         on: profile.active,

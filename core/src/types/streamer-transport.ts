@@ -107,6 +107,23 @@ export interface StreamerPayloadPlayer {
 
 export interface StreamerPayload {
   /**
+   * O botão do menu que SÓ os liberados enxergam.
+   *
+   * O id do elemento no documento (`nav-config`), e `null` quando
+   * a aba deve aparecer para todo mundo.
+   *
+   * ####  A REGRA MORA AQUI, E NAO NO PLUGIN  ####
+   *
+   * Quem monta o menu é o agente, e é ele que sabe qual botão leva
+   * à tela do modo streamer. Um id escrito dentro do `.cs` faria
+   * uma decisão de DESENHO viver no lado que só desenha — e o dia
+   * em que a aba passasse a servir a todos (uma configuração nova,
+   * para qualquer jogador) exigiria recompilar plugin em vez de
+   * mandar `null` neste campo.
+   */
+  readonly tab: string | null;
+
+  /**
    * Quem está liberado. Quem não está aqui não tem o comando.
    *
    * Lista vazia é uma carga legítima: significa "ninguém é
@@ -118,11 +135,30 @@ export interface StreamerPayload {
   readonly players: readonly StreamerPayloadPlayer[];
 }
 
-/** O aviso que o plugin imprime quando alguém digita o comando. */
+/**
+ * O aviso que o plugin imprime quando o jogador mexe no modo.
+ *
+ * ####  ELE LEVA O ESTADO INTEIRO, E NAO O QUE MUDOU  ####
+ *
+ * Desde que a aba do menu existe, o jogador mexe em quatro coisas:
+ * o modo em si e cada um dos três itens. Um aviso que dissesse
+ * apenas "mudou o logo" obrigaria o agente a reconstruir o resto a
+ * partir do que ele acha que estava valendo — e as duas pontas
+ * divergiriam no primeiro clique que se perdesse.
+ *
+ * Mandando tudo, gravar é substituir. É a mesma escolha do payload
+ * de ida (estado completo, nunca delta), e pela mesma razão.
+ *
+ * Os três itens são OPCIONAIS para o agente continuar entendendo
+ * um `.cs` da versão anterior, que só mandava `on`.
+ */
 const noticeSchema = z.object({
   steamId: z.string().trim().min(1).max(32),
-  /** O estado DEPOIS do toque: `true` = ele acabou de ligar. */
+  /** O modo, DEPOIS do toque: `true` = ele acabou de entrar no ar. */
   on: z.boolean(),
+  logo: z.boolean().optional(),
+  ads: z.boolean().optional(),
+  chat: z.boolean().optional(),
   /** O nome, para o log. Ausente em jogador sem nome. */
   name: z.string().trim().max(64).optional(),
 });
@@ -130,6 +166,10 @@ const noticeSchema = z.object({
 export interface StreamerNotice {
   readonly steamId: string;
   readonly active: boolean;
+  /** `null` = o plugin não disse; o agente mantém o que tem. */
+  readonly hideLogo: boolean | null;
+  readonly hideAds: boolean | null;
+  readonly hideMessages: boolean | null;
   readonly name: string | null;
 }
 
@@ -163,6 +203,9 @@ export function parseStreamerNotice(line: string): StreamerNotice | null {
   return {
     steamId: notice.data.steamId,
     active: notice.data.on,
+    hideLogo: notice.data.logo ?? null,
+    hideAds: notice.data.ads ?? null,
+    hideMessages: notice.data.chat ?? null,
     name: notice.data.name ?? null,
   };
 }

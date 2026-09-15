@@ -689,6 +689,9 @@ namespace Oxide.Plugins
             _storeSecret = (string)payload["secret"];
 
             _documents.Clear();
+            // O shell filtrado e derivado do documento: com ele
+            // trocado, o de antes aponta para outro desenho.
+            _shellWithoutTab.Clear();
             foreach (KeyValuePair<string, DocumentCache> entry in built)
             {
                 _documents[entry.Key] = entry.Value;
@@ -1363,7 +1366,7 @@ namespace Oxide.Plugins
             if (!session.ShellDrawn)
             {
                 CuiHelper.DestroyUi(player, RootName);
-                CuiHelper.AddUi(player, Personalize(document.Shell, session.Token));
+                CuiHelper.AddUi(player, Personalize(ShellFor(player, document), session.Token));
                 session.ShellDrawn = true;
             }
             else
@@ -1392,7 +1395,7 @@ namespace Oxide.Plugins
                     // muito melhor que desconectar.
                     session.ShellDrawn = false;
                     CuiHelper.DestroyUi(player, RootName);
-                    CuiHelper.AddUi(player, Personalize(document.Shell, session.Token));
+                    CuiHelper.AddUi(player, Personalize(ShellFor(player, document), session.Token));
                     session.ShellDrawn = true;
                 }
                 else
@@ -1408,6 +1411,95 @@ namespace Oxide.Plugins
             {
                 CuiHelper.AddUi(player, Personalize(screen.Updates, session.Token));
             }
+        }
+
+        /// <summary>
+        /// O shell deste jogador: com ou sem a aba do streamer.
+        ///
+        /// ####  TIRAR UM ELEMENTO E TIRAR A FAMILIA  ####
+        ///
+        /// O CUI e PLANO: o rotulo do botao e um elemento a parte,
+        /// com `parent` apontando para ele. Remover so o botao
+        /// deixaria o rotulo orfao -- e um parent que nao existe
+        /// faz o AddUI do CLIENTE lancar NullReferenceException, o
+        /// que DERRUBA O JOGADOR do servidor (a mesma armadilha
+        /// descrita em Draw).
+        ///
+        /// Por isso a remocao e transitiva: o elemento, os filhos
+        /// dele e os filhos deles.
+        /// </summary>
+        private JArray ShellFor(BasePlayer player, DocumentCache document)
+        {
+            if (document.Shell == null || string.IsNullOrEmpty(_streamerTab))
+            {
+                return document.Shell;
+            }
+
+            if (StreamerOf(player) != null)
+            {
+                // Liberado ve a barra inteira.
+                return document.Shell;
+            }
+
+            JArray cached;
+            if (_shellWithoutTab.TryGetValue(document.Id, out cached))
+            {
+                return cached;
+            }
+
+            string root = RootName + "." + _streamerTab;
+
+            HashSet<string> doomed = new HashSet<string>();
+            doomed.Add(root);
+
+            // Varre ate parar de crescer: a arvore tem poucos
+            // niveis, e o laco termina na primeira passada que nao
+            // acha ninguem novo.
+            bool grew = true;
+            while (grew)
+            {
+                grew = false;
+
+                for (int i = 0; i < document.Shell.Count; i++)
+                {
+                    JObject element = document.Shell[i] as JObject;
+                    if (element == null)
+                    {
+                        continue;
+                    }
+
+                    string name = (string)element["name"];
+                    string parent = (string)element["parent"];
+
+                    if (name == null || parent == null || doomed.Contains(name))
+                    {
+                        continue;
+                    }
+
+                    if (doomed.Contains(parent))
+                    {
+                        doomed.Add(name);
+                        grew = true;
+                    }
+                }
+            }
+
+            JArray kept = new JArray();
+
+            for (int i = 0; i < document.Shell.Count; i++)
+            {
+                JObject element = document.Shell[i] as JObject;
+
+                if (element != null && doomed.Contains((string)element["name"]))
+                {
+                    continue;
+                }
+
+                kept.Add(document.Shell[i]);
+            }
+
+            _shellWithoutTab[document.Id] = kept;
+            return kept;
         }
 
         /// <summary>
@@ -2972,6 +3064,31 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// O botao do menu que SO os liberados enxergam.
+        ///
+        /// Vem do agente (campo `tab` do payload), e vazio quer
+        /// dizer "a aba e de todos". A regra de DESENHO mora la
+        /// porque e la que o menu e montado -- ver
+        /// core/src/types/streamer-transport.ts.
+        /// </summary>
+        private string _streamerTab;
+
+        /// <summary>
+        /// O shell ja filtrado, por documento.
+        ///
+        /// ####  ELE E O MESMO PARA TODO NAO-STREAMER  ####
+        ///
+        /// Que e quase todo mundo. Refiltrar a cada /menu seria
+        /// varrer a lista inteira de elementos por abertura, para
+        /// chegar sempre ao mesmo resultado.
+        ///
+        /// Some quando a carga muda (a aba pode ter mudado de id) e
+        /// quando o documento e recarregado.
+        /// </summary>
+        private readonly Dictionary<string, JArray> _shellWithoutTab =
+            new Dictionary<string, JArray>();
+
+        /// <summary>
         /// SteamID -> o estado dele. So os LIBERADOS moram aqui.
         ///
         /// A chave e string porque e assim que ela viaja e e assim
@@ -3048,6 +3165,11 @@ namespace Oxide.Plugins
             }
 
             _streamers.Clear();
+
+            // O id pode ter mudado (ou sumido): o shell filtrado de
+            // antes nao vale mais.
+            _streamerTab = (string)payload["tab"];
+            _shellWithoutTab.Clear();
 
             JArray players = payload["players"] as JArray;
 
@@ -3163,10 +3285,18 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
-        /// /streamer  -  o jogador liga e desliga a propria live.
+        /// /streamer [logo|ads|chat]  -  o jogador no controle.
         ///
-        /// Um comando so, que alterna: no meio de uma transmissao
-        /// ninguem quer lembrar de subcomando.
+        /// ####  SEM ARGUMENTO ELE ALTERNA O MODO  ####
+        ///
+        /// Que e o que se digita no meio de uma transmissao:
+        /// ninguem quer lembrar de subcomando com a live rodando.
+        ///
+        /// Os itens existem para a ABA DO MENU: os botoes de la
+        /// rodam `/streamer logo` COMO O JOGADOR (a acao `chat` do
+        /// documento), e e por isso que a tela nao precisa de nada
+        /// novo do lado das acoes. Um caminho so decide o que
+        /// acontece, e ele e o mesmo de quem digita no chat.
         /// </summary>
         [ChatCommand("streamer")]
         private void CmdStreamerToggle(BasePlayer player, string command, string[] args)
@@ -3184,19 +3314,124 @@ namespace Oxide.Plugins
                 return;
             }
 
-            state.Active = !state.Active;
+            string item = args != null && args.Length > 0
+                ? args[0].Trim().ToLowerInvariant()
+                : null;
+
+            string message;
+
+            if (string.IsNullOrEmpty(item))
+            {
+                state.Active = !state.Active;
+                message = lang.GetMessage(
+                    state.Active ? "StreamerOn" : "StreamerOff", this, player.UserIDString);
+            }
+            else if (item == "logo")
+            {
+                state.HideLogo = !state.HideLogo;
+                message = StreamerItemMessage(player, "StreamerItemLogo", state.HideLogo);
+            }
+            else if (item == "ads" || item == "propaganda")
+            {
+                state.HideAds = !state.HideAds;
+                message = StreamerItemMessage(player, "StreamerItemAds", state.HideAds);
+            }
+            else if (item == "chat" || item == "avisos")
+            {
+                state.HideChat = !state.HideChat;
+                message = StreamerItemMessage(player, "StreamerItemChat", state.HideChat);
+            }
+            else
+            {
+                player.ChatMessage(lang.GetMessage("StreamerUsage", this, player.UserIDString));
+                return;
+            }
 
             AdsRedrawPlayer(player);
+            player.ChatMessage(message);
 
-            player.ChatMessage(lang.GetMessage(
-                state.Active ? "StreamerOn" : "StreamerOff", this, player.UserIDString));
-
-            // O agente GRAVA a partir desta linha. O Puts leva o
-            // prefixo do plugin, que e o controle de origem que ele
-            // exige -- ver types/streamer-transport.ts.
+            // O agente GRAVA a partir desta linha, e ela leva o
+            // estado INTEIRO -- ver types/streamer-transport.ts. O
+            // Puts leva o prefixo do plugin, que e o controle de
+            // origem que o agente exige.
             Puts(StreamerMarker + "{\"steamId\":\"" + player.UserIDString
                 + "\",\"on\":" + (state.Active ? "true" : "false")
+                + ",\"logo\":" + (state.HideLogo ? "true" : "false")
+                + ",\"ads\":" + (state.HideAds ? "true" : "false")
+                + ",\"chat\":" + (state.HideChat ? "true" : "false")
                 + ",\"name\":" + JsonConvert.ToString(player.displayName ?? string.Empty) + "}");
+
+            StreamerRefreshScreen(player);
+        }
+
+        /// <summary>A frase de um item, com o estado dentro.</summary>
+        private string StreamerItemMessage(BasePlayer player, string key, bool hidden)
+        {
+            string name = lang.GetMessage(key, this, player.UserIDString);
+
+            return lang
+                .GetMessage(hidden ? "StreamerItemHidden" : "StreamerItemShown", this,
+                    player.UserIDString)
+                .Replace("{item}", name);
+        }
+
+        /// <summary>
+        /// Redesenha a tela aberta, se houver uma.
+        ///
+        /// ####  QUEM MONTA A TELA E O AGENTE, DO BANCO  ####
+        ///
+        /// Entao ela so mostra o estado novo depois que a linha do
+        /// console chegou la e virou linha gravada. As duas coisas
+        /// saem daqui na ordem certa (o aviso primeiro, o pedido da
+        /// tela depois, pelo mesmo console), e o atraso curto e a
+        /// folga para o agente escrever antes de ser perguntado.
+        ///
+        /// Com o menu fechado nao ha nada a fazer: e o caso de quem
+        /// digitou o comando no chat, e a tela dele ja foi
+        /// redesenhada pelo AdsRedrawPlayer.
+        /// </summary>
+        private void StreamerRefreshScreen(BasePlayer player)
+        {
+            Session session;
+            if (!_sessions.TryGetValue(player.userID, out session) || !session.ShellDrawn)
+            {
+                return;
+            }
+
+            if (string.IsNullOrEmpty(session.DocumentId) || string.IsNullOrEmpty(session.ScreenId))
+            {
+                return;
+            }
+
+            string documentId = session.DocumentId;
+            string screenId = session.ScreenId;
+            ulong userId = player.userID;
+
+            timer.Once(0.2f, delegate
+            {
+                BasePlayer target = BasePlayer.FindByID(userId);
+
+                if (target == null || !target.IsConnected)
+                {
+                    return;
+                }
+
+                DocumentCache document;
+                if (!_documents.TryGetValue(documentId, out document))
+                {
+                    return;
+                }
+
+                Session current;
+                if (!_sessions.TryGetValue(userId, out current) || !current.ShellDrawn)
+                {
+                    // Ele fechou o menu no meio. Reabrir seria abrir
+                    // uma tela que ninguem pediu.
+                    return;
+                }
+
+                Open(target, document, screenId);
+            });
         }
 
         private void StreamerAskForConfig()
@@ -4468,7 +4703,13 @@ namespace Oxide.Plugins
                 { "BuyTimeout", "Nao recebi a confirmacao da compra. Confira seu inventario e o saldo antes de tentar de novo." },
                 { "StreamerOn", "Modo streamer LIGADO. A marca do servidor sai da sua tela ate voce digitar /streamer de novo." },
                 { "StreamerOff", "Modo streamer desligado. Bem-vindo de volta." },
-                { "StreamerDenied", "O modo streamer nao esta liberado para voce. Fale com a administracao." }
+                { "StreamerDenied", "O modo streamer nao esta liberado para voce. Fale com a administracao." },
+                { "StreamerUsage", "Use /streamer para entrar e sair do ar, ou /streamer logo | ads | chat para escolher o que some." },
+                { "StreamerItemHidden", "{item}: nao aparece mais para voce." },
+                { "StreamerItemShown", "{item}: voltou a aparecer." },
+                { "StreamerItemLogo", "Logo do servidor" },
+                { "StreamerItemAds", "Propaganda" },
+                { "StreamerItemChat", "Avisos do chat" }
             }, this);
 
             lang.RegisterMessages(new Dictionary<string, string>
@@ -4477,6 +4718,12 @@ namespace Oxide.Plugins
                 { "StreamerOn", "Streamer mode ON. The server branding is off your screen until you type /streamer again." },
                 { "StreamerOff", "Streamer mode off. Welcome back." },
                 { "StreamerDenied", "Streamer mode is not enabled for you. Talk to an admin." },
+                { "StreamerUsage", "Use /streamer to go on and off air, or /streamer logo | ads | chat to pick what disappears." },
+                { "StreamerItemHidden", "{item}: hidden from your screen." },
+                { "StreamerItemShown", "{item}: visible again." },
+                { "StreamerItemLogo", "Server logo" },
+                { "StreamerItemAds", "Advertising" },
+                { "StreamerItemChat", "Chat announcements" },
                 { "Loading", "LOADING..." },
                 { "ScreenUnavailable", "Could not load that page. Try again." },
                 { "StoreUnavailable", "The store is not available yet." },

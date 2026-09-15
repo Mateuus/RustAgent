@@ -127,6 +127,10 @@ import {
 } from './game/ui-store-bridge.js';
 import { AdsSync } from './game/ads-sync.js';
 import { StreamerSync } from './game/streamer-sync.js';
+import {
+  createStreamerScreenProvider,
+  withStreamerTab,
+} from './game/ui-streamer-screen.js';
 import { UiSync } from './game/ui-sync.js';
 import { WipeClock } from './game/wipe.js';
 import { StoreRepository } from './db/store-repository.js';
@@ -1549,6 +1553,34 @@ async function main(): Promise<void> {
     );
   }
 
+  // ####  E A ABA CONFIGURACOES, PELA MESMA RAZAO  ####
+  //
+  // O menu gravado antes desta frente não tem onde o jogador mexer
+  // no modo streamer. A edição é a mínima: um botão a mais no fim
+  // da barra, copiado do vizinho, e a tela que ele abre. Quem não
+  // foi liberado nem vê o botão — isso é decidido no plugin, com a
+  // lista que desce no payload. Ver game/ui-streamer-screen.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withStreamerTab(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'a aba CONFIGURAÇÕES entrou neste menu: é onde o streamer liga e desliga o modo dele',
+    );
+  }
+
   // ####  A PÁGINA RANKING DO MENU DO JOGO  ####
   //
   // Ela nasce AQUI, e não lá embaixo junto do calendário, porque o
@@ -1572,6 +1604,17 @@ async function main(): Promise<void> {
   // tela diz que não há Discord em vez de estourar.
   const discordScreens = createDiscordScreenProvider({
     inviteOf: (serverId) => supervisor.configOf(serverId)?.discord ?? '',
+  });
+
+  // ####  E A ABA CONFIGURACOES, QUE E POR JOGADOR  ####
+  //
+  // Ela mostra o modo streamer DAQUELE que abriu o menu, e por isso
+  // é a única deste grupo que depende do `steamId` do pedido. Sem
+  // ele, a resposta certa é a tela de "não liberado" — o
+  // repositório inventa o perfil desligado, e a tela diz o que
+  // fazer. Ver game/ui-streamer-screen.ts.
+  const streamerScreens = createStreamerScreenProvider({
+    profileOf: (steamId) => streamerRepository.get(steamId ?? ''),
   });
 
   // ####  E A PÁGINA REGRAS, QUE VAI AO BANCO E É SÍNCRONA  ####
@@ -1674,6 +1717,17 @@ async function main(): Promise<void> {
 
         if (fromDiscord !== null) {
           return fromDiscord;
+        }
+
+        // ####  E A ABA CONFIGURACOES  ####
+        //
+        // Id exato (`tela-config`), e a única que olha o `steamId`
+        // do pedido: ela desenha o modo streamer de quem abriu. A
+        // leitura é SQLite local, como a das regras.
+        const fromStreamer = streamerScreens(input);
+
+        if (fromStreamer !== null) {
+          return fromStreamer;
         }
 
         // ####  E A PÁGINA REGRAS  ####

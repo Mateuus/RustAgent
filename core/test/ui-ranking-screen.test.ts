@@ -594,8 +594,21 @@ describe('o tamanho do documento gerado', () => {
     //
     // A folga contra o teto real continua em 7.864 bytes (16%), e a
     // regra segue valendo inteira para o que cresce com dados.
+    //
+    // ####  15/09/2026: 42.792, E A TRAVA SUBIU PARA 42.900  ####
+    //
+    // Pelo MESMO critério do parágrafo acima, e pelo mesmo tipo de
+    // peça: o botão CONFIG da barra do menu. Esta tela nem o
+    // desenha — ele chega aqui porque o bundle carrega as ações do
+    // shell, que são as mesmas em toda tela.
+    //
+    // O botão é fixo: ele custa igual com 2 jogadores e com 4.321.
+    // Encurtar a página do ranking para pagá-lo seria trocar uma
+    // linha de conteúdo por um botão, que é a troca errada.
+    //
+    // A folga contra o teto real fica em 7.208 bytes (14%).
     expect(encoded.length).toBeLessThanOrEqual(UI_DOC_MAX_BYTES);
-    expect(encoded.length).toBeLessThan(42_500);
+    expect(encoded.length).toBeLessThan(42_900);
 
     // E a tela nunca é guardada: ela diz "você está em 1.234º".
     expect(bundle.volatile).toBe(true);

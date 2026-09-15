@@ -918,7 +918,17 @@ function cardHeader(
   icon: (rect: Rect) => UiElement,
   title: string,
   subtitleId: string,
-  subtitle: string,
+  /**
+   * A linha de apoio. `null` = ESTE cartão não tem uma.
+   *
+   * ####  VAZIO NAO E AUSENTE  ####
+   *
+   * String vazia é o RANKING no repouso: a linha existe como slot e
+   * o agente a preenche com o nome do ranking em cartaz. Tirá-la do
+   * esqueleto deixaria o agente sem onde escrever, e o cartão
+   * ficaria para sempre sem dizer qual ranking está mostrando.
+   */
+  subtitle: string | null,
 ): UiElement[] {
   return [
     // ####  ARTE, E NÃO UM CARACTERE  ####
@@ -957,11 +967,28 @@ function cardHeader(
       font: 'RobotoCondensed-Bold.ttf',
     }),
 
-    label(subtitleId, subtitle, band(HEAD.subTop, 14, PAD + HEAD.icon + 10), {
-      size: 11,
-      color: C.textMuted,
-      align: 'MiddleLeft',
-    }),
+    // ####  LINHA DE APOIO VAZIA NAO VIRA ELEMENTO  ####
+    //
+    // Decidido com o dono em 15/09/2026, para caber a aba CONFIG na
+    // barra do menu: o documento inteiro viaja num frame de 50.000
+    // bytes, e a trava de test/ui-home-screen.ts diz o que sai
+    // primeiro quando algo entra -- "texto fixo, que enfeita e nao
+    // informa".
+    //
+    // LOJA e WIPE passam vazio: "DESTAQUE DO MES" e "CALENDARIO DO
+    // SERVIDOR" repetiam o titulo com outras palavras. RANKING e
+    // MISSOES continuam com a delas, porque as duas MUDAM com o
+    // estado -- qual ranking esta em cartaz, e quantas missoes
+    // estao em andamento.
+    ...(subtitle === null
+      ? []
+      : [
+          label(subtitleId, subtitle, band(HEAD.subTop, 14, PAD + HEAD.icon + 10), {
+            size: 11,
+            color: C.textMuted,
+            align: 'MiddleLeft',
+          }),
+        ]),
 
     // ####  A RÉGUA FECHA O CABEÇALHO  ####
     //
@@ -1298,7 +1325,7 @@ function offerCard(view: HomeView): UiElement[] {
       CARD_ICON.offer,
       'NOVO NA LOJA',
       'hm-loja-sub',
-      'DESTAQUE DO MÊS',
+      null,
     ),
 
     // A etiqueta, no canto — o mesmo lugar em que a loja a desenha.
@@ -1510,7 +1537,7 @@ function wipeCard(view: HomeView): UiElement[] {
       CARD_ICON.wipe,
       'PRÓXIMO WIPE',
       'hm-wipe-sub',
-      'CALENDÁRIO DO SERVIDOR',
+      null,
     ),
     label('hm-wipe-data', wipe?.when ?? '', band(HEAD.body + 6, 24), {
       size: 15,
