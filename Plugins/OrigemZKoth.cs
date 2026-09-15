@@ -175,9 +175,24 @@ namespace Oxide.Plugins
         /// O arquivo com os netIDs do que está de pé AGORA.
         private const string LeftoverFile = "OrigemZKoth/entidades";
 
+        /// <summary>
+        /// O que ficou para trás, em duas listas.
+        ///
+        /// ####  A BANDEIRA E A CAIXA TÊM VIDAS DIFERENTES  ####
+        ///
+        /// `ids` é o do evento DE PÉ — bandeira e marcadores. Some
+        /// quando ele acaba.
+        ///
+        /// `crates` é o prêmio, e ele PRECISA sobreviver ao fim do
+        /// evento: a caixa fica no mapa para alguém buscar. Quem a
+        /// apaga é o tempo dela, o saque (o `destroyOnEmpty` do jogo
+        /// mata a caixa vazia sozinho) — ou o próximo KOTH, que varre
+        /// o que o anterior deixou.
+        /// </summary>
         private class Leftovers
         {
             public List<ulong> ids = new List<ulong>();
+            public List<ulong> crates = new List<ulong>();
         }
 
         /// <summary>Guarda os ids do que acabou de nascer.</summary>
@@ -185,7 +200,9 @@ namespace Oxide.Plugins
         {
             try
             {
-                var data = new Leftovers();
+                var data = Read();
+
+                data.ids.Clear();
 
                 if (next.banner != null && next.banner.net != null) data.ids.Add(next.banner.net.ID.Value);
                 if (next.mapMarker != null && next.mapMarker.net != null) data.ids.Add(next.mapMarker.net.ID.Value);
@@ -200,15 +217,103 @@ namespace Oxide.Plugins
         }
 
         /// <summary>O evento acabou direito: não há o que varrer depois.</summary>
+        private Leftovers Read()
+        {
+            var data = Interface.Oxide.DataFileSystem.ReadObject<Leftovers>(LeftoverFile);
+
+            if (data == null) data = new Leftovers();
+            if (data.ids == null) data.ids = new List<ulong>();
+            if (data.crates == null) data.crates = new List<ulong>();
+
+            return data;
+        }
+
+        /// <summary>
+        /// O evento acabou direito.
+        ///
+        /// Limpa o que era DELE — e não as caixas, que ficam no mapa
+        /// esperando quem vá buscá-las.
+        /// </summary>
         private void Forget()
         {
             try
             {
-                Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, new Leftovers());
+                var data = Read();
+
+                data.ids.Clear();
+
+                Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, data);
             }
             catch (Exception e)
             {
                 PrintWarning("não consegui limpar a lista de entidades do KOTH: " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// Anota uma caixa do prêmio.
+        ///
+        /// Ela sobrevive ao evento de propósito — e é por isso que
+        /// precisa ser anotada: o que a apaga, se ninguém a abrir, é o
+        /// relógio dela ou o PRÓXIMO KOTH.
+        /// </summary>
+        private void RememberCrate(BaseEntity crate)
+        {
+            try
+            {
+                if (crate == null || crate.net == null) return;
+
+                var data = Read();
+
+                data.crates.Add(crate.net.ID.Value);
+
+                Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, data);
+            }
+            catch (Exception e)
+            {
+                PrintWarning("não consegui anotar a caixa do KOTH: " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// Limpa o que o KOTH anterior deixou no mapa.
+        ///
+        /// Pedido do dono (15/09/2026), depois de ver quatro caixas
+        /// empilhadas no mesmo lugar: "ou quando vai iniciar um novo,
+        /// limpar o anterior".
+        ///
+        /// A caixa VAZIA já some sozinha — `destroyOnEmpty` é padrão do
+        /// `LootContainer` do jogo. Esta varredura é para a que ninguém
+        /// abriu.
+        /// </summary>
+        private void SweepOldCrates()
+        {
+            try
+            {
+                var data = Read();
+
+                if (data.crates.Count == 0) return;
+
+                var mortas = 0;
+
+                foreach (var id in data.crates)
+                {
+                    var found = BaseNetworkable.serverEntities.Find(new NetworkableId(id)) as BaseEntity;
+
+                    if (found == null || found.IsDestroyed) continue;
+
+                    Kill(found);
+                    mortas++;
+                }
+
+                data.crates.Clear();
+                Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, data);
+
+                if (mortas > 0) Puts("limpei " + mortas + " caixa(s) do KOTH anterior.");
+            }
+            catch (Exception e)
+            {
+                PrintWarning("não consegui limpar as caixas do KOTH anterior: " + e.Message);
             }
         }
 
@@ -332,6 +437,11 @@ namespace Oxide.Plugins
             };
 
             ReadReward(next, body);
+
+            // O KOTH novo limpa o que o anterior deixou. Ver
+            // `SweepOldCrates`: a caixa que ninguém abriu não pode
+            // virar entulho no mapa.
+            SweepOldCrates();
 
             var x = Number(body, "x", 0f);
             var z = Number(body, "z", 0f);
@@ -783,6 +893,8 @@ namespace Oxide.Plugins
                             if (doomed != null && !doomed.IsDestroyed) doomed.Kill();
                         }, current.crateLifeSeconds);
                     }
+
+                    RememberCrate(crate);
                 }
                 catch (Exception e)
                 {
