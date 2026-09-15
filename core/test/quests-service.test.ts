@@ -86,16 +86,37 @@ class FakePlaytime implements QuestPlaytimeSource {
   }
 }
 
-/** Um entregador que registra o que lhe pediram e obedece ao roteiro. */
+/**
+ * Um entregador que registra o que lhe pediram e obedece ao roteiro.
+ *
+ * ####  ELE HONRA O `only` E O `index`, COMO O DE VERDADE  ####
+ *
+ * Os dois são o contrato do retry seletivo: o `only` diz quais
+ * posições entregar, e o `index` de volta é o que o serviço grava.
+ * Um fake que ignorasse os dois deixaria os testes verdes sobre um
+ * comportamento que não existe.
+ */
 class FakeRewards {
   readonly calls: DeliverRewardsInput[] = [];
   outcome: (input: DeliverRewardsInput) => readonly RewardOutcome[] = (input) =>
-    input.rewards.map((reward) => ({ kind: reward.kind, ok: true, code: null, message: 'ok' }));
+    input.rewards.map((reward, index) => ({
+      index,
+      kind: reward.kind,
+      ok: true,
+      code: null,
+      message: 'ok',
+    }));
 
   deliver(input: DeliverRewardsInput): Promise<readonly RewardOutcome[]> {
     this.calls.push(input);
 
-    return Promise.resolve(this.outcome(input));
+    const todos = this.outcome(input);
+
+    return Promise.resolve(
+      input.only === undefined
+        ? todos
+        : todos.filter((item) => item.index !== undefined && input.only?.has(item.index) === true),
+    );
   }
 }
 
@@ -916,7 +937,120 @@ describe('o resgate', () => {
     await expect(
       h.service.retryRewards({ playerQuestId: id, actor: 'dono' }),
     ).resolves.toMatchObject({ pending: false });
-    expect(h.rewards.calls).toHaveLength(2);
+  });
+
+  it('a reentrega NÃO reprocessa o que já saiu', async () => {
+    // ####  O DEFEITO QUE ESTE TESTE FIXA  ####
+    //
+    // O botão reprocessava as cinco recompensas. Moeda e ponto
+    // aguentavam pela idempotência que têm na ponta; item, kit e
+    // VIP saíam de novo, e ninguém percebia até o jogador contar.
+    const id = await accept();
+
+    bump(id, 5000);
+    await h.service.claim({ playerQuestId: id });
+
+    expect(h.rewards.calls).toHaveLength(1);
+
+    const result = await h.service.retryRewards({ playerQuestId: id, actor: 'dono' });
+
+    // Nada pendente: o entregador nem é chamado.
+    expect(h.rewards.calls).toHaveLength(1);
+    expect(result.pending).toBe(false);
+    // E o quadro volta como está gravado — a mensagem é a da
+    // entrega que aconteceu, e não uma inventada agora.
+    expect(result.outcomes[0]).toMatchObject({ index: 0, ok: true, message: 'ok' });
+  });
+
+  it('a reentrega manda SÓ a posição que falhou', async () => {
+    h.repository.create(
+      'premiada',
+      quest({
+        rewards: [
+          { kind: 'coins', amount: 50 },
+          { kind: 'points', metric: 'trophy.bleik', amount: 5 },
+        ],
+      }),
+      NOW,
+    );
+
+    // O caso do dono, na letra: os 50 OZCoin entram e os 5 pontos
+    // não, porque o ranking não existia.
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: reward.kind !== 'points',
+        code: reward.kind === 'points' ? 'RANKING_METRIC_UNKNOWN' : null,
+        message: reward.kind === 'points' ? 'o ranking não existe' : 'ok',
+      }));
+
+    const id = await accept('premiada');
+
+    bump(id, 5000);
+
+    expect((await h.service.claim({ playerQuestId: id })).pending).toBe(true);
+
+    // O admin conserta o cadastro; daqui em diante tudo sai.
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: null,
+        message: 'ok',
+      }));
+
+    const result = await h.service.retryRewards({ playerQuestId: id, actor: 'dono' });
+
+    // A moeda NÃO foi remandada: o `only` levou só a posição 1.
+    expect([...(h.rewards.calls[1]?.only ?? [])]).toEqual([1]);
+    expect(result.pending).toBe(false);
+    // E o quadro devolvido é o completo — a tela do painel mostra a
+    // missão inteira, e não só o que acabou de ser reprocessado.
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]).toMatchObject({ index: 0, kind: 'coins', ok: true });
+    expect(result.outcomes[1]).toMatchObject({ index: 1, kind: 'points', ok: true });
+  });
+
+  it('o que falhou DE NOVO continua pendente, e só ele', async () => {
+    h.repository.create(
+      'premiada',
+      quest({
+        rewards: [
+          { kind: 'coins', amount: 50 },
+          { kind: 'points', metric: 'trophy.bleik', amount: 5 },
+        ],
+      }),
+      NOW,
+    );
+
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: reward.kind !== 'points',
+        code: reward.kind === 'points' ? 'RANKING_METRIC_UNKNOWN' : null,
+        message: 'roteiro',
+      }));
+
+    const id = await accept('premiada');
+
+    bump(id, 5000);
+    await h.service.claim({ playerQuestId: id });
+
+    // O admin clica sem ter consertado nada.
+    const primeira = await h.service.retryRewards({ playerQuestId: id, actor: 'dono' });
+
+    expect(primeira.pending).toBe(true);
+
+    // E de novo: o recorte continua o mesmo, e a moeda nunca volta
+    // a ser mandada.
+    const segunda = await h.service.retryRewards({ playerQuestId: id, actor: 'dono' });
+
+    expect(segunda.pending).toBe(true);
+    expect([...(h.rewards.calls[1]?.only ?? [])]).toEqual([1]);
+    expect([...(h.rewards.calls[2]?.only ?? [])]).toEqual([1]);
   });
 
   it('o cooldown vem da quest de HOJE, e o objetivo vem do snapshot', async () => {

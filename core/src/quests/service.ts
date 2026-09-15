@@ -1247,13 +1247,29 @@ export class QuestsService {
   }
 
   /**
-   * Reentrega o que falhou.
+   * Reentrega SÓ o que falhou.
    *
    * É o botão do painel. A tentativa continua `claimed` — ela nunca
-   * deixou de estar —, e a idempotência de moeda e ponto (a
-   * `reference` e o `eventId` estáveis) é o que torna repetir
-   * seguro para esses dois. Item, kit e VIP saem de novo: por isso
-   * o painel diz o que já foi.
+   * deixou de estar.
+   *
+   * ####  ANTES ELE REPROCESSAVA AS CINCO  ####
+   *
+   * Moeda e ponto aguentavam, e por acaso: a `reference` da
+   * carteira e o `eventId` do ranking são estáveis, e a segunda
+   * passada era recusada na ponta. Item, kit e VIP não têm nada
+   * disso — o kit saía de novo, e ninguém percebia até o jogador
+   * contar.
+   *
+   * Agora a pergunta vem antes: `player_quest_rewards` diz o que já
+   * saiu, e só o resto é mandado.
+   *
+   * ####  TENTATIVA SEM REGISTRO REPROCESSA TUDO  ####
+   *
+   * É o caso das resgatadas antes da migração 086, e é deliberado:
+   * o evento de falha diz o TIPO que falhou, não a posição, e não
+   * existe evento de sucesso para cancelá-lo. Adivinhar faria o
+   * retry entregar de novo o que já tinha saído — o defeito que
+   * este método veio fechar. Ver o cabeçalho da migração.
    */
   async retryRewards(input: {
     readonly playerQuestId: number;
@@ -1278,8 +1294,58 @@ export class QuestsService {
       );
     }
 
+    const known = this.#deps.repository.rewardOutcomesOf(attempt.id);
+    const pending = new Set<number>();
+
+    for (const [index] of attempt.snapshot.rewards.entries()) {
+      if (known.get(index)?.ok !== true) {
+        pending.add(index);
+      }
+    }
+
+    // Nada a fazer é uma RESPOSTA, e não um erro: o admin clicou
+    // duas vezes, ou outro já tinha consertado. Devolver o quadro
+    // como está é o que mostra isso na tela.
+    if (pending.size === 0) {
+      return {
+        playerQuestId: attempt.id,
+        questId: attempt.questId,
+        outcomes: this.#knownOutcomes(attempt, known),
+        pending: false,
+      };
+    }
+
     const distance = input.distanceMeters ?? this.deliveryDistanceOf(attempt.id) ?? undefined;
-    const outcomes = await this.#deliver(attempt, distance, input.actor);
+    const fresh = await this.#deliver(attempt, distance, input.actor, pending);
+
+    // O quadro COMPLETO: o que acabou de sair e o que já estava
+    // entregue. Devolver só as reprocessadas faria a tela do painel
+    // parecer que a missão só tinha aquelas.
+    const byIndex = new Map(
+      fresh.filter((outcome) => outcome.index !== undefined).map((o) => [o.index as number, o]),
+    );
+
+    const outcomes = attempt.snapshot.rewards.map((reward, index) => {
+      const agora = byIndex.get(index);
+
+      if (agora !== undefined) {
+        return agora;
+      }
+
+      // A mensagem GRAVADA, e não uma inventada: ela é o que
+      // aconteceu com aquela recompensa, e o painel mostra o quadro
+      // da missão inteira. O `pending: false` é quem diz que não
+      // havia o que reprocessar.
+      const antes = known.get(index);
+
+      return {
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: antes?.code ?? null,
+        message: antes?.message ?? 'Esta recompensa já tinha sido entregue.',
+      };
+    });
 
     return {
       playerQuestId: attempt.id,
@@ -1287,6 +1353,27 @@ export class QuestsService {
       outcomes,
       pending: outcomes.some((item) => !item.ok),
     };
+  }
+
+  /** O quadro das recompensas a partir do que está gravado. */
+  #knownOutcomes(
+    attempt: PlayerQuestRecord,
+    known: ReadonlyMap<
+      number,
+      { readonly kind: string; readonly ok: boolean; readonly code: string | null; readonly message: string | null }
+    >,
+  ): readonly RewardOutcome[] {
+    return attempt.snapshot.rewards.map((reward, index) => {
+      const row = known.get(index);
+
+      return {
+        index,
+        kind: reward.kind,
+        ok: row?.ok ?? true,
+        code: row?.code ?? null,
+        message: row?.message ?? 'Esta recompensa já tinha sido entregue.',
+      };
+    });
   }
 
   /**
@@ -1766,18 +1853,22 @@ export class QuestsService {
     attempt: PlayerQuestRecord,
     distanceMeters: number | undefined,
     actor?: string,
+    only?: ReadonlySet<number>,
   ): Promise<readonly RewardOutcome[]> {
     if (this.#deps.rewards === undefined) {
       // Sem o entregador, a quest fica resgatada e a recompensa
       // vira pendência — que é exatamente o que o painel lista.
-      const outcomes = attempt.snapshot.rewards.map((reward) => ({
-        kind: reward.kind,
-        ok: false,
-        code: 'QUEST_REWARD_UNAVAILABLE',
-        message: 'Este agente não está entregando recompensas agora.',
-      }));
+      const outcomes = attempt.snapshot.rewards
+        .map((reward, index) => ({
+          index,
+          kind: reward.kind,
+          ok: false,
+          code: 'QUEST_REWARD_UNAVAILABLE',
+          message: 'Este agente não está entregando recompensas agora.',
+        }))
+        .filter((outcome) => only === undefined || only.has(outcome.index));
 
-      this.#recordFailures(attempt, outcomes, actor);
+      this.#recordOutcomes(attempt, outcomes, actor);
 
       return outcomes;
     }
@@ -1790,11 +1881,54 @@ export class QuestsService {
       questTitle: attempt.snapshot.title,
       rewards: attempt.snapshot.rewards,
       distanceMeters,
+      ...(only === undefined ? {} : { only }),
     });
 
-    this.#recordFailures(attempt, outcomes, actor);
+    this.#recordOutcomes(attempt, outcomes, actor);
 
     return outcomes;
+  }
+
+  /**
+   * Guarda como cada recompensa terminou, e denuncia as que não
+   * saíram.
+   *
+   * ####  DUAS ESCRITAS, DUAS PERGUNTAS  ####
+   *
+   * `player_quest_rewards` é o ESTADO: o que já foi entregue, por
+   * posição. É dele que o retry tira o que ainda falta.
+   *
+   * `quest_events` é a HISTÓRIA: uma linha por falha, que fica para
+   * sempre mesmo depois de a pendência ser resolvida. Sem ela, um
+   * problema que se repete toda semana pareceria um problema novo
+   * toda semana.
+   */
+  #recordOutcomes(
+    attempt: PlayerQuestRecord,
+    outcomes: readonly RewardOutcome[],
+    actor?: string,
+  ): void {
+    const now = this.#now();
+
+    for (const outcome of outcomes) {
+      if (outcome.index === undefined) {
+        continue;
+      }
+
+      this.#deps.repository.recordRewardOutcome(
+        attempt.id,
+        {
+          idx: outcome.index,
+          kind: outcome.kind,
+          ok: outcome.ok,
+          code: outcome.code,
+          message: outcome.message,
+        },
+        now,
+      );
+    }
+
+    this.#recordFailures(attempt, outcomes, actor);
   }
 
   /**
