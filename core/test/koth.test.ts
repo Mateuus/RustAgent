@@ -175,6 +175,64 @@ describe('erguer', () => {
     expect(run?.status).toBe('active');
   });
 
+  it('o prêmio do território viaja com o start', async () => {
+    const h = harness();
+
+    h.arenas.add(
+      SERVER,
+      kothArenaInputSchema.parse({
+        label: 'Colina',
+        x: 1,
+        z: 2,
+        reward: {
+          smoke: false,
+          flare: true,
+          count: 3,
+          crateSeconds: 120,
+          crates: [
+            { prefab: 'assets/bundled/prefabs/radtown/crate_elite.prefab', weight: 1 },
+            { prefab: 'assets/bundled/prefabs/radtown/crate_normal.prefab', weight: 9 },
+          ],
+        },
+      }),
+      { worldKey: WORLD, grid: 'E7' },
+    );
+
+    await h.service.start({ serverId: SERVER });
+
+    const command = h.sent.find((line) => line.startsWith('origemz.koth start')) ?? '';
+    const body = JSON.parse(command.slice('origemz.koth start '.length)) as Record<string, unknown>;
+    const reward = body['reward'] as Record<string, unknown>;
+
+    expect(reward['smoke']).toBe(false);
+    expect(reward['count']).toBe(3);
+    expect(reward['crateSeconds']).toBe(120);
+
+    // O peso vira `chance` na fronteira: é o nome que o plugin usa.
+    expect(reward['crates']).toEqual([
+      { prefab: 'assets/bundled/prefabs/radtown/crate_elite.prefab', chance: 1 },
+      { prefab: 'assets/bundled/prefabs/radtown/crate_normal.prefab', chance: 9 },
+    ]);
+  });
+
+  it('território sem prêmio configurado manda o padrão, e não vazio', async () => {
+    const h = harness();
+
+    arena(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    const command = h.sent.find((line) => line.startsWith('origemz.koth start')) ?? '';
+    const body = JSON.parse(command.slice('origemz.koth start '.length)) as Record<string, unknown>;
+    const reward = body['reward'] as Record<string, unknown>;
+
+    // Uma caixa, fumaça e flare: é o que o admin espera de um
+    // território que ele criou e ainda não configurou.
+    expect(reward['count']).toBe(1);
+    expect(reward['smoke']).toBe(true);
+    expect(reward['crateSeconds']).toBe(600);
+  });
+
   it('anuncia onde ele abriu', async () => {
     const h = harness();
 

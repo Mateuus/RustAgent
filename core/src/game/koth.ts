@@ -182,6 +182,26 @@ export class KothService {
       decayPerSecond: arena.decayPerSecond,
       color: arena.color,
       requireTeam: true,
+
+      // ####  O PRÊMIO VIAJA COM O EVENTO  ####
+      //
+      // O plugin não lê banco nem config: o que ele sabe do prêmio é
+      // o que vem neste corpo. Assim um território editado no painel
+      // vale no PRÓXIMO evento, sem recarregar plugin nenhum.
+      reward: {
+        smoke: arena.reward.smoke,
+        flare: arena.reward.flare,
+        count: arena.reward.count,
+        crateSeconds: arena.reward.crateSeconds,
+        crates: arena.reward.crates.map((crate) => ({
+          prefab: crate.prefab,
+          // O plugin chama de `chance` o que aqui é `weight`: é peso
+          // de sorteio nos dois lados, e o nome antigo ficou no
+          // protocolo. Traduzir aqui, na fronteira, é mais barato que
+          // uma migração de nome no `.cs`.
+          chance: crate.weight,
+        })),
+      },
     });
 
     let reply: Record<string, unknown>;

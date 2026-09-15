@@ -7507,6 +7507,35 @@ CREATE TABLE team_settings (
 );
 `;
 
+const KOTH_ARENA_REWARD_SCHEMA = `
+-- ============================================================
+--  091  o premio do territorio: a caixa que nasce no fim.
+--
+--  Pedido do dono em 15/09/2026: "no final spawn uma smoke e
+--  aparece a caixa (o tipo de caixa e o random que ela vai aparecer
+--  e totalmente configuravel pelo administrador)".
+--
+--  ####  UMA COLUNA DE JSON, E NAO UMA TABELA  ####
+--
+--  A lista de caixas com peso e uma configuracao que se le e se
+--  grava INTEIRA, junto com o territorio: ninguem vai consultar "as
+--  arenas que tem crate_elite" nem ordenar por peso. Uma tabela
+--  filha custaria um join em toda leitura para responder uma
+--  pergunta que ninguem faz.
+--
+--  E o mesmo criterio do resto do projeto: o que e estrutura vira
+--  coluna, o que e receita vira JSON. Quem valida e o zod na borda
+--  (kothRewardSchema), nao o banco.
+--
+--  NULL = o territorio nunca foi configurado, e vale o padrao do
+--  codigo. Nao semeamos: um territorio criado depois desta migracao
+--  ficaria sem a linha, e o codigo teria de saber o padrao de
+--  qualquer jeito.
+-- ============================================================
+
+ALTER TABLE koth_arenas ADD COLUMN reward TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7756,6 +7785,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 88, name: 'team-ranks', sql: TEAM_RANKS_SCHEMA },
   { id: 89, name: 'koth-arenas', sql: KOTH_ARENAS_SCHEMA },
   { id: 90, name: 'team-settings', sql: TEAM_SETTINGS_SCHEMA },
+  { id: 91, name: 'koth-arena-reward', sql: KOTH_ARENA_REWARD_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

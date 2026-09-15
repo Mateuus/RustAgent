@@ -6283,6 +6283,27 @@ export interface DungeonAccess {
  * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
  * a este bloco: a masmorra nao apodrece nem com ele desligado.
  */
+/** Uma caixa do prêmio, com o PESO dela no sorteio. */
+export interface KothCrate {
+  prefab: string;
+  weight: number;
+}
+
+/**
+ * O que nasce quando alguém vence.
+ *
+ * Espelha `kothRewardSchema` em `core/src/types/koth.ts`. O evento
+ * que EXPIRA sem vencedor não deixa nada.
+ */
+export interface KothReward {
+  smoke: boolean;
+  flare: boolean;
+  crates: KothCrate[];
+  count: number;
+  /** Zero = a caixa fica até alguém abrir. */
+  crateSeconds: number;
+}
+
 /** Um território do KOTH. Espelha `core/src/types/koth.ts`. */
 export interface KothArenaInput {
   label: string;
@@ -6297,6 +6318,7 @@ export interface KothArenaInput {
   decayPerSecond?: number;
   color?: string;
   enabled?: boolean;
+  reward?: KothReward;
 }
 
 export interface KothArena extends KothArenaInput {
@@ -6306,6 +6328,7 @@ export interface KothArena extends KothArenaInput {
   decayPerSecond: number;
   color: string;
   enabled: boolean;
+  reward: KothReward;
   worldKey: string | null;
   grid: string | null;
   lastUsedAt: number | null;

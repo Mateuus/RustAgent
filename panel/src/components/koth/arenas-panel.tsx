@@ -23,17 +23,16 @@
 //  Ver Docs/KOTH/DECISOES-DO-DONO.md.
 // ============================================================
 
-import { Crosshair, Flag, Loader2, Trash2 } from 'lucide-react';
+import { Flag, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
+import { ArenaForm, blankReward } from '@/components/koth/arena-form';
 import { MapView } from '@/components/map-view';
 import { StateBlock } from '@/components/state-block';
-import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
-import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
 import { useMapImage } from '@/lib/hooks/use-map-image';
-import { agent, type KothArena, type PlayersSnapshot } from '@/lib/api';
+import { agent, type KothArena, type KothArenaInput, type PlayersSnapshot } from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -41,33 +40,38 @@ export interface ArenasPanelProps {
   readonly serverId: string;
 }
 
-/** O que está sendo marcado agora, antes de virar território. */
-interface Draft {
-  readonly x: number;
-  readonly z: number;
-  label: string;
-  radius: number;
-  height: number;
-  captureSeconds: number;
-  durationSeconds: number;
+/**
+ * O território que o admin está criando ou editando.
+ *
+ * `null` = nenhum. O formulário é o mesmo nos dois casos — ver
+ * `arena-form.tsx`.
+ */
+interface Editing {
+  readonly value: KothArenaInput;
+  /** Ausente = é um território novo. */
+  readonly arena?: KothArena;
 }
 
-function blankDraft(x: number, z: number): Draft {
+function blankArena(x: number, z: number): KothArenaInput {
   return {
+    label: '',
     x,
     z,
-    label: '',
-    radius: 25,
+    radius: 30,
     height: 30,
-    captureSeconds: 300,
-    durationSeconds: 1800,
+    // O padrão da casa: quinze minutos de domínio para vencer.
+    captureSeconds: 900,
+    durationSeconds: 3600,
+    decayPerSecond: 0,
+    enabled: true,
+    reward: blankReward(),
   };
 }
 
 export function ArenasPanel({ serverId }: ArenasPanelProps) {
   const [arenas, setArenas] = useState<readonly KothArena[] | null>(null);
   const [snapshot, setSnapshot] = useState<PlayersSnapshot | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [editing, setEditing] = useState<Editing | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,32 +114,22 @@ export function ArenasPanel({ serverId }: ArenasPanelProps) {
     };
   }, [serverId]);
 
-  async function save(): Promise<void> {
-    if (draft === null) return;
-
-    const label = draft.label.trim();
-
-    if (label === '') {
-      toast.error('Falta o nome', { description: 'É por ele que o território aparece no jogo.' });
-      return;
-    }
+  async function save(value: KothArenaInput): Promise<void> {
+    if (editing === null) return;
 
     setSaving(true);
 
     try {
-      await agent.createKothArena(serverId, {
-        label,
-        x: draft.x,
-        z: draft.z,
-        radius: draft.radius,
-        height: draft.height,
-        captureSeconds: draft.captureSeconds,
-        durationSeconds: draft.durationSeconds,
-      });
+      if (editing.arena === undefined) {
+        await agent.createKothArena(serverId, value);
+        toast.success('Território cadastrado', { description: value.label });
+      } else {
+        await agent.updateKothArena(serverId, editing.arena.id, value);
+        toast.success('Território salvo', { description: value.label });
+      }
 
-      setDraft(null);
+      setEditing(null);
       await load();
-      toast.success('Território cadastrado', { description: label });
     } catch (cause) {
       toast.error('Não consegui gravar', {
         description: cause instanceof Error ? cause.message : String(cause),
@@ -209,7 +203,7 @@ export function ArenasPanel({ serverId }: ArenasPanelProps) {
               coverage={mapImage.coverage}
               onPick={(point) => {
                 setSelected(null);
-                setDraft(blankDraft(Math.round(point.x), Math.round(point.z)));
+                setEditing({ value: blankArena(Math.round(point.x), Math.round(point.z)) });
               }}
               marks={[
                 ...arenas.map((arena) => ({
@@ -220,14 +214,14 @@ export function ArenasPanel({ serverId }: ArenasPanelProps) {
                   tone: arena.enabled ? ('normal' as const) : ('muted' as const),
                   selected: selected === arena.id,
                 })),
-                ...(draft === null
+                ...(editing === null || editing.arena !== undefined
                   ? []
                   : [
                       {
                         id: 'novo',
-                        x: draft.x,
-                        z: draft.z,
-                        label: draft.label === '' ? 'novo' : draft.label,
+                        x: editing.value.x,
+                        z: editing.value.z,
+                        label: editing.value.label === '' ? 'novo' : editing.value.label,
                         tone: 'warning' as const,
                         selected: true,
                       },
@@ -237,69 +231,15 @@ export function ArenasPanel({ serverId }: ArenasPanelProps) {
           </div>
 
           <div className="space-y-3">
-            {draft !== null && (
-              <section className="border border-amber bg-surface p-3">
-                <h4 className="flex items-center gap-2 font-condensed text-2xs font-bold uppercase tracking-wide">
-                  <Crosshair aria-hidden="true" className="h-3.5 w-3.5 text-amber" />
-                  Novo território
-                  <span className="font-mono font-normal text-muted">
-                    {draft.x}, {draft.z}
-                  </span>
-                </h4>
-
-                <label className="mt-2 block">
-                  <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-                    Nome
-                  </span>
-                  <Input
-                    autoFocus
-                    value={draft.label}
-                    maxLength={60}
-                    placeholder="Colina do Norte"
-                    className="mt-1 h-9"
-                    onChange={(event) =>
-                      setDraft({ ...draft, label: event.target.value })
-                    }
-                  />
-                </label>
-
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <NumberField
-                    label="Raio (m)"
-                    value={draft.radius}
-                    onChange={(radius) => setDraft({ ...draft, radius })}
-                  />
-                  <NumberField
-                    label="Altura (m)"
-                    value={draft.height}
-                    onChange={(height) => setDraft({ ...draft, height })}
-                  />
-                  <NumberField
-                    label="Captura (s)"
-                    value={draft.captureSeconds}
-                    onChange={(captureSeconds) => setDraft({ ...draft, captureSeconds })}
-                  />
-                  <NumberField
-                    label="Duração (s)"
-                    value={draft.durationSeconds}
-                    onChange={(durationSeconds) => setDraft({ ...draft, durationSeconds })}
-                  />
-                </div>
-
-                <p className="mt-2 text-2xs text-muted">
-                  A altura conta do chão para cima: sem ela, quem passa de helicóptero capturaria.
-                </p>
-
-                <div className="mt-3 flex gap-2">
-                  <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
-                    {saving && <Loader2 aria-hidden="true" className="mr-1 h-3.5 w-3.5 animate-spin" />}
-                    Cadastrar
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>
-                    Cancelar
-                  </Button>
-                </div>
-              </section>
+            {editing !== null && (
+              <ArenaForm
+                key={editing.arena?.id ?? 'novo'}
+                value={editing.value}
+                {...(editing.arena === undefined ? {} : { arena: editing.arena })}
+                busy={saving}
+                onSave={(value) => void save(value)}
+                onCancel={() => setEditing(null)}
+              />
             )}
 
             {arenas.length === 0 ? (
@@ -314,7 +254,12 @@ export function ArenasPanel({ serverId }: ArenasPanelProps) {
                   <li key={arena.id} className="p-3">
                     <button
                       type="button"
-                      onClick={() => setSelected(arena.id)}
+                      onClick={() => {
+                        setSelected(arena.id);
+                        // Editar é a ação que se quer ao clicar num
+                        // território: os números dele são a disputa.
+                        setEditing({ value: { ...arena }, arena });
+                      }}
                       className="flex w-full items-start justify-between gap-2 text-left"
                     >
                       <div className="min-w-0">
@@ -365,32 +310,6 @@ export function ArenasPanel({ serverId }: ArenasPanelProps) {
         </div>
       )}
     </div>
-  );
-}
-
-function NumberField({
-  label,
-  value,
-  onChange,
-}: {
-  readonly label: string;
-  readonly value: number;
-  readonly onChange: (value: number) => void;
-}) {
-  return (
-    <label className="block">
-      <span className="font-condensed text-2xs uppercase tracking-wide text-muted">{label}</span>
-      <Input
-        type="number"
-        value={String(value)}
-        className="mt-1 h-9"
-        onChange={(event) => {
-          const parsed = Number(event.target.value);
-
-          if (Number.isFinite(parsed)) onChange(parsed);
-        }}
-      />
-    </label>
   );
 }
 
