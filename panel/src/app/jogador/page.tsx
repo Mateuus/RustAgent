@@ -12,7 +12,7 @@
 //
 //  ####  TRÊS ABAS, TRÊS PERGUNTAS  ####
 //
-//    Identidade   quem é, desde quando, está banido, e é streamer?
+//    Identidade   quem é, desde quando, e está banido?
 //    Servidores   onde ele joga, e há quanto tempo em cada um
 //    Histórico    o que aconteceu com ele
 //
@@ -32,6 +32,7 @@ import {
   IdCard,
   ScrollText,
   Server,
+  SlidersHorizontal,
   Wallet,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -66,7 +67,14 @@ import { EM_DASH, formatDateTime, formatDuration, formatInteger, formatWhen } fr
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-type Tab = 'identidade' | 'servidores' | 'vip' | 'carteira' | 'missoes' | 'historico';
+type Tab =
+  | 'identidade'
+  | 'servidores'
+  | 'vip'
+  | 'carteira'
+  | 'missoes'
+  | 'configuracoes'
+  | 'historico';
 
 const TABS = [
   { key: 'identidade', label: 'Identidade', Icon: IdCard },
@@ -87,6 +95,16 @@ const TABS = [
   // pergunta de quem chegou pelo Discord dizendo "fiz a missão e
   // não recebi". Ela pertence ao mesmo grupo do VIP e da carteira.
   { key: 'missoes', label: 'Missões', Icon: ScrollText },
+  // ####  O QUE VALE SÓ PARA ELE  ####
+  //
+  // As outras abas RESPONDEM sobre o jogador; esta MUDA o jogador.
+  // É onde moram os ajustes que valem para ele e para mais ninguém
+  // — hoje o modo streamer, amanhã o que vier junto.
+  //
+  // Ela vem depois das de estado e antes do histórico pelo mesmo
+  // critério do resto: quem é, onde joga, o que tem, o que dá para
+  // ajustar, e por último o que já aconteceu.
+  { key: 'configuracoes', label: 'Configurações', Icon: SlidersHorizontal },
   { key: 'historico', label: 'Histórico', Icon: History },
 ] as const;
 
@@ -285,6 +303,8 @@ function Jogador() {
 
             {tab === 'missoes' && <MissoesDoJogador steamId={steamId} servers={servers} />}
 
+            {tab === 'configuracoes' && <Configuracoes steamId={steamId} />}
+
             {tab === 'historico' && <Historico steamId={steamId} />}
           </div>
         </>
@@ -450,11 +470,29 @@ function Identidade({
           )}
         </div>
       </section>
+    </div>
+  );
+}
 
-      {/* O modo streamer fica aqui, e não numa aba própria, porque
-          é da mesma natureza do banimento: uma decisão do admin
-          sobre a PESSOA, que vale na rede inteira. */}
-      <StreamerCard steamId={player.steamId} />
+// ------------------------------------------------------------
+//  Configurações
+//
+//  ####  UMA ABA PARA O QUE MUDA O JOGADOR  ####
+//
+//  Pedido do dono em 14/09/2026: "criamos na tab Configurações em
+//  Jogadores, e lá vai ter as configurações para aquele jogador".
+//
+//  Ela nasce com um bloco só — o modo streamer —, e isso é de
+//  propósito: o lugar existe antes do segundo ajuste, e é ele que
+//  impede que o próximo seja pendurado na aba Identidade, que
+//  responde quem a pessoa é e não deveria virar um painel de
+//  controle.
+// ------------------------------------------------------------
+
+function Configuracoes({ steamId }: { steamId: string }) {
+  return (
+    <div className="space-y-4">
+      <StreamerCard steamId={steamId} />
     </div>
   );
 }
