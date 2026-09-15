@@ -66,8 +66,14 @@ export const EVENT_KIND_LABEL: Record<EventKind, { one: string; many: string }> 
  * Sair daqui é o último passo de um evento novo, e não o primeiro:
  * só entra a família cujo caminho inteiro existe — cadastro, lugar
  * no mapa e quem construa.
+ *
+ * O `koth` entrou em 15/09/2026, quando ganhou território cadastrado
+ * (migração 089), plugin que o ergue e relógio próprio
+ * (`game/koth-scheduler.ts`). Cada família tem o SEU relógio: o da
+ * masmorra sabe de planta, ponto com yaw e comando de demolir, e
+ * nada disso vale no território.
  */
-export const RUNNABLE_EVENT_KINDS: readonly EventKind[] = ['dungeon'];
+export const RUNNABLE_EVENT_KINDS: readonly EventKind[] = ['dungeon', 'koth'];
 
 /** Esta família tem quem a faça nascer? */
 export function isRunnableKind(kind: string): boolean {

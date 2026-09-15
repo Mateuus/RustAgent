@@ -222,6 +222,20 @@ export class KothService {
     return { arena, runId: run.id, grid };
   }
 
+  /**
+   * Há território para erguer neste servidor?
+   *
+   * O agendador pergunta ANTES de tentar: erguer sem território
+   * devolve erro, e o erro viraria uma FALHA no histórico — "não
+   * nasceu" com cara de defeito. Falta de território não é defeito,
+   * é configuração que ainda não foi feita.
+   */
+  hasArena(serverId: string): boolean {
+    return this.#deps.arenas.pickFor(serverId, {
+      worldKey: this.#deps.servers.worldKey(serverId),
+    }) !== null;
+  }
+
   /** Derruba o que estiver de pé. */
   async stopRun(serverId: string, reason = 'painel'): Promise<void> {
     await this.#command(serverId, 'origemz.koth stop', { allow: ['not_active'] });

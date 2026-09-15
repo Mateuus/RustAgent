@@ -322,10 +322,15 @@ describe('quando ele NÃO pode erguer', () => {
     const h = harness();
 
     // O guarda-chuva aceita qualquer `kind` (a coluna é texto livre
-    // desde a 057). Este relógio só sabe erguer masmorra — e o que
-    // ele NÃO pode é pular em silêncio, que é o jeito de o admin
-    // ficar esperando a hora marcada de uma coisa que nunca vem.
-    makeEvent(h.events, { kind: 'koth', dungeonId: null });
+    // desde a 057). O agente só sabe erguer o que tem construtor — e
+    // o que ele NÃO pode é pular em silêncio, que é o jeito de o
+    // admin ficar esperando a hora marcada de uma coisa que nunca
+    // vem.
+    //
+    // `convoy` é o exemplo de propósito: o `koth` SAIU desta lista em
+    // 15/09/2026, quando ganhou território, plugin e relógio próprio.
+    // Um teste preso nele passaria a testar o passado.
+    makeEvent(h.events, { kind: 'convoy', dungeonId: null });
     addPoint(h.points, 'Encosta', 100);
 
     await h.scheduler.tick();

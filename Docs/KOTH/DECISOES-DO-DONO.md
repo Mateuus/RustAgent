@@ -69,6 +69,36 @@ Enquanto isso não for medido, a bandeira é decoração e marcação — já va
 
 ---
 
+---
+
+## O que ficou pronto na noite de 15/09/2026
+
+Medido no server01, com o ciclo inteiro rodando:
+
+| Peça | Estado |
+|---|---|
+| Territórios (cadastro + mapa no painel) | pronto — migração 089 |
+| Bandeira e círculo no mapa do jogo | pronto — `sign.pole.banner.large`, conferido no manifesto |
+| Captura por equipe, com contestação e decaimento | pronto — tick de 1 s no plugin |
+| Barra na tela de quem está dentro | pronto — avisa quem está sem equipe |
+| Placar pelo nome da equipe | pronto — vem do OrigemZTeam |
+| Run no histórico do guarda-chuva | pronto — a mesma tabela da masmorra |
+| **Nascer sozinho** | pronto — relógio próprio (`game/koth-scheduler.ts`) |
+| Recompensa | **falta** — o agente registra quem venceu e não paga nada |
+| Perfis reutilizáveis | falta — hoje cada território carrega os próprios números |
+| Textura da bandeira por equipe | falta — §5, ainda não medido |
+
+O teste do nascimento automático, ao vivo: o relógio marcou o compromisso, adiou duas vezes com a
+razão certa (uma por não saber quantos estavam online, com o RCON caído; outra por haver menos gente
+que o mínimo), e depois ergueu sozinho — `KOTH agendado erguido`, território "Colina do Norte", em
+N14.
+
+**Um evento por servidor:** se há qualquer run aberta naquele servidor — masmorra inclusive — o KOTH
+adia. Dois eventos ao mesmo tempo dividem a população e os dois ficam vazios. É a "regra de conflito
+com masmorras" da spec, aplicada no lugar mais barato.
+
+---
+
 ## Ordem de dependência
 
 1. `OrigemZTeam` — equipe com nome, líder e cargo.

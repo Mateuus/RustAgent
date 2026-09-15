@@ -66,6 +66,7 @@ import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { TeamsService } from './game/teams.js';
 import { KothService } from './game/koth.js';
+import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository } from './db/koth-arenas-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
@@ -3434,6 +3435,24 @@ async function main(): Promise<void> {
         });
 
   dungeonScheduler?.start();
+
+  // ####  O RELÓGIO DO KOTH  ####
+  //
+  // Separado do da masmorra de propósito: aquele sabe de planta, de
+  // ponto com yaw e do comando de demolir, e nada disso vale num
+  // território. O que os dois dividem é a AGENDA e o HISTÓRICO, que
+  // é o que importa para quem olha a tela.
+  const kothScheduler = new KothScheduler({
+    events: worldEventsRepository,
+    koth: kothService,
+    servers: {
+      ids: () => supervisor.ids(),
+      onlineCount: onlinePlayersOf,
+    },
+    logger,
+  });
+
+  kothScheduler.start();
 
   // ---- 4. HTTP ---------------------------------------------
   const operators = new OperatorAuth({
