@@ -98,7 +98,7 @@ namespace Oxide.Plugins
             /// Teto da execução. Estourou sem vencedor: expira.
             public float durationSeconds = 1800f;
             /// Quanto o progresso cai por segundo com a zona vazia.
-            public float decayPerSecond = 1f;
+            public float decayPerSecond;
             /// Só participa quem está em equipe.
             public bool requireTeam = true;
 
@@ -124,7 +124,104 @@ namespace Oxide.Plugins
 
         private void OnServerInitialized()
         {
+            SweepLeftovers();
+
             Puts(Marker + "{\"kind\":\"ready\"}");
+        }
+
+        // ============================================================
+        //  §1.5  O QUE SOBRA DE UM PLUGIN QUE MORREU NO MEIO
+        //
+        //  ####  O `Unload` NÃO É GARANTIA  ####
+        //
+        //  Ele roda no reload e no desligamento limpo. Não roda quando
+        //  o plugin quebra, nem quando o servidor morre de uma vez — e
+        //  a bandeira e o círculo continuam no mapa, sem ninguém que os
+        //  conheça. Foi o que aconteceu no server01 em 15/09/2026.
+        //
+        //  A spec do KOTH já mandava: "registrar cada entidade criada;
+        //  a limpeza atua nos IDs da instância, jamais em todos os
+        //  objetos semelhantes do servidor". É exatamente a diferença
+        //  entre varrer o que é NOSSO e apagar o marcador das lojas do
+        //  mapa inteiro — que é o estrago que a varredura por heurística
+        //  causou quando foi tentada.
+        // ============================================================
+
+        /// O arquivo com os netIDs do que está de pé AGORA.
+        private const string LeftoverFile = "OrigemZKoth/entidades";
+
+        private class Leftovers
+        {
+            public List<ulong> ids = new List<ulong>();
+        }
+
+        /// <summary>Guarda os ids do que acabou de nascer.</summary>
+        private void Remember(Run next)
+        {
+            try
+            {
+                var data = new Leftovers();
+
+                if (next.banner != null && next.banner.net != null) data.ids.Add(next.banner.net.ID.Value);
+                if (next.mapMarker != null && next.mapMarker.net != null) data.ids.Add(next.mapMarker.net.ID.Value);
+                if (next.mapLabel != null && next.mapLabel.net != null) data.ids.Add(next.mapLabel.net.ID.Value);
+
+                Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, data);
+            }
+            catch (Exception e)
+            {
+                PrintWarning("não consegui anotar as entidades do KOTH: " + e.Message);
+            }
+        }
+
+        /// <summary>O evento acabou direito: não há o que varrer depois.</summary>
+        private void Forget()
+        {
+            try
+            {
+                Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, new Leftovers());
+            }
+            catch (Exception e)
+            {
+                PrintWarning("não consegui limpar a lista de entidades do KOTH: " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// Mata o que sobrou de uma vida anterior — e SÓ isso.
+        ///
+        /// Pelos ids anotados, um por um. Nunca "todo marcador do
+        /// servidor": os marcadores das lojas do mapa são iguais aos
+        /// nossos aos olhos de um filtro.
+        /// </summary>
+        private void SweepLeftovers()
+        {
+            try
+            {
+                var data = Interface.Oxide.DataFileSystem.ReadObject<Leftovers>(LeftoverFile);
+
+                if (data == null || data.ids == null || data.ids.Count == 0) return;
+
+                var mortos = 0;
+
+                foreach (var id in data.ids)
+                {
+                    var found = BaseNetworkable.serverEntities.Find(new NetworkableId(id)) as BaseEntity;
+
+                    if (found == null || found.IsDestroyed) continue;
+
+                    Kill(found);
+                    mortos++;
+                }
+
+                if (mortos > 0) Puts("varri " + mortos + " entidade(s) de um KOTH que não foi encerrado direito.");
+
+                Forget();
+            }
+            catch (Exception e)
+            {
+                PrintWarning("não consegui varrer o que sobrou do KOTH: " + e.Message);
+            }
         }
 
         private void Unload()
@@ -205,7 +302,7 @@ namespace Oxide.Plugins
                 height = Mathf.Clamp(Number(body, "height", 30f), 5f, 200f),
                 captureSeconds = Mathf.Clamp(Number(body, "captureSeconds", 300f), 10f, 7200f),
                 durationSeconds = Mathf.Clamp(Number(body, "durationSeconds", 1800f), 60f, 21600f),
-                decayPerSecond = Mathf.Clamp(Number(body, "decayPerSecond", 1f), 0f, 60f),
+                decayPerSecond = Mathf.Clamp(Number(body, "decayPerSecond", 0f), 0f, 60f),
                 requireTeam = body["requireTeam"] == null || body["requireTeam"].ToObject<bool>(),
             };
 
@@ -232,6 +329,7 @@ namespace Oxide.Plugins
             SpawnMarker(next, body);
 
             next.startedAt = UnityEngine.Time.realtimeSinceStartup;
+            Remember(next);
             run = next;
             run.ticker = timer.Every(1f, Tick);
 
@@ -313,15 +411,23 @@ namespace Oxide.Plugins
                 {
                     var side = sides.First();
 
-                    // Trocou de dono: o progresso do anterior NÃO é
-                    // herdado. Quem chega começa de onde o outro parou
-                    // seria o mesmo que dar a captura a quem passou
-                    // por último.
-                    if (run.holder != side.Key && run.holder != 0UL)
-                    {
-                        run.progress = 0f;
-                    }
-
+                    // ####  A BARRA É DO EVENTO, E NÃO DO GRUPO  ####
+                    //
+                    // Decisão do dono (15/09/2026): o progresso NÃO
+                    // volta a zero quando o grupo troca. Quem chega
+                    // continua de onde o outro parou.
+                    //
+                    // A primeira versão zerava — era a §9.2 da
+                    // especificação, em que o progresso é do
+                    // CONTROLADOR e quem chega precisa neutralizá-lo
+                    // antes de começar o seu. Aqui é o contrário, e é
+                    // o que faz a virada no fim valer a pena: levar a
+                    // barra a 90% e morrer é perder o evento para quem
+                    // fechar os 10% que faltavam.
+                    //
+                    // `holder` passa a ser quem está capturando AGORA,
+                    // e serve só para a tela e o marcador dizerem de
+                    // quem é a vez.
                     run.holder = side.Key;
                     run.holderName = side.Value.name;
                     run.progress += 1f;
@@ -334,9 +440,24 @@ namespace Oxide.Plugins
                 }
                 else if (sides.Count == 0)
                 {
-                    run.progress = Mathf.Max(0f, run.progress - run.decayPerSecond);
+                    // ####  ZONA VAZIA: O PADRÃO É NÃO PERDER NADA  ####
+                    //
+                    // `decayPerSecond` nasce ZERO no KOTH normal, pela
+                    // mesma razão do bloco acima: a porcentagem
+                    // conquistada permanece. O campo continua existindo
+                    // para o admin que quiser o contrário.
+                    //
+                    // Quem fecha um evento que ninguém terminou é o
+                    // teto de duração, não o decaimento.
+                    if (run.decayPerSecond > 0f)
+                    {
+                        run.progress = Mathf.Max(0f, run.progress - run.decayPerSecond);
+                    }
 
-                    if (run.progress <= 0f) run.holder = 0UL;
+                    // Sem ninguém dentro não há "vez de alguém": a
+                    // barra continua onde está, e a tela diz que a área
+                    // está livre.
+                    run.holder = 0UL;
                 }
 
                 // sides.Count > 1: contestado. Nada sobe, nada cai — o
@@ -628,6 +749,22 @@ namespace Oxide.Plugins
             return true;
         }
 
+        /// <summary>
+        /// Desmonta o evento.
+        ///
+        /// ####  O MUNDO VEM ANTES DA TELA  ####
+        ///
+        /// MEDIDO em 15/09/2026: quatro círculos ficaram no mapa depois
+        /// de eventos encerrados. A primeira versão limpava o CUI antes
+        /// de matar as entidades, e tudo num bloco só — um
+        /// `CuiHelper.DestroyUi` que lançasse (um jogador saindo no
+        /// meio) levava junto os `Kill` que vinham depois, e a bandeira
+        /// ficava plantada sem ninguém para derrubá-la.
+        ///
+        /// Agora o que está no MUNDO morre primeiro, e cada passo tem o
+        /// seu `try`: a tela de um jogador que saiu não pode custar uma
+        /// bandeira no mapa até o wipe.
+        /// </summary>
         private void Teardown(string why)
         {
             if (run == null) return;
@@ -636,20 +773,42 @@ namespace Oxide.Plugins
 
             run = null;
 
-            if (closing.ticker != null) closing.ticker.Destroy();
+            try { if (closing.ticker != null) closing.ticker.Destroy(); }
+            catch (Exception e) { PrintWarning("o relógio do KOTH não parou: " + e.Message); }
+
+            // ####  PRIMEIRO O QUE ESTÁ NO CHÃO  ####
+            Kill(closing.banner);
+            Kill(closing.mapMarker);
+            Kill(closing.mapLabel);
+            Forget();
 
             foreach (var id in closing.watching.ToArray())
             {
-                var player = BasePlayer.FindByID(id);
+                try
+                {
+                    var player = BasePlayer.FindByID(id);
 
-                if (player != null) CuiHelper.DestroyUi(player, UiRoot);
+                    if (player != null) CuiHelper.DestroyUi(player, UiRoot);
+                }
+                catch (Exception e)
+                {
+                    PrintWarning("não consegui tirar a barra de um jogador: " + e.Message);
+                }
             }
 
-            if (closing.banner != null && !closing.banner.IsDestroyed) closing.banner.Kill();
-            if (closing.mapMarker != null && !closing.mapMarker.IsDestroyed) closing.mapMarker.Kill();
-            if (closing.mapLabel != null && !closing.mapLabel.IsDestroyed) closing.mapLabel.Kill();
-
             Push("ended", new JObject { ["runId"] = closing.runId, ["reason"] = why });
+        }
+
+        private static void Kill(BaseEntity entity)
+        {
+            try
+            {
+                if (entity != null && !entity.IsDestroyed) entity.Kill();
+            }
+            catch
+            {
+                // Uma entidade que já morreu não é problema de ninguém.
+            }
         }
 
         // ============================================================
@@ -722,7 +881,7 @@ namespace Oxide.Plugins
                 : contested
                     ? "CONTESTADO"
                     : current.holder == 0UL
-                        ? "SEM DONO"
+                        ? (percent > 0f ? "PARADO" : "SEM DONO")
                         : current.holderName;
 
             container.Add(new CuiLabel
@@ -790,7 +949,13 @@ namespace Oxide.Plugins
             var pct = Mathf.RoundToInt(Percent(current));
 
             if (contested) return current.name + " — DISPUTADO " + pct + "%";
-            if (current.holder == 0UL || pct <= 0) return current.name + " — sem dono";
+            if (pct <= 0) return current.name + " — sem dono";
+
+            // Com progresso e ninguém dentro, a barra fica PARADA onde
+            // está — ela é do evento, não de quem a encheu. Dizer "sem
+            // dono" aqui esconderia justamente a informação que faz
+            // alguém correr para lá: já tem 80% feito.
+            if (current.holder == 0UL) return current.name + " — livre, " + pct + "%";
 
             return current.name + " — " + current.holderName + " " + pct + "%";
         }

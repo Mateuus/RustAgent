@@ -83,11 +83,12 @@ Medido no server01, com o ciclo inteiro rodando:
 | Run no histórico do guarda-chuva | pronto — a mesma tabela da masmorra |
 | **Nascer sozinho** | pronto — relógio próprio (`game/koth-scheduler.ts`) |
 | Recompensa | **falta** — o agente registra quem venceu e não paga nada |
-| Caixa no lugar da bandeira | **falta** — §7 |
-| Pontos de ranking (equipe/membro) | **falta** — §8 |
+| Caixa no lugar da bandeira | **falta** — §8 |
+| Pontos de ranking (Super KOTH) | **falta** — §10 |
 | Aba Eventos no /menu, com sidebar | **falta** — §9 |
 | Vários KOTH ao mesmo tempo | **falta** — §9, e mexe no que já existe |
-| Contestação derrubando o progresso | **falta** — §6; hoje ela CONGELA |
+| Contestação pausando | pronto — §7, e já era assim |
+| Progresso que não volta a zero | **falta** — §7; hoje ele ZERA na troca de grupo |
 | Perfis reutilizáveis | falta — hoje cada território carrega os próprios números |
 | Textura da bandeira por equipe | falta — §5, ainda não medido |
 
@@ -102,59 +103,78 @@ com masmorras" da spec, aplicada no lugar mais barato.
 
 ---
 
-## 6. A contestação DERRUBA o progresso
+## 6. Dois sistemas: KOTH normal e Super KOTH
 
-**Muda o padrão da §9.2 da especificação**, que manda pausar. A regra existe lá como opção
-("Regra contestada: pausar; ou reduzir progresso, se configurado") — aqui ela é o padrão.
+Decisão do dono, 15/09/2026 (tarde). São **dois eventos**, e não um com chave de liga/desliga:
 
-O dono descreveu assim: uma equipe está com 65%; outra chega; os 65% começam a cair — 50%,
-45%, 35%. Quem chega não ganha o tempo de quem estava: ele é *neutralizado* primeiro, e só
-depois o novo lado começa a subir do zero. Isso é a §9.2 item 8, e continua valendo.
+| | KOTH normal | Super KOTH |
+|---|---|---|
+| Ranking | **não pontua** | **pontua** — é o motivo dele existir |
+| Captura | a regra do §7 abaixo | a definir |
+| Recompensa | a caixa do §8 | a definir |
 
-**As velocidades são todas do administrador** — ganho por segundo, perda na contestação e
-decaimento com a zona vazia. O padrão de domínio para vencer passa a ser **15 minutos** (a
-spec exemplificava com 5).
+O que este documento especifica daqui para baixo é o **normal**. O Super KOTH ganha seção
+própria quando for detalhado — e a primeira pergunta dele já está no §10.
 
-## 7. No fim, a bandeira cai e nasce a caixa
+## 7. A captura do KOTH normal: o progresso é DO EVENTO
+
+**Esta regra substitui a §9.2 da especificação.** Lá o progresso é do CONTROLADOR, e quem
+chega precisa neutralizar o que o outro fez antes de começar o seu. Aqui não: a barra é uma
+só, ela é da captura, e ninguém a leva embora.
+
+    Grupo X captura até 20%
+      ↓
+    Grupo Y entra na área
+      ↓
+    a captura PAUSA — com adversários dentro, ninguém avança
+      ↓
+    Grupo Y elimina todos do Grupo X
+      ↓
+    a captura continua em 20%
+      ↓
+    Grupo Y assume e segue A PARTIR dos 20%
+
+Três consequências, e elas são o coração do evento:
+
+1. **Contestado pausa.** Com dois grupos dentro, ninguém sobe. (É o padrão da §9.2 item 4 da
+   spec, e é o que o plugin já fazia.)
+2. **O progresso não volta a zero** quando o grupo que o fez é eliminado ou sai. A §9.2 item
+   8 da spec — "neutralizar o progresso do anterior" — **não vale aqui**.
+3. **Vence quem FECHA os 100%**, não quem acumulou mais. O Grupo X pode levar a barra a 90%,
+   morrer, e o Grupo Y ganhar o evento fechando os 10% que faltavam.
+
+O padrão de domínio para vencer é **15 minutos**, e as velocidades — quanto sobe por segundo,
+e se cai com a zona vazia — são todas do administrador.
+
+**Decaimento com a zona VAZIA:** o dono não falou desse caso, só do grupo eliminado. Como a
+regra é "a porcentagem permanece salva", o padrão do KOTH normal passa a ser **não decair**
+(zero), e o campo continua existindo para quem quiser o contrário. Quem fecha o evento sem
+vencedor é o teto de duração.
+
+## 8. No fim, a bandeira cai e nasce a caixa
 
 Quando o tempo acaba ou alguém conquista, a bandeira é destruída e **nasce uma caixa no
 lugar** — podendo ser mais de uma.
 
-Tudo isso é configurado na tela do KOTH, e por evento:
+Tudo configurado na tela do KOTH, e por evento:
 
-- **quais tipos de caixa** podem nascer (o catálogo de prefabs de caixa que o agente já
-  conhece do loot da masmorra);
+- **quais tipos de caixa** podem nascer (o catálogo de prefabs que o agente já conhece do
+  loot da masmorra);
 - **a chance de cada tipo** — nem toda vitória rende a caixa boa;
 - **quantas caixas** podem nascer;
 - **o loot de dentro**, com a mesma régua do loot do resto do projeto.
 
-A §13.7 da spec continua valendo para o que já estava escrito: o prêmio físico só nasce
-depois do resultado persistido, e o BetterLoot não pode sobrescrever nem duplicar o que o
-evento pôs lá.
-
-## 8. Pontos de ranking: equipe, membro, ou os dois
-
-O KOTH credita pontos no ranking, e o administrador escolhe:
-
-- **pontos para a EQUIPE** — a pontuação é do time que venceu;
-- **pontos para cada MEMBRO** — cada um dos beneficiários recebe;
-- ou **os dois ao mesmo tempo**.
-
-É escolha por evento, e as duas quantidades são configuráveis em separado.
-
-Isso puxa uma pergunta que ainda não tem resposta: **o ranking de hoje pontua PESSOAS.** Um
-ranking de equipe é uma tabela nova — e a equipe muda de nome e de membros no meio da
-temporada. Decidir antes de implementar: o ranking de equipe é por `teamId` (morre com a
-equipe, como os cargos) ou por algo que sobreviva?
+A §13.7 da spec continua valendo: o prêmio físico só nasce depois do resultado persistido, e
+o BetterLoot não pode sobrescrever nem duplicar o que o evento pôs lá.
 
 ## 9. A aba Eventos no /menu, com sidebar
 
 No menu que o jogador abre no jogo, uma aba **Eventos** mostra o que está acontecendo — o
 KOTH incluído — com **uma sidebar à esquerda** listando os eventos em curso, e o detalhe à
-direita: quem está participando, qual equipe domina, quanto falta.
+direita: quem está participando, qual equipe está capturando, quanto falta.
 
-**A sidebar existe porque vai haver mais de um KOTH ao mesmo tempo.** E isso é a mudança
-mais cara desta lista, porque o que existe hoje assume o contrário:
+**A sidebar existe porque vai haver mais de um KOTH ao mesmo tempo.** E isso é a mudança mais
+cara da lista, porque o que existe hoje assume o contrário:
 
 | Onde | O que assume hoje |
 |---|---|
@@ -163,10 +183,21 @@ mais cara desta lista, porque o que existe hoje assume o contrário:
 | `KothScheduler` | adia se houver QUALQUER run aberta naquele servidor |
 | Rotas `/koth/start`, `/stop`, `/status` | sem id de instância |
 
-Passar para vários é mexer nos quatro. Não é difícil, mas é uma reescrita do estado — e o
-limite de um por servidor foi escolhido de propósito (dois eventos dividem a população e os
-dois ficam vazios). Com vários KOTH, essa preocupação passa a ser do administrador: ele
-decide quantos cabem no servidor dele.
+Passar para vários é mexer nos quatro. O limite de um foi escolhido de propósito (dois
+eventos dividem a população e os dois ficam vazios); com vários, quem decide quantos cabem
+passa a ser o administrador.
+
+## 10. O ranking é do Super KOTH — e ele tem uma pergunta aberta
+
+Pontos para a **equipe**, para cada **membro**, ou os dois, à escolha do administrador. Isso
+NÃO vale para o KOTH normal, que não pontua.
+
+A pergunta a responder antes de codar: **o ranking de hoje pontua PESSOAS.** Um ranking de
+equipe é uma tabela nova — e a equipe muda de nome, muda de membros e **some** quando alguém
+a desfaz (ver a regra do §5). Por `teamId` ele morre com a equipe; por outra chave, é preciso
+inventar uma identidade de clã que o jogo não tem.
+
+Pontos por MEMBRO não têm esse problema: são pessoas, que é o que o ranking já sabe pontuar.
 
 ---
 
