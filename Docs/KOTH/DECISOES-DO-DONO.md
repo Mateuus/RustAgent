@@ -83,6 +83,11 @@ Medido no server01, com o ciclo inteiro rodando:
 | Run no histórico do guarda-chuva | pronto — a mesma tabela da masmorra |
 | **Nascer sozinho** | pronto — relógio próprio (`game/koth-scheduler.ts`) |
 | Recompensa | **falta** — o agente registra quem venceu e não paga nada |
+| Caixa no lugar da bandeira | **falta** — §7 |
+| Pontos de ranking (equipe/membro) | **falta** — §8 |
+| Aba Eventos no /menu, com sidebar | **falta** — §9 |
+| Vários KOTH ao mesmo tempo | **falta** — §9, e mexe no que já existe |
+| Contestação derrubando o progresso | **falta** — §6; hoje ela CONGELA |
 | Perfis reutilizáveis | falta — hoje cada território carrega os próprios números |
 | Textura da bandeira por equipe | falta — §5, ainda não medido |
 
@@ -94,6 +99,74 @@ N14.
 **Um evento por servidor:** se há qualquer run aberta naquele servidor — masmorra inclusive — o KOTH
 adia. Dois eventos ao mesmo tempo dividem a população e os dois ficam vazios. É a "regra de conflito
 com masmorras" da spec, aplicada no lugar mais barato.
+
+---
+
+## 6. A contestação DERRUBA o progresso
+
+**Muda o padrão da §9.2 da especificação**, que manda pausar. A regra existe lá como opção
+("Regra contestada: pausar; ou reduzir progresso, se configurado") — aqui ela é o padrão.
+
+O dono descreveu assim: uma equipe está com 65%; outra chega; os 65% começam a cair — 50%,
+45%, 35%. Quem chega não ganha o tempo de quem estava: ele é *neutralizado* primeiro, e só
+depois o novo lado começa a subir do zero. Isso é a §9.2 item 8, e continua valendo.
+
+**As velocidades são todas do administrador** — ganho por segundo, perda na contestação e
+decaimento com a zona vazia. O padrão de domínio para vencer passa a ser **15 minutos** (a
+spec exemplificava com 5).
+
+## 7. No fim, a bandeira cai e nasce a caixa
+
+Quando o tempo acaba ou alguém conquista, a bandeira é destruída e **nasce uma caixa no
+lugar** — podendo ser mais de uma.
+
+Tudo isso é configurado na tela do KOTH, e por evento:
+
+- **quais tipos de caixa** podem nascer (o catálogo de prefabs de caixa que o agente já
+  conhece do loot da masmorra);
+- **a chance de cada tipo** — nem toda vitória rende a caixa boa;
+- **quantas caixas** podem nascer;
+- **o loot de dentro**, com a mesma régua do loot do resto do projeto.
+
+A §13.7 da spec continua valendo para o que já estava escrito: o prêmio físico só nasce
+depois do resultado persistido, e o BetterLoot não pode sobrescrever nem duplicar o que o
+evento pôs lá.
+
+## 8. Pontos de ranking: equipe, membro, ou os dois
+
+O KOTH credita pontos no ranking, e o administrador escolhe:
+
+- **pontos para a EQUIPE** — a pontuação é do time que venceu;
+- **pontos para cada MEMBRO** — cada um dos beneficiários recebe;
+- ou **os dois ao mesmo tempo**.
+
+É escolha por evento, e as duas quantidades são configuráveis em separado.
+
+Isso puxa uma pergunta que ainda não tem resposta: **o ranking de hoje pontua PESSOAS.** Um
+ranking de equipe é uma tabela nova — e a equipe muda de nome e de membros no meio da
+temporada. Decidir antes de implementar: o ranking de equipe é por `teamId` (morre com a
+equipe, como os cargos) ou por algo que sobreviva?
+
+## 9. A aba Eventos no /menu, com sidebar
+
+No menu que o jogador abre no jogo, uma aba **Eventos** mostra o que está acontecendo — o
+KOTH incluído — com **uma sidebar à esquerda** listando os eventos em curso, e o detalhe à
+direita: quem está participando, qual equipe domina, quanto falta.
+
+**A sidebar existe porque vai haver mais de um KOTH ao mesmo tempo.** E isso é a mudança
+mais cara desta lista, porque o que existe hoje assume o contrário:
+
+| Onde | O que assume hoje |
+|---|---|
+| `OrigemZKoth.cs` | um `run` único por servidor; `start` recusa o segundo |
+| `KothService` | um `#live` por servidor |
+| `KothScheduler` | adia se houver QUALQUER run aberta naquele servidor |
+| Rotas `/koth/start`, `/stop`, `/status` | sem id de instância |
+
+Passar para vários é mexer nos quatro. Não é difícil, mas é uma reescrita do estado — e o
+limite de um por servidor foi escolhido de propósito (dois eventos dividem a população e os
+dois ficam vazios). Com vários KOTH, essa preocupação passa a ser do administrador: ele
+decide quantos cabem no servidor dele.
 
 ---
 
