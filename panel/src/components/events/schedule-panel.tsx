@@ -15,10 +15,20 @@
 //
 //  ####  O QUE ELA NÃO PERGUNTA  ####
 //
-//  ONDE ela nasce: isso é dos pontos, na aba ao lado. E COMO ela se
-//  anuncia (mapa e chat): isso é da masmorra, no editor dela. Duas
-//  fontes para a mesma frase é o jeito de ter duas frases
-//  diferentes.
+//  ONDE ela nasce: isso é dos pontos, na tela da família. E COMO
+//  ela se anuncia (mapa e chat): isso é da masmorra, no editor
+//  dela. Duas fontes para a mesma frase é o jeito de ter duas
+//  frases diferentes.
+//
+//  ####  A AGENDA É DE TODAS AS FAMÍLIAS  ####
+//
+//  `world_events.kind` é texto livre desde a migração 057, e esta
+//  lista mostra o que houver lá — masmorra, KOTH, o que vier. O que
+//  ela NÃO faz é oferecer o cadastro de uma família que o agente
+//  ainda não sabe erguer: um horário marcado para uma coisa que
+//  nunca acontece é pior que a ausência do campo. Enquanto isso,
+//  quem já estiver cadastrado ganha o aviso de que nada vai nascer
+//  — o mesmo não que o agendador dá no log.
 //
 //  Ver Docs/OrigemZDurgeon/02-AS-SETE-PENDENCIAS.md §2.
 // ============================================================
@@ -33,6 +43,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
 import { agent, type DungeonSummary, type WorldEvent, type WorldEventInput } from '@/lib/api';
+import { familyOf } from '@/lib/events/families';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -91,8 +102,8 @@ export function SchedulePanel({ dungeons, servers }: SchedulePanelProps) {
             De quanto em quanto tempo
           </h3>
           <p className="mt-1 text-2xs text-muted">
-            O agente sorteia a hora dentro da janela, ergue a masmorra num dos pontos marcados e a
-            derruba quando o tempo acaba.
+            O agente sorteia a hora dentro da janela, ergue o evento num dos pontos marcados e o
+            derruba quando o tempo acaba. Vale para qualquer família.
           </p>
         </div>
 
@@ -108,9 +119,10 @@ export function SchedulePanel({ dungeons, servers }: SchedulePanelProps) {
             Nada acontece sozinho ainda
           </h4>
           <p className="mt-1 max-w-2xl text-sm text-muted">
-            Sem um horário aqui, a masmorra só nasce quando alguém clica em{' '}
-            <strong className="text-foreground">Erguer</strong>. Com um, o servidor passa a ter
-            evento — de hora em hora, ou de madrugada, ou só quando houver dez pessoas online.
+            Sem um horário aqui, um evento só nasce quando alguém clica em{' '}
+            <strong className="text-foreground">Erguer</strong> na tela da família dele. Com um, o
+            servidor passa a ter evento sozinho — de hora em hora, ou de madrugada, ou só quando
+            houver dez pessoas online.
           </p>
         </div>
       ) : (
@@ -129,11 +141,20 @@ export function SchedulePanel({ dungeons, servers }: SchedulePanelProps) {
               />
 
               <span className="min-w-0 flex-1">
-                <span className="block truncate font-condensed text-sm font-bold">
-                  {event.name}
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="border border-border px-1.5 py-0.5 font-condensed text-2xs uppercase tracking-wide text-muted">
+                    {familyOf(event.kind)?.one ?? event.kind}
+                  </span>
+                  <span className="min-w-0 truncate font-condensed text-sm font-bold">
+                    {event.name}
+                  </span>
                 </span>
                 <span className="mt-0.5 block text-2xs text-muted">
-                  {event.dungeonId === null ? (
+                  {familyOf(event.kind)?.ready === false ? (
+                    <span className="text-amber">
+                      o agente ainda não sabe erguer esta família — nada vai nascer
+                    </span>
+                  ) : event.dungeonId === null ? (
                     <span className="text-amber">sem masmorra escolhida — não vai nascer</span>
                   ) : (
                     <>

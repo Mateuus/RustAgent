@@ -42,6 +42,7 @@
 import type { DungeonSpawnPointsRepository, SpawnPoint } from '../db/dungeon-spawn-points-repository.js';
 import type { WorldEventsRepository } from '../db/world-events-repository.js';
 import type { Logger } from '../logger.js';
+import { isRunnableKind } from '../types/world-events.js';
 import type { EventRun, WorldEvent } from '../types/world-events.js';
 import { toError } from '../util.js';
 import type { DungeonBuildAttempt, DungeonBuildInput } from './sync.js';
@@ -98,6 +99,15 @@ export class DungeonScheduler {
   #timer: NodeJS.Timeout | null = null;
   #ticking = false;
   #stopped = false;
+  /**
+   * Os eventos cuja família já foi reclamada.
+   *
+   * O tick volta a cada 30 segundos; sem esta marca, um evento de
+   * família sem construtor encheria o log com a mesma linha quase
+   * três mil vezes por dia — e um aviso repetido assim vira ruído,
+   * que é o oposto do que ele foi escrito para fazer.
+   */
+  readonly #warnedKind = new Set<string>();
 
   constructor(deps: DungeonSchedulerDeps) {
     this.#deps = deps;
@@ -198,7 +208,31 @@ export class DungeonScheduler {
     // Um evento desligado, sem masmorra ou fora do modo agendado
     // não tem compromisso nenhum a cumprir. `manual` é o botão do
     // painel; `permanent` é plantado à mão e fica até o wipe.
-    if (!event.enabled || event.dungeonId === null || event.spawnMode !== 'schedule') return;
+    if (!event.enabled || event.spawnMode !== 'schedule') return;
+
+    // ####  A FAMÍLIA SEM CONSTRUTOR RECLAMA, E NÃO SOME  ####
+    //
+    // A agenda é do guarda-chuva: ela aceita qualquer `kind`. Este
+    // relógio, não — ele só sabe erguer masmorra. Um evento de KOTH
+    // cadastrado aqui antes de existir quem o construa passava batido
+    // em silêncio, e o admin ficava esperando a hora marcada de uma
+    // coisa que nunca ia acontecer.
+    if (!isRunnableKind(event.kind)) {
+      if (!this.#warnedKind.has(event.id)) {
+        this.#warnedKind.add(event.id);
+
+        this.#deps.logger.warn(
+          { event: event.id, kind: event.kind },
+          'evento agendado de uma família que o agente ainda não sabe erguer: nada vai nascer',
+        );
+      }
+
+      return;
+    }
+
+    // Uma masmorra não escolhida é a última resposta que falta, e a
+    // tela já a cobra. Ver a migração 069.
+    if (event.dungeonId === null) return;
 
     const known = new Set(this.#deps.servers.ids());
 

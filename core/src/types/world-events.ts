@@ -37,6 +37,44 @@ import { z } from 'zod';
 // ------------------------------------------------------------
 
 /**
+ * A FAMÍLIA do evento.
+ *
+ * ####  A COLUNA É TEXTO LIVRE; ESTA LISTA É O QUE JÁ TEM DONO  ####
+ *
+ * `world_events.kind` continua TEXT sem CHECK, de propósito (ver a
+ * migração 057): um evento novo não pode custar uma migração. O que
+ * esta lista diz é outra coisa — quais famílias têm alguém do lado
+ * de cá capaz de FAZER o evento nascer.
+ *
+ * Está aqui porque o agendador precisa dizer não em voz alta. Antes
+ * ele pulava qualquer evento sem `dungeonId` em silêncio, e um
+ * evento de outra família cadastrado na agenda simplesmente nunca
+ * acontecia — sem linha no log, sem nada na tela.
+ */
+export const EVENT_KINDS = ['dungeon', 'koth'] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
+
+/** O nome da família na tela, no singular e no plural. */
+export const EVENT_KIND_LABEL: Record<EventKind, { one: string; many: string }> = {
+  dungeon: { one: 'Masmorra', many: 'Masmorras' },
+  koth: { one: 'KOTH', many: 'KOTH' },
+};
+
+/**
+ * As famílias que o agente sabe erguer HOJE.
+ *
+ * Sair daqui é o último passo de um evento novo, e não o primeiro:
+ * só entra a família cujo caminho inteiro existe — cadastro, lugar
+ * no mapa e quem construa.
+ */
+export const RUNNABLE_EVENT_KINDS: readonly EventKind[] = ['dungeon'];
+
+/** Esta família tem quem a faça nascer? */
+export function isRunnableKind(kind: string): boolean {
+  return (RUNNABLE_EVENT_KINDS as readonly string[]).includes(kind);
+}
+
+/**
  * Como o evento nasce.
  *
  *   schedule   o agendador sorteia dentro da janela

@@ -5,11 +5,15 @@
 //
 //  ####  O CARTÃO DO QUE ESTÁ NO AR NÃO MORA AQUI  ####
 //
-//  Ele é da PÁGINA, e não desta lista. MEDIDO na primeira versão:
-//  com zero masmorras cadastradas e uma de pé no mapa, a tela caía
-//  no bloco de primeiro uso e o cartão sumia junto — o cabeçalho
-//  dizia "0 masmorras · 1 no ar" e não havia onde clicar para
-//  derrubá-la.
+//  Ele é do guarda-chuva, em `events/live-card.tsx`. Mudou de casa
+//  quando o KOTH chegou: o que está no ar sai de `event_runs`, que
+//  nunca foi tabela de masmorra.
+//
+//  A razão de ele não ser desta LISTA continua a mesma, e foi
+//  MEDIDA na primeira versão: com zero masmorras cadastradas e uma
+//  de pé no mapa, a tela caía no bloco de primeiro uso e o cartão
+//  sumia junto — o cabeçalho dizia "0 masmorras · 1 no ar" e não
+//  havia onde clicar para derrubá-la.
 //
 //  Acontece de verdade: basta apagar a masmorra enquanto ela está
 //  no ar. O que está no chão do jogo não depende do catálogo.
@@ -22,11 +26,11 @@
 //  que a linha carrega.
 // ============================================================
 
-import { Copy, Hammer, MapPin, Pencil, Play, Trash2, Users } from 'lucide-react';
+import { Copy, Pencil, Play, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
-import { agent, type Dungeon, type DungeonSummary, type EventRun } from '@/lib/api';
+import { agent, type Dungeon, type DungeonSummary } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 export interface DungeonListProps {
@@ -182,85 +186,4 @@ export function DungeonList({ dungeons, onEdit, onChanged, onBuild }: DungeonLis
       ))}
     </div>
   );
-}
-
-/**
- * O que está de pé agora.
- *
- * Primeiro elemento da tela quando existe; ausente quando não há
- * nada — um "nenhuma no ar" permanente vira ruído que se aprende a
- * ignorar.
- */
-export function LiveCard({
-  runs,
-  onChanged,
-}: {
-  readonly runs: readonly EventRun[];
-  readonly onChanged: () => void;
-}) {
-  const [busy, setBusy] = useState<number | null>(null);
-
-  async function stop(run: EventRun) {
-    setBusy(run.id);
-
-    try {
-      await agent.stopWorldEventRun(run.id);
-      onChanged();
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <section className="border border-olive bg-surface">
-      <header className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-olive" />
-        <h2 className="font-condensed text-sm font-bold uppercase tracking-wide">No ar agora</h2>
-      </header>
-
-      <div className="divide-y divide-border">
-        {runs.map((run) => (
-          <div key={run.id} className="flex flex-wrap items-center justify-between gap-3 p-3">
-            <div className="min-w-0">
-              <p className="font-condensed text-sm font-bold">{run.dungeonId ?? 'masmorra'}</p>
-              <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted">
-                <span className="flex items-center gap-1">
-                  <MapPin aria-hidden="true" className="h-3 w-3" />
-                  {run.grid ?? '?'}
-                </span>
-                <span className="flex items-center gap-1">
-                  <Users aria-hidden="true" className="h-3 w-3" />
-                  {run.enteredCount} entrou/entraram
-                </span>
-                <span>{sinceLabel(run.startedAt)}</span>
-                <span className="font-mono">{run.serverId}</span>
-              </p>
-            </div>
-
-            <Button
-              size="sm"
-              variant="danger"
-              disabled={busy === run.id}
-              onClick={() => void stop(run)}
-            >
-              <Hammer aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
-              Derrubar
-            </Button>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-/** "há 12 min". Sem segundo: ninguém precisa dessa precisão aqui. */
-function sinceLabel(epoch: number | null): string {
-  if (epoch === null) return 'há pouco';
-
-  const minutes = Math.max(0, Math.round((Date.now() - epoch) / 60_000));
-
-  if (minutes < 1) return 'agora mesmo';
-  if (minutes < 60) return `há ${String(minutes)} min`;
-
-  return `há ${String(Math.round(minutes / 60))} h`;
 }

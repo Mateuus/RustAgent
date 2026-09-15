@@ -44,6 +44,8 @@ interface Harness {
   /** Cada `ozdungeon build` que o agendador mandou. */
   readonly built: (DungeonBuildInput & { serverId: string })[];
   readonly demolished: string[];
+  /** Cada aviso que o agendador escreveu, para o teste ler. */
+  readonly warnings: string[];
   /** Quantos online o servidor tem, para o teste mexer. */
   online: number | null;
 }
@@ -85,6 +87,7 @@ function harness(
     db,
     built: [],
     demolished: [],
+    warnings: [],
     online: 10,
     scheduler: null as unknown as DungeonScheduler,
   };
@@ -112,7 +115,15 @@ function harness(
 
       return Promise.resolve(true);
     },
-    logger: silent,
+    // O logger é silencioso, e ainda assim ANOTA: o aviso de uma
+    // família sem construtor é o único sinal que o admin recebe, e
+    // um teste que não o lê não prova que ele existe.
+    logger: {
+      ...silent,
+      warn: (...args: unknown[]) => {
+        state.warnings.push(args.map((arg) => String(typeof arg === 'object' ? JSON.stringify(arg) : arg)).join(' '));
+      },
+    } as unknown as typeof silent,
     // Sem sorteio real: um agendador com Math.random produz um
     // teste que passa nove vezes em dez.
     random: options.random ?? (() => 0),
@@ -305,6 +316,30 @@ describe('quando ele NÃO pode erguer', () => {
     // Não é erro: o admin cria o evento, ajusta os horários e
     // escolhe a masmorra depois.
     expect(semMasmorra.events.scheduledRun('noite-de-masmorra', SERVER)).toBeNull();
+  });
+
+  it('uma família que o agente não sabe erguer não agenda nada — e reclama', async () => {
+    const h = harness();
+
+    // O guarda-chuva aceita qualquer `kind` (a coluna é texto livre
+    // desde a 057). Este relógio só sabe erguer masmorra — e o que
+    // ele NÃO pode é pular em silêncio, que é o jeito de o admin
+    // ficar esperando a hora marcada de uma coisa que nunca vem.
+    makeEvent(h.events, { kind: 'koth', dungeonId: null });
+    addPoint(h.points, 'Encosta', 100);
+
+    await h.scheduler.tick();
+
+    expect(h.events.scheduledRun('noite-de-masmorra', SERVER)).toBeNull();
+    expect(h.warnings.some((line) => line.includes('família'))).toBe(true);
+
+    // E reclama UMA vez: o tick volta a cada trinta segundos, e a
+    // mesma linha três mil vezes por dia é ruído, não aviso.
+    const antes = h.warnings.length;
+
+    await h.scheduler.tick();
+
+    expect(h.warnings.length).toBe(antes);
   });
 
   it('o modo manual não é do relógio', async () => {
