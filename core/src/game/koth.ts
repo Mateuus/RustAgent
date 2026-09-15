@@ -216,7 +216,9 @@ export class KothService {
 
     await this.#say(
       serverId,
-      `<color=#C4B454>KOTH</color>: o território <color=#8FBF4F>${arena.label}</color> (${grid}) está aberto. Vá com a sua equipe!`,
+      // A tag `[KOTH]` já vem do broadcaster: repetir o nome aqui
+      // saía no chat como "[KOTH] KOTH: …".
+      `O território <color=#8FBF4F>${arena.label}</color> (${grid}) está aberto. Vá com a sua equipe!`,
     );
 
     return { arena, runId: run.id, grid };
@@ -314,7 +316,7 @@ export class KothService {
         // que pagar um prêmio que ninguém configurou.
         void this.#say(
           serverId,
-          `<color=#C4B454>KOTH</color>: <color=#8FBF4F>${winner}</color> dominou o território!`,
+          `<color=#8FBF4F>${winner}</color> dominou o território!`,
         );
 
         return;
@@ -330,7 +332,7 @@ export class KothService {
         // "sumir" sem explicação.
         void this.#say(
           serverId,
-          '<color=#C4B454>KOTH</color>: ninguém dominou o território a tempo.',
+          'Ninguém dominou o território a tempo.',
         );
 
         return;

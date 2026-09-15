@@ -324,7 +324,7 @@ describe('o desfecho', () => {
     );
 
     expect(h.said).toHaveLength(1);
-    expect(h.said[0]).toContain('ninguém dominou');
+    expect(h.said[0]).toContain('Ninguém dominou');
   });
 
   it('expirado fecha a run sem vencedor', async () => {
