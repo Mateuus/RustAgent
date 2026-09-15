@@ -70,6 +70,17 @@ namespace Oxide.Plugins
         private const string PrefabRadiusMarker = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string PrefabVendingMarker = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
 
+        /// A fumaça do fim. Conferida no manifesto: é o smoke que a
+        /// granada deixa no chão, e ele apaga sozinho.
+        private const string PrefabSmoke = "assets/prefabs/tools/smoke grenade/grenade.smoke.deployed.prefab";
+
+        /// O flare do fim: o morteiro de fogos VERMELHO, que sobe e
+        /// estoura. Conferido no manifesto em 15/09/2026.
+        private const string PrefabFlare = "assets/prefabs/deployable/fireworks/mortarred.prefab";
+
+        /// A caixa padrão, quando o admin não escolheu nenhuma.
+        private const string PrefabDefaultCrate = "assets/bundled/prefabs/radtown/crate_normal.prefab";
+
         /// O lado de uma célula da grade do mapa, em metros. Constante
         /// do Rust: vale para qualquer tamanho de mundo.
         private const float GridCellMeters = 146.3f;
@@ -101,6 +112,20 @@ namespace Oxide.Plugins
             public float decayPerSecond;
             /// Só participa quem está em equipe.
             public bool requireTeam = true;
+
+            /// ####  O QUE NASCE NO FIM  ####
+            ///
+            /// `crates` é a lista de prefabs com peso; `crateCount`,
+            /// quantas nascem. Vazio = a caixa padrão.
+            public readonly List<KeyValuePair<string, float>> crates =
+                new List<KeyValuePair<string, float>>();
+            public int crateCount = 1;
+            public bool smoke = true;
+            public bool flare = true;
+
+            /// Quantos segundos a caixa fica no mapa. Zero = para
+            /// sempre, e é escolha do admin — não o padrão.
+            public float crateLifeSeconds = 600f;
 
             public float progress;
             /// O time que detém o progresso. 0 = ninguém.
@@ -306,6 +331,8 @@ namespace Oxide.Plugins
                 requireTeam = body["requireTeam"] == null || body["requireTeam"].ToObject<bool>(),
             };
 
+            ReadReward(next, body);
+
             var x = Number(body, "x", 0f);
             var z = Number(body, "z", 0f);
 
@@ -463,7 +490,7 @@ namespace Oxide.Plugins
                 // sides.Count > 1: contestado. Nada sobe, nada cai — o
                 // progresso fica onde está, e a barra diz por quê.
 
-                Draw(run, inside, sides.Count > 1);
+                Draw(run, inside, sides, sides.Count > 1);
                 RefreshMarker(run, sides.Count > 1);
             }
             catch (Exception cause)
@@ -597,12 +624,195 @@ namespace Oxide.Plugins
             // streamer. Quem sabe é o agente, e é ele quem fala.
             Push(reason == "captured" ? "captured" : "expired", payload);
 
+            // ####  O PRÊMIO É DA VITÓRIA, NÃO DO FIM  ####
+            //
+            // Expirou sem vencedor: nada nasce. A §10 da spec é clara
+            // ("padrão de expiração: sem vencedor"), e uma caixa que
+            // aparece sozinha no mato ensina que não vale a pena
+            // disputar — basta esperar o tempo acabar.
+            if (reason == "captured") SpawnReward(run);
+
             Teardown(reason);
         }
 
         // ============================================================
         //  §4  O QUE APARECE NO MUNDO
         // ============================================================
+
+        /// <summary>
+        /// O que nasce quando alguém vence: a fumaça e as caixas.
+        ///
+        /// ####  O SORTEIO É DO ADMIN  ####
+        ///
+        /// Cada tipo de caixa tem um PESO, e o sorteio é entre eles —
+        /// "nem toda vitória rende a caixa boa" foi o pedido. Peso, e
+        /// não porcentagem fechada: somar 100 à mão é o tipo de conta
+        /// que ninguém acerta na terceira edição, e um peso a mais não
+        /// quebra os outros.
+        /// </summary>
+        private static void ReadReward(Run next, JObject body)
+        {
+            var reward = body["reward"] as JObject;
+
+            if (reward == null) return;
+
+            next.smoke = reward["smoke"] == null || reward["smoke"].ToObject<bool>();
+            next.flare = reward["flare"] == null || reward["flare"].ToObject<bool>();
+            next.crateCount = Mathf.Clamp((int)Number(reward, "count", 1f), 0, 10);
+            next.crateLifeSeconds = Mathf.Clamp(Number(reward, "crateSeconds", 600f), 0f, 86400f);
+
+            var list = reward["crates"] as JArray;
+
+            if (list == null) return;
+
+            foreach (var entry in list)
+            {
+                var item = entry as JObject;
+
+                if (item == null) continue;
+
+                var prefab = Text(item, "prefab", "");
+
+                if (string.IsNullOrEmpty(prefab)) continue;
+
+                next.crates.Add(new KeyValuePair<string, float>(
+                    prefab,
+                    Mathf.Max(0f, Number(item, "chance", 1f))));
+            }
+        }
+
+        /// <summary>
+        /// A fumaça e a caixa, no lugar da bandeira.
+        ///
+        /// Roda ANTES do `Teardown`: a bandeira ainda está de pé, e é a
+        /// posição dela que manda. O `Teardown` a derruba logo depois.
+        /// </summary>
+        private void SpawnReward(Run current)
+        {
+            var center = current.center;
+
+            if (current.smoke)
+            {
+                try
+                {
+                    // A fumaça é o que faz quem está longe olhar para
+                    // lá. Ela apaga sozinha — nada a limpar depois.
+                    var smoke = GameManager.server.CreateEntity(PrefabSmoke, center + new Vector3(0f, 0.5f, 0f));
+
+                    if (smoke != null)
+                    {
+                        smoke.enableSaving = false;
+                        smoke.Spawn();
+                    }
+                }
+                catch (Exception e)
+                {
+                    PrintWarning("a fumaça do KOTH não subiu: " + e.Message);
+                }
+            }
+
+            if (current.flare)
+            {
+                try
+                {
+                    // ####  O MORTEIRO PRECISA SER ACESO  ####
+                    //
+                    // Ele nasce apagado: quem o dispara é o
+                    // `TryLightFuse`, que liga a flag `OnFire`. Sem
+                    // isso ele fica no chão como um objeto qualquer.
+                    //
+                    // O `fuseLength` do jogo é de 3 s — o tiro sai
+                    // logo depois de a caixa aparecer, que é a ordem
+                    // certa: primeiro o barulho, depois o prêmio.
+                    var flare = GameManager.server.CreateEntity(PrefabFlare, center) as BaseFirework;
+
+                    if (flare != null)
+                    {
+                        flare.enableSaving = false;
+                        flare.Spawn();
+                        flare.TryLightFuse();
+
+                        // Ele não se limpa sozinho depois de gasto.
+                        flare.Invoke(() =>
+                        {
+                            if (flare != null && !flare.IsDestroyed) flare.Kill();
+                        }, 60f);
+                    }
+                }
+                catch (Exception e)
+                {
+                    PrintWarning("o flare do KOTH não subiu: " + e.Message);
+                }
+            }
+
+            for (var i = 0; i < current.crateCount; i++)
+            {
+                try
+                {
+                    // Em roda, para duas caixas não nascerem uma dentro
+                    // da outra.
+                    var angle = current.crateCount <= 1 ? 0f : (360f / current.crateCount) * i;
+                    var offset = current.crateCount <= 1
+                        ? Vector3.zero
+                        : Quaternion.Euler(0f, angle, 0f) * new Vector3(1.5f, 0f, 0f);
+
+                    var spot = center + offset + new Vector3(0f, 0.3f, 0f);
+                    var crate = GameManager.server.CreateEntity(PickCrate(current), spot);
+
+                    if (crate == null) continue;
+
+                    crate.enableSaving = false;
+                    crate.Spawn();
+
+                    // ####  ELA NÃO FICA PARA SEMPRE  ####
+                    //
+                    // Pedido do dono: caixa de evento que não some é
+                    // mapa sujo — e, num servidor com KOTH de hora em
+                    // hora, seriam dezenas espalhadas até o wipe.
+                    //
+                    // O relógio é do MUNDO e não do plugin: o `Invoke`
+                    // vive na entidade, então recarregar o plugin não
+                    // deixa caixa órfã. E ela some mesmo que ninguém a
+                    // tenha aberto.
+                    if (current.crateLifeSeconds > 0f)
+                    {
+                        var doomed = crate;
+
+                        doomed.Invoke(() =>
+                        {
+                            if (doomed != null && !doomed.IsDestroyed) doomed.Kill();
+                        }, current.crateLifeSeconds);
+                    }
+                }
+                catch (Exception e)
+                {
+                    PrintWarning("a caixa do KOTH não nasceu: " + e.Message);
+                }
+            }
+        }
+
+        /// <summary>Sorteia um tipo de caixa pelos pesos do admin.</summary>
+        private static string PickCrate(Run current)
+        {
+            if (current.crates.Count == 0) return PrefabDefaultCrate;
+
+            var total = 0f;
+
+            foreach (var entry in current.crates) total += entry.Value;
+
+            if (total <= 0f) return current.crates[0].Key;
+
+            var roll = UnityEngine.Random.Range(0f, total);
+
+            foreach (var entry in current.crates)
+            {
+                roll -= entry.Value;
+
+                if (roll <= 0f) return entry.Key;
+            }
+
+            return current.crates[current.crates.Count - 1].Key;
+        }
 
         private bool SpawnBanner(Run next)
         {
@@ -815,7 +1025,11 @@ namespace Oxide.Plugins
         //  §5  A BARRA NA TELA
         // ============================================================
 
-        private void Draw(Run current, List<BasePlayer> inside, bool contested)
+        private void Draw(
+            Run current,
+            List<BasePlayer> inside,
+            Dictionary<ulong, Side> sides,
+            bool contested)
         {
             var percent = Percent(current);
             var seen = new HashSet<ulong>();
@@ -826,8 +1040,28 @@ namespace Oxide.Plugins
 
                 var soloWarning = current.requireTeam && player.currentTeam == 0UL;
 
+                // ####  QUANTOS SÃO OS SEUS, E QUANTOS SÃO OS OUTROS  ####
+                //
+                // Pedido do dono: a barra diz o tamanho da SUA equipe
+                // dentro da zona, e o resto vira um número só —
+                // "outros". Não se diz de que equipe são, nem onde
+                // estão: a spec proíbe publicar a posição de cada
+                // participante (§16), e saber que são "3 de um time e 2
+                // de outro" é meio caminho para isso.
+                //
+                // O número serve para uma decisão só, e ela é a que
+                // importa: dá para segurar, ou é hora de sair?
+                var mine = 0;
+                var others = 0;
+
+                foreach (var pair in sides)
+                {
+                    if (player.currentTeam != 0UL && pair.Key == player.currentTeam) mine += pair.Value.members;
+                    else others += pair.Value.members;
+                }
+
                 CuiHelper.DestroyUi(player, UiRoot);
-                CuiHelper.AddUi(player, Hud(current, percent, contested, soloWarning));
+                CuiHelper.AddUi(player, Hud(current, percent, contested, soloWarning, mine, others));
             }
 
             // Quem saiu da zona perde a barra. Sem isto ela ficaria
@@ -853,7 +1087,13 @@ namespace Oxide.Plugins
         /// Seis elementos, ~390 bytes cada: cabe folgado no frame. Ele é
         /// montado à mão porque muda a cada segundo — ver o cabeçalho.
         /// </summary>
-        private string Hud(Run current, float percent, bool contested, bool soloWarning)
+        private string Hud(
+            Run current,
+            float percent,
+            bool contested,
+            bool soloWarning,
+            int mine,
+            int others)
         {
             var container = new CuiElementContainer();
 
@@ -873,7 +1113,7 @@ namespace Oxide.Plugins
                     Align = TextAnchor.MiddleLeft,
                     Color = "0.77 0.71 0.33 1",
                 },
-                RectTransform = { AnchorMin = "0.02 0.52", AnchorMax = "0.7 0.98" },
+                RectTransform = { AnchorMin = "0.02 0.64", AnchorMax = "0.7 0.99" },
             }, root);
 
             var estado = soloWarning
@@ -895,8 +1135,34 @@ namespace Oxide.Plugins
                         ? "0.85 0.35 0.25 1"
                         : contested ? "0.90 0.65 0.20 1" : "0.85 0.85 0.85 1",
                 },
-                RectTransform = { AnchorMin = "0.3 0.52", AnchorMax = "0.98 0.98" },
+                RectTransform = { AnchorMin = "0.3 0.64", AnchorMax = "0.98 0.99" },
             }, root);
+
+            // ####  A CONTAGEM: OS SEUS E OS OUTROS  ####
+            //
+            // Embaixo do nome, em letra pequena. Ela é a informação que
+            // muda a decisão de quem está lá — e não diz de que equipe
+            // são os outros, de propósito.
+            var pessoas = soloWarning
+                ? (others > 0 ? others + " na área" : "")
+                : (mine > 0 || others > 0
+                    ? "seus " + mine + " · outros " + others
+                    : "");
+
+            if (pessoas != "")
+            {
+                container.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = pessoas,
+                        FontSize = 9,
+                        Align = TextAnchor.MiddleLeft,
+                        Color = others > 0 ? "0.90 0.65 0.20 0.95" : "0.70 0.70 0.70 0.9",
+                    },
+                    RectTransform = { AnchorMin = "0.02 0.50", AnchorMax = "0.5 0.66" },
+                }, root);
+            }
 
             // O trilho da barra.
             var trilho = container.Add(new CuiPanel
