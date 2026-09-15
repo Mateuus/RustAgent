@@ -5941,6 +5941,17 @@ export const agent = {
   // parado elas devolvem 503 — e isso é informação, não falha da
   // tela: "esse jogador não tem equipe" e "não consegui perguntar"
   // são respostas diferentes.
+  teamSettings: (serverId: string) =>
+    api<{ settings: { maxSize: number }; live: number | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/team-settings`,
+    ),
+
+  saveTeamSettings: (serverId: string, maxSize: number) =>
+    api<{ settings: { maxSize: number } }>(
+      `/api/servers/${encodeURIComponent(serverId)}/team-settings`,
+      { method: 'PUT', body: { maxSize } },
+    ),
+
   teams: (serverId: string) =>
     api<TeamsSnapshot>(`/api/servers/${encodeURIComponent(serverId)}/teams`),
 

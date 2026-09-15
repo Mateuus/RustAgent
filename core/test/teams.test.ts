@@ -28,7 +28,7 @@ import { describe, expect, it } from 'vitest';
 import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
-import { TeamRanksRepository } from '../src/db/team-ranks-repository.js';
+import { TeamRanksRepository, TeamSettingsRepository } from '../src/db/team-ranks-repository.js';
 import { TeamCommandError, TeamsService, TEAM_MARKER } from '../src/game/teams.js';
 
 const silent = pino({ level: 'silent' });
@@ -91,6 +91,7 @@ function harness(): Harness {
 
   const service = new TeamsService({
     ranks,
+    settings: new TeamSettingsRepository(db),
     servers: {
       ids: () => [SERVER],
       contextOf: () => ({

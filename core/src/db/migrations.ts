@@ -7396,6 +7396,117 @@ CREATE TABLE team_ranks (
 CREATE INDEX idx_team_ranks_team ON team_ranks (server_id, team_id);
 `;
 
+const KOTH_ARENAS_SCHEMA = `
+-- ============================================================
+--  089  os territorios do KOTH.
+--
+--  ####  O OPOSTO DO dungeon_spawn_points  ####
+--
+--  La o ponto e so um lugar: o que nasce ali e decidido pela
+--  masmorra escolhida. Aqui o lugar E a disputa -- "aquela colina"
+--  e "o vale do rio" sao eventos diferentes: um e aberto e largo, o
+--  outro e fechado e rapido.
+--
+--  Por isso raio, altura, tempo de captura e duracao moram aqui. A
+--  spec pede PERFIS reutilizaveis; um perfil com um territorio so e
+--  uma indirecao que nao paga o aluguel, e ele entra quando houver
+--  territorios demais para manter um a um.
+--
+--  ####  UM TERRITORIO E DE UM MAPA  ####
+--
+--  Mesma licao do dungeon_spawn_points (migracao 076): trocado o
+--  mapa, aquele x/z e outro lugar. O world_key guarda
+--  "<worldSize>:<seed>", e a tela cobra a revalidacao em vez de
+--  apagar sozinha -- apagar e o tipo de coisa que ninguem relaciona
+--  com o botao que apertou.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num template
+--  literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE koth_arenas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- "Colina do Norte", "Vale do rio". E por ele que o admin escolhe:
+  -- a coordenada nao diz nada a ninguem.
+  label TEXT NOT NULL,
+
+  x REAL NOT NULL,
+  z REAL NOT NULL,
+
+  -- NULL = o servidor resolve lendo o terreno na hora de erguer. E o
+  -- normal: o admin marca no mapa, que e plano.
+  y REAL,
+
+  -- O cilindro da captura, em metros.
+  radius REAL NOT NULL DEFAULT 25,
+  height REAL NOT NULL DEFAULT 30,
+
+  -- Segundos de dominio para capturar, e o teto da execucao.
+  capture_seconds INTEGER NOT NULL DEFAULT 300,
+  duration_seconds INTEGER NOT NULL DEFAULT 1800,
+
+  -- Quanto o progresso cai por segundo com a zona vazia. Zero = o
+  -- que foi conquistado fica.
+  decay_per_second REAL NOT NULL DEFAULT 1,
+
+  color TEXT NOT NULL DEFAULT '#c4b454',
+
+  -- 0 = desligado sem perder o territorio. O sorteio o ignora.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  world_key TEXT,
+  grid TEXT,
+
+  -- Para o sorteio nao repetir o mesmo lugar duas vezes seguidas.
+  last_used_at INTEGER,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_koth_arenas_server ON koth_arenas (server_id, enabled);
+`;
+
+const TEAM_SETTINGS_SCHEMA = `
+-- ============================================================
+--  090  a configuracao de equipe, por servidor.
+--
+--  Pedido do dono em 15/09/2026: "em configuracao do servidor
+--  colocar o maximo de jogadores por equipe".
+--
+--  ####  O JOGO TEM O VALOR, E ESQUECE DELE  ####
+--
+--  maxTeamSize e um ServerVar do Rust: mudar pelo console vale ate
+--  o proximo restart, e depois volta para 8 sem avisar ninguem. O
+--  admin mexe uma vez, acha que resolveu, e uma semana depois as
+--  equipes voltam a caber oito.
+--
+--  Esta tabela e a MEMORIA disso. O agente reaplica no boot, quando
+--  o RCON conecta -- do mesmo jeito que faz com o resto do estado
+--  que o plugin perde ao recarregar.
+--
+--  ####  SEM LINHA = O PADRAO DO JOGO  ####
+--
+--  Nao semeamos uma linha por servidor: um servidor criado depois
+--  desta migracao ficaria sem ela, e o codigo teria de saber o
+--  padrao de qualquer jeito. Entao o padrao mora num lugar so, no
+--  codigo.
+-- ============================================================
+
+CREATE TABLE team_settings (
+  server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- Quantos cabem numa equipe. 0 = equipes DESLIGADAS no Rust, e e
+  -- um valor legitimo: servidor solo-only usa isso.
+  max_size INTEGER NOT NULL DEFAULT 8 CHECK (max_size >= 0 AND max_size <= 64),
+
+  updated_at INTEGER NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7643,6 +7754,8 @@ export const MIGRATIONS: readonly Migration[] = [
 
   { id: 87, name: 'player-streamer', sql: PLAYER_STREAMER_SCHEMA },
   { id: 88, name: 'team-ranks', sql: TEAM_RANKS_SCHEMA },
+  { id: 89, name: 'koth-arenas', sql: KOTH_ARENAS_SCHEMA },
+  { id: 90, name: 'team-settings', sql: TEAM_SETTINGS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

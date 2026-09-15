@@ -120,6 +120,7 @@ import { registerDungeonRoutes, type DungeonRoutesDeps } from './routes/dungeons
 import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
 import { registerWorldEventRoutes, type WorldEventRoutesDeps } from './routes/world-events.js';
 import { registerTeamRoutes, type TeamRoutesDeps } from './routes/teams.js';
+import { registerKothRoutes, type KothRoutesDeps } from './routes/koth.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 import { registerRuleRoutes, type RuleRoutesDeps } from './routes/rules.js';
 
@@ -393,6 +394,8 @@ export interface BuildServerOptions {
    * painel nao teria como distinguir as duas.
    */
   readonly teams?: TeamRoutesDeps;
+  /** O dominio de territorio: os lugares cadastrados, e o que esta de pe. */
+  readonly koth?: KothRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -581,6 +584,13 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // aqui mostraria no painel uma equipe que ja acabou.
       if (options.teams !== undefined) {
         registerTeamRoutes(api, options.teams);
+      }
+
+      // O KOTH. O CADASTRO dele responde do banco (e com o servidor
+      // parado que se desenha um territorio novo); o ESTADO pergunta
+      // ao jogo.
+      if (options.koth !== undefined) {
+        registerKothRoutes(api, options.koth);
       }
 
       // O catálogo de itens. Ele responde do BANCO, e por isso

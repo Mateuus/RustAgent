@@ -411,12 +411,36 @@ namespace Oxide.Plugins
 
             secret = incoming == null ? "" : incoming.ToString();
 
+            // ####  O TAMANHO VEM NO SYNC, E NÃO NUM COMANDO NOSSO  ####
+            //
+            // Quem MUDA o tamanho é o convar oficial do jogo
+            // (`relationshipmanager.maxteamsize`), e o agente o chama
+            // direto — um comando nosso para isso seria uma segunda
+            // porta para a mesma tranca.
+            //
+            // Ele vem junto do sync porque o boot é exatamente quando o
+            // jogo esqueceu o valor: MEDIDO em 15/09/2026, o
+            // `server.writecfg` NÃO grava este convar no serverauto.cfg,
+            // então ele volta a 8 em todo restart.
+            var size = body["maxSize"];
+
+            if (size != null && size.Type != JTokenType.Null)
+            {
+                int parsed;
+
+                if (int.TryParse(size.ToString(), out parsed) && parsed >= 0 && parsed <= 64)
+                {
+                    RelationshipManager.maxTeamSize = parsed;
+                }
+            }
+
             var payload = new JObject
             {
                 ["ok"] = true,
                 ["teams"] = RelationshipManager.ServerInstance == null
                     ? 0
                     : RelationshipManager.ServerInstance.teams.Count,
+                ["maxSize"] = RelationshipManager.maxTeamSize,
             };
 
             return payload.ToString(Formatting.None);

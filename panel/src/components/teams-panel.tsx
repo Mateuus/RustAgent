@@ -46,7 +46,16 @@
 //  Ver Docs/OrigemZTeam/00-LEVANTAMENTO.md.
 // ============================================================
 
-import { Crown, Loader2, Pencil, Search, ShieldHalf, UserMinus, Users } from 'lucide-react';
+import {
+  Crown,
+  Loader2,
+  Pencil,
+  Search,
+  Settings2,
+  ShieldHalf,
+  UserMinus,
+  Users,
+} from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { StateBlock } from '@/components/state-block';
@@ -207,6 +216,8 @@ export function TeamsPanel({ serverId }: TeamsPanelProps) {
           </Button>
         </div>
       </div>
+
+      <TeamSettingsCard serverId={serverId} />
 
       {teams.length === 0 ? (
         <StateBlock
@@ -619,4 +630,138 @@ function ageLabel(seconds: number): string {
   if (hours < 24) return `${String(hours)} h`;
 
   return `${String(Math.floor(hours / 24))} d`;
+}
+
+/**
+ * A configuração de equipe daquele servidor.
+ *
+ * ####  POR QUE ELA MOSTRA DOIS NÚMEROS  ####
+ *
+ * O primeiro é o que o admin ESCOLHEU, e mora no agente. O segundo é
+ * o que o jogo diz que vale AGORA.
+ *
+ * Eles divergem, e não por bug: `relationshipmanager.maxteamsize` é
+ * um ServerVar que o Rust NÃO salva — medido em 15/09/2026, o
+ * `server.writecfg` não o grava no serverauto.cfg. No próximo
+ * restart o jogo volta a 8 sem avisar ninguém.
+ *
+ * O agente reaplica quando o RCON conecta. Esta tela mostra os dois
+ * justamente para que a hora em que eles se separam seja visível —
+ * escolher um para acreditar esconderia o problema.
+ */
+function TeamSettingsCard({ serverId }: { readonly serverId: string }) {
+  const [saved, setSaved] = useState<number | null>(null);
+  const [live, setLive] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await agent.teamSettings(serverId);
+
+      setSaved(response.settings.maxSize);
+      setLive(response.live);
+      setDraft(String(response.settings.maxSize));
+    } catch {
+      // Sem configuração legível a seção some: ela não é o assunto
+      // principal desta tela.
+      setSaved(null);
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (saved === null) return null;
+
+  const diverge = live !== null && live !== saved;
+
+  async function save(): Promise<void> {
+    const value = Number(draft);
+
+    if (!Number.isInteger(value) || value < 0 || value > 64) {
+      toast.error('Valor inválido', { description: 'Use um número inteiro entre 0 e 64.' });
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      await agent.saveTeamSettings(serverId, value);
+      await load();
+      toast.success('Tamanho aplicado', {
+        description:
+          value === 0
+            ? 'Equipes desligadas neste servidor.'
+            : `Cabem ${String(value)} por equipe, a partir de agora.`,
+      });
+    } catch (cause) {
+      toast.error('Não consegui aplicar', {
+        description: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="border border-border bg-surface">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+      >
+        <span className="flex items-center gap-2 font-condensed text-2xs font-bold uppercase tracking-wide">
+          <Settings2 aria-hidden="true" className="h-3.5 w-3.5 text-muted" />
+          Configuração de equipe
+        </span>
+
+        <span className="flex items-center gap-2 text-2xs text-muted">
+          {saved === 0 ? 'equipes desligadas' : `${String(saved)} por equipe`}
+          {diverge && (
+            <span className="border border-amber px-1.5 py-0.5 uppercase tracking-wide text-amber">
+              o jogo está com {String(live)}
+            </span>
+          )}
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t border-border p-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="block">
+              <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+                Máximo por equipe
+              </span>
+              <Input
+                type="number"
+                min={0}
+                max={64}
+                value={draft}
+                className="mt-1 h-9 w-28"
+                onChange={(event) => setDraft(event.target.value)}
+              />
+            </label>
+
+            <Button size="sm" variant="primary" disabled={busy} onClick={() => void save()}>
+              Aplicar
+            </Button>
+          </div>
+
+          <p className="mt-2 max-w-2xl text-2xs text-muted">
+            É o <span className="font-mono">relationshipmanager.maxteamsize</span> do Rust, e vale
+            na hora — inclusive para as equipes que já existem. Zero{' '}
+            <strong className="text-foreground">desliga</strong> equipes no servidor.
+          </p>
+
+          <p className="mt-1 max-w-2xl text-2xs text-muted">
+            O jogo não guarda este valor: ele volta a 8 em todo restart. Quem tem a memória dele é
+            o agente, que o reaplica quando o RCON conecta.
+          </p>
+        </div>
+      )}
+    </section>
+  );
 }

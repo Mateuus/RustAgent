@@ -190,3 +190,58 @@ export class TeamRanksRepository {
 export function asGrantableRank(value: string): GrantableRank | null {
   return (GRANTABLE_RANKS as readonly string[]).includes(value) ? (value as GrantableRank) : null;
 }
+
+// ------------------------------------------------------------
+//  A CONFIGURAÇÃO DE EQUIPE
+// ------------------------------------------------------------
+
+/**
+ * O padrão do jogo, num lugar só.
+ *
+ * Oito é o `maxTeamSize_Internal` do Rust, medido no
+ * Assembly-CSharp de 15/09/2026. Sem linha na tabela, é isto que
+ * vale — e é isto que a tela mostra.
+ */
+export const DEFAULT_TEAM_SETTINGS: TeamSettings = { maxSize: 8 };
+
+export interface TeamSettings {
+  /** Quantos cabem numa equipe. 0 = equipes desligadas no Rust. */
+  readonly maxSize: number;
+}
+
+export class TeamSettingsRepository {
+  readonly #db: AgentDatabase;
+
+  constructor(db: AgentDatabase) {
+    this.#db = db;
+  }
+
+  of(serverId: string): TeamSettings {
+    const row = this.#db
+      .prepare('SELECT max_size FROM team_settings WHERE server_id = ?')
+      .get(serverId) as { readonly max_size: number } | undefined;
+
+    return row === undefined ? DEFAULT_TEAM_SETTINGS : { maxSize: row.max_size };
+  }
+
+  save(serverId: string, settings: TeamSettings): TeamSettings {
+    this.#db
+      .prepare(
+        `INSERT INTO team_settings (server_id, max_size, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (server_id) DO UPDATE SET max_size = excluded.max_size, updated_at = excluded.updated_at`,
+      )
+      .run(serverId, settings.maxSize, Date.now());
+
+    return this.of(serverId);
+  }
+
+  /** Os servidores que têm configuração própria. É o que o boot reaplica. */
+  configured(): readonly { readonly serverId: string; readonly maxSize: number }[] {
+    const rows = this.#db
+      .prepare('SELECT server_id, max_size FROM team_settings')
+      .all() as { readonly server_id: string; readonly max_size: number }[];
+
+    return rows.map((row) => ({ serverId: row.server_id, maxSize: row.max_size }));
+  }
+}

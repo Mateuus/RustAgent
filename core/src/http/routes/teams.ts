@@ -11,6 +11,9 @@
 //
 //      GET    /players/:steamId/team?server=…   a equipe de alguém
 //
+//      GET    /servers/:id/team-settings        o que vale, e o que o jogo diz
+//      PUT    /servers/:id/team-settings        o tamanho máximo
+//
 //  ####  TUDO SOB /servers/:id, E ISSO É O CONTRÁRIO DO VIP  ####
 //
 //  O VIP é da PESSOA e vale na rede inteira. A equipe é de um MUNDO:
@@ -140,6 +143,52 @@ export function registerTeamRoutes(app: FastifyInstance, deps: TeamRoutesDeps): 
 
     try {
       return { ok: true, team: await deps.teams.teamOf(server, steamId) };
+    } catch (cause) {
+      return asApiError(cause);
+    }
+  });
+
+  // ==========================================================
+  //  A CONFIGURAÇÃO
+  //
+  //  ####  DUAS RESPOSTAS, E ELAS PODEM DIVERGIR  ####
+  //
+  //  `maxSize` é o que o admin escolheu e mora no banco. `live` é o
+  //  que o jogo diz que vale AGORA — e os dois se separam quando
+  //  alguém digita no console, ou quando o servidor reinicia: medido
+  //  em 15/09/2026, o convar `relationshipmanager.maxteamsize` NÃO é
+  //  salvo pelo `server.writecfg`, e volta a 8 em todo restart.
+  //
+  //  A tela mostra os dois. Escolher um para acreditar seria esconder
+  //  justamente a hora em que o valor se perdeu.
+  // ==========================================================
+
+  app.get('/servers/:id/team-settings', async (request) => {
+    const { id } = serverParams.parse(request.params);
+
+    assertServer(id);
+
+    const settings = deps.teams.settingsOf(id);
+    let live: number | null = null;
+
+    try {
+      live = await deps.teams.liveMaxSize(id);
+    } catch {
+      // Servidor parado: `live` fica `null`, e a tela diz "não
+      // consegui perguntar" em vez de inventar que está aplicado.
+    }
+
+    return { ok: true, settings, live };
+  });
+
+  app.put('/servers/:id/team-settings', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const body = z.object({ maxSize: z.number().int().min(0).max(64) }).parse(request.body);
+
+    assertServer(id);
+
+    try {
+      return { ok: true, settings: await deps.teams.saveSettings(id, body) };
     } catch (cause) {
       return asApiError(cause);
     }

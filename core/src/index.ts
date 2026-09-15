@@ -65,7 +65,9 @@ import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
 import { TeamsService } from './game/teams.js';
-import { TeamRanksRepository } from './db/team-ranks-repository.js';
+import { KothService } from './game/koth.js';
+import { KothArenasRepository } from './db/koth-arenas-repository.js';
+import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
 import { loadKitIcons, loadStoreIcons } from './game/card-icons.js';
@@ -412,6 +414,7 @@ async function main(): Promise<void> {
       // avisos sairiam sem assinatura e o agente os descartaria — e
       // o cargo de uma equipe desfeita ficaria para tras.
       void teamsService.sync(serverId);
+      void kothService.sync(serverId);
       // E o overlay de propagandas, que perdeu MAIS que o cache: o
       // mapa chave->CRC das imagens vive na memória do plugin, e
       // sem esquecê-lo aqui a carga desceria apontando para bytes
@@ -512,6 +515,9 @@ async function main(): Promise<void> {
       // A equipe: o `handleLine` recusa numa comparacao de string a
       // linha que nao tem `#OZTEAM#`, que e a esmagadora maioria.
       teamsService.handleLine(serverId, line);
+
+      // O KOTH: mesma recusa barata, outro marcador.
+      kothService.handleLine(serverId, line);
       // O overlay grita `#OZADSREQ#` quando o plugin sobe sem a
       // configuração. Recusa na primeira comparação de string,
       // como o de cima.
@@ -1518,14 +1524,50 @@ async function main(): Promise<void> {
   // proposito: quem sabe quem esta em qual time e o
   // RelationshipManager do Rust. O agente guarda so o CARGO, que o
   // jogo nao tem. Ver Docs/OrigemZTeam/00-LEVANTAMENTO.md.
+  const teamSettings = new TeamSettingsRepository(db);
   const teamsService = new TeamsService({
     ranks: new TeamRanksRepository(db),
+    settings: teamSettings,
     servers: {
       ids: () => repository.list().map((server) => server.id),
       contextOf: (serverId) => supervisor.contextOf(serverId),
     },
     logger,
   });
+
+  // ####  O KOTH  ####
+  //
+  // Ele reusa `world_event_runs` para o historico: "o que nasceu no
+  // mapa ontem" e uma pergunta so, e duas tabelas seriam duas
+  // respostas para ela. O que e proprio dele sao os TERRITORIOS.
+  const kothArenas = new KothArenasRepository(db);
+  const kothService = new KothService({
+    arenas: kothArenas,
+    events: worldEventsRepository,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      contextOf: (serverId) => supervisor.contextOf(serverId),
+      // O mesmo caminho do agendador da masmorra: o mundo vem do
+      // SUPERVISOR, que leu o servidor de pé — e não do cadastro,
+      // que diz o que foi pedido e não o que subiu.
+      worldKey: (serverId) => {
+        const world = supervisor.configOf(serverId);
+
+        return world === null ? null : `${String(world.worldSize)}:${String(world.seed)}`;
+      },
+    },
+    logger,
+    announce: async (serverId, message) => {
+      await dungeonBroadcaster.send({
+        serverId,
+        text: message,
+        tag: '[KOTH]',
+        tagColor: '#C4B454',
+      });
+    },
+  });
+
+  kothService.recover();
 
   dungeonSync = new DungeonSync({
     dungeons: dungeonsRepository,
@@ -3642,6 +3684,11 @@ async function main(): Promise<void> {
     teams: {
       teams: teamsService,
       servers: repository,
+    },
+    koth: {
+      arenas: kothArenas,
+      servers: repository,
+      koth: kothService,
     },
     worldEvents: {
       events: worldEventsRepository,
