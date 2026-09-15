@@ -160,6 +160,9 @@ beforeEach(async () => {
         repository,
         service,
         servers: { list: () => servers.list().map((server) => ({ id: server.id })) },
+        // Três rankings, um de cada natureza: o que aceita ponto
+        // concedido, o que o jogo mede e o que está desligado.
+        rankings: { byMetric: (metric) => RANKINGS.get(metric) ?? null },
       });
     },
     { prefix: '' },
@@ -169,6 +172,22 @@ beforeEach(async () => {
 
   h = { db, repository, service, app };
 });
+
+/**
+ * O catálogo de rankings que a borda consulta.
+ *
+ * Três naturezas, porque são elas que a regra separa: `item` é o
+ * ponto CONCEDIDO (Troféu Bleik), `plugin` é o que o jogo mede, e o
+ * desligado existe para provar que existir não basta.
+ */
+const RANKINGS = new Map<
+  string,
+  { readonly label: string; readonly source: 'item' | 'plugin'; readonly enabled: boolean }
+>([
+  ['trophy.bleik', { label: 'Troféu Bleik', source: 'item', enabled: true }],
+  ['ore.metal', { label: 'Metal', source: 'plugin', enabled: true }],
+  ['trophy.velho', { label: 'Troféu antigo', source: 'item', enabled: false }],
+]);
 
 // ------------------------------------------------------------
 //  O catálogo
@@ -367,6 +386,87 @@ describe('o NPC ausente', () => {
     expect((await post('/quests', body({ npcId: 'velho', servers: ['pvp1'] }))).statusCode).toBe(201);
     // E a quest de rede (sem lista de servidores) também.
     expect((await post('/quests', body({ npcId: 'velho', title: 'Outra' }))).statusCode).toBe(201);
+  });
+});
+
+// ------------------------------------------------------------
+//  O destino dos pontos
+// ------------------------------------------------------------
+
+describe('a métrica que a quest aponta', () => {
+  /** Uma quest que paga pontos naquele ranking. */
+  const pagando = (metric: string) =>
+    body({ rewards: [{ kind: 'points', metric, amount: 5 }] });
+
+  it('recusa a recompensa que aponta para um ranking inexistente', async () => {
+    // ####  O DEFEITO DE 14/09/2026, NA BORDA  ####
+    //
+    // `quest.completed` parece o nome certo e não é ranking nenhum.
+    // A quest salvava, o jogador concluía, os 50 OZCoin caíam e os
+    // 5 pontos viravam pendência no painel.
+    const response = await post('/quests', pagando('quest.completed'));
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('RANKING_METRIC_UNKNOWN');
+    expect(response.json().message).toContain('quest.completed');
+  });
+
+  it('recusa pagar pontos num ranking que o JOGO mede', async () => {
+    // Somar cinco à mão em "Metal" seria dizer que o jogador
+    // minerou cinco de metal.
+    const response = await post('/quests', pagando('ore.metal'));
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('RANKING_NOT_AWARDABLE');
+    expect(response.json().message).toContain('Metal');
+  });
+
+  it('recusa o ranking desligado', async () => {
+    const response = await post('/quests', pagando('trophy.velho'));
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('RANKING_NOT_AWARDABLE');
+  });
+
+  it('aceita o ranking de pontos', async () => {
+    expect((await post('/quests', pagando('trophy.bleik'))).statusCode).toBe(201);
+  });
+
+  it('o OBJETIVO pode ler qualquer ranking, inclusive o que o jogo mede', async () => {
+    // Ler e escrever são coisas diferentes: "chegue a 1.000 de
+    // metal" é um objetivo legítimo, e pagar pontos ali não é.
+    const response = await post(
+      '/quests',
+      body({ objectives: [{ seq: 0, kind: 'metric', metric: 'ore.metal', amount: 1000 }] }),
+    );
+
+    expect(response.statusCode).toBe(201);
+  });
+
+  it('mas o objetivo também recusa um ranking que não existe', async () => {
+    const response = await post(
+      '/quests',
+      body({ objectives: [{ seq: 0, kind: 'metric', metric: 'nao.existe', amount: 10 }] }),
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('RANKING_METRIC_UNKNOWN');
+  });
+
+  it('a EDIÇÃO confere igual à criação', async () => {
+    await post('/quests', pagando('trophy.bleik'));
+
+    const response = await h.app.inject({
+      method: 'PUT',
+      url: '/quests/minerador',
+      payload: pagando('quest.completed'),
+    });
+
+    // Sem isto, a conferência seria um portão que só vale na porta
+    // da frente: editar seria o caminho aberto para gravar o que a
+    // criação recusa.
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('RANKING_METRIC_UNKNOWN');
   });
 });
 
