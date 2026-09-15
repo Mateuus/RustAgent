@@ -3,6 +3,36 @@
 // ============================================================
 //  teams-panel.tsx  -  as equipes que existem no jogo AGORA.
 //
+//  ####  POR QUE ISTO NÃO É UMA LISTA DE CARTÕES  ####
+//
+//  A primeira versão era: um cartão por equipe, com TODOS os
+//  membros abertos. Com vinte equipes de oito, são cento e sessenta
+//  linhas empilhadas — e achar "em que equipe está o Fulano" vira
+//  rolagem no olho.
+//
+//  O desenho certo para isto é o de sempre que a lista é longa e o
+//  item é rico: LISTA à esquerda, DETALHE à direita.
+//
+//    ┌──────────────┬───────────────────────────┐
+//    │ busca        │  Alcateia do Norte    #2  │
+//    │ ──────────── │  ─────────────────────── │
+//    │ ▸ Alcateia 4 │  4 membros · 2 online     │
+//    │   Os Lobos 8 │  ─────────────────────── │
+//    │   #7       2 │  Mateuus      LÍDER       │
+//    │   …          │  Bia          OFICIAL  …  │
+//    └──────────────┴───────────────────────────┘
+//
+//  A lista mostra o que serve para ESCOLHER (nome, tamanho, quantos
+//  online); o painel mostra o que serve para AGIR. Abaixo de `lg` a
+//  tela é estreita demais para as duas colunas, e aí o detalhe
+//  aparece embaixo da lista.
+//
+//  ####  A BUSCA PROCURA GENTE, NÃO SÓ EQUIPE  ####
+//
+//  Porque a pergunta que se faz aqui quase nunca é "onde está a
+//  equipe tal" — é "em que equipe está esse cara que me reportaram".
+//  Ela casa nome de equipe, id, nome de membro e SteamID.
+//
 //  ####  ESTA TELA NÃO TEM CACHE, E ISSO É O PONTO  ####
 //
 //  Toda abertura pergunta ao servidor. A equipe muda a cada convite
@@ -11,24 +41,13 @@
 //
 //  O preço é que ela depende do servidor DE PÉ. Com ele parado, a
 //  tela diz isso, em vez de mostrar uma lista vazia: "não há equipe
-//  nenhuma" e "não consegui perguntar" são respostas diferentes, e
-//  confundi-las é o jeito de o painel mentir com cara de dado.
-//
-//  ####  O QUE É DO JOGO, E O QUE É NOSSO  ####
-//
-//  Quem está dentro, quem é líder e quantos cabem: do jogo. O nome
-//  da equipe é do jogo TAMBÉM — só que ninguém escrevia nele, e
-//  agora escrevemos. O cargo é o único dado que nasce aqui.
-//
-//  Por isso "Promover" não tem confirmação e "Desfazer" tem: o
-//  primeiro mexe numa linha nossa; o segundo acaba com uma equipe
-//  de gente de verdade, e não tem volta.
+//  nenhuma" e "não consegui perguntar" são respostas diferentes.
 //
 //  Ver Docs/OrigemZTeam/00-LEVANTAMENTO.md.
 // ============================================================
 
-import { Crown, Loader2, Pencil, ShieldHalf, UserMinus, Users } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { Crown, Loader2, Pencil, Search, ShieldHalf, UserMinus, Users } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -45,11 +64,30 @@ export interface TeamsPanelProps {
 /** O teto do nome, o mesmo do agente e do plugin. */
 const NAME_MAX = 24;
 
+/**
+ * Como a lista é ordenada.
+ *
+ * `size` é o padrão porque a equipe grande é a que interessa
+ * primeiro — é ela que aparece no KOTH, que domina raide, e sobre a
+ * qual chegam as reclamações.
+ */
+type Order = 'size' | 'online' | 'name';
+
+const ORDERS: readonly { readonly key: Order; readonly label: string }[] = [
+  { key: 'size', label: 'Maiores' },
+  { key: 'online', label: 'Online' },
+  { key: 'name', label: 'Nome' },
+];
+
 export function TeamsPanel({ serverId }: TeamsPanelProps) {
   const [teams, setTeams] = useState<readonly Team[] | null>(null);
   const [maxSize, setMaxSize] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [order, setOrder] = useState<Order>('size');
+  /** A equipe aberta à direita, por id. */
+  const [openId, setOpenId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -69,20 +107,29 @@ export function TeamsPanel({ serverId }: TeamsPanelProps) {
   }, [load]);
 
   /** Roda uma ação e recarrega. O erro vira aviso, não tela em branco. */
-  async function act(key: string, action: () => Promise<unknown>): Promise<void> {
-    setBusy(key);
+  const act = useCallback(
+    async (key: string, action: () => Promise<unknown>): Promise<void> => {
+      setBusy(key);
 
-    try {
-      await action();
-      await load();
-    } catch (cause) {
-      toast.error('O servidor recusou', {
-        description: cause instanceof Error ? cause.message : String(cause),
-      });
-    } finally {
-      setBusy(null);
-    }
-  }
+      try {
+        await action();
+        await load();
+      } catch (cause) {
+        toast.error('O servidor recusou', {
+          description: cause instanceof Error ? cause.message : String(cause),
+        });
+      } finally {
+        setBusy(null);
+      }
+    },
+    [load],
+  );
+
+  const shown = useMemo(() => filterAndSort(teams ?? [], query, order), [teams, query, order]);
+
+  // A equipe aberta some quando é desfeita, e a tela não pode ficar
+  // apontando para o vazio: ela cai na primeira da lista.
+  const open = shown.find((team) => team.teamId === openId) ?? shown[0] ?? null;
 
   if (error !== null) {
     return (
@@ -96,25 +143,69 @@ export function TeamsPanel({ serverId }: TeamsPanelProps) {
 
   if (teams === null) return <StateBlock variant="loading" title="Lendo as equipes…" />;
 
+  const online = teams.reduce(
+    (total, team) => total + team.members.filter((member) => member.online).length,
+    0,
+  );
+
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+      {/* ####  A BARRA DE CIMA  ####
+          Ela responde "quantas há" e "onde procuro" antes de a vista
+          descer para a lista. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
           <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
             <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
             Equipes no jogo
+            <span className="font-normal text-muted">({teams.length})</span>
           </h2>
-          <p className="mt-1 max-w-2xl text-2xs text-muted">
+          <p className="mt-1 text-2xs text-muted">
             Lido do servidor agora. O time é do jogo — o que a casa acrescenta é o{' '}
             <strong className="text-foreground">nome</strong> e o{' '}
             <strong className="text-foreground">cargo</strong>.
-            {maxSize > 0 && ` Cabem ${String(maxSize)} por equipe.`}
+            {maxSize > 0 && ` Cabem ${String(maxSize)}.`}
+            {online > 0 && ` ${String(online)} jogador(es) online em equipe.`}
           </p>
         </div>
 
-        <Button size="sm" variant="outline" onClick={() => void load()}>
-          Reler
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="relative">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
+            />
+            <Input
+              value={query}
+              placeholder="equipe, jogador ou SteamID"
+              className="h-9 w-64 pl-7"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+
+          <div className="flex border border-border">
+            {ORDERS.map((entry) => (
+              <button
+                key={entry.key}
+                type="button"
+                onClick={() => setOrder(entry.key)}
+                aria-pressed={order === entry.key}
+                className={cn(
+                  'px-2 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+                  order === entry.key
+                    ? 'bg-surface-2 text-foreground'
+                    : 'text-muted hover:text-foreground',
+                )}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+
+          <Button size="sm" variant="outline" onClick={() => void load()}>
+            Reler
+          </Button>
+        </div>
       </div>
 
       {teams.length === 0 ? (
@@ -123,32 +214,128 @@ export function TeamsPanel({ serverId }: TeamsPanelProps) {
           title="Ninguém montou equipe ainda"
           detail="Quando dois jogadores se juntarem no jogo, a equipe aparece aqui — e é aqui que ela ganha nome."
         />
+      ) : shown.length === 0 ? (
+        <StateBlock
+          variant="empty"
+          title="Nada casou com a busca"
+          detail={`Nenhuma equipe, jogador ou SteamID com "${query}".`}
+        />
       ) : (
-        <ul className="space-y-3">
-          {teams.map((team) => (
-            <TeamCard
-              key={team.teamId}
-              team={team}
-              busy={busy}
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
+          {/* ####  A LISTA  ####
+              Rolagem própria: com cinquenta equipes, a página inteira
+              rolando levaria o painel de detalhe junto para fora da
+              vista. */}
+          <ul className="max-h-[32rem] divide-y divide-border overflow-y-auto border border-border bg-surface">
+            {shown.map((team) => (
+              <TeamRow
+                key={team.teamId}
+                team={team}
+                active={open?.teamId === team.teamId}
+                onOpen={() => setOpenId(team.teamId)}
+              />
+            ))}
+          </ul>
+
+          {open !== null && (
+            <TeamDetail
+              key={open.teamId}
+              team={open}
               serverId={serverId}
+              busy={busy}
+              maxSize={maxSize}
               onAct={act}
             />
-          ))}
-        </ul>
+          )}
+        </div>
       )}
     </div>
   );
 }
 
-function TeamCard({
+/**
+ * Uma linha da lista.
+ *
+ * Ela carrega só o que serve para ESCOLHER: o nome, o tamanho e
+ * quantos estão online. O resto é do painel ao lado — repetir aqui
+ * faria a lista voltar a ser o que ela era.
+ */
+function TeamRow({
+  team,
+  active,
+  onOpen,
+}: {
+  readonly team: Team;
+  readonly active: boolean;
+  readonly onOpen: () => void;
+}) {
+  const online = team.members.filter((member) => member.online).length;
+
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-current={active ? 'true' : undefined}
+        className={cn(
+          'flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface-2',
+          active && 'border-l-2 border-rust bg-surface-2',
+        )}
+      >
+        <div className="min-w-0 flex-1">
+          <p
+            className={cn(
+              'truncate font-condensed text-sm font-bold uppercase tracking-wide',
+              team.name === '' && 'text-muted',
+            )}
+          >
+            {team.name === '' ? 'sem nome' : team.name}
+          </p>
+          <p className="flex items-center gap-2 text-2xs text-muted">
+            <span className="font-mono">#{team.teamId}</span>
+            <span className="truncate">{team.leaderName}</span>
+          </p>
+        </div>
+
+        {/* Online primeiro, e em cor: é o número que muda o que se
+            faz agora. O total fica ao lado, apagado. */}
+        <span className="shrink-0 text-right">
+          <span
+            className={cn(
+              'font-condensed text-sm font-bold',
+              online > 0 ? 'text-olive' : 'text-muted',
+            )}
+          >
+            {online}
+          </span>
+          <span className="text-2xs text-muted">/{team.members.length}</span>
+        </span>
+      </button>
+    </li>
+  );
+}
+
+/**
+ * O painel de uma equipe.
+ *
+ * ####  É AQUI QUE A EQUIPE VAI CRESCER  ####
+ *
+ * Hoje ele mostra o que o jogo sabe mais o cargo. Quando a equipe
+ * entrar no ranking, é neste painel que a pontuação dela entra — ao
+ * lado dos membros, e não numa tela nova: quem abre uma equipe quer
+ * ver tudo dela de uma vez.
+ */
+function TeamDetail({
   team,
   serverId,
   busy,
+  maxSize,
   onAct,
 }: {
   readonly team: Team;
   readonly serverId: string;
   readonly busy: string | null;
+  readonly maxSize: number;
   readonly onAct: (key: string, action: () => Promise<unknown>) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -157,8 +344,8 @@ function TeamCard({
   const online = team.members.filter((member) => member.online).length;
 
   return (
-    <li className="border border-border bg-surface">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-3">
+    <section className="border border-border bg-surface">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border p-3">
         <div className="min-w-0">
           {editing ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -197,31 +384,34 @@ function TeamCard({
           ) : (
             <button
               type="button"
-              onClick={() => setEditing(true)}
+              onClick={() => {
+                setDraft(team.name);
+                setEditing(true);
+              }}
               className="group flex items-center gap-2 text-left"
             >
               <span
                 className={cn(
-                  'font-condensed text-base font-bold uppercase tracking-wide',
+                  'font-condensed text-lg font-bold uppercase tracking-wide',
                   team.name === '' && 'text-muted',
                 )}
               >
                 {team.name === '' ? 'sem nome' : team.name}
               </span>
-              <Pencil
-                aria-hidden="true"
-                className="h-3.5 w-3.5 text-muted group-hover:text-rust"
-              />
+              <Pencil aria-hidden="true" className="h-4 w-4 text-muted group-hover:text-rust" />
             </button>
           )}
 
-          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 text-2xs text-muted">
+          <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted">
             <span className="font-mono">#{team.teamId}</span>
             <span className="flex items-center gap-1">
               <Users aria-hidden="true" className="h-3 w-3" />
-              {team.members.length} membro(s){online > 0 && ` · ${String(online)} online`}
+              {team.members.length}
+              {maxSize > 0 && `/${String(maxSize)}`} membro(s)
             </span>
+            {online > 0 && <span className="text-olive">{online} online</span>}
             {team.officers > 0 && <span>{team.officers} oficial(is)</span>}
+            <span>de pé há {ageLabel(team.ageSeconds)}</span>
           </p>
         </div>
 
@@ -250,7 +440,7 @@ function TeamCard({
           />
         ))}
       </ul>
-    </li>
+    </section>
   );
 }
 
@@ -274,14 +464,11 @@ function MemberRow({
       <div className="flex min-w-0 items-center gap-2">
         <span
           aria-hidden="true"
-          className={cn(
-            'h-2 w-2 shrink-0 rounded-full',
-            member.online ? 'bg-olive' : 'bg-border',
-          )}
+          className={cn('h-2 w-2 shrink-0 rounded-full', member.online ? 'bg-olive' : 'bg-border')}
         />
 
         <div className="min-w-0">
-          <p className="flex items-center gap-2 font-condensed text-sm font-bold">
+          <p className="flex flex-wrap items-center gap-2 font-condensed text-sm font-bold">
             {member.name}
             <RankBadge rank={member.rank} />
           </p>
@@ -363,4 +550,73 @@ function RankBadge({ rank }: { readonly rank: TeamMember['rank'] }) {
       {rank === 'leader' ? 'Líder' : 'Oficial'}
     </span>
   );
+}
+
+/**
+ * A busca e a ordem.
+ *
+ * Fora do componente porque é lógica pura — e porque assim ela é a
+ * única coisa desta tela que dá para testar sem navegador.
+ */
+export function filterAndSort(
+  teams: readonly Team[],
+  query: string,
+  order: Order,
+): readonly Team[] {
+  const needle = query.trim().toLowerCase();
+
+  const found =
+    needle === ''
+      ? [...teams]
+      : teams.filter(
+          (team) =>
+            team.name.toLowerCase().includes(needle) ||
+            team.teamId.includes(needle) ||
+            team.leaderName.toLowerCase().includes(needle) ||
+            team.members.some(
+              (member) =>
+                member.name.toLowerCase().includes(needle) || member.steamId.includes(needle),
+            ),
+        );
+
+  found.sort((left, right) => {
+    if (order === 'name') {
+      // Equipe sem nome vai para o fim: ordenar por string vazia a
+      // jogaria para o topo, que é onde ela menos ajuda.
+      if (left.name === '' && right.name !== '') return 1;
+      if (right.name === '' && left.name !== '') return -1;
+
+      return left.name.localeCompare(right.name);
+    }
+
+    if (order === 'online') {
+      const diff = onlineOf(right) - onlineOf(left);
+
+      return diff === 0 ? right.members.length - left.members.length : diff;
+    }
+
+    const diff = right.members.length - left.members.length;
+
+    return diff === 0 ? onlineOf(right) - onlineOf(left) : diff;
+  });
+
+  return found;
+}
+
+function onlineOf(team: Team): number {
+  return team.members.filter((member) => member.online).length;
+}
+
+/** "3 h", "12 min". O jogo conta do boot do servidor, não de uma data. */
+function ageLabel(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+
+  if (minutes < 1) return 'menos de um minuto';
+  if (minutes < 60) return `${String(minutes)} min`;
+
+  const hours = Math.floor(minutes / 60);
+
+  if (hours < 24) return `${String(hours)} h`;
+
+  return `${String(Math.floor(hours / 24))} d`;
 }
