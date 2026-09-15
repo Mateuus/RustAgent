@@ -7145,6 +7145,192 @@ CREATE INDEX IF NOT EXISTS idx_player_streamer_allowed
   ON player_streamer (allowed, active);
 `;
 
+// ------------------------------------------------------------
+//  085 — a linha de partida das missoes de TEMPO ONLINE
+//
+//  ####  ELA NAO MUDA O SCHEMA; ACERTA UM NUMERO  ####
+//
+//  Ate hoje o objetivo `playtime` lia a metrica `time.played` do
+//  ranking. A partir desta versao ele le `player_servers` — tempo
+//  acumulado NAQUELE servidor, com a sessao aberta somada (ver
+//  `PlayersRepository.onlineSecondsOf` e `QuestPlaytimeSource`).
+//
+//  As duas contam a mesma coisa, mas de origens diferentes: o
+//  ranking comecou a somar no dia em que foi ligado, e o
+//  `played_seconds` existe desde a primeira vez que o jogador
+//  entrou. Em quem ja joga ha meses a diferenca e de HORAS.
+//
+//  E o `baselines` do aceite foi gravado na regua velha. Sem este
+//  acerto, toda tentativa ja aceita subtrairia uma partida pequena
+//  de um total grande e concluiria sozinha no primeiro ciclo do
+//  coletor — a missao de 90 minutos daria por cumprida sem ninguem
+//  jogar um minuto.
+//
+//  ####  O QUE ELE PRESERVA E O PROGRESSO, NAO A PARTIDA  ####
+//
+//      baseline_novo = tempo_online_agora - minutos_ja_contados * 60
+//
+//  Quem estava em 0/90 continua em 0/90 e comeca a contar daqui;
+//  quem ja tivesse 12/90 mantem os 12. E o que o dono pediu em
+//  14/09/2026: "reconectar nao apaga o tempo ja contabilizado".
+//
+//  So as tentativas `active` entram. Uma `completed` ja fechou e
+//  uma `claimed` ja pagou: mexer no baseline delas seria reabrir
+//  conta encerrada.
+// ------------------------------------------------------------
+interface LegacyPlaytimeRow {
+  readonly id: number;
+  readonly server_id: string;
+  readonly steam_id: string;
+  readonly snapshot: string;
+}
+
+function rebaseActivePlaytimeObjectives(db: AgentDatabase, logger?: Logger): void {
+  const rows = db
+    .prepare(`SELECT id, server_id, steam_id, snapshot FROM player_quests WHERE status = 'active'`)
+    .all() as LegacyPlaytimeRow[];
+
+  // A MESMA conta do `onlineSecondsOf`. Repetida aqui de proposito:
+  // uma migracao que importasse o repositorio passaria a mudar de
+  // comportamento junto com ele — e uma migracao ja aplicada nao
+  // roda de novo para se corrigir.
+  const onlineSeconds = db.prepare(
+    `SELECT played_seconds
+            + CASE
+                WHEN joined_at IS NOT NULL AND left_at IS NULL
+                THEN CAST(MAX(0, last_seen - joined_at) / 1000 AS INTEGER)
+                ELSE 0
+              END AS seconds
+       FROM player_servers
+      WHERE server_id = @server_id AND steam_id = @steam_id`,
+  );
+
+  const progress = db.prepare(
+    `SELECT value FROM player_quest_progress
+      WHERE player_quest_id = @id AND objective_seq = @seq`,
+  );
+
+  const update = db.prepare('UPDATE player_quests SET snapshot = @snapshot WHERE id = @id');
+
+  let touched = 0;
+
+  for (const row of rows) {
+    // Um snapshot ilegivel nao pode derrubar a subida do agente: o
+    // que esta migracao faz e opcional para quem nao tem missao de
+    // tempo online, e obrigatorio para ninguem.
+    let snapshot: {
+      objectives?: { seq?: number; kind?: string }[];
+      baselines?: Record<string, number>;
+    };
+
+    try {
+      snapshot = JSON.parse(row.snapshot) as typeof snapshot;
+    } catch {
+      logger?.warn({ playerQuest: row.id }, 'snapshot de quest ilegivel; baseline nao acertado');
+      continue;
+    }
+
+    const seqs = (snapshot.objectives ?? [])
+      .filter((objective) => objective.kind === 'playtime')
+      .map((objective) => objective.seq)
+      .filter((seq): seq is number => typeof seq === 'number');
+
+    if (seqs.length === 0) {
+      continue;
+    }
+
+    const seconds =
+      (onlineSeconds.get({ server_id: row.server_id, steam_id: row.steam_id }) as
+        | { seconds: number }
+        | undefined)?.seconds ?? 0;
+
+    const baselines = { ...(snapshot.baselines ?? {}) };
+
+    for (const seq of seqs) {
+      const have =
+        (progress.get({ id: row.id, seq }) as { value: number } | undefined)?.value ?? 0;
+
+      baselines[String(seq)] = Math.max(0, seconds - have * 60);
+    }
+
+    update.run({ id: row.id, snapshot: JSON.stringify({ ...snapshot, baselines }) });
+    touched += 1;
+  }
+
+  if (touched > 0) {
+    logger?.info({ attempts: touched }, 'linha de partida das missoes de tempo online acertada');
+  }
+}
+
+// ------------------------------------------------------------
+//  086 -- o DESFECHO de cada recompensa, uma linha por uma
+//
+//  ####  O BOTAO DE REENTREGAR REPROCESSAVA TUDO  ####
+//
+//  Uma missao paga 50 OZCoin e 5 pontos. Os pontos falham (a
+//  metrica nao existia -- 14/09/2026), o admin conserta o cadastro
+//  e clica em reentregar: saiam os dois de novo.
+//
+//  Moeda e ponto aguentam, e por acaso: a `reference` da carteira e
+//  o `eventId` do ranking sao estaveis, entao a segunda passada e
+//  recusada la na ponta. ITEM, KIT e VIP nao tem nada disso -- um
+//  retry entrega o kit outra vez, e ninguem percebe ate o jogador
+//  contar.
+//
+//  Com esta tabela o retry pergunta antes: quais falharam? E manda
+//  so essas.
+//
+//  ####  A CHAVE E A POSICAO NO SNAPSHOT  ####
+//
+//  `idx` e o indice da recompensa dentro de `snapshot.rewards` --
+//  o MESMO numero que ja compoe a `reference` da carteira e o
+//  `eventId` do ranking. Usar outro (um id proprio, a ordem de
+//  chegada) criaria uma segunda numeracao para a mesma coisa, e a
+//  idempotencia daqueles dois depende de ela nunca mudar.
+//
+//  O snapshot e congelado no aceite, entao a posicao vale para
+//  sempre: editar a quest hoje nao mexe na tentativa de ontem.
+//
+//  ####  TENTATIVA SEM LINHA NENHUMA SE COMPORTA COMO ANTES  ####
+//
+//  As que foram resgatadas antes desta migracao nao tem registro, e
+//  nao ha como inventa-lo: o evento `reward_failed` diz o TIPO que
+//  falhou, nao a posicao, e nao existe evento de sucesso para
+//  cancela-lo -- uma pendencia ja consertada por um retry antigo
+//  continuaria marcada. Semear por adivinhacao faria o retry
+//  entregar de novo o que ja saiu, que e exatamente o defeito que
+//  esta tabela veio fechar.
+//
+//  Entao elas seguem reprocessando tudo na primeira vez, como
+//  sempre fizeram -- e a partir dessa primeira vez passam a ter
+//  registro. Nada piora; tudo o que e novo melhora.
+// ------------------------------------------------------------
+const QUEST_REWARD_OUTCOMES_SCHEMA = `
+CREATE TABLE IF NOT EXISTS player_quest_rewards (
+  player_quest_id INTEGER NOT NULL REFERENCES player_quests(id) ON DELETE CASCADE,
+
+  -- A posicao no \`snapshot.rewards\`. A mesma que viaja na
+  -- \`reference\` da carteira e no \`eventId\` do ranking.
+  idx INTEGER NOT NULL,
+
+  -- 'item', 'coins', 'kit', 'points', 'vip'. Guardado para o
+  -- painel poder dizer O QUE falta sem reabrir o snapshot.
+  kind TEXT NOT NULL,
+
+  ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+
+  -- O codigo CRU de quem entrega (INVENTORY_FULL, WALLET_TIMEOUT).
+  -- E o que o admin usa para saber se conserta o cadastro ou se
+  -- tenta de novo mais tarde.
+  code TEXT,
+  message TEXT,
+
+  at INTEGER NOT NULL,
+
+  PRIMARY KEY (player_quest_id, idx)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7371,15 +7557,24 @@ export const MIGRATIONS: readonly Migration[] = [
   // 14/09/2026: a missao passa a poder pedir a CAIXA, e nao o que
   // vem dentro dela -- com varios alvos no mesmo contador.
   { id: 84, name: 'quest-container-objective', sql: QUEST_CONTAINER_OBJECTIVE_SCHEMA },
+  // 14/09/2026: o `playtime` troca de regua -- passa a ler o tempo
+  // online com a sessao ABERTA somada, e a partida das tentativas
+  // que ja estavam em andamento precisa acompanhar.
+  { id: 85, name: 'quest-playtime-rebase', run: rebaseActivePlaytimeObjectives },
+  // 14/09/2026: o botao de reentregar passa a saber O QUE falhou,
+  // em vez de reprocessar as cinco recompensas da tentativa.
+  { id: 86, name: 'quest-reward-outcomes', sql: QUEST_REWARD_OUTCOMES_SCHEMA },
 
-  // ####  O 85 E O 86 NAO EXISTEM AQUI, E ISSO E DE PROPOSITO  ####
+  // ####  O 87 PULOU O 85 E O 86 DE PROPOSITO  ####
   //
-  // Eles estao sendo usados por outra arvore de trabalho neste
-  // mesmo repositorio. O runner aplica todo id AUSENTE da
-  // `schema_migrations`, em qualquer ordem -- entao pular numero
-  // nao custa nada, e REPETIR um numero custa caro: no merge, a
-  // migracao que chegasse depois seria PULADA em silencio, porque
-  // o id dela ja estaria gravado como aplicado.
+  // Eles estavam sendo escritos por outra arvore de trabalho
+  // quando esta migracao nasceu, e chegaram aqui pelo merge --
+  // sao as duas linhas logo acima. O runner aplica todo id
+  // AUSENTE da `schema_migrations`, em qualquer ordem, entao
+  // pular numero nao custa nada; REPETIR um custa caro: no
+  // merge, a migracao que chegasse depois seria PULADA em
+  // silencio, porque o id dela ja estaria gravado como
+  // aplicado.
   { id: 87, name: 'player-streamer', sql: PLAYER_STREAMER_SCHEMA },
 ];
 

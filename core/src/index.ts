@@ -101,8 +101,9 @@ import { questConsumeSchema } from './game/quests-contract.js';
 import { QuestCollector } from './quests/collector.js';
 import { QuestNpcSync } from './quests/npc-sync.js';
 import { QuestEvents } from './quests/events.js';
+import { questCompletionMessage, rewardStateOf } from './quests/completion-message.js';
 import { QuestRewardService } from './quests/rewards.js';
-import { QuestsService } from './quests/service.js';
+import { QuestsService, type QuestCompletedEvent } from './quests/service.js';
 import {
   createQuestsScreenProvider,
   parseQuestsScreenId,
@@ -2015,7 +2016,7 @@ async function main(): Promise<void> {
         hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
       },
     }),
-    // ####  O NÚMERO DOS OBJETIVOS `metric` E `playtime`  ####
+    // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
     // Sai do período `lifetime`, o único que NUNCA zera: um wipe no
     // meio de uma quest faria o total cair, e a subtração
@@ -2027,6 +2028,21 @@ async function main(): Promise<void> {
 
         return period === null ? 0 : rankingsRepository.valueOf(period.id, steamId, metric);
       },
+    },
+    // ####  E O DO `playtime` NÃO SAI DO RANKING  ####
+    //
+    // O `time.played` de lá é a diferença do `played_seconds` entre
+    // duas rodadas do coletor, e aquela coluna só cresce quando a
+    // sessão FECHA: quem está conectado há três horas tem, no
+    // ranking, o número de ontem. A missão de tempo online passava a
+    // sessão inteira em 0/90 por causa disso.
+    //
+    // `onlineSecondsOf` soma a sessão aberta — e soma até o
+    // `last_seen`, que é o mesmo instante que o fechamento vai
+    // gravar. Nenhum minuto se perde na virada, nenhum conta duas
+    // vezes. Ver `QuestPlaytimeSource`.
+    playtime: {
+      secondsOf: (serverId, steamId) => playersRepository.onlineSecondsOf(serverId, steamId),
     },
     // ####  QUEM RESPONDE AO `requires` DA QUEST  ####
     //
@@ -2082,7 +2098,21 @@ async function main(): Promise<void> {
     //
     // Ela é montada aqui, e não no serviço, porque falar com o jogo
     // é trabalho deste arquivo. O serviço só avisa que aconteceu.
-    onCompleted: ({ serverId, steamId, title, npcName, hasRewards }) => {
+    onCompleted: (input) => {
+      // ####  O BALCÃO ANUNCIA A DELE  ####
+      //
+      // Quando a missão fecha DENTRO de um clique no NPC, o resgate
+      // vem uma linha depois, no mesmo clique. Anunciar agora seria
+      // mandar o jogador resgatar o que ele vai receber em seguida
+      // — e foi exatamente o que o dono leu no chat em 14/09/2026.
+      //
+      // Então a conclusão fica segurada, e quem a solta é o balcão,
+      // depois de saber se pagou. Ver `#sayCompleted`.
+      if (counterBusy.has(input.playerQuestId)) {
+        heldCompletions.set(input.playerQuestId, input);
+        return;
+      }
+
       // ####  O RELÓGIO, PELA REGRA DE SEMPRE  ####
       //
       // A conclusão pode nascer do gancho que lê o console (o push
@@ -2091,22 +2121,7 @@ async function main(): Promise<void> {
       // já viveu. 50 ms bastam para sair da pilha, e o jogador não
       // percebe a diferença.
       const timer = setTimeout(() => {
-        // Sem prêmio não há o que resgatar — e prometer resgate numa
-        // missão que não dá nada faria o jogador procurar um botão
-        // que não vale nada. Mesmo assim ela precisa ser fechada no
-        // menu, e é isso que a frase diz.
-        const onde =
-          npcName === null
-            ? 'Resgate no menu, em MISSÕES.'
-            : `Resgate no menu, em MISSÕES, ou fale com ${npcName}.`;
-
-        void tellPlayer(
-          serverId,
-          steamId,
-          hasRewards
-            ? `Missão concluída: ${title}. ${onde}`
-            : `Missão concluída: ${title}. Feche no menu, em MISSÕES.`,
-        ).catch(() => undefined);
+        void sayCompleted(input);
       }, 50);
 
       timer.unref();
@@ -2242,6 +2257,79 @@ async function main(): Promise<void> {
     });
   };
 
+  // ------------------------------------------------------------
+  //  O AVISO DE MISSÃO CONCLUÍDA
+  //
+  //  ####  ELE ESPERA O RESGATE DO MESMO CLIQUE  ####
+  //
+  //  Entregar no NPC conclui a missão E paga o prêmio, nessa ordem
+  //  e no mesmo clique. A frase nascia entre as duas coisas, e por
+  //  isso mandava o jogador resgatar o que ele receberia na linha
+  //  seguinte — medido no server01 em 14/09/2026, com os 10 OZCoin
+  //  caindo logo abaixo do "Resgate no menu".
+  //
+  //  Agora quem fecha dentro do balcão fica SEGURADO aqui, e o
+  //  balcão o solta depois do resgate. Fora do balcão — a missão de
+  //  tempo online que fecha sozinha, o lote do plugin — nada muda:
+  //  a frase sai na hora, e diz onde resgatar.
+  // ------------------------------------------------------------
+
+  /** Tentativas cujo clique no balcão está em curso. */
+  const counterBusy = new Set<number>();
+
+  /** A conclusão que espera o desfecho daquele clique. */
+  const heldCompletions = new Map<number, QuestCompletedEvent>();
+
+  /**
+   * Manda a frase de conclusão, lendo o estado do resgate AGORA.
+   *
+   * `claim` é o desfecho do resgate que acabou de rodar, quando
+   * houve um: sem ele, uma entrega que falhou seria anunciada como
+   * entregue.
+   */
+  const sayCompleted = async (
+    event: QuestCompletedEvent,
+    claim?: { readonly pending: boolean },
+  ): Promise<void> => {
+    const reward = rewardStateOf({
+      hasRewards: event.hasRewards,
+      status: questsService?.viewById(event.playerQuestId)?.status ?? null,
+      claim,
+    });
+
+    await tellPlayer(
+      event.serverId,
+      event.steamId,
+      questCompletionMessage({
+        title: event.title,
+        // ####  O NPC SÓ APARECE COM RESGATE PENDENTE NELE  ####
+        //
+        // Ver `questCompletionMessage`: mandar falar com a Eira
+        // sobre o que já está no bolso é o defeito de origem.
+        npcName: event.npcName,
+        reward,
+      }),
+    ).catch(() => undefined);
+  };
+
+  /** Solta a conclusão segurada daquela tentativa, se houver uma. */
+  const releaseCompletion = async (
+    playerQuestId: number,
+    claim: { readonly pending: boolean } | undefined,
+  ): Promise<void> => {
+    const held = heldCompletions.get(playerQuestId);
+
+    if (held === undefined) {
+      return;
+    }
+
+    // Antes de falar, para que a rede de segurança do `finally` não
+    // repita o que o caminho feliz já disse.
+    heldCompletions.delete(playerQuestId);
+
+    await sayCompleted(held, claim);
+  };
+
   questEvents = new QuestEvents({
     service: questsService,
     logger,
@@ -2336,6 +2424,10 @@ async function main(): Promise<void> {
     // que pode ou não ser resgatado é do serviço.
     onClaim: ({ serverId, steamId, playerQuestId, npcId, atTurnIn, turnInName }) => {
       void (async () => {
+        // Daqui até o `finally`, a conclusão desta tentativa é
+        // anunciada por este fluxo — e não pelo `onCompleted`.
+        counterBusy.add(playerQuestId);
+
         try {
           // ####  ENTREGAR PRIMEIRO, RESGATAR DEPOIS  ####
           //
@@ -2392,6 +2484,18 @@ async function main(): Promise<void> {
           }
 
           const result = await questsService?.claim({ playerQuestId });
+
+          // ####  A ORDEM DAS TRÊS LINHAS NO CHAT  ####
+          //
+          //   Você entregou 500 Pano.
+          //   Missão concluída: Encomenda de Tecido. Sua recompensa
+          //   foi entregue.
+          //   10 OZCoin no seu saldo.
+          //
+          // A conclusão no meio, e não no fim: ela é o desfecho da
+          // entrega, e o saldo é a consequência dela.
+          await releaseCompletion(playerQuestId, result);
+
           const message = (result?.outcomes ?? []).map((outcome) => outcome.message).join(' ');
 
           await tellPlayer(
@@ -2405,6 +2509,13 @@ async function main(): Promise<void> {
             steamId,
             isApiError(error) ? error.message : 'Não deu para resgatar agora.',
           ).catch(() => undefined);
+        } finally {
+          counterBusy.delete(playerQuestId);
+
+          // A rede de segurança: se o resgate LANÇOU, a conclusão
+          // segurada ainda precisa sair. Ela lê o estado de agora e
+          // dirá, corretamente, que a recompensa espera.
+          await releaseCompletion(playerQuestId, undefined);
         }
       })();
     },
@@ -3437,6 +3548,19 @@ async function main(): Promise<void> {
       repository: questsRepository,
       service: questsService,
       servers: { list: () => repository.list().map((server) => ({ id: server.id })) },
+      // ####  O DESTINO DOS PONTOS É CONFERIDO AO SALVAR  ####
+      //
+      // Sem isto, uma métrica digitada errada só aparece quando o
+      // jogador termina a missão e não recebe. Ver `assertMetrics`.
+      rankings: {
+        byMetric: (metric) => {
+          const ranking = rankingsRepository.getByMetric(metric);
+
+          return ranking === null
+            ? null
+            : { label: ranking.label, source: ranking.source, enabled: ranking.enabled };
+        },
+      },
       // O ciclo já notaria sozinho, do banco. Estes dois só ADIANTAM
       // o momento — e para o NPC a diferença é visível: o admin
       // clica em apagar e o boneco some do mapa, não daqui a um

@@ -11035,7 +11035,7 @@ namespace Oxide.Plugins
 
             if (andamento != null)
             {
-                objetivo = QuestNpcProgressLine(andamento, objetivo);
+                objetivo = QuestNpcProgressLine(player, npc, andamento, objetivo);
             }
 
             container.Add(new CuiLabel
@@ -11202,36 +11202,67 @@ namespace Oxide.Plugins
         /// nada -- e foi assim ate 13/09/2026.
         private bool QuestNpcCanPay(BasePlayer player, QuestNpcInfo npc, List<QuestAssignment> andamento)
         {
-            if (player == null || player.inventory == null || npc == null)
-            {
-                return false;
-            }
-
             for (int i = 0; i < andamento.Count; i++)
             {
-                QuestAssignment assignment = andamento[i];
-
-                if (assignment.Have >= assignment.Need)
-                {
-                    continue;
-                }
-
-                string shortname = QuestPayableShortname(assignment, npc);
-
-                if (string.IsNullOrEmpty(shortname))
-                {
-                    continue;
-                }
-
-                ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
-
-                if (definition != null && player.inventory.GetAmount(definition.itemid) > 0)
+                if (QuestNpcPayableAmount(player, npc, andamento[i]) > 0)
                 {
                     return true;
                 }
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Quanto DESTE objetivo a mochila paga agora.
+        ///
+        /// ####  E O QUE ENTRA NO CLIQUE, NAO O QUE ELE TEM  ####
+        ///
+        /// Capado pelo que falta: quem chega com 400 panos numa
+        /// missao de 5 le "na mochila: 5", e nao "400". O numero na
+        /// caixa passa a ser o que vai acontecer se ele clicar --
+        /// que e a pergunta que ele esta fazendo diante do boneco.
+        ///
+        /// Pedido do dono em 14/09/2026, depois de entregar os panos:
+        /// "estava com pano no inventario mas nao contou a quantidade
+        /// que tinha quando falei com o npc". A caixa dizia 0 / 5 com
+        /// a mochila cheia, e nao havia como saber que o clique
+        /// resolveria.
+        ///
+        /// `0` = nao ha o que entregar aqui: objetivo ja fechado,
+        /// objetivo que nao se paga com a mochila (matar), ou a
+        /// encomenda de outro boneco.
+        /// </summary>
+        private int QuestNpcPayableAmount(BasePlayer player, QuestNpcInfo npc, QuestAssignment assignment)
+        {
+            if (player == null || player.inventory == null || npc == null || assignment == null)
+            {
+                return 0;
+            }
+
+            if (assignment.Have >= assignment.Need)
+            {
+                return 0;
+            }
+
+            string shortname = QuestPayableShortname(assignment, npc);
+
+            if (string.IsNullOrEmpty(shortname))
+            {
+                return 0;
+            }
+
+            ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
+
+            if (definition == null)
+            {
+                return 0;
+            }
+
+            int tem = player.inventory.GetAmount(definition.itemid);
+            int falta = assignment.Need - assignment.Have;
+
+            return tem < falta ? tem : falta;
         }
 
         /// <summary>O shortname que ESTE objetivo cobra neste boneco, ou null.</summary>
@@ -11256,7 +11287,11 @@ namespace Oxide.Plugins
 
         // "Matar 2 chicken  -  1 / 2", e com dois objetivos o pior
         // deles: e o que ainda segura a entrega.
-        private static string QuestNpcProgressLine(List<QuestAssignment> andamento, string goal)
+        private string QuestNpcProgressLine(
+            BasePlayer player,
+            QuestNpcInfo npc,
+            List<QuestAssignment> andamento,
+            string goal)
         {
             StringBuilder line = new StringBuilder(goal == string.Empty ? "Em andamento" : goal);
 
@@ -11273,6 +11308,19 @@ namespace Oxide.Plugins
                 line.Append(primeiro ? "  -  " : "  |  ");
                 line.Append(andamento[i].Have).Append(" / ").Append(andamento[i].Need);
                 primeiro = false;
+
+                // ####  O QUE A MOCHILA JA RESOLVE  ####
+                //
+                // Sem isto a caixa dizia 0 / 5 para quem estava com
+                // 400 panos no bolso -- verdade sobre o contador, e
+                // inutil para quem esta decidindo se clica. Ver
+                // QuestNpcPayableAmount.
+                int mochila = QuestNpcPayableAmount(player, npc, andamento[i]);
+
+                if (mochila > 0)
+                {
+                    line.Append(" (na mochila: ").Append(mochila).Append(')');
+                }
             }
 
             return line.ToString();

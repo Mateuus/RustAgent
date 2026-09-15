@@ -599,3 +599,88 @@ describe('a varredura', () => {
     expect(timeline.events[0]?.detail).toBeNull();
   });
 });
+
+// ============================================================
+//  7 — o tempo de quem AINDA está conectado
+// ============================================================
+
+describe('o tempo online com a sessão aberta', () => {
+  // ####  POR QUE ESTA PERGUNTA EXISTE  ####
+  //
+  // `played_seconds` só cresce no FECHAMENTO da sessão, e é isso
+  // que a missão "fique 90 minutos online" lia pelo ranking: o
+  // contador passava a sessão inteira em 0/90 e só pulava quando o
+  // jogador desconectava. Medido no servidor de teste em
+  // 14/09/2026.
+  it('conta do começo da conexão até a última varredura', async () => {
+    const tracker = harness.newTracker();
+    const t0 = Date.UTC(2026, 7, 1, 12, 0, 0);
+
+    // Dez minutos de conexão quando o agente olhou.
+    harness.servers.get('pvp1')!.players = [player(STEAM_ID, 'Fulano', 600)];
+    await tracker.sync('pvp1', t0);
+
+    expect(harness.repository.serversOf(STEAM_ID)[0]?.playedSeconds).toBe(0);
+    expect(harness.repository.onlineSecondsOf('pvp1', STEAM_ID)).toBe(600);
+
+    // Um minuto depois, ainda lá.
+    harness.servers.get('pvp1')!.players = [player(STEAM_ID, 'Fulano', 660)];
+    await tracker.sync('pvp1', t0 + 60_000);
+
+    expect(harness.repository.onlineSecondsOf('pvp1', STEAM_ID)).toBe(660);
+  });
+
+  it('a saída não some com o tempo nem o conta duas vezes', async () => {
+    const tracker = harness.newTracker();
+    const t0 = Date.UTC(2026, 7, 1, 12, 0, 0);
+
+    harness.servers.get('pvp1')!.players = [player(STEAM_ID, 'Fulano', 600)];
+    await tracker.sync('pvp1', t0);
+
+    const vivo = harness.repository.onlineSecondsOf('pvp1', STEAM_ID);
+
+    // ####  A COSTURA É AQUI  ####
+    //
+    // A sessão fecha no `last_seen`, que é o mesmo instante até
+    // onde a conta viva ia. O número não pode mudar na virada: se
+    // mudasse, a missão de tempo online ganharia ou perderia
+    // minutos toda vez que alguém desconectasse.
+    harness.servers.get('pvp1')!.players = [];
+    await tracker.sync('pvp1', t0 + 60_000);
+
+    expect(harness.repository.serversOf(STEAM_ID)[0]?.playedSeconds).toBe(600);
+    expect(harness.repository.onlineSecondsOf('pvp1', STEAM_ID)).toBe(vivo);
+  });
+
+  it('reconectar soma em cima do que já havia', async () => {
+    const tracker = harness.newTracker();
+    const t0 = Date.UTC(2026, 7, 1, 12, 0, 0);
+
+    harness.servers.get('pvp1')!.players = [player(STEAM_ID, 'Fulano', 600)];
+    await tracker.sync('pvp1', t0);
+
+    harness.servers.get('pvp1')!.players = [];
+    await tracker.sync('pvp1', t0 + 60_000);
+
+    // Voltou uma hora depois, com cinco minutos de conexão nova.
+    harness.servers.get('pvp1')!.players = [player(STEAM_ID, 'Fulano', 300)];
+    await tracker.sync('pvp1', t0 + 3_600_000);
+
+    expect(harness.repository.onlineSecondsOf('pvp1', STEAM_ID)).toBe(900);
+  });
+
+  it('cada servidor tem o seu, e quem nunca esteve ali tem zero', async () => {
+    const tracker = harness.newTracker();
+    const t0 = Date.UTC(2026, 7, 1, 12, 0, 0);
+
+    harness.servers.get('pvp1')!.players = [player(STEAM_ID, 'Fulano', 600)];
+    harness.servers.get('pve')!.players = [player(STEAM_ID, 'Fulano', 120)];
+
+    await tracker.sync('pvp1', t0);
+    await tracker.sync('pve', t0);
+
+    expect(harness.repository.onlineSecondsOf('pvp1', STEAM_ID)).toBe(600);
+    expect(harness.repository.onlineSecondsOf('pve', STEAM_ID)).toBe(120);
+    expect(harness.repository.onlineSecondsOf('pvp1', '76561198000000999')).toBe(0);
+  });
+});

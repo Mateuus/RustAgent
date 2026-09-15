@@ -162,6 +162,14 @@ export interface QuestRewardDeps {
 // ------------------------------------------------------------
 
 export interface RewardOutcome {
+  /**
+   * A POSIÇÃO da recompensa no snapshot.
+   *
+   * Opcional porque nem todo caminho que monta um desfecho passa
+   * pelo loop (o serviço monta os seus quando não há entregador).
+   * Quem grava o registro por posição preenche.
+   */
+  readonly index?: number;
   readonly kind: QuestReward['kind'];
   readonly ok: boolean;
   /** O que o jogador lê. Português, sempre preenchido. */
@@ -171,6 +179,15 @@ export interface RewardOutcome {
 }
 
 export interface DeliverRewardsInput {
+  /**
+   * Só estas POSIÇÕES da lista. Ausente = todas.
+   *
+   * É o que o botão de reentregar manda: as que falharam. Sem isto
+   * ele reprocessava as cinco, e item, kit e VIP saíam de novo —
+   * moeda e ponto escapavam por acaso, pela idempotência que os
+   * dois têm na ponta.
+   */
+  readonly only?: ReadonlySet<number>;
   readonly serverId: string;
   readonly steamId: string;
   readonly questId: string;
@@ -211,7 +228,18 @@ export class QuestRewardService {
     const outcomes: RewardOutcome[] = [];
 
     for (const [index, reward] of input.rewards.entries()) {
-      outcomes.push(await this.#one(input, reward, index));
+      // ####  A LISTA NÃO É FILTRADA; O LOOP É QUE PULA  ####
+      //
+      // Filtrar `rewards` antes renumeraria o que sobrou — e o
+      // índice não é enfeite: ele compõe a `reference` da carteira e
+      // o `eventId` do ranking. Renumerar faria a segunda entrega
+      // parecer outra, e a proteção contra pagar duas vezes cairia
+      // justamente no caminho do retry.
+      if (input.only !== undefined && !input.only.has(index)) {
+        continue;
+      }
+
+      outcomes.push({ ...(await this.#one(input, reward, index)), index });
     }
 
     const failed = outcomes.filter((item) => !item.ok);

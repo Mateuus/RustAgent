@@ -30,6 +30,9 @@ import { useState, type ReactNode } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
 import { ContainerPicker } from '@/components/quests/container-picker';
+import { RankingPicker } from '@/components/ranking/ranking-picker';
+import { RequiresPicker } from '@/components/quests/requires-picker';
+import { RewardItemField } from '@/components/quests/reward-item-field';
 import { Section } from '@/components/section';
 import {
   agent,
@@ -121,7 +124,13 @@ function blankReward(kind: QuestRewardKind): QuestReward {
     case 'kit':
       return { kind, slug: '' };
     case 'points':
-      return { kind, metric: 'quest.completed', amount: 1 };
+      // ####  VAZIO, E NAO UM PALPITE  ####
+      //
+      // O padrão era `quest.completed`, que parece o nome certo e
+      // nunca existiu: quem não mexesse no campo salvava uma missão
+      // que não teria como pagar. Vazio obriga a escolher — e o
+      // seletor só oferece rankings que existem.
+      return { kind, metric: '', amount: 1 };
     case 'vip':
       return { kind, tier: 'ouro', days: 7 };
   }
@@ -355,14 +364,15 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
 
                 <div className="mt-2 grid gap-3 sm:grid-cols-3">
                   {objective.kind === 'metric' ? (
-                    <Field label="Métrica do ranking">
-                      <input
-                        className={INPUT}
-                        placeholder="pvp.kills"
+                    /* Aqui a missão LÊ o ranking, e por isso a lista
+                       é a inteira: "chegue a 1.000 de minério" é um
+                       objetivo legítimo. Quem ESCREVE é a recompensa,
+                       e lá a lista é outra. */
+                    <Field label="Ranking do objetivo">
+                      <RankingPicker
+                        mode="read"
                         value={objective.metric ?? ''}
-                        onChange={(event) =>
-                          patchObjective(form, patch, index, { metric: event.target.value })
-                        }
+                        onChange={(metric) => patchObjective(form, patch, index, { metric })}
                       />
                     </Field>
                   ) : objective.kind === 'playtime' || objective.kind === 'container' ? null : (
@@ -573,11 +583,13 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                 </select>
               </Field>
 
-              <Field label="Quem pode ver" hint="`vip:ouro`, ou vazio para todos.">
-                <input
-                  className={INPUT}
-                  value={form.requires ?? ''}
-                  onChange={(event) => patch({ requires: event.target.value || null })}
+              <Field label="Quem pode ver" hint="Vazio = todos veem.">
+                {/* Os níveis vêm do cadastro de VIP. Digitado à mão,
+                    um requisito que não casa com nada não dá erro: a
+                    missão só não aparece para ninguém, para sempre. */}
+                <RequiresPicker
+                  value={form.requires}
+                  onChange={(requires) => patch({ requires })}
                 />
               </Field>
 
@@ -812,24 +824,14 @@ function rewardFields(
       return (
         <>
           <Field label="Item">
-            {/* Mesma razão do alvo do objetivo: o shortname se
-                escolhe com busca e ícone, não se digita de cabeça. */}
-            <ItemCombobox
-              value={reward.shortname}
-              onValueChange={(shortname) =>
-                patch({ shortname } as Partial<QuestReward>)
-              }
-              onChoiceChange={(choice) => {
-                // ####  A SKIN VIAJA JUNTO COM O ITEM  ####
-                //
-                // Um item NOSSO é o par (shortname, skinId): entregar
-                // o shortname sem a marca dá o item comum, sem nome e
-                // sem ação. O combobox devolve os dois — e escutar
-                // isto é o que o cabeçalho dele manda fazer.
-                if (choice !== null) {
-                  patch({ skinId: choice.skinId } as Partial<QuestReward>);
-                }
-              }}
+            {/* Escolhido, o campo vira o ITEM: ícone, nome e
+                shortname, com um botão de trocar. A caixa de busca
+                sozinha obrigava o admin a conferir a recompensa pelo
+                texto que ele mesmo tinha digitado. */}
+            <RewardItemField
+              shortname={reward.shortname}
+              skinId={reward.skinId}
+              onChange={(choice) => patch(choice as Partial<QuestReward>)}
             />
           </Field>
           <Field label="Quantidade">
@@ -873,11 +875,17 @@ function rewardFields(
     case 'points':
       return (
         <>
-          <Field label="Métrica">
-            <input
-              className={INPUT}
+          {/* ####  ESCOLHER, E NÃO DIGITAR  ####
+
+              O campo era texto livre. `quest.completed` — que parece
+              o nome certo e não é ranking nenhum — salvou, o jogador
+              concluiu a missão e os pontos viraram pendência. Ver
+              `ranking-picker.tsx`. */}
+          <Field label="Ranking que recebe os pontos">
+            <RankingPicker
+              mode="award"
               value={reward.metric}
-              onChange={(event) => patch({ metric: event.target.value } as Partial<QuestReward>)}
+              onChange={(metric) => patch({ metric } as Partial<QuestReward>)}
             />
           </Field>
           <Field label="Pontos">

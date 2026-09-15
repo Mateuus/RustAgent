@@ -45,7 +45,13 @@ export const WINDOW_HINTS: Record<RankingPeriodKind, string> = {
 export const SOURCE_LABELS: Record<RankingSource, string> = {
   plugin: 'Plugin (hook do jogo)',
   agent: 'Agente (calculado aqui)',
-  item: 'Item custom (ação de pontos)',
+  // ####  O VALOR E 'item'; O QUE ELE QUER DIZER E CONCEDIDO  ####
+  //
+  // Ele nasceu com o Troféu Bleik, quando um item custom era o
+  // único jeito de conceder ponto. Hoje a missão também concede, no
+  // mesmo ranking e sem se atrapalhar — e é este o rótulo que o
+  // admin precisa ler para saber onde pode mandar pontos.
+  item: 'Concedido (item custom ou missão)',
   computed: 'Derivado de outras métricas',
 };
 

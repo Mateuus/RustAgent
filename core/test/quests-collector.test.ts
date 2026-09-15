@@ -403,12 +403,12 @@ describe('a rodada nunca para a coleta', () => {
 
 describe('o recálculo dos derivados', () => {
   it('roda para quem está ONLINE — a dependência que a frente B pediu', async () => {
-    const totals = new Map<string, number>([['time.played', 0]]);
+    let seconds = 0;
 
     const service = new QuestsService({
       repository: h.repository,
       logger,
-      stats: { totalOf: (_server, _steam, metric) => totals.get(metric) ?? 0 },
+      playtime: { secondsOf: () => seconds },
     });
 
     h.service = service;
@@ -424,13 +424,21 @@ describe('o recálculo dos derivados', () => {
     });
 
     h.online = [FULANO];
-    totals.set('time.played', 1800);
+    seconds = 1800;
 
     await collector().sweep();
 
     // Sem esta chamada, "fique 60 minutos online" de quem nunca
     // abre o menu ficaria em zero PARA SEMPRE.
     expect(h.repository.attempt(view.playerQuestId)?.progress[0]).toBe(30);
+
+    // E o ciclo é quem FECHA a missão de tempo online: o plugin não
+    // conta `playtime`, então nenhum push viria concluí-la.
+    seconds = 3600;
+
+    await collector().sweep();
+
+    expect(h.repository.attempt(view.playerQuestId)?.status).toBe('completed');
   });
 
   it('presence `null` não recalcula nada — é diferente de "ninguém online"', async () => {

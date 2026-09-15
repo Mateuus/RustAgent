@@ -61,6 +61,7 @@ import {
   type QuestSnapshot,
   type QuestSettings,
 } from '../types/quests.js';
+import { parseRequires } from './requires.js';
 import type { QuestRewardService, RewardOutcome } from './rewards.js';
 
 // ------------------------------------------------------------
@@ -82,6 +83,37 @@ import type { QuestRewardService, RewardOutcome } from './rewards.js';
 export interface QuestStatsSource {
   /** O total acumulado. `0` quando aquilo nunca foi medido. */
   totalOf(serverId: string, steamId: string, metric: string): number;
+}
+
+/**
+ * De onde vem o número do objetivo `playtime`.
+ *
+ * ####  POR QUE ELE NÃO SAI DO RANKING, COMO O `metric`  ####
+ *
+ * Porque o `time.played` do ranking é a DIFERENÇA do
+ * `played_seconds` entre duas rodadas do coletor — e aquela coluna
+ * só cresce quando a sessão FECHA. Enquanto o jogador está
+ * conectado, o total do ranking fica parado: foi exatamente assim
+ * que "fique 90 minutos online" passou uma sessão inteira em 0/90,
+ * medido no servidor de teste em 14/09/2026.
+ *
+ * A sessão aberta só aparece em `player_servers`, e é de lá que
+ * este número vem (`PlayersRepository.onlineSecondsOf`). Ele é o
+ * tempo daquele jogador NAQUELE servidor, acumulado desde sempre, e
+ * tem três propriedades que o caminho do ranking não tinha:
+ *
+ *   - **não depende de ninguém** — nem do plugin, nem do RCON, nem
+ *     de o coletor do ranking ter rodado naquele minuto;
+ *   - **nunca anda para trás** — o fechamento da sessão soma
+ *     exatamente o pedaço que já estava sendo contado vivo;
+ *   - **atravessa o reinicio** — está no banco, e a sessão reaberta
+ *     no boot começa na hora em que o jogador de fato conectou.
+ *
+ * Ausente = o objetivo fica parado, como o `metric` sem `stats`.
+ */
+export interface QuestPlaytimeSource {
+  /** Segundos online ali, com a sessão aberta incluída. */
+  secondsOf(serverId: string, steamId: string): number;
 }
 
 /**
@@ -150,11 +182,32 @@ export interface QuestConsumer {
   }>;
 }
 
+/**
+ * A tentativa acabou de fechar todos os objetivos.
+ *
+ * Tem nome próprio porque quem o recebe precisa GUARDÁ-LO: o aviso
+ * de uma missão que fecha dentro do balcão do NPC espera o resgate
+ * do mesmo clique antes de virar frase. Ver `index.ts`.
+ */
+export interface QuestCompletedEvent {
+  readonly serverId: string;
+  readonly steamId: string;
+  readonly playerQuestId: number;
+  readonly questId: string;
+  /** O título do SNAPSHOT: o que ele aceitou, e não o de hoje. */
+  readonly title: string;
+  /** Onde resgatar, além do menu. `null` = só o menu. */
+  readonly npcName: string | null;
+  /** A missão dá alguma coisa? Ver o texto do aviso. */
+  readonly hasRewards: boolean;
+}
+
 export interface QuestsServiceDeps {
   readonly repository: QuestsRepository;
   readonly logger: Logger;
   readonly rewards?: QuestRewardService;
   readonly stats?: QuestStatsSource;
+  readonly playtime?: QuestPlaytimeSource;
   readonly permissions?: QuestPermissions;
   readonly items?: QuestItemNames;
   readonly consumer?: QuestConsumer;
@@ -191,18 +244,7 @@ export interface QuestsServiceDeps {
    *
    * Não lança e não espera: quem fala com o jogo é o index.
    */
-  readonly onCompleted?: (input: {
-    readonly serverId: string;
-    readonly steamId: string;
-    readonly playerQuestId: number;
-    readonly questId: string;
-    /** O título do SNAPSHOT: o que ele aceitou, e não o de hoje. */
-    readonly title: string;
-    /** Onde resgatar, além do menu. `null` = só o menu. */
-    readonly npcName: string | null;
-    /** A missão dá alguma coisa? Ver o texto do aviso. */
-    readonly hasRewards: boolean;
-  }) => void;
+  readonly onCompleted?: (input: QuestCompletedEvent) => void;
   readonly now?: () => number;
 }
 
@@ -1206,13 +1248,29 @@ export class QuestsService {
   }
 
   /**
-   * Reentrega o que falhou.
+   * Reentrega SÓ o que falhou.
    *
    * É o botão do painel. A tentativa continua `claimed` — ela nunca
-   * deixou de estar —, e a idempotência de moeda e ponto (a
-   * `reference` e o `eventId` estáveis) é o que torna repetir
-   * seguro para esses dois. Item, kit e VIP saem de novo: por isso
-   * o painel diz o que já foi.
+   * deixou de estar.
+   *
+   * ####  ANTES ELE REPROCESSAVA AS CINCO  ####
+   *
+   * Moeda e ponto aguentavam, e por acaso: a `reference` da
+   * carteira e o `eventId` do ranking são estáveis, e a segunda
+   * passada era recusada na ponta. Item, kit e VIP não têm nada
+   * disso — o kit saía de novo, e ninguém percebia até o jogador
+   * contar.
+   *
+   * Agora a pergunta vem antes: `player_quest_rewards` diz o que já
+   * saiu, e só o resto é mandado.
+   *
+   * ####  TENTATIVA SEM REGISTRO REPROCESSA TUDO  ####
+   *
+   * É o caso das resgatadas antes da migração 086, e é deliberado:
+   * o evento de falha diz o TIPO que falhou, não a posição, e não
+   * existe evento de sucesso para cancelá-lo. Adivinhar faria o
+   * retry entregar de novo o que já tinha saído — o defeito que
+   * este método veio fechar. Ver o cabeçalho da migração.
    */
   async retryRewards(input: {
     readonly playerQuestId: number;
@@ -1237,8 +1295,58 @@ export class QuestsService {
       );
     }
 
+    const known = this.#deps.repository.rewardOutcomesOf(attempt.id);
+    const pending = new Set<number>();
+
+    for (const [index] of attempt.snapshot.rewards.entries()) {
+      if (known.get(index)?.ok !== true) {
+        pending.add(index);
+      }
+    }
+
+    // Nada a fazer é uma RESPOSTA, e não um erro: o admin clicou
+    // duas vezes, ou outro já tinha consertado. Devolver o quadro
+    // como está é o que mostra isso na tela.
+    if (pending.size === 0) {
+      return {
+        playerQuestId: attempt.id,
+        questId: attempt.questId,
+        outcomes: this.#knownOutcomes(attempt, known),
+        pending: false,
+      };
+    }
+
     const distance = input.distanceMeters ?? this.deliveryDistanceOf(attempt.id) ?? undefined;
-    const outcomes = await this.#deliver(attempt, distance, input.actor);
+    const fresh = await this.#deliver(attempt, distance, input.actor, pending);
+
+    // O quadro COMPLETO: o que acabou de sair e o que já estava
+    // entregue. Devolver só as reprocessadas faria a tela do painel
+    // parecer que a missão só tinha aquelas.
+    const byIndex = new Map(
+      fresh.filter((outcome) => outcome.index !== undefined).map((o) => [o.index as number, o]),
+    );
+
+    const outcomes = attempt.snapshot.rewards.map((reward, index) => {
+      const agora = byIndex.get(index);
+
+      if (agora !== undefined) {
+        return agora;
+      }
+
+      // A mensagem GRAVADA, e não uma inventada: ela é o que
+      // aconteceu com aquela recompensa, e o painel mostra o quadro
+      // da missão inteira. O `pending: false` é quem diz que não
+      // havia o que reprocessar.
+      const antes = known.get(index);
+
+      return {
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: antes?.code ?? null,
+        message: antes?.message ?? 'Esta recompensa já tinha sido entregue.',
+      };
+    });
 
     return {
       playerQuestId: attempt.id,
@@ -1246,6 +1354,27 @@ export class QuestsService {
       outcomes,
       pending: outcomes.some((item) => !item.ok),
     };
+  }
+
+  /** O quadro das recompensas a partir do que está gravado. */
+  #knownOutcomes(
+    attempt: PlayerQuestRecord,
+    known: ReadonlyMap<
+      number,
+      { readonly kind: string; readonly ok: boolean; readonly code: string | null; readonly message: string | null }
+    >,
+  ): readonly RewardOutcome[] {
+    return attempt.snapshot.rewards.map((reward, index) => {
+      const row = known.get(index);
+
+      return {
+        index,
+        kind: reward.kind,
+        ok: row?.ok ?? true,
+        code: row?.code ?? null,
+        message: row?.message ?? 'Esta recompensa já tinha sido entregue.',
+      };
+    });
   }
 
   /**
@@ -1268,12 +1397,6 @@ export class QuestsService {
    * módulo funciona inteiro, menos esses dois tipos de objetivo.
    */
   refreshDerived(input: { readonly serverId: string; readonly steamId: string }): void {
-    const stats = this.#deps.stats;
-
-    if (stats === undefined) {
-      return;
-    }
-
     const now = this.#now();
     const cache = new Map<string, number>();
 
@@ -1282,32 +1405,88 @@ export class QuestsService {
         continue;
       }
 
-      for (const objective of attempt.snapshot.objectives) {
-        const metric = metricOf(objective);
+      let changed = false;
 
-        if (metric === null) {
+      for (const objective of attempt.snapshot.objectives) {
+        const key = derivedKeyOf(objective);
+
+        if (key === null) {
           continue;
         }
 
-        let total = cache.get(metric);
+        let total = cache.get(key);
 
         if (total === undefined) {
-          total = stats.totalOf(input.serverId, input.steamId, metric);
-          cache.set(metric, total);
+          const read = this.#derivedTotalOf(objective, input);
+
+          // Fonte ausente é fonte ausente: o objetivo fica parado,
+          // e não zerado. Zerar apagaria progresso real por causa
+          // de uma dependência que nem foi ligada.
+          if (read === null) {
+            continue;
+          }
+
+          total = read;
+          cache.set(key, total);
         }
 
         const baseline = attempt.snapshot.baselines?.[objective.seq] ?? 0;
-        // `Math.max(0, …)` porque o total pode ter sido zerado por
-        // um reset de admin no ranking: o progresso para de andar,
-        // mas nunca anda para trás.
         const raw = Math.max(0, total - baseline);
         const value = objective.kind === 'playtime' ? Math.floor(raw / 60) : raw;
+        const have = attempt.progress[objective.seq] ?? 0;
 
-        if ((attempt.progress[objective.seq] ?? 0) !== value) {
-          this.#deps.repository.setProgress(attempt.id, objective.seq, value, now);
+        // ####  PARA CIMA, E SÓ PARA CIMA  ####
+        //
+        // O total pode CAIR debaixo do progresso já gravado: um
+        // reset de admin no ranking zera a métrica, e nos segundos
+        // entre a saída do jogador e a consolidação da sessão o
+        // tempo vivo some do total. Gravar a queda faria o contador
+        // andar para trás por algo que o jogador não fez — e
+        // "reconectar não apaga o tempo já contabilizado" é pedido
+        // do dono, não detalhe de implementação.
+        if (value <= have) {
+          continue;
         }
+
+        this.#deps.repository.setProgress(attempt.id, objective.seq, value, now);
+        changed = true;
+      }
+
+      // ####  E É AQUI QUE A MISSÃO DE TEMPO ONLINE FECHA  ####
+      //
+      // Sem esta linha o número chegava a 90/90 e a tentativa
+      // continuava `active` para sempre: o `#completeIfDone` só era
+      // chamado pelo push e pelo lote do plugin, e o plugin não
+      // conta `playtime` nem `metric` (ver PLUGIN_OBJECTIVE_KINDS).
+      // O aviso no chat e a liberação do resgate saem de lá.
+      if (changed) {
+        this.#completeIfDone(attempt.id, 'agent', null);
       }
     }
+  }
+
+  /**
+   * O total acumulado de um objetivo derivado, na unidade em que
+   * ele é medido.
+   *
+   * `null` tem dois sentidos, e os dois dão no mesmo: ou o objetivo
+   * não é derivado, ou a fonte dele não foi ligada.
+   */
+  #derivedTotalOf(
+    objective: QuestObjective,
+    input: { readonly serverId: string; readonly steamId: string },
+  ): number | null {
+    if (objective.kind === 'playtime') {
+      return this.#deps.playtime?.secondsOf(input.serverId, input.steamId) ?? null;
+    }
+
+    const metric = metricOf(objective);
+
+    if (metric === null) {
+      return null;
+    }
+
+    return this.#deps.stats?.totalOf(input.serverId, input.steamId, metric) ?? null;
   }
 
   // ======================================================
@@ -1420,10 +1599,14 @@ export class QuestsService {
     const baselines: Record<number, number> = {};
 
     for (const objective of quest.objectives) {
-      const metric = metricOf(objective);
+      // A MESMA fonte que o `refreshDerived` vai ler depois. Duas
+      // réguas para a partida e para a chegada dariam um contador
+      // que nasce torto — no `playtime`, torto pelo tempo que ele
+      // já estava online antes de aceitar.
+      const total = this.#derivedTotalOf(objective, { serverId, steamId });
 
-      if (metric !== null) {
-        baselines[objective.seq] = this.#deps.stats?.totalOf(serverId, steamId, metric) ?? 0;
+      if (total !== null) {
+        baselines[objective.seq] = total;
       }
     }
 
@@ -1516,11 +1699,27 @@ export class QuestsService {
         };
       }
 
-      const allowed = await this.#deps.permissions.can({
-        steamId: input.steamId,
-        serverId: input.serverId,
-        requires: quest.requires,
-      });
+      // ####  QUALQUER UM BASTA  ####
+      //
+      // O campo virou uma lista em 14/09/2026 ("quem tiver bronze
+      // OU ouro vê"), e a pergunta continua uma por requisito: quem
+      // sabe o que `vip:ouro` quer dizer é quem conhece o Oxide.
+      //
+      // O `for` para no primeiro `true`: um provedor que vá à rede
+      // não deve ser consultado três vezes quando a primeira já
+      // respondeu.
+      let allowed = false;
+
+      for (const requires of parseRequires(quest.requires)) {
+        if (await this.#deps.permissions.can({
+          steamId: input.steamId,
+          serverId: input.serverId,
+          requires,
+        })) {
+          allowed = true;
+          break;
+        }
+      }
 
       if (!allowed) {
         return { code: 'QUEST_LOCKED', reason: 'Você ainda não tem acesso a esta quest.' };
@@ -1671,18 +1870,22 @@ export class QuestsService {
     attempt: PlayerQuestRecord,
     distanceMeters: number | undefined,
     actor?: string,
+    only?: ReadonlySet<number>,
   ): Promise<readonly RewardOutcome[]> {
     if (this.#deps.rewards === undefined) {
       // Sem o entregador, a quest fica resgatada e a recompensa
       // vira pendência — que é exatamente o que o painel lista.
-      const outcomes = attempt.snapshot.rewards.map((reward) => ({
-        kind: reward.kind,
-        ok: false,
-        code: 'QUEST_REWARD_UNAVAILABLE',
-        message: 'Este agente não está entregando recompensas agora.',
-      }));
+      const outcomes = attempt.snapshot.rewards
+        .map((reward, index) => ({
+          index,
+          kind: reward.kind,
+          ok: false,
+          code: 'QUEST_REWARD_UNAVAILABLE',
+          message: 'Este agente não está entregando recompensas agora.',
+        }))
+        .filter((outcome) => only === undefined || only.has(outcome.index));
 
-      this.#recordFailures(attempt, outcomes, actor);
+      this.#recordOutcomes(attempt, outcomes, actor);
 
       return outcomes;
     }
@@ -1695,11 +1898,54 @@ export class QuestsService {
       questTitle: attempt.snapshot.title,
       rewards: attempt.snapshot.rewards,
       distanceMeters,
+      ...(only === undefined ? {} : { only }),
     });
 
-    this.#recordFailures(attempt, outcomes, actor);
+    this.#recordOutcomes(attempt, outcomes, actor);
 
     return outcomes;
+  }
+
+  /**
+   * Guarda como cada recompensa terminou, e denuncia as que não
+   * saíram.
+   *
+   * ####  DUAS ESCRITAS, DUAS PERGUNTAS  ####
+   *
+   * `player_quest_rewards` é o ESTADO: o que já foi entregue, por
+   * posição. É dele que o retry tira o que ainda falta.
+   *
+   * `quest_events` é a HISTÓRIA: uma linha por falha, que fica para
+   * sempre mesmo depois de a pendência ser resolvida. Sem ela, um
+   * problema que se repete toda semana pareceria um problema novo
+   * toda semana.
+   */
+  #recordOutcomes(
+    attempt: PlayerQuestRecord,
+    outcomes: readonly RewardOutcome[],
+    actor?: string,
+  ): void {
+    const now = this.#now();
+
+    for (const outcome of outcomes) {
+      if (outcome.index === undefined) {
+        continue;
+      }
+
+      this.#deps.repository.recordRewardOutcome(
+        attempt.id,
+        {
+          idx: outcome.index,
+          kind: outcome.kind,
+          ok: outcome.ok,
+          code: outcome.code,
+          message: outcome.message,
+        },
+        now,
+      );
+    }
+
+    this.#recordFailures(attempt, outcomes, actor);
   }
 
   /**
@@ -1764,16 +2010,35 @@ export class QuestsService {
 //  §4  FUNÇÕES PURAS
 // ------------------------------------------------------------
 
-/** A métrica de um objetivo que o AGENTE conta. `null` nos do plugin. */
+/**
+ * A métrica de RANKING de um objetivo. `null` em todo o resto.
+ *
+ * ####  O `playtime` SAIU DAQUI EM 14/09/2026  ####
+ *
+ * Ele apontava para `time.played`, a métrica do ranking — e aquela
+ * só anda quando a sessão do jogador FECHA. Hoje o tempo online vem
+ * da `QuestPlaytimeSource`, que enxerga a sessão aberta; o ranking
+ * de tempo online continua exatamente como estava.
+ */
 function metricOf(objective: QuestObjective): string | null {
-  if (objective.kind === 'metric') {
-    return objective.metric;
+  return objective.kind === 'metric' ? objective.metric : null;
+}
+
+/**
+ * A chave de cache do total daquele objetivo. `null` nos do plugin.
+ *
+ * Dois objetivos `metric` da mesma métrica, na mesma rodada, leem o
+ * banco uma vez só; e o `playtime` tem chave própria porque a fonte
+ * dele é outra.
+ */
+function derivedKeyOf(objective: QuestObjective): string | null {
+  if (objective.kind === 'playtime') {
+    return 'playtime';
   }
 
-  // `time.played` é o mesmo nome que o coletor do ranking usa
-  // (rankings/collector.ts). Duas constantes para a mesma métrica
-  // divergiriam no dia em que uma delas fosse renomeada.
-  return objective.kind === 'playtime' ? 'time.played' : null;
+  const metric = metricOf(objective);
+
+  return metric === null ? null : `metric:${metric}`;
 }
 
 /**

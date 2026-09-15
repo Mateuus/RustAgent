@@ -346,3 +346,159 @@ describe('039 — o status de nascimento vira faixa', () => {
     db.close();
   });
 });
+
+// ============================================================
+//  085 — a linha de partida das missões de tempo online
+// ============================================================
+
+describe('085 — a régua do `playtime` mudou de origem', () => {
+  const STEAM_ID = '76561198000000001';
+  const T0 = Date.UTC(2026, 8, 14, 12, 0, 0);
+
+  /**
+   * Um banco na 84 com uma tentativa de tempo online em andamento.
+   *
+   * O `baseline` que ela carrega é o da régua VELHA — o
+   * `time.played` do ranking, que começou a somar no dia em que o
+   * ranking foi ligado e por isso é muito menor que o tempo real
+   * daquele jogador no servidor.
+   */
+  function databaseWithLegacyAttempt(input: {
+    readonly baseline: number;
+    readonly have: number;
+    readonly playedSeconds: number;
+    readonly openSession: boolean;
+    readonly status?: string;
+  }): AgentDatabase {
+    const db = databaseAt(84);
+
+    db.prepare(
+      `INSERT INTO servers (id, name, identity, enabled, game_port, rcon_port, query_port,
+                            app_port, rcon_host, install_dir, created_at, updated_at)
+            VALUES ('pvp1', 'PVP1', 'pvp1', 1, 28015, 28016, 28017, 28082, '127.0.0.1',
+                    'Servers/pvp1', @at, @at)`,
+    ).run({ at: T0 });
+
+    db.prepare(
+      `INSERT INTO players (steam_id, name, first_seen, last_seen, created_at, updated_at)
+            VALUES (@steam_id, 'Fulano', @at, @at, @at, @at)`,
+    ).run({ steam_id: STEAM_ID, at: T0 });
+
+    db.prepare(
+      `INSERT INTO player_servers (server_id, steam_id, first_seen, last_seen, joined_at,
+                                   sessions, played_seconds)
+            VALUES ('pvp1', @steam_id, @at, @last_seen, @joined_at, 1, @played)`,
+    ).run({
+      steam_id: STEAM_ID,
+      at: T0,
+      // Vinte minutos de sessão aberta, quando ela existe.
+      last_seen: T0 + 1_200_000,
+      joined_at: input.openSession ? T0 : null,
+      played: input.playedSeconds,
+    });
+
+    db.prepare(
+      `INSERT INTO quests (id, title, category, enabled, repeat_mode, created_at, updated_at)
+            VALUES ('vigilia', 'Turno da Vigília', 'diaria', 1, 'daily', @at, @at)`,
+    ).run({ at: T0 });
+
+    db.prepare(
+      `INSERT INTO player_quests (id, server_id, steam_id, quest_id, attempt, status,
+                                  accepted_at, snapshot)
+            VALUES (1, 'pvp1', @steam_id, 'vigilia', 1, @status, @at, @snapshot)`,
+    ).run({
+      steam_id: STEAM_ID,
+      at: T0,
+      status: input.status ?? 'active',
+      snapshot: JSON.stringify({
+        title: 'Turno da Vigília',
+        objectives: [{ seq: 0, kind: 'playtime', target: null, metric: null, amount: 90 }],
+        rewards: [],
+        baselines: { 0: input.baseline },
+      }),
+    });
+
+    db.prepare(
+      `INSERT INTO player_quest_progress (player_quest_id, objective_seq, value, updated_at)
+            VALUES (1, 0, @value, @at)`,
+    ).run({ value: input.have, at: T0 });
+
+    return db;
+  }
+
+  function baselineOf(db: AgentDatabase): number {
+    const row = db.prepare('SELECT snapshot FROM player_quests WHERE id = 1').get() as {
+      snapshot: string;
+    };
+
+    return (JSON.parse(row.snapshot) as { baselines: Record<string, number> }).baselines['0'] ?? -1;
+  }
+
+  it('a tentativa em andamento não conclui sozinha por causa da troca', () => {
+    // 200 h no servidor contra uma partida de 1 h gravada na régua
+    // velha: sem o acerto, o primeiro ciclo do coletor daria 11.940
+    // minutos e a missão de 90 fecharia sem ninguém jogar um minuto.
+    const db = databaseWithLegacyAttempt({
+      baseline: 3_600,
+      have: 0,
+      playedSeconds: 720_000,
+      openSession: false,
+    });
+
+    runMigrations(db);
+
+    expect(baselineOf(db)).toBe(720_000);
+
+    db.close();
+  });
+
+  it('o que já estava contado continua contado', () => {
+    const db = databaseWithLegacyAttempt({
+      baseline: 3_600,
+      have: 12,
+      playedSeconds: 720_000,
+      openSession: false,
+    });
+
+    runMigrations(db);
+
+    // 12 minutos atrás do total de agora: o contador volta a andar
+    // de 12/90, e não de 0/90. "Reconectar não apaga o tempo já
+    // contabilizado" vale também para esta virada.
+    expect(baselineOf(db)).toBe(720_000 - 12 * 60);
+
+    db.close();
+  });
+
+  it('a sessão ABERTA entra na conta da nova partida', () => {
+    const db = databaseWithLegacyAttempt({
+      baseline: 0,
+      have: 0,
+      playedSeconds: 600,
+      openSession: true,
+    });
+
+    runMigrations(db);
+
+    // 600 s fechados + 1.200 s da sessão que ainda está aberta.
+    expect(baselineOf(db)).toBe(1_800);
+
+    db.close();
+  });
+
+  it('conta encerrada não se mexe', () => {
+    const db = databaseWithLegacyAttempt({
+      baseline: 3_600,
+      have: 90,
+      playedSeconds: 720_000,
+      openSession: false,
+      status: 'claimed',
+    });
+
+    runMigrations(db);
+
+    expect(baselineOf(db)).toBe(3_600);
+
+    db.close();
+  });
+});

@@ -1621,11 +1621,30 @@ function footerRect(left: number, right: number): Rect {
 //  §5  O PROVEDOR
 // ------------------------------------------------------------
 
+/**
+ * De quantos em quantos segundos a tela se pede de novo.
+ *
+ * ####  POR QUE 10, SE O CONTADOR É EM MINUTOS  ####
+ *
+ * Porque nem tudo nela anda de minuto em minuto: o que o jogador
+ * minera chega no lote do plugin, e a missão que fecha troca a
+ * barra por um botão de RESGATAR. Dez segundos é o atraso máximo
+ * entre o que aconteceu e o que está na tela de quem está olhando.
+ *
+ * E o custo disso é quase zero por desenho: a volta em que nada
+ * mudou não redesenha nada (`UiScreenUnchangedPayload`) e não vai
+ * ao RCON buscar contador (o `refresh` do input). O que sobra é
+ * uma linha de console e uma resposta de 100 bytes.
+ */
+export const QUESTS_REFRESH_SECONDS = 10;
+
 export type QuestsScreenProvider = (input: {
   readonly serverId: string;
   readonly document: UiDocument;
   readonly screenId: string;
   readonly steamId: string | undefined;
+  /** O relógio da tela pediu de novo. Ver `QUESTS_REFRESH_SECONDS`. */
+  readonly refresh?: boolean;
 }) => Promise<UiScreenBundle | null>;
 
 export interface QuestsScreenProviderOptions {
@@ -1683,13 +1702,23 @@ export function createQuestsScreenProvider(
     // RCON aqui compra o número certo. Falhar não pode custar a
     // tela — sem servidor, o que está no banco ainda é a melhor
     // resposta que existe.
-    try {
-      await options.refresh?.(input.serverId);
-    } catch (error) {
-      options.logger?.debug(
-        { server: input.serverId, err: toError(error) },
-        'não deu para atualizar o contador antes de montar a tela; sirvo o do banco',
-      );
+    //
+    // ####  MAS O RELÓGIO NÃO PAGA ESSE PREÇO  ####
+    //
+    // `input.refresh` é a volta automática da tela, de dez em dez
+    // segundos. Ir ao RCON ali seria trocar "uma ida a mais quando
+    // alguém abre o menu" por seis por minuto, por jogador com o
+    // menu aberto — e o lote do ciclo do coletor já traz o número,
+    // atrasado no máximo por um `flushSeconds`.
+    if (input.refresh !== true) {
+      try {
+        await options.refresh?.(input.serverId);
+      } catch (error) {
+        options.logger?.debug(
+          { server: input.serverId, err: toError(error) },
+          'não deu para atualizar o contador antes de montar a tela; sirvo o do banco',
+        );
+      }
     }
 
     const pack = (view: QuestsView): UiScreenBundle =>
@@ -1699,6 +1728,13 @@ export function createQuestsScreenProvider(
         // O endereço que o SHELL conhece. Sem ele, abrir uma lista
         // ou o modal apagaria o destaque de MISSÕES no cabeçalho.
         QUESTS_SCREEN_ID,
+        // ####  É ESTA TELA QUE TEM DE ANDAR SOZINHA  ####
+        //
+        // Ela mostra "47/90 minutos online" para quem está
+        // justamente esperando o número subir. Sem o relógio, ele
+        // ficaria parado até o jogador clicar em alguma coisa —
+        // e clicar não é o que se faz esperando.
+        QUESTS_REFRESH_SECONDS,
       );
 
     try {

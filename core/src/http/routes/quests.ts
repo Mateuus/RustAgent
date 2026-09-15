@@ -75,8 +75,10 @@ import { z } from 'zod';
 
 import { slugify } from '../../db/custom-items-repository.js';
 import type { PlayerQuestRecord, QuestsRepository } from '../../db/quests-repository.js';
+import type { RankingSource } from '../../db/rankings-repository.js';
 import { questContainerCatalog } from '../../game/quest-containers.js';
 import type { QuestsService } from '../../quests/service.js';
+import { whyNotAwardable } from '../../rankings/awards.js';
 import {
   questInputSchema,
   questNpcInputSchema,
@@ -108,6 +110,32 @@ export interface QuestRoutesDeps {
    */
   readonly onCatalogChanged?: () => void;
   readonly onNpcsChanged?: (serverId: string) => void;
+  /**
+   * O catálogo de rankings, para conferir o destino dos pontos.
+   *
+   * ####  A CONFERÊNCIA MORA AQUI, E NÃO NO RESGATE  ####
+   *
+   * Sem ela, uma métrica digitada errada só aparece horas depois —
+   * na hora em que o jogador termina a missão e não recebe. Foi o
+   * que aconteceu com `quest.completed` em 14/09/2026: a quest
+   * salvou, o jogador concluiu, os 50 OZCoin entraram e os 5 pontos
+   * viraram pendência no painel.
+   *
+   * Ausente = não confere. É o que mantém de pé quem monta estas
+   * rotas sem o módulo de ranking (os testes, e um agente montado
+   * pela metade); o resgate continua sendo a segunda linha de
+   * defesa, e é ela que registra a pendência.
+   */
+  readonly rankings?: QuestRoutesRankings;
+}
+
+/** O mínimo que a borda precisa saber do catálogo de rankings. */
+export interface QuestRoutesRankings {
+  byMetric(metric: string): {
+    readonly label: string;
+    readonly source: RankingSource;
+    readonly enabled: boolean;
+  } | null;
 }
 
 // ------------------------------------------------------------
@@ -216,6 +244,7 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
     assertServers(deps, body.servers);
     assertNpc(deps, body);
     assertChain(deps, null, body.requiresQuest);
+    assertMetrics(deps, body);
 
     const quest = deps.repository.create(freeId(deps, body.title), body);
 
@@ -232,6 +261,7 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
     assertServers(deps, body.servers);
     assertNpc(deps, body);
     assertChain(deps, id, body.requiresQuest);
+    assertMetrics(deps, body);
 
     const quest = deps.repository.update(id, body);
 
@@ -460,6 +490,24 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
    * entregar é o desenho (§6.4 do plano). O botão de reentregar
    * fica em `/quests/rewards/:id/retry`.
    */
+  /**
+   * O que ainda não saiu.
+   *
+   * ####  A FONTE É UM HISTÓRICO; A PERGUNTA É SOBRE O AGORA  ####
+   *
+   * `quest_events` guarda uma linha por falha, e ela fica lá para
+   * sempre — de propósito: um problema que se repete toda semana
+   * pareceria um problema novo toda semana se as linhas sumissem.
+   *
+   * Mas isso fazia a tela listar como pendente o que já tinha sido
+   * reentregue: o admin consertava o cadastro, clicava em
+   * reentregar, e a linha continuava ali. Desde a migração 086 o
+   * ESTADO tem tabela própria, e é ela quem responde.
+   *
+   * Tentativa sem registro nenhum continua aparecendo: ela foi
+   * resgatada antes daquela migração, e sumir com ela seria
+   * esconder uma pendência de verdade por falta de dado.
+   */
   app.get('/quests/rewards/pending', async (request) => {
     const query = z
       .object({ serverId: z.string().max(64).optional() })
@@ -468,16 +516,17 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
 
     const failures = deps.repository.events({ ...query, kind: 'reward_failed' });
 
-    return {
-      ok: true,
-      pending: failures.map((event) => ({
+    const pending = failures
+      .map((event) => ({
         ...event,
         // A tentativa pode ter sumido junto com a quest apagada. A
         // linha da auditoria fica de qualquer jeito — é justamente
         // ela que responde "o que aconteceu com o meu prêmio?".
         attempt: findAttempt(deps, event.steamId, event.questId, event.attempt),
-      })),
-    };
+      }))
+      .filter((entry) => stillPending(deps, entry));
+
+    return { ok: true, pending };
   });
 
   // ======================================================
@@ -786,6 +835,109 @@ function assertServers(deps: QuestRoutesDeps, ids: readonly string[]): void {
  * Ela também cobre o destino da ENTREGA, que é um NPC no `target`
  * do objetivo.
  */
+/**
+ * As métricas da quest existem — e a dos PONTOS aceita ser paga.
+ *
+ * ####  SÃO DUAS COISAS DIFERENTES COM O MESMO NOME  ####
+ *
+ * O objetivo `metric` LÊ um ranking ("chegue a 1.000 de minério"),
+ * e qualquer um serve: medido, calculado, derivado. A recompensa
+ * `points` ESCREVE num ranking, e aí só valem os que aceitam ponto
+ * concedido — ver `rankings/awards.ts`.
+ *
+ * Confundir os dois é o que produziu o defeito de 14/09/2026: o
+ * campo era texto livre, os dois usos passavam pela mesma caixa, e
+ * `quest.completed` — que não é ranking nenhum — salvou sem um pio.
+ */
+/**
+ * Aquela falha ainda vale hoje?
+ *
+ * A correspondência é por TIPO, e não por posição: o evento guarda
+ * `{kind, code, message}`, e a posição nunca esteve nele. Com duas
+ * recompensas do mesmo tipo na mesma quest, uma pendente segura a
+ * outra na lista — e é o lado certo para errar: esconder uma
+ * pendência real é pior que mostrar uma linha a mais.
+ */
+function stillPending(
+  deps: QuestRoutesDeps,
+  entry: {
+    readonly detail: unknown;
+    readonly attempt: { readonly id: number } | null;
+  },
+): boolean {
+  // A quest foi apagada e levou a tentativa junto. Não há o que
+  // reentregar — e não há como saber se saiu. A linha FICA: ela é
+  // quem responde "o que aconteceu com o meu prêmio?", e a tela já
+  // esconde o botão nesse caso.
+  if (entry.attempt === null) {
+    return true;
+  }
+
+  const outcomes = deps.repository.rewardOutcomesOf(entry.attempt.id);
+
+  // Resgatada antes da migração 086: não há estado para consultar,
+  // e sumir com a linha esconderia uma pendência de verdade.
+  if (outcomes.size === 0) {
+    return true;
+  }
+
+  const kind = (entry.detail as { kind?: string } | null)?.kind;
+
+  for (const outcome of outcomes.values()) {
+    if (!outcome.ok && (kind === undefined || outcome.kind === kind)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function assertMetrics(deps: QuestRoutesDeps, body: QuestInput): void {
+  const rankings = deps.rankings;
+
+  if (rankings === undefined) {
+    return;
+  }
+
+  for (const objective of body.objectives) {
+    if (objective.kind !== 'metric' || objective.metric === null) {
+      continue;
+    }
+
+    if (rankings.byMetric(objective.metric) === null) {
+      throw new ApiError(
+        'RANKING_METRIC_UNKNOWN',
+        `Não existe ranking para a métrica "${objective.metric}". ` +
+          'Escolha um da lista ou crie o ranking antes.',
+        400,
+      );
+    }
+  }
+
+  for (const reward of body.rewards) {
+    if (reward.kind !== 'points') {
+      continue;
+    }
+
+    const ranking = rankings.byMetric(reward.metric);
+
+    if (ranking === null) {
+      throw new ApiError(
+        'RANKING_METRIC_UNKNOWN',
+        `Não existe ranking para a métrica "${reward.metric}". ` +
+          'Escolha um da lista ou crie o ranking antes.',
+        400,
+      );
+    }
+
+    const recusa = whyNotAwardable({ ...ranking });
+
+    if (recusa !== null) {
+      throw new ApiError('RANKING_NOT_AWARDABLE', recusa, 400);
+    }
+  }
+}
+
 function assertNpc(deps: QuestRoutesDeps, body: QuestInput): void {
   const targets: { readonly id: string; readonly what: string }[] = [];
 
