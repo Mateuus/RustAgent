@@ -490,6 +490,24 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
    * entregar é o desenho (§6.4 do plano). O botão de reentregar
    * fica em `/quests/rewards/:id/retry`.
    */
+  /**
+   * O que ainda não saiu.
+   *
+   * ####  A FONTE É UM HISTÓRICO; A PERGUNTA É SOBRE O AGORA  ####
+   *
+   * `quest_events` guarda uma linha por falha, e ela fica lá para
+   * sempre — de propósito: um problema que se repete toda semana
+   * pareceria um problema novo toda semana se as linhas sumissem.
+   *
+   * Mas isso fazia a tela listar como pendente o que já tinha sido
+   * reentregue: o admin consertava o cadastro, clicava em
+   * reentregar, e a linha continuava ali. Desde a migração 086 o
+   * ESTADO tem tabela própria, e é ela quem responde.
+   *
+   * Tentativa sem registro nenhum continua aparecendo: ela foi
+   * resgatada antes daquela migração, e sumir com ela seria
+   * esconder uma pendência de verdade por falta de dado.
+   */
   app.get('/quests/rewards/pending', async (request) => {
     const query = z
       .object({ serverId: z.string().max(64).optional() })
@@ -498,16 +516,17 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
 
     const failures = deps.repository.events({ ...query, kind: 'reward_failed' });
 
-    return {
-      ok: true,
-      pending: failures.map((event) => ({
+    const pending = failures
+      .map((event) => ({
         ...event,
         // A tentativa pode ter sumido junto com a quest apagada. A
         // linha da auditoria fica de qualquer jeito — é justamente
         // ela que responde "o que aconteceu com o meu prêmio?".
         attempt: findAttempt(deps, event.steamId, event.questId, event.attempt),
-      })),
-    };
+      }))
+      .filter((entry) => stillPending(deps, entry));
+
+    return { ok: true, pending };
   });
 
   // ======================================================
@@ -830,6 +849,49 @@ function assertServers(deps: QuestRoutesDeps, ids: readonly string[]): void {
  * campo era texto livre, os dois usos passavam pela mesma caixa, e
  * `quest.completed` — que não é ranking nenhum — salvou sem um pio.
  */
+/**
+ * Aquela falha ainda vale hoje?
+ *
+ * A correspondência é por TIPO, e não por posição: o evento guarda
+ * `{kind, code, message}`, e a posição nunca esteve nele. Com duas
+ * recompensas do mesmo tipo na mesma quest, uma pendente segura a
+ * outra na lista — e é o lado certo para errar: esconder uma
+ * pendência real é pior que mostrar uma linha a mais.
+ */
+function stillPending(
+  deps: QuestRoutesDeps,
+  entry: {
+    readonly detail: unknown;
+    readonly attempt: { readonly id: number } | null;
+  },
+): boolean {
+  // A quest foi apagada e levou a tentativa junto. Não há o que
+  // reentregar — e não há como saber se saiu. A linha FICA: ela é
+  // quem responde "o que aconteceu com o meu prêmio?", e a tela já
+  // esconde o botão nesse caso.
+  if (entry.attempt === null) {
+    return true;
+  }
+
+  const outcomes = deps.repository.rewardOutcomesOf(entry.attempt.id);
+
+  // Resgatada antes da migração 086: não há estado para consultar,
+  // e sumir com a linha esconderia uma pendência de verdade.
+  if (outcomes.size === 0) {
+    return true;
+  }
+
+  const kind = (entry.detail as { kind?: string } | null)?.kind;
+
+  for (const outcome of outcomes.values()) {
+    if (!outcome.ok && (kind === undefined || outcome.kind === kind)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function assertMetrics(deps: QuestRoutesDeps, body: QuestInput): void {
   const rankings = deps.rankings;
 

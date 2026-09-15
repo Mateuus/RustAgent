@@ -755,6 +755,80 @@ describe('as recompensas pendentes', () => {
     expect(pending[0].attempt.questId).toBe('minerador');
   });
 
+  it('a que JÁ FOI reentregue sai da lista', async () => {
+    // ####  O HISTÓRICO NÃO É O ESTADO  ####
+    //
+    // A linha de falha fica em `quest_events` para sempre, e é isso
+    // que se quer: um problema que se repete toda semana pareceria
+    // um problema novo toda semana se ela sumisse. Mas a TELA de
+    // pendências pergunta sobre o agora — e antes da migração 086
+    // ela respondia com o passado, listando o que o admin já tinha
+    // consertado.
+    seed('minerador');
+
+    const view = await h.service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+    });
+
+    h.repository.setProgress(view.playerQuestId, 0, 5000);
+    h.repository.recordEvent({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+      attempt: 1,
+      kind: 'reward_failed',
+      detail: { kind: 'points', code: 'RANKING_METRIC_UNKNOWN' },
+      source: 'agent',
+    });
+
+    expect((await get('/quests/rewards/pending')).json().pending).toHaveLength(1);
+
+    // O admin consertou o cadastro e reentregou: o desfecho daquela
+    // recompensa passou a ser "saiu".
+    h.repository.recordRewardOutcome(view.playerQuestId, {
+      idx: 0,
+      kind: 'points',
+      ok: true,
+      code: null,
+      message: '5 ponto(s) em trophy.bleik.',
+    });
+
+    expect((await get('/quests/rewards/pending')).json().pending).toEqual([]);
+  });
+
+  it('a que continua falhando permanece na lista', async () => {
+    seed('minerador');
+
+    const view = await h.service.accept({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+    });
+
+    h.repository.setProgress(view.playerQuestId, 0, 5000);
+    h.repository.recordEvent({
+      serverId: 'pvp1',
+      steamId: FULANO,
+      questId: 'minerador',
+      attempt: 1,
+      kind: 'reward_failed',
+      detail: { kind: 'points', code: 'RANKING_METRIC_UNKNOWN' },
+      source: 'agent',
+    });
+
+    h.repository.recordRewardOutcome(view.playerQuestId, {
+      idx: 0,
+      kind: 'points',
+      ok: false,
+      code: 'RANKING_METRIC_UNKNOWN',
+      message: 'o ranking não existe',
+    });
+
+    expect((await get('/quests/rewards/pending')).json().pending).toHaveLength(1);
+  });
+
   it('a pendência de uma quest apagada continua listada', async () => {
     seed('minerador');
     h.repository.recordEvent({

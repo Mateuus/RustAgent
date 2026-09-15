@@ -7184,6 +7184,75 @@ function rebaseActivePlaytimeObjectives(db: AgentDatabase, logger?: Logger): voi
   }
 }
 
+// ------------------------------------------------------------
+//  086 -- o DESFECHO de cada recompensa, uma linha por uma
+//
+//  ####  O BOTAO DE REENTREGAR REPROCESSAVA TUDO  ####
+//
+//  Uma missao paga 50 OZCoin e 5 pontos. Os pontos falham (a
+//  metrica nao existia -- 14/09/2026), o admin conserta o cadastro
+//  e clica em reentregar: saiam os dois de novo.
+//
+//  Moeda e ponto aguentam, e por acaso: a `reference` da carteira e
+//  o `eventId` do ranking sao estaveis, entao a segunda passada e
+//  recusada la na ponta. ITEM, KIT e VIP nao tem nada disso -- um
+//  retry entrega o kit outra vez, e ninguem percebe ate o jogador
+//  contar.
+//
+//  Com esta tabela o retry pergunta antes: quais falharam? E manda
+//  so essas.
+//
+//  ####  A CHAVE E A POSICAO NO SNAPSHOT  ####
+//
+//  `idx` e o indice da recompensa dentro de `snapshot.rewards` --
+//  o MESMO numero que ja compoe a `reference` da carteira e o
+//  `eventId` do ranking. Usar outro (um id proprio, a ordem de
+//  chegada) criaria uma segunda numeracao para a mesma coisa, e a
+//  idempotencia daqueles dois depende de ela nunca mudar.
+//
+//  O snapshot e congelado no aceite, entao a posicao vale para
+//  sempre: editar a quest hoje nao mexe na tentativa de ontem.
+//
+//  ####  TENTATIVA SEM LINHA NENHUMA SE COMPORTA COMO ANTES  ####
+//
+//  As que foram resgatadas antes desta migracao nao tem registro, e
+//  nao ha como inventa-lo: o evento `reward_failed` diz o TIPO que
+//  falhou, nao a posicao, e nao existe evento de sucesso para
+//  cancela-lo -- uma pendencia ja consertada por um retry antigo
+//  continuaria marcada. Semear por adivinhacao faria o retry
+//  entregar de novo o que ja saiu, que e exatamente o defeito que
+//  esta tabela veio fechar.
+//
+//  Entao elas seguem reprocessando tudo na primeira vez, como
+//  sempre fizeram -- e a partir dessa primeira vez passam a ter
+//  registro. Nada piora; tudo o que e novo melhora.
+// ------------------------------------------------------------
+const QUEST_REWARD_OUTCOMES_SCHEMA = `
+CREATE TABLE IF NOT EXISTS player_quest_rewards (
+  player_quest_id INTEGER NOT NULL REFERENCES player_quests(id) ON DELETE CASCADE,
+
+  -- A posicao no \`snapshot.rewards\`. A mesma que viaja na
+  -- \`reference\` da carteira e no \`eventId\` do ranking.
+  idx INTEGER NOT NULL,
+
+  -- 'item', 'coins', 'kit', 'points', 'vip'. Guardado para o
+  -- painel poder dizer O QUE falta sem reabrir o snapshot.
+  kind TEXT NOT NULL,
+
+  ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+
+  -- O codigo CRU de quem entrega (INVENTORY_FULL, WALLET_TIMEOUT).
+  -- E o que o admin usa para saber se conserta o cadastro ou se
+  -- tenta de novo mais tarde.
+  code TEXT,
+  message TEXT,
+
+  at INTEGER NOT NULL,
+
+  PRIMARY KEY (player_quest_id, idx)
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7414,6 +7483,9 @@ export const MIGRATIONS: readonly Migration[] = [
   // online com a sessao ABERTA somada, e a partida das tentativas
   // que ja estavam em andamento precisa acompanhar.
   { id: 85, name: 'quest-playtime-rebase', run: rebaseActivePlaytimeObjectives },
+  // 14/09/2026: o botao de reentregar passa a saber O QUE falhou,
+  // em vez de reprocessar as cinco recompensas da tentativa.
+  { id: 86, name: 'quest-reward-outcomes', sql: QUEST_REWARD_OUTCOMES_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

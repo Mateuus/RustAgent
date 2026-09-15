@@ -1005,6 +1005,88 @@ export class QuestsRepository {
     run();
   }
 
+  // ======================================================
+  //  O DESFECHO DE CADA RECOMPENSA
+  // ======================================================
+
+  /**
+   * Grava como aquela recompensa terminou.
+   *
+   * ####  A CHAVE É (tentativa, POSIÇÃO)  ####
+   *
+   * `idx` é o índice dentro de `snapshot.rewards` — o mesmo número
+   * que já compõe a `reference` da carteira e o `eventId` do
+   * ranking. Uma segunda numeração para a mesma coisa quebraria a
+   * idempotência daqueles dois no dia em que as duas divergissem.
+   *
+   * Regravar é o caso NORMAL: o retry passa por aqui de novo, e o
+   * que vale é o último desfecho.
+   */
+  recordRewardOutcome(
+    playerQuestId: number,
+    outcome: {
+      readonly idx: number;
+      readonly kind: string;
+      readonly ok: boolean;
+      readonly code: string | null;
+      readonly message: string | null;
+    },
+    at: number = Date.now(),
+  ): void {
+    this.#db
+      .prepare(
+        `INSERT INTO player_quest_rewards (player_quest_id, idx, kind, ok, code, message, at)
+              VALUES (@player_quest_id, @idx, @kind, @ok, @code, @message, @at)
+         ON CONFLICT (player_quest_id, idx) DO UPDATE SET
+              kind    = excluded.kind,
+              ok      = excluded.ok,
+              code    = excluded.code,
+              message = excluded.message,
+              at      = excluded.at`,
+      )
+      .run({
+        player_quest_id: playerQuestId,
+        idx: outcome.idx,
+        kind: outcome.kind,
+        ok: outcome.ok ? 1 : 0,
+        code: outcome.code,
+        message: outcome.message,
+        at,
+      });
+  }
+
+  /**
+   * O que já se sabe sobre as recompensas daquela tentativa.
+   *
+   * Mapa por POSIÇÃO. Vazio = nunca foi registrado — e isso não é o
+   * mesmo que "nada foi entregue": tentativas resgatadas antes da
+   * migração 086 não têm linha nenhuma. Ver o cabeçalho dela.
+   */
+  rewardOutcomesOf(playerQuestId: number): ReadonlyMap<
+    number,
+    { readonly kind: string; readonly ok: boolean; readonly code: string | null; readonly message: string | null }
+  > {
+    const rows = this.#db
+      .prepare(
+        `SELECT idx, kind, ok, code, message FROM player_quest_rewards
+          WHERE player_quest_id = @id ORDER BY idx`,
+      )
+      .all({ id: playerQuestId }) as {
+      idx: number;
+      kind: string;
+      ok: number;
+      code: string | null;
+      message: string | null;
+    }[];
+
+    return new Map(
+      rows.map((row) => [
+        row.idx,
+        { kind: row.kind, ok: row.ok === 1, code: row.code, message: row.message },
+      ]),
+    );
+  }
+
   setProgress(
     playerQuestId: number,
     objectiveSeq: number,

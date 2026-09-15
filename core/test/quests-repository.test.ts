@@ -117,7 +117,7 @@ beforeEach(() => {
 // ------------------------------------------------------------
 
 describe('as migrações 046 e 047', () => {
-  it('criam as nove tabelas do módulo', () => {
+  it('criam as tabelas do módulo', () => {
     const names = (
       harness.db
         .prepare(
@@ -131,6 +131,9 @@ describe('as migrações 046 e 047', () => {
 
     expect(names).toEqual([
       'player_quest_progress',
+      // O desfecho de cada recompensa, por posição: é dele que o
+      // botão de reentregar tira o que ainda falta (migração 086).
+      'player_quest_rewards',
       'player_quests',
       'quest_batches',
       'quest_events',
