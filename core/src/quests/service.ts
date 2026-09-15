@@ -61,6 +61,7 @@ import {
   type QuestSnapshot,
   type QuestSettings,
 } from '../types/quests.js';
+import { parseRequires } from './requires.js';
 import type { QuestRewardService, RewardOutcome } from './rewards.js';
 
 // ------------------------------------------------------------
@@ -1698,11 +1699,27 @@ export class QuestsService {
         };
       }
 
-      const allowed = await this.#deps.permissions.can({
-        steamId: input.steamId,
-        serverId: input.serverId,
-        requires: quest.requires,
-      });
+      // ####  QUALQUER UM BASTA  ####
+      //
+      // O campo virou uma lista em 14/09/2026 ("quem tiver bronze
+      // OU ouro vê"), e a pergunta continua uma por requisito: quem
+      // sabe o que `vip:ouro` quer dizer é quem conhece o Oxide.
+      //
+      // O `for` para no primeiro `true`: um provedor que vá à rede
+      // não deve ser consultado três vezes quando a primeira já
+      // respondeu.
+      let allowed = false;
+
+      for (const requires of parseRequires(quest.requires)) {
+        if (await this.#deps.permissions.can({
+          steamId: input.steamId,
+          serverId: input.serverId,
+          requires,
+        })) {
+          allowed = true;
+          break;
+        }
+      }
 
       if (!allowed) {
         return { code: 'QUEST_LOCKED', reason: 'Você ainda não tem acesso a esta quest.' };
