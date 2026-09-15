@@ -307,6 +307,26 @@ describe('o desfecho', () => {
     expect(h.said.some((message) => message.includes('Os Lobos'))).toBe(true);
   });
 
+  it('expirado também é anunciado: o silêncio faria o evento sumir', async () => {
+    const h = harness();
+
+    arena(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    const secret = await grabSecret(h);
+
+    h.said.length = 0;
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"expired","secret":"${secret}"}`,
+    );
+
+    expect(h.said).toHaveLength(1);
+    expect(h.said[0]).toContain('ninguém dominou');
+  });
+
   it('expirado fecha a run sem vencedor', async () => {
     const h = harness();
 

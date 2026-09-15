@@ -459,14 +459,17 @@ namespace Oxide.Plugins
 
             payload["members"] = members;
 
+            // ####  QUEM FALA É O AGENTE  ####
+            //
+            // Este plugin NÃO anuncia. A primeira versão dava um
+            // `server.Broadcast` aqui e o agente mandava a mesma frase
+            // ao receber o aviso: o chat levava tudo em dobro.
+            //
+            // A regra do projeto é a mesma do recibo da masmorra: o
+            // plugin não sabe se o prêmio foi pago, não conhece as
+            // tags do OrigemZChat e não sabe quem está em modo
+            // streamer. Quem sabe é o agente, e é ele quem fala.
             Push(reason == "captured" ? "captured" : "expired", payload);
-
-            var message = reason == "captured"
-                ? "<color=#C4B454>" + run.name + "</color>: <color=#8FBF4F>" + winnerName +
-                  "</color> dominou o território!"
-                : "<color=#C4B454>" + run.name + "</color>: ninguém dominou o território a tempo.";
-
-            server.Broadcast(message);
 
             Teardown(reason);
         }

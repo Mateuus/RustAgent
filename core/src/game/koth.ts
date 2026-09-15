@@ -325,6 +325,14 @@ export class KothService {
 
         this.#deps.logger.info({ server: serverId }, 'KOTH expirou sem vencedor');
 
+        // Ele também é notícia: quem estava indo para lá precisa saber
+        // que não vale mais a pena. O silêncio aqui faria o evento
+        // "sumir" sem explicação.
+        void this.#say(
+          serverId,
+          '<color=#C4B454>KOTH</color>: ninguém dominou o território a tempo.',
+        );
+
         return;
       }
 
