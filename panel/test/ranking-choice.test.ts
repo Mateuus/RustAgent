@@ -23,7 +23,7 @@ import {
   isAwardable,
   matchesRanking,
   searchRankings,
-} from '@/components/quests/ranking-choice';
+} from '@/components/ranking/ranking-choice';
 import type { RankingDefinition } from '@/lib/api';
 
 function ranking(overrides: Partial<RankingDefinition>): RankingDefinition {

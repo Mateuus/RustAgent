@@ -608,8 +608,18 @@ export const questInputSchema = z
     enabled: z.boolean().default(true),
     sort: z.number().int().min(0).max(100_000).default(0),
 
-    /** `null` = todo mundo vê. Ver a coluna `requires` da 046. */
-    requires: z.string().max(64).nullable().default(null),
+    /**
+     * Quem pode VER a quest. `null` = todo mundo.
+     *
+     * ####  É UMA LISTA, SEPARADA POR VÍRGULA  ####
+     *
+     * `vip:ouro,vip:bronze` = quem tiver QUALQUER um dos dois vê.
+     * Um requisito só continua valendo, e é por isso que o formato
+     * é este: nenhum cadastro que existe hoje muda de significado.
+     * Quem a lê é `quests/requires.ts`; quem decide o que cada
+     * forma significa é o provedor de permissões.
+     */
+    requires: z.string().max(200).nullable().default(null),
 
     /** `null` = aparece no menu; preenchido = só perto daquele NPC. */
     npcId: z.string().max(64).nullable().default(null),

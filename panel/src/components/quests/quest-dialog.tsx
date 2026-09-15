@@ -30,7 +30,9 @@ import { useState, type ReactNode } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
 import { ContainerPicker } from '@/components/quests/container-picker';
-import { RankingPicker } from '@/components/quests/ranking-picker';
+import { RankingPicker } from '@/components/ranking/ranking-picker';
+import { RequiresPicker } from '@/components/quests/requires-picker';
+import { RewardItemField } from '@/components/quests/reward-item-field';
 import { Section } from '@/components/section';
 import {
   agent,
@@ -581,11 +583,13 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
                 </select>
               </Field>
 
-              <Field label="Quem pode ver" hint="`vip:ouro`, ou vazio para todos.">
-                <input
-                  className={INPUT}
-                  value={form.requires ?? ''}
-                  onChange={(event) => patch({ requires: event.target.value || null })}
+              <Field label="Quem pode ver" hint="Vazio = todos veem.">
+                {/* Os níveis vêm do cadastro de VIP. Digitado à mão,
+                    um requisito que não casa com nada não dá erro: a
+                    missão só não aparece para ninguém, para sempre. */}
+                <RequiresPicker
+                  value={form.requires}
+                  onChange={(requires) => patch({ requires })}
                 />
               </Field>
 
@@ -820,24 +824,14 @@ function rewardFields(
       return (
         <>
           <Field label="Item">
-            {/* Mesma razão do alvo do objetivo: o shortname se
-                escolhe com busca e ícone, não se digita de cabeça. */}
-            <ItemCombobox
-              value={reward.shortname}
-              onValueChange={(shortname) =>
-                patch({ shortname } as Partial<QuestReward>)
-              }
-              onChoiceChange={(choice) => {
-                // ####  A SKIN VIAJA JUNTO COM O ITEM  ####
-                //
-                // Um item NOSSO é o par (shortname, skinId): entregar
-                // o shortname sem a marca dá o item comum, sem nome e
-                // sem ação. O combobox devolve os dois — e escutar
-                // isto é o que o cabeçalho dele manda fazer.
-                if (choice !== null) {
-                  patch({ skinId: choice.skinId } as Partial<QuestReward>);
-                }
-              }}
+            {/* Escolhido, o campo vira o ITEM: ícone, nome e
+                shortname, com um botão de trocar. A caixa de busca
+                sozinha obrigava o admin a conferir a recompensa pelo
+                texto que ele mesmo tinha digitado. */}
+            <RewardItemField
+              shortname={reward.shortname}
+              skinId={reward.skinId}
+              onChange={(choice) => patch(choice as Partial<QuestReward>)}
             />
           </Field>
           <Field label="Quantidade">

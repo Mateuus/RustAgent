@@ -34,6 +34,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ItemPickerDialog } from '@/components/item-picker-dialog';
 import { ItemIcon } from '@/components/item-icon';
 import { RankingDialog } from '@/components/ranking/ranking-dialog';
+import { RankingPicker } from '@/components/ranking/ranking-picker';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -448,11 +449,6 @@ export function CustomItemDialog({
   };
 
   const effects: CustomItemEffect[] = form.action.kind === 'consume' ? form.action.effects : [];
-
-  // A métrica apontada, fora do estreitamento de tipo: dentro de um
-  // callback o TypeScript perde o `kind === 'points'`, e a leitura
-  // volta a ser a união inteira.
-  const pointsMetric = form.action.kind === 'points' ? form.action.metric : '';
 
   // ####  O QUE O ITEM PODE FAZER VEM DO CORPO EMPRESTADO  ####
   //
@@ -1052,33 +1048,18 @@ export function CustomItemDialog({
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
                     <Label htmlFor="ci-metric">Ranking</Label>
-                    <select
+                    {/* O MESMO seletor do editor de missões: digita,
+                        a lista filtra, e criar um ranking novo é a
+                        última opção dela. Dois desenhos para a mesma
+                        escolha divergiriam no primeiro ajuste. */}
+                    <RankingPicker
                       id="ci-metric"
+                      mode="award"
                       value={form.action.metric}
-                      onChange={(event) =>
-                        setAction({ ...(form.action as PointsAction), metric: event.target.value })
+                      onChange={(metric) =>
+                        setAction({ ...(form.action as PointsAction), metric })
                       }
-                      className="w-full border border-border bg-surface px-2 py-2 text-2xs text-foreground"
-                    >
-                      {/* O rótulo é o que se lê; o que viaja no
-                          corpo é a MÉTRICA — a mesma string que o
-                          ranking guarda. */}
-                      {rankings.map((entry) => (
-                        <option key={entry.id} value={entry.metric}>
-                          {entry.label}
-                        </option>
-                      ))}
-
-                      {/* A métrica que este item já aponta, quando
-                          o ranking dela foi desligado ou apagado.
-                          Sem esta linha o seletor trocaria o valor
-                          sozinho, e o item passaria a dar ponto em
-                          outro lugar sem ninguém pedir. */}
-                      {pointsMetric !== '' &&
-                        !rankings.some((entry) => entry.metric === pointsMetric) && (
-                          <option value={pointsMetric}>{pointsMetric} (fora do catálogo)</option>
-                        )}
-                    </select>
+                    />
                   </div>
 
                   <div>
