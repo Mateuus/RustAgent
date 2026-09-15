@@ -195,9 +195,24 @@ export function registerWorldEventRoutes(app: FastifyInstance, deps: WorldEventR
   app.delete('/world-events/:id', async (request) => {
     const { id } = idParams.parse(request.params);
 
+    // ####  COMPROMISSO NÃO É NASCIMENTO  ####
+    //
+    // `endedAt === null` pega a run `scheduled` junto — e ela é só a
+    // hora marcada do próximo, não uma coisa de pé no mapa. MEDIDO em
+    // 15/09/2026: com um evento agendado e nada no chão, apagar
+    // respondia "tem 1 nascimento de pé". E era um beco sem saída:
+    // desligar o evento não cumpre nem cancela o compromisso, então o
+    // admin ficava com um evento que não dava para apagar nunca.
+    //
+    // O que impede o apagar é o que tem DESTROÇOS: construído,
+    // construindo ou fechando.
     const live = deps.events
       .runs({ eventId: id, limit: 200 })
-      .filter((run) => run.endedAt === null);
+      .filter(
+        (run) =>
+          run.endedAt === null &&
+          (run.status === 'active' || run.status === 'spawning' || run.status === 'closing'),
+      );
 
     if (live.length > 0) {
       throw new ApiError(
