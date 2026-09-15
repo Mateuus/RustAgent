@@ -147,6 +147,19 @@ export interface QuestWatchPayload {
    */
   readonly alias: Readonly<Record<string, string>>;
   /**
+   * A normalização do prefab que ainda não existe.
+   *
+   * `scientistnpc_` → `scientist` pega os 25 do build de hoje E o
+   * que vier no próximo wipe. Consultada só quando `alias` não
+   * respondeu, o que deixa a exceção possível.
+   *
+   * ####  ADITIVA DE PROPÓSITO  ####
+   *
+   * Um `OrigemZAgent.cs` anterior a 15/09/2026 ignora esta chave e
+   * segue só com a tabela exata — que é o que ele já fazia.
+   */
+  readonly aliasPrefix?: Readonly<Record<string, string>>;
+  /**
    * O que cada categoria de contêiner alcança: `@barrel` → prefabs.
    *
    * ####  A LISTA DESCE UMA VEZ, E NÃO POR JOGADOR  ####
