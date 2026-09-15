@@ -30,6 +30,7 @@ import { useState, type ReactNode } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
 import { ContainerPicker } from '@/components/quests/container-picker';
+import { RankingPicker } from '@/components/quests/ranking-picker';
 import { Section } from '@/components/section';
 import {
   agent,
@@ -121,7 +122,13 @@ function blankReward(kind: QuestRewardKind): QuestReward {
     case 'kit':
       return { kind, slug: '' };
     case 'points':
-      return { kind, metric: 'quest.completed', amount: 1 };
+      // ####  VAZIO, E NAO UM PALPITE  ####
+      //
+      // O padrão era `quest.completed`, que parece o nome certo e
+      // nunca existiu: quem não mexesse no campo salvava uma missão
+      // que não teria como pagar. Vazio obriga a escolher — e o
+      // seletor só oferece rankings que existem.
+      return { kind, metric: '', amount: 1 };
     case 'vip':
       return { kind, tier: 'ouro', days: 7 };
   }
@@ -355,14 +362,15 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
 
                 <div className="mt-2 grid gap-3 sm:grid-cols-3">
                   {objective.kind === 'metric' ? (
-                    <Field label="Métrica do ranking">
-                      <input
-                        className={INPUT}
-                        placeholder="pvp.kills"
+                    /* Aqui a missão LÊ o ranking, e por isso a lista
+                       é a inteira: "chegue a 1.000 de minério" é um
+                       objetivo legítimo. Quem ESCREVE é a recompensa,
+                       e lá a lista é outra. */
+                    <Field label="Ranking do objetivo">
+                      <RankingPicker
+                        mode="read"
                         value={objective.metric ?? ''}
-                        onChange={(event) =>
-                          patchObjective(form, patch, index, { metric: event.target.value })
-                        }
+                        onChange={(metric) => patchObjective(form, patch, index, { metric })}
                       />
                     </Field>
                   ) : objective.kind === 'playtime' || objective.kind === 'container' ? null : (
@@ -873,11 +881,17 @@ function rewardFields(
     case 'points':
       return (
         <>
-          <Field label="Métrica">
-            <input
-              className={INPUT}
+          {/* ####  ESCOLHER, E NÃO DIGITAR  ####
+
+              O campo era texto livre. `quest.completed` — que parece
+              o nome certo e não é ranking nenhum — salvou, o jogador
+              concluiu a missão e os pontos viraram pendência. Ver
+              `ranking-picker.tsx`. */}
+          <Field label="Ranking que recebe os pontos">
+            <RankingPicker
+              mode="award"
               value={reward.metric}
-              onChange={(event) => patch({ metric: event.target.value } as Partial<QuestReward>)}
+              onChange={(metric) => patch({ metric } as Partial<QuestReward>)}
             />
           </Field>
           <Field label="Pontos">

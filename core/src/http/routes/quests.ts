@@ -75,8 +75,10 @@ import { z } from 'zod';
 
 import { slugify } from '../../db/custom-items-repository.js';
 import type { PlayerQuestRecord, QuestsRepository } from '../../db/quests-repository.js';
+import type { RankingSource } from '../../db/rankings-repository.js';
 import { questContainerCatalog } from '../../game/quest-containers.js';
 import type { QuestsService } from '../../quests/service.js';
+import { whyNotAwardable } from '../../rankings/awards.js';
 import {
   questInputSchema,
   questNpcInputSchema,
@@ -108,6 +110,32 @@ export interface QuestRoutesDeps {
    */
   readonly onCatalogChanged?: () => void;
   readonly onNpcsChanged?: (serverId: string) => void;
+  /**
+   * O catálogo de rankings, para conferir o destino dos pontos.
+   *
+   * ####  A CONFERÊNCIA MORA AQUI, E NÃO NO RESGATE  ####
+   *
+   * Sem ela, uma métrica digitada errada só aparece horas depois —
+   * na hora em que o jogador termina a missão e não recebe. Foi o
+   * que aconteceu com `quest.completed` em 14/09/2026: a quest
+   * salvou, o jogador concluiu, os 50 OZCoin entraram e os 5 pontos
+   * viraram pendência no painel.
+   *
+   * Ausente = não confere. É o que mantém de pé quem monta estas
+   * rotas sem o módulo de ranking (os testes, e um agente montado
+   * pela metade); o resgate continua sendo a segunda linha de
+   * defesa, e é ela que registra a pendência.
+   */
+  readonly rankings?: QuestRoutesRankings;
+}
+
+/** O mínimo que a borda precisa saber do catálogo de rankings. */
+export interface QuestRoutesRankings {
+  byMetric(metric: string): {
+    readonly label: string;
+    readonly source: RankingSource;
+    readonly enabled: boolean;
+  } | null;
 }
 
 // ------------------------------------------------------------
@@ -216,6 +244,7 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
     assertServers(deps, body.servers);
     assertNpc(deps, body);
     assertChain(deps, null, body.requiresQuest);
+    assertMetrics(deps, body);
 
     const quest = deps.repository.create(freeId(deps, body.title), body);
 
@@ -232,6 +261,7 @@ export function registerQuestRoutes(app: FastifyInstance, deps: QuestRoutesDeps)
     assertServers(deps, body.servers);
     assertNpc(deps, body);
     assertChain(deps, id, body.requiresQuest);
+    assertMetrics(deps, body);
 
     const quest = deps.repository.update(id, body);
 
@@ -786,6 +816,66 @@ function assertServers(deps: QuestRoutesDeps, ids: readonly string[]): void {
  * Ela também cobre o destino da ENTREGA, que é um NPC no `target`
  * do objetivo.
  */
+/**
+ * As métricas da quest existem — e a dos PONTOS aceita ser paga.
+ *
+ * ####  SÃO DUAS COISAS DIFERENTES COM O MESMO NOME  ####
+ *
+ * O objetivo `metric` LÊ um ranking ("chegue a 1.000 de minério"),
+ * e qualquer um serve: medido, calculado, derivado. A recompensa
+ * `points` ESCREVE num ranking, e aí só valem os que aceitam ponto
+ * concedido — ver `rankings/awards.ts`.
+ *
+ * Confundir os dois é o que produziu o defeito de 14/09/2026: o
+ * campo era texto livre, os dois usos passavam pela mesma caixa, e
+ * `quest.completed` — que não é ranking nenhum — salvou sem um pio.
+ */
+function assertMetrics(deps: QuestRoutesDeps, body: QuestInput): void {
+  const rankings = deps.rankings;
+
+  if (rankings === undefined) {
+    return;
+  }
+
+  for (const objective of body.objectives) {
+    if (objective.kind !== 'metric' || objective.metric === null) {
+      continue;
+    }
+
+    if (rankings.byMetric(objective.metric) === null) {
+      throw new ApiError(
+        'RANKING_METRIC_UNKNOWN',
+        `Não existe ranking para a métrica "${objective.metric}". ` +
+          'Escolha um da lista ou crie o ranking antes.',
+        400,
+      );
+    }
+  }
+
+  for (const reward of body.rewards) {
+    if (reward.kind !== 'points') {
+      continue;
+    }
+
+    const ranking = rankings.byMetric(reward.metric);
+
+    if (ranking === null) {
+      throw new ApiError(
+        'RANKING_METRIC_UNKNOWN',
+        `Não existe ranking para a métrica "${reward.metric}". ` +
+          'Escolha um da lista ou crie o ranking antes.',
+        400,
+      );
+    }
+
+    const recusa = whyNotAwardable({ ...ranking });
+
+    if (recusa !== null) {
+      throw new ApiError('RANKING_NOT_AWARDABLE', recusa, 400);
+    }
+  }
+}
+
 function assertNpc(deps: QuestRoutesDeps, body: QuestInput): void {
   const targets: { readonly id: string; readonly what: string }[] = [];
 

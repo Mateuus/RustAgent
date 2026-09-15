@@ -3446,6 +3446,19 @@ async function main(): Promise<void> {
       repository: questsRepository,
       service: questsService,
       servers: { list: () => repository.list().map((server) => ({ id: server.id })) },
+      // ####  O DESTINO DOS PONTOS É CONFERIDO AO SALVAR  ####
+      //
+      // Sem isto, uma métrica digitada errada só aparece quando o
+      // jogador termina a missão e não recebe. Ver `assertMetrics`.
+      rankings: {
+        byMetric: (metric) => {
+          const ranking = rankingsRepository.getByMetric(metric);
+
+          return ranking === null
+            ? null
+            : { label: ranking.label, source: ranking.source, enabled: ranking.enabled };
+        },
+      },
       // O ciclo já notaria sozinho, do banco. Estes dois só ADIANTAM
       // o momento — e para o NPC a diferença é visível: o admin
       // clica em apagar e o boneco some do mapa, não daqui a um
