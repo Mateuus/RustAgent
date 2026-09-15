@@ -736,6 +736,28 @@ export interface PlayerIdentity {
   known: boolean;
 }
 
+/**
+ * O modo streamer de um jogador. Ver core/src/types/streamer.ts.
+ *
+ * Toda ficha tem um destes, inclusive a de quem nunca foi liberado
+ * — ali ele vem todo desligado. É o que permite a tela desenhar as
+ * chaves sem tratar o caso normal como erro.
+ */
+export interface StreamerProfile {
+  /** O ADMIN liberou o uso do comando. */
+  allowed: boolean;
+  /** O JOGADOR ligou, com `/streamer`. */
+  active: boolean;
+  hideLogo: boolean;
+  hideAds: boolean;
+  hideMessages: boolean;
+  /** ISO de quando foi LIGADO pela última vez. */
+  activatedAt: string | null;
+  grantedBy: string | null;
+  /** `null` = nunca teve linha no banco: nunca foi liberado. */
+  updatedAt: string | null;
+}
+
 export type PlayerEventKind =
   | 'join'
   | 'leave'
@@ -3985,6 +4007,34 @@ export const agent = {
   playerEvents: (steamId: string, limit = 50) =>
     api<{ ok: true; events: PlayerEvent[]; sample: PlayerEventSample }>(
       `/api/players/${encodeURIComponent(steamId)}/events?limit=${String(limit)}`,
+    ),
+
+  /** O modo streamer dele. Nunca 404: ver o tipo. */
+  playerStreamer: (steamId: string) =>
+    api<{ ok: true; streamer: StreamerProfile }>(
+      `/api/players/${encodeURIComponent(steamId)}/streamer`,
+    ),
+
+  /**
+   * Libera o modo, e escolhe o que some da tela dele.
+   *
+   * Parcial: a tela manda só a chave que mudou. Desligar `allowed`
+   * desliga a live junto — quem perdeu a liberação não teria mais
+   * como digitar `/streamer` para desligá-la.
+   */
+  saveStreamer: (
+    steamId: string,
+    input: {
+      allowed?: boolean;
+      active?: boolean;
+      hideLogo?: boolean;
+      hideAds?: boolean;
+      hideMessages?: boolean;
+    },
+  ) =>
+    api<{ ok: true; streamer: StreamerProfile }>(
+      `/api/players/${encodeURIComponent(steamId)}/streamer`,
+      { method: 'PUT', body: input },
     ),
 
   // ---- A BanList global ------------------------------------

@@ -5,6 +5,8 @@
 //      GET /api/players/:steamId         a ficha
 //      GET /api/players/:steamId/servers onde ele joga
 //      GET /api/players/:steamId/events  o histórico dele
+//      GET /api/players/:steamId/streamer  o modo streamer dele
+//      PUT /api/players/:steamId/streamer  liberar, e o que some
 //
 //  ####  NÃO CONFUNDIR COM `/api/servers/:id/players`  ####
 //
@@ -35,16 +37,34 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { assertSteamId } from '../../bans/service.js';
+import type { StreamerRepository } from '../../db/streamer-repository.js';
+import type { StreamerSync } from '../../game/streamer-sync.js';
 import {
   DEFAULT_EVENTS_LIMIT,
   MAX_EVENTS_LIMIT,
   MAX_PLAYERS_LIMIT,
   type PlayerDirectory,
 } from '../../players/service.js';
+import { streamerUpdateSchema, type StreamerProfile } from '../../types/streamer.js';
 import { ApiError } from '../error-response.js';
+import { operatorOf } from './admin.js';
 
 export interface PlayerRoutesDeps {
   readonly directory: PlayerDirectory;
+
+  /** O modo streamer. Ver types/streamer.ts. */
+  readonly streamer: StreamerRepository;
+
+  /**
+   * Quem leva o modo ao jogo.
+   *
+   * `null` = o agente subiu sem nenhum servidor montado. A ficha
+   * continua salvando: a carga sai sozinha na primeira conexão de
+   * RCON, e recusar a escrita por causa disso deixaria o admin sem
+   * como preparar a liberação de um streamer antes do servidor
+   * subir.
+   */
+  readonly streamerSync: StreamerSync | null;
 }
 
 const listQuery = z.object({
@@ -155,4 +175,94 @@ export function registerPlayerRoutes(app: FastifyInstance, deps: PlayerRoutesDep
 
     return { ok: true, ...deps.directory.timeline(steamId, limit ?? DEFAULT_EVENTS_LIMIT) };
   });
+
+  /**
+   * O modo streamer deste jogador.
+   *
+   * ####  200 PARA QUEM NUNCA FOI LIBERADO  ####
+   *
+   * Que é quase todo mundo. A ausência de linha no banco É a
+   * resposta ("não é streamer"), e o repositório a devolve como um
+   * perfil desligado — ver `defaultStreamerProfile` em
+   * types/streamer.ts. Um 404 aqui obrigaria a tela a tratar o
+   * caso normal como erro.
+   */
+  app.get('/players/:steamId/streamer', async (request) => {
+    const { steamId } = steamParams.parse(request.params);
+
+    assertSteamId(steamId);
+
+    return { ok: true, streamer: toApiStreamer(deps.streamer.get(steamId)) };
+  });
+
+  /**
+   * Libera o modo, e escolhe o que some da tela dele.
+   *
+   * ####  PARCIAL, E CADA CHAVE E INDEPENDENTE  ####
+   *
+   * A tela salva uma chavinha sem reenviar as outras (ver o
+   * `COALESCE` do repositório). É o que permite desmarcar "esconder
+   * a logo" de um parceiro sem mexer na live que ele já ligou.
+   *
+   * ####  DESLIGAR A LIBERACAO DESLIGA A LIVE JUNTO  ####
+   *
+   * E isso é regra, não efeito colateral: um jogador que perdeu a
+   * liberação não tem mais como digitar `/streamer` para desligar o
+   * que ficou ligado — o comando responderia que ele não tem
+   * acesso. Sem isto, tirar a liberação esconderia o overlay dele
+   * para sempre, e a ficha mostraria "ativo" sem ninguém conseguir
+   * mudar.
+   */
+  app.put('/players/:steamId/streamer', async (request) => {
+    const { steamId } = steamParams.parse(request.params);
+    const input = streamerUpdateSchema.parse(request.body);
+
+    assertSteamId(steamId);
+
+    const patch =
+      input.allowed === false ? { ...input, active: false } : input;
+
+    const streamer = deps.streamer.save(steamId, {
+      ...patch,
+      grantedBy: operatorOf(request),
+    });
+
+    request.log.info(
+      { steamId, allowed: streamer.allowed, active: streamer.active, by: operatorOf(request) },
+      'modo streamer alterado pelo painel',
+    );
+
+    // Em todos os servidores: o modo é da REDE, e o jogador pode
+    // estar em qualquer um deles agora. Ver game/streamer-sync.ts.
+    deps.streamerSync?.pushAllSoon('admin-saved');
+
+    return { ok: true, streamer: toApiStreamer(streamer) };
+  });
+}
+
+/**
+ * O perfil como a tela o lê: datas em ISO.
+ *
+ * O banco guarda epoch ms (ver db/streamer-repository.ts) e esta
+ * ficha inteira responde em ISO — `firstSeen`, `lastSeen` e os
+ * eventos, todos passam por `toIso` em players/service.ts.
+ * Devolver um número solto aqui faria a tela formatar uma data
+ * deste jeito e todas as outras de outro.
+ */
+function toApiStreamer(profile: StreamerProfile): ApiStreamer {
+  return {
+    ...profile,
+    activatedAt: profile.activatedAt === null ? null : new Date(profile.activatedAt).toISOString(),
+    updatedAt: profile.updatedAt === 0 ? null : new Date(profile.updatedAt).toISOString(),
+  };
+}
+
+/**
+ * `updatedAt` nulo é quem NUNCA teve linha no banco — o perfil
+ * inventado por `defaultStreamerProfile`. Zero viraria 1970 na
+ * tela, que é pior que o travessão.
+ */
+interface ApiStreamer extends Omit<StreamerProfile, 'activatedAt' | 'updatedAt'> {
+  readonly activatedAt: string | null;
+  readonly updatedAt: string | null;
 }

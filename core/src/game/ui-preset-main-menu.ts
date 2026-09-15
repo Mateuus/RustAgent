@@ -59,6 +59,13 @@ import {
   DISCORD_COMMAND,
   DISCORD_SCREEN_ID,
 } from './ui-discord-screen.js';
+import { defaultStreamerProfile } from '../types/streamer.js';
+import {
+  buildStreamerScreen,
+  STREAMER_SCREEN_ID,
+  STREAMER_TAB_ID,
+  STREAMER_TAB_LABEL,
+} from './ui-streamer-screen.js';
 import { CALENDAR_SCREEN_ID } from './ui-calendar-screen.js';
 import { buildHomeScreen, emptyHomeView, HOME_SCREEN_ID } from './ui-home-screen.js';
 import { KITS_SCREEN_ID } from './ui-kits-screen.js';
@@ -517,6 +524,25 @@ function buildShell(): UiElement[] {
       // Fica vermelho quando a tela dele estiver aberta, como o
       // resto da barra.
       DISCORD_SCREEN_ID,
+    ),
+  );
+
+  // ####  A ABA CONFIGURACOES  ####
+  //
+  // Ela leva ao que vale só para quem abriu — hoje, o modo
+  // streamer. O botão NASCE aqui, mas quem decide se ele aparece é
+  // o plugin: só os liberados o enxergam, com a lista que desce no
+  // payload do modo (ver game/ui-streamer-screen.ts).
+  nav.push(
+    button(
+      STREAMER_TAB_ID,
+      STREAMER_TAB_LABEL,
+      navRect(STREAMER_TAB_LABEL),
+      STREAMER_TAB_LABEL,
+      { id: 'ir-config', kind: 'navigate', screenId: STREAMER_SCREEN_ID },
+      'nav',
+      12,
+      STREAMER_SCREEN_ID,
     ),
   );
 
@@ -1395,6 +1421,19 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
     // jogador fica olhando "este servidor ainda não divulgou um
     // Discord" num servidor que divulgou.
     { ...buildDiscordScreen({ view: { invite: '' } }), generated: true },
+
+    // ####  A ABA CONFIGURACOES  ####
+    //
+    // Montada por JOGADOR: ela mostra o modo streamer de quem
+    // abriu o menu. O que fica gravado é a tela de quem não foi
+    // liberado — que é também o que a maioria vê.
+    {
+      // O ESQUELETO, e não a tela: ela é remontada por jogador a
+      // cada clique, e o documento não tem bytes sobrando. Ver
+      // `skeleton` em game/ui-streamer-screen.ts.
+      ...buildStreamerScreen({ profile: defaultStreamerProfile(''), skeleton: true }),
+      generated: true,
+    },
 
     // ####  OS MODAIS DA LOJA  ####
     //

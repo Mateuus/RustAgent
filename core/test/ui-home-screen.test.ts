@@ -387,6 +387,25 @@ describe('a HOME dentro do menu', () => {
    * DADOS, e esqueleto não escala — chegou ao fim útil dele.
    *
    * Nenhum elemento novo entra sem tirar outro. Na ordem de saída:
+ *
+ * ####  15/09/2026: A ABA CONFIG ENTROU, E A TROCA FOI FEITA  ####
+ *
+ * O botão CONFIG da barra — a tela onde o streamer liga e desliga
+ * o modo dele — custou 1.628 bytes. A troca saiu do item 1 desta
+ * lista: as linhas de apoio de LOJA e WIPE devolveram 1.404, mais
+ * do que a estimativa de 1.040.
+ *
+ * Faltaram 224, e a decisão de pagá-los com a trava é do dono
+ * (perguntado, com as três saídas na mesa: o botão deixar de
+ * acender, a régua sair, ou a trava subir). Ele escolheu a trava, e
+ * o critério que sustenta isso é o mesmo registrado em
+ * test/ui-ranking-screen.ts: o que entrou é FIXO — custa igual com
+ * 2 jogadores e com 4.321 —, e a trava existe para pegar o que
+ * ESCALA COM OS DADOS.
+ *
+ * A folga contra o teto REAL ficou em 2.332 bytes (4,7%). Para o
+ * que cresce com dados, a regra abaixo segue valendo inteira: a
+ * lista encurta, a trava não sobe.
    *
    *   1. as linhas de apoio de LOJA e WIPE ("DESTAQUE DO MÊS",
    *      "CALENDÁRIO DO SERVIDOR"): texto fixo, enfeitam e não
@@ -404,7 +423,12 @@ describe('a HOME dentro do menu', () => {
   it('a carga inicial fica com folga confortável', () => {
     const bytes = encodeUiDocPayload({ documents: [toDocumentPayload(buildMainMenu())] }).length;
 
-    expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.95);
+    // O teto REAL primeiro: passar dele é o menu não chegar.
+    expect(bytes).toBeLessThanOrEqual(UI_DOC_MAX_BYTES);
+
+    // E a trava, que é o aviso — 47.800, e não uma fração do teto:
+    // o número redondo diz quanto sobra sem ninguém fazer a conta.
+    expect(bytes).toBeLessThan(47_800);
   });
 
   it('nenhuma ação gravada tem `:` no destino', () => {

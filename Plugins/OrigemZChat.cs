@@ -1790,6 +1790,15 @@ namespace Oxide.Plugins
                     continue;
                 }
 
+                // O modo streamer. Ele nao entra na contagem de
+                // `enviados` de proposito: o numero que volta ao
+                // agente e quantos OUVIRAM, e quem esta em live nao
+                // ouviu.
+                if (payload.Skip != null && payload.Skip.Contains(alvo.UserIDString))
+                {
+                    continue;
+                }
+
                 alvo.SendConsoleCommand("chat.add", (int)Chat.ChatChannel.Global, 0UL, textoChat);
                 enviados++;
             }
@@ -2269,6 +2278,22 @@ namespace Oxide.Plugins
             /// <summary>Vazio = todo mundo. Preenchido = so ele.</summary>
             [JsonProperty("steamId")]
             public string SteamId { get; set; }
+
+            /// <summary>
+            /// Quem NAO recebe esta fala.
+            ///
+            /// Sao os jogadores em MODO STREAMER, que pediram
+            /// silencio enquanto transmitem (ver
+            /// core/src/types/streamer.ts). O agente resolve quem
+            /// esta nessa condicao e manda a lista pronta -- este
+            /// lado so pula.
+            ///
+            /// Vazia em quase toda fala, e so tem efeito no anuncio
+            /// GLOBAL: uma fala dirigida a um jogador e resposta a
+            /// algo que ele fez, e engoli-la seria perder a entrega.
+            /// </summary>
+            [JsonProperty("skip")]
+            public List<string> Skip { get; set; }
         }
 
         /// <summary>

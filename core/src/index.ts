@@ -53,6 +53,7 @@ import { ServersRepository } from './db/servers-repository.js';
 import { SpawnStatusRepository } from './db/spawn-status-repository.js';
 import { PlayerTimersRepository } from './db/player-timers-repository.js';
 import { AdsRepository } from './db/ads-repository.js';
+import { StreamerRepository } from './db/streamer-repository.js';
 import { DungeonBlueprintsRepository } from './db/dungeon-blueprints-repository.js';
 import { DungeonLayoutsRepository } from './db/dungeon-layouts-repository.js';
 import { DungeonsRepository } from './db/dungeons-repository.js';
@@ -126,6 +127,11 @@ import {
   createStoreScreenProvider,
 } from './game/ui-store-bridge.js';
 import { AdsSync } from './game/ads-sync.js';
+import { StreamerSync } from './game/streamer-sync.js';
+import {
+  createStreamerScreenProvider,
+  withStreamerTab,
+} from './game/ui-streamer-screen.js';
 import { UiSync } from './game/ui-sync.js';
 import { WipeClock } from './game/wipe.js';
 import { StoreRepository } from './db/store-repository.js';
@@ -297,6 +303,10 @@ async function main(): Promise<void> {
   // O overlay de propagandas. Como o `uiSync`, ele nasce depois
   // dos callbacks que o citam — daí o `let` e o `?.`.
   let adsSync: AdsSync | null = null;
+  // O modo streamer, pela MESMA razão: ele precisa do supervisor,
+  // e o gancho de console (que trata o `/streamer` do jogador)
+  // precisa dele.
+  let streamerSync: StreamerSync | null = null;
   // Os dois da fase de VIP e kits, pela MESMA razão dos de cima:
   // eles precisam do supervisor, e o gancho de reconexão precisa
   // deles. Ver o bloco de montagem, mais abaixo.
@@ -400,6 +410,10 @@ async function main(): Promise<void> {
       // sem esquecê-lo aqui a carga desceria apontando para bytes
       // que o outro lado não tem mais. Ver `handleRconConnected`.
       adsSync?.handleRconConnected(serverId);
+      // E o modo streamer, pelo mesmo motivo do de cima: o plugin
+      // nasce sem saber quem está em live, e o overlay voltaria à
+      // tela de quem está transmitindo agora.
+      streamerSync?.handleRconConnected(serverId);
 
       // ####  E O VIP E OS KITS PELO MESMO MOTIVO — MAIS UM  ####
       //
@@ -524,6 +538,12 @@ async function main(): Promise<void> {
       // deste gancho é o laço descrito lá em cima. Ver
       // messages/commands.ts.
       chatCommands?.handleLine(serverId, line);
+      // E o `#OZSTREAMER#`: um jogador digitou `/streamer`. Ele
+      // APLICA aqui (escrita em SQLite, que não fala com o jogo) e
+      // espalha a carga por um relógio — mandar o comando de dentro
+      // deste gancho é o laço descrito lá em cima. Ver
+      // game/streamer-sync.ts.
+      streamerSync?.handleLine(serverId, line);
     },
     // Ver o comentário do `let wipeRunner`, logo acima.
     wipeRunner: {
@@ -1390,6 +1410,22 @@ async function main(): Promise<void> {
   const uiDocuments = new UiDocumentsRepository(db, logger);
   // O overlay de propagandas: a lista e o ajuste, por servidor.
   const adsRepository = new AdsRepository(db);
+  // O modo streamer. Da REDE, e não de um servidor: quem transmite
+  // é a pessoa. Ver types/streamer.ts.
+  const streamerRepository = new StreamerRepository(db);
+
+  /**
+   * Quem pediu silêncio no chat enquanto transmite.
+   *
+   * Vai para TODO `PluginBroadcaster` deste arquivo, e cala apenas
+   * a fala GLOBAL — o recado dirigido a um jogador (a compra que
+   * caiu, o VIP que vence) continua chegando. Ver game/broadcast.ts.
+   */
+  const mutedByStreamerMode = (): readonly string[] =>
+    streamerRepository
+      .active()
+      .filter((profile) => profile.hideMessages)
+      .map((profile) => profile.steamId);
 
   // ####  O MENU PRINCIPAL NASCE NO PRIMEIRO BOOT  ####
   //
@@ -1463,7 +1499,7 @@ async function main(): Promise<void> {
   // endereçar um jogador (o `origemz.chat.tell` nunca existiu; ver o
   // comentário lá embaixo). Ele sai depois do crédito, e só quando
   // ele deu certo.
-  const dungeonBroadcaster = new PluginBroadcaster({ servers: supervisor, logger });
+  const dungeonBroadcaster = new PluginBroadcaster({ servers: supervisor, logger, mutedPlayers: mutedByStreamerMode });
 
   dungeonSync = new DungeonSync({
     dungeons: dungeonsRepository,
@@ -1518,6 +1554,34 @@ async function main(): Promise<void> {
     );
   }
 
+  // ####  E A ABA CONFIGURACOES, PELA MESMA RAZAO  ####
+  //
+  // O menu gravado antes desta frente não tem onde o jogador mexer
+  // no modo streamer. A edição é a mínima: um botão a mais no fim
+  // da barra, copiado do vizinho, e a tela que ele abre. Quem não
+  // foi liberado nem vê o botão — isso é decidido no plugin, com a
+  // lista que desce no payload. Ver game/ui-streamer-screen.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withStreamerTab(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'a aba CONFIGURAÇÕES entrou neste menu: é onde o streamer liga e desliga o modo dele',
+    );
+  }
+
   // ####  A PÁGINA RANKING DO MENU DO JOGO  ####
   //
   // Ela nasce AQUI, e não lá embaixo junto do calendário, porque o
@@ -1541,6 +1605,17 @@ async function main(): Promise<void> {
   // tela diz que não há Discord em vez de estourar.
   const discordScreens = createDiscordScreenProvider({
     inviteOf: (serverId) => supervisor.configOf(serverId)?.discord ?? '',
+  });
+
+  // ####  E A ABA CONFIGURACOES, QUE E POR JOGADOR  ####
+  //
+  // Ela mostra o modo streamer DAQUELE que abriu o menu, e por isso
+  // é a única deste grupo que depende do `steamId` do pedido. Sem
+  // ele, a resposta certa é a tela de "não liberado" — o
+  // repositório inventa o perfil desligado, e a tela diz o que
+  // fazer. Ver game/ui-streamer-screen.ts.
+  const streamerScreens = createStreamerScreenProvider({
+    profileOf: (steamId) => streamerRepository.get(steamId ?? ''),
   });
 
   // ####  E A PÁGINA REGRAS, QUE VAI AO BANCO E É SÍNCRONA  ####
@@ -1643,6 +1718,17 @@ async function main(): Promise<void> {
 
         if (fromDiscord !== null) {
           return fromDiscord;
+        }
+
+        // ####  E A ABA CONFIGURACOES  ####
+        //
+        // Id exato (`tela-config`), e a única que olha o `steamId`
+        // do pedido: ela desenha o modo streamer de quem abriu. A
+        // leitura é SQLite local, como a das regras.
+        const fromStreamer = streamerScreens(input);
+
+        if (fromStreamer !== null) {
+          return fromStreamer;
         }
 
         // ####  E A PÁGINA REGRAS  ####
@@ -1828,6 +1914,19 @@ async function main(): Promise<void> {
 
   adsSync.start();
   adsSync.pushAllSoon('startup');
+
+  // O modo streamer. Mesmo desenho do overlay, e sem relógio
+  // próprio: a carga é pequena e só muda quando um humano mexe
+  // (o admin na ficha, o jogador no comando). A rede de segurança
+  // dele é o `handleRconConnected` — que é quando o plugin de fato
+  // perde o que sabia.
+  streamerSync = new StreamerSync({
+    repository: streamerRepository,
+    servers: supervisor,
+    logger,
+  });
+
+  streamerSync.pushAllSoon('startup');
 
   void loadoutSync.pushAll('boot');
   // Os itens custom sobem no boot pelo mesmo motivo dos loadouts:
@@ -2134,7 +2233,7 @@ async function main(): Promise<void> {
   // Quem fala com um jogador só é o `origemz.chat.broadcast` com
   // `steamId` — o mesmo caminho dos avisos do painel, e por isso a
   // mensagem sai com a tag e a cor da rede em vez de texto pelado.
-  const questBroadcaster = new PluginBroadcaster({ servers: supervisor, logger });
+  const questBroadcaster = new PluginBroadcaster({ servers: supervisor, logger, mutedPlayers: mutedByStreamerMode });
 
   // O nome que uma pessoa lê, para o recibo da entrega. O catálogo
   // do jogo é quem sabe que `stones` se chama Pedra.
@@ -2832,7 +2931,7 @@ async function main(): Promise<void> {
 
   const messages = new MessagesService({
     repository: messagesRepository,
-    broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
+    broadcaster: new PluginBroadcaster({ servers: supervisor, logger, mutedPlayers: mutedByStreamerMode }),
     variables: messageVariables,
     servers: supervisor,
     // `null` = não deu para perguntar, e é DIFERENTE de zero: com
@@ -3133,7 +3232,7 @@ async function main(): Promise<void> {
     // O MESMO transporte das mensagens agendadas. Ver o bloco delas,
     // acima: três maneiras de mandar texto ao jogo dariam três
     // formatos de aviso e três lugares para consertar.
-    broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
+    broadcaster: new PluginBroadcaster({ servers: supervisor, logger, mutedPlayers: mutedByStreamerMode }),
     // ####  O LOCUTOR DOS AVISOS  ####
     //
     // As falas de "faltam 15 min". O relógio, a ordem dos offsets e
@@ -3141,7 +3240,7 @@ async function main(): Promise<void> {
     // wipe/run.ts): o locutor só transforma UM offset numa fala, e
     // é isso que faz um aviso perdido não ter como derrubar o wipe.
     announcer: new WipeBroadcastAnnouncer({
-      broadcaster: new PluginBroadcaster({ servers: supervisor, logger }),
+      broadcaster: new PluginBroadcaster({ servers: supervisor, logger, mutedPlayers: mutedByStreamerMode }),
       variables: messageVariables,
       logger,
     }),
@@ -3296,6 +3395,9 @@ async function main(): Promise<void> {
     bans,
     players,
     directory,
+    // O modo streamer, na ficha do jogador. Ver types/streamer.ts.
+    streamer: streamerRepository,
+    streamerSync,
     monuments,
     items: itemsRepository,
     betterLootJunk: betterLootJunkRepository,

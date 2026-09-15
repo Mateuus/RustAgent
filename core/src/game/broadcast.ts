@@ -125,6 +125,18 @@ export interface BroadcastServers {
 export interface PluginBroadcasterDeps {
   readonly servers: BroadcastServers;
   readonly logger?: Logger | undefined;
+
+  /**
+   * Quem esta em MODO STREAMER e pediu silencio no chat.
+   *
+   * SteamIDs, e a lista costuma estar vazia. Ver types/streamer.ts:
+   * quem transmite ao vivo pode esconder os avisos automaticos do
+   * servidor enquanto esta no ar.
+   *
+   * Ausente = ninguem e pulado, e e assim que o teste e o wipe
+   * constroem um `Broadcaster` sem precisar de banco.
+   */
+  readonly mutedPlayers?: (() => readonly string[]) | undefined;
 }
 
 /**
@@ -141,6 +153,14 @@ interface ChatBroadcastPayload {
   readonly color: string;
   readonly size: number;
   readonly steamId: string;
+  /**
+   * Quem NAO recebe esta fala. Ver `mutedPlayers`, acima.
+   *
+   * Vazio na esmagadora maioria das falas, e por isso ele vai como
+   * lista e nao como excecao do lado do plugin: o filtro dele e uma
+   * comparacao por jogador, e uma lista vazia nao custa nada.
+   */
+  readonly skip: readonly string[];
 }
 
 /**
@@ -159,6 +179,26 @@ export class PluginBroadcaster implements Broadcaster {
 
   constructor(deps: PluginBroadcasterDeps) {
     this.#deps = deps;
+  }
+
+  /**
+   * Quem esta em modo streamer agora. NUNCA lanca.
+   *
+   * Uma falha de banco aqui nao pode impedir o servidor de FALAR:
+   * o desfecho seguro e mandar para todo mundo, que e o que
+   * acontecia antes de o modo existir.
+   */
+  #muted(): readonly string[] {
+    try {
+      return this.#deps.mutedPlayers?.() ?? [];
+    } catch (error) {
+      this.#deps.logger?.warn(
+        { err: toError(error) },
+        'nao consegui ler quem esta em modo streamer; a fala vai para todo mundo',
+      );
+
+      return [];
+    }
   }
 
   async send(input: BroadcastInput): Promise<BroadcastResult> {
@@ -215,6 +255,14 @@ export class PluginBroadcaster implements Broadcaster {
       // segunda opinião sobre o padrão dele.
       size: input.size ?? 0,
       steamId: input.steamId ?? '',
+      // ####  SO A FALA GLOBAL E SILENCIADA  ####
+      //
+      // Com `steamId`, a fala e para UM jogador ("sua compra caiu",
+      // "seu VIP vence amanha") -- ela e RESPOSTA a algo que ele
+      // fez, e engoli-la seria perder a entrega, nao poupar a live.
+      // O modo streamer cala o anuncio automatico do servidor, e
+      // nada alem disso.
+      skip: input.steamId === undefined ? this.#muted() : [],
     };
 
     const command = `${CHAT_BROADCAST_COMMAND} ${encodeBroadcastPayload(payload)}`;
@@ -293,6 +341,15 @@ export class PluginBroadcaster implements Broadcaster {
    * por mensagem de admin. A mesma regra do `#say` de
    * ops/service.ts — e ela vale mais aqui, porque este texto vem de
    * um formulário.
+   */
+  /**
+   * O caminho ruim, e ele NAO sabe pular ninguem.
+   *
+   * O `say` do jogo fala para o servidor inteiro: nao ha como tirar
+   * um jogador dele. Num servidor sem o `OrigemZChat` carregado, o
+   * silencio do modo streamer simplesmente nao acontece -- o resto
+   * do modo (a logo e a propaganda) continua valendo, porque quem
+   * desenha aquilo e outro plugin.
    */
   async #sendBySay(rcon: OpsRcon, input: BroadcastInput, text: string): Promise<BroadcastResult> {
     if (input.steamId !== undefined && input.steamId !== '') {
