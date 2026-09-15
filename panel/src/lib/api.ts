@@ -5935,6 +5935,54 @@ export const agent = {
    * Não confundir com `/api/events`, que é o CALENDÁRIO do wipe —
    * "Raid Night, sábado às 20h". Estes são os que nascem no mapa.
    */
+  // ####  A EQUIPE NÃO VEM DO BANCO  ####
+  //
+  // Cada uma destas pergunta ao JOGO, pelo RCON. Com o servidor
+  // parado elas devolvem 503 — e isso é informação, não falha da
+  // tela: "esse jogador não tem equipe" e "não consegui perguntar"
+  // são respostas diferentes.
+  teams: (serverId: string) =>
+    api<TeamsSnapshot>(`/api/servers/${encodeURIComponent(serverId)}/teams`),
+
+  team: (serverId: string, teamId: string) =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}`,
+    ),
+
+  renameTeam: (serverId: string, teamId: string, name: string) =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/name`,
+      { method: 'POST', body: { name } },
+    ),
+
+  setTeamRank: (serverId: string, teamId: string, steamId: string, rank: 'officer' | 'member') =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/rank`,
+      { method: 'POST', body: { steamId, rank } },
+    ),
+
+  setTeamLeader: (serverId: string, teamId: string, steamId: string) =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/leader`,
+      { method: 'POST', body: { steamId } },
+    ),
+
+  kickFromTeam: (serverId: string, teamId: string, steamId: string) =>
+    api<{ team: Team | null; disbanded: boolean }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(steamId)}`,
+      { method: 'DELETE' },
+    ),
+
+  disbandTeam: (serverId: string, teamId: string) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}`, {
+      method: 'DELETE',
+    }),
+
+  teamOfPlayer: (steamId: string, serverId: string) =>
+    api<{ team: Team | null }>(
+      `/api/players/${encodeURIComponent(steamId)}/team?server=${encodeURIComponent(serverId)}`,
+    ),
+
   worldEvents: () => api<{ events: WorldEvent[] }>('/api/world-events'),
 
   createWorldEvent: (body: WorldEventInput) =>
@@ -6187,6 +6235,41 @@ export interface DungeonAccess {
  * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
  * a este bloco: a masmorra nao apodrece nem com ele desligado.
  */
+/**
+ * A equipe do jogo, como o agente a devolve.
+ *
+ * Espelha `core/src/types/teams.ts`. Quase tudo aqui é do RUST e
+ * volta a cada leitura; a única coisa nossa é o `rank`, e o
+ * `officers`, que é a contagem dele.
+ */
+export interface TeamMember {
+  steamId: string;
+  name: string;
+  online: boolean;
+  leader: boolean;
+  rank: 'leader' | 'officer' | 'member';
+}
+
+export interface Team {
+  teamId: string;
+  /** Vazio = ninguém batizou. O jogo mostra o nome do líder. */
+  name: string;
+  leader: string;
+  leaderName: string;
+  /** Segundos desde que ela existe. NÃO é data. */
+  ageSeconds: number;
+  members: TeamMember[];
+  invites: string[];
+  officers: number;
+}
+
+export interface TeamsSnapshot {
+  serverId: string;
+  maxSize: number;
+  teams: Team[];
+  readAt: number;
+}
+
 /**
  * Um evento que faz a masmorra nascer sozinha.
  *
