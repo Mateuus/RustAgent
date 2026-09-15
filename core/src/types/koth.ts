@@ -144,19 +144,44 @@ export interface KothArena extends KothArenaInput {
   readonly updatedAt: number;
 }
 
-/** O que o plugin responde quando se pergunta o estado. */
+/**
+ * Um território de pé, como o plugin o descreve.
+ *
+ * É o que a tela do jogador e o painel mostram: o card de uma vaga.
+ */
+export interface KothLiveEvent {
+  readonly runId: string;
+  readonly name: string;
+  readonly grid: string;
+  readonly x: number;
+  readonly z: number;
+  readonly radius: number;
+  readonly percent: number;
+  readonly progress: number;
+  readonly captureSeconds: number;
+  /** `"0"` = ninguém está capturando agora. */
+  readonly holder: string;
+  readonly holderName: string;
+  /** Dois ou mais lados dentro: ninguém avança. */
+  readonly contested: boolean;
+  readonly elapsed: number;
+  readonly durationSeconds: number;
+  readonly inside: number;
+}
+
+/**
+ * O que o plugin responde quando se pergunta o estado.
+ *
+ * ####  UMA LISTA, MESMO COM UM SÓ  ####
+ *
+ * `active` continua para quem só quer saber se há algo acontecendo,
+ * mas o que importa é `events`. Uma resposta que mudasse de forma
+ * conforme a quantidade obrigaria quem lê a tratar dois casos.
+ */
 export interface KothStatus {
   readonly active: boolean;
-  readonly runId?: string;
-  readonly name?: string;
-  readonly grid?: string;
-  readonly percent?: number;
-  readonly progress?: number;
-  readonly captureSeconds?: number;
-  readonly holder?: string;
-  readonly holderName?: string;
-  readonly elapsed?: number;
-  readonly inside?: number;
+  readonly count?: number;
+  readonly events?: readonly KothLiveEvent[];
 }
 
 /** O que o plugin grita no console. Ver `#OZKOTH#` em OrigemZKoth.cs. */

@@ -7536,6 +7536,39 @@ const KOTH_ARENA_REWARD_SCHEMA = `
 ALTER TABLE koth_arenas ADD COLUMN reward TEXT;
 `;
 
+const KOTH_SETTINGS_SCHEMA = `
+-- ============================================================
+--  092  as VAGAS de KOTH, por servidor.
+--
+--  Pedido do dono em 15/09/2026: "pode ter varios koth ativo no
+--  momento... isso dependendo da configuracao de maximo de koth no
+--  mapa".
+--
+--  ####  O LIMITE ERA UMA REGRA; VIROU CONFIGURACAO  ####
+--
+--  Ate aqui o agente recusava o segundo evento, e a razao estava
+--  escrita no codigo: dois eventos dividem a populacao do servidor e
+--  os dois ficam vazios. Isso continua verdade -- mas quem sabe se o
+--  servidor dele aguenta dois e o ADMIN, nao o agente.
+--
+--  Uma VAGA e o lugar onde um evento acontece. Terminado, o card
+--  dele fica na tela ate outro nascer ali: e por isso que a unidade
+--  e a vaga, e nao "os eventos ativos".
+--
+--  Sem linha = uma vaga, que e o que sempre foi.
+-- ============================================================
+
+CREATE TABLE koth_settings (
+  server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- Quantos KOTH podem estar de pe ao mesmo tempo.
+  max_concurrent INTEGER NOT NULL DEFAULT 1
+    CHECK (max_concurrent >= 1 AND max_concurrent <= 10),
+
+  updated_at INTEGER NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7786,6 +7819,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 89, name: 'koth-arenas', sql: KOTH_ARENAS_SCHEMA },
   { id: 90, name: 'team-settings', sql: TEAM_SETTINGS_SCHEMA },
   { id: 91, name: 'koth-arena-reward', sql: KOTH_ARENA_REWARD_SCHEMA },
+  { id: 92, name: 'koth-settings', sql: KOTH_SETTINGS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

@@ -89,7 +89,18 @@ namespace Oxide.Plugins
         private const string UiRoot = "origemz.koth.hud";
 
         private string secret = "";
-        private Run run;
+
+        /// ####  VÁRIOS AO MESMO TEMPO  ####
+        ///
+        /// A chave é o `runId` que o agente manda. O limite de quantos
+        /// cabem NÃO é daqui: quem conta as vagas é o agente, que sabe
+        /// quantas o admin configurou. O plugin recusa só o repetido.
+        private readonly Dictionary<string, Run> runs = new Dictionary<string, Run>();
+
+        /// O relógio é UM, e não um por evento: dois eventos não
+        /// precisam de dois timers, e um só mantém a ordem estável
+        /// entre eles.
+        private Timer ticker;
 
         // ============================================================
         //  §1  O ESTADO DE UMA EXECUÇÃO
@@ -195,8 +206,15 @@ namespace Oxide.Plugins
             public List<ulong> crates = new List<ulong>();
         }
 
-        /// <summary>Guarda os ids do que acabou de nascer.</summary>
-        private void Remember(Run next)
+        /// <summary>
+        /// Anota os ids de tudo que está de pé AGORA.
+        ///
+        /// Chamado quando um evento nasce e quando um acaba: a lista é
+        /// sempre o retrato do momento, e não um diário. Assim o
+        /// plugin que cair no meio encontra, ao voltar, exatamente as
+        /// entidades que ficaram sem dono.
+        /// </summary>
+        private void Remember()
         {
             try
             {
@@ -204,9 +222,12 @@ namespace Oxide.Plugins
 
                 data.ids.Clear();
 
-                if (next.banner != null && next.banner.net != null) data.ids.Add(next.banner.net.ID.Value);
-                if (next.mapMarker != null && next.mapMarker.net != null) data.ids.Add(next.mapMarker.net.ID.Value);
-                if (next.mapLabel != null && next.mapLabel.net != null) data.ids.Add(next.mapLabel.net.ID.Value);
+                foreach (var entry in runs.Values)
+                {
+                    if (entry.banner != null && entry.banner.net != null) data.ids.Add(entry.banner.net.ID.Value);
+                    if (entry.mapMarker != null && entry.mapMarker.net != null) data.ids.Add(entry.mapMarker.net.ID.Value);
+                    if (entry.mapLabel != null && entry.mapLabel.net != null) data.ids.Add(entry.mapLabel.net.ID.Value);
+                }
 
                 Interface.Oxide.DataFileSystem.WriteObject(LeftoverFile, data);
             }
@@ -216,7 +237,6 @@ namespace Oxide.Plugins
             }
         }
 
-        /// <summary>O evento acabou direito: não há o que varrer depois.</summary>
         private Leftovers Read()
         {
             var data = Interface.Oxide.DataFileSystem.ReadObject<Leftovers>(LeftoverFile);
@@ -228,12 +248,7 @@ namespace Oxide.Plugins
             return data;
         }
 
-        /// <summary>
-        /// O evento acabou direito.
-        ///
-        /// Limpa o que era DELE — e não as caixas, que ficam no mapa
-        /// esperando quem vá buscá-las.
-        /// </summary>
+        /// <summary>Esvazia a lista do que estava de pé. Só o boot usa.</summary>
         private void Forget()
         {
             try
@@ -359,7 +374,9 @@ namespace Oxide.Plugins
             // Descarregar com evento de pé deixaria a bandeira no mapa
             // e a barra na tela de quem estava dentro — sem ninguém
             // para tirá-las.
-            if (run != null) Teardown("unload");
+            foreach (var key in runs.Keys.ToArray()) Teardown(key, "unload");
+
+            if (ticker != null) ticker.Destroy();
         }
 
         [Command("origemz.koth")]
@@ -382,7 +399,7 @@ namespace Oxide.Plugins
                         return;
 
                     case "stop":
-                        player.Reply(DoStop());
+                        player.Reply(DoStop(Arg(args, 1)));
                         return;
 
                     case "status":
@@ -404,6 +421,11 @@ namespace Oxide.Plugins
             }
         }
 
+        private static string Arg(string[] args, int index)
+        {
+            return args.Length > index ? args[index] : "";
+        }
+
         private string DoSync(string json)
         {
             if (string.IsNullOrEmpty(json)) return Fail("empty", "Sync sem corpo.");
@@ -412,7 +434,7 @@ namespace Oxide.Plugins
 
             secret = body["secret"] == null ? "" : body["secret"].ToString();
 
-            var payload = new JObject { ["ok"] = true, ["active"] = run != null };
+            var payload = new JObject { ["ok"] = true, ["active"] = runs.Count > 0 };
 
             return payload.ToString(Formatting.None);
         }
@@ -420,7 +442,6 @@ namespace Oxide.Plugins
         /// <summary>Ergue o território. O agente já escolheu onde.</summary>
         private string DoStart(string json)
         {
-            if (run != null) return Fail("already_active", "Já existe um KOTH de pé. Derrube antes.");
             if (string.IsNullOrEmpty(json)) return Fail("empty", "Start sem corpo.");
 
             var body = JObject.Parse(json);
@@ -436,11 +457,25 @@ namespace Oxide.Plugins
                 requireTeam = body["requireTeam"] == null || body["requireTeam"].ToObject<bool>(),
             };
 
+            if (string.IsNullOrEmpty(next.runId)) return Fail("no_run_id", "Start sem runId.");
+
+            // ####  O MESMO EVENTO DUAS VEZES  ####
+            //
+            // Acontece quando o agente reenvia por timeout: o comando
+            // saiu, a resposta se perdeu, e ele tenta de novo. Erguer
+            // um segundo território no mesmo lugar seria pior que
+            // recusar — e o agente trata este `no` como "já está lá".
+            if (runs.ContainsKey(next.runId))
+            {
+                return Fail("already_active", "Esse KOTH já está de pé.");
+            }
+
             ReadReward(next, body);
 
-            // O KOTH novo limpa o que o anterior deixou. Ver
-            // `SweepOldCrates`: a caixa que ninguém abriu não pode
-            // virar entulho no mapa.
+            // O KOTH novo limpa o que os ANTERIORES deixaram. Com
+            // vários ao mesmo tempo isso continua valendo: as caixas
+            // anotadas são as de eventos que já acabaram — as dos que
+            // estão de pé ainda não foram anotadas como sobra.
             SweepOldCrates();
 
             var x = Number(body, "x", 0f);
@@ -466,9 +501,11 @@ namespace Oxide.Plugins
             SpawnMarker(next, body);
 
             next.startedAt = UnityEngine.Time.realtimeSinceStartup;
-            Remember(next);
-            run = next;
-            run.ticker = timer.Every(1f, Tick);
+            runs[next.runId] = next;
+            Remember();
+
+            // O relógio sobe com o primeiro e cai com o último.
+            if (ticker == null) ticker = timer.Every(1f, Tick);
 
             Push("started", new JObject
             {
@@ -489,34 +526,83 @@ namespace Oxide.Plugins
             return payload.ToString(Formatting.None);
         }
 
-        private string DoStop()
+        /// <summary>
+        /// Derruba um território, ou todos.
+        ///
+        /// Sem argumento = todos. É o que o agente manda quando quer
+        /// limpar o servidor, e o que o admin espera de um "parar" sem
+        /// dizer qual.
+        /// </summary>
+        private string DoStop(string runId)
         {
-            if (run == null) return Fail("not_active", "Não há KOTH de pé.");
+            if (runs.Count == 0) return Fail("not_active", "Não há KOTH de pé.");
 
-            Teardown("command");
+            if (string.IsNullOrEmpty(runId))
+            {
+                var todos = runs.Keys.ToArray();
 
-            var payload = new JObject { ["ok"] = true };
+                foreach (var key in todos) Teardown(key, "command");
+
+                var geral = new JObject { ["ok"] = true, ["stopped"] = todos.Length };
+
+                return geral.ToString(Formatting.None);
+            }
+
+            if (!runs.ContainsKey(runId)) return Fail("not_active", "Esse KOTH não está de pé.");
+
+            Teardown(runId, "command");
+
+            var payload = new JObject { ["ok"] = true, ["stopped"] = 1 };
 
             return payload.ToString(Formatting.None);
         }
 
+        /// <summary>
+        /// O estado de tudo que está de pé.
+        ///
+        /// ####  UMA LISTA, MESMO COM UM SÓ  ####
+        ///
+        /// `active` continua existindo para quem só quer saber se há
+        /// algo acontecendo — mas o que importa agora é `events`. Uma
+        /// resposta que mudasse de forma conforme a quantidade
+        /// obrigaria quem lê a tratar os dois casos.
+        /// </summary>
         private string DoStatus()
         {
-            var payload = new JObject { ["ok"] = true, ["active"] = run != null };
+            var lista = new JArray();
 
-            if (run != null)
+            foreach (var entry in runs.Values.ToArray())
             {
-                payload["runId"] = run.runId;
-                payload["name"] = run.name;
-                payload["grid"] = Grid(run.center);
-                payload["progress"] = Mathf.RoundToInt(run.progress);
-                payload["captureSeconds"] = run.captureSeconds;
-                payload["percent"] = Mathf.RoundToInt(Percent(run));
-                payload["holder"] = run.holder.ToString(CultureInfo.InvariantCulture);
-                payload["holderName"] = run.holderName;
-                payload["elapsed"] = Mathf.RoundToInt(Elapsed(run));
-                payload["inside"] = Inside(run).Count;
+                var inside = Inside(entry);
+                var sides = Sides(inside);
+
+                lista.Add(new JObject
+                {
+                    ["runId"] = entry.runId,
+                    ["name"] = entry.name,
+                    ["grid"] = Grid(entry.center),
+                    ["x"] = entry.center.x,
+                    ["z"] = entry.center.z,
+                    ["radius"] = entry.radius,
+                    ["progress"] = Mathf.RoundToInt(entry.progress),
+                    ["captureSeconds"] = entry.captureSeconds,
+                    ["percent"] = Mathf.RoundToInt(Percent(entry)),
+                    ["holder"] = entry.holder.ToString(CultureInfo.InvariantCulture),
+                    ["holderName"] = entry.holderName,
+                    ["contested"] = sides.Count > 1,
+                    ["elapsed"] = Mathf.RoundToInt(Elapsed(entry)),
+                    ["durationSeconds"] = entry.durationSeconds,
+                    ["inside"] = inside.Count,
+                });
             }
+
+            var payload = new JObject
+            {
+                ["ok"] = true,
+                ["active"] = runs.Count > 0,
+                ["count"] = runs.Count,
+                ["events"] = lista,
+            };
 
             return payload.ToString(Formatting.None);
         }
@@ -525,89 +611,123 @@ namespace Oxide.Plugins
         //  §3  O CORAÇÃO: UM TICK POR SEGUNDO
         // ============================================================
 
+        /// <summary>
+        /// Uma volta, para todos os territórios de pé.
+        ///
+        /// ####  A TELA É DECIDIDA NO FIM, E DE UMA VEZ  ####
+        ///
+        /// Cada evento faz a sua conta; a BARRA, não. Com dois
+        /// territórios sobrepostos, dois `Draw` desenhariam um por
+        /// cima do outro na tela do mesmo jogador — e ele veria a
+        /// porcentagem piscando entre dois eventos.
+        ///
+        /// Então o tick junta quem está onde, e no fim desenha uma vez
+        /// por jogador: a zona em que ele está, e se estiver em duas, a
+        /// mais próxima do centro — que é aquela em que ele acha que
+        /// está.
+        /// </summary>
         private void Tick()
         {
-            if (run == null) return;
+            if (runs.Count == 0) return;
+
+            // Quem está em qual evento, para a tela decidir depois.
+            var byPlayer = new Dictionary<ulong, KeyValuePair<Run, float>>();
+            var boards = new Dictionary<string, Dictionary<ulong, Side>>();
+
+            foreach (var entry in runs.Values.ToArray())
+            {
+                try
+                {
+                    var inside = Inside(entry);
+                    var sides = Sides(inside);
+
+                    boards[entry.runId] = sides;
+
+                    // ####  A ORDEM IMPORTA  ####
+                    //
+                    // Primeiro o tempo total (um evento que estourou
+                    // não pode ser capturado no mesmo tick), depois o
+                    // domínio.
+                    if (Elapsed(entry) >= entry.durationSeconds)
+                    {
+                        Finish(entry, "expired", 0UL, "");
+                        continue;
+                    }
+
+                    if (sides.Count == 1)
+                    {
+                        var side = sides.First();
+
+                        // ####  A BARRA É DO EVENTO, E NÃO DO GRUPO  ####
+                        //
+                        // Decisão do dono (15/09/2026): o progresso NÃO
+                        // volta a zero quando o grupo troca. Quem chega
+                        // continua de onde o outro parou — e é o que faz
+                        // a virada no fim valer a pena: levar a barra a
+                        // 90% e morrer é perder o evento para quem
+                        // fechar os 10% que faltavam.
+                        //
+                        // `holder` é quem está capturando AGORA, e serve
+                        // à tela e ao marcador.
+                        entry.holder = side.Key;
+                        entry.holderName = side.Value.name;
+                        entry.progress += 1f;
+
+                        if (entry.progress >= entry.captureSeconds)
+                        {
+                            Finish(entry, "captured", side.Key, side.Value.name);
+                            continue;
+                        }
+                    }
+                    else if (sides.Count == 0)
+                    {
+                        // Zona vazia: o padrão é não perder nada. Ver o
+                        // `decayPerSecond`, que nasce zero.
+                        if (entry.decayPerSecond > 0f)
+                        {
+                            entry.progress = Mathf.Max(0f, entry.progress - entry.decayPerSecond);
+                        }
+
+                        entry.holder = 0UL;
+                    }
+
+                    // sides.Count > 1: contestado. Nada sobe, nada cai —
+                    // o progresso fica onde está, e a barra diz por quê.
+
+                    RefreshMarker(entry, sides.Count > 1);
+
+                    // Quem está em dois eventos fica com o mais próximo.
+                    foreach (var player in inside)
+                    {
+                        var id = player.userID.Get();
+                        var distance = Vector2.Distance(
+                            new Vector2(player.transform.position.x, player.transform.position.z),
+                            new Vector2(entry.center.x, entry.center.z));
+
+                        KeyValuePair<Run, float> chosen;
+
+                        if (!byPlayer.TryGetValue(id, out chosen) || distance < chosen.Value)
+                        {
+                            byPlayer[id] = new KeyValuePair<Run, float>(entry, distance);
+                        }
+                    }
+                }
+                catch (Exception cause)
+                {
+                    // Um tick que lança mata o `timer.Every` e TODOS os
+                    // eventos congelam sem avisar ninguém. Cada evento
+                    // reclama por si, e os outros seguem.
+                    PrintWarning("tick do KOTH '" + entry.runId + "' falhou: " + cause.Message);
+                }
+            }
 
             try
             {
-                var inside = Inside(run);
-                var sides = Sides(inside);
-
-                // ####  A ORDEM IMPORTA  ####
-                //
-                // Primeiro o tempo total (um evento que estourou não
-                // pode ser capturado no mesmo tick), depois o domínio.
-                if (Elapsed(run) >= run.durationSeconds)
-                {
-                    Finish("expired", 0UL, "");
-                    return;
-                }
-
-                if (sides.Count == 1)
-                {
-                    var side = sides.First();
-
-                    // ####  A BARRA É DO EVENTO, E NÃO DO GRUPO  ####
-                    //
-                    // Decisão do dono (15/09/2026): o progresso NÃO
-                    // volta a zero quando o grupo troca. Quem chega
-                    // continua de onde o outro parou.
-                    //
-                    // A primeira versão zerava — era a §9.2 da
-                    // especificação, em que o progresso é do
-                    // CONTROLADOR e quem chega precisa neutralizá-lo
-                    // antes de começar o seu. Aqui é o contrário, e é
-                    // o que faz a virada no fim valer a pena: levar a
-                    // barra a 90% e morrer é perder o evento para quem
-                    // fechar os 10% que faltavam.
-                    //
-                    // `holder` passa a ser quem está capturando AGORA,
-                    // e serve só para a tela e o marcador dizerem de
-                    // quem é a vez.
-                    run.holder = side.Key;
-                    run.holderName = side.Value.name;
-                    run.progress += 1f;
-
-                    if (run.progress >= run.captureSeconds)
-                    {
-                        Finish("captured", side.Key, side.Value.name);
-                        return;
-                    }
-                }
-                else if (sides.Count == 0)
-                {
-                    // ####  ZONA VAZIA: O PADRÃO É NÃO PERDER NADA  ####
-                    //
-                    // `decayPerSecond` nasce ZERO no KOTH normal, pela
-                    // mesma razão do bloco acima: a porcentagem
-                    // conquistada permanece. O campo continua existindo
-                    // para o admin que quiser o contrário.
-                    //
-                    // Quem fecha um evento que ninguém terminou é o
-                    // teto de duração, não o decaimento.
-                    if (run.decayPerSecond > 0f)
-                    {
-                        run.progress = Mathf.Max(0f, run.progress - run.decayPerSecond);
-                    }
-
-                    // Sem ninguém dentro não há "vez de alguém": a
-                    // barra continua onde está, e a tela diz que a área
-                    // está livre.
-                    run.holder = 0UL;
-                }
-
-                // sides.Count > 1: contestado. Nada sobe, nada cai — o
-                // progresso fica onde está, e a barra diz por quê.
-
-                Draw(run, inside, sides, sides.Count > 1);
-                RefreshMarker(run, sides.Count > 1);
+                Draw(byPlayer, boards);
             }
             catch (Exception cause)
             {
-                // Um tick que lança mata o `timer.Every` e o evento
-                // congela sem avisar ninguém. Ele reclama e segue.
-                PrintWarning("tick do KOTH falhou: " + cause.Message);
+                PrintWarning("a barra do KOTH não pôde ser desenhada: " + cause.Message);
             }
         }
 
@@ -688,19 +808,19 @@ namespace Oxide.Plugins
             return sides;
         }
 
-        private void Finish(string reason, ulong winner, string winnerName)
+        private void Finish(Run current, string reason, ulong winner, string winnerName)
         {
-            if (run == null || run.closed) return;
+            if (current == null || current.closed) return;
 
-            run.closed = true;
+            current.closed = true;
 
             var payload = new JObject
             {
-                ["runId"] = run.runId,
+                ["runId"] = current.runId,
                 ["reason"] = reason,
                 ["teamId"] = winner.ToString(CultureInfo.InvariantCulture),
                 ["teamName"] = winnerName,
-                ["seconds"] = Mathf.RoundToInt(Elapsed(run)),
+                ["seconds"] = Mathf.RoundToInt(Elapsed(current)),
             };
 
             // Os beneficiários vão junto: quem paga é o agente, e sem
@@ -740,9 +860,9 @@ namespace Oxide.Plugins
             // ("padrão de expiração: sem vencedor"), e uma caixa que
             // aparece sozinha no mato ensina que não vale a pena
             // disputar — basta esperar o tempo acabar.
-            if (reason == "captured") SpawnReward(run);
+            if (reason == "captured") SpawnReward(current);
 
-            Teardown(reason);
+            Teardown(current.runId, reason);
         }
 
         // ============================================================
@@ -1057,9 +1177,21 @@ namespace Oxide.Plugins
         /// </summary>
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
-            if (run == null || run.banner == null) return null;
-            if (entity == null || entity.net == null || run.banner.net == null) return null;
-            if (entity.net.ID != run.banner.net.ID) return null;
+            if (runs.Count == 0) return null;
+            if (entity == null || entity.net == null) return null;
+
+            var mine = false;
+
+            foreach (var entry in runs.Values)
+            {
+                if (entry.banner == null || entry.banner.net == null) continue;
+                if (entry.banner.net.ID != entity.net.ID) continue;
+
+                mine = true;
+                break;
+            }
+
+            if (!mine) return null;
 
             if (info != null)
             {
@@ -1071,38 +1203,31 @@ namespace Oxide.Plugins
             return true;
         }
 
-        /// <summary>
-        /// Desmonta o evento.
-        ///
-        /// ####  O MUNDO VEM ANTES DA TELA  ####
-        ///
-        /// MEDIDO em 15/09/2026: quatro círculos ficaram no mapa depois
-        /// de eventos encerrados. A primeira versão limpava o CUI antes
-        /// de matar as entidades, e tudo num bloco só — um
-        /// `CuiHelper.DestroyUi` que lançasse (um jogador saindo no
-        /// meio) levava junto os `Kill` que vinham depois, e a bandeira
-        /// ficava plantada sem ninguém para derrubá-la.
-        ///
-        /// Agora o que está no MUNDO morre primeiro, e cada passo tem o
-        /// seu `try`: a tela de um jogador que saiu não pode custar uma
-        /// bandeira no mapa até o wipe.
-        /// </summary>
-        private void Teardown(string why)
+        private void Teardown(string runId, string why)
         {
-            if (run == null) return;
+            Run closing;
 
-            var closing = run;
+            if (!runs.TryGetValue(runId, out closing)) return;
 
-            run = null;
+            runs.Remove(runId);
 
-            try { if (closing.ticker != null) closing.ticker.Destroy(); }
-            catch (Exception e) { PrintWarning("o relógio do KOTH não parou: " + e.Message); }
+            // O relógio cai com o último: um `timer.Every` rodando para
+            // zero eventos é trabalho por nada, a cada segundo.
+            if (runs.Count == 0 && ticker != null)
+            {
+                try { ticker.Destroy(); }
+                catch (Exception e) { PrintWarning("o relógio do KOTH não parou: " + e.Message); }
+
+                ticker = null;
+            }
 
             // ####  PRIMEIRO O QUE ESTÁ NO CHÃO  ####
             Kill(closing.banner);
             Kill(closing.mapMarker);
             Kill(closing.mapLabel);
-            Forget();
+
+            // A lista de sobras passa a ser a dos que CONTINUAM de pé.
+            Remember();
 
             foreach (var id in closing.watching.ToArray())
             {
@@ -1137,60 +1262,75 @@ namespace Oxide.Plugins
         //  §5  A BARRA NA TELA
         // ============================================================
 
+        /// <summary>
+        /// A barra, uma por jogador.
+        ///
+        /// Recebe a escolha já feita pelo tick (quem está em qual
+        /// evento) e desenha uma vez. Ver o cabeçalho do `Tick`: dois
+        /// eventos sobrepostos desenhando cada um por si fariam a
+        /// porcentagem piscar na tela de quem está nos dois.
+        /// </summary>
         private void Draw(
-            Run current,
-            List<BasePlayer> inside,
-            Dictionary<ulong, Side> sides,
-            bool contested)
+            Dictionary<ulong, KeyValuePair<Run, float>> byPlayer,
+            Dictionary<string, Dictionary<ulong, Side>> boards)
         {
-            var percent = Percent(current);
             var seen = new HashSet<ulong>();
 
-            foreach (var player in inside)
+            foreach (var pair in byPlayer)
             {
-                seen.Add(player.userID.Get());
+                var player = BasePlayer.FindByID(pair.Key);
+
+                if (player == null) continue;
+
+                var current = pair.Value.Key;
+
+                Dictionary<ulong, Side> sides;
+
+                if (!boards.TryGetValue(current.runId, out sides)) continue;
+
+                seen.Add(pair.Key);
 
                 var soloWarning = current.requireTeam && player.currentTeam == 0UL;
+                var contested = sides.Count > 1;
 
-                // ####  QUANTOS SÃO OS SEUS, E QUANTOS SÃO OS OUTROS  ####
-                //
-                // Pedido do dono: a barra diz o tamanho da SUA equipe
-                // dentro da zona, e o resto vira um número só —
-                // "outros". Não se diz de que equipe são, nem onde
-                // estão: a spec proíbe publicar a posição de cada
-                // participante (§16), e saber que são "3 de um time e 2
-                // de outro" é meio caminho para isso.
-                //
-                // O número serve para uma decisão só, e ela é a que
-                // importa: dá para segurar, ou é hora de sair?
+                // Quantos são os seus, e quantos são os outros. Não se
+                // diz de que equipe são os outros: a §16 da spec proíbe
+                // publicar a posição de cada participante, e o número
+                // serve para a decisão que importa — dá para segurar,
+                // ou é hora de sair?
                 var mine = 0;
                 var others = 0;
 
-                foreach (var pair in sides)
+                foreach (var side in sides)
                 {
-                    if (player.currentTeam != 0UL && pair.Key == player.currentTeam) mine += pair.Value.members;
-                    else others += pair.Value.members;
+                    if (player.currentTeam != 0UL && side.Key == player.currentTeam) mine += side.Value.members;
+                    else others += side.Value.members;
                 }
 
                 CuiHelper.DestroyUi(player, UiRoot);
-                CuiHelper.AddUi(player, Hud(current, percent, contested, soloWarning, mine, others));
+                CuiHelper.AddUi(
+                    player,
+                    Hud(current, Percent(current), contested, soloWarning, mine, others));
+
+                current.watching.Add(pair.Key);
             }
 
-            // Quem saiu da zona perde a barra. Sem isto ela ficaria
-            // grudada na tela até o fim do evento — e o jogador acharia
-            // que ainda está pontuando.
-            foreach (var id in current.watching.ToArray())
+            // Quem saiu de TODAS as zonas perde a barra. Sem isto ela
+            // ficaria grudada na tela até o fim do evento — e o jogador
+            // acharia que ainda está pontuando.
+            foreach (var entry in runs.Values)
             {
-                if (seen.Contains(id)) continue;
+                foreach (var id in entry.watching.ToArray())
+                {
+                    if (seen.Contains(id)) continue;
 
-                var player = BasePlayer.FindByID(id);
+                    entry.watching.Remove(id);
 
-                if (player != null) CuiHelper.DestroyUi(player, UiRoot);
+                    var player = BasePlayer.FindByID(id);
+
+                    if (player != null) CuiHelper.DestroyUi(player, UiRoot);
+                }
             }
-
-            current.watching.Clear();
-
-            foreach (var id in seen) current.watching.Add(id);
         }
 
         /// <summary>

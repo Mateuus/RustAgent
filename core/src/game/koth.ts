@@ -99,8 +99,16 @@ interface Live {
 export class KothService {
   readonly #deps: KothDeps;
   readonly #secret = randomUUID();
-  /** O que este processo ergueu, por servidor. */
-  readonly #live = new Map<string, Live>();
+  /**
+   * O que este processo ergueu: por servidor, por run.
+   *
+   * ####  VÁRIOS AO MESMO TEMPO  ####
+   *
+   * Eram um por servidor. Viraram VAGAS — o admin decide quantas
+   * cabem, e o card de cada uma fica na tela do jogador até outro
+   * evento nascer ali. Ver Docs/KOTH/DECISOES-DO-DONO.md §9.
+   */
+  readonly #live = new Map<string, Map<number, Live>>();
   #stopped = false;
 
   constructor(deps: KothDeps) {
@@ -109,6 +117,33 @@ export class KothService {
 
   stop(): void {
     this.#stopped = true;
+  }
+
+  /** O único de pé naquele servidor, ou `null` se não houver exatamente um. */
+  #onlyRun(serverId: string): number | null {
+    const live = this.#liveOf(serverId);
+
+    if (live.size !== 1) return null;
+
+    return [...live.keys()][0] ?? null;
+  }
+
+  /** O que está de pé naquele servidor, por run. Nunca `undefined`. */
+  #liveOf(serverId: string): Map<number, Live> {
+    const found = this.#live.get(serverId);
+
+    if (found !== undefined) return found;
+
+    const created = new Map<number, Live>();
+
+    this.#live.set(serverId, created);
+
+    return created;
+  }
+
+  /** Quantos KOTH este processo tem de pé naquele servidor. */
+  liveCount(serverId: string): number {
+    return this.#liveOf(serverId).size;
   }
 
   // ------------------------------------------------------------
@@ -128,10 +163,6 @@ export class KothService {
     readonly arenaId?: number;
   }): Promise<{ readonly arena: KothArena; readonly runId: number; readonly grid: string }> {
     const { serverId } = input;
-
-    if (this.#live.has(serverId)) {
-      throw new KothCommandError('already_active', 'Já há um KOTH de pé neste servidor.');
-    }
 
     const worldKey = this.#deps.servers.worldKey(serverId);
 
@@ -222,7 +253,7 @@ export class KothService {
     this.#deps.arenas.markUsed(serverId, arena.id);
     this.#deps.arenas.markChecked(serverId, arena.id, { worldKey, grid });
 
-    this.#live.set(serverId, {
+    this.#liveOf(serverId).set(run.id, {
       runId: run.id,
       arenaId: arena.id,
       eventId,
@@ -258,11 +289,26 @@ export class KothService {
     }) !== null;
   }
 
-  /** Derruba o que estiver de pé. */
-  async stopRun(serverId: string, reason = 'painel'): Promise<void> {
-    await this.#command(serverId, 'origemz.koth stop', { allow: ['not_active'] });
+  /**
+   * Derruba um KOTH, ou todos os daquele servidor.
+   *
+   * `runId` ausente = todos. É o que o painel manda no "parar tudo",
+   * e o que o agente usa para limpar um servidor.
+   */
+  async stopRun(serverId: string, reason = 'painel', runId?: number): Promise<void> {
+    const alvo = runId === undefined ? '' : ` ${String(runId)}`;
 
-    this.#closeLocal(serverId, 'cancelled', reason);
+    await this.#command(serverId, `origemz.koth stop${alvo}`, { allow: ['not_active'] });
+
+    if (runId === undefined) {
+      for (const id of [...this.#liveOf(serverId).keys()]) {
+        this.#closeLocal(serverId, id, 'cancelled', reason);
+      }
+
+      return;
+    }
+
+    this.#closeLocal(serverId, runId, 'cancelled', reason);
   }
 
   async status(serverId: string): Promise<KothStatus> {
@@ -324,7 +370,7 @@ export class KothService {
       case 'captured': {
         const winner = push.teamName === undefined || push.teamName === '' ? 'uma equipe' : push.teamName;
 
-        this.#closeLocal(serverId, 'ended', 'captured');
+        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', 'captured');
 
         this.#deps.logger.info(
           { server: serverId, team: push.teamId, name: push.teamName, members: push.members?.length ?? 0 },
@@ -343,7 +389,7 @@ export class KothService {
       }
 
       case 'expired': {
-        this.#closeLocal(serverId, 'ended', 'expired');
+        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', 'expired');
 
         this.#deps.logger.info({ server: serverId }, 'KOTH expirou sem vencedor');
 
@@ -362,7 +408,7 @@ export class KothService {
         // O plugin desmontou (comando, `Unload`, ou fim normal). Se a
         // run ainda estiver aberta aqui, ela fecha — uma run aberta
         // com o mapa vazio faz o painel dizer "1 no ar" para sempre.
-        this.#closeLocal(serverId, 'ended', push.reason ?? 'plugin');
+        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', push.reason ?? 'plugin');
 
         return;
       }
@@ -372,16 +418,45 @@ export class KothService {
     }
   }
 
-  /** Fecha a run local, se houver. Chamar duas vezes é inofensivo. */
-  #closeLocal(serverId: string, status: 'ended' | 'cancelled', why: string): void {
-    const live = this.#live.get(serverId);
+  /**
+   * Fecha uma run local, se houver. Chamar duas vezes é inofensivo.
+   *
+   * ####  O AVISO SEM `runId`  ####
+   *
+   * Um plugin de versão anterior grita o desfecho sem dizer de qual
+   * evento ele é — e com vagas, "o evento" deixou de ser óbvio. Com
+   * UM de pé, fechar aquele é o certo e é o que se espera. Com dois,
+   * fechar o errado seria pior que não fechar: o painel mostraria
+   * terminado o que ainda está no mapa.
+   */
+  #closeLocal(
+    serverId: string,
+    runId: number,
+    status: 'ended' | 'cancelled',
+    why: string,
+  ): void {
+    const live = this.#liveOf(serverId);
+    const target = runId > 0 ? runId : this.#onlyRun(serverId);
 
-    if (live === undefined) return;
+    if (target === null) {
+      this.#deps.logger.warn(
+        { server: serverId, why, live: live.size },
+        'aviso de KOTH sem runId com mais de um evento de pé: nenhum foi fechado',
+      );
 
-    this.#live.delete(serverId);
-    this.#deps.events.endRun(live.runId, status);
+      return;
+    }
 
-    this.#deps.logger.debug({ server: serverId, run: live.runId, why }, 'run de KOTH fechada');
+    const found = live.get(target);
+
+    if (found === undefined) return;
+
+    runId = target;
+
+    live.delete(runId);
+    this.#deps.events.endRun(found.runId, status);
+
+    this.#deps.logger.debug({ server: serverId, run: found.runId, why }, 'run de KOTH fechada');
   }
 
   /**
@@ -410,17 +485,19 @@ export class KothService {
   async reconcile(serverId: string): Promise<void> {
     if (this.#stopped) return;
 
-    const open = this.#deps.events.activeRun(serverId);
-    // Uma run de masmorra não é nossa: ela tem `dungeonId`.
-    const mine = open !== null && open.dungeonId === null ? open : null;
+    // As runs de KOTH abertas no banco daquele servidor. A masmorra
+    // não é nossa: ela tem `dungeonId`.
+    const open = this.#deps.events
+      .runs({ serverId, limit: 200 })
+      .filter((run) => run.endedAt === null && run.dungeonId === null);
 
     let status: KothStatus;
 
     try {
       status = await this.status(serverId);
     } catch (cause) {
-      // Sem resposta não se decide nada. Fechar a run aqui seria
-      // apagar o registro de um evento que pode estar acontecendo.
+      // Sem resposta não se decide nada. Fechar as runs aqui seria
+      // apagar o registro de eventos que podem estar acontecendo.
       this.#deps.logger.warn(
         { server: serverId, error: toError(cause).message },
         'não consegui conferir o KOTH do servidor',
@@ -429,42 +506,48 @@ export class KothService {
       return;
     }
 
-    if (status.active === true) {
-      const runId = Number(status.runId ?? '0');
+    const live = this.#liveOf(serverId);
+    const noChao = new Map((status.events ?? []).map((event) => [Number(event.runId), event]));
 
-      if (mine !== null && runId === mine.id) {
-        this.#live.set(serverId, {
-          runId: mine.id,
+    // ---- o que está no chão ----
+    for (const [runId] of noChao) {
+      const known = open.find((run) => run.id === runId);
+
+      if (known !== undefined) {
+        live.set(runId, {
+          runId,
           arenaId: 0,
-          eventId: mine.eventId,
-          startedAt: mine.startedAt ?? Date.now(),
+          eventId: known.eventId,
+          startedAt: known.startedAt ?? Date.now(),
         });
 
         this.#deps.logger.info(
-          { server: serverId, run: mine.id },
+          { server: serverId, run: runId },
           'KOTH readotado: ele continuou de pé enquanto o agente reiniciava',
         );
 
-        return;
+        continue;
       }
 
       // De pé sem dono conhecido. Parar é o certo: ninguém mais vai
       // fechá-lo, e a bandeira ficaria no mapa até o wipe.
-      await this.stopRun(serverId, 'orfao');
+      await this.stopRun(serverId, 'orfao', runId);
 
       this.#deps.logger.warn(
-        { server: serverId, runId: status.runId },
+        { server: serverId, run: runId },
         'havia um KOTH de pé que este agente não conhecia: derrubado',
       );
-
-      return;
     }
 
-    if (mine !== null) {
-      this.#deps.events.endRun(mine.id, 'ended');
+    // ---- o que o banco diz que existe, e o chão não ----
+    for (const run of open) {
+      if (noChao.has(run.id)) continue;
+
+      this.#deps.events.endRun(run.id, 'ended');
+      live.delete(run.id);
 
       this.#deps.logger.info(
-        { server: serverId, run: mine.id },
+        { server: serverId, run: run.id },
         'run de KOTH fechada: não há território de pé no servidor',
       );
     }

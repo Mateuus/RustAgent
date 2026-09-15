@@ -108,14 +108,35 @@ function harness(): Harness {
             }
 
             if (command.startsWith('origemz.koth status')) {
-              const open = events.activeRun(SERVER);
+              // O "jogo" deste teste responde o que o banco diz estar
+              // de pé — e na forma nova: uma LISTA, mesmo com um só.
+              const abertas = events
+                .runs({ serverId: SERVER, limit: 50 })
+                .filter((run) => run.endedAt === null && run.dungeonId === null);
 
               return Promise.resolve(
-                JSON.stringify(
-                  open === null
-                    ? { ok: true, active: false }
-                    : { ok: true, active: true, runId: String(open.id) },
-                ),
+                JSON.stringify({
+                  ok: true,
+                  active: abertas.length > 0,
+                  count: abertas.length,
+                  events: abertas.map((run) => ({
+                    runId: String(run.id),
+                    name: 'Colina do Norte',
+                    grid: run.grid ?? 'E7',
+                    x: run.x ?? 0,
+                    z: run.z ?? 0,
+                    radius: 30,
+                    percent: 0,
+                    progress: 0,
+                    captureSeconds: 300,
+                    holder: '0',
+                    holderName: '',
+                    contested: false,
+                    elapsed: 1,
+                    durationSeconds: 1800,
+                    inside: 0,
+                  })),
+                }),
               );
             }
 
@@ -287,15 +308,52 @@ describe('erguer', () => {
     expect(h.events.activeRun(SERVER)).toBeNull();
   });
 
-  it('não ergue dois no mesmo servidor', async () => {
+  it('ergue VÁRIOS no mesmo servidor: são vagas', async () => {
     const h = harness();
 
-    arena(h);
+    // Dois territórios, dois eventos ao mesmo tempo. Quem conta as
+    // vagas é o agendador, com o limite do admin; o serviço ergue o
+    // que lhe pedirem.
+    arena(h, { label: 'Colina' });
+    arena(h, { label: 'Vale', x: 500, z: 500 });
+
+    const primeiro = await h.service.start({ serverId: SERVER });
+    const segundo = await h.service.start({ serverId: SERVER });
+
+    expect(primeiro.runId).not.toBe(segundo.runId);
+    expect(h.service.liveCount(SERVER)).toBe(2);
+
+    // E o sorteio não repetiu o mesmo lugar.
+    expect(primeiro.arena.id).not.toBe(segundo.arena.id);
+  });
+
+  it('derrubar sem dizer qual derruba todos', async () => {
+    const h = harness();
+
+    arena(h, { label: 'Colina' });
+    arena(h, { label: 'Vale', x: 500, z: 500 });
+
+    await h.service.start({ serverId: SERVER });
     await h.service.start({ serverId: SERVER });
 
-    await expect(h.service.start({ serverId: SERVER })).rejects.toMatchObject({
-      reason: 'already_active',
-    });
+    await h.service.stopRun(SERVER);
+
+    expect(h.service.liveCount(SERVER)).toBe(0);
+  });
+
+  it('derrubar UM deixa o outro de pé', async () => {
+    const h = harness();
+
+    arena(h, { label: 'Colina' });
+    arena(h, { label: 'Vale', x: 500, z: 500 });
+
+    const primeiro = await h.service.start({ serverId: SERVER });
+
+    await h.service.start({ serverId: SERVER });
+    await h.service.stopRun(SERVER, 'painel', primeiro.runId);
+
+    expect(h.service.liveCount(SERVER)).toBe(1);
+    expect(h.events.run(primeiro.runId)?.status).toBe('cancelled');
   });
 
   it('com o servidor parado, diz isso', async () => {
@@ -490,12 +548,19 @@ describe('o desfecho', () => {
     // pé: bandeira sem dono, que não sairia do mapa até o wipe.
     h.replies.set(
       'origemz.koth status',
-      JSON.stringify({ ok: true, active: true, runId: '999' }),
+      JSON.stringify({
+        ok: true,
+        active: true,
+        count: 1,
+        events: [{ runId: '999', name: 'Fantasma', grid: 'A1' }],
+      }),
     );
 
     await h.service.reconcile(SERVER);
 
-    expect(h.sent.some((command) => command.startsWith('origemz.koth stop'))).toBe(true);
+    // E o comando leva o id: derrubar TUDO por causa de um órfão
+    // levaria junto os eventos que estão acontecendo.
+    expect(h.sent.some((command) => command === 'origemz.koth stop 999')).toBe(true);
   });
 
   it('sem nada de pé, a run aberta é fechada', async () => {

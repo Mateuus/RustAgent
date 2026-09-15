@@ -282,3 +282,44 @@ export class KothArenasRepository {
     return pool[index] ?? null;
   }
 }
+
+// ------------------------------------------------------------
+//  AS VAGAS
+// ------------------------------------------------------------
+
+/** O padrão, num lugar só: uma vaga, que é o que sempre foi. */
+export const DEFAULT_KOTH_SETTINGS: KothSettings = { maxConcurrent: 1 };
+
+export interface KothSettings {
+  /** Quantos KOTH podem estar de pé ao mesmo tempo naquele servidor. */
+  readonly maxConcurrent: number;
+}
+
+export class KothSettingsRepository {
+  readonly #db: AgentDatabase;
+
+  constructor(db: AgentDatabase) {
+    this.#db = db;
+  }
+
+  of(serverId: string): KothSettings {
+    const row = this.#db
+      .prepare('SELECT max_concurrent FROM koth_settings WHERE server_id = ?')
+      .get(serverId) as { readonly max_concurrent: number } | undefined;
+
+    return row === undefined ? DEFAULT_KOTH_SETTINGS : { maxConcurrent: row.max_concurrent };
+  }
+
+  save(serverId: string, settings: KothSettings): KothSettings {
+    this.#db
+      .prepare(
+        `INSERT INTO koth_settings (server_id, max_concurrent, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (server_id)
+         DO UPDATE SET max_concurrent = excluded.max_concurrent, updated_at = excluded.updated_at`,
+      )
+      .run(serverId, settings.maxConcurrent, Date.now());
+
+    return this.of(serverId);
+  }
+}

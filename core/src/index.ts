@@ -64,10 +64,23 @@ import { WorldEventsRepository } from './db/world-events-repository.js';
 import { BlueprintMaterializer } from './dungeons/materializer.js';
 import { seedDungeonBlueprints, seedDungeonLayouts } from './dungeons/seed.js';
 import { DungeonSync } from './dungeons/sync.js';
-import { TeamsService } from './game/teams.js';
+import { TeamCommandError, TeamsService } from './game/teams.js';
+import {
+  createTeamScreenProvider,
+  TEAM_ACTION_PREFIX,
+  TEAM_SCREEN_ID,
+  withTeamTab,
+} from './game/ui-team-screen.js';
+import {
+  TEAM_RANK_LABEL,
+  rankCan,
+  rankOutranks,
+  teamNameSchema,
+  type TeamPower,
+} from './types/teams.js';
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
-import { KothArenasRepository } from './db/koth-arenas-repository.js';
+import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
@@ -1542,6 +1555,7 @@ async function main(): Promise<void> {
   // mapa ontem" e uma pergunta so, e duas tabelas seriam duas
   // respostas para ela. O que e proprio dele sao os TERRITORIOS.
   const kothArenas = new KothArenasRepository(db);
+  const kothSettings = new KothSettingsRepository(db);
   const kothService = new KothService({
     arenas: kothArenas,
     events: worldEventsRepository,
@@ -1650,6 +1664,33 @@ async function main(): Promise<void> {
     );
   }
 
+  // ####  E A ABA EQUIPE, PELA MESMA RAZAO  ####
+  //
+  // O menu gravado antes desta frente não tem onde o jogador ver a
+  // equipe dele. A edição é a mesma da aba CONFIGURAÇÕES: um botão
+  // a mais no fim da barra, copiado do vizinho, e a tela que ele
+  // abre. Ver game/ui-team-screen.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withTeamTab(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'a aba EQUIPE entrou neste menu: é onde o jogador vê e administra a equipe dele',
+    );
+  }
+
   // ####  A PÁGINA RANKING DO MENU DO JOGO  ####
   //
   // Ela nasce AQUI, e não lá embaixo junto do calendário, porque o
@@ -1684,6 +1725,22 @@ async function main(): Promise<void> {
   // fazer. Ver game/ui-streamer-screen.ts.
   const streamerScreens = createStreamerScreenProvider({
     profileOf: (steamId) => streamerRepository.get(steamId ?? ''),
+  });
+
+  // ####  E A ABA EQUIPE, QUE PERGUNTA AO JOGO  ####
+  //
+  // Ela é a única deste grupo que sai do agente a cada abertura: a
+  // equipe é do Rust, e a leitura é um comando de RCON. É caro de
+  // propósito — a equipe muda a cada convite aceito, e um cache
+  // aqui mostraria no jogo uma equipe que já se desfez, com botões
+  // que agiriam sobre ela.
+  //
+  // `teamOf` LANÇA com o servidor fora do ar, e o provedor conta
+  // com isso: a tela precisa saber a diferença entre "você não tem
+  // equipe" e "não consegui perguntar".
+  const teamScreens = createTeamScreenProvider({
+    teamOf: (serverId, steamId) => teamsService.teamOf(serverId, steamId),
+    maxSizeOf: (serverId) => teamsService.settingsOf(serverId).maxSize,
   });
 
   // ####  E A PÁGINA REGRAS, QUE VAI AO BANCO E É SÍNCRONA  ####
@@ -1799,6 +1856,24 @@ async function main(): Promise<void> {
           return fromStreamer;
         }
 
+        // ####  E A ABA EQUIPE  ####
+        //
+        // Família de endereços (`tela-equipe`,
+        // `tela-equipe:kick:765…`), como a loja e o ranking — e por
+        // isso perguntada pelo prefixo. Ela olha o `steamId` do
+        // pedido: a equipe que ela mostra é a de quem abriu.
+        //
+        // Nunca devolve `null` para um endereço seu, nem quando o
+        // RCON está fora: cair no caminho normal serviria o
+        // ESQUELETO gravado — o "Carregando…" — e ele não é
+        // volátil, então o servidor inteiro ficaria com ele por
+        // cinco minutos.
+        const fromTeam = await teamScreens(input);
+
+        if (fromTeam !== null) {
+          return fromTeam;
+        }
+
         // ####  E A PÁGINA REGRAS  ####
         //
         // Id exato (`tela-regras`) mais a família da seção e da
@@ -1880,7 +1955,41 @@ async function main(): Promise<void> {
       // O `offerId` que não é de uma oferta pode ser o slug de um
       // kit: os dois entram pelo mesmo botão. Ver `fallback` em
       // game/ui-store-bridge.ts.
-      fallback: async ({ serverId, steamId, offerId, document, screenId }) => {
+      fallback: async ({ serverId, steamId, offerId, document, screenId, value }) => {
+        // ####  E OS BOTÕES DA ABA EQUIPE  ####
+        //
+        // `team:name` (com o texto digitado), `team:rank:<steamId>`,
+        // `team:leader:<steamId>`, `team:kick:<steamId>`,
+        // `team:leave`. Mesma carona das missões, pelo mesmo motivo:
+        // o canal já tem token de sessão, trava de duplo clique e
+        // resposta com a tela seguinte.
+        //
+        // O SteamID de quem clicou vem da CONEXÃO (o plugin o tira
+        // dela), nunca do `offerId` — o que vem no endereço é sempre
+        // o ALVO, e ele é conferido contra a equipe de quem pediu.
+        if (offerId.startsWith(TEAM_ACTION_PREFIX)) {
+          const outcome = await runTeamAction({
+            service: teamsService,
+            serverId,
+            steamId,
+            action: offerId.slice(TEAM_ACTION_PREFIX.length),
+            value,
+          });
+
+          // ####  O OK VOLTA PARA A LISTA, E NÃO PARA A PERGUNTA  ####
+          //
+          // O clique costuma vir da tela de confirmação
+          // (`tela-equipe:kick:765…`). Voltar para ELA depois de
+          // expulsar mostraria "esse jogador não está mais na
+          // equipe" — a pergunta sobre algo que acabou de
+          // acontecer. A lista é o lugar de onde se veio e para
+          // onde se quer voltar, e ela chega remontada do jogo.
+          return {
+            ...outcome,
+            screen: buildResult(document, outcome.ok, outcome.message, null, TEAM_SCREEN_ID),
+          };
+        }
+
         // ####  O BOTÃO DE MISSÃO PEGA CARONA AQUI  ####
         //
         // `quest:accept:<id>`, `quest:claim:<pq>`, `quest:cancel:<pq>`.
@@ -3444,6 +3553,9 @@ async function main(): Promise<void> {
   const kothScheduler = new KothScheduler({
     events: worldEventsRepository,
     koth: kothService,
+    // Quantas vagas aquele servidor tem. Sem linha na tabela, uma —
+    // que é o que sempre foi. Ver a migração 092.
+    maxConcurrent: (serverId) => kothSettings.of(serverId).maxConcurrent,
     servers: {
       ids: () => supervisor.ids(),
       onlineCount: onlinePlayersOf,
@@ -3705,6 +3817,7 @@ async function main(): Promise<void> {
     },
     koth: {
       arenas: kothArenas,
+      settings: kothSettings,
       servers: repository,
       koth: kothService,
     },
@@ -3943,6 +4056,179 @@ main().catch((error: unknown) => {
 //  problema — e a daqui seria a mais pobre, porque este ponto não
 //  sabe por que a regra existe.
 // ============================================================
+
+// ============================================================
+//  O CLIQUE DA ABA EQUIPE
+//
+//  ####  A PERMISSÃO É COBRADA AQUI, E NÃO NA TELA  ####
+//
+//  A tela desenha o botão pela mesma tabela (`rankCan`), mas quem
+//  desenha não é quem decide: o endereço de um botão é digitável no
+//  F1, e um jogador que nunca viu o botão de expulsar pode mandar
+//  o clique dele. Então a pergunta é feita de novo, aqui, contra a
+//  equipe que o JOGO responde agora.
+//
+//  ####  QUEM CLICOU NÃO VEM DO CLIQUE  ####
+//
+//  O `steamId` sai da conexão, lá no plugin. O que viaja no
+//  endereço é o ALVO — e ele só vale se estiver na MESMA equipe de
+//  quem pediu. É isso que impede um pacote forjado de expulsar
+//  alguém de outro time.
+//
+//  ####  E A EQUIPE É RELIDA, SEMPRE  ####
+//
+//  Entre o desenho da tela e o clique, o jogador pode ter sido
+//  expulso, a equipe pode ter sido desfeita, e o líder pode ser
+//  outro. Agir sobre o que a tela mostrava seria agir sobre o
+//  passado.
+// ============================================================
+
+async function runTeamAction(input: {
+  readonly service: TeamsService;
+  readonly serverId: string;
+  /** Quem clicou. Da CONEXÃO, nunca do endereço. */
+  readonly steamId: string;
+  /** O que veio depois do `team:` — `name`, `kick:765…`. */
+  readonly action: string;
+  /** O que ele escreveu, quando o clique veio do campo de texto. */
+  readonly value: string | undefined;
+}): Promise<{ readonly ok: boolean; readonly message: string }> {
+  const [verb, target] = input.action.split(':');
+
+  try {
+    const team = await input.service.teamOf(input.serverId, input.steamId);
+
+    if (team === null) {
+      return { ok: false, message: 'Você não está em uma equipe.' };
+    }
+
+    const viewer = team.members.find((member) => member.steamId === input.steamId);
+
+    if (viewer === undefined) {
+      // O jogo respondeu uma equipe em que quem perguntou não está.
+      // Não deveria acontecer — e por isso mesmo não se age.
+      return { ok: false, message: 'Não consegui confirmar seu cargo na equipe. Reabra o menu.' };
+    }
+
+    // ----------------------------------------------------------
+    //  SAIR — a única ação que se faz sobre si mesmo
+    //
+    //  Ela vai pelo `kick`, e não por um comando novo: o
+    //  `RemovePlayer` do jogo já limpa a equipe do jogador, promove
+    //  o próximo líder e desfaz a equipe que esvaziou (medido no
+    //  decompilado). Um caminho próprio para sair teria de
+    //  reimplementar as três coisas.
+    // ----------------------------------------------------------
+    if (verb === 'leave') {
+      const last = team.members.length <= 1;
+
+      await input.service.kick(input.serverId, team.teamId, input.steamId);
+
+      return {
+        ok: true,
+        message: last
+          ? 'Você saiu, e a equipe foi desfeita.'
+          : 'Você saiu da equipe. Para voltar, peça um convite.',
+      };
+    }
+
+    // ----------------------------------------------------------
+    //  O NOME
+    // ----------------------------------------------------------
+    if (verb === 'name') {
+      if (!rankCan(viewer.rank, 'rename')) {
+        return { ok: false, message: 'Só o líder muda o nome da equipe.' };
+      }
+
+      // O texto vem CRU do cliente: ele não passou por régua
+      // nenhuma no caminho. A daqui é a mesma do painel, de
+      // propósito — um nome que o admin não conseguiria salvar não
+      // pode entrar pelo jogo.
+      const parsed = teamNameSchema.safeParse(input.value ?? '');
+
+      if (!parsed.success) {
+        const why = parsed.error.issues[0]?.message ?? 'nome inválido';
+
+        return { ok: false, message: `Esse nome não serve: ${why}.` };
+      }
+
+      const saved = await input.service.rename(input.serverId, team.teamId, parsed.data);
+
+      return { ok: true, message: `A equipe agora se chama ${saved.name}.` };
+    }
+
+    // ----------------------------------------------------------
+    //  AS TRÊS QUE TÊM ALVO
+    // ----------------------------------------------------------
+    const power: TeamPower | null =
+      verb === 'rank' ? 'rank' : verb === 'leader' ? 'leader' : verb === 'kick' ? 'kick' : null;
+
+    if (power === null || target === undefined || !/^\d{17}$/.test(target)) {
+      return { ok: false, message: 'Este botão não é mais válido. Reabra o menu.' };
+    }
+
+    // O alvo tem de estar NA EQUIPE DE QUEM PEDIU. É esta linha que
+    // impede um endereço forjado de alcançar outro time: a lista
+    // veio do jogo, para a equipe de quem clicou.
+    const member = team.members.find((entry) => entry.steamId === target);
+
+    if (member === undefined) {
+      return { ok: false, message: 'Esse jogador não está mais na equipe.' };
+    }
+
+    if (member.steamId === viewer.steamId) {
+      return { ok: false, message: 'Essa ação não é sobre você. Para sair, use SAIR DA EQUIPE.' };
+    }
+
+    if (!rankCan(viewer.rank, power) || !rankOutranks(viewer.rank, member.rank)) {
+      return {
+        ok: false,
+        message: `Seu cargo (${TEAM_RANK_LABEL[viewer.rank].toLowerCase()}) não permite isso.`,
+      };
+    }
+
+    if (verb === 'rank') {
+      // Um botão só, que alterna: o cargo já está escrito ao lado,
+      // e o destino é decidido pelo que ele é AGORA — relido acima.
+      const next = member.rank === 'member' ? 'officer' : 'member';
+
+      await input.service.setRank({
+        serverId: input.serverId,
+        teamId: team.teamId,
+        steamId: member.steamId,
+        rank: next,
+        grantedBy: input.steamId,
+      });
+
+      return {
+        ok: true,
+        message:
+          next === 'officer'
+            ? `${member.name} agora é oficial da equipe.`
+            : `${member.name} voltou a ser membro.`,
+      };
+    }
+
+    if (verb === 'leader') {
+      await input.service.setLeader(input.serverId, team.teamId, member.steamId);
+
+      return { ok: true, message: `${member.name} agora é o líder da equipe.` };
+    }
+
+    await input.service.kick(input.serverId, team.teamId, member.steamId);
+
+    return { ok: true, message: `${member.name} foi removido da equipe.` };
+  } catch (cause) {
+    // O `TeamCommandError` já vem com a frase certa em português —
+    // "O servidor não está com o RCON de pé", "Essa equipe não
+    // existe mais". É ela que o jogador precisa ler.
+    return {
+      ok: false,
+      message:
+        cause instanceof TeamCommandError ? cause.message : 'Não deu para fazer isso agora.',
+    };
+  }
+}
 
 async function runQuestAction(input: {
   readonly service: QuestsService | null;

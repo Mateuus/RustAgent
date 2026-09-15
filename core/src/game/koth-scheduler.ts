@@ -46,6 +46,8 @@ export const KOTH_RETRY_MS = 120_000;
 export interface KothSchedulerDeps {
   readonly events: WorldEventsRepository;
   readonly koth: KothService;
+  /** Quantas vagas de KOTH aquele servidor tem. Ver a migração 092. */
+  readonly maxConcurrent: (serverId: string) => number;
   readonly servers: {
     readonly ids: () => readonly string[];
     /** `null` = o agente não conseguiu contar. Adiar é o certo. */
@@ -193,7 +195,28 @@ export class KothScheduler {
    * instante é um evento que quase nunca acontece.
    */
   async #whyNot(event: WorldEvent, serverId: string): Promise<string | null> {
-    if (this.#deps.events.activeRun(serverId) !== null) return 'já há um evento de pé';
+    // ####  AS VAGAS  ####
+    //
+    // Era "já há um evento de pé, adie". Agora o limite é do ADMIN:
+    // ele diz quantos KOTH cabem no servidor dele, e o relógio só
+    // adia quando todas as vagas estão ocupadas.
+    //
+    // A razão do limite continua verdadeira — dois eventos dividem a
+    // população e os dois ficam vazios —, mas quem conhece o servidor
+    // é quem cuida dele.
+    const vagas = this.#deps.maxConcurrent(serverId);
+    const ocupadas = this.#deps.koth.liveCount(serverId);
+
+    if (ocupadas >= vagas) {
+      return `as ${String(vagas)} vaga(s) de KOTH estão ocupadas`;
+    }
+
+    // A masmorra continua sendo bloqueio: ela é de outra família, e
+    // duas famílias ao mesmo tempo é a divisão de população que o
+    // limite acima existe para evitar.
+    const active = this.#deps.events.activeRun(serverId);
+
+    if (active !== null && active.dungeonId !== null) return 'há uma masmorra de pé';
 
     const online = await this.#deps.servers.onlineCount(serverId);
 
