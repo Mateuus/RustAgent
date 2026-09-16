@@ -35,6 +35,7 @@ import {
   Menu,
   Package,
   Package2,
+  Palette,
   Puzzle,
   Scale,
   ScrollText,
@@ -94,6 +95,17 @@ const NAV: readonly NavItem[] = [
     label: 'Itens',
     hint: 'O catálogo do jogo, guardado no agente — ele responde com os servidores parados',
     Icon: Package,
+  },
+  // As skins ficam colados em Itens porque são a mesma família: o
+  // item custom é um item do jogo com nome e ação nossos; a skin é
+  // um item do jogo com a CARA nossa. Quem cadastra uma acabou de
+  // procurar o item base na outra. E este é um CATÁLOGO, não um
+  // evento — nada aqui nasce no mapa.
+  {
+    href: '/workshop/',
+    label: 'Skins',
+    hint: 'A arte da casa nos itens do jogo: o item já nasce com ela, para quem tem a permissão',
+    Icon: Palette,
   },
   {
     href: '/banidos/',

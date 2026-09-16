@@ -75,6 +75,11 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
+
+// [PluginReference] e o tipo `Plugin`, para falar com o
+// OrigemZImages — quem guarda os bytes da arte das bandeiras.
+using Oxide.Core.Plugins;
+
 using UnityEngine;
 
 namespace Oxide.Plugins
@@ -447,6 +452,17 @@ namespace Oxide.Plugins
         private string blueprintDir;
 
         /// <summary>
+        /// Quem guarda os PNGs que o agente mandou. Ver a seção
+        /// "A ARTE DAS BANDEIRAS".
+        ///
+        /// O Oxide zera este campo quando o OrigemZImages é
+        /// descarregado, então TODA chamada confere o null antes. Uma
+        /// bandeira branca não pode derrubar a colagem da masmorra.
+        /// </summary>
+        [PluginReference]
+        private Plugin OrigemZImages;
+
+        /// <summary>
         /// Uma masmorra viva: o que foi erguido e como desfazer.
         /// </summary>
         private class ActiveDungeon
@@ -523,6 +539,19 @@ namespace Oxide.Plugins
             public bool ready;
             /// <summary>Desiste se a construção não terminar. Ver `buildTimeout`.</summary>
             public Timer watchdog;
+
+            /// <summary>O que a planta pediu e o que de fato nasceu.</summary>
+            public readonly PasteReport paste = new PasteReport();
+
+            /// <summary>
+            /// As placas da planta, para pintar. Ver `PaintBanners`.
+            ///
+            /// Elas vivem AQUI, e não numa lista local da colagem,
+            /// porque a arte pode chegar depois: o
+            /// `OnOrigemZImageStored` precisa reencontrar a bandeira
+            /// que ficou branca minutos atrás.
+            /// </summary>
+            public readonly List<BannerMark> banners = new List<BannerMark>();
 
             // ####  O QUE TEM DENTRO  ####  (frente do loot)
 
@@ -1321,9 +1350,23 @@ namespace Oxide.Plugins
 
                     var ms = (int)(DateTime.UtcNow - dungeon.startedAt).TotalMilliseconds;
 
+                    // ####  O NÚMERO QUE O ADMIN LIA ERA O ERRADO  ####
+                    //
+                    // `dungeon.entities.Count` é quem foi ADOTADO, e
+                    // adoção acontece no nascimento. Peça que o jogo
+                    // matou meio segundo depois — por instabilidade,
+                    // que é justamente o que mais acontece numa planta
+                    // grande — continuava contando. O relatório sempre
+                    // parecia sucesso. `alive` é a contagem de verdade.
+                    var report = dungeon.paste;
+                    report.diedAfterSpawn = CountDead(dungeon);
+
+                    var alive = dungeon.entities.Count - report.diedAfterSpawn;
+
                     requester?.Reply("Masmorra '" + slug + "' de pé: "
-                                     + dungeon.entities.Count + " peças em " + ms + " ms. "
-                                     + "A entrada está em " + Grid(surface) + ".");
+                                     + alive + " peças em " + ms + " ms. "
+                                     + "A entrada está em " + Grid(surface) + "."
+                                     + (report.requested > 0 ? " Da planta: " + report.Human() + "." : ""));
 
                     Report("built", new Dictionary<string, object>
                     {
@@ -1331,11 +1374,51 @@ namespace Oxide.Plugins
                         ["x"] = surface.x,
                         ["z"] = surface.z,
                         ["grid"] = Grid(surface),
-                        ["entities"] = dungeon.entities.Count,
+                        ["entities"] = alive,
+                        ["adopted"] = dungeon.entities.Count,
                         ["ms"] = ms,
+
+                        // O que a PLANTA pediu e o que dela sobrou. Sem
+                        // estes campos, "600 peças" no painel é um
+                        // número que ninguém consegue conferir.
+                        ["blueprintRequested"] = report.requested,
+                        ["blueprintPlaced"] = report.placed,
+                        ["blueprintSkippedPrefab"] = report.skippedPrefab,
+                        ["blueprintSkippedVehicle"] = report.skippedVehicle,
+                        ["blueprintSkippedError"] = report.skippedError,
+                        ["blueprintSkinRejected"] = report.skinRejected,
+                        ["diedAfterSpawn"] = report.diedAfterSpawn,
+
+                        // As bandeiras. `bannersPending` é o número que
+                        // interessa ao painel: ele não é erro, é "a
+                        // arte ainda não subiu para o servidor" — e o
+                        // caminho de conserto é mandar a imagem, não
+                        // reconstruir a masmorra.
+                        ["bannersFound"] = report.bannersFound,
+                        ["bannersPainted"] = report.bannersPainted,
+                        ["bannersPending"] = report.bannersPending,
+                        ["bannersFailed"] = report.bannersFailed,
                     });
                 });
             });
+        }
+
+        /// <summary>
+        /// Quantas peças adotadas o jogo já matou.
+        ///
+        /// A marca do alçapão não entra: `ConvertToHatch` a mata de
+        /// propósito e a tira da lista antes de chegar aqui.
+        /// </summary>
+        private static int CountDead(ActiveDungeon dungeon)
+        {
+            var dead = 0;
+
+            foreach (var entity in dungeon.entities)
+            {
+                if (entity == null || entity.IsDestroyed) dead++;
+            }
+
+            return dead;
         }
 
         /// <summary>
@@ -1605,6 +1688,15 @@ namespace Oxide.Plugins
             dungeon.entities.Clear();
             dungeon.entranceHatch = null;
             dungeon.exitHatch = null;
+
+            // As texturas das bandeiras NÃO são apagadas aqui de
+            // propósito: `Signage.DoServerDestroy` já chama
+            // `FileStorage.server.RemoveAllByEntity(net.ID)` — MEDIDO
+            // no decompilado, 16/09/2026 —, e o `Kill()` acima passa
+            // por ele. O que se limpa é a lista, para que um
+            // `OnOrigemZImageStored` atrasado não tente pintar uma
+            // placa morta.
+            dungeon.banners.Clear();
 
             Debug("derrubada ('" + reason + "'): " + killed + " peças");
         }
@@ -4561,6 +4653,96 @@ namespace Oxide.Plugins
             }
         }
 
+        // ============================================================
+        //  O RELATÓRIO DE IMPORT
+        //
+        //  ####  "600 PEÇAS" NUNCA FOI O QUE NASCEU  ####
+        //
+        //  MEDIDO em 16/09/2026 na `arena-bleikstore2` (600 nós): o
+        //  que o admin lia no fim era `dungeon.entities.Count`, um
+        //  número que nasce MAIOR que a realidade — ele conta o que
+        //  foi adotado e não desconta o que o jogo matou depois, e os
+        //  filhos descartados no meio do `PasteChildren` não entravam
+        //  em conta nenhuma. Toda importação parecia ter dado certo.
+        //
+        //  Aqui a conta é a da PLANTA: quantos nós ela pediu (topo +
+        //  filhos + netos), quantos nasceram, e o motivo de cada
+        //  ausência. Sem isso, uma planta que perde metade das peças é
+        //  indistinguível de uma que subiu inteira.
+        // ============================================================
+
+        /// <summary>O que a planta pediu, o que nasceu, e o que faltou.</summary>
+        private class PasteReport
+        {
+            /// <summary>Nós do arquivo, contando filhos e netos.</summary>
+            public int requested;
+            /// <summary>Entidades que chegaram a existir no mundo.</summary>
+            public int placed;
+            /// <summary>Prefab que o Rust não conhece mais, ou nó sem nome.</summary>
+            public int skippedPrefab;
+            /// <summary>Veículo, filtrado de propósito. Ver `PasteOne`.</summary>
+            public int skippedVehicle;
+            /// <summary>Estourou ao nascer e foi pulada.</summary>
+            public int skippedError;
+            /// <summary>Blocos cuja skin o prefab não tinha. Ver `PrepareBlock`.</summary>
+            public int skinRejected;
+            /// <summary>Peças que o jogo matou DEPOIS de nascerem.</summary>
+            public int diedAfterSpawn;
+
+            // ####  AS BANDEIRAS  ####  (ver "A ARTE DAS BANDEIRAS")
+            //
+            // A planta não traz imagem nenhuma: MEDIDO em 16/09/2026,
+            // as 3 bandeiras da `arena-bleikstore2` trazem só
+            // `sign: {amount:1}` e `skinid: 0`. Quem pinta é o
+            // plugin, e sem estes números uma arena de bandeiras
+            // brancas é indistinguível de uma pintada.
+
+            /// <summary>Placas encontradas na planta.</summary>
+            public int bannersFound;
+            /// <summary>Placas que receberam a arte.</summary>
+            public int bannersPainted;
+            /// <summary>Placas esperando a arte chegar ao OrigemZImages.</summary>
+            public int bannersPending;
+            /// <summary>Placas que não dá para pintar. Ver `BannerMark.failure`.</summary>
+            public int bannersFailed;
+            /// <summary>A receita mandou deixar as bandeiras em branco.</summary>
+            public bool bannersOff;
+
+            public int Skipped { get { return skippedPrefab + skippedVehicle + skippedError; } }
+
+            /// <summary>Uma linha para o admin. Só cita o que aconteceu.</summary>
+            public string Human()
+            {
+                var text = "colei " + placed + " de " + requested;
+
+                if (Skipped > 0)
+                {
+                    text += " (pulei " + Skipped + ": " + skippedPrefab + " sem prefab, "
+                            + skippedVehicle + " veículo, " + skippedError + " com erro)";
+                }
+
+                if (skinRejected > 0) text += ", " + skinRejected + " sem a skin pedida";
+                if (diedAfterSpawn > 0) text += ", " + diedAfterSpawn + " morreram depois de nascer";
+
+                if (bannersFound > 0)
+                {
+                    if (bannersOff)
+                    {
+                        text += ", " + bannersFound + " bandeira(s) em branco (a receita desligou a arte)";
+                    }
+                    else
+                    {
+                        text += ", " + bannersPainted + " de " + bannersFound + " bandeira(s) pintada(s)";
+
+                        if (bannersPending > 0) text += " (" + bannersPending + " esperando a arte chegar)";
+                        if (bannersFailed > 0) text += " (" + bannersFailed + " sem pintar)";
+                    }
+                }
+
+                return text;
+            }
+        }
+
         /// <summary>
         /// Põe as peças da planta no mundo, em volta de <paramref name="origin"/>.
         /// </summary>
@@ -4605,9 +4787,11 @@ namespace Oxide.Plugins
                 Debug("planta: rotação em radianos, convertendo para graus");
             }
 
+            var report = dungeon.paste;
+            var ordered = OrderByHeight(entities, report);
+
             var markers = new List<HatchMark>();
             var placed = 0;
-            var skipped = 0;
             var index = 0;
 
             var batchSize = Mathf.Clamp(config.entitiesPerTick, 1, 500);
@@ -4618,12 +4802,25 @@ namespace Oxide.Plugins
                 // A masmorra pode ter sido derrubada no meio (o admin
                 // desistiu, o watchdog estourou). Continuar colaria
                 // peças órfãs, que ninguém mais sabe apagar.
-                if (active != dungeon) return;
+                //
+                // ####  ABANDONAR CALADO DEIXAVA O PAINEL PENDURADO  ####
+                //
+                // Até 16/09/2026 isto era um `return` seco: o `onDone`
+                // nunca chegava, a masmorra ficava pela metade e só o
+                // watchdog percebia, sessenta segundos depois, com um
+                // `build_timeout` que apontava para a causa errada.
+                if (active != dungeon)
+                {
+                    Debug("planta: abandonada no nó " + index + " de " + ordered.Count
+                          + " — a masmorra ativa mudou no meio da colagem");
+                    onDone(placed, null);
+                    return;
+                }
 
                 var untilTick = 0;
-                while (index < entities.Count && untilTick < batchSize)
+                while (index < ordered.Count && untilTick < batchSize)
                 {
-                    var node = entities[index++] as JObject;
+                    var node = ordered[index++];
                     untilTick++;
 
                     if (node == null) continue;
@@ -4644,19 +4841,19 @@ namespace Oxide.Plugins
                     try
                     {
                         if (PasteOne(dungeon, node, origin, spin, rotationScale, markers)) placed++;
-                        else skipped++;
                     }
                     catch (Exception e)
                     {
-                        skipped++;
+                        report.skippedError++;
                         Debug("peça '" + (node.Value<string>("prefabname") ?? "?").Split('/').Last()
                               + "' estourou e foi pulada: " + e.Message);
                     }
                 }
 
-                if (index < entities.Count) { NextTick(step); return; }
+                if (index < ordered.Count) { NextTick(step); return; }
 
-                if (skipped > 0) Debug("planta: " + skipped + " peça(s) puladas");
+                if (report.Skipped > 0) Debug("planta: " + report.Skipped + " peça(s) puladas");
+                Debug("planta: " + report.Human());
                 Debug("planta: " + markers.Count + " marca(s) de alçapão");
 
                 // Os marcadores viram alçapão só depois que a planta
@@ -4675,10 +4872,100 @@ namespace Oxide.Plugins
                     return;
                 }
 
+                // A arte das bandeiras vem DEPOIS de a planta inteira
+                // subir, pelo mesmo motivo do alçapão: a ordem em que
+                // as placas recebem cada chave é a do desenho, e ela
+                // só existe quando todas já foram vistas.
+                //
+                // Nunca fatal: uma bandeira branca é feia, não é uma
+                // masmorra perdida.
+                try
+                {
+                    PaintBanners(dungeon);
+                }
+                catch (Exception e)
+                {
+                    // O rastro INTEIRO, e não só o `Message`: um
+                    // NullReferenceException diz "Object reference not
+                    // set" e mais nada — com esse texto sozinho, achar
+                    // a linha é adivinhação. MEDIDO em 16/09/2026, ao
+                    // custo de uma rodada inteira de teste.
+                    PrintWarning("não consegui pintar as bandeiras: " + e);
+                }
+
                 onDone(placed, null);
             };
 
             step();
+        }
+
+        // ============================================================
+        //  A ORDEM DE COLAGEM
+        //
+        //  ####  O ARQUIVO NÃO VEM DE BAIXO PARA CIMA  ####
+        //
+        //  MEDIDO em 16/09/2026 na `arena-bleikstore2`: das 599
+        //  transições consecutivas do arquivo, 293 DESCEM em Y — quase
+        //  metade. A lista sobe até Y=12.39 e volta para Y=-1.59, com
+        //  fundações ainda por nascer. Ordenada, a mesma lista tem
+        //  ZERO descidas.
+        //
+        //  Isso sozinho já seria ruim, mas o que o torna fatal é o
+        //  lote: com `entitiesPerTick` peças por tick, a parede que
+        //  nasce antes da sua fundação passa TICKS INTEIROS sem apoio
+        //  — e `StabilityCheck` mata depois de onze passagens abaixo
+        //  de `Stability.collapse`. A peça nasce, o log diz que nasceu,
+        //  e ela some antes de a planta terminar.
+        //
+        //  Ordenar por Y crescente faz o apoio existir antes de quem
+        //  se apoia nele. A ordenação é ESTÁVEL (LINQ `OrderBy` é), e
+        //  isso importa: peças na mesma altura continuam na ordem em
+        //  que o construtor as salvou.
+        //
+        //  ####  E NADA DEPENDE DA ORDEM DO ARQUIVO  ####
+        //
+        //  Conferido antes de mexer: `IsEntranceHatchMarker` lê do
+        //  NÓ (prefab, filhos, itens) e não do vizinho; os marcadores
+        //  viram alçapão só no fim, já fora do laço; e `oldID`, que
+        //  seria o campo a parear peça com peça, não é lido em lugar
+        //  nenhum deste arquivo — o `SetParent` é por aninhamento.
+        // ============================================================
+
+        /// <summary>
+        /// As peças da planta, da mais baixa para a mais alta.
+        ///
+        /// Aproveita a varredura para contar o que a planta PEDIU,
+        /// contando filhos e netos — é o denominador do relatório.
+        /// </summary>
+        private static List<JObject> OrderByHeight(JArray entities, PasteReport report)
+        {
+            var nodes = new List<JObject>(entities.Count);
+
+            foreach (var token in entities)
+            {
+                var node = token as JObject;
+                if (node == null) continue;
+
+                nodes.Add(node);
+                CountRequested(node, report);
+            }
+
+            return nodes.OrderBy(n => ReadFloat(n["pos"] == null ? null : n["pos"]["y"])).ToList();
+        }
+
+        /// <summary>Um nó e tudo que pende dele, no denominador.</summary>
+        private static void CountRequested(JObject node, PasteReport report)
+        {
+            report.requested++;
+
+            var children = node["children"] as JArray;
+            if (children == null) return;
+
+            foreach (var token in children)
+            {
+                var child = token as JObject;
+                if (child != null) CountRequested(child, report);
+            }
         }
 
         /// <summary>Uma peça. Devolve false quando ela foi pulada.</summary>
@@ -4690,8 +4977,10 @@ namespace Oxide.Plugins
             float rotationScale,
             List<HatchMark> markers)
         {
+            var report = dungeon.paste;
+
             var prefab = node.Value<string>("prefabname");
-            if (string.IsNullOrEmpty(prefab)) return false;
+            if (string.IsNullOrEmpty(prefab)) { report.skippedPrefab++; return false; }
 
             // ####  VEÍCULO NÃO ENTRA  ####
             //
@@ -4703,9 +4992,18 @@ namespace Oxide.Plugins
             if (prefab.Contains("modularcar")
                 || prefab.Contains("module_car_spawned")
                 || prefab.Contains("modular_car_fuel_storage"))
+            {
+                report.skippedVehicle++;
                 return false;
+            }
 
-            var worldPos = origin + spin * ReadVector(node["pos"]);
+            // A pose no DESENHO, antes de girar. Ela sobrevive ao yaw
+            // e à posição em que o admin colou, e é por isso que é ela
+            // — e não a do mundo — que ordena as bandeiras. Ver
+            // `PaintBanners`.
+            var local = ReadVector(node["pos"]);
+
+            var worldPos = origin + spin * local;
             var worldRot = spin * Quaternion.Euler(ReadVector(node["rot"]) * rotationScale);
 
             var entity = GameManager.server.CreateEntity(prefab, worldPos, worldRot);
@@ -4714,6 +5012,7 @@ namespace Oxide.Plugins
                 // Prefab que o Rust removeu num update. Pular, nunca
                 // abortar: uma planta de 584 peças não pode morrer
                 // porque uma delas saiu do jogo.
+                report.skippedPrefab++;
                 return false;
             }
 
@@ -4721,20 +5020,35 @@ namespace Oxide.Plugins
             if (block != null)
             {
                 var grade = node.Value<int?>("grade") ?? (int)BuildingGrade.Enum.Stone;
-                PrepareBlock(dungeon, block, (BuildingGrade.Enum)Mathf.Clamp(grade, 0, 4));
+
+                // ####  A SKIN E A COR VINHAM SENDO JOGADAS FORA  ####
+                //
+                // MEDIDO em 16/09/2026: os 466 blocos da
+                // `arena-bleikstore2` trazem `skinid: 10221` e
+                // `customColour: 1`, e nasciam vanilla e sem cor — o
+                // ramo do bloco nunca tocava nenhum dos dois campos.
+                // A arena importada não parecia a arena copiada.
+                PrepareBlock(dungeon, block,
+                             (BuildingGrade.Enum)Mathf.Clamp(grade, 0, 4),
+                             node.Value<ulong?>("skinid") ?? 0UL,
+                             node.Value<uint?>("customColour") ?? 0u);
             }
             else
             {
                 entity.skinID = node.Value<ulong?>("skinid") ?? 0UL;
                 entity.OwnerID = 0UL;
                 entity.EnableSaving(false);
+                Anchor(entity);
                 entity.Spawn();
             }
 
+            report.placed++;
+
             Adopt(dungeon, entity);
+            NoteBanner(dungeon, entity, local);
             ApplyFlags(entity, node["flags"] as JObject);
             FillContainer(entity, node["items"] as JArray, EntranceItemsOf(dungeon));
-            PasteChildren(dungeon, entity, node["children"] as JArray, rotationScale);
+            PasteChildren(dungeon, entity, node["children"] as JArray, rotationScale, local);
 
             // A pose é lida AGORA, enquanto a peça existe. Ver `HatchMark`.
             if (IsEntranceHatchMarker(node, entity))
@@ -4757,13 +5071,35 @@ namespace Oxide.Plugins
         /// O `parentbone` é o encaixe ("lock"); sem ele a fechadura
         /// nasce no centro da porta, atravessada nela.
         /// </summary>
+        /// <remarks>
+        /// ####  O NÍVEL 2 NÃO EXISTIA  ####
+        ///
+        /// MEDIDO em 16/09/2026: a `entrance1` e a `entrance4` têm
+        /// plantas de TRÊS níveis (um nó com `children` que também
+        /// têm `children`), e este método nunca recursava. O neto —
+        /// a fechadura da porta de um armário, por exemplo — era
+        /// silenciosamente perdido, e nem entrava na conta do que
+        /// faltou.
+        ///
+        /// Os filhos também nasciam sem `skinID` e com o inventário
+        /// vazio: o `items` do filho não era lido. Um armário filho
+        /// vinha da planta cheio e chegava vazio.
+        /// </remarks>
+        /// <param name="parentLocal">
+        /// Onde o PAI está no desenho. Só serve para ordenar bandeiras
+        /// penduradas (ver `PaintBanners`): somada ao `pos` do filho,
+        /// dá uma posição estável no desenho sem depender do mundo.
+        /// </param>
         private void PasteChildren(
             ActiveDungeon dungeon,
             BaseEntity parent,
             JArray children,
-            float rotationScale)
+            float rotationScale,
+            Vector3 parentLocal)
         {
             if (children == null || children.Count == 0) return;
+
+            var report = dungeon.paste;
 
             foreach (var token in children)
             {
@@ -4771,21 +5107,39 @@ namespace Oxide.Plugins
                 if (node == null) continue;
 
                 var prefab = node.Value<string>("prefabname");
-                if (string.IsNullOrEmpty(prefab)) continue;
+                if (string.IsNullOrEmpty(prefab)) { report.skippedPrefab++; continue; }
 
-                var child = GameManager.server.CreateEntity(prefab, parent.transform.position);
-                if (child == null) continue;
+                BaseEntity child;
+
+                try
+                {
+                    child = GameManager.server.CreateEntity(prefab, parent.transform.position);
+                }
+                catch (Exception e)
+                {
+                    report.skippedError++;
+                    Debug("filho '" + prefab.Split('/').Last() + "' estourou: " + e.Message);
+                    continue;
+                }
+
+                if (child == null) { report.skippedPrefab++; continue; }
 
                 var bone = node.Value<string>("parentbone");
                 if (!string.IsNullOrEmpty(bone)) child.SetParent(parent, bone);
                 else child.SetParent(parent);
 
-                child.transform.localPosition = ReadVector(node["pos"]);
+                var childLocal = ReadVector(node["pos"]);
+
+                child.transform.localPosition = childLocal;
                 child.transform.localRotation = Quaternion.Euler(ReadVector(node["rot"]) * rotationScale);
+                child.skinID = node.Value<ulong?>("skinid") ?? 0UL;
                 child.OwnerID = 0UL;
                 child.EnableSaving(false);
+                Anchor(child);
                 child.Spawn();
                 Adopt(dungeon, child);
+                NoteBanner(dungeon, child, parentLocal + childLocal);
+                report.placed++;
 
                 // O código da fechadura é o que marca a peça (ver
                 // `IsEntranceHatchMarker`), então ele tem de chegar.
@@ -4794,7 +5148,729 @@ namespace Oxide.Plugins
                 if (codeLock != null && !string.IsNullOrEmpty(code)) codeLock.code = code;
 
                 ApplyFlags(child, node["flags"] as JObject);
+                FillContainer(child, node["items"] as JArray, EntranceItemsOf(dungeon));
+
+                // O neto. A recursão é a mesma regra: quem pendura
+                // pendura em quem já existe.
+                PasteChildren(dungeon, child, node["children"] as JArray, rotationScale, parentLocal + childLocal);
             }
+        }
+
+        // ============================================================
+        //  A ARTE DAS BANDEIRAS
+        //
+        //  ####  A PLANTA NÃO TRAZ IMAGEM NENHUMA  ####
+        //
+        //  MEDIDO em 16/09/2026 na `arena-bleikstore2`: das 600
+        //  entidades, 3 são `sign.pole.banner.large`, e cada uma traz
+        //  só `sign: {amount:1, locked:false}` e `skinid: 0`. Não há
+        //  bytes, CRC nem URL no arquivo — o CopyPaste nunca copiou a
+        //  textura. A arena importada nascia com três panos brancos.
+        //
+        //  ####  A IMAGEM MORA NO FileStorage, E ELE INDEXA PELO DONO  ####
+        //
+        //      OrigemZImages ──grava──► FileStorage[CRC, CommunityEntity]
+        //            │                          │
+        //            │ GetImage(chave)          │ Get(crc, ..., community)
+        //            ▼                          ▼
+        //          o CRC  ─────────────────►  os BYTES
+        //                                       │
+        //                          Store(bytes, ..., sign.net.ID, i)
+        //                                       ▼
+        //                                 o CRC da BANDEIRA
+        //
+        //  O CRC do OrigemZImages NÃO serve para a placa: MEDIDO no
+        //  decompilado do `Assembly-CSharp` (protocolo 288), o
+        //  `FileStorage` indexa cada arquivo por (tipo, entidade,
+        //  numID), e `Signage.Load` só encontra o que foi gravado sob
+        //  `sign.net.ID`. É por isso que aqui se copiam os BYTES e se
+        //  grava de novo — um por placa.
+        //
+        //  ####  E É ISSO QUE FAZ A ARTE VOLTAR DEPOIS DE RECRIAR  ####
+        //
+        //  Cada `ozdungeon build` cria entidades NOVAS, com `net.ID`
+        //  novo. Guardar o CRC da arena anterior não adiantaria nada:
+        //  ele aponta para um arquivo indexado sob uma entidade que já
+        //  morreu. A pintura roda a cada colagem, e a fonte da verdade
+        //  é a CHAVE (`ozlogo`), que não muda.
+        //
+        //  Vazamento não há: `Signage.DoServerDestroy` chama
+        //  `FileStorage.server.RemoveAllByEntity(net.ID)` — MEDIDO no
+        //  decompilado —, e o `Demolish` mata toda peça com `Kill()`,
+        //  que passa por ali. Repetir a limpeza daqui seria apagar
+        //  duas vezes o mesmo arquivo.
+        //
+        //  ####  QUEM BAIXA A URL É O AGENTE  ####
+        //
+        //  Decisão firmada no cabeçalho do `OrigemZImages`: HTTP de
+        //  dentro do jogo trava o tick. O dono manda a URL ao painel,
+        //  o agente baixa, confere e empurra o PNG para o
+        //  OrigemZImages sob uma chave. Aqui só se pergunta pela
+        //  chave — e, se ela ainda não chegou, a bandeira fica
+        //  PENDENTE e o `OnOrigemZImageStored` a pinta quando chegar.
+        // ============================================================
+
+        /// <summary>
+        /// A arte de quem não pediu arte nenhuma.
+        ///
+        /// A receita manda (ver `BannerSpec`), mas ela é opcional e a
+        /// planta colada crua (`/ozdungeon build`) não tem receita
+        /// alguma. Sem um padrão, o caminho mais usado — o do admin
+        /// testando — continuaria produzindo pano branco.
+        /// </summary>
+        private const string DefaultBannerKey = "ozlogo";
+
+        /// <summary>O `GetImage` do OrigemZImages. Devolve o CRC, ou 0.</summary>
+        private const string BannerHookGetImage = "GetImage";
+
+        /// <summary>
+        /// O teto de lado do jogo para a imagem de uma placa.
+        ///
+        /// MEDIDO em `Signage.UpdateSign` (protocolo 288, 16/09/2026):
+        /// é o que ele passa ao `IsValidPNG` quando o prefab não traz
+        /// `overrideMaxImageWidth/Height`. O override do prefab NÃO é
+        /// usado como recusa aqui — ver o bloco em `PaintBanner`.
+        /// </summary>
+        private const int SignMaxSide = 1024;
+
+        /// <summary>
+        /// Uma placa da planta, e o que já se tentou nela.
+        ///
+        /// `waiting` e `failure` são estados diferentes de propósito:
+        /// o primeiro é "a arte não chegou ainda" e volta a ser
+        /// tentado; o segundo é "esta arte não serve para uma placa" e
+        /// não melhora sozinho.
+        /// </summary>
+        private sealed class BannerMark
+        {
+            public Signage sign;
+            /// <summary>A pose no DESENHO. É o que dá ordem estável.</summary>
+            public Vector3 local;
+            /// <summary>A chave da arte no OrigemZImages.</summary>
+            public string key;
+            public bool painted;
+            /// <summary>A arte ainda não está no OrigemZImages.</summary>
+            public bool waiting;
+            /// <summary>Por que não dá para pintar. `null` = não falhou.</summary>
+            public string failure;
+        }
+
+        /// <summary>Anota a peça se ela for uma placa. Ver `PaintBanners`.</summary>
+        private static void NoteBanner(ActiveDungeon dungeon, BaseEntity entity, Vector3 local)
+        {
+            // O critério é a CLASSE, e não o prefab: toda placa
+            // pintável do jogo é um `Signage` (o banner grande da
+            // arena, o cartaz, a placa de madeira). Uma planta que
+            // troque o banner por outro modelo continua pintada.
+            var sign = entity as Signage;
+            if (sign == null) return;
+
+            var mark = new BannerMark();
+            mark.sign = sign;
+            mark.local = local;
+
+            dungeon.banners.Add(mark);
+        }
+
+        /// <summary>
+        /// Põe a arte em todas as bandeiras que a planta trouxe.
+        ///
+        /// ####  A ORDEM É A DO DESENHO, E ISSO IMPORTA  ####
+        ///
+        /// A receita pode mandar UMA chave por bandeira (`keys`), e aí
+        /// "a segunda bandeira" precisa ser sempre a mesma. A ordem da
+        /// colagem não serve: ela é por altura (ver `OrderByHeight`) e
+        /// muda se alguém reordenar o arquivo. Ordenar pela pose do
+        /// DESENHO — que é anterior ao yaw e ao ponto onde o admin
+        /// colou — dá a mesma sequência em toda recriação.
+        /// </summary>
+        private void PaintBanners(ActiveDungeon dungeon)
+        {
+            var report = dungeon.paste;
+            var banners = dungeon.banners;
+
+            report.bannersFound = banners.Count;
+            if (banners.Count == 0) return;
+
+            var spec = dungeon.spec == null ? null : dungeon.spec.banners;
+            report.bannersOff = spec != null && !spec.enabled;
+
+            banners.Sort(CompareBanners);
+
+            try
+            {
+                for (var i = 0; i < banners.Count; i++)
+                {
+                    var mark = banners[i];
+                    mark.key = BannerKeyAt(spec, i);
+
+                    // Sem chave = a receita desligou a arte. A bandeira
+                    // branca passa a ser uma escolha, e não um defeito.
+                    if (string.IsNullOrEmpty(mark.key)) continue;
+
+                    PaintBanner(mark);
+                }
+            }
+            finally
+            {
+                // No `finally` porque o relatório vale MAIS quando algo
+                // deu errado: foi exatamente com uma exceção no meio
+                // que ele saiu dizendo "3 bandeiras" e zero em todas as
+                // colunas, como se elas tivessem evaporado.
+                RecountBanners(dungeon);
+            }
+
+            Debug("bandeiras: " + report.bannersPainted + " de " + report.bannersFound
+                  + " pintada(s)"
+                  + (report.bannersPending > 0 ? ", " + report.bannersPending + " esperando a arte" : "")
+                  + (report.bannersFailed > 0 ? ", " + report.bannersFailed + " sem pintar" : ""));
+
+            // O motivo sai UMA vez, e não uma por bandeira: a planta
+            // tem três bandeiras com a mesma arte, e três linhas
+            // idênticas no console só escondem o que veio depois.
+            var said = new HashSet<string>();
+
+            foreach (var mark in banners)
+            {
+                if (mark.failure != null)
+                {
+                    if (said.Add(mark.failure)) PrintWarning("bandeira: " + mark.failure);
+                }
+                else if (mark.waiting)
+                {
+                    if (said.Add(mark.key))
+                    {
+                        Debug("bandeira: a arte '" + mark.key + "' ainda não está no OrigemZImages"
+                              + " — pinto sozinho quando o agente a mandar");
+                    }
+                }
+            }
+        }
+
+        /// <summary>A bandeira mais baixa primeiro; empate decide por x e z.</summary>
+        private static int CompareBanners(BannerMark a, BannerMark b)
+        {
+            var byY = a.local.y.CompareTo(b.local.y);
+            if (byY != 0) return byY;
+
+            var byX = a.local.x.CompareTo(b.local.x);
+            if (byX != 0) return byX;
+
+            return a.local.z.CompareTo(b.local.z);
+        }
+
+        /// <summary>
+        /// Que arte vai na bandeira de índice <paramref name="index"/>.
+        ///
+        /// `null` = nenhuma, e a bandeira fica branca de propósito.
+        /// </summary>
+        private static string BannerKeyAt(BannerSpec spec, int index)
+        {
+            if (spec != null && !spec.enabled) return null;
+
+            // A lista ganha da chave única, e só no índice que ela
+            // alcança: uma receita com duas chaves numa planta de três
+            // bandeiras pinta a terceira com a chave geral, em vez de
+            // deixá-la branca.
+            if (spec != null && spec.keys != null && index < spec.keys.Count)
+            {
+                var chosen = spec.keys[index];
+                if (!string.IsNullOrEmpty(chosen)) return chosen;
+            }
+
+            if (spec != null && !string.IsNullOrEmpty(spec.key)) return spec.key;
+
+            return DefaultBannerKey;
+        }
+
+        /// <summary>
+        /// Grava a arte na placa. É o que o RPC do jogador faz.
+        ///
+        /// MEDIDO em `Signage.UpdateSign` (protocolo 288): apaga o
+        /// arquivo anterior daquele índice, grava o novo sob
+        /// `sign.net.ID` e avisa a rede. O `EnsureInitialized` vem
+        /// antes de qualquer toque em `textureIDs` porque é ele que
+        /// dimensiona o array.
+        /// </summary>
+        private void PaintBanner(BannerMark mark)
+        {
+            mark.painted = false;
+            mark.waiting = false;
+            mark.failure = null;
+
+            // ####  O CATCH É DO MÉTODO INTEIRO, E ISSO FOI MEDIDO  ####
+            //
+            // Em 16/09/2026 ele cobria só a gravação, e um
+            // NullReferenceException vindo de ANTES dela subiu até o
+            // `PasteBlueprint`: as três bandeiras da arena não foram
+            // pintadas NEM contadas como falha — `bannersFound:3` com
+            // os outros três números em zero. Uma bandeira que estoura
+            // é uma bandeira que falhou, e o relatório tem de dizer
+            // isso.
+            try
+            {
+                TryPaintBanner(mark);
+            }
+            catch (Exception e)
+            {
+                mark.failure = e.Message;
+
+                // O `Message` de um NRE é a frase genérica e não diz
+                // NADA sobre onde. Com o log detalhado ligado, o
+                // rastro inteiro sai — é ele que aponta a linha.
+                Debug("bandeira '" + mark.key + "' estourou: " + e);
+            }
+        }
+
+        /// <summary>O corpo do `PaintBanner`. Pode lançar; quem chama trata.</summary>
+        private void TryPaintBanner(BannerMark mark)
+        {
+            var sign = mark.sign;
+
+            if (sign == null || sign.IsDestroyed) { mark.failure = "a bandeira já não existe"; return; }
+            if (sign.net == null) { mark.failure = "a bandeira não tem id de rede"; return; }
+
+            // Sem `paintableSources` não há onde pintar: gravar aqui
+            // encheria o FileStorage de arquivo que ninguém desenha.
+            if (sign.TextureCount < 1) { mark.failure = "esta placa não tem superfície pintável"; return; }
+
+            var bytes = BannerBytes(mark.key);
+
+            // Ainda não chegou. NÃO é erro: o agente pode estar
+            // mandando a arte agora, e o `OnOrigemZImageStored` volta
+            // aqui quando ela cair.
+            if (bytes == null) { mark.waiting = true; return; }
+
+            // ####  GRAVAR DIRETO PULA A VALIDAÇÃO DO JOGO  ####
+            //
+            // O `IsValidPNG` roda no RPC do jogador, e daqui não se
+            // passa por ele. O cliente, porém, continua tendo de
+            // decodificar o arquivo: um JPEG (que o OrigemZImages
+            // aceita, porque para o CUI ele serve) ou um PNG de paleta
+            // viram um pano cinzento sem nada no log dizendo por quê.
+            //
+            // ####  O TETO AQUI É O DO JOGO, NÃO O DO PREFAB  ####
+            //
+            // MEDIDO em 16/09/2026 no servidor de teste: o
+            // `sign.pole.banner.large` traz `overrideMaxImageWidth=256`
+            // e `overrideMaxImageHeight=1024` — a bandeira é alta e
+            // estreita. Com esse teto, a `ozlogo` (320x137) é RECUSADA,
+            // e as três bandeiras da `arena-bleikstore2` ficaram
+            // brancas na primeira medição.
+            //
+            // O override existe para conter o UPLOAD do jogador (o
+            // arquivo que o servidor vai ter de reenviar a todo mundo
+            // que passar por ali), e não porque o cliente não saiba
+            // desenhar outro formato. Quem grava aqui é o admin, uma
+            // vez por arena: o limite que se respeita é o do jogo
+            // (1024), e a diferença de proporção vira AVISO — a arte
+            // estica, e quem escolheu a arte precisa saber disso.
+            if (!IsPaintablePng(bytes, SignMaxSide, SignMaxSide))
+            {
+                mark.failure = "a arte '" + mark.key + "' não é um PNG que a placa aceite"
+                               + " (precisa ser PNG RGB ou RGBA, 8 ou 16 bits, sem paleta,"
+                               + " sem entrelaçamento, até " + SignMaxSide + "x" + SignMaxSide + ")";
+                return;
+            }
+
+            WarnOnBannerShape(mark, bytes, sign);
+
+            sign.EnsureInitialized();
+
+            // Todas as faces com a mesma arte: o banner grande tem
+            // uma, mas a placa de dois lados tem duas, e pintar só
+            // a primeira deixaria o verso branco.
+            for (var i = 0; i < sign.textureIDs.Length; i++)
+            {
+                // ####  CADA GRAVAÇÃO PRECISA DE BYTES PRÓPRIOS  ####
+                //
+                // Ver `StampForSign`: gravar os bytes do acervo como
+                // vieram APAGA a arte do OrigemZImages.
+                var mine = StampForSign(bytes, sign.net.ID.Value, i);
+
+                if (mine == null)
+                {
+                    mark.failure = "não consegui marcar a arte '" + mark.key + "' para esta placa";
+                    return;
+                }
+
+                if (sign.textureIDs[i] != 0u)
+                {
+                    FileStorage.server.RemoveExact(
+                        sign.textureIDs[i], FileStorage.Type.png, sign.net.ID, (uint)i);
+                }
+
+                sign.textureIDs[i] = FileStorage.server.Store(
+                    mine, FileStorage.Type.png, sign.net.ID, (uint)i);
+            }
+
+            sign.SendNetworkUpdate();
+            mark.painted = true;
+        }
+
+        // ------------------------------------------------------------
+        //  ####  O FileStorage GUARDA POR CONTEÚDO, NÃO POR DONO  ####
+        //
+        //  MEDIDO em 16/09/2026, no decompilado e no servidor de teste:
+        //
+        //      CREATE TABLE data ( crc INTEGER PRIMARY KEY, data BLOB,
+        //                          updated INTEGER, entid INTEGER,
+        //                          filetype INTEGER, part INTEGER )
+        //
+        //  O CRC é a CHAVE PRIMÁRIA: existe UMA linha por conteúdo no
+        //  banco inteiro, e ela tem UM dono. Gravar os mesmos bytes sob
+        //  outra entidade é um `INSERT OR REPLACE` na MESMA linha — o
+        //  arquivo troca de dono em silêncio.
+        //
+        //  O estrago, medido ao vivo: a arena pintou as 3 bandeiras com
+        //  os bytes da `ozlogo`, a linha da `ozlogo` passou a pertencer
+        //  à terceira placa, e o `ozdungeon stop` — que mata a placa, e
+        //  o `Signage.DoServerDestroy` chama `RemoveAllByEntity` —
+        //  APAGOU A LOGO DO ACERVO. Na construção seguinte o
+        //  OrigemZImages ainda dizia ter a chave, e o FileStorage já
+        //  não tinha o arquivo. A logo do CUI ia junto.
+        //
+        //  A saída é não repetir conteúdo: cada placa (e cada face
+        //  dela) recebe os MESMOS pixels com uma marca invisível, o que
+        //  lhe dá um CRC próprio e, portanto, uma linha própria. A
+        //  linha do acervo nunca é tocada, e derrubar a arena só apaga
+        //  o que é da arena.
+        //
+        //  O preço são ~18 KB por bandeira no banco e um download por
+        //  bandeira em vez de um compartilhado. Numa arena de três, é
+        //  troco.
+        // ------------------------------------------------------------
+
+        /// <summary>
+        /// A mesma imagem, com uma marca que só esta placa e esta face
+        /// têm. Devolve `null` se os bytes não forem um PNG utilizável.
+        /// </summary>
+        /// <remarks>
+        /// A marca é um chunk `tEXt` — texto auxiliar do padrão PNG,
+        /// que todo decodificador pula — inserido logo depois do IHDR.
+        /// Os pixels não mudam; o CRC32 do arquivo, sim.
+        ///
+        /// Depois do IHDR e não no fim porque o cliente para de ler no
+        /// IEND: o que vem depois dele não existe para quem desenha, e
+        /// também não entraria no arquivo que ele recebe.
+        /// </remarks>
+        private static byte[] StampForSign(byte[] png, ulong signId, int face)
+        {
+            // 8 da assinatura + 4 do tamanho + 4 do tipo + 13 do IHDR
+            // + 4 do CRC dele. É onde o próximo chunk começa.
+            const int afterHeader = 33;
+
+            if (png == null || png.Length < afterHeader) return null;
+
+            var text = "ozbanner\0" + signId.ToString(CultureInfo.InvariantCulture)
+                       + "/" + face.ToString(CultureInfo.InvariantCulture);
+
+            var payload = new byte[4 + text.Length];
+
+            // "tEXt", em ASCII.
+            payload[0] = 116; payload[1] = 69; payload[2] = 88; payload[3] = 116;
+
+            for (var i = 0; i < text.Length; i++) payload[4 + i] = (byte)text[i];
+
+            var size = payload.Length - 4;
+            var crc = PngCrc(payload);
+            var stamped = new byte[png.Length + payload.Length + 8];
+
+            Buffer.BlockCopy(png, 0, stamped, 0, afterHeader);
+
+            var at = afterHeader;
+
+            // Tamanho e CRC vão em big-endian: é a ordem do PNG.
+            stamped[at++] = (byte)(size >> 24);
+            stamped[at++] = (byte)(size >> 16);
+            stamped[at++] = (byte)(size >> 8);
+            stamped[at++] = (byte)size;
+
+            Buffer.BlockCopy(payload, 0, stamped, at, payload.Length);
+            at += payload.Length;
+
+            stamped[at++] = (byte)(crc >> 24);
+            stamped[at++] = (byte)(crc >> 16);
+            stamped[at++] = (byte)(crc >> 8);
+            stamped[at++] = (byte)crc;
+
+            Buffer.BlockCopy(png, afterHeader, stamped, at, png.Length - afterHeader);
+
+            return stamped;
+        }
+
+        /// <summary>
+        /// O CRC32 do PNG (polinômio 0xEDB88320), que NÃO é o do
+        /// FileStorage nem o do zip: é o que valida cada chunk.
+        /// </summary>
+        private static uint PngCrc(byte[] data)
+        {
+            var crc = 0xFFFFFFFFu;
+
+            for (var i = 0; i < data.Length; i++)
+            {
+                var index = (crc ^ data[i]) & 0xFFu;
+                var acc = index;
+
+                for (var bit = 0; bit < 8; bit++)
+                {
+                    acc = (acc & 1u) != 0u ? 0xEDB88320u ^ (acc >> 1) : acc >> 1;
+                }
+
+                crc = acc ^ (crc >> 8);
+            }
+
+            return crc ^ 0xFFFFFFFFu;
+        }
+
+        /// <summary>
+        /// Diz no log quando a arte não tem o formato da bandeira.
+        ///
+        /// Não impede nada: a arte entra e estica. É um bilhete para
+        /// quem escolheu a imagem, porque do lado do painel não há
+        /// como adivinhar que a bandeira grande é um retângulo EM PÉ
+        /// (256 x 1024, MEDIDO em 16/09/2026) e que uma logo
+        /// horizontal vai nascer deformada.
+        /// </summary>
+        /// <remarks>
+        /// ####  `TextureSize` NÃO EXISTE NO SERVIDOR  ####
+        ///
+        /// MEDIDO em 16/09/2026, e custou uma rodada de teste: ler
+        /// `sign.TextureSize` estoura com NullReferenceException em
+        /// `Signage.get_TextureSize`. O getter só confere se o ARRAY
+        /// `paintableSources` é nulo ou vazio — e num servidor headless
+        /// o array existe com o tamanho certo e o ELEMENTO é nulo: o
+        /// `MeshPaintableSource` é um componente de renderização, que
+        /// só o cliente instancia. `TextureCount`, que lê apenas o
+        /// `Length`, passa; o primeiro acesso a `texWidth` cai.
+        ///
+        /// O que SOBREVIVE no servidor são os dois inteiros do prefab,
+        /// `overrideMaxImageWidth/Height` — a prova é que a primeira
+        /// medição leu deles o "256x1024". É deles que sai o formato
+        /// esperado aqui.
+        /// </remarks>
+        private void WarnOnBannerShape(BannerMark mark, byte[] bytes, Signage sign)
+        {
+            var wantedWidth = sign.overrideMaxImageWidth;
+            var wantedHeight = sign.overrideMaxImageHeight;
+
+            // Placa sem override não declara formato nenhum: não há o
+            // que avisar, e inventar um número seria pior que calar.
+            if (wantedWidth < 1 || wantedHeight < 1) return;
+
+            var width = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+            var height = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+
+            if (width == wantedWidth && height == wantedHeight) return;
+
+            Debug("bandeira '" + mark.key + "': a arte é " + width + "x" + height
+                  + " e esta placa foi feita para " + wantedWidth + "x" + wantedHeight
+                  + " — ela vai esticar");
+        }
+
+        /// <summary>
+        /// Os BYTES da arte, ou `null` quando ela não está guardada.
+        ///
+        /// O CRC que o OrigemZImages devolve vale sob a
+        /// `CommunityEntity` — é lá que ele grava (`OrigemZImages.cs`,
+        /// no `Store` do fim do upload). Por isso a leitura usa esse
+        /// dono, e não a placa.
+        /// </summary>
+        private byte[] BannerBytes(string key)
+        {
+            // ####  CADA "NÃO TENHO" DIZ QUAL DELES É  ####
+            //
+            // Os quatro motivos abaixo produzem a MESMA bandeira
+            // branca, e sem dizer qual é o admin não tem como saber se
+            // manda a arte de novo, se recarrega um plugin ou se
+            // espera. No relatório eles são todos `pending`; no log,
+            // não.
+
+            // O Oxide zera o [PluginReference] quando o alvo cai. Sem
+            // este null-check, um `oxide.reload OrigemZImages` no meio
+            // de uma construção derrubaria a colagem inteira.
+            if (string.IsNullOrEmpty(key)) return null;
+
+            if (OrigemZImages == null)
+            {
+                Debug("bandeira: o OrigemZImages não está carregado — sem ele não há arte");
+                return null;
+            }
+
+            var community = CommunityEntity.ServerInstance;
+
+            if (community == null || community.net == null)
+            {
+                Debug("bandeira: a CommunityEntity ainda não existe — o servidor não terminou de subir");
+                return null;
+            }
+
+            var raw = OrigemZImages.Call(BannerHookGetImage, key);
+            var crc = raw is uint ? (uint)raw : 0u;
+
+            if (crc == 0u)
+            {
+                Debug("bandeira: o OrigemZImages não tem a arte '" + key + "'"
+                      + " — o agente precisa mandá-la");
+                return null;
+            }
+
+            var bytes = FileStorage.server.Get(crc, FileStorage.Type.png, community.net.ID, 0u);
+
+            if (bytes == null)
+            {
+                // Mapa em pé e arquivo sumido: acontece quando o save
+                // foi trocado sem o OrigemZImages perceber.
+                Debug("bandeira: a arte '" + key + "' tem crc " + crc
+                      + " mas o FileStorage não tem o arquivo sob a CommunityEntity");
+            }
+
+            return bytes;
+        }
+
+        /// <summary>
+        /// O mesmo teste que o jogo faz antes de aceitar uma placa.
+        ///
+        /// Cópia fiel de `ImageProcessing.IsValidPNG`, MEDIDA no
+        /// decompilado em 16/09/2026. Ele reprova coisas que um editor
+        /// de imagem gera sem avisar: PNG de paleta (o "PNG-8" que
+        /// encolhe logo), tons de cinza, e o entrelaçado do "salvar
+        /// para a web".
+        /// </summary>
+        private static bool IsPaintablePng(byte[] data, int maxWidth, int maxHeight)
+        {
+            if (data == null || data.Length < 29) return false;
+
+            // O teto é o do BITMAP cru: um arquivo maior que isso não
+            // cabe na textura nem descomprimido.
+            if (data.Length > 29 + maxWidth * maxHeight * 4) return false;
+
+            // 137 P N G \r \n 26 \n
+            if (data[0] != 137 || data[1] != 80 || data[2] != 78 || data[3] != 71
+                || data[4] != 13 || data[5] != 10 || data[6] != 26 || data[7] != 10)
+            {
+                return false;
+            }
+
+            // O IHDR tem de ser o primeiro chunk, com os seus 13 bytes.
+            if (data[8] != 0 || data[9] != 0 || data[10] != 0 || data[11] != 13
+                || data[12] != 73 || data[13] != 72 || data[14] != 68 || data[15] != 82)
+            {
+                return false;
+            }
+
+            var width = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
+            var height = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
+
+            if (width < 1 || width > maxWidth) return false;
+            if (height < 1 || height > maxHeight) return false;
+
+            // Profundidade de bits: 8 ou 16.
+            if (data[24] != 8 && data[24] != 16) return false;
+
+            // Tipo de cor: 2 (RGB) ou 6 (RGBA). Paleta e cinza caem aqui.
+            if (data[25] != 2 && data[25] != 6) return false;
+
+            // Compressão, filtro e entrelaçamento: os três em zero.
+            return data[26] == 0 && data[27] == 0 && data[28] == 0;
+        }
+
+        /// <summary>Refaz os números do relatório a partir das placas.</summary>
+        /// <remarks>
+        /// Recontar é mais barato do que manter contador: a bandeira
+        /// muda de estado quando a arte chega, e um `pending--` /
+        /// `painted++` espalhado por dois hooks é onde o número
+        /// começaria a divergir da lista.
+        /// </remarks>
+        private static void RecountBanners(ActiveDungeon dungeon)
+        {
+            var report = dungeon.paste;
+
+            report.bannersFound = dungeon.banners.Count;
+            report.bannersPainted = 0;
+            report.bannersPending = 0;
+            report.bannersFailed = 0;
+
+            foreach (var mark in dungeon.banners)
+            {
+                if (mark.painted) report.bannersPainted++;
+                else if (mark.waiting) report.bannersPending++;
+                else if (mark.failure != null) report.bannersFailed++;
+            }
+        }
+
+        /// <summary>
+        /// Uma arte acabou de chegar ao OrigemZImages.
+        ///
+        /// ####  SEM ISTO, A BANDEIRA BRANCA FICAVA BRANCA PARA SEMPRE  ####
+        ///
+        /// A arena pode subir antes de o agente terminar de mandar o
+        /// PNG — e vai subir, na primeira vez que o dono configurar
+        /// uma arte nova: painel e jogo são duas máquinas. A masmorra
+        /// dura minutos; reconstruí-la para ver a arte não é resposta.
+        /// </summary>
+        private void OnOrigemZImageStored(string key, uint crc)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(key)) return;
+
+                RepaintWaiting(key);
+            }
+            catch (Exception e)
+            {
+                PrintError("OnOrigemZImageStored falhou: " + e);
+            }
+        }
+
+        /// <summary>
+        /// O OrigemZImages voltou ao ar depois de um reload.
+        ///
+        /// Enquanto ele esteve fora, `BannerBytes` devolvia `null` e
+        /// toda bandeira virou pendente. O `NextTick` é porque o
+        /// [PluginReference] deste plugin ainda pode estar nulo no
+        /// instante do hook: o Oxide preenche as referências no mesmo
+        /// ciclo em que avisa.
+        /// </summary>
+        private void OnPluginLoaded(Plugin plugin)
+        {
+            if (plugin == null || plugin.Name != "OrigemZImages") return;
+            if (active == null || active.banners.Count == 0) return;
+
+            NextTick(() => RepaintWaiting(null));
+        }
+
+        /// <summary>
+        /// Tenta de novo as bandeiras pendentes.
+        /// </summary>
+        /// <param name="key">
+        /// A arte que chegou, ou `null` para tentar todas — que é o
+        /// caso do plugin de imagens voltando ao ar.
+        /// </param>
+        private void RepaintWaiting(string key)
+        {
+            var dungeon = active;
+            if (dungeon == null || dungeon.banners.Count == 0) return;
+
+            var tried = 0;
+            var painted = 0;
+
+            foreach (var mark in dungeon.banners)
+            {
+                if (mark.painted || !mark.waiting) continue;
+                if (key != null && !string.Equals(mark.key, key, StringComparison.Ordinal)) continue;
+
+                PaintBanner(mark);
+                tried++;
+
+                if (mark.painted) painted++;
+                else if (mark.failure != null) PrintWarning("bandeira '" + mark.key + "' não pintou: " + mark.failure);
+            }
+
+            if (tried == 0) return;
+
+            RecountBanners(dungeon);
+            Debug("bandeiras: a arte chegou e " + painted + " de " + tried + " pendente(s) foram pintadas");
         }
 
         /// <summary>
@@ -5176,10 +6252,139 @@ namespace Oxide.Plugins
         //  guardar 3.000 entidades.
         // ============================================================
 
+        // ============================================================
+        //  A TRAVA DE ESTABILIDADE
+        //
+        //  ####  POR QUE `grounded`, E NÃO O HOOK  ####
+        //
+        //  O jogo oferece DUAS saídas para uma peça não despencar, e
+        //  as duas foram lidas no decompilado em 16/09/2026:
+        //
+        //    1) `OnEntityStabilityCheck` — o hook do Oxide, primeira
+        //       linha de `StabilityEntity.StabilityCheck()`. Devolver
+        //       não-nulo aborta a checagem. Só que ele é chamado para
+        //       TODA construção do servidor: a base de cada jogador
+        //       passaria por um método nosso a cada recálculo, para
+        //       nada. Um plugin de evento não tem por que se pôr no
+        //       caminho quente do servidor inteiro.
+        //
+        //    2) `StabilityEntity.grounded` — campo público. Com ele
+        //       true, `SupportValue()`, `CachedSupportValue()` e
+        //       `DistanceFromGround()` devolvem "apoiado" sem
+        //       calcular nada, e o strike de colapso nunca acumula.
+        //       É POR ENTIDADE e custa zero.
+        //
+        //  Fica o `grounded`. As duas objeções previsíveis foram
+        //  conferidas no decompilado:
+        //
+        //    - Ele é serializado? É — `Save`/`Load` gravam a
+        //      estabilidade. Não nos alcança: tudo aqui é
+        //      `EnableSaving(false)`, a masmorra nunca entra no .sav.
+        //
+        //    - Ele muda `DistanceFromGround`, e isso mexe no modelo
+        //      condicional? Não. `DetermineConditionalModelState`
+        //      chama `ConditionalModel.RunTests`, e nem
+        //      `ConditionalModel` nem `ConditionalModelWallpaper`
+        //      leem `grounded` ou distância do chão.
+        //
+        //  E o convar `Server.stability` está fora de questão: é
+        //  global e o dono proibiu desligá-lo.
+        // ============================================================
+
+        /// <summary>
+        /// Faz a peça se sustentar sozinha, antes de ela nascer.
+        ///
+        /// Tem de vir ANTES do `Spawn()`: `StabilityEntity.ServerInit`
+        /// já enfileira um `UpdateStability()`, e a peça que nasce sem
+        /// apoio começa a levar strike no mesmo tick.
+        /// </summary>
+        private static void Anchor(BaseEntity entity)
+        {
+            var stable = entity as StabilityEntity;
+            if (stable != null) stable.grounded = true;
+        }
+
         private void PrepareBlock(ActiveDungeon dungeon, BuildingBlock block, BuildingGrade.Enum grade)
         {
+            // As salas geradas por código não vêm de planta: nem skin
+            // nem cor, e nenhum relatório de import para alimentar.
+            PrepareBlock(dungeon, block, grade, 0UL, 0u);
+        }
+
+        /// <summary>
+        /// Ergue um bloco com a skin e a cor que a planta pediu.
+        ///
+        /// ####  A ORDEM DESTAS QUATRO CHAMADAS É A DO JOGO  ####
+        ///
+        /// Lida no decompilado em 16/09/2026, e nenhuma das quatro
+        /// posições é escolha de estilo:
+        ///
+        ///   1) `skinID` ANTES de `SetGrade`. `SetGrade` termina com
+        ///      `grade = currentGrade.gradeBase.type`, e `currentGrade`
+        ///      resolve o par (grade, skinID). Setar a skin depois
+        ///      deixa o bloco com um grade resolvido para a skin 0.
+        ///
+        ///   2) `SetGrade` antes do `Spawn`, como já era.
+        ///
+        ///   3) `UpdateSkin()` DEPOIS do `Spawn`: é ele que reconstrói
+        ///      o modelo com o prefab da skin.
+        ///
+        ///   4) `SetCustomColour` por ÚLTIMO. `ChangeSkin`, chamado de
+        ///      dentro do `UpdateSkin`, SOBRESCREVE `customColour` com
+        ///      `currentSkin.GetStartingDetailColour(...)`. Cor posta
+        ///      antes é cor apagada.
+        ///
+        /// ####  A COR SÓ APARECE NUMA SKIN  ####
+        ///
+        /// `ConstructionSkin.GetStartingDetailColour` devolve 0 na
+        /// base; só `ConstructionSkin_CustomDetail` — a skin
+        /// *shipping_container* — honra cor. Em qualquer outra skin o
+        /// jogo zera a cor sozinho, e isso é do jogo. Nós guardamos o
+        /// que a planta pediu; quem decide se ela aparece é o prefab.
+        ///
+        /// ####  E O `uint` NÃO É RGBA  ####
+        ///
+        /// É índice de paleta (`ColourLookup.AllColours`), 0 = sem
+        /// cor. É por isso que a arena traz `customColour: 1` e não um
+        /// número de sete dígitos.
+        /// </summary>
+        private void PrepareBlock(
+            ActiveDungeon dungeon,
+            BuildingBlock block,
+            BuildingGrade.Enum grade,
+            ulong skin,
+            uint colour)
+        {
             block.blockDefinition = PrefabAttribute.server.Find<Construction>(block.prefabID);
+
+            block.skinID = skin;
             block.SetGrade(grade);
+
+            // ####  O REBAIXAMENTO SILENCIOSO  ####
+            //
+            // `Construction.GetGrade(grade, skinID)` cai no
+            // `defaultGrade` quando o prefab não tem aquele par — sem
+            // exceção e sem log. O bloco vira PALHA e ninguém fica
+            // sabendo. Como o `SetGrade` copia o grade resolvido de
+            // volta para o campo, comparar o campo com o que foi
+            // pedido é a única evidência que sobra.
+            //
+            // Ao pegar isso, a skin é que cai — nunca o grade. Um
+            // muro blindado sem a textura pedida ainda é um muro
+            // blindado; um muro de palha com a textura certa é uma
+            // arena que qualquer um derruba com um machado.
+            if (skin != 0UL && block.grade != grade)
+            {
+                block.skinID = 0UL;
+                block.SetGrade(grade);
+                dungeon.paste.skinRejected++;
+
+                Debug("bloco '" + block.ShortPrefabName + "' não tem a skin " + skin
+                      + " no grade " + grade + "; mantive o grade e descartei a skin");
+            }
+
+            Anchor(block);
+
             block.AttachToBuilding(dungeon.buildingId);
             block.buildingID = dungeon.buildingId;
             block.EnableSaving(false);
@@ -5187,6 +6392,10 @@ namespace Oxide.Plugins
             block.Spawn();
             block.SetHealthToMax();
             block.UpdateSkin();
+
+            // Depois do `UpdateSkin`, sempre. Ver o cabeçalho.
+            if (colour != 0u) block.SetCustomColour(colour);
+
             block.SendNetworkUpdate();
             block.ResetUpkeepTime();
 
@@ -5396,6 +6605,12 @@ namespace Oxide.Plugins
             /// `entranceRotation`, que gira a casinha no terreno.
             /// </summary>
             public float? entranceFacing;
+
+            /// <summary>
+            /// A arte das bandeiras da planta. `null` = a logo da
+            /// OrigemZ em todas. Ver `BannerSpec`.
+            /// </summary>
+            public BannerSpec banners;
 
             /// <summary>O círculo no mapa. `null` = tudo no padrão.</summary>
             public MarkerSpec marker;
@@ -5638,6 +6853,47 @@ namespace Oxide.Plugins
         }
 
         private class ZoneSpec { public float x; public float z; public float radius; }
+
+        /// <summary>
+        /// A arte das bandeiras que a planta trouxer.
+        ///
+        /// ####  POR QUE ISTO NÃO MORA NA PLANTA  ####
+        ///
+        /// Seria mais direto pôr um `ozBanner: "ozlogo"` no nó da
+        /// bandeira dentro do `.json` — e é exatamente por isso que
+        /// não se faz: a planta é o arquivo que o CopyPaste gera e o
+        /// admin importa. Um campo nosso ali significa EDITAR à mão
+        /// toda planta que chegar, e perder a edição na próxima
+        /// exportação. Trocar a arte viraria um trabalho de editor de
+        /// texto, e não um clique no painel.
+        ///
+        /// A chave vive na RECEITA, que é do painel e já viaja em toda
+        /// construção. Trocar a arte é trocar a chave (ou reenviar o
+        /// PNG sob a mesma chave) — a planta não é tocada.
+        /// </summary>
+        private class BannerSpec
+        {
+            /// <summary>`false` = as bandeiras nascem brancas, de propósito.</summary>
+            public bool enabled = true;
+
+            /// <summary>
+            /// A arte de TODAS as bandeiras da planta.
+            ///
+            /// Vazio = `ozlogo`, a logo da OrigemZ. É a chave no
+            /// OrigemZImages, não um caminho nem uma URL: quem baixa a
+            /// URL é o agente.
+            /// </summary>
+            public string key = "";
+
+            /// <summary>
+            /// Uma arte por bandeira, na ordem do desenho.
+            ///
+            /// A ordem é a de `PaintBanners`: da mais baixa para a mais
+            /// alta. Bandeira que a lista não alcança cai no `key`.
+            /// `null` ou vazio = todas com a mesma arte.
+            /// </summary>
+            public List<string> keys;
+        }
 
         /// <summary>
         /// O círculo no mapa do jogo.

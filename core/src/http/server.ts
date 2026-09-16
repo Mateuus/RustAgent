@@ -121,6 +121,7 @@ import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
 import { registerWorldEventRoutes, type WorldEventRoutesDeps } from './routes/world-events.js';
 import { registerTeamRoutes, type TeamRoutesDeps } from './routes/teams.js';
 import { registerKothRoutes, type KothRoutesDeps } from './routes/koth.js';
+import { registerWorkshopRoutes, type WorkshopRoutesDeps } from './routes/workshop.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 import { registerRuleRoutes, type RuleRoutesDeps } from './routes/rules.js';
 
@@ -396,6 +397,14 @@ export interface BuildServerOptions {
   readonly teams?: TeamRoutesDeps;
   /** O dominio de territorio: os lugares cadastrados, e o que esta de pe. */
   readonly koth?: KothRoutesDeps;
+  /**
+   * O catalogo de skins do Steam Workshop.
+   *
+   * O CADASTRO daqui nao depende de servidor nenhum -- ele responde
+   * do banco, como o dos itens custom. O que e opcional e o canal
+   * com o jogo, e ele mora dentro deste bloco.
+   */
+  readonly workshop?: WorkshopRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -545,6 +554,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         directory: options.directory,
         streamer: options.streamer,
         streamerSync: options.streamerSync,
+        // Tirar a liberacao de um streamer muda a lista que viaja
+        // DENTRO do catalogo de skins. Ver routes/workshop.ts.
+        ...(options.workshop?.workshop === undefined
+          ? {}
+          : { workshop: options.workshop.workshop }),
       });
 
       // O ranking, junto do jogador porque é dele que ele fala — e
@@ -591,6 +605,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // ao jogo.
       if (options.koth !== undefined) {
         registerKothRoutes(api, options.koth);
+      }
+
+      // O catalogo de skins do Workshop. Ele responde do BANCO,
+      // como os itens custom: cadastrar skin e trabalho de
+      // madrugada, com tudo parado. So o `status` e o disparo
+      // manual de sync falam com o jogo.
+      if (options.workshop !== undefined) {
+        registerWorkshopRoutes(api, options.workshop);
       }
 
       // O catálogo de itens. Ele responde do BANCO, e por isso

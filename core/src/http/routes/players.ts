@@ -39,6 +39,7 @@ import { z } from 'zod';
 import { assertSteamId } from '../../bans/service.js';
 import type { StreamerRepository } from '../../db/streamer-repository.js';
 import type { StreamerSync } from '../../game/streamer-sync.js';
+import type { WorkshopService } from '../../game/workshop.js';
 import {
   DEFAULT_EVENTS_LIMIT,
   MAX_EVENTS_LIMIT,
@@ -65,6 +66,21 @@ export interface PlayerRoutesDeps {
    * subir.
    */
   readonly streamerSync: StreamerSync | null;
+
+  /**
+   * O catálogo de skins do Workshop.
+   *
+   * ####  ELE LÊ A MESMA LISTA, E PRECISA SABER QUE ELA MUDOU  ####
+   *
+   * A carga do OrigemZWorkshop leva quem está escondendo a logo
+   * agora, para o plugin não guardar uma segunda cópia dela (ver
+   * types/workshop.ts). Tirar a liberação de alguém aqui muda essa
+   * lista — e sem este aviso a skin continuaria nascendo com a logo
+   * na mão dele até a próxima reconexão de RCON.
+   *
+   * Opcional: o agente sobe sem ele quando não há servidor montado.
+   */
+  readonly workshop?: WorkshopService;
 }
 
 const listQuery = z.object({
@@ -235,6 +251,8 @@ export function registerPlayerRoutes(app: FastifyInstance, deps: PlayerRoutesDep
     // Em todos os servidores: o modo é da REDE, e o jogador pode
     // estar em qualquer um deles agora. Ver game/streamer-sync.ts.
     deps.streamerSync?.pushAllSoon('admin-saved');
+    // E o catálogo de skins, que leva a mesma lista dentro dele.
+    deps.workshop?.handleStreamerChanged();
 
     return { ok: true, streamer: toApiStreamer(streamer) };
   });
