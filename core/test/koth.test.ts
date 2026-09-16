@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 
 import { MEMORY_DATABASE, openDatabase } from '../src/db/database.js';
 import { KothArenasRepository } from '../src/db/koth-arenas-repository.js';
+import { KothDeliveriesRepository } from '../src/db/koth-deliveries-repository.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { WorldEventsRepository } from '../src/db/world-events-repository.js';
@@ -34,15 +35,30 @@ const silent = pino({ level: 'silent' });
 const SERVER = 'server01';
 const WORLD = '4000:1234';
 
+/** Uma entrega que o teste viu acontecer. */
+interface Paid {
+  readonly steamId: string;
+  readonly scope: string | undefined;
+  readonly questId: string;
+  readonly indices: readonly number[];
+}
+
 interface Harness {
   readonly service: KothService;
   readonly arenas: KothArenasRepository;
   readonly events: WorldEventsRepository;
+  readonly deliveries: KothDeliveriesRepository;
   readonly sent: string[];
   readonly said: string[];
   readonly replies: Map<string, string>;
+  /** O que o entregador recebeu, na ordem. */
+  readonly paid: Paid[];
   connected: boolean;
   world: string | null;
+  /** A próxima entrega volta com falha de inventário? */
+  failPayment: boolean;
+  /** O entregador LANÇA para este jogador. */
+  explodeFor: string | null;
 }
 
 function harness(): Harness {
@@ -63,13 +79,18 @@ function harness(): Harness {
 
   const arenas = new KothArenasRepository(db);
   const events = new WorldEventsRepository(db, silent);
+  const deliveries = new KothDeliveriesRepository(db);
 
   const state: Harness = {
     service: null as unknown as KothService,
     arenas,
     events,
+    deliveries,
     sent: [],
     said: [],
+    paid: [],
+    failPayment: false,
+    explodeFor: null,
     // ####  O `status` NÃO ESTÁ AQUI, E ISSO É DE PROPÓSITO  ####
     //
     // Ele é derivado do banco lá embaixo: o "jogo" deste teste
@@ -146,6 +167,37 @@ function harness(): Harness {
       }),
     },
     logger: silent,
+    deliveries,
+    // O entregador de verdade é o das missões (ver
+    // quests/rewards.ts); aqui basta um que ANOTE o que recebeu.
+    rewards: {
+      deliver: (input) => {
+        if (state.explodeFor === input.steamId) {
+          return Promise.reject(new Error('o site caiu'));
+        }
+
+        const indices = [...(input.only ?? new Set(input.rewards.map((_r, index) => index)))];
+
+        if (!state.failPayment) {
+          state.paid.push({
+            steamId: input.steamId,
+            scope: input.scope,
+            questId: input.questId,
+            indices,
+          });
+        }
+
+        return Promise.resolve(
+          indices.map((index) => ({
+            index,
+            kind: 'coins' as const,
+            ok: !state.failPayment,
+            code: state.failPayment ? 'INVENTORY_FULL' : null,
+            message: state.failPayment ? 'não deu' : 'pago',
+          })),
+        );
+      },
+    },
     announce: (_serverId, message) => {
       state.said.push(message);
 
@@ -162,6 +214,17 @@ function arena(h: Harness, patch: Record<string, unknown> = {}) {
     kothArenaInputSchema.parse({ label: 'Colina do Norte', x: 100, z: -200, ...patch }),
     { worldKey: WORLD, grid: 'E7' },
   );
+}
+
+/**
+ * Deixa a entrega terminar.
+ *
+ * O pagamento sai sem `await` de propósito: o anúncio no chat não
+ * pode esperar a carteira do site. No teste, uma volta do laço de
+ * eventos basta para ele acontecer.
+ */
+async function tick(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** O segredo desta sessão, lido do comando que saiu. */
@@ -402,6 +465,177 @@ describe('o sorteio do território', () => {
     h.arenas.markUsed(SERVER, unico.id);
 
     expect(h.arenas.pickFor(SERVER, { worldKey: WORLD })?.label).toBe('Colina');
+  });
+});
+
+// ============================================================
+//  O PRÊMIO DE QUEM VENCEU
+//
+//  ####  O QUE ESTES TESTES PROTEGEM  ####
+//
+//  Item, kit e VIP não têm proteção nenhuma contra entrega dupla:
+//  o mesmo aviso de captura chegando duas vezes põe duas AK na mão
+//  de cada vencedor, e ninguém devolve. O plugin recarregando no
+//  meio de um evento é exatamente o caso.
+// ============================================================
+
+describe('o prêmio de quem venceu', () => {
+  /** Um território que promete 500 OZCoin a cada membro. */
+  function comPremio(h: Harness): void {
+    h.arenas.add(
+      SERVER,
+      kothArenaInputSchema.parse({
+        label: 'Colina',
+        x: 100,
+        z: -200,
+        reward: {
+          smoke: true,
+          flare: true,
+          crates: [],
+          count: 1,
+          crateSeconds: 600,
+          team: [{ kind: 'coins', amount: 500 }],
+        },
+      }),
+      { worldKey: WORLD, grid: 'E7' },
+    );
+  }
+
+  it('cada membro da equipe recebe', async () => {
+    const h = harness();
+
+    comPremio(h);
+
+    const secret = await grabSecret(h);
+    const started = await h.service.start({ serverId: SERVER });
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","teamId":"7","members":["1","2","3"],"secret":"${secret}"}`,
+    );
+
+    await tick();
+
+    expect(h.paid.map((entry) => entry.steamId)).toEqual(['1', '2', '3']);
+    // O escopo é o que separa isto de uma quest no extrato do
+    // jogador e na referência da carteira.
+    expect(h.paid[0]?.scope).toBe('koth');
+    expect(h.paid[0]?.questId).toBe(`run:${String(started.runId)}`);
+  });
+
+  it('o mesmo aviso duas vezes NÃO paga duas vezes', async () => {
+    const h = harness();
+
+    comPremio(h);
+
+    const secret = await grabSecret(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    const line = `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","teamId":"7","members":["1"],"secret":"${secret}"}`;
+
+    h.service.handleLine(SERVER, line);
+    await tick();
+    h.service.handleLine(SERVER, line);
+    await tick();
+
+    expect(h.paid).toHaveLength(1);
+  });
+
+  it('o que FALHOU pode sair de novo — e fica registrado', async () => {
+    const h = harness();
+
+    comPremio(h);
+
+    const secret = await grabSecret(h);
+    const started = await h.service.start({ serverId: SERVER });
+
+    h.failPayment = true;
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","teamId":"7","members":["1"],"secret":"${secret}"}`,
+    );
+
+    await tick();
+
+    const registro = h.deliveries.ofRun(started.runId);
+
+    expect(registro).toHaveLength(1);
+    expect(registro[0]?.ok).toBe(false);
+    expect(registro[0]?.code).toBe('INVENTORY_FULL');
+
+    // Inventário cheio é o caso em que reentregar é a coisa certa.
+    expect(h.deliveries.alreadyPaid(started.runId, '1').size).toBe(0);
+  });
+
+  it('território sem prêmio individual não paga nada — e isso é o normal', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const secret = await grabSecret(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","members":["1"],"secret":"${secret}"}`,
+    );
+
+    await tick();
+
+    expect(h.paid).toHaveLength(0);
+  });
+
+  // ####  O AGENTE REINICIOU NO MEIO DO EVENTO  ####
+  //
+  // ACONTECEU NO CÓDIGO: a readoção reconstruía a run com
+  // `arenaId: 0`, e a captura seguinte não achava o território — o
+  // prêmio não saía, em silêncio, justamente no dia em que alguém
+  // tinha reiniciado o agente.
+  it('readotado, o território ainda é reencontrado — e o prêmio sai', async () => {
+    const h = harness();
+
+    comPremio(h);
+
+    const secret = await grabSecret(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    // É isto que um restart faz: o agente pergunta o que está de pé
+    // e readota o que encontra.
+    await h.service.sync(SERVER);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","members":["1"],"secret":"${secret}"}`,
+    );
+
+    await tick();
+
+    expect(h.paid.map((entry) => entry.steamId)).toEqual(['1']);
+  });
+
+  it('um membro com problema não cala os outros', async () => {
+    const h = harness();
+
+    comPremio(h);
+
+    const secret = await grabSecret(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    h.explodeFor = '2';
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","members":["1","2","3"],"secret":"${secret}"}`,
+    );
+
+    await tick();
+
+    expect(h.paid.map((entry) => entry.steamId)).toEqual(['1', '3']);
   });
 });
 

@@ -191,6 +191,22 @@ export interface DeliverRewardsInput {
   readonly serverId: string;
   readonly steamId: string;
   readonly questId: string;
+  /**
+   * De QUEM é esta entrega. `quest`, se ninguém disser.
+   *
+   * ####  ELE EXISTE PORQUE O KOTH PAGA PELO MESMO CAMINHO  ####
+   *
+   * Este serviço não entrega nada: ele traduz para quem já sabe
+   * entregar. Isso vale para qualquer coisa que prometa um prêmio,
+   * e o KOTH é a segunda — escrever uma segunda tradução daria dois
+   * jeitos de pôr uma AK na mão de alguém.
+   *
+   * O escopo muda três coisas, e nenhuma delas é o caminho da
+   * entrega: a referência da carteira, o `eventId` do ponto e a
+   * palavra que o jogador lê no extrato. Sem ele, um KOTH pago
+   * apareceria como "Quest: Colina do Norte".
+   */
+  readonly scope?: string;
   /** Qual tentativa. Entra na referência da carteira e no id do ponto. */
   readonly attempt: number;
   readonly questTitle: string;
@@ -209,6 +225,20 @@ export interface DeliverRewardsInput {
 // ------------------------------------------------------------
 //  §3  O SERVIÇO
 // ------------------------------------------------------------
+
+/**
+ * A palavra do extrato, a partir do escopo.
+ *
+ * O jogador lê isto na carteira; "koth" em minúsculas ficaria do
+ * lado de "Quest: Caçador" e pareceria defeito.
+ */
+function scopeLabel(scope: string): string {
+  if (scope === 'quest') return 'Quest';
+
+  if (scope === 'koth') return 'KOTH';
+
+  return scope.charAt(0).toUpperCase() + scope.slice(1);
+}
 
 export class QuestRewardService {
   readonly #deps: QuestRewardDeps;
@@ -400,9 +430,11 @@ export class QuestRewardService {
     // mesma, e a carteira do site responde `idempotent` em vez de
     // creditar duas vezes. É o único dos cinco tipos que tem essa
     // proteção — ver o cabeçalho de store/reference.ts.
+    const scope = input.scope ?? 'quest';
+
     const reference = buildReference(
       input.serverId,
-      'quest',
+      scope,
       `${input.questId}:${String(input.attempt)}:${String(index)}`,
     );
 
@@ -410,7 +442,7 @@ export class QuestRewardService {
       steamId: input.steamId,
       amount,
       reference,
-      reason: `Quest: ${input.questTitle}`,
+      reason: `${scopeLabel(scope)}: ${input.questTitle}`,
     });
 
     if (result.status !== 'ok') {
@@ -500,12 +532,12 @@ export class QuestRewardService {
     // painel cai no `INSERT OR IGNORE` do `applyEvent` e não soma
     // duas vezes.
     const applied = this.#deps.points.applyEvent({
-      eventId: `quest:${input.questId}:${String(input.attempt)}:${String(index)}`,
+      eventId: `${input.scope ?? 'quest'}:${input.questId}:${String(input.attempt)}:${String(index)}`,
       serverId: input.serverId,
       steamId: input.steamId,
       metric: reward.metric,
       amount: reward.amount,
-      source: 'quest',
+      source: input.scope ?? 'quest',
       // Segundos: é a unidade da coluna `at` de `stat_events`, e
       // errar isso desloca o evento para 1970 sem nenhum erro no
       // caminho.

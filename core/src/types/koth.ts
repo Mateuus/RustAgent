@@ -27,6 +27,8 @@
 
 import { z } from 'zod';
 
+import { questRewardSchema } from './quests.js';
+
 /**
  * A régua de um território.
  *
@@ -83,6 +85,29 @@ export const kothRewardSchema = z.object({
    * é padrão do LootContainer do jogo.
    */
   crateSeconds: z.number().int().min(0).max(86_400).default(600),
+
+  /**
+   * O que CADA MEMBRO da equipe vencedora recebe.
+   *
+   * ####  A CAIXA É DE QUEM CHEGAR; ISTO É DE QUEM VENCEU  ####
+   *
+   * As duas coisas convivem e não se substituem. A caixa nasce no
+   * chão e quem estiver por perto pode correr para ela — inclusive
+   * quem perdeu. Isto aqui vai para a mão de cada um que estava na
+   * equipe no instante da captura, e não tem como ser roubado.
+   *
+   * ####  O MESMO CONTRATO DAS MISSÕES, DE PROPÓSITO  ####
+   *
+   * `questRewardSchema` já descreve item, OZCoin, kit, VIP e ponto
+   * de ranking, e o `QuestRewardService` já sabe entregar os cinco.
+   * Um segundo formato aqui daria dois jeitos de pôr uma AK na mão
+   * de alguém — e o que tivesse menos teste seria o que roda com o
+   * inventário cheio.
+   *
+   * Vazio = o território não paga nada individual, que é como todo
+   * território cadastrado antes desta frente continua.
+   */
+  team: z.array(questRewardSchema).max(8).default([]),
 });
 
 export type KothReward = z.infer<typeof kothRewardSchema>;

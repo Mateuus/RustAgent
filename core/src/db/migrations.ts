@@ -7614,6 +7614,54 @@ ALTER TABLE world_event_runs ADD COLUMN winner_name TEXT;
 ALTER TABLE world_event_runs ADD COLUMN winner_id TEXT;
 `;
 
+const KOTH_DELIVERIES_SCHEMA = `
+-- ============================================================
+--  094  o que cada membro da equipe vencedora JA recebeu.
+--
+--  ####  POR QUE UM REGISTRO, SE A ENTREGA JA E IDEMPOTENTE  ####
+--
+--  Ela nao e. Das cinco recompensas, so o OZCoin e o ponto de
+--  ranking se protegem sozinhos -- a carteira pela referencia, o
+--  ranking pelo eventId. Item, kit e VIP NAO: entregar duas vezes
+--  poe duas AK na mao da mesma pessoa, e ninguem devolve.
+--
+--  Entao a protecao mora aqui: uma linha por (run, jogador,
+--  posicao da recompensa). Entregou, gravou; e o que ja tem linha
+--  nao sai de novo.
+--
+--  ####  ELE TAMBEM RESPONDE "QUEM FICOU SEM"  ####
+--
+--  Guardar so os sucessos faria a falha sumir. A linha existe com
+--  ok = 0 e o codigo cru de quem entregou (INVENTORY_FULL,
+--  RCON_UNAVAILABLE) -- que e o que o painel precisa para saber o
+--  que reentregar, e o que o admin precisa para nao esquecer
+--  ninguem.
+--
+--  O steamID vai como TEXTO, pelo motivo de sempre: ele passa de
+--  2^53 e como numero seria arredondado em silencio.
+-- ============================================================
+
+CREATE TABLE koth_deliveries (
+  --  A run do evento. Sem REFERENCES, pela mesma razao das runs:
+  --  apagar o historico nao pode virar pagar duas vezes.
+  run_id INTEGER NOT NULL,
+  steam_id TEXT NOT NULL,
+
+  --  A POSICAO da recompensa na lista do territorio. E ela que
+  --  distingue "o kit" de "os 500 coins" da mesma vitoria.
+  idx INTEGER NOT NULL,
+
+  ok INTEGER NOT NULL DEFAULT 0,
+  --  O codigo cru de quem entregou. NULL quando deu certo.
+  code TEXT,
+  at INTEGER NOT NULL,
+
+  PRIMARY KEY (run_id, steam_id, idx)
+);
+
+CREATE INDEX idx_koth_deliveries_run ON koth_deliveries(run_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7866,6 +7914,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 91, name: 'koth-arena-reward', sql: KOTH_ARENA_REWARD_SCHEMA },
   { id: 92, name: 'koth-settings', sql: KOTH_SETTINGS_SCHEMA },
   { id: 93, name: 'run-outcome', sql: RUN_OUTCOME_SCHEMA },
+  { id: 94, name: 'koth-deliveries', sql: KOTH_DELIVERIES_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

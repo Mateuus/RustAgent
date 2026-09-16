@@ -25,14 +25,15 @@
 //  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §12.2.
 // ============================================================
 
-import { Plus, Trash2, X } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { Trash2, X } from 'lucide-react';
+import { useState } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
 import { ContainerPicker } from '@/components/quests/container-picker';
 import { RankingPicker } from '@/components/ranking/ranking-picker';
 import { RequiresPicker } from '@/components/quests/requires-picker';
-import { RewardItemField } from '@/components/quests/reward-item-field';
+import { RewardAddMenu, RewardList } from '@/components/rewards/reward-list';
+import { AddMenu, Field, INPUT } from '@/components/ui/field';
 import { Section } from '@/components/section';
 import {
   agent,
@@ -40,8 +41,6 @@ import {
   type QuestInput,
   type QuestObjective,
   type QuestObjectiveKind,
-  type QuestReward,
-  type QuestRewardKind,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -99,13 +98,6 @@ const OBJECTIVE_LABELS: Readonly<Record<QuestObjectiveKind, string>> = {
   metric: 'Chegar a um número num ranking',
 };
 
-const REWARD_LABELS: Readonly<Record<QuestRewardKind, string>> = {
-  item: 'Item do jogo',
-  coins: 'OZCoin',
-  kit: 'Kit',
-  points: 'Pontos de ranking',
-  vip: 'VIP',
-};
 
 /** Um objetivo em branco, do tipo escolhido. */
 function blankObjective(seq: number, kind: QuestObjectiveKind): QuestObjective {
@@ -127,26 +119,6 @@ function blankObjective(seq: number, kind: QuestObjectiveKind): QuestObjective {
   };
 }
 
-function blankReward(kind: QuestRewardKind): QuestReward {
-  switch (kind) {
-    case 'item':
-      return { kind, shortname: '', amount: 1, skinId: '0' };
-    case 'coins':
-      return { kind, amount: 100, perMeter: null, min: null, max: null };
-    case 'kit':
-      return { kind, slug: '' };
-    case 'points':
-      // ####  VAZIO, E NAO UM PALPITE  ####
-      //
-      // O padrão era `quest.completed`, que parece o nome certo e
-      // nunca existiu: quem não mexesse no campo salvava uma missão
-      // que não teria como pagar. Vazio obriga a escolher — e o
-      // seletor só oferece rankings que existem.
-      return { kind, metric: '', amount: 1 };
-    case 'vip':
-      return { kind, tier: 'ouro', days: 7 };
-  }
-}
 
 /**
  * A frase que o jogador vai ler, aproximada.
@@ -506,46 +478,18 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
           <Section
             title="Recompensas"
             aside={
-              <AddMenu
-                labels={REWARD_LABELS}
-                onPick={(kind) => patch({ rewards: [...form.rewards, blankReward(kind)] })}
+              <RewardAddMenu
+                value={form.rewards}
+                onChange={(rewards) => patch({ rewards: [...rewards] })}
               />
             }
           >
-            {form.rewards.length === 0 && (
-              <p className="text-2xs text-muted">
-                Sem recompensa. É legítimo — existe missão que só destrava a próxima da cadeia.
-              </p>
-            )}
+            <RewardList
+              value={form.rewards}
+              onChange={(rewards) => patch({ rewards: [...rewards] })}
+              emptyHint="Sem recompensa. É legítimo — existe missão que só destrava a próxima da cadeia."
+            />
 
-            {form.rewards.map((reward, index) => (
-              <div key={index} className="flex items-end gap-3 rounded border border-border p-3">
-                <span className="w-28 shrink-0 font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
-                  {REWARD_LABELS[reward.kind]}
-                </span>
-
-                <div className="grid flex-1 gap-3 sm:grid-cols-2">
-                  {rewardFields(reward, (changes) =>
-                    patch({
-                      rewards: form.rewards.map((item, position) =>
-                        position === index ? ({ ...item, ...changes } as QuestReward) : item,
-                      ),
-                    }),
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  aria-label="Remover recompensa"
-                  onClick={() =>
-                    patch({ rewards: form.rewards.filter((_, position) => position !== index) })
-                  }
-                  className="text-muted hover:text-rust"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ))}
           </Section>
 
           {/* ---- regras ---- */}
@@ -736,8 +680,6 @@ export function QuestDialog({ quest, servers, quests, npcs, onClose, onSaved }: 
 
 // ------------------------------------------------------------
 
-const INPUT =
-  'w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground';
 const BUTTON = 'rounded border border-border px-3 py-1.5 text-2xs uppercase tracking-wide';
 
 /**
@@ -751,67 +693,8 @@ const BUTTON = 'rounded border border-border px-3 py-1.5 text-2xs uppercase trac
  */
 const CHECKBOX = 'h-4 w-4 shrink-0 accent-rust';
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  readonly label: string;
-  readonly hint?: string;
-  readonly children: ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1 block font-condensed text-2xs uppercase tracking-wide text-muted">
-        {label}
-      </span>
-      {children}
-      {hint !== undefined && <span className="mt-1 block text-2xs text-muted">{hint}</span>}
-    </label>
-  );
-}
 
-/** O `+` que abre a lista de tipos. */
-function AddMenu<K extends string>({
-  labels,
-  onPick,
-}: {
-  readonly labels: Readonly<Record<K, string>>;
-  readonly onPick: (kind: K) => void;
-}) {
-  const [open, setOpen] = useState(false);
 
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1 text-2xs uppercase tracking-wide text-muted hover:text-foreground"
-      >
-        <Plus className="h-3.5 w-3.5" />
-        Acrescentar
-      </button>
-
-      {open && (
-        <div className="absolute right-0 z-10 mt-1 w-56 rounded border border-border bg-surface py-1">
-          {(Object.keys(labels) as K[]).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              onClick={() => {
-                onPick(kind);
-                setOpen(false);
-              }}
-              className="block w-full px-3 py-1.5 text-left text-2xs hover:bg-background"
-            >
-              {labels[kind]}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function patchObjective(
   form: QuestInput,
@@ -824,119 +707,6 @@ function patchObjective(
       position === index ? { ...item, ...changes } : item,
     ),
   });
-}
-
-/** Os campos de cada tipo de recompensa. */
-function rewardFields(
-  reward: QuestReward,
-  patch: (changes: Partial<QuestReward>) => void,
-): ReactNode {
-  switch (reward.kind) {
-    case 'item':
-      return (
-        <>
-          <Field label="Item">
-            {/* Escolhido, o campo vira o ITEM: ícone, nome e
-                shortname, com um botão de trocar. A caixa de busca
-                sozinha obrigava o admin a conferir a recompensa pelo
-                texto que ele mesmo tinha digitado. */}
-            <RewardItemField
-              shortname={reward.shortname}
-              skinId={reward.skinId}
-              onChange={(choice) => patch(choice as Partial<QuestReward>)}
-            />
-          </Field>
-          <Field label="Quantidade">
-            <input
-              type="number"
-              min={1}
-              className={INPUT}
-              value={reward.amount}
-              onChange={(event) =>
-                patch({ amount: Number(event.target.value) } as Partial<QuestReward>)
-              }
-            />
-          </Field>
-        </>
-      );
-    case 'coins':
-      return (
-        <Field label="OZCoin">
-          <input
-            type="number"
-            min={0}
-            className={INPUT}
-            value={reward.amount ?? 0}
-            onChange={(event) =>
-              patch({ amount: Number(event.target.value) } as Partial<QuestReward>)
-            }
-          />
-        </Field>
-      );
-    case 'kit':
-      return (
-        <Field label="Slug do kit">
-          <input
-            className={INPUT}
-            placeholder="starter"
-            value={reward.slug}
-            onChange={(event) => patch({ slug: event.target.value } as Partial<QuestReward>)}
-          />
-        </Field>
-      );
-    case 'points':
-      return (
-        <>
-          {/* ####  ESCOLHER, E NÃO DIGITAR  ####
-
-              O campo era texto livre. `quest.completed` — que parece
-              o nome certo e não é ranking nenhum — salvou, o jogador
-              concluiu a missão e os pontos viraram pendência. Ver
-              `ranking-picker.tsx`. */}
-          <Field label="Ranking que recebe os pontos">
-            <RankingPicker
-              mode="award"
-              value={reward.metric}
-              onChange={(metric) => patch({ metric } as Partial<QuestReward>)}
-            />
-          </Field>
-          <Field label="Pontos">
-            <input
-              type="number"
-              min={1}
-              className={INPUT}
-              value={reward.amount}
-              onChange={(event) =>
-                patch({ amount: Number(event.target.value) } as Partial<QuestReward>)
-              }
-            />
-          </Field>
-        </>
-      );
-    case 'vip':
-      return (
-        <>
-          <Field label="Tier">
-            <input
-              className={INPUT}
-              value={reward.tier}
-              onChange={(event) => patch({ tier: event.target.value } as Partial<QuestReward>)}
-            />
-          </Field>
-          <Field label="Dias">
-            <input
-              type="number"
-              min={1}
-              className={INPUT}
-              value={reward.days}
-              onChange={(event) =>
-                patch({ days: Number(event.target.value) } as Partial<QuestReward>)
-              }
-            />
-          </Field>
-        </>
-      );
-  }
 }
 
 /** A quest vira formulário. `null` = os padrões de uma nova. */

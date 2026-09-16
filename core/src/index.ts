@@ -82,6 +82,7 @@ import {
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
+import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
@@ -1557,6 +1558,15 @@ async function main(): Promise<void> {
   // respostas para ela. O que e proprio dele sao os TERRITORIOS.
   const kothArenas = new KothArenasRepository(db);
   const kothSettings = new KothSettingsRepository(db);
+  const kothDeliveries = new KothDeliveriesRepository(db);
+
+  // ####  O ENTREGADOR NASCE LÁ EMBAIXO, JUNTO DOS KITS  ####
+  //
+  // E o KOTH é construído aqui em cima, porque o agendador e as
+  // rotas dependem dele. Esta variável casa os dois sem inverter a
+  // ordem do boot: quando um território é capturado, o boot
+  // terminou há muito tempo.
+  let questRewards: QuestRewardService | null = null;
   const kothService = new KothService({
     arenas: kothArenas,
     events: worldEventsRepository,
@@ -1573,6 +1583,20 @@ async function main(): Promise<void> {
       },
     },
     logger,
+    deliveries: kothDeliveries,
+    rewards: {
+      deliver: (input) => {
+        if (questRewards === null) {
+          // Só chegaria aqui um território capturado no meio do
+          // boot. Lançar é melhor que devolver "nada a entregar":
+          // a falha vira registro com código, e o prêmio pode ser
+          // reentregue.
+          throw new Error('KOTH_REWARDS_NOT_READY');
+        }
+
+        return questRewards.deliver(input);
+      },
+    },
     announce: async (serverId, message) => {
       await dungeonBroadcaster.send({
         serverId,
@@ -2312,7 +2336,7 @@ async function main(): Promise<void> {
   questsService = new QuestsService({
     repository: questsRepository,
     logger,
-    rewards: new QuestRewardService({
+    rewards: (questRewards = new QuestRewardService({
       logger,
       // Os quatro caminhos que já existem. Nenhum deles é
       // reescrito — ver o cabeçalho de quests/rewards.ts.
@@ -2332,7 +2356,7 @@ async function main(): Promise<void> {
         // `hasMetric` em quests/rewards.ts.
         hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
       },
-    }),
+    })),
     // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
     // Sai do período `lifetime`, o único que NUNCA zera: um wipe no
