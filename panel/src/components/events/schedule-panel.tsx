@@ -43,7 +43,8 @@ import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
 import { agent, type DungeonSummary, type WorldEvent, type WorldEventInput } from '@/lib/api';
-import { familyOf } from '@/lib/events/families';
+import { EVENT_FAMILIES, familyOf } from '@/lib/events/families';
+import { describeSchedule } from '@/lib/events/schedule-summary';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -150,21 +151,17 @@ export function SchedulePanel({ dungeons, servers }: SchedulePanelProps) {
                   </span>
                 </span>
                 <span className="mt-0.5 block text-2xs text-muted">
-                  {familyOf(event.kind)?.ready === false ? (
-                    <span className="text-amber">
-                      o agente ainda não sabe erguer esta família — nada vai nascer
-                    </span>
-                  ) : event.dungeonId === null ? (
-                    <span className="text-amber">sem masmorra escolhida — não vai nascer</span>
-                  ) : (
-                    <>
-                      {dungeons.find((dungeon) => dungeon.id === event.dungeonId)?.name ??
-                        event.dungeonId}{' '}
-                      · a cada {windowLabel(event.interval)} · dura {windowLabel(event.duration)}
-                      {event.minOnline > 0 && ` · mínimo ${String(event.minOnline)} online`}
-                      {event.servers.length > 0 && ` · ${event.servers.join(', ')}`}
-                    </>
-                  )}
+                  {(() => {
+                    // A leitura é da família, e mora fora do JSX: ver
+                    // schedule-summary.ts.
+                    const summary = describeSchedule(event, (id) => nameOf(dungeons, id));
+
+                    return summary.warning !== null ? (
+                      <span className="text-amber">{summary.warning}</span>
+                    ) : (
+                      summary.parts.join(' · ')
+                    );
+                  })()}
                 </span>
               </span>
 
@@ -268,7 +265,7 @@ function ScheduleDialog({
               className="mt-1"
               value={draft.name}
               maxLength={80}
-              placeholder="Noite de masmorra"
+              placeholder={draft.kind === 'dungeon' ? 'Noite de masmorra' : 'KOTH da noite'}
               onChange={(target) => {
                 const name = target.target.value;
 
@@ -279,25 +276,66 @@ function ScheduleDialog({
             />
           </label>
 
+          {/* ####  A FAMÍLIA VEM ANTES DE TUDO  ####
+
+              Ela decide quais campos abaixo fazem sentido. A lista é
+              só das famílias que o agente sabe erguer HOJE: oferecer
+              uma que ele ignora produziria um horário que nunca
+              acontece, e ninguém saberia por quê.
+
+              Ela é trocável só enquanto o evento é NOVO. Mudar a
+              família de um horário que já tem histórico faria as
+              runs antigas mudarem de tipo no passado. */}
           <label className="block">
             <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-              Qual masmorra
+              Que evento
             </span>
             <select
-              value={draft.dungeonId ?? ''}
-              onChange={(target) =>
-                patch({ dungeonId: target.target.value === '' ? null : target.target.value })
-              }
-              className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+              value={draft.kind}
+              disabled={event !== null}
+              onChange={(target) => {
+                const kind = target.target.value;
+
+                // Trocar para KOTH larga a masmorra escolhida: ela
+                // viajaria no payload e não significaria nada.
+                patch(kind === 'dungeon' ? { kind } : { kind, dungeonId: null });
+              }}
+              className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm disabled:opacity-60"
             >
-              <option value="">— escolha —</option>
-              {dungeons.map((dungeon) => (
-                <option key={dungeon.id} value={dungeon.id}>
-                  {dungeon.name}
+              {EVENT_FAMILIES.filter((family) => family.ready).map((family) => (
+                <option key={family.kind} value={family.kind}>
+                  {family.one}
                 </option>
               ))}
             </select>
+            <span className="mt-1 block text-2xs text-muted">
+              {event === null
+                ? 'Depois de criado, o horário não muda de família.'
+                : 'A família não muda depois de criada: o histórico dela ficaria de outro tipo.'}
+            </span>
           </label>
+
+          {draft.kind === 'dungeon' && (
+            <label className="block">
+              <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+                Qual masmorra
+              </span>
+              <select
+                value={draft.dungeonId ?? ''}
+                onChange={(target) =>
+                  patch({ dungeonId: target.target.value === '' ? null : target.target.value })
+                }
+                className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+              >
+                <option value="">— escolha —</option>
+                {dungeons.map((dungeon) => (
+                  <option key={dungeon.id} value={dungeon.id}>
+                    {dungeon.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         <MinutesRange
@@ -307,12 +345,22 @@ function ScheduleDialog({
           onChange={(interval) => patch({ interval })}
         />
 
-        <MinutesRange
-          label="Fica de pé por"
-          hint="Quando o tempo acaba, o agente derruba a masmorra e quem estava dentro sai."
-          value={draft.duration}
-          onChange={(duration) => patch({ duration })}
-        />
+        {draft.kind === 'dungeon' ? (
+          <MinutesRange
+            label="Fica de pé por"
+            hint="Quando o tempo acaba, o agente derruba a masmorra e quem estava dentro sai."
+            value={draft.duration}
+            onChange={(duration) => patch({ duration })}
+          />
+        ) : (
+          // Campo que não manda em nada é pior que campo nenhum:
+          // alguém preenche e espera o evento durar aquilo.
+          <p className="border-l-2 border-border bg-surface-2 px-3 py-2 text-2xs text-muted">
+            Quanto o KOTH fica de pé, o raio e o tempo de domínio são de cada{' '}
+            <strong className="text-foreground">território</strong>, na tela do KOTH. Este horário
+            só escolhe a hora de começar — e o território é sorteado entre os ligados.
+          </p>
+        )}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
@@ -360,9 +408,9 @@ function ScheduleDialog({
 
         <div className="flex items-center justify-between gap-3 border border-border bg-surface-2 p-3">
           <span className="min-w-0">
-            <span className="block text-xs text-foreground">Contar só depois que ela fechar</span>
+            <span className="block text-xs text-foreground">Contar só depois que ele fechar</span>
             <span className="block text-2xs text-muted">
-              Ligado, a próxima contagem começa quando a masmorra acabar. Desligado, ela corre em
+              Ligado, a próxima contagem começa quando este evento acabar. Desligado, ela corre em
               paralelo — e a próxima pode estar pronta assim que esta fechar.
             </span>
           </span>
@@ -371,7 +419,7 @@ function ScheduleDialog({
             busy={false}
             onChange={(countAfterEnd) => patch({ countAfterEnd })}
             labels={['Depois', 'Em paralelo']}
-            label="Contar só depois que ela fechar"
+            label="Contar só depois que ele fechar"
           />
         </div>
 
@@ -391,7 +439,7 @@ function ScheduleDialog({
           />
         </div>
 
-        {draft.dungeonId === null && (
+        {draft.kind === 'dungeon' && draft.dungeonId === null && (
           <p className="border-l-2 border-amber bg-surface-2 px-3 py-2 text-2xs">
             Sem masmorra escolhida, este horário fica guardado e o agente o pula. Dá para salvar
             assim e escolher depois.
@@ -476,11 +524,9 @@ function MinutesRange({
 }
 
 /** "de 60 a 120 min", ou "a cada 60 min" quando os dois são iguais. */
-function windowLabel(window: { readonly min: number; readonly max: number }): string {
-  const min = Math.round(window.min / 60);
-  const max = Math.round(window.max / 60);
-
-  return min === max ? `${String(min)} min` : `${String(min)}–${String(max)} min`;
+/** O nome de uma masmorra pelo id, ou `null` se ela não existe mais. */
+function nameOf(dungeons: readonly DungeonSummary[], id: string): string | null {
+  return dungeons.find((dungeon) => dungeon.id === id)?.name ?? null;
 }
 
 /**
