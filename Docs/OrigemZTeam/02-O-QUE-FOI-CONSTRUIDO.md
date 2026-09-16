@@ -202,13 +202,25 @@ boot **reposiciona** o menu que já estava gravado errado — desfaz e refaz.
 A barra do server01 depois do conserto:
 `HOME · LOJA · CALENDÁRIO · EVENTOS · REGRAS · KITS · RANKING · MISSÕES · DISCORD · EQUIPE · CONFIG`
 
-### 3. A barra continua acendendo a aba aberta?
+### 3. A barra acende a aba aberta — CONFIRMADO em 16/09/2026
 
-O mecanismo mudou por inteiro (§3). Navegue entre três ou quatro abas e confira que a aberta
-fica vermelha e a anterior apaga. **Se nenhuma acender, é aqui.**
+O mecanismo mudou por inteiro (§3), e o risco era total e silencioso: se a tabela saísse
+errada, NENHUMA aba acenderia, sem erro em lugar nenhum. A captura do jogo mostra a aba EQUIPE
+vermelha enquanto a tela dela está aberta.
 
-Vale conferir também com um jogador **sem** o modo streamer liberado: a barra dele não tem o
-botão CONFIG, e o `PushNavUpdate` precisa pular o que não está na tela dele.
+**O que ainda não foi visto:** um jogador **sem** o modo streamer liberado. A barra dele não
+tem o botão CONFIG, e o `PushNavUpdate` precisa pular o que não está na tela dele — é o único
+ramo do mecanismo novo que ninguém exercitou.
+
+### O buraco de 72 px, achado na mesma captura
+
+Mover a aba deixava para trás o lugar dela: os botões da barra não se encostam, cada um tem um
+X escrito por deslocamento acumulado, e tirar um do meio não fecha nada. O `dropTab` agora
+puxa de volta quem estava à direita.
+
+O teste que existia não pegava — ele conferia que os botões não se SOBREPÕEM, e um buraco
+passa nisso. Agora ele mede o VÃO entre cada par de vizinhos e exige que todos sejam iguais:
+a mesma medida pega os três defeitos (encostado, sobreposto, com buraco).
 
 ### 4. A tela cabe, e os botões estão onde deveriam?
 
