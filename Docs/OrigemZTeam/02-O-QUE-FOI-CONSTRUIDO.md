@@ -3,8 +3,8 @@
 Este documento fecha o [01](01-A-ABA-EQUIPE-DO-MENU.md), que era a especificação. Aqui está o
 que existe no código, o que foi decidido no caminho, **e o que ainda não foi medido no jogo**.
 
-Quem lê isto: quem for mexer na tela depois — e quem for testá-la com o jogo aberto, que é a
-única forma de fechar as três perguntas do §5.
+Quem lê isto: quem for mexer na tela depois. O §5 guarda o que foi MEDIDO no jogo em
+16/09/2026 — e o pouco que ainda não foi.
 
 ---
 
@@ -32,7 +32,7 @@ E o caminho de volta, quando ele clica ou aperta Enter:
         ↓
   #OZBUY#{…,"value":"Alcateia do Norte"}
         ↓
-  index.ts → runTeamAction  — relê a equipe, confere o cargo, e AÍ age
+  team-actions.ts → runTeamAction  — relê a equipe, confere o cargo, e AÍ age
         ↓
   TeamsService → origemz.team … → o jogo
 ```
@@ -50,9 +50,10 @@ ALVO, e ele só vale se estiver na mesma equipe de quem pediu.
 |---|---|
 | `core/src/game/ui-team-screen.ts` | a tela, a sidebar, as confirmações, `withTeamTab` |
 | `core/src/types/teams.ts` | `TEAM_POWERS_BY_RANK`, `rankCan`, `rankOutranks` |
-| `core/src/index.ts` | `runTeamAction` — onde a permissão é cobrada |
+| `core/src/game/team-actions.ts` | `runTeamAction` — onde a permissão é cobrada |
 | `core/src/game/ui-preset-main-menu.ts` | a aba na barra e os atalhos `/equipe`, `/team` |
-| `core/test/ui-team-screen.test.ts` | 29 testes: cargos, endereço, geometria, orçamento |
+| `core/test/ui-team-screen.test.ts` | 33 testes: cargos, endereço, geometria, ordem da barra |
+| `core/test/team-actions.test.ts` | 22 testes: o que NÃO pode, e o jogo não é tocado |
 
 ---
 
@@ -159,33 +160,49 @@ mesmo RCON e o mesmo banco é um ambiente em que nada se mede.
 
 ---
 
-## 5. O que AINDA NÃO FOI MEDIDO — precisa do jogo aberto
+## 5. O que o jogo respondeu
 
-Isto não é ressalva de rodapé: são três perguntas abertas, e as três só o cliente do Rust
-responde. O CUI **não se confere daqui** — o servidor manda o JSON e quem o desenha é o
-jogador.
+O CUI **não se confere daqui** — o servidor manda o JSON e quem o desenha é o cliente. Estas
+eram as perguntas que só ele podia responder, e o dono as testou em 16/09/2026.
 
-O que já está provado: o `OrigemZUI.cs` compila e carrega no server01; o documento gravado tem
-a aba, a tela e os dois atalhos; o `origemz.team list` responde com as equipes reais; e a carga
-cabe no frame com 5.516 bytes de folga.
+Já estava provado sem o jogo: o `OrigemZUI.cs` compila e carrega no server01; o documento
+gravado tem a aba, a tela e os dois atalhos; o `origemz.team list` responde com as equipes
+reais; e a carga cabe no frame com 5.516 bytes de folga.
 
-### 1. O campo de texto aceita digitação e o Enter volta com ela?
+### 1. O campo de texto — RESPONDIDO em 16/09/2026: funciona
 
-**É a pergunta principal, e ela nunca foi respondida neste projeto.** O `OrigemZQueue.cs` já
-usa um `InputField`, mas o dele é `ReadOnly` — serve para copiar uma URL, e nunca exercitou o
-caminho de volta.
+Era a pergunta principal, e ela nunca tinha sido exercitada aqui (o `InputField` do
+`OrigemZQueue.cs` é `ReadOnly` — serve para copiar uma URL). O dono digitou o nome, e o texto
+chegou ao agente pelo `origemz.ui.input`.
 
-Como testar: abrir `/equipe` como **líder**, clicar no campo do nome, digitar e apertar Enter.
+**E o botão SALVAR também funciona.** Nenhum botão do CUI consegue LER o campo — o texto vive
+no cliente —, mas o `onEndEdit` dispara **ao perder o foco**, e clicar num botão é o que tira
+o foco. O rastro do plugin mostra a sequência:
 
-- Se o chat responder "A equipe agora se chama X" → o caminho inteiro funciona.
-- Se o campo não aceitar tecla → o `needsKeyboard` não bastou.
-- Se aceitar e o Enter não fizer nada → o `command` do InputField não volta com o texto, e o
-  plano B é o comando de chat (`/equipe nome <x>`), que custa um `[ChatCommand]` no
-  `OrigemZTeam.cs`.
+```
+[act] input: eq-nome-a -> [MateusOGostoso2]      o campo mandou sozinho
+#OZBUY#{… "offerId":"team:name" …}
+[act] recebido: … eq-nome-a                      o clique do botão, atrás
+[act] compra ignorada: ja existe uma em curso    engolido pela trava
+```
 
-Com `origemz.ui.debug 1` ligado, o console mostra `input: eq-nome-a -> [o que chegou]`.
+Por isso o botão carrega a **mesma ação** do campo: o texto chega primeiro, e o clique
+duplicado morre na trava de duplo pedido (`PendingBuyId`), que já existia para a loja.
 
-### 2. A barra continua acendendo a aba aberta?
+O único caso que sobra é clicar em SALVAR sem nunca ter tocado no campo — não há foco a
+perder, e o clique chega sem valor. A resposta ensina ("Escreva o nome no campo antes de
+salvar") em vez de reclamar de um nome vazio que o jogador não digitou.
+
+### 2. A ordem da barra — CORRIGIDA em 16/09/2026
+
+A aba nasceu pendurada no FIM da fileira, depois do CONFIG. Regra do dono: **CONFIG é sempre
+o último**. Agora a EQUIPE entra na frente das abas que fecham a barra (DISCORD e CONFIG), e o
+boot **reposiciona** o menu que já estava gravado errado — desfaz e refaz.
+
+A barra do server01 depois do conserto:
+`HOME · LOJA · CALENDÁRIO · EVENTOS · REGRAS · KITS · RANKING · MISSÕES · DISCORD · EQUIPE · CONFIG`
+
+### 3. A barra continua acendendo a aba aberta?
 
 O mecanismo mudou por inteiro (§3). Navegue entre três ou quatro abas e confira que a aberta
 fica vermelha e a anterior apaga. **Se nenhuma acender, é aqui.**
@@ -193,7 +210,7 @@ fica vermelha e a anterior apaga. **Se nenhuma acender, é aqui.**
 Vale conferir também com um jogador **sem** o modo streamer liberado: a barra dele não tem o
 botão CONFIG, e o `PushNavUpdate` precisa pular o que não está na tela dele.
 
-### 3. A tela cabe, e os botões estão onde deveriam?
+### 4. A tela cabe, e os botões estão onde deveriam?
 
 A geometria tem teste, mas contra medidas calculadas — não contra o que o cliente desenha.
 Olhar: a lista de membros com a equipe cheia (8), o botão SAIR no rodapé, e os três botões da

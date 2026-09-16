@@ -106,11 +106,36 @@ export async function runTeamAction(input: {
         return { ok: false, message: 'Só o líder muda o nome da equipe.' };
       }
 
+      // ####  O CLIQUE NO SALVAR CHEGA SEM TEXTO QUANDO O CAMPO NÃO FOI TOCADO  ####
+      //
+      // O botão não consegue LER o campo — nenhum botão do CUI
+      // consegue. Quem manda o texto é o `onEndEdit` do próprio
+      // campo, e ele dispara ao PERDER O FOCO: clicar em SALVAR é o
+      // que tira o foco dele.
+      //
+      // MEDIDO no jogo em 16/09/2026, no rastro do plugin:
+      //
+      //     [act] input: eq-nome-a -> [MateusOGostoso2]
+      //     #OZBUY#{… "offerId":"team:name" …}
+      //     [act] recebido: … eq-nome-a
+      //     [act] compra ignorada: ja existe uma em curso
+      //
+      // Ou seja: o texto chega PRIMEIRO, e o clique do botão que
+      // vem atrás é engolido pela trava de duplo pedido. Este ramo
+      // só é alcançado quando o jogador clica em SALVAR sem nunca
+      // ter tocado no campo — e aí não há foco para perder.
+      //
+      // "O nome não pode ser vazio" seria culpá-lo por uma letra
+      // que ele não chegou a digitar.
+      if (input.value === undefined) {
+        return { ok: false, message: 'Escreva o nome no campo antes de salvar.' };
+      }
+
       // O texto vem CRU do cliente: ele não passou por régua
       // nenhuma no caminho. A daqui é a mesma do painel, de
       // propósito — um nome que o admin não conseguiria salvar não
       // pode entrar pelo jogo.
-      const parsed = teamNameSchema.safeParse(input.value ?? '');
+      const parsed = teamNameSchema.safeParse(input.value);
 
       if (!parsed.success) {
         const why = parsed.error.issues[0]?.message ?? 'nome inválido';

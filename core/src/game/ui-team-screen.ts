@@ -70,6 +70,9 @@ import {
   type TeamMember,
 } from '../types/teams.js';
 
+import { DISCORD_TAB_ID } from './ui-discord-screen.js';
+import { STREAMER_TAB_ID } from './ui-streamer-screen.js';
+
 import {
   C,
   button,
@@ -163,6 +166,9 @@ const BODY_HEIGHT = 455;
 
 /** O botão de sair, parado no rodapé. */
 const FOOTER = { height: 30, width: 150 } as const;
+
+/** O campo do nome e o botão que o salva. */
+const FIELD = { width: 240, button: 76 } as const;
 
 // ------------------------------------------------------------
 //  O ENDEREÇO
@@ -689,7 +695,7 @@ function renameRow(team: Team, top: number): readonly UiElement[] {
           anchorMin: { x: 0, y: 1 },
           anchorMax: { x: 0, y: 1 },
           offsetMin: { x: ROW.pad, y: -(24 + 22) },
-          offsetMax: { x: ROW.pad + 260, y: -24 },
+          offsetMax: { x: ROW.pad + FIELD.width, y: -24 },
         },
         C.bg,
         [
@@ -700,13 +706,46 @@ function renameRow(team: Team, top: number): readonly UiElement[] {
           }),
         ],
       ),
+      // ####  O BOTÃO SALVAR  ####
+      //
+      // Pedido do dono em 16/09/2026, depois de ver o campo
+      // funcionando: "não queria colocar um enter para salvar e sim
+      // um botão Salvar".
+      //
+      // ####  ELE NÃO CONSEGUE LER O CAMPO  ####
+      //
+      // E nenhum botão conseguiria: o texto vive no CLIENTE, e o
+      // servidor só o conhece quando o `InputField` o envia. Não há
+      // no CUI um "me dê o valor daquele campo".
+      //
+      // O que existe é o `onEndEdit` do Unity, e MEDIDO no jogo em
+      // 16/09/2026 ele dispara no Enter E AO PERDER O FOCO. Clicar
+      // aqui tira o foco do campo — e é isso que manda o texto. O
+      // clique em si chega logo atrás e é engolido pela trava de
+      // duplo pedido do plugin (`PendingBuyId`).
+      //
+      // Quem clica SEM ter tocado no campo não tem foco a perder, e
+      // aí o clique chega sozinho e sem valor — o agente responde
+      // dizendo o que fazer, em vez de calar. Ver `runTeamAction`.
+      button(
+        'eq-nome-b',
+        'SALVAR',
+        {
+          anchorMin: { x: 0, y: 1 },
+          anchorMax: { x: 0, y: 1 },
+          offsetMin: { x: ROW.pad + FIELD.width + 8, y: -(24 + 22) },
+          offsetMax: { x: ROW.pad + FIELD.width + 8 + FIELD.button, y: -24 },
+        },
+        action,
+        { color: C.rust, textColor: C.white, fontSize: 11 },
+      ),
       label(
         'eq-nome-h',
-        `Escreva e aperte ENTER. Até ${String(TEAM_NAME_MAX)} caracteres.`,
+        `Clique no campo, escreva, e salve. Até ${String(TEAM_NAME_MAX)} caracteres.`,
         {
           anchorMin: { x: 0, y: 1 },
           anchorMax: { x: 1, y: 1 },
-          offsetMin: { x: ROW.pad + 272, y: -(24 + 22) },
+          offsetMin: { x: ROW.pad + FIELD.width + 8 + FIELD.button + 12, y: -(24 + 22) },
           offsetMax: { x: -ROW.pad, y: -24 },
         },
         { size: 11, color: C.textMuted, align: 'MiddleLeft' },
@@ -714,6 +753,7 @@ function renameRow(team: Team, top: number): readonly UiElement[] {
     ]),
   ];
 }
+
 
 // ------------------------------------------------------------
 //  UMA LINHA DE MEMBRO
@@ -1089,9 +1129,86 @@ function findNavSpot(
   return best;
 }
 
-function tabFrom(model: Extract<UiElement, { type: 'button' }>): UiElement {
-  const width = textWidth(TEAM_TAB_LABEL, model.fontSize) + NAV_PADDING;
-  const left = model.rect.offsetMax.x + NAV_GAP;
+/**
+ * As abas que FECHAM a barra, e na frente das quais a EQUIPE entra.
+ *
+ * ####  O CONFIG É O ÚLTIMO, E ISSO É REGRA  ####
+ *
+ * Decisão do dono em 16/09/2026, vendo a aba nova no jogo: "no menu,
+ * EQUIPE fica antes de Config — Config sempre será o último".
+ *
+ * Faz sentido e não é capricho: CONFIG não é um assunto do servidor
+ * como LOJA ou EQUIPE, é o lugar onde o jogador mexe no que é DELE.
+ * Uma aba de conteúdo depois dela empurraria as opções pessoais para
+ * o meio da fileira.
+ *
+ * O DISCORD entra na mesma regra porque é da mesma natureza: ele não
+ * abre um assunto do servidor, abre um endereço de fora. A barra lê
+ * melhor com as abas de conteúdo juntas e as duas de saída no fim —
+ * e é essa a ordem que o preset já nasce tendo, então segui-la aqui
+ * é o que faz um menu MIGRADO ficar igual a um menu NOVO.
+ */
+const TAIL_TABS: readonly string[] = [DISCORD_TAB_ID, STREAMER_TAB_ID];
+
+/** A aba de fim de barra mais à ESQUERDA — é na frente dela que a EQUIPE entra. */
+function findTailTab(
+  elements: readonly UiElement[],
+): Extract<UiElement, { type: 'button' }> | null {
+  let best: Extract<UiElement, { type: 'button' }> | null = null;
+
+  const visit = (list: readonly UiElement[]): void => {
+    for (const element of list) {
+      if (element.type === 'button' && TAIL_TABS.includes(element.id)) {
+        if (best === null || element.rect.offsetMin.x < best.rect.offsetMin.x) {
+          best = element;
+        }
+      }
+
+      visit(element.children);
+    }
+  };
+
+  visit(elements);
+
+  return best;
+}
+
+/**
+ * Empurra para a direita todo botão de navegação que começa em
+ * `fromX` ou depois.
+ *
+ * É o que abre o buraco para a aba nova sem redesenhar a barra: o
+ * CONFIG (e quem mais vier depois dele um dia) anda, e o resto fica
+ * exatamente onde estava.
+ */
+function shiftNavFrom(elements: readonly UiElement[], fromX: number, by: number): UiElement[] {
+  return elements.map((element) => {
+    const moved =
+      element.type === 'button' &&
+      element.id.startsWith('nav-') &&
+      element.rect.offsetMin.x >= fromX
+        ? {
+            ...element,
+            rect: {
+              ...element.rect,
+              offsetMin: { ...element.rect.offsetMin, x: element.rect.offsetMin.x + by },
+              offsetMax: { ...element.rect.offsetMax, x: element.rect.offsetMax.x + by },
+            },
+          }
+        : element;
+
+    return { ...moved, children: shiftNavFrom(moved.children, fromX, by) } as UiElement;
+  });
+}
+
+/** A largura que o rótulo EQUIPE ocupa num botão daquela fonte. */
+function tabWidth(fontSize: number): number {
+  return textWidth(TEAM_TAB_LABEL, fontSize) + NAV_PADDING;
+}
+
+function tabFrom(model: Extract<UiElement, { type: 'button' }>, left?: number): UiElement {
+  const width = tabWidth(model.fontSize);
+  const at = left ?? model.rect.offsetMax.x + NAV_GAP;
 
   return {
     ...model,
@@ -1101,8 +1218,8 @@ function tabFrom(model: Extract<UiElement, { type: 'button' }>): UiElement {
     rect: {
       anchorMin: model.rect.anchorMin,
       anchorMax: model.rect.anchorMax,
-      offsetMin: { x: left, y: model.rect.offsetMin.y },
-      offsetMax: { x: left + width, y: model.rect.offsetMax.y },
+      offsetMin: { x: at, y: model.rect.offsetMin.y },
+      offsetMax: { x: at + width, y: model.rect.offsetMax.y },
     },
     action: { id: 'ir-equipe', kind: 'navigate', screenId: TEAM_SCREEN_ID },
     activeOnScreenId: TEAM_SCREEN_ID,
@@ -1170,7 +1287,23 @@ export function withTeamTab(document: UiDocument): UiDocument | null {
   // sempre: este caminho roda a cada boot, e é ele que conserta o
   // documento que uma versão anterior deixou incompleto.
   if (document.screens.some((screen) => screen.id === TEAM_SCREEN_ID)) {
-    return missingShortcuts ? { ...document, shortcuts } : null;
+    // ####  E A ABA PODE ESTAR NO LUGAR ERRADO  ####
+    //
+    // A primeira versão pendurava a aba no FIM da barra, depois do
+    // CONFIG — e foi assim que ela chegou ao jogo. A regra do dono
+    // é que o CONFIG fecha a fileira, então o boot também
+    // REPOSICIONA o que já está gravado: desfaz e refaz, que é o
+    // mesmo caminho de quem está ganhando a aba agora.
+    const misplaced = isAfterTail(document.shell);
+    const shell = misplaced
+      ? withTabInPlace(dropTab(document.shell), findNavSpot(dropTab(document.shell)))
+      : document.shell;
+
+    if (!missingShortcuts && !misplaced) {
+      return null;
+    }
+
+    return { ...document, shortcuts, ...(shell === null ? {} : { shell }) };
   }
 
   if (document.screens.length >= MAX_SCREENS_PER_DOCUMENT) {
@@ -1178,14 +1311,18 @@ export function withTeamTab(document: UiDocument): UiDocument | null {
   }
 
   const spot = findNavSpot(document.shell);
+  const shell = withTabInPlace(document.shell, spot);
 
-  if (spot === null) {
+  if (shell === null) {
+    // Barra sem botão de navegação E sem CONFIG: um menu desenhado
+    // do zero, em que não há onde pendurar a aba. Inventar um lugar
+    // seria desenhar por cima do trabalho de quem fez.
     return null;
   }
 
   return {
     ...document,
-    shell: insertAfter(document.shell, spot.parentId, spot.model.id, tabFrom(spot.model)),
+    shell,
     shortcuts,
     screens: [
       ...document.screens,
@@ -1195,6 +1332,85 @@ export function withTeamTab(document: UiDocument): UiDocument | null {
       },
     ],
   };
+}
+
+/** A aba EQUIPE está desenhada DEPOIS de uma aba de fim de barra? */
+function isAfterTail(shell: readonly UiElement[]): boolean {
+  const tail = findTailTab(shell);
+  const tab = findTeamTab(shell);
+
+  return tail !== null && tab !== null && tab.rect.offsetMin.x > tail.rect.offsetMin.x;
+}
+
+function findTeamTab(elements: readonly UiElement[]): Extract<UiElement, { type: 'button' }> | null {
+  for (const element of elements) {
+    if (element.type === 'button' && element.id === TEAM_TAB_ID) {
+      return element;
+    }
+
+    const deeper = findTeamTab(element.children);
+
+    if (deeper !== null) return deeper;
+  }
+
+  return null;
+}
+
+/** A barra sem a aba EQUIPE — o primeiro passo de reposicioná-la. */
+function dropTab(elements: readonly UiElement[]): UiElement[] {
+  return elements
+    .filter((element) => element.id !== TEAM_TAB_ID)
+    .map((element) => ({ ...element, children: dropTab(element.children) }) as UiElement);
+}
+
+/**
+ * A barra com a aba EQUIPE no lugar certo.
+ *
+ * ####  ANTES DO CONFIG, SEMPRE  ####
+ *
+ * Regra do dono (16/09/2026). A primeira versão pendurava a aba no
+ * fim da barra — depois do CONFIG —, e foi assim que ela apareceu no
+ * jogo. Ver `findConfigTab`.
+ *
+ * Quando o CONFIG existe, a aba TOMA a posição dele e o empurra para
+ * a direita. Quando não existe (menu sem o modo streamer, ou
+ * desenhado do zero), ela vai para o fim, que é onde estava o único
+ * lugar possível.
+ */
+function withTabInPlace(shell: readonly UiElement[], spot: NavSpot | null): UiElement[] | null {
+  const config = findTailTab(shell);
+
+  if (config === null) {
+    // Sem CONFIG, ela vai para o fim — que era o único lugar
+    // possível antes desta regra existir.
+    return spot === null ? null : insertAfter(shell, spot.parentId, spot.model.id, tabFrom(spot.model));
+  }
+
+  const left = config.rect.offsetMin.x;
+  // A aba nova ocupa o lugar do CONFIG; ele e quem estiver à direita
+  // dele andam o tamanho dela mais o vão entre botões.
+  const shifted = shiftNavFrom(shell, left, tabWidth(config.fontSize) + NAV_GAP);
+
+  return insertBefore(shifted, config.id, tabFrom(config, left));
+}
+
+/** O elemento entra IMEDIATAMENTE antes daquele id, em qualquer nível. */
+function insertBefore(
+  elements: readonly UiElement[],
+  beforeId: string,
+  tab: UiElement,
+): UiElement[] {
+  const out: UiElement[] = [];
+
+  for (const element of elements) {
+    if (element.id === beforeId) {
+      out.push(tab);
+    }
+
+    out.push({ ...element, children: insertBefore(element.children, beforeId, tab) } as UiElement);
+  }
+
+  return out;
 }
 
 /**

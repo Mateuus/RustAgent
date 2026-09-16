@@ -239,6 +239,39 @@ describe('o nome da equipe', () => {
     expect(campo.action.offerId).toBe(`${TEAM_ACTION_PREFIX}name`);
   });
 
+  it('o líder tem um botão SALVAR ao lado do campo', () => {
+    // Pedido do dono em 16/09: o Enter funciona, mas não é o que se
+    // oferece — o botão é. Ele carrega a MESMA ação do campo: quem
+    // manda o texto é o campo ao perder o foco, e o clique que
+    // chegar depois é engolido pela trava do plugin.
+    const elementos = screenFor(LEADER);
+    const salvar = walk(elementos).find((element) => element.id === 'eq-nome-b');
+
+    expect(salvar?.type).toBe('button');
+
+    if (salvar?.type !== 'button') return;
+
+    expect(salvar.text).toBe('SALVAR');
+    expect(salvar.action.kind).toBe('store.buy');
+
+    const campo = walk(elementos).find((element) => element.id === 'eq-nome-i');
+
+    if (campo?.type !== 'input') throw new Error('o campo sumiu');
+
+    // A mesma ação nos dois: um id só para o plugin validar.
+    expect(salvar.action).toEqual(campo.action);
+  });
+
+  it('o botão SALVAR não fica por cima do campo', () => {
+    const elementos = screenFor(LEADER);
+    const caixa = walk(elementos).find((element) => element.id === 'eq-nome-c');
+    const salvar = walk(elementos).find((element) => element.id === 'eq-nome-b');
+
+    if (caixa === undefined || salvar === undefined) throw new Error('o bloco do nome mudou');
+
+    expect(salvar.rect.offsetMin.x).toBeGreaterThan(caixa.rect.offsetMax.x);
+  });
+
   it('a equipe sem nome mostra SEM NOME, e não uma linha vazia', () => {
     const textos = walk(screenFor(PLAIN)).flatMap((element) =>
       element.type === 'label' ? [element.text] : [],
@@ -611,3 +644,137 @@ describe('o documento que uma versão anterior deixou pela metade', () => {
     expect(withTeamTab(consertado ?? meio)).toBeNull();
   });
 });
+
+// ============================================================
+//  §10  A ORDEM DA BARRA
+//
+//  ####  O CONFIG FECHA A FILEIRA  ####
+//
+//  Regra do dono (16/09/2026), vendo a aba no jogo: "EQUIPE fica
+//  antes de Config — Config sempre será o último". CONFIG não é um
+//  assunto do servidor como LOJA ou EQUIPE: é onde o jogador mexe
+//  no que é DELE, e uma aba de conteúdo depois dela empurraria as
+//  opções pessoais para o meio da fileira.
+//
+//  A primeira versão pendurava a aba no FIM da barra, e foi assim
+//  que ela chegou ao server01. Por isso o boot também REPOSICIONA
+//  o que já está gravado.
+// ============================================================
+
+describe('a ordem dos botões da barra', () => {
+  /** Os botões de navegação, da esquerda para a direita. */
+  function ordem(shell: readonly UiElement[]): string[] {
+    return walk(shell)
+      .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
+      .sort((a, b) => a.rect.offsetMin.x - b.rect.offsetMin.x)
+      .map((element) => element.id);
+  }
+
+  it('o preset nasce com EQUIPE antes de CONFIG', () => {
+    const ids = ordem(buildMainMenu().shell);
+
+    expect(ids.indexOf('nav-equipe')).toBeLessThan(ids.indexOf('nav-config'));
+    // E o CONFIG é o último de todos.
+    expect(ids[ids.length - 1]).toBe('nav-config');
+  });
+
+  it('o menu já gravado com a aba no FIM é reposicionado no boot', () => {
+    // O estado real do server01 em 16/09/2026: a aba entrou depois
+    // do CONFIG, porque a primeira versão a pendurava no fim.
+    const menu = buildMainMenu();
+    const ultimo = walk(menu.shell)
+      .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
+      .sort((a, b) => b.rect.offsetMax.x - a.rect.offsetMax.x)[0];
+
+    if (ultimo === undefined) throw new Error('a barra mudou');
+
+    // O estado do server01: a aba pendurada DEPOIS do último botão,
+    // que é o CONFIG. Os outros ficam onde estavam.
+    const errado = {
+      ...menu,
+      shell: pendura(dropNav(menu.shell, 'nav-equipe'), ultimo.rect.offsetMax.x + 6),
+    };
+
+    expect(ordem(errado.shell).indexOf('nav-equipe')).toBeGreaterThan(
+      ordem(errado.shell).indexOf('nav-config'),
+    );
+
+    const consertado = withTeamTab(errado);
+
+    expect(consertado).not.toBeNull();
+
+    const ids = ordem(consertado?.shell ?? []);
+
+    expect(ids.indexOf('nav-equipe')).toBeLessThan(ids.indexOf('nav-config'));
+    expect(ids[ids.length - 1]).toBe('nav-config');
+
+    // E nenhum botão foi duplicado nem perdido no caminho.
+    expect(ids).toHaveLength(ordem(menu.shell).length);
+  });
+
+  it('com tudo no lugar, o boot não mexe em nada', () => {
+    expect(withTeamTab(buildMainMenu())).toBeNull();
+  });
+
+  it('os botões não se sobrepõem depois do reposicionamento', () => {
+    const menu = buildMainMenu();
+    const botoes = walk(menu.shell)
+      .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
+      .sort((a, b) => a.rect.offsetMin.x - b.rect.offsetMin.x);
+
+    for (let i = 1; i < botoes.length; i += 1) {
+      const anterior = botoes[i - 1];
+      const atual = botoes[i];
+
+      if (anterior === undefined || atual === undefined) continue;
+
+      // Encostar já é defeito visível; sobrepor é um rótulo por
+      // cima do outro.
+      expect(atual.rect.offsetMin.x).toBeGreaterThan(anterior.rect.offsetMax.x);
+    }
+  });
+});
+
+/** A barra sem um botão de navegação. */
+function dropNav(elements: readonly UiElement[], id: string): UiElement[] {
+  return elements
+    .filter((element) => element.id !== id)
+    .map((element) => ({ ...element, children: dropNav(element.children, id) }) as UiElement);
+}
+
+/**
+ * Pendura a aba EQUIPE no X pedido, ao lado do CONFIG.
+ *
+ * É o que a primeira versão do `withTeamTab` fazia: achar o botão
+ * mais à direita e pôr a aba nova depois dele — que é como ela
+ * chegou ao server01.
+ */
+function pendura(elements: readonly UiElement[], x: number): UiElement[] {
+  const modelo = walk(elements).find((element) => element.id === 'nav-config');
+
+  if (modelo === undefined || modelo.type !== 'button') throw new Error('sem CONFIG na barra');
+
+  const tab: UiElement = {
+    ...modelo,
+    id: 'nav-equipe',
+    name: 'nav-equipe',
+    text: 'EQUIPE',
+    rect: {
+      ...modelo.rect,
+      offsetMin: { ...modelo.rect.offsetMin, x },
+      offsetMax: { ...modelo.rect.offsetMax, x: x + 60 },
+    },
+    action: { id: 'ir-equipe', kind: 'navigate', screenId: 'tela-equipe' },
+    activeOnScreenId: 'tela-equipe',
+    children: [],
+  };
+
+  const poe = (els: readonly UiElement[]): UiElement[] =>
+    els.map((element) =>
+      element.children.some((child) => child.id === 'nav-config')
+        ? ({ ...element, children: [...element.children, tab] } as UiElement)
+        : ({ ...element, children: poe(element.children) } as UiElement),
+    );
+
+  return poe(elements);
+}

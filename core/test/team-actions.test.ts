@@ -277,12 +277,28 @@ describe('o nome da equipe', () => {
   });
 
   it('nome vazio é recusado, e o jogo não é tocado', async () => {
-    for (const vazio of ['', '   ', undefined]) {
+    for (const vazio of ['', '   ']) {
       const r = await run(LEADER, 'name', { value: vazio });
 
       expect(r.ok).toBe(false);
       expect(r.calls).toEqual([]);
     }
+  });
+
+  it('o clique no SALVAR sem tocar no campo ensina, em vez de reclamar de nome vazio', async () => {
+    // Nenhum botão do CUI consegue LER o campo. Quem manda o texto
+    // é o `onEndEdit` dele, ao PERDER O FOCO — e clicar em SALVAR é
+    // o que tira o foco (medido no jogo em 16/09/2026).
+    //
+    // Este caso é o do jogador que clica sem nunca ter tocado no
+    // campo: não há foco a perder, e o clique chega sozinho. "O
+    // nome não pode ser vazio" seria culpá-lo por uma letra que ele
+    // não chegou a digitar.
+    const r = await run(LEADER, 'name', { value: undefined });
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('Escreva o nome no campo');
+    expect(r.calls).toEqual([]);
   });
 
   it('nome longo demais é recusado — o teto é o do plugin', async () => {
