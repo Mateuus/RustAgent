@@ -141,6 +141,15 @@ namespace Oxide.Plugins
             public float progress;
             /// O time que detém o progresso. 0 = ninguém.
             public ulong holder;
+
+            /// <summary>
+            /// De quem é a cor que está PINTADA na bandeira agora.
+            ///
+            /// Guardar isto é o que impede repintar a cada segundo: a
+            /// troca de textura custa um arquivo no FileStorage e um
+            /// pacote de rede para todo mundo por perto.
+            /// </summary>
+            public ulong bannerTeam;
             public string holderName = "";
 
             public float startedAt;
@@ -695,6 +704,7 @@ namespace Oxide.Plugins
                     // o progresso fica onde está, e a barra diz por quê.
 
                     RefreshMarker(entry, sides.Count > 1);
+                    RefreshBanner(entry);
 
                     // Quem está em dois eventos fica com o mais próximo.
                     foreach (var player in inside)
@@ -1044,6 +1054,122 @@ namespace Oxide.Plugins
             }
 
             return current.crates[current.crates.Count - 1].Key;
+        }
+
+        // ============================================================
+        //  A BANDEIRA DE QUEM DOMINA
+        //
+        //  ####  A TEXTURA TROCA SEM RECRIAR A BANDEIRA  ####
+        //
+        //  MEDIDO no Assembly-CSharp deste servidor: é o mesmo
+        //  caminho que o jogo usa quando um jogador pinta uma placa
+        //  (`Signage.UpdateSign`) — apaga o arquivo antigo do
+        //  `FileStorage`, guarda o novo e manda um update de rede.
+        //  Recriar a bandeira faria ela sumir e voltar na tela de
+        //  quem está lá, e perderia a proteção contra dano.
+        //
+        //  ####  COR, E NÃO NOME  ####
+        //
+        //  Escrever "Os Lobos" na bandeira exigiria uma fonte
+        //  desenhada pixel a pixel — o servidor não tem como
+        //  rasterizar texto. A cor resolve o que importa de longe:
+        //  a bandeira MUDA quando o território troca de dono, e
+        //  quem está perto lê o nome na barra da tela.
+        //
+        //  A cor é derivada do teamID, então ela é ESTÁVEL: a mesma
+        //  equipe pinta sempre igual, em qualquer evento.
+        // ============================================================
+
+        /// <summary>A paleta. Cores separadas o bastante para não se confundirem de longe.</summary>
+        private static readonly Color[] TeamColors =
+        {
+            new Color(0.77f, 0.25f, 0.17f), // vermelho
+            new Color(0.25f, 0.45f, 0.75f), // azul
+            new Color(0.42f, 0.55f, 0.28f), // verde
+            new Color(0.90f, 0.70f, 0.25f), // âmbar
+            new Color(0.55f, 0.35f, 0.65f), // roxo
+            new Color(0.20f, 0.60f, 0.60f), // turquesa
+            new Color(0.85f, 0.45f, 0.20f), // laranja
+            new Color(0.75f, 0.75f, 0.78f), // prata
+        };
+
+        private void RefreshBanner(Run current)
+        {
+            if (current.banner == null || current.banner.IsDestroyed) return;
+
+            // Zona vazia não despinta: o que foi conquistado fica, e a
+            // bandeira acompanha o progresso — não quem está pisando
+            // nela neste segundo.
+            var team = current.holder != 0UL ? current.holder : current.bannerTeam;
+
+            if (team == current.bannerTeam) return;
+
+            var sign = current.banner as Signage;
+
+            if (sign == null || sign.textureIDs == null || sign.textureIDs.Length == 0) return;
+
+            try
+            {
+                var size = sign.TextureSize;
+                var bytes = FlagPng(TeamColors[(int)(team % (ulong)TeamColors.Length)],
+                    size.x > 0 ? size.x : 256, size.y > 0 ? size.y : 128);
+
+                if (bytes == null) return;
+
+                if (sign.textureIDs[0] != 0u)
+                {
+                    FileStorage.server.RemoveExact(sign.textureIDs[0], FileStorage.Type.png, sign.net.ID, 0u);
+                }
+
+                sign.textureIDs[0] = FileStorage.server.Store(bytes, FileStorage.Type.png, sign.net.ID, 0u);
+                sign.SendNetworkUpdate();
+
+                current.bannerTeam = team;
+            }
+            catch (Exception error)
+            {
+                // Pintar é enfeite: o evento continua sem ele. Um
+                // servidor que recuse `Texture2D` não pode derrubar o
+                // laço que conta a captura.
+                PrintWarning("[KOTH] não deu para pintar a bandeira: " + error.Message);
+
+                // Marcado como pintado para não tentar a cada segundo.
+                current.bannerTeam = team;
+            }
+        }
+
+        /// <summary>Um PNG de uma cor só, com uma faixa escura embaixo.</summary>
+        private static byte[] FlagPng(Color color, int width, int height)
+        {
+            var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
+
+            try
+            {
+                var pixels = new Color32[width * height];
+                var main = (Color32)color;
+                // A faixa dá profundidade e faz a bandeira não parecer
+                // um retângulo chapado a 30 metros.
+                var dark = new Color32(
+                    (byte)(main.r * 0.55f), (byte)(main.g * 0.55f), (byte)(main.b * 0.55f), 255);
+
+                var band = height / 5;
+
+                for (var y = 0; y < height; y++)
+                {
+                    var line = y < band ? dark : main;
+
+                    for (var x = 0; x < width; x++) pixels[y * width + x] = line;
+                }
+
+                texture.SetPixels32(pixels);
+                texture.Apply();
+
+                return texture.EncodeToPNG();
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(texture);
+            }
         }
 
         private bool SpawnBanner(Run next)
