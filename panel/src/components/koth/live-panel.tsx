@@ -1,14 +1,15 @@
 'use client';
 
 // ============================================================
-//  live-panel.tsx  -  as VAGAS, e o que está de pé agora.
+//  live-panel.tsx  -  o que está de pé agora.
 //
-//  ####  O QUE É UMA VAGA  ####
+//  ####  AQUI SE OLHA; EM CONFIGURAÇÕES SE MEXE  ####
 //
-//  O admin diz quantos KOTH cabem no servidor dele ao mesmo tempo.
-//  O relógio respeita: com as vagas cheias ele ADIA o próximo — não
-//  cancela, porque a condição muda em dois minutos e um evento que
-//  perde a vez é um evento que quase nunca acontece.
+//  O número de vagas mora na aba Configurações. Aqui ele aparece
+//  só como MEDIDOR — quantas das que existem estão ocupadas —,
+//  porque é o que explica o botão de erguer estar morto. Um campo
+//  de digitar no meio de uma tela que se olha o dia inteiro é
+//  convite para mexer sem querer.
 //
 //  ####  POR QUE O ESTADO VEM DO JOGO, E NÃO DO BANCO  ####
 //
@@ -37,7 +38,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
-import { Input } from '@/components/ui/input';
 import { agent, type KothArena, type KothLiveEvent, type KothStatus } from '@/lib/api';
 import { clock, holderOf, phaseOf, remainingSeconds, type KothPhase } from '@/lib/koth/live';
 import { toast } from '@/lib/toast';
@@ -54,7 +54,6 @@ export function LivePanel({ serverId }: LivePanelProps) {
   const [status, setStatus] = useState<KothStatus | null>(null);
   const [arenas, setArenas] = useState<readonly KothArena[]>([]);
   const [vagas, setVagas] = useState<number | null>(null);
-  const [draft, setDraft] = useState<number | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [arenaId, setArenaId] = useState('');
@@ -104,7 +103,6 @@ export function LivePanel({ serverId }: LivePanelProps) {
         if (!alive) return;
 
         setVagas(settings.settings.maxConcurrent);
-        setDraft(settings.settings.maxConcurrent);
         setArenas(list.arenas);
       } catch {
         if (alive) setVagas(null);
@@ -115,27 +113,6 @@ export function LivePanel({ serverId }: LivePanelProps) {
       alive = false;
     };
   }, [serverId]);
-
-  async function saveVagas(value: number): Promise<void> {
-    setBusy(true);
-
-    try {
-      const response = await agent.saveKothSettings(serverId, value);
-
-      setVagas(response.settings.maxConcurrent);
-      setDraft(response.settings.maxConcurrent);
-
-      toast.success('Vagas salvas', {
-        description: `Até ${String(response.settings.maxConcurrent)} KOTH ao mesmo tempo.`,
-      });
-    } catch (cause) {
-      toast.error('Não consegui salvar as vagas', {
-        description: cause instanceof Error ? cause.message : String(cause),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function start(): Promise<void> {
     setBusy(true);
@@ -177,61 +154,51 @@ export function LivePanel({ serverId }: LivePanelProps) {
 
   return (
     <div className="space-y-4">
-      {/* ####  AS VAGAS  #### */}
-      <section className="border border-border bg-surface p-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
-              <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
-              Vagas
-            </h3>
-            <p className="mt-1 max-w-2xl text-2xs text-muted">
-              Quantos KOTH podem existir ao mesmo tempo neste servidor. Com todas ocupadas, o
-              relógio <strong className="text-foreground">adia</strong> o próximo em vez de
-              cancelá-lo — e uma masmorra de pé continua bloqueando os dois.
-            </p>
-          </div>
+      {/* ####  A BARRA DE AÇÃO  ####
 
-          <div className="flex items-end gap-2">
-            <label className="block">
-              <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-                Máximo
-              </span>
-              <Input
-                type="number"
-                min={1}
-                max={10}
-                disabled={vagas === null}
-                value={draft === null ? '' : String(draft)}
-                className="mt-1 h-9 w-20"
-                onChange={(event) => {
-                  const parsed = Number(event.target.value);
-
-                  if (Number.isFinite(parsed)) {
-                    setDraft(Math.max(1, Math.min(10, Math.round(parsed))));
-                  }
-                }}
-              />
-            </label>
-
-            <Button
-              size="sm"
-              variant="primary"
-              className="mb-0.5"
-              disabled={busy || draft === null || draft === vagas}
-              onClick={() => {
-                if (draft !== null) void saveVagas(draft);
-              }}
+          Erguer e o medidor de vagas na mesma linha, de propósito: o
+          motivo de o botão estar morto é o medidor ao lado dele. */}
+      <section className="flex flex-wrap items-end justify-between gap-3 border border-border bg-surface p-3">
+        <div className="flex min-w-0 flex-1 flex-wrap items-end gap-2">
+          {/* Largura de campo, e não de tela: um select de 1900 px
+              para escolher entre três nomes é difícil de ler. */}
+          <label className="block min-w-0 max-w-sm flex-1">
+            <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+              Erguer um território agora
+            </span>
+            <select
+              value={arenaId}
+              onChange={(event) => setArenaId(event.target.value)}
+              className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
             >
-              {busy && <Loader2 aria-hidden="true" className="mr-1 h-3.5 w-3.5 animate-spin" />}
-              Salvar
-            </Button>
-          </div>
+              <option value="">Sorteado entre os ligados</option>
+              {arenas
+                .filter((arena) => arena.enabled)
+                .map((arena) => (
+                  <option key={arena.id} value={String(arena.id)}>
+                    {arena.label}
+                  </option>
+                ))}
+            </select>
+          </label>
+
+          <Button
+            size="sm"
+            variant="primary"
+            className="mb-0.5"
+            disabled={busy || offline !== null || cheio || arenas.length === 0}
+            onClick={() => void start()}
+          >
+            {busy && <Loader2 aria-hidden="true" className="mr-1 h-3.5 w-3.5 animate-spin" />}
+            {!busy && <Play aria-hidden="true" className="mr-1 h-3.5 w-3.5" />}
+            Erguer
+          </Button>
         </div>
 
-        {/* As vagas desenhadas: o quadradinho cheio é evento de pé. */}
+        {/* O MEDIDOR. Quem muda o número é a aba Configurações; aqui
+            ele só explica o botão. */}
         {vagas !== null && offline === null && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
             <span className="flex gap-1" aria-hidden="true">
               {Array.from({ length: total }, (_, index) => (
                 <span
@@ -244,50 +211,15 @@ export function LivePanel({ serverId }: LivePanelProps) {
               ))}
             </span>
             <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-              {ocupadas} de {total} ocupada(s)
+              {ocupadas} de {total} vaga(s) ocupada(s)
             </span>
           </div>
         )}
-      </section>
-
-      {/* ####  ERGUER AGORA  #### */}
-      <section className="flex flex-wrap items-end gap-2 border border-border bg-surface p-3">
-        {/* Largura de campo, e não de tela: um select de 1900 px
-            para escolher entre três nomes é difícil de ler. */}
-        <label className="block min-w-0 max-w-sm flex-1">
-          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-            Erguer um território agora
-          </span>
-          <select
-            value={arenaId}
-            onChange={(event) => setArenaId(event.target.value)}
-            className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
-          >
-            <option value="">Sorteado entre os ligados</option>
-            {arenas
-              .filter((arena) => arena.enabled)
-              .map((arena) => (
-                <option key={arena.id} value={String(arena.id)}>
-                  {arena.label}
-                </option>
-              ))}
-          </select>
-        </label>
-
-        <Button
-          size="sm"
-          variant="primary"
-          className="mb-0.5"
-          disabled={busy || offline !== null || cheio || arenas.length === 0}
-          onClick={() => void start()}
-        >
-          <Play aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
-          Erguer
-        </Button>
 
         {cheio && offline === null && (
           <p className="w-full text-2xs text-muted">
-            Todas as vagas estão ocupadas. Aumente o máximo ou derrube um dos que estão de pé.
+            Todas as vagas estão ocupadas. Derrube um dos que estão de pé, ou aumente o máximo na
+            aba Configurações.
           </p>
         )}
       </section>

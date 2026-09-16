@@ -5,13 +5,14 @@
 //
 //  ####  DUAS ABAS, E A PRIMEIRA JÁ FUNCIONA  ####
 //
-//    Ao vivo       as vagas, e o que está de pé agora
-//    Territórios   onde o KOTH pode acontecer, marcados no mapa
-//    O que falta   as frentes que ainda não existem, na ordem
+//    Ao vivo         o que está de pé agora
+//    Territórios     onde o KOTH pode acontecer, marcados no mapa
+//    O que falta     as frentes que ainda não existem, na ordem
+//    Configurações   vagas, e o que mais vier
 //
 //  "Ao vivo" vem primeiro porque é a pergunta que se faz com mais
-//  frequência — "tem KOTH acontecendo?" —, e cadastrar território é
-//  coisa que se faz uma vez.
+//  frequência — "tem KOTH acontecendo?" —, e configurar é coisa que
+//  se faz uma vez.
 //
 //  A segunda aba não é enfeite: metade desta família ainda não foi
 //  escrita, e uma tela que escondesse isso faria o admin cadastrar
@@ -36,6 +37,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { ArenasPanel } from '@/components/koth/arenas-panel';
 import { LivePanel } from '@/components/koth/live-panel';
+import { SettingsPanel } from '@/components/koth/settings-panel';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
@@ -110,7 +112,7 @@ const FRENTES: readonly Frente[] = [
 ];
 
 function Koth() {
-  const [tab, setTab] = useState<'live' | 'territorios' | 'falta'>('live');
+  const [tab, setTab] = useState<'live' | 'territorios' | 'falta' | 'config'>('live');
   const [servers, setServers] = useState<readonly { id: string; name: string }[] | null>(null);
   const [serverId, setServerId] = useState('');
 
@@ -183,6 +185,9 @@ function Koth() {
           <TabButton active={tab === 'falta'} onClick={() => setTab('falta')}>
             O que falta
           </TabButton>
+          <TabButton active={tab === 'config'} onClick={() => setTab('config')}>
+            Configurações
+          </TabButton>
         </div>
       </div>
 
@@ -200,6 +205,8 @@ function Koth() {
             />
           ) : tab === 'live' ? (
             <LivePanel key={current} serverId={current} />
+          ) : tab === 'config' ? (
+            <SettingsPanel key={current} serverId={current} />
           ) : (
             <ArenasPanel key={current} serverId={current} />
           ))}
