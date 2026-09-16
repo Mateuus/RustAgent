@@ -71,6 +71,7 @@ import { buildHomeScreen, emptyHomeView, HOME_SCREEN_ID } from './ui-home-screen
 import { KITS_SCREEN_ID } from './ui-kits-screen.js';
 import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
+import { buildEventsScreen } from './ui-events-screen.js';
 import {
   buildTeamScreen,
   TEAM_COMMANDS,
@@ -474,6 +475,7 @@ const EXTRA_NAV: readonly { readonly id: string; readonly label: string; readonl
 ];
 
 /** As entradas cuja página o AGENTE monta. Ver `buildMainMenu`. */
+const EVENTS_NAV_ID = 'eventos';
 const RANKING_NAV_ID = 'ranking';
 const QUESTS_NAV_ID = 'missoes';
 const RULES_NAV_ID = 'regras';
@@ -1442,6 +1444,30 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
       if (entry.id === RULES_NAV_ID) {
         return {
           ...buildRulesScreen({ view: emptyRulesView(), skeleton: true }),
+          generated: true,
+        };
+      }
+
+      // ####  A PÁGINA EVENTOS TAMBÉM É MONTADA  ####
+      //
+      // Ela era um cartaz — "os eventos ativos entram aqui" — desde
+      // o primeiro menu. Agora é a tela do que está acontecendo no
+      // mapa AGORA, remontada a cada clique (ver
+      // game/ui-events-screen.ts).
+      //
+      // `generated: true` pelo motivo de sempre, e que na aba
+      // MISSÕES custou uma sessão: sem a marca o plugin desenha o
+      // repouso gravado e nunca pede a de verdade.
+      //
+      // Ela nasce SEM a coluna e sem card nenhum: os itens da
+      // coluna navegam para `tela-eventos:masmorra`, e o schema do
+      // documento não aceita `:` em `screenId` de ação.
+      if (entry.id === EVENTS_NAV_ID) {
+        return {
+          ...buildEventsScreen({
+            data: { koth: [], dungeon: null, vagas: 1 },
+            skeleton: true,
+          }),
           generated: true,
         };
       }

@@ -31,6 +31,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { KothArenasRepository } from '../db/koth-arenas-repository.js';
+import type { KothDeliveriesRepository } from '../db/koth-deliveries-repository.js';
+import type { DeliverRewardsInput, RewardOutcome } from '../quests/rewards.js';
 import type {
   RunEndOutcome,
   WorldEventsRepository,
@@ -79,6 +81,25 @@ export interface KothDeps {
    * sabendo que começou.
    */
   readonly announce?: (serverId: string, message: string) => Promise<void>;
+  /**
+   * Quem entrega o prêmio de quem venceu.
+   *
+   * ####  É O MESMO DAS MISSÕES, E ISSO É A DECISÃO  ####
+   *
+   * Ele não entrega nada: traduz para quem já sabe entregar (a
+   * loja, a carteira, os kits, o ranking). Um segundo tradutor
+   * aqui daria dois jeitos de pôr uma AK na mão de alguém — e o
+   * que tivesse menos teste seria o que roda com o inventário
+   * cheio.
+   *
+   * Ausente = o território não paga nada individual, e a caixa
+   * continua nascendo do mesmo jeito.
+   */
+  readonly rewards?: {
+    deliver(input: DeliverRewardsInput): Promise<readonly RewardOutcome[]>;
+  };
+  /** O registro do que cada um já recebeu. Sem ele, não se paga. */
+  readonly deliveries?: KothDeliveriesRepository;
 }
 
 export class KothCommandError extends Error {
@@ -374,6 +395,11 @@ export class KothService {
         const winner =
           push.teamName === undefined || push.teamName === '' ? 'uma equipe' : push.teamName;
 
+        // A run viva é lida ANTES de fechar: o `#closeLocal` a tira
+        // da lista, e é nela que está o território — sem ele não há
+        // como saber o que aquele lugar prometia.
+        const live = this.#findLive(serverId, Number(push.runId ?? '0'));
+
         // ####  O NOME VAI PARA O HISTÓRICO, E NÃO SÓ PARA O CHAT  ####
         //
         // O anúncio some do chat em cinco linhas. "Quem levou o
@@ -392,9 +418,13 @@ export class KothService {
           'KOTH capturado',
         );
 
-        // A recompensa entra AQUI quando existir. Hoje o agente
-        // registra quem ganhou e não paga nada — e é melhor assim do
-        // que pagar um prêmio que ninguém configurou.
+        // ####  E AGORA ELE PAGA  ####
+        //
+        // Sem `await`: o anúncio no chat não pode esperar a
+        // carteira do site responder. A entrega se cuida sozinha —
+        // ela nunca lança, e o que falhar fica registrado com o
+        // código de quem recusou.
+        void this.#payWinners(serverId, push, live);
         void this.#say(
           serverId,
           `<color=#8FBF4F>${winner}</color> dominou o território!`,
@@ -432,6 +462,129 @@ export class KothService {
 
       default:
         return;
+    }
+  }
+
+  /**
+   * O território naquele ponto, ou `0`.
+   *
+   * O casamento é por coordenada arredondada: a run foi aberta com
+   * o x/z do cadastro, e o metro quebrado nunca muda entre os dois.
+   * Território apagado depois devolve `0`, e o evento segue sem
+   * prêmio individual — que é a verdade, já que não há mais o que
+   * ler.
+   */
+  #arenaAt(serverId: string, x: number | null, z: number | null): number {
+    if (x === null || z === null) return 0;
+
+    const found = this.#deps.arenas
+      .list(serverId)
+      .find(
+        (arena) => Math.round(arena.x) === Math.round(x) && Math.round(arena.z) === Math.round(z),
+      );
+
+    return found?.id ?? 0;
+  }
+
+  /** A run viva daquele servidor, pelo id — ou a única, quando o aviso veio sem id. */
+  #findLive(serverId: string, runId: number): Live | null {
+    const live = this.#liveOf(serverId);
+    const target = runId > 0 ? runId : this.#onlyRun(serverId);
+
+    return target === null ? null : (live.get(target) ?? null);
+  }
+
+  /**
+   * Paga o que o território prometeu a cada membro da equipe.
+   *
+   * ####  NUNCA LANÇA  ####
+   *
+   * Ela roda sem `await` depois de a run já estar fechada. Uma
+   * exceção aqui viraria um `unhandledRejection` — e o evento já
+   * acabou, com o vencedor anunciado no chat.
+   *
+   * ####  QUEM JÁ RECEBEU NÃO RECEBE DE NOVO  ####
+   *
+   * O mesmo aviso de captura chega duas vezes quando o plugin
+   * recarrega no meio do evento. Sem o registro, a segunda vez
+   * poria outra AK na mão de cada um — item, kit e VIP não têm
+   * proteção nenhuma do outro lado.
+   */
+  async #payWinners(serverId: string, push: KothPush, live: Live | null): Promise<void> {
+    const { rewards, deliveries } = this.#deps;
+
+    if (rewards === undefined || deliveries === undefined || live === null) return;
+
+    const members = push.members ?? [];
+
+    if (members.length === 0) return;
+
+    const arenaId =
+      live.arenaId > 0
+        ? live.arenaId
+        : this.#arenaAt(serverId, push.x ?? null, push.z ?? null);
+
+    const arena = arenaId > 0 ? this.#deps.arenas.get(serverId, arenaId) : null;
+    const prizes = arena?.reward?.team ?? [];
+
+    // Território sem prêmio individual é o normal: a caixa no chão
+    // continua sendo o que ele dá.
+    if (arena === null || prizes.length === 0) return;
+
+    for (const steamId of members) {
+      try {
+        const paid = deliveries.alreadyPaid(live.runId, steamId);
+        const only = new Set(prizes.map((_prize, index) => index).filter((index) => !paid.has(index)));
+
+        if (only.size === 0) continue;
+
+        const outcomes = await rewards.deliver({
+          only,
+          serverId,
+          steamId,
+          // O escopo muda a referência da carteira, o `eventId` do
+          // ponto e a palavra do extrato — e nada do caminho da
+          // entrega. Ver quests/rewards.ts.
+          scope: 'koth',
+          questId: `run:${String(live.runId)}`,
+          questTitle: arena.label,
+          // A run é a chave; a tentativa é sempre a primeira. O que
+          // impede pagar duas vezes é o registro, não este número.
+          attempt: 1,
+          rewards: prizes,
+        });
+
+        for (const outcome of outcomes) {
+          deliveries.record({
+            runId: live.runId,
+            steamId,
+            index: outcome.index ?? 0,
+            ok: outcome.ok,
+            code: outcome.code,
+          });
+        }
+
+        const failed = outcomes.filter((outcome) => !outcome.ok);
+
+        if (failed.length > 0) {
+          this.#deps.logger.warn(
+            {
+              server: serverId,
+              run: live.runId,
+              steamId,
+              failed: failed.map((outcome) => ({ kind: outcome.kind, code: outcome.code })),
+            },
+            'prêmio de KOTH não saiu para um dos vencedores',
+          );
+        }
+      } catch (cause) {
+        // Um membro com problema não pode calar os outros: o
+        // próximo do laço continua recebendo.
+        this.#deps.logger.warn(
+          { server: serverId, run: live.runId, steamId, error: toError(cause).message },
+          'não deu para pagar o prêmio de KOTH a este jogador',
+        );
+      }
     }
   }
 
@@ -539,7 +692,14 @@ export class KothService {
       if (known !== undefined) {
         live.set(runId, {
           runId,
-          arenaId: 0,
+          // ####  O TERRITÓRIO É REENCONTRADO PELA POSIÇÃO  ####
+          //
+          // A run guarda ONDE o evento nasceu, e não de que
+          // território ele é. Readotar com `arenaId: 0` fazia a
+          // captura seguinte não achar o lugar — e o prêmio de quem
+          // venceu não sair, calado, sempre que o agente tivesse
+          // reiniciado no meio do evento.
+          arenaId: this.#arenaAt(serverId, known.x, known.z),
           eventId: known.eventId,
           startedAt: known.startedAt ?? Date.now(),
         });

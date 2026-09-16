@@ -15,6 +15,16 @@
 //  `normal: 9` não toca em nada — e a coluna da direita já diz
 //  "10%".
 //
+//  ####  DUAS COISAS DIFERENTES NA MESMA TELA  ####
+//
+//  A CAIXA nasce no chão e é de quem chegar — inclusive de quem
+//  perdeu a disputa e estava por perto. O PRÊMIO DA EQUIPE vai
+//  para a mão de cada um que estava no time no instante da
+//  captura, e ninguém rouba.
+//
+//  As duas convivem: um território pode dar as duas, uma só, ou
+//  nenhuma.
+//
 //  ####  O CATÁLOGO É O MESMO DA MASMORRA  ####
 //
 //  `DUNGEON_CRATES` — as mesmas caixas, com os mesmos nomes. Duas
@@ -25,6 +35,7 @@
 import { Plus, Trash2 } from 'lucide-react';
 
 import { DUNGEON_CRATES } from '@/components/dungeons/crate-catalog';
+import { RewardAddMenu, RewardList } from '@/components/rewards/reward-list';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
@@ -217,6 +228,36 @@ export function RewardFields({ value, onChange }: RewardFieldsProps) {
           <Plus aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
           Acrescentar tipo
         </Button>
+      </div>
+
+      {/* ####  O PRÊMIO DE CADA MEMBRO  ####
+
+          O mesmo editor das missões, de propósito: o agente entrega
+          os dois pelo mesmo caminho, e dois editores divergiriam no
+          primeiro tipo novo. */}
+      <div className="space-y-2 border-t border-border pt-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div className="min-w-0">
+            <h4 className="font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+              O que cada membro da equipe vencedora leva
+            </h4>
+            <p className="mt-0.5 text-2xs text-muted">
+              Vai para a mão de quem estava na equipe na hora da captura. Quem já recebeu não
+              recebe de novo, nem que o evento seja avisado duas vezes.
+            </p>
+          </div>
+
+          <RewardAddMenu
+            value={value.team ?? []}
+            onChange={(team) => patch({ team: [...team] })}
+          />
+        </div>
+
+        <RewardList
+          value={value.team ?? []}
+          onChange={(team) => patch({ team: [...team] })}
+          emptyHint="Nada individual. O território continua deixando a caixa no chão — e ela é de quem chegar primeiro."
+        />
       </div>
     </div>
   );

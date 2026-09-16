@@ -72,9 +72,17 @@ import {
   TEAM_SCREEN_ID,
   withTeamTab,
 } from './game/ui-team-screen.js';
+import {
+  createEventsScreenProvider,
+  parseEventsScreenId,
+  withEventsScreen,
+  type DungeonCard,
+  type KothCard,
+} from './game/ui-events-screen.js';
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
+import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
@@ -1550,6 +1558,15 @@ async function main(): Promise<void> {
   // respostas para ela. O que e proprio dele sao os TERRITORIOS.
   const kothArenas = new KothArenasRepository(db);
   const kothSettings = new KothSettingsRepository(db);
+  const kothDeliveries = new KothDeliveriesRepository(db);
+
+  // ####  O ENTREGADOR NASCE LÁ EMBAIXO, JUNTO DOS KITS  ####
+  //
+  // E o KOTH é construído aqui em cima, porque o agendador e as
+  // rotas dependem dele. Esta variável casa os dois sem inverter a
+  // ordem do boot: quando um território é capturado, o boot
+  // terminou há muito tempo.
+  let questRewards: QuestRewardService | null = null;
   const kothService = new KothService({
     arenas: kothArenas,
     events: worldEventsRepository,
@@ -1566,6 +1583,20 @@ async function main(): Promise<void> {
       },
     },
     logger,
+    deliveries: kothDeliveries,
+    rewards: {
+      deliver: (input) => {
+        if (questRewards === null) {
+          // Só chegaria aqui um território capturado no meio do
+          // boot. Lançar é melhor que devolver "nada a entregar":
+          // a falha vira registro com código, e o prêmio pode ser
+          // reentregue.
+          throw new Error('KOTH_REWARDS_NOT_READY');
+        }
+
+        return questRewards.deliver(input);
+      },
+    },
     announce: async (serverId, message) => {
       await dungeonBroadcaster.send({
         serverId,
@@ -1685,6 +1716,33 @@ async function main(): Promise<void> {
     );
   }
 
+  // ####  E A ABA EVENTOS DEIXA DE SER UM CARTAZ  ####
+  //
+  // O botão sempre existiu; a tela dele era a promessa "os eventos
+  // ativos entram aqui". Aqui ela vira a tela VIVA — e o que muda
+  // de verdade é a marca `generated`, sem a qual o plugin desenha
+  // o cartaz e nunca pergunta ao agente.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withEventsScreen(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'a aba EVENTOS deste menu virou a tela do que está acontecendo no mapa',
+    );
+  }
+
   // ####  A PÁGINA RANKING DO MENU DO JOGO  ####
   //
   // Ela nasce AQUI, e não lá embaixo junto do calendário, porque o
@@ -1735,6 +1793,100 @@ async function main(): Promise<void> {
   const teamScreens = createTeamScreenProvider({
     teamOf: (serverId, steamId) => teamsService.teamOf(serverId, steamId),
     maxSizeOf: (serverId) => teamsService.settingsOf(serverId).maxSize,
+  });
+
+  // ####  A ABA EVENTOS: O QUE ESTÁ NO MAPA AGORA  ####
+  //
+  // Duas fontes, e elas respondem coisas diferentes:
+  //
+  //   o JOGO    quem está dentro, quanto a barra andou, quem
+  //             segura. Só o plugin sabe, e a leitura pode falhar;
+  //   o BANCO   quem levou o último. Ele responde com o servidor
+  //             parado, e é o que preenche a vaga vazia.
+  //
+  // O nome do território não está na run: ela guarda a POSIÇÃO. O
+  // casamento é por coordenada com o cadastro — e um território
+  // apagado depois cai na grade, que é onde ele ficava.
+  const nameOfArena = (serverId: string, x: number | null, z: number | null): string | null => {
+    if (x === null || z === null) return null;
+
+    const arena = kothArenas
+      .list(serverId)
+      .find((entry) => Math.round(entry.x) === Math.round(x) && Math.round(entry.z) === Math.round(z));
+
+    return arena?.label ?? null;
+  };
+
+  const eventsScreens = createEventsScreenProvider({
+    liveKoth: async (serverId) => {
+      const status = await kothService.status(serverId);
+
+      return (status.events ?? []).map(
+        (event): KothCard => ({
+          runId: event.runId,
+          name: event.name,
+          grid: event.grid,
+          radius: event.radius,
+          live: true,
+          percent: event.percent,
+          holderId: event.holder === '0' ? null : event.holder,
+          holderName: event.holderName === '' ? null : event.holderName,
+          contested: event.contested,
+          inside: event.inside,
+          remaining: Math.max(0, Math.round(event.durationSeconds - event.elapsed)),
+          captureSeconds: event.captureSeconds,
+        }),
+      );
+    },
+
+    recentKoth: (serverId, limit) => {
+      if (limit <= 0) return [];
+
+      // ####  QUEM É KOTH NO HISTÓRICO  ####
+      //
+      // A run não carrega a família: ela tem `dungeonId`, que a
+      // masmorra preenche e o KOTH não. O DESFECHO (migração 093)
+      // é o que hoje só o KOTH grava — e casar pelos dois evita
+      // pegar um compromisso de agenda que nunca esteve no mapa.
+      return worldEventsRepository
+        .runs({ serverId, limit: limit * 6 })
+        .filter((run) => run.dungeonId === null && run.outcome !== null)
+        .slice(0, limit)
+        .map(
+          (run): KothCard => ({
+            runId: String(run.id),
+            name: nameOfArena(serverId, run.x, run.z) ?? run.grid ?? 'Território',
+            grid: run.grid ?? '',
+            radius: 0,
+            live: false,
+            outcome: run.outcome,
+            winnerName: run.winnerName,
+            endedAt: run.endedAt,
+          }),
+        );
+    },
+
+    vagasOf: (serverId) => kothSettings.of(serverId).maxConcurrent,
+
+    liveDungeon: (serverId): DungeonCard | null => {
+      const active = worldEventsRepository.activeRun(serverId);
+
+      if (active === null || active.dungeonId === null) return null;
+
+      return {
+        name: dungeonsRepository.get(active.dungeonId)?.name ?? active.dungeonId,
+        grid: active.grid,
+        startedAt: active.startedAt,
+      };
+    },
+
+    // O id da equipe de quem abriu o menu, para o card dizer "sua
+    // equipe". Só é chamado quando há alguém segurando território.
+    teamIdOf: async (serverId, steamId) => {
+      const team = await teamsService.teamOf(serverId, steamId);
+
+      return team === null ? null : team.teamId;
+    },
   });
 
   // ####  E A PÁGINA REGRAS, QUE VAI AO BANCO E É SÍNCRONA  ####
@@ -1824,6 +1976,24 @@ async function main(): Promise<void> {
           return (
             (await homeScreens?.(input)) ?? buildEmptyHomeBundle(input.document, input.screenId)
           );
+        }
+
+        // ####  A ABA EVENTOS TAMBÉM É UMA FAMÍLIA  ####
+        //
+        // `tela-eventos`, `tela-eventos:koth:1`, `tela-eventos:
+        // koth:0:r:52` — o prefixo é dela, e por isso ela é
+        // perguntada antes de quem casa um id exato, como a loja e
+        // o ranking.
+        //
+        // O `parseEventsScreenId` decide se o endereço é dela ANTES
+        // de o provedor responder: sem isso, um endereço de outra
+        // tela entraria aqui e voltaria a lista de eventos.
+        if (parseEventsScreenId(input.screenId) !== null) {
+          const fromEvents = await eventsScreens(input);
+
+          if (fromEvents !== null) {
+            return fromEvents;
+          }
         }
 
         // ####  A PÁGINA DISCORD  ####
@@ -2166,7 +2336,7 @@ async function main(): Promise<void> {
   questsService = new QuestsService({
     repository: questsRepository,
     logger,
-    rewards: new QuestRewardService({
+    rewards: (questRewards = new QuestRewardService({
       logger,
       // Os quatro caminhos que já existem. Nenhum deles é
       // reescrito — ver o cabeçalho de quests/rewards.ts.
@@ -2186,7 +2356,7 @@ async function main(): Promise<void> {
         // `hasMetric` em quests/rewards.ts.
         hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
       },
-    }),
+    })),
     // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
     // Sai do período `lifetime`, o único que NUNCA zera: um wipe no

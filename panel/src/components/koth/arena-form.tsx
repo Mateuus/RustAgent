@@ -40,7 +40,7 @@ export interface ArenaFormProps {
 
 /** O prêmio de um território que ainda não tem um. */
 export function blankReward(): KothReward {
-  return { smoke: true, flare: true, crates: [], count: 1, crateSeconds: 600 };
+  return { smoke: true, flare: true, crates: [], count: 1, crateSeconds: 600, team: [] };
 }
 
 export function ArenaForm({ value, arena, busy, onSave, onCancel }: ArenaFormProps) {

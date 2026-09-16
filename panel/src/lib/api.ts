@@ -6317,6 +6317,14 @@ export interface KothReward {
   count: number;
   /** Zero = a caixa fica até alguém abrir. */
   crateSeconds: number;
+  /**
+   * O que CADA MEMBRO da equipe vencedora recebe.
+   *
+   * O mesmo contrato das missões: o agente entrega os dois pelo
+   * mesmo caminho. Ausente num território antigo é o normal — ele
+   * simplesmente não paga nada individual.
+   */
+  team?: QuestReward[];
 }
 
 /** Um território do KOTH. Espelha `core/src/types/koth.ts`. */
