@@ -191,6 +191,11 @@ export interface StoreBuyHandlerOptions {
     readonly offerId: string;
     readonly document: UiDocument;
     readonly screenId?: string;
+    /**
+     * O que o jogador escreveu, quando o clique veio de um campo
+     * de texto e não de um botão. Cru: quem valida é quem trata.
+     */
+    readonly value?: string;
   }) => Promise<UiBuyOutcome>;
 }
 
@@ -203,6 +208,7 @@ export function createStoreBuyHandler(
   readonly quantity: number;
   readonly document: UiDocument;
   readonly screenId?: string;
+  readonly value?: string;
 }) => Promise<UiBuyOutcome> {
   return async (input) => {
     const outcome = await options.store.buy({
@@ -220,6 +226,10 @@ export function createStoreBuyHandler(
         offerId: input.offerId,
         document: input.document,
         ...(input.screenId === undefined ? {} : { screenId: input.screenId }),
+        // O que ele ESCREVEU, quando o pedido veio de um campo de
+        // texto. A loja não o usa; quem o usa é o que estiver do
+        // outro lado do `fallback`.
+        ...(input.value === undefined ? {} : { value: input.value }),
       });
     }
 

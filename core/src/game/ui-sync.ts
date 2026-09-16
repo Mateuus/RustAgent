@@ -212,6 +212,12 @@ export interface UiSyncDeps {
      * aparecer atualizada em vez de continuar dizendo RESGATAR.
      */
     readonly screenId?: string;
+    /**
+     * O que ele ESCREVEU, quando o pedido veio de um campo de
+     * texto. Cru, e sem régua nenhuma no caminho — ver
+     * `uiBuyRequestSchema.value`.
+     */
+    readonly value?: string;
   }) => Promise<UiBuyOutcome>;
   /**
    * O que mostrar no cabeçalho daquele jogador: saldo e VIP.
@@ -544,6 +550,7 @@ export class UiSync {
                 quantity: request.quantity,
                 document,
                 ...(request.screenId === undefined ? {} : { screenId: request.screenId }),
+                ...(request.value === undefined ? {} : { value: request.value }),
               });
       } catch (error) {
         outcome = { ok: false, message: toError(error).message };

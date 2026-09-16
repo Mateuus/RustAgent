@@ -189,6 +189,17 @@ function applyValue(element: UiElement, slot: SlotValue | undefined): UiElement 
       // Painel só aceita cor: o que muda dentro dele são os FILHOS,
       // e esses já são visitados.
       return slot.color === undefined ? element : { ...element, color: slot.color };
+
+    case 'input':
+      // ####  O CAMPO DE TEXTO NÃO É PREENCHÍVEL POR SLOT  ####
+      //
+      // O `text` dele não é rótulo: é o que o jogador vai EDITAR, e
+      // quem o escolhe é quem monta a tela — o nome da equipe
+      // daquele jogador, lido do jogo no clique. Um slot que o
+      // trocasse abriria a porta para o documento ditar o que vai
+      // dentro do campo, e a ação dele é justamente a que não pode
+      // vir de lá (ver o cabeçalho).
+      return element;
   }
 }
 
