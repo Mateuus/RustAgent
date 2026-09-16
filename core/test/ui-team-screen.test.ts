@@ -662,6 +662,26 @@ describe('o documento que uma versão anterior deixou pela metade', () => {
 // ============================================================
 
 describe('a ordem dos botões da barra', () => {
+  /**
+   * O vão entre cada par de botões vizinhos.
+   *
+   * ####  ELE PRECISA SER SEMPRE O MESMO  ####
+   *
+   * Os botões não se encostam: cada um tem um X escrito, contado da
+   * borda esquerda. Um botão removido do meio NÃO fecha o lugar
+   * dele — e o buraco não quebra nada, não aparece num teste de
+   * sobreposição, e só se vê no jogo.
+   */
+  function vaos(shell: readonly UiElement[]): number[] {
+    const botoes = walk(shell)
+      .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
+      .sort((a, b) => a.rect.offsetMin.x - b.rect.offsetMin.x);
+
+    return botoes
+      .slice(1)
+      .map((atual, index) => atual.rect.offsetMin.x - (botoes[index]?.rect.offsetMax.x ?? 0));
+  }
+
   /** Os botões de navegação, da esquerda para a direita. */
   function ordem(shell: readonly UiElement[]): string[] {
     return walk(shell)
@@ -679,25 +699,14 @@ describe('a ordem dos botões da barra', () => {
   });
 
   it('o menu já gravado com a aba no FIM é reposicionado no boot', () => {
-    // O estado real do server01 em 16/09/2026: a aba entrou depois
-    // do CONFIG, porque a primeira versão a pendurava no fim.
+    // O estado real do server01 em 16/09/2026: a primeira versão
+    // pendurava a aba no fim da barra, depois do CONFIG.
     const menu = buildMainMenu();
-    const ultimo = walk(menu.shell)
-      .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
-      .sort((a, b) => b.rect.offsetMax.x - a.rect.offsetMax.x)[0];
+    const errado = { ...menu, shell: mandaParaOFim(menu.shell, 'nav-equipe') };
 
-    if (ultimo === undefined) throw new Error('a barra mudou');
-
-    // O estado do server01: a aba pendurada DEPOIS do último botão,
-    // que é o CONFIG. Os outros ficam onde estavam.
-    const errado = {
-      ...menu,
-      shell: pendura(dropNav(menu.shell, 'nav-equipe'), ultimo.rect.offsetMax.x + 6),
-    };
-
-    expect(ordem(errado.shell).indexOf('nav-equipe')).toBeGreaterThan(
-      ordem(errado.shell).indexOf('nav-config'),
-    );
+    expect(ordem(errado.shell).at(-1)).toBe('nav-equipe');
+    // E a barra do fixture é consistente: o lugar antigo se fechou.
+    expect(new Set(vaos(errado.shell))).toEqual(new Set([6]));
 
     const consertado = withTeamTab(errado);
 
@@ -710,63 +719,69 @@ describe('a ordem dos botões da barra', () => {
 
     // E nenhum botão foi duplicado nem perdido no caminho.
     expect(ids).toHaveLength(ordem(menu.shell).length);
+
+    // ####  E O LUGAR ANTIGO SE FECHOU  ####
+    //
+    // Mover o botão não basta: os botões são posicionados por
+    // deslocamento acumulado, então o lugar de onde ele saiu fica
+    // como um vão vazio. No server01 deu 72 px entre DISCORD e
+    // CONFIG, e só se viu abrindo o jogo.
+    expect(new Set(vaos(consertado?.shell ?? []))).toEqual(new Set([6]));
+
+    // A barra volta a ser exatamente a do preset.
+    expect(ids).toEqual(ordem(menu.shell));
   });
 
   it('com tudo no lugar, o boot não mexe em nada', () => {
     expect(withTeamTab(buildMainMenu())).toBeNull();
   });
 
-  it('os botões não se sobrepõem depois do reposicionamento', () => {
-    const menu = buildMainMenu();
-    const botoes = walk(menu.shell)
-      .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
-      .sort((a, b) => a.rect.offsetMin.x - b.rect.offsetMin.x);
+  it('a fileira tem o mesmo respiro entre todos os botões', () => {
+    const medidos = vaos(buildMainMenu().shell);
 
-    for (let i = 1; i < botoes.length; i += 1) {
-      const anterior = botoes[i - 1];
-      const atual = botoes[i];
-
-      if (anterior === undefined || atual === undefined) continue;
-
-      // Encostar já é defeito visível; sobrepor é um rótulo por
-      // cima do outro.
-      expect(atual.rect.offsetMin.x).toBeGreaterThan(anterior.rect.offsetMax.x);
-    }
+    expect(medidos.length).toBeGreaterThan(8);
+    // Todos iguais: nenhum encostado, nenhum sobreposto, e nenhum
+    // buraco onde um botão morava antes.
+    expect(new Set(medidos).size).toBe(1);
+    expect(medidos[0]).toBeGreaterThan(0);
   });
+
+
 });
 
-/** A barra sem um botão de navegação. */
-function dropNav(elements: readonly UiElement[], id: string): UiElement[] {
-  return elements
-    .filter((element) => element.id !== id)
-    .map((element) => ({ ...element, children: dropNav(element.children, id) }) as UiElement);
-}
-
 /**
- * Pendura a aba EQUIPE no X pedido, ao lado do CONFIG.
+ * Move um botão da barra para o FIM, fechando o lugar dele.
  *
- * É o que a primeira versão do `withTeamTab` fazia: achar o botão
- * mais à direita e pôr a aba nova depois dele — que é como ela
- * chegou ao server01.
+ * É o estado que a primeira versão do `withTeamTab` produzia — e a
+ * barra fica CONSISTENTE: sem buraco onde ele estava, e sem
+ * sobreposição no destino. Um fixture com buraco testaria o
+ * conserto de um defeito que nunca existiu.
  */
-function pendura(elements: readonly UiElement[], x: number): UiElement[] {
-  const modelo = walk(elements).find((element) => element.id === 'nav-config');
+function mandaParaOFim(elements: readonly UiElement[], id: string): UiElement[] {
+  const alvo = walkAll(elements).find((element) => element.id === id);
 
-  if (modelo === undefined || modelo.type !== 'button') throw new Error('sem CONFIG na barra');
+  if (alvo === undefined) throw new Error(`sem ${id} na barra`);
 
+  const largura = alvo.rect.offsetMax.x - alvo.rect.offsetMin.x;
+
+  // 1. tira o botão e puxa de volta quem estava à direita dele
+  const sem = puxa(semBotao(elements, id), alvo.rect.offsetMin.x, -(largura + 6));
+
+  // 2. põe no fim, depois do que passou a ser o último
+  const ultimo = walkAll(sem)
+    .filter((element) => element.type === 'button' && element.id.startsWith('nav-'))
+    .sort((a, b) => b.rect.offsetMax.x - a.rect.offsetMax.x)[0];
+
+  if (ultimo === undefined) throw new Error('barra sem botões');
+
+  const x = ultimo.rect.offsetMax.x + 6;
   const tab: UiElement = {
-    ...modelo,
-    id: 'nav-equipe',
-    name: 'nav-equipe',
-    text: 'EQUIPE',
+    ...alvo,
     rect: {
-      ...modelo.rect,
-      offsetMin: { ...modelo.rect.offsetMin, x },
-      offsetMax: { ...modelo.rect.offsetMax, x: x + 60 },
+      ...alvo.rect,
+      offsetMin: { ...alvo.rect.offsetMin, x },
+      offsetMax: { ...alvo.rect.offsetMax, x: x + largura },
     },
-    action: { id: 'ir-equipe', kind: 'navigate', screenId: 'tela-equipe' },
-    activeOnScreenId: 'tela-equipe',
-    children: [],
   };
 
   const poe = (els: readonly UiElement[]): UiElement[] =>
@@ -776,5 +791,39 @@ function pendura(elements: readonly UiElement[], x: number): UiElement[] {
         : ({ ...element, children: poe(element.children) } as UiElement),
     );
 
-  return poe(elements);
+  return poe(sem);
 }
+
+function walkAll(elements: readonly UiElement[]): UiElement[] {
+  return elements.flatMap((element) => [element, ...walkAll(element.children)]);
+}
+
+function semBotao(elements: readonly UiElement[], id: string): UiElement[] {
+  return elements
+    .filter((element) => element.id !== id)
+    .map((element) => ({ ...element, children: semBotao(element.children, id) }) as UiElement);
+}
+
+/** Desloca em X todo botão de navegação que começa em `fromX` ou depois. */
+function puxa(elements: readonly UiElement[], fromX: number, by: number): UiElement[] {
+  return elements.map((element) => {
+    const move =
+      element.type === 'button' &&
+      element.id.startsWith('nav-') &&
+      element.rect.offsetMin.x >= fromX;
+
+    const movido = move
+      ? {
+          ...element,
+          rect: {
+            ...element.rect,
+            offsetMin: { ...element.rect.offsetMin, x: element.rect.offsetMin.x + by },
+            offsetMax: { ...element.rect.offsetMax, x: element.rect.offsetMax.x + by },
+          },
+        }
+      : element;
+
+    return { ...movido, children: puxa(movido.children, fromX, by) } as UiElement;
+  });
+}
+

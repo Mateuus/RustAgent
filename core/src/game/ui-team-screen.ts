@@ -1356,11 +1356,36 @@ function findTeamTab(elements: readonly UiElement[]): Extract<UiElement, { type:
   return null;
 }
 
-/** A barra sem a aba EQUIPE — o primeiro passo de reposicioná-la. */
+/**
+ * A barra sem a aba EQUIPE — o primeiro passo de reposicioná-la.
+ *
+ * ####  TIRAR O BOTÃO NÃO BASTA: O LUGAR DELE FICA  ####
+ *
+ * ACONTECEU no server01 em 16/09/2026, e deu para ver no jogo: a aba
+ * saiu de entre DISCORD e CONFIG, entrou no lugar certo — e deixou um
+ * vão de 72 px atrás de si, do tamanho exato dela mais o respiro.
+ * Uma falha na fileira, sem nada dentro.
+ *
+ * Os botões são posicionados por deslocamento acumulado a partir da
+ * borda esquerda: ninguém "se encosta" em ninguém, cada um tem um X
+ * escrito. Remover um do meio não fecha nada — é preciso PUXAR de
+ * volta quem estava à direita dele.
+ */
 function dropTab(elements: readonly UiElement[]): UiElement[] {
-  return elements
-    .filter((element) => element.id !== TEAM_TAB_ID)
-    .map((element) => ({ ...element, children: dropTab(element.children) }) as UiElement);
+  const tab = findTeamTab(elements);
+
+  const without = (list: readonly UiElement[]): UiElement[] =>
+    list
+      .filter((element) => element.id !== TEAM_TAB_ID)
+      .map((element) => ({ ...element, children: without(element.children) }) as UiElement);
+
+  if (tab === null) {
+    return without(elements);
+  }
+
+  const width = tab.rect.offsetMax.x - tab.rect.offsetMin.x;
+
+  return shiftNavFrom(without(elements), tab.rect.offsetMin.x, -(width + NAV_GAP));
 }
 
 /**
