@@ -7569,6 +7569,51 @@ CREATE TABLE koth_settings (
 );
 `;
 
+const RUN_OUTCOME_SCHEMA = `
+-- ============================================================
+--  093  o DESFECHO da run: quem levou, e como acabou.
+--
+--  Pedido do dono em 15/09/2026: "ao finalizar o evento fica ali
+--  ate outro iniciar (tipo para mostrar um historico de quem
+--  levou)".
+--
+--  ####  ATE AQUI O VENCEDOR SO EXISTIA NO CHAT  ####
+--
+--  O KOTH anunciava "os Bravos dominaram o territorio!", fechava a
+--  run com status 'ended' e esquecia o nome. Duas horas depois
+--  ninguem sabia responder quem tinha levado -- e 'ended' nao
+--  distingue quem VENCEU de quem so viu o relogio zerar sem
+--  ninguem na area.
+--
+--  ####  POR QUE DUAS COLUNAS, E NAO UMA  ####
+--
+--  O nome da equipe e do jogador: ele muda, e a equipe se desfaz
+--  levando o nome embora. O ID nao. Guardar os dois deixa a tela
+--  mostrar o nome que valia NAQUELE dia, e o ranking somar pelo id
+--  quando essa hora chegar.
+--
+--  O id vai como TEXTO: teamID do Rust passa de 2^53 e um INTEGER
+--  do JavaScript o arredondaria em silencio.
+--
+--  ####  O DESFECHO NAO E O STATUS  ####
+--
+--  'ended' diz que a run fechou; 'captured' / 'expired' dizem o que
+--  aconteceu. Uma masmorra tambem fecha, e nao tem vencedor: a
+--  coluna fica nula, e isso e uma resposta.
+-- ============================================================
+
+--  'captured'  alguem fechou os 100%
+--  'expired'   o tempo acabou sem vencedor
+--  'stopped'   o admin derrubou
+ALTER TABLE world_event_runs ADD COLUMN outcome TEXT;
+
+--  O nome da equipe no dia. Nulo quando nao houve vencedor.
+ALTER TABLE world_event_runs ADD COLUMN winner_name TEXT;
+
+--  O teamID, como texto. Nulo pelo mesmo motivo.
+ALTER TABLE world_event_runs ADD COLUMN winner_id TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7820,6 +7865,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 90, name: 'team-settings', sql: TEAM_SETTINGS_SCHEMA },
   { id: 91, name: 'koth-arena-reward', sql: KOTH_ARENA_REWARD_SCHEMA },
   { id: 92, name: 'koth-settings', sql: KOTH_SETTINGS_SCHEMA },
+  { id: 93, name: 'run-outcome', sql: RUN_OUTCOME_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

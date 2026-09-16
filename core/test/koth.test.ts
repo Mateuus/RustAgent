@@ -423,6 +423,90 @@ describe('o desfecho', () => {
     expect(h.said.some((message) => message.includes('Os Lobos'))).toBe(true);
   });
 
+  // ####  O NOME TEM QUE SOBREVIVER AO CHAT  ####
+  //
+  // "Quem levou ontem?" é pergunta de dias depois. Sem estas três,
+  // o agente continuaria anunciando no chat e esquecendo em
+  // seguida — e o teste acima passaria do mesmo jeito.
+  it('capturado GRAVA quem levou, e não só anuncia', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","teamId":"76561199000000007","secret":"${secret}"}`,
+    );
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.outcome).toBe('captured');
+    expect(run?.winnerName).toBe('Os Lobos');
+    // O id vai como TEXTO: como número, este valor seria
+    // arredondado em silêncio.
+    expect(run?.winnerId).toBe('76561199000000007');
+  });
+
+  it('equipe sem nome não vira uma equipe chamada "uma equipe"', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamId":"9","secret":"${secret}"}`,
+    );
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.outcome).toBe('captured');
+    // O chat diz "uma equipe"; o histórico diz nada, que é a
+    // verdade — e o id continua lá para o ranking somar.
+    expect(run?.winnerName).toBeNull();
+    expect(run?.winnerId).toBe('9');
+    expect(h.said.some((message) => message.includes('uma equipe'))).toBe(true);
+  });
+
+  it('expirado grava o desfecho SEM vencedor', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"expired","secret":"${secret}"}`,
+    );
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.outcome).toBe('expired');
+    expect(run?.winnerName).toBeNull();
+  });
+
+  it('derrubado pelo painel fica marcado como derrubado', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+
+    await h.service.stopRun(SERVER, 'painel');
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.status).toBe('cancelled');
+    expect(run?.outcome).toBe('stopped');
+  });
+
   it('expirado também é anunciado: o silêncio faria o evento sumir', async () => {
     const h = harness();
 

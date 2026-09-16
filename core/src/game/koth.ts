@@ -31,7 +31,10 @@
 import { randomUUID } from 'node:crypto';
 
 import type { KothArenasRepository } from '../db/koth-arenas-repository.js';
-import type { WorldEventsRepository } from '../db/world-events-repository.js';
+import type {
+  RunEndOutcome,
+  WorldEventsRepository,
+} from '../db/world-events-repository.js';
 import type { Logger } from '../logger.js';
 import type { KothArena, KothPush, KothStatus } from '../types/koth.js';
 import { toError } from '../util.js';
@@ -302,13 +305,13 @@ export class KothService {
 
     if (runId === undefined) {
       for (const id of [...this.#liveOf(serverId).keys()]) {
-        this.#closeLocal(serverId, id, 'cancelled', reason);
+        this.#closeLocal(serverId, id, 'cancelled', reason, { outcome: 'stopped' });
       }
 
       return;
     }
 
-    this.#closeLocal(serverId, runId, 'cancelled', reason);
+    this.#closeLocal(serverId, runId, 'cancelled', reason, { outcome: 'stopped' });
   }
 
   async status(serverId: string): Promise<KothStatus> {
@@ -368,9 +371,21 @@ export class KothService {
   #apply(serverId: string, push: KothPush): void {
     switch (push.kind) {
       case 'captured': {
-        const winner = push.teamName === undefined || push.teamName === '' ? 'uma equipe' : push.teamName;
+        const winner =
+          push.teamName === undefined || push.teamName === '' ? 'uma equipe' : push.teamName;
 
-        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', 'captured');
+        // ####  O NOME VAI PARA O HISTÓRICO, E NÃO SÓ PARA O CHAT  ####
+        //
+        // O anúncio some do chat em cinco linhas. "Quem levou o
+        // território ontem?" é pergunta de dias depois, e sem gravar
+        // aqui a resposta é "não sei".
+        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', 'captured', {
+          outcome: 'captured',
+          // Se a equipe não tinha nome, guardar "uma equipe" seria
+          // gravar a frase do chat como se fosse um nome.
+          winnerName: push.teamName === undefined || push.teamName === '' ? null : push.teamName,
+          winnerId: push.teamId ?? null,
+        });
 
         this.#deps.logger.info(
           { server: serverId, team: push.teamId, name: push.teamName, members: push.members?.length ?? 0 },
@@ -389,7 +404,9 @@ export class KothService {
       }
 
       case 'expired': {
-        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', 'expired');
+        this.#closeLocal(serverId, Number(push.runId ?? '0'), 'ended', 'expired', {
+          outcome: 'expired',
+        });
 
         this.#deps.logger.info({ server: serverId }, 'KOTH expirou sem vencedor');
 
@@ -434,6 +451,7 @@ export class KothService {
     runId: number,
     status: 'ended' | 'cancelled',
     why: string,
+    outcome?: RunEndOutcome,
   ): void {
     const live = this.#liveOf(serverId);
     const target = runId > 0 ? runId : this.#onlyRun(serverId);
@@ -454,7 +472,12 @@ export class KothService {
     runId = target;
 
     live.delete(runId);
-    this.#deps.events.endRun(found.runId, status);
+
+    if (outcome === undefined) {
+      this.#deps.events.endRun(found.runId, status);
+    } else {
+      this.#deps.events.endRun(found.runId, status, Date.now(), outcome);
+    }
 
     this.#deps.logger.debug({ server: serverId, run: found.runId, why }, 'run de KOTH fechada');
   }
