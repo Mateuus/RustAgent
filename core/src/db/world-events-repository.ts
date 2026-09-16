@@ -22,6 +22,7 @@ import type { Logger } from '../logger.js';
 import {
   EVENT_ACCESS,
   FAILURE_REASONS,
+  RUN_OUTCOMES,
   RUN_STATUS,
   SPAWN_MODES,
   type EventAccess,
@@ -30,6 +31,7 @@ import {
   type EventZone,
   type EventZoneInput,
   type FailureReason,
+  type RunOutcome,
   type RunStatus,
   type SpawnMode,
   type WorldEvent,
@@ -90,6 +92,22 @@ interface RunRow {
   readonly scheduled_for: number | null;
   readonly started_at: number | null;
   readonly ended_at: number | null;
+  readonly outcome: string | null;
+  readonly winner_name: string | null;
+  readonly winner_id: string | null;
+}
+
+/**
+ * O desfecho, na hora de fechar.
+ *
+ * Sem vencedor (`expired`, `stopped`) os dois nomes ficam de fora —
+ * e não como string vazia, que na tela vira "levou: " sem nada
+ * depois.
+ */
+export interface RunEndOutcome {
+  readonly outcome: RunOutcome;
+  readonly winnerName?: string | null;
+  readonly winnerId?: string | null;
 }
 
 /** O que o agente sabe quando uma masmorra acaba de nascer. */
@@ -393,11 +411,45 @@ export class WorldEventsRepository {
   }
 
   /** Fecha uma run. `cancelled` quando foi o admin. */
-  endRun(runId: number, status: RunStatus = 'ended', endedAt: number = Date.now()): boolean {
+  /**
+   * Fecha a run.
+   *
+   * ####  O DESFECHO É OPCIONAL, E ISSO É DE PROPÓSITO  ####
+   *
+   * A masmorra fecha sem vencedor, e o agendador fecha o
+   * COMPROMISSO (aquela run de `scheduled` que nunca esteve no
+   * mapa) com o mesmo método. Exigir desfecho dos dois produziria
+   * um 'expired' mentiroso no histórico.
+   */
+  endRun(
+    runId: number,
+    status: RunStatus = 'ended',
+    endedAt: number = Date.now(),
+    outcome?: RunEndOutcome,
+  ): boolean {
+    if (outcome === undefined) {
+      return (
+        this.#db
+          .prepare('UPDATE world_event_runs SET status = ?, ended_at = ? WHERE id = ?')
+          .run(status, endedAt, runId).changes > 0
+      );
+    }
+
     return (
       this.#db
-        .prepare('UPDATE world_event_runs SET status = ?, ended_at = ? WHERE id = ?')
-        .run(status, endedAt, runId).changes > 0
+        .prepare(
+          `UPDATE world_event_runs
+              SET status = ?, ended_at = ?, outcome = ?, winner_name = ?, winner_id = ?
+            WHERE id = ?`,
+        )
+        .run(
+          status,
+          endedAt,
+          outcome.outcome,
+          outcome.winnerName ?? null,
+          outcome.winnerId ?? null,
+          runId,
+        ).changes > 0
     );
   }
 
@@ -766,6 +818,12 @@ function toRun(row: RunRow): EventRun {
     scheduledFor: row.scheduled_for,
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    outcome:
+      row.outcome !== null && (RUN_OUTCOMES as readonly string[]).includes(row.outcome)
+        ? (row.outcome as RunOutcome)
+        : null,
+    winnerName: row.winner_name,
+    winnerId: row.winner_id,
   };
 }
 

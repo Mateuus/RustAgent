@@ -108,14 +108,35 @@ function harness(): Harness {
             }
 
             if (command.startsWith('origemz.koth status')) {
-              const open = events.activeRun(SERVER);
+              // O "jogo" deste teste responde o que o banco diz estar
+              // de pé — e na forma nova: uma LISTA, mesmo com um só.
+              const abertas = events
+                .runs({ serverId: SERVER, limit: 50 })
+                .filter((run) => run.endedAt === null && run.dungeonId === null);
 
               return Promise.resolve(
-                JSON.stringify(
-                  open === null
-                    ? { ok: true, active: false }
-                    : { ok: true, active: true, runId: String(open.id) },
-                ),
+                JSON.stringify({
+                  ok: true,
+                  active: abertas.length > 0,
+                  count: abertas.length,
+                  events: abertas.map((run) => ({
+                    runId: String(run.id),
+                    name: 'Colina do Norte',
+                    grid: run.grid ?? 'E7',
+                    x: run.x ?? 0,
+                    z: run.z ?? 0,
+                    radius: 30,
+                    percent: 0,
+                    progress: 0,
+                    captureSeconds: 300,
+                    holder: '0',
+                    holderName: '',
+                    contested: false,
+                    elapsed: 1,
+                    durationSeconds: 1800,
+                    inside: 0,
+                  })),
+                }),
               );
             }
 
@@ -175,6 +196,64 @@ describe('erguer', () => {
     expect(run?.status).toBe('active');
   });
 
+  it('o prêmio do território viaja com o start', async () => {
+    const h = harness();
+
+    h.arenas.add(
+      SERVER,
+      kothArenaInputSchema.parse({
+        label: 'Colina',
+        x: 1,
+        z: 2,
+        reward: {
+          smoke: false,
+          flare: true,
+          count: 3,
+          crateSeconds: 120,
+          crates: [
+            { prefab: 'assets/bundled/prefabs/radtown/crate_elite.prefab', weight: 1 },
+            { prefab: 'assets/bundled/prefabs/radtown/crate_normal.prefab', weight: 9 },
+          ],
+        },
+      }),
+      { worldKey: WORLD, grid: 'E7' },
+    );
+
+    await h.service.start({ serverId: SERVER });
+
+    const command = h.sent.find((line) => line.startsWith('origemz.koth start')) ?? '';
+    const body = JSON.parse(command.slice('origemz.koth start '.length)) as Record<string, unknown>;
+    const reward = body['reward'] as Record<string, unknown>;
+
+    expect(reward['smoke']).toBe(false);
+    expect(reward['count']).toBe(3);
+    expect(reward['crateSeconds']).toBe(120);
+
+    // O peso vira `chance` na fronteira: é o nome que o plugin usa.
+    expect(reward['crates']).toEqual([
+      { prefab: 'assets/bundled/prefabs/radtown/crate_elite.prefab', chance: 1 },
+      { prefab: 'assets/bundled/prefabs/radtown/crate_normal.prefab', chance: 9 },
+    ]);
+  });
+
+  it('território sem prêmio configurado manda o padrão, e não vazio', async () => {
+    const h = harness();
+
+    arena(h);
+
+    await h.service.start({ serverId: SERVER });
+
+    const command = h.sent.find((line) => line.startsWith('origemz.koth start')) ?? '';
+    const body = JSON.parse(command.slice('origemz.koth start '.length)) as Record<string, unknown>;
+    const reward = body['reward'] as Record<string, unknown>;
+
+    // Uma caixa, fumaça e flare: é o que o admin espera de um
+    // território que ele criou e ainda não configurou.
+    expect(reward['count']).toBe(1);
+    expect(reward['smoke']).toBe(true);
+    expect(reward['crateSeconds']).toBe(600);
+  });
+
   it('anuncia onde ele abriu', async () => {
     const h = harness();
 
@@ -229,15 +308,52 @@ describe('erguer', () => {
     expect(h.events.activeRun(SERVER)).toBeNull();
   });
 
-  it('não ergue dois no mesmo servidor', async () => {
+  it('ergue VÁRIOS no mesmo servidor: são vagas', async () => {
     const h = harness();
 
-    arena(h);
+    // Dois territórios, dois eventos ao mesmo tempo. Quem conta as
+    // vagas é o agendador, com o limite do admin; o serviço ergue o
+    // que lhe pedirem.
+    arena(h, { label: 'Colina' });
+    arena(h, { label: 'Vale', x: 500, z: 500 });
+
+    const primeiro = await h.service.start({ serverId: SERVER });
+    const segundo = await h.service.start({ serverId: SERVER });
+
+    expect(primeiro.runId).not.toBe(segundo.runId);
+    expect(h.service.liveCount(SERVER)).toBe(2);
+
+    // E o sorteio não repetiu o mesmo lugar.
+    expect(primeiro.arena.id).not.toBe(segundo.arena.id);
+  });
+
+  it('derrubar sem dizer qual derruba todos', async () => {
+    const h = harness();
+
+    arena(h, { label: 'Colina' });
+    arena(h, { label: 'Vale', x: 500, z: 500 });
+
+    await h.service.start({ serverId: SERVER });
     await h.service.start({ serverId: SERVER });
 
-    await expect(h.service.start({ serverId: SERVER })).rejects.toMatchObject({
-      reason: 'already_active',
-    });
+    await h.service.stopRun(SERVER);
+
+    expect(h.service.liveCount(SERVER)).toBe(0);
+  });
+
+  it('derrubar UM deixa o outro de pé', async () => {
+    const h = harness();
+
+    arena(h, { label: 'Colina' });
+    arena(h, { label: 'Vale', x: 500, z: 500 });
+
+    const primeiro = await h.service.start({ serverId: SERVER });
+
+    await h.service.start({ serverId: SERVER });
+    await h.service.stopRun(SERVER, 'painel', primeiro.runId);
+
+    expect(h.service.liveCount(SERVER)).toBe(1);
+    expect(h.events.run(primeiro.runId)?.status).toBe('cancelled');
   });
 
   it('com o servidor parado, diz isso', async () => {
@@ -305,6 +421,90 @@ describe('o desfecho', () => {
 
     expect(h.events.run(started.runId)?.status).toBe('ended');
     expect(h.said.some((message) => message.includes('Os Lobos'))).toBe(true);
+  });
+
+  // ####  O NOME TEM QUE SOBREVIVER AO CHAT  ####
+  //
+  // "Quem levou ontem?" é pergunta de dias depois. Sem estas três,
+  // o agente continuaria anunciando no chat e esquecendo em
+  // seguida — e o teste acima passaria do mesmo jeito.
+  it('capturado GRAVA quem levou, e não só anuncia', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamName":"Os Lobos","teamId":"76561199000000007","secret":"${secret}"}`,
+    );
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.outcome).toBe('captured');
+    expect(run?.winnerName).toBe('Os Lobos');
+    // O id vai como TEXTO: como número, este valor seria
+    // arredondado em silêncio.
+    expect(run?.winnerId).toBe('76561199000000007');
+  });
+
+  it('equipe sem nome não vira uma equipe chamada "uma equipe"', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"captured","teamId":"9","secret":"${secret}"}`,
+    );
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.outcome).toBe('captured');
+    // O chat diz "uma equipe"; o histórico diz nada, que é a
+    // verdade — e o id continua lá para o ranking somar.
+    expect(run?.winnerName).toBeNull();
+    expect(run?.winnerId).toBe('9');
+    expect(h.said.some((message) => message.includes('uma equipe'))).toBe(true);
+  });
+
+  it('expirado grava o desfecho SEM vencedor', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(
+      SERVER,
+      `[OrigemZ KOTH] ${KOTH_MARKER}{"kind":"expired","secret":"${secret}"}`,
+    );
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.outcome).toBe('expired');
+    expect(run?.winnerName).toBeNull();
+  });
+
+  it('derrubado pelo painel fica marcado como derrubado', async () => {
+    const h = harness();
+
+    arena(h);
+
+    const started = await h.service.start({ serverId: SERVER });
+
+    await h.service.stopRun(SERVER, 'painel');
+
+    const run = h.events.run(started.runId);
+
+    expect(run?.status).toBe('cancelled');
+    expect(run?.outcome).toBe('stopped');
   });
 
   it('expirado também é anunciado: o silêncio faria o evento sumir', async () => {
@@ -432,12 +632,19 @@ describe('o desfecho', () => {
     // pé: bandeira sem dono, que não sairia do mapa até o wipe.
     h.replies.set(
       'origemz.koth status',
-      JSON.stringify({ ok: true, active: true, runId: '999' }),
+      JSON.stringify({
+        ok: true,
+        active: true,
+        count: 1,
+        events: [{ runId: '999', name: 'Fantasma', grid: 'A1' }],
+      }),
     );
 
     await h.service.reconcile(SERVER);
 
-    expect(h.sent.some((command) => command.startsWith('origemz.koth stop'))).toBe(true);
+    // E o comando leva o id: derrubar TUDO por causa de um órfão
+    // levaria junto os eventos que estão acontecendo.
+    expect(h.sent.some((command) => command === 'origemz.koth stop 999')).toBe(true);
   });
 
   it('sem nada de pé, a run aberta é fechada', async () => {

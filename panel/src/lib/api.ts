@@ -5966,6 +5966,17 @@ export const agent = {
       method: 'DELETE',
     }),
 
+  kothSettings: (serverId: string) =>
+    api<{ settings: { maxConcurrent: number }; live: number }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/settings`,
+    ),
+
+  saveKothSettings: (serverId: string, maxConcurrent: number) =>
+    api<{ settings: { maxConcurrent: number } }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/settings`,
+      { method: 'PUT', body: { maxConcurrent } },
+    ),
+
   kothStatus: (serverId: string) =>
     api<{ status: KothStatus }>(`/api/servers/${encodeURIComponent(serverId)}/koth/status`),
 
@@ -5975,8 +5986,12 @@ export const agent = {
       { method: 'POST', body: arenaId === undefined ? {} : { arenaId } },
     ),
 
-  stopKoth: (serverId: string) =>
-    api(`/api/servers/${encodeURIComponent(serverId)}/koth/stop`, { method: 'POST' }),
+  /** Sem `runId`, derruba TODOS os daquele servidor. */
+  stopKoth: (serverId: string, runId?: number) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/koth/stop`, {
+      method: 'POST',
+      body: runId === undefined ? {} : { runId },
+    }),
 
   teamSettings: (serverId: string) =>
     api<{ settings: { maxSize: number }; live: number | null }>(
@@ -6283,6 +6298,27 @@ export interface DungeonAccess {
  * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
  * a este bloco: a masmorra nao apodrece nem com ele desligado.
  */
+/** Uma caixa do prêmio, com o PESO dela no sorteio. */
+export interface KothCrate {
+  prefab: string;
+  weight: number;
+}
+
+/**
+ * O que nasce quando alguém vence.
+ *
+ * Espelha `kothRewardSchema` em `core/src/types/koth.ts`. O evento
+ * que EXPIRA sem vencedor não deixa nada.
+ */
+export interface KothReward {
+  smoke: boolean;
+  flare: boolean;
+  crates: KothCrate[];
+  count: number;
+  /** Zero = a caixa fica até alguém abrir. */
+  crateSeconds: number;
+}
+
 /** Um território do KOTH. Espelha `core/src/types/koth.ts`. */
 export interface KothArenaInput {
   label: string;
@@ -6297,6 +6333,7 @@ export interface KothArenaInput {
   decayPerSecond?: number;
   color?: string;
   enabled?: boolean;
+  reward?: KothReward;
 }
 
 export interface KothArena extends KothArenaInput {
@@ -6306,6 +6343,7 @@ export interface KothArena extends KothArenaInput {
   decayPerSecond: number;
   color: string;
   enabled: boolean;
+  reward: KothReward;
   worldKey: string | null;
   grid: string | null;
   lastUsedAt: number | null;
@@ -6313,16 +6351,32 @@ export interface KothArena extends KothArenaInput {
   updatedAt: number;
 }
 
+/** Um território de pé: o card de uma vaga. */
+export interface KothLiveEvent {
+  runId: string;
+  name: string;
+  grid: string;
+  x: number;
+  z: number;
+  radius: number;
+  percent: number;
+  progress: number;
+  captureSeconds: number;
+  /** `"0"` = ninguém está capturando agora. */
+  holder: string;
+  holderName: string;
+  /** Dois ou mais lados dentro: ninguém avança. */
+  contested: boolean;
+  elapsed: number;
+  durationSeconds: number;
+  inside: number;
+}
+
 /** O que o plugin responde quando se pergunta o estado. */
 export interface KothStatus {
   active: boolean;
-  runId?: string;
-  name?: string;
-  grid?: string;
-  percent?: number;
-  holderName?: string;
-  elapsed?: number;
-  inside?: number;
+  count?: number;
+  events?: KothLiveEvent[];
 }
 
 /**
@@ -6675,6 +6729,18 @@ export interface EventRun {
   scheduledFor: number | null;
   startedAt: number | null;
   endedAt: number | null;
+  /**
+   * COMO a run acabou — e não que acabou, que é o `status`.
+   *
+   * Ausente numa masmorra é o certo: ela fecha e não tem vencedor.
+   * Ausente numa run de KOTH velha também: o desfecho só passou a
+   * ser gravado na migração 093.
+   */
+  outcome?: 'captured' | 'expired' | 'stopped' | null;
+  /** O nome que a equipe tinha NAQUELE dia. */
+  winnerName?: string | null;
+  /** O teamID, como texto: ele passa de 2^53. */
+  winnerId?: string | null;
 }
 
 // ------------------------------------------------------------

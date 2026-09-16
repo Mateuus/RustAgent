@@ -41,6 +41,8 @@ interface Harness {
   readonly started: string[];
   online: number | null;
   hasArena: boolean;
+  /** Quantas vagas de KOTH este servidor tem. */
+  vagas: number;
   /** O próximo `start` falha? */
   failNext: boolean;
 }
@@ -71,11 +73,15 @@ function harness(): Harness {
     started: [],
     online: 10,
     hasArena: true,
+    vagas: 1,
     failNext: false,
   };
 
   const koth = {
     hasArena: () => state.hasArena,
+    // Quantos este agente tem de pé: o relógio pergunta antes de
+    // erguer, porque as vagas são o limite do admin.
+    liveCount: () => state.started.length,
     start: (input: { readonly serverId: string }) => {
       if (state.failNext) return Promise.reject(new Error('o plugin recusou'));
 
@@ -104,6 +110,7 @@ function harness(): Harness {
   const scheduler = new KothScheduler({
     events,
     koth,
+    maxConcurrent: () => state.vagas,
     servers: {
       ids: () => [SERVER],
       onlineCount: () => Promise.resolve(state.online),
@@ -254,7 +261,7 @@ describe('quando ele NÃO pode erguer', () => {
     expect(h.events.runs({ limit: 10 }).filter((run) => run.status === 'failed')).toHaveLength(0);
   });
 
-  it('com um evento já de pé, não ergue um segundo', async () => {
+  it('com uma MASMORRA de pé, não ergue: são famílias diferentes', async () => {
     const h = harness();
 
     makeEvent(h);
@@ -276,6 +283,41 @@ describe('quando ele NÃO pode erguer', () => {
     await h.scheduler.tick();
 
     expect(h.started).toHaveLength(0);
+  });
+
+  it('com as vagas ocupadas, adia', async () => {
+    const h = harness();
+
+    makeEvent(h);
+    arena(h);
+
+    // Uma vaga, e ela já está ocupada por um KOTH deste agente.
+    h.started.push(SERVER);
+
+    await h.scheduler.tick();
+    makeDue(h);
+    await h.scheduler.tick();
+
+    expect(h.started).toHaveLength(1);
+    // O compromisso continua na agenda: vaga ocupada é adiamento,
+    // nunca falha.
+    expect(h.events.scheduledRun('koth-noite', SERVER)).not.toBeNull();
+  });
+
+  it('com DUAS vagas, ergue o segundo', async () => {
+    const h = harness();
+
+    makeEvent(h);
+    arena(h);
+
+    h.vagas = 2;
+    h.started.push(SERVER);
+
+    await h.scheduler.tick();
+    makeDue(h);
+    await h.scheduler.tick();
+
+    expect(h.started).toHaveLength(2);
   });
 
   it('se o start falha, vira falha com nome — e o evento continua na agenda', async () => {

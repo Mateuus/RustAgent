@@ -20,7 +20,7 @@
 //  o editor precisaria saber desenhar.
 // ============================================================
 
-import type { UiAction, UiElement } from '../types/ui-document.js';
+import type { UiAction, UiElement, UiSubmitAction } from '../types/ui-document.js';
 
 /** Os tokens de panel/src/app/globals.css. */
 export const C = {
@@ -170,6 +170,56 @@ export function button(
     activeColor: null,
     activeTextColor: null,
     activeOnScreenId: null,
+    children: [],
+  };
+}
+
+export interface InputStyle {
+  readonly color?: string;
+  /** O mesmo nome do `LabelStyle`: os dois desenham texto. */
+  readonly size?: number;
+  readonly align?: Extract<UiElement, { type: 'input' }>['align'];
+  readonly font?: Extract<UiElement, { type: 'input' }>['font'];
+}
+
+/**
+ * O campo em que o JOGADOR escreve.
+ *
+ * ####  ELE PRECISA DE UM FUNDO ATRÁS  ####
+ *
+ * O `InputField` do CUI não pinta nada: ele é texto e cursor. Um
+ * campo sem painel embaixo fica invisível até alguém acertar o
+ * clique nele por sorte. Por isso o uso normal é este —
+ *
+ *     panel('x-caixa', rect, C.bg, [input('x', …, fill(8, 0, 8, 0))])
+ *
+ * — com o campo recuado dos lados, que é o que dá ao texto o
+ * respiro de uma caixa de verdade.
+ *
+ * `charLimit` é o teto do CLIENTE. Ele não dispensa a régua do
+ * agente: o comando pode ser digitado no F1 sem passar por campo
+ * nenhum.
+ */
+export function input(
+  id: string,
+  text: string,
+  rect: Rect,
+  action: UiSubmitAction,
+  charLimit: number,
+  style: InputStyle = {},
+): UiElement {
+  return {
+    id,
+    name: id,
+    type: 'input',
+    rect,
+    text,
+    fontSize: style.size ?? 12,
+    font: style.font ?? 'RobotoCondensed-Regular.ttf',
+    color: style.color ?? C.text,
+    align: style.align ?? 'MiddleLeft',
+    charLimit,
+    action,
     children: [],
   };
 }

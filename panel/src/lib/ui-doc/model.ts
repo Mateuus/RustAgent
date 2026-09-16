@@ -216,6 +216,20 @@ export const UI_ACTION_KINDS = [
 //  ELEMENTOS
 // ============================================================
 
+/**
+ * O que o admin pode CRIAR no editor.
+ *
+ * ####  `input` FICA DE FORA DE PROPÓSITO  ####
+ *
+ * O modelo tem um quinto tipo — o campo de texto da aba EQUIPE —,
+ * e ele não entra nesta lista porque um campo desenhado aqui
+ * nasceria inútil: o que ele faz com o que o jogador escreve
+ * precisa de um caminho de VOLTA ao agente, e quem o monta é o
+ * construtor da tela, não o editor.
+ *
+ * O editor SABE desenhá-lo (ver `element-view.tsx`): ele pode
+ * aparecer numa tela que o agente montou. Só não se cria um daqui.
+ */
 export const UI_ELEMENT_TYPES = ['panel', 'label', 'button', 'image'] as const;
 export type UiElementType = (typeof UI_ELEMENT_TYPES)[number];
 
@@ -341,7 +355,37 @@ export interface UiImageElement extends UiElementBase {
   readonly color: string;
 }
 
-export type UiElement = UiPanelElement | UiLabelElement | UiButtonElement | UiImageElement;
+/**
+ * O campo em que o JOGADOR escreve.
+ *
+ * ####  ELE NÃO É CRIÁVEL AQUI  ####
+ *
+ * Não está em `UI_ELEMENT_TYPES` de propósito: o que ele faz com o
+ * texto precisa de um caminho de volta ao agente, e quem o monta é
+ * o construtor da tela (hoje, a aba EQUIPE). O editor precisa
+ * apenas SABER o que ele é — para desenhá-lo no preview e para não
+ * recusar o documento em que ele aparece.
+ */
+export interface UiInputElement extends UiElementBase {
+  readonly type: 'input';
+  /** O que já vem escrito quando a tela abre. */
+  readonly text: string;
+  readonly fontSize: number;
+  readonly font: UiFont;
+  readonly color: string;
+  readonly align: UiTextAlign;
+  /** O teto de caracteres, imposto pelo cliente. */
+  readonly charLimit: number;
+  /** Só `store.buy`: é a única ação com caminho de volta. */
+  readonly action: UiAction;
+}
+
+export type UiElement =
+  | UiPanelElement
+  | UiLabelElement
+  | UiButtonElement
+  | UiImageElement
+  | UiInputElement;
 
 // ============================================================
 //  TELA E DOCUMENTO

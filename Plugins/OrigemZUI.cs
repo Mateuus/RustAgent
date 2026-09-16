@@ -79,6 +79,17 @@ namespace Oxide.Plugins
         private const string ActCommand = "origemz.ui.act";
         private const string CloseCommand = "origemz.ui.close";
 
+        /// <summary>
+        /// O Enter de um campo de texto.
+        ///
+        /// Separado do ActCommand porque o que vem depois do
+        /// endereco da acao e TEXTO LIVRE do jogador: o CmdAct
+        /// recusa argumento a mais, e afrouxa-lo para caber um
+        /// nome com espaco enfraqueceria a validacao de todo
+        /// clique do menu.
+        /// </summary>
+        private const string InputCommand = "origemz.ui.input";
+
         /// <summary>O desfecho de uma compra, vindo do agente.</summary>
         private const string BuyResultCommand = "origemz.ui.buyresult";
 
@@ -212,6 +223,15 @@ namespace Oxide.Plugins
             public JArray Cui;
             /// <summary>Elementos do shell a atualizar (update:true).</summary>
             public JArray Updates;
+            /// <summary>
+            /// Que endereco conta como "voce esta aqui" nesta tela.
+            ///
+            /// Nem sempre e o id da tela: uma tela GERADA tem
+            /// endereco com parametro (tela-equipe:kick:765...), e o
+            /// shell so conhece o endereco-base. O agente manda o
+            /// que o shell conhece.
+            /// </summary>
+            public string ActiveId;
             /// <summary>actionId -> o que aquela acao faz.</summary>
             public JObject Actions;
             /// <summary>
@@ -271,6 +291,26 @@ namespace Oxide.Plugins
             /// tudo. Os dois modos convivem de proposito.
             /// </summary>
             public JArray Shell;
+            /// <summary>
+            /// Qual botao do shell acende em que tela.
+            ///
+            /// ####  ELA SUBSTITUIU 4.795 BYTES POR TELA  ####
+            ///
+            /// O agente mandava o "voce esta aqui" como dois
+            /// elementos CUI completos por botao de navegacao, e o
+            /// mesmo bloco viajava de novo em CADA tela servida.
+            /// Onze botoes davam 4.795 bytes para dizer uma coisa:
+            /// qual deles esta aceso.
+            ///
+            /// Agora vem uma linha por botao, uma vez so: o id, a
+            /// tela que o acende e as duas cores do estado aceso. As
+            /// cores do estado NORMAL nao vem - elas ja estao no
+            /// shell que este plugin desenhou.
+            ///
+            /// Vazia = agente anterior a 15/09/2026, e ai o
+            /// ScreenCache.Updates continua valendo.
+            /// </summary>
+            public JArray NavStates;
             /// <summary>Elemento do shell que recebe o conteudo.</summary>
             public string ContentSlot;
             /// <summary>Elemento do shell onde os modais aparecem.</summary>
@@ -853,6 +893,7 @@ namespace Oxide.Plugins
             document.Permission = (string)item["permission"];
             document.EntryScreenId = (string)item["entryScreenId"];
             document.Shell = item["shell"] as JArray;
+            document.NavStates = item["navStates"] as JArray;
             document.ContentSlot = (string)item["contentSlot"];
             document.ModalSlot = (string)item["modalSlot"];
 
@@ -941,6 +982,7 @@ namespace Oxide.Plugins
             screen.Kind = (string)item["kind"];
             screen.Cui = cui;
             screen.Updates = item["updates"] as JArray;
+            screen.ActiveId = (string)item["activeId"];
             screen.Actions = item["actions"] as JObject;
 
             JToken isVolatile = item["volatile"];
@@ -1441,9 +1483,20 @@ namespace Oxide.Plugins
             CuiHelper.AddUi(player, Personalize(screen.Cui, session.Token));
 
             // O "voce esta aqui" da navegacao, sem recriar o botao.
-            if (screen.Updates != null && screen.Updates.Count > 0)
+            //
+            // A tabela do documento vem primeiro: ela e a forma
+            // barata, e o `Updates` so existe para o agente que
+            // ainda nao a manda. Ver DocumentCache.NavStates.
+            JArray highlight = NavUpdates(document, ShellFor(player, document), screen.ActiveId);
+
+            if (highlight == null)
             {
-                CuiHelper.AddUi(player, Personalize(screen.Updates, session.Token));
+                highlight = screen.Updates;
+            }
+
+            if (highlight != null && highlight.Count > 0)
+            {
+                CuiHelper.AddUi(player, Personalize(highlight, session.Token));
             }
 
             // ####  E O RELOGIO DA TELA QUE ACABOU DE ENTRAR  ####
@@ -1563,6 +1616,155 @@ namespace Oxide.Plugins
         /// Por isso a remocao e transitiva: o elemento, os filhos
         /// dele e os filhos deles.
         /// </summary>
+        // ====================================================
+        //  O "VOCE ESTA AQUI" DA BARRA
+        //
+        //  ####  O AGENTE MANDA A COR; O DESENHO E DAQUI  ####
+        //
+        //  Ate 15/09/2026 o agente mandava dois elementos CUI
+        //  completos por botao de navegacao, em cada tela servida -
+        //  com command, texto, fonte e alinhamento repetidos, para
+        //  dizer qual botao esta aceso. Onze botoes: 4.795 bytes.
+        //
+        //  O que ele manda agora e uma linha por botao, uma vez so
+        //  (NavStates), mais o endereco da tela atual. O resto -
+        //  command, texto, fonte - este plugin JA TEM: esta no shell
+        //  que ele mesmo desenhou, e e de la que os componentes sao
+        //  copiados.
+        //
+        //  ####  O SHELL DAQUI E O DO JOGADOR  ####
+        //
+        //  E o podado, e nao o do documento: quem nao foi liberado
+        //  para o modo streamer nao tem o botao CONFIG na barra, e
+        //  mandar update para um elemento que nao existe na tela
+        //  dele seria pedir ao cliente que atualizasse o nada.
+        // ====================================================
+        private JArray NavUpdates(DocumentCache document, JArray shell, string activeId)
+        {
+            if (document.NavStates == null || document.NavStates.Count == 0 || shell == null)
+            {
+                // Agente anterior a esta mudanca. Quem acende a
+                // barra continua sendo o ScreenCache.Updates.
+                return null;
+            }
+
+            JArray output = new JArray();
+
+            foreach (JToken raw in document.NavStates)
+            {
+                JObject state = raw as JObject;
+                if (state == null)
+                {
+                    continue;
+                }
+
+                string id = (string)state["id"];
+                if (string.IsNullOrEmpty(id))
+                {
+                    continue;
+                }
+
+                bool on = !string.IsNullOrEmpty(activeId) && activeId == (string)state["on"];
+                string name = RootName + "." + id;
+
+                // Aceso troca a cor; apagado reenvia a do shell, que
+                // e o que DESLIGA o botao da tela anterior.
+                PushNavUpdate(output, shell, name, null,
+                              on ? (string)state["color"] : null);
+                PushNavUpdate(output, shell, name + ".text", name,
+                              on ? (string)state["textColor"] : null);
+            }
+
+            return output;
+        }
+
+        /// <summary>
+        /// Um elemento do shell, de volta com outra cor.
+        /// </summary>
+        /// <param name="color">
+        /// A cor nova, ou `null` para reenviar a que o shell tem.
+        /// </param>
+        private void PushNavUpdate(JArray output, JArray shell, string name, string parent, string color)
+        {
+            JObject source = FindInShell(shell, name);
+            if (source == null)
+            {
+                // Botao podado da barra deste jogador. Nao ha o que
+                // atualizar, e inventar o elemento o CRIARIA.
+                return;
+            }
+
+            JArray components = source["components"] as JArray;
+            if (components == null)
+            {
+                return;
+            }
+
+            JArray copy = new JArray();
+
+            foreach (JToken component in components)
+            {
+                JObject item = component as JObject;
+                if (item == null)
+                {
+                    continue;
+                }
+
+                // O RectTransform fica de fora: a posicao nao mudou,
+                // e reenvia-la so daria ao cliente mais uma chance
+                // de errar. Mesma regra do cabecalho.
+                string type = (string)item["type"];
+                if (type == "RectTransform")
+                {
+                    continue;
+                }
+
+                JObject clone = (JObject)item.DeepClone();
+
+                if (color != null)
+                {
+                    clone["color"] = color;
+                }
+
+                copy.Add(clone);
+            }
+
+            if (copy.Count == 0)
+            {
+                return;
+            }
+
+            JObject element = new JObject();
+            element["name"] = name;
+            element["parent"] = parent ?? (string)source["parent"];
+            element["update"] = true;
+            element["components"] = copy;
+
+            output.Add(element);
+        }
+
+        /// <summary>
+        /// O elemento do shell com aquele nome, ou `null`.
+        ///
+        /// Varredura linear, e ela e barata: o shell tem ~130
+        /// elementos e isto roda uma vez por navegacao, nao por
+        /// quadro.
+        /// </summary>
+        private static JObject FindInShell(JArray shell, string name)
+        {
+            foreach (JToken raw in shell)
+            {
+                JObject item = raw as JObject;
+
+                if (item != null && (string)item["name"] == name)
+                {
+                    return item;
+                }
+            }
+
+            return null;
+        }
+
         private JArray ShellFor(BasePlayer player, DocumentCache document)
         {
             if (document.Shell == null || string.IsNullOrEmpty(_streamerTab))
@@ -2187,6 +2389,113 @@ namespace Oxide.Plugins
         {
             Trace("recebido: " + (arg.Args == null ? "(sem args)" : string.Join(" ", arg.Args)));
 
+            BasePlayer player;
+            Session session;
+            DocumentCache document;
+            JObject action;
+
+            if (!Resolve(arg, out player, out session, out document, out action))
+            {
+                return;
+            }
+
+            Trace("ok: " + arg.GetString(1) + " -> " + (string)action["kind"]);
+            Execute(player, session, document, action);
+        }
+
+        // ====================================================
+        //  origemz.ui.input  -  O ENTER DE UM CAMPO DE TEXTO
+        //
+        //  ####  O TEXTO VEM DEPOIS DO ENDERECO  ####
+        //
+        //  O cliente roda `<command> <texto digitado>`, e o texto
+        //  vai CRU: sem aspas, sem escape. Um nome com espaco chega
+        //  partido em varios argumentos, e e aqui que eles voltam a
+        //  ser uma frase.
+        //
+        //  A validacao e A MESMA do clique - token da sessao, a
+        //  acao tem de estar na tela de agora - porque o risco e o
+        //  mesmo: a linha inteira pode ser digitada no F1.
+        //
+        //  ####  E O QUE CHEGA AQUI NAO E CONFIAVEL  ####
+        //
+        //  Quem decide se o texto serve e o AGENTE. Este plugin nao
+        //  sabe o que e um nome de equipe valido, e nao deve saber:
+        //  a regra mora num lugar so, e ela nao mora num .cs que
+        //  precisa de reload para mudar.
+        // ====================================================
+        [ConsoleCommand(InputCommand)]
+        private void CmdInput(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            Session session;
+            DocumentCache document;
+            JObject action;
+
+            if (!Resolve(arg, out player, out session, out document, out action))
+            {
+                return;
+            }
+
+            // So `store.buy`: e a unica acao com caminho de VOLTA ao
+            // agente. O modelo ja recusa qualquer outra num campo de
+            // texto (ver ui-document.ts), e esta e a segunda tranca -
+            // um documento antigo, ou montado por fora, cai aqui.
+            if ((string)action["kind"] != "store.buy")
+            {
+                Trace("recusado: campo de texto com acao " + (string)action["kind"]);
+                return;
+            }
+
+            string value = RestOfLine(arg, 2);
+            Trace("input: " + arg.GetString(1) + " -> [" + value + "]");
+
+            RequestBuy(player, session, action, value);
+        }
+
+        /// <summary>
+        /// O que sobrou da linha, do argumento indicado em diante.
+        ///
+        /// ####  arg.Args NAO E string[]  ####
+        ///
+        /// Ele e Facepunch.StringView[] nesta build, e passa-lo a um
+        /// string.Join casa com a sobrecarga de object[] em silencio:
+        /// o resultado vira o nome do tipo impresso, e o comando
+        /// devolve lixo sem erro nenhum. MEDIDO neste projeto.
+        ///
+        /// Por isso a leitura e sempre por GetString, e a juncao e
+        /// concatenacao simples - StringBuilder.Append(" ") fica
+        /// ambiguo com as DLLs do jogo na mesa.
+        /// </summary>
+        private static string RestOfLine(ConsoleSystem.Arg arg, int first)
+        {
+            string text = "";
+
+            for (int i = first; arg.HasArgs(i + 1); i++)
+            {
+                string piece = arg.GetString(i, "");
+                text = text.Length == 0 ? piece : text + " " + piece;
+            }
+
+            return text.Trim();
+        }
+
+        /// <summary>
+        /// Quem e, em que tela esta, e o que aquele endereco faz.
+        ///
+        /// O caminho comum do clique e do Enter. Ele recusa em
+        /// SILENCIO: o que chega aqui pode ser um comando digitado
+        /// no F1, e responder a ele seria dizer a quem sonda o que
+        /// existe do outro lado.
+        /// </summary>
+        private bool Resolve(ConsoleSystem.Arg arg, out BasePlayer player, out Session session,
+                             out DocumentCache document, out JObject action)
+        {
+            player = null;
+            session = null;
+            document = null;
+            action = null;
+
             // O jogador sai da CONEXAO que enviou o comando, e nao
             // de um argumento: e o que amarra o clique a quem
             // clicou. Um argumento com steamId seria escolhido pelo
@@ -2194,21 +2503,20 @@ namespace Oxide.Plugins
             if (arg.Connection == null || !arg.HasArgs(2))
             {
                 Trace("recusado: sem conexao ou sem os dois argumentos");
-                return;
+                return false;
             }
 
-            BasePlayer player = BasePlayer.FindByID(arg.Connection.userid);
+            player = BasePlayer.FindByID(arg.Connection.userid);
             if (player == null)
             {
-                return;
+                return false;
             }
 
-            Session session;
             if (!_sessions.TryGetValue(player.userID, out session))
             {
                 // Sem sessao aberta. Um clique forjado cai aqui.
                 Trace("recusado: jogador sem sessao aberta");
-                return;
+                return false;
             }
 
             // 1. O token.
@@ -2216,14 +2524,13 @@ namespace Oxide.Plugins
             {
                 Trace("recusado: token nao confere (sessao=" + (session.Token ?? "null") +
                       " recebido=" + arg.GetString(0) + ")");
-                return;
+                return false;
             }
 
-            DocumentCache document;
             if (!_documents.TryGetValue(session.DocumentId, out document))
             {
                 Trace("recusado: documento " + (session.DocumentId ?? "null") + " nao esta em cache");
-                return;
+                return false;
             }
 
             // 3. A permissao, revalidada a cada clique: ela pode
@@ -2231,7 +2538,7 @@ namespace Oxide.Plugins
             if (!CanUse(player, document))
             {
                 Close(player);
-                return;
+                return false;
             }
 
             // 2. A acao pertence ao que esta NA TELA agora?
@@ -2244,7 +2551,7 @@ namespace Oxide.Plugins
             // o modal aberto por cima dela. Olhar so a pagina
             // recusaria o botao "confirmar" de um modal legitimo.
             string actionId = arg.GetString(1);
-            JObject action = FindAction(session.CurrentScreen, actionId);
+            action = FindAction(session.CurrentScreen, actionId);
 
             if (action == null)
             {
@@ -2256,11 +2563,10 @@ namespace Oxide.Plugins
                 Trace("recusado: acao " + actionId + " nao esta na tela " +
                       (session.ScreenId ?? "null") +
                       (session.ModalScreenId == null ? "" : " nem no modal " + session.ModalScreenId));
-                return;
+                return false;
             }
 
-            Trace("ok: " + actionId + " -> " + (string)action["kind"]);
-            Execute(player, session, document, action);
+            return true;
         }
 
         /// <summary>
@@ -2363,7 +2669,15 @@ namespace Oxide.Plugins
         //  que o jogador esta agora (ver CmdAct). O clique carrega
         //  um endereco, nunca uma intencao.
         // ====================================================
-        private void RequestBuy(BasePlayer player, Session session, JObject action)
+        /// <param name="value">
+        /// O que o jogador ESCREVEU, quando o pedido veio de um campo
+        /// de texto em vez de um botao. `null` no caminho do clique.
+        ///
+        /// Ele viaja como texto, e NAO como parte do offerId: o
+        /// offerId tem alfabeto e teto proprios (e um nome de equipe
+        /// nao tem nenhum dos dois).
+        /// </param>
+        private void RequestBuy(BasePlayer player, Session session, JObject action, string value = null)
         {
             if (string.IsNullOrEmpty(_storeSecret))
             {
@@ -2467,7 +2781,23 @@ namespace Oxide.Plugins
             // atualiza fora do caminho de modal.
             builder.Append("\",\"screenId\":\"");
             builder.Append(session.ScreenId);
-            builder.Append("\"}");
+            builder.Append("\"");
+
+            // ####  E O QUE ELE ESCREVEU, SE ESCREVEU  ####
+            //
+            // JsonConvert.ToString ja devolve COM as aspas e com
+            // tudo escapado. Concatenar o texto a mao aqui seria o
+            // bug mais facil deste arquivo: um nome de equipe com
+            // uma aspa dupla quebraria o JSON, e o agente
+            // descartaria a linha inteira - a compra de outra
+            // pessoa inclusive, se ela viesse no mesmo frame.
+            if (value != null)
+            {
+                builder.Append(",\"value\":");
+                builder.Append(JsonConvert.ToString(value));
+            }
+
+            builder.Append("}");
 
             Puts(builder.ToString());
         }

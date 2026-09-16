@@ -59,6 +59,72 @@ export const TEAM_RANK_WEIGHT: Record<TeamRank, number> = {
 };
 
 // ------------------------------------------------------------
+//  §1.1  O QUE CADA CARGO PODE — a tabela do dono
+// ------------------------------------------------------------
+
+/**
+ * As quatro coisas que se pode fazer com uma equipe por dentro.
+ *
+ * `leave` não está aqui porque ninguém precisa de cargo para sair:
+ * é a única ação que se faz sobre si mesmo.
+ */
+export const TEAM_POWERS = ['rename', 'rank', 'leader', 'kick'] as const;
+export type TeamPower = (typeof TEAM_POWERS)[number];
+
+/**
+ * QUEM PODE O QUÊ. Decidido pelo dono em 15/09/2026.
+ *
+ * ####  ELA MORA NUM LUGAR SÓ, E ESTE É O LUGAR  ####
+ *
+ * A tela do jogo pergunta a ela para saber que botão desenhar, e o
+ * agente pergunta de novo antes de agir. São as duas perguntas que
+ * importam, e elas têm de ter a mesma resposta: um botão desenhado
+ * por uma regra e recusado por outra é o pior defeito possível
+ * aqui, porque ele só aparece no clique.
+ *
+ * ####  POR QUE O OFICIAL EXPULSA E NÃO RENOMEIA  ####
+ *
+ * Porque o nome é a identidade da equipe — ele aparece no KOTH,
+ * para o servidor inteiro —, e tirar quem está atrapalhando é
+ * operação do dia a dia, que não pode esperar o líder entrar. O
+ * oficial ganha o poder que se usa com pressa, e não o que muda o
+ * que a equipe É.
+ *
+ * Ver Docs/OrigemZTeam/01-A-ABA-EQUIPE-DO-MENU.md §5.
+ */
+const TEAM_POWERS_BY_RANK: Record<TeamRank, readonly TeamPower[]> = {
+  leader: ['rename', 'rank', 'leader', 'kick'],
+  officer: ['kick'],
+  member: [],
+};
+
+/** Esse cargo pode fazer isso? */
+export function rankCan(rank: TeamRank, power: TeamPower): boolean {
+  return TEAM_POWERS_BY_RANK[rank].includes(power);
+}
+
+/**
+ * Quem age pode agir SOBRE aquele outro?
+ *
+ * ####  SÓ PARA BAIXO, NUNCA DE LADO  ####
+ *
+ * A tabela diz que o oficial expulsa; ela não diz quem. Sem esta
+ * segunda régua, dois oficiais da mesma equipe poderiam se expulsar
+ * um ao outro — e quem clicasse primeiro venceria. Pior: o líder
+ * seria expulsável por quem ele promoveu.
+ *
+ * Então a comparação é de PESO, e estrita: age-se sobre quem está
+ * abaixo. O líder está acima de todos e nunca é alvo; o oficial
+ * alcança o membro e mais ninguém.
+ *
+ * O líder mexendo no cargo de um oficial (rebaixar) passa por aqui
+ * normalmente: `leader` pesa mais que `officer`.
+ */
+export function rankOutranks(actor: TeamRank, target: TeamRank): boolean {
+  return TEAM_RANK_WEIGHT[actor] > TEAM_RANK_WEIGHT[target];
+}
+
+// ------------------------------------------------------------
 //  §2  O NOME DA EQUIPE
 // ------------------------------------------------------------
 

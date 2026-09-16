@@ -17,7 +17,13 @@
 //  Ver a migração 089.
 // ============================================================
 
-import { kothArenaInputSchema, type KothArena, type KothArenaInput } from '../types/koth.js';
+import {
+  kothArenaInputSchema,
+  kothRewardSchema,
+  type KothArena,
+  type KothArenaInput,
+  type KothReward,
+} from '../types/koth.js';
 import type { AgentDatabase } from './database.js';
 
 interface Row {
@@ -36,9 +42,30 @@ interface Row {
   readonly enabled: number;
   readonly world_key: string | null;
   readonly grid: string | null;
+  readonly reward: string | null;
   readonly last_used_at: number | null;
   readonly created_at: number;
   readonly updated_at: number;
+}
+
+/**
+ * O prêmio, do texto do banco para o objeto.
+ *
+ * ####  JSON QUEBRADO NÃO PODE DERRUBAR A TELA  ####
+ *
+ * A coluna é texto, e texto no banco pode ter vindo de uma versão
+ * anterior, de uma edição à mão, ou de um schema que mudou. Se ele
+ * não casar, vale o PADRÃO — um território sem prêmio configurado é
+ * um problema menor que uma lista de territórios que não abre.
+ */
+function toReward(raw: string | null): KothReward {
+  if (raw === null || raw.trim() === '') return kothRewardSchema.parse({});
+
+  try {
+    return kothRewardSchema.parse(JSON.parse(raw));
+  } catch {
+    return kothRewardSchema.parse({});
+  }
 }
 
 function toArena(row: Row): KothArena {
@@ -58,6 +85,7 @@ function toArena(row: Row): KothArena {
     enabled: row.enabled === 1,
     worldKey: row.world_key,
     grid: row.grid,
+    reward: toReward(row.reward),
     lastUsedAt: row.last_used_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -99,10 +127,10 @@ export class KothArenasRepository {
       .prepare(
         `INSERT INTO koth_arenas
            (server_id, label, x, z, y, radius, height, capture_seconds, duration_seconds,
-            decay_per_second, color, enabled, world_key, grid, created_at, updated_at)
+            decay_per_second, color, enabled, reward, world_key, grid, created_at, updated_at)
          VALUES
            (@serverId, @label, @x, @z, @y, @radius, @height, @captureSeconds, @durationSeconds,
-            @decayPerSecond, @color, @enabled, @worldKey, @grid, @now, @now)`,
+            @decayPerSecond, @color, @enabled, @reward, @worldKey, @grid, @now, @now)`,
       )
       .run({
         serverId,
@@ -117,6 +145,7 @@ export class KothArenasRepository {
         decayPerSecond: value.decayPerSecond,
         color: value.color,
         enabled: value.enabled ? 1 : 0,
+        reward: JSON.stringify(value.reward),
         worldKey: extra.worldKey ?? null,
         grid: extra.grid ?? null,
         now,
@@ -138,7 +167,7 @@ export class KothArenasRepository {
             SET label = @label, x = @x, z = @z, y = @y, radius = @radius, height = @height,
                 capture_seconds = @captureSeconds, duration_seconds = @durationSeconds,
                 decay_per_second = @decayPerSecond, color = @color, enabled = @enabled,
-                updated_at = @now
+                reward = @reward, updated_at = @now
           WHERE server_id = @serverId AND id = @id`,
       )
       .run({
@@ -155,6 +184,7 @@ export class KothArenasRepository {
         decayPerSecond: value.decayPerSecond,
         color: value.color,
         enabled: value.enabled ? 1 : 0,
+        reward: JSON.stringify(value.reward),
         now: Date.now(),
       });
 
@@ -250,5 +280,46 @@ export class KothArenasRepository {
     const index = Math.min(pool.length - 1, Math.floor(random() * pool.length));
 
     return pool[index] ?? null;
+  }
+}
+
+// ------------------------------------------------------------
+//  AS VAGAS
+// ------------------------------------------------------------
+
+/** O padrão, num lugar só: uma vaga, que é o que sempre foi. */
+export const DEFAULT_KOTH_SETTINGS: KothSettings = { maxConcurrent: 1 };
+
+export interface KothSettings {
+  /** Quantos KOTH podem estar de pé ao mesmo tempo naquele servidor. */
+  readonly maxConcurrent: number;
+}
+
+export class KothSettingsRepository {
+  readonly #db: AgentDatabase;
+
+  constructor(db: AgentDatabase) {
+    this.#db = db;
+  }
+
+  of(serverId: string): KothSettings {
+    const row = this.#db
+      .prepare('SELECT max_concurrent FROM koth_settings WHERE server_id = ?')
+      .get(serverId) as { readonly max_concurrent: number } | undefined;
+
+    return row === undefined ? DEFAULT_KOTH_SETTINGS : { maxConcurrent: row.max_concurrent };
+  }
+
+  save(serverId: string, settings: KothSettings): KothSettings {
+    this.#db
+      .prepare(
+        `INSERT INTO koth_settings (server_id, max_concurrent, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (server_id)
+         DO UPDATE SET max_concurrent = excluded.max_concurrent, updated_at = excluded.updated_at`,
+      )
+      .run(serverId, settings.maxConcurrent, Date.now());
+
+    return this.of(serverId);
   }
 }

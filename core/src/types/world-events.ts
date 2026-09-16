@@ -326,6 +326,20 @@ export interface WorldEvent extends WorldEventInput {
 }
 
 /** Um nascimento. */
+/**
+ * Como uma run terminou.
+ *
+ *   captured   alguém fechou os 100% — e há vencedor
+ *   expired    o tempo acabou sem ninguém dominar
+ *   stopped    o admin derrubou pelo painel
+ *
+ * Isto NÃO substitui o `status`: ele diz que a run fechou, este diz
+ * o que aconteceu. Uma masmorra fecha sem desfecho, e está certo.
+ */
+export const RUN_OUTCOMES = ['captured', 'expired', 'stopped'] as const;
+
+export type RunOutcome = (typeof RUN_OUTCOMES)[number];
+
 export interface EventRun {
   readonly id: number;
   readonly eventId: string;
@@ -342,6 +356,18 @@ export interface EventRun {
   readonly scheduledFor: number | null;
   readonly startedAt: number | null;
   readonly endedAt: number | null;
+  /**
+   * COMO acabou — e não que acabou, que é o `status`.
+   *
+   * `null` numa run de masmorra é o certo: ela fecha e não tem
+   * vencedor. `null` numa run de KOTH velha também: o desfecho só
+   * passou a ser gravado na migração 093.
+   */
+  readonly outcome: RunOutcome | null;
+  /** O nome que a equipe tinha NAQUELE dia. */
+  readonly winnerName: string | null;
+  /** O teamID, como texto: ele passa de 2^53. */
+  readonly winnerId: string | null;
 }
 
 /** Quem entrou numa run. */

@@ -60,6 +60,16 @@ import { C, fill, label, panel, titleBar, type Rect } from './ui-widgets.js';
 /** O endereço desta tela no documento. */
 export const DISCORD_SCREEN_ID = 'tela-discord';
 
+/**
+ * O botão do Discord na barra.
+ *
+ * Exportado porque a ORDEM da barra depende dele: a aba EQUIPE entra
+ * na frente das abas que fecham a fileira, e ele é uma delas (ver
+ * `TAIL_TABS` em ui-team-screen.ts). O id repetido à mão nos dois
+ * arquivos divergiria no dia em que um deles fosse renomeado.
+ */
+export const DISCORD_TAB_ID = 'nav-discord';
+
 /** O comando de chat que abre nela. Sem barra: quem a põe é o jogo. */
 export const DISCORD_COMMAND = 'discord';
 
@@ -209,7 +219,7 @@ function isDiscordButton(element: UiElement): boolean {
   }
 
   // O id é o do modelo, e sobrevive a mover e recolorir no editor.
-  if (element.id === 'nav-discord') {
+  if (element.id === DISCORD_TAB_ID) {
     return true;
   }
 

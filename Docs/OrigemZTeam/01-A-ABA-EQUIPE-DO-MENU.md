@@ -150,34 +150,50 @@ O `TeamsService` **já recusa** promover quem não é membro e mexer no cargo do
 
 ---
 
-## 5. Quem pode o quê — a decisão que falta
+## 5. Quem pode o quê — DECIDIDO em 15/09/2026
 
-O cargo existe (`leader` / `officer` / `member`), e o que cada um PODE fazer **ainda não foi
-decidido**. É a pergunta 2 do [00-LEVANTAMENTO.md](00-LEVANTAMENTO.md) §5.
-
-A proposta abaixo é razoável e precisa ser confirmada com o dono antes de codar:
+O dono escolheu, e a tabela mora em **um lugar só**: `TEAM_POWERS_BY_RANK`, em
+`core/src/types/teams.ts`. A tela pergunta a ela para saber que botão desenhar, e o agente
+pergunta de novo antes de agir — um botão desenhado por uma regra e recusado por outra é o
+defeito mais caro daqui, porque só aparece no clique.
 
 | Ação | Líder | Oficial | Membro |
 |---|---|---|---|
 | Ver a tela | sim | sim | sim |
-| Renomear a equipe | sim | **a decidir** | não |
+| Renomear a equipe | sim | **não** | não |
 | Promover / rebaixar | sim | não | não |
 | Passar a liderança | sim | não | não |
-| Expulsar | sim | **a decidir** | não |
+| Expulsar | sim | **sim** | não |
 | Sair da equipe | sim (desfaz, se for o último) | sim | sim |
 
-**Não invente a resposta.** Pergunte, e depois deixe a tabela escrita no código, num lugar só.
+**Por que o oficial expulsa e não renomeia:** o nome é a identidade da equipe — ele aparece no
+KOTH, para o servidor inteiro. Tirar quem está atrapalhando é operação do dia a dia, que não
+pode esperar o líder entrar. O oficial ganha o poder que se usa com pressa, e não o que muda
+o que a equipe É.
+
+### A segunda régua: só para baixo
+
+A tabela diz que o oficial expulsa; ela não diz **quem**. Sem uma segunda conferência, dois
+oficiais da mesma equipe se expulsariam um ao outro — e quem clicasse primeiro venceria. Pior:
+o líder seria expulsável por quem ele promoveu.
+
+Então a comparação é de PESO, e estrita (`rankOutranks`): age-se sobre quem está **abaixo**.
+O líder está acima de todos e nunca é alvo; o oficial alcança o membro e mais ninguém.
+Ninguém age sobre si mesmo — para isso existe SAIR DA EQUIPE, que tem outro nome de propósito.
 
 ---
 
-## 6. Sair da equipe
+## 6. Sair da equipe — TEM botão, com confirmação
 
-Não existe rota para isso hoje, e provavelmente não deve existir no painel — sair é do
-jogador, não do admin. No jogo o Rust já tem o comando nativo, e o hook `OnTeamLeave` já chega
-ao agente (o cargo é apagado).
+Decisão do dono em 15/09/2026. Ele fica no rodapé da tela e passa por uma pergunta antes:
+sair não se desfaz, e quem sai precisa de convite novo para voltar.
 
-Se a tela oferecer o botão, o caminho mais barato é a ação `chat` rodando o comando nativo
-como o jogador — sem rota nova, sem comando nosso.
+**Por onde ele sai:** pelo `kick` que já existe, com o jogador como alvo de si mesmo — e não
+por um comando novo. O `RemovePlayer` do jogo (decompilado em 15/09) já faz as três coisas que
+um caminho próprio teria de reimplementar: limpa o `currentTeam` do jogador, promove
+`members[0]` se quem saiu era o líder, e desfaz a equipe que esvaziou.
+
+A tela avisa qual dos dois vai acontecer: "você perde o cargo" ou "a equipe será desfeita".
 
 ---
 

@@ -23,7 +23,10 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import type { KothArenasRepository } from '../../db/koth-arenas-repository.js';
+import type {
+  KothArenasRepository,
+  KothSettingsRepository,
+} from '../../db/koth-arenas-repository.js';
 import type { ServersRepository } from '../../db/servers-repository.js';
 import { KothCommandError, type KothService } from '../../game/koth.js';
 import { kothArenaInputSchema } from '../../types/koth.js';
@@ -31,6 +34,7 @@ import { ApiError } from '../error-response.js';
 
 export interface KothRoutesDeps {
   readonly arenas: KothArenasRepository;
+  readonly settings: KothSettingsRepository;
   readonly servers: ServersRepository;
   /**
    * O canal com o jogo.
@@ -170,17 +174,48 @@ export function registerKothRoutes(app: FastifyInstance, deps: KothRoutesDeps): 
     }
   });
 
+  /**
+   * Derruba um KOTH, ou todos.
+   *
+   * Sem `runId` no corpo = todos os daquele servidor. É o "parar
+   * tudo" — e com vagas ele precisa ser pedido de propósito, porque
+   * derrubar o evento errado é o tipo de clique que ninguém desfaz.
+   */
   app.post('/servers/:id/koth/stop', async (request) => {
     const { id } = serverParams.parse(request.params);
+    const body = z
+      .object({ runId: z.number().int().positive().optional() })
+      .parse(request.body ?? {});
 
     assertServer(id);
 
     try {
-      await service().stopRun(id);
+      await service().stopRun(id, 'painel', body.runId);
 
       return { ok: true };
     } catch (cause) {
       return asApiError(cause);
     }
+  });
+
+  // ==========================================================
+  //  AS VAGAS
+  // ==========================================================
+
+  app.get('/servers/:id/koth/settings', async (request) => {
+    const { id } = serverParams.parse(request.params);
+
+    assertServer(id);
+
+    return { ok: true, settings: deps.settings.of(id), live: service().liveCount(id) };
+  });
+
+  app.put('/servers/:id/koth/settings', async (request) => {
+    const { id } = serverParams.parse(request.params);
+    const body = z.object({ maxConcurrent: z.number().int().min(1).max(10) }).parse(request.body);
+
+    assertServer(id);
+
+    return { ok: true, settings: deps.settings.save(id, body) };
   });
 }

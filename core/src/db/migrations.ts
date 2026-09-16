@@ -7507,6 +7507,113 @@ CREATE TABLE team_settings (
 );
 `;
 
+const KOTH_ARENA_REWARD_SCHEMA = `
+-- ============================================================
+--  091  o premio do territorio: a caixa que nasce no fim.
+--
+--  Pedido do dono em 15/09/2026: "no final spawn uma smoke e
+--  aparece a caixa (o tipo de caixa e o random que ela vai aparecer
+--  e totalmente configuravel pelo administrador)".
+--
+--  ####  UMA COLUNA DE JSON, E NAO UMA TABELA  ####
+--
+--  A lista de caixas com peso e uma configuracao que se le e se
+--  grava INTEIRA, junto com o territorio: ninguem vai consultar "as
+--  arenas que tem crate_elite" nem ordenar por peso. Uma tabela
+--  filha custaria um join em toda leitura para responder uma
+--  pergunta que ninguem faz.
+--
+--  E o mesmo criterio do resto do projeto: o que e estrutura vira
+--  coluna, o que e receita vira JSON. Quem valida e o zod na borda
+--  (kothRewardSchema), nao o banco.
+--
+--  NULL = o territorio nunca foi configurado, e vale o padrao do
+--  codigo. Nao semeamos: um territorio criado depois desta migracao
+--  ficaria sem a linha, e o codigo teria de saber o padrao de
+--  qualquer jeito.
+-- ============================================================
+
+ALTER TABLE koth_arenas ADD COLUMN reward TEXT;
+`;
+
+const KOTH_SETTINGS_SCHEMA = `
+-- ============================================================
+--  092  as VAGAS de KOTH, por servidor.
+--
+--  Pedido do dono em 15/09/2026: "pode ter varios koth ativo no
+--  momento... isso dependendo da configuracao de maximo de koth no
+--  mapa".
+--
+--  ####  O LIMITE ERA UMA REGRA; VIROU CONFIGURACAO  ####
+--
+--  Ate aqui o agente recusava o segundo evento, e a razao estava
+--  escrita no codigo: dois eventos dividem a populacao do servidor e
+--  os dois ficam vazios. Isso continua verdade -- mas quem sabe se o
+--  servidor dele aguenta dois e o ADMIN, nao o agente.
+--
+--  Uma VAGA e o lugar onde um evento acontece. Terminado, o card
+--  dele fica na tela ate outro nascer ali: e por isso que a unidade
+--  e a vaga, e nao "os eventos ativos".
+--
+--  Sem linha = uma vaga, que e o que sempre foi.
+-- ============================================================
+
+CREATE TABLE koth_settings (
+  server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- Quantos KOTH podem estar de pe ao mesmo tempo.
+  max_concurrent INTEGER NOT NULL DEFAULT 1
+    CHECK (max_concurrent >= 1 AND max_concurrent <= 10),
+
+  updated_at INTEGER NOT NULL
+);
+`;
+
+const RUN_OUTCOME_SCHEMA = `
+-- ============================================================
+--  093  o DESFECHO da run: quem levou, e como acabou.
+--
+--  Pedido do dono em 15/09/2026: "ao finalizar o evento fica ali
+--  ate outro iniciar (tipo para mostrar um historico de quem
+--  levou)".
+--
+--  ####  ATE AQUI O VENCEDOR SO EXISTIA NO CHAT  ####
+--
+--  O KOTH anunciava "os Bravos dominaram o territorio!", fechava a
+--  run com status 'ended' e esquecia o nome. Duas horas depois
+--  ninguem sabia responder quem tinha levado -- e 'ended' nao
+--  distingue quem VENCEU de quem so viu o relogio zerar sem
+--  ninguem na area.
+--
+--  ####  POR QUE DUAS COLUNAS, E NAO UMA  ####
+--
+--  O nome da equipe e do jogador: ele muda, e a equipe se desfaz
+--  levando o nome embora. O ID nao. Guardar os dois deixa a tela
+--  mostrar o nome que valia NAQUELE dia, e o ranking somar pelo id
+--  quando essa hora chegar.
+--
+--  O id vai como TEXTO: teamID do Rust passa de 2^53 e um INTEGER
+--  do JavaScript o arredondaria em silencio.
+--
+--  ####  O DESFECHO NAO E O STATUS  ####
+--
+--  'ended' diz que a run fechou; 'captured' / 'expired' dizem o que
+--  aconteceu. Uma masmorra tambem fecha, e nao tem vencedor: a
+--  coluna fica nula, e isso e uma resposta.
+-- ============================================================
+
+--  'captured'  alguem fechou os 100%
+--  'expired'   o tempo acabou sem vencedor
+--  'stopped'   o admin derrubou
+ALTER TABLE world_event_runs ADD COLUMN outcome TEXT;
+
+--  O nome da equipe no dia. Nulo quando nao houve vencedor.
+ALTER TABLE world_event_runs ADD COLUMN winner_name TEXT;
+
+--  O teamID, como texto. Nulo pelo mesmo motivo.
+ALTER TABLE world_event_runs ADD COLUMN winner_id TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7756,6 +7863,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 88, name: 'team-ranks', sql: TEAM_RANKS_SCHEMA },
   { id: 89, name: 'koth-arenas', sql: KOTH_ARENAS_SCHEMA },
   { id: 90, name: 'team-settings', sql: TEAM_SETTINGS_SCHEMA },
+  { id: 91, name: 'koth-arena-reward', sql: KOTH_ARENA_REWARD_SCHEMA },
+  { id: 92, name: 'koth-settings', sql: KOTH_SETTINGS_SCHEMA },
+  { id: 93, name: 'run-outcome', sql: RUN_OUTCOME_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */
