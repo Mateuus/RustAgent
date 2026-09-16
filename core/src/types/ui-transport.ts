@@ -42,9 +42,10 @@ import {
   documentUsesShell,
   screenContentToCui,
   screenToCui,
-  screenUpdatesToCui,
+  shellNavStates,
   shellToCui,
   type CuiElement,
+  type NavState,
   type UiActionEntry,
 } from '../game/ui-cui.js';
 import type { UiDocument, UiScreen } from './ui-document.js';
@@ -213,7 +214,29 @@ export interface UiScreenBundle {
    * em vez de recriar o elemento — recriar faria piscar, que é o
    * defeito que o shell corrige.
    */
+  /**
+   * O "você está aqui" da barra, do jeito CARO.
+   *
+   * ####  ELE VAI VAZIO DESDE 15/09/2026  ####
+   *
+   * Eram dois elementos CUI completos por botão de navegação —
+   * 4.795 bytes na carga inicial, e o mesmo bloco de novo em cada
+   * tela servida, para dizer qual botão está aceso. Quem diz isso
+   * agora é o `activeId`, com a tabela `navStates` do documento.
+   *
+   * O campo fica porque é PROTOCOLO: um plugin anterior à mudança
+   * ainda o lê, e um array vazio é o que faz ele não destacar nada
+   * em vez de quebrar. Ver `NavStates` em OrigemZUI.cs.
+   */
   readonly updates: readonly CuiElement[];
+  /**
+   * Que endereço conta como "você está aqui" nesta tela.
+   *
+   * É a versão barata do `updates`: o plugin cruza isto com a
+   * tabela do documento e pinta os botões sozinho. Ausente = nada
+   * acende (tela sem shell).
+   */
+  readonly activeId?: string;
   readonly actions: Readonly<Record<string, UiActionEntry>>;
   /**
    * NÃO GUARDE ESTA TELA.
@@ -270,7 +293,10 @@ export function toScreenBundle(document: UiDocument, screenId: string): UiScreen
     // senão desenha a de repouso e nunca pede. MEDIDO no jogo.
     generated: screen.generated,
     cui: shell ? screenContentToCui(document, screen) : screenToCui(document, screen),
-    updates: shell ? screenUpdatesToCui(document, screen) : [],
+    // Vazio: quem acende a barra agora é o `activeId` com a tabela
+    // do documento. Ver o campo, lá em cima.
+    updates: [],
+    ...(shell ? { activeId: screen.id } : {}),
     actions: collectScreenActions(screen, document.shell),
   };
 }
@@ -305,7 +331,14 @@ export function toGeneratedScreenBundle(
     name: screen.name,
     kind: screen.kind,
     cui: shell ? screenContentToCui(document, screen, 0) : screenToCui(document, screen),
-    updates: shell ? screenUpdatesToCui(document, screen, activeScreenId) : [],
+    // Vazio pelo mesmo motivo do `toScreenBundle`: o destaque agora
+    // é uma string, e não um bloco de CUI.
+    updates: [],
+    // Aqui ele NÃO é o id da tela: uma tela gerada tem endereço com
+    // parâmetro (`tela-equipe:kick:765…`), e o shell só conhece o
+    // endereço-base. Mandar o id cru apagaria o destaque justamente
+    // nas telas internas de cada aba.
+    ...(shell ? { activeId: activeScreenId } : {}),
     // O SHELL entra junto: os botões do cabeçalho são os mesmos, e
     // sem eles o plugin recusaria o clique em HOME enquanto o
     // jogador estivesse na lista de kits.
@@ -333,6 +366,16 @@ export interface UiDocumentPayload {
    * Vazio = o documento não usa shell, e cada tela desenha tudo.
    */
   readonly shell: readonly CuiElement[];
+  /**
+   * Qual botão do shell acende em que tela.
+   *
+   * Uma linha por botão de navegação, e não um bloco de CUI por
+   * tela: é o que tirou 4.795 bytes da carga inicial em
+   * 15/09/2026. Ver `shellNavStates` em game/ui-cui.ts.
+   *
+   * Vazio = documento sem shell, ou sem botão que acenda.
+   */
+  readonly navStates: readonly NavState[];
   /** Onde o conteúdo das telas é pendurado. */
   readonly contentSlot: string | null;
   /** Onde os modais são desenhados, por cima do conteúdo. */
@@ -401,6 +444,25 @@ export const uiBuyRequestSchema = z.object({
     .min(1)
     .max(96)
     .optional(),
+  /**
+   * O que o jogador ESCREVEU, quando o pedido veio de um campo de
+   * texto em vez de um botão.
+   *
+   * ####  ELE É TEXTO DE JOGADOR, E CHEGA CRU  ####
+   *
+   * Não passou por validação nenhuma no caminho: o cliente anexa o
+   * que foi digitado ao comando, e o plugin remonta a linha. Quem
+   * decide se ele serve é quem trata a ação — o teto de 24 do nome
+   * de equipe mora em `teamNameSchema`, não aqui.
+   *
+   * O teto daqui é só o do TRANSPORTE: uma linha de console tem
+   * limite, e um texto de 4 KB colado no campo não pode derrubar o
+   * parse do pedido inteiro.
+   *
+   * `optional` porque o botão comum não manda nada — e porque um
+   * plugin anterior a este campo continua valendo.
+   */
+  value: z.string().max(512).optional(),
 });
 
 /** `origemz.ui.buyresult <base64>` — o desfecho, para o jogador. */
@@ -518,6 +580,12 @@ export function toDocumentPayload(document: UiDocument): UiDocumentPayload {
       screenId: shortcut.screenId,
     })),
     shell: documentUsesShell(document) ? shellToCui(document) : [],
+    // ####  QUAL BOTÃO ACENDE EM QUE TELA  ####
+    //
+    // Uma vez por documento, e não um bloco de CUI por tela. Ver
+    // `shellNavStates` em game/ui-cui.ts para a conta que levou a
+    // isto.
+    navStates: documentUsesShell(document) ? shellNavStates(document) : [],
     contentSlot: document.contentSlotId,
     modalSlot: document.modalSlotId,
     // Documento sem tela de entrada não deveria existir (a borda

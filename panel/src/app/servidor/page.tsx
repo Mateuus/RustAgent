@@ -22,6 +22,7 @@ import {
   SlidersHorizontal,
   TerminalSquare,
   Trophy,
+  Users,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -35,6 +36,7 @@ import { PluginsPanel } from '@/components/plugins-panel';
 import { ServerRankingPanel } from '@/components/ranking/server-ranking-panel';
 import { ServerMenuPanel } from '@/components/server-menu-panel';
 import { ServerSettings } from '@/components/server-settings';
+import { TeamsPanel } from '@/components/teams-panel';
 import { ServerStateBadge } from '@/components/server-state';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
@@ -49,6 +51,7 @@ type Tab =
   | 'console'
   | 'operacoes'
   | 'plugins'
+  | 'equipes'
   | 'menu'
   | 'wipe'
   | 'ranking'
@@ -74,6 +77,13 @@ const TABS = [
   { key: 'console', label: 'Console', Icon: TerminalSquare },
   { key: 'operacoes', label: 'Operações', Icon: SlidersHorizontal },
   { key: 'plugins', label: 'Plugins', Icon: Puzzle },
+  // ####  EQUIPES FICA JUNTO DE ADMINISTRAÇÃO, NÃO DE MENU  ####
+  //
+  // Ela é sobre GENTE deste servidor — quem está com quem —, e é
+  // por isso que vive ao lado das outras telas de operador. Ela
+  // também é a única aba que não funciona com o servidor parado: a
+  // equipe mora no jogo, e só ele sabe quem está em qual.
+  { key: 'equipes', label: 'Equipes', Icon: Users },
   // ####  MENU VEM ANTES DE CONFIGURAÇÕES  ####
   //
   // É o que os JOGADORES veem, e por isso se mexe nele muito mais
@@ -278,6 +288,7 @@ function Servidor() {
           {tab === 'console' && <ConsolePanel serverId={server.id} />}
           {tab === 'operacoes' && <OperationsPanel server={server} />}
           {tab === 'plugins' && <PluginsPanel serverId={server.id} />}
+          {tab === 'equipes' && <TeamsPanel serverId={server.id} />}
           {tab === 'menu' && <ServerMenuPanel serverId={server.id} />}
           {tab === 'wipe' && <WipePanel server={server} />}
           {tab === 'ranking' && <ServerRankingPanel serverId={server.id} />}

@@ -71,6 +71,12 @@ import { buildHomeScreen, emptyHomeView, HOME_SCREEN_ID } from './ui-home-screen
 import { KITS_SCREEN_ID } from './ui-kits-screen.js';
 import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quests-screen.js';
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
+import {
+  buildTeamScreen,
+  TEAM_COMMANDS,
+  TEAM_SCREEN_ID,
+  TEAM_TAB_LABEL,
+} from './ui-team-screen.js';
 import { buildRulesScreen, emptyRulesView, RULES_COMMAND, RULES_SCREEN_ID } from './ui-rules-screen.js';
 import {
   BUNDLE_TEMPLATE_ID,
@@ -448,6 +454,25 @@ const NAV: readonly NavEntry[] = [
   { id: 'missoes', label: 'MISSÕES', hint: 'As missões do servidor entram aqui.' },
 ];
 
+/**
+ * As abas cuja tela já existe FORA desta lista.
+ *
+ * ####  POR QUE ELAS NÃO ENTRAM NO `NAV`  ####
+ *
+ * O `NAV` faz duas coisas para cada entrada: o botão da barra E uma
+ * página de repouso com o id `tela-<id>`. A aba EQUIPE já tem a
+ * página dela — montada pelo agente, com o esqueleto próprio — e
+ * entrar no `NAV` criaria uma SEGUNDA `tela-equipe`, vazia, que
+ * ganharia da primeira na ordem do documento.
+ *
+ * Então elas ganham só o botão, e o id da tela vem do módulo que a
+ * desenha. Mesma razão pela qual o botão do Discord é montado à
+ * parte, logo abaixo.
+ */
+const EXTRA_NAV: readonly { readonly id: string; readonly label: string; readonly screenId: string }[] = [
+  { id: 'equipe', label: TEAM_TAB_LABEL, screenId: TEAM_SCREEN_ID },
+];
+
 /** As entradas cuja página o AGENTE monta. Ver `buildMainMenu`. */
 const RANKING_NAV_ID = 'ranking';
 const QUESTS_NAV_ID = 'missoes';
@@ -460,6 +485,7 @@ const RULES_NAV_ID = 'regras';
  * ver `shortcuts` em types/ui-document.ts.
  */
 const QUESTS_COMMAND = 'quest';
+
 
 const SCREEN_ID = (entry: string): string => `tela-${entry}`;
 
@@ -508,6 +534,25 @@ function buildShell(): UiElement[] {
         12,
         // Fica vermelho quando a tela dele estiver aberta.
         SCREEN_ID(entry.id),
+      ),
+    );
+  }
+
+  // ####  AS ABAS CUJA TELA VEM DE FORA  ####
+  //
+  // Elas entram ANTES do Discord porque são do servidor, e o
+  // Discord é o link que fecha a barra. Ver `EXTRA_NAV`.
+  for (const entry of EXTRA_NAV) {
+    nav.push(
+      button(
+        `nav-${entry.id}`,
+        entry.label,
+        navRect(entry.label),
+        entry.label,
+        { id: `ir-${entry.id}`, kind: 'navigate', screenId: entry.screenId },
+        'nav',
+        12,
+        entry.screenId,
       ),
     );
   }
@@ -1435,6 +1480,18 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
       generated: true,
     },
 
+    // ####  A ABA EQUIPE  ####
+    //
+    // Montada por JOGADOR, como a de configurações: ela mostra a
+    // equipe de quem abriu o menu, e quem está online nela AGORA.
+    // Por isso o que fica gravado é só o esqueleto — e ele vai
+    // `generated: true` pelo motivo de sempre: sem a marca, o
+    // plugin desenha o repouso e nunca pede a de verdade.
+    {
+      ...buildTeamScreen({ steamId: undefined, team: null, maxSize: 0, skeleton: true }),
+      generated: true,
+    },
+
     // ####  OS MODAIS DA LOJA  ####
     //
     // Eles NÃO são navegáveis: nenhum botão do menu leva a eles. São
@@ -1509,6 +1566,23 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
       { command: 'info', screenId: HOME_SCREEN_ID },
       { command: 'kits', screenId: KITS_SCREEN_ID },
       { command: 'wipe', screenId: CALENDAR_SCREEN_ID },
+      // ####  A EQUIPE TEM DOIS NOMES  ####
+      //
+      // Pedido do dono em 15/09/2026. `/equipe` é o do servidor,
+      // que fala português; `/team` é o que a pessoa traz de outro
+      // servidor — e quem digita o de fora não devia ler "Unknown
+      // command" por isso.
+      //
+      // Dois atalhos para a mesma tela não custam nada: o plugin
+      // registra os dois no Oxide, e os dois navegam para o mesmo
+      // endereço. É mais barato que a explicação de por que só um
+      // deles funciona.
+      //
+      // A lista vem de `ui-team-screen.ts`: o menu gravado ANTES
+      // desta frente ganha os mesmos dois pelo `withTeamTab`, e
+      // duas listas divergiriam no dia em que um terceiro nome
+      // aparecesse.
+      ...TEAM_COMMANDS.map((command) => ({ command, screenId: TEAM_SCREEN_ID })),
     ],
     screens,
   };

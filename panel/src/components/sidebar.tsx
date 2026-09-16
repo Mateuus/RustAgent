@@ -166,7 +166,7 @@ const NAV: readonly NavItem[] = [
   {
     href: '/eventos/',
     label: 'Eventos',
-    hint: 'O que nasce no mapa sozinho: masmorras, quando, onde, e o que se leva de lá',
+    hint: 'O que nasce no mapa sozinho: masmorra, KOTH, quando, onde, e o que se leva de lá',
     Icon: Swords,
   },
   // As missões são de REDE, como o kit e o ranking: a missão é

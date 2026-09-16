@@ -45,11 +45,23 @@ import {
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-/** Os alvos de `kill`, como o Quests.cs os cataloga. */
+/**
+ * Os alvos de `kill`, pelo nome que o agente normaliza.
+ *
+ * ####  MEDIDOS CONTRA O JOGO, E NÃO CATALOGADOS  ####
+ *
+ * Em 15/09/2026 a sonda `ozprobe.types` percorreu o
+ * `GameManifest.Current.entities` do server01 e perguntou ao próprio
+ * Rust o que existe. Saiu daqui o `murderer`, que o jogo não tem
+ * mais — quem sobrou no lugar dele é o `zombie`.
+ *
+ * Uma quest antiga apontando para `murderer` continua salva e
+ * continua sem contar: ela já não contava, porque o alvo não existe.
+ */
 const KILL_TARGETS = [
   'player',
   'scientist',
-  'murderer',
+  'zombie',
   'scarecrow',
   'tunneldweller',
   'underwaterdweller',

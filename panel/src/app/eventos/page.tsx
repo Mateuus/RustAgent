@@ -1,59 +1,52 @@
 'use client';
 
 // ============================================================
-//  /eventos  -  o que a casa faz nascer no mapa.
+//  /eventos  -  O GUARDA-CHUVA.
 //
-//  ####  TRÊS PERGUNTAS, TRÊS ABAS  ####
+//  ####  POR QUE ESTA TELA DEIXOU DE SER A DA MASMORRA  ####
 //
-//    Masmorras   o que existe, e o que está de pé agora
-//    Plantas     o acervo de construções prontas
-//    Histórico   o que nasceu, e o que NÃO nasceu — e por quê
+//  A migração 057 criou `world_events` antes de existir um segundo
+//  evento, e explicou por quê: "o que justifica é o SEGUNDO —
+//  agenda, marcador, anúncio, dono, time e zona proibida são os
+//  mesmos para qualquer coisa que nasça no mundo e morra depois".
 //
-//  A quarta aba do plano (a agenda dos eventos automáticos) chega
-//  com o agendador. Uma aba vazia hoje seria uma promessa que a
-//  tela não cumpre.
+//  O segundo chegou (KOTH), e a tela repetiu a separação do banco:
 //
-//  ####  A LEITURA É FEITA UMA VEZ, AQUI  ####
+//    AQUI   o que é de TODAS as famílias — o que está no ar, a
+//           agenda e o histórico. Mais a porta de cada família.
+//    LÁ     o que é de UMA só: a planta e o alçapão da masmorra, o
+//           território e o volume de captura do KOTH.
 //
-//  As três abas precisam das mesmas listas, e o editor precisa das
-//  plantas para o seletor de entrada. Ler em cada uma daria quatro
-//  consultas para a mesma resposta — e, pior, quatro momentos
-//  diferentes: subir uma planta numa aba e não vê-la no editor é o
-//  tipo de divergência que faz alguém subir o arquivo duas vezes.
+//  ####  A PORTA VEM ANTES DAS ABAS  ####
 //
-//  É a mesma escolha de `/quests` e `/ranking`.
+//  Os cartões ficam acima, e não numa aba: eles são a NAVEGAÇÃO, e
+//  quem abre /eventos na maioria das vezes quer ir para uma família
+//  — não olhar a agenda. Esconder a porta atrás de uma aba é pedir
+//  dois cliques para o gesto mais comum da tela.
 //
-//  Ver Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §11.
+//  ####  O QUE NÃO ESTÁ AQUI  ####
+//
+//  Um botão "novo evento" genérico. Criar é sempre criar ALGUMA
+//  coisa — uma masmorra tem planta e alçapão, um KOTH tem raio e
+//  tempo de domínio —, e um formulário que perguntasse o tipo antes
+//  de tudo seria um passo a mais para não decidir nada.
 // ============================================================
 
-import { Plus, Swords } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
+import Link from 'next/link';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
-import { BlueprintShelf } from '@/components/dungeons/blueprint-shelf';
-import { DungeonDialog } from '@/components/dungeons/dungeon-dialog';
-import { BuildDialog } from '@/components/dungeons/build-dialog';
-import { DungeonList, LiveCard } from '@/components/dungeons/dungeon-list';
-import { SchedulePanel } from '@/components/dungeons/schedule-panel';
-import { SpawnPointsPanel } from '@/components/dungeons/spawn-points-panel';
-import { LayoutShelf } from '@/components/dungeons/layout-shelf';
-import { RunHistory } from '@/components/dungeons/run-history';
+import { LiveCard } from '@/components/events/live-card';
+import { RunHistory } from '@/components/events/run-history';
+import { SchedulePanel } from '@/components/events/schedule-panel';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
-import { Button } from '@/components/ui/button';
-import { HelpTip } from '@/components/ui/help-tip';
-import {
-  agent,
-  type BlueprintSummary,
-  type Dungeon,
-  type DungeonLayoutSummary,
-  type DungeonSummary,
-  type EventRun,
-} from '@/lib/api';
-import { DUNGEON_HELP } from '@/lib/help/dungeons';
+import { agent, type DungeonSummary, type EventRun, type WorldEvent } from '@/lib/api';
+import { EVENT_FAMILIES, type EventFamily } from '@/lib/events/families';
 import { cn } from '@/lib/utils';
 
-type Tab = 'masmorras' | 'onde' | 'agenda' | 'plantas' | 'historico';
+type Tab = 'agenda' | 'historico';
 
 export default function EventosPage() {
   return (
@@ -64,44 +57,25 @@ export default function EventosPage() {
 }
 
 function Eventos() {
-  const [tab, setTab] = useState<Tab>('masmorras');
-  const [dungeons, setDungeons] = useState<readonly DungeonSummary[] | null>(null);
-  const [blueprints, setBlueprints] = useState<readonly BlueprintSummary[]>([]);
-  const [layouts, setLayouts] = useState<readonly DungeonLayoutSummary[]>([]);
+  const [tab, setTab] = useState<Tab>('agenda');
+  const [events, setEvents] = useState<readonly WorldEvent[] | null>(null);
   const [runs, setRuns] = useState<readonly EventRun[] | null>(null);
+  const [dungeons, setDungeons] = useState<readonly DungeonSummary[]>([]);
   const [servers, setServers] = useState<readonly { id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
-  /** `undefined` = fechado; `null` = criando; uma masmorra = editando. */
-  const [editing, setEditing] = useState<Dungeon | null | undefined>(undefined);
-  /** A masmorra que está para ser erguida. `null` = ninguém. */
-  const [building, setBuilding] = useState<DungeonSummary | null>(null);
-  /** O servidor cujos pontos a aba "Onde nasce" está mostrando. */
-  const [pointsServer, setPointsServer] = useState<string>('');
-  /**
-   * O traçado com que a criação começa.
-   *
-   * É o atalho da aba Plantas: clicar em "Usar" abre a masmorra
-   * nova já no modo desenho, com aquele traçado dentro. Sem ele, o
-   * admin teria de abrir a criação, trocar o modo e procurar o
-   * traçado outra vez na faixa.
-   */
-  const [startFrom, setStartFrom] = useState<DungeonLayoutSummary | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [dungeonResponse, blueprintResponse, layoutResponse, runResponse, serverResponse] =
-        await Promise.all([
-          agent.dungeons(),
-          agent.dungeonBlueprints(),
-          agent.dungeonLayouts(),
-          agent.worldEventRuns({ limit: 50 }),
-          agent.servers(),
-        ]);
+      const [eventResponse, runResponse, dungeonResponse, serverResponse] = await Promise.all([
+        agent.worldEvents(),
+        agent.worldEventRuns({ limit: 50 }),
+        agent.dungeons(),
+        agent.servers(),
+      ]);
 
-      setDungeons(dungeonResponse.dungeons);
-      setBlueprints(blueprintResponse.blueprints);
-      setLayouts(layoutResponse.layouts);
+      setEvents(eventResponse.events);
       setRuns(runResponse.runs);
+      setDungeons(dungeonResponse.dungeons);
       setServers(serverResponse.servers.map((server) => ({ id: server.id, name: server.name })));
       setError(null);
     } catch (cause) {
@@ -115,263 +89,144 @@ function Eventos() {
 
   const live = (runs ?? []).filter((run) => run.endedAt === null && run.status !== 'failed');
 
+  /**
+   * Os eventos de uma família, por id.
+   *
+   * O cartão precisa de dois números que saem daqui: quantos estão
+   * na agenda e quantos estão no ar. `event_runs` guarda o evento,
+   * não a família — quem casa os dois é este conjunto.
+   */
+  function idsOf(family: EventFamily): ReadonlySet<string> {
+    return new Set(
+      (events ?? []).filter((event) => event.kind === family.kind).map((event) => event.id),
+    );
+  }
+
   return (
-    // Sem padding no wrapper: o `PageHeader` traz o dele (px-4 py-3)
-    // e cada bloco abaixo traz o seu. Um `p-4` aqui empurraria a
-    // tela inteira para dentro e ela ficaria desalinhada das
-    // vizinhas — foi o que aconteceu na primeira versao, e da para
-    // ver de relance colocando /loot e /eventos lado a lado.
     <div>
       <PageHeader
         title="Eventos"
         description="O que a casa faz nascer no mapa"
         aside={
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1.5 text-2xs uppercase tracking-wide text-muted">
-              <Swords aria-hidden="true" className="h-4 w-4" />
-              {dungeons === null
-                ? 'lendo…'
-                : `${String(dungeons.length)} masmorra(s)${live.length > 0 ? ` · ${String(live.length)} no ar` : ''}`}
-            </span>
-
-            <Button size="sm" variant="primary" onClick={() => setEditing(null)}>
-              <Plus aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
-              Nova masmorra
-            </Button>
-          </div>
+          <span className="text-2xs uppercase tracking-wide text-muted">
+            {events === null
+              ? 'lendo…'
+              : `${String(events.length)} na agenda${live.length > 0 ? ` · ${String(live.length)} no ar` : ''}`}
+          </span>
         }
       />
 
-      <div className="mt-4 flex items-center justify-between border-b border-border">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        {EVENT_FAMILIES.map((family) => {
+          const ids = idsOf(family);
+
+          return (
+            <FamilyCard
+              key={family.kind}
+              family={family}
+              scheduled={events === null ? null : ids.size}
+              live={live.filter((run) => ids.has(run.eventId)).length}
+              // Só a masmorra tem catálogo próprio hoje. Quando o
+              // KOTH tiver os perfis dele, o número vem junto.
+              catalog={family.kind === 'dungeon' ? dungeons.length : null}
+            />
+          );
+        })}
+      </div>
+
+      {live.length > 0 && (
+        <div className="mt-4">
+          <LiveCard runs={live} events={events ?? []} onChanged={() => void load()} />
+        </div>
+      )}
+
+      <div className="mt-6 border-b border-border">
         <div className="flex">
-          <TabButton active={tab === 'masmorras'} onClick={() => setTab('masmorras')}>
-            Masmorras {dungeons === null ? '' : `(${String(dungeons.length)})`}
-          </TabButton>
-          <TabButton active={tab === 'onde'} onClick={() => setTab('onde')}>
-            Onde nasce
-          </TabButton>
           <TabButton active={tab === 'agenda'} onClick={() => setTab('agenda')}>
-            Agenda
-          </TabButton>
-          <TabButton active={tab === 'plantas'} onClick={() => setTab('plantas')}>
-            Plantas ({String(blueprints.length + layouts.length)})
+            Agenda {events === null ? '' : `(${String(events.length)})`}
           </TabButton>
           <TabButton active={tab === 'historico'} onClick={() => setTab('historico')}>
             Histórico
           </TabButton>
         </div>
-
-        {/* O guia da tela. O modelo "a masmorra fica 90 metros
-            abaixo do mundo e o alçapão teleporta" NÃO é adivinhável,
-            e quem não o entende não entende por que a entrada é uma
-            planta separada. */}
-        <span className="flex items-center gap-1.5 pr-1 text-2xs text-muted">
-          Como funciona
-          <HelpTip topic={DUNGEON_HELP.modelo} />
-        </span>
       </div>
 
       <div className="mt-4">
-        {error !== null && dungeons === null && (
+        {error !== null && events === null && (
           <StateBlock variant="error" title="Não consegui falar com o agente" detail={error} />
         )}
 
-        {dungeons === null && error === null && (
-          <StateBlock variant="loading" title="Lendo as masmorras…" />
+        {events === null && error === null && (
+          <StateBlock variant="loading" title="Lendo os eventos…" />
         )}
 
-        {dungeons !== null && tab === 'masmorras' && (
-          <div className="space-y-3">
-            {/* O cartão vem ANTES do catálogo, e independe dele: o
-                que está no chão do jogo não depende de haver
-                masmorra cadastrada. Apagar uma que está no ar é o
-                caso em que os dois divergem. */}
-            {live.length > 0 && <LiveCard runs={live} onChanged={() => void load()} />}
-
-            {dungeons.length === 0 ? (
-              <FirstRun onStart={() => setEditing(null)} />
-            ) : (
-              <DungeonList
-                dungeons={dungeons}
-                onEdit={(dungeon) => setEditing(dungeon)}
-                onChanged={() => void load()}
-                // Sem servidor cadastrado o botão abriria um diálogo
-                // sem para onde mandar o comando.
-                onBuild={servers.length === 0 ? undefined : (dungeon) => setBuilding(dungeon)}
-              />
-            )}
-          </div>
-        )}
-
-        {dungeons !== null && tab === 'onde' && (
-          // ####  ELA RESPONDE A PERGUNTA QUE O EDITOR NÃO RESPONDIA  ####
-          //
-          // O passo ⑥ dizia: "o painel sabe tudo sobre esta masmorra,
-          // menos ONDE ela deve nascer". Esta aba é onde isso passa a
-          // ser sabido — e é o que faz o botão Erguer ter para onde
-          // apontar.
-          <WhereTab
-            servers={servers}
-            serverId={pointsServer === '' ? (servers[0]?.id ?? '') : pointsServer}
-            onServer={setPointsServer}
-          />
-        )}
-
-        {dungeons !== null && tab === 'agenda' && (
+        {events !== null && tab === 'agenda' && (
           <SchedulePanel dungeons={dungeons} servers={servers} />
         )}
 
-        {dungeons !== null && tab === 'plantas' && (
-          // ####  DUAS SEÇÕES, PORQUE SÃO DUAS COISAS  ####
-          //
-          // Um traçado é o mapa das células, que o plugin CONSTRÓI;
-          // uma construção é o JSON do CopyPaste, que ele COLA. Para
-          // quem usa, as duas são "plantas" — e por isso moram na
-          // mesma aba —, mas escolher entre elas é escolher entre
-          // desenhar e colar, e a tela precisa dizer isso.
-          //
-          // Os traçados vêm primeiro: é deles que sai toda masmorra
-          // nova. As construções são a casinha da entrada, e se
-          // escolhem uma vez.
-          <div className="space-y-6">
-            <section className="space-y-3">
-              <SectionTitle
-                title="Plantas desenhadas"
-                detail="O mapa dos corredores e das salas. É daqui que uma masmorra nova parte."
-                count={layouts.length}
-              />
-              <LayoutShelf
-                layouts={layouts}
-                onChanged={() => void load()}
-                onUse={(layout) => {
-                  setStartFrom(layout);
-                  setEditing(null);
-                }}
-              />
-            </section>
-
-            <section className="space-y-3">
-              <SectionTitle
-                title="Construções (.json)"
-                detail="Prédios inteiros no formato do CopyPaste. É deles que sai a casinha da entrada."
-                count={blueprints.length}
-              />
-              <BlueprintShelf blueprints={blueprints} onChanged={() => void load()} />
-            </section>
-          </div>
+        {events !== null && tab === 'historico' && (
+          <RunHistory runs={runs} error={error} events={events} />
         )}
-
-        {dungeons !== null && tab === 'historico' && <RunHistory runs={runs} error={error} />}
       </div>
-
-      {building !== null && (
-        <BuildDialog
-          dungeon={building}
-          servers={servers}
-          onClose={() => setBuilding(null)}
-          // O histórico é quem confirma que ela subiu: recarregar
-          // aqui é o que faz o cartão "no ar agora" aparecer.
-          onSent={() => void load()}
-        />
-      )}
-
-      {editing !== undefined && (
-        <DungeonDialog
-          dungeon={editing}
-          blueprints={blueprints}
-          layouts={layouts}
-          startFrom={startFrom?.grid ?? null}
-          servers={servers}
-          onClose={() => {
-            setEditing(undefined);
-            setStartFrom(null);
-          }}
-          onSaved={() => void load()}
-        />
-      )}
     </div>
   );
 }
 
 /**
- * O primeiro uso.
+ * A porta de uma família.
  *
- * Uma tabela vazia com um botão "criar" não diz nada a quem nunca
- * fez isso. O que ajuda é mostrar os caminhos — e o primeiro deles
- * é partir de algo pronto, porque as quatro receitas de fábrica
- * são os níveis do Dungeon Bases, já balanceados e rodados.
+ * Ela carrega três números porque são três perguntas diferentes, e
+ * quem cuida do servidor faz as três: quantas EXISTEM cadastradas,
+ * quantas estão na AGENDA, e quantas estão NO AR agora. Um cartão
+ * que só dissesse o nome obrigaria a entrar para descobrir que não
+ * há nada lá dentro.
  */
-function FirstRun({ onStart }: { readonly onStart: () => void }) {
-  return (
-    <div className="border border-border bg-surface p-6">
-      <h2 className="font-condensed text-lg font-bold uppercase tracking-wide">
-        Nenhuma masmorra ainda
-      </h2>
-      <p className="mt-1 max-w-2xl text-sm text-muted">
-        Uma masmorra é uma casinha no mapa com um alçapão — e, noventa metros abaixo do mundo, os
-        corredores e as salas que ninguém vê de fora.
-      </p>
-
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <Path
-          title="Partir de uma pronta"
-          detail="Quatro níveis já balanceados: fácil, normal, difícil e pesadelo. Duplique e mexa no que quiser."
-        />
-        <Path
-          title="Montar do zero"
-          detail="Seis passos, com uma prévia ao lado que mostra a masmorra que vai nascer enquanto você mexe nos números."
-        />
-        <Path
-          title="Usar uma planta"
-          detail="Sete construções prontas vieram com o projeto. Elas ficam na aba Plantas, e viram a entrada da sua masmorra."
-        />
-      </div>
-
-      <Button variant="primary" className="mt-4" onClick={onStart}>
-        <Plus aria-hidden="true" className="mr-1 h-4 w-4" />
-        Criar a primeira
-      </Button>
-    </div>
-  );
-}
-
-/**
- * O cabeçalho de uma seção da aba Plantas.
- *
- * Ele existe porque as duas listas parecem a mesma coisa e não são
- * — e sem uma linha dizendo o que cada uma é, o admin sobe um .json
- * esperando que ele vire o traçado da masmorra.
- */
-function SectionTitle({
-  title,
-  detail,
-  count,
+function FamilyCard({
+  family,
+  scheduled,
+  live,
+  catalog,
 }: {
-  readonly title: string;
-  readonly detail: string;
-  readonly count: number;
+  readonly family: EventFamily;
+  /** Quantos eventos desta família na agenda. `null` = ainda lendo. */
+  readonly scheduled: number | null;
+  readonly live: number;
+  /** Quantos no catálogo próprio dela. `null` = ela ainda não tem um. */
+  readonly catalog: number | null;
 }) {
-  return (
-    <div className="flex flex-wrap items-baseline justify-between gap-2">
-      <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
-        <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
-        {title}
-        <span className="font-normal text-muted">({count})</span>
-      </h2>
-      <p className="text-2xs text-muted">{detail}</p>
-    </div>
-  );
-}
+  const { Icon } = family;
 
-function Path({ title, detail }: { readonly title: string; readonly detail: string }) {
   return (
-    <div className="border border-border bg-surface-2 p-3">
-      <h3 className="flex items-center gap-2 font-condensed text-xs font-bold uppercase tracking-wide">
-        <span aria-hidden="true" className="h-3 w-[3px] shrink-0 bg-rust" />
-        {title}
-      </h3>
-      <p className="mt-1 text-2xs text-muted">{detail}</p>
-    </div>
+    <Link
+      href={family.href}
+      className="group block border border-border bg-surface p-4 hover:border-rust"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 font-condensed text-base font-bold uppercase tracking-wide">
+            <Icon aria-hidden="true" className="h-4 w-4 text-rust" />
+            {family.many}
+            {!family.ready && (
+              <span className="border border-border px-1.5 py-0.5 text-2xs font-normal normal-case tracking-normal text-muted">
+                em construção
+              </span>
+            )}
+          </h2>
+          <p className="mt-1 max-w-md text-2xs text-muted">{family.hint}</p>
+        </div>
+
+        <ArrowRight
+          aria-hidden="true"
+          className="h-4 w-4 shrink-0 text-muted group-hover:text-rust"
+        />
+      </div>
+
+      <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted">
+        {catalog !== null && <span>{catalog} cadastrada(s)</span>}
+        <span>{scheduled === null ? '…' : `${String(scheduled)} na agenda`}</span>
+        {live > 0 && <span className="text-olive">{live} no ar agora</span>}
+      </p>
+    </Link>
   );
 }
 
@@ -398,57 +253,5 @@ function TabButton({
     >
       {children}
     </button>
-  );
-}
-
-/**
- * A aba "Onde nasce".
- *
- * Um seletor de servidor e o painel de pontos. O servidor é escolha
- * desta tela porque um ponto é de um MAPA — e cada servidor tem o
- * seu.
- */
-function WhereTab({
-  servers,
-  serverId,
-  onServer,
-}: {
-  readonly servers: readonly { readonly id: string; readonly name: string }[];
-  readonly serverId: string;
-  readonly onServer: (id: string) => void;
-}) {
-  if (servers.length === 0) {
-    return (
-      <StateBlock
-        variant="empty"
-        title="Nenhum servidor cadastrado"
-        detail="Um ponto de nascimento é de um mapa, e um mapa é de um servidor."
-      />
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      {servers.length > 1 && (
-        <label className="flex items-center gap-2">
-          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-            Servidor
-          </span>
-          <select
-            value={serverId}
-            onChange={(event) => onServer(event.target.value)}
-            className="h-9 border border-border bg-background px-2 text-sm"
-          >
-            {servers.map((server) => (
-              <option key={server.id} value={server.id}>
-                {server.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      <SpawnPointsPanel serverId={serverId} />
-    </div>
   );
 }

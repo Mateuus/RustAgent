@@ -37,6 +37,50 @@ import { z } from 'zod';
 // ------------------------------------------------------------
 
 /**
+ * A FAMÍLIA do evento.
+ *
+ * ####  A COLUNA É TEXTO LIVRE; ESTA LISTA É O QUE JÁ TEM DONO  ####
+ *
+ * `world_events.kind` continua TEXT sem CHECK, de propósito (ver a
+ * migração 057): um evento novo não pode custar uma migração. O que
+ * esta lista diz é outra coisa — quais famílias têm alguém do lado
+ * de cá capaz de FAZER o evento nascer.
+ *
+ * Está aqui porque o agendador precisa dizer não em voz alta. Antes
+ * ele pulava qualquer evento sem `dungeonId` em silêncio, e um
+ * evento de outra família cadastrado na agenda simplesmente nunca
+ * acontecia — sem linha no log, sem nada na tela.
+ */
+export const EVENT_KINDS = ['dungeon', 'koth'] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
+
+/** O nome da família na tela, no singular e no plural. */
+export const EVENT_KIND_LABEL: Record<EventKind, { one: string; many: string }> = {
+  dungeon: { one: 'Masmorra', many: 'Masmorras' },
+  koth: { one: 'KOTH', many: 'KOTH' },
+};
+
+/**
+ * As famílias que o agente sabe erguer HOJE.
+ *
+ * Sair daqui é o último passo de um evento novo, e não o primeiro:
+ * só entra a família cujo caminho inteiro existe — cadastro, lugar
+ * no mapa e quem construa.
+ *
+ * O `koth` entrou em 15/09/2026, quando ganhou território cadastrado
+ * (migração 089), plugin que o ergue e relógio próprio
+ * (`game/koth-scheduler.ts`). Cada família tem o SEU relógio: o da
+ * masmorra sabe de planta, ponto com yaw e comando de demolir, e
+ * nada disso vale no território.
+ */
+export const RUNNABLE_EVENT_KINDS: readonly EventKind[] = ['dungeon', 'koth'];
+
+/** Esta família tem quem a faça nascer? */
+export function isRunnableKind(kind: string): boolean {
+  return (RUNNABLE_EVENT_KINDS as readonly string[]).includes(kind);
+}
+
+/**
  * Como o evento nasce.
  *
  *   schedule   o agendador sorteia dentro da janela
@@ -282,6 +326,20 @@ export interface WorldEvent extends WorldEventInput {
 }
 
 /** Um nascimento. */
+/**
+ * Como uma run terminou.
+ *
+ *   captured   alguém fechou os 100% — e há vencedor
+ *   expired    o tempo acabou sem ninguém dominar
+ *   stopped    o admin derrubou pelo painel
+ *
+ * Isto NÃO substitui o `status`: ele diz que a run fechou, este diz
+ * o que aconteceu. Uma masmorra fecha sem desfecho, e está certo.
+ */
+export const RUN_OUTCOMES = ['captured', 'expired', 'stopped'] as const;
+
+export type RunOutcome = (typeof RUN_OUTCOMES)[number];
+
 export interface EventRun {
   readonly id: number;
   readonly eventId: string;
@@ -298,6 +356,18 @@ export interface EventRun {
   readonly scheduledFor: number | null;
   readonly startedAt: number | null;
   readonly endedAt: number | null;
+  /**
+   * COMO acabou — e não que acabou, que é o `status`.
+   *
+   * `null` numa run de masmorra é o certo: ela fecha e não tem
+   * vencedor. `null` numa run de KOTH velha também: o desfecho só
+   * passou a ser gravado na migração 093.
+   */
+  readonly outcome: RunOutcome | null;
+  /** O nome que a equipe tinha NAQUELE dia. */
+  readonly winnerName: string | null;
+  /** O teamID, como texto: ele passa de 2^53. */
+  readonly winnerId: string | null;
 }
 
 /** Quem entrou numa run. */

@@ -171,6 +171,32 @@ const rectSchema = z.object({
 //  `OrigemZUI` — omiti-la faria um documento legítimo, montado por
 //  lá, ser recusado na leitura e o menu sumir do jogo.
 // ------------------------------------------------------------
+/**
+ * O pedido ao AGENTE, com um id no lugar da intenção.
+ *
+ * ####  ELA SE CHAMA `store.buy` E NÃO É SÓ DA LOJA  ####
+ *
+ * O nome é o da primeira frente que a usou, e ele ficou porque é
+ * PROTOCOLO: mudá-lo aqui exigiria mudar o `Execute` do
+ * `OrigemZUI.cs` junto, e todo documento já gravado deixaria de
+ * valer. O que ela é de verdade é o ÚNICO canal que leva um clique
+ * até o agente e traz uma resposta de volta — com trava de duplo
+ * clique, tempo-limite e a tela seguinte já montada.
+ *
+ * Por isso as missões pegam carona nela (`quest:accept:…`), e a
+ * equipe também (`team:kick:…`). Um segundo canal com o mesmo
+ * trabalho divergiria do primeiro no primeiro ajuste.
+ */
+const submitActionSchema = z.object({
+  id: idSchema,
+  kind: z.literal('store.buy'),
+  offerId: z.string().max(64),
+  // `.default(1)` mantém válido o que foi gravado antes deste
+  // campo. Sem ele, um documento antigo seria descartado na
+  // leitura e o menu sumiria do jogo.
+  quantity: z.number().int().min(1).max(1000).default(1),
+});
+
 const actionSchema = z.discriminatedUnion('kind', [
   z.object({ id: idSchema, kind: z.literal('navigate'), screenId: idSchema }),
   z.object({ id: idSchema, kind: z.literal('close') }),
@@ -180,18 +206,13 @@ const actionSchema = z.discriminatedUnion('kind', [
   z.object({ id: idSchema, kind: z.literal('console'), command: z.string().min(1).max(256) }),
   z.object({ id: idSchema, kind: z.literal('modal.open'), screenId: idSchema }),
   z.object({ id: idSchema, kind: z.literal('modal.close') }),
-  z.object({
-    id: idSchema,
-    kind: z.literal('store.buy'),
-    offerId: z.string().max(64),
-    // `.default(1)` mantém válido o que foi gravado antes deste
-    // campo. Sem ele, um documento antigo seria descartado na
-    // leitura e o menu sumiria do jogo.
-    quantity: z.number().int().min(1).max(1000).default(1),
-  }),
+  submitActionSchema,
 ]);
 
 export type UiAction = z.infer<typeof actionSchema>;
+
+/** O que um campo de texto pode fazer com o que foi digitado. */
+export type UiSubmitAction = z.infer<typeof submitActionSchema>;
 
 // ------------------------------------------------------------
 //  O ELEMENTO — recursivo.
@@ -258,6 +279,41 @@ export type UiElement = UiElementBase &
           | { readonly kind: 'item'; readonly itemId: number; readonly skinId: string }
           | { readonly kind: 'stored'; readonly key: string };
         readonly color: string;
+      }
+    // ####  O CAMPO DE TEXTO  ####
+    //
+    // O único elemento em que o JOGADOR escreve. Ele existe porque
+    // a equipe precisa de nome, e o nome é dele: um comando de chat
+    // resolveria o mesmo problema pedindo que ele decorasse a
+    // sintaxe — ver Docs/OrigemZTeam/01-A-ABA-EQUIPE-DO-MENU.md.
+    //
+    // ####  ELE NÃO TEM PLACEHOLDER  ####
+    //
+    // O CUI tem (`placeholderId`), e ele aponta para OUTRO elemento
+    // que o campo esconde ao ganhar texto. Seriam dois elementos
+    // amarrados por id para dizer o que uma linha de instrução ao
+    // lado já diz — e um campo vazio ao lado de "digite o nome
+    // aqui" não é mais obscuro que um campo cinza escrito por
+    // dentro. Fica de fora até alguém precisar.
+    | {
+        readonly type: 'input';
+        /** O que já vem escrito quando a tela abre. */
+        readonly text: string;
+        readonly fontSize: number;
+        readonly font: (typeof UI_FONTS)[number];
+        readonly color: string;
+        readonly align: (typeof UI_TEXT_ALIGNS)[number];
+        /**
+         * O teto de caracteres, imposto pelo CLIENTE.
+         *
+         * Ele não substitui a régua do agente: o comando pode ser
+         * digitado no F1 sem passar por campo nenhum. Ele serve
+         * para o jogador não escrever trinta letras e descobrir no
+         * Enter que só cabiam vinte e quatro.
+         */
+        readonly charLimit: number;
+        /** O que fazer com o que ele escreveu. */
+        readonly action: UiSubmitAction;
       }
   );
 
@@ -344,6 +400,22 @@ const elementSchema: z.ZodType<UiElement> = z.lazy(() =>
       ]),
       /** Tinge a imagem. Branco opaco = cor original. */
       color: colorSchema,
+      children: z.array(elementSchema),
+    }),
+    z.object({
+      ...baseFields,
+      type: z.literal('input'),
+      text: z.string().max(512),
+      fontSize: z.number().int().min(1).max(256),
+      font: z.enum(UI_FONTS),
+      color: colorSchema,
+      align: z.enum(UI_TEXT_ALIGNS),
+      charLimit: z.number().int().min(1).max(512),
+      // Só `store.buy`: é a única ação com caminho de VOLTA ao
+      // agente. Um campo que navegasse ou fechasse a tela jogaria
+      // fora o que o jogador escreveu — e o modelo que aceitasse
+      // isso deixaria alguém desenhá-lo sem perceber.
+      action: submitActionSchema,
       children: z.array(elementSchema),
     }),
   ]),

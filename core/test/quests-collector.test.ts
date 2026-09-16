@@ -31,7 +31,11 @@ import { QuestsRepository } from '../src/db/quests-repository.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { parseQuestPush, QUEST_EVENT_MARKER } from '../src/game/quests-contract.js';
 import { createLogger } from '../src/logger.js';
-import { QuestCollector, type QuestCollectorRcon } from '../src/quests/collector.js';
+import {
+  QuestCollector,
+  normalizeCreature,
+  type QuestCollectorRcon,
+} from '../src/quests/collector.js';
 import { QuestEvents } from '../src/quests/events.js';
 import {
   NPC_MARKER,
@@ -185,13 +189,77 @@ describe('o catálogo que desce ao plugin', () => {
     const watch = h.sent.find((command) => command.startsWith('origemz.quest.watch')) ?? '';
     const payload = JSON.parse(
       Buffer.from(watch.split(' ')[1] as string, 'base64').toString('utf8'),
-    ) as { secret: string; watch: Record<string, string[]>; alias: Record<string, string> };
+    ) as {
+      secret: string;
+      watch: Record<string, string[]>;
+      alias: Record<string, string>;
+      aliasPrefix: Record<string, string>;
+    };
 
     expect(payload.secret).toBe(SECRET);
     expect(payload.watch.kill).toEqual(['scientist']);
     // A tabela mora no agente: uma criatura nova do Rust não pode
     // exigir um release de plugin.
-    expect(payload.alias.scientistnpc_heavy).toBe('scientist');
+    expect(payload.alias.wolf2).toBe('wolf');
+    // E o prefixo desce junto, senão o plugin fica só com a tabela
+    // exata e o `scientist2` volta a não contar.
+    expect(payload.aliasPrefix.scientistnpc_).toBe('scientist');
+    expect(payload.aliasPrefix.scientist2).toBe('scientist');
+  });
+
+  // ####  OS PREFABS SÃO MEDIDOS, NÃO IMAGINADOS  ####
+  //
+  // Todos saíram da sonda `ozprobe.types` rodada contra o server01
+  // em 15/09/2026 — `GameManifest.Current.entities` do próprio
+  // build, e o `ShortPrefabName` que o hook entrega.
+  //
+  // O caso que dói é `scientist2`: ele não existia na tabela, o
+  // jogo passou a usá-lo, e a missão de matar cientista parou sem
+  // uma linha de log.
+  it('normaliza os prefabs que o jogo entrega hoje', () => {
+    // A caça que o dono reportou parada.
+    expect(normalizeCreature('wolf2')).toBe('wolf');
+
+    // O cientista, nas duas gerações.
+    expect(normalizeCreature('scientistnpc_heavy')).toBe('scientist');
+    expect(normalizeCreature('scientistnpc_roam')).toBe('scientist');
+    expect(normalizeCreature('scientistnpc_roamtethered')).toBe('scientist');
+    expect(normalizeCreature('scientistnpc_patrol')).toBe('scientist');
+    expect(normalizeCreature('scientistnpc_peacekeeper')).toBe('scientist');
+    expect(normalizeCreature('scientistnpc_excavator')).toBe('scientist');
+    expect(normalizeCreature('scientistnpc_oilrig')).toBe('scientist');
+    expect(normalizeCreature('scientist2')).toBe('scientist');
+    expect(normalizeCreature('scientist2.heavy')).toBe('scientist');
+    expect(normalizeCreature('scientist2.shotgun')).toBe('scientist');
+
+    // O prefab que a Facepunch ainda não inventou.
+    expect(normalizeCreature('scientistnpc_wipe_de_2027')).toBe('scientist');
+
+    // Quem já chega com o nome do painel passa inteiro.
+    for (const prefab of [
+      'bear',
+      'polarbear',
+      'boar',
+      'stag',
+      'chicken',
+      'tiger',
+      'panther',
+      'crocodile',
+      'simpleshark',
+      'zombie',
+      'scarecrow',
+      'bradleyapc',
+      'patrolhelicopter',
+      'autoturret_deployed',
+    ]) {
+      expect(normalizeCreature(prefab)).toBe(prefab);
+    }
+
+    // E os que têm nome próprio.
+    expect(normalizeCreature('npc_tunneldweller')).toBe('tunneldweller');
+    expect(normalizeCreature('npc_underwaterdweller')).toBe('underwaterdweller');
+    expect(normalizeCreature('snake.entity')).toBe('snake');
+    expect(normalizeCreature('ridablehorse')).toBe('horse');
   });
 
   it('`lootEnabled: false` esvazia a lista de loot', async () => {

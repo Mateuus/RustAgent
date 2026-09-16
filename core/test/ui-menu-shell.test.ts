@@ -22,9 +22,14 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { shellNavStates } from '../src/game/ui-cui.js';
 import { CANVAS, resolveRect, type Box } from '../src/game/ui-geometry.js';
 import { buildMainMenu } from '../src/game/ui-preset-main-menu.js';
 import type { UiElement } from '../src/types/ui-document.js';
+import {
+  toGeneratedScreenBundle,
+  toScreenBundle,
+} from '../src/types/ui-transport.js';
 
 /**
  * A caixa de um elemento do shell, medida na cadeia inteira.
@@ -143,5 +148,87 @@ describe('o cabeçalho do Menu Principal', () => {
     const acento = requireBox(shell, 'cabecalho-acento');
 
     expect(conteudo.top).toBeGreaterThanOrEqual(cabecalho.height + acento.height);
+  });
+});
+
+// ============================================================
+//  O "VOCÊ ESTÁ AQUI" DA BARRA
+//
+//  ####  POR QUE ISTO GANHOU TESTE EM 15/09/2026  ####
+//
+//  Até aqui, o destaque viajava como dois elementos CUI completos
+//  por botão de navegação, repetidos em CADA tela servida: 4.795
+//  bytes para dizer qual botão está aceso. A conta só ficou
+//  visível quando a aba EQUIPE não coube no frame do RCON.
+//
+//  Agora o agente manda uma tabela (uma vez, no documento) e o
+//  endereço da tela atual; quem pinta é o plugin, com o shell que
+//  ele já desenhou.
+//
+//  O risco da troca é silencioso e total: se a tabela sair errada,
+//  NENHUMA aba acende — e isso não derruba nada, não aparece em
+//  log, e só se vê abrindo o jogo.
+// ============================================================
+
+describe('a tabela de destaque da barra', () => {
+  const menu = buildMainMenu();
+
+  it('tem uma linha para cada botão que acende', () => {
+    const acendem = walk(menu.shell).filter(
+      (element) => element.type === 'button' && element.activeOnScreenId !== null,
+    );
+
+    expect(shellNavStates(menu)).toHaveLength(acendem.length);
+    // E são as onze abas da barra, não um punhado delas.
+    expect(shellNavStates(menu).length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('cada linha aponta para uma tela que EXISTE no documento', () => {
+    // Um `on` que não casa com tela nenhuma é uma aba que nunca
+    // acende — e o sintoma é invisível.
+    const telas = new Set(menu.screens.map((screen) => screen.id));
+
+    for (const state of shellNavStates(menu)) {
+      expect(telas.has(state.on)).toBe(true);
+    }
+  });
+
+  it('as cores saem no formato do CUI, e não em hex', () => {
+    // O cliente lê "r g b a" em 0..1. Um `#C43F2CFF` aqui seria um
+    // botão que nunca muda de cor, sem erro nenhum.
+    for (const state of shellNavStates(menu)) {
+      expect(state.color).toMatch(/^[\d.]+ [\d.]+ [\d.]+ [\d.]+$/);
+      expect(state.textColor).toMatch(/^[\d.]+ [\d.]+ [\d.]+ [\d.]+$/);
+    }
+  });
+
+  it('a tela leva o endereço que o SHELL conhece, e não o id cru', () => {
+    // A tela de entrada acende a aba dela.
+    const entrada = toScreenBundle(menu, menu.entryScreenId);
+
+    expect(entrada?.activeId).toBe(menu.entryScreenId);
+
+    // E uma tela GERADA com parâmetro acende a aba-base: sem isto,
+    // o destaque de EQUIPE sumiria ao abrir a confirmação de
+    // expulsar, que é `tela-equipe:kick:765…`.
+    const gerada = toGeneratedScreenBundle(
+      menu,
+      { id: 'tela-equipe:kick:76561198000000001', name: 'x', kind: 'page', elements: [] },
+      'tela-equipe',
+    );
+
+    expect(gerada.activeId).toBe('tela-equipe');
+    expect(gerada.id).toBe('tela-equipe:kick:76561198000000001');
+  });
+
+  it('o bloco CARO não viaja mais em tela nenhuma', () => {
+    // É esta linha que guarda os 4.795 bytes. Se `updates` voltar a
+    // ter conteúdo, os dois mecanismos estarão ligados ao mesmo
+    // tempo — e o frame volta a encher.
+    expect(toScreenBundle(menu, menu.entryScreenId)?.updates).toEqual([]);
+
+    for (const screen of menu.screens) {
+      expect(toScreenBundle(menu, screen.id)?.updates).toEqual([]);
+    }
   });
 });

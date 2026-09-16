@@ -124,33 +124,98 @@ export interface QuestCollectorDeps {
  *
  * ####  ELA MORA AQUI, E NÃO NO C#  ####
  *
- * `scientistnpc_heavy`, `scientistnpc_ordinary` e
- * `scientistnpc_oilrig` são todos `scientist` para quem cadastra a
- * missão. O `Quests.cs` acerta isso no C# — e é por isso que uma
- * criatura nova do Rust exigiria um release do plugin dele.
+ * O `ShortPrefabName` é o que o jogo entrega; `scientist` é o que o
+ * admin cadastra no painel. O `Quests.cs` acerta isso no C# — e é
+ * por isso que uma criatura nova do Rust exigiria um release do
+ * plugin dele.
  *
  * Aqui a tabela desce no `watch`, e uma criatura nova é uma linha
  * neste arquivo.
+ *
+ * ####  SÓ O QUE O PREFIXO NÃO PEGA  ####
+ *
+ * Os 25 `scientistnpc_*` do build saíram daqui em 15/09/2026: quem
+ * responde por eles é `CREATURE_ALIAS_PREFIXES`. O que sobrou é o
+ * que nenhuma regra alcança — nome próprio, e nada mais.
+ *
+ * Prefabs MEDIDOS no build do server01 em 15/09/2026, com a sonda
+ * de `ozprobe.types`. Não são de documentação: `scientistnpc_ordinary`
+ * estava nesta tabela e não existe no jogo há tempos.
  */
 export const CREATURE_ALIASES: Readonly<Record<string, string>> = {
   ridablehorse: 'horse',
   ridablehorse2: 'horse',
+  // O lobo virou `Rust.Ai.Gen2.Wolf2`, e o prefab foi junto.
   wolf2: 'wolf',
   npc_tunneldweller: 'tunneldweller',
   npc_underwaterdweller: 'underwaterdweller',
   'snake.entity': 'snake',
-  scientistnpc_heavy: 'scientist',
-  scientistnpc_ordinary: 'scientist',
-  scientistnpc_oilrig: 'scientist',
-  scientistnpc_cargo: 'scientist',
-  scientistnpc_junkpile_pistol: 'scientist',
-  scientistnpc_full_any: 'scientist',
-  scientistnpc_full_lr300: 'scientist',
-  scientistnpc_full_mp5: 'scientist',
-  scientistnpc_full_pistol: 'scientist',
-  scientistnpc_full_shotgun: 'scientist',
-  scarecrow_corpse: 'scarecrow',
 };
+
+/**
+ * A normalização do prefab que AINDA NÃO EXISTE.
+ *
+ * ####  POR QUE UMA TABELA EXATA NÃO BASTA  ####
+ *
+ * Em 15/09/2026 a missão de matar cientista estava parada, e nada
+ * no agente nem no plugin havia mudado. O que mudou foi o jogo: a
+ * Facepunch migrou o cientista para `Rust.Ai.Gen2.ScientistNPC2`,
+ * com prefabs novos (`scientist2`, `scientist2.heavy`,
+ * `scientist2.shotgun`) que a tabela exata não conhecia.
+ *
+ * Uma tabela exata só erra assim — em silêncio, e sempre depois de
+ * um wipe. O prefixo é o que faz o próximo `scientistnpc_<algo>` já
+ * nascer contando.
+ *
+ * ####  A ORDEM IMPORTA, E A TABELA EXATA VEM ANTES  ####
+ *
+ * O plugin só consulta esta lista quando `CREATURE_ALIASES` não
+ * respondeu — é o que permite uma exceção a uma regra de prefixo.
+ *
+ * Deliberadamente curta: prefixo é rede, não atalho. Um `bear` aqui
+ * arrastaria `bear_tutorial` junto, e essa decisão deve ser
+ * explícita na tabela de cima.
+ */
+export const CREATURE_ALIAS_PREFIXES: Readonly<Record<string, string>> = {
+  // Os 25 do build: _arena, _bradley, _cargo, _ch47_gunner,
+  // _excavator, _full_*, _heavy, _junkpile_pistol, _oilrig,
+  // _outbreak, _patrol, _peacekeeper, _ptboat, _rhib, _roam,
+  // _roamtethered...  e o que vier no próximo wipe.
+  scientistnpc_: 'scientist',
+  // A geração nova: `scientist2`, `scientist2.heavy`,
+  // `scientist2.shotgun`. Sem o `_` de propósito — o prefab base
+  // chama-se `scientist2`, sem sufixo nenhum.
+  scientist2: 'scientist',
+};
+
+/**
+ * O `ShortPrefabName` como o plugin vai lê-lo.
+ *
+ * ####  ESTE É O ESPELHO, E O PLUGIN É O ORIGINAL  ####
+ *
+ * Quem normaliza de verdade é o `QuestNormalize` do
+ * `OrigemZAgent.cs`, dentro do jogo. Esta função existe para que a
+ * regra possa ser AFIRMADA em teste contra os prefabs medidos —
+ * sem ela, "o lobo conta" seria uma opinião até alguém abrir o Rust.
+ *
+ * A ordem é a mesma dos dois lados, e é ela que dá o resultado: a
+ * tabela exata primeiro (é onde mora a exceção), o prefixo depois.
+ */
+export function normalizeCreature(prefab: string): string {
+  const exact = CREATURE_ALIASES[prefab];
+
+  if (exact !== undefined) {
+    return exact;
+  }
+
+  for (const [prefix, target] of Object.entries(CREATURE_ALIAS_PREFIXES)) {
+    if (prefab.startsWith(prefix)) {
+      return target;
+    }
+  }
+
+  return prefab;
+}
 
 /** O marcador do pedido. O mesmo do resto do agente. */
 const REQUEST_MARKER = '#OZAREQ#';
@@ -415,6 +480,7 @@ export class QuestCollector {
       secret: this.#deps.secret,
       watch,
       alias: CREATURE_ALIASES,
+      aliasPrefix: CREATURE_ALIAS_PREFIXES,
       // Só as categorias em uso. Um servidor sem missão de saque
       // recebe `{}` e não paga por nada disto.
       sets: containerSetsOf(this.#deps.repository.containerSelectorsFor(serverId)),
@@ -426,7 +492,19 @@ export class QuestCollector {
     // Os conjuntos entram na conta porque eles TAMBÉM mudam sozinhos
     // — um contêiner novo no catálogo do agente muda o que
     // `@barrel` alcança, e o plugin precisa saber.
-    const fingerprint = JSON.stringify({ watch: payload.watch, sets: payload.sets });
+    // ####  A NORMALIZAÇÃO ENTRA NA DIGITAL  ####
+    //
+    // Ela ficou de fora até 15/09/2026, e o preço era invisível:
+    // corrigir um alias não reenviava nada para quem já estava
+    // sincronizado, e o plugin seguia com a tabela velha até o
+    // próximo `oxide.reload`. O conserto do lobo teria "não pegado"
+    // em servidor nenhum que já estivesse de pé.
+    const fingerprint = JSON.stringify({
+      watch: payload.watch,
+      sets: payload.sets,
+      alias: payload.alias,
+      aliasPrefix: payload.aliasPrefix,
+    });
 
     if (this.#sent.get(serverId) === fingerprint) {
       return;

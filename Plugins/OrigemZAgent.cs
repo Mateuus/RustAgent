@@ -495,16 +495,21 @@ namespace Oxide.Plugins
             Unsubscribe("OnItemAddedToContainer");
             _questLootHooked = false;
 
-            // ####  E OS DOIS DO SAQUE, PELA MESMA RAZAO  ####
+            // ####  E OS DO SAQUE E DA CACA, PELA MESMA RAZAO  ####
             //
             // `OnEntityDeath` dispara para TODA entidade que morre no
             // servidor - arvore, pedra, parede, animal. Ele sai na
-            // primeira comparacao (`as LootContainer`), mas nao ha
-            // por que pagar nem isso num servidor sem missao de
-            // saque. Quem os liga e o QuestSyncContainerHook.
+            // primeira comparacao, mas nao ha por que pagar nem isso
+            // num servidor sem missao de saque NEM de caca.
+            //
+            // Ele tem dois donos desde 15/09/2026: o barril quebrado
+            // (QuestSyncContainerHook) e a caca (QuestSyncKillHook).
+            // Os dois desembocam no QuestSyncEntityDeathHook.
             Unsubscribe("OnLootEntity");
             Unsubscribe("OnEntityDeath");
             _questContainerHooked = false;
+            _questKillHooked = false;
+            _questEntityDeathHooked = false;
 
             // Mesma razao, e este e o mais caro de todos: o
             // OnPlayerInput dispara a cada QUADRO, para cada
@@ -6343,20 +6348,28 @@ namespace Oxide.Plugins
 
             BasePlayer attacker = AttackerOf(info);
 
-            // ####  AS MISSOES ENGANCHAM AQUI  ####
+            // ####  A CACADA NAO ENGANCHA MAIS AQUI  ####
             //
-            // No hook que JA roda, e nao num proprio: um segundo
-            // OnPlayerDeath custaria o dobro de quadros para contar a
-            // mesma morte. O QuestOnKill sai na primeira comparacao
-            // quando ninguem persegue aquele alvo.
+            // Ela ficou neste hook ate 15/09/2026, e o preco foi que
+            // NENHUM bicho contava. `OnPlayerDeath` nasce dentro de
+            // `BasePlayer.Die`: so chega aqui quem herda de
+            // BasePlayer. MEDIDO no build deste servidor:
             //
-            // `ShortPrefabName` para o NPC (o `scientistnpc_heavy`
-            // que o alias normaliza) e `player` para gente: e assim
-            // que o alvo e cadastrado no painel.
-            if (attacker != null && attacker != victim)
-            {
-                QuestOnKill(attacker, victim.IsNpc ? victim.ShortPrefabName : "player");
-            }
+            //   wolf2, bear, boar, stag, chicken, polarbear, tiger,
+            //   panther, crocodile, snake.entity, simpleshark, zombie,
+            //   ridablehorse, bradleyapc, patrolhelicopter,
+            //   autoturret_deployed        -> nao sao BasePlayer
+            //   scientist2, scientist2.heavy, scientist2.shotgun
+            //                              -> nao sao BasePlayer
+            //
+            // O cientista da geracao nova (Rust.Ai.Gen2.ScientistNPC2)
+            // entrou nessa lista sem aviso: ele ERA BasePlayer, deixou
+            // de ser, e a missao de matar cientista parou junto -- sem
+            // que uma linha deste plugin mudasse.
+            //
+            // Quem conta agora e o QuestOnEntityKilled, la no
+            // OnEntityDeath, que dispara para TUDO que morre. O
+            // ranking continua aqui, porque ranking e de gente.
 
             // ####  LINHA 1: A VITIMA E NPC  ####
             //
@@ -8580,6 +8593,11 @@ namespace Oxide.Plugins
         // nao pode exigir um release deste plugin.
         private Dictionary<string, string> _questAlias = new Dictionary<string, string>();
 
+        // As regras de prefixo, na ordem em que o agente as mandou.
+        // Consultadas so quando a tabela exata nao respondeu.
+        private List<KeyValuePair<string, string>> _questAliasPrefix =
+            new List<KeyValuePair<string, string>>();
+
         // O segredo que autentica o `#OZQUEST#` de volta. Sem ele, o
         // push nao sai: o agente ignoraria a linha de qualquer jeito.
         private string _questSecret;
@@ -8649,6 +8667,14 @@ namespace Oxide.Plugins
         private bool _questDirty;
         private bool _questLootHooked;
         private bool _questContainerHooked;
+
+        // Ha alvo de `kill` no catalogo?
+        private bool _questKillHooked;
+
+        // O `OnEntityDeath` esta registrado? Ele serve a DOIS donos -
+        // o saque e a caca -, e sem este terceiro estado um deles
+        // desligaria o hook que o outro ainda usa.
+        private bool _questEntityDeathHooked;
 
         // O que ja foi proposto ao agente, para nao gritar duas vezes
         // a mesma conclusao a cada golpe de picareta depois de ela
@@ -8738,6 +8764,31 @@ namespace Oxide.Plugins
                 }
             }
 
+            // ####  E A REGRA PARA O PREFAB QUE AINDA NAO EXISTE  ####
+            //
+            // `scientistnpc_heavy` esta na tabela exata. Mas o Rust
+            // inventa prefab a cada wipe -- `scientist2` nasceu assim,
+            // e a missao de matar cientista parou sem ninguem mexer em
+            // nada. O prefixo cobre o proximo.
+            //
+            // Ausente = agente anterior a 15/09/2026. So a tabela
+            // exata vale, e e o que valia antes.
+            List<KeyValuePair<string, string>> aliasPrefix =
+                new List<KeyValuePair<string, string>>();
+            JObject prefixRaw = payload["aliasPrefix"] as JObject;
+
+            if (prefixRaw != null)
+            {
+                foreach (KeyValuePair<string, JToken> entry in prefixRaw)
+                {
+                    if (!string.IsNullOrEmpty(entry.Key))
+                    {
+                        aliasPrefix.Add(new KeyValuePair<string, string>(
+                            entry.Key, (string)entry.Value));
+                    }
+                }
+            }
+
             // Os conjuntos das categorias de conteiner. Mesma regra
             // do `watch`: o que chega SUBSTITUI o que havia, inteiro.
             Dictionary<string, HashSet<string>> sets =
@@ -8774,11 +8825,13 @@ namespace Oxide.Plugins
 
             _questWatch = watch;
             _questAlias = alias;
+            _questAliasPrefix = aliasPrefix;
             _questSets = sets;
             _questSecret = (string)payload["secret"];
 
             QuestSyncLootHook();
             QuestSyncContainerHook();
+            QuestSyncKillHook();
 
             int total = 0;
 
@@ -8792,7 +8845,8 @@ namespace Oxide.Plugins
             // missao nao progride" nao teria como ser diagnosticado.
             Puts("Missoes: catalogo com " + total + " alvo(s); loot " +
                 (_questLootHooked ? "LIGADO" : "desligado") + "; saque " +
-                (_questContainerHooked ? "LIGADO" : "desligado"));
+                (_questContainerHooked ? "LIGADO" : "desligado") + "; caca " +
+                (_questKillHooked ? "LIGADO" : "desligado"));
 
             // O `kinds` e o que permite ao agente avisar quando este
             // plugin e mais velho que a missao cadastrada. Ver o
@@ -8853,12 +8907,10 @@ namespace Oxide.Plugins
             if (wanted)
             {
                 Subscribe(HookLootEntity);
-                Subscribe(HookEntityDeath);
             }
             else
             {
                 Unsubscribe(HookLootEntity);
-                Unsubscribe(HookEntityDeath);
 
                 // Sem missao de saque nao ha o que deduplicar, e a
                 // lista so ocuparia memoria ate o proximo restart.
@@ -8866,6 +8918,49 @@ namespace Oxide.Plugins
             }
 
             _questContainerHooked = wanted;
+
+            // O OnEntityDeath tem dois donos: quem decide e a soma.
+            QuestSyncEntityDeathHook();
+        }
+
+        // ####  A CACA PRECISA DO MESMO HOOK DO BARRIL  ####
+        //
+        // Ate 15/09/2026 a caca vivia no `OnPlayerDeath`, que nao
+        // custa nada porque jogador morre pouco. O `OnEntityDeath`
+        // custa mais - dispara para arvore, pedra, parede, bicho -,
+        // e e por isso que ele continua nascendo desligado: so entra
+        // quando ha missao de caca OU de saque cadastrada.
+        private void QuestSyncKillHook()
+        {
+            _questKillHooked = _questWatch.ContainsKey("kill");
+
+            QuestSyncEntityDeathHook();
+        }
+
+        // Um Subscribe para os dois donos.
+        //
+        // Sem isto, tirar a ultima missao de saque de um servidor
+        // derrubaria a contagem de caca junto - e o sintoma seria
+        // exatamente o que o dono relatou: "o lobo nao conta".
+        private void QuestSyncEntityDeathHook()
+        {
+            bool wanted = _questContainerHooked || _questKillHooked;
+
+            if (wanted == _questEntityDeathHooked)
+            {
+                return;
+            }
+
+            if (wanted)
+            {
+                Subscribe(HookEntityDeath);
+            }
+            else
+            {
+                Unsubscribe(HookEntityDeath);
+            }
+
+            _questEntityDeathHooked = wanted;
         }
 
         // ------------------------------------------------------
@@ -9337,16 +9432,25 @@ namespace Oxide.Plugins
 
             try
             {
-                LootContainer container = entity as LootContainer;
-
-                if (container == null || info == null)
+                if (entity == null || info == null)
                 {
                     return;
                 }
 
-                // Quem quebrou. Explosivo, arma ou machado: o jogo
-                // resolve a cadeia e entrega o jogador aqui.
-                QuestOnContainer(info.InitiatorPlayer, container);
+                LootContainer container = entity as LootContainer;
+
+                if (container != null)
+                {
+                    // Quem quebrou. Explosivo, arma ou machado: o jogo
+                    // resolve a cadeia e entrega o jogador aqui.
+                    QuestOnContainer(info.InitiatorPlayer, container);
+                    return;
+                }
+
+                // Barril nao e caca, e caca nao e barril: as duas
+                // missoes entram pelo mesmo hook, e cada uma sai na
+                // primeira pergunta que nao for dela.
+                QuestOnEntityKilled(entity, info);
             }
             catch (Exception ex)
             {
@@ -9356,6 +9460,58 @@ namespace Oxide.Plugins
             {
                 StatsHookStop(HookEntityDeath, started);
             }
+        }
+
+        // ####  A CACA DE QUALQUER BICHO DO JOGO  ####
+        //
+        // Este hook dispara para TODA entidade que morre, e e por
+        // isso que ele e o lugar certo da contagem: o `OnPlayerDeath`
+        // so ve quem herda de BasePlayer, e o lobo, o urso e o
+        // cientista da geracao nova nao herdam. Ver o bloco do
+        // ApplyDeath para a lista medida.
+        //
+        // O preco ja estava pago: o hook so e registrado quando ha
+        // missao de caca ou de saque no catalogo (QuestSyncKillHook),
+        // e o corpo sai na primeira comparacao quando nao ha.
+        private void QuestOnEntityKilled(BaseCombatEntity victim, HitInfo info)
+        {
+            // Sem alvo de caca cadastrado, o hook esta ligado por
+            // causa do saque e esta linha e tudo o que a caca custa.
+            if (!_questKillHooked)
+            {
+                return;
+            }
+
+            // ####  O CADAVER NAO E A CRIATURA  ####
+            //
+            // Cortar o corpo de um cientista com a machadinha mata o
+            // `scientistnpc_heavy_corpse`, e isso volta aqui. Sem esta
+            // linha a mesma morte contaria duas vezes -- e uma delas
+            // sem ninguem ter matado nada.
+            if (victim is BaseCorpse)
+            {
+                return;
+            }
+
+            // Mesmo filtro do ranking: gente de verdade, e nao um
+            // cientista que matou o lobo antes de voce.
+            BasePlayer killer = AttackerOf(info);
+
+            if (killer == null || ReferenceEquals(killer, victim))
+            {
+                return;
+            }
+
+            BasePlayer victimPlayer = victim as BasePlayer;
+
+            // `player` para gente; para o resto, o prefab -- que o
+            // alias do agente normaliza (`wolf2` vira `wolf`,
+            // `scientist2.heavy` vira `scientist`).
+            string target = victimPlayer != null && !victimPlayer.IsNpc
+                ? "player"
+                : victim.ShortPrefabName;
+
+            QuestOnKill(killer, target);
         }
 
         // A criatura, com o nome que o admin cadastrou.
@@ -9371,7 +9527,25 @@ namespace Oxide.Plugins
 
             string mapped;
 
-            return _questAlias.TryGetValue(raw, out mapped) ? mapped : raw;
+            // A tabela exata tem a ultima palavra: e ela que permite
+            // a excecao (`scarecrow_corpse` nao e `scarecrow`).
+            if (_questAlias.TryGetValue(raw, out mapped))
+            {
+                return mapped;
+            }
+
+            // So entao o prefixo, na ordem em que o agente mandou -
+            // a lista tem poucas entradas e quase todo prefab sai na
+            // linha de cima.
+            for (int i = 0; i < _questAliasPrefix.Count; i++)
+            {
+                if (raw.StartsWith(_questAliasPrefix[i].Key, StringComparison.Ordinal))
+                {
+                    return _questAliasPrefix[i].Value;
+                }
+            }
+
+            return raw;
         }
 
         // ####  UM ALVO OU UMA LISTA, E O `null` E QUEM DECIDE  ####
@@ -9924,6 +10098,13 @@ namespace Oxide.Plugins
                 // so: se um estiver ligado e o outro nao, e defeito.
                 json.Append(",\"containerHooked\":")
                     .Append(_questContainerHooked ? "true" : "false");
+                // A caca e o segundo dono do OnEntityDeath. Sem estes
+                // dois campos, "o lobo nao conta" nao teria como ser
+                // respondido sem abrir o jogo.
+                json.Append(",\"killHooked\":")
+                    .Append(_questKillHooked ? "true" : "false");
+                json.Append(",\"entityDeathHooked\":")
+                    .Append(_questEntityDeathHooked ? "true" : "false");
                 json.Append(",\"containerSets\":").Append(_questSets.Count);
                 json.Append(",\"watchedKinds\":").Append(_questWatch.Count);
                 json.Append(",\"assignedPlayers\":").Append(_questAssigned.Count);

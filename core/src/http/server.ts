@@ -119,6 +119,8 @@ import { registerWipeBlueprintRoutes } from './routes/wipe-blueprints.js';
 import { registerDungeonRoutes, type DungeonRoutesDeps } from './routes/dungeons.js';
 import { registerQuestRoutes, type QuestRoutesDeps } from './routes/quests.js';
 import { registerWorldEventRoutes, type WorldEventRoutesDeps } from './routes/world-events.js';
+import { registerTeamRoutes, type TeamRoutesDeps } from './routes/teams.js';
+import { registerKothRoutes, type KothRoutesDeps } from './routes/koth.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 import { registerRuleRoutes, type RuleRoutesDeps } from './routes/rules.js';
 
@@ -383,6 +385,17 @@ export interface BuildServerOptions {
   readonly dungeons?: DungeonRoutesDeps;
   /** O guarda-chuva: o que nasce no mapa, e onde nao nasce. */
   readonly worldEvents?: WorldEventRoutesDeps;
+  /**
+   * A equipe do jogo.
+   *
+   * Ausente = o agente subiu sem canal com servidor nenhum. As rotas
+   * NAO existem nesse caso, em vez de existirem devolvendo vazio: uma
+   * lista vazia de equipes e uma resposta legitima do jogo, e o
+   * painel nao teria como distinguir as duas.
+   */
+  readonly teams?: TeamRoutesDeps;
+  /** O dominio de territorio: os lugares cadastrados, e o que esta de pe. */
+  readonly koth?: KothRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -563,6 +576,21 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
       if (options.worldEvents !== undefined) {
         registerWorldEventRoutes(api, options.worldEvents);
+      }
+
+      // A equipe do jogo. Ao contrario das duas de cima, ela NAO vem
+      // do banco: cada leitura pergunta ao RelationshipManager pelo
+      // RCON, porque a equipe muda a cada convite aceito e um cache
+      // aqui mostraria no painel uma equipe que ja acabou.
+      if (options.teams !== undefined) {
+        registerTeamRoutes(api, options.teams);
+      }
+
+      // O KOTH. O CADASTRO dele responde do banco (e com o servidor
+      // parado que se desenha um territorio novo); o ESTADO pergunta
+      // ao jogo.
+      if (options.koth !== undefined) {
+        registerKothRoutes(api, options.koth);
       }
 
       // O catálogo de itens. Ele responde do BANCO, e por isso

@@ -213,5 +213,46 @@ export function ElementView({ element, selectedId, onSelect, scale }: ElementVie
           {children}
         </div>
       );
+
+    // ####  O CAMPO DE TEXTO  ####
+    //
+    // Ele não nasce no editor: quem o desenha é o agente, na tela
+    // da equipe, porque o que vai dentro dele é o nome daquela
+    // equipe e a ação dele precisa de um caminho de volta. Mas o
+    // modelo o aceita, então ele pode APARECER aqui — e um tipo
+    // que o switch não conhece renderizaria `undefined`, que no
+    // React é o editor inteiro em branco.
+    //
+    // O desenho é o do rótulo com uma moldura tracejada: é o que
+    // diz "aqui o jogador escreve" sem prometer que dá para
+    // digitar nesta tela.
+    case 'input': {
+      const flex = alignToFlex(element.align);
+
+      return (
+        <div
+          style={{
+            ...base,
+            display: 'flex',
+            ...flex,
+            color: cssColorFromHex(element.color),
+            fontSize: `${String(element.fontSize * scale)}px`,
+            fontFamily: element.font.startsWith('DroidSansMono')
+              ? 'ui-monospace, monospace'
+              : 'var(--font-condensed, system-ui), system-ui',
+            fontWeight: element.font.includes('Bold') ? 700 : 400,
+            lineHeight: 1.1,
+            overflow: 'hidden',
+            outlineOffset: '-1px',
+          }}
+          className={cn(outline, 'cursor-pointer outline-dashed outline-1 outline-border')}
+          onClick={select}
+          title={`${element.name} — campo de texto (até ${String(element.charLimit)})`}
+        >
+          {element.text === '' ? '…' : element.text}
+          {children}
+        </div>
+      );
+    }
   }
 }

@@ -5935,6 +5935,117 @@ export const agent = {
    * Não confundir com `/api/events`, que é o CALENDÁRIO do wipe —
    * "Raid Night, sábado às 20h". Estes são os que nascem no mapa.
    */
+  // ####  A EQUIPE NÃO VEM DO BANCO  ####
+  //
+  // Cada uma destas pergunta ao JOGO, pelo RCON. Com o servidor
+  // parado elas devolvem 503 — e isso é informação, não falha da
+  // tela: "esse jogador não tem equipe" e "não consegui perguntar"
+  // são respostas diferentes.
+  // ####  O KOTH  ####
+  //
+  // O CADASTRO dos territórios responde do banco — é com o servidor
+  // parado que se desenha um território novo. Erguer e derrubar
+  // perguntam ao jogo.
+  kothArenas: (serverId: string) =>
+    api<{ arenas: KothArena[] }>(`/api/servers/${encodeURIComponent(serverId)}/koth/arenas`),
+
+  createKothArena: (serverId: string, body: KothArenaInput) =>
+    api<{ arena: KothArena }>(`/api/servers/${encodeURIComponent(serverId)}/koth/arenas`, {
+      method: 'POST',
+      body,
+    }),
+
+  updateKothArena: (serverId: string, arenaId: number, body: KothArenaInput) =>
+    api<{ arena: KothArena }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/arenas/${String(arenaId)}`,
+      { method: 'PUT', body },
+    ),
+
+  removeKothArena: (serverId: string, arenaId: number) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/koth/arenas/${String(arenaId)}`, {
+      method: 'DELETE',
+    }),
+
+  kothSettings: (serverId: string) =>
+    api<{ settings: { maxConcurrent: number }; live: number }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/settings`,
+    ),
+
+  saveKothSettings: (serverId: string, maxConcurrent: number) =>
+    api<{ settings: { maxConcurrent: number } }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/settings`,
+      { method: 'PUT', body: { maxConcurrent } },
+    ),
+
+  kothStatus: (serverId: string) =>
+    api<{ status: KothStatus }>(`/api/servers/${encodeURIComponent(serverId)}/koth/status`),
+
+  startKoth: (serverId: string, arenaId?: number) =>
+    api<{ runId: number; grid: string; arena: KothArena }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/start`,
+      { method: 'POST', body: arenaId === undefined ? {} : { arenaId } },
+    ),
+
+  /** Sem `runId`, derruba TODOS os daquele servidor. */
+  stopKoth: (serverId: string, runId?: number) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/koth/stop`, {
+      method: 'POST',
+      body: runId === undefined ? {} : { runId },
+    }),
+
+  teamSettings: (serverId: string) =>
+    api<{ settings: { maxSize: number }; live: number | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/team-settings`,
+    ),
+
+  saveTeamSettings: (serverId: string, maxSize: number) =>
+    api<{ settings: { maxSize: number } }>(
+      `/api/servers/${encodeURIComponent(serverId)}/team-settings`,
+      { method: 'PUT', body: { maxSize } },
+    ),
+
+  teams: (serverId: string) =>
+    api<TeamsSnapshot>(`/api/servers/${encodeURIComponent(serverId)}/teams`),
+
+  team: (serverId: string, teamId: string) =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}`,
+    ),
+
+  renameTeam: (serverId: string, teamId: string, name: string) =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/name`,
+      { method: 'POST', body: { name } },
+    ),
+
+  setTeamRank: (serverId: string, teamId: string, steamId: string, rank: 'officer' | 'member') =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/rank`,
+      { method: 'POST', body: { steamId, rank } },
+    ),
+
+  setTeamLeader: (serverId: string, teamId: string, steamId: string) =>
+    api<{ team: Team }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/leader`,
+      { method: 'POST', body: { steamId } },
+    ),
+
+  kickFromTeam: (serverId: string, teamId: string, steamId: string) =>
+    api<{ team: Team | null; disbanded: boolean }>(
+      `/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(steamId)}`,
+      { method: 'DELETE' },
+    ),
+
+  disbandTeam: (serverId: string, teamId: string) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/teams/${encodeURIComponent(teamId)}`, {
+      method: 'DELETE',
+    }),
+
+  teamOfPlayer: (steamId: string, serverId: string) =>
+    api<{ team: Team | null }>(
+      `/api/players/${encodeURIComponent(steamId)}/team?server=${encodeURIComponent(serverId)}`,
+    ),
+
   worldEvents: () => api<{ events: WorldEvent[] }>('/api/world-events'),
 
   createWorldEvent: (body: WorldEventInput) =>
@@ -6187,6 +6298,122 @@ export interface DungeonAccess {
  * Martelo, ferramenta de remocao e "segurar E". O decay NAO obedece
  * a este bloco: a masmorra nao apodrece nem com ele desligado.
  */
+/** Uma caixa do prêmio, com o PESO dela no sorteio. */
+export interface KothCrate {
+  prefab: string;
+  weight: number;
+}
+
+/**
+ * O que nasce quando alguém vence.
+ *
+ * Espelha `kothRewardSchema` em `core/src/types/koth.ts`. O evento
+ * que EXPIRA sem vencedor não deixa nada.
+ */
+export interface KothReward {
+  smoke: boolean;
+  flare: boolean;
+  crates: KothCrate[];
+  count: number;
+  /** Zero = a caixa fica até alguém abrir. */
+  crateSeconds: number;
+}
+
+/** Um território do KOTH. Espelha `core/src/types/koth.ts`. */
+export interface KothArenaInput {
+  label: string;
+  x: number;
+  z: number;
+  /** `null` = o servidor resolve lendo o terreno na hora de erguer. */
+  y?: number | null;
+  radius: number;
+  height: number;
+  captureSeconds: number;
+  durationSeconds: number;
+  decayPerSecond?: number;
+  color?: string;
+  enabled?: boolean;
+  reward?: KothReward;
+}
+
+export interface KothArena extends KothArenaInput {
+  id: number;
+  serverId: string;
+  y: number | null;
+  decayPerSecond: number;
+  color: string;
+  enabled: boolean;
+  reward: KothReward;
+  worldKey: string | null;
+  grid: string | null;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Um território de pé: o card de uma vaga. */
+export interface KothLiveEvent {
+  runId: string;
+  name: string;
+  grid: string;
+  x: number;
+  z: number;
+  radius: number;
+  percent: number;
+  progress: number;
+  captureSeconds: number;
+  /** `"0"` = ninguém está capturando agora. */
+  holder: string;
+  holderName: string;
+  /** Dois ou mais lados dentro: ninguém avança. */
+  contested: boolean;
+  elapsed: number;
+  durationSeconds: number;
+  inside: number;
+}
+
+/** O que o plugin responde quando se pergunta o estado. */
+export interface KothStatus {
+  active: boolean;
+  count?: number;
+  events?: KothLiveEvent[];
+}
+
+/**
+ * A equipe do jogo, como o agente a devolve.
+ *
+ * Espelha `core/src/types/teams.ts`. Quase tudo aqui é do RUST e
+ * volta a cada leitura; a única coisa nossa é o `rank`, e o
+ * `officers`, que é a contagem dele.
+ */
+export interface TeamMember {
+  steamId: string;
+  name: string;
+  online: boolean;
+  leader: boolean;
+  rank: 'leader' | 'officer' | 'member';
+}
+
+export interface Team {
+  teamId: string;
+  /** Vazio = ninguém batizou. O jogo mostra o nome do líder. */
+  name: string;
+  leader: string;
+  leaderName: string;
+  /** Segundos desde que ela existe. NÃO é data. */
+  ageSeconds: number;
+  members: TeamMember[];
+  invites: string[];
+  officers: number;
+}
+
+export interface TeamsSnapshot {
+  serverId: string;
+  maxSize: number;
+  teams: Team[];
+  readAt: number;
+}
+
 /**
  * Um evento que faz a masmorra nascer sozinha.
  *
@@ -6502,6 +6729,18 @@ export interface EventRun {
   scheduledFor: number | null;
   startedAt: number | null;
   endedAt: number | null;
+  /**
+   * COMO a run acabou — e não que acabou, que é o `status`.
+   *
+   * Ausente numa masmorra é o certo: ela fecha e não tem vencedor.
+   * Ausente numa run de KOTH velha também: o desfecho só passou a
+   * ser gravado na migração 093.
+   */
+  outcome?: 'captured' | 'expired' | 'stopped' | null;
+  /** O nome que a equipe tinha NAQUELE dia. */
+  winnerName?: string | null;
+  /** O teamID, como texto: ele passa de 2^53. */
+  winnerId?: string | null;
 }
 
 // ------------------------------------------------------------

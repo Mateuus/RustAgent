@@ -13,12 +13,20 @@
 //  o motivo aparece por extenso, em português. O agente já traduz
 //  o código na borda (`failureMessage`); esta tela mostra o que ele
 //  mandou, inteiro.
+//
+//  ####  ELE É DO GUARDA-CHUVA, E NÃO DA MASMORRA  ####
+//
+//  `event_runs` sempre foi a tabela de TUDO que nasce no mapa. Com
+//  o KOTH, a lista passou a misturar famílias — e por isso cada
+//  linha carrega o selo da sua. Sem ele, "não nasceu ontem" vira
+//  duas perguntas: o que não nasceu, e de que tipo era.
 // ============================================================
 
-import { MapPin, TriangleAlert, Users } from 'lucide-react';
+import { MapPin, Trophy, TriangleAlert, Users } from 'lucide-react';
 
 import { StateBlock } from '@/components/state-block';
-import type { EventRun, RunStatus } from '@/lib/api';
+import type { EventRun, RunStatus, WorldEvent } from '@/lib/api';
+import { familyLabel } from '@/lib/events/families';
 import { cn } from '@/lib/utils';
 
 const STATUS_LABEL: Readonly<Record<RunStatus, string>> = {
@@ -34,9 +42,18 @@ const STATUS_LABEL: Readonly<Record<RunStatus, string>> = {
 export interface RunHistoryProps {
   readonly runs: readonly EventRun[] | null;
   readonly error: string | null;
+  /**
+   * A agenda, para dizer de que família é cada linha.
+   *
+   * Vazio = nenhum selo, que é o certo numa tela de família só. Um
+   * evento apagado também não tem selo: a run continua no histórico
+   * (ela aconteceu), e inventar uma família para ela seria pior que
+   * não dizer nada.
+   */
+  readonly events?: readonly WorldEvent[];
 }
 
-export function RunHistory({ runs, error }: RunHistoryProps) {
+export function RunHistory({ runs, error, events = [] }: RunHistoryProps) {
   if (runs === null && error !== null) {
     return <StateBlock variant="error" title="Não consegui ler o histórico" detail={error} />;
   }
@@ -50,7 +67,7 @@ export function RunHistory({ runs, error }: RunHistoryProps) {
       <StateBlock
         variant="empty"
         title="Nada nasceu ainda"
-        detail="Cada masmorra construída — e cada tentativa que falhou — aparece aqui, com onde, quando e por quê."
+        detail="Cada evento que subiu — e cada tentativa que falhou — aparece aqui, com onde, quando e por quê."
       />
     );
   }
@@ -58,15 +75,25 @@ export function RunHistory({ runs, error }: RunHistoryProps) {
   return (
     <div className="border border-border bg-surface">
       <ul className="divide-y divide-border">
-        {runs.map((run) => (
+        {runs.map((run) => {
+          const kind = events.find((event) => event.id === run.eventId)?.kind ?? null;
+
+          return (
           <li key={run.id} className="flex flex-wrap items-start justify-between gap-3 p-3">
             <div className="flex min-w-0 gap-2">
               <StatusMark status={run.status} />
 
               <div className="min-w-0">
-                <p className="font-condensed text-sm font-bold">
-                  {run.dungeonId ?? run.eventId}{' '}
-                  <span className="font-normal text-muted">— {STATUS_LABEL[run.status]}</span>
+                <p className="flex flex-wrap items-center gap-2 font-condensed text-sm font-bold">
+                  {kind !== null && (
+                    <span className="border border-border px-1.5 py-0.5 text-2xs font-normal uppercase tracking-wide text-muted">
+                      {familyLabel(kind)}
+                    </span>
+                  )}
+                  <span>
+                    {run.dungeonId ?? run.eventId}{' '}
+                    <span className="font-normal text-muted">— {STATUS_LABEL[run.status]}</span>
+                  </span>
                 </p>
 
                 <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted">
@@ -84,6 +111,27 @@ export function RunHistory({ runs, error }: RunHistoryProps) {
                   <span>{formatWhen(run.startedAt)}</span>
                 </p>
 
+                {/* ####  QUEM LEVOU  ####
+
+                    O anúncio some do chat em cinco linhas; esta é a
+                    resposta de dias depois. Sem vencedor não há
+                    linha nenhuma: "levou: —" é pior que o silêncio. */}
+                {run.outcome === 'captured' && (
+                  <p className="mt-1 flex items-center gap-1 text-2xs">
+                    <Trophy aria-hidden="true" className="h-3 w-3 shrink-0 text-olive" />
+                    <span className="text-muted">levou</span>
+                    <strong className="min-w-0 truncate text-foreground">
+                      {/* Equipe sem nome no dia: o id é o que sobrou,
+                          e ele é melhor que "—". */}
+                      {run.winnerName ?? run.winnerId ?? 'uma equipe'}
+                    </strong>
+                  </p>
+                )}
+
+                {run.outcome === 'expired' && (
+                  <p className="mt-1 text-2xs text-muted">Ninguém dominou a tempo.</p>
+                )}
+
                 {/* A frase vem do agente inteira: ela conhece o
                     motivo, esta tela só sabe que houve um. */}
                 {run.failureMessage != null && (
@@ -98,7 +146,8 @@ export function RunHistory({ runs, error }: RunHistoryProps) {
               #{run.id}
             </span>
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );

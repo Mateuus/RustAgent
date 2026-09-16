@@ -57,6 +57,7 @@ import {
   type PlayerEventSample,
   type PlayerIdentity,
   type PlayerServer,
+  type Team,
   type StorePurchase,
   type Vip,
   type QuestProgressRow,
@@ -295,7 +296,7 @@ function Jogador() {
               />
             )}
 
-            {tab === 'servidores' && <Servidores servers={servers} known={player.known} />}
+            {tab === 'servidores' && <Servidores servers={servers} known={player.known} steamId={steamId} />}
 
             {tab === 'vip' && <VipDoJogador steamId={steamId} />}
 
@@ -515,7 +516,92 @@ function ServerHeaderCell({ children, numeric }: { children: ReactNode; numeric?
   );
 }
 
-function Servidores({ servers, known }: { servers: PlayerServer[]; known: boolean }) {
+/**
+ * A equipe daquele jogador, naquele servidor.
+ *
+ * ####  ELA SÓ PERGUNTA A QUEM PODE RESPONDER  ####
+ *
+ * A equipe mora no jogo. Com o servidor parado não há a quem
+ * perguntar, e a célula diz isso — em vez de "sem equipe", que é
+ * outra coisa e seria mentira.
+ *
+ * Uma chamada por servidor ONLINE, uma vez. A ficha de quem jogou em
+ * cinco servidores e todos parados não faz chamada nenhuma.
+ */
+function TeamCell({
+  serverId,
+  steamId,
+  online,
+}: {
+  readonly serverId: string;
+  readonly steamId: string;
+  /** O jogador está dentro deste servidor agora? */
+  readonly online: boolean;
+}) {
+  const [team, setTeam] = useState<Team | null | undefined>(undefined);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+
+    void (async () => {
+      try {
+        const response = await agent.teamOfPlayer(steamId, serverId);
+
+        if (alive) setTeam(response.team);
+      } catch {
+        // 503 do servidor parado, ou o plugin fora. Não é erro da
+        // ficha: é uma pergunta sem resposta possível agora.
+        if (alive) setFailed(true);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [serverId, steamId]);
+
+  if (failed) {
+    return <span className="text-2xs text-muted">servidor não respondeu</span>;
+  }
+
+  if (team === undefined) return <span className="text-2xs text-muted">…</span>;
+  if (team === null) return <span className="text-2xs text-muted">sem equipe</span>;
+
+  const rank = team.members.find((member) => member.steamId === steamId)?.rank ?? 'member';
+
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      <Link
+        href={`/servidor/?id=${encodeURIComponent(serverId)}`}
+        className="text-sm hover:text-rust"
+      >
+        {team.name === '' ? `#${team.teamId}` : team.name}
+      </Link>
+      {rank !== 'member' && (
+        <span
+          className={cn(
+            'border px-1 py-0.5 font-condensed text-2xs uppercase tracking-wide',
+            rank === 'leader' ? 'border-amber text-amber' : 'border-border text-muted',
+          )}
+        >
+          {rank === 'leader' ? 'Líder' : 'Oficial'}
+        </span>
+      )}
+      {!online && <span className="text-2xs text-muted">(offline)</span>}
+    </span>
+  );
+}
+
+function Servidores({
+  servers,
+  known,
+  steamId,
+}: {
+  servers: PlayerServer[];
+  known: boolean;
+  steamId: string;
+}) {
   if (servers.length === 0) {
     return (
       <StateBlock
@@ -539,6 +625,7 @@ function Servidores({ servers, known }: { servers: PlayerServer[]; known: boolea
               <ServerHeaderCell>Servidor</ServerHeaderCell>
               <ServerHeaderCell>Joga aqui desde</ServerHeaderCell>
               <ServerHeaderCell>Última vez</ServerHeaderCell>
+              <ServerHeaderCell>Equipe</ServerHeaderCell>
               <ServerHeaderCell numeric>Sessões</ServerHeaderCell>
               <ServerHeaderCell numeric>Tempo jogado</ServerHeaderCell>
             </tr>
@@ -576,6 +663,10 @@ function Servidores({ servers, known }: { servers: PlayerServer[]; known: boolea
                       )}
                     </>
                   )}
+                </td>
+
+                <td className="px-3 py-2">
+                  <TeamCell serverId={server.serverId} steamId={steamId} online={server.online} />
                 </td>
 
                 <td className="px-3 py-2 text-right">{formatInteger(server.sessions)}</td>

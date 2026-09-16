@@ -132,6 +132,27 @@ function actionCommand(actionId: string): string {
 }
 
 /**
+ * O comando que o CAMPO DE TEXTO manda ao receber Enter.
+ *
+ * ####  O CLIENTE ANEXA O QUE FOI DIGITADO  ####
+ *
+ * Ele roda `<command> <texto>`, e o texto vai CRU: sem aspas, sem
+ * escape. Um nome com espaço chega partido em vários argumentos, e
+ * é o plugin que os remonta — ver `CmdInput` em OrigemZUI.cs.
+ *
+ * Por isso o endereço da ação vem ANTES do texto: o que tem
+ * posição fixa é o começo da linha. Pôr o `actionId` depois seria
+ * procurá-lo num lugar que o jogador escolhe.
+ *
+ * Um comando separado do `origemz.ui.act` porque o `CmdAct` recusa
+ * o que tem argumento a mais — e afrouxá-lo para caber um texto
+ * livre enfraqueceria a validação de TODO clique do menu.
+ */
+function inputCommand(actionId: string): string {
+  return `origemz.ui.input ${SESSION_TOKEN_PLACEHOLDER} ${actionId}`;
+}
+
+/**
  * O texto de um rótulo, seguro para o caminho até o cliente.
  *
  * ####  ASPAS DUPLAS CHEGAM ESCAPADAS NA TELA  ####
@@ -334,6 +355,40 @@ function emitElement(
         parent: parentName,
         components: [
           { ...base, color: cuiColor(element.color), ...fade } as CuiComponent,
+          rectTransform(element),
+        ],
+      });
+      break;
+    }
+
+    case 'input': {
+      output.push({
+        name,
+        parent: parentName,
+        components: [
+          {
+            type: 'UnityEngine.UI.InputField',
+            text: cuiText(element.text),
+            fontSize: element.fontSize,
+            font: element.font,
+            align: element.align,
+            color: cuiColor(element.color),
+            characterLimit: element.charLimit,
+            // O comando leva o endereço da ação, como o do botão —
+            // e o CLIENTE anexa o que foi digitado no fim dele.
+            // Ver `inputCommand`.
+            command: inputCommand(element.action.id),
+            // ####  SEM ISTO O CAMPO NÃO ACEITA TECLA  ####
+            //
+            // O jogo está com o teclado preso ao personagem: andar,
+            // agachar, recarregar. `needsKeyboard` é o que diz ao
+            // cliente para soltá-lo enquanto o campo tem o foco.
+            // Sem ele o campo aparece, aceita o clique, pisca o
+            // cursor — e não escreve nada. Não é opção de desenho:
+            // é o que faz um campo de texto ser um campo de texto.
+            needsKeyboard: true,
+            ...fade,
+          },
           rectTransform(element),
         ],
       });
@@ -550,6 +605,78 @@ export function screenUpdatesToCui(
 }
 
 // ------------------------------------------------------------
+//  A TABELA DE DESTAQUE — a versão barata do que está acima
+//
+//  ####  O `updates` CUSTAVA 4.795 BYTES NA CARGA INICIAL  ####
+//
+//  MEDIDO em 15/09/2026: onze botões de navegação × dois elementos
+//  CUI cada, com `command`, `text`, `fontSize`, `font` e `align`
+//  repetidos em todos — para dizer UMA coisa, que é qual deles está
+//  aceso. E o mesmo bloco viajava de novo em CADA tela servida.
+//
+//  A conta ficou visível quando a aba EQUIPE não coube: a carga
+//  estava em 47.668 de 50.000, e o teto é o do frame do RCON — um
+//  menu que passa dele não chega ao jogo.
+//
+//  Aqui vai só o que MUDA: o id, a tela que acende cada botão, e as
+//  duas cores do estado aceso. As cores do estado normal o plugin
+//  já tem — elas estão no shell que ele desenhou. Ver `NavStates`
+//  em OrigemZUI.cs.
+//
+//  A tabela viaja UMA vez, no documento; cada tela manda só o
+//  endereço que conta como "você está aqui".
+// ------------------------------------------------------------
+
+/** Um botão de navegação e as cores de quando ele está aceso. */
+export interface NavState {
+  /** O id do elemento, sem o prefixo da raiz. */
+  readonly id: string;
+  /** A tela que o acende. */
+  readonly on: string;
+  /** A cor do botão aceso, no formato do CUI. */
+  readonly color: string;
+  /** A cor do texto do botão aceso. */
+  readonly textColor: string;
+}
+
+/**
+ * Os botões do shell que acendem, e com que cor.
+ *
+ * Só entram os que têm `activeColor` E `activeOnScreenId`: um botão
+ * sem endereço de destaque nunca acende, e mandá-lo aqui seria
+ * mandar uma linha que o plugin descartaria.
+ */
+export function shellNavStates(document: UiDocument): readonly NavState[] {
+  const output: NavState[] = [];
+
+  const visit = (elements: readonly UiElement[]): void => {
+    for (const element of elements) {
+      if (
+        element.type === 'button' &&
+        element.activeColor !== null &&
+        element.activeOnScreenId !== null
+      ) {
+        output.push({
+          id: element.id,
+          on: element.activeOnScreenId,
+          color: cuiColor(element.activeColor),
+          // Sem cor ativa de texto, ele fica com a de sempre — e
+          // mandá-la aqui é o que faz o plugin não precisar
+          // procurar o caso especial.
+          textColor: cuiColor(element.activeTextColor ?? element.textColor),
+        });
+      }
+
+      visit(element.children);
+    }
+  };
+
+  visit(document.shell);
+
+  return output;
+}
+
+// ------------------------------------------------------------
 //  OS ROTULOS DO CABEÇALHO — saldo e VIP
 //
 //  ####  ELES SÃO TROCADOS NO LUGAR, E NÃO REDESENHADOS  ####
@@ -703,6 +830,21 @@ export function collectScreenActions(
 
   const visit = (elements: readonly UiElement[]): void => {
     for (const element of elements) {
+      // ####  O CAMPO DE TEXTO ENTRA PELA MESMA PORTA  ####
+      //
+      // A ação dele precisa estar nesta lista pelo mesmo motivo que
+      // a do botão: o plugin recusa o que não está NA TELA de agora
+      // (ver `FindAction`). Sem isto o Enter seria engolido em
+      // silêncio — e o sintoma seria um campo que aceita o texto e
+      // não faz nada.
+      if (element.type === 'input') {
+        actions[element.action.id] = {
+          kind: 'store.buy',
+          offerId: element.action.offerId,
+          quantity: element.action.quantity,
+        };
+      }
+
       if (element.type === 'button') {
         const action = element.action;
 
