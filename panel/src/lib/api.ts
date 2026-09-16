@@ -5966,6 +5966,17 @@ export const agent = {
       method: 'DELETE',
     }),
 
+  kothSettings: (serverId: string) =>
+    api<{ settings: { maxConcurrent: number }; live: number }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/settings`,
+    ),
+
+  saveKothSettings: (serverId: string, maxConcurrent: number) =>
+    api<{ settings: { maxConcurrent: number } }>(
+      `/api/servers/${encodeURIComponent(serverId)}/koth/settings`,
+      { method: 'PUT', body: { maxConcurrent } },
+    ),
+
   kothStatus: (serverId: string) =>
     api<{ status: KothStatus }>(`/api/servers/${encodeURIComponent(serverId)}/koth/status`),
 
@@ -5975,8 +5986,12 @@ export const agent = {
       { method: 'POST', body: arenaId === undefined ? {} : { arenaId } },
     ),
 
-  stopKoth: (serverId: string) =>
-    api(`/api/servers/${encodeURIComponent(serverId)}/koth/stop`, { method: 'POST' }),
+  /** Sem `runId`, derruba TODOS os daquele servidor. */
+  stopKoth: (serverId: string, runId?: number) =>
+    api(`/api/servers/${encodeURIComponent(serverId)}/koth/stop`, {
+      method: 'POST',
+      body: runId === undefined ? {} : { runId },
+    }),
 
   teamSettings: (serverId: string) =>
     api<{ settings: { maxSize: number }; live: number | null }>(
@@ -6336,16 +6351,32 @@ export interface KothArena extends KothArenaInput {
   updatedAt: number;
 }
 
+/** Um território de pé: o card de uma vaga. */
+export interface KothLiveEvent {
+  runId: string;
+  name: string;
+  grid: string;
+  x: number;
+  z: number;
+  radius: number;
+  percent: number;
+  progress: number;
+  captureSeconds: number;
+  /** `"0"` = ninguém está capturando agora. */
+  holder: string;
+  holderName: string;
+  /** Dois ou mais lados dentro: ninguém avança. */
+  contested: boolean;
+  elapsed: number;
+  durationSeconds: number;
+  inside: number;
+}
+
 /** O que o plugin responde quando se pergunta o estado. */
 export interface KothStatus {
   active: boolean;
-  runId?: string;
-  name?: string;
-  grid?: string;
-  percent?: number;
-  holderName?: string;
-  elapsed?: number;
-  inside?: number;
+  count?: number;
+  events?: KothLiveEvent[];
 }
 
 /**

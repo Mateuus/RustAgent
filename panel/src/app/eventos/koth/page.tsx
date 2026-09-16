@@ -5,8 +5,13 @@
 //
 //  ####  DUAS ABAS, E A PRIMEIRA JÁ FUNCIONA  ####
 //
+//    Ao vivo       as vagas, e o que está de pé agora
 //    Territórios   onde o KOTH pode acontecer, marcados no mapa
 //    O que falta   as frentes que ainda não existem, na ordem
+//
+//  "Ao vivo" vem primeiro porque é a pergunta que se faz com mais
+//  frequência — "tem KOTH acontecendo?" —, e cadastrar território é
+//  coisa que se faz uma vez.
 //
 //  A segunda aba não é enfeite: metade desta família ainda não foi
 //  escrita, e uma tela que escondesse isso faria o admin cadastrar
@@ -30,6 +35,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { ArenasPanel } from '@/components/koth/arenas-panel';
+import { LivePanel } from '@/components/koth/live-panel';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
@@ -86,8 +92,8 @@ const FRENTES: readonly Frente[] = [
   {
     title: 'A agenda própria',
     detail:
-      'Hoje o KOTH nasce pelo botão. Para nascer sozinho ele precisa entrar no relógio do agente, que por enquanto só sabe erguer masmorra.',
-    done: false,
+      'O KOTH tem relógio: ele sorteia um território ligado e ergue sozinho, respeitando as VAGAS do servidor e adiando enquanto houver masmorra de pé.',
+    done: true,
   },
   {
     title: 'Recompensas e entrega',
@@ -104,7 +110,7 @@ const FRENTES: readonly Frente[] = [
 ];
 
 function Koth() {
-  const [tab, setTab] = useState<'territorios' | 'falta'>('territorios');
+  const [tab, setTab] = useState<'live' | 'territorios' | 'falta'>('live');
   const [servers, setServers] = useState<readonly { id: string; name: string }[] | null>(null);
   const [serverId, setServerId] = useState('');
 
@@ -168,6 +174,9 @@ function Koth() {
 
       <div className="mt-4 border-b border-border">
         <div className="flex">
+          <TabButton active={tab === 'live'} onClick={() => setTab('live')}>
+            Ao vivo
+          </TabButton>
           <TabButton active={tab === 'territorios'} onClick={() => setTab('territorios')}>
             Territórios
           </TabButton>
@@ -178,7 +187,9 @@ function Koth() {
       </div>
 
       <div className="mt-4">
-        {tab === 'territorios' &&
+        {/* As duas primeiras abas são de um servidor; a guarda é a
+            mesma, e escrevê-la duas vezes faria uma delas envelhecer. */}
+        {tab !== 'falta' &&
           (servers === null ? (
             <StateBlock variant="loading" title="Lendo os servidores…" />
           ) : current === '' ? (
@@ -187,6 +198,8 @@ function Koth() {
               title="Nenhum servidor cadastrado"
               detail="Um território é um lugar no mapa, e um mapa é de um servidor."
             />
+          ) : tab === 'live' ? (
+            <LivePanel key={current} serverId={current} />
           ) : (
             <ArenasPanel key={current} serverId={current} />
           ))}
