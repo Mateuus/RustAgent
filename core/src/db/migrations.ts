@@ -7662,6 +7662,118 @@ CREATE TABLE koth_deliveries (
 CREATE INDEX idx_koth_deliveries_run ON koth_deliveries(run_id);
 `;
 
+const WORKSHOP_SKINS_SCHEMA = `
+-- ============================================================
+--  095  as skins do Steam Workshop que o servidor aplica sozinho.
+--
+--  ####  ELA E UM ITEM DO JOGO COM OUTRA APARENCIA  ####
+--
+--  E o que a separa do custom_items (041). La o item e NOSSO: tem
+--  nome, icone, descricao e acao propria, e metade daqueles campos
+--  ficaria vazia aqui para sempre. Aqui o item e o DO JOGO -- a
+--  pedra continua sendo pedra, com o numero de uma arte publicada
+--  por nos na oficina carimbado nela.
+--
+--  Duas tabelas, entao, e nao colunas novas na 041. Ver o §5 do
+--  Docs/OrigemZWorkshop/00-LEVANTAMENTO.md, que pos os dois lados
+--  do argumento; este e o lado escolhido.
+--
+--  ####  O CATALOGO E DA REDE, SEM server_id  ####
+--
+--  Decisao do dono em 16/09/2026: um catalogo so para todos os
+--  servidores. Nao e a primeira tabela global do agente -- items
+--  (007) e custom_items (041) tambem sao --, e o padrao vem
+--  inteiro: catalogo global mais tabela de juncao dizendo onde
+--  cada linha vale.
+--
+--  A consequencia a nao esquecer: esta tabela NAO referencia
+--  servers(id). Apagar um servidor nao pode apagar a skin do
+--  catalogo; quem cai na cascata e a juncao.
+--
+--  ####  A MARCA NUNCA E ZERO  ####
+--
+--  Copiado do custom_items, e pelo mesmo motivo medido: skin 0 e
+--  indistinguivel de item comum, e num item SEM skins ela derruba
+--  o jogador pelo caminho do CUI. O CHECK pega o caminho que
+--  esquecer de validar.
+--
+--  skin_id e TEXT porque e um UInt64 na rede: ele nao cabe no
+--  inteiro com sinal do SQLite, e como numero do JS voltaria
+--  arredondado -- uma skin que nao existe, e o jogo nao reclama:
+--  desenha o item vanilla e segue.
+--
+--  ####  A PERMISSAO E DA LINHA, E E UNICA  ####
+--
+--  Uma permissao por skin (decisao do dono, mesmo dia), no formato
+--  origemzworkshop.<algo>. Duas linhas com a mesma permissao
+--  fariam o admin dar uma e entregar duas -- e o plugin registra o
+--  que desce, sem criterio para escolher.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num
+--  template literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE workshop_skins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- "Pedra OrigemZ". E por ele que o admin escolhe na tela: o
+  -- numero da oficina nao diz nada a ninguem.
+  label TEXT NOT NULL,
+
+  -- O item do jogo que recebe a marca. SEM REFERENCES items: a
+  -- tabela de itens e um ESPELHO, preenchido por varredura, e uma
+  -- instalacao nova ainda nao varreu nada. Quem confere que o
+  -- shortname existe e a rota, que tem o catalogo na mao e sabe
+  -- dizer isso numa frase.
+  shortname TEXT NOT NULL,
+
+  -- O id publicado no Steam Workshop. Ver o cabecalho.
+  skin_id TEXT NOT NULL CHECK (skin_id <> '0' AND skin_id <> ''),
+
+  -- A permissao do Oxide. Ver o cabecalho.
+  permission TEXT NOT NULL CHECK (permission <> ''),
+
+  -- 1 = o item nasce SEM a skin na mao de quem esta em modo
+  -- streamer escondendo a logo. A protecao e do PORTADOR, e nao do
+  -- espectador: o skinID viaja no item, e nao ha como mostrar a
+  -- mesma pedra com logo para um e sem logo para outro.
+  hide_in_streamer INTEGER NOT NULL DEFAULT 1 CHECK (hide_in_streamer IN (0, 1)),
+
+  -- Desligada NAO e apagada: ela sai do push e o item volta a
+  -- nascer vanilla, mas a marca continua cadastrada.
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Duas linhas com a mesma marca deixariam o plugin sem criterio
+-- para escolher qual das duas ele esta aplicando.
+CREATE UNIQUE INDEX idx_workshop_skins_mark ON workshop_skins (shortname, skin_id);
+
+CREATE UNIQUE INDEX idx_workshop_skins_permission ON workshop_skins (permission);
+
+-- Em quais servidores esta skin vale. Copia do custom_item_servers
+-- (041), inclusive o indice: a chave primaria comeca pela skin, e a
+-- pergunta da tela do servidor e a OUTRA -- "quais skins este
+-- servidor tem?" --, que sem o indice varreria a tabela.
+--
+-- A COLUNA CHAMA workshop_skin_id, E NAO skin_id: skin_id ja e o
+-- numero da oficina no catalogo, e duas colunas com o mesmo nome e
+-- significados diferentes e o tipo de coisa que passa na revisao e
+-- queima no JOIN.
+--
+-- Sem linha nenhuma = em nenhum servidor. Uma skin recem-cadastrada
+-- que ja valesse em tudo entraria em producao sem ninguem mandar.
+CREATE TABLE workshop_skin_servers (
+  workshop_skin_id INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (workshop_skin_id, server_id)
+);
+
+CREATE INDEX idx_workshop_skin_servers_server ON workshop_skin_servers (server_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -7915,6 +8027,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { id: 92, name: 'koth-settings', sql: KOTH_SETTINGS_SCHEMA },
   { id: 93, name: 'run-outcome', sql: RUN_OUTCOME_SCHEMA },
   { id: 94, name: 'koth-deliveries', sql: KOTH_DELIVERIES_SCHEMA },
+  // 16/09/2026: as skins do Steam Workshop que o item ja traz de
+  // nascenca -- catalogo da rede, e uma permissao por skin.
+  { id: 95, name: 'workshop-skins', sql: WORKSHOP_SKINS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

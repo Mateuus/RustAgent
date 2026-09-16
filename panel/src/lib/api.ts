@@ -6077,6 +6077,67 @@ export const agent = {
     api<{ pendingCommand: string }>(`/api/world-events/runs/${String(runId)}/stop`, {
       method: 'POST',
     }),
+
+  // ####  AS SKINS DO WORKSHOP  ####
+  //
+  // O catálogo é da REDE: não há `serverId` em nenhuma das seis
+  // primeiras. O que é por servidor é só EM QUAIS SERVIDORES cada
+  // skin vale, e isso viaja no corpo (`servers`).
+  //
+  // As seis primeiras respondem com todos os servidores parados —
+  // cadastrar é trabalho de madrugada. As duas últimas perguntam ao
+  // jogo, e com ele fora do ar devolvem 503.
+  //
+  // ####  O `:skinId` DA URL É O NOSSO id  ####
+  //
+  // E não o número da oficina. São dois números diferentes: este é a
+  // chave da linha (1, 2, 3); o do Workshop é um UInt64 de vinte
+  // dígitos que viaja como TEXTO, dentro do corpo, e nunca como
+  // `number`.
+  workshopSkins: () =>
+    api<{ ok: true; count: number; skins: WorkshopSkin[] }>('/api/workshop/skins'),
+
+  workshopSkin: (id: number) =>
+    api<{ ok: true; skin: WorkshopSkin }>(`/api/workshop/skins/${String(id)}`),
+
+  createWorkshopSkin: (body: WorkshopSkinInput) =>
+    api<{ ok: true; skin: WorkshopSkin }>('/api/workshop/skins', { method: 'POST', body }),
+
+  updateWorkshopSkin: (id: number, body: WorkshopSkinInput) =>
+    api<{ ok: true; skin: WorkshopSkin }>(`/api/workshop/skins/${String(id)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  /**
+   * Troca SÓ a lista de servidores.
+   *
+   * Existe para a tela marcar e desmarcar um servidor sem ter o
+   * cadastro inteiro na mão: mandar o formulário de volta para mexer
+   * numa caixa de seleção é como se apaga o que outra pessoa salvou
+   * no meio.
+   */
+  setWorkshopSkinServers: (id: number, servers: readonly string[]) =>
+    api<{ ok: true; servers: string[] }>(`/api/workshop/skins/${String(id)}/servers`, {
+      method: 'PUT',
+      body: { servers },
+    }),
+
+  removeWorkshopSkin: (id: number) =>
+    api<{ ok: true }>(`/api/workshop/skins/${String(id)}`, { method: 'DELETE' }),
+
+  /** O que o plugin tem de pé naquele servidor AGORA. 503 com ele parado. */
+  workshopStatus: (serverId: string) =>
+    api<{ ok: true; status: WorkshopStatus; applied: number | null }>(
+      `/api/servers/${encodeURIComponent(serverId)}/workshop/status`,
+    ),
+
+  /** Manda o catálogo agora, forçado — ignora o dedup de propósito. */
+  syncWorkshop: (serverId: string) =>
+    api<{ ok: true; outcome: string }>(
+      `/api/servers/${encodeURIComponent(serverId)}/workshop/sync`,
+      { method: 'POST' },
+    ),
 };
 
 // ------------------------------------------------------------
@@ -7474,4 +7535,75 @@ export interface SiteStatus {
     unprovable: number;
     refundRejected: number;
   };
+}
+
+// ------------------------------------------------------------
+//  AS SKINS DO WORKSHOP — os tipos
+//
+//  Espelha core/src/types/workshop.ts. As duas pontas são
+//  compiladas separadamente: um campo que o agente renomear vira
+//  TypeError no render e derruba a página inteira com "This page
+//  couldn't load". É por isso que a tela lê todo campo com um
+//  padrão pronto em vez de confiar que ele veio.
+//
+//  ####  `skinId` É TEXTO, E NÃO É PREGUIÇA  ####
+//
+//  Ele é o UInt64 do jogo — vinte dígitos. Não cabe no `number` do
+//  JS sem perder precisão, e o arredondamento é SILENCIOSO: daria
+//  uma skin que não existe, e o jogo não reclama, desenha o item
+//  vanilla e segue. Em lugar nenhum desta tela ele vira número.
+// ------------------------------------------------------------
+
+/**
+ * Uma entrada do catálogo, como o formulário a monta.
+ *
+ * Espelha `workshopSkinBodySchema` — a versão de borda do
+ * contrato, com a permissão OPCIONAL.
+ */
+export interface WorkshopSkinInput {
+  /** "Pedra OrigemZ". É por ele que o admin acha a skin na tela. */
+  label: string;
+  /** O item do jogo que recebe a aparência: `rock`, `stones`. */
+  shortname: string;
+  /** O id publicado no Steam Workshop. Texto, sempre. */
+  skinId: string;
+  /**
+   * A permissão do Oxide.
+   *
+   * Omitida ou vazia, o AGENTE a tira do nome: "Pedra OrigemZ" vira
+   * `origemzworkshop.pedra-origemz`. A tela só mostra a prévia.
+   */
+  permission?: string;
+  /** O item nasce SEM a skin na mão de quem está em modo streamer. */
+  hideInStreamer: boolean;
+  /** Desligada sai do push sem perder a marca. Não é apagada. */
+  enabled: boolean;
+  /** Em que servidores ela vale. Vazio = em nenhum. */
+  servers: string[];
+}
+
+/** A mesma entrada, como o agente a devolve. Datas em ISO. */
+export interface WorkshopSkin {
+  id: number;
+  label: string;
+  shortname: string;
+  skinId: string;
+  /** Já normalizada pelo agente, sempre com o prefixo da feature. */
+  permission: string;
+  hideInStreamer: boolean;
+  enabled: boolean;
+  servers: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * `GET /servers/:id/workshop/status` — o que o PLUGIN tem agora.
+ *
+ * `skins` é quantas ele está aplicando; `streamers` é quantos
+ * jogadores ele sabe estarem escondendo a logo neste instante.
+ */
+export interface WorkshopStatus {
+  skins: number;
+  streamers: number;
 }

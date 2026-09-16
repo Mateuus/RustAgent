@@ -82,6 +82,8 @@ import {
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
+import { WorkshopSkinsRepository } from './db/workshop-repository.js';
+import { WorkshopService } from './game/workshop.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
@@ -327,6 +329,10 @@ async function main(): Promise<void> {
   // e o gancho de console (que trata o `/streamer` do jogador)
   // precisa dele.
   let streamerSync: StreamerSync | null = null;
+  // O catalogo de skins do Workshop. Construido la embaixo, junto
+  // do modo streamer -- e o gancho de console precisa dele aqui em
+  // cima.
+  let workshopService: WorkshopService | null = null;
   // Os dois da fase de VIP e kits, pela MESMA razão dos de cima:
   // eles precisam do supervisor, e o gancho de reconexão precisa
   // deles. Ver o bloco de montagem, mais abaixo.
@@ -440,6 +446,10 @@ async function main(): Promise<void> {
       // nasce sem saber quem está em live, e o overlay voltaria à
       // tela de quem está transmitindo agora.
       streamerSync?.handleRconConnected(serverId);
+      // E o catalogo do Workshop, pelo mesmo motivo: o plugin nasce
+      // sem skin nenhuma, e todo item nasceria vanilla ate alguem
+      // editar a tela.
+      workshopService?.handleRconConnected(serverId);
 
       // ####  E O VIP E OS KITS PELO MESMO MOTIVO — MAIS UM  ####
       //
@@ -577,6 +587,14 @@ async function main(): Promise<void> {
       // deste gancho é o laço descrito lá em cima. Ver
       // game/streamer-sync.ts.
       streamerSync?.handleLine(serverId, line);
+      // E o `#OZWORKSHOP#`: o plugin de skins pedindo o catalogo
+      // depois de um reload, ou confirmando o que aplicou. Ele
+      // tambem ouve o `#OZSTREAMER#` da linha de cima -- a lista de
+      // quem esconde a logo viaja dentro do proprio catalogo, e ela
+      // mudou quando alguem digitou `/streamer`. Recusa na primeira
+      // comparacao de string, e o comando sai de um relogio: falar
+      // de dentro deste gancho e o laco descrito la em cima.
+      workshopService?.handleLine(serverId, line);
     },
     // Ver o comentário do `let wipeRunner`, logo acima.
     wipeRunner: {
@@ -1446,6 +1464,10 @@ async function main(): Promise<void> {
   // O modo streamer. Da REDE, e não de um servidor: quem transmite
   // é a pessoa. Ver types/streamer.ts.
   const streamerRepository = new StreamerRepository(db);
+  // O catalogo de skins do Steam Workshop. Global, como os itens
+  // custom: uma skin vale na rede toda, e a juncao diz em que
+  // servidores ela desce. Ver db/workshop-repository.ts.
+  const workshopSkins = new WorkshopSkinsRepository(db);
 
   /**
    * Quem pediu silêncio no chat enquanto transmite.
@@ -2268,6 +2290,26 @@ async function main(): Promise<void> {
   });
 
   streamerSync.pushAllSoon('startup');
+
+  // ####  O CATALOGO DE SKINS DO WORKSHOP  ####
+  //
+  // Ele nasce ao lado do modo streamer porque le a mesma base: a
+  // lista de quem esconde a logo viaja dentro do proprio catalogo,
+  // para o OrigemZWorkshop nao ter uma segunda copia dela.
+  workshopService = new WorkshopService({
+    skins: workshopSkins,
+    streamers: streamerRepository,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      contextOf: (serverId) => supervisor.contextOf(serverId),
+    },
+    logger,
+  });
+
+  // No boot o envio e FORCADO: um agente que subiu agora nao sabe
+  // o que cada plugin tem, e o dedup diria "nao mudou nada" para
+  // todos. Quem estiver sem RCON e pulado e reenviado na conexao.
+  void workshopService.syncAll('startup');
 
   void loadoutSync.pushAll('boot');
   // Os itens custom sobem no boot pelo mesmo motivo dos loadouts:
@@ -3984,6 +4026,12 @@ async function main(): Promise<void> {
       settings: kothSettings,
       servers: repository,
       koth: kothService,
+    },
+    workshop: {
+      repository: workshopSkins,
+      items: itemsRepository,
+      servers: repository,
+      ...(workshopService === null ? {} : { workshop: workshopService }),
     },
     worldEvents: {
       events: worldEventsRepository,
