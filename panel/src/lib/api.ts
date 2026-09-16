@@ -6729,6 +6729,18 @@ export interface EventRun {
   scheduledFor: number | null;
   startedAt: number | null;
   endedAt: number | null;
+  /**
+   * COMO a run acabou — e não que acabou, que é o `status`.
+   *
+   * Ausente numa masmorra é o certo: ela fecha e não tem vencedor.
+   * Ausente numa run de KOTH velha também: o desfecho só passou a
+   * ser gravado na migração 093.
+   */
+  outcome?: 'captured' | 'expired' | 'stopped' | null;
+  /** O nome que a equipe tinha NAQUELE dia. */
+  winnerName?: string | null;
+  /** O teamID, como texto: ele passa de 2^53. */
+  winnerId?: string | null;
 }
 
 // ------------------------------------------------------------

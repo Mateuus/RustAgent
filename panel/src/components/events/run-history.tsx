@@ -22,7 +22,7 @@
 //  duas perguntas: o que não nasceu, e de que tipo era.
 // ============================================================
 
-import { MapPin, TriangleAlert, Users } from 'lucide-react';
+import { MapPin, Trophy, TriangleAlert, Users } from 'lucide-react';
 
 import { StateBlock } from '@/components/state-block';
 import type { EventRun, RunStatus, WorldEvent } from '@/lib/api';
@@ -110,6 +110,27 @@ export function RunHistory({ runs, error, events = [] }: RunHistoryProps) {
                   <span className="font-mono">{run.serverId}</span>
                   <span>{formatWhen(run.startedAt)}</span>
                 </p>
+
+                {/* ####  QUEM LEVOU  ####
+
+                    O anúncio some do chat em cinco linhas; esta é a
+                    resposta de dias depois. Sem vencedor não há
+                    linha nenhuma: "levou: —" é pior que o silêncio. */}
+                {run.outcome === 'captured' && (
+                  <p className="mt-1 flex items-center gap-1 text-2xs">
+                    <Trophy aria-hidden="true" className="h-3 w-3 shrink-0 text-olive" />
+                    <span className="text-muted">levou</span>
+                    <strong className="min-w-0 truncate text-foreground">
+                      {/* Equipe sem nome no dia: o id é o que sobrou,
+                          e ele é melhor que "—". */}
+                      {run.winnerName ?? run.winnerId ?? 'uma equipe'}
+                    </strong>
+                  </p>
+                )}
+
+                {run.outcome === 'expired' && (
+                  <p className="mt-1 text-2xs text-muted">Ninguém dominou a tempo.</p>
+                )}
 
                 {/* A frase vem do agente inteira: ela conhece o
                     motivo, esta tela só sabe que houve um. */}

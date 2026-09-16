@@ -61,7 +61,10 @@ export const EVENT_FAMILIES: readonly EventFamily[] = [
     href: '/eventos/koth/',
     hint: 'Um território no mapa aberto: quem fica dentro dele o bastante, e defende, leva o prêmio',
     Icon: Flag,
-    ready: false,
+    // O relógio do KOTH existe desde as VAGAS: ele sorteia um
+    // território ligado, respeita o máximo do servidor e adia
+    // enquanto houver masmorra de pé.
+    ready: true,
   },
 ];
 
