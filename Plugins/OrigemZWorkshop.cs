@@ -3633,6 +3633,9 @@ namespace Oxide.Plugins
         /// <summary>A faixa da direita que a barra de rolagem ocupa, fora das células.</summary>
         private const float ScrollGutter = 16f;
 
+        /// <summary>A folga no topo e no pé do conteúdo rolável, do tamanho da borda de seleção.</summary>
+        private const float ScrollInset = 2f;
+
         /// <summary>A largura das quatro colunas de células, sem margem.</summary>
         private static readonly float CellsWidth = GridColumns * CellWidth + (GridColumns - 1) * CellGap;
         private const float RightWidth = 430f;
@@ -4108,8 +4111,12 @@ namespace Oxide.Plugins
                 float viewportHeight = viewportBottom - GridPad;
                 float viewportWidth = GridWidth - 2 * GridPad;
                 int rows = (view.Cells.Count + GridColumns - 1) / GridColumns;
+                // ScrollInset em cima e embaixo: a área rolável recorta o que
+                // passa da borda, e a borda de seleção (2 px) da primeira linha
+                // sumia (visto no jogo em 17/09/2026).
                 float contentHeight = Math.Max(viewportHeight,
-                                               rows * CellHeight + Math.Max(0, rows - 1) * CellGap + 4f);
+                                               rows * CellHeight + Math.Max(0, rows - 1) * CellGap +
+                                               2 * ScrollInset);
 
                 Box content = ScrollArea(canvas, grid, GridPad, GridPad, viewportWidth, viewportHeight,
                                          contentHeight, false);
@@ -4120,7 +4127,7 @@ namespace Oxide.Plugins
                 for (int i = 0; i < view.Cells.Count; i++)
                 {
                     float cx = left + (i % GridColumns) * (CellWidth + CellGap);
-                    float cy = (i / GridColumns) * (CellHeight + CellGap);
+                    float cy = ScrollInset + (i / GridColumns) * (CellHeight + CellGap);
                     GridCellBox(canvas, content, cx, cy, view.Cells[i], view.Token);
                 }
 
