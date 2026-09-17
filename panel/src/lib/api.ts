@@ -6123,7 +6123,7 @@ export const agent = {
 
   // ####  AS SKINS DO WORKSHOP  ####
   //
-  // Skins, coleções, acessos e registro são da REDE: não há
+  // Skins, posse e registro são da REDE: não há
   // `serverId` em nenhuma dessas rotas. O que é por servidor é só EM
   // QUAIS SERVIDORES cada skin vale, e isso viaja no corpo
   // (`servers`).
@@ -6200,83 +6200,59 @@ export const agent = {
     );
   },
 
-  // ---- Coleções: `/skin <slug>` -----------------------------
-
-  workshopCollections: () =>
-    api<{ ok: true; count: number; collections: WorkshopCollection[] }>(
-      '/api/workshop/collections',
-    ),
-
-  workshopCollection: (id: number) =>
-    api<{ ok: true; collection: WorkshopCollection; skins: WorkshopSkin[] }>(
-      `/api/workshop/collections/${String(id)}`,
-    ),
-
-  createWorkshopCollection: (body: WorkshopCollectionInput) =>
-    api<{ ok: true; collection: WorkshopCollection }>('/api/workshop/collections', {
-      method: 'POST',
-      body,
-    }),
-
-  updateWorkshopCollection: (id: number, body: WorkshopCollectionInput) =>
-    api<{ ok: true; collection: WorkshopCollection }>(
-      `/api/workshop/collections/${String(id)}`,
-      { method: 'PUT', body },
-    ),
+  // ---- Posse: quem tem qual skin ----------------------------
+  //
+  // `skinId` aqui é o NOSSO id (o mesmo do `:skinId` das rotas de
+  // skin). O do Workshop, quando aparece junto, chama `workshopId`.
 
   /**
-   * Troca de uma vez QUAIS skins formam a coleção.
-   *
-   * Uma skin por item, e uma coleção por skin: escolher aqui uma
-   * skin que está em outra coleção a MOVE para esta.
+   * Quem tem o quê. Uma das duas chaves é obrigatória (sem nenhuma, o
+   * agente responde 400). Mais novo primeiro; a próxima página é
+   * `cursor` = `nextCursor` desta.
    */
-  setWorkshopCollectionSkins: (id: number, skinIds: readonly number[]) =>
-    api<{ ok: true; skins: WorkshopSkin[] }>(`/api/workshop/collections/${String(id)}/skins`, {
-      method: 'PUT',
-      body: { skinIds },
-    }),
-
-  /** As skins ficam no catálogo, avulsas. */
-  removeWorkshopCollection: (id: number) =>
-    api<{ ok: true }>(`/api/workshop/collections/${String(id)}`, { method: 'DELETE' }),
-
-  // ---- Acessos: quem pode usar o quê ------------------------
-
-  workshopGrants: (
-    filter: {
-      subjectType?: WorkshopGrantSubjectType;
-      subject?: string;
-      targetType?: WorkshopGrantTargetType;
-      targetId?: number;
-      includeExpired?: boolean;
-    } = {},
-  ) => {
+  workshopOwned: (filter: {
+    steamId?: string;
+    skinId?: number;
+    cursor?: number;
+    limit?: number;
+    includeExpired?: boolean;
+  }) => {
     const params = new URLSearchParams();
 
-    if (filter.subjectType !== undefined) params.set('subjectType', filter.subjectType);
-    if (filter.subject !== undefined && filter.subject.trim() !== '') {
-      params.set('subject', filter.subject.trim());
+    if (filter.steamId !== undefined && filter.steamId.trim() !== '') {
+      params.set('steamId', filter.steamId.trim());
     }
-    if (filter.targetType !== undefined) params.set('targetType', filter.targetType);
-    if (filter.targetId !== undefined) params.set('targetId', String(filter.targetId));
+    if (filter.skinId !== undefined) params.set('skinId', String(filter.skinId));
+    if (filter.cursor !== undefined) params.set('cursor', String(filter.cursor));
+    if (filter.limit !== undefined) params.set('limit', String(filter.limit));
     if (filter.includeExpired !== undefined) {
       params.set('includeExpired', filter.includeExpired ? 'true' : 'false');
     }
 
-    const suffix = params.toString();
-
-    return api<{ ok: true; count: number; grants: WorkshopGrant[] }>(
-      `/api/workshop/grants${suffix === '' ? '' : `?${suffix}`}`,
+    return api<{ ok: true; count: number; owned: WorkshopOwned[]; nextCursor: number | null }>(
+      `/api/workshop/owned?${params.toString()}`,
     );
   },
 
-  /** Liberar de novo o mesmo alvo para a mesma pessoa RENOVA o prazo. */
-  createWorkshopGrant: (body: WorkshopGrantInput) =>
-    api<{ ok: true; grant: WorkshopGrant }>('/api/workshop/grants', { method: 'POST', body }),
+  /**
+   * Dá a skin — ou renova: dar de novo SOMA ao prazo vivo (ou mantém o
+   * permanente). `created` é `false` quando só o prazo mudou.
+   */
+  grantWorkshopOwned: (body: WorkshopOwnedGrantInput) =>
+    api<{ ok: true; created: boolean; owned: WorkshopOwned }>('/api/workshop/owned', {
+      method: 'POST',
+      body,
+    }),
 
-  /** Não despinta o que já foi pintado. */
-  removeWorkshopGrant: (id: number) =>
-    api<{ ok: true }>(`/api/workshop/grants/${String(id)}`, { method: 'DELETE' }),
+  /** Tira a posse. Não despinta o que já foi pintado. */
+  revokeWorkshopOwned: (ownedId: number) =>
+    api<{ ok: true }>(`/api/workshop/owned/${String(ownedId)}`, { method: 'DELETE' }),
+
+  /** A aba Skins da ficha: posse viva e vencida, com a skin resolvida. */
+  playerSkins: (steamId: string) =>
+    api<{ ok: true; steamId: string; live: WorkshopOwned[]; expired: WorkshopOwned[] }>(
+      `/api/players/${encodeURIComponent(steamId)}/skins`,
+    ),
 
   // ---- Registro ---------------------------------------------
 
@@ -8014,13 +7990,15 @@ export interface SiteStatus {
 // ------------------------------------------------------------
 
 //
-//  ####  O JOGADOR ESCOLHE; NADA NASCE PINTADO  ####
+//  ####  A SKIN É POSSE DO JOGADOR  ####
 //
-//  `/skin` abre a caixa virtual; `/skin <coleção>` aplica a coleção
-//  ao que ele veste. Uma skin é liberada por QUALQUER um destes:
-//  "para todos", permissão da skin ou da coleção, acesso individual
-//  (jogador ou grupo) na skin ou na coleção, ou
-//  `origemzworkshop.admin`.
+//  Docs/OrigemZWorkshop/02. Uma skin é liberada por QUALQUER um
+//  destes: "liberada para todos" (skin da casa), uma posse VIVA do
+//  jogador, ou `origemzworkshop.admin`. Coleções, permissão por skin
+//  e acesso por grupo SAÍRAM na migração 097.
+
+/** A cor da borda e o rótulo no menu do jogo. `null` = sem raridade. */
+export type WorkshopRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
 
 /**
  * Uma entrada do catálogo, como o formulário a monta.
@@ -8029,32 +8007,29 @@ export interface SiteStatus {
  */
 export interface WorkshopSkinInput {
   /**
-   * "Máscara OrigemZ". É o que o jogador lê na caixa.
+   * "AK Brasa". É o que o jogador lê no menu.
    *
    * Vazio: no cadastro, o agente usa o título publicado no Workshop;
    * na edição, mantém o nome atual.
    */
   label: string;
-  /** O item do jogo que recebe a aparência: `metal.facemask`. */
+  /** O item do jogo que recebe a aparência: `rifle.ak`. */
   shortname: string;
   /** O id publicado no Steam Workshop. Texto, sempre. */
   skinId: string;
-  /**
-   * Permissão própria, OPCIONAL. Vazia ou `null` = sem permissão
-   * própria (e NÃO "de todo mundo" — quem abre é o `openToAll`).
-   * Várias skins podem compartilhar a mesma.
-   */
-  permission?: string | null;
-  /** A coleção em que ela mora. `null` = avulsa. */
-  collectionId: number | null;
-  /** Qualquer jogador pode aplicar, sem permissão nem acesso. */
+  /** O texto do painel de detalhe do menu. Até 280. Vazio = `null`. */
+  description: string | null;
+  rarity: WorkshopRarity | null;
+  /** A ordem na grade do menu: menor primeiro; empate pelo nome. */
+  sort: number;
+  /** Skin da casa: qualquer jogador aplica, sem posse. */
   openToAll: boolean;
   /**
    * A skin SAI do item de quem entra no ar escondendo a logo, e
    * VOLTA quando ele sai. A proteção é do portador.
    */
   hideInStreamer: boolean;
-  /** Desligada some da caixa e das coleções. Não é apagada. */
+  /** Desligada some do menu, sem perder o cadastro nem a posse. */
   enabled: boolean;
   /** Em que servidores ela vale. Vazio = em nenhum. */
   servers: string[];
@@ -8068,9 +8043,9 @@ export interface WorkshopSkin {
   label: string;
   shortname: string;
   skinId: string;
-  /** Já normalizada pelo agente. `null` = sem permissão própria. */
-  permission: string | null;
-  collectionId: number | null;
+  description: string | null;
+  rarity: WorkshopRarity | null;
+  sort: number;
   openToAll: boolean;
   hideInStreamer: boolean;
   enabled: boolean;
@@ -8082,78 +8057,84 @@ export interface WorkshopSkin {
   /** O título publicado no Workshop, quando a Steam respondeu. */
   workshopTitle: string | null;
   previewUrl: string | null;
+  /** Quantos jogadores têm posse VIVA dela. Só vem na resposta. */
+  owners: number;
   createdAt: string;
   updatedAt: string;
 }
 
-/** Espelha `workshopCollectionInputSchema`. */
-export interface WorkshopCollectionInput {
-  /** `neve` → `/skin neve`. Até 24 chars `[a-z0-9_-]`. */
-  slug: string;
-  /** "Inverno 2026". É o que o jogador lê na resposta do comando. */
+/**
+ * De onde veio a ÚLTIMA escrita da posse.
+ *
+ *   site       venda ou caixa do site
+ *   panel      a ficha do jogador ou a aba Posse
+ *   game       o `/skin give` de admin
+ *   system     o próprio agente
+ *   migration  a 097, a partir dos acessos antigos
+ */
+export type WorkshopOwnedSource = 'site' | 'panel' | 'game' | 'system' | 'migration';
+
+/** A skin de uma posse, já resolvida pelo agente. */
+export interface WorkshopOwnedSkin {
+  /** O NOSSO id. */
+  id: number;
   label: string;
-  permission?: string | null;
+  shortname: string;
+  /** O do Steam Workshop. Texto. */
+  workshopId: string;
+  description: string | null;
+  rarity: WorkshopRarity | null;
+  previewUrl: string | null;
   openToAll: boolean;
   enabled: boolean;
+  servers: string[];
 }
 
-export interface WorkshopCollection {
+/** Uma posse. Espelha `ownedView` do core. */
+export interface WorkshopOwned {
   id: number;
-  slug: string;
-  label: string;
-  permission: string | null;
-  openToAll: boolean;
-  enabled: boolean;
-  /** Quantas skins do catálogo moram nela. */
-  skinCount: number;
-  createdBy: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type WorkshopGrantSubjectType = 'player' | 'group';
-export type WorkshopGrantTargetType = 'skin' | 'collection';
-
-/** Espelha `workshopGrantBodySchema`. */
-export interface WorkshopGrantInput {
-  subjectType: WorkshopGrantSubjectType;
-  /** SteamID64 (17 dígitos, 7656…) ou nome de grupo do Oxide. */
-  subject: string;
-  targetType: WorkshopGrantTargetType;
-  targetId: number;
-  /** ISO com offset. `null` = permanente. */
-  expiresAt: string | null;
-  note?: string;
-}
-
-export interface WorkshopGrant {
-  id: number;
-  subjectType: WorkshopGrantSubjectType;
-  subject: string;
-  targetType: WorkshopGrantTargetType;
-  targetId: number;
-  /** O nome do alvo, já resolvido pelo agente. */
-  targetLabel: string;
-  /** O item da skin. `null` para coleção (ou skin apagada). */
-  targetShortname: string | null;
+  steamId: string;
+  /** O NOSSO id da skin. */
+  skinId: number;
   /** `null` = permanente. */
   expiresAt: string | null;
   expired: boolean;
-  note: string;
-  createdBy: string | null;
+  source: WorkshopOwnedSource;
+  /** O `DLV-…` da entrega do site; `null` nas outras origens. */
+  sourceRef: string | null;
+  note: string | null;
+  createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** `null` só numa corrida com a skin sendo apagada. */
+  skin: WorkshopOwnedSkin | null;
 }
 
-export type WorkshopAuditSource = 'panel' | 'game' | 'system';
+/**
+ * Espelha `ownedGrantBodySchema`. `days` e `expiresAt` são
+ * exclusivos; sem nenhum dos dois, a posse é permanente.
+ */
+export interface WorkshopOwnedGrantInput {
+  steamId: string;
+  /** O NOSSO id da skin. */
+  skinId: number;
+  /** 1 a 3650. */
+  days?: number | null;
+  /** ISO com offset. */
+  expiresAt?: string | null;
+  /** Até 200. */
+  note?: string | null;
+}
+
+export type WorkshopAuditSource = 'panel' | 'game' | 'system' | 'site';
 
 export interface WorkshopAuditEntry {
   id: number;
   at: string;
-  /** Usuário do painel, `jogo:<steamId>` ou `sistema`. */
+  /** Usuário do painel, `jogo:<steamId>`, `site:<ref>` ou `sistema`. */
   actor: string;
   source: WorkshopAuditSource;
-  /** `skin.create`, `grant.revoke`, `game.add-refused`… */
+  /** `skin.create`, `owned.grant`, `site.delivered`, `migration.097`… */
   action: string;
   target: string;
   serverId: string | null;
@@ -8191,13 +8172,11 @@ export interface WorkshopLookup {
 /**
  * `GET /servers/:id/workshop/status` — o que o PLUGIN tem agora.
  *
- * `streamers` é quantos jogadores ele sabe estarem escondendo a logo
- * neste instante; `openBoxes`, quantas caixas `/skin` estão abertas.
+ * `ownedPlayers` é de quantos jogadores ele tem a posse na memória;
+ * `streamers`, quantos ele sabe estarem escondendo a logo.
  */
 export interface WorkshopStatus {
   skins: number;
-  collections: number;
-  grants: number;
+  ownedPlayers: number;
   streamers: number;
-  openBoxes: number;
 }

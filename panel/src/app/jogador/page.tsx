@@ -30,6 +30,7 @@ import {
   Crown,
   History,
   IdCard,
+  Paintbrush,
   ScrollText,
   Server,
   SlidersHorizontal,
@@ -50,6 +51,7 @@ import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { VipDialog } from '@/components/vip-dialog';
+import { PlayerSkins } from '@/components/workshop/player-skins';
 import {
   agent,
   type Ban,
@@ -72,6 +74,7 @@ type Tab =
   | 'identidade'
   | 'servidores'
   | 'vip'
+  | 'skins'
   | 'carteira'
   | 'missoes'
   | 'configuracoes'
@@ -86,6 +89,10 @@ const TABS = [
   // das abas é a da pergunta: quem é, onde joga, o que tem, e por
   // último o que já aconteceu.
   { key: 'vip', label: 'VIP', Icon: Crown },
+  // As skins também são estado — "ele tem a AK do evento?" — e
+  // chegam pelo mesmo caminho do VIP e da carteira: o site.
+  // Docs/OrigemZWorkshop/02 §9.
+  { key: 'skins', label: 'Skins', Icon: Paintbrush },
   // A carteira ao lado do VIP pelo mesmo motivo: ela é estado. E é
   // aqui que chega quem veio do Discord perguntar "paguei e não
   // recebi" — o saldo, o extrato e as compras na mesma tela.
@@ -299,6 +306,14 @@ function Jogador() {
             {tab === 'servidores' && <Servidores servers={servers} known={player.known} steamId={steamId} />}
 
             {tab === 'vip' && <VipDoJogador steamId={steamId} />}
+
+            {tab === 'skins' && (
+              <PlayerSkins
+                steamId={steamId}
+                // A ficha só tem o id do servidor; o Registro mostra o id.
+                servers={servers.map((server) => ({ id: server.serverId, name: server.serverId }))}
+              />
+            )}
 
             {tab === 'carteira' && <CarteiraDoJogador steamId={steamId} />}
 
