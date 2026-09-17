@@ -472,6 +472,7 @@ namespace Oxide.Plugins
             LoadCache();
             LoadOwned();
             LoadFavorites();
+            StoreIcons();
 
             if (_config.InventoryButton)
             {
@@ -1254,6 +1255,45 @@ namespace Oxide.Plugins
             catch (Exception cause)
             {
                 PrintWarning("Não consegui gravar a cópia da posse: " + cause.Message);
+            }
+        }
+
+        // ####  OS ÍCONES DO MENU MORAM AQUI, EM PNG  ####
+        //
+        // Nenhum sprite do jogo foi confirmado no servidor (os bundles são
+        // compactados), e um caminho errado vira um quadrado branco. Estes
+        // são nossos: 64x64, brancos sobre transparente, tingidos pelo CUI.
+        // Vão para o FileStorage no boot, e o CUI os pede pelo CRC. O
+        // FileStorage indexa por conteúdo: gravar de novo os mesmos bytes
+        // devolve o mesmo CRC.
+        private static readonly Dictionary<string, string> IconPng = new Dictionary<string, string>
+        {
+            { "list", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAACCElEQVR42u2YsYrVUBCGv0mujXKFLRYEwU7Ex/AJtLBY2UIb7cQnsLPSFxBfQCwVhAUry622XsTSwk6w0t3kt5mjIXs3JO7dG5H/g3DPTXImc+ZM5pz8YIwxxhgzEkkhKf6X8cSEgddAGxFa9X+gXzXlOeucq4ho1zbrnfZWDmpSv5mytTpzBkiqIqKVtAM8Bm4AX4HXwAvgJ0A/EyRFREjSTeDKDJl9GBFfiv9/G8E6f59qNe8l1f1IS6qyVryUdKx5+C7p4dhMODV9JF2XdCSpycG02f6RD9rN+xa9oD3P680MRzfod7p+9RmKTLl2G1gALVBnelXZFnDvT8wUEdFIWgIPsk+xtcmjBo7Tv0eMGOQQyzR0GpdKADrnFsCFqSvNOdSBFri4wr9RASgd9tKYekaaPL9XbGXRq4FvwMe0f5SzsemjyUx4O2GyTxbBLGZvOu9Uk3VAkj7nsvh7c1TakrYl7WteXklaDBXBGLmOL4FnwH3gckb4A/AkIj6VJW/FErgE7gLXNvg6FD8OIuJd1591bCyuSrqVa/vgZudf2C6P8SEmGKoioumdi6FNRt5TzzX+rr9n/hbo7evXt882xlgQsSBiQcSCiAURCyIWRCyIWBCxIGJBxIKIBRELIsYYCyIWRCyIWBCxIGJBxIKIBRELIhZELIhYELEgYkHEGGOMMeZc+AXAd5RwCl2rEwAAAABJRU5ErkJggg==" },
+            { "gem", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADwklEQVR42u2bz4scVRDHP9UzKxgEnYhXYc8xCpIRxcuKCznoSXJRD5LDGvDkn5D/wGuIIMGj5CQKBsXEUyTrXU+ak4eYnxDJupnprwfrwbOdGWZmu1+/Hrtg6D3szqvvt96r+la9Xuitt9566623/61ZHV8iyVpx3kytM9gW+LrWtqM6YGaSVABPA6prVy1a1tc4MLNHwYfkBDj75g59D7yUiIBAwgPgTTP7TVJhZmXq7Tf050W1Z/uSRpKKpEdR0pY/P3ZHHksqE38Ofe3LwackJESRP+MOHLpDbVgg4ZPYtybBD/x5StJdSdMWwSvafZK0tw4JtgL4wn98BvgJ2AZKoGi7EkfJ93Uzuy5pYGbTZf64WCPjf+3gpxmAj4Mo4CtJ22Y2jQJ2dAKAwhm9ALwKTIBBRoq2cAKOA19IOvZP3GpIilHSO1c5czla8O1SLUkxAr9bKXc5W6gM5+OSvXISDIlE0kngKjBa8di0aRNgCJw1s0uShmY2WZqAKIGMHPxJT3oDumGhN3gEvGFmN+ZVBpvXYXmT8w1wGvjLGe2SlR6wW8ALZnZnVs9gc6JfAJ8D727I3OMXYAf4A1DcPQ6r4M2slPQy8DzwnZNhHQY/AZ4C3jKzzzzAynbIkcVIzAnY6njkq/Y4+cygczsgygEvAu8BDz1PqM4hasJSaF6+nwR+NLMvq5Vg+N/drwK4CZwA3t6QQP8OzEyAtmDQ+QRwDXgNOOigDpi6z3eAHTP7eSkdUDkKI+AKMO6YEgxzinvAaTPbX1oJziHhhw7J4RDhA4/8/qJeoFhw61I6a/eA953NQbRArolPjusjB781D/yqc8CxzwHls8DcrDzqfHCZucBY0p9OwDTTYci5RibE0V3AB77QJKPhSAB/odHxeLQT9jKaEAXwF4OPjfYyM26FDjMYf4XboUHjjZwkm3Ev2MagdOLPG9H9YJpxnZNQtEjCv8BXxnikJCGUyMsJj0MA/2tr4GO16J+RRyN2sAkLpfeupFOxTmnzFZlwFJomIWiP25LGWYCfoRafk3SrARLK6Pt2l7nwaJOEV2qWzGX0PXtJ3gOoqW+4XYNknqXv8+5GI6G0W4NkXumeLycSqpJ5nTdJJkklboPHYZ2+oarvi07eVUTH4fwKQin8zrfJ9H1GfUMscZ9Nqu8T9Q2fLiBhEr/82KrEbYoEf16fQUIscbc7Ue6O0Dccr0jmGPx4I8HP6Rv2o52w+eBnlMdtSfedhHc6JXRqJGFH0odZ6/sU/+2xMdl+zcQ4oLfeeuutJfsbOmrjD4R+QIsAAAAASUVORK5CYII=" },
+            { "grid", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABkElEQVR42u2ZPU7DQBSEv+ckEgIpd4ADUUAqRMd50nEOKgqQaCipuQh9foaCtRRZJGRtZx2RGcmKZNlvVt+uN9o3YFmWZZ2uYt8HJVVA1dFPEbE6Bp+8aj+DOnitUj5ZK0BSFRFrSVfANTBN7+27epR+l8BbRHxIiojQED6tKEq6l/SlfjRvzlApn6wVkF4UcAl8AufAImff+GWGKmAE3EbEk6RRun9wn217wi46VVo+NxuDmgDjltckDW4NPAzgQy6AWtNUMOjnX6cCLhrfbUmfbACrngbVrDmUTzaAvge1rWYpn2wA/1oGYAAGYAAGYAAGYAAGYAB/d1r60npgn70B1AVeNw4Wy3TCanstk+fzhn8pn04tsbn607ukM0khKUr6dG2KzoC7js3KF+AxIhbNhmUpn7Yrodez+rZ6pXzaBiOjjptVPZurXTNSyqfWuEW3NTomNjoSHydDToacDDkZcjLkZAgnQ06G3A8wAAMwAAMwAAMwAAMwAANwMuRkyMmQkyEnQyeVDFmWZVmnrG+IYzXYQPTZVgAAAABJRU5ErkJggg==" },
+            { "check", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADz0lEQVR42u2bz2sTURDHZ7IRi/iDVCh4EQX/AaEtFC8qPXnVowdRSq/17qH/Qa+iKHr3KIp4EgRBD4J6UcGTCpa2WEHQJtmPB+fJuCTN22TTZtMdWBJ2k81+v+/NfGfmvYhUVllllVVWWWV71XTcAAEqIok7lapquidGE0i6nK+N/QwAElVtA1MickFEjovIdxF5oqrvAVVVxnrkgavAN/6338BKmAnmImMFvm6vVxzopjtSO3ezlzuUEXzNXqeATaANtDIzIAW27P25bKyolTzaC9AQkYcictguJR3inIpIKiLXsveplRh83eTttojMiEhrGzxq106EW5R9BiSq2rTgdlFEmiJS7/GdVEQ2Sq9+LugtuIDXy0IMuOzvUWbw8wao7aJ8NwsEvQD2l1YKndZPA2sGvt0DfFCEl8AkoGUFX7NjEvjkRj8WfKO0OUAYNTteZMB1s0DOqqXGXeuEMoAPfn8rMuilRsBPYLa04O3B99nrciaabwc+fObKuER8L3exEX/JE1jmiD9noNMc4G8VOvJAAtTtSIYtI67AOQmsR8pdAP+0sLJ3O80clpw4uTsKvIqM+OH6G/teLc/zdQP4r3sCzInIecu1X4vIY8vDE1VtF1zgqKqmNpLzVuDUe+T3Yp2fs6r6duDncmXmJPCoA+PvgJmiI2yfcheOuULkzqZ9DThiGVSYYr7DArBRJAlO7pZyFDjhMwuFDYYbhWXXT+vmc4WQ0KGltRUR8YPWLxcqdzYDJoCPPaJvuwgSnNzNWuaWp7q7F8AXokzO948CP5yfEUHCmbwkZPp5q30UOAcKre4cAQeBr5HJR9uNSrQvOrlrZGJNzG99Glp156bkncjcO9uU6ElCpsB5EBn0gjuuAdNDK3BCBgWcsqkdMzLBVVoxJDiSb+as7gDmh17gON+cMVcojAQ38ou7Knc5SDjmfLTZJwn7uvTzmjnkbmXHS1s3VRsFkDDRRz8v/NaDQuVuABKe90nCokut++rn7Won17lDPUeeng1e14FnA/TzdreZ6UcgJwnZZCqNJG1j5Pp5Jo9JnyS0Iqa97+ddGsl+3oAkMBb9vCGRMJx+3g6TsDUg+Kel2sbShYRWRKDrJHev+unnjQoJQSZXcqzY+gJnHThZ9rW7JLOI0YuE4vt5I7SMFbOS0zSSFkq9fBXR3Pyd0f8U+GXv75d6+SrHai4dip+XFvTq47hx0QfGG8BnB3wTuAtM+jacjONu8bC6BBwSkdPyd//eB1X9kl19kr20e3snFlhH6v8CBjboO3tm735llVVWWWWVjb79AVFUcsSCjjxVAAAAAElFTkSuQmCC" },
+        };
+
+        /// <summary>Nome do ícone → CRC no FileStorage. Vazio até o boot.</summary>
+        private readonly Dictionary<string, string> _icons = new Dictionary<string, string>();
+
+        private void StoreIcons()
+        {
+            if (CommunityEntity.ServerInstance == null || CommunityEntity.ServerInstance.net == null) return;
+
+            foreach (KeyValuePair<string, string> pair in IconPng)
+            {
+                try
+                {
+                    byte[] bytes = Convert.FromBase64String(pair.Value);
+                    uint crc = FileStorage.server.Store(bytes, FileStorage.Type.png,
+                                                        CommunityEntity.ServerInstance.net.ID);
+                    _icons[pair.Key] = crc.ToString(CultureInfo.InvariantCulture);
+                }
+                catch (Exception cause)
+                {
+                    PrintWarning("O ícone " + pair.Key + " não foi guardado: " + cause.Message);
+                }
             }
         }
 
@@ -2962,6 +3002,8 @@ namespace Oxide.Plugins
             public bool Mine;
             public bool ByRarity;
             public bool OnAir;
+            /// <summary>Nome do ícone → CRC; pode faltar (aí vai texto).</summary>
+            public Dictionary<string, string> Icons = new Dictionary<string, string>();
         }
 
         private class SideItem
@@ -3197,6 +3239,7 @@ namespace Oxide.Plugins
                 Mine = session.Mine,
                 ByRarity = session.ByRarity,
                 OnAir = frame.Viewer.OnAir,
+                Icons = _icons,
             };
 
             foreach (SkinEntry entry in _catalog.Ordered)
@@ -4147,51 +4190,65 @@ namespace Oxide.Plugins
                       10, ColAmber, TextAnchor.MiddleLeft, true);
             }
 
-            Label(canvas, head, 330, 0, 270, HeaderHeight,
+            Label(canvas, head, 560, 0, 270, HeaderHeight,
                   view.Usable + " de " + view.Total + " obtidas", 12, ColMuted, TextAnchor.MiddleRight, false);
 
-            // ####  CONTROLES SEGMENTADOS, E NÃO BOTÕES LARGOS  ####
+            // ####  SÓ ÍCONES, COM A DICA NO MOUSE  ####
             //
-            // Pedido do dono (17/09/2026): os dois botões "ORDEM: PADRÃO" e
-            // "SÓ AS MINHAS: NÃO" ocupavam o cabeçalho. Sem ícone: nenhum
-            // sprite do jogo foi confirmado no servidor, e um caminho errado
-            // vira um quadrado branco.
-            Segmented(canvas, head, 624, "ORDEM",
-                      new[] { "PADRÃO", "RARIDADE" },
-                      new[] { "A ordem do catálogo", "Lendária primeiro, depois Épica, Rara, Incomum e Comum" },
-                      view.ByRarity ? 1 : 0,
-                      MenuSortCommand + " " + view.Token);
+            // Pedido do dono (17/09/2026): os controles ocupavam o cabeçalho.
+            // A dica diz o que cada um faz; sem o ícone (FileStorage ainda
+            // vazio), cai para uma letra.
+            IconSegmented(canvas, head, 850, view.Icons,
+                          new[] { "list", "gem" }, new[] { "P", "R" },
+                          new[] { "Ordem do catálogo", "Ordenar por raridade: Lendária primeiro" },
+                          view.ByRarity ? 1 : 0, MenuSortCommand + " " + view.Token);
 
-            Segmented(canvas, head, 830, "MOSTRAR",
-                      new[] { "TODAS", "MINHAS" },
-                      new[] { "Todas as skins deste servidor", "Só as que você tem e as liberadas para todos" },
-                      view.Mine ? 1 : 0,
-                      MenuMineCommand + " " + view.Token);
+            IconSegmented(canvas, head, 940, view.Icons,
+                          new[] { "grid", "check" }, new[] { "T", "M" },
+                          new[] { "Mostrar todas as skins", "Mostrar só as que você tem (e as liberadas para todos)" },
+                          view.Mine ? 1 : 0, MenuMineCommand + " " + view.Token);
 
             return canvas.Json();
         }
 
         /// <summary>
-        /// Um rótulo pequeno e opções coladas, a ativa em vermelho. O comando
-        /// recebe o índice da opção no fim.
+        /// Botões quadrados colados, só com ícone, o ativo em vermelho. O
+        /// comando recebe o índice no fim; a dica diz o que cada um faz.
         /// </summary>
-        private static void Segmented(Canvas canvas, Box parent, float x, string label, string[] options,
-                                      string[] tips, int active, string command)
+        private static void IconSegmented(Canvas canvas, Box parent, float x, Dictionary<string, string> icons,
+                                          string[] names, string[] fallback, string[] tips, int active,
+                                          string command)
         {
-            const float chipWidth = 66f;
-            const float chipHeight = 24f;
-            float y = (HeaderHeight - chipHeight) / 2f;
+            const float size = 30f;
+            float y = (HeaderHeight - size) / 2f;
 
-            Label(canvas, parent, x, 0, 54, HeaderHeight, label, 10, ColMuted, TextAnchor.MiddleRight, true);
-
-            float cx = x + 60f;
-            for (int i = 0; i < options.Length; i++)
+            for (int i = 0; i < names.Length; i++)
             {
                 bool on = i == active;
-                string chip = TextButton(canvas, parent, cx, y, chipWidth, chipHeight, on ? ColRust : ColSurface2,
-                                         command + " " + i, options[i], 10, on ? ColText : ColMuted);
-                if (tips != null && i < tips.Length) Tip(canvas, chip, tips[i]);
-                cx += chipWidth + 1f;
+                float cx = x + i * (size + 1f);
+                string name = Button(canvas, parent, cx, y, size, size, on ? ColRust : ColSurface2,
+                                     command + " " + i, canvas.NextName());
+                Box box = new Box(name, size, size);
+
+                string crc;
+                if (icons != null && icons.TryGetValue(names[i], out crc))
+                {
+                    CuiElement image = new CuiElement { Parent = name };
+                    image.Components.Add(new CuiRawImageComponent
+                    {
+                        Png = crc,
+                        Color = on ? ColText : ColMuted,
+                    });
+                    image.Components.Add(Rect(box, 7, 7, size - 14, size - 14));
+                    canvas.Ui.Add(image);
+                }
+                else
+                {
+                    Label(canvas, box, 0, 0, size, size, fallback[i], 12, on ? ColText : ColMuted,
+                          TextAnchor.MiddleCenter, true);
+                }
+
+                Tip(canvas, name, tips[i]);
             }
         }
 
