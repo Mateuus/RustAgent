@@ -233,15 +233,25 @@ namespace Oxide.Plugins
             public bool InventoryButton = false;
 
             /// <summary>
-            /// Onde o botão fica, em pixels da base 1280×720, ancorado no pé
-            /// da tela, centro. ESTIMADO: à esquerda da barra de atalhos.
-            /// Se encavalar com algo do jogo, é só mexer aqui.
+            /// Onde o botão fica. Padrão: ao lado do botão MISSÕES do próprio
+            /// Rust, no alto à esquerda do inventário, da mesma altura
+            /// (pedido do dono, 17/09/2026).
+            ///
+            /// Âncora "0 1" é o canto de CIMA à esquerda; os offsets são em
+            /// pixels da base 1280×720, e o Y é negativo porque desce. Se
+            /// encavalar com o MISSÕES, mexa só nestes quatro valores.
             /// </summary>
+            [JsonProperty("InventoryButtonAnchorMin")]
+            public string InventoryButtonAnchorMin = "0 1";
+
+            [JsonProperty("InventoryButtonAnchorMax")]
+            public string InventoryButtonAnchorMax = "0 1";
+
             [JsonProperty("InventoryButtonOffsetMin")]
-            public string InventoryButtonOffsetMin = "-572 18";
+            public string InventoryButtonOffsetMin = "160 -52";
 
             [JsonProperty("InventoryButtonOffsetMax")]
-            public string InventoryButtonOffsetMax = "-482 46";
+            public string InventoryButtonOffsetMax = "255 -30";
 
             /// <summary>
             /// A grade de skins ROLA (ScrollView do CUI) em vez de paginar de
@@ -1272,6 +1282,7 @@ namespace Oxide.Plugins
             { "gem", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADwklEQVR42u2bz4scVRDHP9UzKxgEnYhXYc8xCpIRxcuKCznoSXJRD5LDGvDkn5D/wGuIIMGj5CQKBsXEUyTrXU+ak4eYnxDJupnprwfrwbOdGWZmu1+/Hrtg6D3szqvvt96r+la9Xuitt9566623/61ZHV8iyVpx3kytM9gW+LrWtqM6YGaSVABPA6prVy1a1tc4MLNHwYfkBDj75g59D7yUiIBAwgPgTTP7TVJhZmXq7Tf050W1Z/uSRpKKpEdR0pY/P3ZHHksqE38Ofe3LwackJESRP+MOHLpDbVgg4ZPYtybBD/x5StJdSdMWwSvafZK0tw4JtgL4wn98BvgJ2AZKoGi7EkfJ93Uzuy5pYGbTZf64WCPjf+3gpxmAj4Mo4CtJ22Y2jQJ2dAKAwhm9ALwKTIBBRoq2cAKOA19IOvZP3GpIilHSO1c5czla8O1SLUkxAr9bKXc5W6gM5+OSvXISDIlE0kngKjBa8di0aRNgCJw1s0uShmY2WZqAKIGMHPxJT3oDumGhN3gEvGFmN+ZVBpvXYXmT8w1wGvjLGe2SlR6wW8ALZnZnVs9gc6JfAJ8D727I3OMXYAf4A1DcPQ6r4M2slPQy8DzwnZNhHQY/AZ4C3jKzzzzAynbIkcVIzAnY6njkq/Y4+cygczsgygEvAu8BDz1PqM4hasJSaF6+nwR+NLMvq5Vg+N/drwK4CZwA3t6QQP8OzEyAtmDQ+QRwDXgNOOigDpi6z3eAHTP7eSkdUDkKI+AKMO6YEgxzinvAaTPbX1oJziHhhw7J4RDhA4/8/qJeoFhw61I6a/eA953NQbRArolPjusjB781D/yqc8CxzwHls8DcrDzqfHCZucBY0p9OwDTTYci5RibE0V3AB77QJKPhSAB/odHxeLQT9jKaEAXwF4OPjfYyM26FDjMYf4XboUHjjZwkm3Ev2MagdOLPG9H9YJpxnZNQtEjCv8BXxnikJCGUyMsJj0MA/2tr4GO16J+RRyN2sAkLpfeupFOxTmnzFZlwFJomIWiP25LGWYCfoRafk3SrARLK6Pt2l7nwaJOEV2qWzGX0PXtJ3gOoqW+4XYNknqXv8+5GI6G0W4NkXumeLycSqpJ5nTdJJkklboPHYZ2+oarvi07eVUTH4fwKQin8zrfJ9H1GfUMscZ9Nqu8T9Q2fLiBhEr/82KrEbYoEf16fQUIscbc7Ue6O0Dccr0jmGPx4I8HP6Rv2o52w+eBnlMdtSfedhHc6JXRqJGFH0odZ6/sU/+2xMdl+zcQ4oLfeeuutJfsbOmrjD4R+QIsAAAAASUVORK5CYII=" },
             { "grid", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABkElEQVR42u2ZPU7DQBSEv+ckEgIpd4ADUUAqRMd50nEOKgqQaCipuQh9foaCtRRZJGRtZx2RGcmKZNlvVt+uN9o3YFmWZZ2uYt8HJVVA1dFPEbE6Bp+8aj+DOnitUj5ZK0BSFRFrSVfANTBN7+27epR+l8BbRHxIiojQED6tKEq6l/SlfjRvzlApn6wVkF4UcAl8AufAImff+GWGKmAE3EbEk6RRun9wn217wi46VVo+NxuDmgDjltckDW4NPAzgQy6AWtNUMOjnX6cCLhrfbUmfbACrngbVrDmUTzaAvge1rWYpn2wA/1oGYAAGYAAGYAAGYAAGYAB/d1r60npgn70B1AVeNw4Wy3TCanstk+fzhn8pn04tsbn607ukM0khKUr6dG2KzoC7js3KF+AxIhbNhmUpn7Yrodez+rZ6pXzaBiOjjptVPZurXTNSyqfWuEW3NTomNjoSHydDToacDDkZcjLkZAgnQ06G3A8wAAMwAAMwAAMwAAMwAANwMuRkyMmQkyEnQyeVDFmWZVmnrG+IYzXYQPTZVgAAAABJRU5ErkJggg==" },
             { "check", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADz0lEQVR42u2bz2sTURDHZ7IRi/iDVCh4EQX/AaEtFC8qPXnVowdRSq/17qH/Qa+iKHr3KIp4EgRBD4J6UcGTCpa2WEHQJtmPB+fJuCTN22TTZtMdWBJ2k81+v+/NfGfmvYhUVllllVVWWWV71XTcAAEqIok7lapquidGE0i6nK+N/QwAElVtA1MickFEjovIdxF5oqrvAVVVxnrkgavAN/6338BKmAnmImMFvm6vVxzopjtSO3ezlzuUEXzNXqeATaANtDIzIAW27P25bKyolTzaC9AQkYcictguJR3inIpIKiLXsveplRh83eTttojMiEhrGzxq106EW5R9BiSq2rTgdlFEmiJS7/GdVEQ2Sq9+LugtuIDXy0IMuOzvUWbw8wao7aJ8NwsEvQD2l1YKndZPA2sGvt0DfFCEl8AkoGUFX7NjEvjkRj8WfKO0OUAYNTteZMB1s0DOqqXGXeuEMoAPfn8rMuilRsBPYLa04O3B99nrciaabwc+fObKuER8L3exEX/JE1jmiD9noNMc4G8VOvJAAtTtSIYtI67AOQmsR8pdAP+0sLJ3O80clpw4uTsKvIqM+OH6G/teLc/zdQP4r3sCzInIecu1X4vIY8vDE1VtF1zgqKqmNpLzVuDUe+T3Yp2fs6r6duDncmXmJPCoA+PvgJmiI2yfcheOuULkzqZ9DThiGVSYYr7DArBRJAlO7pZyFDjhMwuFDYYbhWXXT+vmc4WQ0KGltRUR8YPWLxcqdzYDJoCPPaJvuwgSnNzNWuaWp7q7F8AXokzO948CP5yfEUHCmbwkZPp5q30UOAcKre4cAQeBr5HJR9uNSrQvOrlrZGJNzG99Glp156bkncjcO9uU6ElCpsB5EBn0gjuuAdNDK3BCBgWcsqkdMzLBVVoxJDiSb+as7gDmh17gON+cMVcojAQ38ou7Knc5SDjmfLTZJwn7uvTzmjnkbmXHS1s3VRsFkDDRRz8v/NaDQuVuABKe90nCokut++rn7Won17lDPUeeng1e14FnA/TzdreZ6UcgJwnZZCqNJG1j5Pp5Jo9JnyS0Iqa97+ddGsl+3oAkMBb9vCGRMJx+3g6TsDUg+Kel2sbShYRWRKDrJHev+unnjQoJQSZXcqzY+gJnHThZ9rW7JLOI0YuE4vt5I7SMFbOS0zSSFkq9fBXR3Pyd0f8U+GXv75d6+SrHai4dip+XFvTq47hx0QfGG8BnB3wTuAtM+jacjONu8bC6BBwSkdPyd//eB1X9kl19kr20e3snFlhH6v8CBjboO3tm735llVVWWWWVjb79AVFUcsSCjjxVAAAAAElFTkSuQmCC" },
+            { "star", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAE00lEQVR42u2az2scZRjHv+/skiK6jSjFbjx4iq3NQdpDgz0oWEogHgxVQ7FCaaj3/gEWF/wDCt4b8KJ/QC4VQZAW9KAFT6beBJtSKdImKITszMdDnxffDrPZme3szGZ3H1hmmEze53ne5/v8fEeqkQAHOE1pwshbHZgFXg2fVU1RTXvg+a5I+szuG5OEgMiu3wEPgEMTEw8C+B8FHvGElu1ZYxJcwCv5iaRZSUhanUT4/8T/dB94oc5gWLXyC8AukAB7tgkX7W/NcXYBz++ypBlJsSRv8Yt2TcY6AAJNYNOsHhsKAB4D7ardIKpQeR/83pY0b5aODAGxpMOSzlVdE1TqAs45JF0yvllQv2RxIhnX3H8E+Mtgn/A0+YD4ehgwxwUBHtLvSTpiFk77eSypKen9KmWragM8pD+0wifTQ+z6wVhlgyD3zwP/9oB/6Aa7wEJVbhBV3Pk9l8r9ynCDGasT6uxWy0WA/Xzp26U3xXbdBGYOfFnscz+waMrF9Cf/3ukqOsRmRrrKC7s81mkCSPrI1u3mWD8xuT4FfrY18vAib0C2eiS3EmXUAPckHc3JE3vngaR2KOzQEAA45xzAYUnvSPrHAlIjY2edPXtT0ouBwFkISSS9Jqm9z3vqsf4rkm4Afxhq2GezHkn6Nfjf9Hpel+cl/eCc2/Y6N1PpKjbFvhhGJTzAu5dLluGapO9NV3oKBbwlaV3ScUm7hhTXo7jJo8yggSwu4NtRBjq6kg5J2pS05pz7sa9VgKZzrgu8JOlrSUuBsgclL4fyfivpY+fc3163Iq2rgE6QorqMPoUydrJ0KjK88GXsErBli+6NsPJeti1gKSjE3LOkMZ8p2sDNjEnOKFASFFk3g8lSOfPFlEtcHzGXCGW4PjDk89b0dr8KPBwBl/C8HwKraTmHVdk1g/b2dk0uEUL+NjBf6Ug92IRmDS7xFORDWepoc/2sbw3YTrW0wyC/9jawls5Wtc357f4UcGeIm+DXvAOcChBY/8wg2IQWsGE+2i0Z9omt3SoT8lFJ8/6ulZk7Vl4PwyruCSu3k7ukLblD29cVrJ2es8ajVaD9Vc5hh5O0I+m4c27L8xyVoagvOs6Z8nHJKPA9favs47OoRAtJ0rsFx1O183Alwn9W0m8Fpz+DuMF9SW845x6X4QZRiSg6aconQwyCifE4WZb8UYkoWh7gSCu2qQ0FBx3LZSG4jFwaWzFytoBQ2K+RUi7KudlnjWdcKwKAyHzwmKSFDKWyqGuKRJK+ktQxRaIcaPBT6gVJxyz2RKNQAV7N0RqH1eE94EKwzmLqq7E4Rwt8tZYmqMfJ70afbjDcmG+sYBLQSHWWnwfv7vXpBjeq/JBiv68+5oJOMClg9WaPidMi8EvqnDC9pu8I52r7tjA4+FzpYf39rO76dJYt4Msea4W8Vur6xDbcgPWUkLmsnnP+uATczUCD57Ve5wY4O8MPBSxk9ZxzhtkMNPiNuFvLdwSB9c+YMN1nsXoBNPweuEDXeJ+pHAWBdTop3x/Y6jnR8LLxCGNBp/J0GKS/WybIn2VZPScaLhhPgFuVpsNA+ROB1dtlWr0PGhrBSZVHw4nKNiEQ4DxwZZhW7+eCdn8FOF9nHIjqKERSh7f1lMO15N8RlGFKU5rSlKZ0UOk/Xz+dVnb1HhEAAAAASUVORK5CYII=" },
         };
 
         /// <summary>Nome do ícone → CRC no FileStorage. Vazio até o boot.</summary>
@@ -2428,6 +2439,9 @@ namespace Oxide.Plugins
         /// grade infinita num AddUI só não foi medida.
         /// </summary>
         private const int ScrollPageSize = 48;
+
+        /// <summary>Quantos alvos o "Aplicar em" mostra de uma vez quando rola.</summary>
+        private const int TargetsScrollMax = 40;
         private const string ScrollCommand = "origemz.skins.scroll";
         private const float CommandCooldownSeconds = 0.08f;
         private const int SearchMinLength = 2;
@@ -3062,6 +3076,8 @@ namespace Oxide.Plugins
         private class GridView
         {
             public string Token = "";
+            /// <summary>Nome do ícone → CRC; pode faltar (aí a estrela vira texto).</summary>
+            public Dictionary<string, string> Icons = new Dictionary<string, string>();
             /// <summary>A grade rola (config `GridScroll`) em vez de paginar de 12 em 12.</summary>
             public bool Scroll;
             public readonly List<GridCell> Cells = new List<GridCell>();
@@ -3104,6 +3120,8 @@ namespace Oxide.Plugins
             public int Ammo = -1;
             public bool Applied;
             public bool Selected;
+            /// <summary>Quantidade da PILHA. Aplicar pinta a pilha inteira: é um item só.</summary>
+            public int Amount = 1;
         }
 
         private class TargetsView
@@ -3114,6 +3132,8 @@ namespace Oxide.Plugins
             public readonly List<TargetRow> Rows = new List<TargetRow>();
             public int Page;
             public int Pages = 1;
+            /// <summary>A lista de alvos rola (config `SideScroll`) em vez de paginar de 4 em 4.</summary>
+            public bool Scroll;
             public string Button = "";
             public bool ButtonLive;
             public string Message = "";
@@ -3376,7 +3396,7 @@ namespace Oxide.Plugins
         private GridView ComputeGrid(Frame frame, MenuSession session)
         {
             Viewer viewer = frame.Viewer;
-            GridView view = new GridView { Token = session.Token, Search = session.Search };
+            GridView view = new GridView { Token = session.Token, Search = session.Search, Icons = _icons };
 
             List<SkinEntry> list = new List<SkinEntry>();
             bool withDefault = false;
@@ -3647,12 +3667,17 @@ namespace Oxide.Plugins
             ulong pickSkin = frame.Pick != null ? frame.Pick.SkinId : 0uL;
             string steamId = frame.Viewer.SteamId;
 
-            view.Pages = Math.Max(1, (frame.Instances.Count + TargetsPageSize - 1) / TargetsPageSize);
+            // Rolando, a lista vem inteira (com teto): um jogador pode ter
+            // dezenas do mesmo item, e paginar de 4 em 4 vira trabalho.
+            view.Scroll = _config.SideScroll;
+            int perPage = view.Scroll ? TargetsScrollMax : TargetsPageSize;
+
+            view.Pages = Math.Max(1, (frame.Instances.Count + perPage - 1) / perPage);
             session.TargetPage = Math.Min(Math.Max(0, session.TargetPage), view.Pages - 1);
             view.Page = session.TargetPage;
 
-            int end = Math.Min(frame.Instances.Count, (view.Page + 1) * TargetsPageSize);
-            for (int i = view.Page * TargetsPageSize; i < end; i++)
+            int end = Math.Min(frame.Instances.Count, (view.Page + 1) * perPage);
+            for (int i = view.Page * perPage; i < end; i++)
             {
                 Item item = frame.Instances[i].Item;
                 TargetRow row = new TargetRow
@@ -3663,6 +3688,7 @@ namespace Oxide.Plugins
                     Where = frame.Instances[i].Where,
                     Applied = EffectiveSkin(steamId, item) == pickSkin,
                     Selected = i == frame.TargetIndex,
+                    Amount = item.amount,
                 };
 
                 if (item.hasCondition && item.maxCondition > 0f)
@@ -4459,7 +4485,7 @@ namespace Oxide.Plugins
                 {
                     float cx = left + (i % GridColumns) * (CellWidth + CellGap);
                     float cy = ScrollInset + (i / GridColumns) * (CellHeight + CellGap);
-                    GridCellBox(canvas, content, cx, cy, view.Cells[i], view.Token);
+    GridCellBox(canvas, content, cx, cy, view.Cells[i], view.Token, view.Icons);
                 }
 
                 if (paged)
@@ -4476,7 +4502,7 @@ namespace Oxide.Plugins
                 {
                     float cx = left + (i % GridColumns) * (CellWidth + CellGap);
                     float cy = GridPad + (i / GridColumns) * (CellHeight + CellGap);
-                    GridCellBox(canvas, grid, cx, cy, view.Cells[i], view.Token);
+                    GridCellBox(canvas, grid, cx, cy, view.Cells[i], view.Token, view.Icons);
                 }
 
                 Pager(canvas, grid, GridPad, gridBottom + 8, GridWidth - 2 * GridPad, 28, view.Page, view.Pages,
@@ -4521,7 +4547,8 @@ namespace Oxide.Plugins
             return canvas.Parts();
         }
 
-        private static void GridCellBox(Canvas canvas, Box grid, float x, float y, GridCell cell, string token)
+        private static void GridCellBox(Canvas canvas, Box grid, float x, float y, GridCell cell, string token,
+                                        Dictionary<string, string> icons)
         {
             // ####  A COR DA RARIDADE É O FUNDO DA CÉLULA  ####
             //
@@ -4563,9 +4590,26 @@ namespace Oxide.Plugins
 
             if (cell.Favorite)
             {
-                // Sem "★": não se sabe se a RobotoCondensed tem o glifo.
-                Panel(canvas, box, 6, 8, 30, 14, ColAmber);
-                Label(canvas, box, 6, 8, 30, 14, "FAV", 9, ColBg, TextAnchor.MiddleCenter, true);
+                // Uma estrela, e não a etiqueta "FAV" (pedido do dono,
+                // 17/09/2026). É PNG nosso: o glifo "★" pode não existir na
+                // RobotoCondensed, e sprite do jogo não foi confirmado.
+                string crc;
+                if (icons != null && icons.TryGetValue("star", out crc))
+                {
+                    string starName = canvas.NextName();
+                    CuiElement star = new CuiElement { Name = starName, Parent = box.Name };
+                    star.Components.Add(new CuiRawImageComponent { Png = crc, Color = ColAmber });
+                    star.Components.Add(Rect(box, 8, 8, 18, 18));
+                    canvas.Ui.Add(star);
+                    Tip(canvas, starName, "Favorita: ela aparece em FAVORITOS, no topo da lateral");
+                }
+                else
+                {
+                    string favName = Panel(canvas, box, 6, 8, 30, 14, ColAmber, canvas.NextName());
+                    Label(canvas, new Box(favName, 30, 14), 0, 0, 30, 14, "FAV", 9, ColBg,
+                          TextAnchor.MiddleCenter, true);
+                    Tip(canvas, favName, "Favorita: ela aparece em FAVORITOS, no topo da lateral");
+                }
             }
 
             if (dim)
@@ -4676,21 +4720,37 @@ namespace Oxide.Plugins
                   TextAnchor.MiddleRight, false);
 
             float y = 36f;
+            float listHeight = TargetsPageSize * (TargetRowHeight + TargetRowGap);
 
             if (view.Rows.Count == 0)
             {
                 Label(canvas, targets, x, y, w, 60, view.Empty, 12, ColMuted, TextAnchor.MiddleCenter, false);
             }
-
-            foreach (TargetRow row in view.Rows)
+            else if (view.Scroll)
             {
-                TargetRowBox(canvas, targets, x, y, w, row, view.Token);
-                y += TargetRowHeight + TargetRowGap;
+                float contentHeight = view.Rows.Count * (TargetRowHeight + TargetRowGap) + 2 * ScrollInset;
+                Box area = ScrollArea(canvas, targets, x, y, w, listHeight, contentHeight, true);
+                float rowWidth = contentHeight > listHeight ? w - ScrollGutter : w;
+                float ry = ScrollInset;
+
+                foreach (TargetRow row in view.Rows)
+                {
+                    TargetRowBox(canvas, area, 0, ry, rowWidth, row, view.Token);
+                    ry += TargetRowHeight + TargetRowGap;
+                }
+            }
+            else
+            {
+                foreach (TargetRow row in view.Rows)
+                {
+                    TargetRowBox(canvas, targets, x, y, w, row, view.Token);
+                    y += TargetRowHeight + TargetRowGap;
+                }
             }
 
             // A faixa de resultado ocupa o meio do paginador (ou o lugar
             // dele, com uma página só).
-            float pagerY = 36f + TargetsPageSize * (TargetRowHeight + TargetRowGap);
+            float pagerY = 36f + listHeight;
             string messageColor = view.MessageOk ? ColOlive : ColAmber;
             string message = view.Message.Length > 0 ? view.Message : null;
 
@@ -4745,6 +4805,20 @@ namespace Oxide.Plugins
             Icon(canvas, box, 8, 4, 36, 36, row.ItemId, row.SkinId, "1 1 1 1");
             Label(canvas, box, 52, 4, 160, 18, row.Where, 12, WhereColor(row.Where), TextAnchor.MiddleLeft, true);
 
+            // ####  PILHA É UM ITEM SÓ  ####
+            //
+            // O Rust junta itens iguais numa pilha, e a pilha é UM objeto: a
+            // lista mostra uma linha, e aplicar pinta as unidades todas. Sem
+            // este "x8" parece que as outras desapareceram.
+            if (row.Amount > 1)
+            {
+                string badge = Panel(canvas, box, 8, 26, 34, 14, ColSurface, canvas.NextName());
+                Label(canvas, new Box(badge, 34, 14), 0, 0, 34, 14,
+                      "x" + row.Amount.ToString(CultureInfo.InvariantCulture), 9, ColText,
+                      TextAnchor.MiddleCenter, true);
+                Tip(canvas, badge, "Pilha de " + row.Amount + ": a skin vale para as " + row.Amount + " unidades");
+            }
+
             if (row.Condition >= 0f)
             {
                 const float barWidth = 120f;
@@ -4785,8 +4859,8 @@ namespace Oxide.Plugins
             button.Components.Add(new CuiButtonComponent { Color = ColRust, Command = MenuOpenCommand });
             button.Components.Add(new CuiRectTransformComponent
             {
-                AnchorMin = "0.5 0",
-                AnchorMax = "0.5 0",
+                AnchorMin = _config.InventoryButtonAnchorMin,
+                AnchorMax = _config.InventoryButtonAnchorMax,
                 OffsetMin = _config.InventoryButtonOffsetMin,
                 OffsetMax = _config.InventoryButtonOffsetMax,
             });
