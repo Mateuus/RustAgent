@@ -733,3 +733,29 @@ describe('a pé, da chegada até o ponto', () => {
     expect(checkBodyPoints(odd, [crate('p-a', 6, 0)], arrival).filter((p) => p.code === 'unreachable')).toEqual([]);
   });
 });
+
+describe('radiano no nível de cima, grau nos filhos', () => {
+  // As sete plantas herdadas. Quatro delas têm filho girado em GRAUS
+  // (um rifle a 359°, uma planta a 340°), e até 17/09/2026 isso bastava
+  // para a planta inteira ser lida como graus.
+  const dir = join(import.meta.dirname, '..', '..', 'Assets', 'dungeons');
+
+  for (const name of ['base2', 'base3', 'base4', 'entrance1', 'entrance2', 'entrance3', 'entrance4']) {
+    it(`#dung#${name} é lida em radianos`, () => {
+      const file = readFileSync(join(dir, `#dung#${name}.json`), 'utf8');
+      const analysis = analyzeBody((JSON.parse(file) as { entities: unknown[] }).entities);
+
+      expect(analysis.rotationInRadians).toBe(true);
+
+      // E as paredes saem em esquadro entre si, como foram construídas.
+      const walls = analysis.pieces.filter((piece) => piece.shape === 'wall');
+      const base = walls[0]?.yaw ?? 0;
+
+      for (const wall of walls) {
+        const off = (((wall.yaw - base) % 90) + 90) % 90;
+
+        expect(Math.min(off, 90 - off)).toBeLessThan(1);
+      }
+    });
+  }
+});

@@ -38,7 +38,7 @@
 //
 //  ####  AS DUAS PONTAS SÃO SEPARADAS, COMO NO ALÇAPÃO  ####
 //
-//  O plugin (`BodyRoleOf`) decide pelo TIPO da entidade, que é a
+//  O plugin (`ExcludedFromBody`) decide pelo TIPO da entidade, que é a
 //  verdade; aqui se decide pelo CAMINHO do prefab, que é o que se tem
 //  sem o jogo. Um prefab novo que escape daqui ainda é filtrado lá —
 //  e a tela o mostra como "não reconhecida".
@@ -377,15 +377,16 @@ function round(value: number): number {
 export function analyzeBody(entities: readonly unknown[]): BodyAnalysis {
   const nodes = entities.filter((node): node is RawNode => node !== null && typeof node === 'object');
 
-  // Radiano ou grau: a planta inteira decide, como no plugin.
+  // Radiano ou grau: o NÍVEL DE CIMA decide, como no plugin. O filho
+  // é sempre grau — é assim que o CopyPaste 4.3.0 grava e lê —, e
+  // deixá-lo votar fazia a `base2` inteira ser lida como graus por
+  // causa de um rifle num rack a 359°.
   let maxRotation = 0;
 
   for (const node of nodes) {
-    for (const each of [node, ...childrenOf(node)]) {
-      const rot = readVector(each.rot);
+    const rot = readVector(node.rot);
 
-      maxRotation = Math.max(maxRotation, Math.abs(rot.x), Math.abs(rot.y), Math.abs(rot.z));
-    }
+    maxRotation = Math.max(maxRotation, Math.abs(rot.x), Math.abs(rot.y), Math.abs(rot.z));
   }
 
   const rotationInRadians = maxRotation <= TWO_PI_CEILING;

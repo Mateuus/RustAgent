@@ -6253,7 +6253,9 @@ namespace Oxide.Plugins
                 var childLocal = ReadVector(node["pos"]);
 
                 child.transform.localPosition = childLocal;
-                child.transform.localRotation = Quaternion.Euler(ReadVector(node["rot"]) * rotationScale);
+                // Filho é sempre GRAU, como o CopyPaste grava e lê. Ver
+                // `RotationScaleOf`: a escala é só do nível de cima.
+                child.transform.localRotation = Quaternion.Euler(ReadVector(node["rot"]));
                 child.skinID = node.Value<ulong?>("skinid") ?? 0UL;
                 child.OwnerID = 0UL;
                 child.EnableSaving(false);
@@ -7325,22 +7327,17 @@ namespace Oxide.Plugins
                 max = Mathf.Max(max, Mathf.Abs(rot.y));
                 max = Mathf.Max(max, Mathf.Abs(rot.z));
 
-                // Uma peça filha (a fechadura na porta) tem rotação
-                // própria, e ela conta para o mesmo veredito.
-                var children = node["children"] as JArray;
-                if (children == null) continue;
-
-                foreach (var child in children)
-                {
-                    var childNode = child as JObject;
-                    if (childNode == null) continue;
-
-                    var childRot = ReadVector(childNode["rot"]);
-
-                    max = Mathf.Max(max, Mathf.Abs(childRot.x));
-                    max = Mathf.Max(max, Mathf.Abs(childRot.y));
-                    max = Mathf.Max(max, Mathf.Abs(childRot.z));
-                }
+                // ####  O FILHO NÃO VOTA  ####
+                //
+                // O CopyPaste 4.3.0 (`Docs/CopyPaste.cs`, `EntityData`)
+                // grava o nível de cima em RADIANOS (`eulerAngles /
+                // Rad2Deg`) e o filho em GRAUS (`localRotation
+                // .eulerAngles`) — e lê os dois assim, sem perguntar.
+                // Até 17/09/2026 os filhos entravam nesta conta: um
+                // rifle num rack a 359° bastava para a `base2` inteira
+                // ser lida como graus, e as paredes dela nasciam quase
+                // paralelas. Medido nas sete plantas: `base2`, `base3`,
+                // `entrance1` e `entrance4` caíam nisso.
             }
 
             // Tudo zero cai aqui e dá no mesmo: zero grau e zero
