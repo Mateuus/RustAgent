@@ -237,8 +237,13 @@ export interface DeliveryTask {
  * compilador não teria como avisar. Deixando-o fora, esquecer o
  * ramo da revogação vira erro de tipo em vez de VIP concedido no
  * lugar de revogado.
+ *
+ * `skin` e `skin_revoke` também ficam de fora (Docs/OrigemZWorkshop/04
+ * §3): a posse é um registro da rede, e não um item na mochila. O
+ * `SiteDeliveryKind` os ganhou junto com o CHECK da migração 097; o
+ * ramo que os executa é da frente C.
  */
-export type DeliveredKind = Exclude<SiteDeliveryKind, 'vip_revoke'>;
+export type DeliveredKind = Exclude<SiteDeliveryKind, 'vip_revoke' | 'skin' | 'skin_revoke'>;
 
 /**
  * O payload de uma revogação. `null` = não passou na régua.
@@ -559,6 +564,14 @@ export class SiteDeliveries {
     // ---- (b) o payload passa na régua? ----
     if (kind === 'vip_revoke') {
       return await this.#revokeVip({ id, steamId, raw, reopen: known !== null, at });
+    }
+
+    // `skin`/`skin_revoke` ainda não chegam aqui: sem schema em
+    // `payloadSchemas`, o portão lá em cima os recusa. Este desvio só
+    // existe para o tipo; o ramo de verdade é da frente C
+    // (Docs/OrigemZWorkshop/04 §3), que o substitui.
+    if (kind === 'skin' || kind === 'skin_revoke') {
+      return { id, status: 'failed', reason: 'PAYLOAD_INVALID', at };
     }
 
     const plan = planOfPayload(kind, raw.payload);

@@ -82,7 +82,7 @@ import {
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
-import { WorkshopAccessRepository } from './db/workshop-access-repository.js';
+import { WorkshopOwnedRepository } from './db/workshop-owned-repository.js';
 import { WorkshopSkinsRepository } from './db/workshop-repository.js';
 import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
@@ -748,6 +748,13 @@ async function main(): Promise<void> {
       // `void` com o erro tratado dentro: o gancho de presença não
       // espera ninguém.
       void questCollector?.onPlayerJoined(serverId, steamIds);
+
+      // ####  A POSSE DE SKINS DELE, NA HORA  ####
+      //
+      // O menu de skins mostra cadeado no que ele nao tem; sem a
+      // posse na memoria do plugin, o menu diz "sincronizando" ate
+      // alguem mexer nela. Ver game/workshop.ts.
+      workshopService?.handlePlayersJoined(serverId, steamIds);
     },
   });
 
@@ -1473,21 +1480,26 @@ async function main(): Promise<void> {
   // custom: uma skin vale na rede toda, e a juncao diz em que
   // servidores ela desce. Ver db/workshop-repository.ts.
   const workshopSkins = new WorkshopSkinsRepository(db);
-  // Quem pode usar cada skin fora da permissao, e o registro de tudo
-  // que mudou no modulo. Ver db/workshop-access-repository.ts.
-  const workshopAccess = new WorkshopAccessRepository(db);
+  // Quem possui cada skin (a posse vale na rede inteira), e o
+  // registro de tudo que mudou no modulo. Ver
+  // db/workshop-owned-repository.ts.
+  const workshopOwned = new WorkshopOwnedRepository(db);
   // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
   const workshopLookup = createWorkshopLookup();
-  // As regras do cadastro, as MESMAS para o painel e para o /skin add
-  // do jogo. O reenvio da carga e avisado ao servico, que nasce mais
-  // abaixo -- dai o `?.`.
+  // As regras do cadastro e da posse, as MESMAS para o painel, para
+  // o /skin add e /skin give do jogo e para a entrega do site. O
+  // reenvio da carga e avisado ao servico, que nasce mais abaixo --
+  // dai o `?.`.
   const workshopCatalog = new WorkshopCatalog({
     skins: workshopSkins,
-    access: workshopAccess,
+    owned: workshopOwned,
     items: itemsRepository,
     serverIds: () => repository.list().map((server) => server.id),
     lookup: workshopLookup,
     onChange: () => workshopService?.handleCatalogChanged(),
+    // A posse de UM jogador mudou: so a dele desce, e so onde ele
+    // estiver online.
+    onOwnershipChange: (steamId) => workshopService?.handleOwnershipChanged(steamId),
   });
 
   /**
@@ -2322,14 +2334,20 @@ async function main(): Promise<void> {
   // para o OrigemZWorkshop nao ter uma segunda copia dela.
   workshopService = new WorkshopService({
     skins: workshopSkins,
-    access: workshopAccess,
+    owned: workshopOwned,
     catalog: workshopCatalog,
     meta,
     streamers: streamerRepository,
     servers: {
       ids: () => repository.list().map((server) => server.id),
       contextOf: (serverId) => supervisor.contextOf(serverId),
+      // Quem a varredura de presenca deixou com sessao aberta. A posse
+      // so desce para quem esta la; quem entra recebe no onJoined.
+      onlineOf: (serverId) => playersRepository.openSessions(serverId).map((row) => row.steamId),
     },
+    // O texto do cadeado do menu de skins (Docs/OrigemZWorkshop/03 §5).
+    // Sem a variavel, o campo nao desce e o plugin usa o texto padrao.
+    storeUrl: process.env.WORKSHOP_STORE_URL ?? null,
     logger,
   });
 
@@ -2337,7 +2355,7 @@ async function main(): Promise<void> {
   // o que cada plugin tem, e o dedup diria "nao mudou nada" para
   // todos. Quem estiver sem RCON e pulado e reenviado na conexao.
   void workshopService.syncAll('startup');
-  // O relogio dos acessos com prazo. Ele tambem registra o que
+  // O relogio das posses com prazo. Ele tambem registra o que
   // venceu enquanto o agente estava desligado.
   workshopService.scheduleExpiry();
 
@@ -4104,7 +4122,7 @@ async function main(): Promise<void> {
     },
     workshop: {
       repository: workshopSkins,
-      access: workshopAccess,
+      owned: workshopOwned,
       catalog: workshopCatalog,
       lookup: workshopLookup,
       items: itemsRepository,

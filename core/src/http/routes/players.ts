@@ -7,6 +7,7 @@
 //      GET /api/players/:steamId/events  o histórico dele
 //      GET /api/players/:steamId/streamer  o modo streamer dele
 //      PUT /api/players/:steamId/streamer  liberar, e o que some
+//      GET /api/players/:steamId/skins     as skins que ele possui
 //
 //  ####  NÃO CONFUNDIR COM `/api/servers/:id/players`  ####
 //
@@ -38,6 +39,8 @@ import { z } from 'zod';
 
 import { assertSteamId } from '../../bans/service.js';
 import type { StreamerRepository } from '../../db/streamer-repository.js';
+import type { WorkshopOwnedRepository } from '../../db/workshop-owned-repository.js';
+import type { WorkshopSkinsRepository } from '../../db/workshop-repository.js';
 import type { StreamerSync } from '../../game/streamer-sync.js';
 import type { WorkshopService } from '../../game/workshop.js';
 import {
@@ -49,6 +52,7 @@ import {
 import { streamerUpdateSchema, type StreamerProfile } from '../../types/streamer.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
+import { ownedView } from './workshop.js';
 
 export interface PlayerRoutesDeps {
   readonly directory: PlayerDirectory;
@@ -81,6 +85,18 @@ export interface PlayerRoutesDeps {
    * Opcional: o agente sobe sem ele quando não há servidor montado.
    */
   readonly workshop?: WorkshopService;
+
+  /**
+   * A posse de skins, para a aba Skins da ficha (02 §9).
+   *
+   * Opcional pelo mesmo motivo do `workshop`: sem ela, a rota
+   * responde 503 em vez de uma lista vazia que pareceria "não tem
+   * nada".
+   */
+  readonly skins?: {
+    readonly repository: Pick<WorkshopSkinsRepository, 'getMany'>;
+    readonly owned: Pick<WorkshopOwnedRepository, 'listForPlayer'>;
+  };
 }
 
 const listQuery = z.object({
@@ -255,6 +271,42 @@ export function registerPlayerRoutes(app: FastifyInstance, deps: PlayerRoutesDep
     deps.workshop?.handleStreamerChanged();
 
     return { ok: true, streamer: toApiStreamer(streamer) };
+  });
+
+  /**
+   * As skins que ele possui — vivas e vencidas, com a skin resolvida.
+   *
+   * ####  200 COM LISTAS VAZIAS PARA QUEM NÃO TEM NADA  ####
+   *
+   * Como no streamer: a ausência de posse É a resposta. O SteamID é
+   * conferido, mas o jogador não precisa já ter entrado — o site pode
+   * vender para quem ainda não jogou.
+   *
+   * Dar e tirar ficam em `/workshop/owned`: a regra do prazo é uma só
+   * e mora lá.
+   */
+  app.get('/players/:steamId/skins', async (request) => {
+    const { steamId } = steamParams.parse(request.params);
+
+    assertSteamId(steamId);
+
+    if (deps.skins === undefined) {
+      throw new ApiError(
+        'WORKSHOP_UNAVAILABLE',
+        'Este agente subiu sem o módulo de skins: não há posse para mostrar.',
+        503,
+      );
+    }
+
+    const now = Date.now();
+    const view = ownedView(deps.skins.repository, deps.skins.owned.listForPlayer(steamId), now);
+
+    return {
+      ok: true,
+      steamId,
+      live: view.filter((owned) => !owned.expired),
+      expired: view.filter((owned) => owned.expired),
+    };
   });
 }
 

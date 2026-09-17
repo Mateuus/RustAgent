@@ -559,6 +559,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         ...(options.workshop?.workshop === undefined
           ? {}
           : { workshop: options.workshop.workshop }),
+        // A aba Skins da ficha le a posse. Ver routes/workshop.ts.
+        ...(options.workshop === undefined
+          ? {}
+          : { skins: { repository: options.workshop.repository, owned: options.workshop.owned } }),
       });
 
       // O ranking, junto do jogador porque é dele que ele fala — e

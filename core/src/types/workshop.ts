@@ -1,33 +1,33 @@
 // ============================================================
 //  workshop.ts  -  O CONTRATO DAS SKINS DO WORKSHOP.
 //
-//  ####  O JOGADOR ESCOLHE; NADA NASCE PINTADO  ####
+//  ####  A SKIN É POSSE DO JOGADOR  ####
 //
-//  Correção do dono em 16/09/2026, revogando a decisão da manhã do
-//  mesmo dia ("o item já nasce com a skin"). O módulo agora tem
-//  dois setores:
+//  Decisão do dono em 17/09/2026 (Docs/OrigemZWorkshop/02). O
+//  módulo tem dois setores:
 //
-//    CADASTRO   o catálogo de skins e de coleções. Entra pelo
-//               painel OU pelo jogo (`/skin add "item" "id"`), e os
-//               dois caminhos gravam na MESMA tabela deste agente.
-//    APLICAÇÃO  o jogador pinta o que já tem: pela caixa virtual
-//               (`/skin`) ou por coleção (`/skin neve`). O item é
-//               o MESMO objeto antes e depois — só o número muda.
+//    CADASTRO   o catálogo de skins. Entra pelo painel OU pelo jogo
+//               (`/skin add "item" "id"`), e os dois caminhos gravam
+//               na MESMA tabela deste agente.
+//    POSSE      quem tem qual skin. Entra pelo painel, pelo site
+//               (venda e caixa) e pelo `/skin give` de admin — os
+//               três pelo MESMO `grantOwnership`.
 //
-//  Ver Docs/OrigemZWorkshop/01-CAIXA-E-COLECOES.md.
+//  Coleções, permissão por skin e acesso por grupo do Oxide SAÍRAM
+//  (migração 097).
 //
-//  ####  QUEM PODE USAR UMA SKIN  ####
+//  ####  QUEM PODE APLICAR UMA SKIN  ####
 //
-//  Qualquer um dos caminhos abaixo libera — é um OU, nunca um E:
+//  Qualquer um dos caminhos abaixo libera — é um OU:
 //
-//    - a skin (ou a coleção dela) está marcada "para todos";
-//    - o jogador tem a permissão da skin, ou a da coleção dela;
-//    - existe um acesso vivo (não vencido) para o jogador, ou para
-//      um grupo Oxide dele, na skin ou na coleção dela;
+//    - a skin está "liberada para todos" (skin da casa);
+//    - o jogador tem uma posse VIVA dela (sem prazo, ou prazo no
+//      futuro);
 //    - o jogador tem `origemzworkshop.admin`.
 //
-//  Quem decide é o PLUGIN, na hora: grupo e permissão do Oxide só
-//  existem lá. Este arquivo descreve o que desce para ele.
+//  Em todos os casos a skin precisa estar ligada e vinculada ao
+//  servidor. Quem decide é o PLUGIN, na hora; este arquivo descreve o
+//  que desce para ele.
 //
 //  ####  `skinId` É TEXTO, E ISSO NÃO É PREGUIÇA  ####
 //
@@ -39,15 +39,9 @@
 
 import { z } from 'zod';
 
-/** O prefixo obrigatório de toda permissão desta feature. */
-export const WORKSHOP_PERMISSION_PREFIX = 'origemzworkshop.';
-
 /**
- * Quem vê e aplica todas as skins, e quem pode usar `/skin add`.
- *
- * Registrada pelo plugin no boot, e não pelo catálogo: ela precisa
- * existir antes de o agente mandar a primeira carga, senão o admin
- * não consegue cadastrar a primeira skin pelo jogo.
+ * Quem vê e aplica todas as skins, e quem pode usar `/skin add` e
+ * `/skin give`. Registrada pelo plugin no boot.
  */
 export const WORKSHOP_ADMIN_PERMISSION = 'origemzworkshop.admin';
 
@@ -80,56 +74,6 @@ export const workshopSkinIdSchema = z
     'O Workshop ID passa do teto de UInt64 do jogo (18446744073709551615).',
   );
 
-/** Tira acento, baixa a caixa e troca o resto por hífen. */
-export function slugify(value: string, max: number): string {
-  return value
-    .normalize('NFD')
-    // U+0300–U+036F são os diacríticos que o NFD separou da letra.
-    // Escritos como escape: um acento solto no código-fonte é
-    // invisível no editor e vira outra coisa numa conversão.
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, max);
-}
-
-/**
- * A permissão, sempre no prefixo da feature.
- *
- * Quem digita "vip" no painel quer dizer `origemzworkshop.vip`;
- * quem digita o nome inteiro também está certo. É IDEMPOTENTE: o
- * repositório revalida o que já gravou, e uma segunda passada não
- * pode dobrar o prefixo.
- *
- * Diferente da versão anterior, a permissão NÃO é mais única por
- * skin: `origemzworkshop.vip` liberando vinte skins é justamente o
- * caso que o dono pediu.
- */
-export function normalizePermission(value: string): string {
-  const trimmed = value.trim().toLowerCase();
-  const suffix = trimmed.startsWith(WORKSHOP_PERMISSION_PREFIX)
-    ? trimmed.slice(WORKSHOP_PERMISSION_PREFIX.length)
-    : trimmed;
-  const slug = slugify(suffix, 40);
-
-  // Nome só de símbolos deixaria a permissão igual ao prefixo.
-  return `${WORKSHOP_PERMISSION_PREFIX}${slug === '' ? 'skin' : slug}`;
-}
-
-/**
- * Permissão opcional: vazio vira `null`, o resto é normalizado.
- *
- * `null` quer dizer "esta linha não tem permissão própria" — e NÃO
- * "é de todo mundo". Quem abre para todos é o `openToAll`.
- */
-export const optionalPermissionSchema = z
-  .string()
-  .trim()
-  .max(80)
-  .nullish()
-  .transform((value) => (value === null || value === undefined || value === '' ? null : normalizePermission(value)));
-
 /**
  * O shortname do item base, na régua do próprio jogo.
  *
@@ -144,38 +88,62 @@ export const workshopShortnameSchema = z
   .max(120)
   .regex(/^[a-z0-9][a-z0-9._-]*$/, 'O shortname é o do jogo: minúsculas, dígitos, ponto e hífen.');
 
+/** SteamID64 de conta de usuário: 17 dígitos começando por 7656. */
+export const steamIdSchema = z
+  .string()
+  .trim()
+  .regex(/^7656\d{13}$/, 'SteamID64 tem 17 dígitos e começa com 7656.');
+
 /** De onde veio o cadastro. */
 export const WORKSHOP_SKIN_SOURCES = ['panel', 'game'] as const;
 export type WorkshopSkinSource = (typeof WORKSHOP_SKIN_SOURCES)[number];
+
+/** A raridade: a cor da borda e o rótulo no menu (03). */
+export const WORKSHOP_RARITIES = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
+export type WorkshopRarity = (typeof WORKSHOP_RARITIES)[number];
+
+/** O teto da descrição. A coluna só recusa o vazio. */
+export const WORKSHOP_DESCRIPTION_MAX = 280;
 
 // ------------------------------------------------------------
 //  SKINS
 // ------------------------------------------------------------
 
+/**
+ * Texto opcional: em branco vira `null`.
+ *
+ * A coluna recusa `''` (CHECK), e "sem descrição" tem UMA forma só —
+ * senão o painel teria de tratar as duas.
+ */
+const optionalText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .nullish()
+    .transform((value) => (value === null || value === undefined || value === '' ? null : value));
+
 /** Uma skin, como o admin a cadastra. */
 export const workshopSkinInputSchema = z.object({
-  /** "Máscara OrigemZ". É por ele que o jogador escolhe na caixa. */
+  /** "AK Brasa". É o nome que o jogador lê no menu. */
   label: z.string().trim().min(1, 'dê um nome à skin').max(60),
 
-  /** O item do jogo que recebe a aparência: `metal.facemask`. */
+  /** O item do jogo que recebe a aparência: `rifle.ak`. */
   shortname: workshopShortnameSchema,
 
   /** O id publicado no Steam Workshop. Ver `workshopSkinIdSchema`. */
   skinId: workshopSkinIdSchema,
 
-  /** Permissão própria, opcional. Ver `optionalPermissionSchema`. */
-  permission: optionalPermissionSchema.default(null),
+  /** O texto do painel de detalhe do menu. */
+  description: optionalText(WORKSHOP_DESCRIPTION_MAX).default(null),
 
-  /**
-   * A coleção a que ela pertence, se alguma.
-   *
-   * Uma skin mora em UMA coleção. É o que deixa a coleção ser um
-   * mapa `shortname → skin` sem ambiguidade: o índice único
-   * `(collection_id, shortname)` recusa duas máscaras na "neve".
-   */
-  collectionId: z.number().int().positive().nullable().default(null),
+  /** `null` = sem raridade: o menu desenha a borda neutra. */
+  rarity: z.enum(WORKSHOP_RARITIES).nullish().transform((value) => value ?? null).default(null),
 
-  /** Qualquer jogador pode aplicar, sem permissão nem acesso. */
+  /** A ordem na grade do menu: menor primeiro; empate pelo nome. */
+  sort: z.number().int().min(-1_000_000).max(1_000_000).default(0),
+
+  /** Skin da casa: qualquer jogador aplica, sem posse. */
   openToAll: z.boolean().default(false),
 
   /**
@@ -187,7 +155,7 @@ export const workshopSkinInputSchema = z.object({
    */
   hideInStreamer: z.boolean().default(true),
 
-  /** Desligada some da caixa e das coleções, sem perder o cadastro. */
+  /** Desligada some do menu, sem perder o cadastro nem a posse. */
   enabled: z.boolean().default(true),
 
   /** Em que servidores ela vale. Vazio = em nenhum. */
@@ -226,150 +194,147 @@ export interface WorkshopSkin extends WorkshopSkinInput, WorkshopSkinMeta {
 }
 
 // ------------------------------------------------------------
-//  COLEÇÕES
+//  POSSE
 // ------------------------------------------------------------
 
 /**
- * Palavras que o `/skin` já usa. Uma coleção com um destes nomes
- * nunca seria alcançada pelo jogador.
+ * De onde veio a ÚLTIMA escrita da posse.
+ *
+ *   site       venda ou caixa do site (entrega `skin`)
+ *   panel      a ficha do jogador ou a aba Posse
+ *   game       o `/skin give` de admin
+ *   system     o próprio agente
+ *   migration  a 097, a partir dos acessos da 096
  */
-export const RESERVED_COLLECTION_SLUGS: readonly string[] = [
-  'add',
-  'adicionar',
-  'ajuda',
-  'help',
-  'lista',
-  'list',
-  'caixa',
-  'box',
-];
+export const OWNED_SOURCES = ['site', 'panel', 'game', 'system', 'migration'] as const;
+export type OwnedSource = (typeof OWNED_SOURCES)[number];
+
+/** O teto do prazo em dias. O mesmo do contrato com o site (04 §3). */
+export const OWNED_MAX_DAYS = 3650;
+
+/** Uma posse, como ela está no banco. */
+export interface OwnedSkin {
+  readonly id: number;
+  readonly steamId: string;
+  /** O `id` da skin NESTE agente (`workshop_skins.id`). */
+  readonly skinRef: number;
+  /** Epoch ms, ou `null` para permanente. */
+  readonly expiresAt: number | null;
+  readonly source: OwnedSource;
+  /** O `DLV-…` da entrega do site; `null` nas outras origens. */
+  readonly sourceRef: string | null;
+  readonly note: string | null;
+  readonly createdBy: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
 
 /**
- * O nome do comando: `/skin <slug>`.
+ * O pedido de dar uma skin — a entrada ÚNICA do `grantOwnership`.
  *
- * Minúsculo e sem acento porque o jogador digita no chat, e o
- * teclado de cada um é diferente.
+ * `days` e `expiresAt` são exclusivos; sem nenhum dos dois, a posse é
+ * permanente. A tabela de renovação está no 02 §4.2 e no repositório
+ * (`db/workshop-owned-repository.ts`).
  */
-export const collectionSlugSchema = z
-  .string()
-  .trim()
-  .toLowerCase()
-  .regex(
-    /^[a-z0-9][a-z0-9_-]{0,23}$/,
-    'O comando tem até 24 letras minúsculas, dígitos, "-" ou "_", sem espaço e sem acento.',
-  )
-  .refine((value) => !RESERVED_COLLECTION_SLUGS.includes(value), {
-    message: `Este nome já é um subcomando do /skin (${RESERVED_COLLECTION_SLUGS.join(', ')}).`,
+export const grantOwnershipInputSchema = z
+  .object({
+    steamId: steamIdSchema,
+    skinRef: z.number().int().positive(),
+    /** Soma ao prazo vivo (ou conta de agora). `null` = permanente. */
+    days: z.number().int().min(1).max(OWNED_MAX_DAYS).nullish(),
+    /** Data absoluta, epoch ms. Nunca encurta um prazo maior. */
+    expiresAt: z.number().int().positive().nullish(),
+    source: z.enum(OWNED_SOURCES),
+    sourceRef: z.string().trim().min(1).max(120).nullish(),
+    note: optionalText(200),
+    /** Quem deu: usuário do painel, `site:<ref>`, `jogo:<nome>`. */
+    createdBy: z.string().trim().min(1).max(120),
+  })
+  .refine((value) => !(isSet(value.days) && isSet(value.expiresAt)), {
+    message: 'Mande dias OU data de vencimento, não os dois.',
+    path: ['days'],
   });
 
-export const workshopCollectionInputSchema = z.object({
-  /** `neve` → `/skin neve`. */
-  slug: collectionSlugSchema,
-  /** "Inverno 2026". É o que o jogador lê na resposta do comando. */
-  label: z.string().trim().min(1, 'dê um nome à coleção').max(60),
-  permission: optionalPermissionSchema.default(null),
-  openToAll: z.boolean().default(false),
-  enabled: z.boolean().default(true),
-});
+export type GrantOwnershipInput = z.input<typeof grantOwnershipInputSchema>;
+export type GrantOwnershipValue = z.output<typeof grantOwnershipInputSchema>;
 
-export type WorkshopCollectionInput = z.infer<typeof workshopCollectionInputSchema>;
-
-export interface WorkshopCollection extends WorkshopCollectionInput {
-  readonly id: number;
-  /** Quantas skins do catálogo apontam para ela. */
-  readonly skinCount: number;
-  readonly createdBy: string | null;
-  readonly createdAt: number;
-  readonly updatedAt: number;
+function isSet(value: number | null | undefined): boolean {
+  return value !== null && value !== undefined;
 }
 
-/** A troca das skins de uma coleção, de uma vez. */
-export const collectionSkinsBodySchema = z.object({
-  skinIds: z.array(z.number().int().positive()).max(200),
+/** O pedido de tirar uma skin. Tira a linha inteira, qualquer origem. */
+export const revokeOwnershipInputSchema = z.object({
+  steamId: steamIdSchema,
+  skinRef: z.number().int().positive(),
+  source: z.enum(OWNED_SOURCES),
+  sourceRef: z.string().trim().min(1).max(120).nullish(),
+  createdBy: z.string().trim().min(1).max(120),
 });
 
-// ------------------------------------------------------------
-//  ACESSOS
-// ------------------------------------------------------------
-
-export const GRANT_SUBJECT_TYPES = ['player', 'group'] as const;
-export type GrantSubjectType = (typeof GRANT_SUBJECT_TYPES)[number];
-
-export const GRANT_TARGET_TYPES = ['skin', 'collection'] as const;
-export type GrantTargetType = (typeof GRANT_TARGET_TYPES)[number];
-
-/** SteamID64 de conta de usuário: 17 dígitos começando por 7656. */
-export const steamIdSchema = z
-  .string()
-  .trim()
-  .regex(/^7656\d{13}$/, 'SteamID64 tem 17 dígitos e começa com 7656.');
-
-/** Grupo do Oxide: o nome como o `oxide.group add` o gravou. */
-export const oxideGroupSchema = z
-  .string()
-  .trim()
-  .toLowerCase()
-  .regex(/^[a-z0-9_.-]{1,64}$/, 'Grupo do Oxide: letras, dígitos, ".", "-" ou "_".');
+export type RevokeOwnershipInput = z.input<typeof revokeOwnershipInputSchema>;
 
 /**
- * Um acesso, como o painel o pede.
+ * `POST /workshop/owned`, como o painel o manda.
  *
- * `expiresAt` nulo é PERMANENTE. Um prazo no passado é recusado:
- * gravar um acesso já vencido não faz nada no jogo, e o admin
- * acharia que liberou.
+ * `skinId` aqui é o NOSSO id (o mesmo do `:skinId` das rotas de
+ * skin), e não o do Workshop. `expiresAt` aceita ISO ou epoch ms.
  */
-export const workshopGrantBodySchema = z
+export const ownedGrantBodySchema = z
   .object({
-    subjectType: z.enum(GRANT_SUBJECT_TYPES),
-    subject: z.string().trim().min(1),
-    targetType: z.enum(GRANT_TARGET_TYPES),
-    targetId: z.number().int().positive(),
+    steamId: steamIdSchema,
+    skinId: z.number().int().positive(),
+    days: z.number().int().min(1).max(OWNED_MAX_DAYS).nullish(),
     expiresAt: z
       .union([z.string().datetime({ offset: true }), z.number().int().positive(), z.null()])
-      .default(null)
-      .transform((value) => (value === null ? null : new Date(value).getTime())),
-    note: z.string().trim().max(200).default(''),
+      .optional()
+      .transform((value) => (value === null || value === undefined ? null : new Date(value).getTime())),
+    note: optionalText(200),
   })
-  .superRefine((value, ctx) => {
-    const check = value.subjectType === 'player' ? steamIdSchema : oxideGroupSchema;
-    const parsed = check.safeParse(value.subject);
+  .refine((value) => !(isSet(value.days) && value.expiresAt !== null), {
+    message: 'Mande dias OU data de vencimento, não os dois.',
+    path: ['days'],
+  });
 
-    if (!parsed.success) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['subject'],
-        message: parsed.error.issues[0]?.message ?? 'quem recebe o acesso é inválido',
-      });
-    }
+export type OwnedGrantBody = z.infer<typeof ownedGrantBodySchema>;
+
+/**
+ * `GET /workshop/owned`. Uma das duas chaves é obrigatória: a lista
+ * da rede inteira não é uma tela, é uma exportação.
+ */
+export const ownedListQuerySchema = z
+  .object({
+    steamId: steamIdSchema.optional(),
+    skinId: z.coerce.number().int().positive().optional(),
+    /** O `id` da última linha da página anterior. */
+    cursor: z.coerce.number().int().positive().optional(),
+    limit: z.coerce.number().int().min(1).max(500).default(100),
+    includeExpired: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
   })
-  .transform((value) => ({
-    ...value,
-    subject: value.subjectType === 'group' ? value.subject.trim().toLowerCase() : value.subject.trim(),
-  }));
+  .refine((value) => value.steamId !== undefined || value.skinId !== undefined, {
+    message: 'Informe steamId ou skinId.',
+    path: ['steamId'],
+  });
 
-export type WorkshopGrantInput = z.infer<typeof workshopGrantBodySchema>;
-
-export interface WorkshopGrant extends WorkshopGrantInput {
-  readonly id: number;
-  readonly createdBy: string | null;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-}
+export type OwnedListQuery = z.infer<typeof ownedListQuerySchema>;
 
 // ------------------------------------------------------------
 //  REGISTRO
 // ------------------------------------------------------------
 
-export const WORKSHOP_AUDIT_SOURCES = ['panel', 'game', 'system'] as const;
+/** `site` entrou na 097: a entrega do site grava aqui. */
+export const WORKSHOP_AUDIT_SOURCES = ['panel', 'game', 'system', 'site'] as const;
 export type WorkshopAuditSource = (typeof WORKSHOP_AUDIT_SOURCES)[number];
 
 export interface WorkshopAuditInput {
-  /** Quem fez: usuário do painel, `jogo:<steamId>` ou `sistema`. */
+  /** Quem fez: usuário do painel, `jogo:<steamId>`, `site:<ref>` ou `sistema`. */
   readonly actor: string;
   readonly source: WorkshopAuditSource;
-  /** `skin.create`, `grant.revoke`, `game.add-refused`… */
+  /** `skin.create`, `owned.grant`, `owned.expired`, `site.delivered`… */
   readonly action: string;
-  /** "skin #12 Máscara OrigemZ", "coleção neve"… */
+  /** "skin #12 AK Brasa (rifle.ak)"… */
   readonly target: string;
   readonly serverId?: string | null;
   /** O jogador AFETADO, quando há um. É por ele que a busca filtra. */
@@ -390,15 +355,17 @@ export interface WorkshopAuditEntry {
 }
 
 // ------------------------------------------------------------
-//  O QUE ATRAVESSA O CONSOLE
+//  O QUE ATRAVESSA O CONSOLE (02 §5)
 // ------------------------------------------------------------
 
 /**
  * Uma skin dentro do `origemz.workshop.sync`.
  *
  * Os nomes são PROTOCOLO com o `OrigemZWorkshop.cs`: mudar um lado
- * sem o outro é o modo parar de funcionar em silêncio. O `label`
- * viaja agora porque a caixa do jogador o mostra.
+ * sem o outro é o modo parar de funcionar em silêncio.
+ *
+ * `description` e `rarity` FALTAM (e não vão como `null`) quando não
+ * há valor — o 02 §5.1 diz "pode faltar".
  */
 export interface WorkshopPayloadSkin {
   readonly id: number;
@@ -406,75 +373,69 @@ export interface WorkshopPayloadSkin {
   readonly shortname: string;
   /** Texto, sempre. Ver o cabeçalho. */
   readonly skinId: string;
-  readonly permission: string | null;
-  readonly collectionId: number | null;
+  readonly description?: string;
+  readonly rarity?: WorkshopRarity;
+  readonly sort: number;
   readonly openToAll: boolean;
   readonly hideInStreamer: boolean;
 }
 
-export interface WorkshopPayloadCollection {
-  readonly id: number;
-  readonly slug: string;
-  readonly label: string;
-  readonly permission: string | null;
-  readonly openToAll: boolean;
-}
-
 /**
- * Um acesso vivo.
- *
- * O prazo desce junto e o plugin confere na hora: o agente também
- * reenvia quando um vence, mas o jogador não pode ganhar uma janela
- * de minutos se o RCON estiver caído nesse instante.
- */
-export interface WorkshopPayloadGrant {
-  readonly subjectType: GrantSubjectType;
-  readonly subject: string;
-  readonly targetType: GrantTargetType;
-  readonly targetId: number;
-  /** Epoch ms, ou `null` para permanente. */
-  readonly expiresAt: number | null;
-}
-
-/**
- * A carga completa. NUNCA um delta.
- *
- * Quem sumiu da lista some do jogo no instante em que a carga é
- * aplicada. Ela desce em PEDAÇOS quando passa do frame — ver
- * game/workshop.ts —, mas o plugin só troca o que tem quando o
- * último pedaço chega.
+ * O catálogo daquele servidor. NUNCA um delta, e sem posse: a posse
+ * desce por jogador, no `origemz.workshop.owned`.
  */
 export interface WorkshopPayload {
   /** O segredo desta sessão do agente. Ver game/workshop.ts. */
   readonly secret: string;
   readonly skins: readonly WorkshopPayloadSkin[];
-  readonly collections: readonly WorkshopPayloadCollection[];
-  readonly grants: readonly WorkshopPayloadGrant[];
   /**
    * Quem está escondendo a LOGO neste instante. SteamIDs em texto:
    * 17 dígitos passam de 2^53.
    */
   readonly streamers: readonly string[];
+  /** O texto do cadeado (03 §5). Falta quando não configurado. */
+  readonly storeUrl?: string;
 }
 
-/** O que o `origemz.workshop.status` responde. */
+/** Uma posse dentro do `origemz.workshop.owned`. */
+export interface WorkshopOwnedPayloadSkin {
+  /** O `id` da skin no catálogo (o mesmo `id` do sync). */
+  readonly id: number;
+  /** Epoch ms; **0 = permanente**. */
+  readonly expiresAt: number;
+}
+
+/**
+ * A posse de UM jogador naquele servidor. Inteira, nunca delta; a
+ * lista vazia é informação ("não tem nada") e é mandada.
+ *
+ * O `steamId` vai também no argumento do comando; aqui dentro ele é
+ * a conferência de que os pedaços remontados são de quem o argumento
+ * diz.
+ */
+export interface WorkshopOwnedPayload {
+  readonly secret: string;
+  readonly steamId: string;
+  readonly skins: readonly WorkshopOwnedPayloadSkin[];
+}
+
+/** O que o `origemz.workshop.status` responde (plugin 0.3.0). */
 export interface WorkshopStatus {
   readonly skins: number;
-  readonly collections: number;
-  readonly grants: number;
+  /** Quantos jogadores têm posse carregada na memória do plugin. */
+  readonly ownedPlayers: number;
   readonly streamers: number;
-  /** Caixas abertas agora, com item dentro ou não. */
-  readonly openBoxes: number;
 }
 
 /**
  * O que o plugin grita no console.
  *
  *   ready    subiu e quer a carga. O ÚNICO sem segredo.
- *   applied  aplicou a carga; confirma quantas skins ficaram de pé.
+ *   applied  aplicou o catálogo; confirma quantas skins ficaram.
  *   add      um admin digitou `/skin add` no jogo.
+ *   give     um admin digitou `/skin give` no jogo.
  */
-export const WORKSHOP_PUSH_KINDS = ['ready', 'applied', 'add'] as const;
+export const WORKSHOP_PUSH_KINDS = ['ready', 'applied', 'add', 'give'] as const;
 export type WorkshopPushKind = (typeof WORKSHOP_PUSH_KINDS)[number];
 
 export interface WorkshopPush {
@@ -498,7 +459,30 @@ export const workshopAddRequestSchema = z.object({
 
 export type WorkshopAddRequest = z.infer<typeof workshopAddRequestSchema>;
 
-/** A resposta ao `/skin add`, pelo `origemz.workshop.reply`. */
+/**
+ * O `/skin give` do jogo (02 §7), como o plugin o manda.
+ *
+ * O plugin resolve o nome digitado para um SteamID antes de gritar:
+ * `targetSteamId` é sempre o SteamID64. `steamId`/`playerName` são do
+ * ADMIN que digitou, e é para ele que a resposta volta.
+ */
+export const workshopGiveRequestSchema = z.object({
+  kind: z.literal('give'),
+  secret: z.string().min(1),
+  requestId: z.string().regex(/^[A-Za-z0-9-]{1,40}$/),
+  steamId: steamIdSchema,
+  playerName: z.string().max(64).default(''),
+  targetSteamId: steamIdSchema,
+  targetName: z.string().max(64).default(''),
+  shortname: z.string().max(120),
+  skinId: z.string().max(40),
+  /** `null`/ausente = permanente. */
+  days: z.number().int().min(1).max(OWNED_MAX_DAYS).nullish(),
+});
+
+export type WorkshopGiveRequest = z.infer<typeof workshopGiveRequestSchema>;
+
+/** A resposta ao `/skin add` e ao `/skin give`, pelo `origemz.workshop.reply`. */
 export interface WorkshopAddReply {
   readonly requestId: string;
   readonly steamId: string;
