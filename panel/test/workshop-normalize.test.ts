@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import {
   describeOwnedExpiry,
   groupByShortname,
+  ownedMatches,
   safeOwned,
   safeOwnedList,
   safeRarity,
@@ -92,5 +93,28 @@ describe('groupByShortname', () => {
     ].map((skin) => safeSkin(skin as WorkshopSkin));
 
     expect(groupByShortname(skins)[0]?.skins.map((skin) => skin.label)).toEqual(['Meio', 'Alfa', 'Zeta']);
+  });
+});
+
+describe('ownedMatches', () => {
+  const owned = safeOwned({
+    id: 1,
+    skinId: 42,
+    skin: { id: 42, label: 'AK Brasa', shortname: 'rifle.ak', workshopId: '3802433262' },
+  } as unknown as WorkshopOwned);
+
+  it('acha pelo nome, pelo item e pelo Workshop ID, sem caixa', () => {
+    expect(ownedMatches(owned, '  brasa ')).toBe(true);
+    expect(ownedMatches(owned, 'RIFLE.AK')).toBe(true);
+    expect(ownedMatches(owned, '38024')).toBe(true);
+    expect(ownedMatches(owned, 'mp5')).toBe(false);
+  });
+
+  it('busca vazia aceita tudo, e skin apagada só bate pelo número', () => {
+    const orphan = safeOwned({ id: 2, skinId: 77 } as unknown as WorkshopOwned);
+
+    expect(ownedMatches(orphan, '')).toBe(true);
+    expect(ownedMatches(orphan, '77')).toBe(true);
+    expect(ownedMatches(orphan, 'ak')).toBe(false);
   });
 });

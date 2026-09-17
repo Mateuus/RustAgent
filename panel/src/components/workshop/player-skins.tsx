@@ -6,11 +6,24 @@
 //  Docs/OrigemZWorkshop/02 §9. No molde da aba VIP: o que ele tem
 //  AGORA, o formulário de dar, e o que já aconteceu.
 //
+//  ####  DUAS SUB-ABAS: SKINS E HISTÓRICO  ####
+//
+//  Empilhadas, a lista, as vencidas, o formulário e o Registro
+//  passavam de uma tela, e o que se procura quase sempre é a lista.
+//  A sub-aba ativa fica só no estado local: não vai para a URL.
+//
+//  ####  DAR SKIN ABRE NUM MODAL  ####
+//
+//  O mesmo `Dialog` do cadastro de skins (skins-panel.tsx): ~720 px,
+//  tela cheia no celular, Esc e X fecham. É `guarded` porque o prazo
+//  é um `<select>` nativo — ver dialog.tsx. Fechar desmonta o
+//  formulário, então a próxima abertura nasce limpa.
+//
 //  ####  VIVA E VENCIDA, SEPARADAS  ####
 //
 //  "Ele tem a AK?" se responde pela lista viva. A vencida fica
-//  embaixo, apagada, porque é a resposta de "eu tinha e sumiu" —
-//  misturá-las faria uma posse vencida parecer valendo.
+//  embaixo, recolhida e apagada, porque é a resposta de "eu tinha e
+//  sumiu" — misturá-las faria uma posse vencida parecer valendo.
 //
 //  ####  MORA AQUI, E NÃO NA PÁGINA DA FICHA  ####
 //
@@ -21,17 +34,20 @@
 //  vira TypeError no render e derruba a página.
 // ============================================================
 
-import { Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Plus, Search, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { Dialog } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import { AuditPanel } from '@/components/workshop/audit-panel';
 import {
   describeOwnedExpiry,
   messageOf,
   OWNED_SOURCE_LABELS,
+  ownedMatches,
   safeOwned,
   safeOwnedList,
   safeSkin,
@@ -41,9 +57,10 @@ import {
   ExpiryPicker,
   NoteField,
   OwnedErrorBox,
-  OwnedSkinCell,
   PERMANENT,
+  RarityBadge,
   SkinCatalogPicker,
+  SkinThumb,
   type ExpiryValue,
 } from '@/components/workshop/owned-parts';
 import type { WorkshopServerOption } from '@/components/workshop/server-picker';
@@ -57,13 +74,27 @@ export interface PlayerSkinsProps {
   readonly servers: readonly WorkshopServerOption[];
 }
 
+type View = 'skins' | 'history';
+
+const VIEWS: readonly { id: View; label: string }[] = [
+  { id: 'skins', label: 'Skins' },
+  { id: 'history', label: 'Histórico' },
+];
+
+/** A partir de quantas posses a lista ganha a busca. */
+const SEARCH_THRESHOLD = 8;
+
 export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
+  const [view, setView] = useState<View>('skins');
   const [live, setLive] = useState<WorkshopOwned[] | null>(null);
   const [expired, setExpired] = useState<WorkshopOwned[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  /** Muda a cada escrita: remonta o Registro para ele reler. */
-  const [revision, setRevision] = useState(0);
+  const [giving, setGiving] = useState(false);
+  /** O modal está com uma requisição no ar: fechar fica travado. */
+  const [givingBusy, setGivingBusy] = useState(false);
+  const [query, setQuery] = useState('');
+  const [showExpired, setShowExpired] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -82,11 +113,6 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
     void load();
   }, [load]);
 
-  async function changed(): Promise<void> {
-    await load();
-    setRevision((value) => value + 1);
-  }
-
   async function revoke(owned: WorkshopOwned): Promise<void> {
     setBusy(true);
 
@@ -95,7 +121,7 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
       toast.success('Skin tirada', {
         description: `${owned.skin?.label ?? `skin #${String(owned.skinId)}`}. O que já foi pintado continua pintado.`,
       });
-      await changed();
+      await load();
     } catch (cause) {
       toast.error('Não consegui tirar', { description: messageOf(cause) });
     } finally {
@@ -104,56 +130,223 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
   }
 
   const liveIds = useMemo(() => new Set((live ?? []).map((owned) => owned.skinId)), [live]);
+  const total = (live?.length ?? 0) + expired.length;
+  const searchable = total > SEARCH_THRESHOLD;
+  // Com a busca escondida, um filtro digitado antes não pode sumir
+  // com linhas sem que se veja por quê.
+  const needle = searchable ? query : '';
+  const shownLive = useMemo(
+    () => (live ?? []).filter((owned) => ownedMatches(owned, needle)),
+    [live, needle],
+  );
+  const shownExpired = useMemo(
+    () => expired.filter((owned) => ownedMatches(owned, needle)),
+    [expired, needle],
+  );
+  const filtering = needle.trim() !== '';
 
   return (
     <div className="space-y-4">
-      {error !== null && (
-        <StateBlock variant="error" title="Não consegui ler as skins deste jogador" detail={error} />
-      )}
+      <div
+        role="tablist"
+        aria-label="Seções das skins do jogador"
+        className="inline-flex items-stretch border border-border bg-surface"
+      >
+        {VIEWS.map((item, index) => (
+          <div key={item.id} role="presentation" className="flex items-stretch">
+            {index > 0 && <span aria-hidden className="my-1 w-px bg-border" />}
 
-      {live === null && error === null && <StateBlock variant="loading" title="Lendo…" />}
+            <button
+              type="button"
+              role="tab"
+              id={`player-skins-tab-${item.id}`}
+              aria-selected={view === item.id}
+              aria-controls={`player-skins-panel-${item.id}`}
+              onClick={() => setView(item.id)}
+              className={cn(
+                'px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+                view === item.id ? 'bg-surface-2 text-foreground' : 'text-muted hover:text-foreground',
+              )}
+            >
+              {item.label}
+            </button>
+          </div>
+        ))}
+      </div>
 
-      {live !== null && (
-        <Block title="O que ele tem">
-          {live.length === 0 ? (
-            <p className="px-4 py-3 text-sm text-muted">
-              Este jogador não tem skin nenhuma. Ele ainda aplica as liberadas para todos.
-            </p>
-          ) : (
-            <OwnedRows rows={live} busy={busy} onRevoke={(owned) => void revoke(owned)} />
+      {view === 'skins' && (
+        <div
+          role="tabpanel"
+          id="player-skins-panel-skins"
+          aria-labelledby="player-skins-tab-skins"
+          className="space-y-4"
+        >
+          {error !== null && (
+            <StateBlock variant="error" title="Não consegui ler as skins deste jogador" detail={error} />
           )}
-        </Block>
-      )}
 
-      {expired.length > 0 && (
-        <Block title="Vencidas">
-          <OwnedRows rows={expired} busy={busy} onRevoke={(owned) => void revoke(owned)} />
-        </Block>
-      )}
+          <Block
+            title="O que ele tem"
+            count={live === null ? null : live.length}
+            aside={
+              <Button size="sm" onClick={() => setGiving(true)}>
+                <Plus aria-hidden="true" className="h-4 w-4" />
+                Adicionar skin
+              </Button>
+            }
+          >
+            {searchable && (
+              <div className="border-b border-border px-4 py-2">
+                <div className="relative max-w-sm">
+                  <Search
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
+                  />
+                  <Input
+                    value={query}
+                    placeholder="Buscar por nome, item ou Workshop ID"
+                    aria-label="Buscar nas skins do jogador"
+                    className="h-8 pl-7"
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+              </div>
+            )}
 
-      <GiveSkin steamId={steamId} liveIds={liveIds} onGranted={changed} />
+            {live === null && error === null ? (
+              <div className="p-3">
+                <StateBlock variant="loading" title="Lendo…" />
+              </div>
+            ) : live === null || live.length === 0 ? (
+              <p className="px-4 py-3 text-sm text-muted">
+                Este jogador não tem skin nenhuma. Ele ainda aplica as liberadas para todos.
+              </p>
+            ) : shownLive.length === 0 ? (
+              <p className="px-4 py-3 text-sm text-muted">Nenhuma skin dele bate com a busca.</p>
+            ) : (
+              <OwnedRows rows={shownLive} busy={busy} onRevoke={(owned) => void revoke(owned)} />
+            )}
+          </Block>
 
-      <Block title="Histórico">
-        <div className="p-3">
-          <AuditPanel key={revision} servers={servers} fixedSteamId={steamId} />
+          {expired.length > 0 && (
+            <Block
+              title="Vencidas"
+              count={expired.length}
+              aside={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-expanded={showExpired}
+                  onClick={() => setShowExpired((value) => !value)}
+                >
+                  {showExpired ? (
+                    <ChevronDown aria-hidden="true" className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight aria-hidden="true" className="h-4 w-4" />
+                  )}
+                  {showExpired ? 'Esconder' : 'Mostrar'}
+                </Button>
+              }
+            >
+              {showExpired &&
+                (shownExpired.length === 0 ? (
+                  <p className="px-4 py-3 text-sm text-muted">
+                    {filtering ? 'Nenhuma vencida bate com a busca.' : 'Nada aqui.'}
+                  </p>
+                ) : (
+                  <OwnedRows
+                    rows={shownExpired}
+                    busy={busy}
+                    onRevoke={(owned) => void revoke(owned)}
+                  />
+                ))}
+            </Block>
+          )}
+
+          <Dialog
+            open={giving}
+            title="Adicionar skin"
+            busy={givingBusy}
+            guarded
+            escapable
+            onClose={() => setGiving(false)}
+            // ~720 px no desktop; no celular, a tela inteira.
+            className="w-[min(45rem,94vw)] max-sm:m-0 max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:max-w-none max-sm:border-0"
+          >
+            {giving && (
+              <GiveSkin
+                steamId={steamId}
+                liveIds={liveIds}
+                onBusy={setGivingBusy}
+                onCancel={() => setGiving(false)}
+                onGranted={async () => {
+                  setGiving(false);
+                  await load();
+                }}
+              />
+            )}
+          </Dialog>
         </div>
-      </Block>
+      )}
+
+      {view === 'history' && (
+        <div
+          role="tabpanel"
+          id="player-skins-panel-history"
+          aria-labelledby="player-skins-tab-history"
+        >
+          {/* Monta ao entrar: o que mudou na outra sub-aba já aparece. */}
+          <Block title="Histórico">
+            <div className="p-3">
+              <AuditPanel servers={servers} fixedSteamId={steamId} />
+            </div>
+          </Block>
+        </div>
+      )}
     </div>
   );
 }
 
-function Block({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }) {
+function Block({
+  title,
+  count,
+  aside,
+  children,
+}: {
+  readonly title: string;
+  readonly count?: number | null;
+  readonly aside?: ReactNode;
+  readonly children: ReactNode;
+}) {
   return (
     <section className="border border-border bg-surface">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
         <h2 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
           <span aria-hidden="true" className="h-4 w-[3px] shrink-0 bg-rust" />
           {title}
+          {count !== undefined && count !== null && (
+            <span className="font-mono text-2xs font-normal text-muted">{count}</span>
+          )}
         </h2>
         {aside}
       </header>
       {children}
     </section>
+  );
+}
+
+/** Um selo discreto, para prazo e origem. */
+function Tag({ tone, title, children }: { tone?: string; title?: string; children: ReactNode }) {
+  return (
+    <span
+      title={title}
+      className={cn(
+        'whitespace-nowrap border border-border bg-surface-2 px-1.5 py-0.5 text-2xs text-muted',
+        tone,
+      )}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -168,39 +361,80 @@ function OwnedRows({
 }) {
   return (
     <ul className="divide-y divide-border">
-      {rows.map((owned) => (
-        <li
-          key={owned.id}
-          className={cn(
-            'flex flex-wrap items-center justify-between gap-3 px-4 py-3',
-            owned.expired && 'opacity-60',
-          )}
-        >
-          <div className="min-w-0 space-y-1">
-            <OwnedSkinCell owned={owned} />
-            <p className="text-2xs text-muted">
-              <span className={cn(!owned.expired && owned.expiresAt === null && 'text-olive')}>
-                {describeOwnedExpiry(owned)}
-              </span>
-              {' · '}
-              {OWNED_SOURCE_LABELS[owned.source]}
-              {owned.sourceRef === null ? '' : ` (${owned.sourceRef})`}
-              {owned.createdBy === '' ? '' : ` · por ${owned.createdBy}`}
-              {owned.note === null ? '' : ` · “${owned.note}”`}
-            </p>
-          </div>
+      {rows.map((owned) => {
+        const skin = owned.skin;
+        const permanent = owned.expiresAt === null;
 
-          <ConfirmButton
-            variant="danger"
-            disabled={busy}
-            icon={null}
-            label="Remover"
-            confirmLabel="Remover mesmo"
-            hint="Ele deixa de poder aplicar esta skin. O que já foi pintado continua pintado."
-            onConfirm={() => onRevoke(owned)}
-          />
-        </li>
-      ))}
+        return (
+          <li
+            key={owned.id}
+            className={cn(
+              'flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5',
+              owned.expired && 'opacity-60',
+            )}
+          >
+            <div className="flex min-w-0 flex-1 basis-64 items-center gap-3">
+              <SkinThumb
+                previewUrl={skin?.previewUrl ?? null}
+                shortname={skin?.shortname ?? ''}
+                large
+              />
+
+              <div className="min-w-0 space-y-0.5">
+                <p className="flex flex-wrap items-center gap-1.5">
+                  <span className="truncate font-medium text-foreground">
+                    {skin?.label ?? `skin #${String(owned.skinId)}`}
+                  </span>
+                  {skin !== null && <RarityBadge rarity={skin.rarity} />}
+                  {skin === null && <span className="text-2xs text-muted">apagada do catálogo</span>}
+                  {skin !== null && !skin.enabled && (
+                    <span className="text-2xs text-muted">desligada</span>
+                  )}
+                </p>
+                {skin !== null && (
+                  <p className="font-mono text-2xs text-muted">{skin.shortname}</p>
+                )}
+                {(owned.createdBy !== '' || owned.note !== null) && (
+                  <p className="truncate text-2xs text-muted">
+                    {owned.createdBy === '' ? '' : `por ${owned.createdBy}`}
+                    {owned.createdBy !== '' && owned.note !== null ? ' · ' : ''}
+                    {owned.note === null ? '' : `“${owned.note}”`}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+              <Tag
+                tone={cn(!owned.expired && permanent && 'border-olive/50 text-olive')}
+                title={owned.expiresAt ?? undefined}
+              >
+                {permanent
+                  ? 'permanente'
+                  : owned.expired
+                    ? describeOwnedExpiry(owned)
+                    : `expira ${describeOwnedExpiry(owned).replace(/^até /, 'em ')}`}
+              </Tag>
+              <Tag title={owned.sourceRef ?? undefined}>
+                {OWNED_SOURCE_LABELS[owned.source]}
+                {owned.sourceRef === null ? '' : ` · ${owned.sourceRef}`}
+              </Tag>
+
+              <ConfirmButton
+                variant="outline"
+                size="sm"
+                className="ml-1 text-muted hover:border-rust hover:text-rust"
+                disabled={busy}
+                icon={<Trash2 aria-hidden="true" className="h-3.5 w-3.5" />}
+                label="Remover"
+                confirmLabel="Remover mesmo"
+                hint="Ele deixa de poder aplicar esta skin. O que já foi pintado continua pintado."
+                onConfirm={() => onRevoke(owned)}
+              />
+            </div>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -208,10 +442,14 @@ function OwnedRows({
 function GiveSkin({
   steamId,
   liveIds,
+  onBusy,
+  onCancel,
   onGranted,
 }: {
   readonly steamId: string;
   readonly liveIds: ReadonlySet<number>;
+  readonly onBusy: (busy: boolean) => void;
+  readonly onCancel: () => void;
   readonly onGranted: () => Promise<void>;
 }) {
   const [skins, setSkins] = useState<readonly WorkshopSkin[] | null>(null);
@@ -243,6 +481,11 @@ function GiveSkin({
     };
   }, []);
 
+  function changeBusy(value: boolean): void {
+    setBusy(value);
+    onBusy(value);
+  }
+
   const { problem: expiryProblem, body } = expiryBody(expiry);
   const problem = skinId === null ? 'Escolha a skin.' : expiryProblem;
   const renewing = skinId !== null && liveIds.has(skinId);
@@ -250,8 +493,10 @@ function GiveSkin({
   async function submit(): Promise<void> {
     if (skinId === null) return;
 
-    setBusy(true);
+    changeBusy(true);
     setError(null);
+
+    let granted = false;
 
     try {
       const trimmed = note.trim();
@@ -268,49 +513,56 @@ function GiveSkin({
           ? {}
           : { description: `${owned.skin?.label ?? ''} · ${describeOwnedExpiry(owned)}` }),
       });
-      setSkinId(null);
-      setNote('');
-      await onGranted();
+      granted = true;
     } catch (cause) {
       setError(cause instanceof ApiError ? cause : new ApiError('', messageOf(cause), 0));
     } finally {
-      setBusy(false);
+      // Destrava ANTES de fechar: com `busy`, o Dialog recusaria.
+      changeBusy(false);
     }
+
+    if (granted) await onGranted();
   }
 
   return (
-    <Block title="Dar skin">
-      <div className="space-y-3 p-4">
-        {catalogError !== null && (
-          <StateBlock variant="error" title="Não consegui ler o catálogo" detail={catalogError} />
-        )}
+    <div className="space-y-3">
+      {catalogError !== null && (
+        <StateBlock variant="error" title="Não consegui ler o catálogo" detail={catalogError} />
+      )}
 
-        {skins === null ? (
-          <StateBlock variant="loading" title="Lendo o catálogo…" />
-        ) : (
-          <SkinCatalogPicker
-            skins={skins}
-            multiple={false}
-            selected={skinId === null ? [] : [skinId]}
-            ownedIds={liveIds}
-            onChange={(ids) => setSkinId(ids[0] ?? null)}
-          />
-        )}
+      {skins === null ? (
+        <StateBlock variant="loading" title="Lendo o catálogo…" />
+      ) : (
+        <SkinCatalogPicker
+          skins={skins}
+          multiple={false}
+          selected={skinId === null ? [] : [skinId]}
+          ownedIds={liveIds}
+          onChange={(ids) => setSkinId(ids[0] ?? null)}
+        />
+      )}
 
-        <ExpiryPicker value={expiry} onChange={setExpiry} />
-        <NoteField value={note} onChange={setNote} />
+      <ExpiryPicker value={expiry} onChange={setExpiry} />
+      <NoteField value={note} onChange={setNote} />
 
-        {renewing && (
-          <p className="border-l-2 border-amber pl-2 text-2xs leading-relaxed text-amber">
-            Ele já tem esta skin. Dar de novo <strong>soma</strong> o prazo escolhido ao que sobra —
-            ou mantém o permanente.
-          </p>
-        )}
+      {renewing && (
+        <p className="border-l-2 border-amber pl-2 text-2xs leading-relaxed text-amber">
+          Ele já tem esta skin. Dar de novo <strong>soma</strong> o prazo escolhido ao que sobra —
+          ou mantém o permanente.
+        </p>
+      )}
 
-        <OwnedErrorBox error={error} title="Não consegui dar a skin" />
+      <OwnedErrorBox error={error} title="Não consegui dar a skin" />
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-          <p className="text-2xs text-muted">{problem}</p>
+      {/* Preso no fundo da caixa, como no cadastro de skins: o -mx/-mb
+          cobre o respiro do Dialog. */}
+      <div className="sticky bottom-0 -mx-3 -mb-3 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-surface px-3 py-3">
+        <p className="text-2xs text-muted">{problem}</p>
+
+        <div className="flex gap-2">
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
+            Cancelar
+          </Button>
           <Button
             size="sm"
             variant="primary"
@@ -322,6 +574,6 @@ function GiveSkin({
           </Button>
         </div>
       </div>
-    </Block>
+    </div>
   );
 }

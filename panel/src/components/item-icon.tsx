@@ -45,9 +45,10 @@ import { cn } from '@/lib/utils';
  * e pedir mais do que isso só entrega borrão. `sm` é a lista de um
  * autocomplete, `md` a tabela do catálogo, `lg` a linha de um
  * editor — onde o ícone é a confirmação visual do que foi
- * escolhido, e por isso é o maior dos três.
+ * escolhido. `xl` é a linha da lista de posse na ficha do jogador,
+ * onde o ícone é o que se procura com o olho.
  */
-const SIZES = { sm: 20, md: 28, lg: 40 } as const;
+const SIZES = { sm: 20, md: 28, lg: 40, xl: 48 } as const;
 
 export type ItemIconSize = keyof typeof SIZES;
 

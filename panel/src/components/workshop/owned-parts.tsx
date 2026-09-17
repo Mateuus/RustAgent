@@ -60,13 +60,18 @@ export function RarityBadge({ rarity }: { readonly rarity: WorkshopRarity | null
 export function SkinThumb({
   previewUrl,
   shortname,
+  large = false,
 }: {
   readonly previewUrl: string | null;
   readonly shortname: string;
+  /** 48 px nos dois casos (arte e item base), para a lista de posse. */
+  readonly large?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
 
-  if (previewUrl === null || failed) return <ItemIcon shortname={shortname} />;
+  if (previewUrl === null || failed) {
+    return <ItemIcon shortname={shortname} size={large ? 'xl' : 'md'} />;
+  }
 
   return (
     // O <img> cru: a imagem vem da Steam, e o export estático não
@@ -75,7 +80,10 @@ export function SkinThumb({
       src={previewUrl}
       alt=""
       loading="lazy"
-      className="h-10 w-10 shrink-0 border border-border object-cover"
+      className={cn(
+        'shrink-0 border border-border object-cover',
+        large ? 'h-12 w-12' : 'h-10 w-10',
+      )}
       onError={() => setFailed(true)}
     />
   );

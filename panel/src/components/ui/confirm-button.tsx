@@ -26,7 +26,11 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 
 export interface ConfirmButtonProps {
-  readonly variant: 'danger' | 'primary';
+  /** `outline` é o destrutivo discreto: só vira vermelho ao armar. */
+  readonly variant: 'danger' | 'primary' | 'outline';
+  readonly size?: 'sm' | 'md';
+  /** Vale só com o botão desarmado; armado, é o vermelho puro. */
+  readonly className?: string;
   readonly disabled: boolean;
   readonly icon: ReactNode;
   readonly label: string;
@@ -38,6 +42,8 @@ export interface ConfirmButtonProps {
 
 export function ConfirmButton({
   variant,
+  size = 'md',
+  className,
   disabled,
   icon,
   label,
@@ -67,6 +73,8 @@ export function ConfirmButton({
     <span className="inline-flex flex-col gap-1">
       <Button
         variant={armed ? 'danger' : variant}
+        size={size}
+        className={armed ? undefined : className}
         disabled={disabled}
         onClick={() => {
           if (armed) {

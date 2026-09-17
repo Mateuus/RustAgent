@@ -275,6 +275,25 @@ export function describeOwnedExpiry(owned: Pick<WorkshopOwned, 'expiresAt' | 'ex
     : `até ${formatDateTime(owned.expiresAt)}`;
 }
 
+/**
+ * A posse bate com o que foi digitado na busca da ficha?
+ *
+ * Procura no nome, no item e no Workshop ID, sem caixa. Busca vazia
+ * aceita tudo; posse cuja skin foi apagada só bate pelo número.
+ */
+export function ownedMatches(owned: WorkshopOwned, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return true;
+
+  const skin = owned.skin;
+  const haystack =
+    skin === null
+      ? [String(owned.skinId)]
+      : [skin.label, skin.shortname, skin.workshopId, String(owned.skinId)];
+
+  return haystack.some((value) => value.toLowerCase().includes(needle));
+}
+
 /** A mensagem de um erro qualquer, sem `[object Object]`. */
 export function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
