@@ -46,7 +46,7 @@ import type { WipeScheduleRepository } from '../../db/wipe-schedule-repository.j
 import type { WipesRepository } from '../../db/wipes-repository.js';
 import type { OperationStore } from '../../ops/operations.js';
 import type { ServerSupervisor } from '../../servers/supervisor.js';
-import { BP_POLICIES } from '../../types/wipe.js';
+import { BP_POLICIES, SEASON_SKINS_POLICIES } from '../../types/wipe.js';
 import { listPluginData } from '../../wipe/plugin-data.js';
 import { buildWipePreview } from '../../wipe/preview.js';
 import type { WipeWorldClock } from '../../wipe/run.js';
@@ -134,6 +134,26 @@ const startSchema = z
      * Docs/Ranking/20-PLANO-E-CONTRATOS.md §3.4.
      */
     openRankingSeason: z.boolean().nullable().optional(),
+    /**
+     * Este wipe tira da posse as **skins de temporada**?
+     *
+     * ####  AUSENTE É `keep`, E DE PROPÓSITO  ####
+     *
+     * Ao contrário do `openRankingSeason`, aqui não existe terceiro
+     * estado: o dono pediu "por padrão a skin NÃO é removida", e um
+     * wipe manual sem escolha é justamente o caso em que ninguém
+     * pediu para remover. Quem quer a remoção marca "Remover da
+     * posse" na tela, e ela viaja neste campo.
+     *
+     * Ele NÃO vira coluna em `wipe_runs`: a decisão é consumida pelo
+     * passo `pos-wipe` desta execução (ver wipe/run.ts). Uma
+     * RETOMADA depois de o agente reiniciar não recebe este campo de
+     * novo — se o `pos-wipe` ainda não tinha rodado, ela cai em
+     * `keep` e nada é removido. É o lado certo de errar: o admin
+     * repete a escolha, em vez de descobrir uma posse apagada que
+     * ninguém confirmou.
+     */
+    seasonSkins: z.enum(SEASON_SKINS_POLICIES).optional(),
   })
   .strict();
 
@@ -426,7 +446,10 @@ export function registerWipeRunRoutes(app: FastifyInstance, deps: WipeRunRoutesD
     try {
       const operation = await context.operations.start({
         kind: 'wipe-run',
-        wipe: { runId: run.id },
+        // A escolha de skins de temporada vai JUNTO da operação, e
+        // não numa coluna: ela é da execução que começa agora, e
+        // quem a consome é o passo `pos-wipe`. Ver o campo no corpo.
+        wipe: { runId: run.id, ...(body.seasonSkins === undefined ? {} : { seasonSkins: body.seasonSkins }) },
       });
 
       operationId = operation.id;

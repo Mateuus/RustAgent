@@ -47,6 +47,7 @@ import {
   type RemoteBuild,
 } from '../steam/builds.js';
 import { appUpdate, steamCmdExe } from '../steam/steamcmd.js';
+import type { SeasonSkinsPolicy } from '../types/wipe.js';
 import { toError } from '../util.js';
 import { openOperationLogFile } from './op-log-file.js';
 import {
@@ -130,6 +131,15 @@ export interface StartOperationInput {
     readonly runId: number;
     /** Retomada: os passos já concluídos não rodam de novo. */
     readonly resume?: boolean;
+    /**
+     * O que este wipe faz com a posse das skins de temporada.
+     *
+     * Ausente = ninguém disse, e quem decide é a configuração do
+     * tipo de wipe (ver `#seasonSkinsOf`, em wipe/run.ts). Este
+     * arquivo não sabe o que a escolha significa: ele a carrega da
+     * rota até a máquina de passos, como já faz com o `resume`.
+     */
+    readonly seasonSkins?: SeasonSkinsPolicy;
   };
 }
 
@@ -504,6 +514,7 @@ export class OperationsService {
       operation,
       control,
       resume: wipe.resume === true,
+      ...(wipe.seasonSkins === undefined ? {} : { seasonSkins: wipe.seasonSkins }),
     });
   }
 

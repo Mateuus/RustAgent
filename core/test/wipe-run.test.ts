@@ -28,7 +28,11 @@
 //       quando o `parar` não consegue derrubá-lo;
 //    8. o relógio que dispara o plano vencido: ele dispara ANTES da
 //       hora (pela folga dos avisos), nunca duas vezes o mesmo
-//       plano, tenta de novo depois de uma recusa, e NUNCA lança.
+//       plano, tenta de novo depois de uma recusa, e NUNCA lança;
+//    9. as SKINS DE TEMPORADA: por padrão nenhuma posse sai, o
+//       `clear` remove UMA vez e reporta a contagem, a cadência e o
+//       forçado leem cada um a sua chave, e a retomada não remove
+//       duas vezes.
 // ============================================================
 
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -166,6 +170,20 @@ interface Scenario {
   /** Erros que o `commitWorld` vai lançar. Ver `RunsComCommitQueFalha`. */
   readonly commitErrors: Error[];
   readonly announced: number[];
+  /**
+   * A porta das skins de temporada, gravada.
+   *
+   * `calls` recebe um item por chamada de `removeSeasonOwnership`
+   * (com o servidor que foi passado), e `result` é o que ela
+   * devolve. Contar as chamadas é o teste da retomada: remover duas
+   * vezes apagaria a posse reconquistada depois do wipe.
+   */
+  readonly season: {
+    readonly calls: (string | null | undefined)[];
+    result: { removed: number; players: readonly string[] };
+    /** Plantada aqui, ela é lançada na próxima chamada. */
+    error: Error | null;
+  };
 }
 
 async function scenario(
@@ -304,6 +322,8 @@ async function scenario(
     rconConnected: true,
   };
 
+  const season: Scenario['season'] = { calls: [], result: { removed: 0, players: [] }, error: null };
+
   const runs = new RunsComCommitQueFalha(db);
   const wipes = new WipesRepository(db);
   const schedule = new WipeScheduleRepository(db);
@@ -325,6 +345,17 @@ async function scenario(
       announceOffset: (input) => {
         announced.push(input.offsetMinutes);
         return Promise.resolve();
+      },
+    },
+    seasonSkins: {
+      removeSeasonOwnership: (serverId) => {
+        season.calls.push(serverId);
+
+        if (season.error !== null) {
+          throw season.error;
+        }
+
+        return season.result;
       },
     },
   });
@@ -354,6 +385,7 @@ async function scenario(
     settingsErrors,
     commitErrors: runs.commitErrors,
     announced,
+    season,
   };
 }
 
@@ -2124,5 +2156,173 @@ describe('a folga dos avisos', () => {
 
   it('com avisos, ela começa pelo MAIOR deles', () => {
     expect(leadTimeMs([60, 1440, 5])).toBe(1440 * 60_000);
+  });
+});
+
+
+// ------------------------------------------------------------
+//  AS SKINS DE TEMPORADA  (Docs/OrigemZWorkshop/02 §4.6)
+// ------------------------------------------------------------
+
+describe('a posse das skins de temporada', () => {
+  it('por padrão NÃO sai: o passo diz "nenhuma" e ninguém é chamado', async () => {
+    // ####  ESTE É O PEDIDO DO DONO, EM UM TESTE  ####
+    //
+    // "por padrão a skin NÃO é removida". Um wipe em que ninguém
+    // tocou na opção não pode encostar na posse de ninguém — e a
+    // frase do passo tem de DIZER isso, senão a única maneira de
+    // saber se saiu algo é ir olhar o banco.
+    const s = await scenario();
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(s.season.calls).toEqual([]);
+
+    const post = finished.steps.find((step) => step.step === 'pos-wipe');
+
+    expect(post?.status).toBe('done');
+    expect(post?.message).toContain('nenhuma posse removida');
+    expect(post?.message).toContain('MANTER');
+  });
+
+  it('`clear` no botão de wipar remove UMA vez, e o passo diz quantas saíram', async () => {
+    const s = await scenario();
+
+    s.season.result = { removed: 12, players: ['76561198000000001', '76561198000000002'] };
+
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      seasonSkins: 'clear',
+    });
+
+    // Uma chamada, e com o servidor do wipe — é ele que o registro
+    // do `owned.season-cleared` guarda para dizer de onde veio a
+    // ordem. A posse em si é da rede e sai inteira.
+    expect(s.season.calls).toEqual([SERVER]);
+
+    const post = finished.steps.find((step) => step.step === 'pos-wipe');
+
+    expect(post?.status).toBe('done');
+    expect(post?.message).toContain('12 posse(s) removida(s)');
+    expect(post?.message).toContain('2 jogador(es)');
+  });
+
+  it('num wipe da CADÊNCIA a escolha vem da configuração, sem ninguém digitar nada', async () => {
+    // O relógio dispara o plano vencido e não passa `seasonSkins`:
+    // a resposta tem de sair de `cadence.seasonSkins`.
+    const s = await scenario();
+
+    s.schedule.saveSettings(SERVER, {
+      ...s.schedule.getSettings(SERVER),
+      cadence: { ...s.schedule.getSettings(SERVER).cadence, seasonSkins: 'clear' },
+    });
+
+    s.season.result = { removed: 3, players: ['76561198000000001'] };
+
+    const run = s.runs.create(SERVER, { kind: 'cadence', bpPolicy: 'keep' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(s.season.calls).toEqual([SERVER]);
+    expect(finished.steps.find((step) => step.step === 'pos-wipe')?.message).toContain(
+      '3 posse(s) removida(s)',
+    );
+  });
+
+  it('o wipe FORÇADO lê a chave dele, e a da cadência não vale nele', async () => {
+    const s = await scenario();
+    const atual = s.schedule.getSettings(SERVER);
+
+    s.schedule.saveSettings(SERVER, {
+      ...atual,
+      cadence: { ...atual.cadence, seasonSkins: 'clear' },
+      forced: { ...atual.forced, seasonSkins: 'keep' },
+    });
+
+    const run = s.runs.create(SERVER, { kind: 'forced', bpPolicy: 'wipe' });
+
+    await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+    });
+
+    expect(s.season.calls).toEqual([]);
+  });
+
+  it('a retomada NÃO remove de novo: o `pos-wipe` já está `done`', async () => {
+    // ####  A REMOÇÃO NÃO É IDEMPOTENTE, E NÃO TEM COMO SER  ####
+    //
+    // Uma segunda passada apagaria a posse que os jogadores
+    // reconquistaram DEPOIS do wipe. Quem impede é a máquina de
+    // passos: `pos-wipe` concluído não roda de novo.
+    const s = await scenario();
+
+    s.season.result = { removed: 5, players: ['76561198000000001'] };
+
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
+
+    await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      seasonSkins: 'clear',
+    });
+
+    expect(s.season.calls).toHaveLength(1);
+
+    // O agente reinicia e alguém manda retomar a MESMA execução.
+    const retomado = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      resume: true,
+      seasonSkins: 'clear',
+    });
+
+    expect(retomado.status).toBe('done');
+    expect(s.season.calls).toHaveLength(1);
+  });
+
+  it('uma remoção que explode não derruba o wipe: o mundo já nasceu', async () => {
+    const s = await scenario();
+
+    s.season.error = new Error('o banco está ocupado');
+
+    const run = s.runs.create(SERVER, { kind: 'manual', bpPolicy: 'keep' });
+
+    const finished = await s.runner.run({
+      serverId: SERVER,
+      runId: run.id,
+      operation: operation(),
+      control: s.control,
+      seasonSkins: 'clear',
+    });
+
+    expect(finished.status).toBe('done');
+
+    const post = finished.steps.find((step) => step.step === 'pos-wipe');
+
+    expect(post?.status).toBe('done');
+    expect(post?.message).toContain('NÃO deu para remover');
   });
 });

@@ -50,6 +50,30 @@ export const BP_POLICIES = ['keep', 'wipe', 'wipe_except_vip'] as const;
 export type BpPolicy = (typeof BP_POLICIES)[number];
 
 /**
+ * O que acontece com a POSSE das **skins de temporada** quando o
+ * mundo zera.
+ *
+ *   keep   ninguém perde skin nenhuma — é o padrão
+ *   clear  a posse de toda skin marcada "Skin de temporada" sai
+ *
+ * ####  A ESCOLHA É DE CADA WIPE, E NÃO DA SKIN  ####
+ *
+ * Pedido do dono, 17/09/2026: "por padrão a skin NÃO é removida; no
+ * wipe que eu quiser, marco para remover a posse das skins de
+ * temporada". Uma skin costuma atravessar dois ou três wipes antes
+ * de sair, então a marca `workshop_skins.season` só diz QUAIS
+ * saem — QUANDO é deste campo, e o padrão é não sair nenhuma.
+ *
+ * O desenho é o do `BpPolicy`: um enum de texto, viajando na
+ * configuração da cadência, na do forçado e no corpo do botão de
+ * wipar. Ver Docs/OrigemZWorkshop/02-SKINS-DO-JOGADOR.md §4.6.
+ */
+export const SEASON_SKINS_POLICIES = ['keep', 'clear'] as const;
+
+/** Manter ou remover a posse das skins de temporada neste wipe. */
+export type SeasonSkinsPolicy = (typeof SEASON_SKINS_POLICIES)[number];
+
+/**
  * O que fazer quando o wipe da casa e o da Facepunch caem quase
  * no mesmo dia.
  *
@@ -89,6 +113,11 @@ export interface WipeCadenceSettings {
   readonly timeZone: string;
   /** O que os wipes desta cadência fazem com os blueprints. */
   readonly bpPolicy: BpPolicy;
+  /**
+   * O que os wipes desta cadência fazem com a posse das skins de
+   * temporada. `keep` por padrão — ver `SeasonSkinsPolicy`.
+   */
+  readonly seasonSkins: SeasonSkinsPolicy;
 }
 
 /**
@@ -111,6 +140,8 @@ export interface WipeSettings {
    */
   readonly forced: {
     readonly bpPolicy: BpPolicy;
+    /** E o que ele faz com a posse das skins de temporada. */
+    readonly seasonSkins: SeasonSkinsPolicy;
   };
   readonly collision: {
     readonly policy: CollisionPolicy;
