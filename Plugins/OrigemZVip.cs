@@ -529,7 +529,7 @@ namespace Oxide.Plugins
                 Tier = outcome.Tier,
                 Added = outcome.Added,
                 Removed = outcome.Removed
-            });
+            }, Formatting.None);
         }
 
         // ========================================================
@@ -894,7 +894,7 @@ namespace Oxide.Plugins
 
         private static string BuildError(string code)
         {
-            return JsonConvert.SerializeObject(new ErrorResponse { Error = code });
+            return JsonConvert.SerializeObject(new ErrorResponse { Error = code }, Formatting.None);
         }
 
         // --------------------------------------------------------

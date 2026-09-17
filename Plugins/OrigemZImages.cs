@@ -572,7 +572,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            arg.ReplyWith(JsonConvert.SerializeObject(response));
+            arg.ReplyWith(JsonConvert.SerializeObject(response, Formatting.None));
         }
 
         /// <summary>

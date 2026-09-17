@@ -1721,7 +1721,7 @@ namespace Oxide.Plugins
                 };
 
                 var encoded = Convert.ToBase64String(
-                    System.Text.Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload)));
+                    System.Text.Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload, Formatting.None)));
 
                 // ####  NO TIQUE SEGUINTE, E NÃO AGORA  ####
                 //

@@ -1469,7 +1469,7 @@ namespace Oxide.Plugins
                 aviso["steamId"] = player.UserIDString;
                 aviso["name"] = player.displayName == null ? string.Empty : player.displayName;
 
-                Puts(ChatCommandMarker + JsonConvert.SerializeObject(aviso));
+                Puts(ChatCommandMarker + JsonConvert.SerializeObject(aviso, Formatting.None));
             }
             catch (Exception ex)
             {
