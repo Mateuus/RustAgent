@@ -1200,6 +1200,8 @@ namespace Oxide.Plugins
                     foreach (KeyValuePair<int, long> skin in pair.Value.Skins)
                     {
                         if (skin.Value != 0 && skin.Value <= now) continue;
+                        // Skin que saiu do catálogo não volta a ser lida: não guardar.
+                        if (_catalog != null && _catalog.ById.Count > 0 && !_catalog.ById.ContainsKey(skin.Key)) continue;
 
                         entry.Skins.Add(new OwnedFileSkin { Id = skin.Key, ExpiresAt = skin.Value });
                     }
@@ -1292,20 +1294,25 @@ namespace Oxide.Plugins
             }
 
             string requestId = Text(body, "requestId");
-            string steamId = Text(body, "steamId");
             bool ok = Flag(body, "ok", false);
             string message = Text(body, "message");
 
-            // Quem PEDIU é quem ouve a resposta: no `give`, o admin.
+            // Quem PEDIU é quem ouve a resposta: no `give`, o admin. Sem o
+            // pedido pendente (venceu o prazo ou o plugin recarregou) não há
+            // como saber quem perguntou: o `steamId` do corpo, no `give`, é o
+            // do ALVO, e a frase iria para a pessoa errada. Fica só no log.
             PendingRequest pending;
-            if (_pendingRequests.TryGetValue(requestId, out pending))
+            if (string.IsNullOrEmpty(requestId) || !_pendingRequests.TryGetValue(requestId, out pending))
             {
-                _pendingRequests.Remove(requestId);
-                if (pending.Timeout != null) pending.Timeout.Destroy();
-                steamId = pending.SteamId;
+                PrintWarning("Resposta sem pedido pendente (" + (string.IsNullOrEmpty(requestId) ? "sem id" : requestId) + "): " + message);
+                arg.ReplyWith("{\"ok\":true}");
+                return;
             }
 
-            BasePlayer player = FindOnline(steamId);
+            _pendingRequests.Remove(requestId);
+            if (pending.Timeout != null) pending.Timeout.Destroy();
+
+            BasePlayer player = FindOnline(pending.SteamId);
             if (player != null)
             {
                 Tell(player, (ok ? "<color=#9fd67a>" : "<color=#e0776b>") + Escape(message) + "</color>");
