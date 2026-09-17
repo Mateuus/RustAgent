@@ -72,6 +72,7 @@ import {
   TEAM_SCREEN_ID,
   withTeamTab,
 } from './game/ui-team-screen.js';
+import { withSkinsTab } from './game/ui-skins-tab.js';
 import {
   createEventsScreenProvider,
   parseEventsScreenId,
@@ -1771,6 +1772,35 @@ async function main(): Promise<void> {
     logger.info(
       { uiDocument: stored.slug },
       'a aba EQUIPE entrou neste menu: é onde o jogador vê e administra a equipe dele',
+    );
+  }
+
+  // ####  E A ABA SKINS, PELA MESMA RAZAO  ####
+  //
+  // O menu gravado antes da frente F do OrigemZWorkshop não tem por
+  // onde chegar ao menu de skins. A edição é um botão só, logo
+  // depois de KITS, copiado do vizinho — sem tela, porque quem
+  // desenha o menu de skins é o plugin. Roda a cada boot e é
+  // idempotente: o marcador é o próprio botão. Ver
+  // game/ui-skins-tab.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withSkinsTab(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'a aba SKINS entrou neste menu: ela abre o menu de skins do OrigemZWorkshop',
     );
   }
 

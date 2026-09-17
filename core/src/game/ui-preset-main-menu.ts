@@ -73,6 +73,12 @@ import { buildQuestsScreen, emptyQuestsView, QUESTS_SCREEN_ID } from './ui-quest
 import { buildRankingScreen, emptyRankingView } from './ui-ranking-screen.js';
 import { buildEventsScreen } from './ui-events-screen.js';
 import {
+  SKINS_ACTION_ID,
+  SKINS_COMMAND,
+  SKINS_TAB_ID,
+  SKINS_TAB_LABEL,
+} from './ui-skins-tab.js';
+import {
   buildTeamScreen,
   TEAM_COMMANDS,
   TEAM_SCREEN_ID,
@@ -479,6 +485,8 @@ const EVENTS_NAV_ID = 'eventos';
 const RANKING_NAV_ID = 'ranking';
 const QUESTS_NAV_ID = 'missoes';
 const RULES_NAV_ID = 'regras';
+/** A entrada depois da qual a aba SKINS é desenhada. */
+const KITS_NAV_ID = 'kits';
 
 /**
  * O comando que abre o menu JÁ nas missões.
@@ -538,6 +546,28 @@ function buildShell(): UiElement[] {
         SCREEN_ID(entry.id),
       ),
     );
+
+    // ####  A ABA SKINS ENTRA LOGO DEPOIS DE KITS  ####
+    //
+    // Decisão de 17/09/2026 (frente F do OrigemZWorkshop): kit e skin
+    // são "o que eu levo para o mapa", e ficam juntos. Ela não tem
+    // tela — roda `/skins` como o jogador, e quem desenha é o
+    // OrigemZWorkshop. Por isso não acende: `activeOnScreenId` nulo
+    // também a deixa fora do `navStates` da carga. Ver
+    // game/ui-skins-tab.ts, que também a leva ao menu já gravado.
+    if (entry.id === KITS_NAV_ID) {
+      nav.push(
+        button(
+          SKINS_TAB_ID,
+          SKINS_TAB_LABEL,
+          navRect(SKINS_TAB_LABEL),
+          SKINS_TAB_LABEL,
+          { id: SKINS_ACTION_ID, kind: 'chat', command: SKINS_COMMAND },
+          'nav',
+          12,
+        ),
+      );
+    }
   }
 
   // ####  AS ABAS CUJA TELA VEM DE FORA  ####

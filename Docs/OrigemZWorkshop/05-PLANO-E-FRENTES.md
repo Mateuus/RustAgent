@@ -241,6 +241,81 @@ Em `Plugins/OrigemZWorkshop.cs`, a versão sobe para **0.3.0**.
    - o loadout do nível `admin`;
    - a pergunta da tocha ao dono.
 
+### 7.1 O que foi feito (17/09/2026, branch `skins-frente-f`)
+
+- **Aba SKINS** logo depois de KITS (kit e skin são "o que eu levo para o mapa"). Ação `chat`
+  com o comando **`/skins`**, com a barra: o `OrigemZUI` roda `chat.say <comando>`, como já faz
+  o `/streamer` da aba CONFIG. Ela não acende (sem `activeOnScreenId`), e por isso não entra no
+  `navStates`. **Não** virou atalho do documento: o plugin registraria `/skins` no Oxide, e o
+  comando é do Workshop.
+- **Carga inicial:** 44.508 → **45.532 bytes** (+1.024). Trava do teste: 47.800; teto: 50.000.
+- **Menu já gravado:** `withSkinsTab` (`core/src/game/ui-skins-tab.ts`), chamado no boot em
+  `core/src/index.ts` depois do `withTeamTab`. É idempotente, e o marcador é o próprio botão.
+  Sem migração de banco. O teste `core/test/ui-skins-tab.test.ts` prova que o shell do menu
+  migrado fica **igual** ao do menu novo. A limitação e os detalhes estão no 03 §7.2.
+- **`OrigemZUI` 0.1.1:** hook público `bool CloseMainMenu(BasePlayer)` e chamada ao
+  `CloseSkinsMenu` do Workshop na abertura (03 §7.2). O `OrigemZWorkshop` não mudou.
+- **Validação:** `pluginlint` dos dois plugins com 0 erros; `tsc` e `npm test -w core` verdes.
+  **Falta testar ao vivo, com o dono:**
+  1. clicar em SKINS: o principal fecha e o de skins abre;
+  2. `/menu` com o de skins aberto: o de skins fecha.
+
+### 7.2 A pedra — passo a passo para o dono
+
+**Não foi feito**, porque é configuração. Pré-requisito: a pedra da OrigemZ **publicada** no
+Steam Workshop. Anote o número do endereço (`…/filedetails/?id=NNNN`).
+
+**1. Cadastrar a skin.** Menu lateral **Skins** (`/workshop`), aba **Skins**:
+
+1. Clique em **Nova skin**.
+2. **Workshop ID**: cole o número. Espere a prévia e confira que o item sugerido é a pedra.
+3. **Item do jogo**: `rock` ("Pedra"), se a sugestão não vier certa.
+4. **Nome**: por exemplo "Pedra OrigemZ". Em branco, usa o título do Workshop.
+5. **Liberada para todos**: **ligado** ("para todos"). Sem isso o jogador recebe a pedra do
+   kit, mas não consegue reaplicá-la pelo menu depois de trocar (02 §8).
+6. **Esta skin está valendo?**: ligado. **Esconder de quem está em modo streamer**: a seu
+   critério (a pedra tem a logo).
+7. Marque os servidores em que ela vale e salve.
+
+Com a frente E integrada, o formulário perde "Permissão" e ganha descrição, raridade e ordem;
+os campos acima continuam. Pelo jogo, a alternativa é `/skin add "rock" "NNNN"`.
+
+**2. Pôr a pedra em cada kit de nível.** Caminho: **Servidores** → o servidor → seção
+**Player** → aba **Loadouts** ("o que ele ganha ao nascer"). Para **cada** grupo com loadout
+(`default`, os de VIP…):
+
+1. Clique em **Editar**.
+2. Acrescente um item:
+   - **Item**: `rock`;
+   - **Quantidade**: `1`;
+   - **Slot**: **Barra rápida**;
+   - **Skin**: o Workshop ID da pedra;
+   - **Posição**: a casa da barra (0 é a primeira). Escolha uma que não colida com a AK do
+     `default`.
+3. Confira que o loadout está **Ligado** e salve.
+
+**3. O admin.** O `OrigemZPlayer` põe quem tem `authLevel > 0` no nível `admin`
+(`AdminTemKitProprio: true`). Sem loadout nesse nível, o admin nasce **sem kit**, com a pedra
+vanilla na skin pessoal dele. Escolha **um** dos caminhos:
+
+- na mesma aba **Loadouts**, no grupo **`admin`**: **Criar loadout** com a pedra (e o que mais
+  o admin deve receber), deixar **Ligado** e salvar; **ou**
+- desligar `AdminTemKitProprio` em `oxide/config/OrigemZPlayer.json` e recarregar o
+  `OrigemZPlayer`. O admin passa a receber o kit do nível dele, como qualquer jogador.
+
+**4. A tocha — pergunta em aberto.** Hoje quem tem kit nasce **sem tocha**: o kit `default` não
+a tem, e a entrega de fábrica é cancelada. Se ela deve vir, entra no loadout como a pedra:
+**Item** `torch`, **Slot** Barra rápida, com ou sem skin.
+
+**Aviso para o anúncio:** quem recebe kit perde a pedra com a skin pessoal do Steam. É
+consequência da decisão, e não defeito.
+
+**Conferência:**
+
+1. Morra e renasça com um jogador comum e com o admin. Os dois nascem com a pedra da OrigemZ
+   na barra.
+2. Use `/skins` com a pedra na mão. O menu abre nela, sem cadeado.
+
 ---
 
 ## 8. O que não é de nenhuma frente
