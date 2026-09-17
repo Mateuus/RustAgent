@@ -8821,6 +8821,530 @@ CREATE TABLE workshop_favorites (
 CREATE INDEX idx_workshop_favorites_steam ON workshop_favorites (steam_id);
 `;
 
+const BATTLEPASS_SCHEMA = `
+-- ============================================================
+--  101  o passe de batalha: a temporada, o XP e o resgate.
+--
+--  ####  O CATALOGO E DA REDE; O PROGRESSO E POR SERVIDOR  ####
+--
+--  Decisao do dono em 17/09/2026. A temporada, a trilha e as
+--  regras de XP sao GLOBAIS -- como o catalogo de skins --, com a
+--  juncao battlepass_season_servers dizendo onde cada uma vale. O
+--  admin monta "outubro de 2026" uma vez e escolhe onde ela roda.
+--
+--  Quatro tabelas fogem disso e levam server_id NA CHAVE:
+--  battlepass_progress, battlepass_xp_daily, battlepass_entitlements
+--  e battlepass_claims. O motivo e o mesmo nas quatro: o XP nasce
+--  por servidor (as estatisticas ja nascem assim) e o dono decidiu
+--  que "o passe so vale naquele servidor". Matar no pvp1 nao da
+--  nivel no pvp2, e comprar no pvp1 nao destrava a faixa paga no
+--  pvp2 -- pela MESMA razao.
+--
+--  ####  O NIVEL COMECA EM 1  ####
+--
+--  Alcancar o nivel 1 e de graca; o XP compra o degrau para o 2 em
+--  diante. A regua mora em types/battlepass.ts (levelAt), e o CHECK
+--  aqui so garante que ninguem grave zero. Ver o cabecalho de la
+--  para o porque.
+--
+--  ####  A RECOMPENSA E UM QuestReward INTEIRO, EM JSON  ####
+--
+--  Nao colunas por tipo. E o contrato que missoes e KOTH ja usam
+--  (migracao 041 estabeleceu o padrao) e que o RewardList do painel
+--  ja edita. Uma coluna por tipo daria uma tabela de quinze colunas
+--  com treze NULL em toda linha, e um tipo novo seria migracao.
+--
+--  ####  A TRILHA E CONGELADA NO RESGATE  ####
+--
+--  battlepass_claims.snapshot guarda o que o jogador levou, no
+--  instante em que levou. Mesmo principio do player_quests.snapshot:
+--  editar a trilha no dia 20 nao pode mudar o que o nivel 3
+--  prometia no dia 3.
+--
+--  ####  O QUE NAO ESTA AQUI, E POR QUE  ####
+--
+--  1. A marca "esta skin e DLC" no cadastro do Workshop. Ela depende
+--     de uma SONDA que ninguem rodou (02 §7.1): se
+--     PlayerBlueprints.CheckSkinOwnership nao for consultavel do
+--     lado do servidor, a regra volta a ser "so skin nossa" e a
+--     coluna nao existe. Coluna sem quem a leia e divida.
+--  2. O kind 'pass' e as colunas pass_* de store_offers (04 §5).
+--     Trocar o CHECK de kind exige RECRIAR store_offers, e a frente
+--     C ainda nao disse de que campos a oferta precisa. Ela pede a
+--     migracao quando souber -- a regra do plano e que id de
+--     migracao nao se repete entre branches, nao que tudo caiba na
+--     primeira.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num template
+--  literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+-- ------------------------------------------------------------
+--  A temporada. E o MES do calendario, identificada por ano e mes
+--  -- nunca por "a atual", que muda de significado a meia-noite do
+--  dia 1 e transformaria todo registro historico em mentira.
+--
+--  period NAO e unico: dois servidores da rede podem ter passes
+--  diferentes no mesmo mes, e a juncao e quem diz onde cada um
+--  vale. Quem garante "so uma active por servidor" e o servico,
+--  numa transacao -- ver battlepass/service.ts. Nao da para ser
+--  indice: o estado e desta tabela e o servidor e da outra, e
+--  repetir o estado na juncao criaria duas verdades.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_seasons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- '2026-10'. A regua fina (mes de 01 a 12) esta no zod; aqui fica
+  -- a forma, que e o que protege a ordenacao e o LIKE.
+  period TEXT NOT NULL CHECK (period GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'),
+
+  -- "Temporada de outubro de 2026". E o que o jogador le.
+  label TEXT NOT NULL CHECK (label <> ''),
+
+  -- Quantas casas a trilha tem.
+  levels INTEGER NOT NULL DEFAULT 30 CHECK (levels >= 1 AND levels <= 200),
+
+  -- A curva de XP, como JSON: {"kind":"flat","perLevel":1000} e as
+  -- outras duas formas. Ver xpCurveSchema em types/battlepass.ts.
+  xp_curve TEXT NOT NULL DEFAULT '{"kind":"flat","perLevel":1000}',
+
+  -- draft / scheduled / active / closed. Publicar e BOTAO, e nao
+  -- efeito do calendario: uma temporada esquecida em draft no dia 1
+  -- nao entra no ar meio montada.
+  state TEXT NOT NULL DEFAULT 'draft'
+    CHECK (state IN ('draft', 'scheduled', 'active', 'closed')),
+
+  -- As duas faixas, que ligam e desligam separadas (01 §8).
+  free_lane INTEGER NOT NULL DEFAULT 1 CHECK (free_lane IN (0, 1)),
+  paid_lane INTEGER NOT NULL DEFAULT 1 CHECK (paid_lane IN (0, 1)),
+
+  -- A compra olha para tras: quem compra no nivel 17 leva os 17.
+  -- NASCE LIGADO. Desligado, a compra vale do nivel seguinte em
+  -- diante -- uma venda pior e uma escolha legitima de quem opera.
+  retroactive INTEGER NOT NULL DEFAULT 1 CHECK (retroactive IN (0, 1)),
+
+  description TEXT CHECK (description IS NULL OR description <> ''),
+
+  created_at INTEGER NOT NULL,
+  created_by TEXT,
+  updated_at INTEGER NOT NULL
+);
+
+-- A pergunta da tela e a do jogo: "qual e a temporada deste mes?".
+CREATE INDEX idx_battlepass_seasons_period ON battlepass_seasons (period);
+
+-- E a do boot: "tem alguma no ar?".
+CREATE INDEX idx_battlepass_seasons_state ON battlepass_seasons (state);
+
+-- ------------------------------------------------------------
+--  Em quais servidores aquela temporada vale.
+--
+--  Copia de workshop_skin_servers, inclusive o indice: a chave
+--  comeca pela temporada, e a pergunta do servidor e a OUTRA --
+--  "que temporada roda aqui?" --, que sem indice varreria a tabela.
+--
+--  Sem linha nenhuma = em nenhum servidor. Uma temporada recem
+--  criada que ja valesse em tudo entraria em producao sem ninguem
+--  mandar.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_season_servers (
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (season_id, server_id)
+);
+
+CREATE INDEX idx_battlepass_season_servers_server ON battlepass_season_servers (server_id);
+
+-- ------------------------------------------------------------
+--  A trilha: o que cada faixa de cada nivel da.
+--
+--  rewards e uma LISTA de QuestReward, e nao uma recompensa so. O
+--  02 §5 escreve no singular, mas duas decisoes do mesmo documento
+--  exigem lista: o RewardList do painel edita listas, e a pendencia
+--  da caixa faz dedupe por (claim, POSICAO) -- posicao que so
+--  existe com mais de uma. Na pratica, e o que evita obrigar o
+--  admin a escolher entre a AK e os 500 OZCoin no mesmo nivel.
+--
+--  Nivel sem linha e nivel vazio, e isso e legitimo: a tela mostra
+--  um traco e nao pede que o admin preencha 60 celulas antes de
+--  publicar.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_rewards (
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+  level INTEGER NOT NULL CHECK (level >= 1),
+  lane TEXT NOT NULL CHECK (lane IN ('free', 'paid')),
+
+  -- JSON: [{"kind":"item","shortname":"stones","amount":1000}, ...]
+  rewards TEXT NOT NULL DEFAULT '[]',
+
+  -- MARCO: o card ganha destaque de tamanho no menu (03 §3.1). E
+  -- marca de TELA e nao muda regra nenhuma.
+  milestone INTEGER NOT NULL DEFAULT 0 CHECK (milestone IN (0, 1)),
+
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (season_id, level, lane)
+);
+
+-- ------------------------------------------------------------
+--  O que da XP nesta temporada, quanto vale, e o teto por dia.
+--
+--  source e TEXTO e nao enum: o cardapio e servido pelo agente e
+--  cresce com cada metrica nova. Um CHECK aqui obrigaria uma
+--  migracao a cada fonte, e o dono foi explicito -- "o que vai dar
+--  XP o administrador vai administrar isso".
+--
+--  daily_cap NULL = sem teto. O teto e POR FONTE ("farm teto de 100
+--  XP por dia, cacar teto de 100 XP por dia"), e nao um teto unico
+--  somando tudo: e o que deixa a missao generosa e o farm contido
+--  sem escolher entre as duas coisas.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_xp_rules (
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+  source TEXT NOT NULL CHECK (source <> ''),
+
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
+  daily_cap INTEGER CHECK (daily_cap IS NULL OR daily_cap > 0),
+
+  -- O rotulo que o jogador le. NULL = o do cardapio do agente.
+  label TEXT CHECK (label IS NULL OR label <> ''),
+
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (season_id, source)
+);
+
+-- ------------------------------------------------------------
+--  O acumulador. NAO e player_stats (02 §4.1), por tres motivos
+--  medidos: o painel tem um botao que zera metricas e apagaria
+--  niveis ja comprados; a linha de la e por periodo de RANKING, que
+--  pode ser 'wipe' e nao casa com o mes; e value so cresce por
+--  soma, sem guardar nivel.
+--
+--  server_id esta NA CHAVE: o jogador tem uma trilha em cada
+--  servidor, e e isso que faz o XP casar com a fonte dele.
+--
+--  level e redundante com xp -- da para derivar pela curva -- e
+--  esta gravado de proposito: a lista do painel ordena por nivel, e
+--  derivar 500 linhas a cada pagina seria varrer a curva 500 vezes.
+--  Quem escreve as duas colunas juntas e o repositorio.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_progress (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- TEXT, como em toda parte: 17 digitos passam de 2^53 e em numero
+  -- o id volta arredondado -- o XP iria para OUTRA CONTA.
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+
+  xp INTEGER NOT NULL DEFAULT 0 CHECK (xp >= 0),
+  level INTEGER NOT NULL DEFAULT 1 CHECK (level >= 1),
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (server_id, steam_id, season_id)
+);
+
+-- A aba Jogadores: "o ranking do passe neste servidor".
+CREATE INDEX idx_battlepass_progress_board
+  ON battlepass_progress (season_id, server_id, xp DESC);
+
+-- A ficha do jogador: "em que pe ele esta em cada servidor?".
+CREATE INDEX idx_battlepass_progress_player ON battlepass_progress (steam_id);
+
+-- ------------------------------------------------------------
+--  O teto diario, e SO ele. Tabela pequena e de escrita
+--  frequente: e o preco do teto por fonte.
+--
+--  local_day e '2026-10-07' pela regua de virada de dia que o
+--  projeto JA escolheu para as missoes diarias (reset_at_minute,
+--  contando dias de calendario e nao 24 horas). Uma segunda virada
+--  no mesmo repositorio seriam dois relogios discordando duas vezes
+--  por ano, e ninguem lembrando por que.
+--
+--  XP que estoura o teto NAO e guardado para amanha: ele nao
+--  acontece. Guardar seria uma segunda contabilidade, e viraria o
+--  teto numa fila -- que e o que ele existe para evitar.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_xp_daily (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+  source TEXT NOT NULL CHECK (source <> ''),
+  local_day TEXT NOT NULL
+    CHECK (local_day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+
+  xp INTEGER NOT NULL DEFAULT 0 CHECK (xp >= 0),
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (server_id, steam_id, season_id, source, local_day)
+);
+
+-- A faxina: "o que e de antes de ontem?". Sem ela, limpar a tabela
+-- de escrita mais frequente do modulo varreria tudo.
+CREATE INDEX idx_battlepass_xp_daily_day ON battlepass_xp_daily (local_day);
+
+-- ------------------------------------------------------------
+--  Quem comprou o mes -- naquele servidor.
+--
+--  period e o do PLANO CONGELADO da compra, nunca o do relogio da
+--  entrega (04 §4): um debito 'unknown' pode ser reconciliado horas
+--  depois, atravessando a virada do mes.
+--
+--  revoked_at NULL = vale. Revogar NAO apaga a linha: a segunda
+--  discussao sobre o mesmo jogador precisa da primeira. Mesma regra
+--  do VIP e dos banimentos.
+--
+--  A cascata do servidor leva o direito junto, e e o comportamento
+--  certo: um passe que so valia naquele servidor nao sobrevive a
+--  ele. O que sobrevive e o registro, que nao tem chave estrangeira.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_entitlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  period TEXT NOT NULL CHECK (period GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'),
+
+  -- Os mesmos nomes do VIP, para quem le os dois registros ler a
+  -- mesma palavra para a mesma coisa.
+  origin TEXT NOT NULL CHECK (origin IN ('loja', 'painel', 'site')),
+
+  -- ####  O NIVEL EM QUE ELE ESTAVA AO COMPRAR  ####
+  --
+  -- Existe por causa da chave "retroativo" (01 §5), que o dono quis
+  -- desligavel: desligada, a compra vale do nivel SEGUINTE em
+  -- diante. Sem guardar o nivel da compra nao ha como saber qual e
+  -- esse nivel -- o XP so cresce, e created_at nao diz em que casa
+  -- ele estava.
+  --
+  -- Com o retroativo LIGADO (o padrao) esta coluna e ignorada. Ela
+  -- e o preco de a chave do documento nao exigir codigo novo depois.
+  level_at_grant INTEGER NOT NULL DEFAULT 1 CHECK (level_at_grant >= 1),
+
+  -- O DLV-... da entrega do site, ou a referencia da compra.
+  source_ref TEXT,
+  note TEXT CHECK (note IS NULL OR note <> ''),
+
+  created_at INTEGER NOT NULL,
+  created_by TEXT NOT NULL,
+
+  revoked_at INTEGER,
+  revoked_by TEXT
+);
+
+-- UM direito vivo por (servidor, jogador, mes). Dois seriam duas
+-- compras do mesmo outubro no mesmo servidor, e nenhuma resposta
+-- para "qual vale?" nem para "revogar fecha qual?".
+--
+-- Indice PARCIAL: o historico pode ter dez linhas revogadas da
+-- mesma tripla, e deve mesmo. Copia de idx_vips_active (010), com
+-- server_id a mais -- decisao do dono, 17/09/2026: "o passe so vale
+-- naquele servidor".
+CREATE UNIQUE INDEX idx_battlepass_entitlements_active
+  ON battlepass_entitlements (server_id, steam_id, period) WHERE revoked_at IS NULL;
+
+-- A ficha do jogador, e a conferencia da compra.
+CREATE INDEX idx_battlepass_entitlements_player ON battlepass_entitlements (steam_id, period);
+
+-- ------------------------------------------------------------
+--  O resgate: o estado da entrega, e a recompensa congelada.
+--
+--  snapshot e o que ele levou, no instante em que levou -- mesmo
+--  principio do player_quests.snapshot. Editar a trilha no dia 20
+--  nao pode mudar o que o nivel 3 prometia no dia 3, e apagar a
+--  recompensa depois nao pode virar "ele nunca levou nada".
+--
+--  status pending = o clique aconteceu e alguma parte ainda deve. A
+--  marca de claimed vem DEPOIS da entrega, nunca antes: em
+--  17/09/2026 um resgate de missao com a mochila cheia marcou a
+--  missao como paga e nao entregou nada.
+--
+--  O UNIQUE e o que faz "clicar duas vezes nao entregar duas
+--  vezes". Ele e por (servidor, jogador, temporada, nivel, faixa) --
+--  o mesmo nivel resgatado no pvp1 e no pvp2 sao dois resgates,
+--  porque sao duas trilhas.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+  level INTEGER NOT NULL CHECK (level >= 1),
+  lane TEXT NOT NULL CHECK (lane IN ('free', 'paid')),
+
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed')),
+
+  -- A LISTA de QuestReward daquela faixa, congelada. Ver o cabecalho.
+  snapshot TEXT NOT NULL,
+
+  claimed_at INTEGER NOT NULL,
+  -- Quando a ultima entrega fechou. NULL enquanto houver pendencia.
+  settled_at INTEGER,
+
+  UNIQUE (server_id, steam_id, season_id, level, lane)
+);
+
+-- A pergunta da tela: "o que este jogador ja levou nesta trilha?".
+CREATE INDEX idx_battlepass_claims_player
+  ON battlepass_claims (server_id, steam_id, season_id);
+
+-- A do painel: "quem levou o nivel 17?", e "o que esta devendo?".
+CREATE INDEX idx_battlepass_claims_open ON battlepass_claims (season_id, status);
+
+-- ------------------------------------------------------------
+--  A caixa: o que foi prometido e ainda nao chegou (02 §6.4).
+--
+--  Uma linha por POSICAO da recompensa dentro do snapshot do
+--  resgate. O lote NAO e atomico: cabendo 6 de 17, entregam-se as 6
+--  e as 11 continuam esperando -- e renumerar a posicao quebraria o
+--  dedupe de pagamento exatamente no caminho do retry.
+--
+--  Duas origens, e elas precisam ficar distinguiveis na lista:
+--    inventory  ele resgatou e nao coube na mochila
+--    rollover   sobrou da temporada anterior, entregue no proximo
+--               login (decisao do dono: nao resgatado e entregue,
+--               nao confiscado)
+--
+--  seen_at e o ponto de notificacao: ele some quando o jogador ABRE
+--  a caixa, e nao quando recebe os itens. Ter pendencia e saber que
+--  tem sao coisas diferentes.
+--
+--  A pendencia NAO tem prazo. Ela ja e o resultado de uma promessa
+--  feita; um segundo prazo em cima dela seria confiscar duas vezes.
+--
+--  server_id e steam_id estao repetidos aqui (o claim ja os tem) de
+--  proposito: a pergunta da caixa e "o que este jogador tem
+--  esperando neste servidor?", e o indice parcial abaixo a responde
+--  sem JOIN -- ela roda a cada login.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_pending (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  claim_id INTEGER NOT NULL REFERENCES battlepass_claims(id) ON DELETE CASCADE,
+
+  -- A POSICAO dentro do snapshot. E ela que distingue "o kit" dos
+  -- "500 coins" do mesmo nivel.
+  idx INTEGER NOT NULL CHECK (idx >= 0),
+
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+
+  origin TEXT NOT NULL CHECK (origin IN ('inventory', 'rollover')),
+
+  -- A recompensa daquela posicao, congelada junto com o resgate.
+  reward TEXT NOT NULL,
+
+  -- O codigo cru de quem entregou: INVENTORY_FULL, RCON_UNAVAILABLE.
+  code TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+
+  seen_at INTEGER,
+  delivered_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+
+  UNIQUE (claim_id, idx)
+);
+
+-- A pergunta do login e a do icone da caixa. Parcial porque as
+-- entregues sao a maioria das linhas e nenhuma delas interessa.
+CREATE INDEX idx_battlepass_pending_open
+  ON battlepass_pending (server_id, steam_id)
+  WHERE delivered_at IS NULL;
+
+-- ------------------------------------------------------------
+--  O registro de tudo que mudou.
+--
+--  SEM CHAVE ESTRANGEIRA, de proposito e pelo mesmo motivo que
+--  workshop_audit nao tem: "apaguei a temporada de setembro"
+--  precisa sobreviver a temporada de setembro. O alvo e guardado em
+--  TEXTO legivel, com o nome que ela tinha naquela hora.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('panel', 'game', 'system', 'site')),
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  server_id TEXT,
+  steam_id TEXT,
+  detail TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_battlepass_audit_at ON battlepass_audit (at DESC);
+CREATE INDEX idx_battlepass_audit_steam ON battlepass_audit (steam_id, at DESC);
+`;
+
+// ------------------------------------------------------------
+//  101, segunda parte — a recompensa do tipo `skin`
+//
+//  ####  POR QUE ISTO ENTRA NA MIGRAÇÃO DO PASSE  ####
+//
+//  Pedido da frente F (skin como recompensa), que é o caso que o
+//  plano previu: "se uma frente precisar de coluna, pede à A". Ela
+//  criou `kind: 'skin'` no `questRewardSchema` — o contrato
+//  COMPARTILHADO, de onde missões, KOTH e a trilha do passe tiram a
+//  mesma lista de tipos — e esbarrou no banco: o zod aceitava
+//  `'skin'` e o SQLite recusava com `CHECK constraint failed`. A
+//  feature ficava completa e inerte.
+//
+//  Vem aqui, e não numa 102, porque as duas voltam pela mesma branch
+//  de integração: uma migração a mais é uma chance a mais de colidir
+//  id com as outras worktrees — e id repetido vira migração PULADA
+//  em silêncio no merge.
+//
+//  ####  RECONSTRUIR, PORQUE O SQLite NÃO ALTERA CHECK  ####
+//
+//  Mesmo molde da 097 e da 100: renomear, criar, copiar, dropar,
+//  recriar os índices. Duas diferenças, e as duas importam:
+//
+//    - `quest_rewards` NÃO tem dependentes (nada referencia o `id`
+//      dela), então o passo "as dependentes saem do caminho sem FK"
+//      das outras duas não existe aqui. Com `foreign_keys = ON`
+//      (database.ts), ele é o que impede o DROP de levar meio
+//      módulo junto — e é por isso que ele é citado mesmo quando
+//      não se aplica: quem copiar este bloco para uma tabela COM
+//      dependentes precisa saber que ele falta;
+//    - o `id` de cada linha é preservado no `INSERT ... SELECT`.
+//      Renumerar mudaria a recompensa para a qual apontam os
+//      registros já gravados.
+//
+//  O índice é recriado DEPOIS do DROP da tabela velha: nome de
+//  índice é global no schema, e o RENAME não o move.
+//
+//  Só o CHECK muda. O resto de `quest_rewards` é da frente F, e o
+//  payload continua sendo JSON validado pelo zod — o banco só
+//  garante que o `kind` é conhecido.
+// ------------------------------------------------------------
+const QUEST_REWARD_SKIN_SCHEMA = `
+ALTER TABLE quest_rewards RENAME TO quest_rewards_100;
+
+CREATE TABLE quest_rewards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  quest_id TEXT NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+
+  -- 'skin' entrou aqui: a posse de uma skin do Workshop como
+  -- recompensa (frente F). Ela e do contrato compartilhado, entao
+  -- missoes, KOTH e a trilha do passe a oferecem de uma vez.
+  kind TEXT NOT NULL CHECK (kind IN ('item','coins','kit','points','vip','skin')),
+
+  -- O corpo, conforme o kind, sem repetir o kind dentro.
+  payload TEXT NOT NULL,
+
+  UNIQUE (quest_id, seq)
+);
+
+INSERT INTO quest_rewards (id, quest_id, seq, kind, payload)
+SELECT id, quest_id, seq, kind, payload FROM quest_rewards_100;
+
+DROP TABLE quest_rewards_100;
+
+CREATE INDEX idx_quest_rewards_quest ON quest_rewards (quest_id, seq);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -9107,6 +9631,17 @@ export const MIGRATIONS: readonly Migration[] = [
   // dado do agente (da REDE, como a posse), e a skin ganha a marca
   // "de temporada". Ver o cabecalho da 100.
   { id: 100, name: 'workshop-favorites-season', sql: WORKSHOP_FAVORITES_SEASON_SCHEMA },
+  // 17/09/2026: o passe de batalha -- a temporada (da rede), a
+  // trilha, as regras de XP, e o progresso, o direito e o resgate
+  // POR SERVIDOR. Dez tabelas novas. A 101 estava livre em todas as
+  // branches vivas em 17/09/2026, e o maior id da main era 100 --
+  // conferido antes de usar, pelo motivo escrito na nota da 087.
+  //
+  // A SEGUNDA PARTE e de outra frente: `quest_rewards.kind` passa a
+  // aceitar 'skin'. Ela vem junto porque as duas voltam pela mesma
+  // branch de integracao, e uma migracao a mais e uma chance a mais
+  // de colidir id. Ver o cabecalho de QUEST_REWARD_SKIN_SCHEMA.
+  { id: 101, name: 'battlepass', sql: `${BATTLEPASS_SCHEMA}\n${QUEST_REWARD_SKIN_SCHEMA}` },
 ];
 
 /** Linha da tabela de controle. */

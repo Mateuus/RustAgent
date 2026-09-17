@@ -94,6 +94,8 @@ import { WorkshopSkinsRepository } from './db/workshop-repository.js';
 import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
 import { WorkshopCatalog } from './game/workshop-catalog.js';
+import { BattlePassRepository } from './db/battlepass-repository.js';
+import { BattlePassService } from './battlepass/service.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
@@ -1401,6 +1403,22 @@ async function main(): Promise<void> {
   // A skin vendida ou sorteada no site vira posse pela MESMA porta do
   // painel. Ver site/skin-deliveries.ts.
   const skinDeliveries = createSkinDeliveryHandlers({ catalog: workshopCatalog, audit: workshopOwned });
+
+  // O passe de batalha. O catalogo (temporada, trilha, regras de XP)
+  // e da rede; o XP, o direito comprado e o resgate sao POR
+  // SERVIDOR. Ver db/battlepass-repository.ts e a migracao 101.
+  const battlePassRepository = new BattlePassRepository(db);
+  // A porta UNICA do modulo: o painel, o jogo e o site entram por
+  // ela. Sem `timeZone`, vale a da maquina do agente -- a mesma
+  // regua do resto do processo (rankings/periods.ts).
+  const battlePass = new BattlePassService({
+    repository: battlePassRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    // A carga para o plugin e a tela sao da frente D; enquanto ela
+    // nao existe, mudar a trilha nao tem a quem avisar -- e o aviso
+    // e uma funcao vazia em vez de um `?.` espalhado pelo servico.
+    onChange: () => undefined,
+  });
 
   for (const [id, client] of siteClients) {
     if (!siteWallets.has(id)) {
@@ -4248,6 +4266,10 @@ async function main(): Promise<void> {
       items: itemsRepository,
       servers: repository,
       ...(workshopService === null ? {} : { workshop: workshopService }),
+    },
+    battlepass: {
+      service: battlePass,
+      servers: repository,
     },
     worldEvents: {
       events: worldEventsRepository,
