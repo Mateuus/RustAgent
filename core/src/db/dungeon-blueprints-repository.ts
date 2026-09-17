@@ -230,6 +230,45 @@ export class DungeonBlueprintsRepository {
     return { ok: true, blueprint: saved };
   }
 
+  /**
+   * Conta os marcadores das plantas gravadas antes da migração 099.
+   *
+   * Roda no boot e só toca as linhas com `markers` NULL: da segunda
+   * subida em diante, não lê arquivo nenhum. Devolve quantas contou.
+   * Uma planta cujo JSON não é mais legível fica NULL — a tela mostra
+   * "não contado", e não um zero que ninguém mediu.
+   */
+  backfillMarkers(): number {
+    const rows = this.#db
+      .prepare('SELECT id, content FROM dungeon_blueprints WHERE markers IS NULL')
+      .all() as { id: string; content: string }[];
+
+    const update = this.#db.prepare('UPDATE dungeon_blueprints SET markers = ? WHERE id = ?');
+    let counted = 0;
+
+    for (const row of rows) {
+      const parsed = parseBlueprint(row.content);
+
+      if (!parsed.ok) continue;
+
+      const body = analyzeBody(parsed.blueprint.entities);
+
+      update.run(
+        JSON.stringify({
+          npc: body.markers.npc.length,
+          crate: body.markers.crate.length,
+          arrival: body.markers.arrival.length,
+        }),
+        row.id,
+      );
+      counted += 1;
+    }
+
+    if (counted > 0) this.#logger?.info({ counted }, 'marcadores das plantas antigas contados');
+
+    return counted;
+  }
+
   /** `false` = não existia. */
   remove(id: string): boolean {
     const result = this.#db.prepare('DELETE FROM dungeon_blueprints WHERE id = ?').run(id);

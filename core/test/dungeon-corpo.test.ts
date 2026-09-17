@@ -666,3 +666,70 @@ describe('as rotas do corpo', () => {
     expect(response.json<{ error: string }>().error).toBe('BLUEPRINT_MISSING');
   });
 });
+
+describe('as plantas de antes da 099', () => {
+  it('ganham a contagem dos marcadores uma vez, no boot', () => {
+    const { db, blueprints } = world();
+
+    blueprints.save({ id: 'corpo-real', name: 'Corpo', kind: 'base', content: REAL_EXPORT, origin: 'import' });
+    db.prepare('UPDATE dungeon_blueprints SET markers = NULL').run();
+
+    expect(blueprints.summary('corpo-real')?.markers).toBeNull();
+    expect(blueprints.backfillMarkers()).toBe(1);
+    expect(blueprints.summary('corpo-real')?.markers).toEqual({ npc: 2, crate: 2, arrival: 1 });
+    expect(blueprints.backfillMarkers()).toBe(0);
+  });
+});
+
+describe('a pé, da chegada até o ponto', () => {
+  const crate = (id: string, x: number, z: number): BodyPointInput => ({
+    id,
+    kind: 'crate',
+    label: '',
+    x,
+    y: 0,
+    z,
+    yaw: 0,
+    profile: 'green',
+    amount: 1,
+    prefab: '',
+    source: 'manual',
+  });
+  const arrival = { x: 0, y: 0, z: 0, yaw: 0, source: 'manual' as const };
+
+  it('na exportação real, a porta do meio deixa tudo alcançável', () => {
+    const problems = checkBodyPoints(realAnalysis(), [crate('p-a', 6, 0), crate('p-b', 6, 3)], arrival);
+
+    expect(problems.filter((problem) => problem.code === 'unreachable')).toEqual([]);
+  });
+
+  it('trocar a porta por parede, e fechar a passagem de cima, lacra os dois cômodos do fundo', () => {
+    const real = realAnalysis();
+    const sealed: BodyAnalysis = {
+      ...real,
+      props: [],
+      pieces: [
+        ...real.pieces.map((piece) => (piece.shape === 'doorway' ? { ...piece, shape: 'wall' as const } : piece)),
+        // Entre (0,0) e (0,1): parede deitada, comprimento em x.
+        { shape: 'wall', x: 0, y: 0, z: 1.5, yaw: 90, grade: 2, skin: 0 },
+      ],
+    };
+
+    const codes = checkBodyPoints(sealed, [crate('p-a', 6, 0), crate('p-b', 0, 3)], arrival).map(
+      (problem) => `${problem.id}:${problem.code}`,
+    );
+
+    expect(codes).toEqual(['p-a:unreachable', 'p-b:unreachable']);
+  });
+
+  it('com triângulo no andar, a régua não opina', () => {
+    const real = realAnalysis();
+    const odd: BodyAnalysis = {
+      ...real,
+      props: [],
+      pieces: [...real.pieces, { shape: 'floor-triangle', x: 9, y: 0, z: 0, yaw: 0, grade: 2, skin: 0 }],
+    };
+
+    expect(checkBodyPoints(odd, [crate('p-a', 6, 0)], arrival).filter((p) => p.code === 'unreachable')).toEqual([]);
+  });
+});

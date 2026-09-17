@@ -663,6 +663,7 @@ export type BodyPointProblemCode =
   | 'inside_wall'
   | 'no_headroom'
   | 'on_prop'
+  | 'unreachable'
   | 'outside';
 
 export interface BodyPointProblem {
@@ -854,5 +855,149 @@ export function checkBodyPoints(
 
   if (arrival !== null) check('arrival', 'arrival', arrival.x, arrival.y, arrival.z);
 
+  // 6) Dá para chegar lá a pé? Só para quem não tem outro problema: o
+  //    ponto sem piso já foi apontado, e a régua não empilha frases.
+  if (arrival !== null) {
+    const reachable = reachability(analysis, arrival);
+    const flagged = new Set(problems.map((problem) => problem.id));
+
+    if (reachable !== null) {
+      for (const point of points) {
+        if (flagged.has(point.id)) continue;
+        if (reachable(point.x, point.y, point.z) !== false) continue;
+
+        problems.push({
+          id: point.id,
+          code: 'unreachable',
+          message: `${point.kind === 'npc' ? 'O inimigo' : 'A caixa'} fica num cômodo que não se alcança da chegada sem atravessar parede: abra um vão ou ponha uma porta no caminho.`,
+        });
+      }
+    }
+  }
+
   return problems;
+}
+
+/** O passo da grade de construção do Rust. */
+const TILE = 3;
+
+/**
+ * Quem se alcança a pé, a partir da chegada, no MESMO andar dela.
+ *
+ * Anda pelos pisos quadrados e atravessa a aresta que não tem parede —
+ * ou que tem vão de porta ou de quadro (as fechaduras do arquivo não
+ * sobem, então toda porta abre). Parede baixa (1 m) se pula; meia
+ * parede e janela, não.
+ *
+ * ####  É UMA RESPOSTA DE MELHOR ESFORÇO, E DIZ QUANDO NÃO SABE  ####
+ *
+ * Devolve `null` — "não sei" — quando a chegada não está num piso
+ * quadrado, ou quando o andar dela tem triângulo ou peça fora de
+ * esquadro: a grade não os representa, e acusar à toa é pior que
+ * calar. A função devolvida responde `undefined` para ponto de OUTRO
+ * andar: escada e rampa não entram na conta.
+ */
+function reachability(
+  analysis: BodyAnalysis,
+  arrival: BodyArrivalInput,
+): ((x: number, y: number, z: number) => boolean | undefined) | null {
+  const squares = analysis.pieces.filter((piece) => piece.shape === 'foundation' || piece.shape === 'floor');
+  const reference = squares.find(
+    (piece) => arrival.y >= piece.y - 0.25 && arrival.y <= piece.y + 0.6 && covers(piece, arrival.x, arrival.z),
+  );
+
+  if (reference === undefined) return null;
+
+  const level = reference.y;
+  const sameLevel = (y: number): boolean => Math.abs(y - level) < 0.3;
+  const aligned = (yaw: number): boolean => {
+    const off = (((yaw - reference.yaw) % 90) + 90) % 90;
+
+    return off < 2 || off > 88;
+  };
+
+  if (analysis.pieces.some((piece) => sameLevel(piece.y) && (piece.shape === 'floor-triangle' || piece.shape === 'foundation-triangle'))) {
+    return null;
+  }
+
+  // A posição de uma peça em unidades de grade, no referencial da
+  // chegada. `null` = fora do esquadro.
+  const toGrid = (x: number, z: number): { gx: number; gz: number } => {
+    const { lx, lz } = toLocal(reference, x, z);
+
+    return { gx: lx / TILE, gz: lz / TILE };
+  };
+  const near = (value: number): boolean => Math.abs(value - Math.round(value)) < 0.1;
+  const tileKey = (gx: number, gz: number): string => `${String(gx)},${String(gz)}`;
+
+  const tiles = new Set<string>();
+
+  for (const piece of squares) {
+    if (!sameLevel(piece.y)) continue;
+    if (!aligned(piece.yaw)) return null;
+
+    const { gx, gz } = toGrid(piece.x, piece.z);
+
+    if (!near(gx) || !near(gz)) return null;
+
+    tiles.add(tileKey(Math.round(gx), Math.round(gz)));
+  }
+
+  const blocked = new Set<string>();
+  const edgeKey = (a: string, b: string): string => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+  for (const piece of analysis.pieces) {
+    if (!sameLevel(piece.y)) continue;
+    if (piece.shape === 'doorway' || piece.shape === 'frame' || piece.shape === 'low') continue;
+    if (piece.shape !== 'wall' && piece.shape !== 'window' && piece.shape !== 'half') continue;
+    if (!aligned(piece.yaw)) return null;
+
+    const { gx, gz } = toGrid(piece.x, piece.z);
+
+    // A parede mora no MEIO de uma aresta: meia unidade num eixo e
+    // inteira no outro.
+    if (near(gx) && Math.abs(gz - Math.round(gz)) > 0.4) {
+      const x = Math.round(gx);
+      blocked.add(edgeKey(tileKey(x, Math.floor(gz)), tileKey(x, Math.ceil(gz))));
+    } else if (near(gz) && Math.abs(gx - Math.round(gx)) > 0.4) {
+      const z = Math.round(gz);
+      blocked.add(edgeKey(tileKey(Math.floor(gx), z), tileKey(Math.ceil(gx), z)));
+    }
+  }
+
+  const start = tileKey(0, 0);
+  const visited = new Set<string>([start]);
+  const queue: [number, number][] = [[0, 0]];
+
+  while (queue.length > 0) {
+    const current = queue.pop();
+
+    if (current === undefined) break;
+
+    const [cx, cz] = current;
+    const here = tileKey(cx, cz);
+
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const next = tileKey(cx + dx, cz + dz);
+
+      if (visited.has(next) || !tiles.has(next) || blocked.has(edgeKey(here, next))) continue;
+
+      visited.add(next);
+      queue.push([cx + dx, cz + dz]);
+    }
+  }
+
+  return (x, y, z) => {
+    if (!sameLevel(y)) return undefined;
+
+    const { gx, gz } = toGrid(x, z);
+    const key = tileKey(Math.round(gx), Math.round(gz));
+
+    return tiles.has(key) ? visited.has(key) : undefined;
+  };
 }
