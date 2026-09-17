@@ -34,6 +34,12 @@ import { openDatabase } from './db/database.js';
 import { KitsRepository } from './db/kits-repository.js';
 import { LoadoutsRepository } from './db/loadouts-repository.js';
 import { runMigrations } from './db/migrations.js';
+import { backupBeforeMigrations, findMigrationBackup } from './db/backup.js';
+import {
+  UnsupportedSchemaError,
+  assertSchemaSupported,
+  recordMigratedBy,
+} from './db/schema-version.js';
 import { BetterLootJunkRepository } from './db/betterloot-junk-repository.js';
 import { CustomItemsRepository } from './db/custom-items-repository.js';
 import { LootRulesRepository } from './db/loot-rules-repository.js';
@@ -292,9 +298,45 @@ async function main(): Promise<void> {
 
   // ---- 2. banco --------------------------------------------
   const db = openDatabase({ file: agent.paths.dbPath, logger });
+
+  // ####  A TRAVA, O BACKUP E SÓ ENTÃO AS MIGRAÇÕES  ####
+  //
+  // As três peças existiam desde o primeiro commit, mas o boot só
+  // chamava a última: um agente velho abria um banco novo sem
+  // reclamar, e uma migração rodava sem cópia de antes. Foi assim
+  // que a 097 (pulada entre branches) virou armadilha para os
+  // agentes das outras worktrees, em 17/09/2026.
+  //
+  // A ordem importa: a recusa vem antes de qualquer escrita, e o
+  // backup antes da primeira migração.
+  try {
+    assertSchemaSupported(db, {
+      file: agent.paths.dbPath,
+      agentVersion: VERSION,
+      findBackup: (schemaVersion) => findMigrationBackup(agent.paths.dbPath, schemaVersion),
+      onRenamed: (migration) => {
+        logger.warn(
+          { id: migration.id, applied: migration.appliedName, known: migration.knownName },
+          'migração aplicada com nome diferente do que este agente conhece — confira se não é colisão de id entre branches',
+        );
+      },
+    });
+  } catch (error) {
+    if (error instanceof UnsupportedSchemaError) {
+      db.close();
+      console.error(`[RustAgent] banco recusado:\n\n${error.message}\n`);
+      process.exit(1);
+    }
+
+    throw error;
+  }
+
+  await backupBeforeMigrations({ db, file: agent.paths.dbPath, logger });
+
   const applied = runMigrations(db, logger);
 
   if (applied.length > 0) {
+    recordMigratedBy(db, VERSION, Date.now());
     logger.info({ count: applied.length }, 'migrações aplicadas');
   }
 

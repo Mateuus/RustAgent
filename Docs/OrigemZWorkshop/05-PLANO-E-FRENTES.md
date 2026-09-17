@@ -41,7 +41,8 @@ merge, **na ordem A → C → E → D → F**. No fim, um PR só da `skins-do-jo
 ### As regras que valem para todas as frentes
 
 1. **Um agente só roda contra o banco de desenvolvimento, e é o da A.** A 097 entra no banco,
-   e dali em diante qualquer agente com código velho recusa subir (`db/schema-version.ts`).
+   e dali em diante um agente com código velho quebra nas rotas do Workshop (a trava de
+   `db/schema-version.ts` só passou a ser chamada no boot nesta branch).
    Quem precisar de API nas outras frentes usa teste ou API falsa.
 2. **`git add` por caminho explícito.** As worktrees de subagente moram dentro do repositório.
 3. **Identificador em inglês, texto em português** (regra global do dono).

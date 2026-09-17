@@ -227,11 +227,13 @@ quantas permissões) e mostre ao dono. O comando está no fim desta seção.
   primeiro que tinha nota.
 - Acesso **vencido** também vira posse, com o mesmo prazo: a ficha mostra "venceu em".
 
-**Cuidado ao voltar o binário.** O guarda de schema (`db/schema-version.ts`) compara o **maior**
-id aplicado. Um agente antigo, que conhece até a 099, abre sem reclamar um banco com a 097, e
-quebra na primeira consulta a `workshop_grants`. Quem volta o binário depois da 097 precisa
-voltar o banco junto: o instantâneo de antes da migração fica em `backups`. Isso vale também
-para as outras worktrees que usam o banco de desenvolvimento.
+**Voltar o binário.** Até 17/09/2026 a trava de schema (`db/schema-version.ts`) nem era chamada no
+boot, e só comparava o **maior** id aplicado: um agente que conhecia até a 099 abria sem reclamar
+um banco com a 097 e quebrava na primeira consulta a `workshop_grants`. A partir desta branch o
+boot chama a trava, e ela **recusa** qualquer migração aplicada que o binário não conheça, com a
+instrução de restaurar o instantâneo (`backups`, também passou a ser gravado no boot). O agente
+antigo, sem esta correção, continua sem recusar — ele precisa receber a `main` antes de subir
+contra um banco com a 097.
 
 **MEDIDO em 17/09/2026**, numa cópia do banco de desenvolvimento, sem tocar no original:
 

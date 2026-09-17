@@ -8024,14 +8024,15 @@ CREATE INDEX idx_workshop_audit_steam ON workshop_audit (steam_id, at DESC);
 //  já tem a 098 e a 099, ela roda sozinha; num banco novo, roda
 //  entre a 096 e a 098.
 //
-//  ####  ATENÇÃO: O GUARDA DE SCHEMA NÃO PEGA ESTA  ####
+//  ####  O GUARDA DE SCHEMA SÓ PEGA ESTA A PARTIR DESTA BRANCH  ####
 //
-//  `assertSchemaSupported` compara o MAIOR id aplicado com o maior
-//  id que o binário conhece. Um agente antigo (que conhece até a
-//  099) abre um banco com a 097 aplicada sem reclamar — e quebra na
-//  primeira consulta a `workshop_grants`, que não existe mais. Quem
-//  volta binário depois desta migração tem de voltar o banco junto
-//  (o instantâneo de antes dela fica na pasta de backups).
+//  Até aqui o `assertSchemaSupported` nem era chamado no boot, e só
+//  comparava o MAIOR id. Agora o boot o chama e ele recusa qualquer
+//  id aplicado que o binário não conheça. Um agente ANTIGO, sem
+//  essa correção, ainda abre um banco com a 097 sem reclamar e
+//  quebra na primeira consulta a `workshop_grants`: quem volta
+//  binário para antes desta branch tem de voltar o banco junto (o
+//  instantâneo de antes dela fica na pasta de backups).
 //
 //  ####  É FUNÇÃO, E NÃO SQL PURO  ####
 //
