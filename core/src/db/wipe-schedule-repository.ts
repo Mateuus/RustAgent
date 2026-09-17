@@ -50,9 +50,11 @@ import {
   BP_POLICIES,
   COLLISION_POLICIES,
   MAP_SOURCES,
+  SEASON_SKINS_POLICIES,
   type BpPolicy,
   type CollisionPolicy,
   type MapSource,
+  type SeasonSkinsPolicy,
   type WipePlan,
   type WipePlanStatus,
   type WipeSettings,
@@ -184,12 +186,22 @@ const KEY = {
   cadenceTimeZone: 'cadence.timeZone',
   cadenceBpPolicy: 'cadence.bpPolicy',
   forcedBpPolicy: 'forced.bpPolicy',
+  // As skins de temporada (02 §4.6). Chave nova não custa migração:
+  // `wipe_settings` nasceu chave/valor justamente para isto, e uma
+  // chave ausente cai no padrão `keep` — que é o que o dono pediu
+  // como comportamento de quem nunca mexeu nisso.
+  cadenceSeasonSkins: 'cadence.seasonSkins',
+  forcedSeasonSkins: 'forced.seasonSkins',
   collisionPolicy: 'collision.policy',
   collisionWindowHours: 'collision.windowHours',
 } as const;
 
 function isBpPolicy(value: string): value is BpPolicy {
   return (BP_POLICIES as readonly string[]).includes(value);
+}
+
+function isSeasonSkinsPolicy(value: string): value is SeasonSkinsPolicy {
+  return (SEASON_SKINS_POLICIES as readonly string[]).includes(value);
 }
 
 function isCollisionPolicy(value: string): value is CollisionPolicy {
@@ -287,6 +299,12 @@ export class WipeScheduleRepository implements WipeScheduleReader {
       return raw !== undefined && isBpPolicy(raw) ? raw : fallback;
     };
 
+    const seasonSkins = (key: string, fallback: SeasonSkinsPolicy): SeasonSkinsPolicy => {
+      const raw = stored.get(key);
+
+      return raw !== undefined && isSeasonSkinsPolicy(raw) ? raw : fallback;
+    };
+
     const timeOfDay = text(KEY.cadenceTimeOfDay, defaults.cadence.timeOfDay);
     const timeZone = text(KEY.cadenceTimeZone, defaults.cadence.timeZone);
     const collisionPolicy = text(KEY.collisionPolicy, defaults.collision.policy);
@@ -301,9 +319,11 @@ export class WipeScheduleRepository implements WipeScheduleReader {
         timeOfDay: parseTimeOfDay(timeOfDay) === null ? defaults.cadence.timeOfDay : timeOfDay,
         timeZone: isValidTimeZone(timeZone) ? timeZone : defaults.cadence.timeZone,
         bpPolicy: bpPolicy(KEY.cadenceBpPolicy, defaults.cadence.bpPolicy),
+        seasonSkins: seasonSkins(KEY.cadenceSeasonSkins, defaults.cadence.seasonSkins),
       },
       forced: {
         bpPolicy: bpPolicy(KEY.forcedBpPolicy, defaults.forced.bpPolicy),
+        seasonSkins: seasonSkins(KEY.forcedSeasonSkins, defaults.forced.seasonSkins),
       },
       collision: {
         policy: isCollisionPolicy(collisionPolicy) ? collisionPolicy : defaults.collision.policy,
@@ -328,7 +348,9 @@ export class WipeScheduleRepository implements WipeScheduleReader {
       [KEY.cadenceTimeOfDay, settings.cadence.timeOfDay],
       [KEY.cadenceTimeZone, settings.cadence.timeZone],
       [KEY.cadenceBpPolicy, settings.cadence.bpPolicy],
+      [KEY.cadenceSeasonSkins, settings.cadence.seasonSkins],
       [KEY.forcedBpPolicy, settings.forced.bpPolicy],
+      [KEY.forcedSeasonSkins, settings.forced.seasonSkins],
       [KEY.collisionPolicy, settings.collision.policy],
       [KEY.collisionWindowHours, String(settings.collision.windowHours)],
     ];

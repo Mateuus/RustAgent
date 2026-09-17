@@ -51,8 +51,10 @@ import {
 } from '@/components/workshop/normalize';
 import { ServerPicker, type WorkshopServerOption } from '@/components/workshop/server-picker';
 import { Button } from '@/components/ui/button';
+import { HelpTip, type HelpTopic } from '@/components/ui/help-tip';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
+import { WORKSHOP_HELP } from '@/lib/help/workshop';
 import type {
   ApiError,
   WorkshopLookup,
@@ -88,6 +90,9 @@ export function blankSkin(): WorkshopSkinInput {
     openToAll: false,
     hideInStreamer: true,
     enabled: true,
+    // "Por padrão a skin NÃO é removida" (dono, 17/09/2026): a caixa
+    // nasce desligada, e é o wipe que decide quando remover.
+    season: false,
     servers: [],
   };
 }
@@ -430,6 +435,26 @@ export function SkinForm({
         </ToggleRow>
 
         <ToggleRow
+          title="Skin de temporada"
+          topic={WORKSHOP_HELP.season}
+          detail={
+            <>
+              Marque quando a skin for de uma temporada. Ela só sai da posse dos jogadores no{' '}
+              <strong>wipe em que você escolher “Remover da posse”</strong> — por padrão, nada é
+              removido, e uma skin pode atravessar vários wipes.
+            </>
+          }
+        >
+          <Toggle
+            on={draft.season}
+            busy={false}
+            onChange={(season) => patch({ season })}
+            labels={['de temporada', 'permanente']}
+            label="Esta skin é de temporada?"
+          />
+        </ToggleRow>
+
+        <ToggleRow
           title="Esta skin está valendo?"
           detail="Desligada some do menu, sem perder o cadastro nem a posse de quem a tem. O que já foi pintado continua pintado."
         >
@@ -493,19 +518,32 @@ export function SkinForm({
   );
 }
 
+/**
+ * Uma linha de interruptor, com o rótulo e o porquê.
+ *
+ * `topic` põe o `(?)` ao lado do rótulo — o mesmo do resto do painel
+ * (ui/help-tip.tsx): passar o mouse mostra a frase curta, clicar abre
+ * o texto inteiro. O `detail` continua sendo o que se lê sem clicar
+ * em nada.
+ */
 function ToggleRow({
   title,
+  topic,
   detail,
   children,
 }: {
   readonly title: string;
+  readonly topic?: HelpTopic;
   readonly detail: ReactNode;
   readonly children: ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
       <div className="max-w-xl">
-        <p className="font-condensed text-2xs uppercase tracking-wide text-muted">{title}</p>
+        <p className="flex items-center gap-1.5 font-condensed text-2xs uppercase tracking-wide text-muted">
+          {title}
+          {topic !== undefined && <HelpTip topic={topic} />}
+        </p>
         <p className="mt-1 text-2xs leading-relaxed text-muted">{detail}</p>
       </div>
       {children}

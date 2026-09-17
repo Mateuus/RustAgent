@@ -83,6 +83,10 @@ export function safeSkin(skin: WorkshopSkin): WorkshopSkin {
     openToAll: skin.openToAll === true,
     hideInStreamer: skin.hideInStreamer === true,
     enabled: skin.enabled === true,
+    // Campo ausente é "não é de temporada", que é o padrão do
+    // agente — e o lado seguro: a tela nunca promete que uma skin
+    // sai no wipe por causa de um campo que não veio.
+    season: skin.season === true,
     servers: Array.isArray(skin.servers) ? skin.servers.map(text) : [],
     source: skin.source === 'game' ? 'game' : 'panel',
     createdBy: nullableText(skin.createdBy),

@@ -43,10 +43,14 @@ import { Section } from '@/components/section';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { HelpTip } from '@/components/ui/help-tip';
 import { Label } from '@/components/ui/label';
-import { stepDuration } from '@/components/wipe/labels';
+import { SEASON_SKINS_HINT, SEASON_SKINS_LABEL, stepDuration } from '@/components/wipe/labels';
+import { WORKSHOP_HELP } from '@/lib/help/workshop';
 import {
+  SEASON_SKINS_POLICIES,
   agent,
+  type SeasonSkinsPolicy,
   type WipeClassifiedFile,
   type WipePreviewResponse,
   type WipeRun,
@@ -97,6 +101,9 @@ export function TabExecucao({ serverId }: { readonly serverId: string }) {
       // `null` = "não decidi", e aí vale a configuração do servidor.
       // Ver Docs\Ranking\20 §3.4 e o cabeçalho de WipeSeasonBox.
       openRankingSeason: boolean | null,
+      // Aqui NÃO existe terceiro estado: "por padrão a skin não é
+      // removida", então quem não marcar nada manda `keep`.
+      seasonSkins: SeasonSkinsPolicy,
     ) => {
       setBusy(true);
 
@@ -105,6 +112,7 @@ export function TabExecucao({ serverId }: { readonly serverId: string }) {
           identity,
           idempotencyKey,
           openRankingSeason,
+          seasonSkins,
         });
 
         toast.success('Wipe disparado', { description: response.message });
@@ -377,11 +385,21 @@ function StartWipe({
     identity: string,
     idempotencyKey: string,
     openRankingSeason: boolean | null,
+    seasonSkins: SeasonSkinsPolicy,
   ) => Promise<void>;
 }) {
   const [typed, setTyped] = useState('');
   /** A decisão de temporada DESTA execução. `null` = herdar. */
   const [openRankingSeason, setOpenRankingSeason] = useState<boolean | null>(null);
+  /**
+   * As skins de temporada NESTA execução.
+   *
+   * Nasce em `keep` a cada abertura da tela, e de propósito: marcar
+   * "remover" é uma decisão daquele wipe, e uma tela que lembrasse a
+   * escolha anterior removeria a posse de todos no wipe seguinte sem
+   * ninguém pedir de novo.
+   */
+  const [seasonSkins, setSeasonSkins] = useState<SeasonSkinsPolicy>('keep');
 
   /**
    * A chave da requisição.
@@ -455,6 +473,8 @@ function StartWipe({
             onChange={setOpenRankingSeason}
           />
 
+          <SeasonSkinsBox value={seasonSkins} onChange={setSeasonSkins} />
+
           <div className="max-w-md space-y-1">
             <Label htmlFor="wipe-identity">
               Digite o identity do servidor para confirmar: {preview.server.identity}
@@ -477,7 +497,7 @@ function StartWipe({
             variant="danger"
             disabled={busy || blocked || !matches}
             onClick={() => {
-              void onStart(typed.trim(), key.current, openRankingSeason);
+              void onStart(typed.trim(), key.current, openRankingSeason, seasonSkins);
             }}
           >
             <Play aria-hidden className="mr-1 h-4 w-4" />
@@ -485,6 +505,58 @@ function StartWipe({
           </Button>
         </div>
       </Section>
+    </div>
+  );
+}
+
+/**
+ * "Skins de temporada": manter ou remover a posse neste wipe.
+ *
+ * ####  ELA VEM ANTES DO CAMPO DE CONFIRMAÇÃO  ####
+ *
+ * Pela mesma razão que a lista de arquivos e a caixa do ranking: o
+ * que vai acontecer se lê ANTES de autorizar.
+ *
+ * ####  E NÃO TEM "HERDAR"  ####
+ *
+ * A caixa do ranking tem três estados porque lá existe uma
+ * configuração do servidor para herdar. Aqui o wipe é manual — não
+ * nasceu de cadência nem de forçado —, então não há configuração a
+ * herdar: ou este clique manda remover, ou nada é removido.
+ */
+function SeasonSkinsBox({
+  value,
+  onChange,
+}: {
+  readonly value: SeasonSkinsPolicy;
+  readonly onChange: (value: SeasonSkinsPolicy) => void;
+}) {
+  return (
+    <div className="space-y-2 border border-border bg-surface-2 p-3">
+      <p className="flex items-center gap-1.5 font-condensed text-2xs font-bold uppercase tracking-wide text-foreground">
+        Skins de temporada
+        <HelpTip topic={WORKSHOP_HELP.wipeSeasonSkins} />
+      </p>
+
+      <div className="flex flex-col gap-1.5">
+        {SEASON_SKINS_POLICIES.map((policy) => (
+          <label key={policy} className="flex items-start gap-2 text-sm">
+            <input
+              type="radio"
+              name="wipe-season-skins"
+              className="mt-1"
+              checked={value === policy}
+              onChange={() => onChange(policy)}
+            />
+            <span>
+              <span className="font-medium text-foreground">{SEASON_SKINS_LABEL[policy]}</span>
+              <span className="block text-2xs leading-relaxed text-muted">
+                {SEASON_SKINS_HINT[policy]}
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
     </div>
   );
 }

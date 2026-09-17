@@ -41,6 +41,14 @@ describe('safeSkin', () => {
     expect(safeSkin({ rarity: 'mythic' } as unknown as WorkshopSkin).rarity).toBeNull();
   });
 
+  it('sem o campo `season`, a skin NÃO é de temporada', () => {
+    // O lado seguro: a tela nunca promete que uma skin sai no wipe
+    // por causa de um campo que não veio. Ver 02 §4.6.
+    expect(safeSkin({ id: 3 } as WorkshopSkin).season).toBe(false);
+    expect(safeSkin({ id: 3, season: true } as WorkshopSkin).season).toBe(true);
+    expect(safeSkin({ id: 3, season: 1 } as unknown as WorkshopSkin).season).toBe(false);
+  });
+
   it('mantém o Workshop ID como texto, sem arredondar', () => {
     expect(safeSkin({ skinId: '18446744073709551615' } as WorkshopSkin).skinId).toBe('18446744073709551615');
   });

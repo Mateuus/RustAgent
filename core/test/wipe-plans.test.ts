@@ -67,6 +67,7 @@ function cadencia(patch: {
   readonly policy?: WipeSettings['collision']['policy'];
   readonly windowHours?: number;
   readonly bpPolicy?: WipeSettings['cadence']['bpPolicy'];
+  readonly seasonSkins?: WipeSettings['cadence']['seasonSkins'];
 }): WipeSettings {
   return {
     cadence: {
@@ -76,8 +77,9 @@ function cadencia(patch: {
       timeOfDay: '16:00',
       timeZone: SAO_PAULO,
       bpPolicy: patch.bpPolicy ?? 'keep',
+      seasonSkins: patch.seasonSkins ?? 'keep',
     },
-    forced: { bpPolicy: 'keep' },
+    forced: { bpPolicy: 'keep', seasonSkins: 'keep' },
     collision: { policy: patch.policy ?? 'reanchor', windowHours: patch.windowHours ?? 24 },
   };
 }
@@ -720,8 +722,9 @@ function settingsBody(everyDays: number): WipeSettings {
       timeOfDay: '16:00',
       timeZone: SAO_PAULO,
       bpPolicy: 'keep',
+      seasonSkins: 'keep',
     },
-    forced: { bpPolicy: 'keep' },
+    forced: { bpPolicy: 'keep', seasonSkins: 'keep' },
     collision: { policy: 'reanchor', windowHours: 24 },
   };
 }

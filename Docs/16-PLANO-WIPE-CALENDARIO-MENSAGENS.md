@@ -507,6 +507,16 @@ minutos mostraria "faltam 3 min" para um wipe que ainda tem uma hora.
 lida do disco (`GET /wipe/preview`) — não é um texto fixo dizendo o que *deveria*
 estar lá.
 
+> **As opções de um wipe, e as duas que NÃO são de arquivo.** Além da política de
+> blueprint e do mapa, cada wipe carrega duas escolhas que mexem no banco do
+> agente, e não na pasta do save: se a **temporada do ranking** vira
+> (`openRankingSeason`, três estados — ver Docs/Ranking/20 §3.4) e se a posse das
+> **skins de temporada** sai (`seasonSkins`, `'keep' | 'clear'`, padrão `keep` —
+> ver Docs/OrigemZWorkshop/02 §4.6). As duas aparecem no formulário do *wipar
+> agora*, e a das skins também na configuração da cadência e do forçado
+> (`cadence.seasonSkins` e `forced.seasonSkins`, em `wipe_settings`). Nenhuma das
+> duas entra na prévia de arquivos: o que elas apagam não está em disco.
+
 #### Agenda
 
 ```
@@ -519,6 +529,9 @@ estar lá.
  │                                                                         │
  │  blueprints da cadência:  (•) mantidos  ( ) apagados  ( ) só VIP mantém │
  │  blueprints do forçado:   (•) mantidos  ( ) apagados  ( ) só VIP mantém │
+ │                                                                         │
+ │  skins de temporada (cadência): (•) manter na posse ( ) remover da posse│
+ │  skins de temporada (forçado):  (•) manter na posse ( ) remover da posse│
  ├─ QUANDO OS DOIS CAEM JUNTOS ────────────────────────────────────────────┤
  │  (•) reancorar — o forçado vira o novo marco zero                       │
  │  ( ) absorver  — cancela o da cadência dentro de [ 24 ] h               │

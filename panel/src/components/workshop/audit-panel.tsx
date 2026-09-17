@@ -74,6 +74,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   'owned.grant': 'Skin dada',
   'owned.revoke': 'Skin tirada',
   'owned.expired': 'Posse venceu',
+  'owned.season-cleared': 'Posse de skins de temporada removida no wipe',
   'site.delivered': 'Entregue pelo site',
   'game.add-refused': 'Cadastro pelo jogo recusado',
   'game.give-refused': '/skin give recusado',
@@ -106,6 +107,7 @@ function actionTone(action: string): string {
     action === 'game.add-refused' ||
     action === 'game.give-refused' ||
     action === 'owned.revoke' ||
+    action === 'owned.season-cleared' ||
     action === 'grant.revoke' ||
     action === 'skin.delete'
   ) {
@@ -147,11 +149,23 @@ const FIELD_LABELS: Readonly<Record<string, string>> = {
   openToAll: 'para todos',
   hideInStreamer: 'esconde no streamer',
   enabled: 'valendo',
+  season: 'de temporada',
   servers: 'servidores',
   slug: 'comando',
   workshopTitle: 'título no Workshop',
   previewUrl: 'prévia',
 };
+
+/**
+ * Um número do detalhe, ou `null`.
+ *
+ * O detalhe vem do agente como JSON solto, e a régua do registro é a
+ * mesma do resto do Workshop: campo ausente não derruba o render —
+ * ele vira uma frase mais curta.
+ */
+function numberOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
 
 function formatValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—';
@@ -204,6 +218,25 @@ export function describeDetail(entry: WorkshopAuditEntry): string {
       const by = typeof detail.grantedBy === 'string' ? ` por ${detail.grantedBy}` : '';
 
       return `era ${expiry === null ? 'permanente' : `até ${expiry}`}${origin === '' && by === '' ? '' : ` · dada${origin === '' ? '' : ` pelo ${origin}`}${by}`}`;
+    }
+
+    case 'owned.season-cleared': {
+      // ####  UMA LINHA PARA O WIPE INTEIRO  ####
+      //
+      // O agente grava UMA linha com as contagens, e não uma por
+      // jogador: um wipe com milhares de posses encheria a tela do
+      // registro e esconderia todo o resto daquele dia. Quem tinha o
+      // quê continua em cada `owned.grant`. Ver 02 §4.6.
+      const removed = numberOf(detail.removed);
+      const players = numberOf(detail.players);
+      const skins = Array.isArray(detail.skins) ? detail.skins.length : numberOf(detail.skins);
+
+      if (removed === null) return 'o wipe mandou remover a posse das skins de temporada';
+
+      const de = players === null ? '' : `, de ${String(players)} jogador(es)`;
+      const quantas = skins === null || skins === 0 ? '' : ` · ${String(skins)} skin(s) marcada(s)`;
+
+      return `${String(removed)} posse(s) removida(s)${de}${quantas}`;
     }
 
     case 'owned.expired': {

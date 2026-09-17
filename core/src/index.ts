@@ -3846,6 +3846,16 @@ async function main(): Promise<void> {
     // A Frente I. Sem ela, `wipe_except_vip` se comportaria como
     // `wipe` — e o jogador que pagou recomeçaria sem nada.
     blueprints,
+    // ####  AS SKINS DE TEMPORADA  ####
+    //
+    // Uma porta só, e por ela sai tudo: apagar a posse (viva e
+    // vencida) das skins marcadas, a linha `owned.season-cleared` no
+    // registro e o reenvio da posse a quem está online. Quem decide
+    // SE ela é chamada é o wipe (`seasonSkins`, em wipe/run.ts); o
+    // catálogo só sabe fazer. Ver Docs/OrigemZWorkshop/02 §4.6.
+    seasonSkins: {
+      removeSeasonOwnership: (serverId) => workshopCatalog.removeSeasonOwnership(serverId),
+    },
   });
 
   // ---- a ponte: `{wipe.*}` nas mensagens ---------------------

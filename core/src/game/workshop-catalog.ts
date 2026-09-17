@@ -27,11 +27,17 @@
 // ============================================================
 
 import type { ItemsRepository } from '../db/items-repository.js';
-import { isOwnedLive, type WorkshopOwnedRepository } from '../db/workshop-owned-repository.js';
+import {
+  FavoritesFullError,
+  isOwnedLive,
+  type FavoriteResult,
+  type WorkshopOwnedRepository,
+} from '../db/workshop-owned-repository.js';
 import type { WorkshopSkinsRepository } from '../db/workshop-repository.js';
 import { ApiError } from '../http/error-response.js';
 import {
   grantOwnershipInputSchema,
+  MAX_FAVORITES_PER_PLAYER,
   revokeOwnershipInputSchema,
   type GrantOwnershipInput,
   type OwnedSkin,
@@ -91,6 +97,14 @@ export type GrantOwnershipRequest = GrantOwnershipInput & { readonly serverId?: 
 
 /** O pedido de `WorkshopCatalog.revokeOwnership`. Ver `GrantOwnershipRequest`. */
 export type RevokeOwnershipRequest = RevokeOwnershipInput & { readonly serverId?: string | null };
+
+/** O desfecho de `WorkshopCatalog.removeSeasonOwnership`. */
+export interface SeasonCleared {
+  /** Quantas LINHAS de posse saíram. */
+  readonly removed: number;
+  /** Os SteamIDs afetados, sem repetir. */
+  readonly players: readonly string[];
+}
 
 export interface GrantedOwnership {
   readonly owned: OwnedSkin;
@@ -417,6 +431,110 @@ export class WorkshopCatalog {
       },
       now,
     );
+  }
+
+  // ======================================================
+  //  FAVORITAS (02 §5.4)
+  // ======================================================
+
+  /**
+   * Põe a favorita no estado pedido, e reenvia a carga do jogador.
+   *
+   * ####  NÃO VAI PARA O REGISTRO  ####
+   *
+   * Favoritar é preferência de tela, e o jogador pode clicar dez vezes
+   * em dez segundos. O 02 §6.2 já deixou "aplicar" fora da auditoria
+   * pelo mesmo motivo: é uso, não configuração.
+   *
+   * @throws ApiError `WORKSHOP_SKIN_NOT_FOUND` (404) quando a skin não
+   *         existe; `FAVORITES_FULL` (409) no teto de
+   *         {@link MAX_FAVORITES_PER_PLAYER}.
+   */
+  setFavorite(steamId: string, skinRef: number, on: boolean, now: number = Date.now()): FavoriteResult {
+    this.#mustGetSkin(skinRef);
+
+    let result: FavoriteResult;
+
+    try {
+      result = this.#deps.owned.setFavorite(steamId, skinRef, on, now);
+    } catch (cause) {
+      if (cause instanceof FavoritesFullError) {
+        throw new ApiError(
+          'FAVORITES_FULL',
+          `Você já tem ${String(MAX_FAVORITES_PER_PLAYER)} skins favoritas. ` +
+            'Desfavorite uma antes de marcar outra.',
+          409,
+        );
+      }
+
+      throw cause;
+    }
+
+    // A favorita desce na carga da posse: sem o aviso, a estrela some
+    // no próximo redesenho do menu (o plugin troca o conjunto inteiro
+    // quando a carga chega).
+    if (result.changed) this.#deps.onOwnershipChange?.(steamId);
+
+    return result;
+  }
+
+  /** Inverte a favorita. Ver `setFavorite` para as recusas. */
+  toggleFavorite(steamId: string, skinRef: number, now: number = Date.now()): FavoriteResult {
+    return this.setFavorite(steamId, skinRef, !this.#deps.owned.isFavorite(steamId, skinRef), now);
+  }
+
+  // ======================================================
+  //  A TEMPORADA (02 §4.6)
+  // ======================================================
+
+  /**
+   * Apaga a posse de TODA skin marcada "Skin de temporada".
+   *
+   * ####  É A FRENTE DO WIPE QUEM CHAMA, E SÓ QUANDO ELE MANDAR  ####
+   *
+   * A marca `season` não faz nada sozinha: "por padrão não é
+   * removida" (decisão do dono, 17/09/2026). Este método é o gatilho,
+   * e ele não decide nada — quem decide é quem o chama.
+   *
+   * `serverId` só entra no REGISTRO, como no `grantOwnership`: a posse
+   * é da rede inteira (02 §4.2) e sai inteira. Passar o servidor do
+   * wipe é o que deixa o registro dizer de onde veio a ordem.
+   *
+   * Uma linha de auditoria só (`owned.season-cleared`), com a
+   * contagem — e não uma por jogador: um wipe com 3.000 posses de
+   * temporada encheria a tela do registro e esconderia tudo o mais que
+   * aconteceu naquele dia. Quem tinha o quê está em cada
+   * `owned.grant`, que continua lá.
+   *
+   * @returns quantas linhas saíram e de quem — a lista é para quem
+   *          quiser avisar o jogador; o reenvio da posse deste método
+   *          já foi feito.
+   */
+  removeSeasonOwnership(serverId?: string | null, now: number = Date.now()): SeasonCleared {
+    const removed = this.#deps.owned.deleteSeasonOwned();
+    const players = [...new Set(removed.map((owned) => owned.steamId))];
+    const skins = [...new Set(removed.map((owned) => owned.skinRef))].sort((a, b) => a - b);
+
+    this.#deps.owned.log(
+      {
+        actor: 'sistema',
+        source: 'system',
+        action: 'owned.season-cleared',
+        target: 'posse de skins de temporada',
+        serverId: serverId ?? null,
+        steamId: null,
+        detail: { removed: removed.length, players: players.length, skins },
+      },
+      now,
+    );
+
+    // Quem estiver online perde a skin da carga agora; quem está fora
+    // recebe a carga nova quando entrar.
+    for (const steamId of players) {
+      this.#deps.onOwnershipChange?.(steamId);
+    }
+
+    return { removed: removed.length, players };
   }
 
   // ======================================================

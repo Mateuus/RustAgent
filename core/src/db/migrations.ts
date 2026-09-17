@@ -8627,6 +8627,200 @@ ALTER TABLE dungeons ADD COLUMN announce_size INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE dungeon_blueprints ADD COLUMN markers TEXT;
 `;
 
+// ------------------------------------------------------------
+//  100 — a favorita da REDE e a skin de temporada
+//
+//  Dois pedidos do dono em 17/09/2026, na mesma migração porque as
+//  duas mexem no mesmo canto do schema (Docs/OrigemZWorkshop/02 §4.5
+//  e §4.6).
+//
+//  ####  A FAVORITA SAI DO PLUGIN E VIRA DADO DO AGENTE  ####
+//
+//  Até a 0.3.0 do OrigemZWorkshop a favorita morava em
+//  `oxide/data/OrigemZWorkshop/favorites.json`, por SERVIDOR: quem
+//  marcava no server01 abria o server02 sem nenhuma. A posse já é da
+//  rede (§4.2), e a preferência de tela não tem motivo para ser
+//  diferente. Então `workshop_favorites` nasce com a MESMA forma da
+//  posse — sem `server_id`, com o mesmo CHECK de SteamID64 e a mesma
+//  cascata pela skin.
+//
+//  Ela NÃO tem `expires_at`, `source` nem `note`: favoritar é
+//  preferência, não direito. Por isso também não vai para o registro
+//  (`workshop_audit`) — seria uma linha por clique, como "aplicar",
+//  que o 02 §6.2 já deixou de fora.
+//
+//  ####  A SKIN DE TEMPORADA É UMA MARCA, E SÓ  ####
+//
+//  `workshop_skins.season` em 1 quer dizer "esta posse PODE sair no
+//  próximo wipe". Nada no jogo muda por causa dela: o menu apenas
+//  informa, e quem de fato apaga é o wipe, chamando
+//  `WorkshopCatalog.removeSeasonOwnership` (outra frente). Por
+//  padrão 0 — "por padrão não é removida" (decisão do dono).
+//
+//  ####  POR QUE RECONSTRUIR A TABELA INTEIRA  ####
+//
+//  `season` sozinha caberia num `ALTER TABLE ADD COLUMN`. O CHECK
+//  `season IN (0,1)` é que não: o SQLite não altera CHECK. E a régua
+//  da casa é que booleano tem CHECK (ver a 095). Então é o mesmo
+//  molde da 097, com a mesma ordem e pelo mesmo motivo — com
+//  `foreign_keys = ON` (database.ts), o DROP da tabela velha de skins
+//  levaria em cascata a junção de servidor E a posse de todo mundo:
+//
+//    a. as duas dependentes vão para tabelas SEM FK;
+//    b. `workshop_skins` é renomeada, recriada com `season` e copiada;
+//    c. as dependentes voltam, com a FK apontando para a tabela nova
+//       (o `id` de cada posse é preservado: o detalhe do registro
+//       guarda `ownedId`, e renumerar mentiria sobre linhas antigas);
+//    d. `workshop_favorites` nasce por último, já apontando para ela.
+//
+//  O índice único da marca é recriado DEPOIS do DROP da tabela velha:
+//  nome de índice é global no schema, e o RENAME não o move.
+// ------------------------------------------------------------
+const WORKSHOP_FAVORITES_SEASON_SCHEMA = `
+-- ---- a. as dependentes saem do caminho, sem FK ---------------
+CREATE TABLE workshop_skin_servers_100 (
+  workshop_skin_id INTEGER NOT NULL,
+  server_id TEXT NOT NULL
+);
+
+INSERT INTO workshop_skin_servers_100 (workshop_skin_id, server_id)
+SELECT workshop_skin_id, server_id FROM workshop_skin_servers;
+
+DROP TABLE workshop_skin_servers;
+
+CREATE TABLE workshop_owned_skins_100 (
+  id INTEGER NOT NULL,
+  steam_id TEXT NOT NULL,
+  skin_ref INTEGER NOT NULL,
+  expires_at INTEGER,
+  source TEXT NOT NULL,
+  source_ref TEXT,
+  note TEXT,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+INSERT INTO workshop_owned_skins_100
+  (id, steam_id, skin_ref, expires_at, source, source_ref, note, created_by, created_at, updated_at)
+SELECT
+   id, steam_id, skin_ref, expires_at, source, source_ref, note, created_by, created_at, updated_at
+  FROM workshop_owned_skins;
+
+DROP TABLE workshop_owned_skins;
+
+-- ---- b. workshop_skins, agora com season ---------------------
+ALTER TABLE workshop_skins RENAME TO workshop_skins_099;
+
+CREATE TABLE workshop_skins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  label TEXT NOT NULL,
+  shortname TEXT NOT NULL,
+  skin_id TEXT NOT NULL CHECK (skin_id <> '0' AND skin_id <> ''),
+
+  description TEXT CHECK (description IS NULL OR description <> ''),
+
+  rarity TEXT CHECK (rarity IS NULL OR rarity IN ('common', 'uncommon', 'rare', 'epic', 'legendary')),
+
+  sort_order INTEGER NOT NULL DEFAULT 0,
+
+  open_to_all INTEGER NOT NULL DEFAULT 0 CHECK (open_to_all IN (0, 1)),
+
+  hide_in_streamer INTEGER NOT NULL DEFAULT 1 CHECK (hide_in_streamer IN (0, 1)),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- 1 = "Skin de temporada": a posse dela PODE sair num wipe. Quem
+  -- apaga e o wipe, chamando removeSeasonOwnership; nada no jogo muda
+  -- por causa desta coluna, e o padrao 0 e o "por padrao nao e
+  -- removida" que o dono pediu.
+  season INTEGER NOT NULL DEFAULT 0 CHECK (season IN (0, 1)),
+
+  source TEXT NOT NULL DEFAULT 'panel' CHECK (source IN ('panel', 'game')),
+  created_by TEXT,
+
+  workshop_title TEXT,
+  preview_url TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Toda skin que ja existia nasce comum: season 0.
+INSERT INTO workshop_skins
+  (id, label, shortname, skin_id, description, rarity, sort_order, open_to_all,
+   hide_in_streamer, enabled, season, source, created_by, workshop_title, preview_url,
+   created_at, updated_at)
+SELECT id, label, shortname, skin_id, description, rarity, sort_order, open_to_all,
+       hide_in_streamer, enabled, 0, source, created_by, workshop_title, preview_url,
+       created_at, updated_at
+  FROM workshop_skins_099;
+
+DROP TABLE workshop_skins_099;
+
+CREATE UNIQUE INDEX idx_workshop_skins_mark ON workshop_skins (shortname, skin_id);
+
+-- ---- c. as dependentes voltam, com FK ------------------------
+CREATE TABLE workshop_skin_servers (
+  workshop_skin_id INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (workshop_skin_id, server_id)
+);
+
+INSERT OR IGNORE INTO workshop_skin_servers (workshop_skin_id, server_id)
+SELECT workshop_skin_id, server_id FROM workshop_skin_servers_100;
+
+DROP TABLE workshop_skin_servers_100;
+
+CREATE INDEX idx_workshop_skin_servers_server ON workshop_skin_servers (server_id);
+
+CREATE TABLE workshop_owned_skins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  skin_ref INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  expires_at INTEGER,
+  source TEXT NOT NULL CHECK (source IN ('site', 'panel', 'game', 'system', 'migration')),
+  source_ref TEXT,
+  note TEXT,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (steam_id, skin_ref)
+);
+
+INSERT INTO workshop_owned_skins
+  (id, steam_id, skin_ref, expires_at, source, source_ref, note, created_by, created_at, updated_at)
+SELECT
+   id, steam_id, skin_ref, expires_at, source, source_ref, note, created_by, created_at, updated_at
+  FROM workshop_owned_skins_100;
+
+DROP TABLE workshop_owned_skins_100;
+
+CREATE INDEX idx_workshop_owned_steam ON workshop_owned_skins (steam_id);
+
+CREATE INDEX idx_workshop_owned_expiry ON workshop_owned_skins (expires_at)
+  WHERE expires_at IS NOT NULL;
+
+CREATE INDEX idx_workshop_owned_skin ON workshop_owned_skins (skin_ref);
+
+-- ---- d. a favorita, da rede ----------------------------------
+--
+-- Sem server_id, como a posse: quem favorita no server01 abre o
+-- server02 com a mesma lista. Sem prazo e sem origem: e preferencia
+-- de tela, nao direito. O teto de 200 por jogador mora no
+-- repositorio, que e quem sabe recusar com frase.
+CREATE TABLE workshop_favorites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  skin_ref INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  UNIQUE (steam_id, skin_ref)
+);
+
+-- A pergunta da carga: "quais sao as favoritas deste jogador?".
+CREATE INDEX idx_workshop_favorites_steam ON workshop_favorites (steam_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -8909,6 +9103,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // a 98 ja existiam em outras branches, e a 97 esta reservada para a
   // frente do workshop.
   { id: 99, name: 'dungeon-body-skins-announce', sql: DUNGEON_BODY_SKINS_ANNOUNCE_SCHEMA },
+  // 17/09/2026: a favorita sai do favorites.json do plugin e vira
+  // dado do agente (da REDE, como a posse), e a skin ganha a marca
+  // "de temporada". Ver o cabecalho da 100.
+  { id: 100, name: 'workshop-favorites-season', sql: WORKSHOP_FAVORITES_SEASON_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

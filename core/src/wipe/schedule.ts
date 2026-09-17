@@ -352,6 +352,15 @@ export function isValidTimeZone(timeZone: string): boolean {
  * É o padrão de um servidor NOVO, e nada mais: quem já tem
  * configuração salva continua com a dele, e cada wipe da agenda
  * pode ser editado um a um na sub-aba Agenda.
+ *
+ * ####  E AS SKINS DE TEMPORADA NASCEM `keep` NOS DOIS  ####
+ *
+ * Inclusive no forçado, ao contrário do blueprint. Não é descuido:
+ * é a frase do dono em 17/09/2026 — "por padrão a skin NÃO é
+ * removida". Uma skin de temporada costuma atravessar dois ou três
+ * wipes, e um padrão `clear` apagaria a posse de todo mundo no
+ * primeiro force wipe depois de alguém marcar a primeira skin.
+ * Ver Docs/OrigemZWorkshop/02 §4.6.
  */
 export const DEFAULT_WIPE_SETTINGS: WipeSettings = {
   cadence: {
@@ -361,9 +370,11 @@ export const DEFAULT_WIPE_SETTINGS: WipeSettings = {
     timeOfDay: '16:00',
     timeZone: 'America/Sao_Paulo',
     bpPolicy: 'keep',
+    seasonSkins: 'keep',
   },
   forced: {
     bpPolicy: 'wipe',
+    seasonSkins: 'keep',
   },
   collision: {
     policy: 'reanchor',

@@ -31,6 +31,28 @@
 //  A posse NUNCA é delta, e a lista VAZIA é mandada: ela é a
 //  informação "não tem nada", diferente de "ainda não sei".
 //
+//  A carga da posse leva também as FAVORITAS daquele jogador
+//  (`favorites: [ids]`, 02 §5.2): são a mesma pergunta ("o que é
+//  deste jogador?") e o plugin troca os dois conjuntos de uma vez.
+//  Desde a migração 100 elas são do AGENTE, e não do
+//  `favorites.json` do plugin — que continua existindo, como cache de
+//  leitura para o servidor que sobe com o agente fora do ar.
+//
+//  ####  A ESTRELA DO MENU: OTIMISTA LÁ, VERDADE AQUI  ####
+//
+//      jogador clica na estrela
+//            ↓  o plugin desenha na hora e grita
+//      #OZWORKSHOP#{"kind":"fav","secret":…,"steamId":…,
+//                   "skinId":N,"on":true|false}
+//            ↓  este arquivo
+//      WorkshopCatalog.setFavorite  →  workshop_favorites
+//            ↓
+//      origemz.workshop.owned  →  o conjunto trocado, que é a verdade
+//
+//  O aviso diz o ESTADO (`on`), e não "alterne": o console repete
+//  linha em reconexão, e alternar duas vezes desfaria o clique em
+//  silêncio.
+//
 //  ####  NENHUM COMANDO SAI DE DENTRO DO GANCHO DE CONSOLE  ####
 //
 //  A lição medida do `agent-requests.ts`, repetida no `koth.ts`: um
@@ -64,9 +86,11 @@ import type { OpsRcon } from '../ops/service.js';
 import { parseStreamerNotice } from '../types/streamer-transport.js';
 import {
   workshopAddRequestSchema,
+  workshopFavoriteRequestSchema,
   workshopGiveRequestSchema,
   type WorkshopAddReply,
   type WorkshopAddRequest,
+  type WorkshopFavoriteRequest,
   type WorkshopGiveRequest,
   type WorkshopOwnedPayload,
   type WorkshopPayload,
@@ -143,6 +167,8 @@ export type WorkshopOwnedTrigger =
   | 'player-joined'
   | 'ownership-changed'
   | 'owned-expired'
+  /** O jogador marcou (ou desmarcou) uma favorita no menu. */
+  | 'favorite-changed'
   /** O catálogo desceu: a posse é filtrada por ele. */
   | 'catalog'
   | 'manual';
@@ -310,6 +336,9 @@ export class WorkshopService {
       sort: skin.sort,
       openToAll: skin.openToAll,
       hideInStreamer: skin.hideInStreamer,
+      // "Skin de temporada": o menu desenha uma linha por causa dela
+      // (03 §3.5) e nada mais muda no jogo. Ver 02 §4.6.
+      season: skin.season,
     }));
 
     const storeUrl = (this.#deps.storeUrl ?? '').trim();
@@ -335,6 +364,11 @@ export class WorkshopService {
    * Só as vivas, e só as de skins que estão no catálogo deste
    * servidor (ligadas e na junção) — o resto o plugin não saberia
    * desenhar. `expiresAt` 0 = permanente.
+   *
+   * As FAVORITAS dele vêm na mesma carga, pelo mesmo filtro: favorita
+   * de skin que não existe naquele servidor não tem célula para
+   * marcar. São a lista de ids, inteira, nunca delta — o plugin troca
+   * o conjunto de uma vez, como faz com a posse (02 §5.2).
    */
   buildOwnedPayload(serverId: string, steamId: string): WorkshopOwnedPayload {
     const now = this.#now();
@@ -347,6 +381,7 @@ export class WorkshopService {
         .liveOwnedForPlayer(steamId, now)
         .filter((owned) => here.has(owned.skinRef))
         .map((owned) => ({ id: owned.skinRef, expiresAt: owned.expiresAt ?? 0 })),
+      favorites: this.#deps.owned.listFavorites(steamId).filter((skinRef) => here.has(skinRef)),
     };
   }
 
@@ -666,10 +701,18 @@ export class WorkshopService {
     this.scheduleExpiry();
   }
 
-  #resendOwned(steamId: string, trigger: WorkshopOwnedTrigger): void {
+  /**
+   * A posse (e as favoritas) dele, em cada servidor onde ele está.
+   *
+   * `forced` existe para o caso em que o agente RECUSOU o que o plugin
+   * pediu: a carga não mudou, então a digital diria "não mudou nada" —
+   * e o plugin ficaria com o estado otimista que ele desenhou antes de
+   * perguntar. Forçado, a verdade volta e desfaz o otimismo.
+   */
+  #resendOwned(steamId: string, trigger: WorkshopOwnedTrigger, forced = false): void {
     for (const serverId of this.#deps.servers.ids()) {
       if (this.#deps.servers.onlineOf(serverId).includes(steamId)) {
-        this.syncOwnedSoon(serverId, [steamId], trigger, false);
+        this.syncOwnedSoon(serverId, [steamId], trigger, forced);
       }
     }
   }
@@ -832,6 +875,36 @@ export class WorkshopService {
       return;
     }
 
+    if (push.kind === 'fav') {
+      const request = workshopFavoriteRequestSchema.safeParse(parsed);
+
+      if (!request.success) {
+        this.#deps.logger?.warn(
+          { server: serverId, issues: request.error.issues.slice(0, 3) },
+          'favorita fora do contrato: descartada',
+        );
+
+        return;
+      }
+
+      // ####  NÃO TEM DEDUP POR requestId, E NÃO PRECISA  ####
+      //
+      // O aviso diz o ESTADO (`on`), e não "alterne": a mesma linha
+      // duas vezes (o console repete em reconexão) dá no mesmo. Ver
+      // `setFavorite` no repositório.
+      //
+      // Fora do gancho: a escrita reenvia a carga, que é um comando de
+      // RCON. Ver o cabeçalho.
+      const data = request.data;
+      const favTimer = setTimeout(() => {
+        this.#handleFavorite(serverId, data);
+      }, 0);
+
+      favTimer.unref();
+
+      return;
+    }
+
     if (push.kind === 'add' || push.kind === 'give') {
       const request =
         push.kind === 'add' ? workshopAddRequestSchema.safeParse(parsed) : workshopGiveRequestSchema.safeParse(parsed);
@@ -875,6 +948,34 @@ export class WorkshopService {
     );
   }
 
+  /**
+   * A estrela do menu (02 §5.4). NUNCA lança.
+   *
+   * O plugin já desenhou a estrela antes de avisar (otimista) e o
+   * agente é a verdade: a escrita reenvia a posse+favoritas dele, e
+   * uma RECUSA reenvia forçado, o que desfaz o otimismo.
+   */
+  #handleFavorite(serverId: string, request: WorkshopFavoriteRequest): void {
+    try {
+      this.#deps.catalog.setFavorite(request.steamId, request.skinId, request.on, this.#now());
+    } catch (cause) {
+      const error = cause instanceof ApiError ? cause : null;
+
+      this.#deps.logger?.[error === null ? 'error' : 'warn'](
+        {
+          server: serverId,
+          steamId: request.steamId,
+          skin: request.skinId,
+          on: request.on,
+          ...(error === null ? { err: toError(cause) } : { reason: error.code, message: error.message }),
+        },
+        'a favorita do menu foi recusada',
+      );
+
+      this.#resendOwned(request.steamId, 'favorite-changed', true);
+    }
+  }
+
   /** O `/skin add` do jogo, pela mesma regra do painel. NUNCA lança. */
   async #handleAdd(serverId: string, request: WorkshopAddRequest): Promise<void> {
     const actor = { name: `jogo:${describePlayer(request)}`, source: 'game' as const, serverId };
@@ -893,6 +994,9 @@ export class WorkshopService {
           openToAll: false,
           hideInStreamer: true,
           enabled: true,
+          // O `/skin add` do jogo não tem como dizer "de temporada": a
+          // marca é decisão de operação, e sai do painel.
+          season: false,
           // O cadastro do jogo vale no servidor de onde veio. Levar
           // para os outros é decisão do painel.
           servers: [serverId],

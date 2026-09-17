@@ -202,6 +202,13 @@ Para a célula **Padrão**, omita o `SkinId`; não mande 0.
 bloqueada: *"Disponível na loja: `storeUrl`"* (02 §5.1). **Sem link clicável**: o CUI não abre
 navegador. Se faltar `storeUrl`, mostre só *"Disponível na loja do site"*.
 
+> **A "Skin de temporada" (v0.4.0, 17/09/2026).** Entre o prazo e a descrição, uma linha em
+> **âmbar**: *"Skin de temporada: pode sair da posse no próximo wipe"*. Ela aparece para
+> **qualquer** acesso — quem ainda não a tem precisa saber disso **antes** de comprar. Na
+> **célula** da grade, a mesma frase vira **dica** (tooltip), e ali **só para quem a possui**:
+> numa skin da casa não há posse para sair, e numa bloqueada o aviso seria sobre algo que ele
+> não tem. É informação, e só: nada no jogo muda por causa da marca (02 §4.6).
+
 ### 3.6 "Aplicar em" (direita, embaixo)
 
 - Lista **as instâncias daquele item que o jogador tem**, na ordem: mão, barra, roupa,
@@ -308,6 +315,19 @@ lateral muda.
   passa pelo §3 do 02.
 - **O estado da tela mora no plugin**, por jogador: categoria, página da lateral, item, página
   da grade, skin, alvo, filtro e pesquisa. Os comandos só mudam esse estado e pedem o redesenho.
+
+> **Mudou na v0.4.0: `origemz.skins.fav` (17/09/2026).** Os argumentos são os mesmos
+> (`token idDaSkin`), mas a favorita deixou de ser do plugin: ela é **do agente**, e vale na
+> **rede** (02 §4.5). O comando agora:
+>
+> 1. muda o conjunto em memória e redesenha **na hora** (otimista: a tela tem de responder no
+>    mesmo frame);
+> 2. grita `#OZWORKSHOP#{"kind":"fav",…,"on":true|false}` para o agente (02 §5.4);
+> 3. **não grava o `favorites.json`** — quem o reescreve é a chegada de uma carga.
+>
+> O agente grava e reenvia a posse+favoritas, e **essa carga é a verdade**. No teto de 200 o
+> plugin mostra a frase na faixa de "Aplicar em" e não grita; se o **agente** recusar, a carga
+> forçada que volta desfaz o otimismo.
 
 ---
 

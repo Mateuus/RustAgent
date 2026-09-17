@@ -55,6 +55,7 @@ import {
   BP_POLICIES,
   COLLISION_POLICIES,
   MAP_SOURCES,
+  SEASON_SKINS_POLICIES,
   type MapSource,
   type WipePlanKind,
 } from '../../types/wipe.js';
@@ -191,6 +192,16 @@ const settingsBody = z
         timeOfDay: timeOfDaySchema,
         timeZone: timeZoneSchema,
         bpPolicy: z.enum(BP_POLICIES),
+        /**
+         * "Skins de temporada" (02 §4.6).
+         *
+         * Com `default`, e não obrigatório: um painel de antes desta
+         * frente manda o corpo sem a chave, e `.strict()` sem o
+         * padrão transformaria isso num 400 em cima de um PUT que
+         * grava a agenda inteira. Ausente = `keep`, que é o padrão
+         * pedido pelo dono.
+         */
+        seasonSkins: z.enum(SEASON_SKINS_POLICIES).default('keep'),
       })
       .strict(),
     forced: z
@@ -198,6 +209,7 @@ const settingsBody = z
         // Sem `enabled`: o forçado acontece com ou sem nós. A única
         // escolha é o que ele leva.
         bpPolicy: z.enum(BP_POLICIES),
+        seasonSkins: z.enum(SEASON_SKINS_POLICIES).default('keep'),
       })
       .strict(),
     collision: z

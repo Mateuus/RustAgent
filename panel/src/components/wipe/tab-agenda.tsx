@@ -49,6 +49,8 @@ import {
   COLLISION_HINT,
   COLLISION_LABEL,
   KIND_LABEL,
+  SEASON_SKINS_HINT,
+  SEASON_SKINS_LABEL,
   MAP_SOURCE_LABEL,
   STATUS_LABEL,
   formatShortMoment,
@@ -61,8 +63,10 @@ import {
   toDateField,
 } from '@/components/wipe/labels';
 import { formatCountdown, type AgentClock } from '@/components/wipe/use-agent-clock';
-import type { BpPolicy, WipePlan, WipeSettings } from '@/lib/api';
-import { BP_POLICIES, COLLISION_POLICIES } from '@/lib/api';
+import { HelpTip } from '@/components/ui/help-tip';
+import { WORKSHOP_HELP } from '@/lib/help/workshop';
+import type { BpPolicy, SeasonSkinsPolicy, WipePlan, WipeSettings } from '@/lib/api';
+import { BP_POLICIES, COLLISION_POLICIES, SEASON_SKINS_POLICIES } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /**
@@ -505,6 +509,15 @@ export function TabAgenda({
                 patchCadence({ bpPolicy });
               }}
             />
+
+            <SeasonSkinsPicker
+              name="season-cadence"
+              legend="Skins de temporada nos wipes da cadência"
+              value={cadence.seasonSkins}
+              onChange={(seasonSkins) => {
+                patchCadence({ seasonSkins });
+              }}
+            />
           </fieldset>
 
           <div className="border-t border-border pt-4">
@@ -513,7 +526,16 @@ export function TabAgenda({
               legend="Blueprints no wipe forçado"
               value={draft.forced.bpPolicy}
               onChange={(bpPolicy) => {
-                setDraft((current) => ({ ...current, forced: { bpPolicy } }));
+                setDraft((current) => ({ ...current, forced: { ...current.forced, bpPolicy } }));
+              }}
+            />
+
+            <SeasonSkinsPicker
+              name="season-forced"
+              legend="Skins de temporada no wipe forçado"
+              value={draft.forced.seasonSkins}
+              onChange={(seasonSkins) => {
+                setDraft((current) => ({ ...current, forced: { ...current.forced, seasonSkins } }));
               }}
             />
             <p className="mt-2 text-2xs leading-relaxed text-muted">
@@ -1259,6 +1281,60 @@ function PolicyPicker({
               }}
             />
             {BP_POLICY_LABEL[policy]}
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
+/**
+ * Manter ou remover a posse das skins de temporada.
+ *
+ * ####  O MESMO DESENHO DO `PolicyPicker`, E O (?) AO LADO  ####
+ *
+ * Dois rádios, como a política de blueprint — é a mesma pergunta
+ * ("o que este wipe leva?") e ela não pode parecer outra coisa. O
+ * `(?)` é obrigatório aqui: "remover da posse" não diz que é
+ * irreversível, que vale para a rede inteira e que não apaga o
+ * cadastro da skin. Ver lib/help/workshop.tsx.
+ */
+function SeasonSkinsPicker({
+  name,
+  legend,
+  value,
+  onChange,
+}: {
+  readonly name: string;
+  readonly legend: string;
+  readonly value: SeasonSkinsPolicy;
+  readonly onChange: (value: SeasonSkinsPolicy) => void;
+}) {
+  return (
+    <fieldset>
+      <legend className="flex items-center gap-1.5 font-condensed text-2xs font-bold uppercase tracking-wide text-muted">
+        {legend}
+        <HelpTip topic={WORKSHOP_HELP.wipeSeasonSkins} />
+      </legend>
+
+      <div className="mt-1 space-y-1">
+        {SEASON_SKINS_POLICIES.map((policy) => (
+          <label key={policy} className="flex items-start gap-2 text-sm">
+            <input
+              type="radio"
+              name={name}
+              className="mt-1"
+              checked={value === policy}
+              onChange={() => {
+                onChange(policy);
+              }}
+            />
+            <span>
+              <span className="font-medium text-foreground">{SEASON_SKINS_LABEL[policy]}</span>
+              <span className="block text-2xs leading-relaxed text-muted">
+                {SEASON_SKINS_HINT[policy]}
+              </span>
+            </span>
           </label>
         ))}
       </div>

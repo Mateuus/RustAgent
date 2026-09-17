@@ -8,8 +8,9 @@
 //  É o que garante que "os cadastros feitos pelo jogo e pelo painel
 //  utilizam os mesmos dados" — não há duas tabelas para divergir.
 //
-//  A tabela e o porquê de cada coluna estão nas migrações 095, 096
-//  e 097. Coleções e permissão por skin saíram na 097.
+//  A tabela e o porquê de cada coluna estão nas migrações 095, 096,
+//  097 e 100. Coleções e permissão por skin saíram na 097; a marca
+//  "Skin de temporada" (`season`) entrou na 100.
 //
 //  ####  O CATÁLOGO É DA REDE; A JUNÇÃO DIZ ONDE VALE  ####
 //
@@ -47,6 +48,7 @@ interface SkinRow {
   readonly open_to_all: number;
   readonly hide_in_streamer: number;
   readonly enabled: number;
+  readonly season: number;
   readonly source: string;
   readonly created_by: string | null;
   readonly workshop_title: string | null;
@@ -72,6 +74,7 @@ function toSkin(row: SkinRow, servers: readonly string[]): WorkshopSkin {
     openToAll: row.open_to_all === 1,
     hideInStreamer: row.hide_in_streamer === 1,
     enabled: row.enabled === 1,
+    season: row.season === 1,
     servers: [...servers],
     source: (row.source === 'game' ? 'game' : 'panel') satisfies WorkshopSkinSource,
     createdBy: row.created_by,
@@ -197,11 +200,11 @@ export class WorkshopSkinsRepository {
         .prepare(
           `INSERT INTO workshop_skins
              (label, shortname, skin_id, description, rarity, sort_order, open_to_all,
-              hide_in_streamer, enabled, source, created_by, workshop_title, preview_url,
+              hide_in_streamer, enabled, season, source, created_by, workshop_title, preview_url,
               created_at, updated_at)
            VALUES
              (@label, @shortname, @skin_id, @description, @rarity, @sort_order, @open_to_all,
-              @hide_in_streamer, @enabled, @source, @created_by, @workshop_title, @preview_url,
+              @hide_in_streamer, @enabled, @season, @source, @created_by, @workshop_title, @preview_url,
               @now, @now)`,
         )
         .run({
@@ -258,6 +261,7 @@ export class WorkshopSkinsRepository {
              open_to_all      = @open_to_all,
              hide_in_streamer = @hide_in_streamer,
              enabled          = @enabled,
+             season           = @season,
              workshop_title   = @workshop_title,
              preview_url      = @preview_url,
              updated_at       = @now
@@ -376,5 +380,6 @@ function skinColumns(input: WorkshopSkinInput): Record<string, unknown> {
     open_to_all: input.openToAll ? 1 : 0,
     hide_in_streamer: input.hideInStreamer ? 1 : 0,
     enabled: input.enabled ? 1 : 0,
+    season: input.season ? 1 : 0,
   };
 }
