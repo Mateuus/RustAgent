@@ -6313,6 +6313,227 @@ export const agent = {
       `/api/servers/${encodeURIComponent(serverId)}/workshop/sync`,
       { method: 'POST' },
     ),
+
+  // ---- O PASSE DE BATALHA ----------------------------------
+  //
+  // As rotas estão em `core/src/http/routes/battlepass.ts`, e o
+  // vocabulário é o do Docs/BattlePass/01 §9: `season` é o mês,
+  // `lane` é a faixa (`tier` é do VIP), `xp` é o que sobe de nível
+  // (`points` é do ranking das missões).
+  //
+  // ####  O CATÁLOGO É DA REDE; O PROGRESSO É POR SERVIDOR  ####
+  //
+  // A temporada, a trilha e as regras de XP valem para a rede, com
+  // uma lista dizendo em que servidores cada temporada entra. Já o
+  // XP, o nível, o direito comprado e o resgate são POR SERVIDOR —
+  // e é por isso que a Visão geral, os Jogadores e o direito levam
+  // `serverId`, e as temporadas não.
+  //
+  // ####  NADA DAQUI VAI CRU PARA O JSX  ####
+  //
+  // `api()` é um cast (ver o topo deste arquivo). Toda resposta
+  // passa por um `safeX` de `components/battlepass/normalize.ts`
+  // antes de chegar à tela.
+
+  /** A aba Visão geral: a temporada de hoje, a do mês que vem e as contagens. */
+  battlePassOverview: (serverId: string) =>
+    api<{
+      ok: true;
+      serverId: string;
+      period: string;
+      season: BattlePassSeason | null;
+      next: BattlePassSeason | null;
+      /** Quantos têm o direito daquele mês, naquele servidor. */
+      owners: number;
+      /** Quantos já pontuaram na temporada no ar. */
+      players: number;
+    }>(`/api/battlepass/overview?serverId=${encodeURIComponent(serverId)}`),
+
+  battlePassSeasons: () =>
+    api<{ ok: true; count: number; seasons: BattlePassSeason[] }>('/api/battlepass/seasons'),
+
+  createBattlePassSeason: (body: BattlePassSeasonInput) =>
+    api<{ ok: true; season: BattlePassSeason }>('/api/battlepass/seasons', {
+      method: 'POST',
+      body,
+    }),
+
+  /**
+   * PUT e não PATCH: a temporada vai INTEIRA, como a quest.
+   *
+   * Um merge parcial abriria "o que acontece com os campos que não
+   * vieram?", e a única resposta segura seria não mexer — o oposto do
+   * que espera quem acabou de desmarcar uma chave na tela.
+   */
+  updateBattlePassSeason: (seasonId: number, body: BattlePassSeasonInput) =>
+    api<{ ok: true; season: BattlePassSeason }>(`/api/battlepass/seasons/${String(seasonId)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  /**
+   * Troca SÓ onde ela vale — o molde do `setWorkshopSkinServers`.
+   *
+   * Mandar a temporada inteira de volta para marcar um servidor é
+   * como se apaga o que outra pessoa salvou no meio.
+   */
+  setBattlePassSeasonServers: (seasonId: number, servers: readonly string[]) =>
+    api<{ ok: true; servers: string[] }>(
+      `/api/battlepass/seasons/${String(seasonId)}/servers`,
+      { method: 'PUT', body: { servers } },
+    ),
+
+  /**
+   * Publicar é BOTÃO, e não efeito do calendário (01 §1.1).
+   *
+   * Quem decide se PODE é o agente — ele conhece a regra de "só uma
+   * no ar por servidor" e devolve a frase da recusa pronta.
+   */
+  setBattlePassSeasonState: (seasonId: number, state: BattlePassSeasonState) =>
+    api<{ ok: true; season: BattlePassSeason }>(
+      `/api/battlepass/seasons/${String(seasonId)}/state`,
+      { method: 'PUT', body: { state } },
+    ),
+
+  /** Leva a trilha, o progresso, os direitos e a caixa. O registro fica. */
+  removeBattlePassSeason: (seasonId: number) =>
+    api<{ ok: true }>(`/api/battlepass/seasons/${String(seasonId)}`, { method: 'DELETE' }),
+
+  battlePassTrack: (seasonId: number) =>
+    api<{ ok: true; count: number; cells: BattlePassTrackCell[] }>(
+      `/api/battlepass/seasons/${String(seasonId)}/track`,
+    ),
+
+  /** Uma casa: a faixa daquele nível, com a lista inteira de recompensas. */
+  setBattlePassTrackCell: (
+    seasonId: number,
+    level: number,
+    lane: BattlePassLane,
+    body: BattlePassTrackCellInput,
+  ) =>
+    api<{ ok: true; cell: BattlePassTrackCell }>(
+      `/api/battlepass/seasons/${String(seasonId)}/track/${String(level)}/${lane}`,
+      { method: 'PUT', body },
+    ),
+
+  /** Esvazia a casa. Nível vazio é legítimo (05 §4, decisão 3). */
+  clearBattlePassTrackCell: (seasonId: number, level: number, lane: BattlePassLane) =>
+    api<{ ok: true }>(
+      `/api/battlepass/seasons/${String(seasonId)}/track/${String(level)}/${lane}`,
+      { method: 'DELETE' },
+    ),
+
+  battlePassXpRules: (seasonId: number) =>
+    api<{ ok: true; count: number; rules: BattlePassXpRule[] }>(
+      `/api/battlepass/seasons/${String(seasonId)}/xp-rules`,
+    ),
+
+  /** A fonte vem da URL; o corpo diz o resto (liga, preço e teto). */
+  setBattlePassXpRule: (seasonId: number, source: string, body: BattlePassXpRuleInput) =>
+    api<{ ok: true; rule: BattlePassXpRule }>(
+      `/api/battlepass/seasons/${String(seasonId)}/xp-rules/${encodeURIComponent(source)}`,
+      { method: 'PUT', body },
+    ),
+
+  removeBattlePassXpRule: (seasonId: number, source: string) =>
+    api<{ ok: true }>(
+      `/api/battlepass/seasons/${String(seasonId)}/xp-rules/${encodeURIComponent(source)}`,
+      { method: 'DELETE' },
+    ),
+
+  /**
+   * O CARDÁPIO: o que o agente sabe medir.
+   *
+   * ####  ELE NÃO É UMA CONSTANTE DO PAINEL  ####
+   *
+   * É a exigência do 05 §3 e do 06 §4: a lista vem do agente, senão
+   * o admin configura XP por "saquear caixa", nada acontece e nada
+   * avisa. Quem a serve é a frente B — até ela entrar, esta rota
+   * responde 404 e a aba XP diz isso na tela, em vez de oferecer uma
+   * lista inventada aqui.
+   */
+  battlePassXpSources: () =>
+    api<{ ok: true; count: number; sources: BattlePassXpSource[] }>(
+      '/api/battlepass/xp-sources',
+    ),
+
+  /**
+   * A aba Jogadores: quem tem mais XP naquele servidor.
+   *
+   * O cursor é TEXTO (a chave composta de xp e steamId), e não um
+   * id — por isso esta lista não usa o `useCursorPages`, que só
+   * conhece cursor numérico.
+   */
+  battlePassPlayers: (options: { serverId: string; cursor?: string; limit?: number }) => {
+    const params = new URLSearchParams({ serverId: options.serverId });
+
+    if (options.cursor !== undefined && options.cursor !== '') params.set('cursor', options.cursor);
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+
+    return api<{
+      ok: true;
+      count: number;
+      players: BattlePassProgress[];
+      nextCursor: string | null;
+    }>(`/api/battlepass/players?${params.toString()}`);
+  },
+
+  /** A trilha DELE: o progresso, o estado de cada casa e a caixa. */
+  battlePassPlayer: (steamId: string, serverId: string) =>
+    api<{
+      ok: true;
+      track: BattlePassPlayerTrack;
+      entitlements: BattlePassEntitlement[];
+    }>(
+      `/api/battlepass/players/${encodeURIComponent(steamId)}?serverId=${encodeURIComponent(serverId)}`,
+    ),
+
+  /**
+   * O admin dá o passe do mês. 201 sempre.
+   *
+   * `created` diz se o direito nasceu agora ou se ele já tinha — dar
+   * de novo não é erro, é um fato (o mês já é dele).
+   */
+  grantBattlePass: (body: {
+    serverId: string;
+    steamId: string;
+    /** Ausente = o mês corrente do servidor, resolvido pelo agente. */
+    period?: string;
+    note?: string | null;
+  }) =>
+    api<{ ok: true; created: boolean; entitlement: BattlePassEntitlement }>(
+      '/api/battlepass/entitlements',
+      { method: 'POST', body },
+    ),
+
+  /** Revogar NÃO apaga a linha: o histórico fica, com quem revogou. */
+  revokeBattlePass: (entitlementId: number) =>
+    api<{ ok: true; entitlement: BattlePassEntitlement }>(
+      `/api/battlepass/entitlements/${String(entitlementId)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** Mais novo primeiro. A próxima página é `before` = menor id desta. */
+  battlePassAudit: (
+    options: { steamId?: string; serverId?: string; limit?: number; before?: number } = {},
+  ) => {
+    const params = new URLSearchParams();
+
+    if (options.steamId !== undefined && options.steamId.trim() !== '') {
+      params.set('steamId', options.steamId.trim());
+    }
+    if (options.serverId !== undefined && options.serverId !== '') {
+      params.set('serverId', options.serverId);
+    }
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.before !== undefined) params.set('before', String(options.before));
+
+    const suffix = params.toString();
+
+    return api<{ ok: true; count: number; entries: BattlePassAuditEntry[] }>(
+      `/api/battlepass/audit${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
 };
 
 // ------------------------------------------------------------
@@ -8234,4 +8455,236 @@ export interface WorkshopStatus {
   skins: number;
   ownedPlayers: number;
   streamers: number;
+}
+
+// ------------------------------------------------------------
+//  O PASSE DE BATALHA — os tipos
+//
+//  Espelham `core/src/types/battlepass.ts`, escritos à mão. Não há
+//  pacote de tipos compartilhado neste repositório e a decisão é
+//  consciente (Docs/BattlePass/05 §6): as duas pontas compilam
+//  separadamente, e um campo que o agente renomear é um TypeError
+//  no render — por isso TODA resposta passa antes pelos `safeX` de
+//  `components/battlepass/normalize.ts`.
+//
+//  ####  AS DATAS CHEGAM EM ISO  ####
+//
+//  Epoch em ms é o que o banco guarda; a borda do agente formata
+//  (o rodapé de `routes/battlepass.ts`). Aqui elas são `string`, e
+//  quem as desenha é `formatWhen`/`formatDateTime` de lib/format.
+// ------------------------------------------------------------
+
+/** Os quatro estados de uma temporada (01 §1.1). */
+export type BattlePassSeasonState = 'draft' | 'scheduled' | 'active' | 'closed';
+
+/** A faixa. `tier` já é do VIP; aqui é `lane`. */
+export type BattlePassLane = 'free' | 'paid';
+
+/** O estado de uma casa PARA UM JOGADOR. Não existe `unavailable`. */
+export type BattlePassCellState = 'locked' | 'available' | 'claimed' | 'pending';
+
+export type BattlePassEntitlementOrigin = 'loja' | 'painel' | 'site';
+
+/** De onde veio a pendência da caixa: mochila cheia ou virada do mês. */
+export type BattlePassPendingOrigin = 'inventory' | 'rollover';
+
+export type BattlePassAuditSource = 'panel' | 'game' | 'system' | 'site';
+
+/**
+ * Quanto custa cada degrau da trilha.
+ *
+ * Três formas e não uma lista crua: `table` obrigaria o painel a
+ * escrever 200 células para dizer "todo nível custa 1.000", e a
+ * reescrevê-las ao mudar o número de níveis. Ela tem EXATAMENTE
+ * `levels - 1` entradas — o nível 1 é de graça.
+ */
+export type BattlePassXpCurve =
+  | { kind: 'flat'; perLevel: number }
+  | { kind: 'linear'; base: number; step: number }
+  | { kind: 'table'; steps: number[] };
+
+/** O formulário da temporada — o corpo do POST e do PUT. */
+export interface BattlePassSeasonInput {
+  /** `2026-10`: ano e mês, nunca "a atual". */
+  period: string;
+  label: string;
+  levels: number;
+  xpCurve: BattlePassXpCurve;
+  /** Desligada, a trilha mostra só a faixa paga. */
+  freeLane: boolean;
+  /** Desligada, a trilha mostra só a grátis e o produto some da loja. */
+  paidLane: boolean;
+  /** Quem compra no nível 17 leva os 17. Nasce LIGADO. */
+  retroactive: boolean;
+  description: string | null;
+  /** Em que servidores ela vale. Vazio = em nenhum. */
+  servers: string[];
+}
+
+export interface BattlePassSeason extends BattlePassSeasonInput {
+  id: number;
+  /** `null` quando o agente mandou um estado que este painel não conhece. */
+  state: BattlePassSeasonState | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O corpo de uma casa da trilha. A lista vai INTEIRA. */
+export interface BattlePassTrackCellInput {
+  rewards: QuestReward[];
+  /** MARCO: destaque de tamanho no card do jogo e selo no painel. */
+  milestone: boolean;
+}
+
+export interface BattlePassTrackCell extends BattlePassTrackCellInput {
+  seasonId: number;
+  level: number;
+  lane: BattlePassLane;
+  updatedAt: string;
+}
+
+/** A casa já resolvida para um jogador. */
+export interface BattlePassTrackCellView extends BattlePassTrackCell {
+  state: BattlePassCellState;
+  /** Por que está trancada, quando está. Cadeado mudo não vende passe. */
+  reason: string | null;
+}
+
+/** O corpo de uma regra de XP. A fonte vem da URL. */
+export interface BattlePassXpRuleInput {
+  enabled: boolean;
+  amount: number;
+  /** O máximo que ESSA fonte rende por dia. `null` = sem teto. */
+  dailyCap: number | null;
+  /** O rótulo que o jogador lê. `null` = o do cardápio do agente. */
+  label: string | null;
+}
+
+export interface BattlePassXpRule extends BattlePassXpRuleInput {
+  seasonId: number;
+  /** A chave da métrica: `quest.completed`, `pvp.kills`. */
+  source: string;
+  updatedAt: string;
+}
+
+/**
+ * Uma fonte do cardápio — o que o agente sabe medir.
+ *
+ * Servida pela frente B. `warning` é o aviso DELE sobre a fonte: o
+ * painel tem os dois que já foram medidos (`sleeper.kills` e
+ * `gather.*`), e o do agente vence quando existe.
+ */
+export interface BattlePassXpSource {
+  source: string;
+  label: string;
+  /** O que exatamente conta uma ocorrência. */
+  hint: string | null;
+  /** A pegadinha da fonte, quando ela tem uma. */
+  warning: string | null;
+  /** O agente sugere ligar. `sleeper.kills` nunca nasce ligada. */
+  recommended: boolean;
+}
+
+/** O XP e o nível de um jogador NAQUELE servidor. */
+export interface BattlePassProgress {
+  serverId: string;
+  /** TEXTO: SteamID64 passa de 2^53. */
+  steamId: string;
+  seasonId: number;
+  xp: number;
+  /** O nível ALCANÇADO. Começa em 1. */
+  level: number;
+  updatedAt: string;
+}
+
+/** A barra do card: onde ele está, e quanto falta para o próximo. */
+export interface BattlePassTrackProgress {
+  level: number;
+  xp: number;
+  /** O numerador de "2.400 / 3.000". */
+  intoLevel: number;
+  /** O denominador. `null` no último nível. */
+  neededForNext: number | null;
+  completed: boolean;
+}
+
+/** Uma promessa que ainda não chegou — uma linha da caixa. */
+export interface BattlePassPendingDelivery {
+  id: number;
+  claimId: number;
+  /** A POSIÇÃO da recompensa dentro do resgate. Renumerar quebra o dedupe. */
+  idx: number;
+  serverId: string;
+  steamId: string;
+  origin: BattlePassPendingOrigin;
+  /** `null` quando nem objeto veio — a linha continua contando. */
+  reward: QuestReward | null;
+  /** O código cru de quem entregou: `INVENTORY_FULL`, `RCON_UNAVAILABLE`. */
+  code: string | null;
+  attempts: number;
+  /** Quando o jogador ABRIU a caixa. */
+  seenAt: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** O registro de que o jogador comprou aquele mês, naquele servidor. */
+export interface BattlePassEntitlement {
+  id: number;
+  serverId: string;
+  steamId: string;
+  period: string;
+  origin: BattlePassEntitlementOrigin;
+  /** O nível de quando comprou. Só o retroativo desligado o lê. */
+  levelAtGrant: number;
+  sourceRef: string | null;
+  note: string | null;
+  createdAt: string;
+  createdBy: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  /** Derivado pelo agente, e recalculado aqui quando falta. */
+  active: boolean;
+}
+
+/** A trilha de um jogador num servidor, inteira. */
+export interface BattlePassPlayerTrack {
+  serverId: string;
+  steamId: string;
+  /** `null` quando não há temporada no ar naquele servidor. */
+  season: BattlePassSeason | null;
+  progress: BattlePassTrackProgress;
+  /** `true` quando ele tem o direito VIVO daquele mês. */
+  paid: boolean;
+  cells: BattlePassTrackCellView[];
+  pending: BattlePassPendingDelivery[];
+  /** Há pendência que ele ainda não olhou: o ponto de notificação. */
+  unseen: boolean;
+}
+
+export interface BattlePassAuditEntry {
+  id: number;
+  at: string;
+  /** Usuário do painel, `jogo:<steamId>`, `site:<ref>` ou `sistema`. */
+  actor: string;
+  source: BattlePassAuditSource;
+  /** `season.create`, `season.state`, `entitlement.grant`, `claim`… */
+  action: string;
+  target: string;
+  serverId: string | null;
+  /** O jogador AFETADO, quando há um. */
+  steamId: string | null;
+  detail: Record<string, unknown>;
+}
+
+/** O que a aba Visão geral recebe. */
+export interface BattlePassOverview {
+  serverId: string;
+  period: string;
+  season: BattlePassSeason | null;
+  next: BattlePassSeason | null;
+  owners: number;
+  players: number;
 }
