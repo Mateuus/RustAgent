@@ -20,7 +20,17 @@
 //  malformado gravado no banco vira interface quebrada no jogo de
 //  todo mundo que abrir o menu — e o defeito aparece longe daqui.
 //
-//  ####  NÃO EXISTE ÁREA ROLÁVEL, E ISSO É MEDIDO  ####
+//  ####  NÃO EXISTE ÁREA ROLÁVEL NESTE MODELO  ####
+//
+//  ATUALIZADO EM 17/09/2026: o `CuiScrollViewComponent` do Oxide
+//  2.0.7716 FUNCIONA no cliente. O menu de skins do
+//  OrigemZWorkshop.cs rola uma grade de 90 células com barra
+//  vertical, e o dono testou no jogo sem cair. O JSON que funciona
+//  é o que o Oxide serializa, com `contentTransform` de quatro
+//  campos e `verticalScrollbar` com cores. Este modelo ainda não
+//  oferece o tipo; oferecer é trabalho do editor, e a receita
+//  está no BuildGrid daquele plugin. O registro abaixo é do
+//  projeto anterior.
 //
 //  O projeto anterior tentou emitir `UnityEngine.UI.ScrollView`
 //  com `contentTransform` e barra vertical. O resultado foi
