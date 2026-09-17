@@ -720,7 +720,16 @@ export type DungeonBodyBuildInput = z.infer<typeof dungeonBodyBuildSchema>;
  * seria um caminho para injetar marcação.
  */
 const announceColorSchema = z
-  .union([z.literal(''), z.string().trim().regex(/^#[0-9a-fA-F]{3,8}$/, 'a cor é hexadecimal, como #ffcc00')])
+  .union([
+    z.literal(''),
+    z
+      .string()
+      .trim()
+      .regex(
+        /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/,
+        'a cor é hexadecimal de 3, 4, 6 ou 8 dígitos, como #ffcc00',
+      ),
+  ])
   .default('');
 
 export const dungeonRoomInputSchema = z.object({

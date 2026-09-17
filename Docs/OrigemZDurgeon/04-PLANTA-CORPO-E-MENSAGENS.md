@@ -360,6 +360,7 @@ colada e copiada de volta pelo próprio plugin, e está em
 | `build_error` fora de `FAILURE_REASONS` | o `failed` era recusado pelo parser e a run ficava aberta | o motivo entrou na lista, com frase |
 | `origemz.chat.broadcast` dentro do `stop` | a resposta do stop virava `{"ok":true,"sent":1}` | o anúncio sai no tique seguinte |
 | empurrão nos eixos do mundo | num cômodo girado, afastar "para trás" podia ir para a parede | os empurrões seguem os eixos da construção |
+| radiano × grau decidido pela planta inteira, contando os filhos | o CopyPaste grava o topo em radianos e o FILHO em graus (`EntityData`); um rifle num rack a 359° fazia `base2`, `base3`, `entrance1` e `entrance4` serem lidas como graus. Medido: a `entrance1` colava 87 de 195 paredes fora de esquadro | só o nível de cima decide, e o filho é sempre grau (plugin e agente). Depois: 0 de 195 |
 | `timeOfDay` | viaja até o plugin e ninguém o lê | **não mexido**; registrado aqui |
 
 ---

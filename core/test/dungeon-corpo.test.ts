@@ -759,3 +759,111 @@ describe('radiano no nível de cima, grau nos filhos', () => {
     });
   }
 });
+
+describe('o papel da planta não muda por baixo de quem a usa', () => {
+  async function api(): Promise<FastifyInstance> {
+    const state = world();
+    const instance = Fastify({ logger: false });
+
+    instance.setErrorHandler(async (error, _request, reply) => {
+      if (error instanceof ZodError) {
+        const response = zodErrorToResponse(error);
+        return reply.status(response.statusCode).send(response.body);
+      }
+
+      if (isApiError(error)) {
+        const response = apiErrorToResponse(error);
+        return reply.status(response.statusCode).send(response.body);
+      }
+
+      return reply.status(500).send({ ok: false, error: 'INTERNAL_ERROR', message: String(error) });
+    });
+
+    await instance.register(async (routesApi) => {
+      registerDungeonRoutes(routesApi, {
+        dungeons: state.dungeons,
+        blueprints: state.blueprints,
+        layouts: new DungeonLayoutsRepository(state.db, silent),
+        events: state.events,
+      });
+    });
+
+    await instance.ready();
+
+    return instance;
+  }
+
+  // A exportação real com um vaso marcado: serve de entrada E de corpo.
+  const withHatch = JSON.stringify({
+    ...(JSON.parse(REAL_EXPORT) as Record<string, unknown>),
+    entities: [
+      ...REAL_ENTITIES,
+      {
+        prefabname: 'assets/prefabs/deployable/planters/planter.large.deployed.prefab',
+        pos: { x: '0', y: '0', z: '9' },
+        rot: { x: '0', y: '0', z: '0' },
+        items: [
+          { id: -930193596, position: 0, amount: 1 },
+          { id: -930193596, position: 5, amount: 999 },
+        ],
+      },
+    ],
+  });
+
+  it('a entrada em uso não vira corpo, nem por PATCH nem por reenvio', async () => {
+    const app = await api();
+
+    await app.inject({ method: 'POST', url: '/dungeon-blueprints', payload: { id: 'casinha', kind: 'entrance', content: withHatch } });
+    await app.inject({ method: 'POST', url: '/dungeons', payload: { id: 'usa', name: 'Usa', entranceBlueprint: 'casinha' } });
+
+    const patch = await app.inject({ method: 'PATCH', url: '/dungeon-blueprints/casinha', payload: { kind: 'base' } });
+    const reupload = await app.inject({
+      method: 'POST',
+      url: '/dungeon-blueprints',
+      payload: { id: 'casinha', kind: 'base', content: withHatch },
+    });
+
+    expect(patch.statusCode).toBe(409);
+    expect(reupload.statusCode).toBe(409);
+
+    await app.close();
+  });
+
+  it('o corpo tem de ter o papel de corpo', async () => {
+    const app = await api();
+
+    await app.inject({ method: 'POST', url: '/dungeon-blueprints', payload: { id: 'corpo-real', kind: 'entrance', content: withHatch } });
+
+    const response = await app.inject({ method: 'POST', url: '/dungeons', payload: cripta() });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json<{ error: string }>().error).toBe('BLUEPRINT_WRONG_KIND');
+
+    await app.close();
+  });
+
+  it('a frase concorda com quem está na parede', () => {
+    const analysis = realAnalysis();
+    const at = (kind: 'npc' | 'crate'): string =>
+      checkBodyPoints(
+        analysis,
+        [{ id: 'p-x', kind, label: '', x: 1.55, y: 0, z: 3, yaw: 0, profile: 'green', amount: 1, prefab: '', source: 'manual' }],
+        null,
+      )[0]?.message ?? '';
+
+    expect(at('npc')).toContain('O inimigo está encostado numa parede');
+    expect(at('crate')).toContain('A caixa está encostada numa parede');
+  });
+
+  it('a cor do aviso segue o que o jogo entende', () => {
+    const parse = (color: string): boolean =>
+      dungeonInputSchema.safeParse({ id: 'cor', name: 'Cor', announce: { color } }).success;
+
+    expect(parse('#abc')).toBe(true);
+    expect(parse('#abcd')).toBe(true);
+    expect(parse('#aabbcc')).toBe(true);
+    expect(parse('#aabbccdd')).toBe(true);
+    expect(parse('#abcde')).toBe(false);
+    expect(parse('#aabbccd')).toBe(false);
+  });
+});

@@ -600,6 +600,15 @@ export class DungeonsRepository {
     return rows.map((row) => row.id);
   }
 
+  /** Quem usa aquela planta como ENTRADA. */
+  entranceUsersOfBlueprint(blueprintId: string): readonly string[] {
+    const rows = this.#db
+      .prepare('SELECT id FROM dungeons WHERE entrance_blueprint = ? ORDER BY id')
+      .all(blueprintId) as { id: string }[];
+
+    return rows.map((row) => row.id);
+  }
+
   /** Quem usa aquela planta como CORPO (em qualquer modo). */
   bodyUsersOfBlueprint(blueprintId: string): readonly string[] {
     const rows = this.#db

@@ -649,6 +649,12 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
   app.post('/dungeon-blueprints', async (request, reply) => {
     const body = blueprintUploadSchema.parse(request.body);
 
+    // Reenviar com o mesmo id e outro papel é trocar o papel: a mesma
+    // régua do PATCH vale aqui, senão o upload seria o atalho dela.
+    const previous = deps.blueprints.summary(body.id);
+
+    if (previous !== null && previous.kind !== body.kind) assertKindChangeAllowed(deps, body.id, body.kind);
+
     const result = deps.blueprints.save({
       id: body.id,
       name: body.name ?? body.id,
@@ -710,17 +716,7 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
       );
     }
 
-    if (kind !== current.kind && kind === 'entrance') {
-      const bodyUsers = deps.dungeons.bodyUsersOfBlueprint(id);
-
-      if (bodyUsers.length > 0) {
-        throw new ApiError(
-          'BLUEPRINT_IN_USE',
-          `Esta planta é o corpo de ${bodyUsers.join(', ')}. Troque o corpo antes de mudar o papel dela.`,
-          409,
-        );
-      }
-    }
+    if (kind !== current.kind) assertKindChangeAllowed(deps, id, kind);
 
     const result = deps.blueprints.save({
       id,
@@ -954,6 +950,17 @@ function assertBlueprintExists(deps: DungeonRoutesDeps, input: DungeonInput): vo
     );
   }
 
+  // O papel é o que protege a planta de virar entrada enquanto é corpo
+  // (ver `assertKindChangeAllowed`). Um corpo com papel de entrada
+  // furaria essa régua.
+  if (stored.kind !== 'base') {
+    throw new ApiError(
+      'BLUEPRINT_WRONG_KIND',
+      `A planta "${input.body.blueprint}" está marcada como entrada. Troque o papel dela para "corpo da masmorra" na biblioteca.`,
+      422,
+    );
+  }
+
   // ####  A CHEGADA SEM CHÃO NÃO SE GRAVA  ####
   //
   // É o único ponto que prende uma PESSOA: um inimigo mal posto o
@@ -972,6 +979,27 @@ function assertBlueprintExists(deps: DungeonRoutesDeps, input: DungeonInput): vo
   if (blocking !== undefined) {
     throw new ApiError('BODY_ARRIVAL_INVALID', blocking.message, 422);
   }
+}
+
+/**
+ * Trocar o papel de uma planta que alguém usa no papel antigo.
+ *
+ * A entrada que vira corpo deixaria a masmorra que a usa sem casinha
+ * escolhível; o corpo que vira entrada, a construção sem corpo. As duas
+ * mudanças são recusadas enquanto houver quem use.
+ */
+function assertKindChangeAllowed(deps: DungeonRoutesDeps, id: string, kind: 'entrance' | 'base'): void {
+  const users = kind === 'base' ? deps.dungeons.entranceUsersOfBlueprint(id) : deps.dungeons.bodyUsersOfBlueprint(id);
+
+  if (users.length === 0) return;
+
+  throw new ApiError(
+    'BLUEPRINT_IN_USE',
+    kind === 'base'
+      ? `Esta planta é a entrada de ${users.join(', ')}. Troque a entrada antes de usá-la como corpo.`
+      : `Esta planta é o corpo de ${users.join(', ')}. Troque o corpo antes de mudar o papel dela.`,
+    409,
+  );
 }
 
 /** A análise de uma planta gravada. `null` = o JSON não é mais legível. */

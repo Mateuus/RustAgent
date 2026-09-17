@@ -770,6 +770,9 @@ export function checkBodyPoints(
 
   const check = (id: string, what: 'npc' | 'crate' | 'arrival', x: number, y: number, z: number): void => {
     const name = what === 'arrival' ? 'A chegada' : what === 'npc' ? 'O inimigo' : 'A caixa';
+    // A frase concorda com quem é: "o inimigo está encostado", "a caixa
+    // está encostada".
+    const ending = what === 'npc' ? 'o' : 'a';
     const push = (code: BodyPointProblemCode, message: string): void => {
       problems.push({ id, code, message });
     };
@@ -831,7 +834,7 @@ export function checkBodyPoints(
       // O vão da porta deixa passar, desde que o corpo caiba nele.
       if (shape.gap > 0 && Math.abs(lz) + radius <= shape.gap + 0.15 && y + head <= piece.y + shape.gapHeight + 0.2) continue;
 
-      push('inside_wall', `${name} está encostada numa parede (ou dentro dela): afaste o ponto uns ${(radius + 0.1).toFixed(1).replace('.', ',')} m.`);
+      push('inside_wall', `${name} está encostad${ending} numa parede (ou dentro dela): afaste o ponto uns ${(radius + 0.1).toFixed(1).replace('.', ',')} m.`);
       return;
     }
 
