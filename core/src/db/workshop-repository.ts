@@ -1,80 +1,127 @@
 // ============================================================
-//  workshop-repository.ts  -  o catálogo de skins do Workshop.
+//  workshop-repository.ts  -  o catálogo de skins e de coleções.
 //
-//  ####  ELE É PRIMO DO custom-items-repository.ts  ####
+//  ####  O PAINEL E O JOGO GRAVAM AQUI, E SÓ AQUI  ####
 //
-//  A forma do dado é a mesma — um id nosso, um item base, um
-//  número de skin, e em que servidores vale. A diferença é o que
-//  cada um representa: lá o item é NOSSO (nome, ícone, ação
-//  própria); aqui o item é o DO JOGO com outra aparência. Ver o §5
-//  do Docs/OrigemZWorkshop/00-LEVANTAMENTO.md.
+//  O `/skin add` do jogo não tem cópia própria: ele vira um pedido
+//  ao agente, que grava por este mesmo `addSkin` com
+//  `source: 'game'`. É o que garante que "os cadastros feitos pelo
+//  jogo e pelo painel utilizam os mesmos dados" — não há duas
+//  tabelas para divergir.
 //
-//  A tabela e o porquê de cada coluna estão na migração 095.
+//  A tabela e o porquê de cada coluna estão nas migrações 095 e
+//  096.
 //
 //  ####  O CATÁLOGO É DA REDE; A JUNÇÃO DIZ ONDE VALE  ####
 //
 //  `workshop_skins` não tem `server_id`. Quem responde "esta skin
-//  vale aqui?" é `workshop_skin_servers`, e a regra herdada da 041
-//  é: sem linha nenhuma = em nenhum servidor.
+//  vale aqui?" é `workshop_skin_servers`: sem linha nenhuma = em
+//  nenhum servidor. Coleção não tem junção — ela vale onde as skins
+//  dela valem.
 //
 //  ####  O ZOD RODA AQUI DENTRO TAMBÉM  ####
 //
-//  Não só na borda HTTP. O `add` e o `update` reparseiam o que
-//  recebem porque este repositório é chamado por testes, por
-//  scripts e — um dia — por uma importação em lote, e a régua do
-//  `skinId` (nunca zero, nunca acima do UInt64) é a diferença
-//  entre um item vanilla silencioso e um cadastro recusado com
+//  Não só na borda HTTP: o `/skin add` chega por outro caminho, e a
+//  régua do `skinId` (nunca zero, nunca acima do UInt64) é a
+//  diferença entre um item vanilla silencioso e uma recusa com
 //  frase.
 // ============================================================
 
 import {
   normalizePermission,
+  workshopCollectionInputSchema,
   workshopSkinInputSchema,
+  type WorkshopCollection,
+  type WorkshopCollectionInput,
   type WorkshopSkin,
   type WorkshopSkinInput,
+  type WorkshopSkinMeta,
+  type WorkshopSkinSource,
 } from '../types/workshop.js';
 import type { AgentDatabase } from './database.js';
 
-interface Row {
+interface SkinRow {
   readonly id: number;
   readonly label: string;
   readonly shortname: string;
   readonly skin_id: string;
-  readonly permission: string;
+  readonly permission: string | null;
+  readonly collection_id: number | null;
+  readonly open_to_all: number;
   readonly hide_in_streamer: number;
   readonly enabled: number;
+  readonly source: string;
+  readonly created_by: string | null;
+  readonly workshop_title: string | null;
+  readonly preview_url: string | null;
   readonly created_at: number;
   readonly updated_at: number;
+}
+
+interface CollectionRow {
+  readonly id: number;
+  readonly slug: string;
+  readonly label: string;
+  readonly permission: string | null;
+  readonly open_to_all: number;
+  readonly enabled: number;
+  readonly created_by: string | null;
+  readonly created_at: number;
+  readonly updated_at: number;
+  readonly skin_count: number;
 }
 
 /**
  * A permissão da linha, sempre no formato da feature.
  *
- * ####  UMA COLUNA MEXIDA À MÃO NÃO PODE VIRAR "TODO MUNDO"  ####
- *
- * O CHECK do banco recusa o texto vazio, mas não recusa
- * `PEDRA OrigemZ` — e uma permissão com espaço atravessa o
- * console do Rust como dois argumentos, o que faz o plugin
- * registrar outra coisa. Normalizar na LEITURA é o que garante
- * que o que sai no push é sempre uma permissão de verdade,
- * qualquer que tenha sido o caminho que a gravou.
+ * Normalizar na LEITURA garante que o que sai no push é uma
+ * permissão de verdade, qualquer que tenha sido o caminho que a
+ * gravou — uma coluna mexida à mão com espaço atravessaria o
+ * console do Rust como dois argumentos.
  */
-function toSkin(row: Row, servers: readonly string[]): WorkshopSkin {
+function readPermission(value: string | null): string | null {
+  return value === null || value.trim() === '' ? null : normalizePermission(value);
+}
+
+function toSkin(row: SkinRow, servers: readonly string[]): WorkshopSkin {
   return {
     id: row.id,
     label: row.label,
     shortname: row.shortname,
     skinId: row.skin_id,
-    permission: normalizePermission(row.permission),
+    permission: readPermission(row.permission),
+    collectionId: row.collection_id,
+    openToAll: row.open_to_all === 1,
     hideInStreamer: row.hide_in_streamer === 1,
     enabled: row.enabled === 1,
-    // Copia: o tipo do dominio guarda uma lista mutavel, e o
-    // `readonly` daqui e so da fronteira.
     servers: [...servers],
+    source: (row.source === 'game' ? 'game' : 'panel') satisfies WorkshopSkinSource,
+    createdBy: row.created_by,
+    workshopTitle: row.workshop_title,
+    previewUrl: row.preview_url,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
+
+function toCollection(row: CollectionRow): WorkshopCollection {
+  return {
+    id: row.id,
+    slug: row.slug,
+    label: row.label,
+    permission: readPermission(row.permission),
+    openToAll: row.open_to_all === 1,
+    enabled: row.enabled === 1,
+    skinCount: row.skin_count,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const COLLECTION_SELECT = `
+  SELECT c.*, (SELECT count(*) FROM workshop_skins s WHERE s.collection_id = c.id) AS skin_count
+    FROM workshop_collections c`;
 
 export class WorkshopSkinsRepository {
   readonly #db: AgentDatabase;
@@ -83,26 +130,20 @@ export class WorkshopSkinsRepository {
     this.#db = db;
   }
 
-  // ------------------------------------------------------
-  //  Leitura
-  // ------------------------------------------------------
+  // ======================================================
+  //  SKINS — leitura
+  // ======================================================
 
   /**
    * Todas, com os servidores de cada uma.
    *
-   * ####  DUAS CONSULTAS, E NÃO UMA POR LINHA  ####
-   *
-   * A lista e as ligações de todas. Perguntar "onde esta vale?"
-   * por linha seria o N+1 clássico desta tela — que é justamente a
-   * que lista tudo de uma vez.
+   * Duas consultas, e não uma por linha: perguntar "onde esta
+   * vale?" por skin seria o N+1 clássico da tela que lista tudo.
    */
   list(): readonly WorkshopSkin[] {
     const rows = this.#db
-      .prepare(
-        `SELECT * FROM workshop_skins
-          ORDER BY label COLLATE NOCASE ASC, id ASC`,
-      )
-      .all() as Row[];
+      .prepare(`SELECT * FROM workshop_skins ORDER BY label COLLATE NOCASE ASC, id ASC`)
+      .all() as SkinRow[];
 
     return this.#withServers(rows);
   }
@@ -110,9 +151,9 @@ export class WorkshopSkinsRepository {
   /**
    * As que AQUELE servidor recebe, e só as ligadas.
    *
-   * É esta a consulta que alimenta o push: uma skin desligada não
-   * é empurrada, e uma skin que não está na junção daquele
-   * servidor não existe para ele.
+   * É a consulta que alimenta o push: uma skin desligada não desce,
+   * e uma que não está na junção daquele servidor não existe para
+   * ele.
    */
   listForServer(serverId: string): readonly WorkshopSkin[] {
     const rows = this.#db
@@ -122,15 +163,24 @@ export class WorkshopSkinsRepository {
           WHERE j.server_id = @server_id AND s.enabled = 1
           ORDER BY s.label COLLATE NOCASE ASC, s.id ASC`,
       )
-      .all({ server_id: serverId }) as Row[];
+      .all({ server_id: serverId }) as SkinRow[];
 
     return this.#withServers(rows);
   }
 
   get(id: number): WorkshopSkin | null {
     const row = this.#db.prepare('SELECT * FROM workshop_skins WHERE id = ?').get(id) as
-      | Row
+      | SkinRow
       | undefined;
+
+    return row === undefined ? null : (this.#withServers([row])[0] ?? null);
+  }
+
+  /** A linha que já usa esta marca, se houver. */
+  findByMark(shortname: string, skinId: string): WorkshopSkin | null {
+    const row = this.#db
+      .prepare('SELECT * FROM workshop_skins WHERE shortname = ? AND skin_id = ?')
+      .get(shortname, skinId) as SkinRow | undefined;
 
     return row === undefined ? null : (this.#withServers([row])[0] ?? null);
   }
@@ -147,74 +197,77 @@ export class WorkshopSkinsRepository {
     ).map((row) => row.server_id);
   }
 
-  // ------------------------------------------------------
-  //  Escrita
-  // ------------------------------------------------------
+  // ======================================================
+  //  SKINS — escrita
+  // ======================================================
 
   /**
    * Cadastra a skin e a liga aos servidores, numa transação.
    *
-   * As duas coisas juntas porque uma skin ligada a servidor nenhum
-   * não chega a lugar nenhum — e isso não parece falha, que é o
-   * que a torna pior que uma falha.
-   *
    * @throws ZodError quando a marca não passa na régua.
-   * @throws quando a marca `(shortname, skinId)` ou a permissão já
-   *         existem. O `UNIQUE` recusa, e quem traduz isso numa
-   *         frase é a rota.
+   * @throws quando a marca `(shortname, skinId)` já existe, ou a
+   *         coleção já tem uma skin para o mesmo item. Quem traduz
+   *         isso numa frase é quem chama.
    */
-  add(input: WorkshopSkinInput, now: number = Date.now()): WorkshopSkin {
+  add(input: WorkshopSkinInput, meta: WorkshopSkinMeta, now: number = Date.now()): WorkshopSkin {
     const value = workshopSkinInputSchema.parse(input);
 
     let id = 0;
 
-    const run = this.#db.transaction((): void => {
+    this.#db.transaction((): void => {
       const result = this.#db
         .prepare(
           `INSERT INTO workshop_skins
-             (label, shortname, skin_id, permission, hide_in_streamer, enabled,
+             (label, shortname, skin_id, permission, collection_id, open_to_all,
+              hide_in_streamer, enabled, source, created_by, workshop_title, preview_url,
               created_at, updated_at)
            VALUES
-             (@label, @shortname, @skin_id, @permission, @hide_in_streamer, @enabled,
+             (@label, @shortname, @skin_id, @permission, @collection_id, @open_to_all,
+              @hide_in_streamer, @enabled, @source, @created_by, @workshop_title, @preview_url,
               @now, @now)`,
         )
-        .run({ ...toColumns(value), now });
+        .run({
+          ...skinColumns(value),
+          source: meta.source,
+          created_by: meta.createdBy,
+          workshop_title: meta.workshopTitle,
+          preview_url: meta.previewUrl,
+          now,
+        });
 
       id = Number(result.lastInsertRowid);
 
       this.#replaceServers(id, value.servers);
-    });
+    })();
 
-    run();
-
-    const saved = this.get(id);
-
-    // Ela acabou de ser gravada dentro de uma transação que não
-    // lançou: só chegaria aqui um banco corrompido, e é melhor
-    // dizer isso alto que devolver `null` para quem não espera.
-    if (saved === null) {
-      throw new Error(`a skin ${String(id)} sumiu logo depois de ser gravada`);
-    }
-
-    return saved;
+    return this.#mustGet(id);
   }
 
   /**
    * Reescreve a skin inteira.
    *
    * PUT, e não PATCH: a tela edita num formulário só e manda tudo.
-   * Um merge parcial abriria a pergunta "o que acontece com os
-   * servidores que não vieram?", e a única resposta segura seria
-   * não mexer — o oposto do que espera quem desmarcou um na tela.
+   * Um merge parcial abriria "o que acontece com os servidores que
+   * não vieram?", e a única resposta segura seria não mexer — o
+   * oposto do que espera quem desmarcou um na tela.
+   *
+   * O título e a prévia do Workshop só são trocados quando vêm:
+   * `undefined` preserva o que a Steam disse da última vez.
    *
    * @returns `null` quando o id não existe.
    */
-  update(id: number, input: WorkshopSkinInput, now: number = Date.now()): WorkshopSkin | null {
+  update(
+    id: number,
+    input: WorkshopSkinInput,
+    steam?: Pick<WorkshopSkinMeta, 'workshopTitle' | 'previewUrl'>,
+    now: number = Date.now(),
+  ): WorkshopSkin | null {
     const value = workshopSkinInputSchema.parse(input);
+    const current = this.get(id);
 
-    if (this.get(id) === null) return null;
+    if (current === null) return null;
 
-    const run = this.#db.transaction((): void => {
+    this.#db.transaction((): void => {
       this.#db
         .prepare(
           `UPDATE workshop_skins SET
@@ -222,17 +275,25 @@ export class WorkshopSkinsRepository {
              shortname        = @shortname,
              skin_id          = @skin_id,
              permission       = @permission,
+             collection_id    = @collection_id,
+             open_to_all      = @open_to_all,
              hide_in_streamer = @hide_in_streamer,
              enabled          = @enabled,
+             workshop_title   = @workshop_title,
+             preview_url      = @preview_url,
              updated_at       = @now
            WHERE id = @id`,
         )
-        .run({ id, ...toColumns(value), now });
+        .run({
+          id,
+          ...skinColumns(value),
+          workshop_title: steam?.workshopTitle ?? current.workshopTitle,
+          preview_url: steam?.previewUrl ?? current.previewUrl,
+          now,
+        });
 
       this.#replaceServers(id, value.servers);
-    });
-
-    run();
+    })();
 
     return this.get(id);
   }
@@ -240,9 +301,8 @@ export class WorkshopSkinsRepository {
   /**
    * Troca só a lista de servidores.
    *
-   * Existe separado do `update` porque a tela de um SERVIDOR marca
-   * e desmarca skins sem ter o cadastro inteiro na mão — e mandar
-   * o resto do formulário de volta só para mexer numa caixa de
+   * A tela marca e desmarca servidores sem ter o cadastro inteiro na
+   * mão — mandar o formulário de volta só para mexer numa caixa de
    * seleção é como se perde o que outra pessoa salvou no meio.
    *
    * @returns `null` quando a skin não existe.
@@ -263,19 +323,159 @@ export class WorkshopSkinsRepository {
   /**
    * Apaga.
    *
-   * A cascata leva as ligações de servidor junto. O que ela NÃO
-   * desfaz é o que já está no mundo: um item que nasceu com a
-   * skin continua com ela, porque quem guarda a marca é o item.
+   * A cascata leva as ligações de servidor e os acessos junto. O
+   * que ela NÃO desfaz é o que já está no mundo: um item pintado
+   * continua pintado, porque quem guarda a marca é o item.
    */
   remove(id: number): boolean {
     return this.#db.prepare('DELETE FROM workshop_skins WHERE id = ?').run(id).changes > 0;
   }
 
-  // ------------------------------------------------------
-  //  Privados
-  // ------------------------------------------------------
+  // ======================================================
+  //  COLEÇÕES
+  // ======================================================
 
-  #withServers(rows: readonly Row[]): readonly WorkshopSkin[] {
+  listCollections(): readonly WorkshopCollection[] {
+    return (
+      this.#db
+        .prepare(`${COLLECTION_SELECT} ORDER BY c.slug ASC`)
+        .all() as CollectionRow[]
+    ).map(toCollection);
+  }
+
+  getCollection(id: number): WorkshopCollection | null {
+    const row = this.#db.prepare(`${COLLECTION_SELECT} WHERE c.id = ?`).get(id) as
+      | CollectionRow
+      | undefined;
+
+    return row === undefined ? null : toCollection(row);
+  }
+
+  findCollectionBySlug(slug: string): WorkshopCollection | null {
+    const row = this.#db.prepare(`${COLLECTION_SELECT} WHERE c.slug = ?`).get(slug) as
+      | CollectionRow
+      | undefined;
+
+    return row === undefined ? null : toCollection(row);
+  }
+
+  /** As skins de uma coleção, em qualquer estado. */
+  skinsOfCollection(id: number): readonly WorkshopSkin[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM workshop_skins WHERE collection_id = ?
+          ORDER BY shortname ASC, id ASC`,
+      )
+      .all(id) as SkinRow[];
+
+    return this.#withServers(rows);
+  }
+
+  /** @throws quando o slug já existe. Quem chama traduz. */
+  addCollection(
+    input: WorkshopCollectionInput,
+    createdBy: string | null,
+    now: number = Date.now(),
+  ): WorkshopCollection {
+    const value = workshopCollectionInputSchema.parse(input);
+
+    const result = this.#db
+      .prepare(
+        `INSERT INTO workshop_collections
+           (slug, label, permission, open_to_all, enabled, created_by, created_at, updated_at)
+         VALUES (@slug, @label, @permission, @open_to_all, @enabled, @created_by, @now, @now)`,
+      )
+      .run({ ...collectionColumns(value), created_by: createdBy, now });
+
+    const saved = this.getCollection(Number(result.lastInsertRowid));
+
+    if (saved === null) throw new Error('a coleção sumiu logo depois de ser gravada');
+
+    return saved;
+  }
+
+  /** @returns `null` quando o id não existe. */
+  updateCollection(
+    id: number,
+    input: WorkshopCollectionInput,
+    now: number = Date.now(),
+  ): WorkshopCollection | null {
+    const value = workshopCollectionInputSchema.parse(input);
+
+    const changes = this.#db
+      .prepare(
+        `UPDATE workshop_collections SET
+           slug = @slug, label = @label, permission = @permission,
+           open_to_all = @open_to_all, enabled = @enabled, updated_at = @now
+         WHERE id = @id`,
+      )
+      .run({ id, ...collectionColumns(value), now }).changes;
+
+    return changes === 0 ? null : this.getCollection(id);
+  }
+
+  /**
+   * Troca QUAIS skins formam a coleção, de uma vez.
+   *
+   * Quem saiu é solto (volta a ser avulsa); quem entrou é tirado da
+   * coleção em que estava. Tudo numa transação: o índice único
+   * `(collection_id, shortname)` recusa duas skins do mesmo item, e
+   * a recusa não pode deixar a coleção pela metade.
+   *
+   * @returns `null` quando a coleção não existe.
+   * @throws quando a lista tem duas skins do mesmo item.
+   */
+  setCollectionSkins(id: number, skinIds: readonly number[]): readonly WorkshopSkin[] | null {
+    if (this.getCollection(id) === null) return null;
+
+    const now = Date.now();
+
+    this.#db.transaction((): void => {
+      this.#db
+        .prepare(
+          `UPDATE workshop_skins SET collection_id = NULL, updated_at = @now
+            WHERE collection_id = @id`,
+        )
+        .run({ id, now });
+
+      const attach = this.#db.prepare(
+        `UPDATE workshop_skins SET collection_id = @id, updated_at = @now WHERE id = @skin`,
+      );
+
+      for (const skin of new Set(skinIds)) {
+        attach.run({ id, skin, now });
+      }
+
+      this.#db
+        .prepare('UPDATE workshop_collections SET updated_at = ? WHERE id = ?')
+        .run(now, id);
+    })();
+
+    return this.skinsOfCollection(id);
+  }
+
+  /** As skins são SOLTAS pelo `ON DELETE SET NULL`, nunca apagadas. */
+  removeCollection(id: number): boolean {
+    return this.#db.prepare('DELETE FROM workshop_collections WHERE id = ?').run(id).changes > 0;
+  }
+
+  // ======================================================
+  //  Privados
+  // ======================================================
+
+  #mustGet(id: number): WorkshopSkin {
+    const saved = this.get(id);
+
+    // Ela acabou de ser gravada numa transação que não lançou: só
+    // chegaria aqui um banco corrompido, e é melhor dizer isso alto.
+    if (saved === null) {
+      throw new Error(`a skin ${String(id)} sumiu logo depois de ser gravada`);
+    }
+
+    return saved;
+  }
+
+  #withServers(rows: readonly SkinRow[]): readonly WorkshopSkin[] {
     if (rows.length === 0) return [];
 
     const bySkin = new Map<number, string[]>();
@@ -308,22 +508,31 @@ export class WorkshopSkinsRepository {
        VALUES (@id, @server_id)`,
     );
 
-    // O `Set` porque a tela pode mandar o mesmo servidor duas vezes
-    // e o `INSERT OR IGNORE` engoliria em silêncio — melhor não
-    // chegar lá.
     for (const serverId of new Set(servers)) {
       insert.run({ id, server_id: serverId });
     }
   }
 }
 
-function toColumns(input: WorkshopSkinInput): Record<string, unknown> {
+function skinColumns(input: WorkshopSkinInput): Record<string, unknown> {
   return {
     label: input.label,
     shortname: input.shortname,
     skin_id: input.skinId,
     permission: input.permission,
+    collection_id: input.collectionId,
+    open_to_all: input.openToAll ? 1 : 0,
     hide_in_streamer: input.hideInStreamer ? 1 : 0,
+    enabled: input.enabled ? 1 : 0,
+  };
+}
+
+function collectionColumns(input: WorkshopCollectionInput): Record<string, unknown> {
+  return {
+    slug: input.slug,
+    label: input.label,
+    permission: input.permission,
+    open_to_all: input.openToAll ? 1 : 0,
     enabled: input.enabled ? 1 : 0,
   };
 }

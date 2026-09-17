@@ -1416,7 +1416,7 @@ export function buildMainMenu(options: MainMenuOptions = {}): UiDocument {
       //
       // Ela também nasce SEM A BARRA LATERAL, pela mesma razão do
       // ranking: o schema não aceita `:` em `screenId` de ação, e o
-      // item da barra navega para `tela-quest:disponiveis`.
+      // item da barra navega para `tela-missoes:semanais`.
       if (entry.id === QUESTS_NAV_ID) {
         return {
           ...buildQuestsScreen({

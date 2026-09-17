@@ -1,72 +1,115 @@
 // ============================================================
-//  routes/workshop.ts  -  o catálogo de skins do Steam Workshop.
+//  routes/workshop.ts  -  skins, coleções, acessos e registro.
 //
-//      GET    /workshop/skins                  a lista
-//      GET    /workshop/skins/:skinId          uma
-//      POST   /workshop/skins                  cria. 201
-//      PUT    /workshop/skins/:skinId          edita (a skin INTEIRA)
-//      DELETE /workshop/skins/:skinId          apaga
-//      PUT    /workshop/skins/:skinId/servers  troca só onde ela vale
+//      GET    /workshop/skins                          a lista
+//      GET    /workshop/skins/:skinId                  uma
+//      POST   /workshop/skins                          cria. 201
+//      PUT    /workshop/skins/:skinId                  edita (INTEIRA)
+//      PUT    /workshop/skins/:skinId/servers          troca só onde vale
+//      DELETE /workshop/skins/:skinId                  apaga
+//      GET    /workshop/lookup/:workshopId             o que a Steam diz
 //
-//      GET    /servers/:id/workshop/status     o que o plugin tem de pé
-//      POST   /servers/:id/workshop/sync       manda o catálogo agora
+//      GET    /workshop/collections                    a lista
+//      GET    /workshop/collections/:collectionId      uma, com as skins
+//      POST   /workshop/collections                    cria. 201
+//      PUT    /workshop/collections/:collectionId      edita
+//      PUT    /workshop/collections/:collectionId/skins  troca as skins
+//      DELETE /workshop/collections/:collectionId      apaga (solta as skins)
+//
+//      GET    /workshop/grants                         filtra por quem/o quê
+//      POST   /workshop/grants                         libera (ou renova)
+//      DELETE /workshop/grants/:grantId                remove
+//
+//      GET    /workshop/audit                          o registro
+//
+//      GET    /servers/:id/workshop/status             o que o plugin tem
+//      POST   /servers/:id/workshop/sync               manda a carga agora
+//
+//  ####  AS REGRAS NÃO MORAM AQUI  ####
+//
+//  Moram em game/workshop-catalog.ts, porque o `/skin add` do jogo
+//  passa por elas também. Esta rota só lê o corpo, diz quem está
+//  mexendo e repassa a frase.
 //
 //  ####  O CADASTRO RESPONDE COM OS SERVIDORES DESLIGADOS  ####
 //
-//  Pela mesma razão da `/custom-items`: cadastrar é trabalho de
-//  madrugada, com tudo parado. As seis primeiras não falam com o
-//  RCON — quem leva o catálogo ao jogo é o sync, e ele acontece
-//  quando o servidor sobe. As duas últimas perguntam ao jogo, e
-//  com ele fora do ar devolvem 503.
+//  Cadastrar é trabalho de madrugada, com tudo parado. Só as duas
+//  últimas perguntam ao jogo, e com ele fora do ar devolvem 503.
 //
 //  ####  O :skinId DA ROTA É O NOSSO id, E NÃO O DA OFICINA  ####
 //
-//  São dois números bem diferentes: o da rota é a chave da linha
-//  (1, 2, 3); o do Workshop é um UInt64 de vinte dígitos que viaja
-//  como TEXTO e nunca como número. Trocar um pelo outro é o tipo de
-//  engano que só aparece quando o catálogo passa de dez linhas, e é
-//  por isso que o parâmetro se chama `skinId` e o campo do corpo
-//  também — mas o primeiro é `coerce.number()` e o segundo é string
-//  com régua própria.
-//
-//  ####  A VALIDAÇÃO PESADA MORA AQUI  ####
-//
-//  O banco tem os CHECK que pegam o caminho que esquecer de validar
-//  (skin ≠ '0', permissão não vazia) e os índices únicos. O resto —
-//  o item base existir no catálogo do jogo, o servidor existir, a
-//  marca não repetir — é zod e conferência aqui, porque a frase que
-//  o admin lê precisa dizer QUAL linha já usa a marca.
+//  O da rota é a chave da linha (1, 2, 3); o do Workshop é um
+//  UInt64 de vinte dígitos que viaja como TEXTO. O primeiro é
+//  `coerce.number()`, o segundo é string com régua própria.
 // ============================================================
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import type { ItemsRepository } from '../../db/items-repository.js';
-import type { ServersRepository } from '../../db/servers-repository.js';
+import type { WorkshopAccessRepository } from '../../db/workshop-access-repository.js';
 import type { WorkshopSkinsRepository } from '../../db/workshop-repository.js';
+import type { ServersRepository } from '../../db/servers-repository.js';
+import { judgeWorkshopFile, type WorkshopLookupFn } from '../../game/steam-workshop.js';
 import { WorkshopCommandError, type WorkshopService } from '../../game/workshop.js';
-import { workshopSkinBodySchema, type WorkshopSkin, type WorkshopSkinInput } from '../../types/workshop.js';
+import type { WorkshopActor, WorkshopCatalog } from '../../game/workshop-catalog.js';
+import type { ItemsRepository } from '../../db/items-repository.js';
+import {
+  collectionSkinsBodySchema,
+  GRANT_SUBJECT_TYPES,
+  GRANT_TARGET_TYPES,
+  workshopCollectionInputSchema,
+  workshopGrantBodySchema,
+  workshopSkinBodySchema,
+  workshopSkinIdSchema,
+  type WorkshopAuditEntry,
+  type WorkshopCollection,
+  type WorkshopGrant,
+  type WorkshopSkin,
+} from '../../types/workshop.js';
 import { ApiError } from '../error-response.js';
+import { operatorOf } from './admin.js';
 
 export interface WorkshopRoutesDeps {
   readonly repository: WorkshopSkinsRepository;
-  /** Para conferir que o item base existe nesta versão do jogo. */
+  readonly access: WorkshopAccessRepository;
+  readonly catalog: WorkshopCatalog;
   readonly items: ItemsRepository;
-  /** Para conferir que os servidores escolhidos existem. */
   readonly servers: ServersRepository;
+  readonly lookup: WorkshopLookupFn;
   /**
    * O canal com o jogo.
    *
    * Ausente = o agente subiu sem servidor nenhum. O cadastro
-   * continua funcionando; mandar o catálogo, não — e a rota diz
-   * isso em vez de fingir.
+   * continua funcionando; mandar a carga, não — e a rota diz isso
+   * em vez de fingir.
    */
   readonly workshop?: WorkshopService;
 }
 
 const skinParams = z.object({ skinId: z.coerce.number().int().positive() });
+const collectionParams = z.object({ collectionId: z.coerce.number().int().positive() });
+const grantParams = z.object({ grantId: z.coerce.number().int().positive() });
 const serverParams = z.object({ id: z.string().min(1) });
+const lookupParams = z.object({ workshopId: workshopSkinIdSchema });
+const lookupQuery = z.object({ shortname: z.string().trim().toLowerCase().optional() });
 const serversBody = z.object({ servers: z.array(z.string().min(1)).max(50) });
+
+const grantsQuery = z.object({
+  subjectType: z.enum(GRANT_SUBJECT_TYPES).optional(),
+  subject: z.string().trim().min(1).optional(),
+  targetType: z.enum(GRANT_TARGET_TYPES).optional(),
+  targetId: z.coerce.number().int().positive().optional(),
+  includeExpired: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
+});
+
+const auditQuery = z.object({
+  steamId: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  before: z.coerce.number().int().positive().optional(),
+});
 
 function asApiError(cause: unknown): never {
   if (!(cause instanceof WorkshopCommandError)) throw cause;
@@ -88,22 +131,12 @@ export function registerWorkshopRoutes(app: FastifyInstance, deps: WorkshopRoute
     if (deps.workshop === undefined) {
       throw new ApiError(
         'WORKSHOP_UNAVAILABLE',
-        'Este agente subiu sem canal com os servidores: não há como mandar o catálogo.',
+        'Este agente subiu sem canal com os servidores: não há como mandar a carga.',
         503,
       );
     }
 
     return deps.workshop;
-  }
-
-  function mustGet(id: number): WorkshopSkin {
-    const skin = deps.repository.get(id);
-
-    if (skin === null) {
-      throw new ApiError('WORKSHOP_SKIN_NOT_FOUND', `Nenhuma skin com o id ${String(id)}.`, 404);
-    }
-
-    return skin;
   }
 
   function assertServer(id: string): void {
@@ -112,113 +145,216 @@ export function registerWorkshopRoutes(app: FastifyInstance, deps: WorkshopRoute
     }
   }
 
+  function actorOf(request: Parameters<typeof operatorOf>[0]): WorkshopActor {
+    return { name: operatorOf(request) ?? 'painel', source: 'panel' };
+  }
+
   // ==========================================================
-  //  O CATÁLOGO
+  //  SKINS
   // ==========================================================
 
   app.get('/workshop/skins', async () => {
     const skins = deps.repository.list();
 
-    return { ok: true, count: skins.length, skins: skins.map(toBody) };
+    return { ok: true, count: skins.length, skins: skins.map(skinBody) };
   });
 
   app.get('/workshop/skins/:skinId', async (request) => {
     const { skinId } = skinParams.parse(request.params);
+    const skin = deps.repository.get(skinId);
 
-    return { ok: true, skin: toBody(mustGet(skinId)) };
+    if (skin === null) {
+      throw new ApiError('WORKSHOP_SKIN_NOT_FOUND', `Nenhuma skin com o id ${String(skinId)}.`, 404);
+    }
+
+    return { ok: true, skin: skinBody(skin) };
   });
 
   app.post('/workshop/skins', async (request, reply) => {
-    const input = workshopSkinBodySchema.parse(request.body);
-
-    validate(deps, input, null);
-
-    const created = deps.repository.add(input);
+    const body = workshopSkinBodySchema.parse(request.body);
+    const { skin, warning } = await deps.catalog.createSkin(body, actorOf(request));
 
     request.log.info(
-      { skin: created.id, base: created.shortname, workshop: created.skinId },
+      { skin: skin.id, base: skin.shortname, workshop: skin.skinId },
       'skin do Workshop cadastrada',
     );
 
-    // ####  SEM ISTO, A SKIN NÃO EXISTE NO JOGO  ####
-    //
-    // Ela fica no banco, aparece na tela, e o plugin nunca soube
-    // que existe — o item continua nascendo vanilla e a permissão
-    // nem chega a ser registrada no Oxide.
-    //
-    // Sem `await`: um servidor reiniciando não pode segurar a
-    // resposta de quem acabou de salvar. O cadastro já está
-    // gravado, e a reconexão o empurra de novo.
-    deps.workshop?.handleCatalogChanged();
-
-    return reply.status(201).send({ ok: true, skin: toBody(created) });
+    return reply.status(201).send({ ok: true, skin: skinBody(skin), warning });
   });
 
   app.put('/workshop/skins/:skinId', async (request) => {
     const { skinId } = skinParams.parse(request.params);
-    const input = workshopSkinBodySchema.parse(request.body);
+    const body = workshopSkinBodySchema.parse(request.body);
+    const { skin, warning } = await deps.catalog.updateSkin(skinId, body, actorOf(request));
 
-    mustGet(skinId);
-    validate(deps, input, skinId);
-
-    const saved = deps.repository.update(skinId, input);
-
-    if (saved === null) {
-      // Só chega aqui se alguém apagou a skin entre o `mustGet` e o
-      // `update`. É improvável, e é exatamente por isso que merece
-      // um 404 honesto em vez de um 500.
-      throw new ApiError('WORKSHOP_SKIN_NOT_FOUND', `Nenhuma skin com o id ${String(skinId)}.`, 404);
-    }
-
-    deps.workshop?.handleCatalogChanged();
-
-    return { ok: true, skin: toBody(saved) };
+    return { ok: true, skin: skinBody(skin), warning };
   });
 
-  /**
-   * Troca só a lista de servidores.
-   *
-   * A tela de um servidor marca e desmarca skins sem ter o cadastro
-   * inteiro na mão — e mandar o resto do formulário de volta só
-   * para mexer numa caixa de seleção é como se perde o que outra
-   * pessoa salvou no meio.
-   */
   app.put('/workshop/skins/:skinId/servers', async (request) => {
     const { skinId } = skinParams.parse(request.params);
     const body = serversBody.parse(request.body);
 
-    mustGet(skinId);
-    assertKnownServers(deps, body.servers);
-
-    const servers = deps.repository.setServers(skinId, body.servers);
-
-    if (servers === null) {
-      throw new ApiError('WORKSHOP_SKIN_NOT_FOUND', `Nenhuma skin com o id ${String(skinId)}.`, 404);
-    }
-
-    deps.workshop?.handleCatalogChanged();
-
-    return { ok: true, servers };
+    return { ok: true, servers: deps.catalog.setSkinServers(skinId, body.servers, actorOf(request)) };
   });
 
   app.delete('/workshop/skins/:skinId', async (request) => {
     const { skinId } = skinParams.parse(request.params);
 
-    mustGet(skinId);
-
-    // ####  APAGAR É DIFERENTE DE DESLIGAR  ####
-    //
-    // Desligar (`enabled: false`) tira a skin do push e o item
-    // volta a nascer vanilla, sem perder a marca do catálogo.
-    // Apagar tira a linha — e o que já nasceu no mundo continua
-    // com o número carimbado, porque quem guarda a marca é o item.
-    deps.repository.remove(skinId);
-
-    request.log.info({ skin: skinId }, 'skin do Workshop apagada');
-
-    deps.workshop?.handleCatalogChanged();
+    // Apagar é diferente de desligar: o que já foi pintado no mundo
+    // continua com o número, porque quem guarda a marca é o item.
+    deps.catalog.removeSkin(skinId, actorOf(request));
 
     return { ok: true };
+  });
+
+  /**
+   * O que a Steam diz de um id, ANTES de salvar.
+   *
+   * É o que deixa a tela preencher o nome e mostrar a prévia
+   * enquanto o admin digita — e avisar "esta skin é da máscara" antes
+   * de ele escolher o machado.
+   */
+  app.get('/workshop/lookup/:workshopId', async (request) => {
+    const { workshopId } = lookupParams.parse(request.params);
+    const { shortname } = lookupQuery.parse(request.query);
+    const lookup = await deps.lookup(workshopId);
+    const verdict =
+      shortname === undefined || shortname === ''
+        ? null
+        : judgeWorkshopFile(lookup, shortname, (name) => deps.items.shortnamesByDisplayName(name));
+
+    // Sugere o item quando a tag casa com um só.
+    const suggested =
+      lookup.status === 'found'
+        ? lookup.details.tags.flatMap((tag) => deps.items.shortnamesByDisplayName(tag))
+        : [];
+
+    return {
+      ok: true,
+      status: lookup.status,
+      details: lookup.status === 'found' ? lookup.details : null,
+      reason: lookup.status === 'unavailable' ? lookup.reason : null,
+      suggestedShortnames: [...new Set(suggested)],
+      verdict:
+        verdict === null
+          ? null
+          : verdict.ok
+            ? { ok: true, warning: verdict.warning }
+            : { ok: false, code: verdict.code, message: verdict.message },
+    };
+  });
+
+  // ==========================================================
+  //  COLEÇÕES
+  // ==========================================================
+
+  app.get('/workshop/collections', async () => {
+    const collections = deps.repository.listCollections();
+
+    return { ok: true, count: collections.length, collections: collections.map(collectionBody) };
+  });
+
+  app.get('/workshop/collections/:collectionId', async (request) => {
+    const { collectionId } = collectionParams.parse(request.params);
+    const collection = deps.repository.getCollection(collectionId);
+
+    if (collection === null) {
+      throw new ApiError(
+        'WORKSHOP_COLLECTION_NOT_FOUND',
+        `Nenhuma coleção com o id ${String(collectionId)}.`,
+        404,
+      );
+    }
+
+    return {
+      ok: true,
+      collection: collectionBody(collection),
+      skins: deps.repository.skinsOfCollection(collectionId).map(skinBody),
+    };
+  });
+
+  app.post('/workshop/collections', async (request, reply) => {
+    const input = workshopCollectionInputSchema.parse(request.body);
+    const collection = deps.catalog.createCollection(input, actorOf(request));
+
+    return reply.status(201).send({ ok: true, collection: collectionBody(collection) });
+  });
+
+  app.put('/workshop/collections/:collectionId', async (request) => {
+    const { collectionId } = collectionParams.parse(request.params);
+    const input = workshopCollectionInputSchema.parse(request.body);
+    const collection = deps.catalog.updateCollection(collectionId, input, actorOf(request));
+
+    return { ok: true, collection: collectionBody(collection) };
+  });
+
+  app.put('/workshop/collections/:collectionId/skins', async (request) => {
+    const { collectionId } = collectionParams.parse(request.params);
+    const body = collectionSkinsBodySchema.parse(request.body);
+    const skins = deps.catalog.setCollectionSkins(collectionId, body.skinIds, actorOf(request));
+
+    return { ok: true, skins: skins.map(skinBody) };
+  });
+
+  app.delete('/workshop/collections/:collectionId', async (request) => {
+    const { collectionId } = collectionParams.parse(request.params);
+
+    deps.catalog.removeCollection(collectionId, actorOf(request));
+
+    return { ok: true };
+  });
+
+  // ==========================================================
+  //  ACESSOS
+  // ==========================================================
+
+  app.get('/workshop/grants', async (request) => {
+    const query = grantsQuery.parse(request.query);
+    const now = Date.now();
+    const grants = deps.access.listGrants(
+      {
+        ...(query.subjectType === undefined ? {} : { subjectType: query.subjectType }),
+        ...(query.subject === undefined
+          ? {}
+          : { subject: query.subjectType === 'group' ? query.subject.toLowerCase() : query.subject }),
+        ...(query.targetType === undefined ? {} : { targetType: query.targetType }),
+        ...(query.targetId === undefined ? {} : { targetId: query.targetId }),
+        includeExpired: query.includeExpired,
+      },
+      now,
+    );
+
+    return { ok: true, count: grants.length, grants: grants.map((grant) => grantBody(grant, deps, now)) };
+  });
+
+  app.post('/workshop/grants', async (request, reply) => {
+    const input = workshopGrantBodySchema.parse(request.body);
+    const grant = deps.catalog.grant(input, actorOf(request));
+
+    return reply.status(201).send({ ok: true, grant: grantBody(grant, deps, Date.now()) });
+  });
+
+  app.delete('/workshop/grants/:grantId', async (request) => {
+    const { grantId } = grantParams.parse(request.params);
+
+    deps.catalog.revoke(grantId, actorOf(request));
+
+    return { ok: true };
+  });
+
+  // ==========================================================
+  //  REGISTRO
+  // ==========================================================
+
+  app.get('/workshop/audit', async (request) => {
+    const query = auditQuery.parse(request.query);
+    const entries = deps.access.audit({
+      limit: query.limit,
+      ...(query.steamId === undefined ? {} : { steamId: query.steamId }),
+      ...(query.before === undefined ? {} : { before: query.before }),
+    });
+
+    return { ok: true, count: entries.length, entries: entries.map(auditBody) };
   });
 
   // ==========================================================
@@ -234,10 +370,9 @@ export function registerWorkshopRoutes(app: FastifyInstance, deps: WorkshopRoute
       return {
         ok: true,
         status: await service().status(id),
-        // O que o plugin CONFIRMOU no último push, que é outra
-        // pergunta: o `status` diz o que ele tem agora, e isto diz
-        // o que ele disse ter recebido. Divergir entre os dois é o
-        // sintoma de um `oxide.reload` que ninguém acompanhou.
+        // O que o plugin CONFIRMOU no último envio. Divergir do
+        // `status` é o sintoma de um `oxide.reload` que ninguém
+        // acompanhou.
         applied: service().appliedCount(id),
       };
     } catch (cause) {
@@ -246,12 +381,8 @@ export function registerWorkshopRoutes(app: FastifyInstance, deps: WorkshopRoute
   });
 
   /**
-   * Manda o catálogo agora, naquele servidor.
-   *
-   * O disparo manual existe para o admin que acabou de recarregar o
-   * plugin à mão e não quer esperar a próxima reconexão. Ele é
-   * FORÇADO: ignora o dedup, porque quem apertou o botão quer o
-   * comando saindo, e não um "não mudou nada".
+   * Manda a carga agora, naquele servidor. FORÇADO: quem apertou o
+   * botão quer o comando saindo, e não um "não mudou nada".
    */
   app.post('/servers/:id/workshop/sync', async (request) => {
     const { id } = serverParams.parse(request.params);
@@ -263,152 +394,111 @@ export function registerWorkshopRoutes(app: FastifyInstance, deps: WorkshopRoute
     if (outcome.status === 'skipped') {
       throw new ApiError(
         'SERVER_OFFLINE',
-        `O RCON do servidor "${id}" está fora do ar: ${outcome.reason}. O catálogo inteiro é ` +
-          'reenviado quando ele voltar.',
+        `O RCON do servidor "${id}" está fora do ar: ${outcome.reason}. A carga inteira é ` +
+          'reenviada quando ele voltar.',
         503,
       );
     }
 
-    if (outcome.status === 'pushed' && outcome.outcome.status === 'refused') {
-      throw new ApiError(
-        'WORKSHOP_TOO_BIG',
-        `O catálogo tem ${String(outcome.outcome.bytes)} bytes e o teto do frame de console é ` +
-          `${String(outcome.outcome.limitBytes)}. NADA foi enviado — meio catálogo faria o plugin ` +
-          'trocar o que ele tem por uma lista incompleta. Desligue ou apague skins.',
-        409,
-      );
+    if (outcome.status === 'failed') {
+      throw new ApiError('WORKSHOP_FAILED', outcome.error.message, 502);
     }
 
-    if (outcome.status === 'pushed' && outcome.outcome.status === 'failed') {
-      throw new ApiError('WORKSHOP_FAILED', outcome.outcome.error.message, 502);
-    }
-
-    return { ok: true, outcome: outcome.status };
+    return {
+      ok: true,
+      outcome: outcome.status,
+      ...(outcome.status === 'sent' ? { parts: outcome.parts, bytes: outcome.bytes } : {}),
+    };
   });
 }
 
-/**
- * As conferências que o banco não faz.
- *
- * @throws ApiError com a frase pronta.
- */
-function validate(
-  deps: WorkshopRoutesDeps,
-  input: WorkshopSkinInput,
-  currentId: number | null,
-): void {
-  // ####  O ITEM BASE PRECISA EXISTIR NESTA VERSÃO DO JOGO  ####
-  //
-  // Conferir aqui é conferir no cadastro. Não conferir seria
-  // descobrir dias depois, no jogo, com o item nascendo vanilla e
-  // nada no log dizendo por quê — o servidor aceita QUALQUER
-  // `ulong` em `item.skin` e não reclama de nada (§2.2 do
-  // levantamento).
-  if (deps.items.get(input.shortname) === null) {
-    throw new ApiError(
-      'UNKNOWN_BASE_ITEM',
-      `Nenhum item do jogo com o shortname "${input.shortname}". A skin do Workshop é uma ` +
-        'aparência para um item que o Rust já tem — escolha um da lista do catálogo.',
-      400,
-    );
-  }
-
-  const others = deps.repository.list().filter((skin) => skin.id !== currentId);
-
-  // ####  A MARCA É ÚNICA  ####
-  //
-  // Duas linhas com o mesmo par (item, skin) deixariam o plugin sem
-  // critério para escolher qual das duas ele está aplicando. O
-  // índice único do banco também recusa; aqui a recusa vira uma
-  // frase que diz QUAL skin já usa a marca.
-  const clash = others.find(
-    (skin) => skin.shortname === input.shortname && skin.skinId === input.skinId,
-  );
-
-  if (clash !== undefined) {
-    throw new ApiError(
-      'DUPLICATE_MARK',
-      `A skin ${input.skinId} em "${input.shortname}" já é a marca de "${clash.label}". Duas ` +
-        'linhas com a mesma marca são indistinguíveis dentro do jogo — escolha outra.',
-      409,
-    );
-  }
-
-  // ####  UM ITEM, UMA SKIN -- POR SERVIDOR  ####
-  //
-  // MEDIDO no OrigemZWorkshop.cs: o plugin indexa o catálogo POR
-  // SHORTNAME e recusa a segunda linha do mesmo item com
-  // `duplicate_shortname`. E é inerente ao desenho: o item nasce
-  // com a skin sozinho, sem menu e sem comando, então não há
-  // ninguém para escolher entre duas pedras.
-  //
-  // A conferência é entre as LIGADAS que dividem algum servidor:
-  // trocar a arte da pedra (desliga a velha, cadastra a nova) tem
-  // de continuar possível, e duas pedras em servidores diferentes
-  // não se encontram. Sem isto, o cadastro é aceito aqui e
-  // RECUSADO lá, com o motivo enterrado no `message` do push.
-  if (input.enabled) {
-    const wanted = new Set(input.servers);
-    const sameItem = others.find(
-      (skin) =>
-        skin.enabled &&
-        skin.shortname === input.shortname &&
-        skin.servers.some((serverId) => wanted.has(serverId)),
-    );
-
-    if (sameItem !== undefined) {
-      throw new ApiError(
-        'DUPLICATE_ITEM',
-        `O item "${input.shortname}" já tem a skin "${sameItem.label}" ligada nos mesmos ` +
-          'servidores. O item nasce com a skin sozinho, sem menu e sem comando: com duas, ' +
-          'não haveria quem escolhesse — o plugin recusaria a segunda. Desligue a outra, ou ' +
-          'separe as duas por servidor.',
-        409,
-      );
-    }
-  }
-
-  // ####  E A PERMISSÃO TAMBÉM  ####
-  //
-  // Duas skins com a mesma permissão fariam o admin dar uma e
-  // entregar duas — e, como a permissão nasce do NOME quando o
-  // painel a omite, dois nomes parecidos colidem sozinhos.
-  const samePermission = others.find((skin) => skin.permission === input.permission);
-
-  if (samePermission !== undefined) {
-    throw new ApiError(
-      'DUPLICATE_PERMISSION',
-      `A permissão "${input.permission}" já é de "${samePermission.label}". Cada skin tem a sua: ` +
-        'com a mesma, dar uma entregaria as duas.',
-      409,
-    );
-  }
-
-  assertKnownServers(deps, input.servers);
-}
-
-/** Servidor que não existe vira ligação órfã que o FOREIGN KEY recusa com uma frase que ninguém entende. */
-function assertKnownServers(deps: WorkshopRoutesDeps, servers: readonly string[]): void {
-  const known = new Set(deps.servers.list().map((server) => server.id));
-  const unknown = servers.filter((id) => !known.has(id));
-
-  if (unknown.length > 0) {
-    throw new ApiError('UNKNOWN_SERVER', `Estes servidores não existem: ${unknown.join(', ')}.`, 400);
-  }
-}
-
 /** Uma skin, na forma que a API entrega. Datas em ISO. */
-function toBody(skin: WorkshopSkin) {
+function skinBody(skin: WorkshopSkin) {
   return {
     id: skin.id,
     label: skin.label,
     shortname: skin.shortname,
     skinId: skin.skinId,
     permission: skin.permission,
+    collectionId: skin.collectionId,
+    openToAll: skin.openToAll,
     hideInStreamer: skin.hideInStreamer,
     enabled: skin.enabled,
     servers: skin.servers,
+    source: skin.source,
+    createdBy: skin.createdBy,
+    workshopTitle: skin.workshopTitle,
+    previewUrl: skin.previewUrl,
     createdAt: new Date(skin.createdAt).toISOString(),
     updatedAt: new Date(skin.updatedAt).toISOString(),
+  };
+}
+
+function collectionBody(collection: WorkshopCollection) {
+  return {
+    id: collection.id,
+    slug: collection.slug,
+    label: collection.label,
+    permission: collection.permission,
+    openToAll: collection.openToAll,
+    enabled: collection.enabled,
+    skinCount: collection.skinCount,
+    createdBy: collection.createdBy,
+    createdAt: new Date(collection.createdAt).toISOString(),
+    updatedAt: new Date(collection.updatedAt).toISOString(),
+  };
+}
+
+/**
+ * Um acesso, com o nome do alvo já resolvido.
+ *
+ * A tela lista acessos de um jogador; sem o nome ela teria de
+ * buscar o catálogo inteiro só para traduzir "skin 12".
+ */
+function grantBody(grant: WorkshopGrant, deps: WorkshopRoutesDeps, now: number) {
+  let targetLabel = `#${String(grant.targetId)}`;
+  let targetShortname: string | null = null;
+
+  if (grant.targetType === 'skin') {
+    const skin = deps.repository.get(grant.targetId);
+
+    if (skin !== null) {
+      targetLabel = skin.label;
+      targetShortname = skin.shortname;
+    }
+  } else {
+    const collection = deps.repository.getCollection(grant.targetId);
+
+    if (collection !== null) targetLabel = `/skin ${collection.slug} — ${collection.label}`;
+  }
+
+  return {
+    id: grant.id,
+    subjectType: grant.subjectType,
+    subject: grant.subject,
+    targetType: grant.targetType,
+    targetId: grant.targetId,
+    targetLabel,
+    targetShortname,
+    expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
+    expired: grant.expiresAt !== null && grant.expiresAt <= now,
+    note: grant.note,
+    createdBy: grant.createdBy,
+    createdAt: new Date(grant.createdAt).toISOString(),
+    updatedAt: new Date(grant.updatedAt).toISOString(),
+  };
+}
+
+function auditBody(entry: WorkshopAuditEntry) {
+  return {
+    id: entry.id,
+    at: new Date(entry.at).toISOString(),
+    actor: entry.actor,
+    source: entry.source,
+    action: entry.action,
+    target: entry.target,
+    serverId: entry.serverId,
+    steamId: entry.steamId,
+    detail: entry.detail,
   };
 }

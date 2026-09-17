@@ -16,8 +16,8 @@
 //  É "em nenhum". A regra vem do catálogo de itens custom e existe
 //  para uma skin recém-cadastrada não entrar em produção sem
 //  ninguém mandar. O problema é que ela não PARECE uma falha: a
-//  skin fica na tela, bonita, e o item nasce vanilla no jogo para
-//  sempre. Por isso o aviso é vermelho e fica visível.
+//  skin fica na tela, bonita, e nunca aparece na caixa do `/skin`.
+//  Por isso o aviso é vermelho e fica visível.
 // ============================================================
 
 import { cn } from '@/lib/utils';
@@ -77,8 +77,8 @@ export function ServerPicker({ value, servers, busy = false, onChange }: ServerP
 
       {chosen.length === 0 && (
         <p className="text-2xs text-rust">
-          Sem nenhum servidor marcado esta skin não chega a lugar nenhum: o item continua nascendo
-          vanilla, e nada no jogo diz por quê.
+          Sem nenhum servidor marcado esta skin não chega a lugar nenhum: ela não aparece na caixa
+          do /skin nem nas coleções, e nada no jogo diz por quê.
         </p>
       )}
     </div>

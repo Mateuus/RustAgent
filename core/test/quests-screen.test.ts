@@ -69,6 +69,7 @@ function view(overrides: Partial<QuestsView> = {}): QuestsView {
 
 function card(overrides: Partial<QuestCard> = {}): QuestCard {
   return {
+    status: 'available',
     actionId: 'quest:accept:minerador',
     actionLabel: 'ACEITAR',
     title: 'Minerador',
@@ -85,11 +86,13 @@ function card(overrides: Partial<QuestCard> = {}): QuestCard {
 // ------------------------------------------------------------
 
 describe('o endereço', () => {
-  it('lê as três formas', () => {
-    expect(parseQuestsScreenId('tela-missoes')).toMatchObject({ tab: 'ativas', page: 0 });
-    expect(parseQuestsScreenId('tela-missoes:disponiveis')).toMatchObject({ tab: 'disponiveis' });
-    expect(parseQuestsScreenId('tela-missoes:disponiveis:2')).toMatchObject({
-      tab: 'disponiveis',
+  it('lê as formas', () => {
+    // Sem aba = a automática: a leitura escolhe a primeira que tem
+    // alguma missão.
+    expect(parseQuestsScreenId('tela-missoes')).toMatchObject({ tab: null, page: 0 });
+    expect(parseQuestsScreenId('tela-missoes:semanais')).toMatchObject({ tab: 'semanais' });
+    expect(parseQuestsScreenId('tela-missoes:semanais:2')).toMatchObject({
+      tab: 'semanais',
       page: 2,
     });
     expect(parseQuestsScreenId('tela-missoes:det:8412')).toMatchObject({
@@ -115,18 +118,28 @@ describe('o endereço', () => {
   it('apara o que vem torto em vez de recusar', () => {
     // O pedido veio do plugin e o jogador está com um aviso de
     // carregando. Recusar o deixaria girando até o timeout.
-    expect(parseQuestsScreenId('tela-missoes:inventada')).toMatchObject({ tab: 'ativas' });
-    expect(parseQuestsScreenId('tela-missoes:ativas:abc')).toMatchObject({ page: 0 });
-    expect(parseQuestsScreenId('tela-missoes:ativas:-5')).toMatchObject({ page: 0 });
+    expect(parseQuestsScreenId('tela-missoes:inventada')).toMatchObject({ tab: null });
+    expect(parseQuestsScreenId('tela-missoes:diarias:abc')).toMatchObject({ page: 0 });
+    expect(parseQuestsScreenId('tela-missoes:diarias:-5')).toMatchObject({ page: 0 });
     // Um `OFFSET` absurdo não pode chegar ao banco.
-    expect(parseQuestsScreenId('tela-missoes:ativas:99999999')?.page).toBe(9_999);
+    expect(parseQuestsScreenId('tela-missoes:diarias:99999999')?.page).toBe(9_999);
     expect(parseQuestsScreenId('tela-missoes:npc:')).toMatchObject({ npcId: null });
+  });
+
+  // ####  AS ABAS DE ANTES DE 16/09/2026  ####
+  //
+  // Um atalho gravado ou um plugin que não recarregou ainda pede
+  // `disponiveis`. A página dela não vale na lista nova.
+  it('o endereço das abas antigas abre a automática, na primeira página', () => {
+    for (const legacy of ['ativas', 'disponiveis:3', 'feitas:2']) {
+      expect(parseQuestsScreenId(`tela-missoes:${legacy}`)).toMatchObject({ tab: null, page: 0 });
+    }
   });
 
   it('ida e volta: o que se escreve é o que se lê', () => {
     for (const target of [
-      { tab: 'ativas' as const, page: 0 },
-      { tab: 'feitas' as const, page: 3 },
+      { tab: 'diarias' as const, page: 0 },
+      { tab: 'especiais' as const, page: 3 },
       { npcId: 'velho-do-outpost', page: 2 },
     ]) {
       const parsed = parseQuestsScreenId(questsScreenId(target));
@@ -154,7 +167,7 @@ describe('o tamanho da tela', () => {
    */
   function worstCase(): QuestsView {
     return view({
-      tab: 'ativas',
+      tab: 'diarias',
       page: 1,
       pages: 9,
       cards: Array.from({ length: QUESTS_PAGE_SIZE }, (_, index) =>
@@ -164,6 +177,8 @@ describe('o tamanho da tela', () => {
           reward: '2500 OZCoin + 1x rifle.ak.diamond.edition +4',
           actionId: `quest:claim:${String(84120 + index)}`,
           actionLabel: 'RESGATAR',
+          // A etiqueta mais longa das quatro.
+          status: 'active',
         }),
       ),
     });
@@ -246,8 +261,8 @@ describe('o desenho', () => {
   it('a tela responde com o id que foi PEDIDO', () => {
     for (const screenId of [
       QUESTS_SCREEN_ID,
-      'tela-missoes:disponiveis',
-      'tela-missoes:feitas:2',
+      'tela-missoes:semanais',
+      'tela-missoes:especiais:2',
       'tela-missoes:npc:velho',
     ]) {
       expect(buildQuestsScreen({ view: view({ cards: [card()] }), screenId }).id).toBe(screenId);
@@ -256,22 +271,22 @@ describe('o desenho', () => {
 
   it('o item da vez é um painel; os outros, botões', () => {
     const screen = buildQuestsScreen({
-      view: view({ tab: 'feitas', cards: [card()] }),
+      view: view({ tab: 'semanais', cards: [card()] }),
       screenId: QUESTS_SCREEN_ID,
     });
 
     const tabs = walk(screen.elements).filter((element) => element.id.startsWith('qt'));
-    const active = tabs.find((element) => element.id === 'qtfei');
+    const active = tabs.find((element) => element.id === 'qtsem');
 
     // Clicar no item para navegar para onde já se está é um clique
     // que não faz nada — e é o que parece defeito.
     expect(active?.type).toBe('panel');
-    expect(tabs.find((element) => element.id === 'qtati')?.type).toBe('button');
+    expect(tabs.find((element) => element.id === 'qtdia')?.type).toBe('button');
   });
 
   it('a barra lateral leva as três contagens', () => {
     const screen = buildQuestsScreen({
-      view: view({ counts: { ativas: 2, disponiveis: 7, feitas: 1 }, cards: [card()] }),
+      view: view({ counts: { diarias: 2, semanais: 7, especiais: 1 }, cards: [card()] }),
       screenId: QUESTS_SCREEN_ID,
     });
 
@@ -279,9 +294,65 @@ describe('o desenho', () => {
       .filter((element) => element.type === 'label' && element.id.endsWith('n'))
       .map((element) => (element.type === 'label' ? element.text : ''));
 
-    // Sem elas, o jogador precisa entrar em cada lista para saber
-    // se há algo a resgatar.
+    // Sem elas, o jogador precisa entrar em cada aba para saber o
+    // que tem nela.
     expect(numbers).toEqual(['2', '7', '1']);
+  });
+
+  it('o número fica VERDE na aba que tem prêmio parado', () => {
+    const screen = buildQuestsScreen({
+      view: view({
+        tab: 'diarias',
+        counts: { diarias: 2, semanais: 3, especiais: 0 },
+        claimables: { diarias: 0, semanais: 1, especiais: 0 },
+        cards: [card()],
+      }),
+      screenId: QUESTS_SCREEN_ID,
+    });
+
+    const at = (id: string): UiElement | undefined =>
+      walk(screen.elements).find((element) => element.id === id);
+
+    expect(at('qtsemn')).toMatchObject({ color: '#6B7F5B' });
+    expect(at('qtdian')).not.toMatchObject({ color: '#6B7F5B' });
+  });
+
+  // O pedido foi DIÁRIAS e SEMANAIS; ESPECIAIS existe para `once` e
+  // `cooldown` não sumirem, e só aparece quando tem algo.
+  it('ESPECIAIS fica fora da barra enquanto estiver vazia', () => {
+    const ids = (counts: { diarias: number; semanais: number; especiais: number }): string[] =>
+      walk(
+        buildQuestsScreen({
+          view: view({ tab: 'diarias', counts, cards: [card()] }),
+          screenId: QUESTS_SCREEN_ID,
+        }).elements,
+      ).map((element) => element.id);
+
+    expect(ids({ diarias: 1, semanais: 0, especiais: 0 })).not.toContain('qtesp');
+    expect(ids({ diarias: 1, semanais: 0, especiais: 0 })).toContain('qtsem');
+    expect(ids({ diarias: 1, semanais: 0, especiais: 2 })).toContain('qtesp');
+  });
+
+  it('cada card leva a etiqueta do seu estado', () => {
+    const screen = buildQuestsScreen({
+      view: view({
+        cards: [
+          card({ status: 'claimable' }),
+          card({ status: 'active' }),
+          card({ status: 'available' }),
+          card({ status: 'blocked' }),
+        ],
+      }),
+      screenId: QUESTS_SCREEN_ID,
+    });
+
+    const texts = ['q0s', 'q1s', 'q2s', 'q3s'].map((id) => {
+      const element = walk(screen.elements).find((item) => item.id === id);
+
+      return element?.type === 'label' ? element.text : null;
+    });
+
+    expect(texts).toEqual(['RESGATAR', 'EM ANDAMENTO', 'DISPONÍVEL', 'BLOQUEADA']);
   });
 
   it('sem contagem, a barra lateral não inventa zeros', () => {
@@ -294,13 +365,13 @@ describe('o desenho', () => {
     });
 
     expect(
-      walk(screen.elements).some((element) => element.id === 'qtatin' || element.id === 'qtdisn'),
+      walk(screen.elements).some((element) => element.id === 'qtdian' || element.id === 'qtsemn'),
     ).toBe(false);
   });
 
   it('a coluna tem largura FIXA, e os cards começam depois dela', () => {
     const screen = buildQuestsScreen({
-      view: view({ tab: 'ativas', cards: [card()] }),
+      view: view({ tab: 'diarias', cards: [card()] }),
       screenId: QUESTS_SCREEN_ID,
     });
 
@@ -316,7 +387,7 @@ describe('o desenho', () => {
 
     // Os itens são FILHOS dela: por isso eles podem esticar de 0 a
     // 1 — a largura que acompanham é a da coluna, não a da tela.
-    for (const id of ['qtati', 'qtdis', 'qtfei']) {
+    for (const id of ['qtdia', 'qtsem']) {
       expect(column?.children.some((child) => child.id === id)).toBe(true);
     }
 
@@ -330,12 +401,12 @@ describe('o desenho', () => {
     // item sob o cursor pareceriam a mesma coisa. É a regra que a
     // coluna do ranking já seguia.
     const screen = buildQuestsScreen({
-      view: view({ tab: 'ativas', cards: [card()] }),
+      view: view({ tab: 'diarias', cards: [card()] }),
       screenId: QUESTS_SCREEN_ID,
     });
 
-    const active = walk(screen.elements).find((element) => element.id === 'qtati');
-    const accent = walk(screen.elements).find((element) => element.id === 'qtatib');
+    const active = walk(screen.elements).find((element) => element.id === 'qtdia');
+    const accent = walk(screen.elements).find((element) => element.id === 'qtdiab');
 
     expect(active).toMatchObject({ type: 'panel', color: '#0F0F0F' });
     expect(accent).toMatchObject({ type: 'panel', color: '#C43F2C' });
@@ -351,15 +422,15 @@ describe('o desenho', () => {
   // constava no log, enquanto `det:1` e `claim:1` constavam.
   it('o número NÃO se sobrepõe ao botão que ele acompanha', () => {
     const screen = buildQuestsScreen({
-      view: view({ tab: 'ativas', counts: { ativas: 2, disponiveis: 7, feitas: 1 } }),
+      view: view({ tab: 'diarias', counts: { diarias: 2, semanais: 7, especiais: 1 } }),
       screenId: QUESTS_SCREEN_ID,
     });
 
     const at = (id: string): UiElement | undefined =>
       walk(screen.elements).find((element) => element.id === id);
 
-    const button = at('qtdis');
-    const badge = at('qtdisn');
+    const button = at('qtsem');
+    const badge = at('qtsemn');
 
     expect(button?.type).toBe('button');
     expect(badge?.type).toBe('label');
@@ -379,11 +450,11 @@ describe('o desenho', () => {
     // pendurado no botão, ele abriria um buraco morto bem onde o
     // jogador clica.
     const screen = buildQuestsScreen({
-      view: view({ tab: 'ativas', counts: { ativas: 2, disponiveis: 7, feitas: 1 } }),
+      view: view({ tab: 'diarias', counts: { diarias: 2, semanais: 7, especiais: 1 } }),
       screenId: QUESTS_SCREEN_ID,
     });
 
-    const inactive = walk(screen.elements).find((element) => element.id === 'qtdis');
+    const inactive = walk(screen.elements).find((element) => element.id === 'qtsem');
 
     expect(inactive?.type).toBe('button');
     expect(inactive?.children).toEqual([]);
@@ -397,7 +468,7 @@ describe('o desenho', () => {
 
     // Uma aba ali levaria o jogador para o menu geral por dentro da
     // tela do NPC, e ele não teria como voltar.
-    expect(walk(screen.elements).some((element) => element.id === 'qtati')).toBe(false);
+    expect(walk(screen.elements).some((element) => element.id === 'qtdia')).toBe(false);
     // E o título é o nome dele.
     expect(
       walk(screen.elements).find((element) => element.id === 'qh' && element.type === 'label'),
@@ -541,11 +612,16 @@ function progress(overrides: Partial<QuestProgressView> = {}): QuestProgressView
     complete: false,
     acceptedAt: 0,
     completedAt: null,
+    repeatMode: 'daily',
     ...overrides,
   };
 }
 
-function offer(id: string, block: QuestOffer['block'] = null): QuestOffer {
+function offer(
+  id: string,
+  block: QuestOffer['block'] = null,
+  repeatMode: QuestOffer['quest']['repeatMode'] = 'once',
+): QuestOffer {
   return {
     quest: {
       id,
@@ -560,7 +636,7 @@ function offer(id: string, block: QuestOffer['block'] = null): QuestOffer {
       // A fixture ficou para trás quando o campo nasceu, e o
       // `npm run typecheck` estava vermelho por causa dela.
       turnInNpcId: null,
-      repeatMode: 'once',
+      repeatMode,
       cooldownSeconds: 0,
       requiresQuest: null,
       availableFrom: null,
@@ -600,7 +676,7 @@ describe('a leitura', () => {
       reader: reader(),
       serverId: 'pvp1',
       steamId: undefined,
-      target: { tab: 'ativas', page: 0, detail: null, npcId: null },
+      target: { tab: 'diarias', page: 0, detail: null, npcId: null },
     });
 
     // Mostrar o catálogo sem o progresso seria pior que a frase:
@@ -609,31 +685,100 @@ describe('a leitura', () => {
     expect(result.cards).toEqual([]);
   });
 
-  it('a aba das ativas traz só `active`; a de resgatar, só `completed`', async () => {
-    const live = [
-      progress({ playerQuestId: 1, status: 'active' }),
-      progress({ playerQuestId: 2, status: 'completed', complete: true }),
-    ];
+  // ####  A ABA É A FREQUÊNCIA; O ESTADO É A ETIQUETA  ####
+  //
+  // Pedido do dono em 16/09/2026: as abas EM ANDAMENTO,
+  // DISPONÍVEIS e RESGATAR viraram DIÁRIAS e SEMANAIS.
+  it('agrupa pela frequência, com o estado em cada card', async () => {
+    const read = (tab: 'diarias' | 'semanais' | 'especiais') =>
+      readQuestsView({
+        reader: reader({
+          liveFor: () => [
+            progress({ playerQuestId: 1, status: 'active', repeatMode: 'daily' }),
+            progress({ playerQuestId: 2, status: 'completed', complete: true, repeatMode: 'weekly' }),
+          ],
+          offersFor: () =>
+            Promise.resolve([
+              offer('lenha', null, 'daily'),
+              offer('veterano', { code: 'QUEST_ON_COOLDOWN', reason: 'Volta em 4h.' }, 'cooldown'),
+            ]),
+        }),
+        serverId: 'pvp1',
+        steamId: '76561198000000001',
+        target: { tab, page: 0, detail: null, npcId: null },
+      });
 
-    const ativas = await readQuestsView({
-      reader: reader({ liveFor: () => live }),
+    const diarias = await read('diarias');
+    const semanais = await read('semanais');
+    const especiais = await read('especiais');
+
+    expect(diarias.cards.map((item) => item.status)).toEqual(['active', 'available']);
+    expect(semanais.cards.map((item) => item.status)).toEqual(['claimable']);
+    expect(semanais.cards[0]?.actionId).toBe('quest:claim:2');
+    expect(especiais.cards.map((item) => item.status)).toEqual(['blocked']);
+
+    expect(diarias.counts).toEqual({ diarias: 2, semanais: 1, especiais: 1 });
+    expect(diarias.claimables).toEqual({ diarias: 0, semanais: 1, especiais: 0 });
+  });
+
+  it('dentro da aba, o prêmio parado vem primeiro e o bloqueado por último', async () => {
+    const result = await readQuestsView({
+      reader: reader({
+        liveFor: () => [
+          progress({ playerQuestId: 1, status: 'active' }),
+          progress({ playerQuestId: 2, status: 'completed', complete: true }),
+        ],
+        offersFor: () =>
+          Promise.resolve([
+            offer('trancada', { code: 'QUEST_LOCKED', reason: 'Só VIP.' }, 'daily'),
+            offer('livre', null, 'daily'),
+          ]),
+      }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 0, detail: null, npcId: null },
+      target: { tab: 'diarias', page: 0, detail: null, npcId: null },
     });
 
-    const feitas = await readQuestsView({
-      reader: reader({ liveFor: () => live }),
+    expect(result.cards.map((item) => item.status)).toEqual([
+      'claimable',
+      'active',
+      'available',
+      'blocked',
+    ]);
+  });
+
+  // Falar com o NPC não é bloqueio: a missão está disponível, só se
+  // pega no balcão. Chamá-la de BLOQUEADA mandaria o jogador embora.
+  it('a missão que pede o NPC continua DISPONÍVEL', async () => {
+    const result = await readQuestsView({
+      reader: reader({
+        offersFor: () =>
+          Promise.resolve([
+            offer('lenha', { code: 'QUEST_NEEDS_NPC', reason: 'Fale com Zev.' }, 'daily'),
+          ]),
+      }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'feitas', page: 0, detail: null, npcId: null },
+      target: { tab: 'diarias', page: 0, detail: null, npcId: null },
     });
 
-    expect(ativas.cards).toHaveLength(1);
-    expect(ativas.cards[0]?.actionLabel).toBeNull();
-    expect(feitas.cards).toHaveLength(1);
-    expect(feitas.cards[0]?.actionLabel).toBe('RESGATAR');
-    expect(feitas.cards[0]?.actionId).toBe('quest:claim:2');
+    expect(result.cards[0]?.status).toBe('available');
+    expect(result.cards[0]?.line).toBe('Fale com Zev.');
+  });
+
+  it('sem aba no endereço, abre a primeira que tem missão', async () => {
+    const result = await readQuestsView({
+      reader: reader({
+        offersFor: () => Promise.resolve([offer('semanal', null, 'weekly')]),
+      }),
+      serverId: 'pvp1',
+      steamId: '76561198000000001',
+      target: { tab: null, page: 0, detail: null, npcId: null },
+    });
+
+    // Quem só tem semanais não deve cair numa aba de diárias vazia.
+    expect(result.tab).toBe('semanais');
+    expect(result.cards).toHaveLength(1);
   });
 
   it('a disponível bloqueada mostra o MOTIVO no lugar da descrição', async () => {
@@ -646,7 +791,7 @@ describe('a leitura', () => {
       }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'disponiveis', page: 0, detail: null, npcId: null },
+      target: { tab: 'especiais', page: 0, detail: null, npcId: null },
     });
 
     // É a informação que ele foi buscar. O texto de sabor da quest
@@ -668,7 +813,7 @@ describe('a leitura', () => {
       }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 0, detail: null, npcId: 'velho' },
+      target: { tab: null, page: 0, detail: null, npcId: 'velho' },
       npcName: 'Velho do Outpost',
     });
 
@@ -686,7 +831,7 @@ describe('a leitura', () => {
       reader: reader({ liveFor: () => live }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 7, detail: null, npcId: null },
+      target: { tab: 'diarias', page: 7, detail: null, npcId: null },
     });
 
     // Ele resgatou a última quest da página 2 e o endereço ficou
@@ -709,7 +854,7 @@ describe('a leitura', () => {
       }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 0, detail: null, npcId: null },
+      target: { tab: 'diarias', page: 0, detail: null, npcId: null },
     });
 
     // Mostrar só o primeiro faria a barra encher pela metade e
@@ -736,7 +881,7 @@ describe('o detalhe', () => {
       reader: reader({ liveFor: () => [mine] }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 0, detail: { kind: 'live', id: '8412' }, npcId: null },
+      target: { tab: null, page: 0, detail: { kind: 'live', id: '8412' }, npcId: null },
     });
 
     expect(result.detail?.title).toBe('Minerador');
@@ -758,7 +903,7 @@ describe('o detalhe', () => {
       reader: reader({ liveFor: () => [mine] }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 0, detail: { kind: 'live', id: '999' }, npcId: null },
+      target: { tab: null, page: 0, detail: { kind: 'live', id: '999' }, npcId: null },
     });
 
     expect(result.detail?.title).toBe('Missão indisponível');
@@ -773,7 +918,7 @@ describe('o detalhe', () => {
         serverId: 'pvp1',
         steamId: '76561198000000001',
         target: {
-          tab: 'ativas',
+          tab: null,
           page: 0,
           detail: { kind: 'live', id: String(view.playerQuestId) },
           npcId: null,
@@ -806,7 +951,7 @@ describe('o detalhe', () => {
       reader: reader({ offersFor: () => Promise.resolve([withObjective]) }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+      target: { tab: null, page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
     });
 
     expect(result.detail?.objectives).toEqual([
@@ -833,7 +978,7 @@ describe('o detalhe', () => {
       reader: reader({ offersFor: () => Promise.resolve([offer]) }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+      target: { tab: null, page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
       catalog: {
         itemOf: (shortname) =>
           shortname === 'metal.refined'
@@ -862,7 +1007,7 @@ describe('o detalhe', () => {
       reader: reader({ offersFor: () => Promise.resolve([offer]) }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+      target: { tab: null, page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
       catalog: { rankingLabelOf: () => null },
     });
 
@@ -880,7 +1025,7 @@ describe('o detalhe', () => {
       reader: reader({ offersFor: () => Promise.resolve([offer]) }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'disponiveis', page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+      target: { tab: null, page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
     });
 
     expect(result.detail?.rewards).toEqual([{ text: '25x metal.refined', icon: null }]);
@@ -1073,10 +1218,10 @@ describe('o detalhe', () => {
       }),
       serverId: 'pvp1',
       steamId: '76561198000000001',
-      target: { tab: 'ativas', page: 0, detail: null, npcId: null },
+      target: { tab: 'diarias', page: 0, detail: null, npcId: null },
     });
 
-    expect(result.counts).toEqual({ ativas: 2, disponiveis: 2, feitas: 1 });
+    expect(result.counts).toEqual({ diarias: 3, semanais: 0, especiais: 2 });
     expect(offersCalls).toBe(1);
   });
 });

@@ -1,70 +1,92 @@
 // ============================================================
-//  workshop.ts  -  o catálogo de skins do Workshop, do lado do
-//  agente.
+//  workshop.ts  -  as skins do Workshop, do lado do agente.
 //
 //  ####  O QUE É DAQUI E O QUE É DO PLUGIN  ####
 //
-//    AQUI     o que existe no catálogo, quem tem direito a cada
-//             skin, em que servidores ela vale e quem está em
-//             modo streamer agora
-//    LÁ       carimbar o número no item que está nascendo, e
-//             registrar as permissões no Oxide
+//    AQUI     o catálogo, as coleções, os acessos, em que
+//             servidores cada skin vale, quem está em modo
+//             streamer, e o registro de tudo isso
+//    LÁ       a caixa do `/skin`, o `/skin <coleção>`, a decisão
+//             "este jogador pode?" (grupo e permissão do Oxide só
+//             existem lá) e a troca do número no item
 //
-//  A decisão por item não pode vir para cá: ela acontece milhares
-//  de vezes por minuto num servidor cheio, dentro de um hook do
-//  jogo. O que sobe pelo console é o CATÁLOGO, e ele muda quando
-//  um humano mexe numa tela.
+//  ####  A CARGA É COMPLETA, E DESCE EM PEDAÇOS  ####
 //
-//  ####  O PAYLOAD É COMPLETO, NUNCA UM DELTA  ####
+//  Nunca um delta: quem sumiu da lista some do jogo no instante em
+//  que a carga é aplicada. Com acessos por jogador, a carga passa do
+//  frame de 50 KB do WebRCON com poucas centenas de linhas — então
+//  ela é cortada:
 //
-//  Mesma regra do `origemz.vip.sync` (ver plugin-push.ts): quem
-//  sumiu da lista perde a skin no instante em que o comando é
-//  aplicado. É isso que faz "apaguei a skin" chegar ao jogo sem um
-//  comando de remoção. Passou do teto de 50 KB, o envio é RECUSADO
-//  inteiro — meio catálogo é pior que catálogo velho, porque o
-//  plugin troca um cache bom por um incompleto que ele acredita
-//  ser completo.
+//      origemz.workshop.sync <lote> <i> <n> <pedaço base64>
+//
+//  O plugin guarda os pedaços do mesmo lote e só troca o que tem
+//  quando o último chega. Um lote que não se completa (o RCON caiu
+//  no meio) é descartado lá — o plugin continua com a carga velha,
+//  inteira, que é melhor que meia carga nova.
 //
 //  ####  NENHUM COMANDO SAI DE DENTRO DO GANCHO DE CONSOLE  ####
 //
 //  A lição medida do `agent-requests.ts`, repetida no `koth.ts`: um
 //  comando mandado de dentro do `onConsoleLine` imprime no console,
-//  a linha volta e dispara de novo. Por isso o `ready` do plugin e
-//  o `/streamer` do jogador só ARMAM um relógio; o comando sai dele.
+//  a linha volta e dispara de novo. O `ready`, o `/streamer` e o
+//  `/skin add` só ARMAM trabalho; o comando sai de um relógio.
 //
-//  ####  E A LISTA DE STREAMERS VIAJA JUNTO  ####
+//  ####  O `/skin add` DO JOGO  ####
 //
-//  O modo streamer já existe inteiro no projeto e a fonte da
-//  verdade dele é o agente. Mandar a lista dentro do próprio sync
-//  é o que evita a pior das opções do §3.3 do levantamento — duas
-//  cópias da mesma lista em dois plugins, que divergem no primeiro
-//  reload. Ver types/workshop.ts.
+//      admin digita  /skin add "metal.facemask" "3802433262"
+//            ↓  o plugin confere item e número, e grita
+//      #OZWORKSHOP#{"kind":"add","secret":…,"requestId":…}
+//            ↓  este arquivo
+//      WorkshopCatalog.createSkin   ← a MESMA regra do painel
+//            ↓
+//      origemz.workshop.reply <base64>  → a frase no chat do admin
+//      origemz.workshop.sync …          → a skin já na caixa
 //
-//  Ver Docs/OrigemZWorkshop/00-LEVANTAMENTO.md.
+//  Ver Docs/OrigemZWorkshop/01-CAIXA-E-COLECOES.md.
 // ============================================================
 
 import { randomUUID } from 'node:crypto';
 
+import type { MetaRepository } from '../db/meta-repository.js';
 import type { StreamerRepository } from '../db/streamer-repository.js';
+import type { WorkshopAccessRepository } from '../db/workshop-access-repository.js';
 import type { WorkshopSkinsRepository } from '../db/workshop-repository.js';
+import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
 import { parseStreamerNotice } from '../types/streamer-transport.js';
-import type {
-  WorkshopPayload,
-  WorkshopPayloadSkin,
-  WorkshopPush,
-  WorkshopStatus,
+import {
+  workshopAddRequestSchema,
+  type WorkshopAddReply,
+  type WorkshopAddRequest,
+  type WorkshopPayload,
+  type WorkshopPayloadCollection,
+  type WorkshopPayloadGrant,
+  type WorkshopPayloadSkin,
+  type WorkshopPush,
+  type WorkshopStatus,
 } from '../types/workshop.js';
 import { toError } from '../util.js';
-import { pushState, type PushOutcome } from './plugin-push.js';
+import { firstJsonLine } from './plugin-contract.js';
+import { encodePushPayload, pushErrorSchema, pushOkSchema, pushState } from './plugin-push.js';
+import type { WorkshopCatalog } from './workshop-catalog.js';
 
 /** O marcador do aviso. O mesmo `Marker` do OrigemZWorkshop.cs. */
 export const WORKSHOP_MARKER = '#OZWORKSHOP#';
 
-/** Os dois comandos do contrato. */
+/** Os comandos do contrato. */
 export const WORKSHOP_SYNC = 'origemz.workshop.sync';
 export const WORKSHOP_STATUS = 'origemz.workshop.status';
+export const WORKSHOP_REPLY = 'origemz.workshop.reply';
+
+/**
+ * O tamanho de cada pedaço, em caracteres de base64.
+ *
+ * 40 KB mais o nome do comando e os três números cabe folgado nos
+ * 50 KB do `MAX_PUSH_BYTES` — base64 é ASCII, então caractere e
+ * byte são a mesma conta.
+ */
+export const WORKSHOP_CHUNK_CHARS = 40_000;
 
 /** Quebra de linha do console, nos dois sabores. */
 const SPLIT_LINES = /\r?\n/;
@@ -84,10 +106,16 @@ const PLUGIN_LINE = /^(?:\[[^\]\r\n]{1,60}\]\s*){0,2}#OZWORKSHOP#/;
  *
  * Um segundo, como o do KOTH: tempo de o banco já ter recebido a
  * escrita que a linha provocou (o `/streamer` é gravado pelo
- * `StreamerSync`, que roda no mesmo gancho) e de juntar a rajada de
- * um `oxide.reload` que derruba todos os plugins de uma vez.
+ * `StreamerSync`, no mesmo gancho) e de juntar a rajada de um
+ * `oxide.reload` que derruba todos os plugins de uma vez.
  */
 const SYNC_DELAY_MS = 1000;
+
+/** O `setTimeout` do Node estoura acima de ~24,8 dias. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** Onde o relógio de vencimento lembra até quando já conferiu. */
+const EXPIRY_CHECKED_KEY = 'workshop.expiry_checked_at';
 
 export type WorkshopSyncTrigger =
   | 'startup'
@@ -95,6 +123,7 @@ export type WorkshopSyncTrigger =
   | 'plugin-requested'
   | 'catalog-changed'
   | 'streamer-toggled'
+  | 'grant-expired'
   | 'manual';
 
 /**
@@ -102,7 +131,7 @@ export type WorkshopSyncTrigger =
  *
  * O plugin que acabou de subir e o RCON que acabou de reconectar
  * não têm carga nenhuma — mandar "não mudou nada" para eles seria
- * deixá-los vazios até alguém editar o catálogo.
+ * deixá-los com a carga do disco até alguém editar o catálogo.
  */
 function isForced(trigger: WorkshopSyncTrigger): boolean {
   return trigger === 'rcon-connected' || trigger === 'plugin-requested' || trigger === 'startup';
@@ -116,16 +145,20 @@ export interface WorkshopServers {
 
 export interface WorkshopDeps {
   readonly skins: WorkshopSkinsRepository;
+  readonly access: WorkshopAccessRepository;
   /**
-   * Quem está em modo streamer.
-   *
-   * O catálogo é lido a cada envio, e a lista também: as duas são
-   * pequenas, e um cache aqui seria a terceira cópia da mesma
-   * verdade.
+   * Quem está em modo streamer. Lido a cada envio: a lista é
+   * pequena, e um cache aqui seria a terceira cópia da verdade.
    */
   readonly streamers: StreamerRepository;
   readonly servers: WorkshopServers;
+  /** As regras do cadastro. É por aqui que o `/skin add` grava. */
+  readonly catalog: WorkshopCatalog;
+  /** Guarda até quando o vencimento de acessos já foi registrado. */
+  readonly meta?: MetaRepository;
   readonly logger?: Logger | undefined;
+  /** Para o teste controlar o tempo. */
+  readonly now?: () => number;
 }
 
 export class WorkshopCommandError extends Error {
@@ -142,7 +175,8 @@ export class WorkshopCommandError extends Error {
 export type WorkshopSyncOutcome =
   | { readonly status: 'skipped'; readonly reason: string }
   | { readonly status: 'unchanged' }
-  | { readonly status: 'pushed'; readonly outcome: PushOutcome };
+  | { readonly status: 'sent'; readonly bytes: number; readonly parts: number }
+  | { readonly status: 'failed'; readonly error: Error };
 
 export class WorkshopService {
   readonly #deps: WorkshopDeps;
@@ -150,38 +184,40 @@ export class WorkshopService {
   /**
    * O segredo desta sessão do agente.
    *
-   * Ele desce no `sync` e volta em todo aviso do plugin — menos no
+   * Desce no `sync` e volta em todo aviso do plugin — menos no
    * `ready`, que é quem o pede. Sem ele, um jogador digita o
-   * marcador no chat e forja evento. Ver `handleLine`.
-   *
-   * Nasce novo a cada processo de propósito: um segredo fixo em
-   * arquivo vazaria no primeiro log colado num chat de suporte.
+   * marcador no chat e forja um `/skin add`. Nasce novo a cada
+   * processo: um segredo fixo vazaria no primeiro log colado num
+   * chat de suporte.
    */
   readonly #secret = randomUUID();
 
-  /** id do servidor -> o relógio de debounce dele. */
   readonly #timers = new Map<string, NodeJS.Timeout>();
-
-  /** id do servidor -> o motivo que abriu o debounce. */
   readonly #pending = new Map<string, WorkshopSyncTrigger>();
 
   /**
    * id do servidor -> a última carga que ENTROU nele.
    *
-   * O dedup existe porque o `/streamer` de um jogador agenda
-   * reenvio em TODOS os servidores, e a carga dos outros quase
-   * sempre não muda. Mandar de novo custaria um frame de RCON por
-   * servidor por clique, sem mudar nada.
+   * O `/streamer` de um jogador agenda reenvio em TODOS os
+   * servidores, e a carga dos outros quase sempre não muda.
    */
   readonly #lastSent = new Map<string, string>();
 
   /** id do servidor -> quantas skins o plugin confirmou ter aplicado. */
   readonly #applied = new Map<string, number>();
 
+  /** Os `requestId` de `/skin add` já tratados, contra aviso repetido. */
+  readonly #seenRequests = new Set<string>();
+
+  #expiryTimer: NodeJS.Timeout | null = null;
   #stopped = false;
 
   constructor(deps: WorkshopDeps) {
     this.#deps = deps;
+  }
+
+  #now(): number {
+    return this.#deps.now?.() ?? Date.now();
   }
 
   stop(): void {
@@ -193,6 +229,11 @@ export class WorkshopService {
 
     this.#timers.clear();
     this.#pending.clear();
+
+    if (this.#expiryTimer !== null) {
+      clearTimeout(this.#expiryTimer);
+      this.#expiryTimer = null;
+    }
   }
 
   // ------------------------------------------------------------
@@ -202,35 +243,71 @@ export class WorkshopService {
   /**
    * O que desce para AQUELE servidor.
    *
-   * Pública porque é o que a rota de diagnóstico e o teste leem:
-   * provar "a skin desligada não vai" não deveria exigir um console
-   * de mentira.
+   * Pública porque é o que o teste lê: provar "a skin desligada não
+   * vai" não deveria exigir um console de mentira.
    */
   buildPayload(serverId: string): WorkshopPayload {
-    // O repositório já filtra: só as LIGADAS, e só as que a junção
-    // deu a este servidor. Ver db/workshop-repository.ts.
+    const now = this.#now();
+
+    // O repositório já filtra: só as LIGADAS, e só as da junção
+    // deste servidor.
     const skins: WorkshopPayloadSkin[] = this.#deps.skins.listForServer(serverId).map((skin) => ({
       id: skin.id,
+      label: skin.label,
       shortname: skin.shortname,
       skinId: skin.skinId,
       permission: skin.permission,
+      collectionId: skin.collectionId,
+      openToAll: skin.openToAll,
       hideInStreamer: skin.hideInStreamer,
-      // Sempre `true` aqui: o que está desligado não chegou. Ver
-      // types/workshop.ts para por que o campo continua viajando.
-      enabled: true,
     }));
+
+    const skinIds = new Set(skins.map((skin) => skin.id));
+    const usedCollections = new Set(
+      skins.map((skin) => skin.collectionId).filter((id): id is number => id !== null),
+    );
+
+    // ####  SÓ AS COLEÇÕES QUE TÊM ALGO AQUI  ####
+    //
+    // Uma coleção sem nenhuma skin neste servidor faria o `/skin
+    // neve` responder "0 itens alterados", que parece defeito. Fora
+    // da carga, o plugin responde "não existe coleção neve aqui" —
+    // que é a verdade deste servidor.
+    const collections: WorkshopPayloadCollection[] = this.#deps.skins
+      .listCollections()
+      .filter((collection) => collection.enabled && usedCollections.has(collection.id))
+      .map((collection) => ({
+        id: collection.id,
+        slug: collection.slug,
+        label: collection.label,
+        permission: collection.permission,
+        openToAll: collection.openToAll,
+      }));
+
+    const collectionIds = new Set(collections.map((collection) => collection.id));
+
+    const grants: WorkshopPayloadGrant[] = this.#deps.access
+      .liveGrants(now)
+      .filter((grant) =>
+        grant.targetType === 'skin' ? skinIds.has(grant.targetId) : collectionIds.has(grant.targetId),
+      )
+      .map((grant) => ({
+        subjectType: grant.subjectType,
+        subject: grant.subject,
+        targetType: grant.targetType,
+        targetId: grant.targetId,
+        expiresAt: grant.expiresAt,
+      }));
 
     return {
       secret: this.#secret,
       skins,
+      collections,
+      grants,
       // ####  QUEM ESTÁ ESCONDENDO A LOGO, E NÃO QUEM É STREAMER  ####
       //
-      // `allowed` é "o admin liberou"; `active` é "ele está no ar
-      // agora"; `hideLogo` é "o que ele escondeu é a logo". A skin
-      // do Workshop É a logo — um parceiro que escondeu só a
-      // propaganda continua recebendo o item marcado, que é
-      // exatamente o acordo que se faz com quem divulga o servidor.
-      // Ver types/streamer.ts.
+      // A skin do Workshop É a logo — um parceiro que escondeu só a
+      // propaganda continua com o item marcado. Ver types/streamer.ts.
       streamers: this.#deps.streamers
         .active()
         .filter((profile) => profile.hideLogo)
@@ -238,74 +315,90 @@ export class WorkshopService {
     };
   }
 
+  /**
+   * A carga como ela viaja: os comandos, em ordem.
+   *
+   * Pública pelo mesmo motivo do `buildPayload`: o teste corta uma
+   * carga grande e confere que as partes remontam o original.
+   */
+  buildSyncCommands(payload: WorkshopPayload): readonly string[] {
+    const encoded = encodePushPayload(payload);
+    const parts = Math.max(1, Math.ceil(encoded.length / WORKSHOP_CHUNK_CHARS));
+    const batch = randomUUID().replace(/-/g, '').slice(0, 12);
+    const commands: string[] = [];
+
+    for (let index = 0; index < parts; index += 1) {
+      const piece = encoded.slice(index * WORKSHOP_CHUNK_CHARS, (index + 1) * WORKSHOP_CHUNK_CHARS);
+
+      commands.push(`${WORKSHOP_SYNC} ${batch} ${String(index)} ${String(parts)} ${piece}`);
+    }
+
+    return commands;
+  }
+
   // ------------------------------------------------------------
   //  §2  EMPURRAR
   // ------------------------------------------------------------
 
-  /** Monta, mede, manda e confere. NUNCA lança. */
-  async sync(
-    serverId: string,
-    trigger: WorkshopSyncTrigger = 'manual',
-  ): Promise<WorkshopSyncOutcome> {
+  /** Monta, corta, manda e confere. NUNCA lança. */
+  async sync(serverId: string, trigger: WorkshopSyncTrigger = 'manual'): Promise<WorkshopSyncOutcome> {
     if (this.#stopped) return { status: 'skipped', reason: 'o agente está parando' };
 
     const rcon = this.#rconOf(serverId);
 
-    if (rcon === null) {
-      // NÃO é erro: metade da lista costuma estar parada, e a
-      // reconexão repassa o catálogo inteiro.
-      return { status: 'skipped', reason: 'sem RCON' };
-    }
+    // NÃO é erro: metade da lista costuma estar parada, e a
+    // reconexão repassa a carga inteira.
+    if (rcon === null) return { status: 'skipped', reason: 'sem RCON' };
 
     const payload = this.buildPayload(serverId);
+    // O segredo é o mesmo a vida toda; o que muda é o resto.
     const fingerprint = JSON.stringify(payload);
 
     if (!isForced(trigger) && this.#lastSent.get(serverId) === fingerprint) {
       return { status: 'unchanged' };
     }
 
-    const outcome = await pushState({
-      rcon,
-      command: WORKSHOP_SYNC,
-      payload,
-      logger: this.#deps.logger,
-      trigger,
-    });
+    const commands = this.buildSyncCommands(payload);
+    let bytes = 0;
 
-    if (outcome.status === 'sent') {
-      this.#lastSent.set(serverId, fingerprint);
+    try {
+      for (const command of commands) {
+        bytes += Buffer.byteLength(command, 'utf8');
+        checkPushReply(await rcon.send(command));
+      }
+    } catch (cause) {
+      const error = toError(cause);
 
-      this.#deps.logger?.debug(
-        { server: serverId, trigger, skins: payload.skins.length },
-        'catálogo do Workshop enviado ao plugin',
-      );
-    } else {
-      // O que não entrou não pode ficar marcado como entrado: a
-      // próxima tentativa precisa mandar de novo.
+      // O que não entrou não pode ficar marcado como entrado.
       this.#lastSent.delete(serverId);
 
-      // ####  E O QUE NÃO ENTROU PRECISA APARECER  ####
-      //
       // Sem esta linha, um servidor cujo plugin não conhece o
-      // comando recusaria a carga em silêncio — e o sintoma, lá na
-      // frente, seria "as skins não funcionam neste servidor", sem
-      // nada no log dizendo por quê.
+      // comando recusaria a carga em silêncio — e o sintoma seria
+      // "a caixa está vazia neste servidor", sem nada no log.
       this.#deps.logger?.warn(
-        {
-          server: serverId,
-          trigger,
-          status: outcome.status,
-          ...(outcome.status === 'failed' ? { err: outcome.error } : {}),
-          ...(outcome.status === 'skipped' ? { reason: outcome.reason } : {}),
-          ...(outcome.status === 'refused'
-            ? { bytes: outcome.bytes, limitBytes: outcome.limitBytes }
-            : {}),
-        },
-        'o catálogo do Workshop NÃO chegou a este servidor',
+        { server: serverId, trigger, err: error, parts: commands.length },
+        'a carga do Workshop NÃO chegou a este servidor',
       );
+
+      return { status: 'failed', error };
     }
 
-    return { status: 'pushed', outcome };
+    this.#lastSent.set(serverId, fingerprint);
+
+    this.#deps.logger?.debug(
+      {
+        server: serverId,
+        trigger,
+        skins: payload.skins.length,
+        collections: payload.collections.length,
+        grants: payload.grants.length,
+        parts: commands.length,
+        bytes,
+      },
+      'carga do Workshop enviada ao plugin',
+    );
+
+    return { status: 'sent', bytes, parts: commands.length };
   }
 
   /** O mesmo, em todos os servidores. NUNCA lança. */
@@ -324,9 +417,8 @@ export class WorkshopService {
   syncSoon(serverId: string, trigger: WorkshopSyncTrigger): void {
     if (this.#stopped) return;
 
-    // O motivo mais forte vence: um salvamento que chega no meio do
-    // debounce não pode apagar o `plugin-requested` que o abriu — é
-    // ele que ignora o dedup.
+    // O motivo mais forte vence: um salvamento no meio do debounce
+    // não pode apagar o `plugin-requested` que o abriu.
     const pending = this.#pending.get(serverId);
 
     if (pending === undefined || !isForced(pending)) {
@@ -343,12 +435,9 @@ export class WorkshopService {
       this.#pending.delete(serverId);
 
       void this.sync(serverId, reason).catch((error: unknown) => {
-        // Não deveria acontecer: `sync` traduz falha em desfecho. O
-        // catch existe porque isto roda dentro de um relógio, onde
-        // uma Promise rejeitada não teria quem a pegasse.
         this.#deps.logger?.error(
           { server: serverId, err: toError(error) },
-          'o envio do catálogo do Workshop lançou',
+          'o envio da carga do Workshop lançou',
         );
       });
     }, SYNC_DELAY_MS);
@@ -357,45 +446,115 @@ export class WorkshopService {
     this.#timers.set(serverId, timer);
   }
 
-  /** O mesmo, em todos. É o caminho do `/streamer`: o estado é da REDE. */
   syncAllSoon(trigger: WorkshopSyncTrigger): void {
     for (const serverId of this.#deps.servers.ids()) {
       this.syncSoon(serverId, trigger);
     }
   }
 
-  /**
-   * O RCON daquele servidor reconectou.
-   *
-   * O servidor pode ter reiniciado, e o plugin nasce sem catálogo —
-   * ou seja, todo item nasceria vanilla até alguém editar a tela.
-   */
+  /** O servidor pode ter reiniciado: o plugin só tem a carga do disco. */
   handleRconConnected(serverId: string): void {
     this.syncSoon(serverId, 'rcon-connected');
   }
 
   /**
-   * O catálogo mudou no painel.
+   * O catálogo ou os acessos mudaram.
    *
-   * Sem isto a skin fica no banco, aparece na tela, e o plugin
-   * nunca soube que ela existe.
+   * Rearma o relógio de vencimento junto: um acesso novo de 1 hora
+   * pode vencer antes do que o relógio esperava.
    */
   handleCatalogChanged(): void {
     this.syncAllSoon('catalog-changed');
+    this.scheduleExpiry();
   }
 
-  /**
-   * O modo streamer de alguém mudou (pelo painel, ou pelo comando).
-   *
-   * Reenvia em TODOS: o modo é da rede, e o jogador atravessa para
-   * outro servidor no meio da transmissão. Ver streamer-sync.ts.
-   */
+  /** O modo streamer é da REDE: o jogador atravessa de servidor. */
   handleStreamerChanged(): void {
     this.syncAllSoon('streamer-toggled');
   }
 
   // ------------------------------------------------------------
-  //  §3  ESCUTAR
+  //  §3  O VENCIMENTO DOS ACESSOS
+  // ------------------------------------------------------------
+
+  /**
+   * Dorme até o próximo prazo, e acorda para reenviar e registrar.
+   *
+   * O plugin confere o prazo sozinho — o reenvio é o que TIRA a
+   * linha vencida da carga, e o registro é o que responde "quem
+   * tirou minha skin?".
+   */
+  scheduleExpiry(): void {
+    if (this.#stopped) return;
+
+    if (this.#expiryTimer !== null) {
+      clearTimeout(this.#expiryTimer);
+      this.#expiryTimer = null;
+    }
+
+    const now = this.#now();
+
+    // O que venceu com o agente desligado é registrado agora.
+    this.#recordExpired(now);
+
+    const next = this.#deps.access.nextExpiry(now);
+
+    if (next === null) return;
+
+    const delay = Math.min(Math.max(next - now + 250, 0), MAX_TIMER_MS);
+
+    this.#expiryTimer = setTimeout(() => {
+      this.#expiryTimer = null;
+      this.syncAllSoon('grant-expired');
+      this.scheduleExpiry();
+    }, delay);
+
+    this.#expiryTimer.unref();
+  }
+
+  #recordExpired(now: number): void {
+    const meta = this.#deps.meta;
+    const raw = meta?.read(EXPIRY_CHECKED_KEY) ?? null;
+    const since = raw === null ? now : Number(raw);
+
+    if (Number.isFinite(since) && since < now) {
+      for (const grant of this.#deps.access.expiredBetween(since, now)) {
+        this.#deps.access.log({
+          actor: 'sistema',
+          source: 'system',
+          action: 'grant.expire',
+          target:
+            grant.targetType === 'skin'
+              ? this.#skinLabel(grant.targetId)
+              : this.#collectionLabel(grant.targetId),
+          steamId: grant.subjectType === 'player' ? grant.subject : null,
+          detail: {
+            grantId: grant.id,
+            subjectType: grant.subjectType,
+            subject: grant.subject,
+            expiresAt: grant.expiresAt,
+          },
+        }, grant.expiresAt ?? now);
+      }
+    }
+
+    meta?.write(EXPIRY_CHECKED_KEY, String(now));
+  }
+
+  #skinLabel(id: number): string {
+    const skin = this.#deps.skins.get(id);
+
+    return skin === null ? `skin #${String(id)}` : `skin #${String(id)} "${skin.label}" (${skin.shortname})`;
+  }
+
+  #collectionLabel(id: number): string {
+    const collection = this.#deps.skins.getCollection(id);
+
+    return collection === null ? `coleção #${String(id)}` : `coleção "${collection.slug}"`;
+  }
+
+  // ------------------------------------------------------------
+  //  §4  ESCUTAR
   // ------------------------------------------------------------
 
   /**
@@ -413,12 +572,8 @@ export class WorkshopService {
         return;
       }
 
-      // ####  O `/streamer` TAMBÉM É NOTÍCIA NOSSA  ####
-      //
-      // Quem grava é o `StreamerSync`, no mesmo gancho e antes
-      // deste. O que interessa aqui é que a lista do payload mudou
-      // — e o relógio de um segundo garante que a escrita dele já
-      // aconteceu quando o comando sair.
+      // O `/streamer` também muda a carga. Quem grava é o
+      // `StreamerSync`, no mesmo gancho e antes deste.
       if (parseStreamerNotice(line) !== null) {
         this.syncAllSoon('streamer-toggled');
       }
@@ -431,8 +586,6 @@ export class WorkshopService {
   }
 
   #handle(serverId: string, line: string): void {
-    // A âncora: o marcador no começo da linha, depois de no máximo
-    // dois prefixos entre colchetes. Ver `PLUGIN_LINE`.
     if (!PLUGIN_LINE.test(line.trimStart())) return;
 
     const body = line.slice(line.indexOf(WORKSHOP_MARKER) + WORKSHOP_MARKER.length).trim();
@@ -446,18 +599,10 @@ export class WorkshopService {
     const push = parsed as WorkshopPush;
 
     if (push.kind === 'ready') {
-      // ####  O ÚNICO QUE VEM SEM SEGREDO  ####
-      //
-      // É o plugin dizendo que subiu sem catálogo. Ele ainda não
-      // tem o segredo — é justamente isto que o pede. O estrago
-      // possível de uma linha forjada aqui é um reenvio do
-      // catálogo, que é o que o agente faria de qualquer jeito na
-      // próxima reconexão.
-      this.#deps.logger?.info(
-        { server: serverId },
-        'o OrigemZWorkshop subiu e pediu o catálogo',
-      );
-
+      // O ÚNICO sem segredo: é justamente ele que pede a carga. O
+      // estrago de um forjado é um reenvio, que o agente faria na
+      // próxima reconexão de qualquer jeito.
+      this.#deps.logger?.info({ server: serverId }, 'o OrigemZWorkshop subiu e pediu a carga');
       this.syncSoon(serverId, 'plugin-requested');
 
       return;
@@ -477,45 +622,158 @@ export class WorkshopService {
 
       this.#applied.set(serverId, count);
 
-      this.#deps.logger?.debug(
-        { server: serverId, skins: count },
-        'o OrigemZWorkshop confirmou o catálogo',
-      );
+      if (typeof push.message === 'string' && push.message !== '') {
+        // Linha recusada lá é cadastro que o painel aceitou e o jogo
+        // não — o motivo só existe aqui, e precisa aparecer.
+        this.#deps.logger?.warn(
+          { server: serverId, skins: count, message: push.message },
+          'o OrigemZWorkshop recusou parte da carga',
+        );
+      }
 
       return;
     }
 
-    // Um aviso de uma versão mais nova do plugin. Ele passou pelo
-    // segredo, então é legítimo — e ignorá-lo em silêncio faria
-    // parecer que o agente o entendeu.
+    if (push.kind === 'add') {
+      const request = workshopAddRequestSchema.safeParse(parsed);
+
+      if (!request.success) {
+        this.#deps.logger?.warn(
+          { server: serverId, issues: request.error.issues.slice(0, 3) },
+          'pedido de /skin add fora do contrato: descartado',
+        );
+
+        return;
+      }
+
+      // Um aviso pode chegar duas vezes (o console repete linha em
+      // reconexão). O mesmo pedido não pode virar dois cadastros.
+      if (this.#seenRequests.has(request.data.requestId)) return;
+
+      this.#seenRequests.add(request.data.requestId);
+
+      if (this.#seenRequests.size > 500) {
+        this.#seenRequests.delete(this.#seenRequests.values().next().value as string);
+      }
+
+      // Fora do gancho: a resposta é um comando de RCON. Ver o
+      // cabeçalho.
+      const timer = setTimeout(() => {
+        void this.#handleAdd(serverId, request.data);
+      }, 0);
+
+      timer.unref();
+
+      return;
+    }
+
     this.#deps.logger?.debug(
       { server: serverId, kind: push.kind },
       'aviso do Workshop de um tipo que este agente não conhece',
     );
   }
 
+  /** O `/skin add` do jogo, pela mesma regra do painel. NUNCA lança. */
+  async #handleAdd(serverId: string, request: WorkshopAddRequest): Promise<void> {
+    const who = request.playerName === '' ? request.steamId : `${request.playerName} (${request.steamId})`;
+    const actor = { name: `jogo:${who}`, source: 'game' as const, serverId };
+
+    let reply: WorkshopAddReply;
+
+    try {
+      const { skin, warning } = await this.#deps.catalog.createSkin(
+        {
+          label: '',
+          shortname: request.shortname.trim().toLowerCase(),
+          skinId: request.skinId.trim(),
+          permission: null,
+          collectionId: null,
+          openToAll: false,
+          hideInStreamer: true,
+          enabled: true,
+          // O cadastro do jogo vale no servidor de onde veio. Levar
+          // para os outros é decisão do painel.
+          servers: [serverId],
+        },
+        actor,
+      );
+
+      reply = {
+        requestId: request.requestId,
+        steamId: request.steamId,
+        ok: true,
+        message:
+          `Skin "${skin.label}" cadastrada (#${String(skin.id)}) e liberada neste servidor. ` +
+          'Ajuste permissão, coleção e servidores no painel.' +
+          (warning === null ? '' : ` Aviso: ${warning}`),
+      };
+    } catch (cause) {
+      const message = cause instanceof ApiError ? cause.message : toError(cause).message;
+
+      reply = { requestId: request.requestId, steamId: request.steamId, ok: false, message };
+
+      this.#deps.access.log({
+        actor: actor.name,
+        source: 'game',
+        action: 'game.add-refused',
+        target: `${request.shortname} ${request.skinId}`,
+        serverId,
+        detail: { reason: cause instanceof ApiError ? cause.code : 'ERROR', message },
+      });
+
+      if (!(cause instanceof ApiError)) {
+        this.#deps.logger?.error(
+          { server: serverId, err: toError(cause) },
+          'o /skin add do jogo falhou por um erro que não é de regra',
+        );
+      }
+    }
+
+    const rcon = this.#rconOf(serverId);
+
+    if (rcon === null) return;
+
+    const outcome = await pushState({
+      rcon,
+      command: WORKSHOP_REPLY,
+      payload: reply,
+      logger: this.#deps.logger,
+      trigger: 'skin-add',
+    });
+
+    if (outcome.status !== 'sent') {
+      this.#deps.logger?.warn(
+        { server: serverId, status: outcome.status },
+        'a resposta do /skin add não chegou ao jogo',
+      );
+    }
+  }
+
   /**
    * Quantas skins o plugin daquele servidor confirmou.
    *
-   * `null` = ele nunca confirmou nada — plugin antigo, ou que ainda
-   * não recebeu carga. NÃO é zero: "nenhuma skin" e "não sei" são
-   * respostas diferentes, e a tela precisa poder dizer a segunda.
+   * `null` = ele nunca confirmou nada. NÃO é zero: "nenhuma skin" e
+   * "não sei" são respostas diferentes, e a tela precisa das duas.
    */
   appliedCount(serverId: string): number | null {
     return this.#applied.get(serverId) ?? null;
   }
 
   // ------------------------------------------------------------
-  //  §4  PERGUNTAR
+  //  §5  PERGUNTAR
   // ------------------------------------------------------------
 
   /** O que o plugin diz ter de pé. Lança `WorkshopCommandError`. */
   async status(serverId: string): Promise<WorkshopStatus> {
     const reply = await this.#command(serverId, WORKSHOP_STATUS);
+    const count = (key: string): number => (typeof reply[key] === 'number' ? reply[key] : 0);
 
     return {
-      skins: typeof reply['skins'] === 'number' ? reply['skins'] : 0,
-      streamers: typeof reply['streamers'] === 'number' ? reply['streamers'] : 0,
+      skins: count('skins'),
+      collections: count('collections'),
+      grants: count('grants'),
+      streamers: count('streamers'),
+      openBoxes: count('openBoxes'),
     };
   }
 
@@ -573,12 +831,37 @@ export class WorkshopService {
 }
 
 /**
+ * A resposta de um pedaço da carga, conferida.
+ *
+ * @throws quando o plugin recusou ou não respondeu JSON.
+ */
+function checkPushReply(raw: string): void {
+  const line = firstJsonLine(raw);
+
+  if (line === null) {
+    throw new Error(
+      `o servidor respondeu ao ${WORKSHOP_SYNC} sem JSON (veio: ${raw.trim().slice(0, 200)}). ` +
+        'O OrigemZWorkshop está carregado?',
+    );
+  }
+
+  const refused = pushErrorSchema.safeParse(line);
+
+  if (refused.success) {
+    throw new Error(`o plugin recusou o ${WORKSHOP_SYNC}: ${refused.data.error}`);
+  }
+
+  if (!pushOkSchema.safeParse(line).success) {
+    throw new Error(`a resposta do ${WORKSHOP_SYNC} não bate com o contrato: ${JSON.stringify(line).slice(0, 200)}`);
+  }
+}
+
+/**
  * A resposta do comando, sem o que o plugin falou por cima.
  *
- * Mesma defesa do `koth.ts`, e pela mesma razão medida: um `Puts`
- * disparado no frame do comando entra na resposta casada do RCON e
- * quebra o JSON. O plugin já tira o aviso do frame; isto é a
- * segunda tranca.
+ * Um `Puts` disparado no frame do comando entra na resposta casada
+ * do RCON e quebra o JSON. O plugin já tira o aviso do frame; isto
+ * é a segunda tranca.
  */
 export function cleanReply(reply: string): string {
   return reply

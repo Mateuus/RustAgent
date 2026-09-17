@@ -131,3 +131,83 @@ export class MonumentReader {
     return monuments;
   }
 }
+
+// ------------------------------------------------------------
+//  O NOME DO LUGAR
+// ------------------------------------------------------------
+
+/**
+ * Até onde cada tipo de monumento "alcança", em metros.
+ *
+ * ####  O CENTRO NÃO É O LUGAR INTEIRO  ####
+ *
+ * `world.monuments` dá UM ponto por monumento. Um NPC a 90 m do
+ * centro do Bandit Camp está dentro dele; um NPC a 90 m de um poço
+ * d'água está no meio do mato. O raio é por tipo porque o tamanho é
+ * do tipo — e os números são o tamanho aproximado de cada um no
+ * mapa, arredondados para cima.
+ *
+ * `Lake`, `Oasis` e `Cave` ficam de fora: os nomes deles são da
+ * geração do mundo ("Lake A", "jungle swamp") e não dizem nada a
+ * quem joga.
+ */
+const PLACE_RADIUS: Readonly<Record<string, number>> = {
+  Town: 180,
+  Airport: 200,
+  Radtown: 150,
+  Building: 100,
+  Lighthouse: 50,
+  Roadside: 60,
+  WaterWell: 40,
+};
+
+/**
+ * As zonas seguras, com o nome que o jogador usa para elas.
+ *
+ * Pedido do dono em 16/09/2026: "Ele está na SafeZone (Outpost)".
+ * O jogo chama as duas de `Town`, igual ao Ranch — e a diferença
+ * importa: é ali que o jogador pode ir sem levar tiro.
+ */
+const SAFE_ZONES: ReadonlySet<string> = new Set(['Outpost', 'Bandit Camp']);
+
+/**
+ * Onde fica um ponto, com a preposição junto.
+ *
+ *     na SafeZone (Outpost)
+ *     perto de Launch Site
+ *
+ * `null` = nenhum monumento perto o bastante. A preposição vem daqui
+ * porque o nome é inglês e o gênero não se adivinha: "perto de"
+ * serve para todos, e a SafeZone é feminina de qualquer jeito.
+ */
+export function describePlace(
+  monuments: readonly Monument[],
+  x: number,
+  z: number,
+): string | null {
+  let best: { readonly monument: Monument; readonly distance: number } | null = null;
+
+  for (const monument of monuments) {
+    const radius = PLACE_RADIUS[monument.type];
+
+    if (radius === undefined) {
+      continue;
+    }
+
+    // Distância no plano: `y` é altura, e um NPC no telhado continua
+    // no mesmo lugar.
+    const distance = Math.hypot(monument.x - x, monument.z - z);
+
+    if (distance <= radius && (best === null || distance < best.distance)) {
+      best = { monument, distance };
+    }
+  }
+
+  if (best === null) {
+    return null;
+  }
+
+  const { name } = best.monument;
+
+  return SAFE_ZONES.has(name) ? `na SafeZone (${name})` : `perto de ${name}`;
+}

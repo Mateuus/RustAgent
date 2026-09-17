@@ -26,7 +26,10 @@
 //  ####  DOIS USOS, DUAS LISTAS  ####
 //
 //    award  a recompensa ESCREVE no ranking -> só os que aceitam
-//           ponto concedido (`rankings/awards.ts`)
+//           ponto concedido (`rankings/awards.ts`) podem ser
+//           ESCOLHIDOS; os outros aparecem apagados, com o motivo
+//           — escondê-los fez o dono achar que a lista estava
+//           quebrada (16/09/2026)
 //    read   o objetivo LÊ o ranking -> todos servem, inclusive
 //           minério e abates
 //
@@ -51,7 +54,14 @@ import { Input } from '@/components/ui/input';
 import { agent, type RankingDefinition, type RankingDefinitionInput } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-import { eligibleRankings, searchRankings, type RankingPickerMode } from './ranking-choice';
+import {
+  eligibleRankings,
+  matchesRanking,
+  rankingOptions,
+  whyNotAwardable,
+  type RankingOption,
+  type RankingPickerMode,
+} from './ranking-choice';
 
 /**
  * O ranking que nasce pelo atalho daqui.
@@ -116,13 +126,23 @@ export function RankingPicker({ value, onChange, mode, id, disabled = false }: R
   // painel roda em node puro e não monta React, então o que se
   // prova é a função.
   const elegiveis = useMemo(() => eligibleRankings(rankings, mode), [rankings, mode]);
-  const options = useMemo(() => searchRankings(elegiveis, query), [elegiveis, query]);
+  const options = useMemo(
+    () => rankingOptions(rankings, mode).filter((option) => matchesRanking(option.ranking, query)),
+    [rankings, mode, query],
+  );
+  const bloqueados = options.some((option) => option.blockedReason !== null);
 
   const escolhido = rankings.find((entry) => entry.metric === value) ?? null;
   const foraDaLista = value !== '' && !elegiveis.some((entry) => entry.metric === value);
 
-  const select = (ranking: RankingDefinition): void => {
-    onChange(ranking.metric);
+  const select = (option: RankingOption): void => {
+    // O apagado aparece para dizer POR QUE não serve — escolhê-lo
+    // gravaria uma missão que a API recusa ao salvar.
+    if (option.blockedReason !== null) {
+      return;
+    }
+
+    onChange(option.ranking.metric);
     setQuery('');
     setIsOpen(false);
     setActiveIndex(-1);
@@ -232,43 +252,70 @@ export function RankingPicker({ value, onChange, mode, id, disabled = false }: R
         >
           {options.length === 0 && (
             <li role="presentation" className="px-2 py-2 text-2xs leading-relaxed text-muted">
-              {elegiveis.length === 0
-                ? mode === 'award'
-                  ? 'Nenhum ranking de pontos cadastrado ainda.'
-                  : 'Nenhum ranking cadastrado ainda.'
+              {rankings.length === 0
+                ? 'Nenhum ranking cadastrado ainda.'
                 : `Nenhum ranking com “${query}”.`}
             </li>
           )}
 
-          {options.map((option, index) => (
-            <li
-              key={option.id}
-              id={`${listboxId}-option-${String(index)}`}
-              role="option"
-              aria-selected={option.metric === value}
-              // O mousedown do clique dispararia o blur do input
-              // ANTES do click, fechando a lista e cancelando a
-              // seleção. Prevenir o padrão mantém o foco.
-              onMouseDown={(event) => {
-                event.preventDefault();
-              }}
-              onClick={() => select(option)}
-              onMouseEnter={() => setActiveIndex(index)}
-              className={cn(
-                'flex cursor-pointer items-center justify-between gap-2 px-2 py-1.5 text-2xs',
-                index === activeIndex && 'bg-surface',
-                option.metric === value && 'text-rust',
-              )}
-            >
-              <span className="truncate font-condensed font-bold uppercase tracking-wide">
-                {option.label}
-              </span>
+          {/* ####  A REGRA DITA ONDE ELA MORDE  ####
 
-              {/* O código técnico junto: quem já o conhece confere, e
-                  é ele que viaja no cadastro. */}
-              <span className="shrink-0 font-mono text-muted">{option.metric}</span>
+              Só aparece quando há algum apagado na lista: é ali que
+              o admin se pergunta por que não consegue escolher. */}
+          {mode === 'award' && bloqueados && (
+            <li
+              role="presentation"
+              className="border-b border-border px-2 py-2 text-2xs leading-relaxed text-muted"
+            >
+              {elegiveis.length === 0 && 'Nenhum ranking aceita pontos de missão ainda. '}
+              Só recebem pontos os rankings com origem{' '}
+              <strong className="text-foreground">Concedido (item custom ou missão)</strong>. Os medidos
+              pelo jogo, calculados pelo agente ou derivados aparecem apagados: somar pontos neles
+              falsearia a medição. Para pontuar, use “Criar um ranking de pontos” abaixo, ou crie
+              um em Rankings com essa origem.
             </li>
-          ))}
+          )}
+
+          {options.map((option, index) => {
+            const { ranking } = option;
+            const blocked = option.blockedReason !== null;
+
+            return (
+              <li
+                key={ranking.id}
+                id={`${listboxId}-option-${String(index)}`}
+                role="option"
+                aria-selected={ranking.metric === value}
+                aria-disabled={blocked}
+                title={blocked ? `Não recebe pontos de missão: ${option.blockedReason ?? ''}.` : undefined}
+                // O mousedown do clique dispararia o blur do input
+                // ANTES do click, fechando a lista e cancelando a
+                // seleção. Prevenir o padrão mantém o foco.
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                }}
+                onClick={() => select(option)}
+                onMouseEnter={() => setActiveIndex(index)}
+                className={cn(
+                  'flex items-center justify-between gap-2 px-2 py-1.5 text-2xs',
+                  blocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+                  index === activeIndex && 'bg-surface',
+                  ranking.metric === value && 'text-rust',
+                )}
+              >
+                <span className="truncate font-condensed font-bold uppercase tracking-wide">
+                  {ranking.label}
+                </span>
+
+                {/* O código técnico junto: quem já o conhece confere,
+                    e é ele que viaja no cadastro. No apagado, o
+                    motivo toma o lugar dele. */}
+                <span className="shrink-0 font-mono text-muted">
+                  {blocked ? option.blockedReason : ranking.metric}
+                </span>
+              </li>
+            );
+          })}
 
           {/* ####  CRIAR SEM PERDER O QUE ESTÁ ESCRITO  ####
 
@@ -307,8 +354,11 @@ export function RankingPicker({ value, onChange, mode, id, disabled = false }: R
       {mode === 'award' && foraDaLista && (
         <p className="text-2xs text-rust">
           {escolhido === null
-            ? `“${value}” não é um ranking. A missão não vai conseguir pagar esses pontos.`
-            : `“${escolhido.label}” é medido pelo jogo e não aceita pontos de missão.`}
+            ? `“${value}” não é um ranking ligado. A missão não vai conseguir pagar esses pontos — ` +
+              'escolha outro, ou crie um ranking com essa métrica e origem “Concedido”.'
+            : `“${escolhido.label}” não aceita pontos de missão: ele é ${
+                whyNotAwardable(escolhido) ?? 'de outro tipo'
+              }. Escolha um ranking com origem “Concedido”.`}
         </p>
       )}
 

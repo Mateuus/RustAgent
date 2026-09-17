@@ -1639,11 +1639,28 @@ a byte.
 Nada guarda estado; tudo é endereço — a regra de `ui-ranking-screen.ts:37-51`:
 
 ```
-   tela-quest                        ativas, página 0
-   tela-quest:<aba>:<página>         aba ∈ ativas | disponiveis | feitas
-   tela-quest:det:<questId>          o detalhe, como modal
-   tela-quest:npc:<npcId>            as quests daquele NPC
+   tela-missoes                      a primeira aba que tem missão, página 0
+   tela-missoes:<aba>:<página>       aba ∈ diarias | semanais | especiais
+   tela-missoes:det:<pq>             o detalhe de uma tentativa, como modal
+   tela-missoes:info:<questId>       o detalhe de uma oferta, como modal
+   tela-missoes:npc:<npcId>          as quests daquele NPC
 ```
+
+**Desde 16/09/2026 a aba é a FREQUÊNCIA, e o estado é uma etiqueta.** As abas
+eram EM ANDAMENTO, DISPONÍVEIS e RESGATAR; o dono pediu DIÁRIAS e SEMANAIS.
+`daily` cai em DIÁRIAS, `weekly` em SEMANAIS, e `once`/`cooldown` em ESPECIAIS —
+que só aparece na barra quando tem alguma missão, para que o cadastro de hoje
+(majoritariamente `once` e `cooldown`) não suma do menu. Cada card leva a
+etiqueta RESGATAR, EM ANDAMENTO, DISPONÍVEL ou BLOQUEADA, nessa ordem dentro da
+aba. Falar com o NPC não é bloqueio: a missão continua DISPONÍVEL. O endereço de
+uma aba antiga (`ativas`, `disponiveis`, `feitas`) abre a automática, na
+primeira página.
+
+**A frase do NPC diz onde ele está** — "Fica na SafeZone (Outpost), no
+quadrante O8." —, calculada do mundo atual: a grade sai do `worldSize` do
+`.ini` e o lugar, do `world.monuments` mais próximo dentro do raio do tipo
+(`game/monuments.ts`, `describePlace`). Sem RCON, só o quadrante; sem mundo
+conhecido, a coordenada.
 
 ### 13.3 Volátil, sempre
 

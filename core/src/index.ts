@@ -82,8 +82,11 @@ import {
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
+import { WorkshopAccessRepository } from './db/workshop-access-repository.js';
 import { WorkshopSkinsRepository } from './db/workshop-repository.js';
+import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
+import { WorkshopCatalog } from './game/workshop-catalog.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
@@ -105,7 +108,9 @@ import { VipList } from './vip/service.js';
 import { VipSiteMirror } from './vip/site-mirror.js';
 import { ItemsSiteMirror } from './game/items-mirror.js';
 import { MapImageKeeper } from './game/map-image.js';
-import { MonumentReader } from './game/monuments.js';
+import { gridLabel } from './game/grid.js';
+import { describePlace, MonumentReader } from './game/monuments.js';
+import { gatherShortnamesOf } from './rankings/plugin-metrics.js';
 import { PlayersReader, type PlayersSnapshot } from './game/players.js';
 // O nome do `.cs` que serve o `origemz.players` E o lote de stats:
 // é o mesmo arquivo, e o `coverage` do ranking pergunta por ele.
@@ -1468,6 +1473,22 @@ async function main(): Promise<void> {
   // custom: uma skin vale na rede toda, e a juncao diz em que
   // servidores ela desce. Ver db/workshop-repository.ts.
   const workshopSkins = new WorkshopSkinsRepository(db);
+  // Quem pode usar cada skin fora da permissao, e o registro de tudo
+  // que mudou no modulo. Ver db/workshop-access-repository.ts.
+  const workshopAccess = new WorkshopAccessRepository(db);
+  // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
+  const workshopLookup = createWorkshopLookup();
+  // As regras do cadastro, as MESMAS para o painel e para o /skin add
+  // do jogo. O reenvio da carga e avisado ao servico, que nasce mais
+  // abaixo -- dai o `?.`.
+  const workshopCatalog = new WorkshopCatalog({
+    skins: workshopSkins,
+    access: workshopAccess,
+    items: itemsRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    lookup: workshopLookup,
+    onChange: () => workshopService?.handleCatalogChanged(),
+  });
 
   /**
    * Quem pediu silêncio no chat enquanto transmite.
@@ -2301,6 +2322,9 @@ async function main(): Promise<void> {
   // para o OrigemZWorkshop nao ter uma segunda copia dela.
   workshopService = new WorkshopService({
     skins: workshopSkins,
+    access: workshopAccess,
+    catalog: workshopCatalog,
+    meta,
     streamers: streamerRepository,
     servers: {
       ids: () => repository.list().map((server) => server.id),
@@ -2313,6 +2337,9 @@ async function main(): Promise<void> {
   // o que cada plugin tem, e o dedup diria "nao mudou nada" para
   // todos. Quem estiver sem RCON e pulado e reenviado na conexao.
   void workshopService.syncAll('startup');
+  // O relogio dos acessos com prazo. Ele tambem registra o que
+  // venceu enquanto o agente estava desligado.
+  workshopService.scheduleExpiry();
 
   void loadoutSync.pushAll('boot');
   // Os itens custom sobem no boot pelo mesmo motivo dos loadouts:
@@ -2381,6 +2408,47 @@ async function main(): Promise<void> {
   questsService = new QuestsService({
     repository: questsRepository,
     logger,
+    // ####  O QUADRANTE E O LUGAR DO NPC  ####
+    //
+    // Pedido do dono em 16/09/2026: "188, 727" não se acha no mapa.
+    // A grade sai do tamanho do mundo (o `.ini`) e o lugar, dos
+    // monumentos — que o `MonumentReader` guarda por tamanho e seed,
+    // então só o primeiro pedido depois de um wipe vai ao RCON.
+    //
+    // Sem RCON o lugar fica de fora e a frase leva só o quadrante:
+    // perder o nome é melhor que perder a tela.
+    locator: {
+      locate: async ({ serverId, x, z }) => {
+        const config = supervisor.configOf(serverId);
+
+        if (config === null) {
+          return { grid: null, place: null };
+        }
+
+        const grid = gridLabel(x, z, config.worldSize);
+        const rcon = supervisor.contextOf(serverId)?.rcon;
+
+        if (rcon === undefined || !rcon.isConnected) {
+          return { grid, place: null };
+        }
+
+        try {
+          const list = await monuments.list(serverId, rcon, {
+            worldSize: config.worldSize,
+            seed: config.seed,
+          });
+
+          return { grid, place: describePlace(list, x, z) };
+        } catch (error) {
+          logger.debug(
+            { server: serverId, err: toError(error) },
+            'não deu para ler os monumentos; a frase do NPC vai só com o quadrante',
+          );
+
+          return { grid, place: null };
+        }
+      },
+    },
     rewards: (questRewards = new QuestRewardService({
       logger,
       // Os quatro caminhos que já existem. Nenhum deles é
@@ -3528,6 +3596,10 @@ async function main(): Promise<void> {
   // rankings/collector.ts.
   const statsCollector = new StatsCollector({
     repository: rankingsRepository,
+    // O que o plugin deve colher: os rankings `gather.<shortname>`
+    // ligados. Lido a cada rodada — criar "Madeira" no painel passa
+    // a contar no ciclo seguinte.
+    gather: () => gatherShortnamesOf(rankingsRepository.list({ enabledOnly: true })),
     wipes: detectedWipes,
     players: playersRepository,
     servers: {
@@ -4032,6 +4104,9 @@ async function main(): Promise<void> {
     },
     workshop: {
       repository: workshopSkins,
+      access: workshopAccess,
+      catalog: workshopCatalog,
+      lookup: workshopLookup,
       items: itemsRepository,
       servers: repository,
       ...(workshopService === null ? {} : { workshop: workshopService }),
@@ -4131,6 +4206,7 @@ async function main(): Promise<void> {
         // um servidor que já está sendo desligado — e o plugin
         // ficaria sem lista sem nunca receber a de volta.
         customItemsSync.stop();
+        workshopService?.stop();
         // E as imagens que esperavam o boot de um servidor: a nova
         // tentativa sairia para um RCON que já não existe.
         imageLibrary.stop();

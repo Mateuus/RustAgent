@@ -6,36 +6,49 @@
 //  ####  UM SÓ, PARA CRIAR E PARA EDITAR  ####
 //
 //  Criar e editar uma skin são a MESMA pergunta — "qual item, qual
-//  arte, e quem tem direito?" —, e a única diferença é de onde vêm
-//  os valores iniciais. Dois formulários divergiriam no primeiro
-//  campo novo, e o que faltasse num deles só apareceria no dia em
-//  que alguém fosse editar.
+//  arte, e quem pode usar?" —, e a única diferença é de onde vêm os
+//  valores iniciais. Dois formulários divergiriam no primeiro campo
+//  novo.
+//
+//  ####  O WORKSHOP ID VEM PRIMEIRO  ####
+//
+//  Porque é dele que sai o resto: enquanto o admin digita, a tela
+//  pergunta à Steam (pelo pai — ver abaixo) o título, a prévia e as
+//  tags. As tags sugerem o item, e o título vira o nome quando o
+//  campo Nome fica em branco. É o mesmo que o `/skin add` do jogo
+//  faz, e é o que mantém os dois caminhos gravando a mesma linha.
 //
 //  ####  ELE NÃO FALA COM A API  ####
 //
-//  Quem chama o agente é o painel-pai. Este arquivo só tem um
-//  rascunho e devolve o que o admin montou — é o que permite a
-//  mesma caixa servir ao cadastro novo e à edição sem saber qual
-//  das duas rotas vai ser usada.
+//  Quem chama o agente é o painel-pai. A consulta à Steam chega aqui
+//  como uma função (`onLookup`); este arquivo só decide QUANDO
+//  perguntar e joga fora a resposta que chegou atrasada.
 //
 //  ####  O QUE A RECUSA DO AGENTE PRECISA VIRAR AQUI  ####
 //
-//  As recusas desta rota não são erros de digitação: são conflitos
-//  com OUTRA linha do catálogo, e cada uma tem uma saída
-//  diferente. Um toast que some em cinco segundos não serve — a
-//  frase fica no formulário, com o que fazer escrito embaixo.
+//  As recusas desta rota têm cada uma uma saída diferente. Um toast
+//  que some em cinco segundos não serve — a frase fica no
+//  formulário, com o que fazer escrito embaixo.
 // ============================================================
 
 import { Loader2 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
 import { ItemIcon } from '@/components/item-icon';
+import { messageOf } from '@/components/workshop/normalize';
 import { ServerPicker, type WorkshopServerOption } from '@/components/workshop/server-picker';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
-import { ApiError, type WorkshopSkin, type WorkshopSkinInput } from '@/lib/api';
+import type {
+  ApiError,
+  WorkshopCollection,
+  WorkshopLookup,
+  WorkshopSkin,
+  WorkshopSkinInput,
+} from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 export interface SkinFormProps {
   /** Os valores iniciais. */
@@ -43,9 +56,12 @@ export interface SkinFormProps {
   /** A skin que está sendo editada, se houver. Ausente = é nova. */
   readonly skin?: WorkshopSkin;
   readonly servers: readonly WorkshopServerOption[];
+  readonly collections: readonly WorkshopCollection[];
   readonly busy: boolean;
   /** A última recusa do agente. Fica na tela até o próximo Salvar. */
   readonly error?: ApiError | null;
+  /** Pergunta à Steam. Quem chama o agente é o pai. */
+  readonly onLookup: (skinId: string, shortname: string) => Promise<WorkshopLookup>;
   readonly onSave: (value: WorkshopSkinInput) => void;
   readonly onCancel: () => void;
 }
@@ -57,95 +73,159 @@ export function blankSkin(): WorkshopSkinInput {
     shortname: '',
     skinId: '',
     permission: '',
+    collectionId: null,
+    openToAll: false,
     hideInStreamer: true,
     enabled: true,
     servers: [],
   };
 }
 
-/**
- * A permissão que o agente vai gravar se o campo ficar em branco.
- *
- * ####  ISTO É UMA PRÉVIA, E NÃO A REGRA  ####
- *
- * Quem decide é o `normalizePermission` de
- * `core/src/types/workshop.ts`, e é ele que grava. Esta cópia
- * existe só para o campo mostrar, ANTES de salvar, o que vai sair
- * do nome — digitar permissão à mão em toda skin é como se erra uma
- * letra e se descobre semanas depois, com o jogador reclamando que
- * não recebe o item.
- *
- * Se as duas divergirem, quem está certo é o agente: o que a tela
- * mostra é um exemplo, e o valor real volta na resposta.
- */
-export function previewPermission(label: string): string {
-  const slug = label
-    .normalize('NFD')
-    // U+0300–U+036F são os diacríticos que o NFD acabou de separar
-    // da letra. Escritos como escape de propósito: um acento solto
-    // no meio do código é invisível no editor.
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return `origemzworkshop.${slug === '' ? 'skin' : slug.slice(0, 40)}`;
-}
+/** Só pergunta à Steam a partir daqui: id de Workshop tem 9+ dígitos. */
+const LOOKUP_MIN_DIGITS = 6;
+const LOOKUP_DEBOUNCE_MS = 500;
 
 /**
  * O que fazer com a recusa, por código de contrato.
  *
- * A FRASE do agente já explica o que aconteceu — ela conhece a
- * outra linha do catálogo e a nossa não. O que falta é a saída, e é
- * só isso que mora aqui.
+ * A FRASE do agente já explica o que aconteceu. O que falta é a
+ * saída, e é só isso que mora aqui.
  */
 function wayOut(code: string): string | null {
   switch (code) {
-    case 'DUPLICATE_ITEM':
-      return (
-        'Duas saídas: abra a outra skin desse item e DESLIGUE ela (a marca dela fica no ' +
-        'catálogo), ou tire daqui os servidores em que ela já vale — duas skins do mesmo item ' +
-        'em servidores diferentes não se encontram.'
-      );
+    case 'UNKNOWN_BASE_ITEM':
+      return 'Escolha o item pela lista do campo Item: o shortname é o do jogo, em inglês.';
 
     case 'DUPLICATE_MARK':
-      return 'Esse par item + número já está cadastrado. Confira o número na página da oficina.';
+      return (
+        'Esse par item + Workshop ID já está no catálogo — talvez cadastrado pelo jogo, com ' +
+        '/skin add. Procure pelo número na lista e edite aquela linha.'
+      );
 
-    case 'DUPLICATE_PERMISSION':
-      return 'Mude o nome da skin, ou escreva uma permissão diferente no campo Permissão.';
+    case 'COLLECTION_ITEM_TAKEN':
+      return (
+        'A coleção escolhida já tem uma skin deste item. Escolha outra coleção, deixe esta ' +
+        'avulsa, ou troque a skin do item na aba Coleções.'
+      );
 
-    case 'UNKNOWN_BASE_ITEM':
-      return 'Escolha o item pela lista do campo acima: o shortname é o do jogo, em inglês.';
+    case 'UNKNOWN_SERVER':
+      return 'Um dos servidores marcados não existe mais no agente. Desmarque-o e salve de novo.';
+
+    case 'WORKSHOP_NOT_FOUND':
+      return (
+        'Confira o número no endereço da página da oficina (…/?id=…). Se a arte acabou de ser ' +
+        'publicada, ou está privada, a Steam ainda não a mostra.'
+      );
+
+    case 'WORKSHOP_WRONG_GAME':
+      return 'Esse número é de uma publicação de outro jogo. Use o da arte publicada para o Rust.';
+
+    case 'WORKSHOP_BANNED':
+      return 'A Steam tirou essa arte do ar. Ela não desenha no cliente de ninguém.';
+
+    case 'WORKSHOP_OTHER_ITEM':
+      return 'As tags da arte apontam outro item. Escolha o item sugerido na prévia do Workshop ID.';
+
+    case 'WORKSHOP_SKIN_NOT_FOUND':
+      return 'A skin que você estava editando foi apagada. Feche o formulário e recarregue a lista.';
+
+    case 'WORKSHOP_COLLECTION_NOT_FOUND':
+      return 'A coleção escolhida foi apagada. Escolha outra, ou deixe a skin avulsa.';
 
     default:
       return null;
   }
 }
 
+/** A última resposta da Steam, com a pergunta que a gerou. */
+interface LookupState {
+  readonly key: string;
+  readonly result: WorkshopLookup | null;
+  readonly failure: string | null;
+}
+
 export function SkinForm({
   value,
   skin,
   servers,
+  collections,
   busy,
   error = null,
+  onLookup,
   onSave,
   onCancel,
 }: SkinFormProps) {
   const [draft, setDraft] = useState<WorkshopSkinInput>(value);
+  const [lookup, setLookup] = useState<LookupState | null>(null);
 
   function patch(change: Partial<WorkshopSkinInput>): void {
     setDraft((current) => ({ ...current, ...change }));
   }
 
+  const skinId = draft.skinId;
+  const shortname = draft.shortname.trim();
+  const lookupKey = skinId.length >= LOOKUP_MIN_DIGITS ? `${skinId}|${shortname}` : null;
+
+  useEffect(() => {
+    if (lookupKey === null) return;
+
+    // `alive` é o que joga fora a resposta atrasada: o id mudou
+    // depois de a pergunta sair, e a limpeza deste efeito já rodou.
+    let alive = true;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await onLookup(skinId, shortname);
+
+          if (!alive) return;
+
+          setLookup({ key: lookupKey, result, failure: null });
+
+          // Item em branco e UMA sugestão só: é ele. Com mais de uma,
+          // o admin escolhe pelos botões da prévia.
+          const suggested = Array.isArray(result.suggestedShortnames)
+            ? result.suggestedShortnames
+            : [];
+
+          if (suggested.length === 1 && suggested[0] !== undefined) {
+            const only = suggested[0];
+
+            setDraft((current) =>
+              current.shortname.trim() === '' ? { ...current, shortname: only } : current,
+            );
+          }
+        } catch (cause) {
+          if (alive) setLookup({ key: lookupKey, result: null, failure: messageOf(cause) });
+        }
+      })();
+    }, LOOKUP_DEBOUNCE_MS);
+
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [lookupKey, skinId, shortname, onLookup]);
+
+  // Só vale a resposta da pergunta ATUAL. Uma resposta de outro id
+  // não aparece, nem por um instante.
+  const current = lookup !== null && lookup.key === lookupKey ? lookup : null;
+  const looking = lookupKey !== null && current === null;
+  const details = current?.result?.details ?? null;
+  const workshopTitle = details?.title ?? skin?.workshopTitle ?? null;
+  const previewUrl =
+    details?.previewUrl ?? (skin !== undefined && skinId === skin.skinId ? skin.previewUrl : null);
+  const suggestions = current?.result?.suggestedShortnames ?? [];
+  const verdict = current?.result?.verdict ?? null;
+
   const permission = draft.permission ?? '';
-  const chosenServers = draft.servers;
+  const isNew = skin === undefined;
   const problem =
-    draft.label.trim() === ''
-      ? 'Dê um nome à skin.'
+    skinId === ''
+      ? 'Falta o Workshop ID da arte publicada.'
       : draft.shortname.trim() === ''
         ? 'Escolha o item do jogo que vai receber a aparência.'
-        : draft.skinId === ''
-          ? 'Falta o número da skin publicada no Workshop.'
+        : isNew && draft.label.trim() === '' && workshopTitle === null && !looking
+          ? 'Dê um nome à skin: a Steam não devolveu um título para usar.'
           : null;
 
   return (
@@ -153,27 +233,53 @@ export function SkinForm({
       <header className="flex flex-wrap items-baseline justify-between gap-2">
         <h4 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
           {draft.shortname !== '' && <ItemIcon shortname={draft.shortname} size="sm" />}
-          {skin === undefined ? 'Nova skin' : draft.label}
+          {isNew ? 'Nova skin' : draft.label || skin.label}
         </h4>
-        {draft.skinId !== '' && (
-          <span className="font-mono text-2xs text-muted">{draft.skinId}</span>
+        {skin !== undefined && (
+          <span className="text-2xs text-muted">
+            {skin.source === 'game' ? 'cadastrada pelo jogo' : 'cadastrada pelo painel'}
+            {skin.createdBy === null ? '' : ` · ${skin.createdBy}`}
+          </span>
         )}
       </header>
 
-      <label className="block">
-        <span className="font-condensed text-2xs uppercase tracking-wide text-muted">Nome</span>
-        <Input
-          value={draft.label}
-          maxLength={60}
-          placeholder="Pedra OrigemZ"
-          className="mt-1 h-9"
-          onChange={(event) => patch({ label: event.target.value })}
+      {/* ---- Workshop ID + prévia ---- */}
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <label className="block">
+          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+            Workshop ID
+          </span>
+          <Input
+            // `type="text"`, e não `number`: este número passa de 2^53
+            // e um campo numérico o devolveria ARREDONDADO.
+            type="text"
+            inputMode="numeric"
+            value={skinId}
+            maxLength={20}
+            placeholder="3216783927"
+            className="mt-1 h-9 font-mono"
+            onChange={(event) => patch({ skinId: event.target.value.replace(/\D/g, '') })}
+          />
+          <span className="mt-1 block text-2xs text-muted">
+            O número do endereço da página da oficina (
+            <span className="font-mono">…/?id=3216783927</span>). A arte precisa estar{' '}
+            <strong>publicada no Steam Workshop</strong>: quem baixa o modelo é o cliente de cada
+            jogador.
+          </span>
+        </label>
+
+        <LookupPreview
+          looking={looking}
+          failure={current?.failure ?? null}
+          lookup={current?.result ?? null}
+          title={workshopTitle}
+          previewUrl={previewUrl}
+          suggestions={suggestions}
+          chosen={shortname}
+          verdict={verdict}
+          onPick={(next) => patch({ shortname: next })}
         />
-        <span className="mt-1 block text-2xs text-muted">
-          É por ele que você acha a skin nesta tela, e é dele que nasce a permissão. O jogador não
-          vê este nome em lugar nenhum.
-        </span>
-      </label>
+      </div>
 
       <div className="block">
         <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
@@ -182,40 +288,30 @@ export function SkinForm({
         <div className="mt-1">
           <ItemCombobox
             value={draft.shortname}
-            onValueChange={(shortname) => patch({ shortname })}
-            placeholder="nome do item (rock, stones, hatchet) ou shortname"
+            onValueChange={(next) => patch({ shortname: next })}
+            placeholder="nome do item (máscara, machado) ou shortname"
           />
         </div>
         <span className="mt-1 block text-2xs text-muted">
-          É o item que recebe a aparência — ele continua sendo a pedra do jogo, com a cara nossa.
-          Nem todo item do Rust aceita skin; se o item não existir nesta versão, o agente recusa o
-          cadastro na hora de salvar.
+          O item que recebe a aparência. Pode haver várias skins para o mesmo item — o jogador
+          escolhe na caixa.
         </span>
       </div>
 
       <label className="block">
-        <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-          Número da skin no Workshop
-        </span>
+        <span className="font-condensed text-2xs uppercase tracking-wide text-muted">Nome</span>
         <Input
-          // `type="text"`, e não `number`: este número passa de 2^53
-          // e um campo numérico o devolveria ARREDONDADO — uma skin
-          // que não existe, que o jogo aceita em silêncio.
-          type="text"
-          inputMode="numeric"
-          value={draft.skinId}
-          maxLength={20}
-          placeholder="3216783927"
-          className="mt-1 h-9 font-mono"
-          onChange={(event) => patch({ skinId: event.target.value.replace(/\D/g, '') })}
+          value={draft.label}
+          maxLength={60}
+          placeholder={workshopTitle ?? (isNew ? 'Máscara OrigemZ' : skin.label)}
+          className="mt-1 h-9"
+          onChange={(event) => patch({ label: event.target.value })}
         />
         <span className="mt-1 block text-2xs text-muted">
-          É o número que aparece no endereço da página da oficina (
-          <span className="font-mono">…/?id=3216783927</span>). O servidor só guarda o número: quem
-          baixa o modelo e a textura é o cliente de cada jogador, e{' '}
-          <strong>a arte precisa estar publicada no Steam Workshop</strong> para ele conseguir. Um
-          número que não corresponde a nada publicado não dá erro — o item simplesmente nasce com a
-          cara normal.
+          É o que o jogador lê na caixa do <span className="font-mono">/skin</span>.{' '}
+          {isNew
+            ? 'Em branco, usa o título publicado no Workshop.'
+            : 'Em branco, mantém o nome atual.'}
         </span>
       </label>
 
@@ -226,16 +322,38 @@ export function SkinForm({
         <Input
           value={permission}
           maxLength={80}
-          placeholder={previewPermission(draft.label)}
+          placeholder="origemzworkshop.vip"
           className="mt-1 h-9 font-mono"
           onChange={(event) => patch({ permission: event.target.value })}
         />
         <span className="mt-1 block text-2xs text-muted">
-          Quem não tiver esta permissão recebe o item comum — sem ela, ninguém ganha a skin. Deixe
-          em branco e ela nasce do nome:{' '}
-          <span className="font-mono text-foreground">{previewPermission(draft.label)}</span>. Dar a
-          permissão é trabalho do Oxide, e o admin pode dá-la a um grupo (o VIP), ao vencedor de um
-          evento ou a uma pessoa só.
+          Em branco, a skin não tem permissão própria — quem a libera é &quot;para todos&quot;, a
+          coleção, ou um acesso na aba Acessos. Várias skins podem usar a mesma permissão (ex.:{' '}
+          <span className="font-mono text-foreground">origemzworkshop.vip</span> liberando todas as
+          do VIP); o prefixo <span className="font-mono">origemzworkshop.</span> é posto pelo
+          agente se faltar.
+        </span>
+      </label>
+
+      <label className="block">
+        <span className="font-condensed text-2xs uppercase tracking-wide text-muted">Coleção</span>
+        <select
+          value={draft.collectionId === null ? '' : String(draft.collectionId)}
+          onChange={(event) =>
+            patch({ collectionId: event.target.value === '' ? null : Number(event.target.value) })
+          }
+          className="mt-1 h-9 w-full border border-border bg-surface-2 px-2 text-sm text-foreground hover:border-muted"
+        >
+          <option value="">nenhuma (avulsa)</option>
+          {collections.map((collection) => (
+            <option key={collection.id} value={String(collection.id)}>
+              /skin {collection.slug} — {collection.label}
+              {collection.enabled ? '' : ' (desligada)'}
+            </option>
+          ))}
+        </select>
+        <span className="mt-1 block text-2xs text-muted">
+          Uma coleção tem no máximo uma skin por item, e a skin mora em uma coleção só.
         </span>
       </label>
 
@@ -244,35 +362,37 @@ export function SkinForm({
           Em quais servidores
         </span>
         <ServerPicker
-          value={chosenServers}
+          value={draft.servers}
           servers={servers}
           onChange={(next) => patch({ servers: next })}
         />
       </div>
 
       <div className="space-y-3 border-t border-border pt-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="max-w-xl">
-            <p className="font-condensed text-2xs uppercase tracking-wide text-muted">
-              Esconder de quem está em modo streamer
-            </p>
-            {/* ####  A PROTEÇÃO É DO PORTADOR, NÃO DO ESPECTADOR  ####
-                MEDIDO: a skin é estado do ITEM e vai igual para todo
-                mundo que olha aquele item. O admin que ligar isto
-                achando que apaga a logo da tela do streamer vai se
-                enganar — e a tela é o único lugar em que dá para
-                dizer isso antes. */}
-            <p className="mt-1 text-2xs leading-relaxed text-muted">
-              Ligado, o item nasce <strong>sem a skin na mão de quem está em modo streamer</strong>
-              : ele vê a pedra normal, e todo mundo à volta também vê a pedra normal no item DELE.{' '}
-              <strong>
-                A logo continua aparecendo nos itens dos outros jogadores no campo de visão dele
-              </strong>{' '}
-              — a skin viaja no item, e não na visão de quem olha. É o máximo que a rede do Rust
-              permite.
-            </p>
-          </div>
+        <ToggleRow
+          title="Liberada para todos"
+          detail="Qualquer jogador pode aplicar, sem permissão nem acesso. Desligado, só quem tem a permissão, a coleção ou um acesso."
+        >
+          <Toggle
+            on={draft.openToAll}
+            busy={false}
+            onChange={(openToAll) => patch({ openToAll })}
+            labels={['para todos', 'restrita']}
+            label="Esta skin é liberada para todos?"
+          />
+        </ToggleRow>
 
+        <ToggleRow
+          title="Esconder de quem está em modo streamer"
+          detail={
+            <>
+              Ligado, a skin <strong>sai do item</strong> de quem entra no ar escondendo a logo, e{' '}
+              <strong>volta</strong> quando ele sai. A proteção é do <strong>portador</strong>: a
+              skin viaja no item, e todo mundo que olha o item dele vê a versão normal — mas a logo
+              continua aparecendo nos itens dos outros jogadores que ele enxerga.
+            </>
+          }
+        >
           <Toggle
             on={draft.hideInStreamer}
             busy={false}
@@ -280,20 +400,12 @@ export function SkinForm({
             labels={['esconde', 'mostra']}
             label="Esconder esta skin de quem está em modo streamer?"
           />
-        </div>
+        </ToggleRow>
 
-        <div className="flex flex-wrap items-start justify-between gap-3 border-t border-border pt-3">
-          <div className="max-w-xl">
-            <p className="font-condensed text-2xs uppercase tracking-wide text-muted">
-              Esta skin está valendo?
-            </p>
-            <p className="mt-1 text-2xs leading-relaxed text-muted">
-              Desligada não é apagada: a skin sai do jogo e o item volta a nascer normal, mas o
-              cadastro e o número continuam aqui. É assim que se troca a arte de um item sem perder
-              a anterior.
-            </p>
-          </div>
-
+        <ToggleRow
+          title="Esta skin está valendo?"
+          detail="Desligada some da caixa e das coleções, sem perder o cadastro. O que já foi pintado continua pintado."
+        >
           <Toggle
             on={draft.enabled}
             busy={false}
@@ -301,15 +413,13 @@ export function SkinForm({
             labels={['valendo', 'desligada']}
             label="Esta skin está valendo?"
           />
-        </div>
+        </ToggleRow>
       </div>
 
       {error !== null && (
         <div role="alert" className="border border-rust bg-surface-2 p-3">
           <p className="font-condensed text-2xs font-bold uppercase tracking-wide text-rust">
-            {/* Sem código é porque nem chegou ao agente — a rede
-                caiu, ou ele não está no ar. Chamar isso de "recusa"
-                mandaria o admin procurar defeito no formulário. */}
+            {/* Sem código é porque nem chegou ao agente. */}
             {error.code === '' ? 'Não consegui gravar' : `O agente recusou (${error.code})`}
           </p>
           <p className="mt-1 text-2xs leading-relaxed text-foreground">{error.message}</p>
@@ -322,8 +432,6 @@ export function SkinForm({
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-        {/* O motivo fica visível o tempo todo, e não escondido atrás
-            de um botão desabilitado sem explicação. */}
         <p className="text-2xs text-muted">{problem}</p>
 
         <div className="flex gap-2">
@@ -337,21 +445,150 @@ export function SkinForm({
             onClick={() =>
               onSave({
                 ...draft,
+                // Vazio vai vazio: é o sinal para o agente usar o
+                // título do Workshop (ou manter o nome, na edição).
                 label: draft.label.trim(),
                 shortname: draft.shortname.trim(),
-                // Vazia é omitida de propósito: é assim que o agente
-                // sabe que deve tirá-la do nome. Mandar "" seria
-                // pedir uma permissão em branco.
-                ...(permission.trim() === '' ? { permission: undefined } : {}),
-                servers: [...chosenServers],
+                permission: permission.trim() === '' ? null : permission.trim(),
+                servers: [...draft.servers],
               })
             }
           >
             {busy && <Loader2 aria-hidden="true" className="mr-1 h-3.5 w-3.5 animate-spin" />}
-            {skin === undefined ? 'Cadastrar' : 'Salvar'}
+            {isNew ? 'Cadastrar' : 'Salvar'}
           </Button>
         </div>
       </div>
     </section>
+  );
+}
+
+function ToggleRow({
+  title,
+  detail,
+  children,
+}: {
+  readonly title: string;
+  readonly detail: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+      <div className="max-w-xl">
+        <p className="font-condensed text-2xs uppercase tracking-wide text-muted">{title}</p>
+        <p className="mt-1 text-2xs leading-relaxed text-muted">{detail}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+interface LookupPreviewProps {
+  readonly looking: boolean;
+  readonly failure: string | null;
+  readonly lookup: WorkshopLookup | null;
+  readonly title: string | null;
+  readonly previewUrl: string | null;
+  readonly suggestions: readonly string[];
+  readonly chosen: string;
+  readonly verdict: WorkshopLookup['verdict'];
+  readonly onPick: (shortname: string) => void;
+}
+
+/** O que a Steam disse do número digitado. */
+function LookupPreview({
+  looking,
+  failure,
+  lookup,
+  title,
+  previewUrl,
+  suggestions,
+  chosen,
+  verdict,
+  onPick,
+}: LookupPreviewProps) {
+  return (
+    <div className="flex min-h-24 gap-3 border border-border bg-surface-2 p-2">
+      <div className="flex h-20 w-20 shrink-0 items-center justify-center border border-border bg-surface">
+        {previewUrl !== null ? (
+          // O <img> cru, e não o next/image: a imagem vem da Steam, e
+          // o export estático não tem otimizador.
+          <img
+            src={previewUrl}
+            alt=""
+            className="h-20 w-20 object-contain"
+            onError={(event) => {
+              event.currentTarget.style.display = 'none';
+            }}
+          />
+        ) : chosen !== '' ? (
+          <ItemIcon shortname={chosen} size="lg" />
+        ) : null}
+      </div>
+
+      <div className="min-w-0 space-y-1 text-2xs">
+        {looking ? (
+          <p className="flex items-center gap-1 text-muted">
+            <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+            Perguntando à Steam…
+          </p>
+        ) : failure !== null ? (
+          <p className="text-muted">Não consegui consultar a Steam: {failure}</p>
+        ) : lookup === null ? (
+          <p className="text-muted">
+            {title === null
+              ? 'Digite o Workshop ID para ver a arte, o título e o item sugerido.'
+              : title}
+          </p>
+        ) : lookup.status === 'not_found' ? (
+          <p className="text-rust">A Steam não encontrou nada publicado com esse número.</p>
+        ) : lookup.status === 'unavailable' ? (
+          <p className="text-amber">
+            A Steam não respondeu agora{lookup.reason === null ? '' : ` (${lookup.reason})`}. Dá
+            para salvar mesmo assim — sem título nem prévia.
+          </p>
+        ) : (
+          <>
+            <p className="truncate font-medium text-foreground" title={title ?? ''}>
+              {title}
+            </p>
+            {lookup.details !== null && lookup.details.tags.length > 0 && (
+              <p className="truncate text-muted">tags: {lookup.details.tags.join(', ')}</p>
+            )}
+            {suggestions.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-muted">item sugerido:</span>
+                {suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    aria-pressed={suggestion === chosen}
+                    onClick={() => onPick(suggestion)}
+                    className={cn(
+                      'border px-1.5 py-0.5 font-mono',
+                      suggestion === chosen
+                        ? 'border-olive bg-olive/10 text-foreground'
+                        : 'border-border text-muted hover:border-muted hover:text-foreground',
+                    )}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {!looking && verdict !== null && (
+          verdict.ok ? (
+            verdict.warning !== null && (
+              <p className="border-l-2 border-amber pl-2 text-amber">{verdict.warning}</p>
+            )
+          ) : (
+            <p className="border-l-2 border-rust pl-2 text-rust">{verdict.message}</p>
+          )
+        )}
+      </div>
+    </div>
   );
 }

@@ -7662,6 +7662,52 @@ CREATE TABLE koth_deliveries (
 CREATE INDEX idx_koth_deliveries_run ON koth_deliveries(run_id);
 `;
 
+const QUEST_POINTS_RANKING_SCHEMA = `
+-- ============================================================
+--  098  o ranking que as missoes ja pagavam sem ele existir.
+--
+--  ####  O QUE ESTAVA ACONTECENDO  ####
+--
+--  Missoes cadastradas com recompensa de pontos em
+--  'quest.completed'. O nome parece um ranking e nao era: o resgate
+--  recusava com RANKING_METRIC_UNKNOWN, os pontos viravam pendencia
+--  e o painel dizia que a metrica "nao e um ranking". Pedido do
+--  dono em 16/09/2026: reconhecer a metrica.
+--
+--  ####  ELE NASCE CONCEDIDO, E NAO CONTADO  ####
+--
+--  'item' e o valor que quer dizer CONCEDIDO (rankings/awards.ts):
+--  o numero e o que a missao da, na quantidade que o admin
+--  configurou. Nao e "quantas missoes ele concluiu" -- uma missao
+--  que da 5 pontos soma 5. E e o unico tipo que aceita ponto de
+--  missao.
+--
+--  ####  E ELE NAO E builtin  ####
+--
+--  O admin renomeia, desliga ou apaga como qualquer ranking que ele
+--  mesmo criou. Semear e so poupar o cadastro -- e as pendencias ja
+--  gravadas passam a ser reentregues pelo botao do painel.
+--
+--  ####  NAO PISA EM NADA  ####
+--
+--  Se a metrica ou o id ja tem dono (o admin criou o ranking na mao
+--  antes deste agente chegar), a linha nao entra.
+-- ============================================================
+INSERT INTO rankings
+  (id, metric, label, unit, description, source, value_kind, direction, window,
+   global_eligible, builtin, enabled, sort_order, created_at, updated_at)
+SELECT
+  'pontos-de-missao', 'quest.completed', 'Pontos de missão', 'pontos',
+  'Os pontos que as missões dão quando são resgatadas.',
+  'item', 'counter', 'desc', 'season', 1, 0, 1,
+  COALESCE((SELECT MAX(sort_order) FROM rankings), 0) + 10,
+  CAST(strftime('%s','now') AS INTEGER) * 1000,
+  CAST(strftime('%s','now') AS INTEGER) * 1000
+WHERE NOT EXISTS (
+  SELECT 1 FROM rankings WHERE metric = 'quest.completed' OR id = 'pontos-de-missao'
+);
+`;
+
 const WORKSHOP_SKINS_SCHEMA = `
 -- ============================================================
 --  095  as skins do Steam Workshop que o servidor aplica sozinho.
@@ -7772,6 +7818,194 @@ CREATE TABLE workshop_skin_servers (
 );
 
 CREATE INDEX idx_workshop_skin_servers_server ON workshop_skin_servers (server_id);
+`;
+
+const WORKSHOP_BOX_SCHEMA = `
+-- ============================================================
+--  096  a skin passa a ser escolhida: caixa, colecoes e acessos.
+--
+--  ####  O QUE MUDOU NA REGRA  ####
+--
+--  Correcao do dono em 16/09/2026: o item NAO nasce mais com a
+--  skin. O jogador pinta o que ja tem, pela caixa (/skin) ou por
+--  colecao (/skin neve). Tres consequencias no banco:
+--
+--    1. a permissao da skin fica OPCIONAL, e deixa de ser unica
+--       (origemzworkshop.vip liberando varias skins e o caso comum);
+--    2. a skin pode morar numa COLECAO -- e dentro de uma colecao
+--       so cabe uma skin por item, que e o que faz "/skin neve"
+--       saber qual mascara vestir;
+--    3. o acesso passa a ser tambem por JOGADOR ou GRUPO, com prazo,
+--       e toda mudanca fica registrada.
+--
+--  ####  POR QUE A TABELA E RECONSTRUIDA ASSIM  ####
+--
+--  O SQLite nao altera NOT NULL. E com foreign_keys = ON um DROP da
+--  tabela de skins apagaria em cascata as ligacoes de servidor. Por
+--  isso a juncao e copiada para uma tabela SEM chave estrangeira,
+--  dropada PRIMEIRO, e so entao a de skins e trocada. Nenhum RENAME
+--  acontece com dependente vivo -- o RENAME reescreve as chaves das
+--  outras tabelas, e isso ja confundiu migracao neste projeto.
+--
+--  (Sem crase em comentario de migracao: este SQL mora num template
+--  literal do TypeScript, e uma crase aqui o FECHA.)
+-- ============================================================
+
+CREATE TABLE workshop_collections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- O nome do comando: /skin <slug>. Minusculo, sem acento.
+  slug TEXT NOT NULL UNIQUE CHECK (slug <> ''),
+
+  label TEXT NOT NULL,
+
+  -- NULL = sem permissao propria. NAO quer dizer "para todos".
+  permission TEXT CHECK (permission IS NULL OR permission <> ''),
+
+  open_to_all INTEGER NOT NULL DEFAULT 0 CHECK (open_to_all IN (0, 1)),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE workshop_skin_servers_096 (
+  workshop_skin_id INTEGER NOT NULL,
+  server_id TEXT NOT NULL
+);
+
+INSERT INTO workshop_skin_servers_096 (workshop_skin_id, server_id)
+SELECT workshop_skin_id, server_id FROM workshop_skin_servers;
+
+DROP TABLE workshop_skin_servers;
+
+ALTER TABLE workshop_skins RENAME TO workshop_skins_095;
+
+CREATE TABLE workshop_skins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  label TEXT NOT NULL,
+  shortname TEXT NOT NULL,
+  skin_id TEXT NOT NULL CHECK (skin_id <> '0' AND skin_id <> ''),
+
+  -- Opcional agora. Ver o cabecalho.
+  permission TEXT CHECK (permission IS NULL OR permission <> ''),
+
+  -- A colecao, se alguma. Apagar a colecao SOLTA a skin: ela
+  -- continua no catalogo, avulsa.
+  collection_id INTEGER REFERENCES workshop_collections(id) ON DELETE SET NULL,
+
+  -- 1 = qualquer jogador aplica, sem permissao nem acesso.
+  open_to_all INTEGER NOT NULL DEFAULT 0 CHECK (open_to_all IN (0, 1)),
+
+  hide_in_streamer INTEGER NOT NULL DEFAULT 1 CHECK (hide_in_streamer IN (0, 1)),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- De onde veio o cadastro: o painel, ou o /skin add do jogo.
+  source TEXT NOT NULL DEFAULT 'panel' CHECK (source IN ('panel', 'game')),
+  created_by TEXT,
+
+  -- O que a Steam disse sobre o id, quando respondeu. Servem a tela;
+  -- nenhum dos dois decide nada.
+  workshop_title TEXT,
+  preview_url TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+INSERT INTO workshop_skins
+  (id, label, shortname, skin_id, permission, hide_in_streamer, enabled, created_at, updated_at)
+SELECT id, label, shortname, skin_id, permission, hide_in_streamer, enabled, created_at, updated_at
+FROM workshop_skins_095;
+
+DROP TABLE workshop_skins_095;
+
+CREATE UNIQUE INDEX idx_workshop_skins_mark ON workshop_skins (shortname, skin_id);
+
+-- Uma skin por item dentro de cada colecao.
+CREATE UNIQUE INDEX idx_workshop_skins_collection_item
+  ON workshop_skins (collection_id, shortname) WHERE collection_id IS NOT NULL;
+
+CREATE TABLE workshop_skin_servers (
+  workshop_skin_id INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (workshop_skin_id, server_id)
+);
+
+INSERT OR IGNORE INTO workshop_skin_servers (workshop_skin_id, server_id)
+SELECT workshop_skin_id, server_id FROM workshop_skin_servers_096;
+
+DROP TABLE workshop_skin_servers_096;
+
+CREATE INDEX idx_workshop_skin_servers_server ON workshop_skin_servers (server_id);
+
+-- ------------------------------------------------------------
+--  Os acessos individuais.
+--
+--  subject_type 'player' = subject e um SteamID64; 'group' = subject
+--  e o nome de um grupo do Oxide, e quem sabe se o jogador esta
+--  nele e o plugin, na hora.
+--
+--  Exatamente UMA das duas referencias e preenchida, e o CHECK
+--  amarra qual. Apagar a skin ou a colecao leva o acesso junto: um
+--  acesso para algo que nao existe nao libera nada, e so polui a
+--  tela.
+--
+--  expires_at NULL = permanente. Vencido NAO e apagado na hora: a
+--  tela mostra "venceu em", e o registro guarda o evento.
+-- ------------------------------------------------------------
+CREATE TABLE workshop_grants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('player', 'group')),
+  subject TEXT NOT NULL CHECK (subject <> ''),
+
+  target_type TEXT NOT NULL CHECK (target_type IN ('skin', 'collection')),
+  skin_ref INTEGER REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  collection_ref INTEGER REFERENCES workshop_collections(id) ON DELETE CASCADE,
+
+  expires_at INTEGER,
+  note TEXT NOT NULL DEFAULT '',
+
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+
+  CHECK (
+    (target_type = 'skin' AND skin_ref IS NOT NULL AND collection_ref IS NULL) OR
+    (target_type = 'collection' AND collection_ref IS NOT NULL AND skin_ref IS NULL)
+  )
+);
+
+-- O mesmo acesso duas vezes e um so: liberar de novo troca o prazo.
+CREATE UNIQUE INDEX idx_workshop_grants_unique ON workshop_grants
+  (subject_type, subject, target_type, ifnull(skin_ref, 0), ifnull(collection_ref, 0));
+
+CREATE INDEX idx_workshop_grants_subject ON workshop_grants (subject_type, subject);
+
+-- ------------------------------------------------------------
+--  O registro de tudo que mudou.
+--
+--  Sem chave estrangeira de proposito: o registro de "apaguei a
+--  skin 12" precisa sobreviver a skin 12. O alvo e guardado em
+--  TEXTO legivel, com o nome que ela tinha naquela hora.
+-- ------------------------------------------------------------
+CREATE TABLE workshop_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('panel', 'game', 'system')),
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  server_id TEXT,
+  steam_id TEXT,
+  detail TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_workshop_audit_at ON workshop_audit (at DESC);
+CREATE INDEX idx_workshop_audit_steam ON workshop_audit (steam_id, at DESC);
 `;
 
 // ------------------------------------------------------------
@@ -8103,9 +8337,24 @@ export const MIGRATIONS: readonly Migration[] = [
   // 16/09/2026: as skins do Steam Workshop que o item ja traz de
   // nascenca -- catalogo da rede, e uma permissao por skin.
   { id: 95, name: 'workshop-skins', sql: WORKSHOP_SKINS_SCHEMA },
+  // 16/09/2026, tarde: o dono revogou o "nasce com a skin". A skin
+  // passa a ser escolhida -- caixa, colecoes, acessos e registro.
+  { id: 96, name: 'workshop-box', sql: WORKSHOP_BOX_SCHEMA },
+  // 16/09/2026: 'quest.completed' vira um ranking de verdade, e as
+  // missoes que ja pagavam nele passam a pagar.
+  //
+  // ####  98, E NAO 96  ####
+  //
+  // A 96 (`workshop-box`) estava sendo escrita na arvore principal
+  // quando esta nasceu, e ja estava aplicada no banco de
+  // desenvolvimento. A 97 fica livre para a mesma frente: id pulado
+  // nao custa nada, id repetido e uma migracao PULADA em silencio no
+  // merge.
+  { id: 98, name: 'quest-points-ranking', sql: QUEST_POINTS_RANKING_SCHEMA },
   // 17/09/2026: a masmorra com corpo feito a mao, a skin de cada
-  // peca gerada e o visual do aviso no chat. 96 a 98 estao ocupados
-  // em outras branches (ver o cabecalho da constante).
+  // peca gerada e o visual do aviso no chat. Nasceu 99 porque a 96 e
+  // a 98 ja existiam em outras branches, e a 97 esta reservada para a
+  // frente do workshop.
   { id: 99, name: 'dungeon-body-skins-announce', sql: DUNGEON_BODY_SKINS_ANNOUNCE_SCHEMA },
 ];
 

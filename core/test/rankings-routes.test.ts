@@ -694,6 +694,36 @@ describe('os dois campos que a tela nova precisa', () => {
   });
 });
 
+// ####  O RANKING QUE NASCIA MORTO  ####
+//
+// "Madeira", `farm.madeira`, origem plugin: salvava, ligava e ficava
+// em zero, porque nenhum hook alimenta aquela chave (16/09/2026).
+describe('a métrica de um ranking do plugin', () => {
+  const criar = async (metric: string) =>
+    await harness.app.inject({
+      method: 'POST',
+      url: '/api/rankings/metrics',
+      payload: { id: 'madeira', metric, label: 'Madeira', source: 'plugin', valueKind: 'counter' },
+    });
+
+  it('a chave que o plugin não conta é recusada, com a chave certa na frase', async () => {
+    const response = await criar('farm.madeira');
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      ok: false,
+      error: 'RANKING_PLUGIN_METRIC_UNKNOWN',
+      message: expect.stringContaining('"gather.wood"'),
+    });
+  });
+
+  it('a família de coleta é aceita', async () => {
+    const response = await criar('gather.wood');
+
+    expect(response.statusCode).toBe(201);
+  });
+});
+
 describe('PUT /api/rankings/metrics/order', () => {
   const pedir = async (ids: readonly string[]) =>
     await harness.app.inject({

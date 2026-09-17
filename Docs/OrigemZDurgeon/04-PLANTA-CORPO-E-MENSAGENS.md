@@ -26,8 +26,8 @@ criado**, o que foi **medido** no `server01`, as decisões que não são óbvias
 | §5 | construção do jogo como corpo | **feito e medido** | modo `construction`, `body`, leitura do JSON, colagem a -90 |
 | §6 | os três marcadores | **feito e medido** | lápide, velas grandes e árvore de Natal |
 
-**Migração:** `099 dungeon-body-skins-announce`. As ids 096 a 098 estão
-ocupadas em outras branches; a 099 é a primeira livre em todas.
+**Migração:** `099 dungeon-body-skins-announce`. A 096 e a 098 vieram de
+outras branches (a 097 fica reservada ao workshop); a 099 é a primeira livre.
 
 **Nada muda para quem não mexer em nada.** Skin zero é o bloco de sempre;
 visual vazio é a linha simples de sempre; o modo continua `recipe` ou
@@ -368,15 +368,19 @@ colada e copiada de volta pelo próprio plugin, e está em
 ## 8. O que foi medido daqui
 
 - **Plugin:** `pluginlint` sobre o `OrigemZDungeon.cs`, 0 erros.
-- **Core:**
-  - 2.772 testes passando;
-  - 34 novos em `dungeon-corpo.test.ts` e 9 em `dungeon-paredes-giradas.test.ts`;
-  - o `wipe-preview.test.ts` falhou uma vez na suíte inteira e passa isolado
-    (intermitente, não tocado);
+- **Core** (depois de mesclar a `main` com o PR #47):
+  - 2.811 testes passando, em 130 arquivos;
+  - 52 novos em `dungeon-corpo.test.ts` (inclui a exportação real e as
+    sete plantas herdadas) e 9 em `dungeon-paredes-giradas.test.ts`;
+  - o `wipe-preview.test.ts` falhou uma vez numa rodada anterior da suíte
+    e passa isolado (intermitente, não tocado);
   - lint limpo;
-  - o typecheck de testes tem 45 erros que **já existiam** na `main`, nenhum
+  - o typecheck de testes tem erros que **já existiam** na `main`, nenhum
     novo.
-- **Painel:** ver a entrega do painel no PR.
+- **Painel:** typecheck e lint limpos, 505 testes em 36 arquivos, e
+  `next build --webpack` completo. As telas foram conferidas no navegador
+  contra um agente de teste com o código real do core, em 1440×900 e
+  1280×720.
 - **Servidor:** `server01`, com uma sonda descartável (`OzDungeonProbe`) e o
   `CopyPaste.cs`. O payload de teste foi montado num banco em memória
   (`core/scripts/dungeon-live-payload.ts`); o banco de desenvolvimento não

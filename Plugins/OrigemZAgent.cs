@@ -5888,6 +5888,33 @@ namespace Oxide.Plugins
                 { "hq.metal.ore", "ore.hqm" }
             };
 
+        // ####  A COLETA DE QUALQUER RECURSO, SOB ENCOMENDA  ####
+        //
+        // O mapa de cima e fechado, e por isso um ranking "Madeira"
+        // criado no painel nunca recebeu nada: `wood` nao esta nele,
+        // e nenhuma chave nova ganha dado sem codigo novo. Medido em
+        // 16/09/2026, com o ranking ligado e o jogador cortando
+        // arvore.
+        //
+        // A saida e o AGENTE dizer o que vigiar. Todo ranking com
+        // origem "plugin" e metrica `gather.<shortname>` entra na
+        // lista que viaja no `flush` (quarto argumento), e o golpe
+        // que colhe aquele shortname soma na metrica dele. O que
+        // ninguem pediu nao e contado - e o que mantem o buffer do
+        // tamanho de hoje.
+        //
+        // shortname -> metrica, montada UMA vez por lista: o hook
+        // dispara a cada golpe e nao pode concatenar string.
+        private const string GatherMetricPrefix = "gather.";
+
+        // Teto da lista. Um servidor com cinquenta rankings de coleta
+        // e um engano, nao um uso, e o buffer por jogador cresceria
+        // com cada um deles.
+        private const int MaxGatherMetrics = 32;
+
+        private Dictionary<string, string> _statsGather =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+
         private static readonly DateTime StatsEpoch =
             new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -6083,6 +6110,118 @@ namespace Oxide.Plugins
             }
 
             QuestOnGather(player, info.shortname, amount);
+            AddGather(player, info.shortname, amount);
+        }
+
+        // Soma na metrica `gather.<shortname>`, se alguem a pediu.
+        //
+        // As mesmas recusas do AddOre (NPC, id que nao e SteamID64),
+        // e o mesmo caminho da madeira da missao: golpe, bonus de
+        // terminar o no e recurso de chao. Quarry continua de fora
+        // pelo mesmo motivo do minerio.
+        private void AddGather(BasePlayer player, string shortname, int amount)
+        {
+            EnsureStatsReady();
+
+            string metric;
+
+            if (_statsGather.Count == 0 || !_statsGather.TryGetValue(shortname, out metric))
+            {
+                return;
+            }
+
+            string steamId = player.UserIDString;
+
+            if (!IsSteamId64(steamId))
+            {
+                return;
+            }
+
+            StatsPlayerCounters counters = OpenCountersOf(steamId, player.displayName);
+
+            if (counters == null)
+            {
+                return;
+            }
+
+            BumpMetric(counters, metric, amount);
+
+            _statsDirty = true;
+        }
+
+        // Troca a lista do que vigiar. `-` limpa.
+        //
+        // Nome que nao e shortname (espaco, aspas, maiuscula) e
+        // ignorado: ele viria de um console digitado a mao, e virar
+        // metrica com ele criaria uma linha que o agente recusa.
+        private void SetGatherList(string raw)
+        {
+            var next = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            if (raw != "-")
+            {
+                foreach (string part in raw.Split(','))
+                {
+                    string shortname = part.Trim();
+
+                    if (!IsGatherShortname(shortname) || next.ContainsKey(shortname))
+                    {
+                        continue;
+                    }
+
+                    if (next.Count >= MaxGatherMetrics)
+                    {
+                        break;
+                    }
+
+                    next[shortname] = GatherMetricPrefix + shortname;
+                }
+            }
+
+            bool same = next.Count == _statsGather.Count;
+
+            if (same)
+            {
+                foreach (string key in next.Keys)
+                {
+                    if (!_statsGather.ContainsKey(key))
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+
+            if (same)
+            {
+                return;
+            }
+
+            _statsGather = next;
+            _statsDirty = true;
+
+            Puts(StatsFlushCommand + ": coleta vigiada agora e [" +
+                 string.Join(", ", new List<string>(next.Keys).ToArray()) + "]");
+        }
+
+        private static bool IsGatherShortname(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 50)
+            {
+                return false;
+            }
+
+            foreach (char c in value)
+            {
+                bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.';
+
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private void AddOreFromItem(BasePlayer player, Item item)
@@ -7694,13 +7833,26 @@ namespace Oxide.Plugins
             {
                 string secret = arg.GetString(2, "").Trim();
 
-                if (secret.Length > 0)
+                // `-` guarda o lugar: e o agente sem segredo que
+                // precisa mandar o quarto argumento.
+                if (secret.Length > 0 && secret != "-")
                 {
                     _statSecret = secret;
                 }
             }
 
             EnsureStatsReady();
+
+            // ####  O QUARTO ARGUMENTO E A LISTA DE COLETA  ####
+            //
+            // `wood,cloth` ou `-`. Ausente NAO mexe, pelo mesmo motivo
+            // do segredo: o flush digitado a mao nao pode apagar o que
+            // o agente pediu. Ele vem em TODO flush, e e isso que faz
+            // um oxide.reload sem data file se curar em um ciclo.
+            if (arg.Args != null && arg.Args.Length > 3)
+            {
+                SetGatherList(arg.GetString(3, "-").Trim());
+            }
 
             if (offset == 0 && _statsPending == null)
             {
@@ -8134,6 +8286,11 @@ namespace Oxide.Plugins
 
                     _statsPending = state.Pending;
                     _statsSeq = state.Seq;
+
+                    if (state.Gather != null)
+                    {
+                        SetGatherList(state.Gather.Count == 0 ? "-" : string.Join(",", state.Gather.ToArray()));
+                    }
                 }
             }
             catch (Exception ex)
@@ -8157,7 +8314,8 @@ namespace Oxide.Plugins
                 {
                     Seq = _statsSeq,
                     Open = _statsOpen,
-                    Pending = _statsPending
+                    Pending = _statsPending,
+                    Gather = new List<string>(_statsGather.Keys)
                 });
 
                 _statsDirty = false;
@@ -8502,6 +8660,10 @@ namespace Oxide.Plugins
 
             [JsonProperty("pending")]
             public StatsBatch Pending { get; set; }
+
+            // O que o agente pediu para vigiar. Ver `_statsGather`.
+            [JsonProperty("gather")]
+            public List<string> Gather { get; set; }
         }
 
         // ============================================================
