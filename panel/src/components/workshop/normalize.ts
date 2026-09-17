@@ -164,6 +164,31 @@ export function safeOwnedList(list: unknown): WorkshopOwned[] {
   return Array.isArray(list) ? (list as WorkshopOwned[]).map(safeOwned) : [];
 }
 
+/**
+ * As favoritas do jogador, como um conjunto de ids de skin.
+ *
+ * Um agente anterior à migração 100 não manda o campo, e a resposta
+ * cortada tampouco: **ausente é conjunto vazio**, e nenhuma estrela
+ * aparece. Nunca é erro de tela.
+ *
+ * Quem marca favorita é o JOGADOR, no menu do jogo (`origemz.skins.fav`,
+ * Docs/OrigemZWorkshop/03 §5). O painel só lê: não existe rota para
+ * escrever, e a tela não oferece o gesto.
+ */
+export function safeFavoriteIds(list: unknown): Set<number> {
+  if (!Array.isArray(list)) return new Set();
+
+  const ids = new Set<number>();
+
+  for (const value of list) {
+    const id = Number(value);
+
+    if (Number.isFinite(id) && id > 0) ids.add(id);
+  }
+
+  return ids;
+}
+
 export function safeAuditEntry(entry: WorkshopAuditEntry): WorkshopAuditEntry {
   const detail = entry.detail;
 

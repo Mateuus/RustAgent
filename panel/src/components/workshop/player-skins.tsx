@@ -31,6 +31,17 @@
 //  então cada lista pagina a sua fatia, com página própria. A busca
 //  vale para as duas e as manda de volta à página 1.
 //
+//  ####  AS FAVORITAS SÃO SÓ LEITURA  ####
+//
+//  A estrela âmbar de uma linha diz que o JOGADOR marcou aquela skin
+//  como favorita no menu do jogo (`origemz.skins.fav`, 03 §5). O painel
+//  **não** marca nem desmarca: não há rota para isso, de propósito — a
+//  favorita é o atalho dele, e não uma configuração de admin. Por isso
+//  a estrela não é botão, e o tooltip diz de quem é a marca.
+//
+//  A rota pode não mandar o campo (agente velho): `safeFavoriteIds`
+//  devolve conjunto vazio e nenhuma estrela aparece.
+//
 //  ####  MORA AQUI, E NÃO NA PÁGINA DA FICHA  ####
 //
 //  Ela usa as peças da aba Posse (owned-parts.tsx) e o Registro do
@@ -40,7 +51,7 @@
 //  vira TypeError no render e derruba a página.
 // ============================================================
 
-import { ChevronDown, ChevronRight, Loader2, Plus, Search, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Plus, Search, Star, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
@@ -55,6 +66,7 @@ import {
   messageOf,
   OWNED_SOURCE_LABELS,
   ownedMatches,
+  safeFavoriteIds,
   safeOwned,
   safeOwnedList,
   safeSkin,
@@ -95,6 +107,9 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
   const [view, setView] = useState<View>('skins');
   const [live, setLive] = useState<WorkshopOwned[] | null>(null);
   const [expired, setExpired] = useState<WorkshopOwned[]>([]);
+  /** Ids de skin que ele favoritou no jogo. Só leitura (ver o topo). */
+  const [favorites, setFavorites] = useState<ReadonlySet<number>>(() => new Set<number>());
+  const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [giving, setGiving] = useState(false);
@@ -112,6 +127,7 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
 
       setLive(safeOwnedList(response.live));
       setExpired(safeOwnedList(response.expired));
+      setFavorites(safeFavoriteIds(response.favorites));
       setError(null);
     } catch (cause) {
       setLive((current) => current ?? []);
@@ -145,15 +161,24 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
   // Com a busca escondida, um filtro digitado antes não pode sumir
   // com linhas sem que se veja por quê.
   const needle = searchable ? query : '';
-  const shownLive = useMemo(
-    () => (live ?? []).filter((owned) => ownedMatches(owned, needle)),
-    [live, needle],
+  // Quantas das posses VIVAS ele favoritou. A contagem é desta lista, e
+  // não do conjunto todo: favoritar não exige ter (02 §5.4), e um número
+  // maior do que as estrelas à mostra pareceria erro de tela.
+  const favoriteLive = useMemo(
+    () => (live ?? []).filter((owned) => favorites.has(owned.skinId)).length,
+    [live, favorites],
   );
-  const shownExpired = useMemo(
-    () => expired.filter((owned) => ownedMatches(owned, needle)),
-    [expired, needle],
+  // Como com a busca: sem estrela nenhuma o filtro não é oferecido, e um
+  // "só favoritas" ligado antes não pode sumir com linhas sem se ver por quê.
+  const favoriteFilter = onlyFavorites && favorites.size > 0;
+  const matches = useCallback(
+    (owned: WorkshopOwned): boolean =>
+      ownedMatches(owned, needle) && (!favoriteFilter || favorites.has(owned.skinId)),
+    [needle, favoriteFilter, favorites],
   );
-  const filtering = needle.trim() !== '';
+  const shownLive = useMemo(() => (live ?? []).filter(matches), [live, matches]);
+  const shownExpired = useMemo(() => expired.filter(matches), [expired, matches]);
+  const filtering = needle.trim() !== '' || favoriteFilter;
 
   // Tirar uma skin pode deixar a página guardada além do fim.
   const liveCurrent = clampPage(livePage, shownLive.length, pageSize);
@@ -216,6 +241,17 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
           <Block
             title="O que ele tem"
             count={live === null ? null : live.length}
+            note={
+              favoriteLive === 0 ? null : (
+                <span
+                  className="flex items-center gap-1 font-condensed text-2xs font-bold uppercase tracking-wide text-amber"
+                  title="Favoritas do jogador entre estas skins. Quem marca é ele, no menu do jogo; o painel não mexe nisso."
+                >
+                  <Star aria-hidden="true" className="h-3 w-3 fill-current" />
+                  {favoriteLive === 1 ? '1 favorita' : `${String(favoriteLive)} favoritas`}
+                </span>
+              )
+            }
             aside={
               <Button size="sm" onClick={() => setGiving(true)}>
                 <Plus aria-hidden="true" className="h-4 w-4" />
@@ -223,25 +259,52 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
               </Button>
             }
           >
-            {searchable && (
-              <div className="border-b border-border px-4 py-2">
-                <div className="relative max-w-sm">
-                  <Search
-                    aria-hidden="true"
-                    className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
-                  />
-                  <Input
-                    value={query}
-                    placeholder="Buscar por nome, item ou Workshop ID"
-                    aria-label="Buscar nas skins do jogador"
-                    className="h-8 pl-7"
-                    onChange={(event) => {
-                      setQuery(event.target.value);
+            {(searchable || favorites.size > 0) && (
+              <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+                {searchable && (
+                  <div className="relative min-w-0 flex-1 basis-56 sm:max-w-sm">
+                    <Search
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
+                    />
+                    <Input
+                      value={query}
+                      placeholder="Buscar por nome, item ou Workshop ID"
+                      aria-label="Buscar nas skins do jogador"
+                      className="h-8 pl-7"
+                      onChange={(event) => {
+                        setQuery(event.target.value);
+                        setLivePage(1);
+                        setExpiredPage(1);
+                      }}
+                    />
+                  </div>
+                )}
+
+                {favorites.size > 0 && (
+                  <button
+                    type="button"
+                    aria-pressed={onlyFavorites}
+                    title="Mostrar só as skins que ele favoritou no jogo. Quem marca é ele; o painel não mexe nisso."
+                    onClick={() => {
+                      setOnlyFavorites((value) => !value);
                       setLivePage(1);
                       setExpiredPage(1);
                     }}
-                  />
-                </div>
+                    className={cn(
+                      'flex h-8 shrink-0 items-center gap-1.5 border px-3 font-condensed text-2xs font-bold uppercase tracking-wide',
+                      onlyFavorites
+                        ? 'border-amber bg-surface-2 text-amber'
+                        : 'border-border text-muted hover:text-foreground',
+                    )}
+                  >
+                    <Star
+                      aria-hidden="true"
+                      className={cn('h-3.5 w-3.5', onlyFavorites && 'fill-current')}
+                    />
+                    Só favoritas
+                  </button>
+                )}
               </div>
             )}
 
@@ -254,11 +317,16 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
                 Este jogador não tem skin nenhuma. Ele ainda aplica as liberadas para todos.
               </p>
             ) : shownLive.length === 0 ? (
-              <p className="px-4 py-3 text-sm text-muted">Nenhuma skin dele bate com a busca.</p>
+              <p className="px-4 py-3 text-sm text-muted">
+                {favoriteFilter && needle.trim() === ''
+                  ? 'Nenhuma das skins que ele tem está favoritada.'
+                  : 'Nenhuma skin dele bate com o filtro.'}
+              </p>
             ) : (
               <>
                 <OwnedRows
                   rows={livePageRows}
+                  favorites={favorites}
                   busy={busy}
                   onRevoke={(owned) => void revoke(owned)}
                 />
@@ -297,12 +365,13 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
               {showExpired &&
                 (shownExpired.length === 0 ? (
                   <p className="px-4 py-3 text-sm text-muted">
-                    {filtering ? 'Nenhuma vencida bate com a busca.' : 'Nada aqui.'}
+                    {filtering ? 'Nenhuma vencida bate com o filtro.' : 'Nada aqui.'}
                   </p>
                 ) : (
                   <>
                     <OwnedRows
                       rows={expiredPageRows}
+                      favorites={favorites}
                       busy={busy}
                       onRevoke={(owned) => void revoke(owned)}
                     />
@@ -366,11 +435,14 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
 function Block({
   title,
   count,
+  note,
   aside,
   children,
 }: {
   readonly title: string;
   readonly count?: number | null;
+  /** Um detalhe ao lado do título — a contagem de favoritas, por exemplo. */
+  readonly note?: ReactNode;
   readonly aside?: ReactNode;
   readonly children: ReactNode;
 }) {
@@ -383,6 +455,7 @@ function Block({
           {count !== undefined && count !== null && (
             <span className="font-mono text-2xs font-normal text-muted">{count}</span>
           )}
+          {note}
         </h2>
         {aside}
       </header>
@@ -408,10 +481,13 @@ function Tag({ tone, title, children }: { tone?: string; title?: string; childre
 
 function OwnedRows({
   rows,
+  favorites,
   busy,
   onRevoke,
 }: {
   readonly rows: readonly WorkshopOwned[];
+  /** Ids de skin favoritados pelo jogador. A estrela é um selo, não um botão. */
+  readonly favorites: ReadonlySet<number>;
   readonly busy: boolean;
   readonly onRevoke: (owned: WorkshopOwned) => void;
 }) {
@@ -420,6 +496,7 @@ function OwnedRows({
       {rows.map((owned) => {
         const skin = owned.skin;
         const permanent = owned.expiresAt === null;
+        const favorite = favorites.has(owned.skinId);
 
         return (
           <li
@@ -438,6 +515,17 @@ function OwnedRows({
 
               <div className="min-w-0 space-y-0.5">
                 <p className="flex flex-wrap items-center gap-1.5">
+                  {/* Selo, e não botão: favoritar é do jogador, no jogo. */}
+                  {favorite && (
+                    <span
+                      role="img"
+                      aria-label="Favorita do jogador"
+                      title="Favorita do jogador — ele marcou esta skin no menu do jogo. O painel não marca nem desmarca."
+                      className="flex shrink-0 items-center"
+                    >
+                      <Star aria-hidden="true" className="h-3.5 w-3.5 fill-amber text-amber" />
+                    </span>
+                  )}
                   <span className="truncate font-medium text-foreground">
                     {skin?.label ?? `skin #${String(owned.skinId)}`}
                   </span>
