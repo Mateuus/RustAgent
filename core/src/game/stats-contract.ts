@@ -45,7 +45,7 @@ import { z } from 'zod';
 
 /** Os comandos de console da coleta. */
 export const STATS_COMMANDS = {
-  /** `origemz.stats.flush [offset] [limit] [secret]` */
+  /** `origemz.stats.flush [offset] [limit] [secret] [gather]` */
   flush: 'origemz.stats.flush',
   /** `origemz.stats.ack <batchId>` */
   ack: 'origemz.stats.ack',
@@ -277,14 +277,35 @@ export type StatsAckReply = z.infer<typeof statsAckOkSchema>;
  * que já tem: é o mesmo comando que um admin digita à mão no
  * console, e uma digitação não pode desligar o push.
  */
-export function buildStatsFlushCommand(offset: number, limit: number, secret?: string): string {
+export function buildStatsFlushCommand(
+  offset: number,
+  limit: number,
+  secret?: string,
+  gather?: readonly string[],
+): string {
   const base = `${STATS_COMMANDS.flush} ${String(offset)} ${String(limit)}`;
+  const hasSecret = secret !== undefined && secret !== '';
+
+  // ####  O QUARTO ARGUMENTO: O QUE COLHER  ####
+  //
+  // Os shortnames dos rankings `gather.<shortname>`, separados por
+  // vírgula, ou `-` para nenhum. Ausente (`undefined`) o plugin não
+  // mexe na lista — o mesmo acordo do segredo. Ver
+  // `rankings/plugin-metrics.ts`.
+  //
+  // Posicional, então sem segredo o terceiro vira `-`, que o plugin
+  // lê como "não mexa".
+  if (gather !== undefined) {
+    const list = gather.length === 0 ? '-' : gather.join(',');
+
+    return `${base} ${hasSecret ? secret : '-'} ${list}`;
+  }
 
   // O segredo é um UUID: sem espaço, sem aspas. O parser de console
   // do Rust COME as aspas de um token citado (medido em
   // `game/plugin-push.ts`), então ele vai cru — como o `batchId` do
   // `ack`.
-  return secret === undefined || secret === '' ? base : `${base} ${secret}`;
+  return hasSecret ? `${base} ${secret}` : base;
 }
 
 /**

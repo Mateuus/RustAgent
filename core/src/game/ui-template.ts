@@ -32,7 +32,7 @@
 //  ####  E É O QUE FAZ A NAVEGAÇÃO COM PARÂMETRO CABER  ####
 //
 //  O `uiDocumentSchema` recusa `:` em `screenId` de ação. Um
-//  documento com um botão apontando para `tela-quest:disponiveis`
+//  documento com um botão apontando para `tela-missoes:semanais`
 //  SERIA RECUSADO NA GRAVAÇÃO, e o menu sumiria do jogo — a tela
 //  que o agente monta a cada clique é que não passa pelo schema.
 //

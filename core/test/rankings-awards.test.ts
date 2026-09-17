@@ -62,7 +62,7 @@ describe('a frase que explica a recusa', () => {
     // "Não pode" sem motivo faria o admin tentar o próximo da lista
     // até acertar por eliminação.
     for (const frase of [medido, calculado, derivado]) {
-      expect(frase).toContain('ranking de pontos');
+      expect(frase).toContain('origem "Concedido (item custom ou missão)"');
     }
   });
 

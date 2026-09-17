@@ -77,11 +77,11 @@ export function whyNotAwardable(input: {
 
   switch (input.source) {
     case 'plugin':
-      return `"${input.label}" é medido pelo jogo, e não aceita pontos dados por missão. Use um ranking de pontos.`;
+      return `"${input.label}" é medido pelo jogo, e não aceita pontos dados por missão. Escolha um ranking com origem "Concedido (item custom ou missão)", ou crie um.`;
     case 'agent':
-      return `"${input.label}" é calculado pelo agente, e não aceita pontos dados por missão. Use um ranking de pontos.`;
+      return `"${input.label}" é calculado pelo agente, e não aceita pontos dados por missão. Escolha um ranking com origem "Concedido (item custom ou missão)", ou crie um.`;
     case 'computed':
-      return `"${input.label}" é derivado de outros rankings e não tem onde guardar ponto. Use um ranking de pontos.`;
+      return `"${input.label}" é derivado de outros rankings e não tem onde guardar ponto. Escolha um ranking com origem "Concedido (item custom ou missão)", ou crie um.`;
     case 'item':
       // Inalcançável: `acceptsAwardedPoints` já teria dito que sim.
       // O `case` existe para o compilador cobrar o dia em que um

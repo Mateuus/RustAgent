@@ -687,6 +687,12 @@ premiação, e é o que o documento do troféu pede.
 dono o cria pelo painel — é justamente essa a demonstração de que o sistema
 funciona sem código novo.
 
+**A migração 098 semeia um ranking a mais, não fixo:** "Pontos de missão"
+(`pontos-de-missao`, métrica `quest.completed`, origem concedida). Missões já
+pagavam pontos nessa métrica, e o resgate recusava porque ela não era de
+ninguém. Ele nasce `builtin = 0` — o admin renomeia, desliga ou apaga — e não
+entra se a métrica ou o id já tiverem dono.
+
 **Três notas sobre a tabela:**
 
 1. **`pvp.kd` é `computed`** — não existe linha `pvp.kd` em `player_stats`. Ele é
@@ -823,8 +829,21 @@ passo 4 nunca produz dois abertos.
 ### 6.1 O comando
 
 ```
-origemz.stats.flush [offset] [limit]
+origemz.stats.flush [offset] [limit] [secret] [gather]
 ```
+
+`secret` é o do `#OZSTAT#` (§7); `-` guarda o lugar sem mexer. `gather` é a lista
+de shortnames que o plugin deve somar em `gather.<shortname>` — `wood,cloth`, ou
+`-` para nenhum. Ausente, o plugin mantém a que tinha (e a grava no data file).
+
+**A coleta de recurso é sob encomenda** (16/09/2026). O plugin só conta as chaves
+escritas nele (`ore.*`, a matriz da morte, `shot.distance`, `explosive.seq`); o
+ranking "Madeira" com métrica `farm.madeira` ficou em zero por isso. Todo ranking
+**ligado**, de origem `plugin` e métrica `gather.<shortname>`, entra na lista que
+o coletor manda na primeira página de cada rodada — `gather.wood` para madeira.
+O cadastro recusa (`RANKING_PLUGIN_METRIC_UNKNOWN`) uma métrica de origem
+`plugin` fora dessas famílias, com a chave certa na frase quando dá para
+adivinhar. Ver `core/src/rankings/plugin-metrics.ts`.
 
 Resposta de sucesso, **uma linha só**, sem indentação:
 

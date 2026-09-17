@@ -20,6 +20,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { columnName, GRID_CELL_SIZE, gridLabel, worldGrid } from '../src/game/grid.js';
+import { describePlace, type Monument } from '../src/game/monuments.js';
 
 /** O mundo do `server01`. */
 const SIZE = 4_000;
@@ -118,3 +119,37 @@ function linha(label: string): number {
 function coluna(label: string): string {
   return /^[A-Z]+/.exec(label)?.[0] ?? '';
 }
+
+// ------------------------------------------------------------
+//  O NOME DO LUGAR
+// ------------------------------------------------------------
+
+describe('describePlace', () => {
+  // Os pontos são os do server01 medidos em 16/09/2026.
+  const MONUMENTS: readonly Monument[] = [
+    { type: 'Town', name: 'Bandit Camp', x: -54, z: -206, grid: 'N15' },
+    { type: 'Town', name: 'Outpost', x: 724, z: 580, grid: 'S9' },
+    { type: 'Town', name: 'Launch Site', x: -745, z: -935, grid: 'I20' },
+    { type: 'WaterWell', name: 'Water Well', x: 403, z: 691, grid: 'Q8' },
+    { type: 'Lake', name: 'Lake A', x: -176, z: -610, grid: 'M17' },
+  ];
+
+  it('dentro de uma zona segura, diz SafeZone com o nome', () => {
+    // O Marcos, a 87 m do centro do Bandit Camp.
+    expect(describePlace(MONUMENTS, -80, -120)).toBe('na SafeZone (Bandit Camp)');
+    expect(describePlace(MONUMENTS, 700, 600)).toBe('na SafeZone (Outpost)');
+  });
+
+  it('perto de um monumento comum, usa "perto de"', () => {
+    expect(describePlace(MONUMENTS, -700, -900)).toBe('perto de Launch Site');
+  });
+
+  it('o raio é do tipo: 90 m de um poço é o meio do mato', () => {
+    expect(describePlace(MONUMENTS, 403 + 90, 691)).toBeNull();
+    expect(describePlace(MONUMENTS, 403 + 20, 691)).toBe('perto de Water Well');
+  });
+
+  it('lago e oásis não são lugar: o nome deles é da geração do mundo', () => {
+    expect(describePlace(MONUMENTS, -176, -610)).toBeNull();
+  });
+});

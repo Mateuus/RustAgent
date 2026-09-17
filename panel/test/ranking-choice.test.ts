@@ -22,7 +22,9 @@ import {
   eligibleRankings,
   isAwardable,
   matchesRanking,
+  rankingOptions,
   searchRankings,
+  whyNotAwardable,
 } from '@/components/ranking/ranking-choice';
 import type { RankingDefinition } from '@/lib/api';
 
@@ -114,5 +116,39 @@ describe('a busca', () => {
 
   it('o que não casa fica de fora', () => {
     expect(searchRankings(TODOS, 'xyz')).toEqual([]);
+  });
+});
+
+// ####  ESCONDER FAZIA PARECER DEFEITO  ####
+//
+// Em 16/09/2026 o dono abriu o seletor, viu só o Bleik e leu como
+// "os outros rankings não aparecem". A regra continua; a lista
+// passou a mostrá-la.
+describe('a lista mostra todos, e diz por que alguns não servem', () => {
+  it('na recompensa, os que servem vêm primeiro e os outros vêm apagados', () => {
+    const options = rankingOptions([METAL, BLEIK, KD, TEMPO], 'award');
+
+    expect(options.map((option) => option.ranking.id)).toEqual([
+      'trofeu-bleik',
+      'minerio-metal',
+      'kd',
+      'tempo-online',
+    ]);
+    expect(options.map((option) => option.blockedReason)).toEqual([
+      null,
+      'medido pelo jogo',
+      'derivado de outros',
+      'calculado pelo agente',
+    ]);
+  });
+
+  it('no objetivo, nada é apagado: ler é livre', () => {
+    expect(rankingOptions(TODOS, 'read').every((option) => option.blockedReason === null)).toBe(true);
+  });
+
+  it('o motivo acompanha a regra de quem pode receber', () => {
+    for (const entry of TODOS) {
+      expect(whyNotAwardable(entry) === null).toBe(isAwardable(entry));
+    }
   });
 });
