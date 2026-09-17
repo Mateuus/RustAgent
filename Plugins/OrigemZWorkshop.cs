@@ -3603,12 +3603,22 @@ namespace Oxide.Plugins
             }
         }
 
-        /// <summary>A janela, na base 1280×720: 1200 × 640, centrada.</summary>
-        private const float WinWidth = 1200f;
+        /// <summary>
+        /// A janela, na base 1280×720: 1240 × 640, centrada. Era 1200; a
+        /// grade rolável precisou de 40 px a mais para a barra não cobrir a
+        /// quarta coluna (visto no jogo em 17/09/2026).
+        /// </summary>
+        private const float WinWidth = 1240f;
         private const float WinHeight = 640f;
         private const float HeaderHeight = 52f;
         private const float FooterHeight = 28f;
-        private const float GridWidth = 560f;
+        private const float GridWidth = 600f;
+
+        /// <summary>A faixa da direita que a barra de rolagem ocupa, fora das células.</summary>
+        private const float ScrollGutter = 16f;
+
+        /// <summary>A largura das quatro colunas de células, sem margem.</summary>
+        private static readonly float CellsWidth = GridColumns * CellWidth + (GridColumns - 1) * CellGap;
         private const float RightWidth = 430f;
         private const float DetailHeight = 250f;
 
@@ -3835,11 +3845,11 @@ namespace Oxide.Plugins
             veil.Components.Add(new CuiNeedsCursorComponent());
             canvas.Ui.Add(veil);
 
-            // A janela com margem, em âncoras (03 §8.6): 1200×640 em 1280×720.
+            // A janela centrada, em âncoras (03 §8.6), na base 1280×720.
             Box screen = new Box(UiRoot, 1280f, 720f);
             CuiElement window = new CuiElement { Name = UiWindow, Parent = UiRoot };
             window.Components.Add(new CuiImageComponent { Color = ColBg });
-            window.Components.Add(Rect(screen, 40f, 40f, WinWidth, WinHeight));
+            window.Components.Add(Rect(screen, (1280f - WinWidth) / 2f, (720f - WinHeight) / 2f, WinWidth, WinHeight));
             canvas.Ui.Add(window);
 
             Box win = new Box(UiWindow, WinWidth, WinHeight);
@@ -4009,7 +4019,7 @@ namespace Oxide.Plugins
                 // continuar relativo e escalar com a resolução.
                 float viewportBottom = paged ? gridBottom : gridBottom + 36f;
                 float viewportHeight = viewportBottom - GridPad;
-                float viewportWidth = GridWidth - GridPad - 4f;
+                float viewportWidth = GridWidth - 2 * GridPad;
                 int rows = (view.Cells.Count + GridColumns - 1) / GridColumns;
                 float contentHeight = Math.Max(viewportHeight,
                                                rows * CellHeight + Math.Max(0, rows - 1) * CellGap + 4f);
@@ -4047,11 +4057,12 @@ namespace Oxide.Plugins
                 canvas.Ui.Add(scroll);
 
                 // Os filhos se posicionam no CONTEÚDO, que tem a altura inteira.
-                Box content = new Box(scrollName, viewportWidth - 10f, contentHeight);
+                Box content = new Box(scrollName, viewportWidth, contentHeight);
+                float left = Math.Max(0f, (viewportWidth - ScrollGutter - CellsWidth) / 2f);
 
                 for (int i = 0; i < view.Cells.Count; i++)
                 {
-                    float cx = (i % GridColumns) * (CellWidth + CellGap);
+                    float cx = left + (i % GridColumns) * (CellWidth + CellGap);
                     float cy = (i / GridColumns) * (CellHeight + CellGap);
                     GridCellBox(canvas, content, cx, cy, view.Cells[i], view.Token);
                 }
@@ -4064,9 +4075,11 @@ namespace Oxide.Plugins
             }
             else
             {
+                float left = (GridWidth - CellsWidth) / 2f;
+
                 for (int i = 0; i < view.Cells.Count; i++)
                 {
-                    float cx = GridPad + (i % GridColumns) * (CellWidth + CellGap);
+                    float cx = left + (i % GridColumns) * (CellWidth + CellGap);
                     float cy = GridPad + (i / GridColumns) * (CellHeight + CellGap);
                     GridCellBox(canvas, grid, cx, cy, view.Cells[i], view.Token);
                 }
