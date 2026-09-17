@@ -1767,7 +1767,67 @@ namespace Oxide.Plugins
             {
                 owner.SendNetworkUpdate();
             }
+
+            RefreshVisual(owner, item);
         }
+
+        /// <summary>
+        /// ####  O MODELO NA MÃO NÃO TROCA SÓ COM O NÚMERO  ####
+        ///
+        /// Relatado pelo dono em 17/09/2026: com a arma ou o machado na mão,
+        /// "tem vez que não troca" e ele precisa guardar e pegar de novo. O
+        /// `skinID` + `SendNetworkUpdate` avisam o cliente, mas o modelo que
+        /// ele já montou na mão continua o de antes — a arte da skin vem de
+        /// outro bundle e o cliente só a busca quando MONTA a entidade.
+        ///
+        /// O que reconstrói é reequipar: `UpdateActiveItem(0)` chama
+        /// `SetHeld(false)` na entidade segurada, e voltar o `uid` a monta de
+        /// novo (MEDIDO no decompilado de `BasePlayer.UpdateActiveItem`,
+        /// 17/09/2026). É o que o jogador fazia à mão.
+        ///
+        /// Um tick depois, e não no mesmo frame: o `skin` precisa estar
+        /// gravado antes de o cliente montar. E o item HOLSTERED (nas costas,
+        /// na cintura) se resolve pelo `UpdatedVisibleHolsteredItems`, que é
+        /// o caminho do próprio jogo para essa arte.
+        /// </summary>
+        private void RefreshVisual(BasePlayer player, Item item)
+        {
+            if (player == null || !player.IsConnected || item == null || player.inventory == null) return;
+
+
+            bool active = player.GetActiveItem() == item;
+            ItemId uid = item.uid;
+
+            if (!active && !_holsterPending.Add(player.userID)) return;
+
+            NextTick(() =>
+            {
+                if (player == null || !player.IsConnected || player.inventory == null) return;
+
+                if (active)
+                {
+                    // O `UpdateActiveItem` sai sem fazer nada se outro plugin
+                    // cancelar o `OnActiveItemChange`; o pior caso é o modelo
+                    // velho continuar, que é o de hoje.
+                    player.UpdateActiveItem(default(ItemId));
+                    NextTick(() =>
+                    {
+                        if (player == null || !player.IsConnected) return;
+                        player.UpdateActiveItem(uid);
+                    });
+                    return;
+                }
+
+                // Uma vez por jogador, e não por item: o modo streamer troca
+                // a skin de vários itens no mesmo frame (HideFrom/RestoreTo).
+                if (!_holsterPending.Remove(player.userID)) return;
+
+                player.inventory.UpdatedVisibleHolsteredItems();
+            });
+        }
+
+        /// <summary>Quem já tem um `UpdatedVisibleHolsteredItems` agendado neste frame.</summary>
+        private readonly HashSet<ulong> _holsterPending = new HashSet<ulong>();
 
         /// <summary>
         /// A definição serve o item `shortname` da skin? Serve a própria, e
