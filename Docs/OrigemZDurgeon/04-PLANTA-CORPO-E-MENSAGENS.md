@@ -370,7 +370,7 @@ colada e copiada de volta pelo próprio plugin, e está em
 - **Plugin:** `pluginlint` sobre o `OrigemZDungeon.cs`, 0 erros.
 - **Core** (depois de mesclar a `main` com o PR #47):
   - 2.811 testes passando, em 130 arquivos;
-  - 52 novos em `dungeon-corpo.test.ts` (inclui a exportação real e as
+  - 49 novos em `dungeon-corpo.test.ts` (inclui a exportação real e as
     sete plantas herdadas) e 9 em `dungeon-paredes-giradas.test.ts`;
   - o `wipe-preview.test.ts` falhou uma vez numa rodada anterior da suíte
     e passa isolado (intermitente, não tocado);
