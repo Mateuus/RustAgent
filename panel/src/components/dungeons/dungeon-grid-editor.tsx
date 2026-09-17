@@ -565,9 +565,9 @@ export function DungeonGridEditor({
    * `null` = a entrada não encosta em nada. Não há direção a
    * mostrar, e o verificador reclama disso por outro caminho.
    */
-  const entranceArrow = useMemo(() => {
-    if (facing !== null) return facing;
-
+  // O automático mora separado da escolha: é contra ELE que a seta
+  // sabe que deu a volta inteira (ver `nextFacing`).
+  const autoArrow = useMemo(() => {
     const { entrance, cells, size } = board;
     const at = (x: number, z: number): boolean =>
       x >= 0 && x < size && z >= 0 && z < size && (cells[z]?.[x] ?? 'empty') !== 'empty';
@@ -579,7 +579,8 @@ export function DungeonGridEditor({
     if (at(entrance.x, entrance.z - 1)) return 180;
 
     return null;
-  }, [board, facing]);
+  }, [board]);
+  const entranceArrow = facing ?? autoArrow;
   const problems = useMemo(() => checkLayout(rows), [rows]);
   const facts = useMemo(() => analyzeLayout(rows), [rows]);
 
@@ -838,7 +839,7 @@ export function DungeonGridEditor({
 
               // Sem isto o clique vira um traço de pincel na célula.
               event.stopPropagation();
-              onFacing(nextFacing(facing, entranceArrow));
+              onFacing(nextFacing(facing, autoArrow));
             }}
             transform={
               `translate(${String(board.entrance.x * CELL + CELL / 2)} ` +
@@ -1304,17 +1305,25 @@ const ARROW_LABEL: Readonly<Record<number, string>> = {
  * de saber qual era o automático para reproduzi-lo à mão. Girando
  * quatro vezes ele passa pelos quatro lados e cai de novo no "deixa
  * o servidor decidir", que é onde começou.
+ *
+ * ####  A COMPARAÇÃO É COM O AUTOMÁTICO, E NÃO COM A SETA  ####
+ *
+ * Até 17/09/2026 isto recebia a seta JÁ com a escolha aplicada. Com
+ * uma escolha feita, a seta é a própria escolha, e `escolha + 90`
+ * nunca é igual a ela: o automático não voltava nunca, e o
+ * `entranceFacing` ficava gravado para sempre — girando a masmorra
+ * no jogo por um motivo que a tela não mostrava mais.
  */
-function nextFacing(
+export function nextFacing(
   current: 0 | 90 | 180 | 270 | null,
-  shown: number,
+  auto: 0 | 90 | 180 | 270 | null,
 ): 0 | 90 | 180 | 270 | null {
   // Sem escolha ainda: o primeiro clique parte do que a seta já
   // mostra, e não do zero — girar tem de mover a seta um quarto,
   // não jogá-la para o norte.
-  const from = current ?? (shown as 0 | 90 | 180 | 270);
+  const from = current ?? auto ?? 0;
   const next = ((from + 90) % 360) as 0 | 90 | 180 | 270;
 
   // Deu a volta inteira: volta ao automático.
-  return current !== null && next === (shown as number) ? null : next;
+  return current !== null && next === (auto ?? 0) ? null : next;
 }

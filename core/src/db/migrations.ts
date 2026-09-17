@@ -8008,6 +8008,79 @@ CREATE INDEX idx_workshop_audit_at ON workshop_audit (at DESC);
 CREATE INDEX idx_workshop_audit_steam ON workshop_audit (steam_id, at DESC);
 `;
 
+// ------------------------------------------------------------
+//  099 — o corpo feito à mão, a skin das peças e o visual do aviso
+//
+//  Três pedidos do dono em 16/09/2026, na mesma migração porque
+//  moram nas mesmas duas tabelas.
+//
+//  ####  O MODO CONSTRUÇÃO NÃO CABE NO `mode`, E NÃO VAI CABER  ####
+//
+//  A 059 criou `dungeons.mode` com `CHECK (mode IN ('recipe',
+//  'blueprint'))`. Ampliar o CHECK exige RECONSTRUIR a tabela — e
+//  `dungeon_rooms` e `dungeon_servers` a referenciam com ON DELETE
+//  CASCADE. Com `foreign_keys = ON` (database.ts), o DROP da tabela
+//  velha apagaria as salas e os vínculos de toda masmorra gravada:
+//  é o mesmo remédio pior que a doença que a 025 já recusou.
+//
+//  Então o modo novo é uma coluna à parte, `construction`. Com ela
+//  em 1, o repositório lê o modo como 'construction', e o `mode`
+//  guarda o modo de células que estava antes — o que faz voltar dele
+//  não perder nada.
+//
+//  ####  `body` É JSON, COMO O `grid`  ####
+//
+//  A planta escolhida, a chegada e os pontos. Ninguém consulta por
+//  dentro, e a lista cabe numa coluna (teto de 120 pontos). NULL =
+//  a masmorra nunca teve corpo importado.
+//
+//  ####  A SKIN É UM INTEIRO, E ZERO É "NENHUMA"  ####
+//
+//  Uma por peça, nos três lugares onde o material já mora: a masmorra
+//  (`structure_*`), o corredor e cada cor de sala. `NOT NULL DEFAULT
+//  0` porque zero já é o significado certo para toda linha antiga —
+//  e o do corredor e da sala só vale quando o material deles vale
+//  (os três `grade_*` NULL continuam sendo "herda").
+//
+//  Os números conhecidos cabem com folga no inteiro do SQLite (o
+//  maior é 10.472); não é o caso do UInt64 da oficina, que a 095
+//  guarda como texto.
+//
+//  ####  O VISUAL DO AVISO É ANULÁVEL, COMO O TEXTO  ####
+//
+//  Vazio = o padrão do chat, que mora no código. Gravar o padrão em
+//  cada linha o congelaria — a mesma razão da 068 para o texto.
+//
+//  ####  AS MARCAS DA PLANTA  ####
+//
+//  `dungeon_blueprints.markers` guarda quantos marcadores cada planta
+//  tem (`{"npc":3,"crate":2,"arrival":1}`), contados na escrita. É o
+//  que a biblioteca mostra sem abrir 512 KB de JSON por linha. NULL =
+//  gravada antes desta migração; a leitura conta de novo.
+// ------------------------------------------------------------
+const DUNGEON_BODY_SKINS_ANNOUNCE_SCHEMA = `
+ALTER TABLE dungeons ADD COLUMN construction INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN body TEXT;
+
+ALTER TABLE dungeons ADD COLUMN structure_foundation_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN structure_wall_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN structure_ceiling_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN corridor_grade_foundation_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN corridor_grade_wall_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeons ADD COLUMN corridor_grade_ceiling_skin INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE dungeon_rooms ADD COLUMN grade_foundation_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeon_rooms ADD COLUMN grade_wall_skin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dungeon_rooms ADD COLUMN grade_ceiling_skin INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE dungeons ADD COLUMN announce_tag TEXT;
+ALTER TABLE dungeons ADD COLUMN announce_tag_color TEXT;
+ALTER TABLE dungeons ADD COLUMN announce_color TEXT;
+ALTER TABLE dungeons ADD COLUMN announce_size INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE dungeon_blueprints ADD COLUMN markers TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -8278,6 +8351,11 @@ export const MIGRATIONS: readonly Migration[] = [
   // nao custa nada, id repetido e uma migracao PULADA em silencio no
   // merge.
   { id: 98, name: 'quest-points-ranking', sql: QUEST_POINTS_RANKING_SCHEMA },
+  // 17/09/2026: a masmorra com corpo feito a mao, a skin de cada
+  // peca gerada e o visual do aviso no chat. Nasceu 99 porque a 96 e
+  // a 98 ja existiam em outras branches, e a 97 esta reservada para a
+  // frente do workshop.
+  { id: 99, name: 'dungeon-body-skins-announce', sql: DUNGEON_BODY_SKINS_ANNOUNCE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

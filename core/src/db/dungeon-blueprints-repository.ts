@@ -25,14 +25,32 @@
 // ============================================================
 
 import { analyzeBlueprint, parseBlueprint, type BlueprintProblem } from '../dungeons/blueprint.js';
+import { analyzeBody } from '../dungeons/body.js';
 import type { Logger } from '../logger.js';
 import type { AgentDatabase } from './database.js';
 
 /** De onde a planta veio. */
 export type BlueprintOrigin = 'builtin' | 'import' | 'capture';
 
-/** Onde ela é colada. */
+/**
+ * Onde ela é colada.
+ *
+ * `entrance` é a casinha da superfície; `base` é o CORPO da masmorra,
+ * colado a -90 no modo construção. Na tela, "entrada" e "masmorra".
+ */
 export type BlueprintKind = 'entrance' | 'base';
+
+/**
+ * Quantos marcadores de corpo a planta tem. Ver `dungeons/body.ts`.
+ *
+ * Contados na escrita, para a biblioteca dizer "3 lápides, 2 velas,
+ * 1 árvore" sem abrir o JSON de cada linha.
+ */
+export interface BlueprintMarkerCounts {
+  readonly npc: number;
+  readonly crate: number;
+  readonly arrival: number;
+}
 
 /** A linha, sem o conteúdo. É o que a lista devolve. */
 export interface BlueprintSummary {
@@ -42,6 +60,8 @@ export interface BlueprintSummary {
   readonly entityCount: number;
   readonly byteSize: number;
   readonly hasHatch: boolean;
+  /** `null` = gravada antes da migração 099 e ainda não relida. */
+  readonly markers: BlueprintMarkerCounts | null;
   readonly origin: BlueprintOrigin;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -71,13 +91,14 @@ interface Row {
   readonly entity_count: number;
   readonly byte_size: number;
   readonly has_hatch: number;
+  readonly markers: string | null;
   readonly origin: string;
   readonly created_at: number;
   readonly updated_at: number;
 }
 
 const SUMMARY_COLUMNS =
-  'id, name, kind, entity_count, byte_size, has_hatch, origin, created_at, updated_at';
+  'id, name, kind, entity_count, byte_size, has_hatch, markers, origin, created_at, updated_at';
 
 export class DungeonBlueprintsRepository {
   readonly #db: AgentDatabase;
@@ -144,6 +165,12 @@ export class DungeonBlueprintsRepository {
     if (!parsed.ok) return { ok: false, problem: parsed.problem };
 
     const facts = analyzeBlueprint(parsed.blueprint, input.content);
+    const body = analyzeBody(parsed.blueprint.entities);
+    const markers: BlueprintMarkerCounts = {
+      npc: body.markers.npc.length,
+      crate: body.markers.crate.length,
+      arrival: body.markers.arrival.length,
+    };
     const requireHatch = input.requireHatch ?? input.kind === 'entrance';
 
     if (requireHatch && !facts.hasHatch) return { ok: false, problem: 'no_hatch' };
@@ -153,9 +180,9 @@ export class DungeonBlueprintsRepository {
     this.#db
       .prepare(
         `INSERT INTO dungeon_blueprints
-              (id, name, kind, content, entity_count, byte_size, has_hatch, origin,
+              (id, name, kind, content, entity_count, byte_size, has_hatch, markers, origin,
                created_at, updated_at)
-              VALUES (@id, @name, @kind, @content, @entityCount, @byteSize, @hasHatch, @origin,
+              VALUES (@id, @name, @kind, @content, @entityCount, @byteSize, @hasHatch, @markers, @origin,
                       @now, @now)
          ON CONFLICT (id) DO UPDATE SET
               name         = excluded.name,
@@ -164,6 +191,7 @@ export class DungeonBlueprintsRepository {
               entity_count = excluded.entity_count,
               byte_size    = excluded.byte_size,
               has_hatch    = excluded.has_hatch,
+              markers      = excluded.markers,
               origin       = excluded.origin,
               updated_at   = excluded.updated_at`,
       )
@@ -175,6 +203,7 @@ export class DungeonBlueprintsRepository {
         entityCount: facts.entityCount,
         byteSize: facts.byteSize,
         hasHatch: facts.hasHatch ? 1 : 0,
+        markers: JSON.stringify(markers),
         origin: input.origin,
         now,
       });
@@ -193,11 +222,51 @@ export class DungeonBlueprintsRepository {
         entities: facts.entityCount,
         hasHatch: facts.hasHatch,
         vehicles: facts.vehicles,
+        markers,
       },
       'planta gravada',
     );
 
     return { ok: true, blueprint: saved };
+  }
+
+  /**
+   * Conta os marcadores das plantas gravadas antes da migração 099.
+   *
+   * Roda no boot e só toca as linhas com `markers` NULL: da segunda
+   * subida em diante, não lê arquivo nenhum. Devolve quantas contou.
+   * Uma planta cujo JSON não é mais legível fica NULL — a tela mostra
+   * "não contado", e não um zero que ninguém mediu.
+   */
+  backfillMarkers(): number {
+    const rows = this.#db
+      .prepare('SELECT id, content FROM dungeon_blueprints WHERE markers IS NULL')
+      .all() as { id: string; content: string }[];
+
+    const update = this.#db.prepare('UPDATE dungeon_blueprints SET markers = ? WHERE id = ?');
+    let counted = 0;
+
+    for (const row of rows) {
+      const parsed = parseBlueprint(row.content);
+
+      if (!parsed.ok) continue;
+
+      const body = analyzeBody(parsed.blueprint.entities);
+
+      update.run(
+        JSON.stringify({
+          npc: body.markers.npc.length,
+          crate: body.markers.crate.length,
+          arrival: body.markers.arrival.length,
+        }),
+        row.id,
+      );
+      counted += 1;
+    }
+
+    if (counted > 0) this.#logger?.info({ counted }, 'marcadores das plantas antigas contados');
+
+    return counted;
   }
 
   /** `false` = não existia. */
@@ -230,10 +299,25 @@ function toSummary(row: Row): BlueprintSummary {
     entityCount: row.entity_count,
     byteSize: row.byte_size,
     hasHatch: row.has_hatch === 1,
+    markers: toMarkers(row.markers),
     origin: toOrigin(row.origin),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** A contagem gravada, ou `null` quando ela não existe ou está torta. */
+function toMarkers(raw: string | null): BlueprintMarkerCounts | null {
+  if (raw === null) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<Record<keyof BlueprintMarkerCounts, unknown>>;
+    const count = (value: unknown): number => (typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0);
+
+    return { npc: count(parsed.npc), crate: count(parsed.crate), arrival: count(parsed.arrival) };
+  } catch {
+    return null;
+  }
 }
 
 function toOrigin(raw: string): BlueprintOrigin {

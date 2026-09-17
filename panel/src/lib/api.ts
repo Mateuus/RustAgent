@@ -5889,12 +5889,55 @@ export const agent = {
       `/api/dungeon-blueprints/${encodeURIComponent(id)}`,
     ),
 
+  /**
+   * Sobe uma planta.
+   *
+   * `body` só vem para `kind: 'base'`: é o relatório do corpo — quantos
+   * marcadores o arquivo tem e o que dele não será importado. É a
+   * validação que a tela mostra no momento do upload.
+   */
   uploadBlueprint: (body: {
     id: string;
     name?: string;
-    kind: 'entrance' | 'base';
+    kind: BlueprintKind;
     content: string;
-  }) => api<{ blueprint: BlueprintSummary }>('/api/dungeon-blueprints', { method: 'POST', body }),
+  }) =>
+    api<{ ok: true; blueprint: BlueprintSummary; body: BlueprintBodyReport | null }>(
+      '/api/dungeon-blueprints',
+      { method: 'POST', body },
+    ),
+
+  /**
+   * Troca o nome ou o PAPEL de uma planta já importada.
+   *
+   * O papel vinha do nome do arquivo, e uma construção feita à mão
+   * raramente se chama "base…". Recusas com frase pronta:
+   * `BLUEPRINT_NO_HATCH` (422) ao virar entrada sem alçapão, e
+   * `BLUEPRINT_IN_USE` (409) ao tirar do papel de corpo uma planta que
+   * alguma masmorra usa assim.
+   */
+  updateBlueprint: (id: string, body: { name?: string; kind?: BlueprintKind }) =>
+    api<{ ok: true; blueprint: BlueprintSummary }>(
+      `/api/dungeon-blueprints/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body },
+    ),
+
+  /**
+   * Lê uma construção como corpo de masmorra.
+   *
+   * ####  A JUNÇÃO É DO AGENTE, E NÃO DESTA TELA  ####
+   *
+   * Recebe os pontos ATUAIS do rascunho e devolve a lista depois de
+   * juntar os marcadores da planta — sem duplicar, sem passar por cima
+   * do que o admin mudou. A tela só troca `draft.body.points` e
+   * `arrival` por `merged.*`; reescrever a regra aqui daria duas
+   * réguas para a mesma lista.
+   */
+  scanDungeonBody: (id: string, body: { points: BodyPoint[]; arrival: BodyArrival | null }) =>
+    api<BodyScanResponse>(`/api/dungeon-blueprints/${encodeURIComponent(id)}/body-scan`, {
+      method: 'POST',
+      body,
+    }),
 
   removeBlueprint: (id: string) =>
     api<{ ok: true }>(`/api/dungeon-blueprints/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -6277,7 +6320,13 @@ export const agent = {
 //  render, e a pagina inteira cai com "This page couldn't load".
 // ------------------------------------------------------------
 
-export type DungeonMode = 'recipe' | 'blueprint';
+/**
+ * Como o corpo da masmorra é produzido.
+ *
+ * `construction` é a construção feita À MÃO no jogo, salva com o
+ * CopyPaste e colada inteira a -90 — ver `DungeonBody`.
+ */
+export type DungeonMode = 'recipe' | 'blueprint' | 'construction';
 export type RoomColor = 'green' | 'blue' | 'red';
 
 /**
@@ -6304,10 +6353,20 @@ export type RoomDoor = (typeof ROOM_DOORS)[number];
 export const BUILD_GRADES = ['twigs', 'wood', 'stone', 'metal', 'toptier'] as const;
 export type BuildGrade = (typeof BUILD_GRADES)[number];
 
+/**
+ * O material de cada tipo de peça, e a skin de cada um.
+ *
+ * A skin é um PAR com o material: zero é a aparência padrão, e o par
+ * que o jogo não conhece a API recusa com 422. Ver
+ * `components/dungeons/building-skins.ts`.
+ */
 export interface GradeSet {
   foundation: BuildGrade;
   wall: BuildGrade;
   ceiling: BuildGrade;
+  foundationSkin: number;
+  wallSkin: number;
+  ceilingSkin: number;
 }
 
 export const LOOT_MODES = ['server', 'add', 'replace'] as const;
@@ -6388,6 +6447,236 @@ export interface DungeonPlacement {
   amount: number;
   /** Vazio = o que a sala ja usa. */
   prefab: string;
+}
+
+// ------------------------------------------------------------
+//  O CORPO IMPORTADO — a construção feita à mão no jogo
+//
+//  Espelha `bodyPointSchema`, `bodyArrivalSchema` e
+//  `dungeonBodyBuildSchema` de `core/src/types/dungeons.ts`, e a
+//  análise de `core/src/dungeons/body.ts`.
+// ------------------------------------------------------------
+
+/**
+ * De qual cadastro um ponto herda o conteúdo.
+ *
+ * As três cores de sala e o corredor continuam sendo o cardápio: a
+ * construção não tem sala, tem pontos — e cada ponto aponta para um
+ * desses quatro.
+ */
+export const BODY_PROFILES = ['green', 'blue', 'red', 'corridor'] as const;
+export type BodyProfile = (typeof BODY_PROFILES)[number];
+
+/** De onde o ponto veio: de um marcador achado na planta, ou da mão do admin. */
+export type BodyPointSource = 'marker' | 'manual';
+
+/** O teto de pontos por construção. O mesmo do agente. */
+export const MAX_BODY_POINTS = 120;
+
+/** O alcance de uma coordenada, em metros relativos à planta. */
+export const BODY_METERS = { min: -512, max: 512 } as const;
+
+/**
+ * Onde o jogador aparece ao descer, e para onde ele olha.
+ *
+ * É também a ÂNCORA da construção: o plugin cola a planta de modo que
+ * este ponto caia embaixo da entrada da superfície. Não mexe no
+ * respawn de quem morre lá dentro.
+ */
+export interface BodyArrival {
+  x: number;
+  y: number;
+  z: number;
+  /** Graus, de 0 a 360. */
+  yaw: number;
+  source: BodyPointSource;
+}
+
+/**
+ * Onde nasce um inimigo ou uma caixa, na construção importada.
+ *
+ * O `id` é o que impede a duplicata: o ponto que veio de um marcador
+ * tem o id derivado da posição dele no arquivo, e reler a planta o
+ * reconhece. O ponto manual precisa de um id único — `p-` e um
+ * pedaço aleatório.
+ */
+export interface BodyPoint {
+  /** `[a-z0-9-]{1,40}`. */
+  id: string;
+  kind: PlacementKind;
+  /** Até 40. Só aparece no painel. */
+  label: string;
+  /** Metros relativos à origem da planta, de -512 a 512. */
+  x: number;
+  y: number;
+  z: number;
+  /** Graus, de 0 a 360. */
+  yaw: number;
+  profile: BodyProfile;
+  /** 1 a 8. */
+  amount: number;
+  /** Vazio = o que o perfil já usa. */
+  prefab: string;
+  source: BodyPointSource;
+}
+
+/** A construção que serve de corpo, e o que nasce nela. */
+export interface DungeonBody {
+  /** O id da planta (`kind: 'base'`) do acervo. */
+  blueprint: string;
+  /** `null` = ainda não definida. O modo construção não salva assim. */
+  arrival: BodyArrival | null;
+  points: BodyPoint[];
+}
+
+/** Quantos marcadores de cada tipo uma planta tem. */
+export interface BlueprintMarkerCounts {
+  /** Lápides: pontos de inimigo. */
+  npc: number;
+  /** Velas grandes: pontos de caixa. */
+  crate: number;
+  /** Árvores de Natal: a chegada. */
+  arrival: number;
+}
+
+/** O relatório que o upload de um corpo devolve. */
+export interface BlueprintBodyReport {
+  markers: BlueprintMarkerCounts;
+  /** O que fica de fora, em frases prontas. */
+  warnings: string[];
+}
+
+/** Um marcador achado na planta. */
+export interface BodyMarker {
+  kind: 'npc' | 'crate' | 'arrival';
+  /** O id que o ponto derivado dele recebe. */
+  id: string;
+  /** A posição na lista `entities` do arquivo. */
+  index: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
+/** A forma de uma peça de construção, para a prévia e para medir espaço. */
+export type BodyPieceShape =
+  | 'foundation'
+  | 'foundation-triangle'
+  | 'floor'
+  | 'floor-triangle'
+  | 'wall'
+  | 'doorway'
+  | 'frame'
+  | 'window'
+  | 'half'
+  | 'low';
+
+export interface BodyPiece {
+  shape: BodyPieceShape;
+  x: number;
+  y: number;
+  z: number;
+  /** Graus. */
+  yaw: number;
+  grade: number;
+  skin: number;
+}
+
+/** O que o plugin faz com cada entidade do arquivo, no papel de corpo. */
+export type BodyEntityRole =
+  | 'structure'
+  | 'attachment'
+  | 'deployable'
+  | 'marker'
+  | 'npc'
+  | 'loot'
+  | 'hostile'
+  | 'vehicle'
+  | 'lock'
+  | 'weapon'
+  | 'unknown';
+
+/** Um enfeite ou móvel que sobe, para a prévia desenhar. */
+export interface BodyProp {
+  x: number;
+  y: number;
+  z: number;
+  role: BodyEntityRole;
+}
+
+/** A leitura inteira de uma construção. */
+export interface BodyAnalysis {
+  entityCount: number;
+  nodeCount: number;
+  markers: { npc: BodyMarker[]; crate: BodyMarker[]; arrival: BodyMarker[] };
+  /** Marcadores encaixados em outra peça: não viram ponto. */
+  nestedMarkers: number;
+  roles: Record<BodyEntityRole, number>;
+  inventoriesWithItems: number;
+  electrical: number;
+  pieces: BodyPiece[];
+  props: BodyProp[];
+  bounds: {
+    min: { x: number; y: number; z: number };
+    max: { x: number; y: number; z: number };
+  } | null;
+  rotationInRadians: boolean;
+  warnings: string[];
+}
+
+/**
+ * Os pontos do rascunho depois de juntar os marcadores.
+ *
+ * `arrivalState`:
+ *   `marker`     veio da única árvore da planta
+ *   `manual`     o admin definiu, e reler não muda isso
+ *   `missing`    a planta não tem árvore: o admin precisa definir
+ *   `ambiguous`  a planta tem mais de uma: o admin precisa escolher
+ */
+export interface BodyMerge {
+  points: BodyPoint[];
+  arrival: BodyArrival | null;
+  added: number;
+  kept: number;
+  removed: number;
+  manual: number;
+  arrivalState: 'marker' | 'manual' | 'missing' | 'ambiguous';
+}
+
+/**
+ * O que pode estar errado com um ponto.
+ *
+ * `on_prop` é o ponto em cima de um móvel ou enfeite: o jogo empurra
+ * até um metro para o lado, e desiste se não houver espaço.
+ * `unreachable` é o ponto num cômodo que não se alcança da chegada sem
+ * atravessar parede — só para quem não tem outro aviso, e nunca para a
+ * própria chegada.
+ *
+ * Todos são aviso. Só `outside`, `no_floor` e `inside_floor` na
+ * CHEGADA impedem salvar.
+ */
+export type BodyPointProblemCode =
+  | 'no_floor'
+  | 'inside_floor'
+  | 'inside_wall'
+  | 'no_headroom'
+  | 'on_prop'
+  | 'unreachable'
+  | 'outside';
+
+/** Um ponto que não cabe onde está. `id` é o do ponto, ou `arrival`. */
+export interface BodyPointProblem {
+  id: string;
+  code: BodyPointProblemCode;
+  message: string;
+}
+
+export interface BodyScanResponse {
+  ok: true;
+  analysis: BodyAnalysis;
+  merged: BodyMerge;
+  problems: BodyPointProblem[];
 }
 
 /**
@@ -6677,12 +6966,29 @@ export interface DungeonMarker {
   radius: number;
 }
 
-/** O que o servidor inteiro ouve. Texto vazio = a frase padrão. */
+/**
+ * O que o servidor inteiro ouve. Texto vazio = a frase padrão.
+ *
+ * `tag`, `tagColor`, `color` e `size` são os campos das mensagens do
+ * servidor, e o texto aceita a mesma marcação `[verde]…[/]`. Tudo
+ * vazio (e `size` 0) é a linha simples de sempre. A conta da frase
+ * mora em `lib/dungeon-announcement.ts`.
+ */
 export interface DungeonAnnounce {
   enabled: boolean;
+  /** Até 300. Vazio = "Uma masmorra apareceu em {grid}." */
   onBuild: string;
+  /** Até 300. Vazio = "A masmorra de {grid} fechou." */
   onEnd: string;
   showGrid: boolean;
+  /** O prefixo, como `[MASMORRA]`. Até 40; vazio = sem prefixo. */
+  tag: string;
+  /** Vazio ou hexadecimal. Vazio = `#ffcc00`. */
+  tagColor: string;
+  /** Vazio ou hexadecimal. Vazio = branco. */
+  color: string;
+  /** 0 = o do chat (15), ou de 8 a 40. */
+  size: number;
 }
 
 export interface DungeonProtection {
@@ -6787,6 +7093,14 @@ export interface DungeonInput {
   grid: string[] | null;
   /** Os marcadores do desenho. Vazio = o sorteio de sempre. */
   placements: DungeonPlacement[];
+  /**
+   * A construção importada que serve de corpo, no modo `construction`.
+   *
+   * Guardada em qualquer modo, como o `grid`: trocar de modo e voltar
+   * não pode apagar os pontos que o admin configurou. Independe da
+   * entrada, que continua sendo `entranceBlueprint`.
+   */
+  body: DungeonBody | null;
   npc: {
     health: { min: number; max: number };
     damageScale: number;
@@ -6849,6 +7163,8 @@ export interface DungeonSummary {
   name: string;
   mode: DungeonMode;
   entranceBlueprint: string | null;
+  /** A construção importada que serve de corpo. `null` = nenhuma. */
+  bodyBlueprint: string | null;
   /** Em que servidores ela vale. Vazio = em todos. */
   servers: string[];
   roomCount: number;
@@ -6858,15 +7174,30 @@ export interface DungeonSummary {
   updatedAt: number;
 }
 
+/**
+ * O papel de uma planta.
+ *
+ * `entrance` é a casinha da superfície; `base` é o CORPO da masmorra,
+ * colado a -90 no modo construção — na tela, "masmorra".
+ */
+export type BlueprintKind = 'entrance' | 'base';
+
 /** Uma planta do acervo, sem o conteudo. */
 export interface BlueprintSummary {
   id: string;
   name: string;
-  kind: 'entrance' | 'base';
+  kind: BlueprintKind;
   entityCount: number;
   byteSize: number;
   /** Sem isto, a masmorra nao abre. E a coluna que importa. */
   hasHatch: boolean;
+  /**
+   * Quantos marcadores de corpo a planta tem, contados na escrita.
+   *
+   * `null` = gravada antes da migração 099: ninguém contou ainda. A
+   * leitura do corpo (`scanDungeonBody`) conta na hora.
+   */
+  markers: BlueprintMarkerCounts | null;
   origin: 'builtin' | 'import' | 'capture';
   createdAt: number;
   updatedAt: number;

@@ -37,6 +37,14 @@
 //  Sem isso, "peso vermelho: 15" é um número sem tradução, e
 //  balancear vira tentativa e erro de wipe em wipe.
 //
+//  ####  NA CONSTRUÇÃO IMPORTADA, O PASSO ② É OUTRO  ####
+//
+//  A masmorra já existe — foi construída no jogo —, e o passo ②
+//  vira a escolha dela e dos pontos (`construction-step.tsx`). As
+//  cores de sala e o corredor do passo ③ continuam valendo como os
+//  PERFIS dos pontos; o que é de célula (porta, fechadura, material)
+//  some da tela, porque a construção já traz os dela.
+//
 //  ####  O PASSO ⑥ TERMINA SOZINHO  ####
 //
 //  Ele mostra o comando, e então FICA OLHANDO: pergunta ao agente,
@@ -48,9 +56,15 @@
 // ============================================================
 
 import { Check, Copy, Dices, Loader2, Plus, RotateCcw, RotateCw, Save, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 
 import { AiFields, resolveAi } from '@/components/dungeons/ai-fields';
+import { isSkinCompatible, skinsForGrade } from '@/components/dungeons/building-skins';
+import {
+  BodyProfileSummary,
+  ConstructionStep,
+  PROFILE_LABEL,
+} from '@/components/dungeons/construction-step';
 import { CrateFields } from '@/components/dungeons/crate-fields';
 import { DungeonGridEditor } from '@/components/dungeons/dungeon-grid-editor';
 import { DungeonPreviewPanel } from '@/components/dungeons/dungeon-preview';
@@ -72,6 +86,7 @@ import {
 import {
   agent,
   BUILD_GRADES,
+  MAX_BODY_POINTS,
   ROOM_DOORS,
   type AccessWhoEnters,
   type AiSpec,
@@ -79,9 +94,11 @@ import {
   type BuildGrade,
   type Dungeon,
   type DungeonAccess,
+  type DungeonBody,
   type DungeonInput,
   type DungeonLayoutSummary,
   type DungeonLock,
+  type DungeonMode,
   type DungeonProtection,
   type DungeonAnnounce,
   type DungeonMarker,
@@ -93,6 +110,18 @@ import {
   type RoomColor,
   type RoomDoor,
 } from '@/lib/api';
+import { CHAT_COLORS, parseChatMarkup } from '@/lib/chat-markup';
+import {
+  ANNOUNCE_DEFAULTS,
+  ANNOUNCE_MAX_TAG,
+  ANNOUNCE_MAX_TEXT,
+  ANNOUNCE_SIZE_RANGE,
+  announcementStyle,
+  announcementText,
+  isAnnounceColor,
+  isAnnounceSize,
+  SAMPLE_GRID,
+} from '@/lib/dungeon-announcement';
 import { DUNGEON_HELP } from '@/lib/help/dungeons';
 import { cn } from '@/lib/utils';
 
@@ -103,6 +132,13 @@ const COLOR_LABEL: Readonly<Record<RoomColor, string>> = {
   green: 'Verde',
   blue: 'Azul',
   red: 'Vermelha',
+};
+
+/** O nome do passo ②, que é outro em cada modo. */
+const SHAPE_STEP_LABEL: Readonly<Record<DungeonMode, string>> = {
+  recipe: 'Tamanho',
+  blueprint: 'Desenho',
+  construction: 'Construção',
 };
 
 const DOOR_LABEL: Readonly<Record<RoomDoor, string>> = {
@@ -256,7 +292,18 @@ const EMPTY: DungeonInput = {
   entranceFacing: null,
   servers: [],
   marker: { enabled: true, label: 'Masmorra', color: '#ff0000', alpha: 0.55, radius: 0.5 },
-  announce: { enabled: true, onBuild: '', onEnd: '', showGrid: true },
+  // Tudo vazio (e tamanho 0) é a linha simples de sempre: o visual
+  // padrão mora no plugin, e gravá-lo aqui o congelaria.
+  announce: {
+    enabled: true,
+    onBuild: '',
+    onEnd: '',
+    showGrid: true,
+    tag: '',
+    tagColor: '',
+    color: '',
+    size: 0,
+  },
   size: { min: 10, max: 15 },
   weights: { green: 60, blue: 30, red: 10 },
   corridor: {
@@ -272,6 +319,8 @@ const EMPTY: DungeonInput = {
   grid: null,
   // Vazio = o sorteio de sempre. Ver `marcadores` na ajuda.
   placements: [],
+  // Só nasce quando o admin escolhe a construção, no passo ②.
+  body: null,
   npc: {
     health: { min: 100, max: 150 },
     damageScale: 1,
@@ -281,7 +330,15 @@ const EMPTY: DungeonInput = {
     ai: {},
   },
   timeOfDay: 0,
-  structure: { foundation: 'stone', wall: 'stone', ceiling: 'stone' },
+  // Skin zero é o bloco de sempre, nos três.
+  structure: {
+    foundation: 'stone',
+    wall: 'stone',
+    ceiling: 'stone',
+    foundationSkin: 0,
+    wallSkin: 0,
+    ceilingSkin: 0,
+  },
   lock: {
     enabled: true,
     sharedCode: false,
@@ -356,6 +413,18 @@ export function DungeonDialog({
     setDraft((current) => ({ ...current, ...change }));
   }, []);
 
+  /** Quem rola: o corpo do passo, entre a trilha e o rodapé. */
+  const stepBody = useRef<HTMLDivElement>(null);
+
+  // ####  TROCAR DE PASSO VOLTA AO TOPO  ####
+  //
+  // O contêiner que rola é o mesmo em todos os passos. Sem isto, sair
+  // do meio da lista de pontos e abrir "Salas e loot" caía no meio do
+  // terceiro perfil, sem o título do passo à vista.
+  useEffect(() => {
+    stepBody.current?.scrollTo({ top: 0 });
+  }, [step]);
+
   const problems = validate(draft);
 
   // ####  O ✓ PASSA A SIGNIFICAR "EU MEXI AQUI"  ####
@@ -377,15 +446,17 @@ export function DungeonDialog({
       done: draft.name !== '' && draft.id !== '',
     },
     {
+      // O mesmo id nos três modos: é o mesmo lugar da trilha, com
+      // outra pergunta dentro.
       id: 'tamanho',
-      label: draft.mode === 'blueprint' ? 'Desenho' : 'Tamanho',
+      label: SHAPE_STEP_LABEL[draft.mode],
       problem: problems.tamanho,
       done: touched.tamanho,
     },
     { id: 'salas', label: 'Salas e loot', problem: problems.salas, done: draft.rooms.length > 0 },
     { id: 'inimigos', label: 'Inimigos', problem: problems.inimigos, done: touched.inimigos },
     { id: 'entrada', label: 'Entrada e acesso', done: touched.entrada },
-    { id: 'anuncio', label: 'Mapa e chat', done: touched.anuncio },
+    { id: 'anuncio', label: 'Mapa e chat', problem: problems.anuncio, done: touched.anuncio },
     { id: 'construir', label: 'Construir', done: saved },
   ];
 
@@ -423,21 +494,23 @@ export function DungeonDialog({
       busy={busy}
       // Trinta campos nao podem ir embora num clique torto.
       guarded
-      // `w-`, e nao `max-w-`: o Dialog traz `w-[min(30rem,92vw)]`
-      // proprio, e um max-width maior nao alarga nada quando a
-      // largura ja e menor que ele. Com 30rem, a trilha de seis
-      // passos vira seis reticencias.
-      className="w-[min(72rem,94vw)]"
+      // ####  A TELA INTEIRA  ####
+      //
+      // Pedido do dono em 16/09/2026: a caixa de 72rem apertava a
+      // prévia da construção e a lista de pontos numa coluna, e tudo
+      // rolava. Agora ela ocupa a janela (com a margem de 16 px), a
+      // trilha e o rodapé ficam parados, e só o passo rola.
+      fullScreen
     >
-      <Steps steps={steps} current={step} onGo={setStep} />
+      <Steps steps={steps} current={step} onGo={setStep} className="shrink-0" />
 
-      {/* ####  68vh, E NAO 60  ####
+      {/* ####  O PASSO ROLA POR DENTRO  ####
 
-          O passo do desenho e o mais alto de todos: cabecalho, a
-          faixa de plantas prontas, a paleta e o grid. Com 60vh a
-          entrada amarela — o unico ponto do desenho que NAO se pode
-          deixar de ver — caia abaixo da dobra. */}
-      <div className="max-h-[68vh] overflow-y-auto">
+          Era `max-h-[68vh]` — 68, e nao 60, porque o passo do desenho
+          e o mais alto de todos e a entrada amarela caia abaixo da
+          dobra. Com a caixa na altura da janela, o passo fica com
+          TUDO o que sobra entre a trilha e o rodape. */}
+      <div ref={stepBody} className="min-h-0 flex-1 overflow-y-auto">
         {step === 'identidade' && (
           <StepIdentidade draft={draft} patch={patch} locked={saved} servers={servers} />
         )}
@@ -455,6 +528,13 @@ export function DungeonDialog({
           <WithPreview draft={draft} seed={seed} onReseed={() => setSeed((n) => n + 1)}>
             <StepTamanho draft={draft} patch={patch} />
           </WithPreview>
+        )}
+
+        {/* A prévia deste passo é a da própria construção, e mora
+            dentro dele: a do sorteio, aqui, desenharia uma masmorra
+            que não é a que vai nascer. */}
+        {step === 'tamanho' && draft.mode === 'construction' && (
+          <ConstructionStep draft={draft} patch={patch} blueprints={blueprints} />
         )}
 
         {step === 'salas' && (
@@ -480,7 +560,7 @@ export function DungeonDialog({
         )}
       </div>
 
-      <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-surface-2 px-4 py-3">
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-border bg-surface-2 px-4 py-3">
         <div className="min-w-0 text-2xs text-muted">
           {error !== null ? (
             // Texto em --text com borda colorida: o vermelho do
@@ -497,7 +577,7 @@ export function DungeonDialog({
             // ①. Correto e fora de hora: quem está escolhendo o nome
             // não tem o que fazer com essa frase, e ela ocupava o
             // lugar do que fazer AGORA.
-            <span>{footerHint(step, saved)}</span>
+            <span>{footerHint(step, saved, draft.mode)}</span>
           )}
         </div>
 
@@ -541,6 +621,22 @@ function WithPreview({
   readonly onReseed: () => void;
   readonly children: ReactNode;
 }) {
+  // ####  NA CONSTRUÇÃO, O LADO DIREITO É QUEM USA CADA PERFIL  ####
+  //
+  // Não há sorteio para mostrar: a masmorra é a que foi construída. O
+  // que ajuda quem mexe na tabela da sala vermelha é saber quantos
+  // pontos obedecem a ela.
+  if (draft.mode === 'construction') {
+    return (
+      <div className="grid gap-0 lg:grid-cols-[1fr_22rem]">
+        <div className="min-w-0">{children}</div>
+        <div className="border-t border-border p-4 lg:border-l lg:border-t-0">
+          <BodyProfileSummary body={draft.body} />
+        </div>
+      </div>
+    );
+  }
+
   const rooms = Math.round((draft.size.min + draft.size.max) / 2);
 
   // ####  NO MODO PLANTA, A PRÉVIA É O DESENHO  ####
@@ -604,7 +700,12 @@ function StepIdentidade({
           caminho errado. */}
       <div>
         <FieldLabel topic={DUNGEON_HELP.modo}>Como ela é montada</FieldLabel>
-        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {/* ####  TROCAR DE MODO NÃO APAGA NADA  ####
+
+            O desenho, os marcadores e a construção ficam guardados no
+            rascunho — e no agente — em qualquer modo. Voltar ao modo
+            anterior devolve o trabalho como estava. */}
+        <div className="mt-2 grid gap-2 sm:grid-cols-3">
           <ModeCard
             active={draft.mode === 'recipe'}
             title="Receita"
@@ -617,6 +718,12 @@ function StepIdentidade({
             detail="Você pinta o traçado célula a célula. Sai sempre igual, e os jogadores decoram o caminho."
             onClick={() => patch({ mode: 'blueprint' })}
           />
+          <ModeCard
+            active={draft.mode === 'construction'}
+            title="Construção importada"
+            detail="Construa no jogo, salve com o CopyPaste e use a construção como corpo da masmorra."
+            onClick={() => patch({ mode: 'construction' })}
+          />
         </div>
       </div>
 
@@ -628,7 +735,17 @@ function StepIdentidade({
             onChange={(event) => {
               const name = event.target.value;
 
-              patch(locked ? { name } : { name, id: draft.id === '' ? slugify(name) : draft.id });
+              // ####  O IDENTIFICADOR ACOMPANHA O NOME ENQUANTO NINGUÉM MEXEU NELE  ####
+              //
+              // MEDIDO em 17/09/2026, criando uma masmorra pela tela: a
+              // regra era "só se o identificador estiver vazio", e ele
+              // deixa de estar vazio na PRIMEIRA letra — "Bunker da
+              // Equipe" virava o identificador "b". Seguir o nome
+              // enquanto ele ainda é o slug do nome resolve, e respeita
+              // quem escreveu um identificador próprio.
+              const following = draft.id === '' || draft.id === slugify(draft.name);
+
+              patch(locked ? { name } : { name, id: following ? slugify(name) : draft.id });
             }}
           />
         </Field>
@@ -645,7 +762,7 @@ function StepIdentidade({
             value={draft.id}
             disabled={locked}
             placeholder="bunker-vermelho"
-            onChange={(event) => patch({ id: slugify(event.target.value) })}
+            onChange={(event) => patch({ id: slugifyWhileTyping(event.target.value) })}
           />
         </Field>
       </div>
@@ -797,7 +914,16 @@ function WideDoorHint({
   );
 }
 
-/** Os três tipos de peça, lado a lado. */
+/**
+ * Os três tipos de peça, lado a lado — o material e a skin de cada um.
+ *
+ * ####  A SKIN SÓ MOSTRA O QUE O MATERIAL TEM  ####
+ *
+ * O jogo guarda a skin como um PAR com o material, e o par que ele
+ * não conhece vira palha sem aviso. Então a lista de skins é a do
+ * material escolhido, e trocar o material apaga a skin que não existe
+ * nele — em vez de deixar a API recusar o formulário inteiro com 422.
+ */
 function GradeRow({
   value,
   onChange,
@@ -807,34 +933,76 @@ function GradeRow({
   readonly onChange: (value: GradeSet) => void;
   readonly className?: string;
 }) {
+  const baseId = useId();
   const pieces = [
-    { field: 'foundation' as const, label: 'Piso' },
-    { field: 'wall' as const, label: 'Parede' },
-    { field: 'ceiling' as const, label: 'Teto' },
+    { field: 'foundation' as const, skin: 'foundationSkin' as const, label: 'Piso', skinLabel: 'Skin do piso' },
+    { field: 'wall' as const, skin: 'wallSkin' as const, label: 'Parede', skinLabel: 'Skin da parede' },
+    { field: 'ceiling' as const, skin: 'ceilingSkin' as const, label: 'Teto', skinLabel: 'Skin do teto' },
   ];
 
   return (
     <div className={cn('grid gap-3 sm:grid-cols-3', className)}>
-      {pieces.map((piece) => (
-        <label key={piece.field} className="block">
-          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-            {piece.label}
-          </span>
-          <select
-            value={value[piece.field]}
-            onChange={(event) =>
-              onChange({ ...value, [piece.field]: event.target.value as BuildGrade })
-            }
-            className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
-          >
-            {BUILD_GRADES.map((grade) => (
-              <option key={grade} value={grade}>
-                {GRADE_LABEL[grade]}
-              </option>
-            ))}
-          </select>
-        </label>
-      ))}
+      {pieces.map((piece, index) => {
+        const grade = value[piece.field];
+        const skins = skinsForGrade(grade);
+        const skinId = `${baseId}-${piece.skin}`;
+
+        return (
+          <div key={piece.field} className="space-y-1">
+            <label className="block">
+              <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+                {piece.label}
+              </span>
+              <select
+                value={grade}
+                onChange={(event) => {
+                  const next = event.target.value as BuildGrade;
+
+                  onChange({
+                    ...value,
+                    [piece.field]: next,
+                    [piece.skin]: isSkinCompatible(next, value[piece.skin]) ? value[piece.skin] : 0,
+                  });
+                }}
+                className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+              >
+                {BUILD_GRADES.map((option) => (
+                  <option key={option} value={option}>
+                    {GRADE_LABEL[option]}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div>
+              {/* O (?) aparece uma vez por linha: três iguais lado a
+                  lado seriam ruído, e o texto é o mesmo. */}
+              <FieldLabel
+                htmlFor={skinId}
+                topic={index === 0 ? DUNGEON_HELP.buildingSkin : undefined}
+              >
+                {piece.skinLabel}
+              </FieldLabel>
+              <select
+                id={skinId}
+                value={String(value[piece.skin])}
+                disabled={skins.length === 0}
+                onChange={(event) => onChange({ ...value, [piece.skin]: Number(event.target.value) })}
+                className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="0">
+                  {skins.length === 0 ? `${GRADE_LABEL[grade]} não tem skin` : 'Padrão do material'}
+                </option>
+                {skins.map((skin) => (
+                  <option key={skin.id} value={String(skin.id)}>
+                    {skin.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1161,11 +1329,32 @@ function StepSalas({
       ? previewLayout(Math.round((draft.size.min + draft.size.max) / 2), seed)
       : null;
 
+  // ####  NA CONSTRUÇÃO, A COR VIRA PERFIL  ####
+  //
+  // A construção não tem sala: tem pontos, e cada ponto aponta para
+  // uma cor (ou para o corredor). O que é de CÉLULA — porta, fechadura,
+  // porta larga, material, a faixa de quantos nascem por sala — não
+  // existe lá, e some daqui. Um campo que fica na tela sem valer é
+  // pior que campo nenhum: ele é preenchido e ignorado em silêncio.
+  const built = draft.mode === 'construction';
+
   return (
     <StepBody
-      title="O que tem dentro de cada cor"
-      hint="A cor é o nível do cômodo: quantos inimigos, que loot, que porta e que material o jogador encontra. Embaixo ficam o corredor, as portas trancadas e o ciclo do loot — que valem para a masmorra inteira."
+      title={built ? 'O que nasce em cada perfil' : 'O que tem dentro de cada cor'}
+      hint={
+        built
+          ? 'Na construção importada, cada cor de sala e o corredor viram um PERFIL: o cardápio de caixas, loot e comportamento que os pontos usam. Quantos nascem é a quantidade de cada ponto, no passo Construção.'
+          : 'A cor é o nível do cômodo: quantos inimigos, que loot, que porta e que material o jogador encontra. Embaixo ficam o corredor, as portas trancadas e o ciclo do loot — que valem para a masmorra inteira.'
+      }
     >
+      {built && (
+        <p className="border-l-2 border-border pl-2 text-2xs leading-relaxed text-muted">
+          Porta, fechadura e material ficam de fora: a construção sobe com as portas, os materiais
+          e as skins que tinha no arquivo. As fechaduras dela não são importadas, e nenhuma sala
+          nasce trancada.
+        </p>
+      )}
+
       <div className="space-y-3">
         {draft.rooms.map((room, index) => (
           <div key={room.key} className="border border-border bg-surface-2 p-3">
@@ -1183,10 +1372,10 @@ function StepSalas({
                           : 'var(--rust-red)',
                   }}
                 />
-                Sala {COLOR_LABEL[room.color]}
+                {built ? `Perfil: ${PROFILE_LABEL[room.color]}` : `Sala ${COLOR_LABEL[room.color]}`}
               </h4>
 
-              {DOOR_MATERIAL[room.door] !== MATERIAL_OF_COLOR[room.color] && (
+              {!built && DOOR_MATERIAL[room.door] !== MATERIAL_OF_COLOR[room.color] && (
                 <span className="border-l-2 border-amber pl-2 text-2xs text-foreground">
                   {room.door === 'none'
                     ? 'Sem porta, esta sala deixa de avisar o que tem dentro.'
@@ -1195,137 +1384,29 @@ function StepSalas({
               )}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div>
-                <FieldLabel topic={DUNGEON_HELP.salaNpc}>Inimigos</FieldLabel>
-                <RangeRow
-                  compact
-                  value={room.npc}
-                  min={0}
-                  max={20}
-                  onChange={(npc) => update(index, { npc })}
-                />
-              </div>
-
-              <div>
-                <FieldLabel topic={DUNGEON_HELP.salaLoot}>Caixas</FieldLabel>
-                <RangeRow
-                  compact
-                  value={room.loot}
-                  min={0}
-                  max={20}
-                  onChange={(loot) => update(index, { loot })}
-                />
-              </div>
-
-              <div>
-                <FieldLabel topic={DUNGEON_HELP.porta}>Porta</FieldLabel>
-                <select
-                  value={room.door}
-                  onChange={(event) => update(index, { door: event.target.value as RoomDoor })}
-                  className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
-                >
-                  {ROOM_DOORS.map((door) => (
-                    <option key={door} value={door}>
-                      {DOOR_LABEL[door]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <FieldLabel topic={DUNGEON_HELP.trancada}>Com código</FieldLabel>
-                <div className="mt-1.5">
-                  <Toggle
-                    on={room.locked}
-                    busy={false}
-                    onChange={(locked) => update(index, { locked })}
-                    labels={['Trancada', 'Aberta']}
-                    label={`Porta da sala ${COLOR_LABEL[room.color]}`}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="lg:col-span-2">
-                <FieldLabel topic={DUNGEON_HELP.portaLarga}>Porta da sala grande</FieldLabel>
-                <select
-                  value={room.wideDoor ?? ''}
-                  onChange={(event) =>
-                    update(index, {
-                      wideDoor: event.target.value === '' ? null : (event.target.value as RoomDoor),
-                    })
-                  }
-                  className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
-                >
-                  <option value="">A mesma de cima, sempre</option>
-                  {WIDE_DOORS.map((door) => (
-                    <option key={door} value={door}>
-                      {DOOR_LABEL[door]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <FieldLabel topic={DUNGEON_HELP.portaLargaLimite}>A partir de</FieldLabel>
-                <div className="mt-1 flex items-center gap-2">
-                  <Input
-                    type="number"
-                    min={1}
-                    max={64}
-                    className="w-16"
-                    disabled={room.wideDoor === null}
-                    value={room.wideDoorCellsPerDoor}
-                    onChange={(event) =>
-                      update(index, {
-                        wideDoorCellsPerDoor: clampInt(event.target.value, 1, 64),
-                      })
-                    }
-                  />
-                  <span className="text-2xs text-muted">células por porta</span>
-                </div>
-              </div>
-
-              <div>
-                <FieldLabel topic={DUNGEON_HELP.grauDaSala}>Material próprio</FieldLabel>
-                <div className="mt-1.5">
-                  <Toggle
-                    on={room.grade !== null}
-                    busy={false}
-                    onChange={(on) =>
-                      update(index, { grade: on ? { ...draft.structure } : null })
-                    }
-                    labels={['Próprio', 'Herda']}
-                    label={`Material da sala ${COLOR_LABEL[room.color]}`}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {room.wideDoor !== null && traced !== null && (
-              <WideDoorHint preview={traced} cellsPerDoor={room.wideDoorCellsPerDoor} />
-            )}
-
-            {room.grade !== null && (
-              <GradeRow
-                value={room.grade}
-                onChange={(grade) => update(index, { grade })}
-                className="mt-3"
+            {!built && (
+              <RoomCellFields
+                room={room}
+                structure={draft.structure}
+                traced={traced}
+                onChange={(change) => update(index, change)}
               />
             )}
 
             <CrateFields
               crates={room.crates}
               onChange={(crates) => update(index, { crates })}
-              scope="desta cor"
-              className="mt-3"
+              scope={built ? 'deste perfil' : 'desta cor'}
+              className={built ? undefined : 'mt-3'}
             />
 
             <div className="mt-3">
               <LootTableFields
-                title={`O que cai nas caixas da sala ${COLOR_LABEL[room.color].toLowerCase()}`}
+                title={
+                  built
+                    ? `O que cai nas caixas do perfil ${PROFILE_LABEL[room.color].toLowerCase()}`
+                    : `O que cai nas caixas da sala ${COLOR_LABEL[room.color].toLowerCase()}`
+                }
                 value={room.table}
                 onChange={(table) => update(index, { table })}
               />
@@ -1342,7 +1423,7 @@ function StepSalas({
           uma ida e volta a cada ajuste. */}
       <div className="border border-border bg-surface-2 p-3">
         <h4 className="mb-3 font-condensed text-xs font-bold uppercase tracking-wide">
-          O corredor
+          {built ? `Perfil: ${PROFILE_LABEL.corridor}` : 'O corredor'}
         </h4>
 
         {/* ####  O MATERIAL DO CORREDOR MORA AQUI, E NAO NO PASSO ②  ####
@@ -1350,54 +1431,212 @@ function StepSalas({
             O `structure` daquele passo e o da MASMORRA — corredor,
             entrada e tudo que nao tem dono de sala. Este e so do
             caminho, e ele fica ao lado das caixas do corredor porque
-            e aqui que o admin esta pensando "como e o corredor". */}
-        <div>
-          <FieldLabel topic={DUNGEON_HELP.grauDoCorredor}>Material do corredor</FieldLabel>
-          <div className="mt-1.5">
-            <Toggle
-              on={draft.corridor.grade !== null}
-              busy={false}
-              onChange={(on) =>
-                patch({
-                  corridor: {
-                    ...draft.corridor,
-                    grade: on ? { ...draft.structure } : null,
-                  },
-                })
-              }
-              labels={['Próprio', 'O da masmorra']}
-              label="Material do corredor"
-            />
-          </div>
+            e aqui que o admin esta pensando "como e o corredor".
 
-          {draft.corridor.grade !== null && (
-            <GradeRow
-              value={draft.corridor.grade}
-              onChange={(grade) => patch({ corridor: { ...draft.corridor, grade } })}
-              className="mt-3"
-            />
-          )}
-        </div>
+            Na construção importada não há corredor gerado: o caminho
+            é o que foi construído, com o material do arquivo. */}
+        {!built && (
+          <div>
+            <FieldLabel topic={DUNGEON_HELP.grauDoCorredor}>Material do corredor</FieldLabel>
+            <div className="mt-1.5">
+              <Toggle
+                on={draft.corridor.grade !== null}
+                busy={false}
+                onChange={(on) =>
+                  patch({
+                    corridor: {
+                      ...draft.corridor,
+                      // A cópia leva as skins junto: ligar o próprio
+                      // parte do que a masmorra tem, inteiro.
+                      grade: on ? { ...draft.structure } : null,
+                    },
+                  })
+                }
+                labels={['Próprio', 'O da masmorra']}
+                label="Material do corredor"
+              />
+            </div>
+
+            {draft.corridor.grade !== null && (
+              <GradeRow
+                value={draft.corridor.grade}
+                onChange={(grade) => patch({ corridor: { ...draft.corridor, grade } })}
+                className="mt-3"
+              />
+            )}
+          </div>
+        )}
 
         <CrateFields
           crates={draft.corridor.crates}
           onChange={(crates) => patch({ corridor: { ...draft.corridor, crates } })}
-          scope="do corredor"
-          className="mt-3"
+          scope={built ? 'deste perfil' : 'do corredor'}
+          className={built ? undefined : 'mt-3'}
         />
 
         <div className="mt-3">
           <LootTableFields
-            title="O que cai nas caixas do corredor"
+            title={built ? 'O que cai nas caixas do perfil corredor' : 'O que cai nas caixas do corredor'}
             value={draft.corridor.table}
             onChange={(table) => patch({ corridor: { ...draft.corridor, table } })}
           />
         </div>
       </div>
 
-      <LockFields draft={draft} patch={patch} />
+      {/* A construção não nasce com porta trancada nenhuma: o bloco
+          inteiro da fechadura seria uma pergunta sobre nada. */}
+      {!built && <LockFields draft={draft} patch={patch} />}
       <RespawnFields draft={draft} patch={patch} />
     </StepBody>
+  );
+}
+
+/**
+ * O que só existe numa sala de CÉLULAS: quantos nascem, a porta, a
+ * fechadura, a porta larga e o material.
+ *
+ * ####  SEPARADO PORQUE A CONSTRUÇÃO IMPORTADA NÃO TEM NADA DISTO  ####
+ *
+ * Lá a cor é só o perfil dos pontos, e a construção já traz as portas
+ * e os materiais dela. Um bloco inteiro que aparece ou some é mais
+ * fácil de ler que doze condições espalhadas pelo cartão da sala.
+ */
+function RoomCellFields({
+  room,
+  structure,
+  traced,
+  onChange,
+}: {
+  readonly room: DungeonRoom;
+  /** O material da masmorra: é o que o "Material próprio" copia ao ligar. */
+  readonly structure: GradeSet;
+  /** O traçado da prévia ao lado, no modo receita. */
+  readonly traced: DungeonPreview | null;
+  readonly onChange: (change: Partial<DungeonRoom>) => void;
+}) {
+  return (
+    <>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.salaNpc}>Inimigos</FieldLabel>
+          <RangeRow
+            compact
+            value={room.npc}
+            min={0}
+            max={20}
+            onChange={(npc) => onChange({ npc })}
+          />
+        </div>
+
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.salaLoot}>Caixas</FieldLabel>
+          <RangeRow
+            compact
+            value={room.loot}
+            min={0}
+            max={20}
+            onChange={(loot) => onChange({ loot })}
+          />
+        </div>
+
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.porta}>Porta</FieldLabel>
+          <select
+            value={room.door}
+            onChange={(event) => onChange({ door: event.target.value as RoomDoor })}
+            className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+          >
+            {ROOM_DOORS.map((door) => (
+              <option key={door} value={door}>
+                {DOOR_LABEL[door]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.trancada}>Com código</FieldLabel>
+          <div className="mt-1.5">
+            <Toggle
+              on={room.locked}
+              busy={false}
+              onChange={(locked) => onChange({ locked })}
+              labels={['Trancada', 'Aberta']}
+              label={`Porta da sala ${COLOR_LABEL[room.color]}`}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="lg:col-span-2">
+          <FieldLabel topic={DUNGEON_HELP.portaLarga}>Porta da sala grande</FieldLabel>
+          <select
+            value={room.wideDoor ?? ''}
+            onChange={(event) =>
+              onChange({
+                wideDoor: event.target.value === '' ? null : (event.target.value as RoomDoor),
+              })
+            }
+            className="mt-1 h-9 w-full border border-border bg-background px-2 text-sm"
+          >
+            <option value="">A mesma de cima, sempre</option>
+            {WIDE_DOORS.map((door) => (
+              <option key={door} value={door}>
+                {DOOR_LABEL[door]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.portaLargaLimite}>A partir de</FieldLabel>
+          <div className="mt-1 flex items-center gap-2">
+            <Input
+              type="number"
+              min={1}
+              max={64}
+              className="w-16"
+              disabled={room.wideDoor === null}
+              value={room.wideDoorCellsPerDoor}
+              onChange={(event) =>
+                onChange({
+                  wideDoorCellsPerDoor: clampInt(event.target.value, 1, 64),
+                })
+              }
+            />
+            <span className="text-2xs text-muted">células por porta</span>
+          </div>
+        </div>
+
+        <div>
+          <FieldLabel topic={DUNGEON_HELP.grauDaSala}>Material próprio</FieldLabel>
+          <div className="mt-1.5">
+            <Toggle
+              on={room.grade !== null}
+              busy={false}
+              // A cópia leva as skins junto: ligar o próprio parte do
+              // que a masmorra tem, inteiro. "Herda" continua `null`.
+              onChange={(on) => onChange({ grade: on ? { ...structure } : null })}
+              labels={['Próprio', 'Herda']}
+              label={`Material da sala ${COLOR_LABEL[room.color]}`}
+            />
+          </div>
+        </div>
+      </div>
+
+      {room.wideDoor !== null && traced !== null && (
+        <WideDoorHint preview={traced} cellsPerDoor={room.wideDoorCellsPerDoor} />
+      )}
+
+      {room.grade !== null && (
+        <GradeRow
+          value={room.grade}
+          onChange={(grade) => onChange({ grade })}
+          className="mt-3"
+        />
+      )}
+    </>
   );
 }
 
@@ -1853,6 +2092,19 @@ function StepEntrada({
 }) {
   const entrances = blueprints.filter((blueprint) => blueprint.kind === 'entrance');
 
+  // ####  A ENTRADA QUE MUDOU DE PAPEL CONTINUA NA TELA  ####
+  //
+  // O papel de uma planta agora se troca na aba Plantas. Uma entrada
+  // que virou "corpo" sumiria desta lista — e a masmorra continuaria
+  // apontando para ela sem nenhum cartão marcado. Mostrá-la, com o
+  // aviso, é o que deixa o admin ver e trocar.
+  const orphan =
+    draft.entranceBlueprint === null
+      ? undefined
+      : entrances.some((blueprint) => blueprint.id === draft.entranceBlueprint)
+        ? undefined
+        : (blueprints.find((blueprint) => blueprint.id === draft.entranceBlueprint) ?? null);
+
   return (
     <StepBody
       title="A casinha que aparece no mapa"
@@ -1878,6 +2130,20 @@ function StepEntrada({
             onClick={() => patch({ entranceBlueprint: blueprint.id })}
           />
         ))}
+
+        {orphan !== undefined && (
+          <BlueprintCard
+            active
+            title={orphan?.name ?? draft.entranceBlueprint ?? ''}
+            detail="A planta escolhida para esta masmorra."
+            warning={
+              orphan === null
+                ? 'Ela não está mais no acervo: escolha outra entrada.'
+                : 'Ela está marcada como corpo de masmorra, e não como entrada: escolha outra, ou troque o papel dela na aba Plantas.'
+            }
+            onClick={() => undefined}
+          />
+        )}
       </div>
 
       {entrances.length === 0 && (
@@ -2380,39 +2646,35 @@ function StepAnuncio({
 
         {draft.announce.enabled ? (
           <div className="mt-3 space-y-3">
-            <div>
-              <FieldLabel>Quando ela nasce</FieldLabel>
-              <Input
-                className="mt-1"
-                value={draft.announce.onBuild}
-                maxLength={200}
-                placeholder="Uma masmorra apareceu em {grid}."
-                onChange={(event) => announce({ onBuild: event.target.value })}
-              />
-            </div>
+            <AnnounceTextField
+              label="Quando ela nasce"
+              value={draft.announce.onBuild}
+              fallback={ANNOUNCE_DEFAULTS.onBuild}
+              onChange={(onBuild) => announce({ onBuild })}
+            />
 
-            <div>
-              <FieldLabel>Quando ela fecha</FieldLabel>
-              <Input
-                className="mt-1"
-                value={draft.announce.onEnd}
-                maxLength={200}
-                placeholder="A masmorra de {grid} fechou."
-                onChange={(event) => announce({ onEnd: event.target.value })}
-              />
-            </div>
+            <AnnounceTextField
+              label="Quando ela fecha"
+              value={draft.announce.onEnd}
+              fallback={ANNOUNCE_DEFAULTS.onEnd}
+              onChange={(onEnd) => announce({ onEnd })}
+            />
 
-            <p className="text-2xs text-muted">
-              Em branco, valem as frases acima. <code className="font-mono">{'{grid}'}</code> vira a
-              grade do mapa (E7) e <code className="font-mono">{'{nome}'}</code> vira o
-              identificador da masmorra.
+            <p className="text-2xs leading-relaxed text-muted">
+              Em branco, valem as frases de exemplo. <code className="font-mono">{'{nome}'}</code>{' '}
+              vira o nome da masmorra e <code className="font-mono">{'{grid}'}</code>, a grade do
+              mapa (G6). Para pintar um trecho, selecione-o e clique numa cor: o texto vira{' '}
+              <code className="font-mono">{'[verde]{nome}[/]'}</code>. Colchete que não é cor
+              (<code className="font-mono">[AVISO]</code>) sai como está.
             </p>
 
             <label className="flex items-center justify-between gap-3 border-t border-border pt-3">
               <span className="min-w-0">
                 <span className="block text-xs text-foreground">Dizer onde ela está</span>
                 <span className="block text-2xs text-muted">
-                  Desligado, a frase sai sem a grade — e quem quiser achá-la procura.
+                  {draft.announce.showGrid
+                    ? 'Ligado: sem {grid} na frase, a grade entra no fim, entre parênteses.'
+                    : 'Desligado: {grid} vira "algum lugar", e quem quiser achá-la procura.'}
                 </span>
               </span>
               <Toggle
@@ -2423,6 +2685,10 @@ function StepAnuncio({
                 label="Dizer onde ela está"
               />
             </label>
+
+            <AnnounceStyleFields value={draft.announce} onChange={announce} />
+
+            <AnnouncePreview draft={draft} />
           </div>
         ) : (
           <p className="mt-2 text-2xs text-muted">
@@ -2433,6 +2699,383 @@ function StepAnuncio({
       </div>
     </StepBody>
   );
+}
+
+/**
+ * Uma frase do aviso: o texto, as variáveis e a cor de um trecho.
+ *
+ * ####  OS BOTÕES ESCREVEM A SINTAXE, E NÃO O ADMIN  ####
+ *
+ * O mesmo desenho do `message-dialog.tsx`: a cor envolve a SELEÇÃO
+ * com o par `[cor]…[/]`, e a variável entra onde o cursor está.
+ * Decorar a sintaxe é o jeito de esquecer o `[/]` — e uma cor que não
+ * fecha pinta o resto da frase.
+ */
+function AnnounceTextField({
+  label,
+  value,
+  fallback,
+  onChange,
+}: {
+  readonly label: string;
+  readonly value: string;
+  /** A frase padrão, que vale com o campo vazio. */
+  readonly fallback: string;
+  readonly onChange: (value: string) => void;
+}) {
+  const id = useId();
+  const field = useRef<HTMLTextAreaElement>(null);
+
+  /**
+   * Onde o cursor esteve pela última vez. `null` = ainda não esteve.
+   *
+   * Um textarea sem foco responde `selectionStart: 0`, e confiar
+   * nisso faria a cor cair no COMEÇO da frase.
+   */
+  const selection = useRef<{ start: number; end: number } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  function remember(target: HTMLTextAreaElement): void {
+    selection.current = { start: target.selectionStart, end: target.selectionEnd };
+  }
+
+  /**
+   * Escreve `before` e `after` em volta da seleção.
+   *
+   * `keepSelection` falso SUBSTITUI o selecionado — é a variável, que
+   * entra no lugar do trecho marcado, como qualquer digitação.
+   */
+  function write(before: string, after: string, keepSelection: boolean): void {
+    const at = selection.current ?? { start: value.length, end: value.length };
+    const start = Math.min(at.start, value.length);
+    const end = Math.min(at.end, value.length);
+    const inner = keepSelection ? value.slice(start, end) : '';
+    const next = `${value.slice(0, start)}${before}${inner}${after}${value.slice(end)}`;
+
+    // O teto é do agente, e ele recusaria a masmorra inteira. Cortar
+    // aqui seria pior: o admin perderia o texto sem entender por quê.
+    if (next.length > ANNOUNCE_MAX_TEXT) {
+      setNotice(`Não cabe: a frase passaria de ${String(ANNOUNCE_MAX_TEXT)} caracteres.`);
+      return;
+    }
+
+    setNotice(null);
+    onChange(next);
+
+    // Cor sem seleção: o cursor fica DENTRO do par, e quem clicou na
+    // cor antes de escrever continua digitando já colorido.
+    const caret =
+      keepSelection && inner === ''
+        ? start + before.length
+        : start + before.length + inner.length + after.length;
+
+    selection.current = { start: caret, end: caret };
+
+    // O React só reescreve o campo no próximo quadro.
+    requestAnimationFrame(() => {
+      field.current?.focus();
+      field.current?.setSelectionRange(caret, caret);
+    });
+  }
+
+  return (
+    <div>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <textarea
+        id={id}
+        ref={field}
+        rows={2}
+        value={value}
+        maxLength={ANNOUNCE_MAX_TEXT}
+        placeholder={fallback}
+        onChange={(event) => {
+          onChange(event.target.value);
+          remember(event.target);
+        }}
+        onSelect={(event) => remember(event.currentTarget)}
+        className="mt-1 w-full border border-border bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted"
+      />
+
+      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-2xs text-muted">
+        <span className={cn('tabular-nums', value.length > ANNOUNCE_MAX_TEXT * 0.9 && 'text-amber')}>
+          {value.length}/{ANNOUNCE_MAX_TEXT}
+        </span>
+
+        <span className="ml-1">variáveis:</span>
+        {['{nome}', '{grid}'].map((token) => (
+          <button
+            key={token}
+            type="button"
+            title={`Inserir ${token} onde está o cursor`}
+            onClick={() => write(token, '', false)}
+            className="border border-border px-1 font-mono text-muted hover:text-foreground"
+          >
+            {token}
+          </button>
+        ))}
+
+        <span aria-hidden="true" className="mx-1 h-4 w-px bg-border" />
+
+        <span>cor de um trecho:</span>
+        {Object.entries(CHAT_COLORS).map(([colorName, hex]) => (
+          <button
+            key={colorName}
+            type="button"
+            title={`${colorName} — pinta o trecho selecionado`}
+            aria-label={`Pintar de ${colorName}`}
+            onClick={() => write(`[${colorName}]`, '[/]', true)}
+            className="h-4 w-4 border border-border hover:scale-110"
+            style={{ backgroundColor: hex }}
+          />
+        ))}
+      </div>
+
+      {notice !== null && (
+        <p className="mt-1 border-l-2 border-amber pl-2 text-2xs text-foreground">{notice}</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A tag, as cores e o tamanho da linha.
+ *
+ * Os mesmos campos das mensagens do servidor, com a mesma regra: em
+ * branco é o padrão do chat, que mora no plugin.
+ */
+function AnnounceStyleFields({
+  value,
+  onChange,
+}: {
+  readonly value: DungeonAnnounce;
+  readonly onChange: (change: Partial<DungeonAnnounce>) => void;
+}) {
+  const tagId = useId();
+  const sizeId = useId();
+  const noTag = value.tag.trim() === '';
+
+  return (
+    <div className="space-y-3 border-t border-border pt-3">
+      <FieldLabel topic={DUNGEON_HELP.announceStyle} className="text-xs font-bold text-foreground">
+        Como a linha aparece
+      </FieldLabel>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <FieldLabel htmlFor={tagId}>Tag</FieldLabel>
+          <Input
+            id={tagId}
+            className="mt-1"
+            value={value.tag}
+            maxLength={ANNOUNCE_MAX_TAG}
+            placeholder="[MASMORRA]"
+            onChange={(event) => onChange({ tag: event.target.value })}
+          />
+          <span className="mt-1 block text-2xs text-muted">Em branco, a linha sai sem prefixo.</span>
+        </div>
+
+        <div>
+          <FieldLabel htmlFor={sizeId}>Tamanho da letra</FieldLabel>
+          <Input
+            id={sizeId}
+            type="number"
+            min={ANNOUNCE_SIZE_RANGE.min}
+            max={ANNOUNCE_SIZE_RANGE.max}
+            className="mt-1 w-24"
+            value={value.size === 0 ? '' : value.size}
+            placeholder={String(ANNOUNCE_DEFAULTS.size)}
+            onChange={(event) => {
+              const parsed = Math.trunc(Number(event.target.value));
+
+              onChange({ size: event.target.value === '' || !Number.isFinite(parsed) ? 0 : parsed });
+            }}
+            // Na saída do campo, o número torto vai para a borda da
+            // faixa: quem digitou 50 quer letra grande, e não um erro.
+            onBlur={() => {
+              if (value.size !== 0 && !isAnnounceSize(value.size)) {
+                onChange({
+                  size: Math.min(ANNOUNCE_SIZE_RANGE.max, Math.max(ANNOUNCE_SIZE_RANGE.min, value.size)),
+                });
+              }
+            }}
+          />
+          <span className="mt-1 block text-2xs text-muted">
+            De {ANNOUNCE_SIZE_RANGE.min} a {ANNOUNCE_SIZE_RANGE.max}. Em branco, o do chat (
+            {ANNOUNCE_DEFAULTS.size}).
+          </span>
+        </div>
+
+        <AnnounceColorField
+          label="Cor da tag"
+          value={value.tagColor}
+          fallback={ANNOUNCE_DEFAULTS.tagColor}
+          disabled={noTag}
+          onChange={(tagColor) => onChange({ tagColor })}
+        />
+
+        <AnnounceColorField
+          label="Cor do texto"
+          value={value.color}
+          fallback={ANNOUNCE_DEFAULTS.color}
+          disabled={false}
+          onChange={(color) => onChange({ color })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Um campo de cor: o código, o seletor nativo e a paleta do chat. */
+function AnnounceColorField({
+  label,
+  value,
+  fallback,
+  disabled,
+  onChange,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly fallback: string;
+  readonly disabled: boolean;
+  readonly onChange: (value: string) => void;
+}) {
+  const id = useId();
+  const valid = isAnnounceColor(value);
+  const shown = valid && value.trim() !== '' ? value.trim() : fallback;
+
+  return (
+    <div className={cn(disabled && 'opacity-60')}>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+
+      <div className="mt-1 flex items-center gap-2">
+        <Input
+          id={id}
+          value={value}
+          maxLength={9}
+          disabled={disabled}
+          placeholder={fallback}
+          className="w-28 font-mono"
+          onChange={(event) => onChange(event.target.value.trim())}
+        />
+        {/* O seletor nativo só conhece `#rrggbb`: o valor curto e o
+            com transparência são convertidos só para ele. */}
+        <input
+          type="color"
+          aria-label={`${label}: escolher no seletor`}
+          disabled={disabled}
+          value={colorInputValue(shown)}
+          onChange={(event) => onChange(event.target.value)}
+          className="h-9 w-10 cursor-pointer border border-border bg-background disabled:cursor-not-allowed"
+        />
+        <Button size="sm" variant="ghost" disabled={disabled || value === ''} onClick={() => onChange('')}>
+          Padrão
+        </Button>
+      </div>
+
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {Object.entries(CHAT_COLORS).map(([colorName, hex]) => (
+          <button
+            key={colorName}
+            type="button"
+            disabled={disabled}
+            title={colorName}
+            aria-label={`${label}: ${colorName}`}
+            aria-pressed={value.toLowerCase() === hex}
+            onClick={() => onChange(hex)}
+            className={cn(
+              'h-4 w-4 border hover:scale-110 disabled:cursor-not-allowed',
+              value.toLowerCase() === hex ? 'border-foreground' : 'border-border',
+            )}
+            style={{ backgroundColor: hex }}
+          />
+        ))}
+      </div>
+
+      {!valid && (
+        <p className="mt-1 border-l-2 border-amber pl-2 text-2xs text-foreground">
+          A cor é hexadecimal, como {fallback} — ou fica em branco.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * As duas frases, como o servidor vai lê-las — sem erguer masmorra
+ * nenhuma.
+ *
+ * ####  A CONTA É A DO PLUGIN  ####
+ *
+ * `announcementText` espelha o `AnnouncementText` do
+ * `OrigemZDungeon.cs`, e `parseChatMarkup` a leitura de cor do
+ * OrigemZChat. Uma prévia que monta a frase diferente do jogo mente
+ * com confiança.
+ */
+function AnnouncePreview({ draft }: { readonly draft: DungeonInput }) {
+  const style = announcementStyle(draft.announce);
+  const tag = draft.announce.tag.trim();
+
+  const shared = {
+    name: draft.name,
+    slug: draft.id === '' ? 'masmorra' : draft.id,
+    grid: SAMPLE_GRID,
+    showGrid: draft.announce.showGrid,
+  };
+
+  const lines = [
+    {
+      key: 'build',
+      label: 'Quando ela nasce',
+      text: announcementText({ ...shared, template: draft.announce.onBuild, fallback: ANNOUNCE_DEFAULTS.onBuild }),
+    },
+    {
+      key: 'end',
+      label: 'Quando ela fecha',
+      text: announcementText({ ...shared, template: draft.announce.onEnd, fallback: ANNOUNCE_DEFAULTS.onEnd }),
+    },
+  ];
+
+  // A prévia não deixa a fonte crescer sem limite: 40 no jogo é grande;
+  // 40 px aqui empurraria o resto do passo para fora da tela.
+  const fontSize = Math.min(28, Math.max(10, style.size));
+
+  return (
+    <div className="border border-border bg-background px-3 py-2">
+      <span className="text-2xs uppercase tracking-wide text-muted">
+        prévia — com a grade de exemplo {SAMPLE_GRID}, sem erguer nada
+      </span>
+
+      {lines.map((line) => (
+        <div key={line.key} className="mt-2">
+          <span className="block text-2xs text-muted">{line.label}</span>
+          <p className="wrap-break-word" style={{ fontSize: `${String(fontSize)}px` }}>
+            {tag !== '' && <span style={{ color: style.tagColor }}>{tag} </span>}
+            {parseChatMarkup(line.text.trim()).map((span, index) => (
+              <span key={index} style={{ color: span.color ?? style.color }}>
+                {span.text}
+              </span>
+            ))}
+          </p>
+        </div>
+      ))}
+
+      <p className="mt-2 text-2xs text-muted">
+        Sem o plugin OrigemZChat no servidor, a frase sai na linha simples do jogo: sem tag, sem cor
+        e sem os marcadores — o texto fica, os colchetes de cor somem.
+      </p>
+    </div>
+  );
+}
+
+/** O valor que o `<input type="color">` aceita: sempre `#rrggbb`. */
+function colorInputValue(hex: string): string {
+  const clean = hex.trim().toLowerCase();
+
+  if (/^#[0-9a-f]{3}$/u.test(clean)) {
+    return `#${clean[1] ?? '0'}${clean[1] ?? '0'}${clean[2] ?? '0'}${clean[2] ?? '0'}${clean[3] ?? '0'}${clean[3] ?? '0'}`;
+  }
+
+  return /^#[0-9a-f]{6}/u.test(clean) ? clean.slice(0, 7) : '#ffffff';
 }
 
 function StepConstruir({
@@ -2888,12 +3531,33 @@ function validate(draft: DungeonInput): Record<string, string | undefined> {
 
   const total = draft.weights.green + draft.weights.blue + draft.weights.red;
 
-  if (total === 0) problems.tamanho = 'Pelo menos uma cor precisa ter peso maior que zero.';
+  // Na construção não há sorteio de cor: os pesos não valem, e a
+  // régua do agente também não os cobra fora da receita.
+  if (total === 0 && draft.mode !== 'construction') {
+    problems.tamanho = 'Pelo menos uma cor precisa ter peso maior que zero.';
+  }
 
   if (draft.npc.weapons.length === 0) problems.inimigos = 'Sem arma nenhuma, os NPCs ficam inertes.';
 
   if (draft.mode === 'blueprint' && (draft.grid === null || draft.grid.length === 0)) {
     problems.tamanho = 'Falta desenhar: sem traçado não há o que construir.';
+  }
+
+  // ####  A CONSTRUÇÃO PRECISA DE CORPO E DE CHEGADA  ####
+  //
+  // As mesmas duas perguntas do schema do agente, antes de ele
+  // recusar: sem a chegada, o jogador não tem onde aparecer — e o
+  // painel não escolhe uma árvore por ele.
+  if (draft.mode === 'construction') {
+    if (draft.body === null) {
+      problems.tamanho =
+        'Escolha a construção que serve de corpo: sem ela não há o que colar lá embaixo.';
+    } else if (draft.body.arrival === null) {
+      problems.tamanho =
+        'Defina a chegada: é onde o jogador aparece ao descer, e a planta não tinha exatamente uma árvore de Natal para indicá-la.';
+    } else if (draft.body.points.length > MAX_BODY_POINTS) {
+      problems.tamanho = `Uma construção aceita até ${String(MAX_BODY_POINTS)} pontos: tire ${String(draft.body.points.length - MAX_BODY_POINTS)}.`;
+    }
   }
 
   // ####  AS DUAS REGRAS DA FECHADURA, ANTES DE O AGENTE RECUSAR  ####
@@ -2902,7 +3566,11 @@ function validate(draft: DungeonInput): Record<string, string | undefined> {
   // jogo (a sala nasce lacrada, o construtor destranca e grita num
   // console que ninguém lê), e o admin conserta enquanto ainda está
   // olhando para o campo.
-  const anyLocked = draft.rooms.some((current) => current.locked);
+  //
+  // Na construção importada não nasce porta nenhuma: o "trancada" das
+  // cores não tranca nada, e o agente ignora as duas regras ali.
+  const anyLocked =
+    draft.mode !== 'construction' && draft.rooms.some((current) => current.locked);
 
   if (anyLocked && draft.lock.enabled) {
     if (draft.lock.carrier === 'none') {
@@ -2957,6 +3625,16 @@ function validate(draft: DungeonInput): Record<string, string | undefined> {
       'A tabela do corpo do inimigo não tem item nenhum: acrescente um, ou volte para "a do servidor".';
   }
 
+  // O visual do aviso tem a régua do agente: cor hexadecimal (ela vai
+  // para dentro de um `<color=…>` no jogo) e tamanho de 8 a 40.
+  if (!isAnnounceColor(draft.announce.tagColor)) {
+    problems.anuncio = 'A cor da tag precisa ser hexadecimal, como #ffcc00 — ou ficar em branco.';
+  } else if (!isAnnounceColor(draft.announce.color)) {
+    problems.anuncio = 'A cor do texto precisa ser hexadecimal, como #ffffff — ou ficar em branco.';
+  } else if (!isAnnounceSize(draft.announce.size)) {
+    problems.anuncio = 'O tamanho da letra vai de 8 a 40 — ou fica em branco, para o do chat.';
+  }
+
   return problems;
 }
 
@@ -2992,7 +3670,7 @@ function toInput(dungeon: Dungeon): DungeonInput {
       // `placements: undefined` faria a tela renderizar
       // `placements.length` e derrubar a pagina inteira — o defeito
       // do "This page couldn't load".
-      grade: input.corridor.grade ?? null,
+      grade: withSkins(input.corridor.grade ?? null),
     },
     npc: {
       ...input.npc,
@@ -3004,18 +3682,21 @@ function toInput(dungeon: Dungeon): DungeonInput {
     entranceFacing: input.entranceFacing ?? null,
     servers: input.servers ?? [],
     marker: input.marker ?? { ...EMPTY.marker },
-    announce: input.announce ?? { ...EMPTY.announce },
-    structure: input.structure ?? { ...EMPTY.structure },
+    // Campo a campo: um agente de antes da 099 manda o aviso sem a tag,
+    // as cores e o tamanho — e `announce.tag.trim()` derrubaria a tela.
+    announce: { ...EMPTY.announce, ...input.announce },
+    structure: withSkins(input.structure ?? EMPTY.structure),
     lock: input.lock ?? { ...EMPTY.lock },
     access: input.access ?? { ...EMPTY.access },
     protection: input.protection ?? { ...EMPTY.protection },
     respawn: input.respawn ?? { ...EMPTY.respawn },
     placements: input.placements ?? [],
+    body: toBody(input.body),
     rooms: input.rooms.map((current) => ({
       ...current,
       wideDoor: current.wideDoor ?? null,
       wideDoorCellsPerDoor: current.wideDoorCellsPerDoor ?? 4,
-      grade: current.grade ?? null,
+      grade: withSkins(current.grade ?? null),
       table: current.table ?? { ...SERVER_TABLE },
       ai: current.ai ?? {},
       // A caixa gravada como texto vira objeto AQUI tambem, e nao so
@@ -3027,6 +3708,37 @@ function toInput(dungeon: Dungeon): DungeonInput {
         typeof crate === 'string' ? { prefab: crate, table: null, coins: null } : crate,
       ),
     })),
+  };
+}
+
+/**
+ * O material com as três skins, mesmo vindo de um agente sem elas.
+ *
+ * `undefined` numa skin iria ao PUT como ausente — o agente aplica o
+ * zero e dá no mesmo —, mas o `<select>` da skin mostraria vazio, e a
+ * cópia do "Material próprio" levaria o buraco adiante.
+ */
+function withSkins(grade: GradeSet): GradeSet;
+function withSkins(grade: GradeSet | null): GradeSet | null;
+function withSkins(grade: GradeSet | null): GradeSet | null {
+  if (grade === null) return null;
+
+  return {
+    ...grade,
+    foundationSkin: grade.foundationSkin ?? 0,
+    wallSkin: grade.wallSkin ?? 0,
+    ceilingSkin: grade.ceilingSkin ?? 0,
+  };
+}
+
+/** A construção importada, com a lista garantida. `null` = nunca teve. */
+function toBody(body: DungeonBody | null | undefined): DungeonBody | null {
+  if (body === null || body === undefined) return null;
+
+  return {
+    blueprint: body.blueprint,
+    arrival: body.arrival ?? null,
+    points: body.points ?? [],
   };
 }
 
@@ -3117,11 +3829,13 @@ function whatChanged(draft: DungeonInput): {
 
   return {
     tamanho:
-      draft.mode === 'blueprint'
-        ? draft.grid !== null && draft.grid.length > 0
-        : !same(draft.size, EMPTY.size) ||
-          !same(draft.weights, EMPTY.weights) ||
-          !same(draft.corridor, EMPTY.corridor),
+      draft.mode === 'construction'
+        ? draft.body !== null
+        : draft.mode === 'blueprint'
+          ? draft.grid !== null && draft.grid.length > 0
+          : !same(draft.size, EMPTY.size) ||
+            !same(draft.weights, EMPTY.weights) ||
+            !same(draft.corridor, EMPTY.corridor),
     inimigos: !same(draft.npc, EMPTY.npc),
     entrada:
       draft.entranceBlueprint !== null ||
@@ -3141,7 +3855,7 @@ function whatChanged(draft: DungeonInput): {
  * passo Construir" aparecia enquanto o admin digitava o nome. A
  * frase certa, na hora errada, ocupa o lugar da frase certa.
  */
-function footerHint(step: string, saved: boolean): string {
+function footerHint(step: string, saved: boolean, mode: DungeonMode): string {
   if (!saved && step !== 'construir') {
     return 'Nada foi gravado ainda: o botão aqui do lado grava, e o jogo recebe na hora.';
   }
@@ -3150,9 +3864,13 @@ function footerHint(step: string, saved: boolean): string {
     case 'identidade':
       return 'O identificador não muda depois de criada: é por ele que o comando no jogo a encontra.';
     case 'tamanho':
-      return 'A prévia ao lado mostra a masmorra que vai nascer com estes números.';
+      return mode === 'construction'
+        ? 'A árvore de Natal é a chegada; as lápides e as velas viram os pontos da lista.'
+        : 'A prévia ao lado mostra a masmorra que vai nascer com estes números.';
     case 'salas':
-      return 'A cor da sala é o que o jogador aprende sem ler nada: vermelha quer dizer "cuidado, e vale a pena".';
+      return mode === 'construction'
+        ? 'Na construção, cada cor é um perfil: o que nasce nos pontos que apontam para ela.'
+        : 'A cor da sala é o que o jogador aprende sem ler nada: vermelha quer dizer "cuidado, e vale a pena".';
     case 'inimigos':
       return 'O que estiver em branco aqui herda o padrão da masmorra — e não vira zero.';
     case 'entrada':
@@ -3173,6 +3891,26 @@ function slugify(value: string): string {
     .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+/**
+ * O `slugify` de quem ainda está digitando.
+ *
+ * ####  O HÍFEN DO FIM NÃO PODE SUMIR NO MEIO DA PALAVRA  ####
+ *
+ * MEDIDO em 17/09/2026: com o `slugify` a cada tecla, o "-" recém
+ * digitado era cortado antes da letra seguinte, e "bunker-da-equipe"
+ * virava "bunkerdaequipe". O agente aceita o hífen no fim
+ * (`^[a-z0-9][a-z0-9-]*$`); só o do começo precisa sair.
+ */
+function slugifyWhileTyping(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/g, '')
     .slice(0, 48);
 }
 

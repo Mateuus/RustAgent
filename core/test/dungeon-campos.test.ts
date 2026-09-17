@@ -193,6 +193,22 @@ function harness(): Captured {
   return { sync, dungeons, sent, db };
 }
 
+/** O bloco de material como o fio o leva: sem as skins zeradas. */
+function withoutZeroSkins(
+  grade: { foundation: string; wall: string; ceiling: string; foundationSkin: number; wallSkin: number; ceilingSkin: number } | null,
+): Record<string, unknown> | null {
+  if (grade === null) return null;
+
+  const { foundationSkin, wallSkin, ceilingSkin, ...rest } = grade;
+
+  return {
+    ...rest,
+    ...(foundationSkin === 0 ? {} : { foundationSkin }),
+    ...(wallSkin === 0 ? {} : { wallSkin }),
+    ...(ceilingSkin === 0 ? {} : { ceilingSkin }),
+  };
+}
+
 /** O JSON que viajou dentro do `origemz.dungeon.sync <base64>`. */
 function decode(command: string): { dungeons: Record<string, unknown>[] } {
   const payload = command.slice(command.indexOf(' ') + 1);
@@ -252,7 +268,9 @@ describe('os campos das quatro frentes atravessam o sync', () => {
 
     if (dungeon === undefined) throw new Error('a masmorra não viajou');
 
-    expect(dungeon.structure).toEqual(FULL.structure);
+    // No fio a skin zero não viaja: é o padrão do `GradeSpec` do
+    // plugin. Ver `leanGrade`.
+    expect(dungeon.structure).toEqual(withoutZeroSkins(FULL.structure));
     expect(dungeon.lock).toEqual(FULL.lock);
     expect(dungeon.respawn).toEqual(FULL.respawn);
 
@@ -294,7 +312,7 @@ describe('os campos das quatro frentes atravessam o sync', () => {
     expect(room.door).toBe('garage');
     expect(room.wideDoor).toBe('double_toptier');
     expect(room.wideDoorCellsPerDoor).toBe(6);
-    expect(room.grade).toEqual(FULL.rooms[0]?.grade);
+    expect(room.grade).toEqual(withoutZeroSkins(FULL.rooms[0]?.grade ?? null));
     expect(room.ai).toEqual(FULL.rooms[0]?.ai);
 
     // A linha da tabela guarda só o que não é padrão — mas o que
@@ -543,6 +561,11 @@ describe('o marcador e o anúncio', () => {
       onBuild: '',
       onEnd: '',
       showGrid: true,
+      // O visual padrão do chat: sem tag, sem cor, tamanho do jogo.
+      tag: '',
+      tagColor: '',
+      color: '',
+      size: 0,
     });
   });
 

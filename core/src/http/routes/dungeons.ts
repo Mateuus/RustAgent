@@ -56,15 +56,19 @@ import {
 } from '../../db/dungeon-spawn-points-repository.js';
 import type { WorldEventsRepository } from '../../db/world-events-repository.js';
 import type { DungeonBuildAttempt } from '../../dungeons/sync.js';
-import { BLUEPRINT_PROBLEM_MESSAGE } from '../../dungeons/blueprint.js';
+import { BLUEPRINT_PROBLEM_MESSAGE, parseBlueprint } from '../../dungeons/blueprint.js';
+import { analyzeBody, checkBodyPoints, mergeBodyPoints, type BodyAnalysis } from '../../dungeons/body.js';
 import type { GroundReport } from '../../game/dungeon-contract.js';
 import { checkLayout } from '../../dungeons/layout.js';
 import { checkLockRoute } from '../../dungeons/lock-route.js';
 import { dungeonLayoutInputSchema } from '../../types/dungeon-layouts.js';
 import {
+  bodyArrivalSchema,
+  bodyPointSchema,
   dungeonInputSchema,
   dungeonUpdateSchema,
   FACTORY_RECIPES,
+  MAX_BODY_POINTS,
   type DungeonInput,
 } from '../../types/dungeons.js';
 import { slugSchema } from '../../types/world-events.js';
@@ -180,6 +184,18 @@ const blueprintUploadSchema = z.object({
   name: z.string().min(1).max(80).optional(),
   kind: z.enum(['entrance', 'base']).default('entrance'),
   content: z.string().min(2),
+});
+
+/** Trocar o nome ou o papel de uma planta já importada. */
+const blueprintPatchSchema = z.object({
+  name: z.string().min(1).max(80).optional(),
+  kind: z.enum(['entrance', 'base']).optional(),
+});
+
+/** O que a leitura do corpo recebe: os pontos atuais do rascunho. */
+const bodyScanSchema = z.object({
+  points: z.array(bodyPointSchema).max(MAX_BODY_POINTS).default([]),
+  arrival: bodyArrivalSchema.nullable().default(null),
 });
 
 export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesDeps): void {
@@ -633,6 +649,12 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
   app.post('/dungeon-blueprints', async (request, reply) => {
     const body = blueprintUploadSchema.parse(request.body);
 
+    // Reenviar com o mesmo id e outro papel é trocar o papel: a mesma
+    // régua do PATCH vale aqui, senão o upload seria o atalho dela.
+    const previous = deps.blueprints.summary(body.id);
+
+    if (previous !== null && previous.kind !== body.kind) assertKindChangeAllowed(deps, body.id, body.kind);
+
     const result = deps.blueprints.save({
       id: body.id,
       name: body.name ?? body.id,
@@ -657,7 +679,89 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
 
     deps.onChanged?.('blueprint-uploaded');
 
-    return reply.status(201).send({ ok: true, blueprint: result.blueprint });
+    // A construção que vai servir de corpo já sai daqui com o
+    // relatório do que tem dentro — "3 lápides, 2 velas, 1 árvore;
+    // 2 NPCs não serão importados" —, que é a validação que o pedido
+    // de 16/09/2026 cobra no momento da importação.
+    const report = body.kind === 'base' ? bodyReport(body.content) : null;
+
+    return reply.status(201).send({ ok: true, blueprint: result.blueprint, body: report });
+  });
+
+  /**
+   * Muda o nome ou o papel de uma planta.
+   *
+   * O papel vinha do NOME do arquivo (começa com "base" = masmorra), e
+   * uma construção feita à mão raramente se chama assim. Sem esta
+   * rota, o único jeito de usá-la como corpo seria renomear o arquivo
+   * e subir de novo.
+   */
+  app.patch('/dungeon-blueprints/:id', async (request) => {
+    const { id } = idParams.parse(request.params);
+    const body = blueprintPatchSchema.parse(request.body);
+    const current = deps.blueprints.get(id);
+
+    if (current === null) throw blueprintNotFound(id);
+
+    const kind = body.kind ?? current.kind;
+
+    // Virar ENTRADA exige a marca do alçapão, como no upload: é a
+    // mesma régua, pela mesma razão.
+    if (kind === 'entrance' && !current.hasHatch) {
+      throw new ApiError(
+        'BLUEPRINT_NO_HATCH',
+        'Esta planta não tem marca de alçapão, e sem ela não serve de entrada. ' +
+          'Ela pode continuar sendo o corpo de uma masmorra.',
+        422,
+      );
+    }
+
+    if (kind !== current.kind) assertKindChangeAllowed(deps, id, kind);
+
+    const result = deps.blueprints.save({
+      id,
+      name: body.name ?? current.name,
+      kind,
+      content: current.content,
+      origin: current.origin,
+      requireHatch: kind === 'entrance',
+    });
+
+    if (!result.ok) throw new ApiError('BLUEPRINT_INVALID', 'A planta gravada não pôde ser relida.', 422);
+
+    deps.onChanged?.('blueprint-updated');
+
+    return { ok: true, blueprint: result.blueprint };
+  });
+
+  /**
+   * Lê uma construção como corpo de masmorra.
+   *
+   * Devolve o que a tela precisa para configurar o corpo sem abrir o
+   * jogo: os marcadores achados, as peças (para a prévia), os pontos
+   * do rascunho depois de juntar os marcadores — sem duplicar — e o
+   * que não cabe onde está.
+   *
+   * É POST porque recebe os pontos atuais do rascunho: a junção é
+   * feita aqui, numa régua só, e não reescrita na tela.
+   */
+  app.post('/dungeon-blueprints/:id/body-scan', async (request) => {
+    const { id } = idParams.parse(request.params);
+    const body = bodyScanSchema.parse(request.body ?? {});
+    const blueprint = deps.blueprints.get(id);
+
+    if (blueprint === null) throw blueprintNotFound(id);
+
+    const analysis = analyzeStored(blueprint.content);
+
+    if (analysis === null) {
+      throw new ApiError('BLUEPRINT_INVALID', 'A planta gravada não é mais um JSON legível.', 422);
+    }
+
+    const merged = mergeBodyPoints(analysis, { points: body.points, arrival: body.arrival });
+    const problems = checkBodyPoints(analysis, merged.points, merged.arrival);
+
+    return { ok: true, analysis, merged, problems };
   });
 
   app.delete('/dungeon-blueprints/:id', async (request) => {
@@ -669,9 +773,9 @@ export function registerDungeonRoutes(app: FastifyInstance, deps: DungeonRoutesD
       throw new ApiError(
         'BLUEPRINT_IN_USE',
         users.length === 1
-          ? `Esta planta é a entrada da masmorra "${users[0] ?? ''}". Troque a entrada dela antes de apagar.`
-          : `Esta planta é a entrada de ${users.length} masmorras (${users.join(', ')}). ` +
-            'Troque a entrada delas antes de apagar.',
+          ? `Esta planta é usada pela masmorra "${users[0] ?? ''}" (como entrada ou como corpo). Troque-a lá antes de apagar.`
+          : `Esta planta é usada por ${users.length} masmorras (${users.join(', ')}), como entrada ou como corpo. ` +
+            'Troque-a nelas antes de apagar.',
         409,
       );
     }
@@ -826,15 +930,111 @@ function layoutNotFound(id: string): ApiError {
  * um wipe achando que escolheu outra coisa.
  */
 function assertBlueprintExists(deps: DungeonRoutesDeps, input: DungeonInput): void {
-  if (input.entranceBlueprint === null) return;
-
-  if (deps.blueprints.summary(input.entranceBlueprint) === null) {
+  if (input.entranceBlueprint !== null && deps.blueprints.summary(input.entranceBlueprint) === null) {
     throw new ApiError(
       'BLUEPRINT_MISSING',
       `A planta de entrada "${input.entranceBlueprint}" não existe no acervo.`,
       422,
     );
   }
+
+  if (input.mode !== 'construction' || input.body === null) return;
+
+  const stored = deps.blueprints.get(input.body.blueprint);
+
+  if (stored === null) {
+    throw new ApiError(
+      'BLUEPRINT_MISSING',
+      `A construção "${input.body.blueprint}" não existe no acervo.`,
+      422,
+    );
+  }
+
+  // O papel é o que protege a planta de virar entrada enquanto é corpo
+  // (ver `assertKindChangeAllowed`). Um corpo com papel de entrada
+  // furaria essa régua.
+  if (stored.kind !== 'base') {
+    throw new ApiError(
+      'BLUEPRINT_WRONG_KIND',
+      `A planta "${input.body.blueprint}" está marcada como entrada. Troque o papel dela para "corpo da masmorra" na biblioteca.`,
+      422,
+    );
+  }
+
+  // ####  A CHEGADA SEM CHÃO NÃO SE GRAVA  ####
+  //
+  // É o único ponto que prende uma PESSOA: um inimigo mal posto o
+  // plugin afasta ou pula, e uma caixa também. O jogador teleportado
+  // para o vazio cai noventa metros, ou nasce dentro da fundação.
+  // As outras frases (parede, altura) ficam como aviso na tela, e o
+  // plugin ainda afasta o jogador da parede antes de levá-lo.
+  const analysis = analyzeStored(stored.content);
+
+  if (analysis === null || input.body.arrival === null) return;
+
+  const blocking = checkBodyPoints(analysis, [], input.body.arrival).find(
+    (problem) => problem.code === 'outside' || problem.code === 'no_floor' || problem.code === 'inside_floor',
+  );
+
+  if (blocking !== undefined) {
+    throw new ApiError('BODY_ARRIVAL_INVALID', blocking.message, 422);
+  }
+}
+
+/**
+ * Trocar o papel de uma planta que alguém usa no papel antigo.
+ *
+ * A entrada que vira corpo deixaria a masmorra que a usa sem casinha
+ * escolhível; o corpo que vira entrada, a construção sem corpo. As duas
+ * mudanças são recusadas enquanto houver quem use.
+ */
+function assertKindChangeAllowed(deps: DungeonRoutesDeps, id: string, kind: 'entrance' | 'base'): void {
+  const users = kind === 'base' ? deps.dungeons.entranceUsersOfBlueprint(id) : deps.dungeons.bodyUsersOfBlueprint(id);
+
+  if (users.length === 0) return;
+
+  throw new ApiError(
+    'BLUEPRINT_IN_USE',
+    kind === 'base'
+      ? `Esta planta é a entrada de ${users.join(', ')}. Troque a entrada antes de usá-la como corpo.`
+      : `Esta planta é o corpo de ${users.join(', ')}. Troque o corpo antes de mudar o papel dela.`,
+    409,
+  );
+}
+
+/** A análise de uma planta gravada. `null` = o JSON não é mais legível. */
+function analyzeStored(content: string): BodyAnalysis | null {
+  const parsed = parseBlueprint(content);
+
+  return parsed.ok ? analyzeBody(parsed.blueprint.entities) : null;
+}
+
+/** O resumo que o upload de um corpo devolve. */
+function bodyReport(content: string): {
+  readonly markers: { readonly npc: number; readonly crate: number; readonly arrival: number };
+  readonly warnings: readonly string[];
+} | null {
+  const analysis = analyzeStored(content);
+
+  if (analysis === null) return null;
+
+  const warnings = [...analysis.warnings];
+  const trees = analysis.markers.arrival.length;
+
+  if (trees === 0) {
+    warnings.push('Não há árvore de Natal: ao usar esta construção, defina o ponto de chegada no painel.');
+  } else if (trees > 1) {
+    warnings.push(`Há ${String(trees)} árvores de Natal: ao usar esta construção, escolha qual é a chegada.`);
+  }
+
+  return {
+    markers: {
+      npc: analysis.markers.npc.length,
+      crate: analysis.markers.crate.length,
+      arrival: trees,
+    },
+    warnings,
+  };
 }
 
 /** Uma receita de fábrica, para o `duplicate` poder partir dela. */

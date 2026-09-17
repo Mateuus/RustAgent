@@ -1529,6 +1529,9 @@ async function main(): Promise<void> {
   // ninguém sabe onde arrumar.
   const dungeonBlueprints = new DungeonBlueprintsRepository(db, logger);
   seedDungeonBlueprints(dungeonBlueprints, { rootDir: projectRoot(), logger });
+  // As plantas de antes da 099 não têm a contagem dos marcadores do
+  // corpo importado; ela é feita uma vez, aqui.
+  dungeonBlueprints.backfillMarkers();
 
   // ####  E OS QUATRO TRAÇADOS, PELA MESMA REGRA  ####
   //

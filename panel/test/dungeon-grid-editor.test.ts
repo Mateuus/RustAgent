@@ -23,7 +23,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { boardFromRows, rowsOfBoard } from '@/components/dungeons/dungeon-grid-editor';
+import { boardFromRows, nextFacing, rowsOfBoard } from '@/components/dungeons/dungeon-grid-editor';
 
 /** Quantas células o desenho tem de fato. */
 function cellsOf(rows: readonly string[]): number {
@@ -138,5 +138,34 @@ describe('desenhos pequenos continuam como eram', () => {
     // 'E', que é a chegada do alçapão.
     expect(cellsOf(rows)).toBe(9);
     expect(rows.join('')).toContain('E');
+  });
+});
+
+// A seta que nunca voltava ao automático (medido em 17/09/2026):
+// com uma escolha gravada, a função comparava a escolha com ela mesma.
+describe('a seta da entrada', () => {
+  it('quatro cliques passam pelos lados e devolvem o automático', () => {
+    const auto = 90;
+    const seen: (number | null)[] = [];
+    let facing: 0 | 90 | 180 | 270 | null = null;
+
+    for (let click = 0; click < 4; click += 1) {
+      facing = nextFacing(facing, auto);
+      seen.push(facing);
+    }
+
+    expect(seen).toEqual([180, 270, 0, null]);
+  });
+
+  it('sem automático (a entrada não encosta em nada), a volta termina no norte', () => {
+    const seen: (number | null)[] = [];
+    let facing: 0 | 90 | 180 | 270 | null = null;
+
+    for (let click = 0; click < 4; click += 1) {
+      facing = nextFacing(facing, null);
+      seen.push(facing);
+    }
+
+    expect(seen).toEqual([90, 180, 270, null]);
   });
 });

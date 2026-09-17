@@ -299,7 +299,7 @@ function Masmorras() {
             <section className="space-y-3">
               <SectionTitle
                 title="Construções (.json)"
-                detail="Prédios inteiros no formato do CopyPaste. É deles que sai a casinha da entrada."
+                detail="Prédios inteiros no formato do CopyPaste. É deles que sai a casinha da entrada — e o corpo da masmorra construída no jogo."
                 count={blueprints.length}
               />
               <BlueprintShelf blueprints={blueprints} onChanged={() => void load()} />
