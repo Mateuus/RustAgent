@@ -6,7 +6,7 @@
 //  Um campo que o agente omitir vira TypeError no render e derruba
 //  a página inteira com "This page couldn't load". Toda resposta do
 //  Workshop passa por uma destas funções antes de chegar ao JSX —
-//  e elas moram juntas porque as quatro abas leem skins, e duas
+//  e elas moram juntas porque as abas (e a ficha do jogador) leem skins, e duas
 //  cópias do `safeSkin` divergiriam no primeiro campo novo.
 //
 //  ####  `skinId` E `steamId` SÃO TEXTO  ####
@@ -18,9 +18,11 @@
 
 import type {
   WorkshopAuditEntry,
-  WorkshopCollection,
-  WorkshopGrant,
   WorkshopLookup,
+  WorkshopOwned,
+  WorkshopOwnedSkin,
+  WorkshopOwnedSource,
+  WorkshopRarity,
   WorkshopSkin,
 } from '@/lib/api';
 
@@ -36,14 +38,48 @@ function nullableNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/** As raridades, na ordem do menu: da mais comum à mais rara. */
+export const RARITIES: readonly WorkshopRarity[] = [
+  'common',
+  'uncommon',
+  'rare',
+  'epic',
+  'legendary',
+];
+
+export const RARITY_LABELS: Readonly<Record<WorkshopRarity, string>> = {
+  common: 'Comum',
+  uncommon: 'Incomum',
+  rare: 'Rara',
+  epic: 'Épica',
+  legendary: 'Lendária',
+};
+
+/** A cor do rótulo de cada raridade, nos tokens do painel. */
+export const RARITY_TONES: Readonly<Record<WorkshopRarity, string>> = {
+  common: 'border-muted text-muted',
+  uncommon: 'border-olive text-olive',
+  rare: 'border-chart-2 text-chart-2',
+  epic: 'border-chart-4 text-chart-4',
+  legendary: 'border-amber text-amber',
+};
+
+/** Raridade desconhecida (ou ausente) vira "sem raridade", e não erro. */
+export function safeRarity(value: unknown): WorkshopRarity | null {
+  return typeof value === 'string' && (RARITIES as readonly string[]).includes(value)
+    ? (value as WorkshopRarity)
+    : null;
+}
+
 export function safeSkin(skin: WorkshopSkin): WorkshopSkin {
   return {
     id: Number(skin.id),
     label: text(skin.label),
     shortname: text(skin.shortname),
     skinId: text(skin.skinId),
-    permission: nullableText(skin.permission),
-    collectionId: nullableNumber(skin.collectionId),
+    description: nullableText(skin.description),
+    rarity: safeRarity(skin.rarity),
+    sort: nullableNumber(skin.sort) ?? 0,
     openToAll: skin.openToAll === true,
     hideInStreamer: skin.hideInStreamer === true,
     enabled: skin.enabled === true,
@@ -52,42 +88,76 @@ export function safeSkin(skin: WorkshopSkin): WorkshopSkin {
     createdBy: nullableText(skin.createdBy),
     workshopTitle: nullableText(skin.workshopTitle),
     previewUrl: nullableText(skin.previewUrl),
+    owners: nullableNumber(skin.owners) ?? 0,
     createdAt: text(skin.createdAt),
     updatedAt: text(skin.updatedAt),
   };
 }
 
-export function safeCollection(collection: WorkshopCollection): WorkshopCollection {
+const OWNED_SOURCES: readonly WorkshopOwnedSource[] = [
+  'site',
+  'panel',
+  'game',
+  'system',
+  'migration',
+];
+
+export const OWNED_SOURCE_LABELS: Readonly<Record<WorkshopOwnedSource, string>> = {
+  site: 'site',
+  panel: 'painel',
+  game: 'jogo',
+  system: 'sistema',
+  migration: 'migração',
+};
+
+function safeOwnedSkin(skin: unknown): WorkshopOwnedSkin | null {
+  if (skin === null || typeof skin !== 'object') return null;
+
+  const value = skin as Partial<Record<keyof WorkshopOwnedSkin, unknown>>;
+
   return {
-    id: Number(collection.id),
-    slug: text(collection.slug),
-    label: text(collection.label),
-    permission: nullableText(collection.permission),
-    openToAll: collection.openToAll === true,
-    enabled: collection.enabled === true,
-    skinCount: Number(collection.skinCount ?? 0),
-    createdBy: nullableText(collection.createdBy),
-    createdAt: text(collection.createdAt),
-    updatedAt: text(collection.updatedAt),
+    id: Number(value.id),
+    label: text(value.label),
+    shortname: text(value.shortname),
+    workshopId: text(value.workshopId),
+    description: nullableText(value.description),
+    rarity: safeRarity(value.rarity),
+    previewUrl: nullableText(value.previewUrl),
+    openToAll: value.openToAll === true,
+    enabled: value.enabled === true,
+    servers: Array.isArray(value.servers) ? value.servers.map(text) : [],
   };
 }
 
-export function safeGrant(grant: WorkshopGrant): WorkshopGrant {
+export function safeOwned(owned: WorkshopOwned): WorkshopOwned {
+  const expiresAt = nullableText(owned.expiresAt);
+
   return {
-    id: Number(grant.id),
-    subjectType: grant.subjectType === 'group' ? 'group' : 'player',
-    subject: text(grant.subject),
-    targetType: grant.targetType === 'collection' ? 'collection' : 'skin',
-    targetId: Number(grant.targetId),
-    targetLabel: text(grant.targetLabel),
-    targetShortname: nullableText(grant.targetShortname),
-    expiresAt: nullableText(grant.expiresAt),
-    expired: grant.expired === true,
-    note: text(grant.note),
-    createdBy: nullableText(grant.createdBy),
-    createdAt: text(grant.createdAt),
-    updatedAt: text(grant.updatedAt),
+    id: Number(owned.id),
+    steamId: text(owned.steamId),
+    skinId: Number(owned.skinId),
+    expiresAt,
+    // Sem o campo, o prazo decide: a tela não pode chamar de viva uma
+    // posse que já passou.
+    expired:
+      typeof owned.expired === 'boolean'
+        ? owned.expired
+        : expiresAt !== null && Date.parse(expiresAt) <= Date.now(),
+    source: (OWNED_SOURCES as readonly string[]).includes(owned.source)
+      ? owned.source
+      : 'system',
+    sourceRef: nullableText(owned.sourceRef),
+    note: nullableText(owned.note),
+    createdBy: text(owned.createdBy),
+    createdAt: text(owned.createdAt),
+    updatedAt: text(owned.updatedAt),
+    skin: safeOwnedSkin(owned.skin),
   };
+}
+
+/** Uma lista que pode nem ter vindo. */
+export function safeOwnedList(list: unknown): WorkshopOwned[] {
+  return Array.isArray(list) ? (list as WorkshopOwned[]).map(safeOwned) : [];
 }
 
 export function safeAuditEntry(entry: WorkshopAuditEntry): WorkshopAuditEntry {
@@ -97,7 +167,10 @@ export function safeAuditEntry(entry: WorkshopAuditEntry): WorkshopAuditEntry {
     id: Number(entry.id),
     at: text(entry.at),
     actor: text(entry.actor),
-    source: entry.source === 'game' || entry.source === 'system' ? entry.source : 'panel',
+    source:
+      entry.source === 'game' || entry.source === 'system' || entry.source === 'site'
+        ? entry.source
+        : 'panel',
     action: text(entry.action),
     target: text(entry.target),
     serverId: nullableText(entry.serverId),
@@ -148,9 +221,6 @@ export function safeLookup(lookup: WorkshopLookup): WorkshopLookup {
 /** SteamID64 de conta de usuário: a mesma régua do agente. */
 export const STEAM_ID_PATTERN = /^7656\d{13}$/;
 
-/** Grupo do Oxide: a mesma régua do agente. */
-export const OXIDE_GROUP_PATTERN = /^[a-z0-9_.-]{1,64}$/;
-
 const DATE_TIME = new Intl.DateTimeFormat('pt-BR', {
   day: '2-digit',
   month: '2-digit',
@@ -169,8 +239,9 @@ export function formatDateTime(iso: string): string {
 /**
  * As skins agrupadas por item, na ordem do nome do item.
  *
- * É como a coleção e o acesso as mostram: a pergunta ali é "qual
- * máscara?", e não "qual das 40 skins?".
+ * É como a posse as mostra: a pergunta ali é "qual máscara?", e não
+ * "qual das 40 skins?". Dentro do item, a ordem do menu (`sort`, e
+ * o nome no empate).
  */
 export function groupByShortname(
   skins: readonly WorkshopSkin[],
@@ -188,8 +259,20 @@ export function groupByShortname(
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([shortname, list]) => ({
       shortname,
-      skins: [...list].sort((left, right) => left.label.localeCompare(right.label, 'pt-BR')),
+      skins: [...list].sort(
+        (left, right) =>
+          left.sort - right.sort || left.label.localeCompare(right.label, 'pt-BR'),
+      ),
     }));
+}
+
+/** "permanente", "até 16/09/2026 14:30" ou "venceu em …". */
+export function describeOwnedExpiry(owned: Pick<WorkshopOwned, 'expiresAt' | 'expired'>): string {
+  if (owned.expiresAt === null) return 'permanente';
+
+  return owned.expired
+    ? `venceu em ${formatDateTime(owned.expiresAt)}`
+    : `até ${formatDateTime(owned.expiresAt)}`;
 }
 
 /** A mensagem de um erro qualquer, sem `[object Object]`. */

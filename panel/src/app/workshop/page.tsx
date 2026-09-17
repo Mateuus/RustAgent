@@ -1,34 +1,33 @@
 'use client';
 
 // ============================================================
-//  /workshop  -  as skins do Steam Workshop, e quem pode usá-las.
+//  /workshop  -  as skins do Steam Workshop, e quem as possui.
 //
-//  ####  O JOGADOR ESCOLHE; NADA NASCE PINTADO  ####
+//  ####  A SKIN É POSSE DO JOGADOR  ####
 //
 //  A arte é publicada no Steam Workshop, o número dela entra no
-//  catálogo, e o JOGADOR decide o que pinta: `/skin` abre uma caixa
-//  virtual no jogo, e `/skin <coleção>` aplica uma coleção inteira
-//  ao que ele veste. O item é o MESMO objeto antes e depois — só a
-//  aparência muda.
+//  catálogo, e o JOGADOR decide o que pinta, pelo menu de skins do
+//  jogo. O item é o MESMO objeto antes e depois — só a aparência
+//  muda.
+//
+//  Uma skin é liberada por QUALQUER um destes: "liberada para todos"
+//  (skin da casa), uma posse VIVA do jogador, ou
+//  `origemzworkshop.admin`. A posse chega pelo site, pela caixa do
+//  site, pelo painel ou pelo `/skin give` de um admin. Posse tirada
+//  ou vencida NÃO despinta o que já foi pintado.
 //
 //  O cadastro entra por dois caminhos que gravam no MESMO catálogo:
 //  esta tela, ou o `/skin add "shortname" "workshop_id"` de um admin
 //  dentro do jogo. A coluna "Origem" diz qual foi.
 //
-//  ####  AS QUATRO ABAS  ####
+//  ####  AS TRÊS ABAS  ####
 //
-//    Skins      o catálogo: item, arte, permissão opcional, coleção,
-//               "para todos", servidores.
-//    Coleções   os `/skin <slug>`: uma skin por item.
-//    Acessos    quem pode usar o quê além da permissão: jogador ou
-//               grupo do Oxide, com prazo ou permanente.
-//    Registro   tudo o que mudou, pelo painel, pelo jogo ou sozinho
-//               (acesso que venceu).
-//
-//  Um acesso é liberado por QUALQUER caminho — "para todos",
-//  permissão da skin ou da coleção, acesso individual, ou
-//  `origemzworkshop.admin`. Acesso removido ou vencido NÃO despinta
-//  o que já foi pintado.
+//    Skins      o catálogo: item, arte, descrição, raridade, ordem,
+//               "para todos", servidores — e quantos donos tem.
+//    Posse      quem tem o quê: por jogador ou por skin, dar e tirar
+//               em lote (o prêmio de evento).
+//    Registro   tudo o que mudou, pelo painel, pelo jogo, pelo site
+//               ou sozinho (posse que venceu).
 //
 //  ####  O CATÁLOGO É DA REDE  ####
 //
@@ -44,7 +43,7 @@
 //  ao jogo — e com ele fora do ar ela diz isso em cinza, sem fingir
 //  que é falha.
 //
-//  Ver Docs/OrigemZWorkshop/01-CAIXA-E-COLECOES.md.
+//  Ver Docs/OrigemZWorkshop/02-SKINS-DO-JOGADOR.md.
 // ============================================================
 
 import { useEffect, useState } from 'react';
@@ -52,9 +51,8 @@ import { useEffect, useState } from 'react';
 import { PageHeader } from '@/components/page-header';
 import { RequireSession } from '@/components/session';
 import { StateBlock } from '@/components/state-block';
-import { AccessPanel } from '@/components/workshop/access-panel';
 import { AuditPanel } from '@/components/workshop/audit-panel';
-import { CollectionsPanel } from '@/components/workshop/collections-panel';
+import { OwnedPanel } from '@/components/workshop/owned-panel';
 import { SkinsPanel } from '@/components/workshop/skins-panel';
 import { StatusBar } from '@/components/workshop/status-bar';
 import type { WorkshopServerOption } from '@/components/workshop/server-picker';
@@ -69,12 +67,11 @@ export default function WorkshopPage() {
   );
 }
 
-type TabId = 'skins' | 'collections' | 'access' | 'audit';
+type TabId = 'skins' | 'owned' | 'audit';
 
 const TABS: readonly { id: TabId; label: string }[] = [
   { id: 'skins', label: 'Skins' },
-  { id: 'collections', label: 'Coleções' },
-  { id: 'access', label: 'Acessos' },
+  { id: 'owned', label: 'Posse' },
   { id: 'audit', label: 'Registro' },
 ];
 
@@ -82,7 +79,7 @@ function Workshop() {
   const [servers, setServers] = useState<readonly WorkshopServerOption[] | null>(null);
   const [total, setTotal] = useState<number | null>(null);
   const [tab, setTab] = useState<TabId>('skins');
-  /** O filtro com que a aba Registro abre. Vem do atalho de Acessos. */
+  /** O filtro com que a aba Registro abre. Vem do atalho da Posse. */
   const [auditSteamId, setAuditSteamId] = useState('');
 
   useEffect(() => {
@@ -103,8 +100,8 @@ function Workshop() {
           })),
         );
       } catch {
-        // A lista de servidores alimenta a atribuição e as sugestões
-        // de grupo, e não o catálogo. Sem ela a tela continua
+        // A lista de servidores alimenta a atribuição e o Registro,
+        // e não o catálogo. Sem ela a tela continua
         // servindo.
         if (alive) setServers([]);
       }
@@ -119,7 +116,7 @@ function Workshop() {
     <div>
       <PageHeader
         title="Skins"
-        description="O jogador escolhe: /skin abre a caixa, /skin <coleção> aplica a coleção ao que ele veste. Cadastre aqui ou no jogo, com /skin add."
+        description="A skin é do jogador: ele a recebe (site, painel ou /skin give) e escolhe no menu de skins do jogo. Cadastre aqui ou no jogo, com /skin add."
         aside={
           <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
             {total === null ? '' : total === 0 ? 'nenhuma' : `${String(total)} no catálogo`}
@@ -151,7 +148,7 @@ function Workshop() {
                     aria-selected={tab === item.id}
                     onClick={() => {
                       // Entrar no Registro pela pílula é ver TUDO; o
-                      // filtro só vem pelo atalho de Acessos.
+                      // filtro só vem pelo atalho da Posse.
                       if (item.id === 'audit') setAuditSteamId('');
                       setTab(item.id);
                     }}
@@ -169,13 +166,11 @@ function Workshop() {
             </div>
 
             {/* Cada aba monta ao entrar e relê o agente: o que mudou
-                numa (uma coleção nova) já aparece na outra. */}
+                numa (uma posse nova) já aparece na outra. */}
             <div role="tabpanel" aria-labelledby={`workshop-tab-${tab}`}>
               {tab === 'skins' && <SkinsPanel servers={servers} onCount={setTotal} />}
-              {tab === 'collections' && <CollectionsPanel />}
-              {tab === 'access' && (
-                <AccessPanel
-                  servers={servers}
+              {tab === 'owned' && (
+                <OwnedPanel
                   onShowAudit={(steamId) => {
                     setAuditSteamId(steamId);
                     setTab('audit');
