@@ -23,6 +23,17 @@
 //  (ou mantém o permanente), e tirar — ou deixar vencer — NÃO
 //  despinta o que já foi pintado.
 //
+//  ####  PÁGINAS POR CURSOR  ####
+//
+//  A lista é paginada NO AGENTE, por cursor (`nextCursor`), e não no
+//  navegador: uma skin de evento pode ter milhares de donos. O
+//  `useCursorPages` (ui/pagination.tsx) guarda o cursor de cada página
+//  já vista — é o que deixa Anterior e os números voltarem. O total só
+//  aparece quando a última página foi lida; antes, "mostrando 51–100".
+//
+//  Dar ou tirar relê a página atual; se ela esvaziar, volta uma. A
+//  seleção vale só para a página que está na tela.
+//
 //  ####  O QUE O AGENTE MANDA, A TELA NÃO CONFERE  ####
 //
 //  Toda resposta passa pelo `safeX` (normalize.ts): campo ausente
@@ -31,12 +42,18 @@
 
 import { History, Loader2, Package, Search, Trash2, UserRound } from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Input } from '@/components/ui/input';
+import {
+  Pagination,
+  PAGE_SIZES,
+  useCursorPages,
+  type CursorPage,
+} from '@/components/ui/pagination';
 import {
   describeOwnedExpiry,
   formatDateTime,
@@ -76,7 +93,6 @@ type Subject =
   | { readonly type: 'player'; readonly steamId: string; readonly name: string | null }
   | { readonly type: 'skin'; readonly skinId: number };
 
-const PAGE_SIZE = 100;
 /** O teto de um lote colado: acima disso, é exportação, não prêmio. */
 const MAX_BATCH = 200;
 
@@ -430,78 +446,39 @@ function OwnedSection({
   readonly onChanged: () => void;
 }) {
   const [includeExpired, setIncludeExpired] = useState(true);
-  const [rows, setRows] = useState<WorkshopOwned[] | null>(null);
-  const [nextCursor, setNextCursor] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0] ?? 20);
 
   const [checked, setChecked] = useState<ReadonlySet<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<{ outcome: BatchOutcome; verb: string } | null>(null);
 
-  // Cada recarga ganha um número; resposta de recarga antiga é
-  // descartada. Sem isso, dois cliques rápidos no filtro deixavam a
-  // resposta mais lenta (e velha) por cima da nova, sem aviso.
-  const generation = useRef(0);
-
   const fetchPage = useCallback(
-    async (cursor?: number) => {
+    async (cursor: number | null): Promise<CursorPage<WorkshopOwned>> => {
       const response = await agent.workshopOwned({
         ...(subject.type === 'player' ? { steamId: subject.steamId } : { skinId: subject.skinId }),
-        ...(cursor === undefined ? {} : { cursor }),
-        limit: PAGE_SIZE,
+        ...(cursor === null ? {} : { cursor }),
+        limit: pageSize,
         includeExpired,
       });
 
       return {
-        list: safeOwnedList(response.owned),
+        items: safeOwnedList(response.owned),
         next: typeof response.nextCursor === 'number' ? response.nextCursor : null,
       };
     },
-    [subject, includeExpired],
+    [subject, includeExpired, pageSize],
   );
 
+  const pages = useCursorPages(fetchPage, pageSize);
+  const rows = pages.items;
+  const error = pages.error === null ? null : messageOf(pages.error);
+
+  /** Relê a página atual e esquece a seleção (as linhas mudaram). */
+  const refreshPage = pages.refresh;
   const reload = useCallback(async () => {
-    const mine = ++generation.current;
-
-    try {
-      const { list, next } = await fetchPage();
-      if (mine !== generation.current) return;
-
-      setRows(list);
-      setNextCursor(next);
-      setError(null);
-      setChecked(new Set());
-    } catch (cause) {
-      if (mine !== generation.current) return;
-      setRows((current) => current ?? []);
-      setError(messageOf(cause));
-    }
-  }, [fetchPage]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  async function loadMore(): Promise<void> {
-    if (nextCursor === null || rows === null) return;
-
-    setLoadingMore(true);
-
-    try {
-      const mine = generation.current;
-      const { list, next } = await fetchPage(nextCursor);
-      // Uma recarga (outro filtro) começou no meio: esta página é de outra lista.
-      if (mine !== generation.current) return;
-
-      setRows([...rows, ...list]);
-      setNextCursor(next);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setLoadingMore(false);
-    }
-  }
+    setChecked(new Set());
+    await refreshPage();
+  }, [refreshPage]);
 
   async function revoke(targets: readonly WorkshopOwned[]): Promise<void> {
     setBusy(true);
@@ -544,7 +521,10 @@ function OwnedSection({
               <input
                 type="checkbox"
                 checked={includeExpired}
-                onChange={(event) => setIncludeExpired(event.target.checked)}
+                onChange={(event) => {
+                  setChecked(new Set());
+                  setIncludeExpired(event.target.checked);
+                }}
               />
               mostrar vencidas
             </label>
@@ -587,7 +567,7 @@ function OwnedSection({
                   <HeaderCell>
                     <input
                       type="checkbox"
-                      aria-label="Selecionar todas"
+                      aria-label="Selecionar todas desta página"
                       checked={allChecked}
                       onChange={() =>
                         setChecked(allChecked ? new Set() : new Set(rows.map((row) => row.id)))
@@ -675,13 +655,25 @@ function OwnedSection({
           </div>
         )}
 
-        {nextCursor !== null && (
-          <div className="border-t border-border px-3 py-2 text-right">
-            <Button size="sm" variant="outline" disabled={loadingMore} onClick={() => void loadMore()}>
-              {loadingMore && <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}
-              Carregar mais
-            </Button>
-          </div>
+        {rows !== null && rows.length > 0 && (
+          <Pagination
+            className="border-t border-border px-3 py-2"
+            page={pages.page}
+            pageSize={pageSize}
+            total={pages.total}
+            shown={rows.length}
+            knownPages={pages.knownPages}
+            hasNext={pages.hasNext}
+            busy={pages.busy}
+            onPageChange={(page) => {
+              setChecked(new Set());
+              pages.goTo(page);
+            }}
+            onPageSizeChange={(size) => {
+              setChecked(new Set());
+              setPageSize(size);
+            }}
+          />
         )}
       </section>
 

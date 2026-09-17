@@ -25,6 +25,12 @@
 //  embaixo, recolhida e apagada, porque é a resposta de "eu tinha e
 //  sumiu" — misturá-las faria uma posse vencida parecer valendo.
 //
+//  ####  PÁGINAS NO NAVEGADOR  ####
+//
+//  A rota da ficha devolve tudo dele de uma vez (vivas e vencidas),
+//  então cada lista pagina a sua fatia, com página própria. A busca
+//  vale para as duas e as manda de volta à página 1.
+//
 //  ####  MORA AQUI, E NÃO NA PÁGINA DA FICHA  ####
 //
 //  Ela usa as peças da aba Posse (owned-parts.tsx) e o Registro do
@@ -42,6 +48,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { clampPage, Pagination, PAGE_SIZES, slicePage } from '@/components/ui/pagination';
 import { AuditPanel } from '@/components/workshop/audit-panel';
 import {
   describeOwnedExpiry,
@@ -95,6 +102,9 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
   const [givingBusy, setGivingBusy] = useState(false);
   const [query, setQuery] = useState('');
   const [showExpired, setShowExpired] = useState(false);
+  const [livePage, setLivePage] = useState(1);
+  const [expiredPage, setExpiredPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0] ?? 20);
 
   const load = useCallback(async () => {
     try {
@@ -144,6 +154,24 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
     [expired, needle],
   );
   const filtering = needle.trim() !== '';
+
+  // Tirar uma skin pode deixar a página guardada além do fim.
+  const liveCurrent = clampPage(livePage, shownLive.length, pageSize);
+  const expiredCurrent = clampPage(expiredPage, shownExpired.length, pageSize);
+  const livePageRows = useMemo(
+    () => slicePage(shownLive, liveCurrent, pageSize),
+    [shownLive, liveCurrent, pageSize],
+  );
+  const expiredPageRows = useMemo(
+    () => slicePage(shownExpired, expiredCurrent, pageSize),
+    [shownExpired, expiredCurrent, pageSize],
+  );
+
+  function changePageSize(size: number): void {
+    setPageSize(size);
+    setLivePage(1);
+    setExpiredPage(1);
+  }
 
   return (
     <div className="space-y-4">
@@ -207,7 +235,11 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
                     placeholder="Buscar por nome, item ou Workshop ID"
                     aria-label="Buscar nas skins do jogador"
                     className="h-8 pl-7"
-                    onChange={(event) => setQuery(event.target.value)}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setLivePage(1);
+                      setExpiredPage(1);
+                    }}
                   />
                 </div>
               </div>
@@ -224,7 +256,21 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
             ) : shownLive.length === 0 ? (
               <p className="px-4 py-3 text-sm text-muted">Nenhuma skin dele bate com a busca.</p>
             ) : (
-              <OwnedRows rows={shownLive} busy={busy} onRevoke={(owned) => void revoke(owned)} />
+              <>
+                <OwnedRows
+                  rows={livePageRows}
+                  busy={busy}
+                  onRevoke={(owned) => void revoke(owned)}
+                />
+                <Pagination
+                  className="border-t border-border px-4 py-2"
+                  page={liveCurrent}
+                  pageSize={pageSize}
+                  total={shownLive.length}
+                  onPageChange={setLivePage}
+                  onPageSizeChange={changePageSize}
+                />
+              </>
             )}
           </Block>
 
@@ -254,11 +300,21 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
                     {filtering ? 'Nenhuma vencida bate com a busca.' : 'Nada aqui.'}
                   </p>
                 ) : (
-                  <OwnedRows
-                    rows={shownExpired}
-                    busy={busy}
-                    onRevoke={(owned) => void revoke(owned)}
-                  />
+                  <>
+                    <OwnedRows
+                      rows={expiredPageRows}
+                      busy={busy}
+                      onRevoke={(owned) => void revoke(owned)}
+                    />
+                    <Pagination
+                      className="border-t border-border px-4 py-2"
+                      page={expiredCurrent}
+                      pageSize={pageSize}
+                      total={shownExpired.length}
+                      onPageChange={setExpiredPage}
+                      onPageSizeChange={changePageSize}
+                    />
+                  </>
                 ))}
             </Block>
           )}
