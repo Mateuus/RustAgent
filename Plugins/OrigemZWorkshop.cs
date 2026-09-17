@@ -3960,11 +3960,30 @@ namespace Oxide.Plugins
         }
 
         /// <summary>Botão com um rótulo centrado.</summary>
-        private static void TextButton(Canvas canvas, Box parent, float x, float y, float w, float h,
-                                       string color, string command, string text, int size, string textColor)
+        private static string TextButton(Canvas canvas, Box parent, float x, float y, float w, float h,
+                                         string color, string command, string text, int size, string textColor)
         {
             string name = Button(canvas, parent, x, y, w, h, color, command, canvas.NextName());
             Label(canvas, new Box(name, w, h), 0, 0, w, h, text, size, textColor, TextAnchor.MiddleCenter, true);
+            return name;
+        }
+
+        /// <summary>
+        /// A dica que o CLIENTE mostra ao passar o mouse (`CuiTooltipComponent`,
+        /// tipo "Tooltip", Oxide 2.0.7716). Pendurada no elemento de nome
+        /// `name`, que já precisa estar no canvas.
+        /// </summary>
+        private static void Tip(Canvas canvas, string name, string text)
+        {
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(text)) return;
+
+            for (int i = canvas.Ui.Count - 1; i >= 0; i--)
+            {
+                if (canvas.Ui[i].Name != name) continue;
+
+                canvas.Ui[i].Components.Add(new CuiTooltipComponent { Text = text });
+                return;
+            }
         }
 
         /// <summary>
@@ -4138,11 +4157,15 @@ namespace Oxide.Plugins
             // sprite do jogo foi confirmado no servidor, e um caminho errado
             // vira um quadrado branco.
             Segmented(canvas, head, 624, "ORDEM",
-                      new[] { "PADRÃO", "RARIDADE" }, view.ByRarity ? 1 : 0,
+                      new[] { "PADRÃO", "RARIDADE" },
+                      new[] { "A ordem do catálogo", "Lendária primeiro, depois Épica, Rara, Incomum e Comum" },
+                      view.ByRarity ? 1 : 0,
                       MenuSortCommand + " " + view.Token);
 
             Segmented(canvas, head, 830, "MOSTRAR",
-                      new[] { "TODAS", "MINHAS" }, view.Mine ? 1 : 0,
+                      new[] { "TODAS", "MINHAS" },
+                      new[] { "Todas as skins deste servidor", "Só as que você tem e as liberadas para todos" },
+                      view.Mine ? 1 : 0,
                       MenuMineCommand + " " + view.Token);
 
             return canvas.Json();
@@ -4153,7 +4176,7 @@ namespace Oxide.Plugins
         /// recebe o índice da opção no fim.
         /// </summary>
         private static void Segmented(Canvas canvas, Box parent, float x, string label, string[] options,
-                                      int active, string command)
+                                      string[] tips, int active, string command)
         {
             const float chipWidth = 66f;
             const float chipHeight = 24f;
@@ -4165,8 +4188,9 @@ namespace Oxide.Plugins
             for (int i = 0; i < options.Length; i++)
             {
                 bool on = i == active;
-                TextButton(canvas, parent, cx, y, chipWidth, chipHeight, on ? ColRust : ColSurface2,
-                           command + " " + i, options[i], 10, on ? ColText : ColMuted);
+                string chip = TextButton(canvas, parent, cx, y, chipWidth, chipHeight, on ? ColRust : ColSurface2,
+                                         command + " " + i, options[i], 10, on ? ColText : ColMuted);
+                if (tips != null && i < tips.Length) Tip(canvas, chip, tips[i]);
                 cx += chipWidth + 1f;
             }
         }
@@ -4490,6 +4514,9 @@ namespace Oxide.Plugins
             if (dim)
             {
                 Lock(canvas, box, CellWidth - 30, 8, 1.1f, cell.Locked ? ColText : ColMuted, fill);
+                Tip(canvas, name, cell.Locked
+                    ? "Você não tem esta skin. Obtenha em eventos ou no nosso site."
+                    : "Carregando suas skins…");
             }
 
             bool mixed = cell.ItemName.Length > 0;
@@ -4562,10 +4589,11 @@ namespace Oxide.Plugins
 
             if (view.PickId != 0)
             {
-                TextButton(canvas, detail, detail.W - 16 - 140, 204, 140, 28,
+                string fav = TextButton(canvas, detail, detail.W - 16 - 140, 204, 140, 28,
                            view.Favorite ? ColAmber : ColSurface2,
                            MenuFavoriteCommand + " " + view.Token + " " + view.PickId,
                            view.Favorite ? "DESFAVORITAR" : "FAVORITAR", 11, view.Favorite ? ColBg : ColText);
+                Tip(canvas, fav, "As favoritas aparecem em FAVORITOS, no topo da lateral");
             }
 
             return canvas.Json();
