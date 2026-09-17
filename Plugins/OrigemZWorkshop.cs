@@ -51,11 +51,37 @@
 //
 //      origemz.workshop.sync  <lote> <i> <n> <b64>            → cache.json
 //      origemz.workshop.owned <steamId> <lote> <i> <n> <b64>  → owned.json
+//                                                             → favorites.json
 //
 //  Os pedaços do mesmo lote são juntados em ordem, e a troca só
 //  acontece quando o último chega. Lote incompleto é descartado e a
 //  cópia anterior continua inteira. A posse também aceita a forma
 //  curta `origemz.workshop.owned <steamId> <b64>`.
+//
+//  ####  A FAVORITA É DO AGENTE DESDE A 0.4.0  ####
+//
+//  Até a 0.3.0 ela morava SÓ aqui, no `favorites.json`, e por isso
+//  valia por servidor: quem marcava no server01 abria o server02 sem
+//  nenhuma. Agora ela desce dentro da carga da posse
+//  (`favorites: [ids]`) e vale na REDE inteira, como a posse
+//  (migração 100 do agente; Docs/OrigemZWorkshop/02 §5.2 e §5.4).
+//
+//  O `favorites.json` continua existindo, mas virou CACHE DE LEITURA:
+//  ele é lido no boot, para o servidor que sobe com o agente fora do
+//  ar mostrar as favoritas da última carga, e só é REESCRITO quando
+//  uma carga chega. O clique na estrela NUNCA mais o edita — ele
+//  desenha na hora (otimista) e grita para o agente:
+//
+//      #OZWORKSHOP#{"kind":"fav","secret":…,"steamId":…,
+//                   "skinId":N,"on":true|false}
+//
+//  O agente grava e reenvia a posse+favoritas daquele jogador, e essa
+//  carga é a verdade: se ele recusar (o teto de 200, por exemplo), a
+//  carga forçada que volta desfaz o otimismo da tela.
+//
+//  O aviso diz o ESTADO (`on`), e não "alterne": o console repete
+//  linha em reconexão, e alternar duas vezes desfaria o clique do
+//  jogador em silêncio.
 //
 //  O Base64 não é capricho: MEDIDO no servidor, o parser de console
 //  do Rust COME AS ASPAS de um JSON cru. Ver core/src/game/plugin-push.ts.
@@ -125,6 +151,8 @@
 //      #OZWORKSHOP#{"kind":"give","secret":…,"requestId":…,
 //                   "steamId":<admin>,"playerName":…,"targetSteamId":…,
 //                   "targetName":…,"shortname":…,"skinId":…,"days":N|null}
+//      #OZWORKSHOP#{"kind":"fav","secret":…,"steamId":…,
+//                   "skinId":N,"on":true|false}
 //
 //  O `give` é respondido pelo mesmo `origemz.workshop.reply`, com o
 //  mesmo `requestId`; a frase vai para o ADMIN que digitou (o plugin
@@ -148,7 +176,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZWorkshop", "OrigemZ", "0.3.0")]
+    [Info("OrigemZWorkshop", "OrigemZ", "0.4.0")]
     [Description("Menu de skins, posse por jogador e cadastro de skins do Steam Workshop da OrigemZ.")]
     public class OrigemZWorkshop : RustPlugin
     {
@@ -187,12 +215,21 @@ namespace Oxide.Plugins
         private const string OwnedFile = "OrigemZWorkshop/owned";
 
         /// <summary>
-        /// As favoritas de cada jogador: `steamId → ids de skin`. Mora SÓ no
-        /// plugin (é preferência de tela, não posse) e por isso vale por
-        /// servidor, não na rede. Id que saiu do catálogo é ignorado na hora
-        /// de mostrar e podado na próxima gravação.
+        /// O CACHE das favoritas em disco: `steamId → ids de skin`.
+        ///
+        /// Desde a 0.4.0 a favorita é do AGENTE e vale na rede (ela desce
+        /// dentro da carga da posse). Este arquivo é lido no boot, para o
+        /// servidor que sobe com o agente fora do ar mostrar as favoritas da
+        /// última carga, e só é REESCRITO quando uma carga chega — nunca
+        /// pelo clique na estrela. Ver o cabeçalho.
         /// </summary>
         private const string FavoritesFile = "OrigemZWorkshop/favorites";
+
+        /// <summary>
+        /// O teto de favoritas por jogador. O MESMO número do
+        /// `MAX_FAVORITES_PER_PLAYER` do agente: a régua local só evita que
+        /// o otimismo da tela passe do que o agente vai aceitar.
+        /// </summary>
         private const int MaxFavoritesPerPlayer = 200;
 
         /// <summary>Quanto o `/skin add` e o `/skin give` esperam a resposta do agente.</summary>
@@ -328,6 +365,15 @@ namespace Oxide.Plugins
             public int Sort;
             public bool OpenToAll;
             public bool HideInStreamer;
+            /// <summary>
+            /// "Skin de temporada": a posse dela PODE sair num wipe.
+            ///
+            /// SÓ INFORMA. Nada aqui muda por causa disto: quem apaga a
+            /// posse é o agente, quando o wipe mandar (02 §4.6). O menu
+            /// desenha uma linha no detalhe e uma dica na célula de quem a
+            /// possui — e é tudo.
+            /// </summary>
+            public bool Season;
 
             // Resolvidos aqui, a partir do jogo (02 §5.1: o agente não manda).
             public int ItemId;
@@ -899,6 +945,7 @@ namespace Oxide.Plugins
                 Sort = Int(row, "sort"),
                 OpenToAll = Flag(row, "openToAll", false),
                 HideInStreamer = Flag(row, "hideInStreamer", true),
+                Season = Flag(row, "season", false),
                 ItemId = def.itemid,
                 ItemName = def.displayName != null ? def.displayName.english : shortname,
                 Category = CategoryKeyOf(def),
@@ -1143,6 +1190,38 @@ namespace Oxide.Plugins
                 }
 
                 _owned[steamId] = record;
+
+                // ####  AS FAVORITAS VÊM NA MESMA CARGA, E TROCAM JUNTO  ####
+                //
+                // Inteiras, nunca delta (02 §5.2): o conjunto dele é
+                // SUBSTITUÍDO. Lista ausente (agente anterior à migração 100)
+                // não mexe no que estava aqui — apagar a estrela de todo
+                // mundo por causa de um campo que faltou seria pior que
+                // ficar com a lista velha. Lista VAZIA apaga, porque ela é a
+                // informação "ele não tem nenhuma".
+                JArray favorites = payload["favorites"] as JArray;
+                if (favorites != null)
+                {
+                    HashSet<int> marked = new HashSet<int>();
+
+                    foreach (JToken token in favorites)
+                    {
+                        int id = 0;
+                        if (token != null && token.Type != JTokenType.Null)
+                        {
+                            int.TryParse(token.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out id);
+                        }
+
+                        if (id > 0 && marked.Count < MaxFavoritesPerPlayer) marked.Add(id);
+                    }
+
+                    if (marked.Count > 0) _favorites[steamId] = marked;
+                    else _favorites.Remove(steamId);
+
+                    // É aqui, e SÓ aqui, que o cache em disco é reescrito.
+                    _favoritesDirty = true;
+                }
+
                 ScheduleOwnedSave();
 
                 // O momento em que o jogador comprou no site e está olhando
@@ -1186,6 +1265,9 @@ namespace Oxide.Plugins
         /// <summary>
         /// Grava daqui a pouco, e uma vez só: no `ready` o agente manda a
         /// posse de todos os online em sequência.
+        ///
+        /// O mesmo relógio grava as favoritas, quando a carga trouxe uma
+        /// lista nova — os dois arquivos são o cache da MESMA carga.
         /// </summary>
         private void ScheduleOwnedSave()
         {
@@ -1197,6 +1279,12 @@ namespace Oxide.Plugins
             {
                 _ownedSaveTimer = null;
                 SaveOwned();
+
+                if (_favoritesDirty)
+                {
+                    _favoritesDirty = false;
+                    SaveFavorites();
+                }
             });
         }
 
@@ -1309,6 +1397,9 @@ namespace Oxide.Plugins
         }
 
         private Dictionary<string, HashSet<int>> _favorites = new Dictionary<string, HashSet<int>>();
+
+        /// <summary>Uma carga trouxe favoritas novas: o cache em disco está velho.</summary>
+        private bool _favoritesDirty;
 
         private void LoadFavorites()
         {
@@ -2870,6 +2961,20 @@ namespace Oxide.Plugins
             Redraw(player, session, Region.AllButWindow);
         }
 
+        /// <summary>
+        /// A estrela do menu.
+        ///
+        /// ####  DESENHA NA HORA, E O AGENTE É QUEM MANDA  ####
+        ///
+        /// Desde a 0.4.0 a favorita é da REDE, e mora no agente. O clique
+        /// muda o conjunto em memória (otimista, porque a tela tem de
+        /// responder no mesmo frame) e grita para o agente, que grava e
+        /// reenvia a carga da posse com as favoritas dentro — e é ela a
+        /// verdade. Recusado (o teto, por exemplo), o reenvio FORÇADO do
+        /// agente desfaz o que esta função desenhou.
+        ///
+        /// O `favorites.json` NÃO é escrito aqui: ele é cache de carga.
+        /// </summary>
         [ConsoleCommand(MenuFavoriteCommand)]
         private void CmdMenuFavorite(ConsoleSystem.Arg arg)
         {
@@ -2880,20 +2985,46 @@ namespace Oxide.Plugins
             int id = arg.GetInt(1, 0);
             if (id <= 0 || !_catalog.ById.ContainsKey(id)) return;
 
+            string steamId = player.UserIDString;
+
             HashSet<int> set;
-            if (!_favorites.TryGetValue(player.UserIDString, out set))
+            if (!_favorites.TryGetValue(steamId, out set))
             {
                 set = new HashSet<int>();
-                _favorites[player.UserIDString] = set;
+                _favorites[steamId] = set;
             }
 
-            if (!set.Remove(id))
+            bool on;
+
+            if (set.Remove(id))
             {
-                if (set.Count >= MaxFavoritesPerPlayer) return;
+                on = false;
+            }
+            else
+            {
+                // A mesma régua do agente: passar daqui ele recusaria, e a
+                // tela piscaria a estrela para trás.
+                if (set.Count >= MaxFavoritesPerPlayer)
+                {
+                    Flash(player, session, "Você já tem " + MaxFavoritesPerPlayer +
+                                           " favoritas. Desfavorite uma antes de marcar outra.", false);
+                    Redraw(player, session, Region.Targets);
+                    return;
+                }
+
                 set.Add(id);
+                on = true;
             }
 
-            SaveFavorites();
+            // `on`, e não "alterne": o console repete linha em reconexão.
+            JObject notice = new JObject
+            {
+                ["steamId"] = steamId,
+                ["skinId"] = id,
+                ["on"] = on,
+            };
+
+            Push("fav", notice);
             Redraw(player, session, Region.Side | Region.Grid | Region.Detail);
         }
 
@@ -3071,6 +3202,13 @@ namespace Oxide.Plugins
             public bool Picked;
             public bool Applied;
             public bool Favorite;
+            /// <summary>
+            /// "Skin de temporada" E ELE A POSSUI: a dica avisa que ela pode
+            /// sair no próximo wipe. Só na posse — numa skin da casa não há
+            /// posse para sair, e numa bloqueada o aviso seria sobre algo
+            /// que ele não tem.
+            /// </summary>
+            public bool Season;
         }
 
         private class GridView
@@ -3100,6 +3238,8 @@ namespace Oxide.Plugins
             public string Expiry = "";
             public string ExpiryColor = "";
             public string Description = "";
+            /// <summary>O aviso da "Skin de temporada"; vazio nas outras.</summary>
+            public string Season = "";
             public string Note = "";
             public string NoteColor = "";
             /// <summary>0 = Padrão, que não se favorita.</summary>
@@ -3497,6 +3637,7 @@ namespace Oxide.Plugins
                     Picked = session.HasPick && session.PickId == entry.Id,
                     Applied = targetShortname == entry.Shortname && targetSkin == entry.SkinId,
                     Favorite = viewer.Favorites.Contains(entry.Id),
+                    Season = entry.Season,
                 };
 
                 long expiresAt;
@@ -3511,6 +3652,9 @@ namespace Oxide.Plugins
         /// <summary>O estado da célula (03 §3.3), na ordem de precedência da tabela.</summary>
         private static void DescribeCell(GridCell cell, Access access, long expiresAt, long now)
         {
+            // "Pode sair da posse" só faz sentido para quem TEM a posse.
+            if (access != Access.Owned) cell.Season = false;
+
             if (cell.Applied && IsUsable(access))
             {
                 cell.State = "Aplicada";
@@ -3586,6 +3730,11 @@ namespace Oxide.Plugins
             view.Rarity = entry.Rarity;
             view.Sub = entry.ItemName;
             view.Description = entry.Description;
+
+            // Aqui a linha aparece para QUALQUER acesso, e não só na posse
+            // como a dica da célula: quem ainda não a tem precisa saber
+            // disso ANTES de comprar.
+            if (entry.Season) view.Season = "Skin de temporada: pode sair da posse no próximo wipe";
 
             long expiresAt;
             Access access = AccessOf(frame.Viewer, entry, out expiresAt);
@@ -4619,6 +4768,12 @@ namespace Oxide.Plugins
                     ? "Você não tem esta skin. Obtenha em eventos ou no nosso site."
                     : "Carregando suas skins…");
             }
+            else if (cell.Season)
+            {
+                // A dica da temporada, na célula de quem A POSSUI. Ela só
+                // INFORMA: nada muda no jogo por causa da marca (02 §4.6).
+                Tip(canvas, name, "Skin de temporada: pode sair da posse no próximo wipe");
+            }
 
             bool mixed = cell.ItemName.Length > 0;
             float line = 82f;
@@ -4680,6 +4835,14 @@ namespace Oxide.Plugins
             }
             Label(canvas, detail, tx, 82, tw, 18, view.State, 12, view.StateColor, TextAnchor.MiddleLeft, true);
             Label(canvas, detail, tx, 102, tw, 18, view.Expiry, 11, view.ExpiryColor, TextAnchor.MiddleLeft, false);
+
+            // A linha da "Skin de temporada", em âmbar, entre o prazo e a
+            // descrição. É AVISO, e só: a marca não muda nada no jogo — quem
+            // apaga a posse é o agente, quando o wipe mandar (02 §4.6).
+            if (view.Season.Length > 0)
+            {
+                Label(canvas, detail, tx, 120, tw, 16, view.Season, 11, ColAmber, TextAnchor.MiddleLeft, false);
+            }
 
             // Até 3 linhas: o limite do agente é 280 caracteres (02 §4.1).
             Label(canvas, detail, 16, 136, detail.W - 32, 58, Shorten(view.Description, 280), 11, ColText,
