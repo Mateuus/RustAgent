@@ -1497,6 +1497,68 @@ describe('a quest órfã', () => {
     expect(depois[0]?.block).toBeNull();
   });
 
+  // ####  "188, 727" NÃO É UM LUGAR  ####
+  //
+  // Pedido do dono em 16/09/2026: a frase diz o quadrante e o nome
+  // do lugar, calculados do mundo ATUAL — é o `locator` do index.
+  it('a frase do NPC diz o lugar e o quadrante, e não a coordenada', async () => {
+    npc('zev');
+    h.repository.create('do-npc', quest({ npcId: 'zev' }), NOW);
+
+    const asked: { serverId: string; x: number; z: number }[] = [];
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      now: () => h.now,
+      locator: {
+        locate: (input) => {
+          asked.push(input);
+
+          return Promise.resolve({ grid: 'O8', place: 'na SafeZone (Outpost)' });
+        },
+      },
+    });
+
+    const [offer] = await service.offersFor({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(offer?.block?.reason).toBe(
+      'Fale com zev para aceitar esta missão. Fica na SafeZone (Outpost), no quadrante O8.',
+    );
+    expect(asked).toEqual([{ serverId: 'pvp1', x: 1, z: 1 }]);
+  });
+
+  it('longe de tudo, a frase fica só com o quadrante', async () => {
+    npc('zev');
+    h.repository.create('do-npc', quest({ npcId: 'zev' }), NOW);
+
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      now: () => h.now,
+      locator: { locate: () => Promise.resolve({ grid: 'O8', place: null }) },
+    });
+
+    const [offer] = await service.offersFor({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(offer?.block?.reason).toMatch(/Fica no quadrante O8\.$/);
+  });
+
+  it('o localizador que falha não derruba a lista: volta a coordenada', async () => {
+    npc('zev');
+    h.repository.create('do-npc', quest({ npcId: 'zev' }), NOW);
+
+    const service = new QuestsService({
+      repository: h.repository,
+      logger,
+      now: () => h.now,
+      locator: { locate: () => Promise.reject(new Error('sem RCON')) },
+    });
+
+    const [offer] = await service.offersFor({ serverId: 'pvp1', steamId: FULANO });
+
+    expect(offer?.block?.reason).toMatch(/Fica em 1, 1\.$/);
+  });
+
   it('um NPC de ENTREGA não oferece missão nenhuma', async () => {
     npc('bandit', 'delivery');
     h.repository.create('do-npc', quest({ npcId: 'bandit' }), NOW);

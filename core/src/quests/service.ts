@@ -57,6 +57,7 @@ import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import {
   type QuestObjective,
+  type QuestRepeatMode,
   type QuestReward,
   type QuestSnapshot,
   type QuestSettings,
@@ -202,8 +203,37 @@ export interface QuestCompletedEvent {
   readonly hasRewards: boolean;
 }
 
+/**
+ * Onde fica um ponto do mapa, para quem joga.
+ *
+ * ####  "188, 727" NÃO É UM LUGAR  ####
+ *
+ * Era o que a frase do NPC dizia até 16/09/2026, e o dono apontou:
+ * ninguém acha nada no mapa do Rust por coordenada. O jogador fala
+ * em quadrante (`O8`) e em monumento (Outpost) — e os dois dependem
+ * do MUNDO atual: o tamanho dá a grade, a seed dá os monumentos.
+ * Quem conhece o mundo é o index, e por isso isto é uma dependência.
+ *
+ * Nunca lança: sem RCON, `place` volta `null` e a frase fica só com
+ * o quadrante.
+ */
+export interface QuestNpcLocator {
+  locate(input: {
+    readonly serverId: string;
+    readonly x: number;
+    readonly z: number;
+  }): Promise<{
+    /** `O8`. `null` = o tamanho do mundo é desconhecido. */
+    readonly grid: string | null;
+    /** `na SafeZone (Outpost)`, com a preposição. Ver `describePlace`. */
+    readonly place: string | null;
+  }>;
+}
+
 export interface QuestsServiceDeps {
   readonly repository: QuestsRepository;
+  /** Ausente = a frase do NPC fica com as coordenadas. */
+  readonly locator?: QuestNpcLocator;
   readonly logger: Logger;
   readonly rewards?: QuestRewardService;
   readonly stats?: QuestStatsSource;
@@ -294,6 +324,15 @@ export interface QuestProgressView {
   readonly complete: boolean;
   readonly acceptedAt: number;
   readonly completedAt: number | null;
+  /**
+   * Como a missão se repete, lido do CADASTRO — e não do snapshot.
+   *
+   * É o que agrupa a tela do jogo em DIÁRIAS e SEMANAIS. O snapshot
+   * não o guarda (ele congela o que o jogador precisa FAZER, e não
+   * quando a missão volta), e uma missão apagada no meio da tentativa
+   * cai em `once`: ela não vai voltar mesmo.
+   */
+  readonly repeatMode: QuestRepeatMode;
 }
 
 export interface ClaimResult {
@@ -549,6 +588,7 @@ export class QuestsService {
       complete: objectives.every((item) => item.done),
       acceptedAt: attempt.acceptedAt,
       completedAt: attempt.completedAt,
+      repeatMode: this.#deps.repository.get(attempt.questId)?.repeatMode ?? 'once',
     };
   }
 
@@ -1733,9 +1773,9 @@ export class QuestsService {
     // cartaz viraria balcão e o boneco perderia a função.
     //
     // Quem responde "ele esteve lá?" é o empurrão do plugin, e não
-    // o clique — ver `#npcTalks`. A frase diz o nome e as
-    // coordenadas porque um NPC que ninguém acha é a mesma coisa
-    // que um NPC que não existe.
+    // o clique — ver `#npcTalks`. A frase diz o nome e ONDE ele
+    // está porque um NPC que ninguém acha é a mesma coisa que um
+    // NPC que não existe. Ver `#whereIs`.
     if (quest.npcId !== null) {
       const npc = this.#deps.repository.getNpc(quest.npcId);
 
@@ -1751,8 +1791,8 @@ export class QuestsService {
         return {
           code: 'QUEST_NEEDS_NPC',
           reason:
-            `Fale com ${npc.name} para pegar esta missão. ` +
-            `Ele fica em ${String(Math.round(npc.x))}, ${String(Math.round(npc.z))}.`,
+            `Fale com ${npc.name} para aceitar esta missão. ` +
+            (await this.#whereIs(input.serverId, npc)),
         };
       }
     }
@@ -1772,6 +1812,49 @@ export class QuestsService {
     }
 
     return null;
+  }
+
+  /**
+   * A segunda frase do bloqueio do NPC: onde ele está.
+   *
+   *     Fica na SafeZone (Outpost), no quadrante O8.
+   *     Fica perto de Launch Site, no quadrante I20.
+   *     Fica no quadrante O8.
+   *
+   * "Fica", e não "Ele fica": o cadastro não diz se o NPC é ele ou
+   * ela, e a Zefa e a Bia estão lá. A coordenada só volta quando o
+   * mundo é desconhecido — é pior que o quadrante, e melhor que
+   * nada.
+   */
+  async #whereIs(
+    serverId: string,
+    npc: { readonly x: number; readonly z: number },
+  ): Promise<string> {
+    const fallback = `Fica em ${String(Math.round(npc.x))}, ${String(Math.round(npc.z))}.`;
+
+    if (this.#deps.locator === undefined) {
+      return fallback;
+    }
+
+    try {
+      const { grid, place } = await this.#deps.locator.locate({ serverId, x: npc.x, z: npc.z });
+
+      if (grid === null) {
+        return place === null ? fallback : `Fica ${place}.`;
+      }
+
+      return place === null
+        ? `Fica no quadrante ${grid}.`
+        : `Fica ${place}, no quadrante ${grid}.`;
+    } catch (error) {
+      // A frase é um detalhe da tela: ela não pode derrubar a lista.
+      this.#deps.logger.debug(
+        { server: serverId, err: error instanceof Error ? error.message : String(error) },
+        'não deu para localizar o NPC; a frase vai com a coordenada',
+      );
+
+      return fallback;
+    }
   }
 
   /**

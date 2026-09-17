@@ -48,6 +48,62 @@ export function eligibleRankings(
 }
 
 /**
+ * Por que este ranking não recebe ponto de missão. `null` = recebe.
+ *
+ * A frase é curta porque mora ao lado do nome, dentro da lista. A
+ * versão longa, que a API devolve ao recusar, está em
+ * `core/src/rankings/awards.ts`.
+ */
+export function whyNotAwardable(ranking: RankingDefinition): string | null {
+  switch (ranking.source) {
+    case 'item':
+      return null;
+    case 'plugin':
+      return 'medido pelo jogo';
+    case 'agent':
+      return 'calculado pelo agente';
+    case 'computed':
+      return 'derivado de outros';
+  }
+}
+
+/** Uma linha da lista do seletor. */
+export interface RankingOption {
+  readonly ranking: RankingDefinition;
+  /** Preenchido = aparece, mas não pode ser escolhido. */
+  readonly blockedReason: string | null;
+}
+
+/**
+ * O que a lista MOSTRA — que não é o mesmo que ela deixa escolher.
+ *
+ * ####  ESCONDER FAZIA PARECER DEFEITO  ####
+ *
+ * Até 16/09/2026 a recompensa listava só os concedidos. O dono abriu
+ * o seletor, viu "Troféu Bleik Store" sozinho e leu como defeito:
+ * "existem outros rankings cadastrados e ligados". Estavam lá, e
+ * eram todos medidos pelo jogo — mas a lista não dizia isso.
+ *
+ * Agora todos aparecem: os que servem primeiro, os outros depois,
+ * apagados e com o motivo. A regra não mudou — só passou a ser
+ * visível.
+ */
+export function rankingOptions(
+  rankings: readonly RankingDefinition[],
+  mode: RankingPickerMode,
+): readonly RankingOption[] {
+  const options = rankings.map((ranking) => ({
+    ranking,
+    blockedReason: mode === 'award' ? whyNotAwardable(ranking) : null,
+  }));
+
+  // `sort` é estável: dentro de cada grupo, a ordem do catálogo fica.
+  return options.sort(
+    (a, b) => Number(a.blockedReason !== null) - Number(b.blockedReason !== null),
+  );
+}
+
+/**
  * A busca: casa pelo nome que se lê e pelo código que se grava.
  *
  * Pelos dois porque os dois aparecem na tela — `Troféu Bleik

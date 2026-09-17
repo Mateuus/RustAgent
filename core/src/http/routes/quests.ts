@@ -924,8 +924,9 @@ function assertMetrics(deps: QuestRoutesDeps, body: QuestInput): void {
     if (ranking === null) {
       throw new ApiError(
         'RANKING_METRIC_UNKNOWN',
-        `Não existe ranking para a métrica "${reward.metric}". ` +
-          'Escolha um da lista ou crie o ranking antes.',
+        `Não existe ranking para a métrica "${reward.metric}". Os pontos não seriam pagos. ` +
+          'Escolha um da lista, ou crie em Rankings um com essa métrica e origem ' +
+          '"Concedido (item custom ou missão)".',
         400,
       );
     }

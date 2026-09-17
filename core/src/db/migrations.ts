@@ -7662,6 +7662,52 @@ CREATE TABLE koth_deliveries (
 CREATE INDEX idx_koth_deliveries_run ON koth_deliveries(run_id);
 `;
 
+const QUEST_POINTS_RANKING_SCHEMA = `
+-- ============================================================
+--  098  o ranking que as missoes ja pagavam sem ele existir.
+--
+--  ####  O QUE ESTAVA ACONTECENDO  ####
+--
+--  Missoes cadastradas com recompensa de pontos em
+--  'quest.completed'. O nome parece um ranking e nao era: o resgate
+--  recusava com RANKING_METRIC_UNKNOWN, os pontos viravam pendencia
+--  e o painel dizia que a metrica "nao e um ranking". Pedido do
+--  dono em 16/09/2026: reconhecer a metrica.
+--
+--  ####  ELE NASCE CONCEDIDO, E NAO CONTADO  ####
+--
+--  'item' e o valor que quer dizer CONCEDIDO (rankings/awards.ts):
+--  o numero e o que a missao da, na quantidade que o admin
+--  configurou. Nao e "quantas missoes ele concluiu" -- uma missao
+--  que da 5 pontos soma 5. E e o unico tipo que aceita ponto de
+--  missao.
+--
+--  ####  E ELE NAO E builtin  ####
+--
+--  O admin renomeia, desliga ou apaga como qualquer ranking que ele
+--  mesmo criou. Semear e so poupar o cadastro -- e as pendencias ja
+--  gravadas passam a ser reentregues pelo botao do painel.
+--
+--  ####  NAO PISA EM NADA  ####
+--
+--  Se a metrica ou o id ja tem dono (o admin criou o ranking na mao
+--  antes deste agente chegar), a linha nao entra.
+-- ============================================================
+INSERT INTO rankings
+  (id, metric, label, unit, description, source, value_kind, direction, window,
+   global_eligible, builtin, enabled, sort_order, created_at, updated_at)
+SELECT
+  'pontos-de-missao', 'quest.completed', 'Pontos de missão', 'pontos',
+  'Os pontos que as missões dão quando são resgatadas.',
+  'item', 'counter', 'desc', 'season', 1, 0, 1,
+  COALESCE((SELECT MAX(sort_order) FROM rankings), 0) + 10,
+  CAST(strftime('%s','now') AS INTEGER) * 1000,
+  CAST(strftime('%s','now') AS INTEGER) * 1000
+WHERE NOT EXISTS (
+  SELECT 1 FROM rankings WHERE metric = 'quest.completed' OR id = 'pontos-de-missao'
+);
+`;
+
 const WORKSHOP_SKINS_SCHEMA = `
 -- ============================================================
 --  095  as skins do Steam Workshop que o servidor aplica sozinho.
@@ -8030,6 +8076,17 @@ export const MIGRATIONS: readonly Migration[] = [
   // 16/09/2026: as skins do Steam Workshop que o item ja traz de
   // nascenca -- catalogo da rede, e uma permissao por skin.
   { id: 95, name: 'workshop-skins', sql: WORKSHOP_SKINS_SCHEMA },
+  // 16/09/2026: 'quest.completed' vira um ranking de verdade, e as
+  // missoes que ja pagavam nele passam a pagar.
+  //
+  // ####  98, E NAO 96  ####
+  //
+  // A 96 (`workshop-box`) estava sendo escrita na arvore principal
+  // quando esta nasceu, e ja estava aplicada no banco de
+  // desenvolvimento. A 97 fica livre para a mesma frente: id pulado
+  // nao custa nada, id repetido e uma migracao PULADA em silencio no
+  // merge.
+  { id: 98, name: 'quest-points-ranking', sql: QUEST_POINTS_RANKING_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

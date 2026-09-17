@@ -21,7 +21,7 @@
 //  de lista, virar página e abrir o detalhe não são eventos, são
 //  ENDEREÇOS:
 //
-//      tela-missoes[:<lista>[:<página>]]
+//      tela-missoes[:<aba>[:<página>]]
 //      tela-missoes:det:<pq>       o detalhe de uma tentativa
 //      tela-missoes:info:<questId> o detalhe de uma oferta
 //      tela-missoes:npc:<npcId>[:<página>]
@@ -89,7 +89,7 @@
 
 import type { Logger } from '../logger.js';
 import type { QuestOffer, QuestProgressView, QuestsService } from '../quests/service.js';
-import type { QuestObjective, QuestReward } from '../types/quests.js';
+import type { QuestObjective, QuestRepeatMode, QuestReward } from '../types/quests.js';
 import type { UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
 import { toGeneratedScreenBundle, type UiScreenBundle } from '../types/ui-transport.js';
 import { toError } from '../util.js';
@@ -142,6 +142,27 @@ export const QUESTS_PAGE_SIZE = 6;
  * aparada de novo contra o total real.
  */
 const MAX_PAGE = 9_999;
+
+/**
+ * A faixa da etiqueta de estado, na ponta direita do título.
+ *
+ * Cabe "EM ANDAMENTO" em corpo 10 negrito condensado, que é a mais
+ * longa das quatro.
+ */
+const STATUS_WIDTH = 86;
+
+/**
+ * A cor de cada etiqueta.
+ *
+ * Verde para o prêmio parado (é a cor de "feito" no detalhe), âmbar
+ * para o que anda, e o cinza de texto para o resto.
+ */
+const STATUS_COLORS = {
+  claimable: C.olive,
+  active: C.amber,
+  available: C.text,
+  blocked: C.textMuted,
+} as const;
 
 /** A altura de um bloco de quest, e o respiro entre dois. */
 const CARD = 58;
@@ -200,7 +221,25 @@ const CONTENT_LEFT = COLUMN.width + COLUMN.gap;
 //  §1  O ENDEREÇO
 // ------------------------------------------------------------
 
-export type QuestsTab = 'ativas' | 'disponiveis' | 'feitas';
+/**
+ * As abas da tela: a FREQUÊNCIA da missão.
+ *
+ * ####  ATÉ 16/09/2026 ELAS ERAM O ESTADO  ####
+ *
+ * EM ANDAMENTO, DISPONÍVEIS e RESGATAR. O dono pediu para trocar:
+ * quem abre o menu quer saber "o que eu faço hoje?", e a resposta
+ * estava espalhada por três listas. Agora a aba agrupa pela
+ * frequência, e o estado virou uma etiqueta em cada missão — ver
+ * `QuestStatus`.
+ *
+ * ####  E A TERCEIRA SÓ APARECE QUANDO TEM ALGO  ####
+ *
+ * O pedido foi DIÁRIAS e SEMANAIS. Mas `once` e `cooldown` também
+ * existem, e são a maioria do cadastro de hoje — sem uma aba para
+ * elas, sumiriam do menu. ESPECIAIS as recolhe, e fica fora da
+ * barra lateral enquanto estiver vazia.
+ */
+export type QuestsTab = 'diarias' | 'semanais' | 'especiais';
 
 /**
  * O que o detalhe está mostrando.
@@ -212,7 +251,13 @@ export type QuestsTab = 'ativas' | 'disponiveis' | 'feitas';
 export type QuestDetailKind = 'live' | 'offer';
 
 export interface QuestsScreenTarget {
-  readonly tab: QuestsTab;
+  /**
+   * A aba pedida. `null` = o endereço não disse qual.
+   *
+   * Aí a leitura abre a primeira que tem alguma missão: quem só tem
+   * semanais não deve cair numa aba de diárias vazia.
+   */
+  readonly tab: QuestsTab | null;
   readonly page: number;
   /** O detalhe pedido. `null` = a lista. */
   readonly detail: { readonly kind: QuestDetailKind; readonly id: string } | null;
@@ -220,21 +265,74 @@ export interface QuestsScreenTarget {
   readonly npcId: string | null;
 }
 
-const TABS: readonly QuestsTab[] = ['ativas', 'disponiveis', 'feitas'];
+const TABS: readonly QuestsTab[] = ['diarias', 'semanais', 'especiais'];
 
-/** O que cada lista se chama na barra lateral. */
+/** O que cada aba se chama na barra lateral. */
 const TAB_LABELS: Readonly<Record<QuestsTab, string>> = {
-  ativas: 'EM ANDAMENTO',
-  disponiveis: 'DISPONÍVEIS',
-  feitas: 'RESGATAR',
+  diarias: 'DIÁRIAS',
+  semanais: 'SEMANAIS',
+  especiais: 'ESPECIAIS',
 };
+
+/** A aba em que uma missão mora, pela frequência dela. */
+export function tabOfRepeatMode(mode: QuestRepeatMode): QuestsTab {
+  switch (mode) {
+    case 'daily':
+      return 'diarias';
+    case 'weekly':
+      return 'semanais';
+    case 'once':
+    case 'cooldown':
+      return 'especiais';
+  }
+}
+
+/**
+ * Onde a missão está, para quem joga.
+ *
+ * `blocked` é a quarta, e não estava no pedido: uma missão em
+ * cooldown ou já feita (`once`) ainda aparece na lista — com o
+ * motivo —, e chamá-la de DISPONÍVEL seria prometer o que o botão
+ * vai recusar. Falar com o NPC NÃO é bloqueio: a missão está
+ * disponível, só se pega no balcão.
+ */
+export type QuestStatus = 'claimable' | 'active' | 'available' | 'blocked';
+
+const STATUS_LABELS: Readonly<Record<QuestStatus, string>> = {
+  claimable: 'RESGATAR',
+  active: 'EM ANDAMENTO',
+  available: 'DISPONÍVEL',
+  blocked: 'BLOQUEADA',
+};
+
+/**
+ * A ordem dentro da aba: o que pede ação primeiro.
+ *
+ * O prêmio parado é o que o jogador mais quer ver; o que ele está
+ * fazendo vem logo depois, e o que não dá para pegar fica no fim.
+ */
+const STATUS_ORDER: Readonly<Record<QuestStatus, number>> = {
+  claimable: 0,
+  active: 1,
+  available: 2,
+  blocked: 3,
+};
+
+/**
+ * Os bloqueios que NÃO tiram a missão de "disponível".
+ *
+ * `QUEST_NEEDS_NPC` diz ONDE pegar, e `QUEST_LIMIT_REACHED` é sobre
+ * o jogador, não sobre a missão: ela continua lá, esperando ele
+ * terminar outra.
+ */
+const SOFT_BLOCKS: ReadonlySet<string> = new Set(['QUEST_NEEDS_NPC', 'QUEST_LIMIT_REACHED']);
 
 /**
  * Lê o id da tela. `null` = não é uma tela de quest.
  *
- *     tela-missoes                  as ativas, primeira página
- *     tela-missoes:disponiveis      a lista das disponíveis
- *     tela-missoes:disponiveis:2    ...na terceira página
+ *     tela-missoes                  a primeira aba que tem missão
+ *     tela-missoes:semanais         a aba das semanais
+ *     tela-missoes:semanais:2       ...na terceira página
  *     tela-missoes:det:8412         o detalhe de uma tentativa
  *     tela-missoes:info:minerador   o detalhe de uma oferta
  *     tela-missoes:npc:velho        as quests daquele NPC
@@ -242,7 +340,7 @@ const TAB_LABELS: Readonly<Record<QuestsTab, string>> = {
  * ####  TUDO O QUE VEM TORTO É APARADO, NUNCA RECUSADO  ####
  *
  * O pedido veio do plugin e o jogador está com um aviso de
- * carregando na tela. Uma lista desconhecida vira `ativas`; uma
+ * carregando na tela. Uma aba desconhecida vira a automática; uma
  * página que não é número vira zero. Recusar deixaria alguém
  * girando até o timeout.
  */
@@ -254,7 +352,7 @@ export function parseQuestsScreenId(screenId: string): QuestsScreenTarget | null
   }
 
   const rest = parts.slice(1);
-  const empty: QuestsScreenTarget = { tab: 'ativas', page: 0, detail: null, npcId: null };
+  const empty: QuestsScreenTarget = { tab: null, page: 0, detail: null, npcId: null };
 
   if (rest.length === 0) {
     return empty;
@@ -280,7 +378,18 @@ export function parseQuestsScreenId(screenId: string): QuestsScreenTarget | null
       : { ...empty, npcId, page: hasPage ? clamp(page, 0, MAX_PAGE) : 0 };
   }
 
-  const tab = TABS.find((item) => item === rest[0]) ?? 'ativas';
+  const tab = TABS.find((item) => item === rest[0]) ?? null;
+
+  // ####  OS ENDEREÇOS DE ANTES DE 16/09/2026 CAEM AQUI  ####
+  //
+  // Um atalho gravado ou um plugin que ainda não recarregou pode
+  // pedir `tela-missoes:disponiveis:3`. A aba vira a automática, e
+  // a página vai junto para o zero: a lista é outra, e a página 3
+  // dela seria uma tela vazia.
+  if (tab === null) {
+    return empty;
+  }
+
   const page = Number(rest[1]);
 
   return { ...empty, tab, page: Number.isInteger(page) ? clamp(page, 0, MAX_PAGE) : 0 };
@@ -300,7 +409,7 @@ export function questsScreenId(target: {
       : `${QUESTS_SCREEN_ID}:npc:${target.npcId}:${String(page)}`;
   }
 
-  const tab = target.tab ?? 'ativas';
+  const tab = target.tab ?? 'diarias';
   const page = target.page ?? 0;
 
   return page === 0
@@ -319,6 +428,8 @@ export function questDetailScreenId(kind: QuestDetailKind, id: string): string {
 
 /** Uma linha da lista, já recortada e sem SteamID de ninguém. */
 export interface QuestCard {
+  /** A etiqueta do card. Ver `QuestStatus`. */
+  readonly status: QuestStatus;
   /** `quest:accept:<id>` ou `quest:claim:<pq>`. Ver §13.4 do plano. */
   readonly actionId: string | null;
   readonly actionLabel: string | null;
@@ -377,12 +488,16 @@ export interface QuestDetail {
   readonly abandonId: string | null;
 }
 
-/** Quantas quests há em cada lista, para a barra lateral. */
-export interface QuestCounts {
-  readonly ativas: number;
-  readonly disponiveis: number;
-  readonly feitas: number;
-}
+/** Quantas quests há em cada aba, para a barra lateral. */
+export type QuestCounts = Readonly<Record<QuestsTab, number>>;
+
+/**
+ * Quantas estão prontas para resgatar, por aba.
+ *
+ * É o que pinta o número de verde: sem isso o jogador precisaria
+ * abrir cada aba para descobrir onde está o prêmio parado.
+ */
+export type QuestClaimables = Readonly<Record<QuestsTab, number>>;
 
 export interface QuestsView {
   readonly tab: QuestsTab;
@@ -398,13 +513,15 @@ export interface QuestsView {
   readonly trouble: string | null;
   /** `null` = não foram contadas (a tela em repouso). */
   readonly counts: QuestCounts | null;
+  /** `null` junto com `counts`. */
+  readonly claimables: QuestClaimables | null;
   /** Preenchido = a tela É o modal, e a lista nem é montada. */
   readonly detail: QuestDetail | null;
 }
 
 export function emptyQuestsView(): QuestsView {
   return {
-    tab: 'ativas',
+    tab: 'diarias',
     page: 0,
     pages: 1,
     cards: [],
@@ -413,6 +530,7 @@ export function emptyQuestsView(): QuestsView {
     emptyMessage: 'Nenhuma missão por aqui ainda.',
     trouble: null,
     counts: null,
+    claimables: null,
     detail: null,
   };
 }
@@ -505,72 +623,89 @@ export async function readQuestsView(input: {
     };
   }
 
-  // A tela do NPC só tem uma lista: o que ELE oferece. As listas de
-  // ativas e feitas são do menu — o NPC não é um lugar para
-  // conferir progresso, e por isso ela também não tem barra
-  // lateral.
+  // A tela do NPC só tem uma lista: o que ELE oferece. As abas são
+  // do menu — o NPC não é um lugar para conferir progresso, e por
+  // isso ela também não tem barra lateral.
   if (npcId !== null) {
     const offers = await reader.offersFor({ serverId, steamId, npcId });
 
     return {
       ...base,
-      ...pageOf(offers.map((offer) => offerCard(offer, catalog)), input.target.page),
-      tab: 'disponiveis',
+      ...pageOf(sortCards(offers.map((offer) => offerCard(offer, catalog))), input.target.page),
       npcId,
       npcName: input.npcName ?? null,
       emptyMessage: 'Este NPC não tem missões para você agora.',
     };
   }
 
-  // ####  AS TRÊS CONTAGENS SAEM DE DUAS LEITURAS  ####
+  // ####  AS TRÊS ABAS SAEM DE DUAS LEITURAS  ####
   //
   // `liveFor` é síncrono e traz ativas e concluídas de uma vez;
-  // `offersFor` traz o catálogo elegível. As duas já eram feitas —
-  // só que uma de cada vez, conforme a lista aberta. Fazer as duas
-  // sempre é o que permite a barra lateral dizer QUANTAS há em
-  // cada uma sem o jogador ter de entrar para descobrir.
+  // `offersFor` traz o catálogo elegível — sem o que ele já está
+  // fazendo, que o serviço tira. Juntas, são tudo o que o jogador
+  // pode ver, e cada uma cai na aba da sua frequência.
+  //
+  // "Resgatar" é só o que está pronto. O histórico inteiro mora no
+  // site: uma lista de trinta diárias resgatadas no CUI estouraria
+  // o frame e ninguém a leria no jogo.
   const live = reader.liveFor({ serverId, steamId });
   const offers = await reader.offersFor({ serverId, steamId });
 
-  const active = live.filter((item) => item.status === 'active');
-  // "Feitas" é o que está pronto para resgatar. O histórico inteiro
-  // mora no site: uma lista de trinta diárias no CUI estouraria o
-  // frame e ninguém a leria no jogo.
-  const done = live.filter((item) => item.status === 'completed');
+  const entries: { readonly tab: QuestsTab; readonly card: QuestCard }[] = [
+    ...live
+      .filter((item) => item.status === 'active' || item.status === 'completed')
+      .map((item) => ({ tab: tabOfRepeatMode(item.repeatMode), card: progressCard(item, catalog) })),
+    ...offers.map((offer) => ({
+      tab: tabOfRepeatMode(offer.quest.repeatMode),
+      card: offerCard(offer, catalog),
+    })),
+  ];
 
-  const counts: QuestCounts = {
-    ativas: active.length,
-    disponiveis: offers.length,
-    feitas: done.length,
+  const tally = (status?: QuestStatus): Record<QuestsTab, number> => {
+    const result: Record<QuestsTab, number> = { diarias: 0, semanais: 0, especiais: 0 };
+
+    for (const entry of entries) {
+      if (status === undefined || entry.card.status === status) {
+        result[entry.tab] += 1;
+      }
+    }
+
+    return result;
   };
 
-  if (input.target.tab === 'disponiveis') {
-    return {
-      ...base,
-      ...pageOf(offers.map((offer) => offerCard(offer, catalog)), input.target.page),
-      tab: 'disponiveis',
-      counts,
-      emptyMessage: 'Nenhuma missão nova por enquanto. Volte depois.',
-    };
-  }
+  const counts = tally();
 
-  if (input.target.tab === 'feitas') {
-    return {
-      ...base,
-      ...pageOf(done.map((item) => progressCard(item, catalog)), input.target.page),
-      tab: 'feitas',
-      counts,
-      emptyMessage: 'Nada para resgatar agora.',
-    };
-  }
+  // Sem aba no endereço: a primeira que tem algo, e diárias quando
+  // nenhuma tem — é a aba que o pedido do dono pôs primeiro.
+  const tab = input.target.tab ?? TABS.find((item) => counts[item] > 0) ?? 'diarias';
 
   return {
     ...base,
-    ...pageOf(active.map((item) => progressCard(item, catalog)), input.target.page),
-    tab: 'ativas',
+    ...pageOf(
+      sortCards(entries.filter((entry) => entry.tab === tab).map((entry) => entry.card)),
+      input.target.page,
+    ),
+    tab,
     counts,
-    emptyMessage: 'Você não está fazendo nenhuma missão. Veja as disponíveis.',
+    claimables: tally('claimable'),
+    emptyMessage: EMPTY_MESSAGES[tab],
   };
+}
+
+const EMPTY_MESSAGES: Readonly<Record<QuestsTab, string>> = {
+  diarias: 'Nenhuma missão diária por enquanto. Volte depois.',
+  semanais: 'Nenhuma missão semanal por enquanto. Volte depois.',
+  especiais: 'Nenhuma missão especial por enquanto.',
+};
+
+/**
+ * Ordena pela etiqueta, sem embaralhar o resto.
+ *
+ * `sort` é estável desde o ES2019: dentro do mesmo estado, a ordem
+ * do cadastro — que é a do arrasto no painel — é mantida.
+ */
+function sortCards(cards: readonly QuestCard[]): readonly QuestCard[] {
+  return [...cards].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
 }
 
 /**
@@ -684,6 +819,7 @@ function offerCard(offer: QuestOffer, catalog: QuestsCatalog): QuestCard {
   const blocked = offer.block !== null;
 
   return {
+    status: offer.block !== null && !SOFT_BLOCKS.has(offer.block.code) ? 'blocked' : 'available',
     // ####  O BOTÃO REUSA `store.buy`  ####
     //
     // `offerId` prefixado, e o `fallback` do `onBuy` no index.ts
@@ -708,6 +844,7 @@ function progressCard(view: QuestProgressView, catalog: QuestsCatalog): QuestCar
   const have = view.objectives.reduce((sum, item) => sum + Math.min(item.have, item.need), 0);
 
   return {
+    status: done ? 'claimable' : 'active',
     actionId: done ? `quest:claim:${String(view.playerQuestId)}` : null,
     actionLabel: done ? 'RESGATAR' : null,
     title: view.title,
@@ -1015,22 +1152,29 @@ function rectOf(left: number, top: number, bottom: number): Rect {
 // ------------------------------------------------------------
 
 /**
- * As três listas, em coluna.
+ * As abas, em coluna.
  *
  * ####  A DA VEZ É UM PAINEL, E NÃO UM BOTÃO  ####
  *
  * Clicar nela navegaria para onde já se está — um clique que não
  * faz nada, que é o que parece defeito. Ver ui-widgets.ts:284.
  *
- * O número ao lado é o que essa lista tem AGORA. Sem ele o jogador
- * precisa entrar em cada uma para descobrir se há algo a resgatar.
+ * O número ao lado é o que essa aba tem AGORA, e fica VERDE quando
+ * há prêmio parado nela. Sem isso o jogador precisaria entrar em
+ * cada uma para descobrir onde resgatar.
  */
 function sidebar(view: QuestsView): UiElement[] {
   const items: UiElement[] = [];
+  // ESPECIAIS só entra quando tem algo, ou quando é ela que está
+  // aberta — um endereço antigo pode apontar para ela vazia.
+  const tabs = TABS.filter(
+    (tab) => tab !== 'especiais' || tab === view.tab || (view.counts?.[tab] ?? 0) > 0,
+  );
 
-  for (const [index, tab] of TABS.entries()) {
+  for (const [index, tab] of tabs.entries()) {
     const id = `qt${tab.slice(0, 3)}`;
     const count = view.counts === null ? null : view.counts[tab];
+    const ready = (view.claimables?.[tab] ?? 0) > 0;
     const active = tab === view.tab;
 
     // ####  O NÚMERO NÃO PODE ENCOSTAR NO BOTÃO  ####
@@ -1075,7 +1219,7 @@ function sidebar(view: QuestsView): UiElement[] {
             font: 'RobotoCondensed-Bold.ttf',
           }),
         ]),
-        ...badge(C.text),
+        ...badge(ready ? C.olive : C.text),
       );
 
       continue;
@@ -1108,7 +1252,7 @@ function sidebar(view: QuestsView): UiElement[] {
           align: 'MiddleLeft',
         },
       ),
-      ...badge(C.textMuted),
+      ...badge(ready ? C.olive : C.textMuted),
     );
   }
 
@@ -1206,12 +1350,40 @@ function cardElements(card: QuestCard, id: string, left: number, top: number): U
   });
 
   const children: UiElement[] = [
-    label(`${id}t`, card.title, row(6, 18), {
-      size: 13,
-      color: C.text,
-      align: 'MiddleLeft',
-      font: 'RobotoCondensed-Bold.ttf',
-    }),
+    // O título cede a ponta direita para a etiqueta: os dois na
+    // mesma faixa, sem se encavalar.
+    label(
+      `${id}t`,
+      card.title,
+      { ...row(6, 18), offsetMax: { x: -(gutter + STATUS_WIDTH), y: -6 } },
+      {
+        size: 13,
+        color: C.text,
+        align: 'MiddleLeft',
+        font: 'RobotoCondensed-Bold.ttf',
+      },
+    ),
+    // ####  A ETIQUETA É O QUE AS ABAS ANTIGAS DIZIAM  ####
+    //
+    // Um rótulo só, colorido — sem caixa atrás: um painel a mais
+    // por card seria o dobro do custo para a mesma leitura, num
+    // frame que tem teto.
+    label(
+      `${id}s`,
+      STATUS_LABELS[card.status],
+      {
+        anchorMin: { x: 1, y: 1 },
+        anchorMax: { x: 1, y: 1 },
+        offsetMin: { x: -(gutter + STATUS_WIDTH), y: -24 },
+        offsetMax: { x: -gutter, y: -6 },
+      },
+      {
+        size: 10,
+        color: STATUS_COLORS[card.status],
+        align: 'MiddleRight',
+        font: 'RobotoCondensed-Bold.ttf',
+      },
+    ),
     label(`${id}l`, card.line, row(25, 14), {
       size: 11,
       color: C.textMuted,

@@ -153,6 +153,15 @@ export interface StatsCollectorDeps {
    * chega no lote, que é o caminho garantido.
    */
   readonly secret?: string | undefined;
+  /**
+   * Os shortnames que o plugin deve somar em `gather.<shortname>`.
+   *
+   * Perguntado A CADA rodada, do catálogo: um ranking de coleta
+   * criado no painel passa a contar no ciclo seguinte, sem reload.
+   * Ausente = o plugin não recebe lista e mantém a que tinha. Ver
+   * `rankings/plugin-metrics.ts`.
+   */
+  readonly gather?: (() => readonly string[]) | undefined;
   readonly logger?: Logger | undefined;
   readonly intervalMs?: number | undefined;
 }
@@ -204,8 +213,9 @@ export async function fetchStatsPage(
   offset: number,
   limit: number,
   secret?: string,
+  gather?: readonly string[],
 ): Promise<StatsFlushPage | null> {
-  const raw = await rcon.send(buildStatsFlushCommand(offset, limit, secret));
+  const raw = await rcon.send(buildStatsFlushCommand(offset, limit, secret, gather));
   const line = firstJsonLine(raw);
 
   if (line === null) {
@@ -257,6 +267,7 @@ export async function collectStatsBatch(
   rcon: OpsRcon,
   startLimit: number = STATS_FLUSH_DEFAULT_LIMIT,
   secret?: string,
+  gather?: readonly string[],
 ): Promise<StatsBatchPages> {
   const players: StatsFlushPlayer[] = [];
   const records: StatsFlushRecord[] = [];
@@ -270,7 +281,9 @@ export async function collectStatsBatch(
   let shrunkPages = 0;
 
   while (total === null || offset < total) {
-    const page = await fetchStatsPage(rcon, offset, limit, secret);
+    // A lista vai só na primeira página: é ela que congela o lote,
+    // e repetir nas outras não muda nada.
+    const page = await fetchStatsPage(rcon, offset, limit, secret, offset === 0 ? gather : undefined);
 
     if (page === null) {
       if (limit <= 1) {
@@ -462,7 +475,12 @@ export class StatsCollector {
     const played = this.#playedRound(serverId);
 
     // 5. o lote — e, de carona, o segredo do canal do "agora".
-    const batch = await collectStatsBatch(rcon, STATS_FLUSH_DEFAULT_LIMIT, this.#deps.secret);
+    const batch = await collectStatsBatch(
+      rcon,
+      STATS_FLUSH_DEFAULT_LIMIT,
+      this.#deps.secret,
+      this.#deps.gather?.(),
+    );
 
     // 6. tudo numa transação só.
     //

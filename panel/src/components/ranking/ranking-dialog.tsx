@@ -26,6 +26,11 @@ import {
   WINDOW_HINTS,
   WINDOW_LABELS,
 } from '@/components/ranking/labels';
+import {
+  checkPluginMetric,
+  gatherShortnameOf,
+  GATHER_METRIC_PREFIX,
+} from '@/components/ranking/plugin-metric-choice';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
@@ -43,6 +48,16 @@ import {
 import { toast } from '@/lib/toast';
 
 const SOURCES: readonly RankingSource[] = ['plugin', 'agent', 'item', 'computed'];
+
+/** O que cada origem exige para o número andar. */
+const SOURCE_HINTS: Readonly<Record<RankingSource, string>> = {
+  plugin:
+    'O OrigemZAgent conta no jogo — só as chaves que ele conhece (ore.*, pvp.*, …) ou ' +
+    'gather.<shortname> para coleta de recurso. Outra chave fica em zero.',
+  agent: 'O agente calcula sozinho. Hoje só o tempo online (time.played).',
+  item: 'Recebe pontos de missão e de item custom. É a única origem que aceita pontos de missão.',
+  computed: 'Calculado a partir de outros rankings na leitura (ex.: K/D). Não guarda ponto.',
+};
 const VALUE_KINDS: readonly RankingValueKind[] = ['counter', 'record', 'ratio'];
 const WINDOWS: readonly RankingPeriodKind[] = ['wipe', 'season', 'lifetime'];
 
@@ -168,6 +183,13 @@ export function RankingDialog({ open, ranking, preset, onClose, onSaved }: Ranki
 
   const editing = ranking !== null;
   const ready = form.label.trim() !== '' && form.metric.trim() !== '' && form.id.trim() !== '';
+  // ####  A ORIGEM "PLUGIN" SÓ FUNCIONA COM UMA CHAVE QUE ELE CONTA  ####
+  //
+  // O "Madeira" (`farm.madeira`) salvava e ficava em zero. O core
+  // recusa ao salvar; aqui o aviso chega enquanto se digita.
+  const pluginCheck =
+    form.source === 'plugin' && form.metric.trim() !== '' ? checkPluginMetric(form.metric) : null;
+  const gatherItem = form.source === 'plugin' ? gatherShortnameOf(form.metric.trim()) : null;
 
   const save = async (): Promise<void> => {
     setSaving(true);
@@ -259,6 +281,37 @@ export function RankingDialog({ open, ranking, preset, onClose, onSaved }: Ranki
                 ? 'Este ranking veio com o agente: a métrica não troca, senão o número já contado ficaria sob a métrica antiga.'
                 : 'No formato familia.nome, em minúsculas. É a mesma string que o item custom aponta.'}
             </p>
+
+            {gatherItem !== null && (
+              <p className="mt-1 text-2xs text-muted">
+                Conta cada unidade de <span className="font-mono text-foreground">{gatherItem}</span>{' '}
+                colhida (golpe, bônus de terminar o nó e recurso do chão). O agente avisa o plugin
+                na próxima rodada de coleta — até um minuto.
+              </p>
+            )}
+
+            {pluginCheck !== null && !pluginCheck.ok && (
+              <p className="mt-1 text-2xs text-rust">
+                O plugin não conta esta chave: o ranking ficaria parado em zero, e o agente recusa
+                ao salvar.{' '}
+                {pluginCheck.suggestion !== null && (
+                  <>
+                    Quis dizer{' '}
+                    <button
+                      type="button"
+                      className="font-mono underline"
+                      onClick={() => patch({ metric: pluginCheck.suggestion ?? form.metric })}
+                    >
+                      {pluginCheck.suggestion}
+                    </button>
+                    ?{' '}
+                  </>
+                )}
+                Coleta de recurso usa{' '}
+                <span className="font-mono">{GATHER_METRIC_PREFIX}&lt;shortname do item&gt;</span>{' '}
+                (ex.: <span className="font-mono">{GATHER_METRIC_PREFIX}wood</span> para madeira).
+              </p>
+            )}
           </div>
 
           <div>
@@ -326,6 +379,9 @@ export function RankingDialog({ open, ranking, preset, onClose, onSaved }: Ranki
                 </option>
               ))}
             </select>
+            {/* Quem alimenta o número, dito junto da escolha: é a
+                dependência que o "Madeira" não deixava ver. */}
+            <p className="mt-1 text-2xs text-muted">{SOURCE_HINTS[form.source]}</p>
           </div>
 
           <div>
