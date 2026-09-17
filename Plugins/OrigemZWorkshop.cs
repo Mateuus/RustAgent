@@ -172,6 +172,10 @@ namespace Oxide.Plugins
         private const string MenuTargetsCommand = "origemz.skins.targets";
         private const string MenuMineCommand = "origemz.skins.mine";
         private const string MenuSortCommand = "origemz.skins.sort";
+        private const string MenuFavoriteCommand = "origemz.skins.fav";
+
+        /// <summary>A "categoria" da lateral que mostra as favoritas do jogador.</summary>
+        private const string FavoritesKey = "fav";
         private const string MenuSearchCommand = "origemz.skins.search";
         private const string MenuApplyCommand = "origemz.skins.apply";
 
@@ -181,6 +185,15 @@ namespace Oxide.Plugins
         private const string AdminPermission = "origemzworkshop.admin";
         private const string CacheFile = "OrigemZWorkshop/cache";
         private const string OwnedFile = "OrigemZWorkshop/owned";
+
+        /// <summary>
+        /// As favoritas de cada jogador: `steamId → ids de skin`. Mora SÓ no
+        /// plugin (é preferência de tela, não posse) e por isso vale por
+        /// servidor, não na rede. Id que saiu do catálogo é ignorado na hora
+        /// de mostrar e podado na próxima gravação.
+        /// </summary>
+        private const string FavoritesFile = "OrigemZWorkshop/favorites";
+        private const int MaxFavoritesPerPlayer = 200;
 
         /// <summary>Quanto o `/skin add` e o `/skin give` esperam a resposta do agente.</summary>
         private const float RequestTimeoutSeconds = 20f;
@@ -458,6 +471,7 @@ namespace Oxide.Plugins
             LoadSkinnables();
             LoadCache();
             LoadOwned();
+            LoadFavorites();
 
             if (_config.InventoryButton)
             {
@@ -1243,6 +1257,57 @@ namespace Oxide.Plugins
             }
         }
 
+        private Dictionary<string, HashSet<int>> _favorites = new Dictionary<string, HashSet<int>>();
+
+        private void LoadFavorites()
+        {
+            try
+            {
+                if (!Interface.Oxide.DataFileSystem.ExistsDatafile(FavoritesFile)) return;
+
+                Dictionary<string, List<int>> data =
+                    Interface.Oxide.DataFileSystem.ReadObject<Dictionary<string, List<int>>>(FavoritesFile);
+                if (data == null) return;
+
+                foreach (KeyValuePair<string, List<int>> pair in data)
+                {
+                    if (!IsSteamId(pair.Key) || pair.Value == null) continue;
+                    _favorites[pair.Key] = new HashSet<int>(pair.Value);
+                }
+            }
+            catch (Exception cause)
+            {
+                PrintWarning("As favoritas não abriram (" + cause.Message + "): começando vazio.");
+                _favorites = new Dictionary<string, HashSet<int>>();
+            }
+        }
+
+        private void SaveFavorites()
+        {
+            Dictionary<string, List<int>> data = new Dictionary<string, List<int>>();
+
+            foreach (KeyValuePair<string, HashSet<int>> pair in _favorites)
+            {
+                List<int> ids = new List<int>();
+                foreach (int id in pair.Value)
+                {
+                    // Enquanto o catálogo não chegou, não se sabe o que saiu dele.
+                    if (_catalog.ById.Count == 0 || _catalog.ById.ContainsKey(id)) ids.Add(id);
+                }
+
+                if (ids.Count > 0) data[pair.Key] = ids;
+            }
+
+            try
+            {
+                Interface.Oxide.DataFileSystem.WriteObject(FavoritesFile, data);
+            }
+            catch (Exception cause)
+            {
+                PrintWarning("Não consegui gravar as favoritas: " + cause.Message);
+            }
+        }
+
         private void LoadOwned()
         {
             try
@@ -1368,6 +1433,16 @@ namespace Oxide.Plugins
             public OwnedRecord Owned;
             public long Now;
             public bool OnAir;
+            /// <summary>Nunca nulo.</summary>
+            public HashSet<int> Favorites;
+        }
+
+        private static readonly HashSet<int> NoFavorites = new HashSet<int>();
+
+        private HashSet<int> FavoritesOf(string steamId)
+        {
+            HashSet<int> set;
+            return _favorites.TryGetValue(steamId, out set) ? set : NoFavorites;
         }
 
         private Viewer ViewerOf(BasePlayer player)
@@ -1384,6 +1459,7 @@ namespace Oxide.Plugins
                 // do servidor ou a permissão. Dois critérios confundiam o teste.
                 Admin = IsAdmin(player),
                 Owned = owned,
+                Favorites = FavoritesOf(steamId),
                 Now = NowMs(),
                 OnAir = _streamers.Contains(steamId),
             };
@@ -1420,6 +1496,19 @@ namespace Oxide.Plugins
         private static bool IsUsable(Access access)
         {
             return access == Access.Owned || access == Access.Free || access == Access.Admin;
+        }
+
+        /// <summary>
+        /// O jogador TEM a skin: posse viva ou skin da casa. Diferente de
+        /// `CanUse`, que também é verdade para o admin. É o que conta nas
+        /// telas ("obtidas", "só as minhas", o cadeado): o admin vê o mesmo
+        /// que um jogador veria, e continua podendo aplicar tudo.
+        /// </summary>
+        private static bool Obtained(Viewer viewer, SkinEntry entry)
+        {
+            long ignored;
+            Access access = AccessOf(viewer, entry, out ignored);
+            return access == Access.Owned || access == Access.Free;
         }
 
         private static bool CanUse(Viewer viewer, SkinEntry entry)
@@ -2584,9 +2673,9 @@ namespace Oxide.Plugins
             bool hasPage = arg.HasArgs(3);
             int page = Math.Max(0, arg.GetInt(2, 0));
 
-            if (key == "all")
+            if (key == "all" || key == FavoritesKey)
             {
-                session.Category = "";
+                session.Category = key == FavoritesKey ? FavoritesKey : "";
                 session.SidePage = 0;
                 session.Shortname = "";
                 session.GridPage = 0;
@@ -2727,6 +2816,33 @@ namespace Oxide.Plugins
             Redraw(player, session, Region.AllButWindow);
         }
 
+        [ConsoleCommand(MenuFavoriteCommand)]
+        private void CmdMenuFavorite(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            int id = arg.GetInt(1, 0);
+            if (id <= 0 || !_catalog.ById.ContainsKey(id)) return;
+
+            HashSet<int> set;
+            if (!_favorites.TryGetValue(player.UserIDString, out set))
+            {
+                set = new HashSet<int>();
+                _favorites[player.UserIDString] = set;
+            }
+
+            if (!set.Remove(id))
+            {
+                if (set.Count >= MaxFavoritesPerPlayer) return;
+                set.Add(id);
+            }
+
+            SaveFavorites();
+            Redraw(player, session, Region.Side | Region.Grid | Region.Detail);
+        }
+
         [ConsoleCommand(MenuSortCommand)]
         private void CmdMenuSort(ConsoleSystem.Arg arg)
         {
@@ -2805,7 +2921,8 @@ namespace Oxide.Plugins
                 session.HasPick = false;
             }
 
-            if (session.Category.Length > 0 && !_catalog.CategoryByKey.ContainsKey(session.Category))
+            if (session.Category.Length > 0 && session.Category != FavoritesKey &&
+                !_catalog.CategoryByKey.ContainsKey(session.Category))
             {
                 session.Category = "";
                 session.Shortname = "";
@@ -2875,6 +2992,8 @@ namespace Oxide.Plugins
             public bool Scroll;
             public bool AllActive;
             public int AllCount;
+            public bool FavActive;
+            public int FavCount;
             public readonly List<SideCategory> Categories = new List<SideCategory>();
         }
 
@@ -2895,6 +3014,7 @@ namespace Oxide.Plugins
             public bool Syncing;
             public bool Picked;
             public bool Applied;
+            public bool Favorite;
         }
 
         private class GridView
@@ -2924,6 +3044,10 @@ namespace Oxide.Plugins
             public string Description = "";
             public string Note = "";
             public string NoteColor = "";
+            /// <summary>0 = Padrão, que não se favorita.</summary>
+            public int PickId;
+            public bool Favorite;
+            public string Token = "";
         }
 
         private class TargetRow
@@ -3009,7 +3133,7 @@ namespace Oxide.Plugins
 
         private static bool Visible(Viewer viewer, MenuSession session, SkinEntry entry)
         {
-            return !session.Mine || CanUse(viewer, entry);
+            return !session.Mine || Obtained(viewer, entry);
         }
 
         private List<string> VisibleItems(Viewer viewer, MenuSession session, CategoryInfo info)
@@ -3078,7 +3202,7 @@ namespace Oxide.Plugins
             foreach (SkinEntry entry in _catalog.Ordered)
             {
                 view.Total++;
-                if (CanUse(frame.Viewer, entry)) view.Usable++;
+                if (Obtained(frame.Viewer, entry)) view.Usable++;
             }
 
             return view;
@@ -3093,7 +3217,14 @@ namespace Oxide.Plugins
             {
                 Token = session.Token,
                 AllActive = searching || session.Category.Length == 0,
+                FavActive = !searching && session.Category == FavoritesKey,
             };
+
+            foreach (int favorite in viewer.Favorites)
+            {
+                SkinEntry entry;
+                if (_catalog.ById.TryGetValue(favorite, out entry) && Visible(viewer, session, entry)) view.FavCount++;
+            }
 
             List<CategoryInfo> shown = new List<CategoryInfo>();
             List<List<string>> shownItems = new List<List<string>>();
@@ -3155,7 +3286,7 @@ namespace Oxide.Plugins
 
                         foreach (SkinEntry entry in skins)
                         {
-                            if (CanUse(viewer, entry)) item.Usable++;
+                            if (Obtained(viewer, entry)) item.Usable++;
                         }
 
                         category.Items.Add(item);
@@ -3230,6 +3361,15 @@ namespace Oxide.Plugins
                     if (Visible(viewer, session, entry)) list.Add(entry);
                 }
             }
+            else if (session.Category == FavoritesKey)
+            {
+                foreach (SkinEntry entry in _catalog.Ordered)
+                {
+                    if (viewer.Favorites.Contains(entry.Id) && Visible(viewer, session, entry)) list.Add(entry);
+                }
+
+                view.Empty = "Nenhuma favorita ainda. Escolha uma skin e toque em FAVORITAR no detalhe.";
+            }
             else
             {
                 foreach (SkinEntry entry in _catalog.Ordered)
@@ -3293,6 +3433,7 @@ namespace Oxide.Plugins
                     Rarity = entry.Rarity,
                     Picked = session.HasPick && session.PickId == entry.Id,
                     Applied = targetShortname == entry.Shortname && targetSkin == entry.SkinId,
+                    Favorite = viewer.Favorites.Contains(entry.Id),
                 };
 
                 long expiresAt;
@@ -3334,8 +3475,11 @@ namespace Oxide.Plugins
                     cell.StateColor = ColText;
                     break;
                 case Access.Admin:
-                    cell.State = "Liberada (admin)";
+                    // Escurecida e com cadeado, como para qualquer jogador; o
+                    // admin só continua podendo aplicar.
+                    cell.State = "Não obtida (admin)";
                     cell.StateColor = ColMuted;
+                    cell.Locked = true;
                     break;
                 case Access.Syncing:
                     cell.State = "Sincronizando";
@@ -3343,7 +3487,7 @@ namespace Oxide.Plugins
                     cell.Syncing = true;
                     break;
                 default:
-                    cell.State = "Bloqueada";
+                    cell.State = "Não obtida";
                     cell.StateColor = ColMuted;
                     cell.Locked = true;
                     break;
@@ -3370,6 +3514,9 @@ namespace Oxide.Plugins
             }
 
             SkinEntry entry = frame.Pick;
+            view.PickId = entry.Id;
+            view.Favorite = frame.Viewer.Favorites.Contains(entry.Id);
+            view.Token = session.Token;
             view.ItemId = entry.ItemId;
             view.SkinId = entry.SkinId;
             view.Label = entry.Label;
@@ -3405,8 +3552,10 @@ namespace Oxide.Plugins
                     view.ExpiryColor = ColMuted;
                     break;
                 case Access.Admin:
-                    view.State = "Liberada para você (admin)";
-                    view.StateColor = ColOlive;
+                    view.State = "Não obtida";
+                    view.StateColor = ColMuted;
+                    view.Expiry = "Você é admin: pode aplicar mesmo assim";
+                    view.ExpiryColor = ColAmber;
                     break;
                 case Access.Syncing:
                     view.State = "Sincronizando";
@@ -3623,7 +3772,16 @@ namespace Oxide.Plugins
         private static readonly string ColTransparent = "0 0 0 0";
         /// <summary>O véu de ui-preset-main-menu.ts:132 (#000000D1).</summary>
         private const string ColVeil = "0 0 0 0.82";
-        private const string ColIconDim = "1 1 1 0.35";
+        private const string ColIconDim = "1 1 1 0.3";
+        private static readonly string ColLockedFill = Hex("#141414");
+
+        /// <summary>A mesma cor com outro alpha ("r g b a" do CUI).</summary>
+        private static string Faded(string color, float alpha)
+        {
+            string[] parts = color.Split(' ');
+            if (parts.Length < 3) return color;
+            return parts[0] + " " + parts[1] + " " + parts[2] + " " + F(alpha);
+        }
         private const string BlurMaterial = "assets/content/ui/uibackgroundblur.mat";
         private const string FontBold = "RobotoCondensed-Bold.ttf";
         private const string FontRegular = "RobotoCondensed-Regular.ttf";
@@ -3993,7 +4151,7 @@ namespace Oxide.Plugins
             Box side = RegionRoot(canvas, UiSide, 0, HeaderHeight, SideWidth, BodyHeight, ColTransparent);
 
             // A altura do que vai ser desenhado, para saber se precisa rolar.
-            float needed = 8f + SideRow + SideGap;
+            float needed = 8f + 2 * (SideRow + SideGap);
             foreach (SideCategory category in view.Categories)
             {
                 needed += SideRow + SideGap;
@@ -4014,6 +4172,10 @@ namespace Oxide.Plugins
             }
 
             float y = 8f;
+
+            SideHeader(canvas, area, x, y, w, "FAVORITOS", view.FavCount, view.FavActive,
+                       MenuCategoryCommand + " " + view.Token + " " + FavoritesKey);
+            y += SideRow + SideGap;
 
             SideHeader(canvas, area, x, y, w, "TODAS", view.AllCount, view.AllActive,
                        MenuCategoryCommand + " " + view.Token + " all");
@@ -4258,8 +4420,16 @@ namespace Oxide.Plugins
             // cor da raridade, e a raridade vira uma linha de texto. A
             // escolha e o "aplicado" passam a ser a BORDA (branca e verde),
             // para não brigar com a cor.
+            // ####  SKIN QUE O JOGADOR NÃO TEM: A CÉLULA INTEIRA ESCURECE  ####
+            //
+            // Pedido do dono (17/09/2026): mostrar todas, com as que ele não
+            // tem apagadas e com cadeado. O fundo vira quase preto e a cor da
+            // raridade só sobra, fraca, na faixa de baixo.
+            bool dim = cell.Locked || cell.Syncing;
             string rarity = RarityColor(cell.Rarity);
-            string fill = rarity != null ? RarityFill(cell.Rarity) : cell.Picked ? ColPicked : ColSurface2;
+            string fill = dim ? ColLockedFill
+                : rarity != null ? RarityFill(cell.Rarity)
+                : cell.Picked ? ColPicked : ColSurface2;
             string border = cell.Applied ? ColOlive : cell.Picked ? ColText : null;
 
             string name = Button(canvas, grid, x, y, CellWidth, CellHeight, border ?? fill,
@@ -4273,24 +4443,30 @@ namespace Oxide.Plugins
 
             if (rarity != null)
             {
-                Panel(canvas, box, 2, CellHeight - 6, CellWidth - 4, 4, rarity);
+                Panel(canvas, box, 2, CellHeight - 6, CellWidth - 4, 4, dim ? Faded(rarity, 0.35f) : rarity);
             }
             else if (cell.Picked)
             {
                 Panel(canvas, box, 2, CellHeight - 5, CellWidth - 4, 3, ColRust);
             }
 
-            bool dim = cell.Locked || cell.Syncing;
             Icon(canvas, box, 28, 8, 72, 72, cell.ItemId, cell.SkinId, dim ? ColIconDim : "1 1 1 1");
+
+            if (cell.Favorite)
+            {
+                // Sem "★": não se sabe se a RobotoCondensed tem o glifo.
+                Panel(canvas, box, 6, 8, 30, 14, ColAmber);
+                Label(canvas, box, 6, 8, 30, 14, "FAV", 9, ColBg, TextAnchor.MiddleCenter, true);
+            }
 
             if (dim)
             {
-                Lock(canvas, box, CellWidth - 28, 8, 1f, cell.Locked ? ColText : ColMuted, fill);
+                Lock(canvas, box, CellWidth - 30, 8, 1.1f, cell.Locked ? ColText : ColMuted, fill);
             }
 
             bool mixed = cell.ItemName.Length > 0;
             float line = 82f;
-            Label(canvas, box, 6, line, CellWidth - 12, 16, Shorten(cell.Label, 20), 11, ColText,
+            Label(canvas, box, 6, line, CellWidth - 12, 16, Shorten(cell.Label, 20), 11, dim ? ColMuted : ColText,
                   TextAnchor.MiddleCenter, true);
             line += 16f;
 
@@ -4304,7 +4480,7 @@ namespace Oxide.Plugins
             if (cell.PickId != 0)
             {
                 Label(canvas, box, 6, line, CellWidth - 12, 14, RarityLabel(cell.Rarity), 10,
-                      rarity ?? ColMuted, TextAnchor.MiddleCenter, true);
+                      rarity == null ? ColMuted : dim ? Faded(rarity, 0.6f) : rarity, TextAnchor.MiddleCenter, true);
                 line += 14f;
             }
 
@@ -4353,7 +4529,16 @@ namespace Oxide.Plugins
             Label(canvas, detail, 16, 136, detail.W - 32, 58, Shorten(view.Description, 280), 11, ColText,
                   TextAnchor.UpperLeft, false);
 
-            Label(canvas, detail, 16, 200, detail.W - 32, 36, view.Note, 11, view.NoteColor, TextAnchor.MiddleLeft, true);
+            Label(canvas, detail, 16, 200, detail.W - 32 - 150, 36, view.Note, 11, view.NoteColor,
+                  TextAnchor.MiddleLeft, true);
+
+            if (view.PickId != 0)
+            {
+                TextButton(canvas, detail, detail.W - 16 - 140, 204, 140, 28,
+                           view.Favorite ? ColAmber : ColSurface2,
+                           MenuFavoriteCommand + " " + view.Token + " " + view.PickId,
+                           view.Favorite ? "DESFAVORITAR" : "FAVORITAR", 11, view.Favorite ? ColBg : ColText);
+            }
 
             return canvas.Json();
         }
