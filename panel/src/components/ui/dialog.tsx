@@ -57,6 +57,15 @@ interface DialogProps {
   readonly onClose: () => void;
   /** Uma requisição está em andamento: fechar fica bloqueado. */
   readonly busy?: boolean;
+  /**
+   * A caixa ocupa a janela inteira, com a margem de 16 px.
+   *
+   * Para o editor que precisa de espaço (o da masmorra: prévia e
+   * lista lado a lado). O cabeçalho fica parado e os filhos recebem
+   * uma coluna flexível da altura que sobra — quem rola é o conteúdo
+   * deles, e não a caixa.
+   */
+  readonly fullScreen?: boolean;
   readonly className?: string;
   readonly children: ReactNode;
 }
@@ -67,6 +76,7 @@ export function Dialog({
   onClose,
   busy = false,
   guarded = false,
+  fullScreen = false,
   className,
   children,
 }: DialogProps) {
@@ -113,12 +123,15 @@ export function Dialog({
       }}
       className={cn(
         'm-auto w-[min(30rem,92vw)] border border-border bg-surface p-0 text-foreground',
+        // O `max-*` do navegador para `dialog:modal` é 100% menos
+        // 2em e 6 px — mais apertado que a margem de 16 px do painel.
+        fullScreen && 'h-[calc(100dvh-2rem)] max-h-none w-[calc(100vw-2rem)] max-w-none',
         className,
       )}
     >
       {open && (
-        <div className="flex flex-col">
-          <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+        <div className={cn('flex flex-col', fullScreen && 'h-full')}>
+          <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-2">
             <h2
               id={titleId}
               className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide"
@@ -144,7 +157,7 @@ export function Dialog({
             </span>
           </header>
 
-          <div className="p-3">{children}</div>
+          <div className={cn('p-3', fullScreen && 'flex min-h-0 flex-1 flex-col')}>{children}</div>
         </div>
       )}
     </dialog>

@@ -172,6 +172,9 @@ export function BlueprintPreview({ blueprint, onClose }: BlueprintPreviewProps) 
   const [error, setError] = useState<string | null>(null);
 
   const pieces = contents?.pieces ?? null;
+  // `?? null`: um agente de antes da contagem não manda o campo, e o
+  // tipo do painel não valida a resposta.
+  const markers = blueprint.markers ?? null;
 
   useEffect(() => {
     let alive = true;
@@ -211,9 +214,18 @@ export function BlueprintPreview({ blueprint, onClose }: BlueprintPreviewProps) 
               <Stat label="Tamanho" value={formatBytes(blueprint.byteSize)} />
               <Stat
                 label="Tipo"
-                value={blueprint.kind === 'entrance' ? 'entrada' : 'masmorra'}
+                value={blueprint.kind === 'entrance' ? 'entrada' : 'masmorra (corpo)'}
               />
               <Stat label="Alçapão" value={blueprint.hasHatch ? 'tem a marca' : 'sem marca'} />
+              {/* Os marcadores do corpo — lápide, velas e árvore — já
+                  vêm contados na lista; aqui eles só ganham nome. */}
+              {markers !== null && (
+                <>
+                  <Stat label="Lápides" value={String(markers.npc)} />
+                  <Stat label="Velas" value={String(markers.crate)} />
+                  <Stat label="Árvores" value={String(markers.arrival)} />
+                </>
+              )}
             </dl>
 
             <Legend pieces={pieces} />

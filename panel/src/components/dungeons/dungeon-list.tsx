@@ -124,12 +124,25 @@ export function DungeonList({ dungeons, onEdit, onChanged, onBuild }: DungeonLis
 
               <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted">
                 <span className="font-mono">{dungeon.id}</span>
-                <span>
-                  {dungeon.mode === 'recipe' ? 'receita' : 'planta'} ·{' '}
-                  {dungeon.sizeMin === dungeon.sizeMax
-                    ? `${String(dungeon.sizeMin)} salas`
-                    : `${String(dungeon.sizeMin)}–${String(dungeon.sizeMax)} salas`}
-                </span>
+                {dungeon.mode === 'construction' ? (
+                  // A construção não tem "de 10 a 15 salas": o que a
+                  // identifica é a planta que vira o corpo dela.
+                  <span>
+                    construção importada ·{' '}
+                    {dungeon.bodyBlueprint === null || dungeon.bodyBlueprint === undefined ? (
+                      <span className="text-amber">sem corpo escolhido</span>
+                    ) : (
+                      <>corpo: {dungeon.bodyBlueprint}</>
+                    )}
+                  </span>
+                ) : (
+                  <span>
+                    {dungeon.mode === 'recipe' ? 'receita' : 'planta'} ·{' '}
+                    {dungeon.sizeMin === dungeon.sizeMax
+                      ? `${String(dungeon.sizeMin)} salas`
+                      : `${String(dungeon.sizeMin)}–${String(dungeon.sizeMax)} salas`}
+                  </span>
+                )}
                 <span>
                   entrada:{' '}
                   {dungeon.entranceBlueprint ?? (

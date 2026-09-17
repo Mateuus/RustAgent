@@ -65,8 +65,8 @@ export const DUNGEON_HELP = {
   },
 
   modo: {
-    title: 'Receita ou planta',
-    short: 'Receita sorteia um traçado novo a cada vez; planta sai sempre igual.',
+    title: 'Receita, planta ou construção',
+    short: 'Receita sorteia um traçado novo a cada vez; planta e construção saem sempre iguais.',
     body: (
       <>
         <p>
@@ -79,10 +79,207 @@ export const DUNGEON_HELP = {
           os jogadores decoram o caminho — o que é bom para uma masmorra permanente que vira ponto
           de referência do servidor.
         </p>
+        <p>
+          <strong>Construção importada</strong> é uma masmorra que você <em>construiu no jogo</em>,
+          peça por peça, e salvou com o CopyPaste. Ela é colada inteira a noventa metros de
+          profundidade — com escadas, andares e o formato que nenhum grid desenha.
+        </p>
         <HelpExample>
           Um evento que nasce de hora em hora pede receita. A masmorra fixa da ilha do meio pede
-          planta.
+          planta. O bunker de três andares que a equipe montou no servidor de testes pede construção.
         </HelpExample>
+      </>
+    ),
+  },
+
+  constructionMode: {
+    title: 'A construção importada',
+    short: 'Construa no jogo, salve com o CopyPaste e use a construção como corpo da masmorra.',
+    body: (
+      <>
+        <p>
+          O caminho tem quatro passos: <strong>construir</strong> a masmorra dentro do Rust,{' '}
+          <strong>marcar</strong> onde nascem os inimigos, as caixas e a chegada (veja os
+          marcadores), <strong>salvar</strong> com o CopyPaste e <strong>subir</strong> o .json na
+          aba Plantas, escolhendo &ldquo;Corpo da masmorra&rdquo;.
+        </p>
+        <p>
+          Aqui você escolhe a construção, lê os marcadores e ajusta cada ponto. O que nasce em cada
+          ponto — vida, arma, loot, caixas — continua vindo dos passos &ldquo;Salas e loot&rdquo; e
+          &ldquo;Inimigos&rdquo;: as cores de sala e o corredor viram os <strong>perfis</strong> dos
+          pontos.
+        </p>
+        <HelpExample>
+          Três lápides na sala do chefe apontando para o perfil &ldquo;Sala vermelha&rdquo;, duas
+          velas no depósito com o perfil &ldquo;Corredor&rdquo;, e a árvore de Natal no pé da
+          escada: é a masmorra inteira configurada sem digitar coordenada nenhuma.
+        </HelpExample>
+        <HelpWarn>
+          A entrada continua sendo escolhida à parte, no passo &ldquo;Entrada e acesso&rdquo;. A
+          construção importada é só o que fica lá embaixo.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  bodyMarkers: {
+    title: 'Os três marcadores',
+    short: 'Lápide = inimigo, conjunto de velas grandes = caixa, árvore de Natal = chegada.',
+    body: (
+      <>
+        <p>
+          Dentro do jogo, você marca a construção com três itens comuns. Eles não sobem para a
+          masmorra: viram <strong>pontos</strong> na lista, e o evento decide o que nasce em cada um.
+        </p>
+        <ul className="ml-4 list-disc space-y-0.5 text-xs">
+          <li>
+            <strong>Gravestone</strong> (lápide) — onde nasce um <strong>inimigo</strong>, olhando
+            para onde a lápide aponta;
+          </li>
+          <li>
+            <strong>Large Candle Set</strong> (conjunto de velas grandes) — onde nasce uma{' '}
+            <strong>caixa</strong>;
+          </li>
+          <li>
+            <strong>Christmas Tree</strong> (árvore de Natal) — a <strong>entrada e a chegada</strong>{' '}
+            do jogador: é onde ele aparece ao descer, e sobre ela nasce o alçapão de subir.
+          </li>
+        </ul>
+        <HelpExample>
+          Ler os marcadores de novo não duplica nada: a lápide que já estava na lista é reconhecida,
+          e o nome, o perfil e a quantidade que você deu a ela ficam como estão.
+        </HelpExample>
+        <HelpWarn>
+          Ponha o marcador <strong>solto no piso</strong>. Uma vela encaixada numa estante é salva
+          como parte da estante, e é ignorada. E exatamente <strong>uma</strong> árvore: sem
+          nenhuma, ou com duas, o painel pede que você escolha a chegada à mão.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  bodyNotImported: {
+    title: 'O que não sobe da construção',
+    short: 'NPCs, caixas de loot, armadilhas, torres, veículos, fechaduras, itens e fiação ficam de fora.',
+    body: (
+      <>
+        <p>
+          A construção sobe com as paredes, os pisos, as escadas, os móveis e a decoração — com o
+          material e a <strong>skin</strong> que cada peça tinha no arquivo. O que ela carregava
+          dentro, não:
+        </p>
+        <ul className="ml-4 list-disc space-y-0.5 text-xs">
+          <li>
+            <strong>NPCs</strong> e <strong>caixas de loot</strong> de monumento — os inimigos e as
+            caixas vêm dos pontos, senão a recompensa viria duas vezes;
+          </li>
+          <li>
+            <strong>armadilhas e torres</strong> (turret, lança-chamas, mina, armadilha de urso) —
+            quem ataca é configurado no evento;
+          </li>
+          <li>
+            <strong>veículos</strong> — um carro só existe montado, e colado peça a peça vira
+            destroço;
+          </li>
+          <li>
+            <strong>fechaduras</strong> — com o código do arquivo, a porta ficaria trancada para
+            sempre;
+          </li>
+          <li>
+            <strong>itens dentro de caixas e armários</strong> — a peça sobe vazia;
+          </li>
+          <li>
+            <strong>fiação</strong> — a peça elétrica sobe, desligada.
+          </li>
+        </ul>
+        <HelpWarn>
+          Uma peça que o agente não reconhece sobe como está, se o jogo a aceitar. O relatório da
+          importação diz quantas são — confira antes de usar a construção num evento.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  bodyArrival: {
+    title: 'A chegada do jogador',
+    short: 'Onde o jogador aparece ao descer, e para onde ele olha. Não muda o respawn.',
+    body: (
+      <>
+        <p>
+          A chegada é a <strong>entrada e a saída</strong> da masmorra: quem desce pelo alçapão da
+          casinha aparece aqui, olhando para a direção da seta, e o alçapão de subir nasce em cima
+          deste ponto. A construção é colada de modo que ele fique embaixo da entrada.
+        </p>
+        <p>
+          Com uma árvore de Natal na planta, ela vira a chegada sozinha. Sem nenhuma, ou com mais de
+          uma, o painel <strong>não escolhe por você</strong>: use uma das árvores ou defina a
+          posição à mão.
+        </p>
+        <HelpExample>
+          Mexeu na chegada, ela passa a ser sua: ler os marcadores de novo não a troca mais pela
+          árvore. O botão &ldquo;Voltar para a árvore&rdquo; desfaz isso.
+        </HelpExample>
+        <HelpWarn>
+          Ela <strong>não mexe no respawn</strong>: quem morre lá dentro volta para o saco de dormir
+          ou para a praia, como sempre. E a masmorra não salva com a chegada fora da construção,
+          sem piso embaixo ou enterrada numa fundação — é o único ponto que prenderia um jogador.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  bodyPoints: {
+    title: 'Os pontos da construção',
+    short: 'Cada ponto é onde nasce um inimigo ou uma caixa. A posição é em metros da planta.',
+    body: (
+      <>
+        <p>
+          Os pontos vêm dos marcadores da planta, e você pode acrescentar outros à mão. Cada um tem
+          um <strong>tipo</strong> (inimigo ou caixa), um <strong>perfil</strong> (de onde vem o
+          conteúdo), a <strong>quantidade</strong> que nasce ali e, se quiser, um prefab próprio.
+        </p>
+        <p>
+          A posição é em metros, relativa à origem da planta: <code>x</code> para a direita,{' '}
+          <code>z</code> para a frente e <code>y</code> para cima — a altura do piso. As setas do
+          teclado mudam o número de 0,1 em 0,1; o botão &ldquo;Mover&rdquo; deixa você clicar no
+          desenho.
+        </p>
+        <HelpExample>
+          O inimigo que ficou dentro da parede: selecione-o, clique em &ldquo;Mover&rdquo; e depois
+          no meio do cômodo. O aviso some na próxima conferência.
+        </HelpExample>
+        <HelpWarn>
+          Os avisos (sem piso, dentro da parede, sem altura) são calculados com a forma das peças de
+          construção, e o servidor confere de novo na hora de erguer — ele afasta ou pula o que
+          estiver preso. Um ponto de marcador que você removeu <strong>volta</strong> na próxima
+          leitura: para tirá-lo de vez, tire a lápide (ou a vela) da construção.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  bodyProfile: {
+    title: 'O perfil do ponto',
+    short: 'De qual sala (ou do corredor) o ponto herda o inimigo e o loot.',
+    body: (
+      <>
+        <p>
+          A construção não tem sala nem corredor: tem pontos. O perfil diz a qual cadastro do passo{' '}
+          <strong>&ldquo;Salas e loot&rdquo;</strong> cada ponto obedece — as caixas, a tabela de
+          loot e o OZCoin daquela cor, e o comportamento do inimigo daquela cor no passo
+          &ldquo;Inimigos&rdquo;.
+        </p>
+        <HelpExample>
+          A caixa do cofre com o perfil &ldquo;Sala vermelha&rdquo; sorteia entre as caixas da sala
+          vermelha e usa a tabela dela. A do corredor, com o perfil &ldquo;Corredor&rdquo;, usa a
+          do corredor.
+        </HelpExample>
+        <HelpWarn>
+          Deixando o prefab em branco, a caixa sorteia entre as do perfil. Um prefab escolhido no
+          ponto que TAMBÉM está cadastrado no perfil herda a tabela e o OZCoin daquele cadastro — a
+          mesma regra do marcador do desenho. Quantos nascem é a quantidade do ponto, e não a faixa
+          da sala.
+        </HelpWarn>
       </>
     ),
   },
@@ -103,6 +300,33 @@ export const DUNGEON_HELP = {
         <HelpWarn>
           A planta precisa ter a <strong>marca do alçapão</strong>, ou a masmorra não abre. O painel
           confere isso no momento em que você sobe o arquivo — a coluna do acervo mostra quais têm.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  blueprintRole: {
+    title: 'Entrada ou corpo',
+    short: 'A mesma construção .json pode ser a casinha da superfície ou a masmorra lá embaixo.',
+    body: (
+      <>
+        <p>
+          <strong>Entrada</strong> é a casinha que aparece no mapa. Ela precisa da marca do
+          alçapão, e o painel recusa subir uma entrada sem ela.
+        </p>
+        <p>
+          <strong>Corpo da masmorra</strong> é uma construção feita no jogo para ser colada a
+          noventa metros de profundidade, no modo &ldquo;Construção importada&rdquo;. Ela não
+          precisa de alçapão — o servidor põe o de subir sobre a chegada do jogador —, e o
+          relatório do upload conta os marcadores que ela tem.
+        </p>
+        <HelpExample>
+          O nome do arquivo só sugere o papel (&ldquo;base…&rdquo; sugere corpo). Errou? Troque na
+          coluna &ldquo;Papel&rdquo; da lista, sem subir o arquivo de novo.
+        </HelpExample>
+        <HelpWarn>
+          Uma planta que é o corpo de alguma masmorra não vira entrada enquanto a masmorra a usar:
+          troque o corpo dela antes.
         </HelpWarn>
       </>
     ),
@@ -162,13 +386,51 @@ export const DUNGEON_HELP = {
         </p>
         <p>
           Deixando os textos em branco, valem as frases padrão. Escrevendo, você pode usar{' '}
-          <code>{'{grid}'}</code> para a grade do mapa e <code>{'{nome}'}</code> para o
-          identificador da masmorra.
+          <code>{'{grid}'}</code> para a grade do mapa e <code>{'{nome}'}</code> para o nome da
+          masmorra, e pintar um trecho com <code>[verde]…[/]</code>, como nas mensagens do servidor.
         </p>
         <p>
           A grade (<strong>E7</strong>) é o que se diz num jogo de Rust. A coordenada crua nunca
           entra na frase: ninguém joga com <code>(-1330, 871)</code> na cabeça.
         </p>
+        <HelpExample>
+          <code>{'[vermelho]{nome}[/] abriu em {grid}. Levem cura.'}</code> vira &ldquo;
+          <strong>Bunker Vermelho</strong> abriu em G6. Levem cura.&rdquo;, com o nome em vermelho.
+        </HelpExample>
+        <HelpWarn>
+          Com &ldquo;Dizer onde ela está&rdquo; ligado e sem <code>{'{grid}'}</code> na frase, a
+          grade entra no fim, entre parênteses. Desligado, <code>{'{grid}'}</code> vira
+          &ldquo;algum lugar&rdquo; — escreva a frase pensando nisso.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  announceStyle: {
+    title: 'O visual do aviso',
+    short: 'Tag, cor e tamanho — os mesmos das mensagens do servidor.',
+    body: (
+      <>
+        <p>
+          A <strong>tag</strong> é o prefixo da linha, como <code>[MASMORRA]</code>, com a cor dela.
+          A <strong>cor do texto</strong> pinta a frase inteira, e a marcação{' '}
+          <code>[cor]…[/]</code> pinta só um trecho por cima dela. O <strong>tamanho</strong> vale
+          para a linha toda.
+        </p>
+        <p>
+          Em branco, cada campo usa o padrão do chat: tag em <code>#ffcc00</code>, texto branco e
+          tamanho 15. Tudo em branco é a linha simples de sempre.
+        </p>
+        <HelpExample>
+          Tag <code>[MASMORRA]</code> em vermelho e o texto em branco: o aviso se destaca das falas
+          dos jogadores sem gritar.
+        </HelpExample>
+        <HelpWarn>
+          Quem desenha a linha colorida é o plugin <strong>OrigemZChat</strong>. Sem ele no
+          servidor, o aviso sai na linha simples do jogo — sem tag, sem cor e sem os marcadores. E
+          letra grande numa frase longa toma várias linhas do chat de todo mundo, escondendo as
+          falas dos jogadores.
+        </HelpWarn>
       </>
     ),
   },
@@ -495,6 +757,36 @@ export const DUNGEON_HELP = {
         <HelpWarn>
           Palha desmonta com machado. Se a masmorra inteira for palha, a porta trancada deixa de ser
           um obstáculo — o jogador entra pela parede em quinze segundos.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  buildingSkin: {
+    title: 'A skin da peça',
+    short: 'A aparência do bloco: Fronteira, Tijolo, Contêiner… Cada uma é de um material só.',
+    body: (
+      <>
+        <p>
+          A skin muda só a <strong>aparência</strong> do bloco — a resistência continua sendo a do
+          material. E ela existe <strong>dentro</strong> de um material: por isso a lista mostra só
+          as do material escolhido ao lado.
+        </p>
+        <ul className="ml-4 list-disc space-y-0.5 text-xs">
+          <li>madeira: Fronteira;</li>
+          <li>pedra: Adobe, Tijolo, Brutalista, Selva e Cripta;</li>
+          <li>metal: Contêiner;</li>
+          <li>blindado: Estação espacial;</li>
+          <li>palha não tem skin.</li>
+        </ul>
+        <HelpExample>
+          Pedra com a skin Cripta nas salas vermelhas: o jogador reconhece o cômodo difícil pela
+          parede antes de ver a porta.
+        </HelpExample>
+        <HelpWarn>
+          Trocar o material apaga a skin que não existe nele — o jogo transformaria o par
+          impossível num bloco de palha. Na <strong>construção importada</strong> nada disto se
+          aplica: cada peça sobe com o material e a skin que tinha no arquivo.
         </HelpWarn>
       </>
     ),
