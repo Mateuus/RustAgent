@@ -1109,7 +1109,7 @@ describe('o segredo do canal, que viaja no `flush`', () => {
   it('o plugin ignora o argumento vazio em vez de apagar o segredo', async () => {
     const tail = await pluginTail();
 
-    expect(tail).toContain('if (secret.Length > 0)');
+    expect(tail).toContain('if (secret.Length > 0 && secret != "-")');
     expect(tail).toContain('_statSecret = secret;');
   });
 });

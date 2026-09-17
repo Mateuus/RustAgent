@@ -114,7 +114,9 @@ beforeEach(() => {
 
 describe('o catálogo que nasce semeado', () => {
   it('traz os onze rankings fixos, com a janela de cada um', () => {
-    const list = harness.repository.list();
+    // A 098 semeia um décimo segundo, que NÃO é fixo: o "Pontos de
+    // missão" é do admin, e só nasce pronto.
+    const list = harness.repository.list().filter((item) => item.id !== 'pontos-de-missao');
 
     expect(list).toHaveLength(11);
     expect(list.every((item) => item.builtin)).toBe(true);
@@ -130,6 +132,22 @@ describe('o catálogo que nasce semeado', () => {
     // ordenaria a lista por em que servidor a pessoa jogou.
     expect(harness.repository.getByMetric('ore.total')?.globalEligible).toBe(false);
     expect(harness.repository.getByMetric('pvp.kills')?.globalEligible).toBe(true);
+  });
+
+  // ####  `quest.completed` VIROU RANKING EM 16/09/2026  ####
+  //
+  // Missões já pagavam pontos nele, e o resgate recusava porque a
+  // métrica não era de ninguém.
+  it('semeia o ranking de pontos de missão, concedido e apagável', () => {
+    const ranking = harness.repository.getByMetric('quest.completed');
+
+    expect(ranking).toMatchObject({
+      id: 'pontos-de-missao',
+      source: 'item',
+      valueKind: 'counter',
+      enabled: true,
+      builtin: false,
+    });
   });
 
   it('recusa apagar um `builtin`, e apaga o que o admin criou', () => {

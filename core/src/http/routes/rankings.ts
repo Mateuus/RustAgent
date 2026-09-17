@@ -85,6 +85,7 @@ import {
   type RankingsService,
   type RankingServers,
 } from '../../rankings/service.js';
+import { whyNotPluginMetric } from '../../rankings/plugin-metrics.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
 
@@ -563,6 +564,9 @@ export function registerRankingRoutes(app: FastifyInstance, deps: RankingRoutesD
 
   app.post('/rankings/metrics', async (request, reply) => {
     const input = rankingBody.parse(request.body);
+
+    assertPluginMetric(input);
+
     const created = deps.service.createMetric(input);
 
     request.log.info(
@@ -613,6 +617,8 @@ export function registerRankingRoutes(app: FastifyInstance, deps: RankingRoutesD
   app.put('/rankings/metrics/:id', async (request) => {
     const { id } = idParams.parse(request.params);
     const input = rankingBody.parse(request.body);
+
+    assertPluginMetric(input);
 
     const saved = deps.service.updateMetric(id, { ...input, id });
 
@@ -855,6 +861,32 @@ function requireServer(deps: RankingRoutesDeps, serverId: string): void {
  * A frase diz QUAL item colidiu, e não só que colidiu — a mesma
  * régua da marca duplicada em `custom-items.ts`.
  */
+/**
+ * Um ranking de origem "plugin" precisa de uma métrica que o plugin
+ * conte.
+ *
+ * ####  SEM ISTO, O RANKING NASCE MORTO  ####
+ *
+ * O "Madeira" do dono (`farm.madeira`, 16/09/2026) salvou, ligou,
+ * apareceu no menu — e ficou em zero, porque nenhum hook alimenta
+ * aquela chave. Recusar aqui é dizer isso na hora de salvar, com a
+ * chave certa na frase. Ver `rankings/plugin-metrics.ts`.
+ *
+ * Só a origem "plugin": as outras têm quem as alimente sem o jogo
+ * (a missão, o item custom, o agente, a conta).
+ */
+function assertPluginMetric(input: { readonly source: string; readonly metric: string }): void {
+  if (input.source !== 'plugin') {
+    return;
+  }
+
+  const recusa = whyNotPluginMetric(input.metric);
+
+  if (recusa !== null) {
+    throw new ApiError('RANKING_PLUGIN_METRIC_UNKNOWN', recusa, 400);
+  }
+}
+
 function assertNotInUse(deps: RankingRoutesDeps, id: string): void {
   const ranking = deps.service.metrics().find((item) => item.id === id);
 
