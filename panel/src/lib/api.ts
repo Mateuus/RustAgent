@@ -3005,7 +3005,7 @@ export type QuestObjectiveKind =
   | 'playtime'
   | 'metric';
 
-export type QuestRewardKind = 'item' | 'coins' | 'kit' | 'points' | 'vip';
+export type QuestRewardKind = 'item' | 'coins' | 'kit' | 'points' | 'vip' | 'skin';
 
 export type PlayerQuestStatus = 'active' | 'completed' | 'claimed' | 'abandoned';
 
@@ -3077,7 +3077,15 @@ export type QuestReward =
     }
   | { kind: 'kit'; slug: string }
   | { kind: 'points'; metric: string; amount: number }
-  | { kind: 'vip'; tier: string; days: number };
+  | { kind: 'vip'; tier: string; days: number }
+  /**
+   * Uma skin do Workshop, pela MARCA `(shortname, skinId)`.
+   *
+   * O `id` interno da skin nao entra aqui: ele e desta maquina, e a
+   * marca e a mesma em toda parte -- e a mesma escolha que o kit fez
+   * com o `slug`. `days` nulo = para sempre.
+   */
+  | { kind: 'skin'; shortname: string; skinId: string; days: number | null };
 
 export interface QuestDefinition {
   id: string;

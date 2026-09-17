@@ -38,6 +38,7 @@
 import { z } from 'zod';
 
 import { isValidContainerSelector } from '../game/quest-containers.js';
+import { OWNED_MAX_DAYS, workshopShortnameSchema, workshopSkinIdSchema } from './workshop.js';
 
 // ------------------------------------------------------------
 //  §1  VOCABULÁRIO
@@ -550,13 +551,66 @@ const vipRewardSchema = z.object({
 });
 
 /**
+ * Uma skin do catálogo do Workshop.
+ *
+ * ####  A CHAVE É A MARCA, E NÃO O `id` DESTA MÁQUINA  ####
+ *
+ * `workshop_skins.id` é local: a mesma skin tem outro número em
+ * outro agente, e o cadastro que veio do painel não nasce com o
+ * número do que veio do jogo. A marca `(shortname, skinId)` é a
+ * mesma em toda parte — é por ela que a entrega do site e o
+ * `/skin give` acham a skin (`WorkshopCatalog.findSkinByMark`), e é
+ * a mesma escolha que o kit fez com o `slug`.
+ *
+ * ####  `days` PODE SER NULO, AO CONTRÁRIO DO VIP  ####
+ *
+ * No VIP o vitalício está de fora de propósito: é o tipo de coisa
+ * que se cadastra por engano uma vez e não se desfaz. Na skin o
+ * permanente é o caso NORMAL — é assim que o site a vende — e
+ * obrigar um prazo faria toda skin de recompensa vencer um dia sem
+ * ninguém ter pedido isso.
+ *
+ * Preenchido, o prazo SOMA ao que o jogador já tinha vivo, e nunca
+ * encurta uma posse maior: a tabela inteira está em `renewedExpiry`
+ * (db/workshop-owned-repository.ts).
+ *
+ * ####  O BANCO AINDA NÃO DEIXA GRAVAR ESTE `kind`  ####
+ *
+ * MEDIDO em 17/09/2026: `quest_rewards.kind` tem um CHECK com os
+ * cinco nomes antigos, e salvar uma quest com skin volta "CHECK
+ * constraint failed" — o zod aceita, o banco recusa. Soltar isso é
+ * RECRIAR a tabela, o que é uma migração, e o id da próxima está com
+ * outra frente.
+ *
+ * O KOTH não passa por lá: a recompensa dele é JSON numa coluna da
+ * arena (migração 091), validada só pelo zod — nele a skin já vale.
+ *
+ * ####  NÃO HÁ NADA DE DLC AQUI  ####
+ *
+ * Skin de DLC como prêmio foi decidida (só quem tem a DLC a usa),
+ * mas depende de uma marca no CADASTRO da skin e de uma sonda que
+ * ainda não rodou — ver Docs/BattlePass/03-MENU-DO-PASSE.md §9.
+ * Quando ela entrar, entra no cadastro e na hora de aplicar; esta
+ * recompensa continua sendo "o direito à skin tal".
+ */
+const skinRewardSchema = z.object({
+  kind: z.literal('skin'),
+  /** O item base da marca: `rifle.ak`. */
+  shortname: workshopShortnameSchema,
+  /** O id publicado no Steam Workshop. TEXTO: passa de 2^53. */
+  skinId: workshopSkinIdSchema,
+  /** `null` = para sempre. O teto é o mesmo do contrato com o site. */
+  days: z.number().int().min(1).max(OWNED_MAX_DAYS).nullable().default(null),
+});
+
+/**
  * A recompensa, achatada.
  *
  * ####  POR QUE `kind` + PAYLOAD, E NÃO UMA COLUNA POR TIPO  ####
  *
- * Cinco tipos com colunas próprias dariam uma tabela de quinze
- * colunas das quais treze são NULL em toda linha, e um tipo novo
- * seria uma migração. O item custom já resolveu isso com `action`
+ * Seis tipos com colunas próprias dariam uma tabela de dezoito
+ * colunas das quais dezesseis são NULL em toda linha, e um tipo
+ * novo seria uma migração. O item custom já resolveu isso com `action`
  * em JSON validado por zod (migração 041), e o padrão é o dele.
  *
  * O objeto chega achatado (`{kind:'item', shortname, amount}`)
@@ -569,6 +623,7 @@ export const questRewardSchema = z.discriminatedUnion('kind', [
   kitRewardSchema,
   pointsRewardSchema,
   vipRewardSchema,
+  skinRewardSchema,
 ]);
 
 export type QuestReward = z.infer<typeof questRewardSchema>;

@@ -13,11 +13,14 @@
 //       duas vezes;
 //    4. `perMeter` sem distância medida FALHA, em vez de pagar
 //       zero em silêncio;
-//    5. dependência ausente vira pendência visível, e não sumiço.
+//    5. dependência ausente vira pendência visível, e não sumiço;
+//    6. a skin é LIBERADA (posse), e o retry por posição não
+//       renova o prazo de quem já a recebeu.
 // ============================================================
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { ApiError } from '../src/http/error-response.js';
 import { createLogger } from '../src/logger.js';
 import {
   QuestRewardService,
@@ -26,6 +29,7 @@ import {
   type QuestItemDelivery,
   type QuestKits,
   type QuestPoints,
+  type QuestSkins,
   type QuestWallet,
 } from '../src/quests/rewards.js';
 import { questRewardSchema, type QuestReward } from '../src/types/quests.js';
@@ -42,6 +46,7 @@ type CreditInput = Parameters<QuestWallet['credit']>[0];
 type DeliverPlan = Parameters<QuestItemDelivery['deliverPlan']>[2];
 type ClaimInput = Parameters<QuestKits['claim']>[0];
 type PointsInput = Parameters<QuestPoints['applyEvent']>[0];
+type SkinGrant = Parameters<QuestSkins['grantOwnership']>[0];
 
 const logger = createLogger({ log: { level: 'silent', pretty: false } });
 const NOW = 1_757_000_000_000;
@@ -69,6 +74,7 @@ function build(parts: {
   readonly wallet?: QuestWallet;
   readonly kits?: QuestKits;
   readonly points?: QuestPoints;
+  readonly skins?: QuestSkins;
   /** `null` = o catálogo não conhece nada. Ver o teste do ITEM_UNKNOWN. */
   readonly catalog?: QuestItemCatalog | null;
 }) {
@@ -82,6 +88,7 @@ function build(parts: {
     wallet: parts.wallet === undefined ? undefined : () => parts.wallet as QuestWallet,
     kits: parts.kits,
     points: parts.points,
+    skins: parts.skins,
     now: () => NOW,
   });
 }
@@ -383,6 +390,170 @@ describe('os pontos', () => {
 
 // ------------------------------------------------------------
 
+describe('a skin', () => {
+  /** A skin como o catálogo deste agente a conhece. */
+  const BRASA = { id: 7, label: 'AK Brasa' };
+  const MARK = { kind: 'skin', shortname: 'rifle.ak', skinId: '3120436264' } as const;
+  const DAY_MS = 86_400_000;
+
+  /** Um catálogo que acha a `BRASA` e concede o que pedirem. */
+  function catalogOf(
+    grantOwnership = vi.fn((_grant: SkinGrant, _now?: number) => ({
+      owned: { expiresAt: null as number | null },
+    })),
+    found: { readonly id: number; readonly label: string } | null = BRASA,
+  ) {
+    const findSkinByMark = vi.fn((_shortname: string, _workshopId: string) => found);
+
+    return { skins: { findSkinByMark, grantOwnership }, findSkinByMark, grantOwnership };
+  }
+
+  it('acha a skin pela MARCA e libera a posse dela', async () => {
+    const grant = vi.fn((_grant: SkinGrant, _now?: number) => ({
+      owned: { expiresAt: NOW + 30 * DAY_MS as number | null },
+    }));
+    const catalog = catalogOf(grant);
+    const service = build({ skins: catalog.skins });
+
+    const outcomes = await service.deliver(input([reward({ ...MARK, days: 30 })]));
+
+    // O `id` interno não entra no cadastro da recompensa: ele é
+    // desta máquina. Quem traduz a marca para ele é o catálogo.
+    expect(catalog.findSkinByMark).toHaveBeenCalledWith('rifle.ak', '3120436264');
+    expect(grant).toHaveBeenCalledWith(
+      {
+        steamId: FULANO,
+        skinRef: 7,
+        days: 30,
+        source: 'system',
+        sourceRef: 'quest:minerador:3:0',
+        createdBy: 'quest:minerador',
+        serverId: 'RUST01',
+      },
+      NOW,
+    );
+    expect(outcomes[0]).toMatchObject({ kind: 'skin', ok: true, code: null });
+    expect(outcomes[0]?.message).toContain('AK Brasa');
+    expect(outcomes[0]?.message).toContain('30 dia(s)');
+  });
+
+  it('sem prazo a posse é para sempre, e a frase diz isso', async () => {
+    const catalog = catalogOf();
+    const service = build({ skins: catalog.skins });
+
+    const outcomes = await service.deliver(input([reward({ ...MARK })]));
+
+    // O zod preenche `days: null` — permanente é o caso NORMAL de
+    // uma skin, ao contrário do VIP.
+    expect(catalog.grantOwnership.mock.calls[0]?.[0].days).toBeNull();
+    expect(outcomes[0]?.message).toContain('para sempre');
+  });
+
+  it('quem já tinha a skin para sempre continua com ela para sempre', async () => {
+    // A recompensa dá 30 dias, mas o `renewedExpiry` nunca encurta
+    // uma posse permanente: o desfecho volta sem prazo, e a frase
+    // sai do RESULTADO — dizer "por 30 dias" seria mentir para quem
+    // já tem a skin para sempre.
+    const catalog = catalogOf(
+      vi.fn((_grant: SkinGrant, _now?: number) => ({ owned: { expiresAt: null as number | null } })),
+    );
+    const service = build({ skins: catalog.skins });
+
+    const outcomes = await service.deliver(input([reward({ ...MARK, days: 30 })]));
+
+    expect(outcomes[0]?.ok).toBe(true);
+    expect(outcomes[0]?.message).toContain('para sempre');
+  });
+
+  it('skin apagada do catálogo vira pendência COM A MARCA', async () => {
+    const catalog = catalogOf(undefined, null);
+    const service = build({ skins: catalog.skins });
+
+    const outcomes = await service.deliver(input([reward({ ...MARK, days: 7 })]));
+
+    // O snapshot guardou a promessa; a skin não existe mais para
+    // cumpri-la. A marca na frase é o que o admin precisa para saber
+    // qual cadastro refazer.
+    expect(outcomes[0]).toMatchObject({ kind: 'skin', ok: false, code: 'SKIN_NOT_IN_CATALOG' });
+    expect(outcomes[0]?.message).toContain('rifle.ak');
+    expect(outcomes[0]?.message).toContain('3120436264');
+    expect(catalog.grantOwnership).not.toHaveBeenCalled();
+  });
+
+  it('a recusa do catálogo entra com o CÓDIGO dele, e não com a frase', async () => {
+    const catalog = catalogOf(
+      vi.fn((_grant: SkinGrant, _now?: number) => {
+        throw new ApiError('OWNED_ALREADY_EXPIRED', 'O prazo escolhido já passou.', 400);
+      }),
+    );
+    const service = build({ skins: catalog.skins });
+
+    const outcomes = await service.deliver(input([reward({ ...MARK, days: 7 })]));
+
+    // Sem isto o código viraria a FRASE — e o painel mostraria uma
+    // frase no lugar onde ele espera um código.
+    expect(outcomes[0]).toMatchObject({
+      ok: false,
+      code: 'OWNED_ALREADY_EXPIRED',
+      message: 'O prazo escolhido já passou.',
+    });
+  });
+
+  it('a skin que falha não impede as outras recompensas da mesma linha', async () => {
+    const credit = vi.fn((_move: CreditInput) => Promise.resolve({ status: 'ok' }));
+    const applyEvent = vi.fn((_event: PointsInput) => ({ applied: true }));
+    const catalog = catalogOf(undefined, null);
+    const service = build({
+      skins: catalog.skins,
+      wallet: { credit },
+      points: { applyEvent },
+    });
+
+    const outcomes = await service.deliver(
+      input([
+        reward({ ...MARK, days: 30 }),
+        reward({ kind: 'coins', amount: 500 }),
+        reward({ kind: 'points', metric: 'quest.completed', amount: 2 }),
+      ]),
+    );
+
+    // "A skin sumiu do catálogo" não pode virar "não recebi nada".
+    expect(outcomes.map((item) => item.ok)).toEqual([false, true, true]);
+    expect(credit).toHaveBeenCalledOnce();
+    expect(applyEvent).toHaveBeenCalledOnce();
+  });
+
+  // ####  O RETRY NÃO PODE RENOVAR O PRAZO  ####
+  //
+  // Dar de novo uma posse VIVA soma os dias (ver `renewedExpiry`).
+  // Reprocessar uma skin que já saiu dobraria o prazo em silêncio:
+  // ninguém reclama de ganhar mais, e ninguém descobre.
+  it('o retry por posição não libera a skin de novo', async () => {
+    const catalog = catalogOf();
+    const credit = vi
+      .fn((_move: CreditInput) => Promise.resolve({ status: 'ok' }))
+      .mockResolvedValueOnce({ status: 'unknown' });
+    const service = build({ skins: catalog.skins, wallet: { credit } });
+    const rewards = [reward({ ...MARK, days: 30 }), reward({ kind: 'coins', amount: 500 })];
+
+    const first = await service.deliver(input(rewards));
+
+    expect(first.map((item) => item.ok)).toEqual([true, false]);
+
+    // O painel reentrega SÓ o que falhou — e a lista não é filtrada
+    // antes, senão a moeda viraria a posição 0 e mudaria de
+    // referência.
+    const again = await service.deliver(input(rewards, { only: new Set([1]) }));
+
+    expect(catalog.grantOwnership).toHaveBeenCalledOnce();
+    expect(again).toHaveLength(1);
+    expect(again[0]).toMatchObject({ kind: 'coins', ok: true, index: 1 });
+    expect(credit.mock.calls[1]?.[0].reference).toContain('minerador:3:1');
+  });
+});
+
+// ------------------------------------------------------------
+
 describe('a dependência ausente', () => {
   it('vira pendência visível, e não sumiço', async () => {
     const service = build({ catalog: null });
@@ -394,12 +565,13 @@ describe('a dependência ausente', () => {
         reward({ kind: 'kit', slug: 'starter' }),
         reward({ kind: 'points', metric: 'quest.completed', amount: 1 }),
         reward({ kind: 'vip', tier: 'ouro', days: 1 }),
+        reward({ kind: 'skin', shortname: 'rifle.ak', skinId: '3120436264' }),
       ]),
     );
 
     // Uma quest que promete kit num agente sem o serviço de kits
     // precisa aparecer como algo a resolver — não como entregue.
-    expect(outcomes).toHaveLength(5);
+    expect(outcomes).toHaveLength(6);
     expect(outcomes.every((item) => !item.ok)).toBe(true);
     expect(new Set(outcomes.map((item) => item.code))).toEqual(
       new Set(['QUEST_REWARD_UNAVAILABLE']),
