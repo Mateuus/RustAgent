@@ -29,6 +29,12 @@
 //  tela) rola dentro da caixa. É `guarded` porque tem `<select>`
 //  nativo — ver dialog.tsx —, mas o Escape e o X fecham.
 //
+//  ####  PÁGINAS NO NAVEGADOR  ####
+//
+//  A rota devolve o catálogo inteiro (e o menu do jogo também o lê
+//  inteiro), então a página é só uma fatia do que já chegou. Filtro e
+//  item escolhido voltam para a página 1.
+//
 //  ####  O QUE O AGENTE MANDA, A TELA NÃO CONFERE  ####
 //
 //  Toda resposta passa pelo `safeSkin` (normalize.ts) antes de
@@ -43,6 +49,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { clampPage, Pagination, PAGE_SIZES, slicePage } from '@/components/ui/pagination';
 import { Toggle } from '@/components/ui/toggle';
 import { messageOf, safeLookup, safeSkin } from '@/components/workshop/normalize';
 import { RarityBadge, SkinThumb } from '@/components/workshop/owned-parts';
@@ -101,6 +108,8 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
 
   const [query, setQuery] = useState('');
   const [itemFilter, setItemFilter] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0] ?? 20);
 
   const [editing, setEditing] = useState<Editing | null>(null);
   const [saving, setSaving] = useState(false);
@@ -160,6 +169,13 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
           (skin.workshopTitle ?? '').toLowerCase().includes(needle)),
     );
   }, [skins, query, itemFilter]);
+
+  // A lista pode encolher (skin apagada) com a página guardada além do fim.
+  const currentPage = clampPage(page, visible.length, pageSize);
+  const pageRows = useMemo(
+    () => slicePage(visible, currentPage, pageSize),
+    [visible, currentPage, pageSize],
+  );
 
   function warn(warning: string | null | undefined, label: string): void {
     if (typeof warning === 'string' && warning !== '') {
@@ -326,14 +342,20 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
                 placeholder="Filtrar por nome, item ou Workshop ID"
                 aria-label="Filtrar skins"
                 className="pl-7"
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setPage(1);
+                }}
               />
             </div>
 
             <select
               value={itemFilter}
               aria-label="Filtrar por item"
-              onChange={(event) => setItemFilter(event.target.value)}
+              onChange={(event) => {
+                setItemFilter(event.target.value);
+                setPage(1);
+              }}
               className="h-9 border border-border bg-surface-2 px-2 font-mono text-2xs text-foreground hover:border-muted"
             >
               <option value="">todos os itens</option>
@@ -354,53 +376,70 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
           {visible.length === 0 ? (
             <StateBlock variant="empty" title="Nenhuma skin casa com o filtro" />
           ) : (
-            <div className="overflow-x-auto border border-border bg-surface">
-              <table className="w-full text-sm">
-                <thead className="border-b border-border">
-                  <tr>
-                    <HeaderCell className="w-14">
-                      <span className="sr-only">Prévia</span>
-                    </HeaderCell>
-                    <HeaderCell>Nome</HeaderCell>
-                    <HeaderCell>Item</HeaderCell>
-                    <HeaderCell>Workshop ID</HeaderCell>
-                    <HeaderCell>Raridade</HeaderCell>
-                    <HeaderCell className="text-right">Ordem</HeaderCell>
-                    <HeaderCell>Acesso</HeaderCell>
-                    <HeaderCell className="text-right">Donos</HeaderCell>
-                    <HeaderCell>Origem</HeaderCell>
-                    <HeaderCell>Servidores</HeaderCell>
-                    <HeaderCell className="text-right">
-                      <span className="sr-only">Ações</span>
-                    </HeaderCell>
-                  </tr>
-                </thead>
+            <div className="border border-border bg-surface">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-border">
+                    <tr>
+                      <HeaderCell className="w-14">
+                        <span className="sr-only">Prévia</span>
+                      </HeaderCell>
+                      <HeaderCell>Nome</HeaderCell>
+                      <HeaderCell>Item</HeaderCell>
+                      <HeaderCell>Workshop ID</HeaderCell>
+                      <HeaderCell>Raridade</HeaderCell>
+                      <HeaderCell className="text-right">Ordem</HeaderCell>
+                      <HeaderCell>Acesso</HeaderCell>
+                      <HeaderCell className="text-right">Donos</HeaderCell>
+                      <HeaderCell>Origem</HeaderCell>
+                      <HeaderCell>Servidores</HeaderCell>
+                      <HeaderCell className="text-right">
+                        <span className="sr-only">Ações</span>
+                      </HeaderCell>
+                    </tr>
+                  </thead>
 
-                <tbody className="divide-y divide-border">
-                  {visible.map((skin) => (
-                    <SkinRows
-                      key={skin.id}
-                      skin={skin}
-                      servers={servers}
-                      serverName={serverName}
-                      open={openServers === skin.id}
-                      draft={serversDraft}
-                      busy={serversBusy}
-                      toggling={toggling === skin.id}
-                      onOpenServers={() => {
-                        setOpenServers(skin.id);
-                        setServersDraft([...skin.servers]);
-                      }}
-                      onCloseServers={() => setOpenServers(null)}
-                      onDraftChange={setServersDraft}
-                      onSaveServers={() => void saveServers(skin)}
-                      onEdit={() => openForm(skin)}
-                      onToggle={() => void toggleEnabled(skin)}
-                      onRemove={() => void remove(skin)}
-                    />
-                  ))}
-                </tbody>
-              </table>
+                  <tbody className="divide-y divide-border">
+                    {pageRows.map((skin) => (
+                      <SkinRows
+                        key={skin.id}
+                        skin={skin}
+                        servers={servers}
+                        serverName={serverName}
+                        open={openServers === skin.id}
+                        draft={serversDraft}
+                        busy={serversBusy}
+                        toggling={toggling === skin.id}
+                        onOpenServers={() => {
+                          setOpenServers(skin.id);
+                          setServersDraft([...skin.servers]);
+                        }}
+                        onCloseServers={() => setOpenServers(null)}
+                        onDraftChange={setServersDraft}
+                        onSaveServers={() => void saveServers(skin)}
+                        onEdit={() => openForm(skin)}
+                        onToggle={() => void toggleEnabled(skin)}
+                        onRemove={() => void remove(skin)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <Pagination
+                className="border-t border-border px-3 py-2"
+                page={currentPage}
+                pageSize={pageSize}
+                total={visible.length}
+                onPageChange={(next) => {
+                  setPage(next);
+                  setOpenServers(null);
+                }}
+                onPageSizeChange={(size) => {
+                  setPageSize(size);
+                  setPage(1);
+                }}
+              />
             </div>
           )}
         </>

@@ -23,16 +23,22 @@
 //
 //  ####  PÁGINAS POR `before`  ####
 //
-//  Carregar mais pede as entradas com id menor que a menor desta
-//  lista. Offset daria entrada repetida quando alguém grava no meio.
+//  A página seguinte pede as entradas com id menor que a menor desta.
+//  Offset daria entrada repetida quando alguém grava no meio. O
+//  `useCursorPages` (ui/pagination.tsx) guarda o `before` de cada
+//  página já vista, e é isso que faz Anterior e os números voltarem.
+//
+//  A rota não diz o total nem se há mais: pedimos UMA a mais do que
+//  a página mostra, e é essa sobra que diz se existe a próxima.
 // ============================================================
 
 import { Loader2, RefreshCw, Search } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Pagination, useCursorPages, type CursorPage } from '@/components/ui/pagination';
 import {
   formatDateTime,
   messageOf,
@@ -53,7 +59,8 @@ export interface AuditPanelProps {
   readonly fixedSteamId?: string;
 }
 
-const PAGE_SIZE = 100;
+/** O registro é lido de passada: cabe mais numa página do que as outras listas. */
+const DEFAULT_PAGE_SIZE = 50;
 
 const ACTION_LABELS: Readonly<Record<string, string>> = {
   'skin.create': 'Skin cadastrada',
@@ -298,75 +305,34 @@ export function AuditPanel({ servers, initialSteamId = '', fixedSteamId }: Audit
   const steamId = fixedSteamId ?? chosenSteamId;
   const fixed = fixedSteamId !== undefined;
 
-  const [entries, setEntries] = useState<readonly WorkshopAuditEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  // Cada recarga ganha um número; resposta de recarga antiga é
-  // descartada. Sem isso, dois cliques rápidos no filtro deixavam a
-  // resposta mais lenta (e velha) por cima da nova, sem aviso.
-  const generation = useRef(0);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   const fetchPage = useCallback(
-    async (before?: number) => {
+    async (before: number | null): Promise<CursorPage<WorkshopAuditEntry>> => {
       const response = await agent.workshopAudit({
-        limit: PAGE_SIZE,
+        // Uma a mais: é ela que diz se existe a próxima página.
+        limit: pageSize + 1,
         ...(steamId === '' ? {} : { steamId }),
-        ...(before === undefined ? {} : { before }),
+        ...(before === null ? {} : { before }),
       });
-      const page = (response.entries ?? []).map(safeAuditEntry);
+      const all = (Array.isArray(response.entries) ? response.entries : []).map(safeAuditEntry);
+      const items = all.slice(0, pageSize);
+      // reduce, e não Math.min(...lista): o spread estoura com listas enormes.
+      const lowest = items.reduce((min, entry) => Math.min(min, entry.id), Infinity);
 
-      return { page, more: page.length >= PAGE_SIZE };
+      return {
+        items,
+        next: all.length > pageSize && Number.isFinite(lowest) ? lowest : null,
+      };
     },
-    [steamId],
+    [steamId, pageSize],
   );
 
-  const reload = useCallback(async () => {
-    const mine = ++generation.current;
-    setBusy(true);
-
-    try {
-      const { page, more } = await fetchPage();
-      if (mine !== generation.current) return;
-
-      setEntries(page);
-      setHasMore(more);
-      setError(null);
-    } catch (cause) {
-      if (mine !== generation.current) return;
-      setError(messageOf(cause));
-      setEntries((current) => current ?? []);
-    } finally {
-      if (mine === generation.current) setBusy(false);
-    }
-  }, [fetchPage]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  async function loadMore(): Promise<void> {
-    if (entries === null || entries.length === 0) return;
-
-    setBusy(true);
-
-    try {
-      // reduce, e não Math.min(...lista): o spread estoura com listas enormes.
-      const before = entries.reduce((min, entry) => Math.min(min, entry.id), Infinity);
-      const mine = generation.current;
-      const { page, more } = await fetchPage(before);
-      // Uma recarga (outro filtro) começou no meio: esta página é de outra lista.
-      if (mine !== generation.current) return;
-
-      setEntries([...entries, ...page]);
-      setHasMore(more);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const pages = useCursorPages(fetchPage, pageSize);
+  const entries = pages.items;
+  const busy = pages.busy;
+  const error = pages.error === null ? null : messageOf(pages.error);
+  const reload = pages.reset;
 
   function apply(value: string): void {
     const trimmed = value.trim();
@@ -534,18 +500,17 @@ export function AuditPanel({ servers, initialSteamId = '', fixedSteamId }: Audit
             </table>
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-              {entries.length === 1 ? '1 entrada' : `${String(entries.length)} entradas`}
-            </span>
-
-            {hasMore && (
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => void loadMore()}>
-                {busy && <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}
-                Carregar mais
-              </Button>
-            )}
-          </div>
+          <Pagination
+            page={pages.page}
+            pageSize={pageSize}
+            total={pages.total}
+            shown={entries.length}
+            knownPages={pages.knownPages}
+            hasNext={pages.hasNext}
+            busy={busy}
+            onPageChange={pages.goTo}
+            onPageSizeChange={setPageSize}
+          />
         </>
       )}
     </div>
