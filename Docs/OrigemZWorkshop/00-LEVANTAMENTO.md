@@ -1,5 +1,10 @@
 # OrigemZWorkshop — levantamento
 
+> **Revogado em parte, 16/09/2026 (noite).** O dono desfez a decisão do §6 ("o item já
+> nasce com a skin") e a do §6.1 (o kit carimba). A skin agora é escolhida pelo jogador —
+> caixa `/skin`, coleções e acessos. O desenho vigente está em
+> [01-CAIXA-E-COLECOES.md](01-CAIXA-E-COLECOES.md). O resto deste levantamento continua valendo.
+
 **Isto ainda não é uma especificação.** É o que o dono pediu em 16/09/2026 mais o que foi
 MEDIDO no mesmo dia — no decompilado do jogo e no próprio repositório. O que aqui está
 marcado como MEDIDO tem data e procedência; o resto está marcado como **não medido**, e
@@ -270,7 +275,9 @@ metade.
 
 ---
 
-## 6. A skin não se aplica: o item já nasce com ela
+## 6. ~~A skin não se aplica: o item já nasce com ela~~ — REVOGADO
+
+> Ver [01-CAIXA-E-COLECOES.md](01-CAIXA-E-COLECOES.md). O texto abaixo fica como histórico.
 
 **Decisão do dono, 16/09/2026.** O jogador não aplica nada. Não há menu de skin, não há
 comando de aplicar, não há caixa de skin ao segurar o item. É automático: onde o jogo daria

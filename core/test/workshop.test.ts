@@ -1,32 +1,27 @@
 // ============================================================
-//  O catálogo de skins do Steam Workshop, do lado do agente.
+//  As skins do Workshop, do lado do agente.
 //
 //  ####  O QUE ESTE ARQUIVO PROTEGE  ####
 //
 //  Esta feature falha CALADA por natureza: o servidor aceita
-//  qualquer `ulong` em `item.skin` e nunca reclama (MEDIDO, §2.2 do
-//  levantamento). Um catálogo errado não derruba nada — o item
-//  simplesmente nasce vanilla, e ninguém descobre até um jogador
-//  perguntar por que não recebeu a pedra com a logo.
+//  qualquer `ulong` em `item.skin` e nunca reclama. Os casos abaixo
+//  são os que produzem esse silêncio — ou, pior, um cadastro que
+//  aparece numa porta e não na outra:
 //
-//  Os casos abaixo são os que produzem esse silêncio:
-//
-//    aviso forjado          um jogador digita `#OZWORKSHOP#` no
-//                           chat e o agente acredita nele
-//    catálogo grande demais  o comando é truncado e o plugin troca
-//                           um cache bom por meio catálogo que ele
-//                           acredita ser completo
-//    skin fora do UInt64    o número é aceito no cadastro, vira
-//                           outro número na rede e não desenha
-//                           arte nenhuma
-//    skin desligada no push  o admin desligou a skin no painel e o
-//                           item continua nascendo com ela
-//    junção ignorada        a skin de um servidor desce em todos,
-//                           ou não desce em nenhum
-//    streamer esquecido     o `/streamer` liga e a logo continua
-//                           nascendo na mão de quem está no ar
+//    migração que perde dado   as skins e as ligações de servidor
+//                              da 095 somem na reconstrução
+//    duas portas, duas regras  o painel confere a Steam e o
+//                              `/skin add` do jogo não
+//    aviso forjado             um jogador digita `#OZWORKSHOP#` no
+//                              chat e cadastra uma skin
+//    carga grande demais       o frame é truncado e o plugin troca
+//                              uma carga boa por meia
+//    acesso vencido na carga   o jogador continua pintando depois
+//                              do prazo
+//    coleção ambígua           duas máscaras na "neve", e o
+//                              `/skin neve` escolhe uma ao acaso
 //    comando de dentro do gancho  a linha volta pelo console e o
-//                           agente entra em laço com ele mesmo
+//                              agente entra em laço com ele mesmo
 // ============================================================
 
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -34,42 +29,109 @@ import { pino } from 'pino';
 import { describe, expect, it } from 'vitest';
 import { ZodError } from 'zod';
 
-import { MEMORY_DATABASE, openDatabase } from '../src/db/database.js';
-import { runMigrations } from '../src/db/migrations.js';
+import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
 import { ItemsRepository } from '../src/db/items-repository.js';
+import { MetaRepository } from '../src/db/meta-repository.js';
+import { applyMigration, MIGRATIONS, runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { StreamerRepository } from '../src/db/streamer-repository.js';
+import { WorkshopAccessRepository } from '../src/db/workshop-access-repository.js';
 import { WorkshopSkinsRepository } from '../src/db/workshop-repository.js';
 import { decodePushPayload, MAX_PUSH_BYTES } from '../src/game/plugin-push.js';
+import type { WorkshopLookup, WorkshopLookupFn } from '../src/game/steam-workshop.js';
 import {
-  WorkshopCommandError,
-  WorkshopService,
+  WORKSHOP_CHUNK_CHARS,
   WORKSHOP_MARKER,
+  WORKSHOP_REPLY,
   WORKSHOP_SYNC,
+  WorkshopService,
 } from '../src/game/workshop.js';
-import { apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
+import { WorkshopCatalog, type WorkshopActor } from '../src/game/workshop-catalog.js';
+import { ApiError, apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
 import { registerWorkshopRoutes } from '../src/http/routes/workshop.js';
 import { STREAMER_MARKER } from '../src/types/streamer-transport.js';
 import {
+  collectionSlugSchema,
   normalizePermission,
+  workshopGrantBodySchema,
   workshopSkinBodySchema,
+  workshopSkinInputSchema,
   type WorkshopPayload,
-  type WorkshopSkinInput,
+  type WorkshopSkinBody,
 } from '../src/types/workshop.js';
 
 const silent = pino({ level: 'silent' });
 const SERVER = 'server01';
 const OTHER = 'server02';
+const PLAYER = '76561190000000001';
+const PANEL: WorkshopActor = { name: 'admin', source: 'panel' };
+
+/** O que a Steam respondeu para o 3802433262, MEDIDO em 16/09/2026. */
+const FACEMASK: WorkshopLookup = {
+  status: 'found',
+  details: {
+    workshopId: '3802433262',
+    title: 'MetalFacemaskOrigemZ',
+    previewUrl: 'https://images.steamusercontent.com/ugc/x/',
+    appId: 252490,
+    banned: false,
+    tags: ['Metal Facemask'],
+  },
+};
 
 interface Harness {
+  readonly db: AgentDatabase;
   readonly service: WorkshopService;
+  readonly catalog: WorkshopCatalog;
   readonly skins: WorkshopSkinsRepository;
+  readonly access: WorkshopAccessRepository;
+  readonly items: ItemsRepository;
+  readonly servers: ServersRepository;
   readonly streamers: StreamerRepository;
+  readonly meta: MetaRepository;
   /** Todo comando que saiu pelo RCON, na ordem. */
   readonly sent: string[];
-  /** Prefixo do comando -> a resposta que o "plugin" dá. */
-  readonly replies: Map<string, string>;
+  /** Workshop ID -> o que a "Steam" responde. Ausente = não existe. */
+  readonly steam: Map<string, WorkshopLookup>;
   connected: boolean;
+  now: number;
+}
+
+function seedServers(servers: ServersRepository): void {
+  for (const [index, id] of [SERVER, OTHER].entries()) {
+    servers.create({
+      id,
+      name: `Dev ${String(index + 1)}`,
+      identity: id,
+      gamePort: 28_015 + index * 10,
+      rconPort: 28_016 + index * 10,
+      queryPort: 28_017 + index * 10,
+      appPort: 28_082 + index * 10,
+      installDir: `F:\\Servers\\${id}`,
+    });
+  }
+}
+
+function seedItems(items: ItemsRepository): void {
+  const item = (shortname: string, displayName: string, itemId: number) => ({
+    shortname,
+    displayName,
+    itemId,
+    category: 'Attire',
+    maxStack: 1,
+    hasCondition: true,
+  });
+
+  items.replace({
+    items: [
+      item('metal.facemask', 'Metal Facemask', -194953424),
+      item('hoodie', 'Hoodie', 1751045826),
+      item('hatchet', 'Hatchet', -1469578201),
+      item('rifle.ak', 'Assault Rifle', 1545779598),
+    ],
+    protocol: '2633.288.1',
+    at: 1_000,
+  });
 }
 
 function harness(): Harness {
@@ -78,34 +140,32 @@ function harness(): Harness {
   runMigrations(db);
 
   const servers = new ServersRepository(db);
+  const items = new ItemsRepository(db);
 
-  for (const [index, id] of [SERVER, OTHER].entries()) {
-    servers.create({
-      id,
-      name: `Dev ${String(index + 1)}`,
-      identity: id,
-      gamePort: 28_015 + index * 10,
-      rconPort: 28_016 + index * 10,
-      queryPort: 28_017 + index * 10,
-      appPort: 28_082 + index * 10,
-      installDir: `F:\\Servers\\${id}`,
-    });
-  }
+  seedServers(servers);
+  seedItems(items);
 
   const skins = new WorkshopSkinsRepository(db);
+  const access = new WorkshopAccessRepository(db);
   const streamers = new StreamerRepository(db);
+  const meta = new MetaRepository(db);
+  const steam = new Map<string, WorkshopLookup>([['3802433262', FACEMASK]]);
 
-  const state: Harness = {
-    service: null as unknown as WorkshopService,
+  const lookup: WorkshopLookupFn = (id) => Promise.resolve(steam.get(id) ?? { status: 'not_found' });
+
+  const state = {
+    db,
     skins,
+    access,
+    items,
+    servers,
     streamers,
-    sent: [],
-    replies: new Map([
-      [WORKSHOP_SYNC, JSON.stringify({ ok: true, count: 0 })],
-      ['origemz.workshop.status', JSON.stringify({ ok: true, skins: 0, streamers: 0 })],
-    ]),
+    meta,
+    sent: [] as string[],
+    steam,
     connected: true,
-  };
+    now: 1_800_000_000_000,
+  } as Omit<Harness, 'service' | 'catalog'> & { service: WorkshopService; catalog: WorkshopCatalog };
 
   const rcon = {
     get isConnected() {
@@ -114,555 +174,701 @@ function harness(): Harness {
     send: (command: string) => {
       state.sent.push(command);
 
-      for (const [prefix, reply] of state.replies) {
-        if (command.startsWith(prefix)) return Promise.resolve(reply);
+      if (command.startsWith(WORKSHOP_SYNC) || command.startsWith(WORKSHOP_REPLY)) {
+        return Promise.resolve(JSON.stringify({ ok: true }));
       }
 
       return Promise.resolve('');
     },
   };
 
-  const service = new WorkshopService({
+  state.catalog = new WorkshopCatalog({
     skins,
-    streamers,
-    servers: {
-      ids: () => [SERVER, OTHER],
-      contextOf: () => ({ rcon }),
-    },
-    logger: silent,
+    access,
+    items,
+    serverIds: () => [SERVER, OTHER],
+    lookup,
+    onChange: () => undefined,
   });
 
-  return Object.assign(state, { service });
+  state.service = new WorkshopService({
+    skins,
+    access,
+    catalog: state.catalog,
+    meta,
+    streamers,
+    servers: { ids: () => [SERVER, OTHER], contextOf: () => ({ rcon }) },
+    logger: silent,
+    now: () => state.now,
+  });
+
+  return state;
 }
 
 /** Um cadastro completo, pelo mesmo caminho que a rota usa. */
-function input(patch: Record<string, unknown> = {}): WorkshopSkinInput {
+function body(patch: Record<string, unknown> = {}): WorkshopSkinBody {
   return workshopSkinBodySchema.parse({
-    label: 'Pedra OrigemZ',
-    shortname: 'rock',
-    skinId: '3071657601',
+    label: 'Máscara OrigemZ',
+    shortname: 'metal.facemask',
+    skinId: '3802433262',
     servers: [SERVER],
     ...patch,
   });
 }
 
-/** A carga do último `sync` que saiu naquele servidor. */
-function lastPayload(h: Harness): WorkshopPayload {
-  const command = [...h.sent].reverse().find((line) => line.startsWith(WORKSHOP_SYNC));
-
-  if (command === undefined) throw new Error('nenhum sync saiu');
-
-  return decodePushPayload(command.slice(WORKSHOP_SYNC.length + 1)) as WorkshopPayload;
+/** Grava direto no repositório, sem Steam. */
+function addSkin(h: Harness, patch: Record<string, unknown> = {}) {
+  return h.skins.add(workshopSkinInputSchema.parse({ ...body(), ...patch }), {
+    source: 'panel',
+    createdBy: 'teste',
+    workshopTitle: null,
+    previewUrl: null,
+  });
 }
 
-/** O segredo desta sessão, lido do comando que saiu. */
+/** Remonta a última carga que saiu, juntando os pedaços. */
+function lastPayload(h: Harness): WorkshopPayload {
+  const commands = h.sent.filter((line) => line.startsWith(`${WORKSHOP_SYNC} `));
+  const last = commands.at(-1);
+
+  if (last === undefined) throw new Error('nenhum sync saiu');
+
+  const [, batch, , total] = last.split(' ');
+  const parts = commands
+    .filter((line) => line.split(' ')[1] === batch)
+    .slice(-Number(total))
+    .map((line) => line.split(' ')[4] ?? '');
+
+  return decodePushPayload(parts.join('')) as WorkshopPayload;
+}
+
 async function grabSecret(h: Harness): Promise<string> {
   await h.service.sync(SERVER, 'manual');
 
   return lastPayload(h).secret;
 }
 
-/** Deixa os relógios de `syncSoon` (1 s) dispararem. */
-async function waitForSoon(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 1200));
+/** Deixa os relógios (1 s do sync, 0 do /skin add) dispararem. */
+async function settle(ms = 1200): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function expectApiError(promise: Promise<unknown> | (() => unknown), code: string): Promise<void> {
+  try {
+    await (typeof promise === 'function' ? promise() : promise);
+  } catch (cause) {
+    expect(cause).toBeInstanceOf(ApiError);
+    expect((cause as ApiError).code).toBe(code);
+    return;
+  }
+
+  throw new Error(`esperava ${code}, e nada lançou`);
 }
 
 // ============================================================
-//  A RÉGUA DO CADASTRO
+//  A MIGRAÇÃO 096
 // ============================================================
 
-describe('a marca', () => {
-  it('skin acima do teto de UInt64 é recusada', () => {
-    const h = harness();
+describe('a migração 096', () => {
+  it('reconstrói as skins sem perder linha nem ligação de servidor', () => {
+    const db = openDatabase({ file: MEMORY_DATABASE });
 
-    // 20 dígitos, e maior que 18446744073709551615. Ele passa na
-    // régua de formato e morre no teto — que é justamente o caso
-    // que um regex sozinho deixaria entrar.
-    expect(() => h.skins.add(input({ skinId: '99999999999999999999' }))).toThrow();
+    db.exec(`CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)`);
 
-    // E o teto EXATO passa: uma régua que recusa o maior id
-    // possível recusaria arte legítima.
-    expect(h.skins.add(input({ skinId: '18446744073709551615' })).skinId).toBe(
-      '18446744073709551615',
-    );
-  });
+    for (const migration of MIGRATIONS.filter((m) => m.id <= 95)) {
+      applyMigration(db, migration);
+      db.prepare('INSERT INTO schema_migrations VALUES (?, ?, 0)').run(migration.id, migration.name);
+    }
 
-  it('skin zero, vazia ou com zero à esquerda é recusada', () => {
-    const h = harness();
+    seedServers(new ServersRepository(db));
 
-    // Zero é indistinguível de item comum, e num item sem skins
-    // derruba o jogador pelo caminho do CUI.
-    expect(() => h.skins.add(input({ skinId: '0' }))).toThrow();
-    expect(() => h.skins.add(input({ skinId: '' }))).toThrow();
-    // Dois textos para o mesmo número furariam o índice único.
-    expect(() => h.skins.add(input({ skinId: '0307' }))).toThrow();
-  });
+    // Como a 095 gravava: permissão obrigatória.
+    db.prepare(
+      `INSERT INTO workshop_skins
+         (id, label, shortname, skin_id, permission, hide_in_streamer, enabled, created_at, updated_at)
+       VALUES (7, 'Pedra', 'rock', '3071657601', 'origemzworkshop.pedra', 0, 1, 5, 6)`,
+    ).run();
+    db.prepare(`INSERT INTO workshop_skin_servers VALUES (7, ?), (7, ?)`).run(SERVER, OTHER);
 
-  it('a mesma marca duas vezes é recusada pelo banco', () => {
-    const h = harness();
+    runMigrations(db);
 
-    h.skins.add(input());
+    const skins = new WorkshopSkinsRepository(db);
+    const skin = skins.get(7);
 
-    // Mesmo item, mesma skin, outro nome e outra permissão: o que
-    // colide é a MARCA, e é ela que o plugin usa para saber o que
-    // está vendo.
-    expect(() =>
-      h.skins.add(input({ label: 'Outra pedra', permission: 'origemzworkshop.outra' })),
-    ).toThrow();
-  });
-
-  it('duas skins não dividem a mesma permissão', () => {
-    const h = harness();
-
-    h.skins.add(input());
-
-    expect(() =>
-      h.skins.add(
-        input({ label: 'Machado', shortname: 'hatchet', skinId: '999', permission: 'Pedra OrigemZ' }),
-      ),
-    ).toThrow();
-  });
-});
-
-describe('a permissão', () => {
-  it('nasce do nome quando o painel a omite', () => {
-    // "Pedra OrigemZ" vira `origemzworkshop.pedra-origemz`: quem
-    // digita a permissão à mão em toda skin erra uma letra e
-    // descobre semanas depois.
-    expect(input().permission).toBe('origemzworkshop.pedra-origemz');
-  });
-
-  it('o prefixo entra uma vez só, venha ele ou não', () => {
-    expect(normalizePermission('pedra')).toBe('origemzworkshop.pedra');
-    expect(normalizePermission('origemzworkshop.pedra')).toBe('origemzworkshop.pedra');
-    // Idempotente: o repositório revalida o que já gravou, e uma
-    // segunda passada não pode dobrar o prefixo.
-    expect(normalizePermission(normalizePermission('Pedra'))).toBe('origemzworkshop.pedra');
-  });
-
-  it('acento e espaço somem: ela atravessa o console do Rust', () => {
-    // O espaço separa argumentos no parser de console, e o acento
-    // depende do encoding dele.
-    expect(normalizePermission('Pedra Sagrada')).toBe('origemzworkshop.pedra-sagrada');
-    expect(normalizePermission('Troféu')).toBe('origemzworkshop.trofeu');
-  });
-});
-
-// ============================================================
-//  O QUE DESCE PARA O JOGO
-// ============================================================
-
-describe('a carga', () => {
-  it('leva a marca, a permissão e a régua de streamer', async () => {
-    const h = harness();
-
-    h.skins.add(input({ hideInStreamer: true }));
-
-    await h.service.sync(SERVER, 'manual');
-
-    const payload = lastPayload(h);
-
-    expect(payload.skins).toHaveLength(1);
-    expect(payload.skins[0]).toMatchObject({
+    expect(skin).toMatchObject({
+      label: 'Pedra',
       shortname: 'rock',
-      // TEXTO, e não número: 20 dígitos não cabem no `number` do JS
-      // sem perder precisão.
       skinId: '3071657601',
-      permission: 'origemzworkshop.pedra-origemz',
-      hideInStreamer: true,
-      enabled: true,
+      permission: 'origemzworkshop.pedra',
+      hideInStreamer: false,
+      collectionId: null,
+      openToAll: false,
+      source: 'panel',
+      servers: [SERVER, OTHER],
+      createdAt: 5,
     });
+
+    // E a cascata continua de pé DEPOIS da reconstrução.
+    skins.remove(7);
+    expect(db.prepare('SELECT count(*) AS n FROM workshop_skin_servers').get()).toEqual({ n: 0 });
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+});
+
+// ============================================================
+//  AS RÉGUAS
+// ============================================================
+
+describe('as réguas', () => {
+  it('o Workshop ID nunca é zero, nunca tem zero à esquerda e cabe no UInt64', () => {
+    const parse = (skinId: string) => workshopSkinBodySchema.safeParse({ ...body(), skinId }).success;
+
+    expect(parse('0')).toBe(false);
+    expect(parse('0307')).toBe(false);
+    expect(parse('99999999999999999999')).toBe(false);
+    expect(parse('18446744073709551615')).toBe(true);
   });
 
-  it('a skin DESLIGADA não vai no push', async () => {
-    const h = harness();
-
-    h.skins.add(input({ label: 'Pedra', enabled: true }));
-    h.skins.add(input({ label: 'Machado', shortname: 'hatchet', skinId: '42', enabled: false }));
-
-    await h.service.sync(SERVER, 'manual');
-
-    const payload = lastPayload(h);
-
-    // Desligar é o que tira a skin de circulação sem perder a marca
-    // — e se ela continuasse descendo, o botão do painel não faria
-    // nada e ninguém saberia por quê.
-    expect(payload.skins.map((skin) => skin.shortname)).toEqual(['rock']);
-    // A linha continua no catálogo: desligar não é apagar.
-    expect(h.skins.list()).toHaveLength(2);
+  it('a permissão é opcional, e quando vem é normalizada', () => {
+    expect(body({ permission: '' }).permission).toBeNull();
+    expect(body({ permission: null }).permission).toBeNull();
+    expect(body({ permission: 'VIP Ouro' }).permission).toBe('origemzworkshop.vip-ouro');
+    expect(normalizePermission(normalizePermission('vip'))).toBe('origemzworkshop.vip');
   });
 
-  it('a junção decide quem recebe o quê', async () => {
-    const h = harness();
-
-    h.skins.add(input({ label: 'So do um', servers: [SERVER] }));
-    h.skins.add(input({ label: 'So do dois', shortname: 'hatchet', skinId: '42', servers: [OTHER] }));
-    h.skins.add(
-      input({ label: 'Dos dois', shortname: 'pickaxe', skinId: '43', servers: [SERVER, OTHER] }),
-    );
-    // Sem servidor nenhum: cadastrada e em lugar nenhum. É a regra
-    // herdada da migração 041 — uma skin recém-cadastrada que já
-    // valesse em tudo entraria em produção sem ninguém mandar.
-    h.skins.add(input({ label: 'De ninguem', shortname: 'spear.wooden', skinId: '44', servers: [] }));
-
-    await h.service.sync(SERVER, 'manual');
-    const first = lastPayload(h).skins.map((skin) => skin.shortname).sort();
-
-    await h.service.sync(OTHER, 'manual');
-    const second = lastPayload(h).skins.map((skin) => skin.shortname).sort();
-
-    expect(first).toEqual(['pickaxe', 'rock']);
-    expect(second).toEqual(['hatchet', 'pickaxe']);
+  it('a coleção não pode ter o nome de um subcomando do /skin', () => {
+    expect(collectionSlugSchema.safeParse('neve').success).toBe(true);
+    expect(collectionSlugSchema.safeParse('Neve').success).toBe(true);
+    expect(collectionSlugSchema.safeParse('add').success).toBe(false);
+    expect(collectionSlugSchema.safeParse('ajuda').success).toBe(false);
+    expect(collectionSlugSchema.safeParse('com espaço').success).toBe(false);
   });
 
-  it('o `setServers` muda onde ela vale sem tocar no resto', async () => {
+  it('o acesso de jogador exige SteamID64, e o de grupo, um nome do Oxide', () => {
+    const grant = (subjectType: string, subject: string) =>
+      workshopGrantBodySchema.safeParse({ subjectType, subject, targetType: 'skin', targetId: 1 });
+
+    expect(grant('player', PLAYER).success).toBe(true);
+    expect(grant('player', 'Fulano').success).toBe(false);
+    expect(grant('group', 'VIP').success).toBe(true);
+    expect(grant('group', 'vip ouro').success).toBe(false);
+  });
+});
+
+// ============================================================
+//  O CADASTRO — as mesmas regras nas duas portas
+// ============================================================
+
+describe('o cadastro', () => {
+  it('confere a Steam e usa o título do Workshop quando o nome vem vazio', async () => {
     const h = harness();
+    const { skin, warning } = await h.catalog.createSkin(body({ label: '' }), PANEL);
 
-    const skin = h.skins.add(input({ servers: [SERVER] }));
-
-    expect(h.skins.setServers(skin.id, [OTHER])).toEqual([OTHER]);
-
-    await h.service.sync(SERVER, 'manual');
-    expect(lastPayload(h).skins).toHaveLength(0);
-
-    await h.service.sync(OTHER, 'manual');
-    expect(lastPayload(h).skins).toHaveLength(1);
-    // E o cadastro continua o mesmo: a tela do servidor marca uma
-    // caixa, e não reescreve a skin.
-    expect(h.skins.get(skin.id)?.label).toBe('Pedra OrigemZ');
+    expect(skin.label).toBe('MetalFacemaskOrigemZ');
+    expect(skin.workshopTitle).toBe('MetalFacemaskOrigemZ');
+    expect(skin.previewUrl).toContain('steamusercontent');
+    expect(warning).toBeNull();
   });
 
-  it('apagar a skin a tira do push — e do catálogo', async () => {
+  it('recusa o id que a Steam não conhece', async () => {
     const h = harness();
 
-    const skin = h.skins.add(input());
-
-    expect(h.skins.remove(skin.id)).toBe(true);
-
-    await h.service.sync(SERVER, 'manual');
-
-    // A cascata levou a junção junto: sem ela, o `listForServer`
-    // devolveria uma linha que não existe mais.
-    expect(lastPayload(h).skins).toHaveLength(0);
+    await expectApiError(h.catalog.createSkin(body({ skinId: '1234567' }), PANEL), 'WORKSHOP_NOT_FOUND');
     expect(h.skins.list()).toHaveLength(0);
   });
 
-  it('catálogo acima de 50 KB é recusado INTEIRO, e nada sai', async () => {
+  it('recusa a skin publicada para OUTRO item', async () => {
     const h = harness();
 
-    // ####  MEIO CATÁLOGO É PIOR QUE CATÁLOGO VELHO  ####
-    //
-    // O plugin substitui o cache inteiro ao aplicar. Um comando
-    // truncado o faria trocar uma lista boa por uma incompleta que
-    // ele acredita ser completa — jogadores perdendo a skin, e
-    // nada no log dizendo por quê.
-    for (let index = 0; index < 500; index += 1) {
-      h.skins.add(
-        input({
-          label: `Skin numero ${String(index)} com nome comprido para encher o frame`,
-          shortname: `item.numero.${String(index)}`,
-          skinId: String(3_000_000_000 + index),
-          permission: `permissao-numero-${String(index)}`,
+    // A tag da Steam diz "Metal Facemask"; colado no machado, não
+    // desenha nada.
+    await expectApiError(
+      h.catalog.createSkin(body({ shortname: 'hatchet' }), PANEL),
+      'WORKSHOP_OTHER_ITEM',
+    );
+  });
+
+  it('Steam fora do ar não barra: entra, com aviso', async () => {
+    const h = harness();
+
+    h.steam.set('555', { status: 'unavailable', reason: 'timeout' });
+
+    const { skin, warning } = await h.catalog.createSkin(body({ skinId: '555', label: '' }), PANEL);
+
+    expect(warning).toContain('timeout');
+    // Sem título, o nome sai do item.
+    expect(skin.label).toBe('Metal Facemask 555');
+  });
+
+  it('recusa item que o jogo não tem e marca repetida', async () => {
+    const h = harness();
+
+    await expectApiError(h.catalog.createSkin(body({ shortname: 'pedra.magica' }), PANEL), 'UNKNOWN_BASE_ITEM');
+
+    await h.catalog.createSkin(body(), PANEL);
+    await expectApiError(h.catalog.createSkin(body({ label: 'Outra' }), PANEL), 'DUPLICATE_MARK');
+  });
+
+  it('várias skins do MESMO item convivem — o jogador escolhe na caixa', async () => {
+    const h = harness();
+
+    h.steam.set('111', { status: 'unavailable', reason: 'x' });
+
+    await h.catalog.createSkin(body(), PANEL);
+    await h.catalog.createSkin(body({ skinId: '111', label: 'Máscara 2' }), PANEL);
+
+    expect(h.skins.list().map((skin) => skin.skinId).sort()).toEqual(['111', '3802433262']);
+  });
+
+  it('registra quem cadastrou e de onde', async () => {
+    const h = harness();
+
+    await h.catalog.createSkin(body(), { name: 'jogo:Fulano', source: 'game', serverId: SERVER });
+
+    const [entry] = h.access.audit({ limit: 10 });
+
+    expect(entry).toMatchObject({
+      action: 'skin.create',
+      actor: 'jogo:Fulano',
+      source: 'game',
+      serverId: SERVER,
+    });
+    expect(h.skins.list()[0]?.source).toBe('game');
+  });
+
+  it('a edição só consulta a Steam quando a marca muda', async () => {
+    const h = harness();
+    const { skin } = await h.catalog.createSkin(body(), PANEL);
+
+    // A Steam "cai" depois do cadastro: renomear continua valendo.
+    h.steam.clear();
+
+    const { skin: saved } = await h.catalog.updateSkin(skin.id, body({ label: 'Novo nome' }), PANEL);
+
+    expect(saved.label).toBe('Novo nome');
+    expect(saved.workshopTitle).toBe('MetalFacemaskOrigemZ');
+
+    const [entry] = h.access.audit({ limit: 1 });
+
+    expect(entry?.action).toBe('skin.update');
+    expect(entry?.detail['changed']).toHaveProperty('label');
+  });
+});
+
+// ============================================================
+//  AS COLEÇÕES
+// ============================================================
+
+describe('as coleções', () => {
+  it('cabe uma skin por item em cada coleção', async () => {
+    const h = harness();
+    const neve = h.catalog.createCollection(
+      { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true },
+      PANEL,
+    );
+
+    const mask1 = addSkin(h);
+    const mask2 = addSkin(h, { skinId: '222', label: 'Máscara 2' });
+    const hoodie = addSkin(h, { shortname: 'hoodie', skinId: '333', label: 'Moletom' });
+
+    await expectApiError(
+      () => h.catalog.setCollectionSkins(neve.id, [mask1.id, mask2.id], PANEL),
+      'COLLECTION_ITEM_TAKEN',
+    );
+
+    // A recusa não deixou a coleção pela metade.
+    expect(h.skins.skinsOfCollection(neve.id)).toHaveLength(0);
+
+    const saved = h.catalog.setCollectionSkins(neve.id, [mask1.id, hoodie.id], PANEL);
+
+    expect(saved.map((skin) => skin.shortname).sort()).toEqual(['hoodie', 'metal.facemask']);
+
+    // E pelo formulário da skin também.
+    await expectApiError(
+      h.catalog.updateSkin(mask2.id, body({ skinId: '222', label: 'Máscara 2', collectionId: neve.id }), PANEL),
+      'COLLECTION_ITEM_TAKEN',
+    );
+  });
+
+  it('apagar a coleção SOLTA as skins, e não as apaga', () => {
+    const h = harness();
+    const neve = h.catalog.createCollection(
+      { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true },
+      PANEL,
+    );
+    const mask = addSkin(h, { collectionId: neve.id });
+
+    h.access.upsertGrant(
+      { subjectType: 'player', subject: PLAYER, targetType: 'collection', targetId: neve.id, expiresAt: null, note: '' },
+      null,
+    );
+
+    h.catalog.removeCollection(neve.id, PANEL);
+
+    expect(h.skins.get(mask.id)?.collectionId).toBeNull();
+    // O acesso caiu na cascata — e o registro diz de quem era.
+    expect(h.access.listGrants()).toHaveLength(0);
+    expect(h.access.audit({ limit: 1 })[0]?.detail['grantsRemoved']).toEqual([`player:${PLAYER}`]);
+  });
+
+  it('o nome do comando é único', async () => {
+    const h = harness();
+    const input = { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true };
+
+    h.catalog.createCollection(input, PANEL);
+    await expectApiError(() => h.catalog.createCollection(input, PANEL), 'DUPLICATE_COLLECTION');
+  });
+});
+
+// ============================================================
+//  OS ACESSOS
+// ============================================================
+
+describe('os acessos', () => {
+  it('liberar de novo RENOVA, e não empilha', () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const grant = (expiresAt: number | null) =>
+      h.catalog.grant(
+        workshopGrantBodySchema.parse({
+          subjectType: 'player',
+          subject: PLAYER,
+          targetType: 'skin',
+          targetId: mask.id,
+          expiresAt,
         }),
+        PANEL,
+        h.now,
+      );
+
+    grant(h.now + 1000);
+    grant(null);
+
+    const grants = h.access.listGrants({ subject: PLAYER });
+
+    expect(grants).toHaveLength(1);
+    expect(grants[0]?.expiresAt).toBeNull();
+    expect(h.access.audit({ limit: 10, steamId: PLAYER }).map((entry) => entry.action)).toEqual([
+      'grant.update',
+      'grant.create',
+    ]);
+  });
+
+  it('recusa prazo que já passou', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    await expectApiError(
+      () =>
+        h.catalog.grant(
+          workshopGrantBodySchema.parse({
+            subjectType: 'player',
+            subject: PLAYER,
+            targetType: 'skin',
+            targetId: mask.id,
+            expiresAt: h.now - 1,
+          }),
+          PANEL,
+          h.now,
+        ),
+      'GRANT_ALREADY_EXPIRED',
+    );
+  });
+
+  it('acesso para skin que não existe é recusado', async () => {
+    const h = harness();
+
+    await expectApiError(
+      () =>
+        h.catalog.grant(
+          workshopGrantBodySchema.parse({
+            subjectType: 'group',
+            subject: 'vip',
+            targetType: 'collection',
+            targetId: 99,
+          }),
+          PANEL,
+        ),
+      'WORKSHOP_COLLECTION_NOT_FOUND',
+    );
+  });
+
+  it('o vencimento fica registrado, inclusive o que venceu com o agente parado', () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    h.access.upsertGrant(
+      { subjectType: 'player', subject: PLAYER, targetType: 'skin', targetId: mask.id, expiresAt: h.now + 500, note: '' },
+      'admin',
+      h.now,
+    );
+
+    // O relógio arma e grava "conferido até agora".
+    h.service.scheduleExpiry();
+    h.service.stop();
+
+    // O agente "reinicia" depois do prazo.
+    h.now += 10_000;
+
+    const restarted = new WorkshopService({
+      skins: h.skins,
+      access: h.access,
+      catalog: h.catalog,
+      meta: h.meta,
+      streamers: h.streamers,
+      servers: { ids: () => [], contextOf: () => null },
+      now: () => h.now,
+    });
+
+    restarted.scheduleExpiry();
+    restarted.stop();
+
+    const expired = h.access.audit({ limit: 5, steamId: PLAYER }).filter((e) => e.action === 'grant.expire');
+
+    expect(expired).toHaveLength(1);
+    expect(expired[0]?.source).toBe('system');
+  });
+});
+
+// ============================================================
+//  A CARGA
+// ============================================================
+
+describe('a carga', () => {
+  it('leva só as skins LIGADAS daquele servidor', async () => {
+    const h = harness();
+
+    addSkin(h);
+    addSkin(h, { skinId: '2', label: 'Desligada', enabled: false });
+    addSkin(h, { skinId: '3', label: 'Do outro', servers: [OTHER] });
+
+    await h.service.sync(SERVER, 'manual');
+
+    expect(lastPayload(h).skins.map((skin) => skin.label)).toEqual(['Máscara OrigemZ']);
+  });
+
+  it('coleção só desce onde tem skin, e acesso só desce vivo e para o que desceu', async () => {
+    const h = harness();
+    const neve = h.skins.addCollection(
+      { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true },
+      null,
+    );
+    const vazia = h.skins.addCollection(
+      { slug: 'vazia', label: 'Vazia', permission: null, openToAll: false, enabled: true },
+      null,
+    );
+    const mask = addSkin(h, { collectionId: neve.id });
+    const elsewhere = addSkin(h, { skinId: '9', label: 'Longe', servers: [OTHER] });
+
+    const grant = (targetType: 'skin' | 'collection', targetId: number, expiresAt: number | null) =>
+      h.access.upsertGrant(
+        { subjectType: 'player', subject: PLAYER, targetType, targetId, expiresAt, note: '' },
+        null,
+        h.now - 10,
+      );
+
+    grant('skin', mask.id, null);
+    grant('collection', neve.id, h.now + 60_000);
+    grant('skin', elsewhere.id, null); // a skin não está neste servidor
+    grant('collection', vazia.id, null); // a coleção não desce aqui
+    h.access.upsertGrant(
+      { subjectType: 'group', subject: 'vip', targetType: 'skin', targetId: mask.id, expiresAt: h.now - 1, note: '' },
+      null,
+      h.now - 10,
+    );
+
+    await h.service.sync(SERVER, 'manual');
+
+    const payload = lastPayload(h);
+
+    expect(payload.collections.map((c) => c.slug)).toEqual(['neve']);
+    expect(payload.skins[0]?.collectionId).toBe(neve.id);
+    expect(payload.grants).toEqual([
+      { subjectType: 'player', subject: PLAYER, targetType: 'collection', targetId: neve.id, expiresAt: h.now + 60_000 },
+      { subjectType: 'player', subject: PLAYER, targetType: 'skin', targetId: mask.id, expiresAt: null },
+    ].sort((a, b) => (a.targetType < b.targetType ? -1 : 1)));
+  });
+
+  it('carga maior que o frame desce em pedaços que remontam o original', async () => {
+    const h = harness();
+
+    addSkin(h);
+
+    for (let index = 0; index < 1500; index += 1) {
+      h.access.upsertGrant(
+        {
+          subjectType: 'player',
+          subject: `7656119${String(index).padStart(10, '0')}`,
+          targetType: 'skin',
+          targetId: 1,
+          expiresAt: null,
+          note: '',
+        },
+        null,
       );
     }
 
     const outcome = await h.service.sync(SERVER, 'manual');
+    const commands = h.sent.filter((line) => line.startsWith(`${WORKSHOP_SYNC} `));
 
-    expect(outcome.status).toBe('pushed');
-    expect(outcome.status === 'pushed' && outcome.outcome.status).toBe('refused');
-    expect(
-      outcome.status === 'pushed' && outcome.outcome.status === 'refused' && outcome.outcome.bytes,
-    ).toBeGreaterThan(MAX_PUSH_BYTES);
+    expect(outcome).toMatchObject({ status: 'sent' });
+    expect(commands.length).toBeGreaterThan(1);
 
-    // O que importa: NENHUM comando saiu. O plugin fica com o que
-    // tinha (velho, mas íntegro).
-    expect(h.sent.filter((line) => line.startsWith(WORKSHOP_SYNC))).toHaveLength(0);
+    for (const [index, command] of commands.entries()) {
+      const [, , part, total, piece] = command.split(' ');
+
+      expect(Number(part)).toBe(index);
+      expect(Number(total)).toBe(commands.length);
+      expect((piece ?? '').length).toBeLessThanOrEqual(WORKSHOP_CHUNK_CHARS);
+      expect(Buffer.byteLength(command)).toBeLessThanOrEqual(MAX_PUSH_BYTES);
+    }
+
+    expect(lastPayload(h).grants).toHaveLength(1500);
   });
 
-  it('sem RCON não é erro: ele é pulado e reenviado depois', async () => {
+  it('sem RCON é pulado; o que não mudou não sai; o forçado sai', async () => {
     const h = harness();
 
-    h.skins.add(input());
+    addSkin(h);
     h.connected = false;
+    expect((await h.service.sync(SERVER, 'manual')).status).toBe('skipped');
 
-    const outcome = await h.service.sync(SERVER, 'manual');
-
-    expect(outcome.status).toBe('skipped');
-    expect(h.sent).toHaveLength(0);
-  });
-
-  it('não reenvia o que não mudou, mas reenvia para quem acabou de subir', async () => {
-    const h = harness();
-
-    h.skins.add(input());
-
+    h.connected = true;
     await h.service.sync(SERVER, 'manual');
     expect(await h.service.sync(SERVER, 'manual')).toEqual({ status: 'unchanged' });
+    expect((await h.service.sync(SERVER, 'plugin-requested')).status).toBe('sent');
+  });
 
-    // O plugin que acabou de subir NÃO tem carga nenhuma: um
-    // "não mudou nada" o deixaria vazio até alguém editar a tela.
-    expect((await h.service.sync(SERVER, 'plugin-requested')).status).toBe('pushed');
+  it('só quem está no ar ESCONDENDO A LOGO entra na lista de streamers', async () => {
+    const h = harness();
+
+    h.streamers.save(PLAYER, { allowed: true, active: true, hideLogo: true });
+    h.streamers.save('76561190000000002', { allowed: true, active: true, hideLogo: false });
+
+    await h.service.sync(SERVER, 'manual');
+
+    expect(lastPayload(h).streamers).toEqual([PLAYER]);
+  });
+
+  it('o `/streamer` reenvia a carga — por um relógio, nunca de dentro do gancho', async () => {
+    const h = harness();
+
+    await h.service.sync(SERVER, 'manual');
+
+    h.streamers.save(PLAYER, { allowed: true, active: true, hideLogo: true });
+
+    const before = h.sent.length;
+
+    h.service.handleLine(SERVER, `[OrigemZUI] ${STREAMER_MARKER}{"steamId":"${PLAYER}","on":true}`);
+    expect(h.sent).toHaveLength(before);
+
+    await settle();
+
+    expect(lastPayload(h).streamers).toEqual([PLAYER]);
+    h.service.stop();
   });
 });
 
 // ============================================================
-//  O MODO STREAMER
+//  O /skin add DO JOGO
 // ============================================================
 
-describe('os streamers', () => {
-  it('só quem está LIBERADO, LIGADO e escondendo a logo entra na lista', async () => {
+describe('o /skin add do jogo', () => {
+  function addLine(secret: string, patch: Record<string, unknown> = {}): string {
+    return `[OrigemZWorkshop] ${WORKSHOP_MARKER}${JSON.stringify({
+      kind: 'add',
+      secret,
+      requestId: 'req-1',
+      steamId: PLAYER,
+      playerName: 'Fulano',
+      shortname: 'metal.facemask',
+      skinId: '3802433262',
+      ...patch,
+    })}`;
+  }
+
+  function lastReply(h: Harness): Record<string, unknown> {
+    const command = h.sent.filter((line) => line.startsWith(WORKSHOP_REPLY)).at(-1);
+
+    if (command === undefined) throw new Error('nenhuma resposta saiu');
+
+    return decodePushPayload(command.slice(WORKSHOP_REPLY.length + 1)) as Record<string, unknown>;
+  }
+
+  it('grava no MESMO catálogo do painel, só no servidor de onde veio, e responde', async () => {
     const h = harness();
+    const secret = await grabSecret(h);
+    const before = h.sent.length;
 
-    h.skins.add(input());
+    h.service.handleLine(SERVER, addLine(secret));
 
-    // Liberado e no ar, escondendo a logo: é ele.
-    h.streamers.save('76561190000000001', { allowed: true, active: true, hideLogo: true });
-    // Liberado, mas fora do ar.
-    h.streamers.save('76561190000000002', { allowed: true, active: false, hideLogo: true });
-    // No ar, mas escondendo só a propaganda — o acordo de quem
-    // divulga o servidor é manter a logo.
-    h.streamers.save('76561190000000003', { allowed: true, active: true, hideLogo: false });
-    // Ligou sem liberação: o plugin está com a lista velha.
-    h.streamers.save('76561190000000004', { allowed: false, active: true, hideLogo: true });
+    // Nada sai de dentro do gancho.
+    expect(h.sent).toHaveLength(before);
 
-    await h.service.sync(SERVER, 'manual');
+    await settle(50);
 
-    expect(lastPayload(h).streamers).toEqual(['76561190000000001']);
+    const [skin] = h.skins.list();
+
+    expect(skin).toMatchObject({
+      label: 'MetalFacemaskOrigemZ',
+      shortname: 'metal.facemask',
+      source: 'game',
+      servers: [SERVER],
+      createdBy: 'jogo:Fulano (76561190000000001)',
+    });
+    expect(lastReply(h)).toMatchObject({ requestId: 'req-1', steamId: PLAYER, ok: true });
+    h.service.stop();
   });
 
-  it('o `/streamer` de um jogador reenvia o catálogo — e por um relógio', async () => {
+  it('a recusa volta ao admin com a frase, e fica no registro', async () => {
     const h = harness();
-
-    h.skins.add(input());
-    h.streamers.save('76561190000000001', { allowed: true, active: false, hideLogo: true });
-
-    await h.service.sync(SERVER, 'manual');
-    expect(lastPayload(h).streamers).toEqual([]);
-
-    // Ele ligou. Quem grava é o StreamerSync, no mesmo gancho de
-    // console; aqui simulamos a escrita e a linha.
-    h.streamers.save('76561190000000001', { active: true });
-
-    const antes = h.sent.length;
-
-    h.service.handleLine(
-      SERVER,
-      `[OrigemZUI] ${STREAMER_MARKER}{"steamId":"76561190000000001","on":true}`,
-    );
-
-    // ####  NADA SAI DE DENTRO DO GANCHO  ####
-    //
-    // Um comando mandado daqui imprime no console, a linha volta e
-    // dispara de novo. O envio sai do relógio.
-    expect(h.sent).toHaveLength(antes);
-
-    await waitForSoon();
-
-    expect(lastPayload(h).streamers).toEqual(['76561190000000001']);
-  });
-});
-
-// ============================================================
-//  O SEGREDO
-// ============================================================
-
-describe('o segredo', () => {
-  it('desce dentro do sync', async () => {
-    const h = harness();
-
     const secret = await grabSecret(h);
 
-    expect(secret).not.toBe('');
+    h.service.handleLine(SERVER, addLine(secret, { skinId: '404' }));
+    await settle(50);
+
+    expect(h.skins.list()).toHaveLength(0);
+    expect(lastReply(h)).toMatchObject({ ok: false });
+    expect(String(lastReply(h)['message'])).toContain('Steam');
+    expect(h.access.audit({ limit: 1 })[0]).toMatchObject({ action: 'game.add-refused', serverId: SERVER });
+    h.service.stop();
   });
 
-  it('o `ready` vem SEM segredo e faz o catálogo descer', async () => {
-    const h = harness();
-
-    h.skins.add(input());
-
-    const antes = h.sent.length;
-
-    h.service.handleLine(SERVER, `[OrigemZ Workshop] ${WORKSHOP_MARKER}{"kind":"ready"}`);
-
-    // De novo: nada sai de dentro do gancho.
-    expect(h.sent).toHaveLength(antes);
-
-    await waitForSoon();
-
-    expect(lastPayload(h).skins).toHaveLength(1);
-  });
-
-  it('aviso com segredo forjado é DESCARTADO', async () => {
+  it('sem o segredo — um jogador digitando no chat — não cadastra nada', async () => {
     const h = harness();
 
     await grabSecret(h);
 
-    h.service.handleLine(
-      SERVER,
-      `[OrigemZ Workshop] ${WORKSHOP_MARKER}{"kind":"applied","count":99,"secret":"chutei"}`,
-    );
+    h.service.handleLine(SERVER, addLine('chute'));
+    // E a linha de chat, com o nome antes do marcador, nem é lida.
+    h.service.handleLine(SERVER, `[CHAT] Fulano: ${addLine('chute')}`);
+    await settle(50);
 
-    // O agente não acredita: se acreditasse, a tela diria que o
-    // plugin tem 99 skins de pé porque alguém digitou isso.
-    expect(h.service.appliedCount(SERVER)).toBeNull();
+    expect(h.skins.list()).toHaveLength(0);
+    expect(h.sent.some((line) => line.startsWith(WORKSHOP_REPLY))).toBe(false);
   });
 
-  it('com o segredo certo, o aviso vale', async () => {
+  it('o mesmo pedido duas vezes vira UM cadastro e UMA resposta', async () => {
     const h = harness();
-
     const secret = await grabSecret(h);
 
-    h.service.handleLine(
-      SERVER,
-      `[OrigemZ Workshop] ${WORKSHOP_MARKER}{"kind":"applied","count":3,"secret":"${secret}"}`,
-    );
+    h.service.handleLine(SERVER, addLine(secret));
+    h.service.handleLine(SERVER, addLine(secret));
+    await settle(50);
 
-    expect(h.service.appliedCount(SERVER)).toBe(3);
-  });
-
-  it('a linha de CHAT não passa, nem com o segredo certo', async () => {
-    const h = harness();
-
-    const secret = await grabSecret(h);
-
-    // O nome de quem falou vem antes do marcador, e a âncora do
-    // regex exige o marcador no começo (depois de no máximo dois
-    // prefixos entre colchetes). Sem isso, qualquer jogador
-    // forjaria um aviso digitando no chat.
-    h.service.handleLine(
-      SERVER,
-      `[CHAT] Fulano: ${WORKSHOP_MARKER}{"kind":"applied","count":99,"secret":"${secret}"}`,
-    );
-
-    expect(h.service.appliedCount(SERVER)).toBeNull();
-  });
-
-  it('linha quebrada não derruba o agente', () => {
-    const h = harness();
-
-    expect(() => {
-      h.service.handleLine(SERVER, `[OrigemZ Workshop] ${WORKSHOP_MARKER}{isto nao e json`);
-      h.service.handleLine(SERVER, `[OrigemZ Workshop] ${WORKSHOP_MARKER}`);
-      h.service.handleLine(SERVER, `[OrigemZ Workshop] ${WORKSHOP_MARKER}"so um texto"`);
-      h.service.handleLine(SERVER, 'uma linha qualquer do console');
-    }).not.toThrow();
+    expect(h.skins.list()).toHaveLength(1);
+    expect(h.sent.filter((line) => line.startsWith(WORKSHOP_REPLY))).toHaveLength(1);
+    h.service.stop();
   });
 });
 
 // ============================================================
-//  PERGUNTAR AO JOGO
+//  AS ROTAS
 // ============================================================
 
-describe('o status', () => {
-  it('lê o que o plugin responde', async () => {
-    const h = harness();
-
-    h.replies.set(
-      'origemz.workshop.status',
-      JSON.stringify({ ok: true, skins: 7, streamers: 2 }),
-    );
-
-    expect(await h.service.status(SERVER)).toEqual({ skins: 7, streamers: 2 });
-  });
-
-  it('servidor sem RCON vira erro com nome, e não resposta vazia', async () => {
-    const h = harness();
-
-    h.connected = false;
-
-    await expect(h.service.status(SERVER)).rejects.toBeInstanceOf(WorkshopCommandError);
-  });
-
-  it('plugin ausente (resposta vazia) não vira "zero skins"', async () => {
-    const h = harness();
-
-    h.replies.delete('origemz.workshop.status');
-
-    // "O plugin não está carregado" e "o plugin tem zero skins" são
-    // respostas diferentes, e confundi-las esconderia um plugin que
-    // nem subiu.
-    await expect(h.service.status(SERVER)).rejects.toMatchObject({ reason: 'no_plugin' });
-  });
-
-  it('a resposta suja de `Puts` ainda é lida', async () => {
-    const h = harness();
-
-    // MEDIDO no projeto: um `Puts` disparado no frame do comando
-    // entra na resposta casada do RCON. O plugin já tira o aviso do
-    // frame; esta é a segunda tranca.
-    h.replies.set(
-      'origemz.workshop.status',
-      `${WORKSHOP_MARKER}{"kind":"ready"}\n${JSON.stringify({ ok: true, skins: 1, streamers: 0 })}`,
-    );
-
-    expect(await h.service.status(SERVER)).toEqual({ skins: 1, streamers: 0 });
-  });
-});
-
-// ============================================================
-//  A BORDA HTTP
-//
-//  As conferências que o banco NÃO faz. Elas moram na rota
-//  porque a frase que o admin lê precisa dizer QUAL linha já usa
-//  a marca — e porque a régua do item base mora no catálogo do
-//  jogo, que o banco desta feature não referencia.
-// ============================================================
-
-async function routes(): Promise<{
-  readonly app: FastifyInstance;
-  readonly skins: WorkshopSkinsRepository;
-}> {
-  const db = openDatabase({ file: MEMORY_DATABASE });
-
-  runMigrations(db);
-
-  const items = new ItemsRepository(db);
-  const servers = new ServersRepository(db);
-  const skins = new WorkshopSkinsRepository(db);
-
-  // O catálogo do jogo. `rock` é o exemplo do dono -- a pedra.
-  items.replace({
-    items: [
-      {
-        shortname: 'rock',
-        displayName: 'Rock',
-        itemId: 963906841,
-        category: 'Tool',
-        maxStack: 1,
-        hasCondition: false,
-      },
-      {
-        shortname: 'hatchet',
-        displayName: 'Hatchet',
-        itemId: -1469578201,
-        category: 'Tool',
-        maxStack: 1,
-        hasCondition: true,
-      },
-    ],
-    protocol: '2633.288.1',
-    at: 1_000,
-  });
-
-  for (const [index, id] of [SERVER, OTHER].entries()) {
-    servers.create({
-      id,
-      name: `Dev ${String(index + 1)}`,
-      identity: id,
-      gamePort: 28_015 + index * 10,
-      rconPort: 28_016 + index * 10,
-      queryPort: 28_017 + index * 10,
-      appPort: 28_082 + index * 10,
-      installDir: `F:\\Servers\\${id}`,
-    });
-  }
-
+async function buildApp(h: Harness): Promise<FastifyInstance> {
   const app = Fastify();
 
-  // O mesmo tratamento do servidor real (http/server.ts). Sem a
-  // linha do ZodError, uma recusa de validação viria como 500 e o
-  // teste passaria a medir o handler do teste, e não a rota.
   app.setErrorHandler(async (error, _request, reply) => {
     if (error instanceof ZodError) {
       const response = zodErrorToResponse(error);
@@ -681,136 +887,129 @@ async function routes(): Promise<{
 
   await app.register(
     async (api) => {
-      // Sem `workshop`: o cadastro tem de funcionar com todos os
-      // servidores parados, e é essa a promessa que estes testes
-      // guardam.
-      registerWorkshopRoutes(api, { repository: skins, items, servers });
+      // Sem `workshop`: o cadastro funciona com os servidores parados.
+      registerWorkshopRoutes(api, {
+        repository: h.skins,
+        access: h.access,
+        catalog: h.catalog,
+        items: h.items,
+        servers: h.servers,
+        lookup: (id) => Promise.resolve(h.steam.get(id) ?? { status: 'not_found' }),
+      });
     },
     { prefix: '/api' },
   );
 
-  return { app, skins };
+  return app;
 }
 
-/** O corpo que a tela manda. A permissão vai OMITIDA de propósito. */
-function body(patch: Record<string, unknown> = {}): Record<string, unknown> {
-  return { label: 'Pedra OrigemZ', shortname: 'rock', skinId: '3071657601', servers: [SERVER], ...patch };
-}
+describe('as rotas', () => {
+  it('o ciclo inteiro responde com os servidores parados', async () => {
+    const h = harness();
+    const app = await buildApp(h);
 
-describe('a rota do catálogo', () => {
-  it('cadastra, e a permissão volta pronta', async () => {
-    const { app } = await routes();
-
-    const created = await app.inject({ method: 'POST', url: '/api/workshop/skins', payload: body() });
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/workshop/skins',
+      payload: { shortname: 'metal.facemask', skinId: '3802433262', servers: [SERVER] },
+    });
 
     expect(created.statusCode).toBe(201);
-    expect(created.json().skin).toMatchObject({
-      shortname: 'rock',
-      skinId: '3071657601',
-      permission: 'origemzworkshop.pedra-origemz',
-      servers: [SERVER],
+
+    const skin = created.json().skin as { id: number; label: string; permission: string | null };
+
+    expect(skin.label).toBe('MetalFacemaskOrigemZ');
+    expect(skin.permission).toBeNull();
+
+    const collection = await app.inject({
+      method: 'POST',
+      url: '/api/workshop/collections',
+      payload: { slug: 'Neve', label: 'Neve 2026', permission: 'neve' },
+    });
+
+    expect(collection.statusCode).toBe(201);
+    expect(collection.json().collection).toMatchObject({ slug: 'neve', permission: 'origemzworkshop.neve' });
+
+    const collectionId = collection.json().collection.id as number;
+
+    const linked = await app.inject({
+      method: 'PUT',
+      url: `/api/workshop/collections/${String(collectionId)}/skins`,
+      payload: { skinIds: [skin.id] },
+    });
+
+    expect(linked.statusCode).toBe(200);
+
+    const granted = await app.inject({
+      method: 'POST',
+      url: '/api/workshop/grants',
+      payload: {
+        subjectType: 'player',
+        subject: PLAYER,
+        targetType: 'collection',
+        targetId: collectionId,
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      },
+    });
+
+    expect(granted.statusCode).toBe(201);
+    expect(granted.json().grant).toMatchObject({ targetLabel: '/skin neve — Neve 2026', expired: false });
+
+    const listed = await app.inject({
+      method: 'GET',
+      url: `/api/workshop/grants?subjectType=player&subject=${PLAYER}`,
+    });
+
+    expect(listed.json().count).toBe(1);
+
+    const grantId = listed.json().grants[0].id as number;
+
+    expect((await app.inject({ method: 'DELETE', url: `/api/workshop/grants/${String(grantId)}` })).statusCode).toBe(200);
+
+    const audit = await app.inject({ method: 'GET', url: `/api/workshop/audit?steamId=${PLAYER}` });
+
+    expect(audit.json().entries.map((entry: { action: string }) => entry.action)).toEqual([
+      'grant.revoke',
+      'grant.create',
+    ]);
+  });
+
+  it('a consulta prévia sugere o item pela tag e julga o escolhido', async () => {
+    const h = harness();
+    const app = await buildApp(h);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/workshop/lookup/3802433262?shortname=hatchet',
+    });
+
+    expect(response.json()).toMatchObject({
+      status: 'found',
+      suggestedShortnames: ['metal.facemask'],
+      verdict: { ok: false, code: 'WORKSHOP_OTHER_ITEM' },
     });
   });
 
-  it('item que o jogo não tem é recusado no CADASTRO', async () => {
-    const { app } = await routes();
+  it('a recusa de regra chega com código e frase', async () => {
+    const h = harness();
+    const app = await buildApp(h);
 
-    // O servidor aceita qualquer `ulong` em `item.skin` e não
-    // reclama de nada: sem esta conferência, o engano só
-    // apareceria dias depois, com o item nascendo vanilla.
     const response = await app.inject({
       method: 'POST',
       url: '/api/workshop/skins',
-      payload: body({ shortname: 'pedra-inventada' }),
-    });
-
-    expect(response.statusCode).toBe(400);
-    expect(response.json().error).toBe('UNKNOWN_BASE_ITEM');
-  });
-
-  it('duas skins LIGADAS no mesmo item e no mesmo servidor: 409', async () => {
-    const { app } = await routes();
-
-    await app.inject({ method: 'POST', url: '/api/workshop/skins', payload: body() });
-
-    // O plugin indexa por shortname e recusaria a segunda com
-    // `duplicate_shortname` -- e o motivo ficaria enterrado no
-    // `message` do push, longe de quem cadastrou.
-    const clash = await app.inject({
-      method: 'POST',
-      url: '/api/workshop/skins',
-      payload: body({ label: 'Pedra de Evento', skinId: '3071657602' }),
-    });
-
-    expect(clash.statusCode).toBe(409);
-    expect(clash.json().error).toBe('DUPLICATE_ITEM');
-  });
-
-  it('trocar a arte é possível: a velha desligada não atrapalha', async () => {
-    const { app } = await routes();
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/workshop/skins',
-      payload: body({ enabled: false }),
-    });
-
-    const nova = await app.inject({
-      method: 'POST',
-      url: '/api/workshop/skins',
-      payload: body({ label: 'Pedra nova', skinId: '3071657602' }),
-    });
-
-    expect(nova.statusCode).toBe(201);
-  });
-
-  it('a mesma pedra em servidores DIFERENTES convive', async () => {
-    const { app } = await routes();
-
-    await app.inject({ method: 'POST', url: '/api/workshop/skins', payload: body() });
-
-    const outra = await app.inject({
-      method: 'POST',
-      url: '/api/workshop/skins',
-      payload: body({ label: 'Pedra do dois', skinId: '3071657602', servers: [OTHER] }),
-    });
-
-    expect(outra.statusCode).toBe(201);
-  });
-
-  it('servidor que não existe é recusado, e não vira ligação órfã', async () => {
-    const { app } = await routes();
-
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/workshop/skins',
-      payload: body({ servers: ['server99'] }),
+      payload: { shortname: 'metal.facemask', skinId: '1', servers: ['nao-existe'] },
     });
 
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toBe('UNKNOWN_SERVER');
   });
 
-  it('skin fora da faixa de UInt64 é recusada na BORDA, com 400', async () => {
-    const { app } = await routes();
-
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/workshop/skins',
-      payload: body({ skinId: '99999999999999999999' }),
-    });
-
-    // 400 do zod, e não 500 do CHECK do banco: a frase precisa
-    // chegar à tela de quem digitou.
-    expect(response.statusCode).toBe(400);
-  });
-
-  it('o disparo manual de sync avisa quando não há canal com o jogo', async () => {
-    const { app } = await routes();
+  it('mandar a carga sem canal com o jogo é 503, e não silêncio', async () => {
+    const h = harness();
+    const app = await buildApp(h);
 
     const response = await app.inject({ method: 'POST', url: `/api/servers/${SERVER}/workshop/sync` });
 
-    // 503 com nome, e não 200 mentindo que mandou.
     expect(response.statusCode).toBe(503);
     expect(response.json().error).toBe('WORKSHOP_UNAVAILABLE');
   });

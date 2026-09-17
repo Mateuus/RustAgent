@@ -104,7 +104,7 @@ const NAV: readonly NavItem[] = [
   {
     href: '/workshop/',
     label: 'Skins',
-    hint: 'A arte da casa nos itens do jogo: o item já nasce com ela, para quem tem a permissão',
+    hint: 'Skins do Workshop: caixa /skin, coleções e acessos por jogador ou grupo',
     Icon: Palette,
   },
   {

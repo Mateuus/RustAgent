@@ -16,13 +16,17 @@
 //  cinza, e não em vermelho: quem vê alerta o tempo todo para de
 //  ler alerta.
 //
-//  ####  DUAS CONTAGENS, E ELAS SÃO PERGUNTAS DIFERENTES  ####
+//  ####  DUAS CONTAGENS DE SKIN, E ELAS SÃO PERGUNTAS DIFERENTES  ####
 //
 //  `skins` é o que o plugin tem carregado neste instante.
-//  `aplicadas` é o que ele CONFIRMOU ter recebido no último envio.
+//  `confirmadas` é o que ele CONFIRMOU ter recebido no último envio.
 //  Divergirem é o sintoma de um `oxide.reload` que ninguém
-//  acompanhou — e é exatamente para isso que o botão de mandar de
-//  novo existe.
+//  acompanhou — e é exatamente para isso que o botão de mandar a
+//  carga de novo existe.
+//
+//  O resto (coleções, acessos vivos, caixas `/skin` abertas e quem
+//  está escondendo a logo) é o que o plugin tem na memória: a
+//  mesma carga, vista pelo lado do jogo.
 // ============================================================
 
 import { Loader2, RefreshCw } from 'lucide-react';
@@ -78,7 +82,10 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
       return {
         status: {
           skins: Number(response.status?.skins ?? 0),
+          collections: Number(response.status?.collections ?? 0),
+          grants: Number(response.status?.grants ?? 0),
           streamers: Number(response.status?.streamers ?? 0),
+          openBoxes: Number(response.status?.openBoxes ?? 0),
         },
         applied: typeof response.applied === 'number' ? response.applied : null,
         reason: null,
@@ -110,14 +117,17 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
     setBusy(true);
 
     try {
-      await agent.syncWorkshop(server.id);
-      toast.success('Catálogo enviado', { description: server.name });
+      const response = await agent.syncWorkshop(server.id);
+
+      toast.success(response.outcome === 'unchanged' ? 'Carga já estava lá' : 'Carga enviada', {
+        description: server.name,
+      });
       setState(await read());
     } catch (cause) {
       // A frase vem do CORE inteira: ela sabe se o RCON caiu, se o
-      // plugin não está lá ou se o catálogo passou do tamanho do
+      // plugin não está lá ou se a carga passou do tamanho do
       // frame de console — e a nossa não saberia.
-      toast.error('Não consegui mandar o catálogo', {
+      toast.error('Não consegui mandar a carga', {
         description: cause instanceof ApiError ? cause.message : String(cause),
       });
       setState(await read());
@@ -150,18 +160,12 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
           <span className="text-muted">{state.reason}</span>
         ) : (
           <>
-            <span className="text-muted">
-              Skins no plugin:{' '}
-              <span className="font-mono text-foreground">{state.status.skins}</span>
-            </span>
-            <span className="text-muted">
-              Escondendo a logo agora:{' '}
-              <span className="font-mono text-foreground">{state.status.streamers}</span>
-            </span>
-            <span className="text-muted">
-              Confirmadas no último envio:{' '}
-              <span className="font-mono text-foreground">{state.applied ?? '—'}</span>
-            </span>
+            <Count label="Skins" value={state.status.skins} />
+            <Count label="Coleções" value={state.status.collections} />
+            <Count label="Acessos" value={state.status.grants} />
+            <Count label="Caixas abertas" value={state.status.openBoxes} />
+            <Count label="Escondendo a logo" value={state.status.streamers} />
+            <Count label="Confirmadas no último envio" value={state.applied} />
           </>
         )}
       </div>
@@ -171,7 +175,7 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
         variant="outline"
         disabled={busy}
         onClick={() => void sync()}
-        title="Manda o catálogo inteiro agora, mesmo que nada tenha mudado. Serve para quem acabou de recarregar o plugin à mão."
+        title="Manda a carga inteira (skins, coleções e acessos) agora, mesmo que nada tenha mudado. Serve para quem acabou de recarregar o plugin à mão."
       >
         {busy ? (
           <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
@@ -181,5 +185,13 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
         Mandar agora
       </Button>
     </div>
+  );
+}
+
+function Count({ label, value }: { readonly label: string; readonly value: number | null }) {
+  return (
+    <span className="text-muted">
+      {label}: <span className="font-mono text-foreground">{value ?? '—'}</span>
+    </span>
   );
 }

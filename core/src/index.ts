@@ -82,8 +82,11 @@ import {
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
+import { WorkshopAccessRepository } from './db/workshop-access-repository.js';
 import { WorkshopSkinsRepository } from './db/workshop-repository.js';
+import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
+import { WorkshopCatalog } from './game/workshop-catalog.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
@@ -1470,6 +1473,22 @@ async function main(): Promise<void> {
   // custom: uma skin vale na rede toda, e a juncao diz em que
   // servidores ela desce. Ver db/workshop-repository.ts.
   const workshopSkins = new WorkshopSkinsRepository(db);
+  // Quem pode usar cada skin fora da permissao, e o registro de tudo
+  // que mudou no modulo. Ver db/workshop-access-repository.ts.
+  const workshopAccess = new WorkshopAccessRepository(db);
+  // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
+  const workshopLookup = createWorkshopLookup();
+  // As regras do cadastro, as MESMAS para o painel e para o /skin add
+  // do jogo. O reenvio da carga e avisado ao servico, que nasce mais
+  // abaixo -- dai o `?.`.
+  const workshopCatalog = new WorkshopCatalog({
+    skins: workshopSkins,
+    access: workshopAccess,
+    items: itemsRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    lookup: workshopLookup,
+    onChange: () => workshopService?.handleCatalogChanged(),
+  });
 
   /**
    * Quem pediu silêncio no chat enquanto transmite.
@@ -2300,6 +2319,9 @@ async function main(): Promise<void> {
   // para o OrigemZWorkshop nao ter uma segunda copia dela.
   workshopService = new WorkshopService({
     skins: workshopSkins,
+    access: workshopAccess,
+    catalog: workshopCatalog,
+    meta,
     streamers: streamerRepository,
     servers: {
       ids: () => repository.list().map((server) => server.id),
@@ -2312,6 +2334,9 @@ async function main(): Promise<void> {
   // o que cada plugin tem, e o dedup diria "nao mudou nada" para
   // todos. Quem estiver sem RCON e pulado e reenviado na conexao.
   void workshopService.syncAll('startup');
+  // O relogio dos acessos com prazo. Ele tambem registra o que
+  // venceu enquanto o agente estava desligado.
+  workshopService.scheduleExpiry();
 
   void loadoutSync.pushAll('boot');
   // Os itens custom sobem no boot pelo mesmo motivo dos loadouts:
@@ -4076,6 +4101,9 @@ async function main(): Promise<void> {
     },
     workshop: {
       repository: workshopSkins,
+      access: workshopAccess,
+      catalog: workshopCatalog,
+      lookup: workshopLookup,
       items: itemsRepository,
       servers: repository,
       ...(workshopService === null ? {} : { workshop: workshopService }),
@@ -4175,6 +4203,7 @@ async function main(): Promise<void> {
         // um servidor que já está sendo desligado — e o plugin
         // ficaria sem lista sem nunca receber a de volta.
         customItemsSync.stop();
+        workshopService?.stop();
         // E as imagens que esperavam o boot de um servidor: a nova
         // tentativa sairia para um RCON que já não existe.
         imageLibrary.stop();
