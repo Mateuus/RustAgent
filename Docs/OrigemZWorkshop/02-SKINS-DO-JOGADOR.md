@@ -152,6 +152,33 @@ Quem implementa isso é **o repositório**, numa função só (`grantOwnership`)
 pelo site e pelo `/skin` de admin. **Duas implementações dessa tabela divergem no primeiro
 bug.**
 
+**Implementado (frente A, 17/09/2026):**
+
+- A tabela está em `renewedExpiry`, em `core/src/db/workshop-owned-repository.ts`.
+- O painel também pode mandar uma **data** (`expiresAt`) em vez de dias. Essa linha não estava
+  acima, e a decisão foi aplicar a mesma régua de "nunca encurta":
+
+  | O que existe | O que chega | Resultado |
+  |---|---|---|
+  | nada ou vencida | `expiresAt` | `expires_at = expiresAt` |
+  | permanente | `expiresAt` | continua permanente |
+  | com prazo | `expiresAt` | `max(expires_at, expiresAt)` |
+
+  Quem quer **encurtar** remove a posse e dá de novo.
+- Mandar `days` **e** `expiresAt` juntos é recusado.
+- Uma data no passado é recusada com `OWNED_ALREADY_EXPIRED`.
+- Quem é de fora chama `WorkshopCatalog.grantOwnership` / `revokeOwnership`
+  (`core/src/game/workshop-catalog.ts`), que envolvem a função do repositório. Além dela, esse
+  método faz três coisas:
+  1. confere que a skin existe;
+  2. grava `owned.grant` / `owned.revoke` no registro;
+  3. avisa o serviço para reenviar a posse do jogador onde ele estiver online.
+
+  A skin **não precisa estar ligada nem em algum servidor** (04 §3).
+- Com a posse viva, a nota nova só substitui a antiga quando vem preenchida. `created_by` e
+  `created_at` ficam os da primeira vez. Com a posse vencida, a linha é tratada como nova, e os
+  quatro campos são trocados.
+
 `source` e `source_ref` guardam **a última escrita** e servem de rastro. A idempotência da
 entrega do site **não depende deles**: ela é da reserva em `site_deliveries`, que já existe
 (04 §3).
@@ -174,7 +201,66 @@ A auditoria da migração é o que permite ao dono, no dia seguinte, perguntar "
 pelo grupo vip?" e ter resposta.
 
 **Antes de aplicar em produção**, rode as contagens (quantos acessos de grupo, de coleção e
-quantas permissões) e mostre ao dono. O comando está no plano (05, frente A).
+quantas permissões) e mostre ao dono. O comando está no fim desta seção.
+
+#### Como a 097 foi implementada (frente A, 17/09/2026)
+
+- É uma migração em função (`migrateWorkshopOwnedSkins`, em `core/src/db/migrations.ts`), e
+  não SQL puro: a expansão de coleção funde origens pela regra do §4.2, e o descarte é
+  registrado com detalhe em JSON. A regra de fusão está **copiada** na migração, e não importada
+  do repositório: o repositório pode mudar, a migração não.
+- Na lista, ela fica entre a 096 e a 098. O runner aplica todo id **ausente**, então num banco
+  que já tem a 098 e a 099 ela roda sozinha. Isso foi testado.
+- Além do que a tabela acima pede, ela também:
+  - registra `migration.collection-dropped` para **cada** coleção, com o que ela era;
+  - registra `migration.collection-grant-expanded` para cada acesso de coleção expandido, com a
+    lista de skins (inclusive a lista vazia);
+  - registra `migration.invalid-grant-dropped` para acesso de "jogador" com SteamID torto (só
+    edição à mão produz isso; sem o descarte, o CHECK novo derrubaria a migração);
+  - grava um resumo `migration.097` com as contagens;
+  - **reconstrói `workshop_audit`** com a origem `site` no CHECK, porque a entrega do site grava
+    no registro e a frente C não pode criar migração.
+- **Coleção desligada não propaga o "liberada para todos"**: o push da 096 só levava as
+  coleções ligadas, então ela não liberava nada no jogo. O fato fica no detalhe do
+  `migration.collection-dropped` (`openToAllPropagated`).
+- A posse migrada guarda o `created_by` e o `created_at` do acesso mais antigo, e a nota do
+  primeiro que tinha nota.
+- Acesso **vencido** também vira posse, com o mesmo prazo: a ficha mostra "venceu em".
+
+**Cuidado ao voltar o binário.** O guarda de schema (`db/schema-version.ts`) compara o **maior**
+id aplicado. Um agente antigo, que conhece até a 099, abre sem reclamar um banco com a 097, e
+quebra na primeira consulta a `workshop_grants`. Quem volta o binário depois da 097 precisa
+voltar o banco junto: o instantâneo de antes da migração fica em `backups`. Isso vale também
+para as outras worktrees que usam o banco de desenvolvimento.
+
+**MEDIDO em 17/09/2026**, numa cópia do banco de desenvolvimento, sem tocar no original:
+
+| Cópia | Antes | Depois |
+|---|---|---|
+| real | 2 acessos (1 de grupo `vip`, 1 de jogador a coleção), 1 coleção, 1 skin | 1 posse; 4 linhas `migration.*` no registro; `foreign_key_check` vazio; `integrity_check` ok |
+| real + fabricados (50 jogadores numa coleção aberta com 2 skins, metade permanente; 10 acessos diretos; 2 de grupo; 1 permissão) | 64 acessos, 3 de grupo, 51 de coleção, 2 coleções | 101 posses (50 permanentes); 2 skins viraram "liberada para todos"; 3 `group-grant-dropped`, 1 `permission-dropped`, 51 `collection-grant-expanded`, 2 `collection-dropped` |
+
+#### O comando de contagem, para produção
+
+O `sqlite3` de linha de comando não está instalado nas máquinas da casa, então a contagem é um
+script. Ele abre o banco **só para leitura**, e pode rodar com o agente de pé:
+
+```bash
+# da raiz do repositório, na máquina de produção, ANTES de subir o agente com a 097.
+# O caminho é o AGENT_DB_PATH do .env de lá (padrão: <raiz>/data/rustagent.db).
+npx tsx core/scripts/workshop-097-counts.ts C:/OrigemZ/RustAgent/data/rustagent.db
+```
+
+Ele mostra:
+
+- os acessos: no total, de grupo, de jogador a skin e de jogador a coleção;
+- quantas posses a expansão gera e quantas sobram depois da fusão;
+- as permissões distintas que serão descartadas;
+- as coleções;
+- as skins que viram "liberada para todos";
+- os acessos de grupo, por grupo.
+
+Se a 097 já tiver rodado naquele banco, ele mostra o resumo que ela gravou.
 
 ### 4.4 `site_deliveries` — o CHECK do `kind`
 
@@ -219,6 +305,16 @@ O mesmo transporte de hoje (pedaços base64, lote, `OUT_OF_ORDER`, cache em disc
 - **Só vão as skins ligadas e vinculadas àquele servidor** (como hoje).
 - **A categoria e o nome do item** são resolvidos pelo plugin: `ItemDefinition.category` e
   `displayName`. O agente não os manda.
+- **Implementado (frente A):**
+  - `description` e `rarity` **faltam** quando não têm valor; nunca vêm como `null`;
+  - `storeUrl` vem da variável `WORKSHOP_STORE_URL` do `.env` do agente, e falta quando ela
+    está vazia ou ausente;
+  - as skins vêm na ordem da grade: `sort`, depois o nome;
+  - o comando continua `origemz.workshop.sync <lote> <i> <n> <pedaço>`, e a resposta
+    esperada a cada pedaço continua `{"ok":true}` (ou `{"ok":false,"error":"…"}`).
+- **`origemz.workshop.status`** (plugin 0.3.0) deve responder
+  `{"ok":true,"skins":N,"ownedPlayers":N,"streamers":N}`. `ownedPlayers` é quantos jogadores
+  têm posse carregada na memória. `collections`, `grants` e `openBoxes` saem.
 
 ### 5.2 A posse — `origemz.workshop.owned` (novo)
 
@@ -249,6 +345,57 @@ continua valendo.
 **O vencimento** continua como no 01 §4: o plugin confere o prazo na hora de aplicar; o agente
 agenda o próximo vencimento (`scheduleExpiry`) e reenvia a posse do jogador afetado, se ele
 estiver online, além de registrar o vencimento na auditoria.
+
+#### O formato exato (implementado pela frente A, 17/09/2026) — é o que a frente D lê
+
+**O comando é sempre cortado**, mesmo quando cabe num pedaço só:
+
+```text
+origemz.workshop.owned <steamId> <lote> <i> <n> <pedaço>
+```
+
+| Argumento | O que é |
+|---|---|
+| `steamId` | SteamID64 do dono da posse, 17 dígitos. `arg.GetString(0)` |
+| `lote` | 12 caracteres hexadecimais minúsculos, novos a cada carga. `arg.GetString(1)` |
+| `i` | índice do pedaço, de `0` a `n-1`, em ordem. `arg.GetInt(2)` |
+| `n` | total de pedaços do lote, `>= 1`. `arg.GetInt(3)` |
+| `pedaço` | uma fatia do base64, com no máximo **40.000** caracteres. `arg.GetString(4)` |
+
+- **A carga** é o texto base64, em UTF-8, do JSON abaixo. Ela é **cortada em fatias de
+  caracteres**, e não em blocos de base64 válidos: junte as fatias do mesmo lote, na ordem de
+  `i`, e só então decodifique. É o mesmo `encodePushPayload` do `sync`.
+
+  ```json
+  {"secret":"…","steamId":"76561198000000000","skins":[{"id":12,"expiresAt":0},{"id":40,"expiresAt":1790000000000}]}
+  ```
+
+  - `secret` é o mesmo do `sync`. Carga com segredo errado é recusada.
+  - `steamId` repete o argumento. Se não bater, o plugin recusa o lote.
+  - `id` é o `id` da skin no catálogo, o mesmo do `sync`.
+  - `expiresAt` vem em epoch ms, e **0 = permanente**.
+  - A lista vem ordenada por `id`, e **pode vir vazia**.
+- **A resposta a cada pedaço** é a mesma do `sync`, numa linha JSON:
+  - `{"ok":true}` quando aceitou, inclusive os pedaços intermediários;
+  - `{"ok":false,"error":"…"}` quando recusou. Por exemplo: `BAD_SECRET`, `BAD_STEAMID`,
+    `OUT_OF_ORDER` ou `INVALID_ARGS`.
+
+  O agente para no primeiro pedaço recusado e registra o aviso. Ele manda de novo no próximo
+  gatilho, porque não marca como entregue o que não entrou.
+- **Troca atômica.** O conjunto daquele `steamId` só é trocado quando o pedaço `n-1` chega e o
+  JSON remontado passa na conferência. Lote incompleto, ou atropelado por um lote novo do
+  mesmo jogador, é descartado, e o conjunto anterior fica inteiro.
+- **O plugin guarda a posse inteira como veio.** O agente já filtrou pelo catálogo daquele
+  servidor. Se o plugin receber a posse antes de um catálogo novo, ele não deve jogar fora ids
+  que ainda não conhece: o agente manda o catálogo **antes** da posse em todo gatilho que mexe
+  nos dois, mas uma corrida com um `oxide.reload` não é impossível.
+- **Ordem dos envios.** No `ready` do plugin e na reconexão do RCON vai primeiro o `sync` e
+  depois um `owned` para cada jogador online. Uma mudança de catálogo manda o `sync` e depois a
+  posse de quem está online, mas só se ela mudou.
+- **"Online" para o agente** é quem tem sessão aberta em `player_servers`. Essa lista é mantida
+  pela varredura de presença, a cada 15 s. Quem acabou de entrar recebe a posse pelo
+  `onJoined` dessa varredura, forçada, ou seja, mesmo que igual à última. **Até lá, o plugin
+  fica no estado "não sei"** (§5.3) para esse jogador, a menos que o `owned.json` já o conheça.
 
 ### 5.3 A cópia da posse no plugin
 
@@ -335,6 +482,25 @@ pesquisa preenchida** com aquela palavra.
 O `give` é opcional (frente D, prioridade baixa): o painel já cobre o caso. Ele existe porque
 admin em jogo costuma premiar em jogo.
 
+**O aviso do `give`, como o agente o lê (frente A, 17/09/2026):**
+
+```text
+#OZWORKSHOP#{"kind":"give","secret":"…","requestId":"g-1a2b","steamId":"<admin>","playerName":"<admin>",
+             "targetSteamId":"7656…","targetName":"Fulano","shortname":"rifle.ak","skinId":"3802433262","days":30}
+```
+
+- O plugin resolve `<steamId|nome>` para um SteamID64 **antes** de gritar. `targetSteamId` é
+  sempre o SteamID64, e `targetName` é só para a frase.
+- `days` vale de 1 a 3650. `null`, ou o campo ausente, quer dizer permanente.
+- `requestId` segue a mesma régua do `add`: `[A-Za-z0-9-]{1,40}`. O agente ignora um
+  `requestId` repetido, separado por `kind`.
+- O agente procura a skin por `(shortname, skinId)`. Se não achar, responde
+  `ok:false` com "Cadastre antes com /skin add".
+- A resposta volta pelo mesmo `origemz.workshop.reply`, no mesmo formato do `add`:
+  `{requestId, steamId, ok, message}`, e o `steamId` ali é o do **admin**.
+- Recusas vão para o registro como `game.give-refused`.
+- A posse dada grava `owned.grant` com `source: "game"` e o `serverId`.
+
 ---
 
 ## 8. A pedra
@@ -418,6 +584,54 @@ Lembrete (memória: *o tipo do painel não valida a resposta*): toda resposta pa
 | `/workshop/audit`, `/servers/:id/workshop/*` | ficam |
 
 Zod na borda **e** no repositório, como no resto do projeto.
+
+### Como ficaram (frente A, 17/09/2026) — é o que a frente E consome
+
+`skinId` nas rotas de posse é o **id do agente** (o mesmo do `:skinId` das rotas de skin). O
+id do Workshop, quando aparece junto, se chama `workshopId`. As datas vêm em ISO.
+
+- **Skin**, em `GET/POST/PUT /workshop/skins*`. Os campos de sempre, com três mudanças:
+  - saem `permission` e `collectionId`;
+  - entram `description` (`string | null`, até 280), `rarity` (`common | uncommon | rare |
+    epic | legendary | null`) e `sort` (inteiro, padrão 0);
+  - entra `owners`, a quantidade de posses **vivas**. Só vem na resposta.
+- **`GET /workshop/owned`**:
+  - parâmetros: `steamId`, `skinId`, `cursor`, `limit` (1 a 500, padrão 100) e
+    `includeExpired` (`true`/`false`, padrão `true`);
+  - sem `steamId` **e** sem `skinId`, responde 400;
+  - resposta: `{ ok, count, owned: Owned[], nextCursor: number | null }`, do mais novo para o
+    mais velho;
+  - para a página seguinte, passe o `nextCursor` como `cursor`.
+- **`POST /workshop/owned`**:
+  - corpo: `{ steamId, skinId, days?, expiresAt?, note? }`;
+  - `days` vai de 1 a 3650;
+  - `expiresAt` é ISO ou epoch ms;
+  - mandar `days` **e** `expiresAt` dá 400; sem nenhum dos dois, a posse é permanente;
+  - resposta **201**: `{ ok, created, owned: Owned }`. `created` é `false` quando só o prazo
+    mudou;
+  - erros: `WORKSHOP_SKIN_NOT_FOUND` (404) e `OWNED_ALREADY_EXPIRED` (400, data no passado).
+- **`DELETE /workshop/owned/:ownedId`** responde `{ ok }`, ou 404 `OWNED_NOT_FOUND`.
+- **`GET /players/:steamId/skins`** responde `{ ok, steamId, live: Owned[], expired: Owned[] }`:
+  - listas vazias quando ele não tem nada;
+  - 400 `INVALID_STEAM_ID` quando o SteamID é inválido.
+- **`Owned`** tem estes campos:
+
+  ```ts
+  {
+    id, steamId, skinId, expiresAt: string | null, expired: boolean,
+    source: 'site' | 'panel' | 'game' | 'system' | 'migration',
+    sourceRef, note, createdBy, createdAt, updatedAt,
+    skin: { id, label, shortname, workshopId, description, rarity, previewUrl,
+            openToAll, enabled, servers } | null
+  }
+  ```
+
+- **`/workshop/audit`**: `source` agora pode ser `site`. As ações novas são `owned.grant`,
+  `owned.revoke`, `owned.expired`, `game.give-refused` e `migration.*`. `site.delivered` é da
+  frente C. `grant.*` e `collection.*` só aparecem em linhas antigas.
+- **`GET /servers/:id/workshop/status`** traz `status: { skins, ownedPlayers, streamers }`.
+- **`POST /servers/:id/workshop/sync`** manda também a posse de todos os online, forçada.
+- **`/workshop/collections*` e `/workshop/grants*`** respondem 404.
 
 ---
 

@@ -49,7 +49,17 @@ export type SiteDeliveryState =
  * cabeçalho de `site/deliveries.ts` — a diferença muda o portão de
  * presença e muda o que fazer com uma linha órfã.
  */
-export type SiteDeliveryKind = 'item' | 'kit' | 'vip' | 'vehicle' | 'vip_revoke';
+export type SiteDeliveryKind =
+  | 'item'
+  | 'kit'
+  | 'vip'
+  | 'vehicle'
+  | 'vip_revoke'
+  // A posse de skin da rede (Docs/OrigemZWorkshop/04 §3). O CHECK da
+  // tabela os aceita desde a migracao 097; o ramo que os executa e da
+  // entrega do site.
+  | 'skin'
+  | 'skin_revoke';
 
 export interface SiteDeliveryRow {
   readonly id: string;
