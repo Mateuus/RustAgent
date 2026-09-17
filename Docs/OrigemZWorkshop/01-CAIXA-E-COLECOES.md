@@ -202,19 +202,24 @@ Não testado ao vivo, por falta de um jogador conectado: a caixa, o `/skin <cole
 
 ## 8. Onde está cada coisa
 
+Atualizado em 17/09/2026 com a reformulação (02 a 05).
+
 | Camada | Arquivo |
 |---|---|
 | Plugin | `Plugins/OrigemZWorkshop.cs` |
 | Contrato | `core/src/types/workshop.ts` |
-| Migrações | `core/src/db/migrations.ts` — 095 e 096 |
-| Catálogo e coleções | `core/src/db/workshop-repository.ts` |
-| Acessos e registro | `core/src/db/workshop-access-repository.ts` |
+| Migrações | `core/src/db/migrations.ts` — 095, 096 e **097** (posse; tira coleções, acessos e permissões) |
+| Catálogo | `core/src/db/workshop-repository.ts` |
+| Posse e registro | `core/src/db/workshop-owned-repository.ts` (substitui o `workshop-access-repository.ts`) |
+| Contagem antes da 097 em produção | `core/scripts/workshop-097-counts.ts` |
 | Regras de cadastro | `core/src/game/workshop-catalog.ts` |
 | Consulta à Steam | `core/src/game/steam-workshop.ts` |
 | Carga, `/skin add`, vencimento | `core/src/game/workshop.ts` |
 | Rotas | `core/src/http/routes/workshop.ts` |
-| Testes | `core/test/workshop.test.ts` |
-| Painel | `panel/src/app/workshop/page.tsx`, `panel/src/components/workshop/` |
+| Entrega e espelho do site | `core/src/site/skin-deliveries.ts`, `core/src/site/skins-mirror.ts`, `core/src/site/deliveries.ts` |
+| Aba SKINS do menu principal | `core/src/game/ui-skins-tab.ts`, `Plugins/OrigemZUI.cs` (`CloseMainMenu`) |
+| Testes | `core/test/workshop.test.ts`, `core/test/site-skins.test.ts`, `core/test/ui-skins-tab.test.ts`, `panel/test/workshop-normalize.test.ts` |
+| Painel | `panel/src/app/workshop/page.tsx`, `panel/src/components/workshop/` (a aba Skins da ficha é `player-skins.tsx`) |
 
 O `OrigemZPlayer` **não** consulta mais o catálogo ao montar o kit: o hook `GetWorkshopSkin`
 foi removido junto com o carimbo no nascimento.
