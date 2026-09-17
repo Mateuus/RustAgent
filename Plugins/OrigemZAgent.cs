@@ -703,7 +703,7 @@ namespace Oxide.Plugins
                 Offset = offset,
                 Limit = limit,
                 Players = page
-            });
+            }, Formatting.None);
         }
 
         private static PlayerInfo BuildPlayerInfo(BasePlayer player)
@@ -868,7 +868,7 @@ namespace Oxide.Plugins
                 Offset = offset,
                 Limit = limit,
                 Items = take > 0 ? catalog.GetRange(offset, take) : new List<ItemInfo>()
-            });
+            }, Formatting.None);
         }
 
         // Argumento que nao veio vale o padrao; argumento que veio
@@ -1167,7 +1167,7 @@ namespace Oxide.Plugins
             response.Items = take > 0 ? sorted.GetRange(offset, take) : new List<NativeLootItem>();
             response.Guaranteed = Sorted(guaranteed);
 
-            return JsonConvert.SerializeObject(response);
+            return JsonConvert.SerializeObject(response, Formatting.None);
         }
 
         /// <summary>
@@ -3438,7 +3438,7 @@ namespace Oxide.Plugins
 
             logLine = VipSyncCommand + ": " + players + " jogador(es) no cache de VIP.";
 
-            return JsonConvert.SerializeObject(new VipSyncOkResponse { Players = players });
+            return JsonConvert.SerializeObject(new VipSyncOkResponse { Players = players }, Formatting.None);
         }
 
         // Remonta o argumento unico que o console fatiou. Usa
@@ -3834,14 +3834,23 @@ namespace Oxide.Plugins
         // ========================================================
         //  RESPOSTAS
         //
-        //  JsonConvert.SerializeObject sem Formatting.Indented: o
-        //  agente separa as respostas por linha, e um JSON
-        //  quebrado em varias linhas viraria varios fragmentos
-        //  invalidos.
+        //  Todo JsonConvert.SerializeObject passa Formatting.None,
+        //  SEMPRE explicito: o agente separa as respostas por linha,
+        //  e um JSON quebrado em varias linhas viraria varios
+        //  fragmentos invalidos.
+        //
+        //  Omitir o argumento NAO basta. Sem ele, o Newtonsoft usa o
+        //  JsonConvert.DefaultSettings, que e global do processo, e
+        //  qualquer plugin pode troca-lo. MEDIDO em 16/09/2026: o
+        //  CopyPaste 4.3.0 o poe em Formatting.Indented ao carregar
+        //  e nao desfaz no unload. Todo SerializeObject sem formato
+        //  passou a sair indentado, e o agente parou de ler o flush
+        //  e as entregas pendentes. O teste
+        //  core/test/plugins-single-line-json.test.ts barra a volta.
         // ========================================================
         private static string BuildError(string code)
         {
-            return JsonConvert.SerializeObject(new ErrorResponse { Error = code });
+            return JsonConvert.SerializeObject(new ErrorResponse { Error = code }, Formatting.None);
         }
 
         // A resposta do GetVipInfo NAO tem "ok": ela atravessa a
@@ -3855,7 +3864,7 @@ namespace Oxide.Plugins
             {
                 SteamId = steamId,
                 Tiers = tiers
-            });
+            }, Formatting.None);
         }
 
         private string BuildGiveOk(int requestedAmount, string delivered, int given, int dropped)
@@ -3876,7 +3885,7 @@ namespace Oxide.Plugins
                 Delivered = delivered,
                 Given = given,
                 Dropped = dropped
-            });
+            }, Formatting.None);
         }
 
         // --------------------------------------------------------
@@ -4320,7 +4329,7 @@ namespace Oxide.Plugins
             {
                 Tiers = tiers,
                 Items = items
-            });
+            }, Formatting.None);
         }
 
         // Le o JSON e TROCA o cache. Devolve null quando aplicou, ou
@@ -4398,7 +4407,7 @@ namespace Oxide.Plugins
                 // declarado aqui, entao o que atravessa o hook e
                 // string. Serializar uma vez por sincronizacao e
                 // melhor do que uma vez por respawn de jogador.
-                rebuilt[tier] = JsonConvert.SerializeObject(valid);
+                rebuilt[tier] = JsonConvert.SerializeObject(valid, Formatting.None);
                 total += valid.Count;
             }
 
@@ -4488,7 +4497,7 @@ namespace Oxide.Plugins
             return JsonConvert.SerializeObject(new SpawnStatusSyncOkResponse
             {
                 Tiers = tiers
-            });
+            }, Formatting.None);
         }
 
         // Le o JSON e TROCA o cache. Devolve null quando aplicou, ou
@@ -4557,7 +4566,7 @@ namespace Oxide.Plugins
                     continue;
                 }
 
-                rebuilt[tier] = JsonConvert.SerializeObject(entry.Value);
+                rebuilt[tier] = JsonConvert.SerializeObject(entry.Value, Formatting.None);
             }
 
             _spawnStatusCache = rebuilt;
@@ -4684,7 +4693,7 @@ namespace Oxide.Plugins
             return JsonConvert.SerializeObject(new TimersSyncOkResponse
             {
                 Tiers = tiers
-            });
+            }, Formatting.None);
         }
 
         // Le o JSON e TROCA o cache - mesma regra do
@@ -4743,7 +4752,7 @@ namespace Oxide.Plugins
                     continue;
                 }
 
-                rebuilt[tier] = JsonConvert.SerializeObject(entry.Value);
+                rebuilt[tier] = JsonConvert.SerializeObject(entry.Value, Formatting.None);
             }
 
             _timersCache = rebuilt;
@@ -5262,7 +5271,7 @@ namespace Oxide.Plugins
                 Limit = limit,
                 Players = page,
                 Benches = benches
-            });
+            }, Formatting.None);
 
             // #### RECUSA INTEIRA, NUNCA CORTE ####
             //
@@ -5515,7 +5524,7 @@ namespace Oxide.Plugins
                 Items = items,
                 Dropped = dropped,
                 Pending = pending
-            });
+            }, Formatting.None);
         }
 
         // ========================================================
@@ -7703,7 +7712,7 @@ namespace Oxide.Plugins
                 Secret = _statSecret
             };
 
-            string line = EventMarker + JsonConvert.SerializeObject(push);
+            string line = EventMarker + JsonConvert.SerializeObject(push, Formatting.None);
 
             // ####  O ADIAMENTO NAO E ESTILO  ####
             //
@@ -7895,7 +7904,7 @@ namespace Oxide.Plugins
                 Players = SliceStatsList(batch.Players, offset, end),
                 Records = SliceStatsList(batch.Records, offset, end),
                 Events = SliceStatsList(batch.Events, offset, end)
-            });
+            }, Formatting.None);
 
             // #### RECUSA INTEIRA, NUNCA CORTE ####
             //
@@ -7978,7 +7987,7 @@ namespace Oxide.Plugins
                 BatchId = done.BatchId,
                 Seq = done.Seq,
                 Players = done.Players == null ? 0 : done.Players.Count
-            });
+            }, Formatting.None);
         }
 
         // ========================================================
@@ -8047,7 +8056,7 @@ namespace Oxide.Plugins
                 HookErrors = _statsHookErrors,
                 SeqItems = seqItems,
                 Hooks = StatsHookCostReport()
-            });
+            }, Formatting.None);
         }
 
         // --------------------------------------------------------

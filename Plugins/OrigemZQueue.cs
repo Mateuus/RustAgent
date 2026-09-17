@@ -1537,7 +1537,7 @@ namespace Oxide.Plugins
             response.Joining = queue.Joining;
             response.Queue = items;
 
-            return JsonConvert.SerializeObject(response);
+            return JsonConvert.SerializeObject(response, Formatting.None);
         }
 
         // ========================================================
@@ -2080,7 +2080,7 @@ namespace Oxide.Plugins
 
         private static string BuildError(string code)
         {
-            return JsonConvert.SerializeObject(new ErrorResponse { Error = code });
+            return JsonConvert.SerializeObject(new ErrorResponse { Error = code }, Formatting.None);
         }
 
         // string.Join(string, IEnumerable<string>) so existe a

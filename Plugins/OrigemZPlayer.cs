@@ -512,7 +512,7 @@ namespace Oxide.Plugins
             // sobre fuso, e eles nao concordam.
             payload.At = (long)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-            string line = EventMarker + JsonConvert.SerializeObject(payload);
+            string line = EventMarker + JsonConvert.SerializeObject(payload, Formatting.None);
 
             // #### O EVENTO SAI NO PROXIMO FRAME ####
             //
@@ -1090,7 +1090,7 @@ namespace Oxide.Plugins
                 Alive = !player.IsDead(),
                 Count = items.Count,
                 Items = items
-            });
+            }, Formatting.None);
         }
 
         private void CollectItems(ItemContainer container, string slot,
@@ -1240,7 +1240,7 @@ namespace Oxide.Plugins
             {
                 SteamId = player.UserIDString,
                 WasAlive = wasAlive
-            });
+            }, Formatting.None);
         }
 
         // ========================================================
@@ -1424,7 +1424,7 @@ namespace Oxide.Plugins
                     Z = destination.z
                 },
                 HeightAdjusted = !explicitHeight
-            });
+            }, Formatting.None);
         }
 
         // ========================================================
@@ -1492,7 +1492,7 @@ namespace Oxide.Plugins
                 Tier = outcome.Tier,
                 Given = outcome.Given,
                 Skipped = outcome.Skipped
-            });
+            }, Formatting.None);
         }
 
         // ========================================================
@@ -2503,7 +2503,7 @@ namespace Oxide.Plugins
 
         private static string BuildError(string code)
         {
-            return JsonConvert.SerializeObject(new ErrorResponse { Error = code });
+            return JsonConvert.SerializeObject(new ErrorResponse { Error = code }, Formatting.None);
         }
 
         // --------------------------------------------------------

@@ -996,7 +996,7 @@ namespace Oxide.Plugins
                     Ok = true,
                     Count = list.Count,
                     Items = list
-                }));
+                }, Formatting.None));
             }
             catch (Exception ex)
             {
@@ -2076,7 +2076,7 @@ namespace Oxide.Plugins
                 Offset = offset,
                 Limit = limit,
                 Pending = page
-            });
+            }, Formatting.None);
 
             // ####  RECUSA INTEIRA, NUNCA CORTE  ####
             //
@@ -2999,7 +2999,7 @@ namespace Oxide.Plugins
                     Ok = true,
                     Count = list.Count,
                     Stats = list
-                }));
+                }, Formatting.None));
             }
             catch (Exception ex)
             {
@@ -4032,7 +4032,7 @@ namespace Oxide.Plugins
                      ", gravada " + skinAfterCreate +
                      ", icone crc " + (crc != 0U ? crc.ToString(CultureInfo.InvariantCulture) : "nenhum"));
 
-                arg.ReplyWith(JsonConvert.SerializeObject(response));
+                arg.ReplyWith(JsonConvert.SerializeObject(response, Formatting.None));
             }
             catch (Exception ex)
             {
@@ -4146,7 +4146,7 @@ namespace Oxide.Plugins
                 response.OpensLoot = mods.Contains("ItemModOpenLootBag") ||
                                      mods.Contains("ItemModUnwrap");
 
-                arg.ReplyWith(JsonConvert.SerializeObject(response));
+                arg.ReplyWith(JsonConvert.SerializeObject(response, Formatting.None));
             }
             catch (Exception ex)
             {
