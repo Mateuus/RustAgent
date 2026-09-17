@@ -4583,15 +4583,19 @@ namespace Oxide.Plugins
                 string crc;
                 if (icons != null && icons.TryGetValue("star", out crc))
                 {
-                    CuiElement star = new CuiElement { Parent = box.Name };
+                    string starName = canvas.NextName();
+                    CuiElement star = new CuiElement { Name = starName, Parent = box.Name };
                     star.Components.Add(new CuiRawImageComponent { Png = crc, Color = ColAmber });
                     star.Components.Add(Rect(box, 8, 8, 18, 18));
                     canvas.Ui.Add(star);
+                    Tip(canvas, starName, "Favorita: ela aparece em FAVORITOS, no topo da lateral");
                 }
                 else
                 {
-                    Panel(canvas, box, 6, 8, 30, 14, ColAmber);
-                    Label(canvas, box, 6, 8, 30, 14, "FAV", 9, ColBg, TextAnchor.MiddleCenter, true);
+                    string favName = Panel(canvas, box, 6, 8, 30, 14, ColAmber, canvas.NextName());
+                    Label(canvas, new Box(favName, 30, 14), 0, 0, 30, 14, "FAV", 9, ColBg,
+                          TextAnchor.MiddleCenter, true);
+                    Tip(canvas, favName, "Favorita: ela aparece em FAVORITOS, no topo da lateral");
                 }
             }
 
