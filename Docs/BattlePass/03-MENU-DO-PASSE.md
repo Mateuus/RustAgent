@@ -147,10 +147,39 @@ de skins já faz na abertura: ao vivo, saiu em três envios (~30, 32 e 8 KB).
 Uma temporada de 30 níveis cabe, com folga, em três envios. **Não há paginação a
 escrever** — a rolagem resolve.
 
-> **PENDENTE:** os números acima são estimativa a partir da régua, não medição. O
-> valor real sai do `MeasureWorstCase()` copiado do Workshop (`:5101`), exposto
-> como `origemz.passe.bytes` — ele compila fora do servidor e devolve os bytes
-> por região e por `AddUI`. Medir **antes** de ir ao jogo.
+### 4.3 E os bytes medidos, em 17/09/2026
+
+A estimativa acima era de trabalho; estes são os números do
+`MeasureWorstCase()` do `OrigemZBattlePass.cs`, exposto como
+`origemz.passe.bytes [níveis]`. O pior caso que ele monta é **toda faixa
+cheia**, com rótulo longo, ícone, selo e dica, e a **caixa de pendências
+aberta** e cheia:
+
+| Trilha | JSON da trilha | `AddUI` na abertura |
+|---|---|---|
+| 20 níveis | 61.493 | 4 |
+| 30 níveis | 91.970 | 5 |
+| 40 níveis | 122.587 | 5 |
+
+**3.065 bytes por nível** — a estimativa de ~3.000 estava certa. As regiões
+fixas: janela 814, cabeçalho 4.399, rodapé 1.399; a caixa cheia (60 linhas),
+36.580.
+
+Dois ajustes que a medição obrigou, e que a régua não teria mostrado:
+
+1. **a caixa também sai elemento por elemento** (`Parts()`, como a trilha). Ela
+   cresce com a pendência, o `Pack` só corta **entre** arrays, e cheia ela
+   chegava a 36,5 KB — a um passo dos 40.000 num envio só;
+2. **a caixa desenha no máximo 60 linhas**, com "e mais N esperando" na última.
+   O teto é do **desenho**, nunca da promessa: a pendência não tem prazo (02
+   §6.4) e a lista pode crescer por meses.
+
+Nenhum envio passa de 40.000 em nenhum dos três tamanhos
+(`openUnderLimit: true`). Medido fora do servidor, compilando o `.cs` contra as
+DLLs do `server01` — `MeasureWorstCase` é `public static` justamente para isso.
+
+> **PENDENTE:** o que continua sem medição é a **tela**, não os bytes. Ninguém
+> viu esta trilha num cliente ainda.
 
 ---
 
