@@ -4123,24 +4123,52 @@ namespace Oxide.Plugins
 
             if (view.OnAir)
             {
-                Label(canvas, head, 0, 0, 420, HeaderHeight,
+                Label(canvas, head, 0, 0, 320, HeaderHeight,
                       "Modo streamer ligado: skins com logo ficam escondidas até você desligar.",
                       10, ColAmber, TextAnchor.MiddleLeft, true);
             }
 
-            Label(canvas, head, 420, 0, 240, HeaderHeight,
+            Label(canvas, head, 330, 0, 270, HeaderHeight,
                   view.Usable + " de " + view.Total + " obtidas", 12, ColMuted, TextAnchor.MiddleRight, false);
 
-            TextButton(canvas, head, 676, 12, 160, 28, view.ByRarity ? ColRust : ColSurface2,
-                       MenuSortCommand + " " + view.Token + " " + (view.ByRarity ? "0" : "1"),
-                       view.ByRarity ? "ORDEM: RARIDADE" : "ORDEM: PADRÃO", 11, ColText);
+            // ####  CONTROLES SEGMENTADOS, E NÃO BOTÕES LARGOS  ####
+            //
+            // Pedido do dono (17/09/2026): os dois botões "ORDEM: PADRÃO" e
+            // "SÓ AS MINHAS: NÃO" ocupavam o cabeçalho. Sem ícone: nenhum
+            // sprite do jogo foi confirmado no servidor, e um caminho errado
+            // vira um quadrado branco.
+            Segmented(canvas, head, 624, "ORDEM",
+                      new[] { "PADRÃO", "RARIDADE" }, view.ByRarity ? 1 : 0,
+                      MenuSortCommand + " " + view.Token);
 
-            TextButton(canvas, head, 850, 12, 160, 28, view.Mine ? ColRust : ColSurface2,
-                       MenuMineCommand + " " + view.Token + " " + (view.Mine ? "0" : "1"),
-                       // Sem "✓": não se sabe se a RobotoCondensed tem o glifo.
-                       view.Mine ? "SÓ AS MINHAS: SIM" : "SÓ AS MINHAS: NÃO", 11, ColText);
+            Segmented(canvas, head, 830, "MOSTRAR",
+                      new[] { "TODAS", "MINHAS" }, view.Mine ? 1 : 0,
+                      MenuMineCommand + " " + view.Token);
 
             return canvas.Json();
+        }
+
+        /// <summary>
+        /// Um rótulo pequeno e opções coladas, a ativa em vermelho. O comando
+        /// recebe o índice da opção no fim.
+        /// </summary>
+        private static void Segmented(Canvas canvas, Box parent, float x, string label, string[] options,
+                                      int active, string command)
+        {
+            const float chipWidth = 66f;
+            const float chipHeight = 24f;
+            float y = (HeaderHeight - chipHeight) / 2f;
+
+            Label(canvas, parent, x, 0, 54, HeaderHeight, label, 10, ColMuted, TextAnchor.MiddleRight, true);
+
+            float cx = x + 60f;
+            for (int i = 0; i < options.Length; i++)
+            {
+                bool on = i == active;
+                TextButton(canvas, parent, cx, y, chipWidth, chipHeight, on ? ColRust : ColSurface2,
+                           command + " " + i, options[i], 10, on ? ColText : ColMuted);
+                cx += chipWidth + 1f;
+            }
         }
 
         // ---- a lateral ---------------------------------------------
