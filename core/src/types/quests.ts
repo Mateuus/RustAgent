@@ -604,6 +604,39 @@ const skinRewardSchema = z.object({
 });
 
 /**
+ * XP do passe de batalha.
+ *
+ * ####  A MISSÃO É A FONTE PRIORITÁRIA DE XP  ####
+ *
+ * Decisão do dono, 17/09/2026, e ela tem razão técnica além da
+ * preferência: matar e farmar chegam ao agente como um DELTA
+ * acumulado de 60 em 60 segundos, sem identificador de ocorrência
+ * (Docs/BattlePass/02 §1). A missão é a única fonte que já nasce
+ * discreta — "esta missão, uma vez, vale 800 XP" — e por isso a
+ * única que se pode pagar com idempotência de verdade.
+ *
+ * ####  O VALOR É DESTA RECOMPENSA, E NÃO DA REGRA  ####
+ *
+ * As fontes de ação rendem `regra.amount × ocorrências`, porque
+ * ninguém cadastra o preço de cada pedra. Aqui o número está
+ * escrito na missão e o jogador o LEU na tela antes de aceitar —
+ * cobrá-lo da regra faria a mesma missão pagar valores diferentes
+ * em temporadas diferentes, sem nada na tela dizendo isso.
+ *
+ * A regra da fonte `quest.reward` continua valendo para o que ela
+ * decide de fato: desligar o XP de missão na temporada, e o teto
+ * do dia. Ver `battlepass/xp-sources.ts`.
+ *
+ * Sem temporada no ar, a recompensa FALHA — e vira pendência no
+ * painel com o motivo. Pagar zero em silêncio seria a missão
+ * prometer 800 XP na tela e não dar nada.
+ */
+const xpRewardSchema = z.object({
+  kind: z.literal('xp'),
+  amount: z.number().int().min(1).max(1_000_000),
+});
+
+/**
  * A recompensa, achatada.
  *
  * ####  POR QUE `kind` + PAYLOAD, E NÃO UMA COLUNA POR TIPO  ####
@@ -624,6 +657,7 @@ export const questRewardSchema = z.discriminatedUnion('kind', [
   pointsRewardSchema,
   vipRewardSchema,
   skinRewardSchema,
+  xpRewardSchema,
 ]);
 
 export type QuestReward = z.infer<typeof questRewardSchema>;

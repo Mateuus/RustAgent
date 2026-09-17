@@ -243,7 +243,10 @@ describe('101 — o passe, sobre um banco na 100', () => {
       .prepare('SELECT id, quest_id, seq, kind, payload FROM quest_rewards ORDER BY seq')
       .all();
 
-    expect(runMigrations(db).map((migration) => migration.id)).toEqual([101]);
+    // A 102 vem junto: ela reconstroi a MESMA tabela para aceitar
+    // o `kind: 'xp'`, e o que este caso guarda e que nenhuma das
+    // duas reconstrucoes perde linha.
+    expect(runMigrations(db).map((migration) => migration.id)).toEqual([101, 102]);
 
     // A 101 RECONSTRÓI `quest_rewards` para abrir o CHECK do `kind`.
     // Recriar tabela com INSERT ... SELECT é onde se perde dado em
@@ -618,7 +621,7 @@ describe('o XP', () => {
 
     h.service.setXpRule(
       season,
-      { source: 'quest.completed', enabled: true, amount: 800, dailyCap: null, label: null },
+      { source: 'quest.reward', enabled: true, amount: 800, dailyCap: null, label: null },
       PANEL,
     );
 
@@ -635,7 +638,7 @@ describe('o XP', () => {
     const quest = h.service.creditXp({
       serverId: SERVER,
       steamId: PLAYER,
-      source: 'quest.completed',
+      source: 'quest.reward',
       units: 1,
       localDay: '2026-10-07',
     });
@@ -695,14 +698,14 @@ describe('o XP', () => {
     h.service.setSeasonState(season.id, 'active', PANEL);
     h.service.setXpRule(
       season.id,
-      { source: 'quest.completed', enabled: true, amount: 1500, dailyCap: null, label: null },
+      { source: 'quest.reward', enabled: true, amount: 1500, dailyCap: null, label: null },
       PANEL,
     );
 
     const credit = h.service.creditXp({
       serverId: SERVER,
       steamId: PLAYER,
-      source: 'quest.completed',
+      source: 'quest.reward',
       units: 2,
       localDay: '2026-10-07',
     });
@@ -756,13 +759,13 @@ describe('o resgate', () => {
     h.service.setTrackCell(season, 2, 'paid', { rewards: [AK], milestone: false }, PANEL);
     h.service.setXpRule(
       season,
-      { source: 'quest.completed', enabled: true, amount: 1000, dailyCap: null, label: null },
+      { source: 'quest.reward', enabled: true, amount: 1000, dailyCap: null, label: null },
       PANEL,
     );
     h.service.creditXp({
       serverId: SERVER,
       steamId: PLAYER,
-      source: 'quest.completed',
+      source: 'quest.reward',
       units: 2,
       localDay: '2026-10-07',
     });
@@ -792,13 +795,13 @@ describe('o resgate', () => {
     h.service.setTrackCell(season, 2, 'paid', { rewards: [AK], milestone: false }, PANEL);
     h.service.setXpRule(
       season,
-      { source: 'quest.completed', enabled: true, amount: 1000, dailyCap: null, label: null },
+      { source: 'quest.reward', enabled: true, amount: 1000, dailyCap: null, label: null },
       PANEL,
     );
     h.service.creditXp({
       serverId: SERVER,
       steamId: PLAYER,
-      source: 'quest.completed',
+      source: 'quest.reward',
       units: 1,
       localDay: '2026-10-07',
     });

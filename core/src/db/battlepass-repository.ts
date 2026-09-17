@@ -373,6 +373,22 @@ export interface CreditXpInput {
   readonly amount: number;
   /** O teto daquela fonte, ou `null` para sem teto. */
   readonly dailyCap: number | null;
+  /**
+   * A chave do evento que pagou este XP. Ausente = não há evento.
+   *
+   * ####  ELA É A IDEMPOTÊNCIA DO XP CONCEDIDO  ####
+   *
+   * O XP de AÇÃO se protege pelo `batchId` do lote, que só entra uma
+   * vez. O XP que uma missão promete não passa por lote nenhum: ele
+   * sai do resgate, e o botão "reentregar" do painel manda o mesmo
+   * resgate de novo. Sem chave, o retry dobra o XP em silêncio.
+   *
+   * O molde é o do `eventId` do ponto de ranking —
+   * `quest:<missão>:<tentativa>:<posição>` — e a gravação é um
+   * INSERT OR IGNORE dentro DESTA transação: quem já está lá não
+   * soma de novo. Ver a migração 102.
+   */
+  readonly eventId?: string;
 }
 
 /** O desfecho de um crédito de XP. */
@@ -384,6 +400,14 @@ export interface XpCredit {
   readonly progress: PlayerProgress;
   /** O nível de antes, para quem quiser avisar "você subiu". */
   readonly levelBefore: number;
+  /**
+   * `false` = este `eventId` já tinha pago, e nada foi somado agora.
+   *
+   * Diferente de `granted === 0` com `applied: true`, que é "o
+   * evento chegou pela primeira vez e o teto do dia estava cheio".
+   * Sempre `true` quando não há evento no caminho.
+   */
+  readonly applied: boolean;
 }
 
 export interface ProgressPage {
@@ -843,14 +867,47 @@ export class BattlePassRepository {
         updatedAt: now,
       };
 
+      // ####  A MARCA DO EVENTO VEM ANTES DE TUDO  ####
+      //
+      // É o `INSERT OR IGNORE` que TESTA a duplicata, e não uma
+      // consulta antes dele: consultar e inserir depois abriria a
+      // corrida entre dois resgates no mesmo instante, que é
+      // justamente o caso que isto existe para cobrir. Mesmo
+      // desenho do `applyEvent` do ranking.
+      if (input.eventId !== undefined && !this.#markEvent(input, now)) {
+        return {
+          granted: 0,
+          capped: 0,
+          progress: before,
+          levelBefore: before.level,
+          applied: false,
+        };
+      }
+
       const wanted = Math.max(0, Math.trunc(input.amount));
       const granted = wanted === 0 ? 0 : this.#allowedBy(input, wanted);
 
       if (granted === 0) {
-        return { granted: 0, capped: wanted, progress: before, levelBefore: before.level };
+        return {
+          granted: 0,
+          capped: wanted,
+          progress: before,
+          levelBefore: before.level,
+          applied: true,
+        };
       }
 
       this.#bumpDaily(input, granted, now);
+
+      if (input.eventId !== undefined) {
+        // A linha do evento nasceu com zero: agora ela diz quanto
+        // entrou de verdade. Quem confere o número do jogador
+        // precisa ver o que o teto deixou passar, e não o que foi
+        // pedido.
+        this.#db
+          .prepare('UPDATE battlepass_xp_events SET xp = @xp WHERE event_id = @event')
+          .run({ xp: granted, event: input.eventId });
+      }
 
       const xp = before.xp + granted;
       const level = levelAt(input.season.xpCurve, input.season.levels, xp);
@@ -880,8 +937,23 @@ export class BattlePassRepository {
         throw new Error('o progresso sumiu logo depois de ser gravado');
       }
 
-      return { granted, capped: wanted - granted, progress: saved, levelBefore: before.level };
+      return {
+        granted,
+        capped: wanted - granted,
+        progress: saved,
+        levelBefore: before.level,
+        applied: true,
+      };
     })();
+  }
+
+  /** Quanto aquele evento pagou. `null` = ele nunca chegou aqui. */
+  xpEvent(eventId: string): { readonly xp: number; readonly at: number } | null {
+    const row = this.#db
+      .prepare('SELECT xp, at FROM battlepass_xp_events WHERE event_id = ?')
+      .get(eventId) as { readonly xp: number; readonly at: number } | undefined;
+
+    return row ?? null;
   }
 
   /** Quanto aquela fonte já rendeu hoje. O teto do §3 se apoia nisto. */
@@ -1323,6 +1395,33 @@ export class BattlePassRepository {
   // ======================================================
   //  Privados
   // ======================================================
+
+  /**
+   * Carimba o evento. `false` = ele já tinha pago.
+   *
+   * O XP entra como zero e é corrigido depois do teto: gravar o
+   * valor PEDIDO aqui faria a linha mentir sobre o que o jogador
+   * recebeu, e ela é a prova que sobra quando alguém desconfia do
+   * número.
+   */
+  #markEvent(input: CreditXpInput, now: number): boolean {
+    return (
+      this.#db
+        .prepare(
+          `INSERT OR IGNORE INTO battlepass_xp_events
+             (event_id, server_id, steam_id, season_id, source, xp, at)
+           VALUES (@event, @server, @steam, @season, @source, 0, @now)`,
+        )
+        .run({
+          event: input.eventId,
+          server: input.serverId,
+          steam: input.steamId,
+          season: input.season.id,
+          source: input.source,
+          now,
+        }).changes > 0
+    );
+  }
 
   /** Quanto daquele crédito o teto deixa passar. */
   #allowedBy(input: CreditXpInput, wanted: number): number {

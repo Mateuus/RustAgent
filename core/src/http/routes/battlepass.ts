@@ -16,6 +16,7 @@
 //      PUT    /battlepass/seasons/:seasonId/track/:level/:lane   a casa
 //      DELETE /battlepass/seasons/:seasonId/track/:level/:lane   esvazia
 //
+//      GET    /battlepass/xp-sources                            o CARDAPIO
 //      GET    /battlepass/seasons/:seasonId/xp-rules            o cardapio ligado
 //      PUT    /battlepass/seasons/:seasonId/xp-rules/:source    liga e precifica
 //      DELETE /battlepass/seasons/:seasonId/xp-rules/:source    tira
@@ -256,6 +257,22 @@ export function registerBattlePassRoutes(app: FastifyInstance, deps: BattlePassR
   // ==========================================================
   //  AS REGRAS DE XP
   // ==========================================================
+
+  // ####  O CARDÁPIO VEM DAQUI, E NÃO DE UMA LISTA NO PAINEL  ####
+  //
+  // Uma constante do lado de lá ofereceria ao admin coisas que o
+  // agente não mede — "saquear caixa" —, ele ligaria, precificaria,
+  // e nada aconteceria. Em silêncio. Foi assim que o ranking
+  // "Madeira" nasceu parado em zero. Ver `battlepass/xp-sources.ts`.
+  //
+  // Sem `:seasonId`: o cardápio é do AGENTE, e a tela precisa dele
+  // antes de a temporada existir — é com ele que o formulário de uma
+  // temporada nova se monta.
+  app.get('/battlepass/xp-sources', async () => {
+    const sources = deps.service.xpSources();
+
+    return { ok: true, count: sources.length, sources };
+  });
 
   app.get('/battlepass/seasons/:seasonId/xp-rules', async (request) => {
     const { seasonId } = seasonParams.parse(request.params);

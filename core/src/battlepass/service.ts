@@ -70,6 +70,8 @@ import type { QuestReward } from '../types/quests.js';
 import type { AuditFilter, BattlePassRepository, ProgressPage } from '../db/battlepass-repository.js';
 import { ApiError } from '../http/error-response.js';
 import { localDayOf } from '../rankings/periods.js';
+import { xpDayKey } from './xp-day.js';
+import { isBatchXpSource, whyNotXpSource, XP_SOURCES, type XpSource } from './xp-sources.js';
 
 /** Quem está mexendo. Vai para o registro. */
 export interface BattlePassActor {
@@ -91,6 +93,20 @@ export interface BattlePassServiceDeps {
    * relógios dariam dois "dia 1" diferentes na mesma tela.
    */
   readonly timeZone?: string | undefined;
+  /**
+   * Em que minuto do dia a diária daquele servidor vira.
+   *
+   * ####  É A RÉGUA DAS MISSÕES, E NÃO UMA SEGUNDA  ####
+   *
+   * O teto do XP é "por dia", e o projeto já decidiu o que é um dia:
+   * `quest_settings.reset_at_minute`, contando dias de CALENDÁRIO
+   * (01 §3.1). Em produção quem satisfaz isto é o
+   * `QuestsRepository.settingsOf`.
+   *
+   * Ausente = meia-noite do fuso do agente. Dois relógios de virada
+   * no mesmo repositório discordariam duas vezes por ano.
+   */
+  readonly resetAtMinuteOf?: (serverId: string) => number;
   /** A temporada ou a trilha mudou: reenviar a carga aos servidores. */
   readonly onChange: () => void;
   /** O que é DAQUELE jogador mudou: reenviar a dele, onde ele estiver. */
@@ -129,6 +145,63 @@ export interface CreditXpResult {
   readonly levelBefore: number;
   /** Por que não entrou nada, quando não entrou. */
   readonly reason: 'ok' | 'no_season' | 'no_rule' | 'disabled' | 'capped';
+}
+
+/** Um jogador do lote, com o delta de 60 s dele. */
+export interface BatchXpPlayer {
+  readonly steamId: string;
+  /** `{ 'ore.sulfur': 1200, 'pvp.kills': 3 }` — sempre DELTAS. */
+  readonly metrics: Readonly<Record<string, number>>;
+}
+
+/** Quem subiu de nível na rodada. */
+export interface XpLevelUp {
+  readonly steamId: string;
+  readonly from: number;
+  readonly to: number;
+}
+
+/** O desfecho de uma rodada inteira do coletor. */
+export interface BatchXpResult {
+  /** `false` = não há temporada no ar ali, e nada foi olhado. */
+  readonly season: boolean;
+  /** O XP que entrou no lote inteiro. */
+  readonly granted: number;
+  /** O que o teto cortou — e que NÃO fica para amanhã. */
+  readonly capped: number;
+  /** Quem recebeu alguma coisa. É por eles que a trilha é reenviada. */
+  readonly touched: readonly string[];
+  readonly levelUps: readonly XpLevelUp[];
+}
+
+/** O XP que um EVENTO concede: a missão diz quanto vale. */
+export interface GrantXpRequest {
+  readonly serverId: string;
+  readonly steamId: string;
+  /** `quest:<missão>:<tentativa>:<posição>`. Estável, e é a chave do retry. */
+  readonly eventId: string;
+  /** A fonte do cardápio. Hoje, sempre `quest.reward`. */
+  readonly source: string;
+  /** O XP prometido. Vem de quem concede, nunca da regra. */
+  readonly amount: number;
+  readonly localDay?: string;
+}
+
+export interface GrantXpResult {
+  readonly granted: number;
+  readonly capped: number;
+  readonly level: number;
+  readonly levelBefore: number;
+  /**
+   * Por que não entrou tudo.
+   *
+   *   ok         entrou
+   *   no_season  não há temporada no ar naquele servidor
+   *   disabled   o admin desligou essa fonte nesta temporada
+   *   capped     o teto do dia já estava cheio
+   *   repeated   este evento já tinha pago (o retry do painel)
+   */
+  readonly reason: 'ok' | 'no_season' | 'disabled' | 'capped' | 'repeated';
 }
 
 /** A resposta da aba Visão geral. */
@@ -170,6 +243,23 @@ export class BattlePassService {
   /** O dia de hoje, `2026-10-07`, no mesmo fuso. */
   dayNow(now: number = Date.now()): string {
     return dayKeyOf(localDayOf(now, this.#deps.timeZone));
+  }
+
+  /**
+   * O dia do TETO naquele servidor.
+   *
+   * É a régua das missões (`reset_at_minute`, dias de calendário),
+   * e não uma segunda: com a virada às 06:00, o que o jogador farma
+   * às 03:00 ainda conta no teto de ontem — nos dois sistemas, pelo
+   * mesmo motivo. Ver `xp-day.ts`.
+   *
+   * Sem a régua configurada vale a meia-noite do fuso do agente,
+   * que é o mesmo resultado quando `reset_at_minute` é zero.
+   */
+  dayFor(serverId: string, now: number = Date.now()): string {
+    const resetAtMinute = this.#deps.resetAtMinuteOf?.(serverId);
+
+    return resetAtMinute === undefined ? this.dayNow(now) : xpDayKey(now, resetAtMinute);
   }
 
   // ======================================================
@@ -380,14 +470,41 @@ export class BattlePassService {
   //  AS REGRAS DE XP
   // ======================================================
 
+  /**
+   * O cardápio: o que o agente sabe medir.
+   *
+   * Servido ao painel, e não escrito nele: o painel que trouxesse a
+   * própria lista ofereceria "saquear caixa" ao admin, que ligaria,
+   * precificaria — e nada aconteceria, em silêncio. Ver
+   * `xp-sources.ts`.
+   */
+  xpSources(): readonly XpSource[] {
+    return XP_SOURCES;
+  }
+
   xpRules(seasonId: number): readonly XpRule[] {
     this.getSeason(seasonId);
 
     return this.#deps.repository.xpRules(seasonId);
   }
 
+  /** @throws ApiError `BATTLEPASS_XP_SOURCE_UNKNOWN` (400). */
   setXpRule(seasonId: number, input: XpRuleInput, actor: BattlePassActor): XpRule {
     const season = this.getSeason(seasonId);
+
+    // ####  A RECUSA É AQUI, E NÃO NA TELA  ####
+    //
+    // O cardápio é uma OFERTA; esta é a porta. Sem ela, um PUT com
+    // a chave errada — do painel velho, do script de alguém —
+    // gravaria uma regra que nunca renderia nada, e o admin passaria
+    // o mês achando que o XP de farm está ligado. É a mesma resposta
+    // que o ranking deu ao `farm.madeira` (`whyNotPluginMetric`).
+    const refusal = whyNotXpSource(input.source);
+
+    if (refusal !== null) {
+      throw new ApiError('BATTLEPASS_XP_SOURCE_UNKNOWN', refusal, 400);
+    }
+
     const rule = this.#deps.repository.setXpRule(seasonId, input);
 
     this.#log(actor, 'xp.rule', `${describeSeason(season)} fonte "${rule.source}"`, {
@@ -443,7 +560,7 @@ export class BattlePassService {
         steamId: request.steamId,
         season,
         source: rule.source,
-        localDay: request.localDay ?? this.dayNow(now),
+        localDay: request.localDay ?? this.dayFor(request.serverId, now),
         amount: rule.amount * Math.max(0, Math.trunc(request.units)),
         dailyCap: rule.dailyCap ?? null,
       },
@@ -461,6 +578,198 @@ export class BattlePassService {
       levelBefore: credit.levelBefore,
       reason: credit.granted === 0 ? 'capped' : 'ok',
     };
+  }
+
+  /**
+   * O XP que um EVENTO concede — hoje, o que uma missão promete.
+   *
+   * ####  O VALOR VEM DE QUEM CONCEDE  ####
+   *
+   * As fontes de ação rendem `regra.amount × ocorrências`, porque
+   * ninguém cadastra o preço de cada pedra. Aqui o número está
+   * escrito na missão e o jogador o LEU antes de aceitar: a regra
+   * decide se aquela fonte vale nesta temporada e qual é o teto do
+   * dia — nunca quanto a missão pagou.
+   *
+   * SEM REGRA CADASTRADA ELE PAGA. É a diferença entre uma torneira
+   * e uma promessa: a torneira que ninguém abriu não pinga, mas uma
+   * missão que anuncia 800 XP na tela e entrega zero é defeito.
+   * Desligar o XP de missão é uma regra `quest.reward` com
+   * `enabled: false` — uma ordem explícita, e não um esquecimento.
+   *
+   * O `eventId` é a proteção do retry: o botão "reentregar" do
+   * painel manda o mesmo, e ele cai no `INSERT OR IGNORE` de
+   * `battlepass_xp_events`, dentro da transação que soma.
+   */
+  grantXp(request: GrantXpRequest, now: number = Date.now()): GrantXpResult {
+    const season = this.activeSeason(request.serverId);
+
+    if (season === null) {
+      return { granted: 0, capped: 0, level: 1, levelBefore: 1, reason: 'no_season' };
+    }
+
+    const rule = this.#deps.repository.xpRule(season.id, request.source);
+    const progress = this.#deps.repository.progressOf(request.serverId, request.steamId, season.id);
+    const levelBefore = progress?.level ?? 1;
+
+    if (rule !== null && !rule.enabled) {
+      return { granted: 0, capped: 0, level: levelBefore, levelBefore, reason: 'disabled' };
+    }
+
+    const credit = this.#deps.repository.creditXp(
+      {
+        serverId: request.serverId,
+        steamId: request.steamId,
+        season,
+        source: request.source,
+        localDay: request.localDay ?? this.dayFor(request.serverId, now),
+        amount: Math.max(0, Math.trunc(request.amount)),
+        dailyCap: rule?.dailyCap ?? null,
+        eventId: request.eventId,
+      },
+      now,
+    );
+
+    if (credit.granted > 0) {
+      this.#deps.onPlayerChange?.(request.serverId, request.steamId);
+    }
+
+    return {
+      granted: credit.granted,
+      capped: credit.capped,
+      level: credit.progress.level,
+      levelBefore: credit.levelBefore,
+      reason: !credit.applied ? 'repeated' : credit.granted === 0 ? 'capped' : 'ok',
+    };
+  }
+
+  /**
+   * O XP de AÇÃO de uma rodada inteira do coletor.
+   *
+   * ####  ELE RODA DENTRO DA TRANSAÇÃO QUE APLICA O LOTE  ####
+   *
+   * O delta de 60 s não tem identificador de ocorrência: chega
+   * `{"pvp.kills": 3}`, e não três mortes (02 §1). A única
+   * idempotência que existe é o `batchId`, e ela vale para o que
+   * acontece DENTRO daquela transação — por isso quem chama é o
+   * `onApplied` do `applyBatch`, e nunca um segundo passo que lê
+   * `player_stats` depois. Ler por fora é o caminho que dobra o XP
+   * numa rodada repetida sem nada acusar.
+   *
+   * ####  O AVISO NÃO SAI DAQUI  ####
+   *
+   * A trilha de quem subiu é reenviada DEPOIS do commit, pelo
+   * coletor, com o `touched`/`levelUps` que este método devolve.
+   * Avisar aqui dentro anunciaria um nível que um rollback logo
+   * desfaria — e a tela do jogador é o último lugar onde se quer
+   * descobrir isso.
+   */
+  creditBatchXp(
+    input: {
+      readonly serverId: string;
+      readonly players: readonly BatchXpPlayer[];
+      /** Ausente = a régua de virada daquele servidor. */
+      readonly localDay?: string;
+    },
+    now: number = Date.now(),
+  ): BatchXpResult {
+    const empty: BatchXpResult = {
+      season: false,
+      granted: 0,
+      capped: 0,
+      touched: [],
+      levelUps: [],
+    };
+    const season = this.activeSeason(input.serverId);
+
+    if (season === null) return empty;
+
+    // As regras de lote, lidas UMA vez: trezentos jogadores vezes
+    // dezenove métricas seriam seis mil consultas por rodada, a cada
+    // minuto, por servidor.
+    const rules = new Map(
+      this.#deps.repository
+        .xpRules(season.id)
+        .filter((rule) => rule.enabled && rule.amount > 0 && isBatchXpSource(rule.source))
+        .map((rule) => [rule.source, rule] as const),
+    );
+
+    if (rules.size === 0) {
+      return { ...empty, season: true };
+    }
+
+    const localDay = input.localDay ?? this.dayFor(input.serverId, now);
+    const touched: string[] = [];
+    const levelUps: XpLevelUp[] = [];
+    let granted = 0;
+    let capped = 0;
+
+    for (const player of input.players) {
+      let got = 0;
+
+      for (const [metric, delta] of Object.entries(player.metrics)) {
+        const rule = rules.get(metric);
+
+        if (rule === undefined) continue;
+
+        const units = Math.max(0, Math.trunc(delta));
+
+        if (units === 0) continue;
+
+        const credit = this.#deps.repository.creditXp(
+          {
+            serverId: input.serverId,
+            steamId: player.steamId,
+            season,
+            source: rule.source,
+            localDay,
+            amount: rule.amount * units,
+            dailyCap: rule.dailyCap ?? null,
+          },
+          now,
+        );
+
+        granted += credit.granted;
+        capped += credit.capped;
+        got += credit.granted;
+
+        if (credit.progress.level > credit.levelBefore) {
+          const up = levelUps.find((item) => item.steamId === player.steamId);
+
+          if (up === undefined) {
+            levelUps.push({
+              steamId: player.steamId,
+              from: credit.levelBefore,
+              to: credit.progress.level,
+            });
+          } else {
+            // Duas métricas do mesmo jogador na mesma rodada: o
+            // aviso é UM, do nível em que ele estava para o em que
+            // ficou. Dois avisos diriam "subiu para o 4" e "subiu
+            // para o 5" na mesma tela.
+            levelUps[levelUps.indexOf(up)] = { ...up, to: credit.progress.level };
+          }
+        }
+      }
+
+      if (got > 0) {
+        touched.push(player.steamId);
+      }
+    }
+
+    return { season: true, granted, capped, touched, levelUps };
+  }
+
+  /**
+   * Reenvia a trilha de quem mudou. Chamado DEPOIS do commit.
+   *
+   * O par deste método é o `creditBatchXp`, que junta os nomes e não
+   * avisa ninguém — ver o porquê lá.
+   */
+  playersChanged(serverId: string, steamIds: readonly string[]): void {
+    for (const steamId of steamIds) {
+      this.#deps.onPlayerChange?.(serverId, steamId);
+    }
   }
 
   // ======================================================

@@ -9345,6 +9345,113 @@ DROP TABLE quest_rewards_100;
 CREATE INDEX idx_quest_rewards_quest ON quest_rewards (quest_id, seq);
 `;
 
+// ------------------------------------------------------------
+//  102 - o XP como recompensa, e a prova de que ele so entra uma vez
+//
+//  ####  POR QUE O CHECK PRECISA ABRIR DE NOVO  ####
+//
+//  A frente B criou `kind: 'xp'` no `questRewardSchema` -- o
+//  contrato COMPARTILHADO, de onde missoes, KOTH e a trilha do passe
+//  tiram a mesma lista de tipos. Sem abrir o CHECK, salvar uma
+//  missao que paga XP volta "CHECK constraint failed": o zod aceita
+//  e o SQLite recusa, e a feature fica completa e inerte. Foi
+//  exatamente o que aconteceu com o tipo `skin` antes da 101.
+//
+//  A forma e a da 101 (e da 097, e da 100): renomear, criar, copiar,
+//  dropar, recriar o indice depois do DROP -- nome de indice e
+//  global no schema, e o RENAME nao o move. O `id` de cada linha e
+//  preservado no `INSERT ... SELECT`: renumerar mudaria a recompensa
+//  para a qual apontam os registros de entrega ja gravados.
+//
+//  `quest_rewards` nao tem dependentes, entao o passo "as
+//  dependentes saem do caminho" das outras nao existe aqui -- fica
+//  dito porque quem copiar este bloco para uma tabela COM
+//  dependentes precisa saber que ele falta (foreign_keys = ON em
+//  database.ts).
+//
+//  ####  E POR QUE UMA TABELA NOVA VEM JUNTO  ####
+//
+//  O XP de acao nasce do delta de 60 s e se protege pelo `batchId`
+//  do lote (02 secao 1.1). O XP de EVENTO -- o que uma missao
+//  promete -- nao passa por lote nenhum: ele sai do resgate, e o
+//  botao "reentregar" do painel manda o mesmo resgate de novo. Sem
+//  chave, o retry dobra o XP em silencio, que e o unico jeito de o
+//  passe errar sem ninguem reclamar.
+//
+//  `battlepass_xp_events` e essa chave, no molde de `stat_events`: o
+//  `event_id` e `quest:<missao>:<tentativa>:<posicao>`, estavel, e a
+//  insercao e um INSERT OR IGNORE DENTRO da transacao que soma o XP.
+//  Quem ja esta la nao soma de novo.
+// ------------------------------------------------------------
+const BATTLEPASS_XP_EVENT_SCHEMA = `
+ALTER TABLE quest_rewards RENAME TO quest_rewards_101;
+
+CREATE TABLE quest_rewards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  quest_id TEXT NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+
+  -- 'xp' entrou aqui: o XP do passe de batalha como recompensa de
+  -- missao (frente B). A missao e a fonte PRIORITARIA de XP, e a
+  -- unica que chega como evento de verdade -- com identificador, e
+  -- idempotente.
+  kind TEXT NOT NULL CHECK (kind IN ('item','coins','kit','points','vip','skin','xp')),
+
+  -- O corpo, conforme o kind, sem repetir o kind dentro.
+  payload TEXT NOT NULL,
+
+  UNIQUE (quest_id, seq)
+);
+
+INSERT INTO quest_rewards (id, quest_id, seq, kind, payload)
+SELECT id, quest_id, seq, kind, payload FROM quest_rewards_101;
+
+DROP TABLE quest_rewards_101;
+
+CREATE INDEX idx_quest_rewards_quest ON quest_rewards (quest_id, seq);
+
+-- ------------------------------------------------------------
+--  O XP que ja foi concedido por um EVENTO.
+--
+--  A tabela existe para uma pergunta so: "este evento ja pagou?".
+--  A resposta e a presenca da linha, e quem pergunta e o INSERT OR
+--  IGNORE -- consultar antes e inserir depois abriria a corrida
+--  entre dois resgates no mesmo instante, que e o caso que isto
+--  existe para cobrir. Mesmo desenho de stat_events.
+--
+--  event_id e a chave PRIMARIA e nasce de quem concede:
+--  'quest:<missao>:<tentativa>:<posicao>' e o molde ja usado pela
+--  carteira e pelo ponto de ranking (quests/rewards.ts). Estavel de
+--  proposito: o retry do painel manda o mesmo, e cai aqui.
+--
+--  Nao ha chave estrangeira para a missao: ela pode ser apagada
+--  depois, e apagar a prova de que o XP saiu faria o retry pagar de
+--  novo. Servidor e temporada ficam guardados como O QUE ACONTECEU,
+--  sem cascata, pela mesma razao de battlepass_audit.
+--
+--  xp e o que ENTROU depois do teto. Zero e informacao: quer dizer
+--  "o evento chegou e o teto do dia ja estava cheio" -- e ele nao
+--  volta amanha.
+-- ------------------------------------------------------------
+CREATE TABLE battlepass_xp_events (
+  event_id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  season_id INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK (source <> ''),
+
+  xp INTEGER NOT NULL DEFAULT 0 CHECK (xp >= 0),
+  at INTEGER NOT NULL
+);
+
+-- "quanto de XP de evento este jogador levou nesta temporada?" -- a
+-- ficha do jogador, e a conferencia de quem desconfia do numero.
+CREATE INDEX idx_battlepass_xp_events_player
+  ON battlepass_xp_events (season_id, server_id, steam_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -9642,6 +9749,12 @@ export const MIGRATIONS: readonly Migration[] = [
   // branch de integracao, e uma migracao a mais e uma chance a mais
   // de colidir id. Ver o cabecalho de QUEST_REWARD_SKIN_SCHEMA.
   { id: 101, name: 'battlepass', sql: `${BATTLEPASS_SCHEMA}\n${QUEST_REWARD_SKIN_SCHEMA}` },
+  // 17/09/2026: o XP do passe -- `quest_rewards.kind` passa a
+  // aceitar 'xp', e o XP concedido por evento ganha a chave que
+  // o impede de sair duas vezes. A 102 estava livre em todas as
+  // branches vivas, conferido antes de usar: id repetido vira uma
+  // migracao PULADA em silencio no merge.
+  { id: 102, name: 'battlepass-xp-reward', sql: BATTLEPASS_XP_EVENT_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

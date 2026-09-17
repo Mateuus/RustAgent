@@ -963,6 +963,12 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
     case 'vip':
       return { text: `VIP ${reward.tier}`, icon: null };
 
+    case 'xp':
+      // "800 XP" sozinho não diz de quê: o jogador tem ponto de
+      // ranking, moeda e agora isto. A palavra "passe" é o que liga
+      // o número à trilha que ele vê no outro menu.
+      return { text: `${reward.amount.toLocaleString('pt-BR')} XP no passe`, icon: null };
+
     case 'skin': {
       // ####  O NOME DA SKIN É O DELA, E NÃO O DO ITEM  ####
       //

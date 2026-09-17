@@ -3005,7 +3005,7 @@ export type QuestObjectiveKind =
   | 'playtime'
   | 'metric';
 
-export type QuestRewardKind = 'item' | 'coins' | 'kit' | 'points' | 'vip' | 'skin';
+export type QuestRewardKind = 'item' | 'coins' | 'kit' | 'points' | 'vip' | 'skin' | 'xp';
 
 export type PlayerQuestStatus = 'active' | 'completed' | 'claimed' | 'abandoned';
 
@@ -3085,7 +3085,16 @@ export type QuestReward =
    * marca e a mesma em toda parte -- e a mesma escolha que o kit fez
    * com o `slug`. `days` nulo = para sempre.
    */
-  | { kind: 'skin'; shortname: string; skinId: string; days: number | null };
+  | { kind: 'skin'; shortname: string; skinId: string; days: number | null }
+  /**
+   * XP do passe de batalha.
+   *
+   * O valor e desta recompensa, e nao da regra da temporada: o
+   * jogador leu "800 XP" na tela da missao antes de aceitar. A
+   * regra da fonte `quest.reward` decide o teto do dia e se o XP
+   * de missao vale naquela temporada.
+   */
+  | { kind: 'xp'; amount: number };
 
 export interface QuestDefinition {
   id: string;

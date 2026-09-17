@@ -39,6 +39,7 @@ export const REWARD_LABELS: Readonly<Record<QuestRewardKind, string>> = {
   points: 'Pontos de ranking',
   vip: 'VIP',
   skin: 'Skin do Workshop',
+  xp: 'XP do passe',
 };
 
 export function blankReward(kind: QuestRewardKind): QuestReward {
@@ -67,6 +68,11 @@ export function blankReward(kind: QuestRewardKind): QuestReward {
       // é o caso normal — é assim que o site a vende, e quem quiser
       // que ela vença escreve quantos dias.
       return { kind, shortname: '', skinId: '', days: null };
+    case 'xp':
+      // Um numero redondo e visivel: o XP de missao e a fonte
+      // PRIORITARIA do passe, e quem publicar sem mexer no campo
+      // paga um valor que da para notar na trilha.
+      return { kind, amount: 100 };
   }
 }
 
@@ -271,6 +277,24 @@ export function rewardFields(
             />
           </Field>
         </>
+      );
+
+    case 'xp':
+      return (
+        // ####  O NÚMERO É DESTA MISSÃO  ####
+        //
+        // Ele não sai da regra de XP da temporada: aquela decide se
+        // a missão dá XP e qual é o teto do dia. É este valor que o
+        // jogador lê na tela antes de aceitar a missão.
+        <Field label="XP do passe" hint="O que ESTA missão paga na trilha.">
+          <input
+            type="number"
+            min={1}
+            className={INPUT}
+            value={reward.amount}
+            onChange={(event) => patch({ amount: Number(event.target.value) } as Partial<QuestReward>)}
+          />
+        </Field>
       );
   }
 }

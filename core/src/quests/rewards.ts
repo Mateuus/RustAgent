@@ -4,7 +4,7 @@
 //
 //  ####  ESTE ARQUIVO NÃO ENTREGA NADA  ####
 //
-//  Ele TRADUZ. As seis recompensas já existem no agente, cada uma
+//  Ele TRADUZ. As sete recompensas já existem no agente, cada uma
 //  com o seu caminho testado, e nenhuma delas é reescrita aqui:
 //
 //    item, vip  ->  StoreService.deliverPlan   (store/service.ts)
@@ -12,6 +12,7 @@
 //    kit        ->  KitsService.claim          (kits/service.ts)
 //    points     ->  o applyEvent do ranking    (db/rankings-repository.ts)
 //    skin       ->  WorkshopCatalog.grantOwnership (game/workshop-catalog.ts)
+//    xp         ->  BattlePassService.grantXp  (battlepass/service.ts)
 //
 //  Escrever uma segunda entrega de item aqui produziria duas
 //  maneiras de pôr uma AK na mão de alguém — e a que tivesse menos
@@ -41,6 +42,7 @@
 //  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §6.
 // ============================================================
 
+import { QUEST_XP_SOURCE } from '../battlepass/xp-sources.js';
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import { buildReference } from '../store/reference.js';
@@ -187,6 +189,37 @@ export interface QuestSkins {
   ): { readonly owned: { readonly expiresAt: number | null } };
 }
 
+/**
+ * O caminho do XP do passe de batalha.
+ *
+ * ####  É A MESMA PORTA DO PASSE, E NÃO UMA SEGUNDA CONTA  ####
+ *
+ * Quem soma XP, aplica o teto do dia e recalcula o nível é o
+ * `BattlePassService` — aqui só se diz quanto a missão prometeu e
+ * qual é a chave do evento. Uma segunda soma escrita neste arquivo
+ * daria dois jeitos de subir de nível, e o que tivesse menos teste
+ * seria o que roda quando o teto está cheio.
+ *
+ * Ausente = este agente não tem passe, e a recompensa vira pendência
+ * no painel em vez de sumir.
+ */
+export interface QuestXp {
+  grantXp(request: {
+    readonly serverId: string;
+    readonly steamId: string;
+    /** `quest:<missão>:<tentativa>:<posição>`. É a chave do retry. */
+    readonly eventId: string;
+    readonly source: string;
+    readonly amount: number;
+  }): {
+    readonly granted: number;
+    readonly capped: number;
+    readonly level: number;
+    readonly levelBefore: number;
+    readonly reason: 'ok' | 'no_season' | 'disabled' | 'capped' | 'repeated';
+  };
+}
+
 export interface QuestRewardDeps {
   readonly logger: Logger;
   /**
@@ -203,6 +236,7 @@ export interface QuestRewardDeps {
   readonly kits?: QuestKits;
   readonly points?: QuestPoints;
   readonly skins?: QuestSkins;
+  readonly xp?: QuestXp;
   readonly now?: () => number;
 }
 
@@ -366,6 +400,8 @@ export class QuestRewardService {
           return this.#points(input, reward, index);
         case 'skin':
           return this.#skin(input, reward, index);
+        case 'xp':
+          return this.#xp(input, reward, index);
       }
     } catch (cause) {
       // O código CRU de quem entrega — `INVENTORY_FULL`,
@@ -691,6 +727,87 @@ export class QuestRewardService {
 
       throw cause;
     }
+  }
+
+  #xp(
+    input: DeliverRewardsInput,
+    reward: Extract<QuestReward, { kind: 'xp' }>,
+    index: number,
+  ): RewardOutcome {
+    if (this.#deps.xp === undefined) {
+      return missing('xp', 'XP do passe de batalha');
+    }
+
+    const scope = input.scope ?? 'quest';
+    const result = this.#deps.xp.grantXp({
+      serverId: input.serverId,
+      steamId: input.steamId,
+      // ####  A MESMA CHAVE DA CARTEIRA E DO PONTO  ####
+      //
+      // (escopo, missão, tentativa, posição) é único e ESTÁVEL: o
+      // botão de reentregar do painel manda o mesmo, e ele cai no
+      // `INSERT OR IGNORE` de `battlepass_xp_events` em vez de somar
+      // de novo. Renumerar a posição quebraria essa proteção
+      // exatamente no caminho do retry.
+      eventId: `${scope}:${input.questId}:${String(input.attempt)}:${String(index)}`,
+      source: QUEST_XP_SOURCE,
+      amount: reward.amount,
+    });
+
+    if (result.reason === 'no_season') {
+      // ####  ZERO EM SILÊNCIO SERIA PIOR  ####
+      //
+      // A missão anunciou "800 XP" na tela e o jogador aceitou por
+      // causa disso. Sem temporada no ar não há onde somar, e isto
+      // precisa virar pendência no painel — com o motivo — para o
+      // admin decidir: publicar a temporada e reentregar, ou tirar a
+      // recompensa da missão.
+      return {
+        kind: 'xp',
+        ok: false,
+        code: 'BATTLEPASS_NO_SEASON',
+        message: 'Não há temporada do passe no ar neste servidor. Um administrador foi avisado.',
+      };
+    }
+
+    if (result.reason === 'repeated') {
+      // Já tinha pago. Como no ponto de ranking, isto NÃO é falha: é
+      // o retry funcionando como devia.
+      return {
+        kind: 'xp',
+        ok: true,
+        code: null,
+        message: 'O XP desta missão já tinha sido somado.',
+      };
+    }
+
+    if (result.granted === 0) {
+      // O teto do dia daquela fonte está cheio, ou o admin desligou
+      // o XP de missão nesta temporada. Os dois são decisão dele, e
+      // nenhum é erro de entrega — o jogador precisa é entender por
+      // que o número não mudou.
+      return {
+        kind: 'xp',
+        ok: true,
+        code: null,
+        message:
+          result.reason === 'disabled'
+            ? 'O XP de missão está desligado nesta temporada.'
+            : 'Você já bateu o teto de XP de missão de hoje. Amanhã ele zera.',
+      };
+    }
+
+    const levelUp =
+      result.level > result.levelBefore ? ` Você chegou ao nível ${String(result.level)}!` : '';
+    const partial =
+      result.capped > 0 ? ` (o teto de hoje cortou ${result.capped.toLocaleString('pt-BR')})` : '';
+
+    return {
+      kind: 'xp',
+      ok: true,
+      code: null,
+      message: `${result.granted.toLocaleString('pt-BR')} XP no passe${partial}.${levelUp}`,
+    };
   }
 
   /**

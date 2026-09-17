@@ -1414,6 +1414,17 @@ async function main(): Promise<void> {
   const battlePass = new BattlePassService({
     repository: battlePassRepository,
     serverIds: () => repository.list().map((server) => server.id),
+    // ####  O DIA DO TETO E O DIA DA DIARIA SAO O MESMO  ####
+    //
+    // "Farm teto de 100 XP por dia" precisa saber quando o dia vira,
+    // e o projeto ja decidiu isso uma vez: `reset_at_minute`, das
+    // missoes, contando dias de CALENDARIO e nao 24 horas. Um
+    // segundo relogio aqui discordaria do outro duas vezes por ano.
+    //
+    // O repositorio de missoes nasce mais abaixo (ele depende do
+    // supervisor); a funcao so e chamada quando ha XP para creditar,
+    // muito depois do boot.
+    resetAtMinuteOf: (serverId) => questsRepository.settingsOf(serverId).resetAtMinute,
     // A carga para o plugin e a tela sao da frente D; enquanto ela
     // nao existe, mudar a trilha nao tem a quem avisar -- e o aviso
     // e uma funcao vazia em vez de um `?.` espalhado pelo servico.
@@ -2620,6 +2631,14 @@ async function main(): Promise<void> {
       // Pelo catálogo, e não pelo repositório, porque é ele que
       // registra e reenvia a posse para quem está online.
       skins: workshopCatalog,
+      // ####  O XP DA MISSÃO É A FONTE PRIORITÁRIA DO PASSE  ####
+      //
+      // E a única que chega como evento de verdade: a chave
+      // `quest:<missão>:<tentativa>:<posição>` faz o botão de
+      // reentregar do painel cair no `INSERT OR IGNORE` em vez de
+      // somar duas vezes. Quem aplica o teto do dia e recalcula o
+      // nível é o passe, e não este arquivo.
+      xp: battlePass,
     })),
     // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
@@ -3756,6 +3775,15 @@ async function main(): Promise<void> {
     // ligados. Lido a cada rodada — criar "Madeira" no painel passa
     // a contar no ciclo seguinte.
     gather: () => gatherShortnamesOf(rankingsRepository.list({ enabledOnly: true })),
+    // ####  O XP DE AÇÃO É CARONA DESTE LOTE  ####
+    //
+    // Não existe evento de "matou" nem de "farmou": o que chega é o
+    // delta acumulado de 60 s, sem identificador de ocorrência. A
+    // única idempotência disponível é o `batchId`, e ela só cobre o
+    // que acontece DENTRO da transação do lote — por isso o passe
+    // entra por aqui, e não como um segundo passo que leria
+    // `player_stats` depois (Docs/BattlePass/02 §1.1).
+    battlePass,
     wipes: detectedWipes,
     players: playersRepository,
     servers: {
