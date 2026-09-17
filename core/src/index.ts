@@ -34,6 +34,12 @@ import { openDatabase } from './db/database.js';
 import { KitsRepository } from './db/kits-repository.js';
 import { LoadoutsRepository } from './db/loadouts-repository.js';
 import { runMigrations } from './db/migrations.js';
+import { backupBeforeMigrations, findMigrationBackup } from './db/backup.js';
+import {
+  UnsupportedSchemaError,
+  assertSchemaSupported,
+  recordMigratedBy,
+} from './db/schema-version.js';
 import { BetterLootJunkRepository } from './db/betterloot-junk-repository.js';
 import { CustomItemsRepository } from './db/custom-items-repository.js';
 import { LootRulesRepository } from './db/loot-rules-repository.js';
@@ -72,6 +78,7 @@ import {
   TEAM_SCREEN_ID,
   withTeamTab,
 } from './game/ui-team-screen.js';
+import { withSkinsTab } from './game/ui-skins-tab.js';
 import {
   createEventsScreenProvider,
   parseEventsScreenId,
@@ -82,7 +89,7 @@ import {
 import { KothService } from './game/koth.js';
 import { KothScheduler } from './game/koth-scheduler.js';
 import { KothArenasRepository, KothSettingsRepository } from './db/koth-arenas-repository.js';
-import { WorkshopAccessRepository } from './db/workshop-access-repository.js';
+import { WorkshopOwnedRepository } from './db/workshop-owned-repository.js';
 import { WorkshopSkinsRepository } from './db/workshop-repository.js';
 import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
@@ -170,6 +177,8 @@ import { SiteClient } from './site/client.js';
 import { SiteBeacon } from './site/beacon.js';
 import { PurchaseSettler } from './store/settle.js';
 import { SiteDeliveries } from './site/deliveries.js';
+import { createSkinDeliveryHandlers } from './site/skin-deliveries.js';
+import { SkinsSiteMirror } from './site/skins-mirror.js';
 import { SiteCommands } from './site/commands.js';
 import { SiteConfig } from './site/config.js';
 import {
@@ -289,9 +298,45 @@ async function main(): Promise<void> {
 
   // ---- 2. banco --------------------------------------------
   const db = openDatabase({ file: agent.paths.dbPath, logger });
+
+  // ####  A TRAVA, O BACKUP E SÓ ENTÃO AS MIGRAÇÕES  ####
+  //
+  // As três peças existiam desde o primeiro commit, mas o boot só
+  // chamava a última: um agente velho abria um banco novo sem
+  // reclamar, e uma migração rodava sem cópia de antes. Foi assim
+  // que a 097 (pulada entre branches) virou armadilha para os
+  // agentes das outras worktrees, em 17/09/2026.
+  //
+  // A ordem importa: a recusa vem antes de qualquer escrita, e o
+  // backup antes da primeira migração.
+  try {
+    assertSchemaSupported(db, {
+      file: agent.paths.dbPath,
+      agentVersion: VERSION,
+      findBackup: (schemaVersion) => findMigrationBackup(agent.paths.dbPath, schemaVersion),
+      onRenamed: (migration) => {
+        logger.warn(
+          { id: migration.id, applied: migration.appliedName, known: migration.knownName },
+          'migração aplicada com nome diferente do que este agente conhece — confira se não é colisão de id entre branches',
+        );
+      },
+    });
+  } catch (error) {
+    if (error instanceof UnsupportedSchemaError) {
+      db.close();
+      console.error(`[RustAgent] banco recusado:\n\n${error.message}\n`);
+      process.exit(1);
+    }
+
+    throw error;
+  }
+
+  await backupBeforeMigrations({ db, file: agent.paths.dbPath, logger });
+
   const applied = runMigrations(db, logger);
 
   if (applied.length > 0) {
+    recordMigratedBy(db, VERSION, Date.now());
     logger.info({ count: applied.length }, 'migrações aplicadas');
   }
 
@@ -748,6 +793,13 @@ async function main(): Promise<void> {
       // `void` com o erro tratado dentro: o gancho de presença não
       // espera ninguém.
       void questCollector?.onPlayerJoined(serverId, steamIds);
+
+      // ####  A POSSE DE SKINS DELE, NA HORA  ####
+      //
+      // O menu de skins mostra cadeado no que ele nao tem; sem a
+      // posse na memoria do plugin, o menu diz "sincronizando" ate
+      // alguem mexer nela. Ver game/workshop.ts.
+      workshopService?.handlePlayersJoined(serverId, steamIds);
     },
   });
 
@@ -1314,6 +1366,42 @@ async function main(): Promise<void> {
   // pareamentos.
   const siteDeliveriesRepository = new SiteDeliveriesRepository(db);
 
+  // O catalogo de skins do Steam Workshop. Global, como os itens
+  // custom: uma skin vale na rede toda, e a juncao diz em que
+  // servidores ela desce. Ver db/workshop-repository.ts.
+  const workshopSkins = new WorkshopSkinsRepository(db);
+  // Quem possui cada skin (a posse vale na rede inteira), e o
+  // registro de tudo que mudou no modulo. Ver
+  // db/workshop-owned-repository.ts.
+  const workshopOwned = new WorkshopOwnedRepository(db);
+  // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
+  const workshopLookup = createWorkshopLookup();
+  // As regras do cadastro e da posse, as MESMAS para o painel, para
+  // o /skin add e /skin give do jogo e para a entrega do site. O
+  // reenvio da carga e avisado ao servico e ao espelho do site, que
+  // nascem mais abaixo -- dai o `?.`.
+  //
+  // Mora ANTES das filas de entrega porque a entrega `skin` passa
+  // por ele.
+  let skinsSiteMirror: SkinsSiteMirror | null = null;
+  const workshopCatalog = new WorkshopCatalog({
+    skins: workshopSkins,
+    owned: workshopOwned,
+    items: itemsRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    lookup: workshopLookup,
+    onChange: () => {
+      workshopService?.handleCatalogChanged();
+      skinsSiteMirror?.notifyChanged();
+    },
+    // A posse de UM jogador mudou: so a dele desce, e so onde ele
+    // estiver online.
+    onOwnershipChange: (steamId) => workshopService?.handleOwnershipChanged(steamId),
+  });
+  // A skin vendida ou sorteada no site vira posse pela MESMA porta do
+  // painel. Ver site/skin-deliveries.ts.
+  const skinDeliveries = createSkinDeliveryHandlers({ catalog: workshopCatalog, audit: workshopOwned });
+
   for (const [id, client] of siteClients) {
     if (!siteWallets.has(id)) {
       // Sem token não há como puxar fila: a rota é autenticada.
@@ -1344,6 +1432,10 @@ async function main(): Promise<void> {
                 // o site (estorno, chargeback, ban ou o prazo dele).
                 await vips.revoke(steamId, tier, 'site');
               },
+        // A posse de skin: nao passa pelo `deliverPlan` nem espera o
+        // jogador (Docs/OrigemZWorkshop/04 §3).
+        grantSkin: skinDeliveries.grantSkin,
+        revokeSkin: skinDeliveries.revokeSkin,
         logger,
         pollMs: agent.site.deliveryPollMs,
       }),
@@ -1431,6 +1523,27 @@ async function main(): Promise<void> {
 
   itemsSiteMirror?.start();
 
+  // ####  O CATALOGO DE SKINS, PARA A VITRINE DO SITE  ####
+  //
+  // O retrato e da REDE, e vai pelo mesmo snapshot em todos os
+  // pareamentos com token; cada um pergunta a `version` antes. O
+  // `servers` de cada skin viaja com o id NO SITE. Enquanto o site
+  // nao tiver a rota, o 404 fica quieto. Ver site/skins-mirror.ts e
+  // Docs/OrigemZWorkshop/04 §2.
+  skinsSiteMirror =
+    siteWallets.size === 0
+      ? null
+      : new SkinsSiteMirror({
+          clients: new Map([...siteClients].filter(([id]) => siteWallets.has(id))),
+          skins: workshopSkins,
+          items: itemsRepository,
+          siteServerIdOf: (localServerId) =>
+            servers.find((server) => server.id === localServerId)?.site?.serverId ?? null,
+          logger,
+        });
+
+  skinsSiteMirror?.start();
+
   // O que a tela de diagnóstico lê. Um mapa por servidor PAREADO:
   // "a loja parou" quase sempre é um servidor só, e uma resposta
   // agregada esconderia qual.
@@ -1469,26 +1582,6 @@ async function main(): Promise<void> {
   // O modo streamer. Da REDE, e não de um servidor: quem transmite
   // é a pessoa. Ver types/streamer.ts.
   const streamerRepository = new StreamerRepository(db);
-  // O catalogo de skins do Steam Workshop. Global, como os itens
-  // custom: uma skin vale na rede toda, e a juncao diz em que
-  // servidores ela desce. Ver db/workshop-repository.ts.
-  const workshopSkins = new WorkshopSkinsRepository(db);
-  // Quem pode usar cada skin fora da permissao, e o registro de tudo
-  // que mudou no modulo. Ver db/workshop-access-repository.ts.
-  const workshopAccess = new WorkshopAccessRepository(db);
-  // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
-  const workshopLookup = createWorkshopLookup();
-  // As regras do cadastro, as MESMAS para o painel e para o /skin add
-  // do jogo. O reenvio da carga e avisado ao servico, que nasce mais
-  // abaixo -- dai o `?.`.
-  const workshopCatalog = new WorkshopCatalog({
-    skins: workshopSkins,
-    access: workshopAccess,
-    items: itemsRepository,
-    serverIds: () => repository.list().map((server) => server.id),
-    lookup: workshopLookup,
-    onChange: () => workshopService?.handleCatalogChanged(),
-  });
 
   /**
    * Quem pediu silêncio no chat enquanto transmite.
@@ -1759,6 +1852,35 @@ async function main(): Promise<void> {
     logger.info(
       { uiDocument: stored.slug },
       'a aba EQUIPE entrou neste menu: é onde o jogador vê e administra a equipe dele',
+    );
+  }
+
+  // ####  E A ABA SKINS, PELA MESMA RAZAO  ####
+  //
+  // O menu gravado antes da frente F do OrigemZWorkshop não tem por
+  // onde chegar ao menu de skins. A edição é um botão só, logo
+  // depois de KITS, copiado do vizinho — sem tela, porque quem
+  // desenha o menu de skins é o plugin. Roda a cada boot e é
+  // idempotente: o marcador é o próprio botão. Ver
+  // game/ui-skins-tab.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withSkinsTab(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'a aba SKINS entrou neste menu: ela abre o menu de skins do OrigemZWorkshop',
     );
   }
 
@@ -2322,14 +2444,20 @@ async function main(): Promise<void> {
   // para o OrigemZWorkshop nao ter uma segunda copia dela.
   workshopService = new WorkshopService({
     skins: workshopSkins,
-    access: workshopAccess,
+    owned: workshopOwned,
     catalog: workshopCatalog,
     meta,
     streamers: streamerRepository,
     servers: {
       ids: () => repository.list().map((server) => server.id),
       contextOf: (serverId) => supervisor.contextOf(serverId),
+      // Quem a varredura de presenca deixou com sessao aberta. A posse
+      // so desce para quem esta la; quem entra recebe no onJoined.
+      onlineOf: (serverId) => playersRepository.openSessions(serverId).map((row) => row.steamId),
     },
+    // O texto do cadeado do menu de skins (Docs/OrigemZWorkshop/03 §5).
+    // Sem a variavel, o campo nao desce e o plugin usa o texto padrao.
+    storeUrl: process.env.WORKSHOP_STORE_URL ?? null,
     logger,
   });
 
@@ -2337,7 +2465,7 @@ async function main(): Promise<void> {
   // o que cada plugin tem, e o dedup diria "nao mudou nada" para
   // todos. Quem estiver sem RCON e pulado e reenviado na conexao.
   void workshopService.syncAll('startup');
-  // O relogio dos acessos com prazo. Ele tambem registra o que
+  // O relogio das posses com prazo. Ele tambem registra o que
   // venceu enquanto o agente estava desligado.
   workshopService.scheduleExpiry();
 
@@ -4104,7 +4232,7 @@ async function main(): Promise<void> {
     },
     workshop: {
       repository: workshopSkins,
-      access: workshopAccess,
+      owned: workshopOwned,
       catalog: workshopCatalog,
       lookup: workshopLookup,
       items: itemsRepository,
@@ -4292,6 +4420,7 @@ async function main(): Promise<void> {
 
         catalogMirror?.stop();
         vipSiteMirror?.stop();
+        skinsSiteMirror?.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de

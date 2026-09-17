@@ -8009,6 +8009,552 @@ CREATE INDEX idx_workshop_audit_steam ON workshop_audit (steam_id, at DESC);
 `;
 
 // ------------------------------------------------------------
+//  097 — a skin vira POSSE do jogador
+//
+//  Decisão do dono em 17/09/2026 (Docs/OrigemZWorkshop/02 §4): o
+//  site vende e sorteia skins, e quem libera uma skin passa a ser a
+//  POSSE do jogador ou a marca "liberada para todos". Saem as
+//  coleções, a permissão por skin e o acesso por grupo do Oxide.
+//
+//  ####  POR QUE 097, DEPOIS DA 098 E DA 099  ####
+//
+//  Ela foi reservada para esta frente quando a 098 nasceu (ver o
+//  comentário na lista lá embaixo), e o runner aplica todo id
+//  AUSENTE de `schema_migrations`, em qualquer ordem. Num banco que
+//  já tem a 098 e a 099, ela roda sozinha; num banco novo, roda
+//  entre a 096 e a 098.
+//
+//  ####  O GUARDA DE SCHEMA SÓ PEGA ESTA A PARTIR DESTA BRANCH  ####
+//
+//  Até aqui o `assertSchemaSupported` nem era chamado no boot, e só
+//  comparava o MAIOR id. Agora o boot o chama e ele recusa qualquer
+//  id aplicado que o binário não conheça. Um agente ANTIGO, sem
+//  essa correção, ainda abre um banco com a 097 sem reclamar e
+//  quebra na primeira consulta a `workshop_grants`: quem volta
+//  binário para antes desta branch tem de voltar o banco junto (o
+//  instantâneo de antes dela fica na pasta de backups).
+//
+//  ####  É FUNÇÃO, E NÃO SQL PURO  ####
+//
+//  Três coisas desta migração não cabem num texto fixo:
+//
+//    1. a expansão de coleção: um acesso a coleção vira uma posse
+//       por skin, e duas origens para o mesmo par se FUNDEM pela
+//       regra do 02 §4.2 (permanente vence; entre dois prazos, o
+//       maior) — escrita aqui, e não importada do repositório: o
+//       repositório pode mudar amanhã, e uma migração não;
+//    2. a auditoria do que foi descartado, com o detalhe em JSON;
+//    3. a contagem final no log, para o dono conferir.
+//
+//  O SQL de cada passo continua em texto, com comentário ASCII sem
+//  acento e sem crase (ver a nota da 095).
+//
+//  ####  A ORDEM DOS PASSOS, E POR QUÊ  ####
+//
+//  Com `foreign_keys = ON` (database.ts), DROP de uma tabela
+//  referenciada apaga em cascata o que aponta para ela. Por isso:
+//
+//    a. tudo que precisa ser lido é lido ANTES de qualquer DROP;
+//    b. `workshop_grants` cai primeiro (ela aponta para as outras);
+//    c. a junção de servidor vai para uma tabela sem FK, como na
+//       096, antes de a tabela de skins ser trocada;
+//    d. `workshop_owned_skins` nasce DEPOIS da tabela nova de skins:
+//       criada antes, o RENAME da velha reescreveria a FK dela para
+//       apontar para a tabela que vai ser dropada.
+// ------------------------------------------------------------
+
+/** O que a 097 precisa ler da 096 antes de derrubar as tabelas. */
+interface Migration097Skin {
+  readonly id: number;
+  readonly label: string;
+  readonly shortname: string;
+  readonly permission: string | null;
+  readonly collection_id: number | null;
+}
+
+interface Migration097Collection {
+  readonly id: number;
+  readonly slug: string;
+  readonly label: string;
+  readonly permission: string | null;
+  readonly open_to_all: number;
+  readonly enabled: number;
+}
+
+interface Migration097Grant {
+  readonly id: number;
+  readonly subject_type: string;
+  readonly subject: string;
+  readonly target_type: string;
+  readonly skin_ref: number | null;
+  readonly collection_ref: number | null;
+  readonly expires_at: number | null;
+  readonly note: string;
+  readonly created_by: string | null;
+  readonly created_at: number;
+}
+
+/** Uma posse montada em memória, antes de existir a tabela. */
+interface Migration097Owned {
+  readonly steamId: string;
+  readonly skinRef: number;
+  expiresAt: number | null;
+  note: string | null;
+  createdBy: string;
+  createdAt: number;
+  /** De quais acessos da 096 ela veio. Vai para o log. */
+  readonly grants: number[];
+}
+
+/** A mesma régua do CHECK da tabela nova. */
+const MIGRATION_097_STEAM_ID = /^7656[0-9]{13}$/;
+
+const WORKSHOP_097_DROP_GRANTS = `
+-- Os acessos ja foram lidos. Ela cai primeiro porque aponta para
+-- as skins e para as colecoes.
+DROP TABLE workshop_grants;
+`;
+
+const WORKSHOP_097_AUDIT = `
+-- O registro ganha a origem 'site': a entrega do site grava aqui
+-- (site.delivered, owned.revoke com o sourceRef). CHECK nao se
+-- altera no SQLite; a tabela nao tem dependentes, entao e o
+-- caminho oficial: renomear, criar, copiar, dropar.
+ALTER TABLE workshop_audit RENAME TO workshop_audit_096;
+
+CREATE TABLE workshop_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('panel', 'game', 'system', 'site')),
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  server_id TEXT,
+  steam_id TEXT,
+  detail TEXT NOT NULL DEFAULT '{}'
+);
+
+INSERT INTO workshop_audit (id, at, actor, source, action, target, server_id, steam_id, detail)
+SELECT id, at, actor, source, action, target, server_id, steam_id, detail
+  FROM workshop_audit_096;
+
+DROP TABLE workshop_audit_096;
+
+CREATE INDEX idx_workshop_audit_at ON workshop_audit (at DESC);
+CREATE INDEX idx_workshop_audit_steam ON workshop_audit (steam_id, at DESC);
+`;
+
+const WORKSHOP_097_SKINS = `
+-- A juncao sai do caminho, sem FK, como na 096.
+CREATE TABLE workshop_skin_servers_097 (
+  workshop_skin_id INTEGER NOT NULL,
+  server_id TEXT NOT NULL
+);
+
+INSERT INTO workshop_skin_servers_097 (workshop_skin_id, server_id)
+SELECT workshop_skin_id, server_id FROM workshop_skin_servers;
+
+DROP TABLE workshop_skin_servers;
+
+ALTER TABLE workshop_skins RENAME TO workshop_skins_096;
+
+-- Sem permission e sem collection_id. Ganha o que o menu de skins
+-- mostra: descricao, raridade e ordem na grade.
+--
+-- A categoria NAO vira coluna: ela e do jogo (ItemDefinition), e o
+-- plugin a resolve. Quem precisar dela aqui le o espelho items.
+CREATE TABLE workshop_skins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  label TEXT NOT NULL,
+  shortname TEXT NOT NULL,
+  skin_id TEXT NOT NULL CHECK (skin_id <> '0' AND skin_id <> ''),
+
+  -- O texto do painel de detalhe do menu. O teto de 280 caracteres
+  -- e do zod; aqui so se recusa o vazio, que e o mesmo que nulo.
+  description TEXT CHECK (description IS NULL OR description <> ''),
+
+  -- A cor da borda e o rotulo no menu. Nulo = sem raridade.
+  rarity TEXT CHECK (rarity IS NULL OR rarity IN ('common', 'uncommon', 'rare', 'epic', 'legendary')),
+
+  -- A ordem na grade: menor primeiro, empate pelo nome.
+  sort_order INTEGER NOT NULL DEFAULT 0,
+
+  -- 1 = skin da casa: qualquer jogador aplica, sem posse.
+  open_to_all INTEGER NOT NULL DEFAULT 0 CHECK (open_to_all IN (0, 1)),
+
+  hide_in_streamer INTEGER NOT NULL DEFAULT 1 CHECK (hide_in_streamer IN (0, 1)),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  source TEXT NOT NULL DEFAULT 'panel' CHECK (source IN ('panel', 'game')),
+  created_by TEXT,
+
+  workshop_title TEXT,
+  preview_url TEXT,
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- A skin de uma colecao LIGADA e liberada para todos continua
+-- gratis: o que era de todo mundo nao pode virar cadeado no dia
+-- seguinte. Colecao desligada nao liberava nada no jogo (o push so
+-- levava as ligadas), entao ela nao propaga.
+INSERT INTO workshop_skins
+  (id, label, shortname, skin_id, description, rarity, sort_order, open_to_all,
+   hide_in_streamer, enabled, source, created_by, workshop_title, preview_url,
+   created_at, updated_at)
+SELECT s.id, s.label, s.shortname, s.skin_id, NULL, NULL, 0,
+       CASE WHEN s.open_to_all = 1 THEN 1
+            WHEN c.id IS NOT NULL AND c.open_to_all = 1 AND c.enabled = 1 THEN 1
+            ELSE 0 END,
+       s.hide_in_streamer, s.enabled, s.source, s.created_by, s.workshop_title, s.preview_url,
+       s.created_at, s.updated_at
+  FROM workshop_skins_096 s
+  LEFT JOIN workshop_collections c ON c.id = s.collection_id;
+
+DROP TABLE workshop_skins_096;
+DROP TABLE workshop_collections;
+
+CREATE UNIQUE INDEX idx_workshop_skins_mark ON workshop_skins (shortname, skin_id);
+
+CREATE TABLE workshop_skin_servers (
+  workshop_skin_id INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  PRIMARY KEY (workshop_skin_id, server_id)
+);
+
+INSERT OR IGNORE INTO workshop_skin_servers (workshop_skin_id, server_id)
+SELECT workshop_skin_id, server_id FROM workshop_skin_servers_097;
+
+DROP TABLE workshop_skin_servers_097;
+
+CREATE INDEX idx_workshop_skin_servers_server ON workshop_skin_servers (server_id);
+
+-- ------------------------------------------------------------
+--  A posse. Uma linha por (jogador, skin): dar de novo mexe no
+--  prazo da que existe (a regra mora no repositorio, numa funcao
+--  so). Sem server_id: a posse vale na rede inteira, e onde a skin
+--  aparece continua sendo a juncao acima.
+--
+--  expires_at NULL = permanente. Vencida NAO e apagada: a ficha
+--  mostra "venceu em", e dar de novo conta o prazo a partir de
+--  agora.
+--
+--  source e source_ref guardam a ULTIMA escrita, como rastro. A
+--  idempotencia da entrega do site e da reserva em site_deliveries,
+--  e nao destas colunas.
+-- ------------------------------------------------------------
+CREATE TABLE workshop_owned_skins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  steam_id TEXT NOT NULL CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17),
+  skin_ref INTEGER NOT NULL REFERENCES workshop_skins(id) ON DELETE CASCADE,
+  expires_at INTEGER,
+  source TEXT NOT NULL CHECK (source IN ('site', 'panel', 'game', 'system', 'migration')),
+  source_ref TEXT,
+  note TEXT,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (steam_id, skin_ref)
+);
+
+CREATE INDEX idx_workshop_owned_steam ON workshop_owned_skins (steam_id);
+
+-- A pergunta do relogio de vencimento: "qual e o proximo prazo?".
+CREATE INDEX idx_workshop_owned_expiry ON workshop_owned_skins (expires_at)
+  WHERE expires_at IS NOT NULL;
+
+-- A pergunta da tela: "quem tem esta skin?".
+CREATE INDEX idx_workshop_owned_skin ON workshop_owned_skins (skin_ref);
+`;
+
+const WORKSHOP_097_SITE_DELIVERIES = `
+-- A fila do site ganha skin e skin_revoke. Mesmo caminho da 038, e
+-- as linhas antigas passam inteiras: sao o comprovante de entregas
+-- ja confirmadas.
+ALTER TABLE site_deliveries RENAME TO site_deliveries_096;
+
+CREATE TABLE site_deliveries (
+  id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  -- vip_revoke e skin_revoke nao entregam nada: eles TIRAM.
+  kind TEXT NOT NULL
+    CHECK (kind IN ('item', 'kit', 'vip', 'vehicle', 'vip_revoke', 'skin', 'skin_revoke')),
+
+  payload TEXT NOT NULL,
+  source_ref TEXT,
+
+  state TEXT NOT NULL
+    CHECK (state IN ('reserved', 'delivered', 'failed', 'indeterminate', 'expired')),
+
+  reason TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+
+  reserved_at INTEGER NOT NULL,
+  acked_at    INTEGER,
+  updated_at  INTEGER NOT NULL
+);
+
+INSERT INTO site_deliveries
+  (id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at)
+SELECT
+   id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at
+  FROM site_deliveries_096;
+
+DROP TABLE site_deliveries_096;
+
+CREATE INDEX idx_site_deliveries_open ON site_deliveries (updated_at DESC)
+  WHERE acked_at IS NULL;
+
+CREATE INDEX idx_site_deliveries_player ON site_deliveries (steam_id, reserved_at DESC);
+`;
+
+/**
+ * A 097 inteira. Ver o cabeçalho logo acima.
+ *
+ * Exportada para o script de contagem de produção e para o teste
+ * poderem nomeá-la sem procurar pelo id na lista.
+ */
+export function migrateWorkshopOwnedSkins(db: AgentDatabase, logger?: Logger): void {
+  const now = Date.now();
+
+  // ---- a. ler tudo antes de derrubar qualquer coisa ----------
+  const skins = db
+    .prepare('SELECT id, label, shortname, permission, collection_id FROM workshop_skins')
+    .all() as Migration097Skin[];
+  const collections = db
+    .prepare('SELECT id, slug, label, permission, open_to_all, enabled FROM workshop_collections')
+    .all() as Migration097Collection[];
+  const grants = db
+    .prepare('SELECT * FROM workshop_grants ORDER BY id ASC')
+    .all() as Migration097Grant[];
+
+  const skinById = new Map(skins.map((skin) => [skin.id, skin]));
+  const collectionById = new Map(collections.map((collection) => [collection.id, collection]));
+  const skinsOfCollection = new Map<number, number[]>();
+
+  for (const skin of skins) {
+    if (skin.collection_id === null) continue;
+
+    const list = skinsOfCollection.get(skin.collection_id);
+
+    if (list === undefined) skinsOfCollection.set(skin.collection_id, [skin.id]);
+    else list.push(skin.id);
+  }
+
+  const describeSkin = (id: number): string => {
+    const skin = skinById.get(id);
+
+    return skin === undefined ? `skin #${String(id)}` : `skin #${String(id)} "${skin.label}" (${skin.shortname})`;
+  };
+
+  const describeCollection = (id: number): string => {
+    const collection = collectionById.get(id);
+
+    return collection === undefined ? `coleção #${String(id)}` : `coleção "${collection.slug}"`;
+  };
+
+  const audits: { action: string; target: string; steamId: string | null; detail: Record<string, unknown> }[] = [];
+  const owned = new Map<string, Migration097Owned>();
+
+  /** A regra do 02 §4.2, na forma que a migração precisa: fundir. */
+  const merge = (steamId: string, skinRef: number, grant: Migration097Grant): void => {
+    const key = `${steamId}:${String(skinRef)}`;
+    const current = owned.get(key);
+    const note = grant.note.trim() === '' ? null : grant.note.trim();
+
+    if (current === undefined) {
+      owned.set(key, {
+        steamId,
+        skinRef,
+        expiresAt: grant.expires_at,
+        note,
+        createdBy: grant.created_by ?? 'sistema',
+        createdAt: grant.created_at,
+        grants: [grant.id],
+      });
+
+      return;
+    }
+
+    current.grants.push(grant.id);
+    current.expiresAt =
+      current.expiresAt === null || grant.expires_at === null
+        ? null
+        : Math.max(current.expiresAt, grant.expires_at);
+    current.createdAt = Math.min(current.createdAt, grant.created_at);
+    current.note = current.note ?? note;
+  };
+
+  let droppedGroup = 0;
+  let droppedInvalid = 0;
+  let fromCollections = 0;
+
+  for (const grant of grants) {
+    const isSkin = grant.target_type === 'skin' && grant.skin_ref !== null;
+    const target = isSkin
+      ? describeSkin(grant.skin_ref ?? 0)
+      : describeCollection(grant.collection_ref ?? 0);
+    const detail = {
+      grantId: grant.id,
+      subjectType: grant.subject_type,
+      subject: grant.subject,
+      targetType: grant.target_type,
+      targetId: isSkin ? grant.skin_ref : grant.collection_ref,
+      expiresAt: grant.expires_at,
+      note: grant.note,
+      createdBy: grant.created_by,
+      createdAt: grant.created_at,
+    };
+
+    // ####  ACESSO DE GRUPO: DESCARTADO, E REGISTRADO  ####
+    //
+    // É a linha que responde "quem tinha acesso pelo grupo vip?" no
+    // dia seguinte. Uma por acesso, com o alvo legível.
+    if (grant.subject_type !== 'player') {
+      droppedGroup += 1;
+      audits.push({ action: 'migration.group-grant-dropped', target, steamId: null, detail });
+      continue;
+    }
+
+    // O zod da 096 já exigia SteamID64; isto pega linha mexida à mão,
+    // que o CHECK da tabela nova recusaria e derrubaria a migração.
+    if (!MIGRATION_097_STEAM_ID.test(grant.subject)) {
+      droppedInvalid += 1;
+      audits.push({ action: 'migration.invalid-grant-dropped', target, steamId: null, detail });
+      continue;
+    }
+
+    if (isSkin) {
+      merge(grant.subject, grant.skin_ref ?? 0, grant);
+      continue;
+    }
+
+    // ####  ACESSO A COLEÇÃO: UMA POSSE POR SKIN DELA  ####
+    const members = skinsOfCollection.get(grant.collection_ref ?? 0) ?? [];
+
+    fromCollections += 1;
+
+    for (const skinRef of members) {
+      merge(grant.subject, skinRef, grant);
+    }
+
+    // Coleção vazia não gera posse nenhuma, e isso também precisa
+    // estar escrito em algum lugar.
+    audits.push({
+      action: 'migration.collection-grant-expanded',
+      target,
+      steamId: grant.subject,
+      detail: { ...detail, skins: members },
+    });
+  }
+
+  // ####  PERMISSÃO: UMA LINHA POR PERMISSÃO DISTINTA  ####
+  const permissions = new Map<string, { skins: number[]; collections: string[] }>();
+
+  const notePermission = (permission: string | null, add: (entry: { skins: number[]; collections: string[] }) => void) => {
+    if (permission === null || permission.trim() === '') return;
+
+    const key = permission.trim();
+    let entry = permissions.get(key);
+
+    if (entry === undefined) {
+      entry = { skins: [], collections: [] };
+      permissions.set(key, entry);
+    }
+
+    add(entry);
+  };
+
+  for (const skin of skins) notePermission(skin.permission, (entry) => entry.skins.push(skin.id));
+  for (const collection of collections) {
+    notePermission(collection.permission, (entry) => entry.collections.push(collection.slug));
+  }
+
+  for (const [permission, users] of permissions) {
+    audits.push({ action: 'migration.permission-dropped', target: permission, steamId: null, detail: users });
+  }
+
+  // A coleção some inteira: o registro guarda o que ela era.
+  for (const collection of collections) {
+    audits.push({
+      action: 'migration.collection-dropped',
+      target: `coleção "${collection.slug}"`,
+      steamId: null,
+      detail: {
+        collectionId: collection.id,
+        label: collection.label,
+        permission: collection.permission,
+        openToAll: collection.open_to_all === 1,
+        enabled: collection.enabled === 1,
+        skins: skinsOfCollection.get(collection.id) ?? [],
+        // A regra do SQL da 097: só a ligada e aberta propaga.
+        openToAllPropagated: collection.open_to_all === 1 && collection.enabled === 1,
+      },
+    });
+  }
+
+  // ---- b/c/d. as tabelas --------------------------------------
+  db.exec(WORKSHOP_097_DROP_GRANTS);
+  db.exec(WORKSHOP_097_AUDIT);
+  db.exec(WORKSHOP_097_SKINS);
+  db.exec(WORKSHOP_097_SITE_DELIVERIES);
+
+  const insertOwned = db.prepare(
+    `INSERT INTO workshop_owned_skins
+       (steam_id, skin_ref, expires_at, source, source_ref, note, created_by, created_at, updated_at)
+     VALUES (@steam_id, @skin_ref, @expires_at, 'migration', NULL, @note, @created_by, @created_at, @now)`,
+  );
+
+  for (const row of owned.values()) {
+    insertOwned.run({
+      steam_id: row.steamId,
+      skin_ref: row.skinRef,
+      expires_at: row.expiresAt,
+      note: row.note,
+      created_by: row.createdBy,
+      created_at: row.createdAt,
+      now,
+    });
+  }
+
+  const summary = {
+    grants: grants.length,
+    owned: owned.size,
+    collectionGrantsExpanded: fromCollections,
+    groupGrantsDropped: droppedGroup,
+    invalidGrantsDropped: droppedInvalid,
+    permissionsDropped: permissions.size,
+    collectionsDropped: collections.length,
+  };
+
+  audits.push({ action: 'migration.097', target: 'posse de skins', steamId: null, detail: summary });
+
+  const insertAudit = db.prepare(
+    `INSERT INTO workshop_audit (at, actor, source, action, target, server_id, steam_id, detail)
+     VALUES (@at, 'sistema', 'system', @action, @target, NULL, @steam_id, @detail)`,
+  );
+
+  for (const entry of audits) {
+    insertAudit.run({
+      at: now,
+      action: entry.action,
+      target: entry.target,
+      steam_id: entry.steamId,
+      detail: JSON.stringify(entry.detail),
+    });
+  }
+
+  logger?.info(summary, 'migração 097: acessos do Workshop viraram posse');
+}
+
+// ------------------------------------------------------------
 //  099 — o corpo feito à mão, a skin das peças e o visual do aviso
 //
 //  Três pedidos do dono em 16/09/2026, na mesma migração porque
@@ -8340,6 +8886,13 @@ export const MIGRATIONS: readonly Migration[] = [
   // 16/09/2026, tarde: o dono revogou o "nasce com a skin". A skin
   // passa a ser escolhida -- caixa, colecoes, acessos e registro.
   { id: 96, name: 'workshop-box', sql: WORKSHOP_BOX_SCHEMA },
+  // 17/09/2026: a skin vira POSSE do jogador (vendida e sorteada pelo
+  // site); saem colecoes, permissao por skin e acesso por grupo. E a
+  // fila do site aprende 'skin' e 'skin_revoke'. Id reservado desde a
+  // 098 -- ver a nota logo abaixo -- e conferido livre em todas as
+  // branches antes de ser usado. Fica aqui, entre a 96 e a 98, para a
+  // lista continuar em ordem crescente.
+  { id: 97, name: 'workshop-owned-skins', run: migrateWorkshopOwnedSkins },
   // 16/09/2026: 'quest.completed' vira um ranking de verdade, e as
   // missoes que ja pagavam nele passam a pagar.
   //

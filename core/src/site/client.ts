@@ -344,6 +344,24 @@ export class SiteClient {
     return this.#call('POST', '/api/agent/items/images', { images });
   }
 
+  // ---- catálogo de SKINS do Workshop -----------------------
+
+  /**
+   * As skins que a rede tem, contadas ao site para a vitrine e a
+   * caixa. Ver `site/skins-mirror.ts` e
+   * Docs/OrigemZWorkshop/04-ENTREGA-PELO-SITE.md §2.
+   *
+   * Enquanto o site não tiver as rotas, isto responde 404 e o
+   * `SkinsSiteMirror` fica quieto.
+   */
+  skinsMirrorVersion(): Promise<SiteResult<MirrorVersionBody>> {
+    return this.#call('GET', '/api/agent/skins/mirror/version');
+  }
+
+  pushSkinsMirror(payload: unknown): Promise<SiteResult<SkinsMirrorBody>> {
+    return this.#call('POST', '/api/agent/skins/mirror', payload);
+  }
+
   // ---- comandos --------------------------------------------
 
   /**
@@ -771,6 +789,18 @@ export interface ItemsMirrorBody {
   readonly missingImages?: readonly string[];
   /** Quantos faltam NO TOTAL, sem o teto de 200. */
   readonly missingImageCount?: number;
+  readonly storedAt?: string;
+}
+
+/**
+ * `POST /skins/mirror`. PROPOSTA do `oz-rust/8`: o site ainda não
+ * tem a rota, e os campos são os que o 04 §2 pede.
+ */
+export interface SkinsMirrorBody {
+  readonly ok?: boolean;
+  readonly accepted?: boolean;
+  readonly version?: string;
+  readonly count?: number;
   readonly storedAt?: string;
 }
 

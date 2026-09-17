@@ -135,6 +135,94 @@ export function pendingMigrations(db: AgentDatabase): readonly Migration[] {
   return MIGRATIONS.filter((migration) => !applied.has(migration.id));
 }
 
+/** Uma linha de `schema_migrations` que não bate com este binário. */
+export interface DivergentMigration {
+  readonly id: number;
+  /** O nome gravado no banco. */
+  readonly appliedName: string;
+  /** O nome que este binário dá ao mesmo id; `null` = ele não conhece o id. */
+  readonly knownName: string | null;
+}
+
+/**
+ * As migrações aplicadas neste banco que este binário não reconhece.
+ *
+ * ####  POR QUE O MAIOR ID NÃO BASTA  ####
+ *
+ * Ids são reservados e pulados entre branches (a 097 nasceu depois da
+ * 098 e da 099). Um agente que conhece até a 099, mas não a 097, vê o
+ * maior id aplicado igual ao dele e sobe feliz num banco em que a 097
+ * já apagou tabelas que ele consulta. Comparar o CONJUNTO é o que pega
+ * esse caso.
+ *
+ * Devolve duas espécies de divergência:
+ *   - `knownName === null`: o id foi aplicado por outro binário e este
+ *     não o conhece. É motivo de recusa;
+ *   - nomes diferentes para o mesmo id: a colisão entre branches (ver o
+ *     comentário da 098 em migrations.ts). Pode ser só um nome trocado
+ *     depois de aplicado, então vira aviso, não recusa.
+ */
+export function divergentMigrations(db: AgentDatabase): readonly DivergentMigration[] {
+  if (!tableExists(db, 'schema_migrations')) {
+    return [];
+  }
+
+  const known = new Map(MIGRATIONS.map((migration) => [migration.id, migration.name]));
+  const rows = db.prepare('SELECT id, name FROM schema_migrations ORDER BY id').all() as {
+    readonly id: number;
+    readonly name: string;
+  }[];
+
+  const divergent: DivergentMigration[] = [];
+
+  for (const row of rows) {
+    const knownName = known.get(row.id);
+
+    if (knownName === undefined) {
+      divergent.push({ id: row.id, appliedName: row.name, knownName: null });
+    } else if (knownName !== row.name) {
+      divergent.push({ id: row.id, appliedName: row.name, knownName });
+    }
+  }
+
+  return divergent;
+}
+
+/**
+ * A recusa por migração desconhecida, em texto — ou `null` quando todas
+ * as aplicadas são conhecidas. Nomes divergentes não entram aqui.
+ */
+export function describeUnknownMigrations(
+  divergent: readonly DivergentMigration[],
+  details: SchemaRefusalDetails,
+): string | null {
+  const unknown = divergent.filter((migration) => migration.knownName === null);
+
+  if (unknown.length === 0) {
+    return null;
+  }
+
+  const list = unknown.map((migration) => `${String(migration.id)} (${migration.appliedName})`).join(', ');
+
+  return [
+    `O banco em ${details.file} tem migração aplicada que este RustAgent ` +
+      `(${details.agentVersion}) não conhece: ${list}.`,
+    '',
+    'Ela foi aplicada por outro agente — uma versão mais nova ou outra branch — e as ' +
+      'migrações não têm volta. Abrir assim faria este código consultar tabela que mudou ' +
+      'ou sumiu, e o erro apareceria depois, no meio de uma entrega.',
+    '',
+    'O que fazer:',
+    details.migratedBy === null
+      ? '  - suba a versão do RustAgent que conhece essa migração (traga a main para esta ' +
+        'branch, se for desenvolvimento); ou'
+      : `  - suba o RustAgent ${details.migratedBy}, que foi quem migrou este banco por ` +
+        'último (ou traga a main para esta branch, se for desenvolvimento); ou',
+    '  - restaure, por cima dele, o instantâneo tirado antes dessa migração — os backups ' +
+      'ficam na pasta "backups", ao lado do banco.',
+  ].join('\n');
+}
+
 /**
  * A versão do agente que aplicou a última migração aqui.
  *
@@ -275,6 +363,11 @@ export interface SchemaGuardContext {
    * ninguém vai ao disco por causa disto.
    */
   readonly findBackup?: (schemaVersion: number) => string | null;
+  /**
+   * Chamado para cada id aplicado com nome diferente do que este binário
+   * conhece. É aviso, não recusa: ver `divergentMigrations`.
+   */
+  readonly onRenamed?: (migration: DivergentMigration) => void;
 }
 
 /**
@@ -288,13 +381,29 @@ export interface SchemaGuardContext {
  * anuncia uma versão de origem errada.
  *
  * @throws {UnsupportedSchemaError} quando o schema do banco está
- * acima do que este agente conhece, ou abaixo de onde ele sabe
- * partir.
+ * acima do que este agente conhece, abaixo de onde ele sabe partir,
+ * ou quando tem aplicada uma migração que este agente não conhece.
  */
 export function assertSchemaSupported(db: AgentDatabase, context: SchemaGuardContext): void {
   const version = readSchemaVersion(db);
 
   if (version <= TARGET_SCHEMA && version >= MIN_SCHEMA) {
+    const divergent = divergentMigrations(db);
+    const unknownRefusal = describeUnknownMigrations(divergent, {
+      file: context.file,
+      agentVersion: context.agentVersion,
+      migratedBy: readMigratedBy(db),
+      backup: null,
+    });
+
+    if (unknownRefusal !== null) {
+      throw new UnsupportedSchemaError(unknownRefusal);
+    }
+
+    for (const migration of divergent) {
+      context.onRenamed?.(migration);
+    }
+
     return;
   }
 

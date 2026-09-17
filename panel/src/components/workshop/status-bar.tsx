@@ -24,9 +24,9 @@
 //  acompanhou — e é exatamente para isso que o botão de mandar a
 //  carga de novo existe.
 //
-//  O resto (coleções, acessos vivos, caixas `/skin` abertas e quem
-//  está escondendo a logo) é o que o plugin tem na memória: a
-//  mesma carga, vista pelo lado do jogo.
+//  O resto (de quantos jogadores ele tem a posse na memória e quem
+//  está escondendo a logo) é o que o plugin tem de pé: a mesma
+//  carga, vista pelo lado do jogo.
 // ============================================================
 
 import { Loader2, RefreshCw } from 'lucide-react';
@@ -82,10 +82,8 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
       return {
         status: {
           skins: Number(response.status?.skins ?? 0),
-          collections: Number(response.status?.collections ?? 0),
-          grants: Number(response.status?.grants ?? 0),
+          ownedPlayers: Number(response.status?.ownedPlayers ?? 0),
           streamers: Number(response.status?.streamers ?? 0),
-          openBoxes: Number(response.status?.openBoxes ?? 0),
         },
         applied: typeof response.applied === 'number' ? response.applied : null,
         reason: null,
@@ -161,9 +159,7 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
         ) : (
           <>
             <Count label="Skins" value={state.status.skins} />
-            <Count label="Coleções" value={state.status.collections} />
-            <Count label="Acessos" value={state.status.grants} />
-            <Count label="Caixas abertas" value={state.status.openBoxes} />
+            <Count label="Jogadores com posse" value={state.status.ownedPlayers} />
             <Count label="Escondendo a logo" value={state.status.streamers} />
             <Count label="Confirmadas no último envio" value={state.applied} />
           </>
@@ -175,7 +171,7 @@ function ServerStatusRow({ server }: { readonly server: WorkshopServerOption }) 
         variant="outline"
         disabled={busy}
         onClick={() => void sync()}
-        title="Manda a carga inteira (skins, coleções e acessos) agora, mesmo que nada tenha mudado. Serve para quem acabou de recarregar o plugin à mão."
+        title="Manda a carga inteira (o catálogo e a posse de quem está online) agora, mesmo que nada tenha mudado. Serve para quem acabou de recarregar o plugin à mão."
       >
         {busy ? (
           <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />

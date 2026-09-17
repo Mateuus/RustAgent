@@ -44,7 +44,8 @@ interface AgentExpectation {
 
 interface FixtureResponse {
   readonly case: string;
-  readonly origin: 'observed' | 'manual';
+  /** `proposal` = corpo de um contrato futuro, que o site ainda não tem. */
+  readonly origin: 'observed' | 'manual' | 'proposal';
   readonly status: number;
   readonly headers?: Record<string, string>;
   readonly body?: unknown;
@@ -128,6 +129,10 @@ function invoke(client: SiteClient, call: string, args: readonly unknown[]): Pro
       return client.pushItemsMirror(args[0]);
     case 'pushItemImages':
       return client.pushItemImages(args[0] as readonly ItemImageUpload[]);
+    case 'skinsMirrorVersion':
+      return client.skinsMirrorVersion();
+    case 'pushSkinsMirror':
+      return client.pushSkinsMirror(args[0]);
     default:
       throw new Error(`fixture com um método que este teste não conhece: ${call}`);
   }
