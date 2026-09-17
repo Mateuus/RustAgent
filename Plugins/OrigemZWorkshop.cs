@@ -285,10 +285,10 @@ namespace Oxide.Plugins
             public string InventoryButtonAnchorMax = "0 1";
 
             [JsonProperty("InventoryButtonOffsetMin")]
-            public string InventoryButtonOffsetMin = "160 -52";
+            public string InventoryButtonOffsetMin = "160 -41";
 
             [JsonProperty("InventoryButtonOffsetMax")]
-            public string InventoryButtonOffsetMax = "255 -30";
+            public string InventoryButtonOffsetMax = "232 -19";
 
             /// <summary>
             /// A grade de skins ROLA (ScrollView do CUI) em vez de paginar de
@@ -5033,7 +5033,10 @@ namespace Oxide.Plugins
             text.Components.Add(new CuiTextComponent
             {
                 Text = "SKINS",
-                FontSize = 12,
+                // 10 e não 12: o botão acompanha a altura do MISSÕES do jogo,
+                // e o texto tem de caber proporcional (medido no jogo em
+                // 17/09/2026).
+                FontSize = 10,
                 Font = FontBold,
                 Align = TextAnchor.MiddleCenter,
                 Color = ColText,
