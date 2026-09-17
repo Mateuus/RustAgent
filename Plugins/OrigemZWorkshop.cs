@@ -233,15 +233,25 @@ namespace Oxide.Plugins
             public bool InventoryButton = false;
 
             /// <summary>
-            /// Onde o botão fica, em pixels da base 1280×720, ancorado no pé
-            /// da tela, centro. ESTIMADO: à esquerda da barra de atalhos.
-            /// Se encavalar com algo do jogo, é só mexer aqui.
+            /// Onde o botão fica. Padrão: ao lado do botão MISSÕES do próprio
+            /// Rust, no alto à esquerda do inventário, da mesma altura
+            /// (pedido do dono, 17/09/2026).
+            ///
+            /// Âncora "0 1" é o canto de CIMA à esquerda; os offsets são em
+            /// pixels da base 1280×720, e o Y é negativo porque desce. Se
+            /// encavalar com o MISSÕES, mexa só nestes quatro valores.
             /// </summary>
+            [JsonProperty("InventoryButtonAnchorMin")]
+            public string InventoryButtonAnchorMin = "0 1";
+
+            [JsonProperty("InventoryButtonAnchorMax")]
+            public string InventoryButtonAnchorMax = "0 1";
+
             [JsonProperty("InventoryButtonOffsetMin")]
-            public string InventoryButtonOffsetMin = "-572 18";
+            public string InventoryButtonOffsetMin = "160 -52";
 
             [JsonProperty("InventoryButtonOffsetMax")]
-            public string InventoryButtonOffsetMax = "-482 46";
+            public string InventoryButtonOffsetMax = "255 -30";
 
             /// <summary>
             /// A grade de skins ROLA (ScrollView do CUI) em vez de paginar de
@@ -4785,8 +4795,8 @@ namespace Oxide.Plugins
             button.Components.Add(new CuiButtonComponent { Color = ColRust, Command = MenuOpenCommand });
             button.Components.Add(new CuiRectTransformComponent
             {
-                AnchorMin = "0.5 0",
-                AnchorMax = "0.5 0",
+                AnchorMin = _config.InventoryButtonAnchorMin,
+                AnchorMax = _config.InventoryButtonAnchorMax,
                 OffsetMin = _config.InventoryButtonOffsetMin,
                 OffsetMax = _config.InventoryButtonOffsetMax,
             });
