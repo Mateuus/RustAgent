@@ -5,37 +5,54 @@
 //
 //  ####  TABELA, E NÃO CARTÃO  ####
 //
-//  Pela mesma razão da lista de itens nossos: é uma tela de
-//  COMPARAÇÃO. A pergunta que se faz aqui é "qual item já tem skin,
-//  e em que servidores?" — e ela se responde varrendo uma coluna de
-//  cima a baixo, não lendo cartão por cartão.
+//  É uma tela de COMPARAÇÃO. A pergunta que se faz aqui é "que
+//  skins este item tem, quem pode usar, e em que servidores?" — e
+//  ela se responde varrendo colunas, não lendo cartão por cartão.
+//  Várias skins por item são o caso normal: o jogador escolhe na
+//  caixa do `/skin`.
+//
+//  ####  DUAS ORIGENS, UM CATÁLOGO  ####
+//
+//  O admin cadastra aqui OU no jogo (`/skin add`). As duas gravam a
+//  mesma linha, e a coluna "Origem" é o único lugar que diz qual foi.
 //
 //  ####  O CATÁLOGO É DA REDE  ####
 //
-//  Não há seletor de servidor no topo desta tela, e isso é
-//  deliberado: a skin é cadastrada uma vez para a rede inteira. A
-//  coluna "Servidores" é a única coisa que varia — e por isso ela é
-//  editável ali mesmo, pela rota que troca só a lista, sem reenviar
-//  o formulário inteiro.
+//  A coluna "Servidores" é a única coisa que varia por servidor — e
+//  por isso ela é editável ali mesmo, pela rota que troca só a
+//  lista, sem reenviar o formulário inteiro.
 //
 //  ####  O QUE O AGENTE MANDA, A TELA NÃO CONFERE  ####
 //
-//  Um campo que o agente omitir vira TypeError no render e derruba
-//  a página inteira com "This page couldn't load". É por isso que
-//  toda resposta passa pelo `safeSkin` antes de chegar ao JSX.
+//  Toda resposta passa pelo `safeSkin` (normalize.ts) antes de
+//  chegar ao JSX: campo ausente vira TypeError e derruba a página.
 // ============================================================
 
-import { Plus, Trash2, Video } from 'lucide-react';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { Plus, Search, Trash2, Video } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { ItemIcon } from '@/components/item-icon';
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
+import {
+  messageOf,
+  safeCollection,
+  safeLookup,
+  safeSkin,
+} from '@/components/workshop/normalize';
 import { ServerPicker, type WorkshopServerOption } from '@/components/workshop/server-picker';
 import { SkinForm, blankSkin } from '@/components/workshop/skin-form';
-import { agent, ApiError, type WorkshopSkin, type WorkshopSkinInput } from '@/lib/api';
+import {
+  agent,
+  ApiError,
+  type WorkshopCollection,
+  type WorkshopLookup,
+  type WorkshopSkin,
+  type WorkshopSkinInput,
+} from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -52,29 +69,8 @@ interface Editing {
   readonly skin?: WorkshopSkin;
 }
 
-/**
- * A resposta do agente, com todo campo com um padrão pronto.
- *
- * Nenhum destes `??` é decoração: eles são a diferença entre uma
- * célula vazia e a página inteira caindo. E o `skinId` passa por
- * `String` porque ele é o UInt64 do jogo — se algum dia chegar como
- * número, ele já veio errado, mas pelo menos a tela não o
- * arredonda de novo.
- */
-function safeSkin(skin: WorkshopSkin): WorkshopSkin {
-  return {
-    id: Number(skin.id),
-    label: skin.label ?? '',
-    shortname: skin.shortname ?? '',
-    skinId: String(skin.skinId ?? ''),
-    permission: skin.permission ?? '',
-    hideInStreamer: skin.hideInStreamer === true,
-    enabled: skin.enabled === true,
-    servers: Array.isArray(skin.servers) ? [...skin.servers] : [],
-    createdAt: skin.createdAt ?? '',
-    updatedAt: skin.updatedAt ?? '',
-  };
-}
+/** Colunas da tabela — a linha de servidores ocupa todas. */
+const COLUMN_COUNT = 9;
 
 /** O que o formulário recebe quando se abre uma skin já gravada. */
 function toInput(skin: WorkshopSkin): WorkshopSkinInput {
@@ -82,16 +78,27 @@ function toInput(skin: WorkshopSkin): WorkshopSkinInput {
     label: skin.label,
     shortname: skin.shortname,
     skinId: skin.skinId,
-    permission: skin.permission,
+    permission: skin.permission ?? '',
+    collectionId: skin.collectionId,
+    openToAll: skin.openToAll,
     hideInStreamer: skin.hideInStreamer,
     enabled: skin.enabled,
     servers: [...skin.servers],
   };
 }
 
+/** A consulta à Steam, já normalizada. Estável: é dependência de efeito. */
+async function lookupWorkshop(skinId: string, shortname: string): Promise<WorkshopLookup> {
+  return safeLookup(await agent.workshopLookup(skinId, shortname));
+}
+
 export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
   const [skins, setSkins] = useState<readonly WorkshopSkin[] | null>(null);
+  const [collections, setCollections] = useState<readonly WorkshopCollection[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  const [query, setQuery] = useState('');
+  const [itemFilter, setItemFilter] = useState('');
 
   const [editing, setEditing] = useState<Editing | null>(null);
   const [saving, setSaving] = useState(false);
@@ -102,17 +109,29 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
   const [openServers, setOpenServers] = useState<number | null>(null);
   const [serversDraft, setServersDraft] = useState<readonly string[]>([]);
   const [serversBusy, setServersBusy] = useState(false);
+  /** A skin cujo liga/desliga está em voo. */
+  const [toggling, setToggling] = useState<number | null>(null);
 
   const load = useCallback(async () => {
-    try {
-      const response = await agent.workshopSkins();
-      const list = (response.skins ?? []).map(safeSkin);
+    // As coleções só dão nome à coluna e ao select: sem elas a lista
+    // continua servindo, e a coluna mostra o número.
+    const [skinsResult, collectionsResult] = await Promise.allSettled([
+      agent.workshopSkins(),
+      agent.workshopCollections(),
+    ]);
+
+    if (collectionsResult.status === 'fulfilled') {
+      setCollections((collectionsResult.value.collections ?? []).map(safeCollection));
+    }
+
+    if (skinsResult.status === 'fulfilled') {
+      const list = (skinsResult.value.skins ?? []).map(safeSkin);
 
       setSkins(list);
       onCount?.(list.length);
       setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+    } else {
+      setError(messageOf(skinsResult.reason));
       setSkins([]);
     }
   }, [onCount]);
@@ -120,6 +139,36 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const collectionById = useMemo(
+    () => new Map(collections.map((collection) => [collection.id, collection])),
+    [collections],
+  );
+
+  const shortnames = useMemo(
+    () => [...new Set((skins ?? []).map((skin) => skin.shortname))].sort(),
+    [skins],
+  );
+
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+
+    return (skins ?? []).filter(
+      (skin) =>
+        (itemFilter === '' || skin.shortname === itemFilter) &&
+        (needle === '' ||
+          skin.label.toLowerCase().includes(needle) ||
+          skin.shortname.includes(needle) ||
+          skin.skinId.includes(needle) ||
+          (skin.workshopTitle ?? '').toLowerCase().includes(needle)),
+    );
+  }, [skins, query, itemFilter]);
+
+  function warn(warning: string | null | undefined, label: string): void {
+    if (typeof warning === 'string' && warning !== '') {
+      toast.warning('Gravada, com um aviso', { description: `${label}: ${warning}` });
+    }
+  }
 
   async function save(value: WorkshopSkinInput): Promise<void> {
     if (editing === null) return;
@@ -129,24 +178,25 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
 
     try {
       if (editing.skin === undefined) {
-        await agent.createWorkshopSkin(value);
-        toast.success('Skin cadastrada', { description: value.label });
+        const response = await agent.createWorkshopSkin(value);
+        const label = response.skin?.label ?? value.label;
+
+        toast.success('Skin cadastrada', { description: label });
+        warn(response.warning, label);
       } else {
-        await agent.updateWorkshopSkin(editing.skin.id, value);
-        toast.success('Skin salva', { description: value.label });
+        const response = await agent.updateWorkshopSkin(editing.skin.id, value);
+        const label = response.skin?.label ?? editing.skin.label;
+
+        toast.success('Skin salva', { description: label });
+        warn(response.warning, label);
       }
 
       setEditing(null);
       await load();
     } catch (cause) {
-      // A recusa fica NO FORMULÁRIO: ela é um conflito com outra
-      // linha do catálogo, e a saída exige mexer num campo. Um
-      // toast some antes de a pessoa terminar de ler.
-      setSaveError(
-        cause instanceof ApiError
-          ? cause
-          : new ApiError('', cause instanceof Error ? cause.message : String(cause), 0),
-      );
+      // A recusa fica NO FORMULÁRIO: a saída exige mexer num campo, e
+      // um toast some antes de a pessoa terminar de ler.
+      setSaveError(cause instanceof ApiError ? cause : new ApiError('', messageOf(cause), 0));
     } finally {
       setSaving(false);
     }
@@ -158,23 +208,26 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
       toast.success(`"${skin.label}" apagada.`);
       await load();
     } catch (cause) {
-      toast.error('Não consegui apagar', {
-        description: cause instanceof Error ? cause.message : String(cause),
-      });
+      toast.error('Não consegui apagar', { description: messageOf(cause) });
     }
   }
 
   async function toggleEnabled(skin: WorkshopSkin): Promise<void> {
+    setToggling(skin.id);
+
     try {
-      await agent.updateWorkshopSkin(skin.id, { ...toInput(skin), enabled: !skin.enabled });
+      const response = await agent.updateWorkshopSkin(skin.id, {
+        ...toInput(skin),
+        permission: skin.permission,
+        enabled: !skin.enabled,
+      });
+
+      warn(response.warning, skin.label);
       await load();
     } catch (cause) {
-      // Ligar uma skin pode ser RECUSADO: o item já pode ter outra
-      // ligada nos mesmos servidores. A frase do agente diz qual, e
-      // a nossa não saberia.
-      toast.error('Não consegui mudar', {
-        description: cause instanceof Error ? cause.message : String(cause),
-      });
+      toast.error('Não consegui mudar', { description: messageOf(cause) });
+    } finally {
+      setToggling(null);
     }
   }
 
@@ -187,9 +240,7 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
       setOpenServers(null);
       await load();
     } catch (cause) {
-      toast.error('Não consegui salvar os servidores', {
-        description: cause instanceof Error ? cause.message : String(cause),
-      });
+      toast.error('Não consegui salvar os servidores', { description: messageOf(cause) });
     } finally {
       setServersBusy(false);
     }
@@ -198,9 +249,7 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
   function openForm(skin: WorkshopSkin | null): void {
     setSaveError(null);
     setOpenServers(null);
-    setEditing(
-      skin === null ? { value: blankSkin() } : { value: toInput(skin), skin },
-    );
+    setEditing(skin === null ? { value: blankSkin() } : { value: toInput(skin), skin });
   }
 
   const serverName = (id: string): string =>
@@ -217,8 +266,10 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="max-w-2xl text-2xs leading-relaxed text-muted">
           Uma skin <strong>não é um item novo</strong>: é a aparência de um item que o Rust já tem.
-          O jogador não aplica nada e não há menu — <strong>o item já nasce com ela</strong> na mão
-          de quem tiver a permissão.
+          O <strong>jogador escolhe</strong> — <span className="font-mono">/skin</span> abre a
+          caixa com as que ele pode usar, e <span className="font-mono">/skin &lt;coleção&gt;</span>{' '}
+          aplica a coleção inteira ao que ele veste. Admins também cadastram pelo jogo, com{' '}
+          <span className="font-mono">/skin add &quot;item&quot; &quot;id&quot;</span>.
         </p>
 
         <Button size="sm" onClick={() => openForm(null)}>
@@ -233,8 +284,10 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
           value={editing.value}
           {...(editing.skin === undefined ? {} : { skin: editing.skin })}
           servers={servers}
+          collections={collections}
           busy={saving}
           error={saveError}
+          onLookup={lookupWorkshop}
           onSave={(value) => void save(value)}
           onCancel={() => {
             setEditing(null);
@@ -247,71 +300,126 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
         <StateBlock
           variant="empty"
           title="Nenhuma skin cadastrada"
-          detail="Comece por Nova skin: escolha o item do jogo, cole o número da arte publicada no Workshop e diga em quais servidores ela vale."
+          detail="Comece por Nova skin: cole o Workshop ID da arte publicada, confira o item sugerido e diga em quais servidores ela vale."
         />
       ) : (
-        <div className="overflow-x-auto border border-border bg-surface">
-          <table className="w-full text-sm">
-            <thead className="border-b border-border">
-              <tr>
-                <HeaderCell className="w-12">
-                  <span className="sr-only">Ícone</span>
-                </HeaderCell>
-                <HeaderCell>Nome</HeaderCell>
-                <HeaderCell>Item do jogo</HeaderCell>
-                <HeaderCell>Número da skin</HeaderCell>
-                <HeaderCell>Permissão</HeaderCell>
-                <HeaderCell>Streamer</HeaderCell>
-                <HeaderCell>Servidores</HeaderCell>
-                <HeaderCell className="text-right">
-                  <span className="sr-only">Ações</span>
-                </HeaderCell>
-              </tr>
-            </thead>
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-56 flex-1">
+              <Search
+                aria-hidden="true"
+                className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
+              />
+              <Input
+                value={query}
+                placeholder="Filtrar por nome, item ou Workshop ID"
+                aria-label="Filtrar skins"
+                className="pl-7"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </div>
 
-            <tbody className="divide-y divide-border">
-              {skins.map((skin) => (
-                <SkinRows
-                  key={skin.id}
-                  skin={skin}
-                  servers={servers}
-                  serverName={serverName}
-                  open={openServers === skin.id}
-                  draft={serversDraft}
-                  busy={serversBusy}
-                  onOpenServers={() => {
-                    setOpenServers(skin.id);
-                    setServersDraft([...skin.servers]);
-                  }}
-                  onCloseServers={() => setOpenServers(null)}
-                  onDraftChange={setServersDraft}
-                  onSaveServers={() => void saveServers(skin)}
-                  onEdit={() => openForm(skin)}
-                  onToggle={() => void toggleEnabled(skin)}
-                  onRemove={() => void remove(skin)}
-                />
+            <select
+              value={itemFilter}
+              aria-label="Filtrar por item"
+              onChange={(event) => setItemFilter(event.target.value)}
+              className="h-9 border border-border bg-surface-2 px-2 font-mono text-2xs text-foreground hover:border-muted"
+            >
+              <option value="">todos os itens</option>
+              {shortnames.map((shortname) => (
+                <option key={shortname} value={shortname}>
+                  {shortname}
+                </option>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </select>
+
+            <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+              {visible.length === skins.length
+                ? `${String(skins.length)} skins`
+                : `${String(visible.length)} de ${String(skins.length)}`}
+            </span>
+          </div>
+
+          {visible.length === 0 ? (
+            <StateBlock variant="empty" title="Nenhuma skin casa com o filtro" />
+          ) : (
+            <div className="overflow-x-auto border border-border bg-surface">
+              <table className="w-full text-sm">
+                <thead className="border-b border-border">
+                  <tr>
+                    <HeaderCell className="w-14">
+                      <span className="sr-only">Prévia</span>
+                    </HeaderCell>
+                    <HeaderCell>Nome</HeaderCell>
+                    <HeaderCell>Item</HeaderCell>
+                    <HeaderCell>Workshop ID</HeaderCell>
+                    <HeaderCell>Acesso</HeaderCell>
+                    <HeaderCell>Coleção</HeaderCell>
+                    <HeaderCell>Origem</HeaderCell>
+                    <HeaderCell>Servidores</HeaderCell>
+                    <HeaderCell className="text-right">
+                      <span className="sr-only">Ações</span>
+                    </HeaderCell>
+                  </tr>
+                </thead>
+
+                <tbody className="divide-y divide-border">
+                  {visible.map((skin) => (
+                    <SkinRows
+                      key={skin.id}
+                      skin={skin}
+                      collection={
+                        skin.collectionId === null
+                          ? null
+                          : (collectionById.get(skin.collectionId) ?? null)
+                      }
+                      servers={servers}
+                      serverName={serverName}
+                      open={openServers === skin.id}
+                      draft={serversDraft}
+                      busy={serversBusy}
+                      toggling={toggling === skin.id}
+                      onOpenServers={() => {
+                        setOpenServers(skin.id);
+                        setServersDraft([...skin.servers]);
+                      }}
+                      onCloseServers={() => setOpenServers(null)}
+                      onDraftChange={setServersDraft}
+                      onSaveServers={() => void saveServers(skin)}
+                      onEdit={() => openForm(skin)}
+                      onToggle={() => void toggleEnabled(skin)}
+                      onRemove={() => void remove(skin)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
 
-      {/* ####  AS DUAS COISAS QUE MORDEM DEPOIS  ####
-          Nenhuma das duas aparece no cadastro, e as duas viram
-          chamado de jogador. */}
+      {/* ####  O QUE MORDE DEPOIS  ####
+          Nada disto aparece no cadastro, e tudo vira chamado de
+          jogador. */}
       <div className="space-y-2 border border-border bg-surface-2 p-3 text-2xs leading-relaxed text-muted">
         <p>
           <strong className="text-foreground">Skin diferente não empilha.</strong> Um item com skin
-          não junta com o mesmo item sem skin: quem tem a permissão pode acabar com duas pilhas de
-          pedra na mochila, e isso é normal — é o jogo, não o cadastro.
+          não junta com o mesmo item sem skin (nem com outra skin) — é o jogo, não o cadastro.
+        </p>
+        <p>
+          <strong className="text-foreground">O item é o MESMO objeto.</strong> Aplicar uma skin só
+          troca a aparência: quantidade, condição, munição e acessórios continuam como estavam.
         </p>
         <p>
           <strong className="text-foreground">
             A arte precisa estar publicada no Steam Workshop.
           </strong>{' '}
-          O servidor guarda só o número e nunca vê o modelo: quem baixa a arte é o cliente de cada
-          jogador. Número que não corresponde a nada publicado não dá erro em lugar nenhum — o item
-          nasce com a cara normal e ninguém é avisado.
+          O servidor guarda só o número; quem baixa o modelo é o cliente de cada jogador.
+        </p>
+        <p>
+          <strong className="text-foreground">Acesso removido não despinta.</strong> Tirar a
+          permissão, remover ou deixar vencer um acesso impede NOVAS aplicações — o que já foi
+          pintado continua pintado.
         </p>
       </div>
     </div>
@@ -320,11 +428,13 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
 
 interface SkinRowsProps {
   readonly skin: WorkshopSkin;
+  readonly collection: WorkshopCollection | null;
   readonly servers: readonly WorkshopServerOption[];
   readonly serverName: (id: string) => string;
   readonly open: boolean;
   readonly draft: readonly string[];
   readonly busy: boolean;
+  readonly toggling: boolean;
   readonly onOpenServers: () => void;
   readonly onCloseServers: () => void;
   readonly onDraftChange: (servers: string[]) => void;
@@ -336,11 +446,13 @@ interface SkinRowsProps {
 
 function SkinRows({
   skin,
+  collection,
   servers,
   serverName,
   open,
   draft,
   busy,
+  toggling,
   onOpenServers,
   onCloseServers,
   onDraftChange,
@@ -353,21 +465,29 @@ function SkinRows({
     <>
       <tr className={cn('hover:bg-surface-2', !skin.enabled && 'opacity-60')}>
         <td className="py-1 pl-3 pr-0">
-          {/* O ícone é o do item BASE: a nossa arte só existe no
-              Workshop do Steam, e o painel não tem como desenhá-la. */}
-          <ItemIcon shortname={skin.shortname} />
+          <SkinPreview skin={skin} />
         </td>
 
         <td className="px-3 py-2">
-          <span className="text-foreground">{skin.label}</span>
-
-          {!skin.enabled && (
-            <span
-              className="ml-2 border border-muted px-1.5 py-0.5 font-condensed text-2xs font-bold uppercase tracking-wide text-muted"
-              title="Desligada: o item volta a nascer normal. O cadastro e o número continuam aqui."
-            >
-              desligada
-            </span>
+          <span className="flex items-center gap-1.5">
+            <span className="text-foreground">{skin.label}</span>
+            {skin.hideInStreamer && (
+              <Video
+                aria-label="Some do item de quem está em modo streamer"
+                className="h-3.5 w-3.5 shrink-0 text-muted"
+              />
+            )}
+            {!skin.enabled && (
+              <span
+                className="border border-muted px-1.5 py-0.5 font-condensed text-2xs font-bold uppercase tracking-wide text-muted"
+                title="Desligada: some da caixa e das coleções. O cadastro continua aqui."
+              >
+                desligada
+              </span>
+            )}
+          </span>
+          {skin.workshopTitle !== null && skin.workshopTitle !== skin.label && (
+            <span className="block text-2xs text-muted">{skin.workshopTitle}</span>
           )}
         </td>
 
@@ -376,28 +496,32 @@ function SkinRows({
         </td>
 
         <td className="px-3 py-2">
-          {/* Texto, e nada de formatação de milhar: são vinte
-              dígitos que precisam ser conferidos contra a URL da
-              oficina, um a um. */}
+          {/* Texto, sem separador de milhar: vinte dígitos para
+              conferir contra a URL da oficina, um a um. */}
           <span className="font-mono text-2xs text-foreground">{skin.skinId}</span>
         </td>
 
         <td className="px-3 py-2">
-          <span className="font-mono text-2xs text-muted">{skin.permission}</span>
+          <AccessBadge skin={skin} collection={collection} />
+        </td>
+
+        <td className="px-3 py-2 text-2xs">
+          {skin.collectionId === null ? (
+            <span className="text-muted">—</span>
+          ) : (
+            <span
+              className="font-mono text-foreground"
+              title={collection === null ? undefined : collection.label}
+            >
+              {collection === null ? `#${String(skin.collectionId)}` : `/skin ${collection.slug}`}
+            </span>
+          )}
         </td>
 
         <td className="px-3 py-2 text-2xs text-muted">
-          {skin.hideInStreamer ? (
-            <span
-              className="flex items-center gap-1"
-              title="Quem está em modo streamer recebe o item SEM a skin. Ela continua aparecendo nos itens dos outros jogadores."
-            >
-              <Video aria-hidden="true" className="h-3.5 w-3.5" />
-              esconde
-            </span>
-          ) : (
-            'mostra'
-          )}
+          <span title={skin.createdBy ?? undefined}>
+            {skin.source === 'game' ? 'jogo' : 'painel'}
+          </span>
         </td>
 
         <td className="px-3 py-2 text-2xs">
@@ -419,7 +543,7 @@ function SkinRows({
           <div className="flex items-center justify-end gap-2">
             <Toggle
               on={skin.enabled}
-              busy={false}
+              busy={toggling}
               onChange={onToggle}
               labels={['valendo', 'desligada']}
               label="Esta skin está valendo?"
@@ -429,15 +553,13 @@ function SkinRows({
               Editar
             </Button>
 
-            {/* Apagar é diferente de desligar, e o `hint` é onde
-                essa diferença aparece na hora em que ela importa. */}
             <ConfirmButton
               variant="danger"
               disabled={false}
               icon={<Trash2 aria-hidden="true" className="h-4 w-4" />}
               label="Apagar"
               confirmLabel="Apagar mesmo"
-              hint="Some do catálogo. O que já nasceu no mundo continua com o número carimbado. Para só tirar de circulação, desligue."
+              hint="Some do catálogo, da caixa e da coleção. O que já foi pintado no mundo continua pintado. Para só tirar de circulação, desligue."
               onConfirm={onRemove}
             />
           </div>
@@ -446,17 +568,12 @@ function SkinRows({
 
       {open && (
         <tr className="bg-surface-2">
-          <td colSpan={8} className="px-3 py-3">
+          <td colSpan={COLUMN_COUNT} className="px-3 py-3">
             <p className="mb-2 font-condensed text-2xs uppercase tracking-wide text-muted">
               Em quais servidores “{skin.label}” vale
             </p>
 
-            <ServerPicker
-              value={draft}
-              servers={servers}
-              busy={busy}
-              onChange={onDraftChange}
-            />
+            <ServerPicker value={draft} servers={servers} busy={busy} onChange={onDraftChange} />
 
             <div className="mt-3 flex gap-2">
               <Button size="sm" variant="primary" disabled={busy} onClick={onSaveServers}>
@@ -470,6 +587,77 @@ function SkinRows({
         </tr>
       )}
     </>
+  );
+}
+
+/** A arte do Workshop quando a Steam deu a prévia; senão, o item base. */
+function SkinPreview({ skin }: { readonly skin: WorkshopSkin }) {
+  const [failed, setFailed] = useState(false);
+
+  if (skin.previewUrl === null || failed) return <ItemIcon shortname={skin.shortname} />;
+
+  return (
+    // O <img> cru: a imagem vem da Steam, e o export estático não
+    // tem otimizador.
+    <img
+      src={skin.previewUrl}
+      alt=""
+      loading="lazy"
+      className="h-10 w-10 border border-border object-cover"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+/**
+ * Quem pode usar, em uma palavra.
+ *
+ * A coleção conta: uma skin sem permissão própria numa coleção "para
+ * todos" é, na prática, para todos — e dizer "só com acesso" ali
+ * mandaria o admin liberar o que já está liberado.
+ */
+function AccessBadge({
+  skin,
+  collection,
+}: {
+  readonly skin: WorkshopSkin;
+  readonly collection: WorkshopCollection | null;
+}) {
+  if (skin.openToAll || collection?.openToAll === true) {
+    return (
+      <span
+        className="border border-olive px-1.5 py-0.5 font-condensed text-2xs font-bold uppercase tracking-wide text-olive"
+        title={skin.openToAll ? undefined : 'Liberada pela coleção, que é para todos'}
+      >
+        para todos{skin.openToAll ? '' : ' (coleção)'}
+      </span>
+    );
+  }
+
+  const permissions = [skin.permission, collection?.permission ?? null].filter(
+    (permission): permission is string => permission !== null,
+  );
+
+  if (permissions.length > 0) {
+    return (
+      <span
+        className="flex flex-col font-mono text-2xs text-foreground"
+        title="Quem tem uma destas permissões (ou um acesso) pode usar"
+      >
+        {[...new Set(permissions)].map((permission) => (
+          <span key={permission}>{permission}</span>
+        ))}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="text-2xs text-muted"
+      title="Sem permissão: só por um acesso (aba Acessos) ou por origemzworkshop.admin"
+    >
+      só com acesso
+    </span>
   );
 }
 

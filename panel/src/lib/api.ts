@@ -6080,13 +6080,16 @@ export const agent = {
 
   // ####  AS SKINS DO WORKSHOP  ####
   //
-  // O catálogo é da REDE: não há `serverId` em nenhuma das seis
-  // primeiras. O que é por servidor é só EM QUAIS SERVIDORES cada
-  // skin vale, e isso viaja no corpo (`servers`).
+  // Skins, coleções, acessos e registro são da REDE: não há
+  // `serverId` em nenhuma dessas rotas. O que é por servidor é só EM
+  // QUAIS SERVIDORES cada skin vale, e isso viaja no corpo
+  // (`servers`).
   //
-  // As seis primeiras respondem com todos os servidores parados —
-  // cadastrar é trabalho de madrugada. As duas últimas perguntam ao
-  // jogo, e com ele fora do ar devolvem 503.
+  // Todas respondem com os servidores parados — cadastrar é
+  // trabalho de madrugada. Só as duas últimas (status e envio)
+  // perguntam ao jogo, e com ele fora do ar devolvem 503. A consulta
+  // à Steam (`workshopLookup`) responde `unavailable` quando a Steam
+  // não atende, em vez de falhar.
   //
   // ####  O `:skinId` DA URL É O NOSSO id  ####
   //
@@ -6100,14 +6103,22 @@ export const agent = {
   workshopSkin: (id: number) =>
     api<{ ok: true; skin: WorkshopSkin }>(`/api/workshop/skins/${String(id)}`),
 
+  /**
+   * `warning` é um aviso que NÃO impediu a gravação — a Steam fora do
+   * ar, uma tag que não bate com o item. A tela mostra e segue.
+   */
   createWorkshopSkin: (body: WorkshopSkinInput) =>
-    api<{ ok: true; skin: WorkshopSkin }>('/api/workshop/skins', { method: 'POST', body }),
-
-  updateWorkshopSkin: (id: number, body: WorkshopSkinInput) =>
-    api<{ ok: true; skin: WorkshopSkin }>(`/api/workshop/skins/${String(id)}`, {
-      method: 'PUT',
+    api<{ ok: true; skin: WorkshopSkin; warning: string | null }>('/api/workshop/skins', {
+      method: 'POST',
       body,
     }),
+
+  /** `label` vazio = o agente mantém o nome atual. */
+  updateWorkshopSkin: (id: number, body: WorkshopSkinInput) =>
+    api<{ ok: true; skin: WorkshopSkin; warning: string | null }>(
+      `/api/workshop/skins/${String(id)}`,
+      { method: 'PUT', body },
+    ),
 
   /**
    * Troca SÓ a lista de servidores.
@@ -6126,15 +6137,132 @@ export const agent = {
   removeWorkshopSkin: (id: number) =>
     api<{ ok: true }>(`/api/workshop/skins/${String(id)}`, { method: 'DELETE' }),
 
+  /**
+   * O que a Steam diz de um Workshop ID, ANTES de salvar.
+   *
+   * Com `shortname`, o agente também dá o veredito: se aquela arte
+   * serve naquele item. Sem ele, `verdict` volta `null`.
+   */
+  workshopLookup: (workshopId: string, shortname?: string) => {
+    const params = new URLSearchParams();
+
+    if (shortname !== undefined && shortname.trim() !== '') {
+      params.set('shortname', shortname.trim());
+    }
+
+    const suffix = params.toString();
+
+    return api<WorkshopLookup>(
+      `/api/workshop/lookup/${encodeURIComponent(workshopId)}${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  // ---- Coleções: `/skin <slug>` -----------------------------
+
+  workshopCollections: () =>
+    api<{ ok: true; count: number; collections: WorkshopCollection[] }>(
+      '/api/workshop/collections',
+    ),
+
+  workshopCollection: (id: number) =>
+    api<{ ok: true; collection: WorkshopCollection; skins: WorkshopSkin[] }>(
+      `/api/workshop/collections/${String(id)}`,
+    ),
+
+  createWorkshopCollection: (body: WorkshopCollectionInput) =>
+    api<{ ok: true; collection: WorkshopCollection }>('/api/workshop/collections', {
+      method: 'POST',
+      body,
+    }),
+
+  updateWorkshopCollection: (id: number, body: WorkshopCollectionInput) =>
+    api<{ ok: true; collection: WorkshopCollection }>(
+      `/api/workshop/collections/${String(id)}`,
+      { method: 'PUT', body },
+    ),
+
+  /**
+   * Troca de uma vez QUAIS skins formam a coleção.
+   *
+   * Uma skin por item, e uma coleção por skin: escolher aqui uma
+   * skin que está em outra coleção a MOVE para esta.
+   */
+  setWorkshopCollectionSkins: (id: number, skinIds: readonly number[]) =>
+    api<{ ok: true; skins: WorkshopSkin[] }>(`/api/workshop/collections/${String(id)}/skins`, {
+      method: 'PUT',
+      body: { skinIds },
+    }),
+
+  /** As skins ficam no catálogo, avulsas. */
+  removeWorkshopCollection: (id: number) =>
+    api<{ ok: true }>(`/api/workshop/collections/${String(id)}`, { method: 'DELETE' }),
+
+  // ---- Acessos: quem pode usar o quê ------------------------
+
+  workshopGrants: (
+    filter: {
+      subjectType?: WorkshopGrantSubjectType;
+      subject?: string;
+      targetType?: WorkshopGrantTargetType;
+      targetId?: number;
+      includeExpired?: boolean;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+
+    if (filter.subjectType !== undefined) params.set('subjectType', filter.subjectType);
+    if (filter.subject !== undefined && filter.subject.trim() !== '') {
+      params.set('subject', filter.subject.trim());
+    }
+    if (filter.targetType !== undefined) params.set('targetType', filter.targetType);
+    if (filter.targetId !== undefined) params.set('targetId', String(filter.targetId));
+    if (filter.includeExpired !== undefined) {
+      params.set('includeExpired', filter.includeExpired ? 'true' : 'false');
+    }
+
+    const suffix = params.toString();
+
+    return api<{ ok: true; count: number; grants: WorkshopGrant[] }>(
+      `/api/workshop/grants${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
+  /** Liberar de novo o mesmo alvo para a mesma pessoa RENOVA o prazo. */
+  createWorkshopGrant: (body: WorkshopGrantInput) =>
+    api<{ ok: true; grant: WorkshopGrant }>('/api/workshop/grants', { method: 'POST', body }),
+
+  /** Não despinta o que já foi pintado. */
+  removeWorkshopGrant: (id: number) =>
+    api<{ ok: true }>(`/api/workshop/grants/${String(id)}`, { method: 'DELETE' }),
+
+  // ---- Registro ---------------------------------------------
+
+  /** Mais novo primeiro. A próxima página é `before` = menor id desta. */
+  workshopAudit: (options: { steamId?: string; limit?: number; before?: number } = {}) => {
+    const params = new URLSearchParams();
+
+    if (options.steamId !== undefined && options.steamId.trim() !== '') {
+      params.set('steamId', options.steamId.trim());
+    }
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.before !== undefined) params.set('before', String(options.before));
+
+    const suffix = params.toString();
+
+    return api<{ ok: true; count: number; entries: WorkshopAuditEntry[] }>(
+      `/api/workshop/audit${suffix === '' ? '' : `?${suffix}`}`,
+    );
+  },
+
   /** O que o plugin tem de pé naquele servidor AGORA. 503 com ele parado. */
   workshopStatus: (serverId: string) =>
     api<{ ok: true; status: WorkshopStatus; applied: number | null }>(
       `/api/servers/${encodeURIComponent(serverId)}/workshop/status`,
     ),
 
-  /** Manda o catálogo agora, forçado — ignora o dedup de propósito. */
+  /** Manda a carga agora, forçada — ignora o dedup de propósito. */
   syncWorkshop: (serverId: string) =>
-    api<{ ok: true; outcome: string }>(
+    api<{ ok: true; outcome: 'sent' | 'unchanged'; parts?: number; bytes?: number }>(
       `/api/servers/${encodeURIComponent(serverId)}/workshop/sync`,
       { method: 'POST' },
     ),
@@ -7554,33 +7682,54 @@ export interface SiteStatus {
 //  vanilla e segue. Em lugar nenhum desta tela ele vira número.
 // ------------------------------------------------------------
 
+//
+//  ####  O JOGADOR ESCOLHE; NADA NASCE PINTADO  ####
+//
+//  `/skin` abre a caixa virtual; `/skin <coleção>` aplica a coleção
+//  ao que ele veste. Uma skin é liberada por QUALQUER um destes:
+//  "para todos", permissão da skin ou da coleção, acesso individual
+//  (jogador ou grupo) na skin ou na coleção, ou
+//  `origemzworkshop.admin`.
+
 /**
  * Uma entrada do catálogo, como o formulário a monta.
  *
- * Espelha `workshopSkinBodySchema` — a versão de borda do
- * contrato, com a permissão OPCIONAL.
+ * Espelha `workshopSkinBodySchema` — a versão de borda do contrato.
  */
 export interface WorkshopSkinInput {
-  /** "Pedra OrigemZ". É por ele que o admin acha a skin na tela. */
+  /**
+   * "Máscara OrigemZ". É o que o jogador lê na caixa.
+   *
+   * Vazio: no cadastro, o agente usa o título publicado no Workshop;
+   * na edição, mantém o nome atual.
+   */
   label: string;
-  /** O item do jogo que recebe a aparência: `rock`, `stones`. */
+  /** O item do jogo que recebe a aparência: `metal.facemask`. */
   shortname: string;
   /** O id publicado no Steam Workshop. Texto, sempre. */
   skinId: string;
   /**
-   * A permissão do Oxide.
-   *
-   * Omitida ou vazia, o AGENTE a tira do nome: "Pedra OrigemZ" vira
-   * `origemzworkshop.pedra-origemz`. A tela só mostra a prévia.
+   * Permissão própria, OPCIONAL. Vazia ou `null` = sem permissão
+   * própria (e NÃO "de todo mundo" — quem abre é o `openToAll`).
+   * Várias skins podem compartilhar a mesma.
    */
-  permission?: string;
-  /** O item nasce SEM a skin na mão de quem está em modo streamer. */
+  permission?: string | null;
+  /** A coleção em que ela mora. `null` = avulsa. */
+  collectionId: number | null;
+  /** Qualquer jogador pode aplicar, sem permissão nem acesso. */
+  openToAll: boolean;
+  /**
+   * A skin SAI do item de quem entra no ar escondendo a logo, e
+   * VOLTA quando ele sai. A proteção é do portador.
+   */
   hideInStreamer: boolean;
-  /** Desligada sai do push sem perder a marca. Não é apagada. */
+  /** Desligada some da caixa e das coleções. Não é apagada. */
   enabled: boolean;
   /** Em que servidores ela vale. Vazio = em nenhum. */
   servers: string[];
 }
+
+export type WorkshopSkinSource = 'panel' | 'game';
 
 /** A mesma entrada, como o agente a devolve. Datas em ISO. */
 export interface WorkshopSkin {
@@ -7588,22 +7737,136 @@ export interface WorkshopSkin {
   label: string;
   shortname: string;
   skinId: string;
-  /** Já normalizada pelo agente, sempre com o prefixo da feature. */
-  permission: string;
+  /** Já normalizada pelo agente. `null` = sem permissão própria. */
+  permission: string | null;
+  collectionId: number | null;
+  openToAll: boolean;
   hideInStreamer: boolean;
   enabled: boolean;
   servers: string[];
+  /** Cadastrada pelo painel ou pelo `/skin add` do jogo. */
+  source: WorkshopSkinSource;
+  /** Usuário do painel, ou `jogo:<steamId>`. */
+  createdBy: string | null;
+  /** O título publicado no Workshop, quando a Steam respondeu. */
+  workshopTitle: string | null;
+  previewUrl: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Espelha `workshopCollectionInputSchema`. */
+export interface WorkshopCollectionInput {
+  /** `neve` → `/skin neve`. Até 24 chars `[a-z0-9_-]`. */
+  slug: string;
+  /** "Inverno 2026". É o que o jogador lê na resposta do comando. */
+  label: string;
+  permission?: string | null;
+  openToAll: boolean;
+  enabled: boolean;
+}
+
+export interface WorkshopCollection {
+  id: number;
+  slug: string;
+  label: string;
+  permission: string | null;
+  openToAll: boolean;
+  enabled: boolean;
+  /** Quantas skins do catálogo moram nela. */
+  skinCount: number;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkshopGrantSubjectType = 'player' | 'group';
+export type WorkshopGrantTargetType = 'skin' | 'collection';
+
+/** Espelha `workshopGrantBodySchema`. */
+export interface WorkshopGrantInput {
+  subjectType: WorkshopGrantSubjectType;
+  /** SteamID64 (17 dígitos, 7656…) ou nome de grupo do Oxide. */
+  subject: string;
+  targetType: WorkshopGrantTargetType;
+  targetId: number;
+  /** ISO com offset. `null` = permanente. */
+  expiresAt: string | null;
+  note?: string;
+}
+
+export interface WorkshopGrant {
+  id: number;
+  subjectType: WorkshopGrantSubjectType;
+  subject: string;
+  targetType: WorkshopGrantTargetType;
+  targetId: number;
+  /** O nome do alvo, já resolvido pelo agente. */
+  targetLabel: string;
+  /** O item da skin. `null` para coleção (ou skin apagada). */
+  targetShortname: string | null;
+  /** `null` = permanente. */
+  expiresAt: string | null;
+  expired: boolean;
+  note: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkshopAuditSource = 'panel' | 'game' | 'system';
+
+export interface WorkshopAuditEntry {
+  id: number;
+  at: string;
+  /** Usuário do painel, `jogo:<steamId>` ou `sistema`. */
+  actor: string;
+  source: WorkshopAuditSource;
+  /** `skin.create`, `grant.revoke`, `game.add-refused`… */
+  action: string;
+  target: string;
+  serverId: string | null;
+  /** O jogador AFETADO, quando há um. */
+  steamId: string | null;
+  detail: Record<string, unknown>;
+}
+
+export interface WorkshopFileDetails {
+  workshopId: string;
+  title: string;
+  previewUrl: string | null;
+  appId: number | null;
+  banned: boolean;
+  tags: string[];
+}
+
+export type WorkshopLookupVerdict =
+  | { ok: true; warning: string | null }
+  | { ok: false; code: string; message: string };
+
+/** `GET /workshop/lookup/:workshopId` — o que a Steam diz. */
+export interface WorkshopLookup {
+  ok: true;
+  status: 'found' | 'not_found' | 'unavailable';
+  details: WorkshopFileDetails | null;
+  /** Por que a Steam não respondeu. Só com `unavailable`. */
+  reason: string | null;
+  /** Os itens que as tags da arte apontam. */
+  suggestedShortnames: string[];
+  /** `null` quando não se mandou `shortname`. */
+  verdict: WorkshopLookupVerdict | null;
 }
 
 /**
  * `GET /servers/:id/workshop/status` — o que o PLUGIN tem agora.
  *
- * `skins` é quantas ele está aplicando; `streamers` é quantos
- * jogadores ele sabe estarem escondendo a logo neste instante.
+ * `streamers` é quantos jogadores ele sabe estarem escondendo a logo
+ * neste instante; `openBoxes`, quantas caixas `/skin` estão abertas.
  */
 export interface WorkshopStatus {
   skins: number;
+  collections: number;
+  grants: number;
   streamers: number;
+  openBoxes: number;
 }

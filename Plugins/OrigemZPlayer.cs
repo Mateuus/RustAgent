@@ -56,46 +56,6 @@
 //  responde "qual o nivel" e o agente.
 //
 //  ------------------------------------------------------------
-//  #### A SKIN DO ITEM DO KIT ####
-//
-//  Decisao do dono, 16/09/2026: a skin do catalogo do Workshop
-//  vale TAMBEM nos itens do kit. Quem cadastra e o painel; quem
-//  guarda a copia de leitura no jogo e o OrigemZWorkshop; e quem
-//  ESCREVE a skin no item e este arquivo, uma vez so, no
-//  ItemManager.CreateByName do GiveLoadoutItem.
-//
-//  #### POR QUE ESTE PLUGIN PERGUNTA, EM VEZ DE O AGENTE MANDAR
-//
-//  MEDIDO em 16/09/2026: o loadout que chega aqui e POR NIVEL, e
-//  nao por jogador - o core/src/loadouts/sync.ts monta
-//  `tiers: { "gold": [...], "normal": [...] }` e empurra UMA
-//  carga, que o OrigemZAgent guarda em cache e devolve pelo
-//  GetLoadout(tier). Nao existe no agente um ponto em que o kit
-//  DE UM JOGADOR seja montado.
-//
-//  E o direito a skin e por jogador e por skin (permissao do
-//  Oxide), alem de depender do modo streamer, que e estado ao
-//  vivo. Nenhum dos dois cabe numa carga por nivel: o agente que
-//  preenchesse o skinId do kit `gold` estaria dando a skin ao
-//  grupo inteiro, com permissao ou sem.
-//
-//  #### O QUE O ADMIN DIGITOU GANHA ####
-//
-//  O catalogo so preenche o que esta VAZIO. skinId diferente de
-//  zero no loadout e uma escolha explicita de quem configurou a
-//  tela, e ela tem precedencia - o catalogo e o padrao da casa,
-//  nao uma ordem.
-//
-//  #### E SO UMA FONTE ESCREVE item.skin ####
-//
-//  O OrigemZWorkshop carimba no OnDefaultItemsReceived, que so
-//  dispara quando a entrega de fabrica NAO foi cancelada. Este
-//  arquivo cancela justamente quando ha kit para por no lugar
-//  (ver OnDefaultItemsReceive abaixo). Os dois caminhos sao
-//  mutuamente exclusivos por construcao do jogo, e o cabecalho do
-//  OrigemZWorkshop.cs tem a figura inteira.
-//
-//  ------------------------------------------------------------
 //  #### AS REGRAS QUE VALEM PARA O ARQUIVO INTEIRO ####
 //
 //   1. NENHUMA chamada ao agente em Init(). O Oxide so garante as
@@ -135,26 +95,13 @@ namespace Oxide.Plugins
         [PluginReference]
         private Plugin OrigemZAgent;
 
-        // O catalogo de skins do Steam Workshop. OPCIONAL de
-        // proposito: nao ha `// Requires: OrigemZWorkshop` la em
-        // cima, porque um servidor sem a feature continua entregando
-        // o kit inteiro - so que sem a nossa cara nos itens. Exigi-lo
-        // faria este plugin nao carregar onde o catalogo nem existe.
-        //
-        // Como todo [PluginReference], ele vira null no instante em
-        // que o alvo e descarregado. Null-check em TODA chamada.
-        [PluginReference]
-        private Plugin OrigemZWorkshop;
-
         private const string HookGetApiVersion = "GetApiVersion";
         private const string HookGetVipTier = "GetVipTier";
         private const string HookGetLoadout = "GetLoadout";
         private const string HookGetSpawnStatus = "GetSpawnStatus";
         private const string HookGetTimers = "GetTimers";
-        private const string HookGetWorkshopSkin = "GetWorkshopSkin";
 
         private const int ExpectedAgentApiVersion = 1;
-        private const int ExpectedWorkshopApiVersion = 1;
 
         // Nivel de quem nao e VIP. Nao vem do agente: e a AUSENCIA
         // de VIP, e mesmo assim tem kit - o que substitui a tocha e
@@ -236,7 +183,6 @@ namespace Oxide.Plugins
             try
             {
                 LogAgentApiVersion();
-                LogWorkshopApiVersion();
                 _ready = true;
 
                 Puts("Kit ao nascer: " + (_config.AplicarKitAoNascer ? "ligado" : "desligado") +
@@ -754,23 +700,6 @@ namespace Oxide.Plugins
             int amount = entry.Amount < 1 ? 1 : entry.Amount;
             ulong skin = ParseSkin(entry.SkinId);
 
-            // ####  O CATALOGO SO PREENCHE O QUE ESTA VAZIO  ####
-            //
-            // skinId no loadout e escolha explicita de quem
-            // configurou a tela; o catalogo do Workshop e o padrao da
-            // casa. Entre os dois ganha quem foi explicito - por isso
-            // a pergunta so acontece com skin 0.
-            //
-            // E e AQUI, na criacao, que o item.skin e escrito: o
-            // ItemManager.Create poe a skin ANTES do Initialize, que e
-            // o que dispara o ItemModEntity.OnItemCreated. Trocar a
-            // skin depois exigiria MarkDirty e mexer no heldEntity a
-            // mao (ver OrigemZWorkshop.ApplySkinToItem).
-            if (skin == 0UL)
-            {
-                skin = ResolveWorkshopSkin(player, entry.Shortname);
-            }
-
             Item item = ItemManager.CreateByName(entry.Shortname, amount, skin);
 
             if (item == null)
@@ -845,53 +774,6 @@ namespace Oxide.Plugins
                          "; ele foi descartado.");
             item.Remove();
             return false;
-        }
-
-        // ========================================================
-        //  A SKIN DA CASA PARA ESTE ITEM, OU 0
-        //
-        //  Quem responde e o OrigemZWorkshop, e a resposta ja vem
-        //  decidida: catalogo, modo streamer e permissao do jogador.
-        //  A regra mora LA porque e la que a permissao do Oxide vive
-        //  - perguntar aqui exigiria duplicar as tres perguntas, e
-        //  duas copias divergem na primeira correcao.
-        //
-        //  #### TRES MOTIVOS PARA ISTO NAO LANCAR ####
-        //
-        //   1. Estamos no caminho de nascimento do jogador. Uma
-        //      excecao aqui nao tira so a skin: ela sobe pelo kit e
-        //      o jogador nasce pelado.
-        //   2. [PluginReference] vira null a cada reload do
-        //      OrigemZWorkshop, que e o plugin mais reescrito
-        //      enquanto o catalogo esta sendo montado.
-        //   3. Contrato mudado do outro lado faz o Call devolver
-        //      null, e null aqui e 0 - o item nasce vanilla, que e
-        //      exatamente o que acontecia antes desta feature.
-        //
-        //  Nao ha I/O nem rede nisto: o outro lado le um dicionario
-        //  em memoria que o agente empurrou pelo
-        //  origemz.workshop.sync.
-        // ========================================================
-        private ulong ResolveWorkshopSkin(BasePlayer player, string shortname)
-        {
-            if (OrigemZWorkshop == null || player == null || string.IsNullOrEmpty(shortname))
-            {
-                return 0UL;
-            }
-
-            try
-            {
-                string raw = OrigemZWorkshop.Call(
-                    HookGetWorkshopSkin, player.UserIDString, shortname) as string;
-
-                return ParseSkin(raw);
-            }
-            catch (Exception ex)
-            {
-                PrintError("GetWorkshopSkin falhou para o item '" + shortname + "'; ele vai sem " +
-                           "skin: " + ex.Message);
-                return 0UL;
-            }
         }
 
         private ItemContainer ResolveContainer(BasePlayer player, string slot)
@@ -2467,42 +2349,6 @@ namespace Oxide.Plugins
             {
                 PrintWarning("Versao de contrato diferente da esperada. Confira " +
                              "Docs\\OrigemZAgent\\HOOKS.md antes de confiar no resultado.");
-            }
-        }
-
-        // O catalogo de skins e OPCIONAL: ausente, o kit sai sem a
-        // nossa cara e nada mais muda. Por isso aqui nao ha
-        // PrintError e nada desliga o _ready - so uma linha dizendo
-        // em que pe a coisa esta, que e o que se procura no console
-        // quando o jogador diz que nao recebeu a skin.
-        private void LogWorkshopApiVersion()
-        {
-            if (OrigemZWorkshop == null)
-            {
-                Puts("OrigemZWorkshop nao esta carregado: os itens do kit saem com a skin que o " +
-                     "loadout trouxer, e so.");
-                return;
-            }
-
-            object raw = OrigemZWorkshop.Call(HookGetApiVersion);
-
-            if (!(raw is int))
-            {
-                PrintWarning("GetApiVersion do OrigemZWorkshop devolveu " +
-                             (raw == null ? "null" : raw.ToString()) + ", que nao e um inteiro. " +
-                             "O kit vai sair sem as skins do catalogo.");
-                return;
-            }
-
-            int version = (int)raw;
-            Puts("API do OrigemZWorkshop: v" + version + " (este plugin foi escrito para a v" +
-                 ExpectedWorkshopApiVersion + ").");
-
-            if (version != ExpectedWorkshopApiVersion)
-            {
-                PrintWarning("Versao de contrato do catalogo diferente da esperada. Confira " +
-                             "Docs\\OrigemZWorkshop\\00-LEVANTAMENTO.md antes de confiar na skin " +
-                             "que o kit entrega.");
             }
         }
 

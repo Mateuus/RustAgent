@@ -360,6 +360,22 @@ export class ItemsRepository {
   }
 
   /**
+   * Os shortnames cujo nome em INGLÊS é exatamente este.
+   *
+   * Existe para o Workshop: a Steam marca cada skin com o nome do
+   * item em inglês ("Metal Facemask"), e é assim que o cadastro
+   * descobre que um id publicado para a máscara foi colado no
+   * machado. Pode voltar mais de um — variantes com o mesmo nome.
+   */
+  shortnamesByDisplayName(displayName: string): readonly string[] {
+    return (
+      this.#db
+        .prepare('SELECT shortname FROM items WHERE display_name = ? COLLATE NOCASE')
+        .all(displayName.trim()) as { shortname: string }[]
+    ).map((row) => row.shortname);
+  }
+
+  /**
    * As categorias que existem, com quantos itens cada uma tem.
    *
    * Sai do banco, e não de uma lista fixa: as categorias são do
