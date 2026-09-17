@@ -95,7 +95,7 @@ export interface PlayerRoutesDeps {
    */
   readonly skins?: {
     readonly repository: Pick<WorkshopSkinsRepository, 'getMany'>;
-    readonly owned: Pick<WorkshopOwnedRepository, 'listForPlayer'>;
+    readonly owned: Pick<WorkshopOwnedRepository, 'listForPlayer' | 'listFavorites'>;
   };
 }
 
@@ -284,6 +284,11 @@ export function registerPlayerRoutes(app: FastifyInstance, deps: PlayerRoutesDep
    *
    * Dar e tirar ficam em `/workshop/owned`: a regra do prazo é uma só
    * e mora lá.
+   *
+   * `favorites` são os ids de skin que ELE marcou no menu do jogo
+   * (migração 100; 02 §5.4). Vêm sem filtro de servidor — a favorita
+   * é da rede, como a posse — e podem apontar para uma skin que ele
+   * NÃO possui: favoritar é "quero achar rápido", não "tenho".
    */
   app.get('/players/:steamId/skins', async (request) => {
     const { steamId } = steamParams.parse(request.params);
@@ -306,6 +311,7 @@ export function registerPlayerRoutes(app: FastifyInstance, deps: PlayerRoutesDep
       steamId,
       live: view.filter((owned) => !owned.expired),
       expired: view.filter((owned) => owned.expired),
+      favorites: deps.skins.owned.listFavorites(steamId),
     };
   });
 }

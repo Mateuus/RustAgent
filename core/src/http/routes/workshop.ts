@@ -384,6 +384,8 @@ function skinBody(skin: WorkshopSkin, owners: number) {
     openToAll: skin.openToAll,
     hideInStreamer: skin.hideInStreamer,
     enabled: skin.enabled,
+    /** "Skin de temporada": a posse dela pode sair num wipe (02 §4.6). */
+    season: skin.season,
     servers: skin.servers,
     source: skin.source,
     createdBy: skin.createdBy,
@@ -440,6 +442,7 @@ export function ownedView(
               previewUrl: skin.previewUrl,
               openToAll: skin.openToAll,
               enabled: skin.enabled,
+              season: skin.season,
               servers: skin.servers,
             },
     };
