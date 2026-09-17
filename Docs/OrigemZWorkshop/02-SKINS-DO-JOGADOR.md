@@ -341,7 +341,46 @@ season INTEGER NOT NULL DEFAULT 0 CHECK (season IN (0, 1))
   com a mesma ordem e pelo mesmo motivo (`foreign_keys = ON`: o DROP da tabela velha de skins
   levaria em cascata a junção de servidor e a posse de todo mundo).
 
-**Quem apaga é o wipe, e por uma porta só:**
+**Quem apaga é o wipe, e QUANDO é escolha dele (frente do wipe, 17/09/2026):**
+
+A marca diz **quais** skins podem sair; o wipe diz **se hoje é o dia**. A opção
+chama-se `seasonSkins` em código, vale `'keep' | 'clear'` (padrão **`keep`**), e
+segue o molde da política de blueprint:
+
+| Onde | Chave / campo | Vale para |
+|---|---|---|
+| configuração da cadência | `cadence.seasonSkins`, em `wipe_settings` | todo wipe de cadência |
+| configuração do forçado | `forced.seasonSkins`, em `wipe_settings` | o wipe forçado da Facepunch |
+| `POST /servers/:id/wipe/runs` | `seasonSkins` no corpo | **aquele** clique em "wipar agora" |
+
+- **Nenhuma migração.** `wipe_settings` é chave/valor por servidor (migração 023);
+  chave ausente cai em `keep`, que é exatamente o comportamento de quem nunca
+  mexeu nisso. O padrão é `keep` **inclusive no forçado**, ao contrário do
+  blueprint — é a frase do dono: "por padrão a skin NÃO é removida".
+- **Onde roda:** no passo **`pos-wipe`**, e não no `apagar`. Três razões somadas:
+  a remoção termina reenviando a posse a quem está **online**, e o `apagar`
+  recusa rodar com o servidor de pé; o `apagar` é fatal, e uma pancada no banco
+  de skins não pode derrubar um wipe que já apagou o mundo; e é onde o progresso
+  das **missões** já zera, que é o mesmo tipo de trabalho. A posse não está em
+  disco — é linha do nosso SQLite —, então apagá-la depois de o mundo subir dá o
+  mesmo resultado, com o jogador vendo o menu já sem a skin.
+- **A mensagem do passo diz o que aconteceu**, sempre: `12 posse(s) removida(s),
+  de 3 jogador(es)`, ou `nenhuma posse removida (este wipe manda MANTER)`.
+- **Um wipe retomado não remove duas vezes.** Quem garante é a máquina de passos:
+  `pos-wipe` concluído não roda de novo (só o `parar` é refeito). A remoção não é
+  idempotente e não teria como ser — a segunda passada apagaria a posse
+  reconquistada **depois** do wipe.
+- **A escolha não é coluna.** Ela é da execução que começa agora: viaja da rota
+  até a máquina de passos junto da operação. Uma **retomada** depois de o agente
+  reiniciar não recebe o campo de novo: se o `pos-wipe` ainda não tinha rodado,
+  ela cai em `keep` e nada é removido. É o lado certo de errar — remover é
+  irreversível e o zip do wipe não copia posse. Um wipe de cadência ou forçado
+  retomado continua lendo a chave dele, porque a configuração não vai embora.
+- **A tela:** rótulo **"Skins de temporada"**, opções "Manter na posse" e
+  "Remover da posse", com `(?)` (lib/help/workshop.tsx) na sub-aba Agenda (para
+  a cadência e para o forçado) e no formulário do "wipar agora".
+
+**A porta única:**
 
 ```ts
 WorkshopCatalog.removeSeasonOwnership(serverId?: string | null, now?: number): SeasonCleared
@@ -847,7 +886,10 @@ id do Workshop, quando aparece junto, se chama `workshopId`. As datas vêm em IS
 2. **A tocha no kit** (§8, passo 4).
 3. **O endereço da loja** que o cadeado mostra (`storeUrl`, §5.1).
 4. As medições da fase 0 (§6.3 e 03 §8).
-5. **Quem chama o `removeSeasonOwnership`** (§4.6). O método existe e está testado; ligá-lo ao
-   wipe é da outra frente. Até ela chegar, **nenhuma skin de temporada sai da posse** — que é
-   exatamente o "por padrão não é removida" que o dono pediu.
+5. ~~**Quem chama o `removeSeasonOwnership`** (§4.6).~~ **Feito em 17/09/2026:** quem chama é o
+   passo `pos-wipe`, e só quando aquele wipe manda (`seasonSkins: 'clear'`). Ver §4.6.
 6. **A estrela na ficha do painel** (§9): a rota já entrega `favorites`; mostrar é do painel.
+7. **A marca de temporada por wipe da AGENDA.** Hoje a escolha é da cadência, do forçado ou do
+   clique em "wipar agora". Marcar **um** wipe específico da lista dos 90 dias — como se faz com a
+   política de blueprint — pede uma coluna em `wipe_plans`, e coluna pede migração: fica para a
+   frente que abrir a próxima.
