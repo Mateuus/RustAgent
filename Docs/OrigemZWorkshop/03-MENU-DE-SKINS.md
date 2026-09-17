@@ -33,6 +33,10 @@ Os motivos:
 inicial (memória: *onde estão os bytes do menu*); confira que a carga continua abaixo de
 50.000.
 
+> **Feito (frente F, 17/09/2026).** A aba fica logo depois de KITS e custou **1.024 bytes**: a
+> carga inicial foi de **44.508** para **45.532** (trava do teste: 47.800). O código é
+> `core/src/game/ui-skins-tab.ts`; o §7.2 conta a ligação entre os dois plugins.
+
 ---
 
 ## 2. Visual — os tokens do menu
@@ -397,7 +401,7 @@ a medição 0.4** (§8).
 | catálogo novo chega com o menu aberto | redesenha as cinco regiões; se a skin ou o item escolhido sumiram, volta para TODAS |
 | posse nova chega com o menu aberto | redesenha lateral, grade e detalhe (a skin pode ter perdido o cadeado agora mesmo — **é o momento em que o jogador comprou no site e está olhando**) |
 | o item escolhido em "Aplicar em" sumiu (largou, trocou, usou) | na hora de aplicar, recusa com *"Esse item não está mais com você."* e redesenha a lista |
-| o jogador abre o menu principal | o `OrigemZUI` desenha por cima em `Overall`. **Feche o de skins** ao receber `/menu`, por um hook chamado pelo `OrigemZUI` ou por conferência simples: ao abrir um, o outro fecha |
+| o jogador abre o menu principal | o `OrigemZUI` (0.1.1) chama `CloseSkinsMenu` antes de desenhar: o de skins fecha e o principal abre. Ao abrir o de skins, o `OrigemZWorkshop` chama `CloseMainMenu`. **Um aberto por vez**, nos dois sentidos (§7.1 e §7.2) |
 
 ### 7.1 A ligação com o `OrigemZUI`, na v0.3.0
 
@@ -408,16 +412,37 @@ O `OrigemZWorkshop` expõe dois hooks públicos:
 | `void CloseSkinsMenu(BasePlayer player)` | fecha o menu de skins e descarta a sessão. **É o que a frente F deve chamar** quando o menu principal abre: `Interface.CallHook("CloseSkinsMenu", player)` |
 | `bool IsSkinsMenuOpen(BasePlayer player)` | diz se o menu de skins está aberto |
 
-**O outro sentido já funciona sem mexer no `OrigemZUI`.** Ele não tem hook de fechar (conferido
-em 17/09/2026). Ao abrir, o menu de skins chama primeiro `CloseMainMenu(BasePlayer)` no
-`OrigemZUI`, que existe para o dia em que a frente F criar esse hook. Se a chamada devolver
-nulo, ele roda o `origemz.ui.close <steamId>` de servidor, com `Option.Server.Quiet()`. Esse
-comando já existe: destrói a raiz pelo nome e descarta a sessão do menu principal.
+**O outro sentido.** Ao abrir, o menu de skins chama primeiro `CloseMainMenu(BasePlayer)` no
+`OrigemZUI`. Se a chamada devolver nulo (um `OrigemZUI` anterior à 0.1.1), ele roda o
+`origemz.ui.close <steamId>` de servidor, com `Option.Server.Quiet()`. Esse comando destrói a
+raiz pelo nome e descarta a sessão do menu principal.
 
 Morte, ferimento e desconexão fecham o menu (`OnPlayerDeath`, `OnPlayerWound`,
 `OnPlayerDisconnected`). O `Unload` destrói `OZSkins` e o botão do inventário para todos os
 online, e grava a posse pendente. Sem a caixa não existe item "emprestado": nada precisa ser
 devolvido.
+
+### 7.2 O lado do `OrigemZUI` — feito na frente F (v0.1.1, 17/09/2026)
+
+| Peça | O que faz |
+|---|---|
+| `bool CloseMainMenu(BasePlayer player)` (`[HookMethod]`, público) | se há sessão do menu principal, roda o mesmo `Close` do botão de fechar (destrói a raiz e o aviso de carregando, descarta a sessão) e devolve `true`; sem menu aberto, não faz nada e devolve `false`. **Nunca devolve nulo**: o Workshop lê nulo como "hook inexistente" e cairia no comando de console. Não chama o `CloseSkinsMenu` de volta |
+| `[PluginReference] Plugin OrigemZWorkshop` | dependência mole, como a do `OrigemZImages`: sem o plugin, nada é chamado e o menu abre igual |
+| `Open(...)` | na **abertura** (quando o shell ainda não foi desenhado), chama `OrigemZWorkshop.Call("CloseSkinsMenu", player)` antes de desenhar. Não chama a cada troca de aba. Sem log: o `Open` roda dentro do handler de comando, e o que se imprime ali entra na resposta (memória: *o Puts entra na resposta do comando*) |
+
+**O caminho da aba SKINS, de ponta a ponta:** clique → `origemz.ui.act` → ação `chat` → o
+`OrigemZUI` manda `chat.say /skins` **como o jogador** → o `/skins` do Workshop abre o menu
+dele → `CloseMainMenu` fecha o principal. O comando da ação leva a barra: sem ela, a palavra
+sairia no chat como mensagem.
+
+**O menu já gravado recebe a aba no boot** (`withSkinsTab`, chamado em `core/src/index.ts`
+junto dos outros upgrades de documento). Como a aba não tem tela, o marcador de "já passou" é o
+próprio botão: o id `nav-skins` **ou** qualquer botão com ação `chat` para `/skins` (o que
+respeita a aba renomeada no editor). Onde ela entra: depois de KITS; sem KITS, antes do
+DISCORD/CONFIG; sem nenhum deles, no fim da barra. **Limitação conhecida:** o admin que apagar
+a aba a vê voltar no boot seguinte, porque o documento não tem campo para marcar "migração
+feita". Para escondê-la, troque o comando do botão em vez de apagá-lo. Nenhuma migração de
+banco foi criada.
 
 ---
 

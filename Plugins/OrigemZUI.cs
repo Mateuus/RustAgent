@@ -66,7 +66,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZUI", "OrigemZ", "0.1.0")]
+    [Info("OrigemZUI", "OrigemZ", "0.1.1")]
     [Description("Desenha no jogo as interfaces feitas no painel do RustAgent.")]
     public class OrigemZUI : RustPlugin
     {
@@ -169,6 +169,22 @@ namespace Oxide.Plugins
         /// </summary>
         [PluginReference]
         private Plugin OrigemZImages;
+
+        /// <summary>
+        /// #### O MENU DE SKINS, OUTRA DEPENDENCIA MOLE ####
+        ///
+        /// O OrigemZWorkshop desenha o proprio menu (Docs/OrigemZWorkshop/
+        /// 03-MENU-DE-SKINS.md §7.1). Quando este menu abre, o de skins
+        /// fecha - pelo hook `CloseSkinsMenu` de la. Sem o plugin, nao
+        /// ha o que fechar, e o menu abre do mesmo jeito.
+        ///
+        /// O outro sentido e o `CloseMainMenu`, logo abaixo do
+        /// origemz.ui.close.
+        /// </summary>
+        [PluginReference]
+        private Plugin OrigemZWorkshop;
+
+        private const string HookCloseSkinsMenu = "CloseSkinsMenu";
 
         private const string HookGetImage = "GetImage";
 
@@ -1223,6 +1239,56 @@ namespace Oxide.Plugins
             ClearSession(player.userID);
         }
 
+        /// <summary>
+        /// Hook publico: fecha o menu principal, se estiver aberto.
+        ///
+        /// #### QUEM CHAMA ####
+        ///
+        /// O OrigemZWorkshop, ao abrir o menu de skins - inclusive pela
+        /// aba SKINS deste menu, que roda `/skins` como o jogador
+        /// (03 §7.1). E o mesmo `Close` do botao de fechar: destroi a
+        /// raiz e descarta a sessao, e nada alem disso.
+        ///
+        /// #### O RETORNO NUNCA E NULO ####
+        ///
+        /// O Workshop le nulo como "este OrigemZUI nao tem o hook" e cai
+        /// no `origemz.ui.close <steamId>`. Por isso `bool`: true se
+        /// havia menu aberto, false se nao havia - e nos dois casos o
+        /// pedido foi atendido.
+        ///
+        /// Ele NAO chama o `CloseSkinsMenu` de volta: quem pede para
+        /// fechar este e justamente o menu de skins abrindo.
+        /// </summary>
+        [HookMethod("CloseMainMenu")]
+        public bool CloseMainMenu(BasePlayer player)
+        {
+            if (player == null || !_sessions.ContainsKey(player.userID))
+            {
+                return false;
+            }
+
+            Close(player);
+            return true;
+        }
+
+        /// <summary>
+        /// Fecha o menu de skins do OrigemZWorkshop, se o plugin estiver
+        /// carregado. Chamado quando este menu ABRE (03 §7).
+        ///
+        /// Sem log: isto roda dentro do handler do comando, e o que se
+        /// imprime ali entra na resposta dele. Uma excecao do outro
+        /// plugin o proprio Oxide registra, e a chamada devolve nulo.
+        /// </summary>
+        private void CloseSkinsMenu(BasePlayer player)
+        {
+            if (OrigemZWorkshop == null || !OrigemZWorkshop.IsLoaded)
+            {
+                return;
+            }
+
+            OrigemZWorkshop.Call(HookCloseSkinsMenu, player);
+        }
+
         private bool CanUse(BasePlayer player, DocumentCache document)
         {
             if (string.IsNullOrEmpty(document.Permission))
@@ -1272,6 +1338,16 @@ namespace Oxide.Plugins
 
             bool firstDraw = !session.ShellDrawn;
             session.DocumentId = document.Id;
+
+            // #### O MENU DE SKINS SAI ANTES DE ESTE ENTRAR ####
+            //
+            // So na abertura (ou quando o shell precisa ser redesenhado),
+            // e nao a cada troca de aba: com este menu na tela, o de
+            // skins ja esta fechado. Ver o `CloseMainMenu` acima.
+            if (firstDraw)
+            {
+                CloseSkinsMenu(player);
+            }
 
             OpenScreen(player, session, document, screenId);
 
