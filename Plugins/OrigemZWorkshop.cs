@@ -27,15 +27,67 @@
 //  ficava "emprestado" fora do inventário do jogador: agora nada sai
 //  de onde está, e o `Unload` não tem item nenhum para devolver.
 //
-//  ####  O ITEM É O MESMO OBJETO, E É ISSO QUE NÃO PERDE NADA  ####
+//  ####  O ITEM É O MESMO OBJETO — MENOS QUANDO É UMA VARIANTE  ####
 //
-//  Este plugin NUNCA cria nem destrói item. Ele troca o número
-//  `item.skin` do objeto que já existe — o `ApplySkinToItem` da
+//  No caso normal este plugin não cria nem destrói item: ele troca o
+//  número `item.skin` do objeto que já existe — o `ApplySkinToItem` da
 //  bancada de reparo (MEDIDO em 16 e 17/09/2026, 02 §6.1). Tudo o que
 //  o item carrega (condição, munição, acessórios, conteúdo da mochila)
-//  continua nele porque ele não foi trocado por outro. O caminho da
-//  vanilla que RECRIA o item é só o do "redirect skin", e item de
-//  redirect é recusado no cadastro e na aplicação.
+//  continua nele porque ele não foi trocado por outro.
+//
+//  ####  A VARIANTE DE DLC/LOJA, E POR QUE ELA OBRIGA A CONVERTER  ####
+//
+//  Uma "Crystal Assault Rifle Diamond" NÃO é uma AK com skin: é uma
+//  ItemDefinition PRÓPRIA (`rifle.ak.glass`) que aponta para a AK por
+//  `ItemDefinition.isRedirectOf`. O visual dela é a definição, não o
+//  campo `skin` — trocar `item.skin` nela não faria nada. São 160
+//  variantes no jogo (medido no server01 em 17/09/2026); só para
+//  `rifle.ak` são 9 (`.diver`, `.glass`, `.glass.blue/.green/.pink/
+//  .red`, `.ice`, `.jungle`, `.med`).
+//
+//  Até a 0.4.0 o plugin RECUSAVA esses itens: eles nem apareciam no
+//  "Aplicar em", e o jogador ficava preso no visual da variante, sem
+//  nem poder voltar ao padrão. A 0.5.0 os reconhece e CONVERTE a
+//  variante no item base antes de aplicar a skin (`ConvertToBase`,
+//  §8). A conversão é a única coisa neste plugin que cria e destrói
+//  item, e ela é uma cópia da ordem do `RepairBench.ChangeSkin` da
+//  vanilla (ramo `if (itemDefinition != slot.info)`, decompilado do
+//  Assembly-CSharp do server01 em 17/09/2026).
+//
+//  O QUE A CONVERSÃO PRESERVA, e por que cada um precisa de código:
+//
+//    condição e condição máxima  a `maxCondition` vai PRIMEIRO: pôr a
+//                                `condition` antes dela a limita ao
+//                                máximo da definição nova;
+//    quantidade                  o item novo nasce com 1;
+//    munição (tipo e quantidade)  vive na `primaryMagazine` da
+//                                `BaseProjectile`, que é da ENTIDADE,
+//                                não do item — morre com ele;
+//    a serra                     `Chainsaw.ammo`, fora do pente;
+//    acessório (`attachment`)     só volta se `supportsAccessories`;
+//    o que está DENTRO (mods,
+//    conteúdo da mochila)        sai do `contents` ANTES do `Remove()`
+//                                — senão o contêiner morre e leva tudo
+//                                (memória: caixa virtual e Skinnable);
+//    a capacidade do slot de
+//    armadura                    `ItemModContainerArmorSlot` cria o
+//                                contêiner do item novo no tamanho do
+//                                antigo, senão os mods não caibam;
+//    as cotas de posse           `ownershipShares` PASSA para o novo e
+//                                é anulada no antigo antes do
+//                                `Remove()`, que a levaria embora;
+//    contêiner e posição         a bancada joga no slot 0 dela; nós
+//                                devolvemos ao MESMO contêiner e
+//                                MESMA posição (barra, roupa, mochila
+//                                vestida, inventário);
+//    a mão                       o item ativo é desequipado antes e
+//                                reequipado depois, pelo `uid` NOVO —
+//                                sem isso sobra entidade órfã e a mão
+//                                fica vazia.
+//
+//  A conversão é SEMPRE variante → base: as nossas skins são do
+//  Workshop e nunca redirecionam, então o caminho "skin que virou
+//  outro item" da vanilla não existe aqui.
 //
 //  ####  O SERVIDOR NUNCA SERVE A ARTE  ####
 //
@@ -176,7 +228,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZWorkshop", "OrigemZ", "0.4.0")]
+    [Info("OrigemZWorkshop", "OrigemZ", "0.5.0")]
     [Description("Menu de skins, posse por jogador e cadastro de skins do Steam Workshop da OrigemZ.")]
     public class OrigemZWorkshop : RustPlugin
     {
@@ -1702,9 +1754,46 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// A definição serve o item `shortname` da skin? Serve a própria, e
+        /// serve a VARIANTE de DLC/loja que aponta para ela por
+        /// `isRedirectOf` (a "Crystal Assault Rifle Diamond" serve a
+        /// `rifle.ak`).
+        ///
+        /// Uma volta só: o `isRedirectOf` da vanilla nunca encadeia — a
+        /// variante aponta direto para a base.
+        /// </summary>
+        /// <summary>
+        /// O nome do item como o catálogo o guarda: o `displayName.english`,
+        /// a mesma escolha do `Catalog` (§4). O `.translated` devolveria
+        /// inglês de todo jeito aqui (memória: o servidor tem a tradução do
+        /// jogo, mas a chave é o token).
+        /// </summary>
+        private static string DisplayNameOf(ItemDefinition def)
+        {
+            if (def == null) return "item";
+
+            return def.displayName != null && !string.IsNullOrEmpty(def.displayName.english)
+                ? def.displayName.english
+                : def.shortname;
+        }
+
+        private static bool Serves(ItemDefinition def, string shortname)
+        {
+            if (def == null || string.IsNullOrEmpty(shortname)) return false;
+            if (def.shortname == shortname) return true;
+
+            return def.isRedirectOf != null && def.isRedirectOf.shortname == shortname;
+        }
+
+        /// <summary>
         /// A skin que o item "tem" do ponto de vista do jogador: com o modo
         /// streamer ligado, um item nosso fica com skin 0 e a escolha dele
         /// mora no `_strippedByPlayer`.
+        ///
+        /// CUIDADO: numa VARIANTE de DLC isto devolve 0 — e 0 aqui não quer
+        /// dizer "está no visual padrão", porque o visual dela é a
+        /// definição, não o campo `skin`. Quem quer saber "este item está
+        /// com esta skin?" usa o `Wears`, não este.
         /// </summary>
         private ulong EffectiveSkin(string steamId, Item item)
         {
@@ -1722,11 +1811,31 @@ namespace Oxide.Plugins
             return item.skin;
         }
 
+        /// <summary>
+        /// Este item está VESTINDO esta skin do catálogo (ou o visual
+        /// Padrão, com `skin` 0)?
+        ///
+        /// Uma variante de DLC/loja responde SEMPRE `false`, inclusive para
+        /// a skin 0: ela não está no visual padrão, ela é outra definição
+        /// de item. É isso que mantém o botão vivo — sem esta regra o
+        /// "Padrão" numa Crystal Diamond dizia "JÁ APLICADA" e o jogador
+        /// não tinha como voltar à AK original (o pedido 2 do dono).
+        /// </summary>
+        private bool Wears(string steamId, Item item, ulong skin)
+        {
+            if (item == null || item.info == null) return false;
+            if (item.info.isRedirectOf != null) return false;
+
+            return EffectiveSkin(steamId, item) == skin;
+        }
+
         /// <summary>Uma instância do item no inventário do jogador, e onde ela está.</summary>
         private class Instance
         {
             public Item Item;
             public string Where = "";
+            /// <summary>É uma variante de DLC/loja: aplicar CONVERTE para a base.</summary>
+            public bool Variant;
         }
 
         /// <summary>
@@ -1736,6 +1845,18 @@ namespace Oxide.Plugins
         /// É também a conferência de posse do item (02 §6.2, item 2): o
         /// que não está nesta lista não é dele — nunca vale uma caixa do
         /// mundo, nem uma mochila guardada no inventário.
+        ///
+        /// ####  A VARIANTE DE DLC ENTRA NA LISTA (0.5.0)  ####
+        ///
+        /// Casa o `shortname` da skin E o de quem redireciona para ele: a
+        /// Crystal Assault Rifle Diamond aparece quando a skin é de
+        /// `rifle.ak`. Antes disso ela não aparecia, e a tela dizia "você
+        /// não tem um(a) Assault Rifle no inventário" com a arma na mão —
+        /// o defeito que o dono mediu em 17/09/2026.
+        ///
+        /// Reconhecer a variante NÃO mexe em quem pode usar a skin: quem
+        /// decide isso é o `AccessOf` (02 §3), e ele não sabe nem quer
+        /// saber que item é.
         /// </summary>
         private List<Instance> CollectInstances(BasePlayer player, string shortname)
         {
@@ -1745,10 +1866,15 @@ namespace Oxide.Plugins
             PlayerInventory inventory = player.inventory;
             Item active = player.GetActiveItem();
 
-            if (active != null && active.info != null && active.info.shortname == shortname &&
+            if (active != null && Serves(active.info, shortname) &&
                 active.parent == inventory.containerBelt)
             {
-                result.Add(new Instance { Item = active, Where = "Na mão" });
+                result.Add(new Instance
+                {
+                    Item = active,
+                    Where = Place("Na mão", active),
+                    Variant = active.info.isRedirectOf != null,
+                });
             }
 
             AddInstances(result, inventory.containerBelt, shortname, active, "Barra");
@@ -1778,11 +1904,30 @@ namespace Oxide.Plugins
 
             foreach (Item item in sorted)
             {
-                if (item == null || item == skip || item.info == null || item.info.shortname != shortname) continue;
+                if (item == null || item == skip || !Serves(item.info, shortname)) continue;
 
                 string label = where == "Barra" ? "Barra " + (item.position + 1) : where;
-                result.Add(new Instance { Item = item, Where = label });
+                result.Add(new Instance
+                {
+                    Item = item,
+                    Where = Place(label, item),
+                    Variant = item.info.isRedirectOf != null,
+                });
             }
+        }
+
+        /// <summary>
+        /// O rótulo do lugar, com o aviso de variante colado nele: "Barra 3
+        /// · variante". A cor do `WhereColor` continua valendo porque ela
+        /// olha o PREFIXO, e o ícone da linha continua sendo o do item real
+        /// (a arte da variante, não a da base) — o jogador precisa
+        /// reconhecer a arma que está vendo no inventário.
+        /// </summary>
+        private static string Place(string where, Item item)
+        {
+            return item != null && item.info != null && item.info.isRedirectOf != null
+                ? where + " · variante"
+                : where;
         }
 
         /// <summary>
@@ -1838,8 +1983,8 @@ namespace Oxide.Plugins
 
             Item item = target.Item;
 
-            // 3. o item é o da skin
-            if (item.info.shortname != shortname)
+            // 3. o item é o da skin — ou uma variante de DLC/loja dele
+            if (!Serves(item.info, shortname))
             {
                 return "Essa skin não é deste item.";
             }
@@ -1858,14 +2003,53 @@ namespace Oxide.Plugins
                 }
             }
 
-            // 5. não é item de redirect
-            if (item.info.isRedirectOf != null)
+            // 5. variante de DLC/loja: converter, não recusar
+            //
+            // Até a 0.4.0 esta conferência recusava TODO item com
+            // `isRedirectOf` ("é uma variante especial e não aceita skin"),
+            // e era o furo que o dono mediu em 17/09/2026. Agora ela barra
+            // só o que é incompatível DE VERDADE; a conversão vem depois
+            // das outras conferências, quando nada mais pode recusar.
+            ItemDefinition variantBase = item.info.isRedirectOf;
+            if (variantBase != null)
             {
-                return "Este item é uma variante especial e não aceita skin.";
+                // A base da variante tem de ser o item da skin escolhida. O
+                // `CollectInstances` já filtra por isso; aqui é a segunda
+                // tranca, porque o `TargetUid` vem do cliente e um uid
+                // forjado poderia apontar para outra variante qualquer.
+                if (variantBase.shortname != shortname)
+                {
+                    return "Este item é uma variante especial e não aceita esta skin.";
+                }
+
+                // O guarda da própria vanilla, invertido para o nosso lado:
+                // no `ChangeSkin` ele é
+                // `itemDefinition.isRedirectOf == null && itemDefinition.hidden`
+                // e olha a definição de DESTINO, não a de origem. Definição
+                // escondida não vai para a mão de ninguém.
+                if (variantBase.hidden)
+                {
+                    return "Este item não tem versão padrão para receber skin.";
+                }
+
+                // E a base tem de aceitar skin do Workshop — a MESMA lista
+                // do cadastro (`/skin add`, `CheckItemAndId`). Uma variante
+                // cuja base não é "skinnable" continua bloqueada, e sem
+                // conversão nenhuma: converter aí seria estragar o item do
+                // jogador em troca de nada.
+                if (_skinnable != null && !_skinnable.Contains(variantBase.shortname))
+                {
+                    return "Este item é uma variante especial e não aceita skin.";
+                }
             }
 
             // 6. já está com essa skin
-            if (EffectiveSkin(viewer.SteamId, item) == skin)
+            //
+            // O `Wears` (e não o `EffectiveSkin`) porque uma variante nunca
+            // está com a skin do catálogo — nem com a 0. Sem isso o
+            // "Padrão" numa Crystal Diamond dizia "Já aplicada" e não havia
+            // caminho de volta para a AK original.
+            if (Wears(viewer.SteamId, item, skin))
             {
                 return "Já aplicada.";
             }
@@ -1882,6 +2066,38 @@ namespace Oxide.Plugins
 
             _nextApply[player.userID] = now + ApplyCooldownSeconds;
 
+            // ####  A VARIANTE VIRA A BASE ANTES DE QUALQUER SKIN  ####
+            //
+            // Daqui para baixo nada mais recusa, então é seguro mexer no
+            // item. Guardo o `uid` antigo: a conversão cria um NOVO, e a
+            // sessão e o cache do modo streamer apontam para o velho.
+            ulong oldUid = item.uid.Value;
+
+            if (variantBase != null)
+            {
+                string problem;
+                Item created = ConvertToBase(player, item, out problem);
+
+                if (created == null)
+                {
+                    // Nem deu para criar o item novo: o antigo continua
+                    // intocado, inteiro, onde estava.
+                    return problem;
+                }
+
+                // A sessão passa a apontar para o item novo mesmo quando a
+                // colocação falhou — senão o menu fica com um alvo morto.
+                session.TargetUid = created.uid.Value;
+                item = created;
+
+                if (problem != null)
+                {
+                    // O item está com o jogador e completo, mas fora do
+                    // lugar: recusa a aplicação e deixa ele conferir.
+                    return problem;
+                }
+            }
+
             // ####  MODO STREAMER: A ESCOLHA É GUARDADA, NÃO VESTIDA  ####
             //
             // 02 §6.3, decidido pela frente D: com o /streamer ligado, uma
@@ -1893,6 +2109,20 @@ namespace Oxide.Plugins
             Dictionary<ulong, ulong> stripped;
             _strippedByPlayer.TryGetValue(viewer.SteamId, out stripped);
 
+            // ####  O CACHE DO STREAMER É POR `uid`, E O `uid` MUDOU  ####
+            //
+            // O `_strippedByPlayer` guarda uid → skin escondida. A conversão
+            // matou o item antigo, então a entrada dele é lixo: ela nunca
+            // mais casa com item nenhum e ficaria pendurada até o
+            // `RestoreTo`. DESCARTO em vez de migrar, de propósito: as
+            // linhas abaixo decidem AGORA o que este item vai vestir (a
+            // escolha entra no cache, ou sai dele), e uma entrada herdada
+            // só poderia contradizer essa decisão.
+            if (stripped != null && oldUid != item.uid.Value)
+            {
+                stripped.Remove(oldUid);
+            }
+
             if (viewer.OnAir && entry != null && entry.HideInStreamer)
             {
                 if (stripped == null)
@@ -1902,10 +2132,21 @@ namespace Oxide.Plugins
                 }
 
                 stripped[item.uid.Value] = skin;
+
+                // Item recém-convertido já nasce com skin 0, e o
+                // `ApplySkinToItem` sai na hora nesse caso. A chamada fica
+                // porque o caminho normal (item base já pintado) precisa
+                // dela.
                 ApplySkinToItem(item, 0uL);
 
                 ok = true;
-                return "Skin guardada: ela aparece quando você desligar o modo streamer.";
+
+                // A conversão trocou a definição do item: dizer só "skin
+                // guardada" esconderia do jogador que a arma dele mudou.
+                return variantBase != null
+                    ? "O item passou a ser um(a) " + DisplayNameOf(variantBase) +
+                      ", e a skin aparece quando você desligar o modo streamer."
+                    : "Skin guardada: ela aparece quando você desligar o modo streamer.";
             }
 
             if (stripped != null)
@@ -1916,7 +2157,295 @@ namespace Oxide.Plugins
             ApplySkinToItem(item, skin);
 
             ok = true;
+
+            // A conversão troca a definição do item, e o jogador precisa
+            // saber disso: a arma dele deixou de ser a variante de DLC.
+            if (variantBase != null)
+            {
+                return skin == 0uL
+                    ? "Visual padrão aplicado: o item voltou a ser um(a) " + DisplayNameOf(variantBase) + "."
+                    : "Skin aplicada: o item passou a ser um(a) " + DisplayNameOf(variantBase) + ".";
+            }
+
             return "Skin aplicada.";
+        }
+
+        /// <summary>
+        /// Converte a VARIANTE de DLC/loja no item BASE (`isRedirectOf`),
+        /// preservando tudo o que o item carrega. NÃO aplica skin nenhuma:
+        /// isso é do chamador, depois.
+        ///
+        /// ####  A ORDEM É COPIADA, NÃO INVENTADA  ####
+        ///
+        /// É o ramo `if (itemDefinition != slot.info)` do
+        /// `RepairBench.ChangeSkin` da vanilla (decompilado do
+        /// Assembly-CSharp do server01 em 17/09/2026, com o `ilspycmd`), na
+        /// MESMA ordem. Cada passo protege de uma coisa:
+        ///
+        ///   1. guarda condição, quantidade, acessório, munição e a
+        ///      capacidade do slot de armadura ANTES de mexer em nada — a
+        ///      munição mora na ENTIDADE, e ela morre com o item;
+        ///   2. tira os filhos do `contents`: o `Remove()` mataria o
+        ///      contêiner e tudo dentro dele (memória: caixa virtual e
+        ///      Skinnable);
+        ///   3. cria o item novo e PASSA o `ownershipShares`, anulando o do
+        ///      antigo — o `Remove()` levaria as cotas embora;
+        ///   4. `Remove()` e então `DoRemoves()`: sem o flush a posição
+        ///      continua ocupada e o `MoveToContainer` abaixo falha;
+        ///   5. só então coloca, restaura e devolve os filhos.
+        ///
+        /// Trocar a ordem quebra um desses, e o sintoma aparece longe
+        /// daqui: mochila vazia, arma sem munição, item que não cabe.
+        ///
+        /// ####  O QUE É NOSSO, E NÃO DA BANCADA  ####
+        ///
+        /// A bancada joga o item no slot 0 dela, que está sempre livre.
+        /// Nós devolvemos ao MESMO contêiner e MESMA posição de antes —
+        /// barra, roupa, mochila vestida ou inventário — e reequipamos a
+        /// mão quando era o item ativo.
+        ///
+        /// Devolve o item NOVO, ou `null` quando nem deu para criá-lo (aí
+        /// o antigo continua intocado e `problem` explica). `problem`
+        /// não-vazio COM item devolvido quer dizer "está inteiro com o
+        /// jogador, mas fora do lugar": o chamador recusa a aplicação em
+        /// vez de seguir. Em nenhum caminho o jogador termina sem o item.
+        /// </summary>
+        private Item ConvertToBase(BasePlayer player, Item item, out string problem)
+        {
+            problem = null;
+
+            ItemDefinition target = item.info.isRedirectOf;
+            if (target == null)
+            {
+                problem = "Este item não é uma variante.";
+                return null;
+            }
+
+            // Onde ele estava. O `parent` pode ser o `contents` de uma
+            // mochila VESTIDA, e é para lá que ele volta.
+            ItemContainer parent = item.parent;
+            int position = item.position;
+
+            // Era o item da mão? O `GetActiveItem` só acha na barra, e é
+            // por `uid`: depois do `Remove()` ele devolve `null` e o
+            // `svActiveItemID` fica apontando para um item morto.
+            bool wasActive = player.GetActiveItem() == item;
+
+            // ---- 1. o que o item carrega ---------------------------
+            float condition = item.condition;
+            float maxCondition = item.maxCondition;
+            int amount = item.amount;
+            ulong attachment = item.attachment;
+
+            int ammo = 0;
+            ItemDefinition ammoType = null;
+
+            // `hadMagazine` é NOSSO, não da vanilla: ela escreve
+            // `SetAmmoCount(0)` no item novo mesmo quando o antigo não
+            // tinha pente nenhum para ler, e aí ESVAZIA um pente que
+            // nasceu cheio. Só restauro a munição se havia munição para
+            // restaurar.
+            bool hadMagazine = false;
+            BaseProjectile gun = item.GetHeldEntity() as BaseProjectile;
+            if (gun != null && gun.primaryMagazine != null)
+            {
+                hadMagazine = true;
+                ammo = gun.primaryMagazine.contents;
+                ammoType = gun.primaryMagazine.ammoType;
+            }
+
+            Chainsaw saw = item.GetHeldEntity() as Chainsaw;
+            if (saw != null)
+            {
+                ammo = saw.ammo;
+            }
+
+            // A capacidade do slot de armadura: o item novo nasce com o
+            // contêiner do TAMANHO da definição, e a variante pode ter
+            // outro. Sem isto os mods não cabem de volta.
+            int armorCapacity = 0;
+            ItemModContainerArmorSlot armorSlot = item.info.GetComponent<ItemModContainerArmorSlot>();
+            if (armorSlot != null && item.contents != null)
+            {
+                armorCapacity = item.contents.capacity;
+            }
+
+            // ---- 2. os filhos saem antes do Remove -----------------
+            //
+            // Guardo a POSIÇÃO de cada um: a vanilla devolve sem posição
+            // quando o item não tem slot de armadura, e aí os mods de uma
+            // arma podem trocar de lugar entre si. Preservar a posição não
+            // pode perder nada (há o caminho de volta abaixo) e é o que o
+            // dono pediu no critério 3.
+            List<Item> children = new List<Item>();
+            List<int> childPositions = new List<int>();
+
+            if (item.contents != null && item.contents.itemList != null && item.contents.itemList.Count > 0)
+            {
+                foreach (Item child in item.contents.itemList)
+                {
+                    if (child == null) continue;
+
+                    children.Add(child);
+                    childPositions.Add(child.position);
+                }
+
+                // Em duas passadas: mexer na `itemList` durante o `foreach`
+                // de cima derrubaria o enumerador.
+                foreach (Item child in children)
+                {
+                    child.RemoveFromContainer();
+                }
+            }
+
+            // ---- 3. o item novo, com as cotas de posse -------------
+            Item created = ItemManager.Create(target, 1, 0uL, true, 0uL);
+            if (created == null)
+            {
+                // Nada foi destruído ainda: só os filhos saíram, e eles
+                // voltam para o item ORIGINAL, que continua vivo.
+                ReturnChildren(player, item, children, childPositions);
+
+                problem = "Não deu para converter este item agora. Tente de novo.";
+                return null;
+            }
+
+            created.ownershipShares = item.ownershipShares;
+            item.ownershipShares = null;
+
+            // A mão é desequipada com o item AINDA VIVO: é o que faz o
+            // `SetHeld(false)` rodar na entidade certa. Desequipar depois
+            // do `Remove()` deixaria a entidade órfã no mundo, e o
+            // `svActiveItemID` apontando para um item que não existe mais.
+            //
+            // ARMADILHA do decompilado: o `UpdateActiveItem` dispara o
+            // `OnActiveItemChange` do Oxide e RETORNA sem fazer nada se
+            // outro plugin cancelar — e também zera a escolha quando
+            // `equippingBlocked`. Não há como forçar, e nem se deve: o pior
+            // caso é o jogador terminar de mão vazia e ter de clicar na
+            // barra outra vez. Nenhum item se perde por causa disso.
+            if (wasActive)
+            {
+                player.UpdateActiveItem(default(ItemId));
+            }
+
+            // ---- 4. mata o antigo e LIBERA a posição ---------------
+            item.Remove();
+            ItemManager.DoRemoves();
+
+            // ---- 5. coloca de volta no mesmo lugar -----------------
+            //
+            // `allowStack: false` e a posição exata, como a vanilla: nada
+            // de empilhar com um vizinho igual. A posição está livre — o
+            // `DoRemoves()` acima é justamente o que a libera.
+            bool placed = parent != null && created.MoveToContainer(parent, position, false);
+
+            // ---- 5a. condição, quantidade, munição -----------------
+            //
+            // `maxCondition` PRIMEIRO: a `condition` é limitada ao máximo
+            // no momento em que é escrita.
+            created.maxCondition = maxCondition;
+            created.condition = condition;
+            created.amount = amount;
+
+            BaseProjectile newGun = created.GetHeldEntity() as BaseProjectile;
+            if (newGun != null)
+            {
+                if (hadMagazine && newGun.primaryMagazine != null)
+                {
+                    newGun.SetAmmoCount(ammo);
+                    newGun.primaryMagazine.ammoType = ammoType;
+                }
+
+                // Sem isto o cliente continua desenhando o pente antigo.
+                newGun.ForceModsChanged();
+            }
+
+            Chainsaw newSaw = created.GetHeldEntity() as Chainsaw;
+            if (newSaw != null)
+            {
+                newSaw.ammo = ammo;
+            }
+
+            // ---- 5b. o contêiner de armadura no tamanho certo ------
+            //
+            // A vanilla chama `CreateAtCapacity` sem conferir o `null` e
+            // estoura se a definição de destino não tiver o componente.
+            // Confiro: variante e base podem divergir.
+            ItemModContainerArmorSlot newArmorSlot = created.info.GetComponent<ItemModContainerArmorSlot>();
+            if (armorCapacity > 0 && newArmorSlot != null)
+            {
+                newArmorSlot.CreateAtCapacity(armorCapacity, created);
+            }
+
+            // ---- 5c. os filhos voltam ------------------------------
+            ReturnChildren(player, created, children, childPositions);
+
+            // ---- 5d. o acessório -----------------------------------
+            if (attachment != 0uL && created.info.supportsAccessories)
+            {
+                created.attachment = attachment;
+                created.MarkDirty();
+
+                BaseEntity held = created.GetHeldEntity();
+                if (held != null)
+                {
+                    held.attachmentID = created.attachment;
+                    held.SendNetworkUpdate();
+                }
+            }
+
+            // ---- 5e. o item fora do lugar, mas COMPLETO ------------
+            //
+            // O `GiveItem` vem aqui, depois de tudo restaurado, e não junto
+            // do `MoveToContainer`: ele pode EMPILHAR o item com outro
+            // igual, e empilhar um item ainda pela metade perderia a
+            // quantidade e o conteúdo. Com o inventário cheio ele cai aos
+            // pés do jogador — nunca se perde. A skin NÃO é aplicada: o
+            // chamador recusa e diz isso na tela.
+            if (!placed)
+            {
+                player.GiveItem(created, BaseEntity.GiveItemReason.Generic);
+                problem = "O item foi convertido, mas não voltou para o lugar de antes: " +
+                          "confira o inventário e aplique de novo.";
+            }
+
+            // ---- 5f. a mão de volta, pelo uid NOVO -----------------
+            //
+            // Depois da colocação, porque o `UpdateActiveItem` procura o
+            // item na `containerBelt` por `uid`. Se ele não voltou para a
+            // barra, o jogador fica de mão vazia de propósito — melhor que
+            // segurar coisa que não está lá.
+            if (wasActive && player.inventory != null && created.parent == player.inventory.containerBelt)
+            {
+                player.UpdateActiveItem(created.uid);
+            }
+
+            created.MarkDirty();
+            return created;
+        }
+
+        /// <summary>
+        /// Devolve os filhos ao `contents` do item, na posição que tinham.
+        ///
+        /// Três tentativas, em ordem, e nenhuma delas pode terminar com o
+        /// filho fora do mundo: a posição exata, qualquer posição livre do
+        /// mesmo contêiner, e o inventário do jogador. A vanilla para na
+        /// segunda; a terceira existe porque a base pode ter contêiner
+        /// menor que a variante.
+        /// </summary>
+        private static void ReturnChildren(BasePlayer player, Item item, List<Item> children, List<int> positions)
+        {
+            for (int i = 0; i < children.Count; i++)
+            {
+                Item child = children[i];
+                if (child == null) continue;
+
+                if (item.contents != null && child.MoveToContainer(item.contents, positions[i], false)) continue;
+                if (item.contents != null && child.MoveToContainer(item.contents)) continue;
+
+                player.GiveItem(child, BaseEntity.GiveItemReason.Generic);
+            }
         }
 
         // ============================================================
@@ -2683,7 +3212,11 @@ namespace Oxide.Plugins
             session.PickId = 0;
 
             List<Instance> instances = CollectInstances(player, shortname);
-            if (instances.Count > 0)
+
+            // Uma VARIANTE de DLC não veste skin nenhuma do catálogo, então
+            // não há o que pré-selecionar: fica no "Padrão", que é
+            // justamente a troca que ela precisa oferecer.
+            if (instances.Count > 0 && !instances[0].Variant)
             {
                 ulong current = EffectiveSkin(player.UserIDString, instances[0].Item);
                 foreach (SkinEntry entry in skins)
@@ -3599,8 +4132,20 @@ namespace Oxide.Plugins
             view.Page = session.GridPage;
 
             Item target = frame.TargetIndex >= 0 ? frame.Instances[frame.TargetIndex].Item : null;
-            ulong targetSkin = target != null ? EffectiveSkin(viewer.SteamId, target) : 0uL;
             string targetShortname = target != null ? target.info.shortname : "";
+
+            // ####  UMA VARIANTE NÃO VESTE SKIN DO CATÁLOGO  ####
+            //
+            // O `Wears` responde `false` para toda variante de DLC/loja,
+            // inclusive para a skin 0. Efeito na grade: com uma Crystal
+            // Diamond escolhida, NENHUMA célula fica marcada "Aplicada" —
+            // nem a do "Padrão" — e todas continuam clicáveis. É assim que
+            // o jogador sai do visual da variante (critério 2 do dono).
+            //
+            // O `targetShortname` continua na conta porque a grade pode
+            // misturar itens: uma célula de outro item nunca está aplicada
+            // no alvo, mesmo que o número da skin bata.
+            bool defaultApplied = targetShortname == session.Shortname && Wears(viewer.SteamId, target, 0uL);
 
             int start = view.Page * pageSize;
             int end = Math.Min(count, start + pageSize);
@@ -3617,10 +4162,10 @@ namespace Oxide.Plugins
                         PickId = 0,
                         ItemId = sameItem[0].ItemId,
                         Label = "Padrão",
-                        State = targetShortname == session.Shortname && targetSkin == 0uL ? "Aplicada" : "Padrão",
-                        StateColor = targetShortname == session.Shortname && targetSkin == 0uL ? ColOlive : ColMuted,
+                        State = defaultApplied ? "Aplicada" : "Padrão",
+                        StateColor = defaultApplied ? ColOlive : ColMuted,
                         Picked = session.HasPick && session.PickId == 0,
-                        Applied = targetShortname == session.Shortname && targetSkin == 0uL,
+                        Applied = defaultApplied,
                     });
                     continue;
                 }
@@ -3635,7 +4180,7 @@ namespace Oxide.Plugins
                     ItemName = mixed ? entry.ItemName : "",
                     Rarity = entry.Rarity,
                     Picked = session.HasPick && session.PickId == entry.Id,
-                    Applied = targetShortname == entry.Shortname && targetSkin == entry.SkinId,
+                    Applied = targetShortname == entry.Shortname && Wears(viewer.SteamId, target, entry.SkinId),
                     Favorite = viewer.Favorites.Contains(entry.Id),
                     Season = entry.Season,
                 };
@@ -3835,7 +4380,10 @@ namespace Oxide.Plugins
                     ItemId = item.info.itemid,
                     SkinId = item.skin,
                     Where = frame.Instances[i].Where,
-                    Applied = EffectiveSkin(steamId, item) == pickSkin,
+                    // O `Wears` e não o `EffectiveSkin`: a linha de uma
+                    // variante nunca sai "Aplicada", nem com o "Padrão"
+                    // escolhido — e é por isso que o botão continua vivo.
+                    Applied = Wears(steamId, item, pickSkin),
                     Selected = i == frame.TargetIndex,
                     Amount = item.amount,
                 };
@@ -3883,7 +4431,7 @@ namespace Oxide.Plugins
                 return view;
             }
 
-            if (EffectiveSkin(steamId, frame.Instances[frame.TargetIndex].Item) == pickSkin)
+            if (Wears(steamId, frame.Instances[frame.TargetIndex].Item, pickSkin))
             {
                 view.Button = "JÁ APLICADA";
                 return view;
@@ -4966,7 +5514,11 @@ namespace Oxide.Plugins
 
             // O ícone com a skin ATUAL do item.
             Icon(canvas, box, 8, 4, 36, 36, row.ItemId, row.SkinId, "1 1 1 1");
-            Label(canvas, box, 52, 4, 160, 18, row.Where, 12, WhereColor(row.Where), TextAnchor.MiddleLeft, true);
+            // 200 e não 160: o sufixo " · variante" (0.5.0) não cabia em
+            // "Inventário · variante" e o texto era cortado. A faixa da
+            // direita começa em `w - 150`, com `w` perto de 410 (RightWidth
+            // 430), então 52+200 = 252 continua antes dela.
+            Label(canvas, box, 52, 4, 200, 18, row.Where, 12, WhereColor(row.Where), TextAnchor.MiddleLeft, true);
 
             // ####  PILHA É UM ITEM SÓ  ####
             //

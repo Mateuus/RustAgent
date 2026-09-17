@@ -624,10 +624,14 @@ MEDIDO em 17/09/2026, no decompilado do `RepairBench.ChangeSkin` (Assembly-CShar
   para skin de loja da Facepunch que **redireciona para outro item** (`ItemSkin.Redirect` /
   `isRedirectOf`).
 
-**Skin do Workshop nunca redireciona**, e o cadastro já recusa item de redirect (01 §2). Logo
-este sistema **só faz troca no lugar**. Quantidade, condição, condição máxima, munição no pente,
-tipo de munição, acessórios, conteúdo de mochila e `ownershipShares` ficam onde estavam,
-porque o objeto é o mesmo.
+**Skin do Workshop nunca redireciona**, e o cadastro continua recusando item de redirect
+(01 §2): uma skin é sempre cadastrada no item **base**. Logo, para um item base, este sistema
+**só faz troca no lugar**. Quantidade, condição, condição máxima, munição no pente, tipo de
+munição, acessórios, conteúdo de mochila e `ownershipShares` ficam onde estavam, porque o
+objeto é o mesmo.
+
+> **A partir da v0.5.0 existe UM caso que recria o item: a variante de DLC/loja.** Não é uma
+> exceção à regra acima — é o outro ramo do mesmo `ChangeSkin`. Está no §6.4.
 
 **Por que não copiar o `Skins.cs` de referência** (`Docs/Skins/Skins.cs`): ele cria uma cópia
 do item por skin num contêiner, zera o pente da cópia, guarda o conteúdo numa lista à parte e
@@ -642,10 +646,15 @@ Na ordem, e recusando com uma mensagem na própria tela:
 2. o item existe (`uid`) e **é dele**. Isso inclui os contêineres principal, barra e roupa, e o
    conteúdo de uma mochila **vestida**. A subida por `item.parent` precisa terminar em
    `player.inventory`; nunca vale uma caixa do mundo;
-3. o `shortname` do item é o `shortname` da skin;
+3. o `shortname` do item é o `shortname` da skin — **ou** o item é uma variante de DLC/loja
+   que redireciona para ele (`info.isRedirectOf.shortname`, v0.5.0, §6.4);
 4. a skin está no catálogo deste servidor e o jogador pode usá-la (§3). A skin 0 sempre passa;
-5. o item não é de redirect (`info.isRedirectOf == null`);
-6. o item já não está com essa skin (se estiver, a tela diz "já aplicada" e não faz nada);
+5. **se for uma variante**, ela é compatível: a base dela é o item da skin escolhida, a base
+   não é `hidden` e a base aceita skin do Workshop (a mesma lista do `/skin add`). Até a
+   v0.4.0 esta conferência recusava **toda** variante — era o defeito do §6.4;
+6. o item já não está com essa skin (se estiver, a tela diz "já aplicada" e não faz nada).
+   Uma variante **nunca** conta como "já aplicada", nem para o visual Padrão: o visual dela é
+   a definição do item, não o campo `skin`;
 7. trava de frequência: **uma aplicação a cada 0,5 s** por jogador. O relógio é **do jogador**, e não da sessão do menu: fechar e reabrir o menu não o zera.
 
 **Aplicar não vai para a auditoria** (01 §5): é uso, não configuração.
@@ -678,6 +687,125 @@ Na ordem, e recusando com uma mensagem na própria tela:
 >   O `RestoreTo` a veste na saída do ar. Qualquer outra escolha feita no ar (Padrão ou uma
 >   skin sem logo) tira o item da lista, para a saída do ar não desfazê-la. O menu mostra a
 >   escolha guardada como "Aplicada".
+
+### 6.4 A variante de DLC/loja — reconhecer e CONVERTER (v0.5.0)
+
+#### O defeito, medido no jogo em 17/09/2026
+
+O dono tinha uma **Crystal Assault Rifle Diamond** no inventário. Abriu o menu, escolheu a
+skin *System Killer AR* (cadastrada para `rifle.ak`) e o "Aplicar em" respondeu:
+
+> Você não tem um(a) Assault Rifle no inventário.
+
+A arma estava ali, na mão. E não havia caminho nenhum: nem aplicar uma skin, nem voltar ao
+visual padrão.
+
+#### A causa
+
+Uma variante de DLC/loja **não é uma AK com skin**. É uma `ItemDefinition` própria — a Crystal
+Diamond é `rifle.ak.glass` — que aponta para a base por `ItemDefinition.isRedirectOf`. O visual
+dela é a **definição**, não o campo `item.skin`; escrever `item.skin` nela não faria nada.
+
+**Medido no server01 em 17/09/2026: existem 160 variantes no jogo.** Só para `rifle.ak` são 9:
+
+```
+rifle.ak.diver   rifle.ak.glass        rifle.ak.glass.blue   rifle.ak.glass.green
+rifle.ak.ice     rifle.ak.glass.pink   rifle.ak.glass.red    rifle.ak.jungle
+rifle.ak.med
+```
+
+Até a v0.4.0 o plugin fechava as duas portas:
+
+- `CollectInstances`/`AddInstances` casavam **só** `item.info.shortname == shortname`, então a
+  variante nunca entrava na lista do "Aplicar em" — daí a frase "você não tem";
+- a conferência 5 do `TryApply` recusava qualquer item com `isRedirectOf != null`, com
+  *"Este item é uma variante especial e não aceita skin."*
+
+#### A saída: converter variante → base, com a ordem da vanilla
+
+Não há como pintar a variante. O que existe é **trocá-la pelo item base** e pintar esse. É
+exatamente o que a própria vanilla faz: o ramo `if (itemDefinition != slot.info)` do
+`RepairBench.ChangeSkin` (decompilado do Assembly-CSharp do server01 com o `ilspycmd`, em
+17/09/2026). O `ConvertToBase` do plugin é uma cópia da ordem dele, e a ordem não é decorativa
+— cada passo protege de uma coisa:
+
+| Passo | Por que ele existe |
+|---|---|
+| 1. guardar condição, condição máxima, quantidade, acessório, munição (tipo e quantidade), `Chainsaw.ammo` e a capacidade do `ItemModContainerArmorSlot` | a munição mora na **entidade** (`BaseProjectile.primaryMagazine`), não no item: ela morre junto com ele |
+| 2. tirar os filhos do `contents` com `RemoveFromContainer()` **antes** do `Remove()` | o `Remove()` mata o contêiner e tudo dentro dele — mods da arma, conteúdo da mochila (memória: *caixa virtual e Skinnable*) |
+| 3. criar o novo com `ItemManager.Create(base, 1, 0uL, true, 0uL)`, **passar** o `ownershipShares` e anular o do antigo | o `Remove()` levaria as cotas de posse embora |
+| 4. `Remove()` e **então** `ItemManager.DoRemoves()` | sem o flush a posição continua ocupada e o `MoveToContainer` do passo 5 falha |
+| 5. colocar, restaurar e devolver os filhos | a `maxCondition` vai **antes** da `condition`: escrever a condição primeiro a limita ao máximo da definição nova |
+
+O que é **nosso**, e não da bancada:
+
+- **contêiner e posição.** A bancada joga o item no slot 0 dela, que está sempre livre. Nós
+  devolvemos ao **mesmo contêiner e mesma posição** de antes — barra, roupa, mochila vestida ou
+  inventário principal. Se o `MoveToContainer` na posição exata falhar, o item vai para o
+  jogador pelo `GiveItem` (e, com o inventário cheio, cai aos pés dele) e a aplicação é
+  **recusada** com a frase *"O item foi convertido, mas não voltou para o lugar de antes"*. Em
+  nenhum caminho o jogador termina sem o item.
+- **a mão.** Se o item era o ativo, ele é desequipado **com o item ainda vivo** (é o que faz o
+  `SetHeld(false)` rodar na entidade certa, sem deixar entidade órfã) e reequipado depois pelo
+  **`uid` novo**. A vanilla não trata isso porque na bancada o item nunca está na mão.
+- **os filhos voltam na posição que tinham.** A vanilla devolve sem posição quando o item não
+  tem slot de armadura; preservar a posição não pode perder nada (há dois caminhos de volta) e
+  é o critério 3 do dono.
+- **a munição só é restaurada se havia munição para restaurar.** A vanilla chama
+  `SetAmmoCount(0)` no item novo mesmo quando o antigo não tinha pente para ler, e aí **esvazia
+  um pente que nasceu cheio**. O plugin guarda um `hadMagazine` e pula a restauração nesse
+  caso.
+- **o `GiveItem` do caminho de recuperação vem DEPOIS de tudo restaurado.** Ele pode
+  **empilhar** o item com outro igual, e empilhar um item ainda pela metade perderia a
+  quantidade e o conteúdo. A vanilla não tem esse caminho (o slot da bancada está sempre
+  livre), então a ordem é nossa.
+- **o `CreateAtCapacity` é conferido contra `null`.** A vanilla chama direto e estoura se a
+  definição de destino não tiver o componente; variante e base podem divergir.
+- **o cache do modo streamer.** O `_strippedByPlayer` guarda `uid → skin`, e a conversão cria
+  um `uid` **novo**. A entrada antiga é **descartada**, não migrada: as linhas seguintes do
+  `TryApply` decidem naquele instante o que o item vai vestir, e uma entrada herdada só
+  poderia contradizer essa decisão.
+
+A conversão é **sempre variante → base**. O caminho inverso da vanilla ("a skin escolhida
+redireciona para outro item", `ItemSkin.Redirect`) não existe aqui: as nossas skins são do
+Workshop e nunca redirecionam.
+
+#### O que NÃO mudou
+
+- **O catálogo continua sendo da base.** `/skin add` e o `ReadSkin` seguem recusando um
+  `shortname` de variante (`redirect_item`): a skin é cadastrada em `rifle.ak`, e a variante é
+  reconhecida **na hora de aplicar**, não no cadastro.
+- **As regras de acesso do §3 continuam iguais.** Reconhecer uma variante **não** libera skin
+  que o jogador não possui: quem decide é o `AccessOf`, e ele não sabe nem quer saber que item
+  é. O privilégio de admin segue **desligado** (decisão do dono de 17/09/2026, §3).
+- **Item de verdade incompatível continua bloqueado**, e sem conversão nenhuma — converter aí
+  seria estragar o item do jogador em troca de nada.
+
+#### Na tela
+
+A linha do "Aplicar em" de uma variante ganha o sufixo **" · variante"** no lugar ("Barra 3 ·
+variante"), e o **ícone continua o do item real** — a arte da Crystal Diamond, não a da AK: o
+jogador precisa reconhecer a arma que está vendo no inventário. Detalhe em 03 §3.6.
+
+Uma variante **nunca** sai marcada "Aplicada", em nenhuma célula da grade e em nenhuma linha
+do "Aplicar em", nem com o "Padrão" escolhido. É isso que mantém o botão vivo e dá o caminho de
+volta. No plugin é o `Wears`, que responde `false` para toda variante — e por isso o
+`EffectiveSkin` não serve mais para responder "este item está com esta skin?".
+
+#### Critérios de aceite do dono
+
+1. a Crystal Assault Rifle Diamond aparece como compatível ao escolher uma skin de `rifle.ak`;
+2. dá para trocar dessa variante para o visual **Padrão** (a AK original) e para qualquer skin
+   que o jogador possua;
+3. a arma mantém condição, munição (tipo e quantidade) e acessórios depois da troca;
+4. o item continua correto depois de fechar o menu e reconectar;
+5. funciona com armas padrão e variantes ao mesmo tempo no inventário, mexendo só na escolhida;
+6. vale para **todas** as variantes, não só as da AK, inclusive de outras categorias;
+7. item de verdade incompatível continua bloqueado, sem conversão indevida;
+8. reconhecer uma variante **não** libera skin que o jogador não possui: as regras de acesso do
+   §3 continuam iguais (e o privilégio de admin está desligado desde 17/09/2026).
+
+O roteiro de teste ao vivo está em **03 §3.6**.
 
 ---
 
