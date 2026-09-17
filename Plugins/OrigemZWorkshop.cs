@@ -2439,6 +2439,9 @@ namespace Oxide.Plugins
         /// grade infinita num AddUI só não foi medida.
         /// </summary>
         private const int ScrollPageSize = 48;
+
+        /// <summary>Quantos alvos o "Aplicar em" mostra de uma vez quando rola.</summary>
+        private const int TargetsScrollMax = 40;
         private const string ScrollCommand = "origemz.skins.scroll";
         private const float CommandCooldownSeconds = 0.08f;
         private const int SearchMinLength = 2;
@@ -3127,6 +3130,8 @@ namespace Oxide.Plugins
             public readonly List<TargetRow> Rows = new List<TargetRow>();
             public int Page;
             public int Pages = 1;
+            /// <summary>A lista de alvos rola (config `SideScroll`) em vez de paginar de 4 em 4.</summary>
+            public bool Scroll;
             public string Button = "";
             public bool ButtonLive;
             public string Message = "";
@@ -3660,12 +3665,17 @@ namespace Oxide.Plugins
             ulong pickSkin = frame.Pick != null ? frame.Pick.SkinId : 0uL;
             string steamId = frame.Viewer.SteamId;
 
-            view.Pages = Math.Max(1, (frame.Instances.Count + TargetsPageSize - 1) / TargetsPageSize);
+            // Rolando, a lista vem inteira (com teto): um jogador pode ter
+            // dezenas do mesmo item, e paginar de 4 em 4 vira trabalho.
+            view.Scroll = _config.SideScroll;
+            int perPage = view.Scroll ? TargetsScrollMax : TargetsPageSize;
+
+            view.Pages = Math.Max(1, (frame.Instances.Count + perPage - 1) / perPage);
             session.TargetPage = Math.Min(Math.Max(0, session.TargetPage), view.Pages - 1);
             view.Page = session.TargetPage;
 
-            int end = Math.Min(frame.Instances.Count, (view.Page + 1) * TargetsPageSize);
-            for (int i = view.Page * TargetsPageSize; i < end; i++)
+            int end = Math.Min(frame.Instances.Count, (view.Page + 1) * perPage);
+            for (int i = view.Page * perPage; i < end; i++)
             {
                 Item item = frame.Instances[i].Item;
                 TargetRow row = new TargetRow
@@ -4707,21 +4717,37 @@ namespace Oxide.Plugins
                   TextAnchor.MiddleRight, false);
 
             float y = 36f;
+            float listHeight = TargetsPageSize * (TargetRowHeight + TargetRowGap);
 
             if (view.Rows.Count == 0)
             {
                 Label(canvas, targets, x, y, w, 60, view.Empty, 12, ColMuted, TextAnchor.MiddleCenter, false);
             }
-
-            foreach (TargetRow row in view.Rows)
+            else if (view.Scroll)
             {
-                TargetRowBox(canvas, targets, x, y, w, row, view.Token);
-                y += TargetRowHeight + TargetRowGap;
+                float contentHeight = view.Rows.Count * (TargetRowHeight + TargetRowGap) + 2 * ScrollInset;
+                Box area = ScrollArea(canvas, targets, x, y, w, listHeight, contentHeight, true);
+                float rowWidth = contentHeight > listHeight ? w - ScrollGutter : w;
+                float ry = ScrollInset;
+
+                foreach (TargetRow row in view.Rows)
+                {
+                    TargetRowBox(canvas, area, 0, ry, rowWidth, row, view.Token);
+                    ry += TargetRowHeight + TargetRowGap;
+                }
+            }
+            else
+            {
+                foreach (TargetRow row in view.Rows)
+                {
+                    TargetRowBox(canvas, targets, x, y, w, row, view.Token);
+                    y += TargetRowHeight + TargetRowGap;
+                }
             }
 
             // A faixa de resultado ocupa o meio do paginador (ou o lugar
             // dele, com uma página só).
-            float pagerY = 36f + TargetsPageSize * (TargetRowHeight + TargetRowGap);
+            float pagerY = 36f + listHeight;
             string messageColor = view.MessageOk ? ColOlive : ColAmber;
             string message = view.Message.Length > 0 ? view.Message : null;
 
