@@ -988,18 +988,21 @@ function vipMirrorLabel(mirror: SiteVipMirrorView, serverId: string): string {
     return 'não construído — o site não sabe quem tem VIP no jogo';
   }
 
-  const count = `${String(mirror.count ?? 0)} VIP(s)`;
+  // A contagem é a DESTE servidor — os VIPs dele mais os de rede.
+  // Desde que o VIP tem escopo, um número só para todos diria "12
+  // VIPs" numa tela onde valem três.
+  const mine = mirror.mirrored.find((entry) => entry.serverId === serverId) ?? null;
+  const count = `${String(mine?.count ?? mirror.count ?? 0)} VIP(s) aqui`;
 
   if (mirror.routeMissing) {
     return `${count} — o site ainda não tem a rota; nada a fazer aqui`;
   }
 
-  const at = mirror.mirrored.find((entry) => entry.serverId === serverId)?.at ?? null;
-
-  if (mirror.inSync === true) {
-    return at === null
+  // E "em dia" também: o retrato do vizinho não diz nada sobre este.
+  if (mine !== null && mine.version === mine.expected) {
+    return mine.at === null
       ? `${count}, em dia`
-      : `${count}, confirmado em ${new Date(at).toLocaleString('pt-BR')}`;
+      : `${count}, confirmado em ${new Date(mine.at).toLocaleString('pt-BR')}`;
   }
 
   return `${count} — ${mirror.reason ?? 'ainda não confirmado pelo site'}`;

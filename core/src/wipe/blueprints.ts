@@ -291,9 +291,15 @@ export async function fetchBpPage(
 //  §3  O SERVIÇO
 // ------------------------------------------------------------
 
-/** O que o serviço precisa saber sobre VIP. Ver db/vips-repository.ts. */
+/**
+ * O que o serviço precisa saber sobre VIP. Ver db/vips-repository.ts.
+ *
+ * `where` é o servidor do wipe: a devolução de blueprint é uma régua
+ * DAQUELE servidor, e lê-la sem escopo devolveria o progresso a quem
+ * é VIP em outro.
+ */
 export interface BpVips {
-  activeOf(steamId: string, now?: number): readonly { readonly tier: string }[];
+  activeOf(steamId: string, where: string, now?: number): readonly { readonly tier: string }[];
 }
 
 /** O recorte do supervisor que a devolução usa. */
@@ -618,7 +624,7 @@ export class BlueprintService {
 
     const restore = this.#deps.repository.restoreOf(input.serverId, snapshot.id);
     const settings = this.#deps.repository.getSettings(input.serverId);
-    const tiers = this.#deps.vips.activeOf(input.steamId, now).map((vip) => vip.tier);
+    const tiers = this.#deps.vips.activeOf(input.steamId, input.serverId, now).map((vip) => vip.tier);
     const best = bestRuleOf(settings, tiers);
 
     if (best === null && input.force !== true) {
@@ -730,7 +736,7 @@ export class BlueprintService {
       //
       // Contra o VIP VIGENTE neste instante: quem venceu entre o
       // wipe e agora não recebe, e quem comprou depois recebe.
-      const tiers = this.#deps.vips.activeOf(restore.steamId, now).map((vip) => vip.tier);
+      const tiers = this.#deps.vips.activeOf(restore.steamId, serverId, now).map((vip) => vip.tier);
       const best = bestRuleOf(settings, tiers);
 
       if (best === null) {

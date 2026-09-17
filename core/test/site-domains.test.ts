@@ -522,9 +522,9 @@ describe('o VIP que vem do site', () => {
 
         return Promise.resolve({});
       },
-      revoke: (steamId: string, tier: string): Promise<unknown> => {
+      revoke: (steamId: string, tier: string, serverId: string | null): Promise<unknown> => {
         behaviour.onRevoke?.(steamId, tier);
-        revoked.push(`${steamId}:${tier}`);
+        revoked.push(`${steamId}:${tier}@${serverId ?? 'rede'}`);
 
         return Promise.resolve({});
       },
@@ -563,16 +563,55 @@ describe('o VIP que vem do site', () => {
       {
         steamId: '76561198123456789',
         tier: 'gold',
+        // Lote SEM escopo é o VIP de rede: é o que este canal sempre
+        // significou, e um lote em voo não pode mudar de sentido no
+        // deploy. Ver `serverOf`, em site/appliers/vips.ts.
+        serverId: null,
         expiresAt: Date.parse('2026-10-01T00:00:00.000Z'),
         origin: 'loja',
         createdBy: 'site',
       },
     ]);
-    expect(fake.revoked).toEqual(['76561198987654321:silver']);
+    expect(fake.revoked).toEqual(['76561198987654321:silver@rede']);
     expect(acks(test.calls)[0]).toMatchObject({
       applied: true,
       stats: { granted: 1, revoked: 1, alreadyRevoked: 0 },
     });
+  });
+
+  it('e o lote COM `serverId` prende o VIP àquele servidor', async () => {
+    // A ordem do deploy é esta: quem RECEBE aprende primeiro. O site
+    // ainda publica lotes sem escopo (e aqueles continuam sendo de
+    // rede, pelo teste acima), mas quando ele passar a carimbar o
+    // servidor na concessão manual, o lote já chega inteiro.
+    const fake = fakeVips({});
+    const test = loopOf(vipsApplier({ vips: fake.vips }), {
+      get: [
+        {
+          status: 200,
+          body: {
+            ok: true,
+            version: 1,
+            desired: {
+              grants: [
+                {
+                  steamId: '76561198123456789',
+                  tier: 'gold',
+                  serverId: 'pvp1',
+                  expiresAt: '2026-10-01T00:00:00.000Z',
+                },
+              ],
+              revocations: [{ steamId: '76561198987654321', tier: 'silver', serverId: 'pve' }],
+            },
+          },
+        },
+      ],
+    });
+
+    await test.loop.pull();
+
+    expect(fake.granted[0]).toMatchObject({ serverId: 'pvp1' });
+    expect(fake.revoked).toEqual(['76561198987654321:silver@pve']);
   });
 
   it('`expiresAt` ausente é recusado: VIP eterno de graça não se descobre sozinho', async () => {

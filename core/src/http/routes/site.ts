@@ -360,17 +360,23 @@ function iso(at: number | null): string | null {
 function vipMirrorStatus(deps: SiteRoutesDeps): {
   readonly running: boolean;
   readonly reason: string | null;
-  readonly version: string | null;
-  /** Quantos VIPs o retrato representa. `null` = não há espelho. */
+  /** Quantos VIPs o agente conhece, em todos os escopos. `null` = não há espelho. */
   readonly count: number | null;
   readonly inSync: boolean | null;
   readonly routeMissing: boolean;
   readonly lastPushAt: string | null;
   readonly lastPushError: string | null;
+  /**
+   * Um por destino — e o hash esperado vem junto porque agora ele é
+   * POR SERVIDOR: cada um recebe o retrato dele mais o da rede. Ver
+   * `VipMirrorStatus`.
+   */
   readonly mirrored: readonly {
     readonly serverId: string;
+    readonly expected: string;
     readonly version: string | null;
     readonly at: string | null;
+    readonly count: number;
   }[];
 } {
   const status = deps.vipMirror?.() ?? null;
@@ -383,7 +389,6 @@ function vipMirrorStatus(deps: SiteRoutesDeps): {
       reason:
         'Nenhum servidor pareado tem carteira no site, então o espelho de VIP não foi ' +
         'construído. O site NÃO fica sabendo quem tem VIP no jogo.',
-      version: null,
       count: null,
       inSync: null,
       routeMissing: false,
@@ -403,7 +408,6 @@ function vipMirrorStatus(deps: SiteRoutesDeps): {
         : status.lastPushError === null
           ? 'Há mudança de VIP ainda não confirmada pelo site. A próxima rodada sai em até 60 s.'
           : `O site recusou o espelho de VIP: ${status.lastPushError}`,
-    version: status.version,
     count: status.count,
     inSync: status.inSync,
     routeMissing: status.routeMissing,
@@ -411,8 +415,10 @@ function vipMirrorStatus(deps: SiteRoutesDeps): {
     lastPushError: status.lastPushError,
     mirrored: status.mirrored.map((entry) => ({
       serverId: entry.serverId,
+      expected: entry.expected,
       version: entry.version,
       at: iso(entry.at),
+      count: entry.count,
     })),
   };
 }

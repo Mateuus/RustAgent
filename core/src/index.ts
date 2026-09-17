@@ -1426,11 +1426,14 @@ async function main(): Promise<void> {
         revokeVip:
           vips === null
             ? undefined
-            : async ({ steamId, tier }): Promise<void> => {
+            : async ({ serverId, steamId, tier }): Promise<void> => {
                 // `revoked_by` é quem mandou tirar, e a ficha do
                 // jogador mostra isso: aqui não foi um operador, foi
                 // o site (estorno, chargeback, ban ou o prazo dele).
-                await vips.revoke(steamId, tier, 'site');
+                //
+                // E o escopo é o do SERVIDOR desta fila: o site pede
+                // a revogação pela fila do servidor em que vendeu.
+                await vips.revoke(steamId, tier, serverId, 'site');
               },
         // A posse de skin: nao passa pelo `deliverPlan` nem espera o
         // jogador (Docs/OrigemZWorkshop/04 §3).
@@ -2633,7 +2636,7 @@ async function main(): Promise<void> {
     // com a frase que explica, em vez de aberta para todo mundo:
     // liberar o que não se sabe conferir é o erro caro aqui.
     permissions: {
-      can: ({ steamId, requires }) => {
+      can: ({ steamId, serverId, requires }) => {
         const [kind, value] = requires.split(':');
 
         if (kind !== 'vip' || value === undefined) {
@@ -2645,7 +2648,11 @@ async function main(): Promise<void> {
         // `activeOf` e não `historyOf`: o VIP que venceu ontem não
         // abre a quest de hoje. Um jogador pode ter mais de um tier
         // ativo, e qualquer um deles que case serve.
-        return vipsRepository.activeOf(steamId).some((vip) => vip.tier === value);
+        //
+        // E a pergunta é NESTE servidor: a quest é dele, e o VIP de
+        // outro servidor não abre uma quest daqui. O de rede abre —
+        // ele vale aqui também.
+        return vipsRepository.activeOf(steamId, serverId).some((vip) => vip.tier === value);
       },
     },
     // O nome bonito do catálogo do JOGO, para a frase do objetivo.

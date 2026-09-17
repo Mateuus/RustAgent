@@ -1,9 +1,37 @@
 // ============================================================
-//  vips-repository.ts  -  quem é VIP, de que nível, até quando.
+//  vips-repository.ts  -  quem é VIP, de que nível, onde e até
+//  quando.
 //
 //  Uma tabela só (migração 010), e ela é a FONTE: o cache do
 //  `OrigemZAgent` e o grupo do Oxide são reflexos dela, repovoados
 //  a cada sincronização. Ver vip/service.ts.
+//
+//  ------------------------------------------------------------
+//  ####  O VIP TEM SERVIDOR, E `NULL` É A REDE INTEIRA  ####
+//
+//  Desde a migração 102. Quem compra no `pvp1` é VIP no `pvp1` — a
+//  regra anterior ("o VIP é da rede") vendia, de graça, o benefício
+//  em todo servidor que a máquina viesse a ter.
+//
+//  Daí a assimetria entre as duas perguntas deste arquivo, que é o
+//  que mais confunde quem chega:
+//
+//    "o que vale AQUI?"     `activeIn`/`activeOf`, com o escopo —
+//                           trazem o do servidor MAIS o da rede;
+//    "que linha é esta?"    `openOf`/`latestOf`/`revoke`, com o
+//                           `server_id` EXATO (e `null` é um valor,
+//                           não um curinga).
+//
+//  A segunda não pode usar a primeira: estender a linha de REDE
+//  porque alguém comprou no `pvp1` daria tempo em todos os
+//  servidores por um pagamento de um só.
+//
+//  ####  E O ESCOPO DE LEITURA É PARÂMETRO OBRIGATÓRIO  ####
+//
+//  Sem valor implícito, e de propósito: `ANY_SERVER` é uma palavra
+//  que alguém escreve, não o que sobra de quem esqueceu de pensar.
+//  Um benefício que vaza para o servidor errado não aparece em teste
+//  nenhum — ele aparece no Discord, meses depois.
 //
 //  ------------------------------------------------------------
 //  ####  ESTE ARQUIVO NÃO FALA COM O JOGO  ####
@@ -46,6 +74,16 @@ import type { AgentDatabase } from './database.js';
  */
 export type VipOrigin = 'loja' | 'painel' | 'adotado';
 
+/**
+ * A leitura que NÃO recorta por servidor.
+ *
+ * Só para a FICHA do jogador e para a listagem do painel — telas que
+ * respondem "o que esta pessoa tem?". Decidir benefício com ele é
+ * reintroduzir o VIP de rede por engano; para isso, passe o id do
+ * servidor.
+ */
+export const ANY_SERVER = '*';
+
 /** Uma concessão, como ela está no banco. Datas em epoch ms. */
 export interface VipRecord {
   readonly id: number;
@@ -53,6 +91,14 @@ export interface VipRecord {
   readonly steamId: string;
   /** O `Tier` do OrigemZVip.json: `bronze`, `silver`, `gold`. */
   readonly tier: string;
+  /**
+   * Onde ele vale. `null` = na REDE inteira.
+   *
+   * Ver a migração 102 — e repare que `null` aqui é um VALOR, e não
+   * "não sei": é o VIP que o dono decidiu vender para todos os
+   * servidores de uma vez.
+   */
+  readonly serverId: string | null;
   /** `null` = vitalício. */
   readonly expiresAt: number | null;
   readonly origin: VipOrigin;
@@ -78,6 +124,14 @@ export interface VipListRecord extends VipRecord {
 export interface VipGrantInput {
   readonly steamId: string;
   readonly tier: string;
+  /**
+   * Onde a concessão vale. `null` = na REDE inteira.
+   *
+   * Sem default: quem concede RESPONDE onde. O default silencioso
+   * seria a rede (é o que `null` significa), e "esqueci de passar"
+   * viraria o VIP mais caro da casa, de graça.
+   */
+  readonly serverId: string | null;
   /** Epoch ms. `null` = vitalício. */
   readonly expiresAt: number | null;
   readonly origin: VipOrigin;
@@ -104,6 +158,13 @@ export interface ListVipsOptions {
   /** Trecho de SteamID ou de nome do jogador. */
   readonly query?: string | undefined;
   readonly tier?: string | undefined;
+  /**
+   * Só as que valem naquele servidor (as dele e as de rede).
+   *
+   * Ausente = todas, de todos os escopos. Aqui o ausente é seguro
+   * porque isto é TELA: quem lista não concede nada.
+   */
+  readonly where?: string | undefined;
   readonly limit: number;
   readonly offset: number;
 }
@@ -118,6 +179,7 @@ interface VipRow {
   readonly id: number;
   readonly steam_id: string;
   readonly tier: string;
+  readonly server_id: string | null;
   readonly expires_at: number | null;
   readonly origin: string;
   readonly created_at: number;
@@ -135,6 +197,18 @@ interface VipRow {
  * discordarem sobre quem é VIP.
  */
 const IS_ACTIVE_SQL = '(revoked_at IS NULL AND (expires_at IS NULL OR expires_at > @now))';
+
+/**
+ * "Vale NAQUELE servidor" = é dele, ou é da rede inteira.
+ *
+ * `@where` é o id do servidor ou `ANY_SERVER`. A ordem dos testes
+ * importa para quem lê, não para o SQLite: o primeiro é a leitura
+ * sem recorte, o segundo é o VIP de rede, o terceiro é o do servidor.
+ */
+const IS_HERE_SQL = `(@where = '${ANY_SERVER}' OR server_id IS NULL OR server_id = @where)`;
+
+/** O MESMO critério, com a coluna qualificada. Ver `IS_ACTIVE_SQL_V`. */
+const IS_HERE_SQL_V = IS_HERE_SQL.replace(/\bserver_id\b/g, 'v.server_id');
 
 /**
  * O MESMO critério, com as colunas qualificadas.
@@ -166,25 +240,28 @@ export class VipsRepository {
   }
 
   /**
-   * Os níveis que este jogador tem AGORA, do mais recente ao mais
-   * antigo.
+   * Os níveis que este jogador tem valendo AGORA em `where`, do mais
+   * recente ao mais antigo.
    *
-   * Na REDE inteira: o VIP não é de servidor (ver a migração 010).
+   * `where` é o id do servidor — e a resposta inclui o VIP de REDE,
+   * que vale ali também. `ANY_SERVER` só para a ficha; ver o
+   * cabeçalho.
    */
-  activeOf(steamId: string, now: number = Date.now()): readonly VipRecord[] {
+  activeOf(steamId: string, where: string, now: number = Date.now()): readonly VipRecord[] {
     const rows = this.#db
       .prepare(
         `SELECT * FROM vips
-          WHERE steam_id = @steam_id AND ${IS_ACTIVE_SQL}
+          WHERE steam_id = @steam_id AND ${IS_HERE_SQL} AND ${IS_ACTIVE_SQL}
           ORDER BY created_at DESC, id DESC`,
       )
-      .all({ steam_id: steamId, now }) as VipRow[];
+      .all({ steam_id: steamId, where, now }) as VipRow[];
 
     return rows.map(toRecord);
   }
 
   /**
-   * A linha NÃO REVOGADA daquele par (jogador, nível), se houver.
+   * A linha NÃO REVOGADA daquele par (jogador, nível) NAQUELE
+   * escopo, se houver.
    *
    * "Não revogada" aqui é só `revoked_at IS NULL` — sem olhar
    * vencimento. É a definição do `idx_vips_active`, e é ela que
@@ -192,13 +269,21 @@ export class VipsRepository {
    * concessão vencida que o relógio ainda não fechou continua
    * ocupando o índice, e o `grant` precisa ESTENDÊ-LA em vez de
    * estourar num 500.
+   *
+   * ####  O ESCOPO AQUI É EXATO, E `null` NÃO É CURINGA  ####
+   *
+   * `server_id IS @server_id` (e não `=`) porque em SQL `NULL =
+   * NULL` é desconhecido: com `=`, a concessão de REDE nunca se
+   * encontraria e a segunda compra estouraria no índice único.
    */
-  openOf(steamId: string, tier: string): VipRecord | null {
+  openOf(steamId: string, tier: string, serverId: string | null): VipRecord | null {
     const row = this.#db
       .prepare(
-        'SELECT * FROM vips WHERE steam_id = @steam_id AND tier = @tier AND revoked_at IS NULL',
+        `SELECT * FROM vips
+          WHERE steam_id = @steam_id AND tier = @tier AND server_id IS @server_id
+            AND revoked_at IS NULL`,
       )
-      .get({ steam_id: steamId, tier }) as VipRow | undefined;
+      .get({ steam_id: steamId, tier, server_id: serverId }) as VipRow | undefined;
 
     return row === undefined ? null : toRecord(row);
   }
@@ -221,15 +306,15 @@ export class VipsRepository {
    * reconexão ADOTAR de volta o mesmo VIP que acabou de ser
    * revogado. Mesma lição do `latestOf` da BanList.
    */
-  latestOf(steamId: string, tier: string): VipRecord | null {
+  latestOf(steamId: string, tier: string, where: string): VipRecord | null {
     const row = this.#db
       .prepare(
         `SELECT * FROM vips
-          WHERE steam_id = @steam_id AND tier = @tier
+          WHERE steam_id = @steam_id AND tier = @tier AND ${IS_HERE_SQL}
           ORDER BY created_at DESC, id DESC
           LIMIT 1`,
       )
-      .get({ steam_id: steamId, tier }) as VipRow | undefined;
+      .get({ steam_id: steamId, tier, where }) as VipRow | undefined;
 
     return row === undefined ? null : toRecord(row);
   }
@@ -248,24 +333,27 @@ export class VipsRepository {
   }
 
   /**
-   * TODAS as concessões que valem agora, na rede.
+   * TODAS as concessões que valem agora em `where`.
+   *
+   * Com o id de um servidor, é a resposta a "quem é VIP AQUI?" — os
+   * VIPs daquele servidor mais os da rede. É o que monta o payload do
+   * `origemz.vip.sync` DELE e o retrato que o site recebe por ele.
    *
    * ####  SEM PAGINAÇÃO, E DE PROPÓSITO  ####
    *
-   * É o que monta o payload do `origemz.vip.sync`, e esse payload é
-   * UM comando de console: ele precisa caber inteiro em memória
-   * antes de sair, e o teto de tamanho (ver vip/sync.ts) morde bem
-   * antes de a lista pesar. Paginar aqui daria a ilusão de um
-   * limite que o transporte já impõe.
+   * O payload é UM comando de console: ele precisa caber inteiro em
+   * memória antes de sair, e o teto de tamanho (ver vip/sync.ts)
+   * morde bem antes de a lista pesar. Paginar aqui daria a ilusão de
+   * um limite que o transporte já impõe.
    */
-  active(now: number = Date.now()): readonly VipRecord[] {
+  activeIn(where: string, now: number = Date.now()): readonly VipRecord[] {
     const rows = this.#db
       .prepare(
         `SELECT * FROM vips
-          WHERE ${IS_ACTIVE_SQL}
+          WHERE ${IS_HERE_SQL} AND ${IS_ACTIVE_SQL}
           ORDER BY steam_id ASC, tier ASC`,
       )
-      .all({ now }) as VipRow[];
+      .all({ where, now }) as VipRow[];
 
     return rows.map(toRecord);
   }
@@ -317,6 +405,10 @@ export class VipsRepository {
           ? null
           : `%${escapeLike(options.query.trim())}%`,
       tier: options.tier ?? null,
+      // O nome do parâmetro é `where` porque é o mesmo de
+      // `IS_HERE_SQL`; ausente vira `ANY_SERVER`, que aquele trecho
+      // já entende como "sem recorte".
+      where: options.where ?? ANY_SERVER,
       now,
     };
 
@@ -325,6 +417,7 @@ export class VipsRepository {
     const where = `
       WHERE (@tier IS NULL OR v.tier = @tier)
         AND (@q IS NULL OR v.steam_id LIKE @q ESCAPE '\\' OR p.name LIKE @q ESCAPE '\\')
+        AND ${IS_HERE_SQL_V}
         AND (@active IS NULL OR @active = (CASE WHEN ${IS_ACTIVE_SQL_V} THEN 1 ELSE 0 END))
     `;
 
@@ -390,17 +483,23 @@ export class VipsRepository {
    */
   grant(input: VipGrantInput, now: number = Date.now()): VipGrantResult {
     const run = this.#db.transaction((): VipGrantResult => {
-      const existing = this.openOf(input.steamId, input.tier);
+      // O escopo EXATO, e não "o que vale ali": quem já tem `gold` da
+      // REDE e compra `gold` no `pvp1` ganha uma linha NOVA. Estender
+      // a de rede daria tempo em todos os servidores por um pagamento
+      // de um só — ver o cabeçalho.
+      const existing = this.openOf(input.steamId, input.tier, input.serverId);
 
       if (existing === null) {
         const result = this.#db
           .prepare(
-            `INSERT INTO vips (steam_id, tier, expires_at, origin, created_at, created_by)
-             VALUES (@steam_id, @tier, @expires_at, @origin, @created_at, @created_by)`,
+            `INSERT INTO vips
+                 (steam_id, tier, server_id, expires_at, origin, created_at, created_by)
+             VALUES (@steam_id, @tier, @server_id, @expires_at, @origin, @created_at, @created_by)`,
           )
           .run({
             steam_id: input.steamId,
             tier: input.tier,
+            server_id: input.serverId,
             expires_at: input.expiresAt,
             origin: input.origin,
             created_at: now,
@@ -442,11 +541,15 @@ export class VipsRepository {
   revoke(
     steamId: string,
     tier: string,
+    serverId: string | null,
     revokedBy: string | null,
     now: number = Date.now(),
   ): VipRecord | null {
     const run = this.#db.transaction((): VipRecord | null => {
-      const existing = this.openOf(steamId, tier);
+      // Escopo EXATO, como no `grant`: revogar o VIP do `pvp1` não
+      // pode derrubar o da rede, que vale em outros servidores e
+      // provavelmente foi pago à parte.
+      const existing = this.openOf(steamId, tier, serverId);
 
       if (existing === null) {
         return null;
@@ -525,6 +628,7 @@ function toRecord(row: VipRow): VipRecord {
     id: row.id,
     steamId: row.steam_id,
     tier: row.tier,
+    serverId: row.server_id,
     expiresAt: row.expires_at,
     origin: row.origin === 'loja' || row.origin === 'adotado' ? row.origin : 'painel',
     createdAt: row.created_at,

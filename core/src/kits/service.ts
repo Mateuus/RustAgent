@@ -286,7 +286,7 @@ export class KitStore {
     const now = Date.now();
 
     return kits.map((kit) => {
-      const problem = this.#whyNot(kit, steamId, levels, now, wipe);
+      const problem = this.#whyNot(kit, serverId, steamId, levels, now, wipe);
       const last = this.#deps.repository.lastDeliveredClaim(steamId, kit.id);
 
       return {
@@ -376,7 +376,7 @@ export class KitStore {
 
     // A MESMA função da vitrine: uma tela que oferece o botão e uma
     // rota que recusa é o pior desencontro possível.
-    const problem = this.#whyNot(kit, input.steamId, levels, Date.now(), wipe);
+    const problem = this.#whyNot(kit, input.serverId, input.steamId, levels, Date.now(), wipe);
 
     if (problem !== null) {
       throw new ApiError(problem.code, problem.reason, 409);
@@ -471,6 +471,8 @@ export class KitStore {
    */
   #whyNot(
     kit: KitRecord,
+    /** O kit é DAQUELE servidor, e o VIP exigido também. */
+    serverId: string,
     steamId: string,
     levels: readonly VipTierLevel[],
     now: number,
@@ -505,7 +507,7 @@ export class KitStore {
 
     if (
       kit.requiredTier !== null &&
-      !this.#hasTier(steamId, kit.requiredTier, kit.requiredTierExact, levels, now)
+      !this.#hasTier(serverId, steamId, kit.requiredTier, kit.requiredTierExact, levels, now)
     ) {
       return {
         code: 'KIT_TIER_REQUIRED',
@@ -581,13 +583,14 @@ export class KitStore {
    * quem tem dois níveis ativos pega os kits dos dois.
    */
   #hasTier(
+    serverId: string,
     steamId: string,
     required: string,
     exact: boolean,
     levels: readonly VipTierLevel[],
     now: number,
   ): boolean {
-    const tiers = this.#deps.vips.activeOf(steamId, now).map((vip) => vip.tier);
+    const tiers = this.#deps.vips.activeOf(steamId, serverId, now).map((vip) => vip.tier);
     const wanted = required.trim().toLowerCase();
 
     if (tiers.includes(wanted)) {

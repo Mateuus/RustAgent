@@ -8821,6 +8821,68 @@ CREATE TABLE workshop_favorites (
 CREATE INDEX idx_workshop_favorites_steam ON workshop_favorites (steam_id);
 `;
 
+// ------------------------------------------------------------
+//  102 — o VIP passa a ter servidor
+//
+//  ####  A DECISÃO DE 2026-09-17 DESFAZ A DA MIGRAÇÃO 010  ####
+//
+//  A 010 dizia, com todas as letras, que "o VIP é de REDE, e não de
+//  servidor" (Docs\15 §PARTE 1) — quem compra compra da rede. O dono
+//  mudou a regra: o VIP vale no servidor onde foi COMPRADO, e o site
+//  já vende assim (ele carimba o servidor na compra, no grant e na
+//  fila de entrega; era este agente que jogava a informação fora).
+//
+//  ####  `NULL` CONTINUA SIGNIFICANDO A REDE INTEIRA  ####
+//
+//  E é por isso que a coluna é anulável em vez de NOT NULL: o dono
+//  quis PODER vender os dois — o VIP de um servidor e o da rede. Sem
+//  o nulo, "vale em todos" precisaria de N linhas, uma por servidor,
+//  e um servidor novo nasceria sem o VIP que alguém já pagou.
+//
+//  ####  E AS LINHAS QUE JÁ EXISTEM FICAM COM `NULL`  ####
+//
+//  Sem backfill, de propósito. Elas foram concedidas sob a regra
+//  antiga — "compra da rede" —, e carimbá-las com um servidor é
+//  TIRAR direito que já foi pago. O caminho contrário (deixar de
+//  rede) não tira nada de ninguém: hoje a máquina tem um servidor só,
+//  e nele os dois escopos são a mesma coisa. Quem quiser rebaixar uma
+//  concessão antiga revoga e concede de novo, à mão, com a decisão
+//  registrada em `created_by`.
+//
+//  ####  SEM CHAVE ESTRANGEIRA, E ISSO É ESCOLHA  ####
+//
+//  `ON DELETE CASCADE` apagaria o histórico de VIP junto com o
+//  servidor — contra a regra da tabela, em que nem revogar apaga
+//  linha. E `ON DELETE SET NULL` seria pior: tirar um servidor
+//  ALARGARIA, em silêncio, todo VIP dele para a rede inteira. Sem FK,
+//  a linha órfã continua legível e não vira benefício que ninguém
+//  concedeu.
+// ------------------------------------------------------------
+const VIP_SERVER_SCOPE_SCHEMA = `
+-- NULL = vale na REDE inteira. Preenchido = só naquele servidor.
+ALTER TABLE vips ADD COLUMN server_id TEXT;
+
+-- O índice único ganha o escopo, e ele entra por \`COALESCE\`: em
+-- SQLite dois NULL NÃO colidem num índice único, então
+-- \`(steam_id, tier, server_id)\` cru deixaria passar duas concessões
+-- de REDE do mesmo par — exatamente as duas datas de vencimento sem
+-- resposta para "qual vale?" que a 010 existia para impedir.
+DROP INDEX idx_vips_active;
+CREATE UNIQUE INDEX idx_vips_active
+    ON vips (steam_id, tier, COALESCE(server_id, '*'))
+ WHERE revoked_at IS NULL;
+
+-- O VIP de rede e o do servidor convivem: quem tem \`gold\` da rede e
+-- compra \`gold\` no pvp1 fica com DUAS linhas, e é isso mesmo —
+-- estender a de rede daria tempo em todos os servidores por um
+-- pagamento de um só. Quem consolida as duas é a leitura
+-- (\`activeIn\`) e a montagem do payload, não o banco.
+
+-- A pergunta de toda sincronização: "quem é VIP NESTE servidor?".
+-- Sem ela, cada push varre a tabela inteira uma vez por servidor.
+CREATE INDEX idx_vips_server ON vips (server_id) WHERE revoked_at IS NULL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -9107,6 +9169,11 @@ export const MIGRATIONS: readonly Migration[] = [
   // dado do agente (da REDE, como a posse), e a skin ganha a marca
   // "de temporada". Ver o cabecalho da 100.
   { id: 100, name: 'workshop-favorites-season', sql: WORKSHOP_FAVORITES_SEASON_SCHEMA },
+  // 17/09/2026: o VIP deixa de ser da rede e passa a ser do servidor
+  // onde foi comprado. Nasceu 102 porque a 101 ja esta escrita na
+  // branch do battle-pass: id repetido e uma migracao PULADA em
+  // silencio no merge.
+  { id: 102, name: 'vip-server-scope', sql: VIP_SERVER_SCOPE_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

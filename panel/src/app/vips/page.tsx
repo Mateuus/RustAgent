@@ -108,7 +108,9 @@ function Vips() {
     setBusy(true);
 
     try {
-      const response = await agent.revokeVip(vip.steamId, vip.tier);
+      // O escopo vem da própria linha: revogar o VIP do `pvp1` não
+      // pode derrubar o de rede, que é outra concessão.
+      const response = await agent.revokeVip(vip.steamId, vip.tier, vip.serverId);
 
       toast.success('VIP revogado', { description: response.message });
       await load();
@@ -199,6 +201,7 @@ function Vips() {
                 <tr>
                   <HeaderCell>Jogador</HeaderCell>
                   <HeaderCell>Nível</HeaderCell>
+                  <HeaderCell>Onde vale</HeaderCell>
                   <HeaderCell>Desde</HeaderCell>
                   <HeaderCell>Até</HeaderCell>
                   <HeaderCell>De onde veio</HeaderCell>
@@ -218,6 +221,12 @@ function Vips() {
 
                     <td className="px-3 py-2 font-mono text-2xs">{vip.tier}</td>
 
+                    {/* O escopo é a primeira pergunta de quem atende
+                        "comprei e não tenho": comprou ONDE? */}
+                    <td className="px-3 py-2 font-mono text-2xs">
+                      {vip.serverId ?? <span className="text-muted">a rede</span>}
+                    </td>
+
                     <td className="px-3 py-2 text-muted">{formatWhen(vip.createdAt)}</td>
 
                     <td className="px-3 py-2 text-muted">{situacaoDe(vip)}</td>
@@ -236,7 +245,11 @@ function Vips() {
                           icon={null}
                           label="Revogar"
                           confirmLabel="Revogar mesmo"
-                          hint={`${vip.playerName ?? vip.steamId} sai do grupo ${vip.tier} em todos os servidores.`}
+                          hint={
+                            vip.serverId === null
+                              ? `${vip.playerName ?? vip.steamId} sai do grupo ${vip.tier} em todos os servidores.`
+                              : `${vip.playerName ?? vip.steamId} sai do grupo ${vip.tier} em ${vip.serverId}. O VIP dele em outros servidores não é tocado.`
+                          }
                           onConfirm={() => void revoke(vip)}
                         />
                       ) : (

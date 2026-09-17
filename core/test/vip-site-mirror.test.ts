@@ -80,12 +80,16 @@ function open(): { repository: VipsRepository; meta: MetaRepository } {
 function grant(
   repository: VipsRepository,
   steamId: string,
-  over: { tier?: string; expiresAt?: number | null } = {},
+  over: { tier?: string; expiresAt?: number | null; serverId?: string | null } = {},
 ): void {
   repository.grant(
     {
       steamId,
       tier: over.tier ?? 'bronze',
+      // Padrão: o VIP de REDE. Ele entra no retrato de TODO servidor,
+      // que é o que estes testes descrevem — o recorte por servidor
+      // tem o `describe` só dele, mais abaixo.
+      serverId: over.serverId === undefined ? null : over.serverId,
       expiresAt: over.expiresAt === undefined ? NOW + 30 * DAY : over.expiresAt,
       origin: 'loja',
       createdBy: 'loja',
@@ -93,6 +97,9 @@ function grant(
     NOW,
   );
 }
+
+/** O servidor de quem pergunta. Os testes antigos só tinham um. */
+const PVP1 = 'pvp1';
 
 const client = (serverId: string, fetchImpl: typeof globalThis.fetch): SiteClient =>
   new SiteClient({
@@ -113,8 +120,8 @@ describe('o retrato', () => {
     grant(repository, '76561198000000001');
     grant(repository, '76561198000000002');
 
-    expect(buildVipMirror(repository, NOW).version).toBe(
-      buildVipMirror(repository, NOW).version,
+    expect(buildVipMirror(repository, PVP1, NOW).version).toBe(
+      buildVipMirror(repository, PVP1, NOW).version,
     );
   });
 
@@ -131,8 +138,8 @@ describe('o retrato', () => {
     grant(b.repository, '76561198000000002');
     grant(b.repository, '76561198000000001');
 
-    expect(buildVipMirror(a.repository, NOW).version).toBe(
-      buildVipMirror(b.repository, NOW).version,
+    expect(buildVipMirror(a.repository, PVP1, NOW).version).toBe(
+      buildVipMirror(b.repository, PVP1, NOW).version,
     );
   });
 
@@ -144,11 +151,11 @@ describe('o retrato', () => {
 
     grant(repository, '76561198000000001', { expiresAt: NOW + DAY });
 
-    const before = buildVipMirror(repository, NOW);
+    const before = buildVipMirror(repository, PVP1, NOW);
 
     expect(before.payload.vips).toHaveLength(1);
 
-    const after = buildVipMirror(repository, NOW + 2 * DAY);
+    const after = buildVipMirror(repository, PVP1, NOW + 2 * DAY);
 
     expect(after.payload.vips).toHaveLength(0);
     expect(after.version).not.toBe(before.version);
@@ -160,7 +167,7 @@ describe('o retrato', () => {
     grant(repository, '76561198000000001', { expiresAt: null });
     grant(repository, '76561198000000002', { expiresAt: NOW + DAY, tier: 'gold' });
 
-    const { payload } = buildVipMirror(repository, NOW);
+    const { payload } = buildVipMirror(repository, PVP1, NOW);
     const forever = payload.vips.find((vip) => vip.steamId === '76561198000000001');
     const timed = payload.vips.find((vip) => vip.steamId === '76561198000000002');
 
@@ -179,9 +186,9 @@ describe('o retrato', () => {
 
     grant(repository, '76561198000000001');
     grant(repository, '76561198000000002');
-    repository.revoke('76561198000000001', 'bronze', 'admin');
+    repository.revoke('76561198000000001', 'bronze', null, 'admin');
 
-    const { payload } = buildVipMirror(repository, NOW);
+    const { payload } = buildVipMirror(repository, PVP1, NOW);
 
     expect(payload.vips).toHaveLength(1);
     expect(payload.vips[0]?.steamId).toBe('76561198000000002');
@@ -198,6 +205,7 @@ describe('o retrato', () => {
       {
         steamId: '76561198000000003',
         tier: 'gold',
+        serverId: null,
         expiresAt: null,
         origin: 'adotado',
         createdBy: null,
@@ -205,7 +213,7 @@ describe('o retrato', () => {
       NOW,
     );
 
-    expect(buildVipMirror(repository, NOW).payload.vips[0]?.origin).toBe('adotado');
+    expect(buildVipMirror(repository, PVP1, NOW).payload.vips[0]?.origin).toBe('adotado');
   });
 
   it('o generatedAt fica FORA do hash', () => {
@@ -213,8 +221,8 @@ describe('o retrato', () => {
 
     grant(repository, '76561198000000001', { expiresAt: null });
 
-    const early = buildVipMirror(repository, NOW);
-    const late = buildVipMirror(repository, NOW + 60_000);
+    const early = buildVipMirror(repository, PVP1, NOW);
+    const late = buildVipMirror(repository, PVP1, NOW + 60_000);
 
     expect(late.version).toBe(early.version);
     expect(late.payload.generatedAt).not.toBe(early.payload.generatedAt);
@@ -250,7 +258,7 @@ describe('o push', () => {
 
     expect(fetch.calls.filter((call) => call.url.endsWith('/vip/mirror'))).toHaveLength(2);
 
-    const version = buildVipMirror(repository, NOW).version;
+    const version = buildVipMirror(repository, PVP1, NOW).version;
 
     expect(meta.read('site.vip.mirrored_version.pvp1')).toBe(version);
     expect(meta.read('site.vip.mirrored_version.pve')).toBe(version);
@@ -307,7 +315,7 @@ describe('o push', () => {
 
     grant(repository, '76561198000000001');
 
-    const version = buildVipMirror(repository, NOW).version;
+    const version = buildVipMirror(repository, PVP1, NOW).version;
     const fetch = fakeFetch([{ status: 200, body: { ok: true, version } }]);
 
     const mirror = new VipSiteMirror({
@@ -362,7 +370,7 @@ describe('os níveis que viajam com o retrato', () => {
     // produziriam duas versions para o mesmo estado.
     const { repository } = open();
 
-    const { payload } = buildVipMirror(repository, NOW, [' GOLD ', 'bronze', 'gold', '']);
+    const { payload } = buildVipMirror(repository, PVP1, NOW, [' GOLD ', 'bronze', 'gold', '']);
 
     expect(payload.tiers).toEqual(['bronze', 'gold']);
   });
@@ -373,7 +381,7 @@ describe('os níveis que viajam com o retrato', () => {
     // aviso em vez de abrir um campo de texto livre.
     const { repository } = open();
 
-    expect(buildVipMirror(repository, NOW).payload.tiers).toEqual([]);
+    expect(buildVipMirror(repository, PVP1, NOW).payload.tiers).toEqual([]);
   });
 
   it('o teto do site é respeitado AQUI, porque um 400 derruba o corpo inteiro', () => {
@@ -391,8 +399,8 @@ describe('os níveis que viajam com o retrato', () => {
 
     grant(repository, '76561198000000001');
 
-    const before = buildVipMirror(repository, NOW, ['bronze']);
-    const after = buildVipMirror(repository, NOW, ['bronze', 'gold']);
+    const before = buildVipMirror(repository, PVP1, NOW, ['bronze']);
+    const after = buildVipMirror(repository, PVP1, NOW, ['bronze', 'gold']);
 
     expect(after.version).not.toBe(before.version);
   });
@@ -428,7 +436,11 @@ describe('os níveis que viajam com o retrato', () => {
     expect((pushed?.body as { tiers: string[] }).tiers).toEqual(['bronze', 'gold']);
     expect(reads).toBe(1);
     // E a tela de diagnóstico enxerga a mesma lista, sem ler disco.
-    expect(mirror.status.version).toBe(buildVipMirror(repository, NOW, ['bronze', 'gold']).version);
+    // O hash esperado é POR DESTINO desde que o VIP tem servidor:
+    // cada um recebe o retrato dele mais o da rede.
+    expect(mirror.status.mirrored[0]?.expected).toBe(
+      buildVipMirror(repository, PVP1, NOW, ['bronze', 'gold']).version,
+    );
   });
 
   it('falha de leitura MANTÉM a última lista, em vez de mandar vazia', async () => {
