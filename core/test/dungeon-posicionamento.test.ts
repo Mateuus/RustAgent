@@ -415,6 +415,9 @@ describe('o corredor tem material próprio', () => {
       foundation: 'wood',
       wall: 'wood',
       ceiling: 'stone',
+      foundationSkin: 0,
+      wallSkin: 0,
+      ceilingSkin: 0,
     });
   });
 

@@ -71,6 +71,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Oxide.Core;
@@ -463,6 +464,15 @@ namespace Oxide.Plugins
         private Plugin OrigemZImages;
 
         /// <summary>
+        /// Quem desenha as mensagens do servidor com tag, cor e tamanho.
+        ///
+        /// Opcional, como o OrigemZImages: sem ele o anúncio sai na
+        /// linha simples de sempre, com a marcação de cor tirada.
+        /// </summary>
+        [PluginReference]
+        private Plugin OrigemZChat;
+
+        /// <summary>
         /// Uma masmorra viva: o que foi erguido e como desfazer.
         /// </summary>
         private class ActiveDungeon
@@ -547,6 +557,28 @@ namespace Oxide.Plugins
 
             /// <summary>O que a planta pediu e o que de fato nasceu.</summary>
             public readonly PasteReport paste = new PasteReport();
+
+            // ####  O CORPO IMPORTADO  ####  (ver "O CORPO IMPORTADO")
+
+            /// <summary>O mesmo relatório, para a construção colada a -90.</summary>
+            public readonly PasteReport bodyPaste = new PasteReport();
+            /// <summary>O giro da construção no mundo.</summary>
+            public Quaternion bodySpin = Quaternion.identity;
+            /// <summary>Onde a origem da planta caiu. Ponto no mundo = isto + giro * local.</summary>
+            public Vector3 bodyOrigin;
+            /// <summary>
+            /// Para onde o alçapão de descida leva. `null` = o centro da
+            /// célula (0,0), que é a regra das masmorras de células.
+            /// </summary>
+            public Vector3? arrivalPoint;
+            /// <summary>A chegada precisou ser afastada de alguma peça?</summary>
+            public bool arrivalMoved;
+            public int bodyNpcs;
+            public int bodyCrates;
+            /// <summary>Peças de conteúdo que não couberam em lugar nenhum perto do ponto.</summary>
+            public int bodyBlocked;
+            /// <summary>Peças afastadas do ponto marcado para não nascerem presas.</summary>
+            public int bodyMoved;
 
             /// <summary>
             /// As placas da planta, para pintar. Ver `PaintBanners`.
@@ -1188,7 +1220,18 @@ namespace Oxide.Plugins
                 return;
             }
 
-            var blueprint = LoadBlueprint(blueprintName);
+            // ####  COM RECEITA E SEM ENTRADA, A ENTRADA É A MÍNIMA  ####
+            //
+            // A volta para "a planta com o nome da masmorra" existe para
+            // quem não tem painel. Com receita, ela colava a planta
+            // ERRADA sempre que uma planta tivesse o mesmo nome da
+            // masmorra — MEDIDO em 17/09/2026: a construção importada
+            // "ozteste-corpo", corpo da masmorra "ozteste-corpo", subiu
+            // na superfície no lugar da entrada mínima, e a masmorra
+            // falhou com `no_hatch`.
+            var blueprint = spec != null && string.IsNullOrEmpty(spec.entrance)
+                ? null
+                : LoadBlueprint(blueprintName);
 
             // ####  SEM PLANTA ESCOLHIDA, A ENTRADA É GERADA AQUI  ####
             //
@@ -1317,6 +1360,14 @@ namespace Oxide.Plugins
             {
                 if (active != dungeon) return;
 
+                // A construção importada não tem células: ela é colada,
+                // e termina sozinha quando a colagem acabar.
+                if (HasBody(dungeon))
+                {
+                    BuildBody(dungeon, slug, surface, forward, requester);
+                    return;
+                }
+
                 try
                 {
                     GenerateRooms(dungeon, forward);
@@ -1335,92 +1386,123 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                // 3) Emparelhar. Só agora existem os dois.
-                timer.Once(1f, () =>
+                FinishBuild(dungeon, slug, surface, requester);
+            });
+        }
+
+        /// <summary>
+        /// O fim de toda construção: emparelhar os alçapões, pôr no mapa,
+        /// anunciar e reportar.
+        ///
+        /// Virou método quando o corpo importado chegou: ele termina
+        /// DEPOIS da colagem assíncrona, e não no mesmo tique das salas.
+        /// Duplicar este bloco faria um dos dois caminhos esquecer o
+        /// `Report` — e o painel esperaria para sempre.
+        /// </summary>
+        private void FinishBuild(ActiveDungeon dungeon, string slug, Vector3 surface, IPlayer requester)
+        {
+            // 3) Emparelhar. Só agora existem os dois.
+            timer.Once(1f, () =>
+            {
+                if (active != dungeon) return;
+
+                if (!LinkHatches(dungeon))
                 {
-                    if (active != dungeon) return;
+                    Fail(requester, "no_hatch",
+                         "A planta subiu, mas não achei o par de alçapões. Sem eles não há masmorra.");
+                    return;
+                }
 
-                    if (!LinkHatches(dungeon))
-                    {
-                        Fail(requester, "no_hatch",
-                             "A planta subiu, mas não achei o par de alçapões. Sem eles não há masmorra.");
-                        return;
-                    }
+                dungeon.ready = true;
+                dungeon.watchdog?.Destroy();
+                dungeon.watchdog = null;
 
-                    dungeon.ready = true;
-                    dungeon.watchdog?.Destroy();
-                    dungeon.watchdog = null;
+                // O mapa e o chat: sem eles, a masmorra nasce e
+                // ninguém no servidor fica sabendo. Ver a seção
+                // "O MARCADOR NO MAPA".
+                CreateMarker(dungeon);
+                Broadcast(dungeon,
+                          dungeon.spec == null || dungeon.spec.announce == null
+                              ? null
+                              : dungeon.spec.announce.onBuild,
+                          "Uma masmorra apareceu em {grid}.");
 
-                    // O mapa e o chat: sem eles, a masmorra nasce e
-                    // ninguém no servidor fica sabendo. Ver a seção
-                    // "O MARCADOR NO MAPA".
-                    CreateMarker(dungeon);
-                    Broadcast(dungeon,
-                              dungeon.spec == null || dungeon.spec.announce == null
-                                  ? null
-                                  : dungeon.spec.announce.onBuild,
-                              "Uma masmorra apareceu em {grid}.");
+                var ms = (int)(DateTime.UtcNow - dungeon.startedAt).TotalMilliseconds;
 
-                    var ms = (int)(DateTime.UtcNow - dungeon.startedAt).TotalMilliseconds;
+                // ####  O NÚMERO QUE O ADMIN LIA ERA O ERRADO  ####
+                //
+                // `dungeon.entities.Count` é quem foi ADOTADO, e
+                // adoção acontece no nascimento. Peça que o jogo
+                // matou meio segundo depois — por instabilidade,
+                // que é justamente o que mais acontece numa planta
+                // grande — continuava contando. O relatório sempre
+                // parecia sucesso. `alive` é a contagem de verdade.
+                var report = dungeon.paste;
+                report.diedAfterSpawn = CountDead(dungeon);
 
-                    // ####  O NÚMERO QUE O ADMIN LIA ERA O ERRADO  ####
-                    //
-                    // `dungeon.entities.Count` é quem foi ADOTADO, e
-                    // adoção acontece no nascimento. Peça que o jogo
-                    // matou meio segundo depois — por instabilidade,
-                    // que é justamente o que mais acontece numa planta
-                    // grande — continuava contando. O relatório sempre
-                    // parecia sucesso. `alive` é a contagem de verdade.
-                    var report = dungeon.paste;
-                    report.diedAfterSpawn = CountDead(dungeon);
+                var alive = dungeon.entities.Count - report.diedAfterSpawn;
 
-                    var alive = dungeon.entities.Count - report.diedAfterSpawn;
+                requester?.Reply("Masmorra '" + slug + "' de pé: "
+                                 + alive + " peças em " + ms + " ms. "
+                                 + "A entrada está em " + Grid(surface) + "."
+                                 + (dungeon.depthNote == null
+                                     ? ""
+                                     : " A masmorra desceu para " + dungeon.origin.y.ToString("0", CultureInfo.InvariantCulture)
+                                       + " m: na profundidade padrão havia " + dungeon.depthNote + ".")
+                                 + (report.requested > 0 ? " Da planta: " + report.Human() + "." : "")
+                                 + (dungeon.bodyPaste.requested > 0
+                                     ? " Da construção: " + dungeon.bodyPaste.Human() + "; " + dungeon.bodyNpcs
+                                       + " inimigo(s) e " + dungeon.bodyCrates + " caixa(s) nos pontos"
+                                       + (dungeon.bodyBlocked > 0 ? ", " + dungeon.bodyBlocked + " sem espaço" : "") + "."
+                                     : ""));
 
-                    requester?.Reply("Masmorra '" + slug + "' de pé: "
-                                     + alive + " peças em " + ms + " ms. "
-                                     + "A entrada está em " + Grid(surface) + "."
-                                     + (dungeon.depthNote == null
-                                         ? ""
-                                         : " A masmorra desceu para " + dungeon.origin.y.ToString("0", CultureInfo.InvariantCulture)
-                                           + " m: na profundidade padrão havia " + dungeon.depthNote + ".")
-                                     + (report.requested > 0 ? " Da planta: " + report.Human() + "." : ""));
+                Report("built", new Dictionary<string, object>
+                {
+                    ["slug"] = slug,
+                    ["x"] = surface.x,
+                    ["z"] = surface.z,
+                    ["grid"] = Grid(surface),
+                    ["entities"] = alive,
+                    ["adopted"] = dungeon.entities.Count,
+                    ["ms"] = ms,
 
-                    Report("built", new Dictionary<string, object>
-                    {
-                        ["slug"] = slug,
-                        ["x"] = surface.x,
-                        ["z"] = surface.z,
-                        ["grid"] = Grid(surface),
-                        ["entities"] = alive,
-                        ["adopted"] = dungeon.entities.Count,
-                        ["ms"] = ms,
+                    // Em que altura ela ficou, e por que desceu, se
+                    // desceu. Ver `SettleDepth`.
+                    ["depth"] = dungeon.origin.y,
+                    ["depthNote"] = dungeon.depthNote,
 
-                        // Em que altura ela ficou, e por que desceu, se
-                        // desceu. Ver `SettleDepth`.
-                        ["depth"] = dungeon.origin.y,
-                        ["depthNote"] = dungeon.depthNote,
+                    // O que a PLANTA pediu e o que dela sobrou. Sem
+                    // estes campos, "600 peças" no painel é um
+                    // número que ninguém consegue conferir.
+                    ["blueprintRequested"] = report.requested,
+                    ["blueprintPlaced"] = report.placed,
+                    ["blueprintSkippedPrefab"] = report.skippedPrefab,
+                    ["blueprintSkippedVehicle"] = report.skippedVehicle,
+                    ["blueprintSkippedError"] = report.skippedError,
+                    ["blueprintSkinRejected"] = report.skinRejected,
+                    ["diedAfterSpawn"] = report.diedAfterSpawn,
 
-                        // O que a PLANTA pediu e o que dela sobrou. Sem
-                        // estes campos, "600 peças" no painel é um
-                        // número que ninguém consegue conferir.
-                        ["blueprintRequested"] = report.requested,
-                        ["blueprintPlaced"] = report.placed,
-                        ["blueprintSkippedPrefab"] = report.skippedPrefab,
-                        ["blueprintSkippedVehicle"] = report.skippedVehicle,
-                        ["blueprintSkippedError"] = report.skippedError,
-                        ["blueprintSkinRejected"] = report.skinRejected,
-                        ["diedAfterSpawn"] = report.diedAfterSpawn,
+                    // As bandeiras. `bannersPending` é o número que
+                    // interessa ao painel: ele não é erro, é "a
+                    // arte ainda não subiu para o servidor" — e o
+                    // caminho de conserto é mandar a imagem, não
+                    // reconstruir a masmorra.
+                    ["bannersFound"] = report.bannersFound,
+                    ["bannersPainted"] = report.bannersPainted,
+                    ["bannersPending"] = report.bannersPending,
+                    ["bannersFailed"] = report.bannersFailed,
 
-                        // As bandeiras. `bannersPending` é o número que
-                        // interessa ao painel: ele não é erro, é "a
-                        // arte ainda não subiu para o servidor" — e o
-                        // caminho de conserto é mandar a imagem, não
-                        // reconstruir a masmorra.
-                        ["bannersFound"] = report.bannersFound,
-                        ["bannersPainted"] = report.bannersPainted,
-                        ["bannersPending"] = report.bannersPending,
-                        ["bannersFailed"] = report.bannersFailed,
-                    });
+                    // O corpo importado. Zeros quando a masmorra é de células.
+                    ["bodyRequested"] = dungeon.bodyPaste.requested,
+                    ["bodyPlaced"] = dungeon.bodyPaste.placed,
+                    ["bodyMarkersRemoved"] = dungeon.bodyPaste.markersRemoved,
+                    ["bodySkippedContent"] = dungeon.bodyPaste.SkippedContent,
+                    ["bodyItemsDropped"] = dungeon.bodyPaste.itemsDropped,
+                    ["bodyNpcs"] = dungeon.bodyNpcs,
+                    ["bodyCrates"] = dungeon.bodyCrates,
+                    ["bodyBlocked"] = dungeon.bodyBlocked,
+                    ["bodyMoved"] = dungeon.bodyMoved,
+                    ["arrivalMoved"] = dungeon.arrivalMoved,
                 });
             });
         }
@@ -1610,28 +1692,114 @@ namespace Oxide.Plugins
 
             if (spec != null && !spec.enabled) return;
 
+            var text = AnnouncementText(dungeon, spec, custom, fallback);
+
+            // ####  O VISUAL É O DAS MENSAGENS DO SERVIDOR  ####
+            //
+            // Pedido do dono em 16/09/2026: a frase da masmorra com a
+            // mesma tag, cor e tamanho das mensagens do painel. Quem
+            // desenha é o OrigemZChat, pelo MESMO comando que o agente
+            // usa (`origemz.chat.broadcast`) — chamado daqui, de
+            // dentro do servidor, a frase sai mesmo com o agente fora.
+            //
+            // Sem visual escolhido e sem marcação de cor, a linha
+            // continua a de sempre: é o "manter as mensagens atuais
+            // como padrão" do pedido.
+            var formatted = (spec != null && spec.Styled) || HasChatMarkup(text);
+
+            // Descarregando, não há tique seguinte (ver `Report`): a
+            // frase vai pela linha simples, que é síncrona.
+            if (formatted && !unloading && OrigemZChat != null && OrigemZChat.IsLoaded)
+            {
+                var payload = new Dictionary<string, object>
+                {
+                    ["text"] = text,
+                    ["tag"] = spec == null ? "" : spec.tag ?? "",
+                    ["tagColor"] = spec == null ? "" : spec.tagColor ?? "",
+                    ["color"] = spec == null ? "" : spec.color ?? "",
+                    ["size"] = spec == null ? 0 : spec.size,
+                };
+
+                var encoded = Convert.ToBase64String(
+                    System.Text.Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload)));
+
+                // ####  NO TIQUE SEGUINTE, E NÃO AGORA  ####
+                //
+                // MEDIDO em 17/09/2026: chamado dentro do `ozdungeon
+                // stop`, o `ReplyWith` do OrigemZChat virou a resposta
+                // do STOP — o console recebeu `{"ok":true,"sent":1}` no
+                // lugar da frase da masmorra. É o mesmo casamento de
+                // resposta que o `Report` já evita com o `NextTick`.
+                NextTick(() => server.Command(ChatBroadcastCommand, encoded));
+                Debug("anunciado pelo OrigemZChat: " + text);
+                return;
+            }
+
+            // Sem o OrigemZChat, a marcação não vira cor: ela sairia
+            // como colchete no meio da frase. Some, e a frase fica.
+            var plain = StripChatMarkup(text);
+
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player != null && player.IsConnected) player.ChatMessage(plain);
+            }
+
+            Debug("anunciado ao servidor: " + plain);
+        }
+
+        /// <summary>O comando do OrigemZChat. É o mesmo que o agente usa.</summary>
+        private const string ChatBroadcastCommand = "origemz.chat.broadcast";
+
+        /// <summary>
+        /// A frase, com as variáveis trocadas.
+        ///
+        /// `{grid}` vira a grade do mapa (`E7`) — a coordenada crua
+        /// nunca entra, porque ninguém joga com (-1330, 871) na cabeça
+        /// — e `{nome}` vira o NOME que o admin deu (antes de
+        /// 17/09/2026 era o slug). Sem `{grid}` na frase e com a grade
+        /// ligada, ela entra no fim: uma masmorra que ninguém sabe onde
+        /// fica não é um evento, é um boato.
+        ///
+        /// A mesma conta mora na prévia do painel
+        /// (`panel/src/lib/dungeon-announcement.ts`).
+        /// </summary>
+        private static string AnnouncementText(ActiveDungeon dungeon, AnnounceSpec spec, string custom, string fallback)
+        {
             var showGrid = spec == null || spec.showGrid;
             var grid = Grid(dungeon.surface);
+            var name = dungeon.spec != null && !string.IsNullOrEmpty(dungeon.spec.name)
+                ? dungeon.spec.name
+                : dungeon.slug;
             var text = string.IsNullOrEmpty(custom) ? fallback : custom;
 
             text = text.Replace("{grid}", showGrid ? grid : "algum lugar")
-                       .Replace("{nome}", dungeon.slug);
+                       .Replace("{nome}", name);
 
-            // Sem `{grid}` na frase e com a grade ligada, ela entra no
-            // fim: uma masmorra que ninguém sabe onde fica não é um
-            // evento, é um boato.
             if (showGrid && text.IndexOf(grid, StringComparison.Ordinal) < 0)
             {
                 text = text + " (" + grid + ")";
             }
 
-            foreach (var player in BasePlayer.activePlayerList)
-            {
-                if (player != null && player.IsConnected) player.ChatMessage(text);
-            }
-
-            Debug("anunciado ao servidor: " + text);
+            return text;
         }
+
+        /// <summary>
+        /// A marcação de cor das mensagens: `[verde]…[/]`, `[#ff0000]…`.
+        ///
+        /// Os doze nomes são os do OrigemZChat (`ChatColors`) e do
+        /// `chat-markup.ts` do agente. Colchete que não é cor fica
+        /// como está — `[AVISO]` é texto.
+        /// </summary>
+        private static readonly Regex ChatMarkupPattern = new Regex(
+            @"\[(?:/(?:#[0-9a-fA-F]{3,8}|branco|preto|cinza|vermelho|laranja|amarelo|dourado|verde|ciano|azul|roxo|rosa)?"
+            + @"|#[0-9a-fA-F]{3,8}|branco|preto|cinza|vermelho|laranja|amarelo|dourado|verde|ciano|azul|roxo|rosa)\]",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static bool HasChatMarkup(string text) =>
+            !string.IsNullOrEmpty(text) && ChatMarkupPattern.IsMatch(text);
+
+        private static string StripChatMarkup(string text) =>
+            string.IsNullOrEmpty(text) ? text : ChatMarkupPattern.Replace(text, "");
 
         // ============================================================
         //  A LIMPEZA
@@ -1724,6 +1892,528 @@ namespace Oxide.Plugins
         }
 
         // ============================================================
+        //  O CORPO IMPORTADO — a construção feita à mão no jogo
+        //
+        //  Pedido do dono em 16/09/2026: construir a masmorra DENTRO do
+        //  Rust, salvar com o CopyPaste e usar a construção como corpo,
+        //  sem redesenhá-la no grid do painel.
+        //
+        //  ####  OS TRÊS MARCADORES  ####
+        //
+        //    lápide (gravestone)        ponto de inimigo
+        //    velas (largecandles)       ponto de caixa
+        //    árvore de Natal (xmas.tree) chegada do jogador
+        //
+        //  Quem os LÊ é o agente, na importação (`dungeons/body.ts`): o
+        //  que chega aqui já são pontos, com o perfil de conteúdo que o
+        //  admin escolheu. Aqui o marcador só é PULADO na colagem — a
+        //  masmorra ativa não tem lápide em cima de cada inimigo.
+        //
+        //  ####  A ÁRVORE É A ÂNCORA  ####
+        //
+        //     planta (local)                  mundo
+        //
+        //        árvore ●──► olhar           ● chegada, sob a casinha
+        //                                    └──► para onde a casinha aponta
+        //
+        //  A planta é colada de modo que a árvore caia exatamente sob a
+        //  entrada da superfície, na profundidade escolhida, e girada
+        //  para que o olhar da árvore aponte para a frente da casinha —
+        //  a mesma promessa das masmorras de células ("quem desce chega
+        //  olhando para o caminho"). Todo ponto, peça e a própria saída
+        //  passam pela MESMA conta, `bodyOrigin + bodySpin * local`: é o
+        //  que faz a construção inteira acompanhar posição e giro.
+        //
+        //  ####  O QUE A CONSTRUÇÃO NÃO TRAZ  ####
+        //
+        //  NPC, caixa de loot, armadilha, torre, veículo, fechadura,
+        //  arma exposta e item em inventário. Ver `ExcludedFromBody`.
+        // ============================================================
+
+        /// <summary>
+        /// Os três prefabs de marcador. MEDIDOS no server01 em
+        /// 17/09/2026 pelo `ItemModDeployable` de cada item.
+        /// </summary>
+        private const string PrefabMarkerNpc =
+            "assets/prefabs/misc/halloween/deployablegravestone/gravestone.stone.deployed.prefab";
+        private const string PrefabMarkerCrate = "assets/prefabs/misc/halloween/candles/largecandleset.prefab";
+        private const string PrefabMarkerArrival = "assets/prefabs/misc/xmas/xmastree/xmas_tree.deployed.prefab";
+
+        private static bool HasBody(ActiveDungeon dungeon) =>
+            dungeon.spec != null && dungeon.spec.mode == "construction";
+
+        private static bool IsBodyMarker(string prefab)
+        {
+            var path = (prefab ?? "").ToLowerInvariant();
+            return path == PrefabMarkerNpc || path == PrefabMarkerCrate || path == PrefabMarkerArrival;
+        }
+
+        /// <summary>
+        /// Esta peça é conteúdo que o evento controla? Conta e devolve true.
+        ///
+        /// A pergunta é ao TIPO da entidade, que é a verdade; o agente
+        /// faz a mesma pergunta pelo caminho do prefab
+        /// (`roleOfPrefab`), para a tela avisar antes.
+        /// </summary>
+        private static bool ExcludedFromBody(BaseEntity entity, string prefab, PasteReport report)
+        {
+            if (entity is BasePlayer || entity is BaseNpc)
+            {
+                report.skippedNpc++;
+                return true;
+            }
+
+            if (entity is LootContainer || entity is DroppedItemContainer)
+            {
+                report.skippedLoot++;
+                return true;
+            }
+
+            if (entity is BaseTrap || entity is GunTrap || entity is FlameTurret || entity is AutoTurret
+                || entity is SamSite || entity is TeslaCoil
+                || (prefab ?? "").IndexOf("spikes.floor", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                report.skippedHostile++;
+                return true;
+            }
+
+            if (entity is BaseLock)
+            {
+                report.skippedLock++;
+                return true;
+            }
+
+            if (entity is HeldEntity || entity is WorldItem)
+            {
+                report.skippedWeapon++;
+                return true;
+            }
+
+            if (entity is BaseVehicle)
+            {
+                report.skippedVehicle++;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Cola a construção a -90 e, quando ela terminar, põe a saída, a
+        /// chegada e o conteúdo — e chama o fim de toda construção.
+        /// </summary>
+        private void BuildBody(ActiveDungeon dungeon, string slug, Vector3 surface, Vector3 forward, IPlayer requester)
+        {
+            var body = dungeon.spec.body;
+
+            if (body == null || string.IsNullOrEmpty(body.blueprint))
+            {
+                Fail(requester, "blueprint_invalid",
+                     "A masmorra '" + slug + "' está no modo construção e não tem construção escolhida.");
+                return;
+            }
+
+            if (body.arrival == null)
+            {
+                Fail(requester, "blueprint_invalid",
+                     "A masmorra '" + slug + "' não tem ponto de chegada: defina-o no painel.");
+                return;
+            }
+
+            var blueprint = LoadBlueprint(body.blueprint);
+
+            if (blueprint == null)
+            {
+                Fail(requester, "blueprint_missing",
+                     "A construção '" + body.blueprint + "' não está em " + blueprintDir);
+                return;
+            }
+
+            var entities = blueprint["entities"] as JArray;
+
+            if (entities == null || entities.Count == 0)
+            {
+                Fail(requester, "blueprint_invalid", "A construção '" + body.blueprint + "' não tem peça nenhuma.");
+                return;
+            }
+
+            // O giro: o olhar da árvore passa a apontar para onde a
+            // casinha aponta. O `forward` aqui é o do comando de build.
+            var buildYaw = Quaternion.LookRotation(forward, Vector3.up).eulerAngles.y;
+            var spin = Quaternion.Euler(0f, buildYaw - body.arrival.yaw, 0f);
+            var arrivalLocal = body.arrival.Local;
+
+            // ####  A PROFUNDIDADE OLHA A CONSTRUÇÃO INTEIRA  ####
+            //
+            // Cada peça de construção vira uma caixa na régua do
+            // `SettleDepth`, com a altura RELATIVA à chegada: o porão
+            // desce, o segundo andar sobe, e os dois têm de caber.
+            var footprint = new List<Vector3>();
+            var seen = new HashSet<(int, int, int)>();
+
+            foreach (var token in entities)
+            {
+                var node = token as JObject;
+                var prefab = node == null ? null : node.Value<string>("prefabname");
+
+                if (prefab == null || !prefab.StartsWith("assets/prefabs/building core/", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var local = ReadVector(node["pos"]) - arrivalLocal;
+                var flat = spin * new Vector3(local.x, 0f, local.z);
+                var key = (Mathf.RoundToInt(flat.x / 1.5f), Mathf.RoundToInt(local.y / 1.5f), Mathf.RoundToInt(flat.z / 1.5f));
+
+                if (!seen.Add(key)) continue;
+
+                footprint.Add(new Vector3(dungeon.origin.x + flat.x, local.y, dungeon.origin.z + flat.z));
+            }
+
+            if (footprint.Count == 0) footprint.Add(new Vector3(dungeon.origin.x, 0f, dungeon.origin.z));
+
+            var refusal = SettleDepth(dungeon, footprint, spin, CellBoxHalf);
+
+            if (refusal != null)
+            {
+                Fail(requester, "no_position", refusal);
+                return;
+            }
+
+            // A chegada cai sob a entrada, na profundidade escolhida.
+            var anchor = dungeon.origin;
+
+            dungeon.bodySpin = spin;
+            dungeon.bodyOrigin = anchor - spin * arrivalLocal;
+            dungeon.lobbyFacing = forward;
+
+            PasteBlueprint(dungeon, blueprint, dungeon.bodyOrigin, spin.eulerAngles.y, (placed, error) =>
+            {
+                if (active != dungeon) return;
+
+                if (error != null)
+                {
+                    Fail(requester, "blueprint_invalid", "A construção '" + body.blueprint + "' não pôde ser colada: " + error);
+                    return;
+                }
+
+                if (placed == 0)
+                {
+                    Fail(requester, "blueprint_invalid", "A construção '" + body.blueprint + "' não tem nenhuma peça válida.");
+                    return;
+                }
+
+                Debug("corpo: " + dungeon.bodyPaste.Human());
+
+                // Meio segundo para a física registrar as peças: é
+                // contra elas que a chegada e os pontos são conferidos.
+                timer.Once(0.5f, () =>
+                {
+                    if (active != dungeon) return;
+
+                    string problem;
+
+                    try
+                    {
+                        problem = FurnishBody(dungeon);
+                    }
+                    catch (Exception e)
+                    {
+                        Fail(requester, "blueprint_invalid", "Falhei ao mobiliar a construção: " + e.Message);
+                        return;
+                    }
+
+                    if (problem != null)
+                    {
+                        Fail(requester, "no_position", problem);
+                        return;
+                    }
+
+                    FinishBuild(dungeon, slug, surface, requester);
+                });
+            }, PasteRole.Body);
+        }
+
+        /// <summary>
+        /// A chegada, a saída e o conteúdo da construção colada.
+        /// Devolve a frase de recusa, ou null.
+        /// </summary>
+        private string FurnishBody(ActiveDungeon dungeon)
+        {
+            Physics.SyncTransforms();
+
+            var body = dungeon.spec.body;
+            var arrival = dungeon.bodyOrigin + dungeon.bodySpin * body.arrival.Local;
+            Vector3 cleared;
+
+            // ####  A CHEGADA NÃO PODE PRENDER NINGUÉM  ####
+            //
+            // O painel já conferiu o piso com a forma das peças; aqui a
+            // conferência é com a física de verdade, e um palmo de
+            // parede ou um móvel encostado empurram a chegada para o
+            // lado livre mais próximo. Sem lado livre, a masmorra não
+            // sobe — levar alguém para dentro de uma parede é pior que
+            // não ter evento.
+            if (!ClearSpot(arrival, dungeon.bodySpin, 0.4f, 1.8f, out cleared))
+            {
+                return "O ponto de chegada da construção '" + body.blueprint + "' está preso (parede, piso "
+                       + "ou móvel em volta, ou sem chão embaixo). Ajuste a chegada no painel.";
+            }
+
+            dungeon.arrivalMoved = Flat(cleared - arrival) > 0.05f;
+            dungeon.arrivalPoint = cleared + Vector3.up * 0.1f;
+
+            PlaceBodyExit(dungeon, cleared);
+
+            PopulateBody(dungeon, new System.Random());
+
+            return null;
+        }
+
+        /// <summary>
+        /// O alçapão de subir, sob o teto que fica sobre a chegada, e a
+        /// luz ao lado dele.
+        ///
+        /// Sem teto em cima (um pátio a céu aberto a -90), a tampa fica
+        /// flutuando a 2,75 m — ainda ao alcance de quem olha para cima.
+        /// </summary>
+        private void PlaceBodyExit(ActiveDungeon dungeon, Vector3 arrival)
+        {
+            var frame = dungeon.bodySpin;
+            RaycastHit hit;
+            Vector3 under;
+            BaseEntity ceiling = null;
+
+            if (Physics.Raycast(arrival + Vector3.up * 1.0f, Vector3.up, out hit, 6f,
+                                Rust.Layers.Mask.Construction, QueryTriggerInteraction.Ignore))
+            {
+                under = hit.point;
+                ceiling = hit.collider.ToBaseEntity();
+            }
+            else
+            {
+                under = arrival + Vector3.up * 3f;
+            }
+
+            // O pivô da tampa é a dobradiça: o mesmo metro e o mesmo
+            // quarto de volta do `PlaceExitHatch`, no referencial da
+            // construção.
+            var hatch = GameManager.server.CreateEntity(
+                PrefabHatch,
+                under + Vector3.down * 0.25f + frame * new Vector3(HatchPivotOffset, 0f, 0f),
+                frame * R90) as Door;
+
+            if (hatch != null)
+            {
+                hatch.OwnerID = 0UL;
+                hatch.EnableSaving(false);
+                Anchor(hatch);
+                hatch.Spawn();
+
+                if (ceiling != null && ceiling._name == MarkIndestructible) hatch.SetParent(ceiling, true, true);
+
+                Adopt(dungeon, hatch);
+                dungeon.exitHatch = hatch;
+            }
+
+            PlaceLightAt(dungeon, under + Vector3.down * 0.1f + frame * new Vector3(-0.9f, 0f, 0f));
+        }
+
+        /// <summary>
+        /// Os inimigos e as caixas, nos pontos.
+        ///
+        /// ####  O PONTO DIZ ONDE; O PERFIL DIZ O QUÊ  ####
+        ///
+        /// `green`, `blue` e `red` são os cadastros das cores de sala;
+        /// `corridor` é o do corredor. Vida, arma, nome, IA, caixas,
+        /// tabela e OZCoin saem de lá, pelos mesmos caminhos das
+        /// masmorras de células (`SpawnNpcAt`, `SpawnContainerAt`).
+        ///
+        /// ####  E NÃO ABRE RESPAWN NENHUM  ####
+        ///
+        /// Inimigo morto não volta; caixa só volta se o `respawn` da
+        /// masmorra estiver ligado — a mesma regra de sempre.
+        /// </summary>
+        private void PopulateBody(ActiveDungeon dungeon, System.Random rng)
+        {
+            var body = dungeon.spec.body;
+            var points = body.points ?? new List<BodyPointSpec>();
+
+            foreach (var point in points)
+            {
+                if (point == null) continue;
+
+                var isNpc = point.kind == "npc";
+                var profile = string.IsNullOrEmpty(point.profile) ? "green" : point.profile;
+                var corridor = profile == "corridor" ? dungeon.spec.corridor : null;
+                var room = profile == "corridor" ? null : RoomSpecOf(dungeon, profile);
+                var world = dungeon.bodyOrigin + dungeon.bodySpin * point.Local;
+                var rotation = dungeon.bodySpin * Quaternion.Euler(0f, point.yaw, 0f);
+                var many = Mathf.Clamp(point.amount <= 0 ? 1 : point.amount, 1, MaxPerMark);
+
+                for (var i = 0; i < many; i++)
+                {
+                    var wanted = RingAround(world, rng, i, many);
+                    Vector3 at;
+
+                    string blocker;
+
+                    if (!ClearSpot(wanted, dungeon.bodySpin, isNpc ? 0.35f : 0.3f, isNpc ? 1.8f : 1.0f, out at, out blocker))
+                    {
+                        dungeon.bodyBlocked++;
+                        PrintWarning("corpo '" + body.blueprint + "': o " + (isNpc ? "inimigo" : "caixa")
+                                     + " do ponto " + point.Local + " não coube (" + (blocker ?? "?")
+                                     + " no lugar, e nada livre a 1 m). Ajuste o ponto no painel.");
+                        continue;
+                    }
+
+                    // O pé cai no chão de verdade, então a altura sempre
+                    // muda um pouco: "afastado" é só o deslocamento de lado.
+                    if (Flat(at - wanted) > 0.05f) dungeon.bodyMoved++;
+
+                    if (isNpc)
+                    {
+                        if (SpawnNpcAt(dungeon, at + Vector3.up * 0.1f, rotation,
+                                       profile == "corridor" ? null : profile, rng, point.prefab) != null)
+                            dungeon.bodyNpcs++;
+
+                        continue;
+                    }
+
+                    var list = room != null ? room.crates : corridor != null ? corridor.crates : null;
+                    var prefabs = list == null || list.Count == 0 ? DefaultCrates : list;
+                    var prefab = string.IsNullOrEmpty(point.prefab) ? prefabs[rng.Next(prefabs.Count)] : point.prefab;
+                    var contents = room != null ? room.crateContents : corridor != null ? corridor.crateContents : null;
+                    var fallback = room != null ? room.table : corridor != null ? corridor.table : null;
+
+                    if (SpawnContainerAt(dungeon, NoCell, at + Vector3.up * 0.05f, rotation, prefab,
+                                         TableFor(contents, prefab, fallback), CoinsFor(contents, prefab)) != null)
+                        dungeon.bodyCrates++;
+                }
+            }
+
+            Debug("corpo: " + dungeon.bodyNpcs + " inimigos, " + dungeon.bodyCrates + " caixas, "
+                  + dungeon.bodyMoved + " afastado(s), " + dungeon.bodyBlocked + " sem espaço");
+
+            StartRespawn(dungeon);
+        }
+
+        /// <summary>
+        /// Onde a peça número <paramref name="index"/> nasce em volta do
+        /// ponto. Uma peça fica EXATAMENTE no ponto — o admin o marcou
+        /// com precisão; várias ganham o mesmo anel do `SpotInRing`.
+        /// </summary>
+        private static Vector3 RingAround(Vector3 center, System.Random rng, int index, int total)
+        {
+            if (total <= 1) return center;
+
+            var turn = rng.Next(360) * Mathf.Deg2Rad;
+            var angle = turn + index * (Mathf.PI * 2f / total);
+            var radius = Mathf.Min(0.45f + total * 0.08f, 1.05f);
+
+            return center + new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
+        }
+
+        /// <summary>O tamanho de um deslocamento, só no plano.</summary>
+        private static float Flat(Vector3 delta) => new Vector2(delta.x, delta.z).magnitude;
+
+        /// <summary>Quem ocupa espaço para um corpo em pé.</summary>
+        private const int BodySolidMask =
+            Rust.Layers.Mask.Construction | Rust.Layers.Mask.Deployed | Rust.Layers.Mask.World;
+
+        /// <summary>As direções em que um ponto preso é empurrado.</summary>
+        private static readonly Vector3[] NudgeDirections =
+        {
+            Vector3.forward, Vector3.back, Vector3.left, Vector3.right,
+            new Vector3(1f, 0f, 1f).normalized, new Vector3(-1f, 0f, 1f).normalized,
+            new Vector3(1f, 0f, -1f).normalized, new Vector3(-1f, 0f, -1f).normalized,
+        };
+
+        /// <summary>
+        /// Um lugar livre para um corpo de <paramref name="height"/> m no
+        /// ponto, ou perto dele (até 1,05 m para o lado), com chão embaixo.
+        ///
+        /// É a conferência que o painel não pode fazer: ele só conhece a
+        /// forma das peças de construção, e aqui a física conhece tudo —
+        /// móvel, escada, telhado, o que o admin tiver posto.
+        /// </summary>
+        private static bool ClearSpot(Vector3 wanted, Quaternion frame, float radius, float height, out Vector3 result)
+        {
+            string blocker;
+            return ClearSpot(wanted, frame, radius, height, out result, out blocker);
+        }
+
+        private static readonly Collider[] SpotBuffer = new Collider[32];
+
+        /// <param name="frame">
+        /// O giro da construção. Os empurrões seguem os eixos DELA: num
+        /// cômodo girado 30°, "para trás" é para longe da parede do
+        /// cômodo, e não do norte do mundo.
+        /// </param>
+        /// <param name="blocker">Quem ocupava o ponto marcado, para o log. Null = nada.</param>
+        private static bool ClearSpot(
+            Vector3 wanted, Quaternion frame, float radius, float height, out Vector3 result, out string blocker)
+        {
+            blocker = null;
+
+            foreach (var step in new[] { 0f, 0.35f, 0.7f, 1.05f })
+            {
+                foreach (var direction in step == 0f ? new[] { Vector3.zero } : NudgeDirections)
+                {
+                    var candidate = wanted + frame * direction * step;
+
+                    // O chão: até 0,6 m abaixo do ponto, e nunca mais de
+                    // meio metro acima dele.
+                    RaycastHit ground;
+
+                    if (!Physics.Raycast(candidate + Vector3.up * 0.5f, Vector3.down, out ground, 1.1f,
+                                         BodySolidMask, QueryTriggerInteraction.Ignore))
+                    {
+                        if (step == 0f) blocker = "sem chão";
+                        continue;
+                    }
+
+                    var feet = ground.point;
+                    var bottom = feet + Vector3.up * (radius + 0.05f);
+                    var top = feet + Vector3.up * Mathf.Max(radius + 0.06f, height - radius);
+                    var found = Physics.OverlapCapsuleNonAlloc(
+                        bottom, top, radius, SpotBuffer, BodySolidMask, QueryTriggerInteraction.Ignore);
+                    var names = new List<string>();
+
+                    for (var i = 0; i < found; i++)
+                    {
+                        var collider = SpotBuffer[i];
+                        if (collider == null) continue;
+
+                        // ####  QUEM ANDA NÃO OCUPA LUGAR  ####
+                        //
+                        // MEDIDO em 17/09/2026: dois inimigos no mesmo
+                        // ponto, e o segundo "sem espaço" em sala vazia.
+                        // A arma na mão do primeiro tem colisor numa
+                        // camada de objeto. Gente — e o que ela segura —
+                        // sai do caminho sozinha; parede e caixa, não.
+                        var entity = collider.ToBaseEntity();
+                        if (entity is BasePlayer) continue;
+                        if (entity != null && entity.GetParentEntity() is BasePlayer) continue;
+
+                        var name = entity != null ? entity.ShortPrefabName : collider.name;
+                        if (!names.Contains(name)) names.Add(name);
+                    }
+
+                    if (names.Count > 0)
+                    {
+                        if (step == 0f) blocker = string.Join(", ", names.ToArray());
+                        continue;
+                    }
+
+                    result = feet;
+                    return true;
+                }
+            }
+
+            result = wanted;
+            return false;
+        }
+
+        // ============================================================
         //  A PROFUNDIDADE — o lugar lá embaixo também tem vizinhos
         //
         //  ####  A ALTURA FINAL NÃO DEPENDE DO PONTO ESCOLHIDO  ####
@@ -1809,7 +2499,11 @@ namespace Oxide.Plugins
         /// grava em `dungeon.origin.y`. Devolve a frase de recusa, ou
         /// null quando achou.
         /// </summary>
-        /// <param name="points">O piso de cada caixa, com a altura da config.</param>
+        /// <param name="points">
+        /// O piso de cada caixa: x/z no mundo, e `y` RELATIVO ao piso da
+        /// masmorra (zero numa masmorra de células; o andar de cima de
+        /// uma construção importada tem 3).
+        /// </param>
         private string SettleDepth(ActiveDungeon dungeon, List<Vector3> points, Quaternion rotation, Vector3 half)
         {
             string first = null;
@@ -1849,7 +2543,7 @@ namespace Oxide.Plugins
         {
             foreach (var point in points)
             {
-                var floor = new Vector3(point.x, y, point.z);
+                var floor = new Vector3(point.x, y + point.y, point.z);
                 var center = floor + Vector3.up * 1.5f;
 
                 // 1) Volume de ambiente. É ele que escurece o interior.
@@ -1883,7 +2577,7 @@ namespace Oxide.Plugins
 
                 // 3) O terreno por cima do teto. Um vale fundo, ou um
                 //    mapa próprio com fosso, deixaria o teto de fora.
-                if (TerrainMeta.HeightMap != null && TerrainMeta.HeightMap.GetHeight(floor) < y + 2f * half.y)
+                if (TerrainMeta.HeightMap != null && TerrainMeta.HeightMap.GetHeight(floor) < floor.y + 2f * half.y)
                     return "o próprio terreno, que ali desce até a altura da masmorra (" + Grid(floor) + ")";
 
                 // 4) Água. Num mapa procedural o fundo do mar não passa
@@ -2512,7 +3206,12 @@ namespace Oxide.Plugins
             // A profundidade sai daqui, e não do `Build`: só agora se
             // sabe onde cada célula cai. Ver `SettleDepth`.
             var footprint = layout.cells
-                .Select(c => dungeon.origin + right * (c.Item1 * CellSize) + forward * (c.Item2 * CellSize))
+                .Select(c =>
+                {
+                    var p = dungeon.origin + right * (c.Item1 * CellSize) + forward * (c.Item2 * CellSize);
+                    p.y = 0f;
+                    return p;
+                })
                 .ToList();
             var refusal = SettleDepth(dungeon, footprint, cellRotation, CellBoxHalf);
 
@@ -2569,7 +3268,8 @@ namespace Oxide.Plugins
                 var block = GameManager.server.CreateEntity(PrefabFoundation, pos, cellRotation) as BuildingBlock;
                 if (block == null) continue;
 
-                PrepareBlock(dungeon, block, GradeOf(dungeon, layout, cell, Piece.Foundation));
+                PrepareBlock(dungeon, block, GradeOf(dungeon, layout, cell, Piece.Foundation),
+                             SkinOf(dungeon, layout, cell, Piece.Foundation), 0u);
                 Adopt(dungeon, block);
                 floors[cell] = block;
             }
@@ -2655,7 +3355,8 @@ namespace Oxide.Plugins
                     wall.SetParent(parent);
                     wall.transform.localPosition = localPos;
                     wall.transform.localRotation = localRot;
-                    PrepareBlock(dungeon, wall, WallGradeOf(dungeon, layout, cell, neighbour));
+                    PrepareBlock(dungeon, wall, WallGradeOf(dungeon, layout, cell, neighbour),
+                                 WallSkinOf(dungeon, layout, cell, neighbour), 0u);
                     Adopt(dungeon, wall);
                     walls[key] = wall;
 
@@ -2695,7 +3396,8 @@ namespace Oxide.Plugins
                 ceiling.SetParent(pair.Value);
                 ceiling.transform.localPosition = new Vector3(0f, 3f, 0f);
                 ceiling.transform.localRotation = R0;
-                PrepareBlock(dungeon, ceiling, GradeOf(dungeon, layout, pair.Key, Piece.Ceiling));
+                PrepareBlock(dungeon, ceiling, GradeOf(dungeon, layout, pair.Key, Piece.Ceiling),
+                             SkinOf(dungeon, layout, pair.Key, Piece.Ceiling), 0u);
                 Adopt(dungeon, ceiling);
                 ceilings[pair.Key] = ceiling;
             }
@@ -3205,8 +3907,6 @@ namespace Oxide.Plugins
             // O `as ScientistNPC` devolvendo null e a rede de seguranca:
             // um prefab de outra familia (editado a mao no banco) faz o
             // inimigo NAO nascer, com aviso, em vez de nascer quebrado.
-            var wanted = string.IsNullOrEmpty(prefab) ? PrefabScientist : prefab;
-
             // Duas pecas no mesmo ponto precisam de um anel: ver
             // `SpotInRing`. Com uma, o comportamento e o de sempre.
             var at = total > 1
@@ -3215,25 +3915,9 @@ namespace Oxide.Plugins
 
             if (total > 1) at.y = floor.transform.position.y + 0.2f;
 
-            var npc = GameManager.server.CreateEntity(
-                wanted,
-                at,
-                Quaternion.Euler(0f, rng.Next(360), 0f)) as ScientistNPC;
+            var npc = SpawnNpcAt(dungeon, at, Quaternion.Euler(0f, rng.Next(360), 0f), color, rng, prefab);
 
-            if (npc == null)
-            {
-                if (wanted != PrefabScientist)
-                {
-                    PrintWarning("o inimigo '" + wanted + "' nao existe ou nao e um cientista: "
-                                 + "esta posicao ficou vazia");
-                }
-
-                return false;
-            }
-
-            npc.EnableSaving(false);
-            npc.Spawn();
-            Adopt(dungeon, npc);
+            if (npc == null) return false;
 
             // ####  UMA LINHA DA FRENTE DAS PORTAS  ####
             //
@@ -3249,6 +3933,38 @@ namespace Oxide.Plugins
                 if (npc.inventory == null || !npcNote.MoveToContainer(npc.inventory.containerMain))
                     npcNote.Remove();
             }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Um inimigo naquele ponto, com vida, arma, nome e IA da receita.
+        ///
+        /// É o miolo do `SpawnNpc`, sem célula: a construção importada
+        /// tem pontos, e não chão de grade. Devolve `null` quando o
+        /// prefab não existe ou não é um cientista.
+        /// </summary>
+        private ScientistNPC SpawnNpcAt(
+            ActiveDungeon dungeon, Vector3 at, Quaternion rotation, string color, System.Random rng, string prefab)
+        {
+            var wanted = string.IsNullOrEmpty(prefab) ? PrefabScientist : prefab;
+
+            var npc = GameManager.server.CreateEntity(wanted, at, rotation) as ScientistNPC;
+
+            if (npc == null)
+            {
+                if (wanted != PrefabScientist)
+                {
+                    PrintWarning("o inimigo '" + wanted + "' nao existe ou nao e um cientista: "
+                                 + "esta posicao ficou vazia");
+                }
+
+                return null;
+            }
+
+            npc.EnableSaving(false);
+            npc.Spawn();
+            Adopt(dungeon, npc);
 
             var navigator = npc.GetComponent<BaseNavigator>();
             if (navigator != null) navigator.CanUseNavMesh = false;
@@ -3286,7 +4002,7 @@ namespace Oxide.Plugins
             // todo NPC do servidor.
             if (npc.net != null) dungeon.npcIds.Add(npc.net.ID.Value);
 
-            return true;
+            return npc;
         }
 
         /// <summary>
@@ -3980,6 +4696,41 @@ namespace Oxide.Plugins
         /// </summary>
         private BuildingGrade.Enum GradeOf(ActiveDungeon dungeon, Layout layout, (int, int) cell, Piece piece)
         {
+            var set = GradeSetOf(dungeon, layout, cell);
+
+            if (set == null) return DefaultGrade;
+
+            if (piece == Piece.Foundation) return ParseGrade(set.foundation, DefaultGrade);
+            if (piece == Piece.Ceiling) return ParseGrade(set.ceiling, DefaultGrade);
+
+            return ParseGrade(set.wall, DefaultGrade);
+        }
+
+        /// <summary>
+        /// A skin daquela peça naquela célula. Zero = a aparência padrão.
+        ///
+        /// Sai do MESMO conjunto que o grau (`GradeSetOf`): a sala que
+        /// herda o material herda a skin junto, e a que tem material
+        /// próprio usa a skin dela. Nunca uma mistura das duas.
+        /// </summary>
+        private ulong SkinOf(ActiveDungeon dungeon, Layout layout, (int, int) cell, Piece piece)
+        {
+            var set = GradeSetOf(dungeon, layout, cell);
+
+            if (set == null) return 0UL;
+            if (piece == Piece.Foundation) return set.foundationSkin;
+            if (piece == Piece.Ceiling) return set.ceilingSkin;
+
+            return set.wallSkin;
+        }
+
+        /// <summary>
+        /// O conjunto de material que vale naquela célula: o da cor da
+        /// sala, o do corredor, ou o `structure` da masmorra. `null` =
+        /// ninguém escolheu nada, e vale a pedra de sempre.
+        /// </summary>
+        private GradeSpec GradeSetOf(ActiveDungeon dungeon, Layout layout, (int, int) cell)
+        {
             var set = dungeon.spec == null ? null : dungeon.spec.structure;
 
             // `-1` e "corredor" no `layout.owner`, e serve de valor
@@ -4014,12 +4765,7 @@ namespace Oxide.Plugins
                 if (corridor != null && corridor.grade != null) set = corridor.grade;
             }
 
-            if (set == null) return DefaultGrade;
-
-            if (piece == Piece.Foundation) return ParseGrade(set.foundation, DefaultGrade);
-            if (piece == Piece.Ceiling) return ParseGrade(set.ceiling, DefaultGrade);
-
-            return ParseGrade(set.wall, DefaultGrade);
+            return set;
         }
 
         /// <summary>
@@ -4038,6 +4784,33 @@ namespace Oxide.Plugins
 
             var theirs = GradeOf(dungeon, layout, b, Piece.Wall);
             return theirs > mine ? theirs : mine;
+        }
+
+        /// <summary>
+        /// A skin da parede de dois donos: a do lado que venceu o grau.
+        ///
+        /// Empatados no grau, vence a SALA — é o cômodo que o admin
+        /// vestiu; o corredor encostado nela não deve trocar a cara da
+        /// parede dela. Duas salas empatadas ficam com a primeira.
+        /// </summary>
+        private ulong WallSkinOf(ActiveDungeon dungeon, Layout layout, (int, int) a, (int, int) b)
+        {
+            if (!layout.cells.Contains(b)) return SkinOf(dungeon, layout, a, Piece.Wall);
+
+            var mine = GradeOf(dungeon, layout, a, Piece.Wall);
+            var theirs = GradeOf(dungeon, layout, b, Piece.Wall);
+
+            if (theirs > mine) return SkinOf(dungeon, layout, b, Piece.Wall);
+            if (mine > theirs) return SkinOf(dungeon, layout, a, Piece.Wall);
+
+            int ownerA;
+            int ownerB;
+            layout.owner.TryGetValue(a, out ownerA);
+            layout.owner.TryGetValue(b, out ownerB);
+
+            return ownerA < 0 && ownerB >= 0
+                ? SkinOf(dungeon, layout, b, Piece.Wall)
+                : SkinOf(dungeon, layout, a, Piece.Wall);
         }
 
         /// <summary>
@@ -4068,7 +4841,8 @@ namespace Oxide.Plugins
 
             if (foundation == null) return 0;
 
-            PrepareBlock(dungeon, foundation, GradeOf(dungeon, null, (0, 0), Piece.Foundation));
+            PrepareBlock(dungeon, foundation, GradeOf(dungeon, null, (0, 0), Piece.Foundation),
+                         SkinOf(dungeon, null, (0, 0), Piece.Foundation), 0u);
             Adopt(dungeon, foundation);
             made++;
 
@@ -4085,7 +4859,8 @@ namespace Oxide.Plugins
                 frame.SetParent(foundation);
                 frame.transform.localPosition = new Vector3(0f, 3f, 0f);
                 frame.transform.localRotation = R0;
-                PrepareBlock(dungeon, frame, GradeOf(dungeon, null, (0, 0), Piece.Ceiling));
+                PrepareBlock(dungeon, frame, GradeOf(dungeon, null, (0, 0), Piece.Ceiling),
+                             SkinOf(dungeon, null, (0, 0), Piece.Ceiling), 0u);
                 Adopt(dungeon, frame);
                 made++;
 
@@ -4176,10 +4951,13 @@ namespace Oxide.Plugins
 
         private void PlaceLight(ActiveDungeon dungeon, BuildingBlock under)
         {
-            var light = GameManager.server.CreateEntity(
-                PrefabCeilingLight,
-                under.transform.position + Vector3.up * 2.9f,
-                Quaternion.identity);
+            PlaceLightAt(dungeon, under.transform.position + Vector3.up * 2.9f);
+        }
+
+        /// <summary>A luminária pendurada naquele ponto, já acesa.</summary>
+        private void PlaceLightAt(ActiveDungeon dungeon, Vector3 at)
+        {
+            var light = GameManager.server.CreateEntity(PrefabCeilingLight, at, Quaternion.identity);
             if (light == null) return;
 
             light.OwnerID = 0UL;
@@ -4282,7 +5060,9 @@ namespace Oxide.Plugins
             // medo original, e longe das quatro paredes.
             var down = top.gameObject.AddComponent<HatchLink>();
             down.descends = true;
-            down.target = bottom.transform.position + Vector3.down * 2f;
+            // A construção importada tem chegada MARCADA (a árvore), já
+            // conferida contra as peças. Ela ganha do centro da célula.
+            down.target = dungeon.arrivalPoint ?? bottom.transform.position + Vector3.down * 2f;
 
             // Subir devolve o jogador SOBRE a tampa, e não ao lado dela:
             // ao lado é onde ficam as paredes da casinha da entrada, e é
@@ -4944,7 +5724,28 @@ namespace Oxide.Plugins
             /// <summary>A receita mandou deixar as bandeiras em branco.</summary>
             public bool bannersOff;
 
+            // ####  SÓ NO CORPO IMPORTADO  ####
+            //
+            // O que o arquivo trazia e o evento não aceita. Ver
+            // `ExcludedFromBody`.
+
+            /// <summary>Lápides, velas e árvores: viram pontos, e não peças.</summary>
+            public int markersRemoved;
+            public int skippedNpc;
+            public int skippedLoot;
+            public int skippedHostile;
+            public int skippedLock;
+            public int skippedWeapon;
+            /// <summary>Peças que vieram com itens dentro. Os itens ficaram de fora.</summary>
+            public int itemsDropped;
+
             public int Skipped { get { return skippedPrefab + skippedVehicle + skippedError; } }
+
+            /// <summary>O conteúdo que o corpo recusou de propósito.</summary>
+            public int SkippedContent
+            {
+                get { return skippedNpc + skippedLoot + skippedHostile + skippedLock + skippedWeapon; }
+            }
 
             /// <summary>Uma linha para o admin. Só cita o que aconteceu.</summary>
             public string Human()
@@ -4958,6 +5759,16 @@ namespace Oxide.Plugins
                 }
 
                 if (skinRejected > 0) text += ", " + skinRejected + " sem a skin pedida";
+                if (markersRemoved > 0) text += ", " + markersRemoved + " marcador(es) virou(aram) ponto";
+
+                if (SkippedContent > 0)
+                {
+                    text += ", ficaram de fora " + skippedNpc + " NPC, " + skippedLoot + " caixa de loot, "
+                            + skippedHostile + " armadilha/torre, " + skippedLock + " fechadura e "
+                            + skippedWeapon + " arma";
+                }
+
+                if (itemsDropped > 0) text += ", " + itemsDropped + " peça(s) sem os itens do arquivo";
                 if (diedAfterSpawn > 0) text += ", " + diedAfterSpawn + " morreram depois de nascer";
 
                 if (bannersFound > 0)
@@ -5007,7 +5818,8 @@ namespace Oxide.Plugins
             JObject blueprint,
             Vector3 origin,
             float yaw,
-            Action<int, string> onDone)
+            Action<int, string> onDone,
+            PasteRole role = PasteRole.Entrance)
         {
             var entities = blueprint["entities"] as JArray;
             if (entities == null) { onDone(0, null); return; }
@@ -5023,7 +5835,7 @@ namespace Oxide.Plugins
                 Debug("planta: rotação em radianos, convertendo para graus");
             }
 
-            var report = dungeon.paste;
+            var report = role == PasteRole.Body ? dungeon.bodyPaste : dungeon.paste;
             var ordered = OrderByHeight(entities, report);
 
             var markers = new List<HatchMark>();
@@ -5076,7 +5888,7 @@ namespace Oxide.Plugins
                     // nunca é a peça exótica.
                     try
                     {
-                        if (PasteOne(dungeon, node, origin, spin, rotationScale, markers)) placed++;
+                        if (PasteOne(dungeon, node, origin, spin, rotationScale, markers, role, report)) placed++;
                     }
                     catch (Exception e)
                     {
@@ -5090,6 +5902,16 @@ namespace Oxide.Plugins
 
                 if (report.Skipped > 0) Debug("planta: " + report.Skipped + " peça(s) puladas");
                 Debug("planta: " + report.Human());
+
+                // O corpo não tem alçapão de superfície nem bandeira para
+                // pintar: quem o usa é o `BuildBody`, e ele põe a saída
+                // sobre a chegada.
+                if (role == PasteRole.Body)
+                {
+                    onDone(placed, null);
+                    return;
+                }
+
                 Debug("planta: " + markers.Count + " marca(s) de alçapão");
 
                 // Os marcadores viram alçapão só depois que a planta
@@ -5204,6 +6026,15 @@ namespace Oxide.Plugins
             }
         }
 
+        /// <summary>Para que uma planta está sendo colada.</summary>
+        private enum PasteRole
+        {
+            /// <summary>A casinha da superfície: cola tudo, converte o alçapão, pinta as bandeiras.</summary>
+            Entrance,
+            /// <summary>O corpo a -90: filtra marcador e conteúdo, e não traz item nenhum.</summary>
+            Body,
+        }
+
         /// <summary>Uma peça. Devolve false quando ela foi pulada.</summary>
         private bool PasteOne(
             ActiveDungeon dungeon,
@@ -5211,12 +6042,23 @@ namespace Oxide.Plugins
             Vector3 origin,
             Quaternion spin,
             float rotationScale,
-            List<HatchMark> markers)
+            List<HatchMark> markers,
+            PasteRole role,
+            PasteReport report)
         {
-            var report = dungeon.paste;
-
             var prefab = node.Value<string>("prefabname");
             if (string.IsNullOrEmpty(prefab)) { report.skippedPrefab++; return false; }
+
+            // ####  O MARCADOR MARCA, E NÃO NASCE  ####
+            //
+            // A lápide, as velas e a árvore já viraram pontos na
+            // configuração da masmorra (`dungeons/body.ts`). Colá-las
+            // deixaria enfeite de Halloween em cima de cada inimigo.
+            if (role == PasteRole.Body && IsBodyMarker(prefab))
+            {
+                report.markersRemoved++;
+                return false;
+            }
 
             // ####  VEÍCULO NÃO ENTRA  ####
             //
@@ -5252,6 +6094,15 @@ namespace Oxide.Plugins
                 return false;
             }
 
+            // O conteúdo que o evento controla não vem do arquivo. A
+            // pergunta é feita ao TIPO, antes do `Spawn`: é a mesma
+            // peça, sem ainda existir para ninguém.
+            if (role == PasteRole.Body && ExcludedFromBody(entity, prefab, report))
+            {
+                UnityEngine.Object.Destroy(entity.gameObject);
+                return false;
+            }
+
             var block = entity as BuildingBlock;
             if (block != null)
             {
@@ -5267,7 +6118,8 @@ namespace Oxide.Plugins
                 PrepareBlock(dungeon, block,
                              (BuildingGrade.Enum)Mathf.Clamp(grade, 0, 4),
                              node.Value<ulong?>("skinid") ?? 0UL,
-                             node.Value<uint?>("customColour") ?? 0u);
+                             node.Value<uint?>("customColour") ?? 0u,
+                             report);
             }
             else
             {
@@ -5281,10 +6133,25 @@ namespace Oxide.Plugins
             report.placed++;
 
             Adopt(dungeon, entity);
-            NoteBanner(dungeon, entity, local);
             ApplyFlags(entity, node["flags"] as JObject);
+
+            if (role == PasteRole.Body)
+            {
+                // ####  O CORPO SOBE VAZIO  ####
+                //
+                // Item dentro de caixa, armário ou estante é recompensa
+                // que não passou pela configuração do evento. A peça
+                // fica; o que ela carregava, não.
+                var items = node["items"] as JArray;
+                if (items != null && items.Count > 0) report.itemsDropped++;
+
+                PasteChildren(dungeon, entity, node["children"] as JArray, rotationScale, local, role, report);
+                return true;
+            }
+
+            NoteBanner(dungeon, entity, local);
             FillContainer(entity, node["items"] as JArray, EntranceItemsOf(dungeon));
-            PasteChildren(dungeon, entity, node["children"] as JArray, rotationScale, local);
+            PasteChildren(dungeon, entity, node["children"] as JArray, rotationScale, local, role, report);
 
             // A pose é lida AGORA, enquanto a peça existe. Ver `HatchMark`.
             if (IsEntranceHatchMarker(node, entity))
@@ -5331,11 +6198,11 @@ namespace Oxide.Plugins
             BaseEntity parent,
             JArray children,
             float rotationScale,
-            Vector3 parentLocal)
+            Vector3 parentLocal,
+            PasteRole role,
+            PasteReport report)
         {
             if (children == null || children.Count == 0) return;
-
-            var report = dungeon.paste;
 
             foreach (var token in children)
             {
@@ -5360,6 +6227,25 @@ namespace Oxide.Plugins
 
                 if (child == null) { report.skippedPrefab++; continue; }
 
+                // No corpo, a fechadura pendurada na porta fica de fora:
+                // com o código do arquivo, a porta seria uma parede. E o
+                // marcador encaixado também não nasce.
+                if (role == PasteRole.Body)
+                {
+                    if (IsBodyMarker(prefab))
+                    {
+                        report.markersRemoved++;
+                        UnityEngine.Object.Destroy(child.gameObject);
+                        continue;
+                    }
+
+                    if (ExcludedFromBody(child, prefab, report))
+                    {
+                        UnityEngine.Object.Destroy(child.gameObject);
+                        continue;
+                    }
+                }
+
                 var bone = node.Value<string>("parentbone");
                 if (!string.IsNullOrEmpty(bone)) child.SetParent(parent, bone);
                 else child.SetParent(parent);
@@ -5374,7 +6260,7 @@ namespace Oxide.Plugins
                 Anchor(child);
                 child.Spawn();
                 Adopt(dungeon, child);
-                NoteBanner(dungeon, child, parentLocal + childLocal);
+                if (role != PasteRole.Body) NoteBanner(dungeon, child, parentLocal + childLocal);
                 report.placed++;
 
                 // O código da fechadura é o que marca a peça (ver
@@ -5384,11 +6270,20 @@ namespace Oxide.Plugins
                 if (codeLock != null && !string.IsNullOrEmpty(code)) codeLock.code = code;
 
                 ApplyFlags(child, node["flags"] as JObject);
-                FillContainer(child, node["items"] as JArray, EntranceItemsOf(dungeon));
+
+                if (role == PasteRole.Body)
+                {
+                    var items = node["items"] as JArray;
+                    if (items != null && items.Count > 0) report.itemsDropped++;
+                }
+                else
+                {
+                    FillContainer(child, node["items"] as JArray, EntranceItemsOf(dungeon));
+                }
 
                 // O neto. A recursão é a mesma regra: quem pendura
                 // pendura em quem já existe.
-                PasteChildren(dungeon, child, node["children"] as JArray, rotationScale, parentLocal + childLocal);
+                PasteChildren(dungeon, child, node["children"] as JArray, rotationScale, parentLocal + childLocal, role, report);
             }
         }
 
@@ -6540,13 +7435,6 @@ namespace Oxide.Plugins
             if (stable != null) stable.grounded = true;
         }
 
-        private void PrepareBlock(ActiveDungeon dungeon, BuildingBlock block, BuildingGrade.Enum grade)
-        {
-            // As salas geradas por código não vêm de planta: nem skin
-            // nem cor, e nenhum relatório de import para alimentar.
-            PrepareBlock(dungeon, block, grade, 0UL, 0u);
-        }
-
         /// <summary>
         /// Ergue um bloco com a skin e a cor que a planta pediu.
         ///
@@ -6589,7 +7477,8 @@ namespace Oxide.Plugins
             BuildingBlock block,
             BuildingGrade.Enum grade,
             ulong skin,
-            uint colour)
+            uint colour,
+            PasteReport report = null)
         {
             block.blockDefinition = PrefabAttribute.server.Find<Construction>(block.prefabID);
 
@@ -6613,7 +7502,7 @@ namespace Oxide.Plugins
             {
                 block.skinID = 0UL;
                 block.SetGrade(grade);
-                dungeon.paste.skinRejected++;
+                (report ?? dungeon.paste).skinRejected++;
 
                 Debug("bloco '" + block.ShortPrefabName + "' não tem a skin " + skin
                       + " no grade " + grade + "; mantive o grade e descartei a skin");
@@ -6810,8 +7699,14 @@ namespace Oxide.Plugins
         private class DungeonSpec
         {
             public string id;
+            /// <summary>O nome que o admin deu. É o `{nome}` do anúncio. Vazio = o slug.</summary>
+            public string name;
+            /// <summary>`recipe` | `blueprint` | `construction`.</summary>
             public string mode;
             public string entrance;
+
+            /// <summary>A construção importada. Só no modo `construction`.</summary>
+            public BodySpec body;
 
             /// <summary>
             /// O que a casinha da entrada carrega dentro:
@@ -7162,22 +8057,93 @@ namespace Oxide.Plugins
             public string onBuild = "";
             public string onEnd = "";
             public bool showGrid = true;
+
+            // ####  O VISUAL DAS MENSAGENS DO SERVIDOR  ####
+            //
+            // Os quatro vazios (e `size` 0) são a linha simples de
+            // sempre. Com qualquer um preenchido, a frase sai pelo
+            // OrigemZChat — ver `Broadcast`.
+
+            /// <summary>O prefixo, como `[MASMORRA]`. Vazio = nenhum.</summary>
+            public string tag = "";
+            /// <summary>`#rgb`..`#rrggbbaa`. Vazio = a do OrigemZChat.</summary>
+            public string tagColor = "";
+            /// <summary>A cor do texto. Vazio = branco.</summary>
+            public string color = "";
+            /// <summary>8 a 40. Zero = o tamanho do chat.</summary>
+            public int size;
+
+            /// <summary>Alguém escolheu o visual?</summary>
+            public bool Styled
+            {
+                get
+                {
+                    return !string.IsNullOrEmpty(tag) || !string.IsNullOrEmpty(tagColor)
+                           || !string.IsNullOrEmpty(color) || size > 0;
+                }
+            }
         }
 
 
         /// <summary>
-        /// O nível de construção, por tipo de peça.
+        /// O nível de construção, por tipo de peça, e a skin de cada um.
         ///
         /// Os nomes são os do painel (`twigs`|`wood`|`stone`|`metal`|
         /// `toptier`) e não os do enum do jogo: o contrato é escrito uma
         /// vez, em `core/src/types/dungeons.ts`, e o plugin traduz —
         /// ver `GradeByName`.
+        ///
+        /// A skin é o `skinID` do bloco; zero é a aparência padrão. O
+        /// par (grade, skin) que o prefab não conhece é descartado no
+        /// `PrepareBlock`, e o material fica.
         /// </summary>
         private class GradeSpec
         {
             public string foundation;
             public string wall;
             public string ceiling;
+            public ulong foundationSkin;
+            public ulong wallSkin;
+            public ulong ceilingSkin;
+        }
+
+        /// <summary>
+        /// O corpo importado: a construção feita à mão no jogo.
+        ///
+        /// Só vale no modo `construction`. Ver "O CORPO IMPORTADO".
+        /// </summary>
+        private class BodySpec
+        {
+            /// <summary>O slug da planta, já no disco (ver `materializer.ts`).</summary>
+            public string blueprint;
+            /// <summary>Onde o jogador aparece, em coordenadas da planta.</summary>
+            public BodyPointSpec arrival;
+            public List<BodyPointSpec> points;
+        }
+
+        /// <summary>
+        /// Um ponto do corpo importado.
+        ///
+        /// As chaves do JSON têm uma letra: são até 120 pontos dividindo
+        /// os 50 KB do comando com o resto do catálogo (ver
+        /// `BodyPointPayload` no agente).
+        /// </summary>
+        private class BodyPointSpec
+        {
+            /// <summary>`npc` | `crate`. Vazio na chegada.</summary>
+            [JsonProperty("k")] public string kind;
+            [JsonProperty("x")] public float x;
+            [JsonProperty("y")] public float y;
+            [JsonProperty("z")] public float z;
+            /// <summary>Graus.</summary>
+            [JsonProperty("r")] public float yaw;
+            /// <summary>`green`|`blue`|`red`|`corridor`. Ausente = verde.</summary>
+            [JsonProperty("p")] public string profile = "green";
+            [JsonProperty("a")] public int amount = 1;
+            /// <summary>Vazio = o que o perfil já usa.</summary>
+            [JsonProperty("f")] public string prefab;
+
+            public Vector3 Local { get { return new Vector3(x, y, z); } }
         }
 
         /// <summary>
@@ -8330,22 +9296,11 @@ namespace Oxide.Plugins
             BuildingBlock floor;
             if (!floors.TryGetValue(cell, out floor) || floor == null) return null;
 
-            var spot = new LootSpot
-            {
-                prefab = prefab,
-                cell = cell,
-                position = SpotInRing(floor, rng, index, total),
-                rotation = Quaternion.Euler(0f, rng.Next(360), 0f),
-                table = table,
-                // A REGRA fica no ponto; quem sorteia e o `Furnish`,
-                // que roda no nascimento e a cada reposicao. Sortear
-                // aqui daria um premio que o respawn nunca renova.
-                coinsRule = coins,
-            };
+            var spot = SpawnContainerAt(
+                dungeon, cell, SpotInRing(floor, rng, index, total),
+                Quaternion.Euler(0f, rng.Next(360), 0f), prefab, table, coins);
 
-            if (!Furnish(dungeon, spot)) return null;
-
-            dungeon.spots.Add(spot);
+            if (spot == null) return null;
 
             // ####  UMA LINHA DA FRENTE DAS PORTAS  ####
             //
@@ -8373,6 +9328,44 @@ namespace Oxide.Plugins
 
             return spot;
         }
+
+        /// <summary>
+        /// Um contêiner naquele ponto, registrado para o respawn.
+        ///
+        /// `cell` é a célula dona, nas masmorras de grade; na construção
+        /// importada é `NoCell`, que nenhuma fechadura conhece.
+        /// </summary>
+        private LootSpot SpawnContainerAt(
+            ActiveDungeon dungeon,
+            (int, int) cell,
+            Vector3 position,
+            Quaternion rotation,
+            string prefab,
+            LootTableSpec table,
+            CoinsSpec coins)
+        {
+            var spot = new LootSpot
+            {
+                prefab = prefab,
+                cell = cell,
+                position = position,
+                rotation = rotation,
+                table = table,
+                // A REGRA fica no ponto; quem sorteia e o `Furnish`,
+                // que roda no nascimento e a cada reposicao. Sortear
+                // aqui daria um premio que o respawn nunca renova.
+                coinsRule = coins,
+            };
+
+            if (!Furnish(dungeon, spot)) return null;
+
+            dungeon.spots.Add(spot);
+
+            return spot;
+        }
+
+        /// <summary>A "célula" dos pontos da construção importada: nenhuma.</summary>
+        private static readonly (int, int) NoCell = (int.MinValue, int.MinValue);
 
         /// <summary>
         /// Põe de pé a peça de um ponto de loot — no nascimento e no

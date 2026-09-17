@@ -148,6 +148,14 @@ export const FAILURE_REASONS = [
    * Ver `LOCK_UNDELIVERED` em `types/dungeons.ts`.
    */
   'code_unreachable',
+  /**
+   * O construtor estourou no meio (uma exceção dentro do plugin).
+   *
+   * O plugin sempre mandou este motivo, e ele não estava nesta lista:
+   * a linha era recusada pelo `parseDungeonPush` e a execução ficava
+   * aberta no painel para sempre. Achado em 17/09/2026.
+   */
+  'build_error',
 ] as const;
 export type FailureReason = (typeof FAILURE_REASONS)[number];
 
@@ -164,6 +172,7 @@ export const FAILURE_MESSAGE: Record<FailureReason, string> = {
   code_unreachable:
     'O código de uma porta trancada só teria onde nascer atrás dela mesma. ' +
     'Abra caminho para o portador (NPC no corredor, ou "em qualquer lugar"), ou escolha destrancar.',
+  build_error: 'O construtor falhou no meio da montagem. O motivo exato está no console do servidor.',
 };
 
 // ------------------------------------------------------------

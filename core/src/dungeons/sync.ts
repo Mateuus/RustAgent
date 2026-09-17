@@ -50,6 +50,8 @@ import {
   type CrateContentPayload,
   type DungeonPayload,
   type DungeonSyncPayload,
+  type BodyPayload,
+  type BodyPointPayload,
   type GradePayload,
   type GroundReport,
   type DungeonPushEvent,
@@ -485,6 +487,7 @@ export class DungeonSync {
 
     return {
       id: dungeon.id,
+      name: dungeon.name,
       mode: dungeon.mode,
       entrance: dungeon.entranceBlueprint,
       // `none` é o padrão dos dois lados do fio, então não viaja:
@@ -510,10 +513,11 @@ export class DungeonSync {
         // por ser igual ao padrão do PLUGIN faria o corredor herdar
         // o `structure` da masmorra — e "escolhi pedra" viraria
         // "herda", que é o oposto do que o admin marcou.
-        grade: dungeon.corridor.grade ?? undefined,
+        grade: leanGrade(dungeon.corridor.grade),
       },
       grid: dungeon.grid,
       placements: leanPlacements(dungeon.placements),
+      body: dungeon.mode === 'construction' ? leanBody(dungeon.body) : undefined,
       npc: {
         health: dungeon.npc.health,
         damageScale: dungeon.npc.damageScale,
@@ -547,7 +551,7 @@ export class DungeonSync {
         // pediu pedra numa masmorra de metal precisa dizer "pedra".
         // Omitir por ser o padrão do PLUGIN faria essa sala herdar o
         // metal da masmorra — o oposto do que o admin escolheu.
-        grade: room.grade ?? undefined,
+        grade: leanGrade(room.grade),
 
         wideDoorCellsPerDoor:
           room.wideDoorCellsPerDoor === DEFAULT_WIDE_DOOR_CELLS
@@ -984,9 +988,69 @@ function leanAi(ai: AiSpecInput): AiPayload | undefined {
  */
 function leanStructure(structure: GradeSetInput): GradePayload | undefined {
   const untouched =
-    structure.foundation === 'stone' && structure.wall === 'stone' && structure.ceiling === 'stone';
+    structure.foundation === 'stone' &&
+    structure.wall === 'stone' &&
+    structure.ceiling === 'stone' &&
+    structure.foundationSkin === 0 &&
+    structure.wallSkin === 0 &&
+    structure.ceilingSkin === 0;
 
-  return untouched ? undefined : structure;
+  return untouched ? undefined : leanGrade(structure);
+}
+
+/**
+ * O material de uma peça, com a skin só quando há uma.
+ *
+ * O material viaja sempre que o bloco viaja (ver o `grade` da sala);
+ * a skin zero é o padrão do `GradeSpec` do plugin, e não custa byte.
+ */
+function leanGrade(grade: GradeSetInput | null): GradePayload | undefined {
+  if (grade === null) return undefined;
+
+  return {
+    foundation: grade.foundation,
+    wall: grade.wall,
+    ceiling: grade.ceiling,
+    ...(grade.foundationSkin === 0 ? {} : { foundationSkin: grade.foundationSkin }),
+    ...(grade.wallSkin === 0 ? {} : { wallSkin: grade.wallSkin }),
+    ...(grade.ceilingSkin === 0 ? {} : { ceilingSkin: grade.ceilingSkin }),
+  };
+}
+
+/** Dois decimais: o centímetro basta, e cada dígito a menos é byte a menos. */
+function metric(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * O corpo importado, enxuto.
+ *
+ * Sem chegada não há o que mandar: a régua não salva o modo
+ * construção assim, e um corpo sem chegada no plugin falharia com a
+ * frase errada. Ausente, o plugin diz "escolha a construção".
+ */
+function leanBody(body: Dungeon['body']): BodyPayload | undefined {
+  if (body === null || body.arrival === null) return undefined;
+
+  return {
+    blueprint: body.blueprint,
+    arrival: {
+      x: metric(body.arrival.x),
+      y: metric(body.arrival.y),
+      z: metric(body.arrival.z),
+      ...(body.arrival.yaw === 0 ? {} : { r: metric(body.arrival.yaw) }),
+    },
+    points: body.points.map((point): BodyPointPayload => ({
+      k: point.kind,
+      x: metric(point.x),
+      y: metric(point.y),
+      z: metric(point.z),
+      ...(point.yaw === 0 ? {} : { r: metric(point.yaw) }),
+      ...(point.profile === 'green' ? {} : { p: point.profile }),
+      ...(point.amount === 1 ? {} : { a: point.amount }),
+      ...(point.prefab === '' ? {} : { f: point.prefab }),
+    })),
+  };
 }
 
 /**
@@ -1101,7 +1165,9 @@ function leanMarker(marker: Dungeon['marker']): DungeonPayload['marker'] {
 function leanAnnounce(announce: Dungeon['announce']): DungeonPayload['announce'] {
   if (!announce.enabled) return { enabled: false };
 
-  const untouched = announce.onBuild === '' && announce.onEnd === '' && announce.showGrid;
+  const plainStyle =
+    announce.tag === '' && announce.tagColor === '' && announce.color === '' && announce.size === 0;
+  const untouched = announce.onBuild === '' && announce.onEnd === '' && announce.showGrid && plainStyle;
 
   if (untouched) return undefined;
 
@@ -1110,6 +1176,10 @@ function leanAnnounce(announce: Dungeon['announce']): DungeonPayload['announce']
     ...(announce.onBuild === '' ? {} : { onBuild: announce.onBuild }),
     ...(announce.onEnd === '' ? {} : { onEnd: announce.onEnd }),
     ...(announce.showGrid ? {} : { showGrid: false }),
+    ...(announce.tag === '' ? {} : { tag: announce.tag }),
+    ...(announce.tagColor === '' ? {} : { tagColor: announce.tagColor }),
+    ...(announce.color === '' ? {} : { color: announce.color }),
+    ...(announce.size === 0 ? {} : { size: announce.size }),
   };
 }
 

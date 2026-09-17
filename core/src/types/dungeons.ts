@@ -1,12 +1,18 @@
 // ============================================================
 //  dungeons.ts  -  O CONTRATO DA MASMORRA.
 //
-//  Duas maneiras de produzir a MESMA estrutura, e daí para baixo o
-//  construtor é um só:
+//  Três maneiras de produzir o corpo da masmorra:
 //
-//    'recipe'     parâmetros; o jogo sorteia o layout, e cada
-//                 nascimento sai diferente
-//    'blueprint'  um grid desenhado no painel; sai sempre igual
+//    'recipe'        parâmetros; o jogo sorteia o layout, e cada
+//                    nascimento sai diferente
+//    'blueprint'     um grid desenhado no painel; sai sempre igual
+//    'construction'  uma construção feita À MÃO no jogo, salva em
+//                    JSON do CopyPaste e colada inteira a -90. Os
+//                    inimigos e as caixas saem de pontos marcados
+//                    nela (ver `body`), e não de células
+//
+//  As duas primeiras passam pelo mesmo construtor de células; a
+//  terceira é colada peça por peça, como a entrada.
 //
 //  ####  A COR DA SALA NÃO É DECORAÇÃO  ####
 //
@@ -25,13 +31,14 @@
 
 import { z } from 'zod';
 
+import { isSkinCompatible } from '../game/building-skins.js';
 import { slugSchema } from './world-events.js';
 
 // ------------------------------------------------------------
 //  §1  VOCABULÁRIO
 // ------------------------------------------------------------
 
-export const DUNGEON_MODES = ['recipe', 'blueprint'] as const;
+export const DUNGEON_MODES = ['recipe', 'blueprint', 'construction'] as const;
 export type DungeonMode = (typeof DUNGEON_MODES)[number];
 
 export const ROOM_COLORS = ['green', 'blue', 'red'] as const;
@@ -136,6 +143,25 @@ export const PLACEMENT_KINDS = ['npc', 'crate'] as const;
 export type PlacementKind = (typeof PLACEMENT_KINDS)[number];
 
 /**
+ * De quem um ponto da construção importada herda o conteúdo.
+ *
+ * ####  AS CORES CONTINUAM SENDO O CARDÁPIO  ####
+ *
+ * A construção não tem sala nem corredor: tem pontos. Mas o que nasce
+ * num ponto — a vida e a arma do inimigo, a IA, as caixas, a tabela de
+ * loot e o OZCoin de cada caixa — já tem tela, e ela é por cor de sala
+ * e pelo corredor. Apontar o ponto para um desses quatro cadastros é o
+ * que deixa "manter as opções atuais" ser literal: nenhum campo novo de
+ * loot ou de inimigo, e a mesma tela serve aos três modos.
+ */
+export const BODY_PROFILES = ['green', 'blue', 'red', 'corridor'] as const;
+export type BodyProfile = (typeof BODY_PROFILES)[number];
+
+/** De onde o ponto veio: de um marcador achado na planta, ou da mão do admin. */
+export const BODY_POINT_SOURCES = ['marker', 'manual'] as const;
+export type BodyPointSource = (typeof BODY_POINT_SOURCES)[number];
+
+/**
  * Quem desce pelo alçapão.
  *
  * ####  `everyone` NASCE PRIMEIRO PORQUE É O PEDIDO DO DONO  ####
@@ -187,17 +213,65 @@ const cratePrefabSchema = z
   .max(200)
   .regex(/^assets\/.+\.prefab$/, 'informe o caminho completo do prefab');
 
+/** O material na frase de erro. */
+const GRADE_WORD: Record<BuildGrade, string> = {
+  twigs: 'palha',
+  wood: 'madeira',
+  stone: 'pedra',
+  metal: 'metal',
+  toptier: 'blindado',
+};
+
 /**
- * O nível de cada tipo de peça.
+ * O `skinID` de um bloco. Zero = a aparência padrão do material.
+ *
+ * Um `ulong` no jogo; os que existem cabem com folga num número do
+ * JavaScript (o maior medido é 10.472).
+ */
+const buildingSkinSchema = z.number().int().min(0).max(4_294_967_295).default(0);
+
+/**
+ * O nível de cada tipo de peça, e a skin de cada um.
  *
  * `stone` em tudo é o que o construtor cravava até aqui — então uma
- * masmorra que ninguém reeditar nasce exatamente igual.
+ * masmorra que ninguém reeditar nasce exatamente igual. O mesmo vale
+ * para a skin: zero é o bloco de sempre.
+ *
+ * ####  A SKIN SÓ EXISTE DENTRO DO MATERIAL  ####
+ *
+ * O jogo guarda a skin como um PAR com o grade, e o par que ele não
+ * conhece vira palha sem aviso (ver `game/building-skins.ts`). Então a
+ * régua recusa o par impossível aqui, onde o admin ainda lê a frase —
+ * e o plugin, por segurança, descarta a skin e mantém o material se um
+ * par torto chegar mesmo assim.
  */
-const gradeSetSchema = z.object({
-  foundation: z.enum(BUILD_GRADES).default('stone'),
-  wall: z.enum(BUILD_GRADES).default('stone'),
-  ceiling: z.enum(BUILD_GRADES).default('stone'),
-});
+const gradeSetSchema = z
+  .object({
+    foundation: z.enum(BUILD_GRADES).default('stone'),
+    wall: z.enum(BUILD_GRADES).default('stone'),
+    ceiling: z.enum(BUILD_GRADES).default('stone'),
+    foundationSkin: buildingSkinSchema,
+    wallSkin: buildingSkinSchema,
+    ceilingSkin: buildingSkinSchema,
+  })
+  .superRefine((value, ctx) => {
+    const pieces = [
+      ['foundation', 'piso', value.foundation, value.foundationSkin],
+      ['wall', 'parede', value.wall, value.wallSkin],
+      ['ceiling', 'teto', value.ceiling, value.ceilingSkin],
+    ] as const;
+
+    for (const [piece, label, grade, skin] of pieces) {
+      if (isSkinCompatible(grade, skin)) continue;
+
+      ctx.addIssue({
+        code: 'custom',
+        path: [`${piece}Skin`],
+        message: `a skin ${String(skin)} não existe para ${label} de ${GRADE_WORD[grade]}: escolha outra, ou nenhuma`,
+      });
+    }
+  });
+
 
 export type GradeSetInput = z.infer<typeof gradeSetSchema>;
 
@@ -533,6 +607,122 @@ export const dungeonPlacementSchema = z.object({
 
 export type DungeonPlacementInput = z.infer<typeof dungeonPlacementSchema>;
 
+// ------------------------------------------------------------
+//  O CORPO IMPORTADO — a construção feita à mão no jogo
+// ------------------------------------------------------------
+
+/**
+ * Um metro, em relação à ORIGEM DA PLANTA.
+ *
+ * É o mesmo referencial do `pos` do JSON do CopyPaste: o ponto guarda
+ * onde ele está no desenho, e não no mundo. Girar ou mudar a masmorra
+ * de lugar leva o ponto junto, porque o plugin aplica ao ponto a MESMA
+ * conta que aplica a cada peça.
+ */
+const bodyMetersSchema = z.number().finite().min(-512).max(512);
+
+/** Graus, de 0 a 360. O que vier fora disso é reduzido para dentro. */
+const bodyYawSchema = z
+  .number()
+  .finite()
+  .transform((value) => ((value % 360) + 360) % 360);
+
+/** O caminho de um prefab, ou vazio para "o que o perfil já usa". */
+const optionalPrefabSchema = z
+  .union([
+    z.literal(''),
+    z
+      .string()
+      .min(8)
+      .max(200)
+      .regex(/^assets\/.+\.prefab$/, 'informe o caminho completo do prefab'),
+  ])
+  .default('');
+
+/**
+ * Onde nasce um inimigo ou uma caixa, na construção importada.
+ *
+ * ####  O `id` É O QUE IMPEDE A DUPLICATA  ####
+ *
+ * Reprocessar a planta ("detectar marcadores de novo") acha as mesmas
+ * lápides e as mesmas velas. O ponto que veio de um marcador tem um id
+ * derivado da POSIÇÃO do marcador no arquivo (`dungeons/body.ts`), e
+ * o mesmo marcador produz o mesmo id — então ele é reconhecido, e não
+ * somado. As mudanças que o admin fez no ponto (nome, perfil,
+ * quantidade, e até a posição) sobrevivem ao reprocesso.
+ */
+export const bodyPointSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]{1,40}$/, 'o id do ponto usa letras minúsculas, números e "-"'),
+  kind: z.enum(PLACEMENT_KINDS),
+  /** O nome que o admin dá ao ponto ("chefe", "arsenal"). Só aparece no painel. */
+  label: z.string().trim().max(40).default(''),
+  x: bodyMetersSchema,
+  y: bodyMetersSchema,
+  z: bodyMetersSchema,
+  /** Para onde o inimigo olha, ou como a caixa fica. */
+  yaw: bodyYawSchema.default(0),
+  /** De qual cadastro o conteúdo vem. Ver `BODY_PROFILES`. */
+  profile: z.enum(BODY_PROFILES).default('green'),
+  /** Quantos nascem neste ponto. Mesmo teto do marcador do desenho. */
+  amount: z.number().int().min(1).max(8).default(1),
+  /**
+   * O prefab deste ponto. Vazio = o que o perfil já usa.
+   *
+   * Para caixa, vazio sorteia entre as caixas do perfil; um prefab
+   * que TAMBÉM está cadastrado no perfil herda a tabela e o OZCoin
+   * dele — a mesma regra do marcador do desenho.
+   */
+  prefab: optionalPrefabSchema,
+  source: z.enum(BODY_POINT_SOURCES).default('manual'),
+});
+
+export type BodyPointInput = z.infer<typeof bodyPointSchema>;
+
+/**
+ * Onde o jogador aparece ao descer, e para onde ele olha.
+ *
+ * É também a ÂNCORA da construção: o plugin cola a planta de modo que
+ * este ponto caia exatamente embaixo da entrada da superfície, e gira
+ * a planta para que o olhar de quem chega aponte para a frente da
+ * casinha. A saída (o alçapão de subir) nasce sobre ele.
+ *
+ * Não mexe no respawn de quem morre: morrer lá dentro continua levando
+ * o jogador para o saco de dormir ou para a praia, como sempre.
+ */
+export const bodyArrivalSchema = z.object({
+  x: bodyMetersSchema,
+  y: bodyMetersSchema,
+  z: bodyMetersSchema,
+  yaw: bodyYawSchema.default(0),
+  source: z.enum(BODY_POINT_SOURCES).default('manual'),
+});
+
+export type BodyArrivalInput = z.infer<typeof bodyArrivalSchema>;
+
+/** O teto de pontos por construção. Ver o orçamento do sync. */
+export const MAX_BODY_POINTS = 120;
+
+export const dungeonBodyBuildSchema = z.object({
+  /** O id da planta (`dungeon_blueprints`) que serve de corpo. */
+  blueprint: z.string().min(1).max(64),
+  /** `null` = ainda não definido. O modo construção não salva assim. */
+  arrival: bodyArrivalSchema.nullable().default(null),
+  points: z.array(bodyPointSchema).max(MAX_BODY_POINTS).default([]),
+});
+
+export type DungeonBodyBuildInput = z.infer<typeof dungeonBodyBuildSchema>;
+
+/**
+ * A cor de um campo do anúncio: vazio (o padrão do chat) ou hexadecimal.
+ *
+ * A mesma trava das mensagens (`http/routes/messages.ts`): a cor vai
+ * para dentro de um `<color=…>` no jogo, e aceitar texto livre ali
+ * seria um caminho para injetar marcação.
+ */
+const announceColorSchema = z
+  .union([z.literal(''), z.string().trim().regex(/^#[0-9a-fA-F]{3,8}$/, 'a cor é hexadecimal, como #ffcc00')])
+  .default('');
+
 export const dungeonRoomInputSchema = z.object({
   /** 'green'|'blue'|'red' no modo receita; 'A','B','C'… no modo planta. */
   key: z.string().min(1).max(16),
@@ -719,7 +909,23 @@ const dungeonBodySchema = z
      */
     placements: z.array(dungeonPlacementSchema).max(100).default([]),
 
-    // ---- os dois modos ----
+    // ---- modo 'construction' ----
+
+    /**
+     * A construção que serve de corpo, e o que nasce nela.
+     *
+     * ####  É INDEPENDENTE DA ENTRADA  ####
+     *
+     * `entranceBlueprint` continua escolhendo a casinha da superfície;
+     * este campo escolhe o que fica a -90. As duas podem ser a mesma
+     * planta ou nenhuma relação entre si.
+     *
+     * Guardado em qualquer modo, pelo mesmo motivo do `grid`: trocar de
+     * modo e voltar não pode apagar os pontos que o admin configurou.
+     */
+    body: dungeonBodyBuildSchema.nullable().default(null),
+
+    // ---- os modos todos ----
     npc: z
       .object({
         health: countRange('vida', 5000).default({ min: 100, max: 150 }),
@@ -856,17 +1062,42 @@ const dungeonBodySchema = z
      * `dungeon.inside` — quem JÁ está lá dentro. Não havia nada que
      * alcançasse quem está no mapa.
      *
-     * Texto vazio = a frase padrão do agente. Isso é de propósito:
+     * Texto vazio = a frase padrão do PLUGIN. Isso é de propósito:
      * mudar a frase padrão um dia não pode exigir reescrever a
      * linha de cada masmorra.
+     *
+     * ####  A FRASE TEM O MESMO VISUAL DAS MENSAGENS DO SERVIDOR  ####
+     *
+     * Pedido do dono em 16/09/2026. `tag`, `tagColor`, `color` e
+     * `size` são os campos das mensagens (`types/messages.ts`), e o
+     * texto aceita a mesma marcação de cor no meio da frase
+     * (`[verde]…[/]`). Quem desenha é o OrigemZChat, pelo mesmo
+     * `origemz.chat.broadcast` — o plugin da masmorra o chama direto,
+     * então o aviso sai mesmo com o agente fora do ar.
+     *
+     * Tudo vazio (e `size` 0) é a linha simples de sempre, sem tag.
      */
     announce: z
       .object({
         enabled: z.boolean().default(true),
         /** Vazio = "Uma masmorra apareceu em {grid}." */
-        onBuild: z.string().max(200).default(''),
+        onBuild: z.string().max(300).default(''),
         /** Vazio = "A masmorra de {grid} fechou." */
-        onEnd: z.string().max(200).default(''),
+        onEnd: z.string().max(300).default(''),
+        /** O prefixo, como `[MASMORRA]`. Vazio = sem prefixo. */
+        tag: z.string().trim().max(40).default(''),
+        /** A cor do prefixo. Vazio = a do chat (`#ffcc00`). */
+        tagColor: announceColorSchema,
+        /** A cor do texto. Vazio = branco. */
+        color: announceColorSchema,
+        /** O tamanho da letra, de 8 a 40. Zero = o do chat (15). */
+        size: z
+          .number()
+          .int()
+          .min(0)
+          .max(40)
+          .refine((value) => value === 0 || value >= 8, 'o tamanho vai de 8 a 40 (ou 0, para o padrão)')
+          .default(0),
         /**
          * Dizer a grade (`E7`) na frase.
          *
@@ -936,6 +1167,46 @@ const dungeonBodySchema = z
       });
     }
 
+    // ####  A CONSTRUÇÃO PRECISA DE CORPO E DE CHEGADA  ####
+    //
+    // Sem árvore de Natal na planta — ou com mais de uma — o ponto de
+    // chegada fica em branco de propósito: escolher uma das árvores em
+    // silêncio poria o jogador num lugar que o admin não escolheu.
+    // Esta frase é o pedido para ele escolher.
+    if (value.mode === 'construction') {
+      if (value.body === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['body'],
+          message: 'no modo construção é preciso escolher a construção que serve de corpo',
+        });
+      } else if (value.body.arrival === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['body', 'arrival'],
+          message:
+            'defina o ponto de chegada: é onde o jogador aparece ao descer, e a planta não tinha exatamente uma árvore de Natal para indicá-lo',
+        });
+      }
+    }
+
+    if (value.body !== null) {
+      const seen = new Set<string>();
+
+      for (const point of value.body.points) {
+        if (seen.has(point.id)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['body', 'points'],
+            message: `há dois pontos com o mesmo id (${point.id}): cada ponto nasce uma vez`,
+          });
+          break;
+        }
+
+        seen.add(point.id);
+      }
+    }
+
     if (value.mode === 'recipe') {
       const total = value.weights.green + value.weights.blue + value.weights.red;
 
@@ -954,7 +1225,11 @@ const dungeonBodySchema = z
     //
     // O plugin destranca e grita no log — mas o admin não lê o log
     // do servidor, e lê esta frase enquanto ainda pode consertar.
-    const anyLocked = value.rooms.some((room) => room.locked);
+    //
+    // Na construção importada não nasce porta nenhuma: as cores ali
+    // são só o cardápio dos pontos (ver `BODY_PROFILES`), e o "trancada"
+    // delas não tranca nada. As regras de fechadura não se aplicam.
+    const anyLocked = value.mode !== 'construction' && value.rooms.some((room) => room.locked);
 
     if (anyLocked && value.lock.enabled && value.lock.carrier === 'none') {
       ctx.addIssue({
@@ -1120,6 +1395,8 @@ export interface DungeonSummary {
   readonly name: string;
   readonly mode: DungeonMode;
   readonly entranceBlueprint: string | null;
+  /** A construção importada que serve de corpo. `null` = nenhuma. */
+  readonly bodyBlueprint: string | null;
   /** Em que servidores ela vale. Vazio = em todos. */
   readonly servers: readonly string[];
   readonly roomCount: number;

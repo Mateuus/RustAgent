@@ -409,11 +409,59 @@ export interface PlacementPayload {
   readonly prefab?: string;
 }
 
-/** O nível de construção, por tipo de peça. */
+/**
+ * O nível de construção, por tipo de peça, e a skin de cada um.
+ *
+ * Skin ausente = zero, a aparência padrão do material — que é o
+ * inicializador do `GradeSpec` do plugin. Só viaja a que foi escolhida.
+ */
 export interface GradePayload {
   readonly foundation: string;
   readonly wall: string;
   readonly ceiling: string;
+  readonly foundationSkin?: number;
+  readonly wallSkin?: number;
+  readonly ceilingSkin?: number;
+}
+
+/**
+ * Um ponto da construção importada.
+ *
+ * ####  AS CHAVES TÊM UMA LETRA, E ISSO É ORÇAMENTO  ####
+ *
+ * Uma construção pode ter 120 pontos, e o comando inteiro divide 50 KB
+ * com todas as masmorras do servidor. Com as chaves por extenso, cada
+ * ponto custaria uns 110 bytes; assim, uns 45. Os nomes do lado de lá
+ * (`BodyPointSpec`) dizem o que cada letra é.
+ */
+export interface BodyPointPayload {
+  /** `npc` ou `crate`. */
+  readonly k: 'npc' | 'crate';
+  /** Metros, relativos à origem da planta, como o `pos` do JSON. */
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  /** Graus. Ausente = 0. */
+  readonly r?: number;
+  /** O perfil de conteúdo. Ausente = `green`. */
+  readonly p?: 'blue' | 'red' | 'corridor';
+  /** Quantos. Ausente = 1. */
+  readonly a?: number;
+  /** O prefab. Ausente = o que o perfil já usa. */
+  readonly f?: string;
+}
+
+/**
+ * O corpo importado: a planta colada a -90, a chegada e os pontos.
+ *
+ * Só viaja no modo `construction`, e sempre com a chegada — a régua
+ * do agente não salva o modo sem ela.
+ */
+export interface BodyPayload {
+  /** O slug da planta, que o `materializer` já pôs no disco. */
+  readonly blueprint: string;
+  readonly arrival: { readonly x: number; readonly y: number; readonly z: number; readonly r?: number };
+  readonly points: readonly BodyPointPayload[];
 }
 
 /**
@@ -432,7 +480,12 @@ export interface GradePayload {
  */
 export interface DungeonPayload {
   readonly id: string;
-  readonly mode: 'recipe' | 'blueprint';
+  /**
+   * O nome que o admin deu. É o `{nome}` do anúncio no chat — antes
+   * dele, a frase dizia o slug.
+   */
+  readonly name?: string;
+  readonly mode: 'recipe' | 'blueprint' | 'construction';
   readonly entrance: string | null;
   /**
    * O que a casinha da entrada carrega dentro.
@@ -486,6 +539,8 @@ export interface DungeonPayload {
    * para marcar, porque o traçado é sorteado a cada nascimento.
    */
   readonly placements?: readonly PlacementPayload[];
+  /** O corpo importado. Ausente fora do modo `construction`. */
+  readonly body?: BodyPayload;
   readonly npc: {
     readonly health: { readonly min: number; readonly max: number };
     readonly damageScale: number;
@@ -523,6 +578,15 @@ export interface DungeonPayload {
     readonly onBuild?: string;
     readonly onEnd?: string;
     readonly showGrid?: boolean;
+    /**
+     * O visual das mensagens do servidor. Ausentes = a linha simples
+     * de sempre. Com qualquer um presente, o plugin fala pelo
+     * OrigemZChat (`origemz.chat.broadcast`).
+     */
+    readonly tag?: string;
+    readonly tagColor?: string;
+    readonly color?: string;
+    readonly size?: number;
   };
   /** Ausente = o `new LockSpec()` do plugin, que é o mesmo padrão daqui. */
   readonly lock?: {

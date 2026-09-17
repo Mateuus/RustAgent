@@ -56,3 +56,25 @@ junto.
 Um teste que fala com a internet falha no CI por um motivo que não é o dele — e
 pior, passa a depender de um serviço de fora para dizer que o nosso código está
 certo.
+
+## A construção importada da masmorra
+
+`dungeon-body-copypaste.json` é uma **exportação real do CopyPaste 4.3.0**
+(`Docs/CopyPaste.cs`, o plugin que o dono usa para as entradas e o KOTH),
+gerada no `server01` em 17/09/2026: uma construção de teste foi colada com o
+próprio CopyPaste e copiada de volta com `TryCopy` (método `proximity`, raio 3,
+a partir da árvore de Natal). É dela que sai o formato que o
+`core/src/dungeons/body.ts` lê — `pos` em texto, `rot` em radianos, a
+fechadura dentro de `children` da porta.
+
+O que ela tem: 6 fundações, 6 pisos, 11 paredes, 1 vão com porta de metal e
+fechadura, **2 lápides, 2 velas grandes e 1 árvore de Natal**, 1 caixa de
+elite, 1 mina e 1 caixa grande de madeira com um item dentro.
+
+Duas ressalvas, para ninguém tirar dela mais do que ela prova:
+
+- **O NPC da construção de origem não veio.** O CopyPaste não copia NPC — o
+  arquivo mostra isso, e o teste do corpo conta com isso.
+- **Quem pôs os marcadores foi o CopyPaste, e não a mão de um jogador.** O
+  prefab e o formato são os do jogo; as posições são as da construção montada
+  para o teste (uma lápide caiu dentro da caixa de madeira de propósito).

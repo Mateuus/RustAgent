@@ -35,12 +35,14 @@
 //  Ver Docs/OrigemZDurgeon/01-PLANO-E-CONTRATOS.md §6.2.
 // ============================================================
 
+import { isSkinCompatible } from '../game/building-skins.js';
 import type { Logger } from '../logger.js';
 import {
   ACCESS_WHO_ENTERS,
   aiSpecSchema,
   BUILD_GRADES,
   crateSpecSchema,
+  dungeonBodyBuildSchema,
   dungeonGridSchema,
   dungeonPlacementSchema,
   ENTRANCE_ITEM_MODES,
@@ -55,7 +57,9 @@ import {
   type BuildGrade,
   type CrateSpecInput,
   type Dungeon,
+  type DungeonBodyBuildInput,
   type DungeonInput,
+  type DungeonMode,
   type DungeonPlacementInput,
   type DungeonRoomInput,
   type DungeonSummary,
@@ -88,6 +92,11 @@ interface DungeonRow {
   readonly announce_on_build: string | null;
   readonly announce_on_end: string | null;
   readonly announce_show_grid: number;
+  /** Os quatro vazios (NULL, NULL, NULL, 0) = o visual padrão do chat. Ver a 099. */
+  readonly announce_tag: string | null;
+  readonly announce_tag_color: string | null;
+  readonly announce_color: string | null;
+  readonly announce_size: number;
   readonly size_min: number;
   readonly size_max: number;
   readonly weight_green: number;
@@ -102,6 +111,9 @@ interface DungeonRow {
   readonly corridor_grade_foundation: string | null;
   readonly corridor_grade_wall: string | null;
   readonly corridor_grade_ceiling: string | null;
+  readonly corridor_grade_foundation_skin: number;
+  readonly corridor_grade_wall_skin: number;
+  readonly corridor_grade_ceiling_skin: number;
   readonly grid: string | null;
   /** Os marcadores do desenho, em JSON. `'[]'` é o sorteio de sempre. */
   readonly placements: string;
@@ -116,6 +128,13 @@ interface DungeonRow {
   readonly structure_foundation: string;
   readonly structure_wall: string;
   readonly structure_ceiling: string;
+  readonly structure_foundation_skin: number;
+  readonly structure_wall_skin: number;
+  readonly structure_ceiling_skin: number;
+  /** 1 = o corpo é a construção importada (ver a 099). O `mode` guarda o modo de células. */
+  readonly construction: number;
+  /** A construção importada, em JSON. NULL = nunca teve. */
+  readonly body: string | null;
   readonly lock_enabled: number;
   readonly lock_shared_code: number;
   readonly lock_carrier: string;
@@ -153,6 +172,9 @@ interface RoomRow {
   readonly grade_foundation: string | null;
   readonly grade_wall: string | null;
   readonly grade_ceiling: string | null;
+  readonly grade_foundation_skin: number;
+  readonly grade_wall_skin: number;
+  readonly grade_ceiling_skin: number;
   readonly loot_table: string;
   readonly ai: string;
 }
@@ -187,7 +209,7 @@ export class DungeonsRepository {
   list(): readonly DungeonSummary[] {
     const rows = this.#db
       .prepare(
-        `SELECT d.id, d.name, d.mode, d.entrance_blueprint, d.size_min, d.size_max,
+        `SELECT d.id, d.name, d.mode, d.construction, d.body, d.entrance_blueprint, d.size_min, d.size_max,
                 d.created_at, d.updated_at,
                 (SELECT COUNT(*) FROM dungeon_rooms r WHERE r.dungeon_id = d.id) AS room_count
            FROM dungeons d
@@ -195,7 +217,16 @@ export class DungeonsRepository {
       )
       .all() as (Pick<
       DungeonRow,
-      'id' | 'name' | 'mode' | 'entrance_blueprint' | 'size_min' | 'size_max' | 'created_at' | 'updated_at'
+      | 'id'
+      | 'name'
+      | 'mode'
+      | 'construction'
+      | 'body'
+      | 'entrance_blueprint'
+      | 'size_min'
+      | 'size_max'
+      | 'created_at'
+      | 'updated_at'
     > & { room_count: number })[];
 
     // Um SELECT para todos os vínculos: com dez masmorras, o N+1
@@ -205,8 +236,9 @@ export class DungeonsRepository {
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
-      mode: row.mode === 'blueprint' ? 'blueprint' : 'recipe',
+      mode: modeOf(row),
       entranceBlueprint: row.entrance_blueprint,
+      bodyBlueprint: this.#body(row.body, row.id)?.blueprint ?? null,
       servers: byDungeon.get(row.id) ?? [],
       roomCount: row.room_count,
       sizeMin: row.size_min,
@@ -259,9 +291,11 @@ export class DungeonsRepository {
                  corridor_npc_density, corridor_loot_density, corridor_crates,
                  corridor_loot_table, corridor_ai,
                  corridor_grade_foundation, corridor_grade_wall, corridor_grade_ceiling,
-                 grid, placements, npc_health_min, npc_health_max, npc_damage_scale,
+                 corridor_grade_foundation_skin, corridor_grade_wall_skin, corridor_grade_ceiling_skin,
+                 grid, placements, construction, body, npc_health_min, npc_health_max, npc_damage_scale,
                  npc_weapons, npc_names, npc_loot_table, npc_ai, time_of_day,
                  structure_foundation, structure_wall, structure_ceiling,
+                 structure_foundation_skin, structure_wall_skin, structure_ceiling_skin,
                  lock_enabled, lock_shared_code, lock_carrier, lock_carrier_scope,
                  lock_on_undelivered, lock_note_title, lock_announce_open,
                  lock_warn_wrong_code,
@@ -271,6 +305,7 @@ export class DungeonsRepository {
                  respawn_rebuild_destroyed,
                  marker_enabled, marker_label, marker_color, marker_alpha, marker_radius,
                  announce_enabled, announce_on_build, announce_on_end, announce_show_grid,
+                 announce_tag, announce_tag_color, announce_color, announce_size,
                  created_at, updated_at)
                 VALUES (@id, @name, @description, @mode, @entranceBlueprint, @entranceItems,
                         @entranceRotation, @entranceFacing,
@@ -278,9 +313,11 @@ export class DungeonsRepository {
                         @corridorNpc, @corridorLoot, @corridorCrates,
                         @corridorTable, @corridorAi,
                         @corridorGradeFoundation, @corridorGradeWall, @corridorGradeCeiling,
-                        @grid, @placements, @healthMin, @healthMax, @damageScale,
+                        @corridorSkinFoundation, @corridorSkinWall, @corridorSkinCeiling,
+                        @grid, @placements, @construction, @body, @healthMin, @healthMax, @damageScale,
                         @weapons, @names, @npcTable, @npcAi, @timeOfDay,
                         @structureFoundation, @structureWall, @structureCeiling,
+                        @structureSkinFoundation, @structureSkinWall, @structureSkinCeiling,
                         @lockEnabled, @lockSharedCode, @lockCarrier, @lockCarrierScope,
                         @lockOnUndelivered, @lockNoteTitle, @lockAnnounceOpen,
                         @lockWarnWrongCode,
@@ -290,6 +327,7 @@ export class DungeonsRepository {
                         @respawnRebuildDestroyed,
                         @markerEnabled, @markerLabel, @markerColor, @markerAlpha, @markerRadius,
                         @announceEnabled, @announceOnBuild, @announceOnEnd, @announceShowGrid,
+                        @announceTag, @announceTagColor, @announceColor, @announceSize,
                         @now, @now)
            ON CONFLICT (id) DO UPDATE SET
                 name = excluded.name,
@@ -312,8 +350,13 @@ export class DungeonsRepository {
                 corridor_grade_foundation = excluded.corridor_grade_foundation,
                 corridor_grade_wall = excluded.corridor_grade_wall,
                 corridor_grade_ceiling = excluded.corridor_grade_ceiling,
+                corridor_grade_foundation_skin = excluded.corridor_grade_foundation_skin,
+                corridor_grade_wall_skin = excluded.corridor_grade_wall_skin,
+                corridor_grade_ceiling_skin = excluded.corridor_grade_ceiling_skin,
                 grid = excluded.grid,
                 placements = excluded.placements,
+                construction = excluded.construction,
+                body = excluded.body,
                 npc_health_min = excluded.npc_health_min,
                 npc_health_max = excluded.npc_health_max,
                 npc_damage_scale = excluded.npc_damage_scale,
@@ -325,6 +368,9 @@ export class DungeonsRepository {
                 structure_foundation = excluded.structure_foundation,
                 structure_wall = excluded.structure_wall,
                 structure_ceiling = excluded.structure_ceiling,
+                structure_foundation_skin = excluded.structure_foundation_skin,
+                structure_wall_skin = excluded.structure_wall_skin,
+                structure_ceiling_skin = excluded.structure_ceiling_skin,
                 lock_enabled = excluded.lock_enabled,
                 lock_shared_code = excluded.lock_shared_code,
                 lock_carrier = excluded.lock_carrier,
@@ -351,13 +397,22 @@ export class DungeonsRepository {
                 announce_on_build = excluded.announce_on_build,
                 announce_on_end = excluded.announce_on_end,
                 announce_show_grid = excluded.announce_show_grid,
+                announce_tag = excluded.announce_tag,
+                announce_tag_color = excluded.announce_tag_color,
+                announce_color = excluded.announce_color,
+                announce_size = excluded.announce_size,
                 updated_at = excluded.updated_at`,
         )
         .run({
           id: input.id,
           name: input.name,
           description: input.description ?? null,
-          mode: input.mode,
+          // O CHECK da 059 só conhece os dois modos de células. O de
+          // construção vai na coluna própria, e o `mode` guarda o de
+          // células que o rascunho teria — ver a migração 099.
+          mode: input.mode === 'construction' ? (input.grid === null ? 'recipe' : 'blueprint') : input.mode,
+          construction: input.mode === 'construction' ? 1 : 0,
+          body: input.body === null ? null : JSON.stringify(input.body),
           entranceBlueprint: input.entranceBlueprint,
           entranceItems: input.entranceItems,
           entranceRotation: input.entranceRotation,
@@ -373,6 +428,10 @@ export class DungeonsRepository {
           announceOnBuild: input.announce.onBuild === '' ? null : input.announce.onBuild,
           announceOnEnd: input.announce.onEnd === '' ? null : input.announce.onEnd,
           announceShowGrid: input.announce.showGrid ? 1 : 0,
+          announceTag: input.announce.tag === '' ? null : input.announce.tag,
+          announceTagColor: input.announce.tagColor === '' ? null : input.announce.tagColor,
+          announceColor: input.announce.color === '' ? null : input.announce.color,
+          announceSize: input.announce.size,
           sizeMin: input.size.min,
           sizeMax: input.size.max,
           weightGreen: input.weights.green,
@@ -389,6 +448,9 @@ export class DungeonsRepository {
           corridorGradeFoundation: input.corridor.grade?.foundation ?? null,
           corridorGradeWall: input.corridor.grade?.wall ?? null,
           corridorGradeCeiling: input.corridor.grade?.ceiling ?? null,
+          corridorSkinFoundation: input.corridor.grade?.foundationSkin ?? 0,
+          corridorSkinWall: input.corridor.grade?.wallSkin ?? 0,
+          corridorSkinCeiling: input.corridor.grade?.ceilingSkin ?? 0,
           grid: input.grid === null ? null : JSON.stringify(input.grid),
           placements: JSON.stringify(input.placements),
           healthMin: input.npc.health.min,
@@ -402,6 +464,9 @@ export class DungeonsRepository {
           structureFoundation: input.structure.foundation,
           structureWall: input.structure.wall,
           structureCeiling: input.structure.ceiling,
+          structureSkinFoundation: input.structure.foundationSkin,
+          structureSkinWall: input.structure.wallSkin,
+          structureSkinCeiling: input.structure.ceilingSkin,
           lockEnabled: input.lock.enabled ? 1 : 0,
           lockSharedCode: input.lock.sharedCode ? 1 : 0,
           lockCarrier: input.lock.carrier,
@@ -448,10 +513,12 @@ export class DungeonsRepository {
         `INSERT INTO dungeon_rooms
               (dungeon_id, room_key, color, npc_min, npc_max, loot_min, loot_max,
                crates, door, locked, wide_door, wide_door_cells_per_door,
-               grade_foundation, grade_wall, grade_ceiling, loot_table, ai)
+               grade_foundation, grade_wall, grade_ceiling,
+               grade_foundation_skin, grade_wall_skin, grade_ceiling_skin, loot_table, ai)
               VALUES (@dungeonId, @key, @color, @npcMin, @npcMax, @lootMin, @lootMax,
                       @crates, @door, @locked, @wideDoor, @wideDoorCells,
-                      @gradeFoundation, @gradeWall, @gradeCeiling, @table, @ai)`,
+                      @gradeFoundation, @gradeWall, @gradeCeiling,
+                      @skinFoundation, @skinWall, @skinCeiling, @table, @ai)`,
       );
 
       for (const room of input.rooms) {
@@ -471,6 +538,9 @@ export class DungeonsRepository {
           gradeFoundation: room.grade === null ? null : room.grade.foundation,
           gradeWall: room.grade === null ? null : room.grade.wall,
           gradeCeiling: room.grade === null ? null : room.grade.ceiling,
+          skinFoundation: room.grade === null ? 0 : room.grade.foundationSkin,
+          skinWall: room.grade === null ? 0 : room.grade.wallSkin,
+          skinCeiling: room.grade === null ? 0 : room.grade.ceilingSkin,
           table: JSON.stringify(room.table),
           ai: JSON.stringify(room.ai),
         });
@@ -509,10 +579,35 @@ export class DungeonsRepository {
     return row.total;
   }
 
-  /** Quem usa aquela planta como entrada. É o que barra o DELETE dela. */
+  /**
+   * Quem usa aquela planta — como entrada ou como corpo. É o que barra
+   * o DELETE dela.
+   *
+   * O corpo conta mesmo com a masmorra em outro modo: o rascunho dele
+   * continua apontando para a planta, e voltar ao modo construção com
+   * a planta apagada daria uma masmorra que não sobe.
+   */
   usersOfBlueprint(blueprintId: string): readonly string[] {
     const rows = this.#db
-      .prepare('SELECT id FROM dungeons WHERE entrance_blueprint = ? ORDER BY id')
+      .prepare(
+        `SELECT id FROM dungeons
+          WHERE entrance_blueprint = @id
+             OR (body IS NOT NULL AND json_valid(body) AND json_extract(body, '$.blueprint') = @id)
+          ORDER BY id`,
+      )
+      .all({ id: blueprintId }) as { id: string }[];
+
+    return rows.map((row) => row.id);
+  }
+
+  /** Quem usa aquela planta como CORPO (em qualquer modo). */
+  bodyUsersOfBlueprint(blueprintId: string): readonly string[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT id FROM dungeons
+          WHERE body IS NOT NULL AND json_valid(body) AND json_extract(body, '$.blueprint') = ?
+          ORDER BY id`,
+      )
       .all(blueprintId) as { id: string }[];
 
     return rows.map((row) => row.id);
@@ -577,7 +672,7 @@ export class DungeonsRepository {
       id: row.id,
       name: row.name,
       description: row.description,
-      mode: row.mode === 'blueprint' ? 'blueprint' : 'recipe',
+      mode: modeOf(row),
       entranceBlueprint: row.entrance_blueprint,
       // Um modo que o banco nao conhece cai em 'none': a entrada
       // que nao da nada decepciona, a que da uma M249 de graca
@@ -602,6 +697,11 @@ export class DungeonsRepository {
         onBuild: row.announce_on_build ?? '',
         onEnd: row.announce_on_end ?? '',
         showGrid: row.announce_show_grid === 1,
+        tag: row.announce_tag ?? '',
+        // Uma cor torta — banco editado à mão — vira o padrão do chat.
+        tagColor: hexOrEmpty(row.announce_tag_color),
+        color: hexOrEmpty(row.announce_color),
+        size: row.announce_size >= 8 && row.announce_size <= 40 ? row.announce_size : 0,
       },
       size: { min: row.size_min, max: row.size_max },
       weights: { green: row.weight_green, blue: row.weight_blue, red: row.weight_red },
@@ -615,6 +715,7 @@ export class DungeonsRepository {
       },
       grid: this.#grid(row.grid, row.id),
       placements: this.#placements(row.placements, row.id),
+      body: this.#body(row.body, row.id),
       npc: {
         health: { min: row.npc_health_min, max: row.npc_health_max },
         damageScale: row.npc_damage_scale,
@@ -624,11 +725,14 @@ export class DungeonsRepository {
         ai: this.#aiSpec(row.npc_ai, row.id, 'npc_ai'),
       },
       timeOfDay: row.time_of_day,
-      structure: {
-        foundation: grade(row.structure_foundation),
-        wall: grade(row.structure_wall),
-        ceiling: grade(row.structure_ceiling),
-      },
+      structure: gradeSet(
+        row.structure_foundation,
+        row.structure_wall,
+        row.structure_ceiling,
+        row.structure_foundation_skin,
+        row.structure_wall_skin,
+        row.structure_ceiling_skin,
+      ),
       lock: {
         enabled: row.lock_enabled === 1,
         sharedCode: row.lock_shared_code === 1,
@@ -700,11 +804,14 @@ export class DungeonsRepository {
       return null;
     }
 
-    return {
-      foundation: grade(row.grade_foundation),
-      wall: grade(row.grade_wall),
-      ceiling: grade(row.grade_ceiling),
-    };
+    return gradeSet(
+      row.grade_foundation,
+      row.grade_wall,
+      row.grade_ceiling,
+      row.grade_foundation_skin,
+      row.grade_wall_skin,
+      row.grade_ceiling_skin,
+    );
   }
 
   /**
@@ -843,11 +950,14 @@ export class DungeonsRepository {
       return null;
     }
 
-    return {
-      foundation: grade(row.corridor_grade_foundation),
-      wall: grade(row.corridor_grade_wall),
-      ceiling: grade(row.corridor_grade_ceiling),
-    };
+    return gradeSet(
+      row.corridor_grade_foundation,
+      row.corridor_grade_wall,
+      row.corridor_grade_ceiling,
+      row.corridor_grade_foundation_skin,
+      row.corridor_grade_wall_skin,
+      row.corridor_grade_ceiling_skin,
+    );
   }
 
   /**
@@ -898,6 +1008,30 @@ export class DungeonsRepository {
     return {};
   }
 
+  /**
+   * A construção importada que veio da coluna.
+   *
+   * Ilegível vira `null` — "nunca teve corpo" —, com aviso. Um corpo
+   * torto no modo construção faz a régua recusar o build com a frase
+   * de "escolha a construção", que é o conserto certo; qualquer outro
+   * padrão inventaria uma planta ou pontos que ninguém escolheu.
+   */
+  #body(raw: string | null, dungeonId: string): DungeonBodyBuildInput | null {
+    if (raw === null) return null;
+
+    try {
+      const parsed = dungeonBodyBuildSchema.safeParse(JSON.parse(raw));
+
+      if (parsed.success) return parsed.data;
+    } catch {
+      // cai no aviso abaixo
+    }
+
+    this.#logger?.warn({ dungeon: dungeonId }, 'a construção importada está ilegível: a masmorra ficou sem corpo');
+
+    return null;
+  }
+
   #grid(raw: string | null, dungeonId: string): string[] | null {
     if (raw === null) return null;
 
@@ -916,6 +1050,52 @@ export class DungeonsRepository {
 
     return null;
   }
+}
+
+/**
+ * O modo que a linha guarda.
+ *
+ * `construction` ganha do `mode`: é a coluna nova que diz se o corpo
+ * é importado (ver a migração 099).
+ */
+function modeOf(row: Pick<DungeonRow, 'mode' | 'construction'>): DungeonMode {
+  if (row.construction === 1) return 'construction';
+
+  return row.mode === 'blueprint' ? 'blueprint' : 'recipe';
+}
+
+/**
+ * Um conjunto de material e skin, vindo das colunas.
+ *
+ * A skin que não combina com o material — banco editado à mão, ou um
+ * update do jogo que tirou a skin do catálogo — vira zero, e o
+ * material fica. Recusar a leitura por isso derrubaria a masmorra.
+ */
+function gradeSet(
+  foundation: string | null,
+  wall: string | null,
+  ceiling: string | null,
+  foundationSkin: number,
+  wallSkin: number,
+  ceilingSkin: number,
+): GradeSetInput {
+  const f = grade(foundation);
+  const w = grade(wall);
+  const c = grade(ceiling);
+
+  return {
+    foundation: f,
+    wall: w,
+    ceiling: c,
+    foundationSkin: isSkinCompatible(f, foundationSkin) ? foundationSkin : 0,
+    wallSkin: isSkinCompatible(w, wallSkin) ? wallSkin : 0,
+    ceilingSkin: isSkinCompatible(c, ceilingSkin) ? ceilingSkin : 0,
+  };
+}
+
+/** Uma cor hexadecimal do banco, ou vazio. */
+function hexOrEmpty(raw: string | null): string {
+  return raw !== null && /^#[0-9a-fA-F]{3,8}$/u.test(raw) ? raw : '';
 }
 
 /** O grau da peça, com `stone` para o que o banco não souber dizer. */
