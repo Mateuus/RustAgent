@@ -73,6 +73,7 @@ function offer(over: Partial<StoreOfferInput> = {}): StoreOfferInput {
     ],
     vip: null,
     vehicle: null,
+    pass: null,
     badge: 'promo',
     oldPrice: 400,
     perks: [],

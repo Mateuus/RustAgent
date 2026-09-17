@@ -71,6 +71,15 @@ export interface QuestItemDelivery {
       }[];
       readonly vehicle: null;
       readonly vip: { readonly tier: string; readonly days: number | null } | null;
+      /**
+       * Sempre `null`: missão não concede o passe por este caminho.
+       *
+       * O tipo diz isso em vez de omitir o campo — omitido, o dia
+       * em que uma recompensa de passe existir passaria por aqui
+       * sem ninguém notar. O XP do passe entra pela trilha, e não
+       * pela entrega de item (Docs/BattlePass/06 §4).
+       */
+      readonly pass: null;
       readonly units: number;
     },
   ): Promise<void>;
@@ -415,6 +424,7 @@ export class QuestRewardService {
       ],
       vehicle: null,
       vip: null,
+      pass: null,
       units: 1,
     });
 
@@ -440,6 +450,7 @@ export class QuestRewardService {
       items: [],
       vehicle: null,
       vip: { tier: reward.tier, days: reward.days },
+      pass: null,
       units: 1,
     });
 

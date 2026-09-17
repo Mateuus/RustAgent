@@ -9345,6 +9345,178 @@ DROP TABLE quest_rewards_100;
 CREATE INDEX idx_quest_rewards_quest ON quest_rewards (quest_id, seq);
 `;
 
+// ------------------------------------------------------------
+//  103 — a loja passa a vender o passe de batalha
+//
+//  O que a 101 deixou escrito para esta frente (ver "O QUE NAO ESTA
+//  AQUI" no cabecalho dela): o kind 'pass' e as colunas do formato.
+//
+//  ####  RECONSTRUIR, PORQUE O SQLite NAO ALTERA CHECK  ####
+//
+//  `kind` tem CHECK com os quatro formatos de sempre, e acrescentar
+//  um quinto exige recriar a tabela — o mesmo molde da 097, da 100 e
+//  da 101. A diferenca daqui e que `store_offers` TEM dependentes
+//  (`store_offer_items` e `store_offer_perks`, as duas com
+//  ON DELETE CASCADE): com `foreign_keys = ON` (database.ts), o DROP
+//  da tabela velha levaria junto o conteudo de TODA oferta da loja.
+//
+//  Por isso a ordem e a da 100:
+//
+//    a. as duas dependentes vao para tabelas SEM FK;
+//    b. `store_offers` e renomeada, recriada com o kind novo e
+//       copiada (o `id` de cada oferta e preservado: `store_purchases`
+//       guarda o `offer_id` de quem comprou, e renumerar transformaria
+//       o historico em mentira);
+//    c. as dependentes voltam, com a FK apontando para a tabela nova.
+//
+//  Os indices sao recriados DEPOIS dos DROPs: nome de indice e global
+//  no schema, e o RENAME nao o move.
+//
+//  ####  UMA COLUNA, E NAO DUAS  ####
+//
+//  O molde citado e `vip_tier`/`vip_days`, mas o passe tem UMA
+//  dimensao: o mes. Nao ha "nivel" a escolher (a temporada e uma so
+//  por servidor) nem prazo a somar (o mes acaba quando acaba).
+//
+//  `pass_period` NULL — e este e o caso normal — quer dizer "o mes
+//  corrente no instante da compra". Quem resolve o mes e a compra, e
+//  ela grava o resultado no PLANO CONGELADO: um debito `unknown`
+//  reconciliado horas depois pode atravessar a virada do mes, e o
+//  passe pago em setembro tem de ser ativado como setembro
+//  (Docs/BattlePass/04 §4).
+//
+//  Preenchida, ela fixa o mes daquela oferta. Nao e o produto da
+//  primeira versao — o 04 §3 recomenda nao abrir a venda antecipada
+//  —, mas a coluna tem leitor desde o primeiro dia (`planOf`), e a
+//  tela de compra diz de que mes o passe e. Coluna sem quem a leia
+//  seria divida; esta e lida em toda compra de passe.
+//
+//  O CHECK e o mesmo de `battlepass_seasons.period`: a forma, que e
+//  o que protege a ordenacao e o LIKE. A regua fina (mes de 01 a 12)
+//  esta no zod.
+// ------------------------------------------------------------
+const STORE_OFFER_PASS_SCHEMA = `
+-- ---- a. as dependentes saem do caminho, sem FK ---------------
+CREATE TABLE store_offer_items_102 (
+  id        TEXT NOT NULL,
+  offer_id  TEXT NOT NULL,
+  shortname TEXT NOT NULL,
+  item_id   INTEGER NOT NULL,
+  skin_id   TEXT NOT NULL,
+  amount    INTEGER NOT NULL,
+  position  INTEGER NOT NULL
+);
+
+INSERT INTO store_offer_items_102
+  (id, offer_id, shortname, item_id, skin_id, amount, position)
+SELECT id, offer_id, shortname, item_id, skin_id, amount, position
+  FROM store_offer_items;
+
+DROP TABLE store_offer_items;
+
+CREATE TABLE store_offer_perks_102 (
+  id       TEXT NOT NULL,
+  offer_id TEXT NOT NULL,
+  text     TEXT NOT NULL,
+  position INTEGER NOT NULL
+);
+
+INSERT INTO store_offer_perks_102 (id, offer_id, text, position)
+SELECT id, offer_id, text, position FROM store_offer_perks;
+
+DROP TABLE store_offer_perks;
+
+-- ---- b. store_offers, agora com o formato 'pass' -------------
+ALTER TABLE store_offers RENAME TO store_offers_102;
+
+CREATE TABLE store_offers (
+  id          TEXT PRIMARY KEY,
+  category_id TEXT NOT NULL REFERENCES store_categories(id) ON DELETE CASCADE,
+
+  -- 'pass' entrou aqui: o passe de batalha daquele mes, naquele
+  -- servidor. Ele nao entrega item nenhum por si -- concede o
+  -- DIREITO, que e uma linha de battlepass_entitlements.
+  kind TEXT NOT NULL CHECK (kind IN ('item', 'bundle', 'vip', 'vehicle', 'pass')),
+
+  icon_shortname TEXT NOT NULL,
+  icon_item_id   INTEGER NOT NULL,
+  icon_skin_id   TEXT NOT NULL DEFAULT '0',
+  icon_file      TEXT,
+
+  vip_tier TEXT,
+  vip_days INTEGER,
+
+  vehicle_prefab TEXT,
+  vehicle_fuel   INTEGER NOT NULL DEFAULT 0,
+
+  -- So em 'pass'. NULL = o mes corrente no instante da compra, que e
+  -- o caso normal; preenchida, fixa o mes daquela oferta. Ver o
+  -- cabecalho.
+  pass_period TEXT
+    CHECK (pass_period IS NULL OR pass_period GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'),
+
+  name TEXT NOT NULL,
+
+  price INTEGER NOT NULL,
+  old_price INTEGER,
+
+  position INTEGER NOT NULL DEFAULT 0,
+  enabled  INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  badge TEXT CHECK (badge IS NULL OR badge IN ('promo', 'novo', 'destaque')),
+
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Toda oferta que ja existia nasce sem mes: nenhuma delas e passe.
+INSERT INTO store_offers
+  (id, category_id, kind, icon_shortname, icon_item_id, icon_skin_id, icon_file,
+   vip_tier, vip_days, vehicle_prefab, vehicle_fuel, pass_period, name, price,
+   old_price, position, enabled, badge, created_at, updated_at)
+SELECT id, category_id, kind, icon_shortname, icon_item_id, icon_skin_id, icon_file,
+       vip_tier, vip_days, vehicle_prefab, vehicle_fuel, NULL, name, price,
+       old_price, position, enabled, badge, created_at, updated_at
+  FROM store_offers_102;
+
+DROP TABLE store_offers_102;
+
+CREATE INDEX idx_store_offers_category ON store_offers (category_id, position);
+
+-- ---- c. as dependentes voltam, com FK ------------------------
+CREATE TABLE store_offer_items (
+  id        TEXT PRIMARY KEY,
+  offer_id  TEXT NOT NULL REFERENCES store_offers(id) ON DELETE CASCADE,
+  shortname TEXT NOT NULL,
+  item_id   INTEGER NOT NULL,
+  skin_id   TEXT NOT NULL DEFAULT '0',
+  amount    INTEGER NOT NULL,
+  position  INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO store_offer_items (id, offer_id, shortname, item_id, skin_id, amount, position)
+SELECT id, offer_id, shortname, item_id, skin_id, amount, position
+  FROM store_offer_items_102;
+
+DROP TABLE store_offer_items_102;
+
+CREATE INDEX idx_store_offer_items_offer ON store_offer_items (offer_id, position);
+
+CREATE TABLE store_offer_perks (
+  id       TEXT PRIMARY KEY,
+  offer_id TEXT NOT NULL REFERENCES store_offers(id) ON DELETE CASCADE,
+  text     TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO store_offer_perks (id, offer_id, text, position)
+SELECT id, offer_id, text, position FROM store_offer_perks_102;
+
+DROP TABLE store_offer_perks_102;
+
+CREATE INDEX idx_store_offer_perks_offer ON store_offer_perks (offer_id, position);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -9642,6 +9814,13 @@ export const MIGRATIONS: readonly Migration[] = [
   // branch de integracao, e uma migracao a mais e uma chance a mais
   // de colidir id. Ver o cabecalho de QUEST_REWARD_SKIN_SCHEMA.
   { id: 101, name: 'battlepass', sql: `${BATTLEPASS_SCHEMA}\n${QUEST_REWARD_SKIN_SCHEMA}` },
+  // 17/09/2026: a loja aprende o quinto formato -- o passe de
+  // batalha. E a migracao que a 101 deixou reservada para esta
+  // frente. O id 103 foi conferido livre em todas as branches vivas
+  // em 17/09/2026 antes de ser usado; a 102 ficou reservada a outra
+  // frente do passe. Pular numero nao custa nada; repetir um vira
+  // migracao PULADA em silencio no merge -- ver a nota da 087.
+  { id: 103, name: 'store-offer-pass', sql: STORE_OFFER_PASS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

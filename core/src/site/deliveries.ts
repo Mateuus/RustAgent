@@ -342,6 +342,7 @@ export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPl
       items: items.map((item) => ({ ...item, itemId: 0 })),
       vehicle: null,
       vip: null,
+      pass: null,
       units: 1,
     };
   }
@@ -349,7 +350,7 @@ export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPl
   if (kind === 'vehicle') {
     const vehicle = parsed.data as z.infer<typeof payloadSchemas.vehicle>;
 
-    return { items: [], vehicle, vip: null, units: 1 };
+    return { items: [], vehicle, vip: null, pass: null, units: 1 };
   }
 
   const vip = parsed.data as z.infer<typeof payloadSchemas.vip>;
@@ -360,6 +361,10 @@ export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPl
     // `days` é o vocabulário do site e `expiresAt` é o do VipList: a
     // tradução acontece AQUI, na fronteira, e não lá dentro.
     vip: { tier: vip.tier, days: vip.days },
+    // A fila do site ainda não conhece o passe: ele é o oitavo kind,
+    // e depende de acordo com o outro lado (Docs/BattlePass/04 §6 —
+    // frente G). Até lá, só a compra in-game concede o direito.
+    pass: null,
     units: 1,
   };
 }

@@ -67,6 +67,9 @@ import {
   type StoreService,
 } from '../../store/service.js';
 import type { Wallet } from '../../store/wallet.js';
+// A régua do mês é a do passe, e ela fica de um lado só: uma segunda
+// aqui divergiria no primeiro ajuste.
+import { seasonPeriodSchema } from '../../types/battlepass.js';
 import { ApiError } from '../error-response.js';
 import { listIcons, readIcon, saveIcon, uploadedIcon } from '../icon-files.js';
 import { operatorOf } from './admin.js';
@@ -219,7 +222,7 @@ export function toOfferInput(
 /**
  * O corpo de criação e de edição de uma oferta.
  *
- * O `superRefine` é onde os quatro formatos ficam honestos: um VIP
+ * O `superRefine` é onde os cinco formatos ficam honestos: um VIP
  * sem nível e um veículo sem prefab são pedidos que o banco
  * aceitaria (as colunas são anuláveis) e que o jogador descobriria
  * como "paguei e não recebi".
@@ -282,6 +285,25 @@ export const storeOfferBody = z
       .strict()
       .nullable()
       .default(null),
+    /**
+     * O passe de batalha, e ele quase sempre vem vazio.
+     *
+     * ####  OMITIDO É O CASO NORMAL  ####
+     *
+     * Sem ele — ou com `period: null` — a oferta vende "o passe do
+     * mês corrente", e quem resolve qual é o mês é a COMPRA, que o
+     * congela no plano. É por isso que o campo tem `.default(null)`:
+     * o site aplica a loja por este mesmo schema e não conhece o
+     * formato novo.
+     *
+     * A régua do `period` é a mesma de `battlepass_seasons`
+     * (`seasonPeriodSchema`): a lista fica de um lado só.
+     */
+    pass: z
+      .object({ period: seasonPeriodSchema.nullable().default(null) })
+      .strict()
+      .nullable()
+      .default(null),
   })
   .strict()
   .superRefine((offer, ctx) => {
@@ -320,6 +342,28 @@ export const storeOfferBody = z
         message:
           'uma oferta de veículo precisa do prefab (minicopter, rowboat, sedan). O jogo resolve o ' +
           'nome curto — o caminho completo muda quando a Facepunch move um arquivo',
+      });
+    }
+
+    // ####  PASSE: O QUE SE CONFERE É A COERÊNCIA, NÃO A FALTA  ####
+    //
+    // Ao contrário do VIP e do veículo, uma oferta de passe COMPLETA
+    // é a que não diz nada: sem `pass`, ela vende o mês corrente, e
+    // quem o resolve é a compra. Não há campo que possa faltar.
+    //
+    // O defeito que existe é o inverso — o mês preenchido num
+    // formato que não é passe. Ele não viria do painel (o formulário
+    // monta `pass` só em 'pass'), mas vem do canal de config do
+    // site, que aplica a loja por este mesmo schema. Gravado, ele
+    // seria um campo que ninguém lê: a oferta cobraria e não daria
+    // passe nenhum, e o admin leria na tela o mês que cadastrou.
+    if (offer.kind !== 'pass' && offer.pass !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pass'],
+        message:
+          'só uma oferta do formato "pass" concede o passe de batalha. Num outro formato o mês ' +
+          'ficaria gravado e não seria lido por ninguém',
       });
     }
 

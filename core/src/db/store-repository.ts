@@ -70,11 +70,12 @@ export type OfferBadge = (typeof OFFER_BADGES)[number];
  *   vip      um nível de VIP com prazo, mais a lista de vantagens
  *            e, se quiser, itens que vêm junto.
  *   vehicle  um veículo que nasce no mundo.
+ *   pass     o passe de batalha daquele mês, naquele servidor.
  *
- * Os quatro entregam pela mesma tabela filha. O que muda é o que a
+ * Os cinco entregam pela mesma tabela filha. O que muda é o que a
  * loja mostra e o que a compra concede além dos itens.
  */
-export const OFFER_KINDS = ['item', 'bundle', 'vip', 'vehicle'] as const;
+export const OFFER_KINDS = ['item', 'bundle', 'vip', 'vehicle', 'pass'] as const;
 export type OfferKind = (typeof OFFER_KINDS)[number];
 
 /** Um item dentro de uma oferta. */
@@ -133,6 +134,27 @@ export interface OfferVehicle {
   readonly fuel: number;
 }
 
+/**
+ * O passe de batalha que a compra concede.
+ *
+ * ####  UM CAMPO, E ELE QUASE SEMPRE É `null`  ####
+ *
+ * `period: null` = "o mês corrente no instante da compra", que é o
+ * produto da primeira versão. Quem resolve o mês é a compra, e ela
+ * grava o resultado no PLANO CONGELADO — um débito `unknown`
+ * reconciliado horas depois pode atravessar a virada do mês, e um
+ * passe pago em setembro tem de ser ativado como setembro
+ * (Docs/BattlePass/04 §4).
+ *
+ * Preenchido (`'2026-11'`), fixa o mês daquela oferta. É o que
+ * permitiria vender o passe do mês seguinte — uma decisão de produto
+ * que ainda não foi tomada (04 §3) e que não exige código novo.
+ */
+export interface OfferPass {
+  /** `null` = o mês corrente. `'2026-10'` = aquele mês. */
+  readonly period: string | null;
+}
+
 export interface StoreOffer {
   readonly id: string;
   readonly categoryId: string;
@@ -150,6 +172,8 @@ export interface StoreOffer {
   readonly vip: OfferVip | null;
   /** `null` fora de `vehicle`. */
   readonly vehicle: OfferVehicle | null;
+  /** `null` fora de `pass`. Dentro dele, `period` ainda pode ser `null`. */
+  readonly pass: OfferPass | null;
   readonly icon: OfferIcon;
   readonly name: string;
   readonly price: number;
@@ -177,6 +201,7 @@ export interface StoreOfferInput {
   readonly perks: readonly string[];
   readonly vip: OfferVip | null;
   readonly vehicle: OfferVehicle | null;
+  readonly pass: OfferPass | null;
   readonly icon: OfferIcon;
   readonly name: string;
   readonly price: number;
@@ -268,6 +293,7 @@ interface OfferRow {
   readonly vip_days: number | null;
   readonly vehicle_prefab: string | null;
   readonly vehicle_fuel: number;
+  readonly pass_period: string | null;
   readonly name: string;
   readonly price: number;
   readonly position: number;
@@ -342,6 +368,13 @@ function toOffer(row: OfferRow, items: readonly OfferItem[], perks: readonly str
       row.vehicle_prefab === null || row.vehicle_prefab === ''
         ? null
         : { prefab: row.vehicle_prefab, fuel: row.vehicle_fuel },
+    // ####  AQUI O `kind` MANDA, E NÃO A COLUNA  ####
+    //
+    // É o oposto do VIP e do veículo logo acima, e de propósito: o
+    // valor normal de `pass_period` é NULL — "o mês corrente" —, e
+    // ele é indistinguível de "não é passe". Quem diz que a oferta é
+    // um passe é o formato dela.
+    pass: row.kind === 'pass' ? { period: row.pass_period } : null,
     icon: {
       shortname: row.icon_shortname,
       itemId: row.icon_item_id,
@@ -588,11 +621,13 @@ export class StoreRepository {
         .prepare(
           `INSERT INTO store_offers
              (id, category_id, kind, icon_shortname, icon_item_id, icon_skin_id,
-              icon_file, vip_tier, vip_days, vehicle_prefab, vehicle_fuel, name,
+              icon_file, vip_tier, vip_days, vehicle_prefab, vehicle_fuel,
+              pass_period, name,
               price, position, enabled, badge, old_price, created_at, updated_at)
            VALUES
              (@id, @categoryId, @kind, @iconShortname, @iconItemId, @iconSkinId,
-              @iconFile, @vipTier, @vipDays, @vehiclePrefab, @vehicleFuel, @name,
+              @iconFile, @vipTier, @vipDays, @vehiclePrefab, @vehicleFuel,
+              @passPeriod, @name,
               @price, @position, @enabled, @badge, @oldPrice, @now, @now)
            ON CONFLICT(id) DO UPDATE SET
              category_id    = excluded.category_id,
@@ -605,6 +640,7 @@ export class StoreRepository {
              vip_days       = excluded.vip_days,
              vehicle_prefab = excluded.vehicle_prefab,
              vehicle_fuel   = excluded.vehicle_fuel,
+             pass_period    = excluded.pass_period,
              name           = excluded.name,
              price          = excluded.price,
              position       = excluded.position,
@@ -625,6 +661,7 @@ export class StoreRepository {
           vipDays: input.vip?.days ?? null,
           vehiclePrefab: input.vehicle?.prefab ?? null,
           vehicleFuel: input.vehicle?.fuel ?? 0,
+          passPeriod: input.pass?.period ?? null,
           name: input.name,
           price: input.price,
           position: input.position,

@@ -42,11 +42,14 @@ import {
   parseStoreScreenId,
   STORE_SCREEN_ID,
 } from '../src/game/ui-store-screens.js';
+import { storeOfferBody } from '../src/http/routes/store.js';
 import { createLogger } from '../src/logger.js';
 import type { OpsRcon } from '../src/ops/service.js';
 import {
   DEFAULT_VEHICLE_FUEL,
   StoreService,
+  daysLeftInPeriod,
+  planFromJson,
   type StoreCatalogEntry,
 } from '../src/store/service.js';
 import { LocalWallet, type Wallet, type WalletChange } from '../src/store/wallet.js';
@@ -107,6 +110,27 @@ interface Harness {
   readonly service: StoreService;
   readonly server: FakeServer;
   readonly granted: { tier: string; expiresAt: number | null }[];
+  readonly pass: FakePass;
+}
+
+/**
+ * O concessor do passe, em cinco linhas.
+ *
+ * `owned` é o índice único parcial do banco visto de fora: uma chave
+ * por `(servidor, jogador, mês)`. `period` é o relógio da virada — o
+ * teste o move para provar que o mês da ENTREGA não é o mês da
+ * compra.
+ */
+interface FakePass {
+  readonly granted: {
+    serverId: string;
+    steamId: string;
+    period: string;
+    sourceRef: string | null;
+  }[];
+  readonly owned: Set<string>;
+  /** O mês corrente, como o agente o vê AGORA. */
+  period: string;
 }
 
 /**
@@ -115,7 +139,14 @@ interface Harness {
  * `wallet` é injetável para o teste do estorno que falha: é a única
  * forma de exercitar `failed` sem quebrar o banco de propósito.
  */
-function setup(options: { readonly wallet?: Wallet; readonly balance?: number } = {}): Harness {
+function setup(
+  options: {
+    readonly wallet?: Wallet;
+    readonly balance?: number;
+    /** `false` = agente sem o concessor do passe ligado. */
+    readonly pass?: boolean;
+  } = {},
+): Harness {
   const db = openDatabase({ file: MEMORY_DATABASE });
 
   runMigrations(db);
@@ -140,6 +171,7 @@ function setup(options: { readonly wallet?: Wallet; readonly balance?: number } 
 
   const server: FakeServer = { commands: [], connected: true, acceptsGive: true, hasSpace: true };
   const granted: Harness['granted'] = [];
+  const pass: FakePass = { granted: [], owned: new Set<string>(), period: '2026-09' };
 
   const service = new StoreService({
     repository,
@@ -152,6 +184,26 @@ function setup(options: { readonly wallet?: Wallet; readonly balance?: number } 
         return Promise.resolve(undefined);
       },
     },
+    ...(options.pass === false
+      ? {}
+      : {
+          pass: {
+            periodNow: () => pass.period,
+            hasPass: (serverId, steamId, period) =>
+              pass.owned.has(`${serverId}|${steamId}|${period}`),
+            grant: (input) => {
+              pass.granted.push({
+                serverId: input.serverId,
+                steamId: input.steamId,
+                period: input.period,
+                sourceRef: input.sourceRef,
+              });
+              // O `grant` de verdade é idempotente por mês: o índice
+              // único parcial recusa o segundo direito vivo.
+              pass.owned.add(`${input.serverId}|${input.steamId}|${input.period}`);
+            },
+          },
+        }),
     logger: silent,
     now: () => NOW,
     // Determinístico: sem isto, duas compras do mesmo milissegundo
@@ -163,7 +215,7 @@ function setup(options: { readonly wallet?: Wallet; readonly balance?: number } 
     })(),
   });
 
-  return { db, repository, wallets, service, server, granted };
+  return { db, repository, wallets, service, server, granted, pass };
 }
 
 function offer(over: Partial<StoreOfferInput> = {}): StoreOfferInput {
@@ -181,6 +233,7 @@ function offer(over: Partial<StoreOfferInput> = {}): StoreOfferInput {
     perks: [],
     vip: null,
     vehicle: null,
+    pass: null,
     ...over,
   };
 }
@@ -429,6 +482,288 @@ describe('as ofertas que não são item', () => {
 });
 
 // ============================================================
+//  O PASSE DE BATALHA
+//
+//  O formato 'pass' não entrega item nenhum: ele concede um DIREITO,
+//  e o direito é de um MÊS e de um SERVIDOR. Daí as três coisas que
+//  este bloco guarda, e que nenhum outro formato da loja precisa:
+//
+//    1. comprar o mesmo mês duas vezes é recusado ANTES do débito —
+//       o VIP não sofre disso porque compra nova SOMA prazo;
+//    2. o mês vem do PLANO CONGELADO, e não do relógio da entrega;
+//    3. um plano gravado ANTES desta frente continua legível — sem
+//       isso, toda compra em voo no deploy vira conferência humana.
+// ============================================================
+
+/** Uma oferta de passe, com o mês resolvido na compra. */
+function passOffer(over: Partial<StoreOfferInput> = {}): Partial<StoreOfferInput> {
+  return {
+    kind: 'pass',
+    name: 'Passe de Batalha',
+    price: 500,
+    items: [],
+    // `null` é o caso normal: quem resolve o mês é a compra.
+    pass: { period: null },
+    ...over,
+  };
+}
+
+describe('a compra do passe', () => {
+  it('concede o direito do mês corrente e termina em "delivered"', async () => {
+    const harness = setup({ balance: 1000 });
+    const id = seed(harness, passOffer());
+
+    const outcome = await harness.service.buy({
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 1,
+    });
+
+    expect(outcome.status).toBe('ok');
+    expect(harness.wallets.getBalance(STEAM_ID)).toBe(500);
+    expect(harness.pass.granted).toEqual([
+      { serverId: SERVER, steamId: STEAM_ID, period: '2026-09', sourceRef: 'p1' },
+    ]);
+    expect(harness.repository.listPurchases({ steamId: STEAM_ID })[0]?.state).toBe('delivered');
+
+    // Nada de `origemz.give`: o passe é uma linha de tabela, e não
+    // uma coisa na mochila.
+    expect(harness.server.commands.some((line) => line.startsWith('origemz.give '))).toBe(false);
+  });
+
+  it('comprar o mesmo mês duas vezes é recusado SEM tocar em dinheiro', async () => {
+    const harness = setup({ balance: 10_000 });
+    const id = seed(harness, passOffer());
+
+    // Ele já comprou hoje de manhã.
+    harness.pass.owned.add(`${SERVER}|${STEAM_ID}|2026-09`);
+
+    const outcome = await harness.service.buy({
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 1,
+    });
+
+    expect(outcome.status).toBe('pass-owned');
+
+    if (outcome.status === 'pass-owned') {
+      expect(outcome.period).toBe('2026-09');
+    }
+
+    // ####  O QUE ESTE TESTE REALMENTE GUARDA  ####
+    //
+    // Saldo intacto, NENHUMA linha de compra e nenhum estorno. Se a
+    // recusa morasse no `deliverPlan`, os três seriam diferentes:
+    // débito, exceção, estorno — e um extrato com uma cobrança e uma
+    // devolução para quem só clicou no botão errado.
+    expect(harness.wallets.getBalance(STEAM_ID)).toBe(10_000);
+    expect(harness.repository.listPurchases({ steamId: STEAM_ID })).toHaveLength(0);
+    expect(harness.pass.granted).toHaveLength(0);
+  });
+
+  it('ter o passe no pvp1 não impede comprá-lo no pvp2', async () => {
+    const harness = setup({ balance: 10_000 });
+    const id = seed(harness, passOffer());
+
+    harness.pass.owned.add(`${SERVER}|${STEAM_ID}|2026-09`);
+
+    // São duas trilhas, e o XP de uma não conta na outra — então o
+    // direito também é de um servidor só. É o comportamento
+    // pretendido, e não um furo na recusa.
+    const outcome = await harness.service.buy({
+      serverId: 'pvp2',
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 1,
+    });
+
+    expect(outcome.status).toBe('ok');
+    expect(harness.pass.granted).toEqual([
+      { serverId: 'pvp2', steamId: STEAM_ID, period: '2026-09', sourceRef: 'p1' },
+    ]);
+  });
+
+  it('quantidade não multiplica o passe: um mês não vem em dobro', async () => {
+    const harness = setup({ balance: 10_000 });
+    const id = seed(harness, passOffer());
+
+    // A vitrine não oferece o seletor, mas a rota HTTP aceita até
+    // 1000. Sem o teto aqui seriam TRÊS PREÇOS e UM direito: o
+    // `grant` é idempotente por mês.
+    await harness.service.buy({
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 3,
+    });
+
+    expect(harness.wallets.getBalance(STEAM_ID)).toBe(9500);
+    expect(harness.pass.granted).toHaveLength(1);
+  });
+
+  it('num agente sem o concessor, a oferta é recusada antes do débito', async () => {
+    const harness = setup({ balance: 10_000, pass: false });
+    const id = seed(harness, passOffer());
+
+    const outcome = await harness.service.buy({
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 1,
+    });
+
+    // Diferente do VIP de propósito: sem o concessor não há de quem
+    // perguntar de que mês é a compra, e um plano sem mês é uma
+    // promessa que a entrega não sabe cumprir. Cobrar para estornar
+    // em seguida seria susto no extrato por configuração faltando.
+    expect(outcome.status).toBe('pass-unavailable');
+    expect(harness.wallets.getBalance(STEAM_ID)).toBe(10_000);
+    expect(harness.repository.listPurchases({ steamId: STEAM_ID })).toHaveLength(0);
+  });
+
+  it('o direito é o ÚLTIMO passo: entrega que falha não concede passe', async () => {
+    // ####  A PERGUNTA EM ABERTO DO 04 §9 NÃO CHEGA A EXISTIR  ####
+    //
+    // "Estorno de um passe já resgatado" só seria possível se algum
+    // passo da entrega pudesse falhar DEPOIS do `grant`. Não pode: o
+    // passe é o último. Aqui o item extra falha, o valor volta
+    // inteiro e nenhum direito nasceu.
+    const harness = setup({ balance: 10_000 });
+
+    const id = seed(
+      harness,
+      passOffer({ items: [{ shortname: 'wood', itemId: 1, skinId: '0', amount: 100 }] }),
+    );
+
+    harness.server.acceptsGive = false;
+
+    const outcome = await harness.service.buy({
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 1,
+    });
+
+    expect(outcome.status).toBe('delivery-failed');
+    expect(harness.pass.granted).toHaveLength(0);
+    expect(harness.wallets.getBalance(STEAM_ID)).toBe(10_000);
+  });
+
+  it('a oferta com mês FIXO manda no mês corrente', async () => {
+    const harness = setup({ balance: 10_000 });
+    const id = seed(harness, passOffer({ pass: { period: '2026-12' } }));
+
+    await harness.service.buy({ serverId: SERVER, steamId: STEAM_ID, offerId: id, quantity: 1 });
+
+    expect(harness.pass.granted[0]?.period).toBe('2026-12');
+  });
+});
+
+// ============================================================
+//  O MÊS VEM DO PLANO CONGELADO
+// ============================================================
+
+describe('o mês do passe', () => {
+  it('é o da COMPRA, mesmo que a entrega aconteça no mês seguinte', async () => {
+    // ####  A ARMADILHA QUE SÓ APARECE QUANDO O SITE CAI  ####
+    //
+    // Débito `unknown` deixa a compra aberta, e quem a fecha é o
+    // reconciliador — com teto de 6 horas. Se essas horas
+    // atravessarem a meia-noite do dia 1, um passe pago em setembro
+    // seria ativado como outubro.
+    const unknownWallet: Wallet = {
+      source: 'remote',
+      getBalance: (steamId) => Promise.resolve({ steamId, balance: 10_000, source: 'remote' }),
+      debit: (): Promise<WalletChange> =>
+        Promise.resolve({ status: 'unknown', reason: 'timeout', cause: 'network' }),
+      credit: (): Promise<WalletChange> =>
+        Promise.resolve({ status: 'ok', balance: 10_000, transactionId: null, replayed: false }),
+    };
+
+    const harness = setup({ wallet: unknownWallet });
+    const id = seed(harness, passOffer());
+
+    const outcome = await harness.service.buy({
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      offerId: id,
+      quantity: 1,
+    });
+
+    expect(outcome.status).toBe('charge-unknown');
+    expect(harness.pass.granted).toHaveLength(0);
+
+    const purchase = harness.repository.listPurchases({ steamId: STEAM_ID })[0];
+
+    expect(purchase?.state).toBe('charge-unknown');
+
+    // O mês ficou GRAVADO na linha, e não numa variável de quem
+    // comprou.
+    const plan = planFromJson(purchase?.delivery ?? null);
+
+    expect(plan?.pass).toEqual({ period: '2026-09' });
+
+    // ---- horas depois, e já é outubro ----
+    harness.pass.period = '2026-10';
+
+    if (plan === null) {
+      throw new Error('o plano tinha de estar legível');
+    }
+
+    // É o que o settle faz com a prova na mão: entrega o PLANO, e
+    // não a oferta de hoje.
+    await harness.service.deliverPlan(SERVER, STEAM_ID, plan, purchase?.reference ?? null);
+
+    expect(harness.pass.granted).toEqual([
+      {
+        serverId: SERVER,
+        steamId: STEAM_ID,
+        period: '2026-09',
+        sourceRef: purchase?.reference ?? null,
+      },
+    ]);
+  });
+
+  it('planFromJson aceita um plano gravado ANTES desta frente', () => {
+    // ####  SEM O `.default(null)`, ISTO SERIA `null`  ####
+    //
+    // E `null` não é "entregue o que der": é "não sei o que
+    // prometi", que vira `PLAN_MISSING` e conferência humana. Toda
+    // compra em voo no momento do deploy tem um plano com esta
+    // forma — sem o padrão, o deploy vira uma fila de suporte.
+    const gravadoAntes = JSON.stringify({
+      items: [{ shortname: 'wood', itemId: 1, amount: 100, skinId: '0' }],
+      vehicle: null,
+      vip: null,
+      units: 2,
+    });
+
+    expect(planFromJson(gravadoAntes)).toEqual({
+      items: [{ shortname: 'wood', itemId: 1, amount: 100, skinId: '0' }],
+      vehicle: null,
+      vip: null,
+      pass: null,
+      units: 2,
+    });
+  });
+
+  it('daysLeftInPeriod conta o dia de hoje, e zera num mês vencido', () => {
+    // Comprar no dia 30 é comprar UM dia, e é isso que a tela
+    // precisa dizer antes de cobrar.
+    const dia30 = Date.UTC(2026, 8, 30, 12, 0, 0);
+
+    expect(daysLeftInPeriod('2026-09', dia30, 'UTC')).toBe(1);
+    expect(daysLeftInPeriod('2026-09', Date.UTC(2026, 8, 1, 12, 0, 0), 'UTC')).toBe(30);
+    // Mês futuro: ele ainda vem inteiro.
+    expect(daysLeftInPeriod('2026-10', dia30, 'UTC')).toBe(31);
+    // Mês vencido: uma oferta de mês fixo que ficou ligada.
+    expect(daysLeftInPeriod('2026-08', dia30, 'UTC')).toBe(0);
+  });
+});
+
+// ============================================================
 //  A CARTEIRA
 // ============================================================
 
@@ -458,6 +793,55 @@ describe('a carteira local', () => {
 
     expect(harness.wallets.getBalance('76561198000000009')).toBe(0);
     expect(harness.wallets.listEntries('76561198000000009')).toHaveLength(0);
+  });
+});
+
+// ============================================================
+//  A RÉGUA DA OFERTA
+//
+//  O `storeOfferBody` é UM só, e o canal de config do site o importa
+//  (site/appliers/store.ts). Então o que este bloco prova vale nos
+//  dois caminhos de uma vez — o painel e o snapshot do site.
+// ============================================================
+
+describe('o cadastro de uma oferta de passe', () => {
+  const base = {
+    categoryId: 'cat',
+    name: 'Passe de Batalha',
+    price: 500,
+    icon: { shortname: 'box.wooden', itemId: 1 },
+  };
+
+  it('sem dizer o mês é o cadastro NORMAL — quem resolve é a compra', () => {
+    const parsed = storeOfferBody.parse({ ...base, kind: 'pass' });
+
+    // `null`, e não o mês de hoje: congelar o mês na OFERTA daria
+    // uma oferta que vence sozinha na virada.
+    expect(parsed.pass).toBeNull();
+  });
+
+  it('com mês, ele passa pela mesma régua da temporada', () => {
+    expect(storeOfferBody.parse({ ...base, kind: 'pass', pass: { period: '2026-10' } }).pass)
+      .toEqual({ period: '2026-10' });
+
+    // Mês 13 não existe, e o banco só protege a FORMA.
+    expect(() =>
+      storeOfferBody.parse({ ...base, kind: 'pass', pass: { period: '2026-13' } }),
+    ).toThrow();
+  });
+
+  it('mês num formato que não é passe é RECUSADO', () => {
+    // Ele não viria do painel, mas vem do canal do site, que aplica
+    // a loja por este mesmo schema. Gravado, seria um campo que
+    // ninguém lê: a oferta cobraria e não daria passe nenhum.
+    expect(() =>
+      storeOfferBody.parse({
+        ...base,
+        kind: 'bundle',
+        items: [{ shortname: 'wood', itemId: 1, amount: 1 }],
+        pass: { period: '2026-10' },
+      }),
+    ).toThrow(/passe de batalha/i);
   });
 });
 
@@ -815,6 +1199,119 @@ describe('o modal', () => {
         screenId: itemScreenId('of0', 3),
       });
     }
+  });
+});
+
+describe('o modal do passe', () => {
+  /** Um catálogo com uma oferta de passe só. */
+  function passCatalog(): readonly StoreCatalogEntry[] {
+    const harness = setup();
+
+    harness.repository.saveCategory('cat', { name: 'Passe', position: 0, enabled: true }, NOW);
+    harness.repository.saveOffer('of0', offer(passOffer()), NOW);
+
+    return harness.service.catalog();
+  }
+
+  const view = {
+    period: '2026-09',
+    serverName: 'OrigemZ PVP #1',
+    daysLeft: 3,
+    owned: false,
+    level: 17,
+    retroactive: true,
+    seasonReady: true,
+  };
+
+  it('diz o mês, o servidor, os dias que restam e o que o retroativo dá', () => {
+    // ####  CADA LINHA AQUI EVITA UMA RECLAMAÇÃO PREVISÍVEL  ####
+    //
+    // Sem o mês, quem compra no dia 1 e quem compra no dia 30 leem a
+    // mesma frase. Sem o servidor, quem joga em dois compra no
+    // errado. Sem os dias, descobre depois de pagar que comprou três
+    // dias. E sem o retroativo, o principal argumento de venda do
+    // passe comprado tarde simplesmente não é dito.
+    const texts = textsOf(
+      buildStoreScreen({
+        catalog: passCatalog(),
+        target: { kind: 'item', offerId: 'of0', quantity: 1, tab: 'geral' },
+        balance: 10_000,
+        pass: view,
+      }),
+    );
+
+    // As linhas da lista saem com o marcador na frente ("-  "), como
+    // as vantagens de um VIP: o que se confere é o texto dentro.
+    const corpo = texts.join(' | ');
+
+    expect(texts).toContain('Passe de setembro de 2026');
+    expect(corpo).toContain('Vale só no servidor OrigemZ PVP #1');
+    expect(corpo).toContain('Faltam 3 dias para o mês acabar');
+    // O número é DAQUELE jogador: um genérico não vende nada.
+    expect(corpo).toContain('Resgate na hora os 17 níveis que você já alcançou');
+    // E o título da lista não promete um pacote de coisas.
+    expect(texts).toContain('O PASSE DESTE MÊS');
+  });
+
+  it('quem já tem NÃO vê o botão de comprar', () => {
+    const screen = buildStoreScreen({
+      catalog: passCatalog(),
+      target: { kind: 'item', offerId: 'of0', quantity: 1, tab: 'geral' },
+      balance: 10_000,
+      pass: { ...view, owned: true },
+    });
+
+    // A compra recusaria isto antes de cobrar; o botão só levaria a
+    // um aviso.
+    expect(collect(screen.elements).some((element) => element.id === 'buy')).toBe(false);
+    expect(textsOf(screen).join(' | ')).toContain('Você já tem o passe deste mês');
+
+    // ####  E O MOTIVO NO LUGAR DO BOTÃO É O CERTO  ####
+    //
+    // "SALDO INSUFICIENTE" ali faria quem tem 10.000 OZ achar que
+    // está sem dinheiro — a mesma armadilha do `store-unavailable`.
+    expect(textsOf(screen)).toContain('VOCÊ JÁ TEM');
+    expect(textsOf(screen)).not.toContain('SALDO INSUFICIENTE');
+  });
+
+  it('com o retroativo desligado, a tela conta', () => {
+    const texts = textsOf(
+      buildStoreScreen({
+        catalog: passCatalog(),
+        target: { kind: 'item', offerId: 'of0', quantity: 1, tab: 'geral' },
+        balance: 10_000,
+        pass: { ...view, retroactive: false },
+      }),
+    );
+
+    // É uma chave do admin, e desligada ela muda o que a compra
+    // entrega: quem não souber vai achar que perdeu os níveis.
+    expect(texts.join(' | ')).toContain('A faixa paga vale do próximo nível em diante');
+    expect(texts.join(' | ')).not.toContain('Resgate na hora os 17 níveis');
+  });
+
+  it('sem saber do passe, o modal ainda abre — e o botão continua lá', () => {
+    // `null` = não deu para perguntar. Recusar sem certeza seria
+    // pior: a compra confere de novo antes de cobrar.
+    const screen = buildStoreScreen({
+      catalog: passCatalog(),
+      target: { kind: 'item', offerId: 'of0', quantity: 1, tab: 'geral' },
+      balance: 10_000,
+    });
+
+    expect(collect(screen.elements).some((element) => element.id === 'buy')).toBe(true);
+  });
+
+  it('não tem seletor de quantidade', () => {
+    // "2x Passe de setembro" é ambíguo e não existe: o mês é um só.
+    const screen = buildStoreScreen({
+      catalog: passCatalog(),
+      target: { kind: 'item', offerId: 'of0', quantity: 1, tab: 'geral' },
+      balance: 10_000,
+      pass: view,
+    });
+
+    expect(textsOf(screen)).not.toContain('QUANTIDADE');
   });
 });
 

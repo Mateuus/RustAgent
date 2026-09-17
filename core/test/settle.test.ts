@@ -214,6 +214,7 @@ function offer(): StoreOfferInput {
     items: [{ shortname: 'metal.refined', itemId: 69_511_070, skinId: '0', amount: 100 }],
     vip: null,
     vehicle: null,
+    pass: null,
     badge: null,
     oldPrice: null,
     perks: [],

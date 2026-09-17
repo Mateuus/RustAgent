@@ -84,6 +84,7 @@ const KIND_LABEL: Record<StoreOffer['kind'], string> = {
   bundle: 'kit',
   vip: 'VIP',
   vehicle: 'veículo',
+  pass: 'passe',
 };
 
 /**
@@ -428,6 +429,12 @@ function Loja() {
                         {offer.kind === 'vip' &&
                           offer.vip !== null &&
                           ` · ${offer.vip.days === null ? 'vitalício' : `${String(offer.vip.days)} dias`}`}
+                        {/* Sem mês = o mês corrente, que é o caso
+                            normal. Dizer "mês corrente" na etiqueta
+                            evita que a ausência pareça um cadastro
+                            pela metade. */}
+                        {offer.kind === 'pass' &&
+                          ` · ${offer.pass?.period ?? 'mês corrente'}`}
                       </p>
 
                       <p className="flex items-baseline gap-2">
