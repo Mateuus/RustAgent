@@ -240,6 +240,14 @@ namespace Oxide.Plugins
             /// </summary>
             [JsonProperty("GridScroll")]
             public bool GridScroll = true;
+
+            /// <summary>
+            /// A lateral rola quando a categoria aberta não cabe, em vez de
+            /// paginar os itens. O ScrollView foi medido no jogo em
+            /// 17/09/2026 (a grade); `origemz.skins.scroll 0` desliga os dois.
+            /// </summary>
+            [JsonProperty("SideScroll")]
+            public bool SideScroll = true;
         }
 
         private PluginConfig _config;
@@ -1845,9 +1853,8 @@ namespace Oxide.Plugins
             text.Append("/skins ou /skin — abre o menu de skins (com o item da mão já escolhido).\n");
             text.Append("/skin <nome> — abre o menu pesquisando esse nome.\n");
             text.Append("No menu: escolha a categoria, o item e a skin; embaixo, em qual dos seus " +
-                        "itens aplicar. Aplicar não gasta a skin, e durabilidade, munição e conteúdo " +
-                        "continuam iguais.\n");
-            text.Append("Skins com cadeado estão à venda no site.");
+                        "itens aplicar.\n");
+            text.Append("Skins podem ser obtidas em eventos e no nosso site.");
 
             if (IsAdmin(player))
             {
@@ -2848,6 +2855,8 @@ namespace Oxide.Plugins
         private class SideView
         {
             public string Token = "";
+            /// <summary>A lateral rola (config `SideScroll`) em vez de paginar a categoria aberta.</summary>
+            public bool Scroll;
             public bool AllActive;
             public int AllCount;
             public readonly List<SideCategory> Categories = new List<SideCategory>();
@@ -3025,6 +3034,9 @@ namespace Oxide.Plugins
         private const float SideGap = 2f;
         private const float SidePager = 24f;
 
+        /// <summary>Quantos itens a categoria aberta mostra de uma vez quando a lateral rola.</summary>
+        private const int SideScrollMaxItems = 60;
+
         /// <summary>
         /// Quantos itens cabem na categoria aberta sem ScrollView (a medição
         /// 0.1 não foi feita): o que sobra da altura depois das linhas de
@@ -3073,7 +3085,11 @@ namespace Oxide.Plugins
                 shownItems.Add(items);
             }
 
-            int perPage = SideItemsPerPage(shown.Count);
+            view.Scroll = _config.SideScroll;
+
+            // Rolando, a categoria aberta vem inteira (com um teto, para a
+            // região não crescer sem limite).
+            int perPage = view.Scroll ? SideScrollMaxItems : SideItemsPerPage(shown.Count);
 
             for (int c = 0; c < shown.Count; c++)
             {
@@ -3472,7 +3488,7 @@ namespace Oxide.Plugins
 
             if ((regions & Region.Window) != 0) first.Add(BuildWindow(session.Token));
             if ((regions & Region.Head) != 0) first.Add(BuildHead(ComputeHead(frame, session)));
-            if ((regions & Region.Side) != 0) first.Add(BuildSide(ComputeSide(frame, session)));
+            if ((regions & Region.Side) != 0) first.AddRange(BuildSide(ComputeSide(frame, session)));
             if ((regions & Region.Detail) != 0) first.Add(BuildDetail(ComputeDetail(frame, session)));
             if ((regions & Region.Grid) != 0) second.AddRange(BuildGrid(ComputeGrid(frame, session)));
             if ((regions & Region.Targets) != 0) second.Add(BuildTargets(ComputeTargets(frame, session)));
@@ -3872,7 +3888,7 @@ namespace Oxide.Plugins
             // O rodapé.
             Panel(canvas, win, 0, WinHeight - FooterHeight, WinWidth, FooterHeight, ColSurface);
             Label(canvas, win, 16, WinHeight - FooterHeight, WinWidth - 32, FooterHeight,
-                  "Aplicar não gasta a skin · Durabilidade, munição e conteúdo continuam iguais",
+                  "Skins podem ser obtidas em eventos e no nosso site",
                   11, ColMuted, TextAnchor.MiddleLeft, false);
 
             return canvas.Json();
@@ -3908,22 +3924,41 @@ namespace Oxide.Plugins
 
         // ---- a lateral ---------------------------------------------
 
-        private static string BuildSide(SideView view)
+        private static List<string> BuildSide(SideView view)
         {
             Canvas canvas = new Canvas("OZSk.S");
             Box side = RegionRoot(canvas, UiSide, 0, HeaderHeight, SideWidth, BodyHeight, ColTransparent);
 
+            // A altura do que vai ser desenhado, para saber se precisa rolar.
+            float needed = 8f + SideRow + SideGap;
+            foreach (SideCategory category in view.Categories)
+            {
+                needed += SideRow + SideGap;
+                if (!category.Open) continue;
+                needed += category.Items.Count * (SideRow + SideGap);
+                if (category.Pages > 1) needed += SidePager + 4f;
+            }
+            needed += 8f;
+
+            Box area = side;
             float x = 8f;
             float w = SideWidth - 16f;
+
+            if (view.Scroll && needed > BodyHeight)
+            {
+                area = ScrollArea(canvas, side, 0, 0, SideWidth, BodyHeight, needed, true);
+                w = SideWidth - 8f - ScrollGutter;
+            }
+
             float y = 8f;
 
-            SideHeader(canvas, side, x, y, w, "TODAS", view.AllCount, view.AllActive,
+            SideHeader(canvas, area, x, y, w, "TODAS", view.AllCount, view.AllActive,
                        MenuCategoryCommand + " " + view.Token + " all");
             y += SideRow + SideGap;
 
             foreach (SideCategory category in view.Categories)
             {
-                SideHeader(canvas, side, x, y, w, (category.Open ? "–  " : "+  ") + category.Label,
+                SideHeader(canvas, area, x, y, w, (category.Open ? "–  " : "+  ") + category.Label,
                            category.Count, category.Open, MenuCategoryCommand + " " + view.Token + " " + category.Key);
                 y += SideRow + SideGap;
 
@@ -3931,19 +3966,71 @@ namespace Oxide.Plugins
 
                 foreach (SideItem item in category.Items)
                 {
-                    SideItemRow(canvas, side, x, y, w, item, view.Token);
+                    SideItemRow(canvas, area, x, y, w, item, view.Token);
                     y += SideRow + SideGap;
                 }
 
                 if (category.Pages > 1)
                 {
-                    Pager(canvas, side, x + 12, y, w - 12, SidePager, category.Page, category.Pages,
+                    Pager(canvas, area, x + 12, y, w - 12, SidePager, category.Page, category.Pages,
                           MenuCategoryCommand + " " + view.Token + " " + category.Key, 36, "‹", "›", null, null);
                     y += SidePager + 4f;
                 }
             }
 
-            return canvas.Json();
+            return canvas.Parts();
+        }
+
+        /// <summary>
+        /// Uma área que ROLA na vertical, dentro de `parent`, e devolve a caixa
+        /// do CONTEÚDO (altura inteira), onde os filhos se posicionam.
+        ///
+        /// ####  A RECEITA MEDIDA NO JOGO EM 17/09/2026  ####
+        ///
+        /// `CuiScrollViewComponent` do Oxide 2.0.7716 com o conteúdo ancorado
+        /// no topo e crescendo para baixo, em fração da área visível (âncora
+        /// mínima negativa), para tudo continuar relativo. A barra ocupa a
+        /// borda direita da área: quem desenha dentro deixa `ScrollGutter`
+        /// livre. O projeto anterior derrubou o cliente com ScrollView; esta
+        /// receita não derrubou (ver core/src/types/ui-document.ts).
+        /// </summary>
+        private static Box ScrollArea(Canvas canvas, Box parent, float x, float y, float w, float h,
+                                      float contentHeight, bool autoHide)
+        {
+            float height = Math.Max(h, contentHeight);
+            string name = canvas.NextName();
+
+            CuiElement scroll = new CuiElement { Name = name, Parent = parent.Name };
+            scroll.Components.Add(new CuiScrollViewComponent
+            {
+                Vertical = true,
+                Horizontal = false,
+                MovementType = UnityEngine.UI.ScrollRect.MovementType.Clamped,
+                Elasticity = 0.25f,
+                Inertia = true,
+                DecelerationRate = 0.3f,
+                ScrollSensitivity = 24f,
+                ContentTransform = new CuiRectTransform
+                {
+                    AnchorMin = "0 " + F(1f - height / h),
+                    AnchorMax = "1 1",
+                    OffsetMin = "0 0",
+                    OffsetMax = "0 0",
+                },
+                VerticalScrollbar = new CuiScrollbar
+                {
+                    Size = 6f,
+                    AutoHide = autoHide,
+                    HandleColor = ColRust,
+                    HighlightColor = ColText,
+                    PressedColor = ColText,
+                    TrackColor = ColSurface,
+                },
+            });
+            scroll.Components.Add(Rect(parent, x, y, w, h));
+            canvas.Ui.Add(scroll);
+
+            return new Box(name, w, height);
         }
 
         private static void SideHeader(Canvas canvas, Box parent, float x, float y, float w, string text, int count,
@@ -4023,41 +4110,11 @@ namespace Oxide.Plugins
                 int rows = (view.Cells.Count + GridColumns - 1) / GridColumns;
                 float contentHeight = Math.Max(viewportHeight,
                                                rows * CellHeight + Math.Max(0, rows - 1) * CellGap + 4f);
-                float bottomAnchor = 1f - contentHeight / viewportHeight;
 
-                string scrollName = canvas.NextName();
-                CuiElement scroll = new CuiElement { Name = scrollName, Parent = UiGrid };
-                scroll.Components.Add(new CuiScrollViewComponent
-                {
-                    Vertical = true,
-                    Horizontal = false,
-                    MovementType = UnityEngine.UI.ScrollRect.MovementType.Clamped,
-                    Elasticity = 0.25f,
-                    Inertia = true,
-                    DecelerationRate = 0.3f,
-                    ScrollSensitivity = 24f,
-                    ContentTransform = new CuiRectTransform
-                    {
-                        AnchorMin = "0 " + F(bottomAnchor),
-                        AnchorMax = "1 1",
-                        OffsetMin = "0 0",
-                        OffsetMax = "0 0",
-                    },
-                    VerticalScrollbar = new CuiScrollbar
-                    {
-                        Size = 6f,
-                        AutoHide = false,
-                        HandleColor = ColRust,
-                        HighlightColor = ColText,
-                        PressedColor = ColText,
-                        TrackColor = ColSurface,
-                    },
-                });
-                scroll.Components.Add(Rect(grid, GridPad, GridPad, viewportWidth, viewportHeight));
-                canvas.Ui.Add(scroll);
+                Box content = ScrollArea(canvas, grid, GridPad, GridPad, viewportWidth, viewportHeight,
+                                         contentHeight, false);
 
                 // Os filhos se posicionam no CONTEÚDO, que tem a altura inteira.
-                Box content = new Box(scrollName, viewportWidth, contentHeight);
                 float left = Math.Max(0f, (viewportWidth - ScrollGutter - CellsWidth) / 2f);
 
                 for (int i = 0; i < view.Cells.Count; i++)
@@ -4411,11 +4468,13 @@ namespace Oxide.Plugins
             if (arg.HasArgs(1))
             {
                 _config.GridScroll = arg.GetString(0) == "1" || arg.GetString(0).ToLowerInvariant() == "true";
+                _config.SideScroll = _config.GridScroll;
                 SaveConfig();
-                RedrawAllMenus(Region.Grid);
+                RedrawAllMenus(Region.Grid | Region.Side);
             }
 
-            arg.ReplyWith("{\"ok\":true,\"gridScroll\":" + (_config.GridScroll ? "true" : "false") + "}");
+            arg.ReplyWith("{\"ok\":true,\"gridScroll\":" + (_config.GridScroll ? "true" : "false") +
+                          ",\"sideScroll\":" + (_config.SideScroll ? "true" : "false") + "}");
         }
 
         [ConsoleCommand(BytesCommand)]
@@ -4539,7 +4598,7 @@ namespace Oxide.Plugins
 
             string window = BuildWindow(token);
             string headJson = BuildHead(head);
-            string sideJson = BuildSide(side);
+            string sideJson = Pack(BuildSide(side), int.MaxValue)[0];
             string gridJson = Pack(BuildGrid(grid), int.MaxValue)[0];
             string detailJson = BuildDetail(detail);
             string targetsJson = BuildTargets(targets);
