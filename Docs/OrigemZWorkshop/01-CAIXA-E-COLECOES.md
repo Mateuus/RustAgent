@@ -1,5 +1,16 @@
 # OrigemZWorkshop — caixa, coleções e acessos
 
+> **Em reformulação, 17/09/2026.** O dono decidiu:
+> - a skin passa a ser **posse do jogador** (vendida e sorteada pelo site);
+> - o **menu de skins** substitui a caixa;
+> - as **coleções**, a **permissão por skin** e o **acesso por grupo** saem.
+>
+> O desenho novo está em [02-SKINS-DO-JOGADOR.md](02-SKINS-DO-JOGADOR.md) (o 02 §2 lista o que
+> deste documento fica e o que sai), [03-MENU-DE-SKINS.md](03-MENU-DE-SKINS.md),
+> [04-ENTREGA-PELO-SITE.md](04-ENTREGA-PELO-SITE.md) e
+> [05-PLANO-E-FRENTES.md](05-PLANO-E-FRENTES.md). Até essas frentes entrarem na `main`, este
+> documento descreve o que **está rodando**.
+
 **Substitui o §6 do [00-LEVANTAMENTO.md](00-LEVANTAMENTO.md).** Na manhã de 16/09/2026 a
 decisão era "o item já nasce com a skin". Na noite do mesmo dia o dono a revogou:
 
