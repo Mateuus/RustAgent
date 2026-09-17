@@ -170,6 +170,8 @@ import { SiteClient } from './site/client.js';
 import { SiteBeacon } from './site/beacon.js';
 import { PurchaseSettler } from './store/settle.js';
 import { SiteDeliveries } from './site/deliveries.js';
+import { createSkinDeliveryHandlers } from './site/skin-deliveries.js';
+import { SkinsSiteMirror } from './site/skins-mirror.js';
 import { SiteCommands } from './site/commands.js';
 import { SiteConfig } from './site/config.js';
 import {
@@ -1321,6 +1323,42 @@ async function main(): Promise<void> {
   // pareamentos.
   const siteDeliveriesRepository = new SiteDeliveriesRepository(db);
 
+  // O catalogo de skins do Steam Workshop. Global, como os itens
+  // custom: uma skin vale na rede toda, e a juncao diz em que
+  // servidores ela desce. Ver db/workshop-repository.ts.
+  const workshopSkins = new WorkshopSkinsRepository(db);
+  // Quem possui cada skin (a posse vale na rede inteira), e o
+  // registro de tudo que mudou no modulo. Ver
+  // db/workshop-owned-repository.ts.
+  const workshopOwned = new WorkshopOwnedRepository(db);
+  // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
+  const workshopLookup = createWorkshopLookup();
+  // As regras do cadastro e da posse, as MESMAS para o painel, para
+  // o /skin add e /skin give do jogo e para a entrega do site. O
+  // reenvio da carga e avisado ao servico e ao espelho do site, que
+  // nascem mais abaixo -- dai o `?.`.
+  //
+  // Mora ANTES das filas de entrega porque a entrega `skin` passa
+  // por ele.
+  let skinsSiteMirror: SkinsSiteMirror | null = null;
+  const workshopCatalog = new WorkshopCatalog({
+    skins: workshopSkins,
+    owned: workshopOwned,
+    items: itemsRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    lookup: workshopLookup,
+    onChange: () => {
+      workshopService?.handleCatalogChanged();
+      skinsSiteMirror?.notifyChanged();
+    },
+    // A posse de UM jogador mudou: so a dele desce, e so onde ele
+    // estiver online.
+    onOwnershipChange: (steamId) => workshopService?.handleOwnershipChanged(steamId),
+  });
+  // A skin vendida ou sorteada no site vira posse pela MESMA porta do
+  // painel. Ver site/skin-deliveries.ts.
+  const skinDeliveries = createSkinDeliveryHandlers({ catalog: workshopCatalog, audit: workshopOwned });
+
   for (const [id, client] of siteClients) {
     if (!siteWallets.has(id)) {
       // Sem token não há como puxar fila: a rota é autenticada.
@@ -1351,6 +1389,10 @@ async function main(): Promise<void> {
                 // o site (estorno, chargeback, ban ou o prazo dele).
                 await vips.revoke(steamId, tier, 'site');
               },
+        // A posse de skin: nao passa pelo `deliverPlan` nem espera o
+        // jogador (Docs/OrigemZWorkshop/04 §3).
+        grantSkin: skinDeliveries.grantSkin,
+        revokeSkin: skinDeliveries.revokeSkin,
         logger,
         pollMs: agent.site.deliveryPollMs,
       }),
@@ -1438,6 +1480,27 @@ async function main(): Promise<void> {
 
   itemsSiteMirror?.start();
 
+  // ####  O CATALOGO DE SKINS, PARA A VITRINE DO SITE  ####
+  //
+  // O retrato e da REDE, e vai pelo mesmo snapshot em todos os
+  // pareamentos com token; cada um pergunta a `version` antes. O
+  // `servers` de cada skin viaja com o id NO SITE. Enquanto o site
+  // nao tiver a rota, o 404 fica quieto. Ver site/skins-mirror.ts e
+  // Docs/OrigemZWorkshop/04 §2.
+  skinsSiteMirror =
+    siteWallets.size === 0
+      ? null
+      : new SkinsSiteMirror({
+          clients: new Map([...siteClients].filter(([id]) => siteWallets.has(id))),
+          skins: workshopSkins,
+          items: itemsRepository,
+          siteServerIdOf: (localServerId) =>
+            servers.find((server) => server.id === localServerId)?.site?.serverId ?? null,
+          logger,
+        });
+
+  skinsSiteMirror?.start();
+
   // O que a tela de diagnóstico lê. Um mapa por servidor PAREADO:
   // "a loja parou" quase sempre é um servidor só, e uma resposta
   // agregada esconderia qual.
@@ -1476,31 +1539,6 @@ async function main(): Promise<void> {
   // O modo streamer. Da REDE, e não de um servidor: quem transmite
   // é a pessoa. Ver types/streamer.ts.
   const streamerRepository = new StreamerRepository(db);
-  // O catalogo de skins do Steam Workshop. Global, como os itens
-  // custom: uma skin vale na rede toda, e a juncao diz em que
-  // servidores ela desce. Ver db/workshop-repository.ts.
-  const workshopSkins = new WorkshopSkinsRepository(db);
-  // Quem possui cada skin (a posse vale na rede inteira), e o
-  // registro de tudo que mudou no modulo. Ver
-  // db/workshop-owned-repository.ts.
-  const workshopOwned = new WorkshopOwnedRepository(db);
-  // A conferencia do Workshop ID na Steam. Ver game/steam-workshop.ts.
-  const workshopLookup = createWorkshopLookup();
-  // As regras do cadastro e da posse, as MESMAS para o painel, para
-  // o /skin add e /skin give do jogo e para a entrega do site. O
-  // reenvio da carga e avisado ao servico, que nasce mais abaixo --
-  // dai o `?.`.
-  const workshopCatalog = new WorkshopCatalog({
-    skins: workshopSkins,
-    owned: workshopOwned,
-    items: itemsRepository,
-    serverIds: () => repository.list().map((server) => server.id),
-    lookup: workshopLookup,
-    onChange: () => workshopService?.handleCatalogChanged(),
-    // A posse de UM jogador mudou: so a dele desce, e so onde ele
-    // estiver online.
-    onOwnershipChange: (steamId) => workshopService?.handleOwnershipChanged(steamId),
-  });
 
   /**
    * Quem pediu silêncio no chat enquanto transmite.
@@ -4310,6 +4348,7 @@ async function main(): Promise<void> {
 
         catalogMirror?.stop();
         vipSiteMirror?.stop();
+        skinsSiteMirror?.stop();
         await app.close();
         // Os contextos depois do HTTP: fechar o RCON com uma
         // requisição em voo faria a rota estourar em vez de
