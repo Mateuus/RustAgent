@@ -58,17 +58,22 @@ merge, **na ordem A → C → E → D → F**. No fim, um PR só da `skins-do-jo
 cada item. **Nada de código de produção.** Os plugins descartáveis ficam fora do repositório,
 ou são apagados no fim (memória: *sondar a API do jogo ao vivo*).
 
-| # | O quê | Como |
-|---|---|---|
-| 0.1 | ScrollView não derruba o jogador | plugin descartável, só o admin conectado, `CuiScrollViewComponent` completo (03 §8.1) |
-| 0.2 | o botão na camada `Inventory` aparece só com o inventário e o clique funciona | 03 §4.1 |
-| 0.3 | troca de skin no lugar: roupa vestida vista **por outro jogador**, mochila vestida, arma na mão | 02 §6.3; se `MarkDirty` não bastar, testar `player.SendNetworkUpdate()` |
-| 0.4 | um `AddUI` de ~40 KB direto pelo plugin | 03 §6 |
-| 0.5 | o sprite do cadeado | 03 §3.3 |
-| 0.6 | a janela em 16:9 e 21:9 | 03 §8.6 |
+| # | O quê | Como | Situação |
+|---|---|---|---|
+| 0.1 | ScrollView não derruba o jogador | plugin descartável, só o admin conectado, `CuiScrollViewComponent` completo (03 §8.1) | **MEDIDO 17/09/2026: funciona** — rolou 90 células; a receita e as duas armadilhas estão no 03 §8.1 |
+| 0.2 | o botão na camada `Inventory` aparece só com o inventário e o clique funciona | 03 §4.1 | **MEDIDO 17/09/2026: funciona** — ligado por config, ao lado do MISSÕES (03 §8.2) |
+| 0.3 | troca de skin no lugar: roupa vestida vista **por outro jogador**, mochila vestida, arma na mão | 02 §6.3; se `MarkDirty` não bastar, testar `player.SendNetworkUpdate()` | **PENDENTE** — só a arma na mão foi vista, e pelo próprio dono; faltou o segundo jogador (03 §8.3) |
+| 0.4 | um `AddUI` de ~40 KB direto pelo plugin | 03 §6 | **MEDIDO 17/09/2026: funciona** — a abertura sai em três envios de ~30, 32 e 8 KB (03 §8.4) |
+| 0.5 | o sprite do cadeado | 03 §3.3 | **ENCERRADO 17/09/2026: não há sprite** — cadeado com painéis, e os ícones são PNG nossos no FileStorage (03 §8.5) |
+| 0.6 | a janela em 16:9 e 21:9 | 03 §8.6 | **16:9 certo; 21:9 PENDENTE** (03 §8.6) |
 
 Para o 0.3 com "outro jogador", basta um segundo cliente ou um bot que o dono consiga olhar.
-**Se não houver segundo jogador, registre isso**; não deduza.
+**Se não houver segundo jogador, registre isso**; não deduza. **Foi o que aconteceu em
+17/09/2026:** o dono estava sozinho, então o 0.3 continua aberto.
+
+**A fase 0 não fechou.** Sobraram o 0.3 e o 21:9 do 0.6, os dois de olhar a tela: o 0.3 pede um
+segundo jogador, e o 21:9 pede um monitor ultrawide. Nada do código depende deles — o 03 §8 diz,
+item por item, o que está de pé.
 
 ---
 

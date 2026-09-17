@@ -28,6 +28,19 @@ Os motivos:
 **O preço:** o visual não sai de graça do `ui-widgets.ts`. O plugin copia os **tokens**
 (§2) e as medidas da moldura. Isso é aceitável porque a tela é uma só.
 
+> **Confirmado no jogo em 17/09/2026, com o dono no server01 (v0.4.0).** A abertura sai em
+> **três** `AddUI` (cerca de 30, 32 e 8 KB — §8.4), ou seja: pelo caminho do agente, com o
+> teto de 50.000 num frame, ela não caberia inteira. A coluna da direita da tabela é o que
+> está de pé.
+>
+> **Os ícones da tela também são nossos.** Nenhum sprite do jogo se confirmou (os bundles do
+> servidor são compactados, e um caminho errado desenha um quadrado branco), então os cinco
+> ícones do cabeçalho e a estrela das favoritas são PNG de 64×64 nossos, guardados em
+> `Assets/menu-icons/` e embutidos em base64 no plugin. No boot eles vão para o `FileStorage`
+> e o CUI os pede pelo CRC (memória: *o FileStorage indexa por conteúdo*). O CUI os tinge,
+> então eles são brancos sobre transparente. Sem CRC (FileStorage ainda vazio), cada um cai
+> para uma letra.
+
 **Como o menu principal chega aqui:** uma aba **SKINS** no `ui-preset-main-menu.ts` com ação
 `chat` → `/skins`. O menu principal fecha e este abre. Custa cerca de 970 bytes na carga
 inicial (memória: *onde estão os bytes do menu*); confira que a carga continua abaixo de
@@ -171,15 +184,33 @@ são categorias de tela do jogo, não de item, e não aparecem aqui.
 Para a célula **Padrão**, omita o `SkinId`; não mande 0.
 
 **Ícone esmaecido:** o `CuiImageComponent` aceita `Color`. Use um tom com alpha (por exemplo
-`1 1 1 0.35`) e ponha o cadeado por cima. O cadeado sai de um sprite do jogo (por exemplo
-`assets/icons/lock.png`). **A MEDIR:** o caminho exato do sprite.
+`1 1 1 0.35`) e ponha o cadeado por cima.
 
 > **Decidido na v0.3.0 (frente D, 17/09/2026): o cadeado é desenhado com três painéis** (arco,
 > vão do arco e corpo). O `lock.png` não se confirma daqui: as DLLs do server01 citam só
 > `assets/icons/close.png`, `device_add.png`, `embrella.png`, `explosion_sprite.png`,
 > `facepunch.png` e `fun.png`, e os sprites moram nos bundles do cliente. Um sprite que não
-> existe desenha um quadrado branco. Trocar pelos painéis por um sprite continua sendo a
-> medição 0.5.
+> existe desenha um quadrado branco.
+>
+> **MEDIDO em 17/09/2026, com o dono no jogo: a medição 0.5 está encerrada, e o resultado é
+> "não há sprite".** Os painéis ficam. O que a tela precisava de figura — os ícones do
+> cabeçalho e a estrela — virou PNG nosso no `FileStorage` (§1).
+
+> **Mudou na v0.4.0 (17/09/2026): a grade ROLA.** Medido no jogo, com o dono: a barra vertical
+> aparece à direita e a grade rola sem derrubar o cliente (§8.1). O que isso muda aqui:
+>
+> - as **4 colunas** continuam, e as 3 linhas deixaram de ser o teto: a área rolável leva até
+>   **48 células** por página (`ScrollPageSize`). Acima disso o paginador `‹ ANTERIOR 1 / 2
+>   PRÓXIMA ›` volta a aparecer embaixo, porque cada célula custa ~2,3 KB e uma grade sem teto
+>   num `AddUI` não foi medida;
+> - a janela passou de 1200 para **1240 px** de largura: a barra cobria a quarta coluna;
+> - quem desenha dentro da área deixa `ScrollGutter` (16 px) livre à direita, e `ScrollInset`
+>   (2 px) em cima e embaixo — sem ele, a borda de seleção da primeira linha era recortada;
+> - `origemz.skins.scroll 0` desliga a grade rolável (e a lateral) na hora, sem recarregar o
+>   plugin, se algum cliente reclamar.
+>
+> A **célula da favorita** leva a estrela âmbar no canto de cima à esquerda, com a dica *"Favorita:
+> ela aparece em FAVORITOS, no topo da lateral"*.
 
 ### 3.4 Pesquisa
 
@@ -227,6 +258,14 @@ navegador. Se faltar `storeUrl`, mostre só *"Disponível na loja do site"*.
 **Por que não uma grade com o inventário inteiro**, como no protótipo: ela não ajuda a escolher
 e custa caro. 37 casas com ícone são ~110 elementos, uns 43 KB pela régua da memória *quanto
 custa um elemento do CUI*. A lista filtrada pelo item faz o mesmo trabalho com 4 linhas.
+
+> **Mudou na v0.4.0 (17/09/2026): a lista ROLA.** O ScrollView foi medido no jogo (§8.1) e a
+> mesma receita vale aqui. A área continua do tamanho de **4 linhas** — é o espaço que existe
+> embaixo do detalhe —, e o que passa disso se alcança rolando, até **40 alvos**
+> (`TargetsScrollMax`) de uma vez. O paginador só aparece quando a rolagem está desligada
+> (`origemz.skins.scroll 0`), e aí valem as 4 linhas por página desta seção. A barra
+> auto-esconde: com 4 alvos ou menos, não há barra na tela. As medidas de folga são as do
+> §3.3 (`ScrollGutter` e `ScrollInset`).
 
 ---
 
@@ -316,6 +355,17 @@ lateral muda.
 - **O estado da tela mora no plugin**, por jogador: categoria, página da lateral, item, página
   da grade, skin, alvo, filtro e pesquisa. Os comandos só mudam esse estado e pedem o redesenho.
 
+**Acrescentados na v0.4.0 (17/09/2026):**
+
+| Comando | Argumentos | Por quê |
+|---|---|---|
+| `origemz.skins.fav` | `token idDaSkin` | marca e desmarca a favorita (a nota abaixo) |
+| `origemz.skins.sort` | `token 0\|1` | a ordem da grade: `0` é a do catálogo, `1` é por raridade (Lendária primeiro). É o par de ícones do cabeçalho, ao lado do "só as minhas" |
+| `origemz.skins.scroll` | `0\|1` (opcional) | liga e desliga a grade **e** a lateral roláveis na hora, grava na config e redesenha quem estiver com o menu aberto. Sem argumento, só responde o estado. **Não tem token:** é servidor, RCON ou admin, e é a saída se o ScrollView der problema em algum cliente |
+
+O `sort` e o `mine` viraram **só ícone** no cabeçalho, com a dica no mouse (pedido do dono em
+17/09/2026): os dois alternadores escritos ocupavam a faixa inteira.
+
 > **Mudou na v0.4.0: `origemz.skins.fav` (17/09/2026).** Os argumentos são os mesmos
 > (`token idDaSkin`), mas a favorita deixou de ser do plugin: ela é **do agente**, e vale na
 > **rede** (02 §4.5). O comando agora:
@@ -359,7 +409,9 @@ depois `AddUI`. Abrir desenha as cinco.
 
 **Cuidado com a abertura:** ~63 KB num `AddUI` só é mais do que o frame que o projeto já mediu
 como seguro para o transporte do agente (50.000). Aqui o caminho é outro (o RPC do servidor
-direto para o cliente, sem RCON), mas **não foi medido**. Por isso, **abra em dois `AddUI`**:
+direto para o cliente, sem RCON). **Ele foi medido no jogo em 17/09/2026 e aguenta: a abertura
+sai em três envios de ~30, 32 e 8 KB** (§8.4). O teto curto abaixo continua valendo por decisão,
+e não por desconhecimento. Por isso, **abra em dois `AddUI`**:
 janela, lateral e detalhe num; grade e "Aplicar em" no outro, no mesmo frame. Cada um fica
 abaixo de 40 KB. O teste do plano (05) mede os bytes de cada região com um helper que
 serializa o `CuiElementContainer`.
@@ -466,28 +518,93 @@ banco foi criada.
 
 ---
 
-## 8. A MEDIR na fase 0 (com um cliente de verdade)
+## 8. A fase 0 — o que foi medido no jogo, e o que falta
 
-1. **ScrollView.** O `Oxide.Rust.dll` 2.0.7716 do server01 traz `CuiScrollViewComponent`
-   (`"UnityEngine.UI.ScrollView"`, com `contentTransform`, `vertical`, `movementType`,
-   `verticalScrollbar`, etc.), `CuiScrollbar` e `CuiMaskComponent`. MEDIDO por decompilação em
-   17/09/2026.
-   - **Mas o projeto anterior derrubou o jogador** com `RPC Error in AddUI` ao emiti-lo
-     (`core/src/types/ui-document.ts:23-36`), sem saber o que o cliente exigia junto.
-   - O teste: plugin descartável, **só com o admin conectado**, emitindo o componente como o
-     `CuiScrollViewComponent` do Oxide serializa. Isso inclui `contentTransform` completo e uma
-     barra.
-   - **Se passar:** a lateral e o "Aplicar em" podem rolar em vez de paginar. A grade continua
-     paginada, porque foi pedida assim e é a região mais cara.
-   - **Se falhar:** registre o JSON exato e o erro no comentário do `ui-document.ts`. Tudo
-     continua paginado, e este documento já funciona assim.
-2. **O botão na camada `Inventory`** (§4.1).
-3. **Os três visuais do 02 §6.3:** roupa vestida, mochila vestida e arma na mão.
-4. **`AddUI` de ~40 KB** direto pelo plugin (§6).
-5. **O sprite do cadeado** (§3.3).
-6. **A posição da tela** em 16:9 e em 21:9. Âncoras relativas bastam? A janela deve ter
-   `AnchorMin`/`AnchorMax` com margem, não tamanho fixo.
+**Medido em 17/09/2026, com o dono conectado no server01, contra o `OrigemZWorkshop` 0.4.0.**
+Quatro dos seis itens estão fechados; **dois continuam abertos** (3 e 6), e nenhum código
+depende deles.
+
+| # | O quê | Situação |
+|---|---|---|
+| 1 | ScrollView | **FUNCIONA** (17/09/2026) |
+| 2 | botão na camada `Inventory` | **FUNCIONA** (17/09/2026) |
+| 3 | roupa e mochila vestidas vistas por OUTRO jogador | **PENDENTE** |
+| 4 | `AddUI` grande direto pelo plugin | **FUNCIONA** (17/09/2026) |
+| 5 | o sprite do cadeado | **ENCERRADO: não há sprite** (17/09/2026) |
+| 6 | a janela em 21:9 | **PENDENTE** |
+
+### 8.1 ScrollView — funciona
+
+A grade rolou **90 células** com a barra vertical à direita, e o cliente **não caiu**. O
+`RPC Error in AddUI` do projeto anterior (`core/src/types/ui-document.ts:23-36`) não voltou, e
+o que mudou foi a receita, não o cliente: ela está no `ScrollArea` do `Plugins/OrigemZWorkshop.cs`
+e é o que deve ser copiado em qualquer outra tela.
+
+- `CuiScrollViewComponent` do Oxide 2.0.7716, com o `contentTransform` **completo**: o conteúdo
+  ancorado no topo e crescendo para baixo por **âncora mínima negativa** (uma fração da área
+  visível, para tudo continuar relativo), e `OffsetMin`/`OffsetMax` em `"0 0"`.
+- `verticalScrollbar` presente, **com as cores** (alça, destaque, pressionado e trilha). Foi
+  emitido junto desde a primeira tentativa; não se mediu se ele é obrigatório.
+- `MovementType = Clamped`, com inércia.
+
+**Duas armadilhas, as duas medidas na tela:**
+
+1. **A barra ocupa a borda direita da área**, por cima do que estiver ali. Ela cobria a quarta
+   coluna de células, e a janela teve de crescer de 1200 para 1240 px. Quem desenha dentro de
+   uma área rolável reserva `ScrollGutter` (16 px) à direita.
+2. **O conteúdo é recortado na borda**, e a borda de seleção (2 px) da primeira linha sumia. Daí
+   o `ScrollInset` (2 px) no topo e no pé do conteúdo.
+
+**Onde vale:** na **grade** (§3.3), na **lateral** (§3.2) e no **"Aplicar em"** (§3.6) — as três
+usam o mesmo `ScrollArea`. A grade guarda um teto de 48 células por página, e o "Aplicar em" de
+40 alvos, por causa dos bytes, e não do ScrollView. O `origemz.skins.scroll 0` desliga tudo na
+hora se algum outro cliente reclamar.
+
+### 8.2 O botão na camada `Inventory` — funciona
+
+O `OZSkins.InvBtn` aparece **só com o inventário aberto** — a camada `Inventory` é do cliente e
+some quando ele fecha —, e o **clique abre o menu** com o cursor do inventário. Ele sobrevive a
+abrir e fechar o inventário.
+
+Está ligado por config (`"InventoryButton"` em `oxide/config/OrigemZWorkshop.json`), e o lugar é
+**ao lado do botão MISSÕES do próprio jogo**, no alto à esquerda, da mesma altura — pedido do
+dono. As quatro âncoras ficam na config
+(`InventoryButtonAnchorMin`/`Max`, `InventoryButtonOffsetMin`/`Max`), para o encavalamento se
+resolver sem mexer no código.
+
+### 8.3 Roupa e mochila vestidas, vistas por outro jogador — PENDENTE
+
+Só a **arma na mão** foi vista, e pelo **próprio dono**. Falta o que o item 0.3 do
+[05](05-PLANO-E-FRENTES.md) §2 pede de verdade: a **roupa** e a **mochila vestidas** trocando de
+skin no lugar, **olhadas por um segundo jogador**. Sem um segundo cliente na hora, não se mediu —
+e não se deduz. Fica aberto.
+
+### 8.4 `AddUI` grande direto pelo plugin — funciona
+
+A abertura sai em **três envios**, de cerca de **30, 32 e 8 KB**, e a tela chega inteira. Quem
+divide é o `Pack`, com teto de 40.000 bytes por `AddUI` (`AddUiByteLimit`); a grade rolável, com
+mais células, é o que fez o segundo grupo estourar e virar dois. O caminho é o RPC do servidor
+direto para o cliente, sem RCON, e ele **não** tem o teto de 50.000 do transporte do agente.
+
+Quem mede é o `origemz.skins.bytes`: ele monta cada região no pior caso e responde o tamanho de
+cada uma e dos grupos da abertura, **com o mesmo código do `Redraw`** — por isso o número dele é
+o número que vai pela rede. A tabela do §6.1 é a leitura anterior, de antes da grade rolável.
+
+### 8.5 O sprite do cadeado — encerrado, e a resposta é "não há"
+
+Nenhum sprite do jogo foi confirmado: os bundles do servidor são compactados, e um caminho que
+não existe desenha um quadrado branco. O cadeado continua desenhado com **três painéis** (§3.3),
+e o resto do que a tela precisava de figura — os cinco ícones do cabeçalho e a estrela das
+favoritas — é **PNG nosso**, de `Assets/menu-icons/`, guardado no `FileStorage` no boot e pedido
+pelo CRC (§1).
+
+### 8.6 A janela em 21:9 — PENDENTE
+
+A janela é toda em âncoras relativas (`AnchorMin`/`AnchorMax` com margem, nunca tamanho fixo), e
+em **16:9** ela está certa na tela do dono. **21:9 não foi olhado.** Fica aberto.
+
+---
 
 A régua para conferir sem abrir o jogo continua sendo o console (memória: *como validar mudança
-de menu sem abrir o jogo*). Mas os itens 1 a 3 **só se confirmam olhando a tela**, e isso é
-com o dono.
+de menu sem abrir o jogo*). Mas o que falta (3 e 6) **só se confirma olhando a tela**, e isso é
+com o dono — o 3 precisa de um segundo jogador, e o 6, de um monitor ultrawide.
