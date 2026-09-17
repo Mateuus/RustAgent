@@ -7,7 +7,9 @@
 > propõe o **`oz-rust/8`**. O árbitro continua sendo `contracts/oz-rust-fixtures.json`: os
 > corpos abaixo só valem depois de entrarem lá.
 >
-> **Data:** 17/09/2026. **Estado:** proposta. Nada disto existe ainda em nenhum dos dois lados.
+> **Data:** 17/09/2026. **Estado:** o lado do **agente** está implementado (frente C, §7); o do
+> **site** não existe. Os corpos estão em `contracts/oz-rust-fixtures.json` com
+> `origin: "proposal"`, e o contrato continua `oz-rust/7` até o site aceitar.
 
 ---
 
@@ -73,12 +75,18 @@ versão e, se mudou, empurra o snapshot inteiro.
   viaja**: ele muda se a skin for recadastrada, e o par não muda. É o mesmo par que a Steam
   valida (01 §2) e o mesmo `UNIQUE` do banco.
 - **É o snapshot da rede**, não o de um servidor. O agente empurra por um pareamento qualquer;
-  o site guarda **um** espelho de skins da rede, e não um por servidor. **Confirmar com quem
-  mantém o site** como ele trata espelho global num canal pareado por servidor. Se não houver
-  como, o agente empurra o mesmo snapshot por **todos** os pareamentos e o site deduplica por
-  `version`.
+  o site guarda **um** espelho de skins da rede, e não um por servidor. **Decidido na frente C
+  (17/09/2026), sem o site para confirmar:** o agente empurra o mesmo snapshot por **todos** os
+  pareamentos com token, e cada um pergunta a `version` antes. Se o site guardar um espelho só,
+  o segundo pareamento vê a `version` batendo e não manda nada (custa um GET); se guardar um por
+  servidor, cada um recebe o seu. As duas formas funcionam sem mudar o agente.
+- **`servers` viaja com o id NO SITE** (o `X-Server-Id` de cada pareamento), e não com o id
+  local do `Configs<id>.ini`, que o site não conhece. Servidor sem pareamento sai da lista.
+- **`skins: []` é legítimo** (o admin apagou todas) e é mandado: o site tira tudo da vitrine.
 - **`category`** sai do espelho `items` do agente (migração 07), porque o banco de skins não
-  guarda a categoria (02 §4.1). Se o item não estiver no espelho, vai `misc`.
+  guarda a categoria (02 §4.1). O espelho guarda o nome do enum do jogo (`Weapon`); ele viaja em
+  minúsculas. Se o item não estiver no espelho, ou a categoria não estiver na lista acima
+  (`Component`, por exemplo), vai `misc`.
 - **`previewUrl`** é a URL que a Steam devolveu no cadastro (`workshop_skins.preview_url`). O
   site **não deve depender dela para sempre**: a Steam pode trocá-la. Se precisar de imagem
   estável, baixe e guarde do lado do site.
@@ -134,11 +142,22 @@ e `:591`).
 
 | Situação | ACK | `reason` |
 |---|---|---|
-| payload inválido | `failed` | `INVALID_PAYLOAD` |
+| payload inválido | `failed` | `PAYLOAD_INVALID` |
 | a skin não está no catálogo | `deferred` | `SKIN_NOT_IN_CATALOG` |
 | a skin está no catálogo, mas **desligada** | `delivered` | — a posse é gravada e passa a valer quando a skin for religada. O jogador pagou; desligar é decisão de operação, e não pode apagar a compra |
 | a skin está em nenhum servidor | `delivered` | — mesmo motivo |
 | erro de banco | não dá ACK | a reserva fica órfã e vira `AGENT_INDETERMINATE` (o caminho que já existe, Docs/31 §6.6) |
+
+**Grafia do `reason`:** esta tabela dizia `INVALID_PAYLOAD`. O agente manda `PAYLOAD_INVALID`,
+que é a grafia que a fila já usa para `item`, `kit`, `vip` e `vehicle` — um código só para o
+mesmo desfecho. O vocabulário do `reason` é do agente (`contracts/README.md`).
+
+Além da tabela, o agente produz mais dois desfechos:
+
+| Situação | ACK | `reason` |
+|---|---|---|
+| o SteamID não passa na régua da posse (`7656…`) | `failed` | `PAYLOAD_INVALID` |
+| o agente está sem o catálogo de skins ligado (só em teste) | `failed` | `SKIN_GRANTER_UNAVAILABLE` |
 
 `SKIN_NOT_IN_CATALOG` é `deferred`, e não `failed`, porque o caso típico é o admin ter apagado e
 recadastrado a skin. A tarefa volta na próxima volta e passa assim que o catálogo tiver o par de
@@ -159,7 +178,11 @@ novo. **O site deve mostrar essas tarefas para alguém**, porque não se resolve
 - Remove a linha de posse daquele jogador para aquela skin, **qualquer que seja a origem dela**.
   Existe uma linha só por par (02 §4.2). Grava `owned.revoke` na auditoria com o `sourceRef`.
 - **Sem posse para remover:** `delivered` mesmo assim. O estado desejado já vale. Assim o
-  `skin_revoke` pode ser reexecutado, como o `vip_revoke` (`deliveries.ts:548`).
+  `skin_revoke` pode ser reexecutado, como o `vip_revoke`: uma linha órfã dele **reexecuta**, em
+  vez de virar `AGENT_INDETERMINATE`.
+- **A skin fora do catálogo:** `delivered` também. A posse cai em cascata quando a skin é
+  apagada, então não há o que tirar.
+- Grava também `site.delivered` (com `kind: "skin_revoke"` e `removed`), como o `skin`.
 - **Não despinta o item** (02 §3).
 - Reenvia a posse do jogador se ele estiver online.
 
@@ -217,3 +240,44 @@ um terceiro espelho (a posse por jogador) e não é pedido agora.
 **Enquanto o site não tiver os itens 1 e 2 do §5,** o agente recebe 404 no espelho. Trate como
 "o site ainda não sabe disso": log em nível `debug` uma vez por boot, **sem** tentar de novo a
 cada 10 minutos com aviso. E nenhuma tarefa `skin` chega, o que não quebra nada.
+
+---
+
+## 7. Como ficou no agente (frente C, 17/09/2026)
+
+| Peça | Onde |
+|---|---|
+| `skinsMirrorVersion()` / `pushSkinsMirror()` | `core/src/site/client.ts` |
+| o espelho (`SkinsSiteMirror`, `buildSkinsMirror`) | `core/src/site/skins-mirror.ts` |
+| a tradução da tarefa para o `WorkshopCatalog`, e o `site.delivered` | `core/src/site/skin-deliveries.ts` |
+| `skin`/`skin_revoke` nos schemas, o ramo `#skin`, `SKIN_NOT_IN_CATALOG` no `DEFERRABLE` | `core/src/site/deliveries.ts` |
+| a ligação (e o bloco do Workshop subiu para antes das filas) | `core/src/index.ts` |
+| os corpos propostos | `contracts/oz-rust-fixtures.json` (`origin: "proposal"`) |
+| os testes | `core/test/site-skins.test.ts` |
+
+**Decisões que este documento não tomava:**
+
+- **O que se grava na posse:** `source: 'site'`, `sourceRef: <DLV-…>`, `createdBy:
+  'site:<sourceRef do site>'` (ou `site:<DLV>` quando o site não manda `sourceRef`), cortado em 120
+  caracteres. No `skin_revoke`, o `sourceRef` do `owned.revoke` é o do site (`refund:1234`).
+- **`days` é obrigatório.** Ausente é `PAYLOAD_INVALID`, e não "permanente": um campo esquecido
+  do lado de lá daria a skin para sempre. Permanente é `days: null`, explícito.
+- **`workshopId`** passa na mesma régua do cadastro: dígitos, sem zero à esquerda, até o teto de
+  UInt64. **`shortname`** também, e é normalizado para minúsculas.
+- **Erro de banco** (qualquer exceção que não seja uma recusa conhecida): sem ACK, a reserva fica
+  em `reserved`, e a volta seguinte manda `deferred`/`AGENT_INDETERMINATE`. Na `skin_revoke`, a
+  volta seguinte reexecuta.
+- **O 404 do espelho:** um `debug` por pareamento por boot. O pareamento fica quieto até a volta
+  seguinte do relógio (10 min), que **tenta de novo em silêncio**: assim o espelho começa a andar
+  sozinho no dia em que o site publicar a rota, sem reiniciar o agente. O aviso de mudança do
+  catálogo não acorda um pareamento que está quieto.
+- **Quando empurra:** no boot, 5 s depois da última mudança no catálogo (criar, editar, trocar
+  servidores, apagar) e a cada 10 minutos. Mudança só no espelho `items` (a categoria) espera a
+  volta dos 10 minutos.
+- **Teto:** acima de 3000 skins ou de 1 MiB o espelho **não é mandado** (aviso no log): o
+  snapshot não se fatia, e meio snapshot tiraria da vitrine o que ficasse de fora.
+
+**O que o site precisa saber, em uma lista:** as duas rotas do §2 (com `skins: []` aceito e
+`servers` em ids do site); os dois `kind` do §3; `reason` com a grafia `PAYLOAD_INVALID`; a trava
+de uma tarefa `skin` aberta por (jogador, skin, compra); e mostrar as `deferred` com
+`SKIN_NOT_IN_CATALOG`. A troca para `oz-rust/8` sobe nos dois lados no mesmo commit.

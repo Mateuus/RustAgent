@@ -45,7 +45,7 @@ export type SiteDeliveryState =
 /**
  * O que a tarefa da fila pede.
  *
- * `vip_revoke` é o único que NÃO entrega nada: ele TIRA. Ver o
+ * `vip_revoke` e `skin_revoke` NÃO entregam nada: eles TIRAM. Ver o
  * cabeçalho de `site/deliveries.ts` — a diferença muda o portão de
  * presença e muda o que fazer com uma linha órfã.
  */
@@ -56,8 +56,8 @@ export type SiteDeliveryKind =
   | 'vehicle'
   | 'vip_revoke'
   // A posse de skin da rede (Docs/OrigemZWorkshop/04 §3). O CHECK da
-  // tabela os aceita desde a migracao 097; o ramo que os executa e da
-  // entrega do site.
+  // tabela os aceita desde a migracao 097; quem os executa e o
+  // `#skin` de site/deliveries.ts.
   | 'skin'
   | 'skin_revoke';
 

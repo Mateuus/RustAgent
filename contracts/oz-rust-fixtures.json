@@ -12,7 +12,8 @@
   "legend": {
     "observed": "corpo COPIADO de uma resposta real do dev, na data acima",
     "manual": "corpo que o manual (Docs/20, Docs/22, Docs/23) descreve; NÃO verificado contra o site",
-    "agent": "o que o SiteClient deste repositório conclui daquela resposta; é o que core/test/site-fixtures.test.ts confere"
+    "agent": "o que o SiteClient deste repositório conclui daquela resposta; é o que core/test/site-fixtures.test.ts confere",
+    "proposal": "corpo PROPOSTO para um contrato futuro (o campo `proposal` diz qual); NÃO existe no site. Não sobe `contract` até o site aceitar"
   },
   "headers": {
     "authenticated": {
@@ -276,6 +277,70 @@
             "presenca": "NÃO se aplica: revogar não espera o jogador entrar (Docs/27 §2.4)",
             "alvo ausente": "revogar VIP que o jogador não tem ACKa `delivered`, SEM `reason` (Docs/27 §2.3)",
             "linha órfã": "reexecuta, em vez de virar AGENT_INDETERMINATE: tirar duas vezes não tira nada na segunda"
+          }
+        },
+        {
+          "case": "uma skin do Workshop — PROPOSTA oz-rust/8",
+          "origin": "proposal",
+          "proposal": "oz-rust/8",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "deliveries": [
+              {
+                "id": "DLV-5b9cf2b0731a",
+                "steamId": "76561198000000000",
+                "kind": "skin",
+                "payload": {
+                  "shortname": "rifle.ak",
+                  "workshopId": "3802433262",
+                  "days": null
+                },
+                "sourceRef": "order:1234",
+                "attempts": 0,
+                "createdAt": "2026-09-17T14:00:00.000Z",
+                "expiresAt": null
+              }
+            ],
+            "next": null
+          },
+          "reguas": {
+            "workshopId": "STRING de dígitos, sem zero à esquerda, até UInt64. `number` é PAYLOAD_INVALID",
+            "days": "OBRIGATÓRIO: null = permanente; senão inteiro 1..3650. Ausente é PAYLOAD_INVALID",
+            "presenca": "NÃO se aplica: a posse é da rede, não da mochila",
+            "repetir": "dar de novo SOMA o prazo; por isso a linha órfã vira AGENT_INDETERMINATE",
+            "fora do catalogo": "deferred SKIN_NOT_IN_CATALOG — não se resolve sozinho, alguém precisa ver",
+            "desligada ou sem servidor": "delivered: a posse é gravada e passa a valer quando a skin voltar"
+          }
+        },
+        {
+          "case": "uma revogação de skin — PROPOSTA oz-rust/8",
+          "origin": "proposal",
+          "proposal": "oz-rust/8",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "deliveries": [
+              {
+                "id": "DLV-7c2e4f6a8b10",
+                "steamId": "76561198000000000",
+                "kind": "skin_revoke",
+                "payload": {
+                  "shortname": "rifle.ak",
+                  "workshopId": "3802433262"
+                },
+                "sourceRef": "refund:1234",
+                "attempts": 0,
+                "createdAt": "2026-09-17T15:00:00.000Z",
+                "expiresAt": null
+              }
+            ],
+            "next": null
+          },
+          "reguas": {
+            "alvo ausente": "sem posse (ou skin fora do catálogo) ACKa `delivered`, SEM `reason`",
+            "linha órfã": "reexecuta, como o vip_revoke",
+            "parcial": "tira a posse INTEIRA; devolver só parte dos dias não existe ainda"
           }
         }
       ]
@@ -951,6 +1016,133 @@
               "ok": false,
               "status": 413,
               "code": "ITEMS_TOO_LARGE"
+            }
+          }
+        }
+      ]
+    },
+
+    "skins-mirror-version": {
+      "route": "proposta",
+      "proposal": "oz-rust/8",
+      "method": "GET",
+      "path": "/api/agent/skins/mirror/version",
+      "auth": "bearer",
+      "note": "PROPOSTA oz-rust/8 (Docs/OrigemZWorkshop/04). O site ainda NAO aceita: nada disto foi medido. A pergunta barata antes do push. `version: null` = nunca mandaram espelho. Enquanto a rota não existir, o 404 é esperado e o agente fica quieto (um debug por boot).",
+      "responses": [
+        {
+          "case": "em dia",
+          "origin": "proposal",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "version": "b3f1000000000000000000000000000000000000000000000000000000000000",
+            "updatedAt": "2026-09-17T18:00:01.000Z"
+          },
+          "agent": {
+            "call": "skinsMirrorVersion",
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "version": "b3f1000000000000000000000000000000000000000000000000000000000000"
+              }
+            }
+          }
+        },
+        {
+          "case": "nunca mandaram espelho",
+          "origin": "proposal",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "version": null,
+            "updatedAt": null
+          },
+          "agent": {
+            "call": "skinsMirrorVersion",
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "version": null
+              }
+            }
+          }
+        },
+        {
+          "case": "o site ainda não tem a rota",
+          "origin": "proposal",
+          "status": 404,
+          "body": {
+            "error": "Not found"
+          },
+          "agent": {
+            "call": "skinsMirrorVersion",
+            "expect": {
+              "ok": false,
+              "status": 404
+            }
+          }
+        }
+      ]
+    },
+
+    "skins-mirror": {
+      "route": "proposta",
+      "proposal": "oz-rust/8",
+      "method": "POST",
+      "path": "/api/agent/skins/mirror",
+      "auth": "bearer",
+      "note": "PROPOSTA oz-rust/8 (Docs/OrigemZWorkshop/04). O site ainda NAO aceita: nada disto foi medido. SNAPSHOT DA REDE, não de um servidor: o agente manda o mesmo corpo por todos os pareamentos, cada um perguntando a `version` antes; o site pode guardar um só e deduplicar por `version`. A chave da skin é (shortname, workshopId); o id interno do agente não viaja. `version` = sha256 hex do corpo canônico sem ela. `category` vem do espelho de itens (minúsculas; desconhecida = misc). `servers` são ids NO SITE (o X-Server-Id), não os locais. `skins: []` é legítimo (catálogo vazio). Teto: 1 MiB e 3000 skins.",
+      "request": {
+        "version": "b3f1000000000000000000000000000000000000000000000000000000000000",
+        "skins": [
+          {
+            "shortname": "rifle.ak",
+            "workshopId": "3802433262",
+            "label": "AK Brasa",
+            "description": null,
+            "rarity": "epic",
+            "category": "weapon",
+            "previewUrl": "https://steamuserimages-a.akamaihd.net/ugc/exemplo/",
+            "openToAll": false,
+            "enabled": true,
+            "servers": [
+              "RUST01",
+              "RUST02"
+            ]
+          }
+        ]
+      },
+      "responses": [
+        {
+          "case": "gravado",
+          "origin": "proposal",
+          "status": 200,
+          "body": {
+            "ok": true,
+            "accepted": true,
+            "version": "b3f1000000000000000000000000000000000000000000000000000000000000",
+            "count": 1,
+            "storedAt": "2026-09-17T18:00:01.000Z"
+          },
+          "agent": {
+            "call": "pushSkinsMirror",
+            "args": [
+              {
+                "version": "b3f1000000000000000000000000000000000000000000000000000000000000",
+                "skins": []
+              }
+            ],
+            "expect": {
+              "ok": true,
+              "status": 200,
+              "body": {
+                "accepted": true,
+                "version": "b3f1000000000000000000000000000000000000000000000000000000000000",
+                "count": 1
+              }
             }
           }
         }

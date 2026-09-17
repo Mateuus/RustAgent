@@ -39,6 +39,14 @@
 //  ele REEXECUTA depois de uma linha órfã, porque tirar duas vezes
 //  não tira nada na segunda (`#handle`, o bloco (a)).
 //
+//  ####  A SKIN TAMBÉM NÃO ESPERA NINGUÉM  ####
+//
+//  `skin` e `skin_revoke` são a posse de skin da rede
+//  (Docs/OrigemZWorkshop/04 §3): outra linha de tabela, que vale em
+//  todos os servidores. Pulam a presença pelo mesmo motivo do VIP.
+//  E `skin_revoke` reexecuta como o `vip_revoke`; `skin` NÃO, porque
+//  dar de novo SOMA o prazo.
+//
 //  ####  NADA AQUI LANÇA  ####
 //
 //  Roda num relógio. Um `throw` para a fila em silêncio.
@@ -52,8 +60,15 @@ import type { SiteDeliveriesRepository, SiteDeliveryKind } from '../db/site-deli
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import type { DeliveryPlan } from '../store/service.js';
+import { OWNED_MAX_DAYS, workshopShortnameSchema, workshopSkinIdSchema } from '../types/workshop.js';
 import { toError } from '../util.js';
 import type { DeliveryAck, SiteClient } from './client.js';
+import type {
+  SkinGrantOutcome,
+  SkinGrantRequest,
+  SkinRevokeOutcome,
+  SkinRevokeRequest,
+} from './skin-deliveries.js';
 
 /**
  * Quantas tarefas cabem numa página.
@@ -101,6 +116,11 @@ const DEFERRABLE = new Set([
   'RCON_UNAVAILABLE',
   // O veículo que não cabe onde ele está: ele sai da base e volta.
   'VEHICLE_NO_SPACE',
+  // A skin que o admin apagou e ainda não recadastrou (04 §3). Não
+  // melhora sozinha — alguém precisa recadastrar —, mas `failed`
+  // devolveria ao jogador uma compra que o agente vai honrar assim
+  // que o par voltar ao catálogo.
+  'SKIN_NOT_IN_CATALOG',
 ]);
 
 /**
@@ -182,6 +202,24 @@ const payloadSchemas = {
    * `#revokeVip`.
    */
   vip_revoke: z.object({ tier: z.string().trim().min(1).max(32) }),
+  /**
+   * A posse de uma skin do Workshop (Docs/OrigemZWorkshop/04 §3).
+   *
+   * `workshopId` é TEXTO pelo mesmo motivo do `skinId` do item: é
+   * UInt64. Número aqui é PAYLOAD_INVALID. `days` é obrigatório e
+   * `null` é permanente — ausente NÃO vira permanente, senão um
+   * campo esquecido do lado de lá daria a skin para sempre.
+   */
+  skin: z.object({
+    shortname: workshopShortnameSchema,
+    workshopId: workshopSkinIdSchema,
+    days: z.number().int().min(1).max(OWNED_MAX_DAYS).nullable(),
+  }),
+  /** Tirar a posse. Sem `days`: a linha sai inteira (04 §3). */
+  skin_revoke: z.object({
+    shortname: workshopShortnameSchema,
+    workshopId: workshopSkinIdSchema,
+  }),
   vehicle: z.object({
     /**
      * O nome curto (`minicopter`) OU o exato (`sedantest.entity`).
@@ -239,9 +277,8 @@ export interface DeliveryTask {
  * lugar de revogado.
  *
  * `skin` e `skin_revoke` também ficam de fora (Docs/OrigemZWorkshop/04
- * §3): a posse é um registro da rede, e não um item na mochila. O
- * `SiteDeliveryKind` os ganhou junto com o CHECK da migração 097; o
- * ramo que os executa é da frente C.
+ * §3): a posse é um registro da rede, e não um item na mochila. Quem
+ * os executa é `#skin`, e não o `deliver`.
  */
 export type DeliveredKind = Exclude<SiteDeliveryKind, 'vip_revoke' | 'skin' | 'skin_revoke'>;
 
@@ -255,6 +292,24 @@ export function revokeOfPayload(payload: unknown): { readonly tier: string } | n
   const parsed = payloadSchemas.vip_revoke.safeParse(payload);
 
   return parsed.success ? { tier: parsed.data.tier.toLowerCase() } : null;
+}
+
+/** O payload de uma tarefa de skin. `null` = não passou na régua. */
+export function skinOfPayload(
+  payload: unknown,
+): { readonly shortname: string; readonly workshopId: string; readonly days: number | null } | null {
+  const parsed = payloadSchemas.skin.safeParse(payload);
+
+  return parsed.success ? parsed.data : null;
+}
+
+/** O payload de uma revogação de skin. `null` = não passou na régua. */
+export function skinRevokeOfPayload(
+  payload: unknown,
+): { readonly shortname: string; readonly workshopId: string } | null {
+  const parsed = payloadSchemas.skin_revoke.safeParse(payload);
+
+  return parsed.success ? parsed.data : null;
 }
 
 /**
@@ -335,6 +390,22 @@ export interface SiteDeliveriesOptions {
    */
   readonly revokeVip?:
     | ((input: { readonly steamId: string; readonly tier: string }) => Promise<void>)
+    | undefined;
+  /**
+   * Quem dá e quem tira a posse de skin (`site/skin-deliveries.ts`).
+   *
+   * Ausente = o agente não tem o catálogo de skins ligado, e a tarefa
+   * falha com `SKIN_GRANTER_UNAVAILABLE`, no molde do VIP.
+   *
+   * Recusas esperadas saem como `ApiError` (`SKIN_NOT_IN_CATALOG`,
+   * `PAYLOAD_INVALID`); qualquer outra exceção é tratada como "pode
+   * ter gravado" e deixa a reserva órfã.
+   */
+  readonly grantSkin?:
+    | ((input: SkinGrantRequest) => SkinGrantOutcome | Promise<SkinGrantOutcome>)
+    | undefined;
+  readonly revokeSkin?:
+    | ((input: SkinRevokeRequest) => SkinRevokeOutcome | Promise<SkinRevokeOutcome>)
     | undefined;
   readonly logger: Logger;
   readonly pollMs?: number;
@@ -550,7 +621,9 @@ export class SiteDeliveries {
       // chega nele nos dois casos. Mandar esta para conferência
       // humana deixaria de pé, até alguém olhar, um VIP que o site
       // já estornou.
-      if (kind !== 'vip_revoke') {
+      // `skin_revoke` também reexecuta, pelo mesmo motivo. `skin` não:
+      // dar a mesma skin de novo SOMA o prazo.
+      if (kind !== 'vip_revoke' && kind !== 'skin_revoke') {
         if (known.state === 'reserved') {
           // O processo morreu entre a reserva e o desfecho: o comando
           // PODE ter saído. Reexecutar entregaria duas vezes.
@@ -566,12 +639,8 @@ export class SiteDeliveries {
       return await this.#revokeVip({ id, steamId, raw, reopen: known !== null, at });
     }
 
-    // `skin`/`skin_revoke` ainda não chegam aqui: sem schema em
-    // `payloadSchemas`, o portão lá em cima os recusa. Este desvio só
-    // existe para o tipo; o ramo de verdade é da frente C
-    // (Docs/OrigemZWorkshop/04 §3), que o substitui.
     if (kind === 'skin' || kind === 'skin_revoke') {
-      return { id, status: 'failed', reason: 'PAYLOAD_INVALID', at };
+      return await this.#skin({ id, steamId, kind, raw, reopen: known !== null, at });
     }
 
     const plan = planOfPayload(kind, raw.payload);
@@ -777,6 +846,138 @@ export class SiteDeliveries {
         sourceRef: raw.sourceRef ?? null,
       },
       'vip revoked by the site',
+    );
+
+    return { id, status: 'delivered', at };
+  }
+
+  /**
+   * Dar ou tirar a posse de uma skin (Docs/OrigemZWorkshop/04 §3).
+   *
+   * ####  NÃO PASSA PELO PORTÃO DE PRESENÇA  ####
+   *
+   * A posse é uma linha da rede, não um item na mochila. Quem está
+   * online recebe a posse nova pelo próprio catálogo (ele avisa o
+   * serviço do Workshop); quem está fora a recebe na conexão.
+   *
+   * ####  AS RECUSAS  ####
+   *
+   *   payload inválido               failed     PAYLOAD_INVALID
+   *   par fora do catálogo           deferred   SKIN_NOT_IN_CATALOG
+   *   skin desligada / sem servidor  delivered  (a posse é gravada)
+   *   revogar sem posse              delivered
+   *   erro de banco                  SEM ACK: a reserva fica órfã e vira
+   *                                  AGENT_INDETERMINATE na volta seguinte
+   */
+  async #skin(input: {
+    readonly id: string;
+    readonly steamId: string;
+    readonly kind: 'skin' | 'skin_revoke';
+    readonly raw: { readonly payload?: unknown; readonly sourceRef?: string | null };
+    /** A linha já existe: só acontece com `skin_revoke` (ver `#handle`). */
+    readonly reopen: boolean;
+    readonly at: string;
+  }): Promise<DeliveryAck | null> {
+    const { id, steamId, kind, raw, at } = input;
+    const grant = kind === 'skin' ? skinOfPayload(raw.payload) : null;
+    const wanted = grant ?? (kind === 'skin_revoke' ? skinRevokeOfPayload(raw.payload) : null);
+
+    if (wanted === null) {
+      return { id, status: 'failed', reason: 'PAYLOAD_INVALID', at };
+    }
+
+    const sourceRef = typeof raw.sourceRef === 'string' ? raw.sourceRef : null;
+
+    if (input.reopen) {
+      // Reabre a tentativa anterior; o `attempts` sobe.
+      this.#options.repository.finish(id, 'reserved', null, this.#now());
+    } else {
+      const reserved = this.#options.repository.reserve(
+        {
+          id,
+          serverId: this.#options.serverId,
+          steamId,
+          kind,
+          payload: JSON.stringify(raw.payload),
+          sourceRef,
+        },
+        this.#now(),
+      );
+
+      if (!reserved) {
+        return null;
+      }
+    }
+
+    const { grantSkin, revokeSkin } = this.#options;
+
+    if ((kind === 'skin' && grantSkin === undefined) || (kind === 'skin_revoke' && revokeSkin === undefined)) {
+      this.#options.repository.finish(id, 'failed', 'SKIN_GRANTER_UNAVAILABLE', this.#now());
+
+      return { id, status: 'failed', reason: 'SKIN_GRANTER_UNAVAILABLE', at };
+    }
+
+    const request: SkinRevokeRequest = {
+      deliveryId: id,
+      steamId,
+      shortname: wanted.shortname,
+      workshopId: wanted.workshopId,
+      sourceRef,
+      serverId: this.#options.serverId,
+    };
+
+    let outcome: SkinGrantOutcome | SkinRevokeOutcome | undefined;
+
+    try {
+      outcome =
+        grant !== null
+          ? await grantSkin?.({ ...request, days: grant.days })
+          : await revokeSkin?.(request);
+    } catch (error) {
+      if (!(error instanceof ApiError)) {
+        // Pode ter gravado: sem ACK, e a reserva continua de pé. A volta
+        // seguinte a lê como órfã (AGENT_INDETERMINATE) — a menos que
+        // seja uma revogação, que reexecuta sem risco.
+        this.#options.logger.error(
+          { deliveryId: id, steamId, serverId: this.#options.serverId, kind, err: toError(error) },
+          'a skin delivery from the site failed midway; leaving the reservation open',
+        );
+
+        return null;
+      }
+
+      const { status, reason } = ackOf(error);
+
+      if (status === 'deferred') {
+        this.#options.repository.release(id);
+      } else {
+        this.#options.repository.finish(id, status, reason, this.#now());
+      }
+
+      if (reason === 'SKIN_NOT_IN_CATALOG') {
+        // Não se resolve sozinho: alguém precisa recadastrar o par.
+        this.#options.logger.warn(
+          { deliveryId: id, steamId, kind, shortname: wanted.shortname, workshopId: wanted.workshopId },
+          'the site delivered a skin that is not in the catalog; deferring',
+        );
+      }
+
+      return { id, status, reason, at };
+    }
+
+    this.#options.repository.finish(id, 'delivered', null, this.#now());
+    this.#options.logger.info(
+      {
+        deliveryId: id,
+        steamId,
+        serverId: this.#options.serverId,
+        kind,
+        shortname: wanted.shortname,
+        workshopId: wanted.workshopId,
+        sourceRef,
+        ...outcome,
+      },
+      kind === 'skin' ? 'skin granted by the site' : 'skin revoked by the site',
     );
 
     return { id, status: 'delivered', at };
