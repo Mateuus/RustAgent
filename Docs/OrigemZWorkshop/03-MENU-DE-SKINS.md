@@ -267,6 +267,54 @@ custa um elemento do CUI*. A lista filtrada pelo item faz o mesmo trabalho com 4
 > auto-esconde: com 4 alvos ou menos, não há barra na tela. As medidas de folga são as do
 > §3.3 (`ScrollGutter` e `ScrollInset`).
 
+#### A variante de DLC/loja na lista (v0.5.0)
+
+A lista passa a incluir as **variantes de DLC/loja** do item — a Crystal Assault Rifle Diamond
+(`rifle.ak.glass`) aparece quando a skin escolhida é de `rifle.ak`. A regra e o porquê estão em
+**02 §6.4**; aqui é só o que a tela faz.
+
+- **O lugar ganha o sufixo " · variante"**: "Barra 3 · variante", "Inventário · variante". A
+  cor do lugar continua a mesma (o `WhereColor` olha o prefixo), e o rótulo passou de 160 para
+  200 px de largura para "Inventário · variante" caber sem cortar.
+- **O ícone continua o do item real** — a arte da variante, não a da base. O jogador precisa
+  reconhecer no menu a arma que está vendo no inventário.
+- **Uma variante nunca sai "aplicada"**, em nenhuma linha e em nenhuma célula da grade, nem com
+  o **Padrão** escolhido: o visual dela é a definição do item, não o campo `skin`. Por isso o
+  botão continua **APLICAR** (e não **JÁ APLICADA**) — é o caminho de volta para a arma
+  original.
+- **Sem pré-seleção de skin** quando o provável alvo é uma variante: a escolha fica no
+  **Padrão**, que é justamente a troca que ela precisa oferecer.
+- **Depois de aplicar numa variante** a faixa diz o que aconteceu com o item, porque a
+  definição dele mudou: *"Visual padrão aplicado: o item voltou a ser um(a) Assault Rifle."* ou
+  *"Skin aplicada: o item passou a ser um(a) Assault Rifle."*.
+- **Se a conversão não conseguir devolver o item ao lugar de antes**, a faixa recusa sem perder
+  nada: *"O item foi convertido, mas não voltou para o lugar de antes: confira o inventário e
+  aplique de novo."*
+
+#### Roteiro de teste ao vivo — a variante (v0.5.0)
+
+Nada disso dá para provar sem cliente: o menu é CUI e a conversão mexe em item de verdade. O
+roteiro abaixo é o que fecha os oito critérios de aceite de **02 §6.4**.
+
+Preparação: uma skin de `rifle.ak` **na posse** do jogador de teste (não vale admin — o
+privilégio está desligado, 02 §3), uma variante de AK (`rifle.ak.glass` ou outra das 9) e uma
+AK padrão no inventário ao mesmo tempo.
+
+| # | O que fazer | O que tem de acontecer | Critério |
+|---|---|---|---|
+| 1 | Com a variante no inventário, abrir o menu e escolher a skin de `rifle.ak` | a variante aparece no "Aplicar em", com " · variante" no lugar e o ícone da Crystal Diamond | 1 |
+| 2 | Escolher a linha da variante e a célula **Padrão** | o botão fica **APLICAR** (não "JÁ APLICADA"); aplicar devolve uma **Assault Rifle** comum | 2 |
+| 3 | Repetir com uma **skin** em vez do Padrão | a arma vira AK com a skin escolhida | 2 |
+| 4 | Antes de converter, deixar a arma com condição parcial, pente cheio de um tipo de munição escolhido e um acessório (mira/silenciador) | depois da troca: mesma condição, **mesmo tipo** e **mesma quantidade** de munição, acessório no lugar | 3 |
+| 5 | Fechar o menu, deslogar e reconectar | o item continua o convertido, com tudo do passo 4 | 4 |
+| 6 | Com a AK padrão **e** a variante no inventário, aplicar na variante | só a variante muda; a AK padrão fica intacta, na posição dela | 5 |
+| 7 | Repetir o 2 com a arma **na mão** | a mão não fica vazia nem com o modelo antigo; o jogador segue segurando a arma convertida | 3 |
+| 8 | Repetir o 2 com a variante **dentro de uma mochila vestida** | o item volta para a mochila, na mesma casa | 3 |
+| 9 | Repetir o 2 com uma variante **de outra categoria** (roupa, capacete) | o mesmo comportamento; a peça vestida continua vestida | 6 |
+| 10 | Tentar aplicar numa variante cuja base não aceita skin do Workshop | recusa clara, e o item **não** é convertido | 7 |
+| 11 | Tentar aplicar uma skin **bloqueada** (sem posse) numa variante | recusa "Você ainda não tem esta skin"; nada é convertido | 8 |
+| 12 | Com o `/streamer` ligado, aplicar numa variante uma skin com `hideInStreamer` | converte, o item fica com skin 0 e a faixa diz que a skin aparece ao desligar; desligar o modo veste a skin no item **novo** | 8 |
+
 ---
 
 ## 4. Como o menu abre
