@@ -18,6 +18,13 @@
 //  campo Nome fica em branco. É o mesmo que o `/skin add` do jogo
 //  faz, e é o que mantém os dois caminhos gravando a mesma linha.
 //
+//  ####  ELE MORA NUM MODAL  ####
+//
+//  Quem o abre é o `SkinsPanel`, dentro do `Dialog` do painel — é a
+//  caixa que dá o título, o X e o Escape. Por isso aqui não há
+//  moldura nem cabeçalho próprio, e o rodapé com Salvar fica preso
+//  embaixo enquanto o resto rola.
+//
 //  ####  ELE NÃO FALA COM A API  ####
 //
 //  Quem chama o agente é o painel-pai. A consulta à Steam chega aqui
@@ -233,19 +240,16 @@ export function SkinForm({
               : null;
 
   return (
-    <section className="space-y-4 border border-border bg-surface p-3">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h4 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+    <div className="space-y-4">
+      {skin !== undefined && (
+        <p className="flex flex-wrap items-center gap-2 text-2xs text-muted">
           {draft.shortname !== '' && <ItemIcon shortname={draft.shortname} size="sm" />}
-          {isNew ? 'Nova skin' : draft.label || skin.label}
-        </h4>
-        {skin !== undefined && (
-          <span className="text-2xs text-muted">
+          <span>
             {skin.source === 'game' ? 'cadastrada pelo jogo' : 'cadastrada pelo painel'}
             {skin.createdBy === null ? '' : ` · ${skin.createdBy}`}
           </span>
-        )}
-      </header>
+        </p>
+      )}
 
       {/* ---- Workshop ID + prévia ---- */}
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -394,7 +398,7 @@ export function SkinForm({
       <div className="space-y-3 border-t border-border pt-3">
         <ToggleRow
           title="Liberada para todos (skin da casa)"
-          detail="Qualquer jogador pode aplicar, sem possuir. Desligado, só quem tem a posse (site, caixa do site, painel ou /skin give) — e os admins."
+          detail="Qualquer jogador pode aplicar, sem possuir. Desligado, só aparece no menu de skins (/skins) de quem a possui — recebida pelo site, pelo painel ou por /skin give — e dos admins."
         >
           <Toggle
             on={draft.openToAll}
@@ -454,7 +458,10 @@ export function SkinForm({
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+      {/* Preso no fundo da caixa: o formulário é mais alto que a tela,
+          e Salvar não pode ficar lá embaixo. O -mx/-mb cobre o
+          respiro do Dialog para o conteúdo não aparecer por baixo. */}
+      <div className="sticky bottom-0 -mx-3 -mb-3 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-surface px-3 py-3">
         <p className="text-2xs text-muted">{problem}</p>
 
         <div className="flex gap-2">
@@ -482,7 +489,7 @@ export function SkinForm({
           </Button>
         </div>
       </div>
-    </section>
+    </div>
   );
 }
 

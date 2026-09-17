@@ -16,7 +16,7 @@
 //  É "em nenhum". A regra vem do catálogo de itens custom e existe
 //  para uma skin recém-cadastrada não entrar em produção sem
 //  ninguém mandar. O problema é que ela não PARECE uma falha: a
-//  skin fica na tela, bonita, e nunca aparece na caixa do `/skin`.
+//  skin fica na tela, bonita, e nunca aparece no menu `/skins`.
 //  Por isso o aviso é vermelho e fica visível.
 // ============================================================
 
@@ -77,8 +77,8 @@ export function ServerPicker({ value, servers, busy = false, onChange }: ServerP
 
       {chosen.length === 0 && (
         <p className="text-2xs text-rust">
-          Sem nenhum servidor marcado esta skin não chega a lugar nenhum: ela não aparece na caixa
-          do /skin nem nas coleções, e nada no jogo diz por quê.
+          Sem nenhum servidor marcado esta skin não vale em lugar nenhum: ela não aparece no menu
+          de skins (/skins) de ninguém — nem de quem a possui — e nada no jogo diz por quê.
         </p>
       )}
     </div>

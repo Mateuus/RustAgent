@@ -22,6 +22,13 @@
 //  por isso ela é editável ali mesmo, pela rota que troca só a
 //  lista, sem reenviar o formulário inteiro.
 //
+//  ####  O CADASTRO ABRE NUM MODAL  ####
+//
+//  "Nova skin" e "Editar" abrem o MESMO formulário, no `Dialog` do
+//  painel: a tabela fica onde estava, e o formulário (mais alto que a
+//  tela) rola dentro da caixa. É `guarded` porque tem `<select>`
+//  nativo — ver dialog.tsx —, mas o Escape e o X fecham.
+//
 //  ####  O QUE O AGENTE MANDA, A TELA NÃO CONFERE  ####
 //
 //  Toda resposta passa pelo `safeSkin` (normalize.ts) antes de
@@ -34,6 +41,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
+import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
 import { messageOf, safeLookup, safeSkin } from '@/components/workshop/normalize';
@@ -240,6 +248,11 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
     setEditing(skin === null ? { value: blankSkin() } : { value: toInput(skin), skin });
   }
 
+  function closeForm(): void {
+    setEditing(null);
+    setSaveError(null);
+  }
+
   const serverName = (id: string): string =>
     servers.find((server) => server.id === id)?.name ?? id;
 
@@ -267,22 +280,32 @@ export function SkinsPanel({ servers, onCount }: SkinsPanelProps) {
         </Button>
       </div>
 
-      {editing !== null && (
-        <SkinForm
-          key={editing.skin?.id ?? 'nova'}
-          value={editing.value}
-          {...(editing.skin === undefined ? {} : { skin: editing.skin })}
-          servers={servers}
-          busy={saving}
-          error={saveError}
-          onLookup={lookupWorkshop}
-          onSave={(value) => void save(value)}
-          onCancel={() => {
-            setEditing(null);
-            setSaveError(null);
-          }}
-        />
-      )}
+      <Dialog
+        open={editing !== null}
+        title={
+          editing?.skin === undefined ? 'Nova skin' : `Editar skin · ${editing.skin.label}`
+        }
+        busy={saving}
+        guarded
+        escapable
+        onClose={closeForm}
+        // ~720 px no desktop; no celular, a tela inteira.
+        className="w-[min(45rem,94vw)] max-sm:m-0 max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:max-w-none max-sm:border-0"
+      >
+        {editing !== null && (
+          <SkinForm
+            key={editing.skin?.id ?? 'nova'}
+            value={editing.value}
+            {...(editing.skin === undefined ? {} : { skin: editing.skin })}
+            servers={servers}
+            busy={saving}
+            error={saveError}
+            onLookup={lookupWorkshop}
+            onSave={(value) => void save(value)}
+            onCancel={closeForm}
+          />
+        )}
+      </Dialog>
 
       {skins.length === 0 ? (
         <StateBlock
