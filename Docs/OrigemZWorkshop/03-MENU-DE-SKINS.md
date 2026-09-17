@@ -170,6 +170,13 @@ Para a célula **Padrão**, omita o `SkinId`; não mande 0.
 `1 1 1 0.35`) e ponha o cadeado por cima. O cadeado sai de um sprite do jogo (por exemplo
 `assets/icons/lock.png`). **A MEDIR:** o caminho exato do sprite.
 
+> **Decidido na v0.3.0 (frente D, 17/09/2026): o cadeado é desenhado com três painéis** (arco,
+> vão do arco e corpo). O `lock.png` não se confirma daqui: as DLLs do server01 citam só
+> `assets/icons/close.png`, `device_add.png`, `embrella.png`, `explosion_sprite.png`,
+> `facepunch.png` e `fun.png`, e os sprites moram nos bundles do cliente. Um sprite que não
+> existe desenha um quadrado branco. Trocar pelos painéis por um sprite continua sendo a
+> medição 0.5.
+
 ### 3.4 Pesquisa
 
 - É um `InputField` abaixo da grade, com `needsKeyboard` (memória: *como o jogador digita dentro
@@ -244,6 +251,19 @@ renasce, e o cliente o mostra só com o inventário aberto.
 menu cobrem o caso. **Não pendure o botão em `Hud`/`Overlay`**, porque ele ficaria na tela o
 tempo todo.
 
+> **Na v0.3.0 o botão está implementado, mas vem desligado.** Ele fica atrás de
+> `"InventoryButton": false` em `oxide/config/OrigemZWorkshop.json`, até a medição 0.2 ser
+> feita. Ligado, ele é desenhado:
+> - em `OnServerInitialized`, para os online;
+> - 3 s depois de `OnPlayerConnected`;
+> - em `OnPlayerRespawned`.
+>
+> O elemento se chama `OZSkins.InvBtn` e leva `destroyUi` com o próprio nome. O comando é
+> `origemz.skins.open`. A posição é estimada: ancorado no pé da tela, centro, em
+> `-572 18` → `-482 46`, à esquerda da barra. Ela fica na config
+> (`InventoryButtonOffsetMin`/`InventoryButtonOffsetMax`), para ser ajustada sem mexer no
+> código.
+
 ---
 
 ## 5. Os comandos da tela
@@ -263,6 +283,18 @@ Todos com o **token da sessão** do jogador, gerado ao abrir e descartado ao fec
 | `origemz.skins.mine` | `token 0\|1` |
 | `origemz.skins.search` | `token texto…` (texto cru, remontado com `GetString`, como o `RestOfLine` do `OrigemZUI.cs:2470`) |
 | `origemz.skins.apply` | `token` (aplica a skin escolhida na instância escolhida) |
+
+**Acrescentados na v0.3.0:**
+
+| Comando | Argumentos | Por quê |
+|---|---|---|
+| `origemz.skins.open` | nenhum | o botão do inventário (§4.1). Não tem token porque é a abertura que cria o token |
+| `origemz.skins.close` | `token` **opcional** | fechar a própria tela é sempre seguro, e é a saída de quem ficou com o menu preso (pelo F1) |
+| `origemz.skins.search` | só o `token` | limpa a pesquisa. É o que o **X** do campo manda |
+| `origemz.skins.bytes` | nenhum | só servidor/RCON ou admin: mede o pior caso de cada região (§6) |
+
+No `origemz.skins.cat`, a categoria `all` é TODAS. Com `página`, e a categoria já aberta, só a
+lateral muda.
 
 - São `[ConsoleCommand]` chamados **pelo cliente**, então `arg.Connection` **não** é nulo.
   Esse é o inverso dos comandos do agente, que recusam conexão. Se o plugin continuar como
@@ -308,6 +340,52 @@ janela, lateral e detalhe num; grade e "Aplicar em" no outro, no mesmo frame. Ca
 abaixo de 40 KB. O teste do plano (05) mede os bytes de cada região com um helper que
 serializa o `CuiElementContainer`.
 
+### 6.1 Como ficou na v0.3.0 (frente D, 17/09/2026)
+
+**São seis regiões, e não cinco.** A parte **viva** do cabeçalho virou `OZSkins.Head`: o
+contador "N de M obtidas", o alternador "só as minhas" e a faixa do modo streamer. O contador
+muda quando a posse chega, e sem essa separação a janela inteira teria de ser redesenhada por
+causa dele.
+
+```text
+OZSkins            véu (Overall, NeedsCursor)        — só na abertura
+OZSkins.Win        janela 1200×640, título, X, rodapé, divisórias
+OZSkins.Head       contador, "só as minhas", faixa do streamer
+OZSkins.Side / .Grid / .Detail / .Targets            — como acima
+```
+
+- Cada raiz de região leva **`destroyUi` com o próprio nome**: o cliente troca a velha pela nova
+  no mesmo RPC, sem `DestroyUI` à parte e sem piscar. O agente já usa esse campo em produção
+  (`ui-cui.ts:436`).
+- A raiz do `Head` cobre só a faixa entre o título e o **X**. A raiz de uma região bloqueia
+  clique onde está, e uma raiz redesenhada vai para cima das irmãs.
+- Só recebe **nome** o elemento que tem filho. Os outros vão sem nome, e isso economiza bytes.
+- A abertura vai nos **dois `AddUI`** desta seção: janela + cabeçalho + lateral + detalhe, e
+  depois grade + "aplicar em". Os redesenhos parciais usam os mesmos dois grupos, e um grupo
+  que passe de 40.000 bytes é quebrado em mais de um.
+- A lateral pagina a categoria aberta com **3 a 8 itens por página**. O número depende de
+  quantas categorias aparecem, para tudo caber nos 560 px sem ScrollView.
+
+**Medido** em 17/09/2026, fora do servidor. O `OrigemZWorkshop.MeasureWorstCase()` (o mesmo
+código do `origemz.skins.bytes`) foi compilado com as DLLs do server01 num executável net48 e
+rodado. O cenário é o pior caso: as 13 categorias à mostra com a primeira aberta e 8 itens de
+nome longo, 12 células lendárias, bloqueadas e de grade misturada, pesquisa de 37
+caracteres, descrição de 280 caracteres e 4 alvos com condição, munição e "Aplicada".
+
+| Região | Bytes |
+|---|---|
+| Janela | 2.821 |
+| Cabeçalho | 1.327 |
+| Lateral | 20.519 |
+| Grade | 27.779 |
+| Detalhe | 2.834 |
+| Aplicar em | 8.318 |
+| **1º `AddUI` da abertura** | **27.498** |
+| **2º `AddUI` da abertura** | **36.096** |
+
+Todas as regiões ficam abaixo de 40 KB. **O `AddUI` de ~36 KB direto pelo plugin continua sendo
+a medição 0.4** (§8).
+
 ---
 
 ## 7. Casos da tela
@@ -320,6 +398,26 @@ serializa o `CuiElementContainer`.
 | posse nova chega com o menu aberto | redesenha lateral, grade e detalhe (a skin pode ter perdido o cadeado agora mesmo — **é o momento em que o jogador comprou no site e está olhando**) |
 | o item escolhido em "Aplicar em" sumiu (largou, trocou, usou) | na hora de aplicar, recusa com *"Esse item não está mais com você."* e redesenha a lista |
 | o jogador abre o menu principal | o `OrigemZUI` desenha por cima em `Overall`. **Feche o de skins** ao receber `/menu`, por um hook chamado pelo `OrigemZUI` ou por conferência simples: ao abrir um, o outro fecha |
+
+### 7.1 A ligação com o `OrigemZUI`, na v0.3.0
+
+O `OrigemZWorkshop` expõe dois hooks públicos:
+
+| Hook | Para quê |
+|---|---|
+| `void CloseSkinsMenu(BasePlayer player)` | fecha o menu de skins e descarta a sessão. **É o que a frente F deve chamar** quando o menu principal abre: `Interface.CallHook("CloseSkinsMenu", player)` |
+| `bool IsSkinsMenuOpen(BasePlayer player)` | diz se o menu de skins está aberto |
+
+**O outro sentido já funciona sem mexer no `OrigemZUI`.** Ele não tem hook de fechar (conferido
+em 17/09/2026). Ao abrir, o menu de skins chama primeiro `CloseMainMenu(BasePlayer)` no
+`OrigemZUI`, que existe para o dia em que a frente F criar esse hook. Se a chamada devolver
+nulo, ele roda o `origemz.ui.close <steamId>` de servidor, com `Option.Server.Quiet()`. Esse
+comando já existe: destrói a raiz pelo nome e descarta a sessão do menu principal.
+
+Morte, ferimento e desconexão fecham o menu (`OnPlayerDeath`, `OnPlayerWound`,
+`OnPlayerDisconnected`). O `Unload` destrói `OZSkins` e o botão do inventário para todos os
+online, e grava a posse pendente. Sem a caixa não existe item "emprestado": nada precisa ser
+devolvido.
 
 ---
 

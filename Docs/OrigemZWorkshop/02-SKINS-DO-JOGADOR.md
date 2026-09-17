@@ -464,6 +464,22 @@ Na ordem, e recusando com uma mensagem na própria tela:
   - se o mecanismo não guarda escolhas feitas **durante** o modo, isso vira trabalho da frente
     D. **Não invente um segundo mecanismo.**
 
+> **Decidido na v0.3.0 (frente D, 17/09/2026), antes da medição:**
+> - **Roupa vestida.** Depois do `MarkDirty`, o `ApplySkinToItem` também chama
+>   `player.SendNetworkUpdate()` quando o item está em `containerWear`, o que inclui a mochila
+>   vestida. É barato e cobre o caso que não foi medido. A 0.3 diz se ele fica, sai ou não
+>   basta.
+> - **Modo streamer.** O mecanismo de hoje **não** guardava escolhas feitas durante o modo, e
+>   agora guarda, pelo mesmo `_strippedByPlayer` do `HideFrom`. Aplicar uma skin com
+>   `hideInStreamer` durante o `/streamer`:
+>   1. grava `uid → skin` nessa lista;
+>   2. deixa o item com skin 0;
+>   3. responde *"Skin guardada: ela aparece quando você desligar o modo streamer."*
+>
+>   O `RestoreTo` a veste na saída do ar. Qualquer outra escolha feita no ar (Padrão ou uma
+>   skin sem logo) tira o item da lista, para a saída do ar não desfazê-la. O menu mostra a
+>   escolha guardada como "Aplicada".
+
 ---
 
 ## 7. Os comandos no jogo
@@ -500,6 +516,16 @@ admin em jogo costuma premiar em jogo.
   `{requestId, steamId, ok, message}`, e o `steamId` ali é o do **admin**.
 - Recusas vão para o registro como `game.give-refused`.
 - A posse dada grava `owned.grant` com `source: "game"` e o `serverId`.
+
+**Do lado do plugin (v0.3.0, frente D):**
+
+- `requestId` tem 16 caracteres hexadecimais. O plugin guarda quem pediu, entrega a resposta ao
+  admin e, sem resposta em 20 s, avisa.
+- O nome é resolvido entre os jogadores **online e dormindo**: o nome exato vence, e senão vale
+  "contém", desde que só um jogador case. Um SteamID64 vale mesmo com o jogador offline.
+- A skin precisa estar no catálogo **deste** servidor. Se não estiver, o plugin manda o admin
+  cadastrá-la antes com `/skin add`.
+- `days` aceita de 1 a 3650. `perm`, `permanente`, `0` ou nada viram `null`.
 
 ---
 
