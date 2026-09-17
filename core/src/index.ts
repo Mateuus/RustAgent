@@ -2615,6 +2615,11 @@ async function main(): Promise<void> {
         // `hasMetric` em quests/rewards.ts.
         hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
       },
+      // A skin não entrega nada na mochila: ela LIBERA a posse, pelo
+      // mesmo `grantOwnership` do painel, do site e do `/skin give`.
+      // Pelo catálogo, e não pelo repositório, porque é ele que
+      // registra e reenvia a posse para quem está online.
+      skins: workshopCatalog,
     })),
     // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
@@ -2793,6 +2798,11 @@ async function main(): Promise<void> {
       return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
     },
     rankingLabelOf: (metric: string) => rankingsRepository.getByMetric(metric)?.label ?? null,
+    // O mesmo motivo do ranking: o cadastro guarda a MARCA
+    // `(rifle.ak, 3120436264)`, e ninguém joga procurando por um
+    // número de Workshop. O nome vem do catálogo, a cada leitura.
+    skinLabelOf: (shortname: string, workshopId: string) =>
+      workshopCatalog.findSkinByMark(shortname, workshopId)?.label ?? null,
   };
 
   questScreens = createQuestsScreenProvider({
