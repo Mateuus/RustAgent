@@ -3120,6 +3120,8 @@ namespace Oxide.Plugins
             public int Ammo = -1;
             public bool Applied;
             public bool Selected;
+            /// <summary>Quantidade da PILHA. Aplicar pinta a pilha inteira: é um item só.</summary>
+            public int Amount = 1;
         }
 
         private class TargetsView
@@ -3686,6 +3688,7 @@ namespace Oxide.Plugins
                     Where = frame.Instances[i].Where,
                     Applied = EffectiveSkin(steamId, item) == pickSkin,
                     Selected = i == frame.TargetIndex,
+                    Amount = item.amount,
                 };
 
                 if (item.hasCondition && item.maxCondition > 0f)
@@ -4801,6 +4804,20 @@ namespace Oxide.Plugins
             // O ícone com a skin ATUAL do item.
             Icon(canvas, box, 8, 4, 36, 36, row.ItemId, row.SkinId, "1 1 1 1");
             Label(canvas, box, 52, 4, 160, 18, row.Where, 12, WhereColor(row.Where), TextAnchor.MiddleLeft, true);
+
+            // ####  PILHA É UM ITEM SÓ  ####
+            //
+            // O Rust junta itens iguais numa pilha, e a pilha é UM objeto: a
+            // lista mostra uma linha, e aplicar pinta as unidades todas. Sem
+            // este "x8" parece que as outras desapareceram.
+            if (row.Amount > 1)
+            {
+                string badge = Panel(canvas, box, 8, 26, 34, 14, ColSurface, canvas.NextName());
+                Label(canvas, new Box(badge, 34, 14), 0, 0, 34, 14,
+                      "x" + row.Amount.ToString(CultureInfo.InvariantCulture), 9, ColText,
+                      TextAnchor.MiddleCenter, true);
+                Tip(canvas, badge, "Pilha de " + row.Amount + ": a skin vale para as " + row.Amount + " unidades");
+            }
 
             if (row.Condition >= 0f)
             {
