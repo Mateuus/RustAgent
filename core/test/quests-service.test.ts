@@ -48,6 +48,7 @@ import {
   questNpcInputSchema,
   type QuestDraft,
   type QuestInput,
+  type QuestReward,
 } from '../src/types/quests.js';
 
 const NOW = 1_757_000_000_000;
@@ -861,21 +862,26 @@ describe('o resgate', () => {
     expect(h.rewards.calls).toHaveLength(1);
   });
 
-  it('a entrega que falha NÃO desfaz o resgate — vira pendência com código', async () => {
+  // ####  MUDOU EM 17/09/2026  ####
+  //
+  // A entrega que falhava deixava a missão `claimed`, com o prêmio
+  // perdido e sem botão para o jogador pedi-lo de novo. Agora ela
+  // continua `completed` até tudo sair.
+  it('a entrega que falha deixa a missão CONCLUÍDA, e vira pendência com código', async () => {
     const id = await accept();
 
     bump(id, 5000);
     h.rewards.outcome = () => [
-      { kind: 'coins', ok: false, code: 'WALLET_UNKNOWN', message: 'sem resposta da carteira' },
+      { index: 0, kind: 'coins', ok: false, code: 'WALLET_UNKNOWN', message: 'sem resposta da carteira' },
     ];
 
     const result = await h.service.claim({ playerQuestId: id });
 
-    // Entregar e depois marcar daria, numa queda no meio, um
-    // jogador que recebeu duas vezes. Assim dá um jogador que
-    // precisa de um clique do admin — e o painel mostra quem.
     expect(result.pending).toBe(true);
-    expect(h.repository.attempt(id)?.status).toBe('claimed');
+    expect(h.repository.attempt(id)?.status).toBe('completed');
+    // O cooldown não começa e o resgate não é registrado.
+    expect(h.repository.attempt(id)?.cooldownUntil ?? null).toBeNull();
+    expect(h.repository.events({ kind: 'claim' })).toHaveLength(0);
 
     const failures = h.repository.events({ kind: 'reward_failed' });
 
@@ -899,8 +905,8 @@ describe('o resgate', () => {
 
     bump(id, 5000);
     h.rewards.outcome = () => [
-      { kind: 'coins', ok: true, code: null, message: 'ok' },
-      { kind: 'kit', ok: false, code: 'KIT_NOT_FOUND', message: 'sumiu' },
+      { index: 0, kind: 'coins', ok: true, code: null, message: 'ok' },
+      { index: 1, kind: 'kit', ok: false, code: 'KIT_NOT_FOUND', message: 'sumiu' },
     ];
 
     await h.service.claim({ playerQuestId: id });
@@ -910,7 +916,7 @@ describe('o resgate', () => {
     expect(h.repository.events({ kind: 'reward_failed' })).toHaveLength(1);
   });
 
-  it('sem entregador, a quest fica resgatada e a recompensa vira pendência', async () => {
+  it('sem entregador, a quest fica concluída e a recompensa vira pendência', async () => {
     const service = build({ rewards: undefined });
     const id = (await service.accept({ serverId: 'pvp1', steamId: FULANO, questId: 'minerador' }))
       .playerQuestId;
@@ -921,7 +927,7 @@ describe('o resgate', () => {
 
     expect(result.pending).toBe(true);
     expect(result.outcomes[0]?.code).toBe('QUEST_REWARD_UNAVAILABLE');
-    expect(h.repository.attempt(id)?.status).toBe('claimed');
+    expect(h.repository.attempt(id)?.status).toBe('completed');
   });
 
   it('a reentrega só vale em quest já resgatada', async () => {
@@ -2010,5 +2016,310 @@ describe('a encomenda: a entrega que cobra um item', () => {
         objectives: [{ seq: 0, kind: 'deliver', target: 'mateus', item: CARTAO, amount: 1 }],
       }),
     ).not.toThrow();
+  });
+});
+
+// ============================================================
+//  O RESGATE COM A MOCHILA CHEIA
+//
+//  17/09/2026: o dono resgatou uma missão de NPC com o inventário
+//  cheio. A missão virou resgatada e o item não chegou — nem na
+//  mochila, nem no chão.
+//
+//  O que estes testes seguram:
+//
+//    - sem espaço, o resgate PARA antes de tudo, com a frase dos
+//      slots, e a missão continua concluída;
+//    - liberado o espaço, o prêmio sai inteiro, UMA vez;
+//    - num prêmio misto, o que já saiu não sai de novo;
+//    - o material é cobrado uma vez só, mesmo com a entrega falhando;
+//    - dois cliques ao mesmo tempo não entregam duas vezes.
+// ============================================================
+describe('o resgate confere o espaço antes de pagar', () => {
+  const AK = { kind: 'item' as const, shortname: 'rifle.ak', amount: 1, skinId: '0' };
+
+  /** A mochila de mentira: quantos slots faltam, e quem perguntou. */
+  function mochila(faltam: { value: number }) {
+    const perguntas: (readonly QuestReward[])[] = [];
+
+    return {
+      perguntas,
+      inventory: {
+        missingSlotsFor: (input: { rewards: readonly QuestReward[] }) => {
+          perguntas.push(input.rewards);
+
+          return Promise.resolve(faltam.value);
+        },
+      },
+    };
+  }
+
+  function servico(parts: Partial<QuestsServiceDeps>): QuestsService {
+    return new QuestsService({
+      repository: h.repository,
+      logger,
+      rewards: h.rewards as never,
+      now: () => h.now,
+      ...parts,
+    });
+  }
+
+  function premiada(rewards: readonly Record<string, unknown>[], repeat: 'once' | 'daily' = 'once') {
+    h.repository.create(
+      'premiada',
+      questInputSchema.parse({
+        title: 'Premiada',
+        repeatMode: repeat,
+        objectives: [{ seq: 0, kind: 'gather', target: 'sulfur.ore', amount: 10 }],
+        rewards,
+      }),
+      NOW,
+    );
+  }
+
+  async function concluida(service: QuestsService): Promise<number> {
+    const view = await service.accept({ serverId: 'pvp1', steamId: FULANO, questId: 'premiada' });
+
+    bump(view.playerQuestId, 10);
+
+    return view.playerQuestId;
+  }
+
+  it('inventário cheio: recusa com os slots que faltam, e nada acontece', async () => {
+    premiada([{ kind: 'coins', amount: 50 }, AK], 'daily');
+
+    const faltam = { value: 2 };
+    const service = servico({ inventory: mochila(faltam).inventory });
+    const id = await concluida(service);
+
+    await expect(service.claim({ playerQuestId: id })).rejects.toMatchObject({
+      code: 'QUEST_INVENTORY_FULL',
+      message:
+        'Inventário sem espaço para receber a recompensa. Libere 2 slots e tente resgatar novamente.',
+    });
+
+    // Nem a moeda saiu: prêmio misto não paga pela metade.
+    expect(h.rewards.calls).toHaveLength(0);
+    expect(h.repository.attempt(id)?.status).toBe('completed');
+    expect(h.repository.attempt(id)?.cooldownUntil ?? null).toBeNull();
+    expect(h.repository.events({ kind: 'claim' })).toHaveLength(0);
+  });
+
+  it('um slot só é "1 slot"', async () => {
+    premiada([AK]);
+
+    const service = servico({ inventory: mochila({ value: 1 }).inventory });
+    const id = await concluida(service);
+
+    await expect(service.claim({ playerQuestId: id })).rejects.toMatchObject({
+      message: expect.stringContaining('Libere 1 slot e'),
+    });
+  });
+
+  it('liberado o espaço, entrega inteiro e UMA vez só', async () => {
+    premiada([{ kind: 'coins', amount: 50 }, AK]);
+
+    const faltam = { value: 1 };
+    const service = servico({ inventory: mochila(faltam).inventory });
+    const id = await concluida(service);
+
+    await expect(service.claim({ playerQuestId: id })).rejects.toMatchObject({
+      code: 'QUEST_INVENTORY_FULL',
+    });
+
+    faltam.value = 0;
+
+    const result = await service.claim({ playerQuestId: id });
+
+    expect(result.pending).toBe(false);
+    expect(h.rewards.calls).toHaveLength(1);
+    expect(h.repository.attempt(id)?.status).toBe('claimed');
+    expect(h.repository.events({ kind: 'claim' })).toHaveLength(1);
+
+    // O segundo clique não paga de novo.
+    await expect(service.claim({ playerQuestId: id })).rejects.toMatchObject({
+      code: 'QUEST_ALREADY_CLAIMED',
+    });
+    expect(h.rewards.calls).toHaveLength(1);
+  });
+
+  it('não saber se cabe NÃO vira "cabe": o resgate espera', async () => {
+    premiada([AK]);
+
+    const service = servico({
+      inventory: { missingSlotsFor: () => Promise.reject(new Error('RCON caiu')) },
+    });
+    const id = await concluida(service);
+
+    await expect(service.claim({ playerQuestId: id })).rejects.toMatchObject({
+      code: 'QUEST_INVENTORY_UNCHECKED',
+    });
+    expect(h.rewards.calls).toHaveLength(0);
+    expect(h.repository.attempt(id)?.status).toBe('completed');
+  });
+
+  it('prêmio só de moeda não pergunta nada à mochila', async () => {
+    premiada([{ kind: 'coins', amount: 50 }]);
+
+    const m = mochila({ value: 9 });
+    const service = servico({ inventory: m.inventory });
+    const id = await concluida(service);
+
+    await expect(service.claim({ playerQuestId: id })).resolves.toMatchObject({ pending: false });
+    expect(m.perguntas).toHaveLength(0);
+  });
+
+  it('prêmio misto: a nova tentativa entrega SÓ o que faltou, e mede só isso', async () => {
+    premiada([{ kind: 'coins', amount: 50 }, AK]);
+
+    const m = mochila({ value: 0 });
+    const service = servico({ inventory: m.inventory });
+    const id = await concluida(service);
+
+    // A moeda sai; o item cai (o espaço sumiu entre medir e entregar).
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: reward.kind !== 'item',
+        code: reward.kind === 'item' ? 'INVENTORY_FULL' : null,
+        message: reward.kind === 'item' ? 'não coube' : 'ok',
+      }));
+
+    const primeira = await service.claim({ playerQuestId: id });
+
+    expect(primeira.pending).toBe(true);
+    expect(h.repository.attempt(id)?.status).toBe('completed');
+
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: null,
+        message: 'ok',
+      }));
+
+    const segunda = await service.claim({ playerQuestId: id });
+
+    expect(segunda.pending).toBe(false);
+    expect(h.repository.attempt(id)?.status).toBe('claimed');
+    // A moeda não sai de novo: a segunda chamada só leva a posição 1.
+    expect([...(h.rewards.calls[1]?.only ?? [])]).toEqual([1]);
+    // E a mochila foi medida só para o item.
+    expect(m.perguntas[1]?.map((reward) => reward.kind)).toEqual(['item']);
+    // O quadro volta inteiro.
+    expect(segunda.outcomes.map((outcome) => outcome.ok)).toEqual([true, true]);
+  });
+
+  it('o material é cobrado UMA vez, mesmo com a entrega falhando', async () => {
+    const tirado: { shortname: string; amount: number }[] = [];
+    const service = servico({
+      inventory: mochila({ value: 0 }).inventory,
+      consumer: {
+        take: (input) => {
+          tirado.push(...input.items);
+
+          return Promise.resolve({ complete: true });
+        },
+      },
+    });
+
+    h.repository.create(
+      'premiada',
+      questInputSchema.parse({
+        title: 'Premiada',
+        objectives: [{ seq: 0, kind: 'gather', target: 'stones', amount: 300, consume: true }],
+        rewards: [AK],
+      }),
+      NOW,
+    );
+
+    const id = await concluida(service);
+
+    bump(id, 300);
+
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: false,
+        code: 'PLAYER_DEAD',
+        message: 'morto',
+      }));
+
+    await service.claim({ playerQuestId: id });
+
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: null,
+        message: 'ok',
+      }));
+
+    await service.claim({ playerQuestId: id });
+
+    expect(tirado).toEqual([{ shortname: 'stones', amount: 300 }]);
+    expect(h.repository.attempt(id)?.status).toBe('claimed');
+  });
+
+  it('dois cliques ao mesmo tempo: o segundo espera, e o prêmio sai uma vez', async () => {
+    premiada([AK]);
+
+    let soltar: (value: number) => void = () => undefined;
+    const service = servico({
+      inventory: {
+        missingSlotsFor: () =>
+          new Promise<number>((resolve) => {
+            soltar = resolve;
+          }),
+      },
+    });
+    const id = await concluida(service);
+
+    const primeiro = service.claim({ playerQuestId: id });
+
+    await expect(service.claim({ playerQuestId: id })).rejects.toMatchObject({
+      code: 'QUEST_CLAIM_BUSY',
+    });
+
+    soltar(0);
+    await primeiro;
+
+    expect(h.rewards.calls).toHaveLength(1);
+  });
+
+  it('a reentrega do painel numa missão concluída é o resgate', async () => {
+    premiada([AK]);
+
+    const service = servico({ inventory: mochila({ value: 0 }).inventory });
+    const id = await concluida(service);
+
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: false,
+        code: 'RCON_UNAVAILABLE',
+        message: 'fora',
+      }));
+
+    await service.claim({ playerQuestId: id });
+
+    h.rewards.outcome = (input) =>
+      input.rewards.map((reward, index) => ({
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: null,
+        message: 'ok',
+      }));
+
+    await expect(service.retryRewards({ playerQuestId: id, actor: 'dono' })).resolves.toMatchObject({
+      pending: false,
+    });
+    expect(h.repository.attempt(id)?.status).toBe('claimed');
   });
 });
