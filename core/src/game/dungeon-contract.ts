@@ -117,6 +117,17 @@ const builtSchema = z.object({
   ms: z.number().int().min(0),
   /** A semente do sorteio. É o que faz a reconstrução sair igual. */
   seed: z.number().int().optional(),
+  /**
+   * Em que altura a masmorra ficou. Ausente = plugin anterior a
+   * 17/09/2026, que sempre usava a da config.
+   */
+  depth: z.number().optional(),
+  /**
+   * Quem ocupava a profundidade da config, quando o plugin precisou
+   * descer (o poço de uma entrada do metrô, quase sempre). Null =
+   * ficou onde a config manda.
+   */
+  depthNote: z.string().max(400).nullable().optional(),
 });
 
 /** Não deu. O motivo tem o MESMO nome dos dois lados do fio. */

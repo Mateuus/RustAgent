@@ -624,9 +624,20 @@ export class DungeonSync {
         this.#activeRun.set(serverId, run.id);
 
         this.#deps.logger.info(
-          { server: serverId, dungeon: event.slug, grid: event.grid, entities: event.entities },
+          { server: serverId, dungeon: event.slug, grid: event.grid, entities: event.entities, depth: event.depth },
           'masmorra de pé',
         );
+
+        // A masmorra desceu para fugir de alguém (quase sempre o poço
+        // de uma entrada do metrô, que deixa o interior escuro). Não é
+        // erro, mas é o tipo de coisa que o admin quer saber ao
+        // escolher pontos.
+        if (event.depthNote !== undefined && event.depthNote !== null) {
+          this.#deps.logger.warn(
+            { server: serverId, dungeon: event.slug, grid: event.grid, depth: event.depth, blocker: event.depthNote },
+            'a masmorra desceu: a profundidade da config estava ocupada',
+          );
+        }
 
         return;
       }

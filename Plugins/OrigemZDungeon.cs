@@ -472,8 +472,13 @@ namespace Oxide.Plugins
             public DungeonSpec spec;
             /// <summary>Onde a entrada foi colada, na superfície.</summary>
             public Vector3 surface;
-            /// <summary>O canto de onde a masmorra cresceu, a -90.</summary>
+            /// <summary>
+            /// O canto de onde a masmorra cresceu. O `y` começa na config
+            /// e pode descer — ver `SettleDepth`.
+            /// </summary>
             public Vector3 origin;
+            /// <summary>Quem estava na profundidade da config, quando a masmorra desceu. Null = ninguém.</summary>
+            public string depthNote;
             public uint buildingId;
             /// <summary>Tudo que foi erguido, na ordem em que nasceu.</summary>
             public readonly List<BaseEntity> entities = new List<BaseEntity>();
@@ -1316,6 +1321,14 @@ namespace Oxide.Plugins
                 {
                     GenerateRooms(dungeon, forward);
                 }
+                catch (PlacementRefused e)
+                {
+                    // Não é defeito do construtor: é o lugar. O motivo é o
+                    // mesmo `no_position` da água, porque o conserto é o
+                    // mesmo — escolher outro ponto.
+                    Fail(requester, "no_position", e.Message);
+                    return;
+                }
                 catch (Exception e)
                 {
                     Fail(requester, "build_error", "Falhei ao erguer a masmorra: " + e.Message);
@@ -1366,6 +1379,10 @@ namespace Oxide.Plugins
                     requester?.Reply("Masmorra '" + slug + "' de pé: "
                                      + alive + " peças em " + ms + " ms. "
                                      + "A entrada está em " + Grid(surface) + "."
+                                     + (dungeon.depthNote == null
+                                         ? ""
+                                         : " A masmorra desceu para " + dungeon.origin.y.ToString("0", CultureInfo.InvariantCulture)
+                                           + " m: na profundidade padrão havia " + dungeon.depthNote + ".")
                                      + (report.requested > 0 ? " Da planta: " + report.Human() + "." : ""));
 
                     Report("built", new Dictionary<string, object>
@@ -1377,6 +1394,11 @@ namespace Oxide.Plugins
                         ["entities"] = alive,
                         ["adopted"] = dungeon.entities.Count,
                         ["ms"] = ms,
+
+                        // Em que altura ela ficou, e por que desceu, se
+                        // desceu. Ver `SettleDepth`.
+                        ["depth"] = dungeon.origin.y,
+                        ["depthNote"] = dungeon.depthNote,
 
                         // O que a PLANTA pediu e o que dela sobrou. Sem
                         // estes campos, "600 peças" no painel é um
@@ -1699,6 +1721,189 @@ namespace Oxide.Plugins
             dungeon.banners.Clear();
 
             Debug("derrubada ('" + reason + "'): " + killed + " peças");
+        }
+
+        // ============================================================
+        //  A PROFUNDIDADE — o lugar lá embaixo também tem vizinhos
+        //
+        //  ####  A ALTURA FINAL NÃO DEPENDE DO PONTO ESCOLHIDO  ####
+        //
+        //  `origin.y` sempre foi `config.baseDepth` (-90), absoluto:
+        //  uma entrada no pico de uma montanha e outra na praia põem a
+        //  masmorra na MESMA altura. O que muda ao trocar de ponto é o
+        //  x/z — e é o x/z que decide o que existe a -90 ali.
+        //
+        //  ####  E A -90 EXISTE O METRÔ  ####
+        //
+        //  MEDIDO em 17/09/2026 no server01 (mapa procedural 4000):
+        //  3.273 volumes de ambiente no mundo, e QUINZE deles cruzam a
+        //  faixa da masmorra. São os poços das entradas do metrô —
+        //  `entrance_bunker_*`, porto, aeroporto, túnel militar,
+        //  escavadeira, balsa, apartamentos — cada um com uns 30×30 m
+        //  e cem metros de altura, de -113 a -13.
+        //
+        //  O volume diz ao CLIENTE que ali é túnel (`TrainTunnels`), e
+        //  o cliente ilumina como túnel: sem sol. Uma masmorra erguida
+        //  perto de um desses monumentos tem o interior dentro do poço,
+        //  e o jogador a vê quase preta; a mesma masmorra noutro ponto
+        //  do mapa, não. A estrutura continua igual nos dois casos —
+        //  que é o que o dono viu.
+        //
+        //  O servidor não calcula luz (a propriedade do volume nem vem
+        //  preenchida aqui), então o que dá para medir daqui é a
+        //  SOBREPOSIÇÃO. É ela que este bloco evita.
+        //
+        //  ####  DESCER, EM VEZ DE DESISTIR  ####
+        //
+        //  O mundo aceita entidade até -500 (`ValidBounds`, medido), e
+        //  nenhum volume medido passa de -113. Então, com conflito na
+        //  profundidade da config, a masmorra desce de 30 em 30 metros
+        //  e só desiste depois da quinta tentativa — com a frase de
+        //  quem estava no caminho, para o admin trocar o ponto.
+        // ============================================================
+
+        /// <summary>Quanto descer a cada tentativa, a partir da config.</summary>
+        private static readonly float[] DepthSteps = { 0f, -30f, -60f, -90f, -120f };
+
+        /// <summary>O fundo que nunca se passa. `ValidBounds` recusa abaixo de -500.</summary>
+        private const float DeepestDepth = -400f;
+
+        /// <summary>
+        /// A caixa que uma célula ocupa, em volta do piso: um palmo além
+        /// da parede e acima do teto, e o topo da fundação embaixo.
+        /// </summary>
+        private static readonly Vector3 CellBoxHalf = new Vector3(CellSize / 2f + 0.1f, 2.2f, CellSize / 2f + 0.1f);
+
+        /// <summary>
+        /// Quem a masmorra não pode atravessar: peça de monumento,
+        /// construção e deployable.
+        ///
+        /// O terreno fica de fora de propósito: ele é um campo de
+        /// altura, e se confere pela altura (ver `DepthConflict`).
+        ///
+        /// ####  E A ZONA DE "NÃO CONSTRUA" TAMBÉM  ####
+        ///
+        /// MEDIDO em 17/09/2026: a `Prevent_building` do
+        /// `apartments_complex_1` desce além de -180 e cobre o ponto de
+        /// dev inteiro — onde a masmorra sempre subiu certa e clara.
+        /// Com ela na máscara, toda masmorra perto de monumento descia
+        /// sem motivo. Ela só proíbe o JOGADOR de construir; não tem
+        /// luz nem parede.
+        /// </summary>
+        private const int DepthSolidMask =
+            Rust.Layers.Mask.World | Rust.Layers.Mask.Construction | Rust.Layers.Mask.Deployed;
+
+        private static readonly Collider[] DepthBuffer = new Collider[64];
+
+        /// <summary>
+        /// O lugar não serve para a masmorra. Vira `no_position`, e não
+        /// `build_error`: o conserto é trocar o ponto, e não o código.
+        /// </summary>
+        private sealed class PlacementRefused : Exception
+        {
+            public PlacementRefused(string message) : base(message) { }
+        }
+
+        /// <summary>
+        /// Acha a primeira profundidade livre para as caixas dadas e a
+        /// grava em `dungeon.origin.y`. Devolve a frase de recusa, ou
+        /// null quando achou.
+        /// </summary>
+        /// <param name="points">O piso de cada caixa, com a altura da config.</param>
+        private string SettleDepth(ActiveDungeon dungeon, List<Vector3> points, Quaternion rotation, Vector3 half)
+        {
+            string first = null;
+
+            foreach (var step in DepthSteps)
+            {
+                var y = Mathf.Max(DeepestDepth, config.baseDepth + step);
+                var conflict = DepthConflict(points, rotation, half, y);
+
+                if (conflict == null)
+                {
+                    dungeon.origin.y = y;
+
+                    if (first != null)
+                    {
+                        dungeon.depthNote = first;
+                        PrintWarning("masmorra '" + dungeon.slug + "': a " + config.baseDepth.ToString("0", CultureInfo.InvariantCulture)
+                                     + " m havia " + first + ". Desci para " + y.ToString("0", CultureInfo.InvariantCulture) + " m.");
+                    }
+
+                    return null;
+                }
+
+                if (first == null) first = conflict;
+                if (y <= DeepestDepth) break;
+            }
+
+            return "Debaixo deste ponto há " + first + ", e desci até "
+                   + Mathf.Max(DeepestDepth, config.baseDepth + DepthSteps[DepthSteps.Length - 1]).ToString("0", CultureInfo.InvariantCulture)
+                   + " m sem achar espaço livre. Escolha outro ponto, longe de entradas do metrô e monumentos subterrâneos.";
+        }
+
+        /// <summary>
+        /// O que ocupa aquela faixa de altura, em português. Null = livre.
+        /// </summary>
+        private static string DepthConflict(List<Vector3> points, Quaternion rotation, Vector3 half, float y)
+        {
+            foreach (var point in points)
+            {
+                var floor = new Vector3(point.x, y, point.z);
+                var center = floor + Vector3.up * 1.5f;
+
+                // 1) Volume de ambiente. É ele que escurece o interior.
+                //    Um volume só de `Outdoor` não muda nada e passa.
+                var found = Physics.OverlapBoxNonAlloc(
+                    center, half, DepthBuffer, rotation, Rust.Layers.Mask.Trigger, QueryTriggerInteraction.Collide);
+
+                for (var i = 0; i < found; i++)
+                {
+                    var volume = DepthBuffer[i] == null ? null : DepthBuffer[i].GetComponent<EnvironmentVolume>();
+                    if (volume == null) continue;
+                    if ((volume.Type & ~EnvironmentType.Outdoor) == 0) continue;
+
+                    return "o volume '" + volume.Type + "' de " + RootName(volume.transform) + " (" + Grid(floor) + ")";
+                }
+
+                // 2) Peça sólida de outro dono: túnel, bunker, caverna.
+                found = Physics.OverlapBoxNonAlloc(
+                    center, half, DepthBuffer, rotation, DepthSolidMask, QueryTriggerInteraction.Collide);
+
+                for (var i = 0; i < found; i++)
+                {
+                    var collider = DepthBuffer[i];
+                    if (collider == null) continue;
+
+                    var owner = collider.ToBaseEntity();
+                    if (owner != null && owner._name == MarkIndestructible) continue;
+
+                    return "a peça '" + collider.name + "' de " + RootName(collider.transform) + " (" + Grid(floor) + ")";
+                }
+
+                // 3) O terreno por cima do teto. Um vale fundo, ou um
+                //    mapa próprio com fosso, deixaria o teto de fora.
+                if (TerrainMeta.HeightMap != null && TerrainMeta.HeightMap.GetHeight(floor) < y + 2f * half.y)
+                    return "o próprio terreno, que ali desce até a altura da masmorra (" + Grid(floor) + ")";
+
+                // 4) Água. Num mapa procedural o fundo do mar não passa
+                //    de -50 (medido); num mapa próprio, pode passar.
+                if (WaterLevel.Test(center, false, true))
+                    return "água (" + Grid(floor) + ")";
+            }
+
+            return null;
+        }
+
+        /// <summary>O nome do prefab raiz, sem a pasta. É o que o admin reconhece.</summary>
+        private static string RootName(Transform transform)
+        {
+            var root = transform == null ? null : transform.root;
+            if (root == null) return "?";
+
+            var name = root.name ?? "?";
+            var slash = name.LastIndexOf('/');
+            return slash >= 0 ? name.Substring(slash + 1) : name;
         }
 
         // ============================================================
@@ -2282,6 +2487,37 @@ namespace Oxide.Plugins
 
             var right = Vector3.Cross(Vector3.up, forward).normalized;
 
+            // ####  A FUNDAÇÃO GIRA COM A MASMORRA  ####
+            //
+            // MEDIDO em 17/09/2026 no server01, peça por peça: com a
+            // fundação em `R0`, só o ponto que acaba com `forward` igual
+            // ao norte do mundo sai certo. O "Labirinto" no ponto de dev
+            // (yaw 90, saída do E a 90°) cancelava os dois giros, e por
+            // isso passava; com yaw 0 ele subiu com 122 das 496 paredes
+            // no lugar, e com 45° com nenhuma.
+            //
+            // A POSIÇÃO de cada fundação já seguia `right`/`forward`; o
+            // que ficava parado era o eixo LOCAL dela — e parede, vão e
+            // teto nascem como filhos, em `localPosition` ±1,5 nos eixos
+            // locais. A parede da célula vizinha à direita caía, então,
+            // no lado do mundo, e não no do desenho: a entrada perdia a
+            // parede de trás e ganhava uma entre ela e o corredor, que é
+            // exatamente o defeito que o dono encontrou nas plantas
+            // desenhadas.
+            //
+            // `LookRotation(forward)` tem +z em `forward` e +x em
+            // `Cross(up, forward)` — o mesmo `right` de cima.
+            var cellRotation = Quaternion.LookRotation(forward, Vector3.up);
+
+            // A profundidade sai daqui, e não do `Build`: só agora se
+            // sabe onde cada célula cai. Ver `SettleDepth`.
+            var footprint = layout.cells
+                .Select(c => dungeon.origin + right * (c.Item1 * CellSize) + forward * (c.Item2 * CellSize))
+                .ToList();
+            var refusal = SettleDepth(dungeon, footprint, cellRotation, CellBoxHalf);
+
+            if (refusal != null) throw new PlacementRefused(refusal);
+
             // Para onde quem desce tem de estar olhando. Ver `LobbyFacing`.
             dungeon.lobbyFacing = LobbyFacing(layout, forward, right);
 
@@ -2330,7 +2566,7 @@ namespace Oxide.Plugins
                 var pos = dungeon.origin + right * (cell.Item1 * CellSize) + forward * (cell.Item2 * CellSize);
                 pos.y = dungeon.origin.y;
 
-                var block = GameManager.server.CreateEntity(PrefabFoundation, pos, R0) as BuildingBlock;
+                var block = GameManager.server.CreateEntity(PrefabFoundation, pos, cellRotation) as BuildingBlock;
                 if (block == null) continue;
 
                 PrepareBlock(dungeon, block, GradeOf(dungeon, layout, cell, Piece.Foundation));
