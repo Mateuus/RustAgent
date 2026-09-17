@@ -88,7 +88,11 @@ vezes quiser.
 
 ---
 
-## 4. Os dados — migração **097**
+## 4. Os dados — migrações **097** e **100**
+
+> A **097** é a reformulação de 17/09/2026 (§4.1 a §4.4). A **100**, do mesmo dia, é a favorita
+> da rede (§4.5) e a marca "Skin de temporada" (§4.6). As duas mexem no mesmo canto do schema, e
+> a 100 **depende da forma que a 097 deixa**: num banco parado antes da 097 ela não roda.
 
 A 097 foi reservada para esta frente, conforme o comentário em `core/src/db/migrations.ts`
 antes da 98. **Confira que ninguém a usou antes de escrever.** Se alguém usou, pule para um id
@@ -270,6 +274,109 @@ Ganha `'skin'` e `'skin_revoke'`. Como o SQLite não altera CHECK, é reconstru�
 **entra na mesma 097**: uma migração só para as duas frentes, para que nenhuma delas crie a
 própria e as duas colidam no merge. Detalhe no 04.
 
+### 4.5 `workshop_favorites` — a favorita da rede (migração **100**)
+
+**Pedido do dono, 17/09/2026.** Na v0.3.0 do plugin a favorita morava só em
+`oxide/data/OrigemZWorkshop/favorites.json`, **por servidor**: quem marcava no server01 abria o
+server02 sem nenhuma. A posse já é da rede (§4.2), e a preferência de tela não tem motivo para
+ser diferente.
+
+```text
+workshop_favorites
+  id          INTEGER PK
+  steam_id    TEXT NOT NULL      CHECK (steam_id GLOB '7656[0-9]*' AND length(steam_id) = 17)
+  skin_ref    INTEGER NOT NULL   REFERENCES workshop_skins(id) ON DELETE CASCADE
+  created_at  INTEGER NOT NULL
+  UNIQUE (steam_id, skin_ref)
+  INDEX  (steam_id)
+```
+
+- **Sem `server_id`**, como a posse: a favorita vale na rede inteira.
+- **Sem prazo, sem origem e sem nota**: favoritar é preferência, não direito. **Favoritar não é
+  possuir**, e nunca libera nada.
+- **Não vai para o registro.** Seria uma linha por clique; o §6.2 já deixou "aplicar" de fora
+  pelo mesmo motivo.
+- **Teto de 200 por jogador**, o mesmo número do `MaxFavoritesPerPlayer` do plugin. Quem chama:
+  `WorkshopCatalog.setFavorite` / `toggleFavorite`, que devolvem `ApiError`
+  `FAVORITES_FULL` (409). **Desfavoritar nunca é recusado** — senão quem bateu no teto não teria
+  como sair dele.
+
+**Onde mora o código (decisão desta frente):** em `WorkshopOwnedRepository`
+(`core/src/db/workshop-owned-repository.ts`), e não num arquivo próprio. É a mesma pergunta ("o
+que é deste jogador?"), desce na mesma carga (§5.2), tem a mesma forma de chave, e um segundo
+repositório seria um parâmetro a mais em toda a fiação (`index.ts`, rotas, serviço, testes) por
+três métodos. Essa classe já não é só posse: ela guarda o registro, que também não é.
+
+Os métodos:
+
+| Método | O que faz |
+|---|---|
+| `listFavorites(steamId)` | os ids, em ordem crescente — a ordem da carga |
+| `isFavorite(steamId, skinRef)` / `countFavorites(steamId)` | leitura |
+| `setFavorite(steamId, skinRef, on, now?)` | põe no estado pedido. **Idempotente** |
+| `toggleFavorite(steamId, skinRef, now?)` | inverte e devolve o estado novo |
+| `removeFavorite(steamId, skinRef)` | `true` quando havia o que tirar |
+
+**`setFavorite` e não "alterne", no caminho do plugin:** o console repete linha em reconexão
+(§5.4), e um "alterne" repetido desfaria o clique do jogador em silêncio. `toggleFavorite`
+existe para quem só sabe "clicaram na estrela".
+
+### 4.6 `workshop_skins.season` — a **Skin de temporada** (migração **100**)
+
+**Pedido do dono, 17/09/2026:** skins que saem da posse num wipe, mas **só quando o wipe
+mandar** — "por padrão não é removida".
+
+Decisão de nome, para os dois lados usarem o mesmo: o campo é **`season`**, e o rótulo em
+português é **"Skin de temporada"**.
+
+```sql
+season INTEGER NOT NULL DEFAULT 0 CHECK (season IN (0, 1))
+```
+
+- `season = 1` quer dizer **"a posse desta skin PODE sair num wipe"**. É uma **marca**, e só:
+  nada no jogo muda por causa dela. O menu apenas informa (03 §3.5).
+- O padrão é 0, e **toda skin que já existia nasceu 0** (MEDIDO abaixo).
+- `ALTER TABLE ADD COLUMN` não serviria: o CHECK `season IN (0,1)` não se altera no SQLite, e a
+  régua da casa é que booleano tem CHECK. Então é **reconstrução de tabela, no molde da 097** —
+  com a mesma ordem e pelo mesmo motivo (`foreign_keys = ON`: o DROP da tabela velha de skins
+  levaria em cascata a junção de servidor e a posse de todo mundo).
+
+**Quem apaga é o wipe, e por uma porta só:**
+
+```ts
+WorkshopCatalog.removeSeasonOwnership(serverId?: string | null, now?: number): SeasonCleared
+// SeasonCleared = { removed: number; players: readonly string[] }
+```
+
+- Apaga **toda** posse cuja skin tem `season = 1` — vivas **e vencidas** (uma vencida que
+  sobrasse voltaria a valer se alguém a renovasse).
+- Grava **UMA** linha de auditoria, `owned.season-cleared`, com a contagem
+  (`detail: { removed, players, skins }`). **Não** uma por jogador: um wipe com milhares de
+  posses encheria a tela do registro e esconderia todo o resto daquele dia. Quem tinha o quê
+  continua em cada `owned.grant`.
+- **Reenvia a posse** de cada jogador afetado que esteja online, em cada servidor em que ele
+  esteja. Quem está fora recebe ao entrar.
+- **`serverId` só entra no registro**, como no `grantOwnership`: a posse é da rede e sai
+  inteira. Passar o servidor do wipe é o que deixa o registro dizer de onde veio a ordem.
+- No repositório, o que sustenta isso é `seasonOwned()` (lê) e `deleteSeasonOwned()` (apaga e
+  devolve as linhas). **A porta pública é a do `WorkshopCatalog`**, porque o registro e o
+  reenvio não cabem no repositório — é a mesma divisão do `grantOwnership` (§4.2).
+
+**MEDIDO em 17/09/2026**, na cópia do banco de desenvolvimento que a trava de schema guardou
+antes de aplicar a 100 (`data/backups/rustagent-schema-099-to-100-*.db`):
+
+| | Antes | Depois |
+|---|---|---|
+| skins | 90 | 90, **todas com `season = 0`** |
+| posses | 45 | 45, **byte a byte iguais** (o `id` de cada uma preservado) |
+| junção de servidor | 90 | 90, byte a byte iguais |
+| registro | 148 linhas | 148 linhas (a 100 não escreve nele) |
+| `workshop_favorites` | não existia | existe, vazia |
+| `foreign_key_check` / `integrity_check` | — | vazio / `ok` |
+
+O agente de desenvolvimento aplicou a 100 sozinho no boot, e o banco de dev está no mesmo
+estado.
+
 ---
 
 ## 5. O que desce para o plugin — duas cargas
@@ -295,7 +402,8 @@ O mesmo transporte de hoje (pedaços base64, lote, `OUT_OF_ORDER`, cache em disc
       "rarity": "epic",             // pode faltar
       "sort": 0,
       "openToAll": false,
-      "hideInStreamer": true
+      "hideInStreamer": true,
+      "season": false           // "Skin de temporada" (§4.6); vai SEMPRE
     }
   ],
   "streamers": ["7656…"],
@@ -314,6 +422,9 @@ O mesmo transporte de hoje (pedaços base64, lote, `OUT_OF_ORDER`, cache em disc
   - as skins vêm na ordem da grade: `sort`, depois o nome;
   - o comando continua `origemz.workshop.sync <lote> <i> <n> <pedaço>`, e a resposta
     esperada a cada pedaço continua `{"ok":true}` (ou `{"ok":false,"error":"…"}`).
+- **`season` (migração 100) vai SEMPRE**, como `openToAll` e `hideInStreamer` — e não "pode
+  faltar" como a descrição. Um campo ausente viraria "não é de temporada" num plugin velho, e
+  essa é justamente a leitura errada que custa caro.
 - **`origemz.workshop.status`** (plugin 0.3.0) deve responder
   `{"ok":true,"skins":N,"ownedPlayers":N,"streamers":N}`. `ownedPlayers` é quantos jogadores
   têm posse carregada na memória. `collections`, `grants` e `openBoxes` saem.
@@ -321,11 +432,14 @@ O mesmo transporte de hoje (pedaços base64, lote, `OUT_OF_ORDER`, cache em disc
 ### 5.2 A posse — `origemz.workshop.owned` (novo)
 
 ```text
-origemz.workshop.owned <steamId> <base64 de {"secret":"…","skins":[{"id":12,"expiresAt":0}]}>
+origemz.workshop.owned <steamId> <base64 de {"secret":"…","skins":[{"id":12,"expiresAt":0}],"favorites":[12]}>
 ```
 
 - `expiresAt` em epoch ms; **0 = permanente** (o mesmo sentido do `GrantEntry` de hoje).
 - A carga é **inteira por jogador**, nunca delta: o plugin troca o conjunto dele de uma vez.
+- **`favorites` (migração 100)** são os ids das favoritas dele (§4.5), na mesma carga — é a
+  mesma pergunta ("o que é deste jogador?"), e o plugin troca os **dois** conjuntos de uma vez.
+  Uma carga separada abriria a janela em que a posse é nova e a favorita é velha.
 - Só vão as posses **vivas** de skins que **estão no catálogo daquele servidor**.
 - Uma lista vazia é informação válida ("não tem nada") e **precisa** ser mandada. O plugin
   distingue "não tem nada" de "ainda não sei" (memória: *a digital de envio cega o agente* —
@@ -337,6 +451,8 @@ origemz.workshop.owned <steamId> <base64 de {"secret":"…","skins":[{"id":12,"e
 |---|---|
 | o jogador entrou (`PresenceWatcher.onJoined`, `core/src/index.ts:738`) | ele |
 | a posse dele mudou (painel, site, `/skin` de admin, vencimento) e ele está online **em algum** servidor | ele, em cada servidor em que estiver |
+| ele **favoritou** ou desfavoritou no menu (§5.4) | ele, em cada servidor em que estiver |
+| o wipe apagou as posses de temporada (§4.6) | cada afetado, onde estiver |
 | o plugin avisou `ready` | todos os online daquele servidor |
 | o RCON reconectou | todos os online daquele servidor |
 
@@ -369,7 +485,7 @@ origemz.workshop.owned <steamId> <lote> <i> <n> <pedaço>
   `i`, e só então decodifique. É o mesmo `encodePushPayload` do `sync`.
 
   ```json
-  {"secret":"…","steamId":"76561198000000000","skins":[{"id":12,"expiresAt":0},{"id":40,"expiresAt":1790000000000}]}
+  {"secret":"…","steamId":"76561198000000000","skins":[{"id":12,"expiresAt":0},{"id":40,"expiresAt":1790000000000}],"favorites":[12,40]}
   ```
 
   - `secret` é o mesmo do `sync`. Carga com segredo errado é recusada.
@@ -377,6 +493,14 @@ origemz.workshop.owned <steamId> <lote> <i> <n> <pedaço>
   - `id` é o `id` da skin no catálogo, o mesmo do `sync`.
   - `expiresAt` vem em epoch ms, e **0 = permanente**.
   - A lista vem ordenada por `id`, e **pode vir vazia**.
+  - **`favorites`** (migração 100) é a lista de ids das favoritas dele, **ordenada por `id`** e
+    **filtrada pelo catálogo daquele servidor**, como `skins`: favorita de skin que não existe
+    ali não tem célula para marcar. **Pode vir vazia, e a lista vazia é mandada** — ela é a
+    informação "ele não tem nenhuma". **Favoritar não é possuir:** um id pode estar em
+    `favorites` e não estar em `skins`.
+  - **Do lado do plugin (v0.4.0):** `favorites` **ausente** não mexe no que ele tem (agente
+    anterior à 100: apagar a estrela de todo mundo por um campo que faltou seria pior que ficar
+    com a lista velha). `favorites` **vazia** apaga.
 - **A resposta a cada pedaço** é a mesma do `sync`, numa linha JSON:
   - `{"ok":true}` quando aceitou, inclusive os pedaços intermediários;
   - `{"ok":false,"error":"…"}` quando recusou. Por exemplo: `BAD_SECRET`, `BAD_STEAMID`,
@@ -408,6 +532,40 @@ origemz.workshop.owned <steamId> <lote> <i> <n> <pedaço>
 - Estado "não sei" (jogador sem carga e sem cache): o menu abre, mostra só as skins da casa e
   as "Padrão", e diz *"Carregando suas skins…"*. **Nunca mostra cadeado numa skin que talvez
   seja dele.** Em vez disso, cadeado cinza com o texto "sincronizando".
+
+**O `favorites.json` (v0.4.0):** continua existindo, e virou **cache de leitura**. Ele é lido no
+boot, para o servidor que sobe com o agente fora do ar mostrar as favoritas da última carga, e
+só é **reescrito quando uma carga chega** (pelo mesmo relógio de 5 s do `owned.json`: os dois
+são o cache da mesma carga). **A estrela nunca mais o edita** — está escrito no cabeçalho do
+plugin. Id que saiu do catálogo continua sendo podado na gravação.
+
+### 5.4 A estrela do menu — o aviso `fav` (novo, migração 100)
+
+O plugin **desenha na hora** (otimista, porque a tela tem de responder no mesmo frame) e grita:
+
+```text
+#OZWORKSHOP#{"kind":"fav","secret":"…","steamId":"7656…","skinId":12,"on":true}
+```
+
+| Campo | O que é |
+|---|---|
+| `secret` | o mesmo do `sync`. Sem ele, um jogador digita o marcador no chat e mexe na lista de outro |
+| `steamId` | o SteamID64 de quem clicou |
+| `skinId` | o `id` da skin **no agente** (o mesmo do `sync`) |
+| `on` | o estado que ele quer: `true` favorita, `false` desfavorita |
+
+- **É `on`, e não "alterne".** O console repete linha em reconexão, e um "alterne" repetido
+  desfaria o clique em silêncio. Com `on`, mandar duas vezes é o mesmo que mandar uma — e por
+  isso **este aviso não tem `requestId` nem dedup**, ao contrário do `add` e do `give`.
+- **Não tem resposta.** A confirmação é a própria carga da posse, que volta com `favorites`
+  dentro: o agente grava e reenvia a posse+favoritas daquele jogador. **O agente é a verdade.**
+- **Recusado** (o teto de 200, uma skin que não existe), o agente **reenvia forçado**: sem isso
+  a digital de envio diria "não mudou nada" e o plugin ficaria com o otimismo dele para sempre.
+  A recusa vai para o log do agente, não para a auditoria.
+- O plugin tem a **mesma régua de 200** localmente, só para não desenhar o que o agente
+  recusaria; ao bater nela ele mostra a frase na faixa de "Aplicar em" e **não** grita.
+- Segredo vazio (catálogo ainda não chegou): o `Push` não sai, e a favorita é local até a
+  próxima carga — que é quem manda.
 
 ---
 
@@ -578,7 +736,7 @@ deve ser cadastrada como **liberada para todos**.
 
 | Aba | Destino |
 |---|---|
-| Skins | fica. O formulário perde permissão e coleção e ganha descrição, raridade e ordem. A tabela ganha a coluna "donos" (contagem) |
+| Skins | fica. O formulário perde permissão e coleção e ganha descrição, raridade, ordem e **"Skin de temporada"** (§4.6). A tabela ganha a coluna "donos" (contagem) |
 | Coleções | **sai** |
 | Acessos | **vira "Posse"**: busca por jogador ou por skin, lista quem tem o quê, dá e remove em lote (útil para prêmio de evento). O seletor de grupo sai |
 | Registro | fica, com as ações novas (`owned.grant`, `owned.revoke`, `owned.expired`, `site.delivered`, `migration.*`) |
@@ -596,6 +754,19 @@ Em `panel/src/app/jogador/page.tsx`, entre `vip` e `carteira`, no molde de `VipD
 Lembrete (memória: *o tipo do painel não valida a resposta*): toda resposta passa por um
 `safeX` em `panel/src/components/workshop/normalize.ts` antes do render.
 
+**O que a migração 100 acrescentou para o painel (17/09/2026):**
+
+- o formulário de skin ganha **"Skin de temporada"** — caixa de seleção, `season` no corpo do
+  POST/PUT e na resposta do GET. O PUT é o formulário **inteiro**: sem o campo, a marca volta ao
+  padrão (`false`);
+- `GET /players/:steamId/skins` passa a trazer **`favorites: number[]`** — os ids que ELE marcou
+  no menu do jogo. Sem filtro de servidor (a favorita é da rede), e **pode apontar para uma
+  skin que ele não possui**: favoritar é "quero achar rápido", não "tenho". A ficha pode mostrar
+  a estrela na lista, mas **a lista de posse não muda por causa dela**;
+- a ação nova do registro é **`owned.season-cleared`** (uma linha por wipe, com a contagem em
+  `detail`). **Favoritar não gera linha de registro nenhuma** — não procure por ela;
+- não há rota para o painel mexer em favorita. Ela é do jogador, marcada no jogo.
+
 ---
 
 ## 10. Rotas
@@ -608,7 +779,7 @@ Lembrete (memória: *o tipo do painel não valida a resposta*): toda resposta pa
 | `GET /workshop/owned?steamId=&skinId=&cursor=` | **nova** — lista a posse (uma das duas chaves é obrigatória) |
 | `POST /workshop/owned` `{ steamId, skinId, days?, expiresAt?, note? }` | **nova** — `grantOwnership` |
 | `DELETE /workshop/owned/:id` | **nova** |
-| `GET /players/:steamId/skins` | **nova** — a aba da ficha: posse viva e vencida, com o catálogo resolvido |
+| `GET /players/:steamId/skins` | **nova** — a aba da ficha: posse viva e vencida, com o catálogo resolvido, e as favoritas (§4.5) |
 | `/workshop/audit`, `/servers/:id/workshop/*` | ficam |
 
 Zod na borda **e** no repositório, como no resto do projeto.
@@ -622,7 +793,9 @@ id do Workshop, quando aparece junto, se chama `workshopId`. As datas vêm em IS
   - saem `permission` e `collectionId`;
   - entram `description` (`string | null`, até 280), `rarity` (`common | uncommon | rare |
     epic | legendary | null`) e `sort` (inteiro, padrão 0);
-  - entra `owners`, a quantidade de posses **vivas**. Só vem na resposta.
+  - entra `owners`, a quantidade de posses **vivas**. Só vem na resposta;
+  - **entra `season`** (booleano, padrão `false`; migração 100) — no corpo do POST/PUT e na
+    resposta do GET. Ver §4.6.
 - **`GET /workshop/owned`**:
   - parâmetros: `steamId`, `skinId`, `cursor`, `limit` (1 a 500, padrão 100) e
     `includeExpired` (`true`/`false`, padrão `true`);
@@ -639,9 +812,12 @@ id do Workshop, quando aparece junto, se chama `workshopId`. As datas vêm em IS
     mudou;
   - erros: `WORKSHOP_SKIN_NOT_FOUND` (404) e `OWNED_ALREADY_EXPIRED` (400, data no passado).
 - **`DELETE /workshop/owned/:ownedId`** responde `{ ok }`, ou 404 `OWNED_NOT_FOUND`.
-- **`GET /players/:steamId/skins`** responde `{ ok, steamId, live: Owned[], expired: Owned[] }`:
+- **`GET /players/:steamId/skins`** responde
+  `{ ok, steamId, live: Owned[], expired: Owned[], favorites: number[] }`:
   - listas vazias quando ele não tem nada;
-  - 400 `INVALID_STEAM_ID` quando o SteamID é inválido.
+  - 400 `INVALID_STEAM_ID` quando o SteamID é inválido;
+  - `favorites` (migração 100) são ids de skin, sem filtro de servidor, e podem apontar para uma
+    skin que ele **não** possui. Ver §4.5 e §9.
 - **`Owned`** tem estes campos:
 
   ```ts
@@ -650,13 +826,14 @@ id do Workshop, quando aparece junto, se chama `workshopId`. As datas vêm em IS
     source: 'site' | 'panel' | 'game' | 'system' | 'migration',
     sourceRef, note, createdBy, createdAt, updatedAt,
     skin: { id, label, shortname, workshopId, description, rarity, previewUrl,
-            openToAll, enabled, servers } | null
+            openToAll, enabled, season, servers } | null
   }
   ```
 
 - **`/workshop/audit`**: `source` agora pode ser `site`. As ações novas são `owned.grant`,
-  `owned.revoke`, `owned.expired`, `game.give-refused` e `migration.*`. `site.delivered` é da
-  frente C. `grant.*` e `collection.*` só aparecem em linhas antigas.
+  `owned.revoke`, `owned.expired`, `owned.season-cleared` (§4.6), `game.give-refused` e
+  `migration.*`. `site.delivered` é da frente C. `grant.*` e `collection.*` só aparecem em
+  linhas antigas. **Favoritar não gera linha nenhuma** (§4.5).
 - **`GET /servers/:id/workshop/status`** traz `status: { skins, ownedPlayers, streamers }`.
 - **`POST /servers/:id/workshop/sync`** manda também a posse de todos os online, forçada.
 - **`/workshop/collections*` e `/workshop/grants*`** respondem 404.
@@ -670,3 +847,7 @@ id do Workshop, quando aparece junto, se chama `workshopId`. As datas vêm em IS
 2. **A tocha no kit** (§8, passo 4).
 3. **O endereço da loja** que o cadeado mostra (`storeUrl`, §5.1).
 4. As medições da fase 0 (§6.3 e 03 §8).
+5. **Quem chama o `removeSeasonOwnership`** (§4.6). O método existe e está testado; ligá-lo ao
+   wipe é da outra frente. Até ela chegar, **nenhuma skin de temporada sai da posse** — que é
+   exatamente o "por padrão não é removida" que o dono pediu.
+6. **A estrela na ficha do painel** (§9): a rota já entrega `favorites`; mostrar é do painel.
