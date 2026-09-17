@@ -337,10 +337,10 @@ namespace Oxide.Plugins
             public string InventoryButtonAnchorMax = "0 1";
 
             [JsonProperty("InventoryButtonOffsetMin")]
-            public string InventoryButtonOffsetMin = "160 -41";
+            public string InventoryButtonOffsetMin = "164 -38";
 
             [JsonProperty("InventoryButtonOffsetMax")]
-            public string InventoryButtonOffsetMax = "232 -19";
+            public string InventoryButtonOffsetMax = "236 -17";
 
             /// <summary>
             /// A grade de skins ROLA (ScrollView do CUI) em vez de paginar de
@@ -351,6 +351,21 @@ namespace Oxide.Plugins
             /// `origemz.skins.scroll 0` no console desliga na hora, sem
             /// recarregar o plugin.
             /// </summary>
+            /// <summary>
+            /// O admin aplica skin que NÃO possui (`Access.Admin`).
+            ///
+            /// ####  DESLIGADO, POR DECISÃO DO DONO (17/09/2026)  ####
+            ///
+            /// "Skin bloqueada não pode ser aplicada" — e isso vale para o
+            /// admin também: ele viu no jogo que conseguia aplicar o que não
+            /// tinha, e isso é o furo, não a conveniência. Quem precisa de uma
+            /// skin dá a posse a si mesmo pelo painel ou por `/skin give`.
+            ///
+            /// Ligue de novo apenas para depurar: `origemz.skins.adminbypass 1`.
+            /// </summary>
+            [JsonProperty("AdminAppliesLocked")]
+            public bool AdminAppliesLocked = false;
+
             [JsonProperty("GridScroll")]
             public bool GridScroll = true;
 
@@ -1423,6 +1438,7 @@ namespace Oxide.Plugins
             { "grid", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABkElEQVR42u2ZPU7DQBSEv+ckEgIpd4ADUUAqRMd50nEOKgqQaCipuQh9foaCtRRZJGRtZx2RGcmKZNlvVt+uN9o3YFmWZZ2uYt8HJVVA1dFPEbE6Bp+8aj+DOnitUj5ZK0BSFRFrSVfANTBN7+27epR+l8BbRHxIiojQED6tKEq6l/SlfjRvzlApn6wVkF4UcAl8AufAImff+GWGKmAE3EbEk6RRun9wn217wi46VVo+NxuDmgDjltckDW4NPAzgQy6AWtNUMOjnX6cCLhrfbUmfbACrngbVrDmUTzaAvge1rWYpn2wA/1oGYAAGYAAGYAAGYAAGYAB/d1r60npgn70B1AVeNw4Wy3TCanstk+fzhn8pn04tsbn607ukM0khKUr6dG2KzoC7js3KF+AxIhbNhmUpn7Yrodez+rZ6pXzaBiOjjptVPZurXTNSyqfWuEW3NTomNjoSHydDToacDDkZcjLkZAgnQ06G3A8wAAMwAAMwAAMwAAMwAANwMuRkyMmQkyEnQyeVDFmWZVmnrG+IYzXYQPTZVgAAAABJRU5ErkJggg==" },
             { "check", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADz0lEQVR42u2bz2sTURDHZ7IRi/iDVCh4EQX/AaEtFC8qPXnVowdRSq/17qH/Qa+iKHr3KIp4EgRBD4J6UcGTCpa2WEHQJtmPB+fJuCTN22TTZtMdWBJ2k81+v+/NfGfmvYhUVllllVVWWWV71XTcAAEqIok7lapquidGE0i6nK+N/QwAElVtA1MickFEjovIdxF5oqrvAVVVxnrkgavAN/6338BKmAnmImMFvm6vVxzopjtSO3ezlzuUEXzNXqeATaANtDIzIAW27P25bKyolTzaC9AQkYcictguJR3inIpIKiLXsveplRh83eTttojMiEhrGzxq106EW5R9BiSq2rTgdlFEmiJS7/GdVEQ2Sq9+LugtuIDXy0IMuOzvUWbw8wao7aJ8NwsEvQD2l1YKndZPA2sGvt0DfFCEl8AkoGUFX7NjEvjkRj8WfKO0OUAYNTteZMB1s0DOqqXGXeuEMoAPfn8rMuilRsBPYLa04O3B99nrciaabwc+fObKuER8L3exEX/JE1jmiD9noNMc4G8VOvJAAtTtSIYtI67AOQmsR8pdAP+0sLJ3O80clpw4uTsKvIqM+OH6G/teLc/zdQP4r3sCzInIecu1X4vIY8vDE1VtF1zgqKqmNpLzVuDUe+T3Yp2fs6r6duDncmXmJPCoA+PvgJmiI2yfcheOuULkzqZ9DThiGVSYYr7DArBRJAlO7pZyFDjhMwuFDYYbhWXXT+vmc4WQ0KGltRUR8YPWLxcqdzYDJoCPPaJvuwgSnNzNWuaWp7q7F8AXokzO948CP5yfEUHCmbwkZPp5q30UOAcKre4cAQeBr5HJR9uNSrQvOrlrZGJNzG99Glp156bkncjcO9uU6ElCpsB5EBn0gjuuAdNDK3BCBgWcsqkdMzLBVVoxJDiSb+as7gDmh17gON+cMVcojAQ38ou7Knc5SDjmfLTZJwn7uvTzmjnkbmXHS1s3VRsFkDDRRz8v/NaDQuVuABKe90nCokut++rn7Won17lDPUeeng1e14FnA/TzdreZ6UcgJwnZZCqNJG1j5Pp5Jo9JnyS0Iqa97+ddGsl+3oAkMBb9vCGRMJx+3g6TsDUg+Kel2sbShYRWRKDrJHev+unnjQoJQSZXcqzY+gJnHThZ9rW7JLOI0YuE4vt5I7SMFbOS0zSSFkq9fBXR3Pyd0f8U+GXv75d6+SrHai4dip+XFvTq47hx0QfGG8BnB3wTuAtM+jacjONu8bC6BBwSkdPyd//eB1X9kl19kr20e3snFlhH6v8CBjboO3tm735llVVWWWWVjb79AVFUcsSCjjxVAAAAAElFTkSuQmCC" },
             { "star", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAE00lEQVR42u2az2scZRjHv+/skiK6jSjFbjx4iq3NQdpDgz0oWEogHgxVQ7FCaaj3/gEWF/wDCt4b8KJ/QC4VQZAW9KAFT6beBJtSKdImKITszMdDnxffDrPZme3szGZ3H1hmmEze53ne5/v8fEeqkQAHOE1pwshbHZgFXg2fVU1RTXvg+a5I+szuG5OEgMiu3wEPgEMTEw8C+B8FHvGElu1ZYxJcwCv5iaRZSUhanUT4/8T/dB94oc5gWLXyC8AukAB7tgkX7W/NcXYBz++ypBlJsSRv8Yt2TcY6AAJNYNOsHhsKAB4D7ardIKpQeR/83pY0b5aODAGxpMOSzlVdE1TqAs45JF0yvllQv2RxIhnX3H8E+Mtgn/A0+YD4ehgwxwUBHtLvSTpiFk77eSypKen9KmWragM8pD+0wifTQ+z6wVhlgyD3zwP/9oB/6Aa7wEJVbhBV3Pk9l8r9ynCDGasT6uxWy0WA/Xzp26U3xXbdBGYOfFnscz+waMrF9Cf/3ukqOsRmRrrKC7s81mkCSPrI1u3mWD8xuT4FfrY18vAib0C2eiS3EmXUAPckHc3JE3vngaR2KOzQEAA45xzAYUnvSPrHAlIjY2edPXtT0ouBwFkISSS9Jqm9z3vqsf4rkm4Afxhq2GezHkn6Nfjf9Hpel+cl/eCc2/Y6N1PpKjbFvhhGJTzAu5dLluGapO9NV3oKBbwlaV3ScUm7hhTXo7jJo8yggSwu4NtRBjq6kg5J2pS05pz7sa9VgKZzrgu8JOlrSUuBsgclL4fyfivpY+fc3163Iq2rgE6QorqMPoUydrJ0KjK88GXsErBli+6NsPJeti1gKSjE3LOkMZ8p2sDNjEnOKFASFFk3g8lSOfPFlEtcHzGXCGW4PjDk89b0dr8KPBwBl/C8HwKraTmHVdk1g/b2dk0uEUL+NjBf6Ug92IRmDS7xFORDWepoc/2sbw3YTrW0wyC/9jawls5Wtc357f4UcGeIm+DXvAOcChBY/8wg2IQWsGE+2i0Z9omt3SoT8lFJ8/6ulZk7Vl4PwyruCSu3k7ukLblD29cVrJ2es8ajVaD9Vc5hh5O0I+m4c27L8xyVoagvOs6Z8nHJKPA9favs47OoRAtJ0rsFx1O183Alwn9W0m8Fpz+DuMF9SW845x6X4QZRiSg6aconQwyCifE4WZb8UYkoWh7gSCu2qQ0FBx3LZSG4jFwaWzFytoBQ2K+RUi7KudlnjWdcKwKAyHzwmKSFDKWyqGuKRJK+ktQxRaIcaPBT6gVJxyz2RKNQAV7N0RqH1eE94EKwzmLqq7E4Rwt8tZYmqMfJ70afbjDcmG+sYBLQSHWWnwfv7vXpBjeq/JBiv68+5oJOMClg9WaPidMi8EvqnDC9pu8I52r7tjA4+FzpYf39rO76dJYt4Msea4W8Vur6xDbcgPWUkLmsnnP+uATczUCD57Ve5wY4O8MPBSxk9ZxzhtkMNPiNuFvLdwSB9c+YMN1nsXoBNPweuEDXeJ+pHAWBdTop3x/Y6jnR8LLxCGNBp/J0GKS/WybIn2VZPScaLhhPgFuVpsNA+ROB1dtlWr0PGhrBSZVHw4nKNiEQ4DxwZZhW7+eCdn8FOF9nHIjqKERSh7f1lMO15N8RlGFKU5rSlKZ0UOk/Xz+dVnb1HhEAAAAASUVORK5CYII=" },
+            { "shirt", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADyklEQVR42u2az6scRRDHvzWzxkOihIckBCHgwUMwIIoKih5UguAhGMGDF8WAOQhe/APUWxCRxJMBUcSDJ/EPCOpBhBAjgoiggqeIP9CYRFF42Zn+eEg1tuPs7tvdnvf2kf5CM9Oz29VV36nqru5pqaCgoKCgoKCgoOCahA3dAWCSZGYs0m6RtptOgCtbubxgZgGo/Z4M8msza72fWhKSMLOwJQT0Gdz5/TozG/v9blf4z3kUBnZJGkn6wwmtevrJTshcrpk8WwMeAl4EPgFuB+4HzgAXge+BGye178iq/PoB8DvwNfAcsBP4EHgdOALs37KBww1+GHgJ+Ai4wH/xCtB2nt0FmIfGRHKByo39sdP+JPBbUv8L+Aw4ATweCZlF8DJGxzdzAPiF/6MFxl4iGuCK37/j7XdM6WOHX5/2NmOX2yb1scvt4m/gqThmDEHAyK+veYfriTKhR6HQIacFDkUFgZFf432Uvxf42du3E+TFeuM6rPuzc+5BVfa497LLXTP0uPg0BC+XgOen9PMI8O0Eg2eh8XLPrFCbexYARmbWAE9Kek9S66PvXDwm/Z2V9L6kL/zZfkmPSTrsvwefZeZB47PGm2Z2LE6duQiofCr6WNKDCxIQSQhT2uKlWlC2JF2QdMCvM5Ooag7jb5P0gHdUL5F31E5g42QEr7f+e7WE7CDpJklH3PCZem6ks/ifo+5ibYZhpXZZlZd6CVL7POFZHwjDUiGQzKk7JX0naV8nllcR0eh7JZ2TVE0bC2Z5QO2u9KikvYmbahsQ8MxG1iEbSUtrH7Xv8Li1jO46hPHBw6uRdIuZ/QDYJDKqDU5db0g644Lj4qNNRt6tRhxEK9fxG0nHJa1nTY2BQ8DpTgIyXiBpyYHQk4V+BRwFrs+dCdYpk8B9wFtJCrqZRISetcBp4HC6zujqPBQRB4FXPXdPU9KhkMpeB96N64tBDe8bHNNcG9gDvAyc3wQPuAy8DRzsrFWGN3wCEaOkfgNwzJemOcOhTfYEbu687XpV9gRHZjb2qfNXSWsZk6a4OLrbzD73WG9ybIFlWTf7HNs4EWsDJku7neA21/5f1o0DJ6IdMOra3Bufla5xFAIKAYWAQkAhoBBQCCgEFAIKAYWAQkAhoBBQCFhpDPJNshpIUWX+ahSNb1eWADPDd2gvS/rUFb6SfLZatIx19XPcT5K+9H3HsJo++u9Jslt7jrktgzHwhAY4AWZDHKR0b9gn6QVJdy7YVzwuc17SKTM723dadFU9wYbyLm2X0+LJOd6QQUe2xZsvKCgoKNhm+Ad2QJr5iEEQwgAAAABJRU5ErkJggg==" },
         };
 
         /// <summary>Nome do ícone → CRC no FileStorage. Vazio até o boot.</summary>
@@ -1651,7 +1667,7 @@ namespace Oxide.Plugins
                 SteamId = steamId,
                 // O mesmo critério do /skin add e do /skin give: admin nativo
                 // do servidor ou a permissão. Dois critérios confundiam o teste.
-                Admin = IsAdmin(player),
+                Admin = _config.AdminAppliesLocked && IsAdmin(player),
                 Owned = owned,
                 Favorites = FavoritesOf(steamId),
                 Now = NowMs(),
@@ -5581,6 +5597,26 @@ namespace Oxide.Plugins
             });
             ui.Add(button);
 
+            // O ícone à esquerda, como o MISSÕES do jogo (pedido do dono,
+            // 17/09/2026). Sem ele (FileStorage ainda vazio), o texto ocupa o
+            // botão inteiro.
+            string crc;
+            bool withIcon = _icons.TryGetValue("shirt", out crc);
+
+            if (withIcon)
+            {
+                CuiElement icon = new CuiElement { Parent = UiInventoryButton };
+                icon.Components.Add(new CuiRawImageComponent { Png = crc, Color = ColText });
+                icon.Components.Add(new CuiRectTransformComponent
+                {
+                    AnchorMin = "0 0.5",
+                    AnchorMax = "0 0.5",
+                    OffsetMin = "6 -7",
+                    OffsetMax = "20 7",
+                });
+                ui.Add(icon);
+            }
+
             CuiElement text = new CuiElement { Parent = UiInventoryButton };
             text.Components.Add(new CuiTextComponent
             {
@@ -5590,10 +5626,16 @@ namespace Oxide.Plugins
                 // 17/09/2026).
                 FontSize = 10,
                 Font = FontBold,
-                Align = TextAnchor.MiddleCenter,
+                Align = withIcon ? TextAnchor.MiddleLeft : TextAnchor.MiddleCenter,
                 Color = ColText,
             });
-            text.Components.Add(new CuiRectTransformComponent { AnchorMin = "0 0", AnchorMax = "1 1" });
+            text.Components.Add(new CuiRectTransformComponent
+            {
+                AnchorMin = "0 0",
+                AnchorMax = "1 1",
+                OffsetMin = withIcon ? "24 0" : "0 0",
+                OffsetMax = "0 0",
+            });
             ui.Add(text);
 
             CuiHelper.AddUi(player, ui);
@@ -5613,6 +5655,31 @@ namespace Oxide.Plugins
         /// e redesenha quem estiver com o menu aberto. Sem argumento, só diz
         /// o estado. Servidor, RCON ou admin.
         /// </summary>
+        /// <summary>
+        /// `origemz.skins.adminbypass 0|1`: liga e desliga o privilégio do
+        /// admin de aplicar skin que não possui, e redesenha quem está com o
+        /// menu aberto. Serve para o admin ver a tela como jogador.
+        /// </summary>
+        [ConsoleCommand("origemz.skins.adminbypass")]
+        private void CmdAdminBypass(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null)
+            {
+                BasePlayer player = arg.Player();
+                if (player == null || !IsAdmin(player)) return;
+            }
+
+            if (arg.HasArgs(1))
+            {
+                _config.AdminAppliesLocked = arg.GetString(0) == "1" || arg.GetString(0).ToLowerInvariant() == "true";
+                SaveConfig();
+                RedrawAllMenus(Region.AllButWindow);
+            }
+
+            arg.ReplyWith("{\"ok\":true,\"adminAppliesLocked\":" +
+                          (_config.AdminAppliesLocked ? "true" : "false") + "}");
+        }
+
         [ConsoleCommand(ScrollCommand)]
         private void CmdScroll(ConsoleSystem.Arg arg)
         {

@@ -72,7 +72,11 @@ Qualquer um destes libera — é um **OU**:
 
 1. a skin está **liberada para todos** (skin da casa);
 2. o jogador tem uma **posse viva** dela: sem prazo, ou com prazo no futuro;
-3. o jogador é admin: tem `origemzworkshop.admin` **ou** é admin nativo do servidor (`player.IsAdmin`). É o mesmo critério do `/skin add` e do `/skin give`.
+3. ~~o jogador é admin~~ — **REVOGADO em 17/09/2026.** O dono viu no jogo que o admin aplicava
+   skin bloqueada e decidiu: *"uma skin que está bloqueada, que o usuário não tem, não pode ser
+   aplicada"*. Vale para o admin também; quem precisa de uma skin dá a posse a si mesmo pelo
+   painel ou pelo `/skin give`. A config `AdminAppliesLocked` do plugin (e
+   `origemz.skins.adminbypass 1`) devolve o privilégio, e existe só para depurar.
 
 E, em todos os casos, a skin precisa estar **ligada** e **vinculada ao servidor** (a junção
 `workshop_skin_servers` continua valendo).
