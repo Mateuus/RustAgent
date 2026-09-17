@@ -17,6 +17,7 @@ import {
   describeOwnedExpiry,
   groupByShortname,
   ownedMatches,
+  safeFavoriteIds,
   safeOwned,
   safeOwnedList,
   safeRarity,
@@ -124,5 +125,20 @@ describe('ownedMatches', () => {
     expect(ownedMatches(orphan, '')).toBe(true);
     expect(ownedMatches(orphan, '77')).toBe(true);
     expect(ownedMatches(orphan, 'ak')).toBe(false);
+  });
+});
+
+describe('safeFavoriteIds', () => {
+  it('campo ausente é conjunto vazio: nenhuma estrela, e nenhum erro de tela', () => {
+    // Um agente anterior à migração 100 não manda `favorites`.
+    expect(safeFavoriteIds(undefined).size).toBe(0);
+    expect(safeFavoriteIds(null).size).toBe(0);
+    expect(safeFavoriteIds('3,7').size).toBe(0);
+  });
+
+  it('aceita os ids e descarta lixo, sem repetir', () => {
+    const ids = safeFavoriteIds([3, '7', 3, 0, -1, null, 'ak', Number.NaN]);
+
+    expect([...ids].sort((left, right) => left - right)).toEqual([3, 7]);
   });
 });

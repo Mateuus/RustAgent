@@ -19,17 +19,39 @@
 //  é um `<select>` nativo — ver dialog.tsx. Fechar desmonta o
 //  formulário, então a próxima abertura nasce limpa.
 //
-//  ####  VIVA E VENCIDA, SEPARADAS  ####
+//  ####  VIVA E VENCIDA, SEPARADAS — HOJE POR ABAS  ####
 //
-//  "Ele tem a AK?" se responde pela lista viva. A vencida fica
-//  embaixo, recolhida e apagada, porque é a resposta de "eu tinha e
-//  sumiu" — misturá-las faria uma posse vencida parecer valendo.
+//  "Ele tem a AK?" se responde pela lista viva. A vencida é a resposta
+//  de "eu tinha e sumiu", e misturá-las faria uma posse vencida parecer
+//  valendo.
+//
+//  Com 48 posses a lista única virou rolagem sem fim, então o bloco "O
+//  que ele tem" ganhou abas: **Todas**, **Favoritas** e **Vencidas** (as
+//  duas últimas só aparecem quando há alguma). É o mesmo desenho das
+//  sub-abas Skins|Histórico daqui. A aba ativa fica só no estado local.
+//
+//  **Nada de "Por item".** Foi considerado e recusado: agrupar quebraria
+//  a paginação (uma página cortaria um grupo no meio) e o item já está em
+//  toda linha, em monoespaçado, e a busca procura por ele. O que 48
+//  linhas pedem é filtro, e é o que as abas e a busca dão.
 //
 //  ####  PÁGINAS NO NAVEGADOR  ####
 //
-//  A rota da ficha devolve tudo dele de uma vez (vivas e vencidas),
-//  então cada lista pagina a sua fatia, com página própria. A busca
-//  vale para as duas e as manda de volta à página 1.
+//  A rota da ficha devolve tudo dele de uma vez (vivas e vencidas), e
+//  quem pagina é a aba ativa. A página é uma só: trocar de aba, buscar
+//  ou mudar o tamanho volta para a 1 — guardar uma página por aba faria
+//  a de trás voltar num lugar que ninguém deixou.
+//
+//  ####  AS FAVORITAS SÃO SÓ LEITURA  ####
+//
+//  A estrela âmbar de uma linha diz que o JOGADOR marcou aquela skin
+//  como favorita no menu do jogo (`origemz.skins.fav`, 03 §5). O painel
+//  **não** marca nem desmarca: não há rota para isso, de propósito — a
+//  favorita é o atalho dele, e não uma configuração de admin. Por isso
+//  a estrela não é botão, e o tooltip diz de quem é a marca.
+//
+//  A rota pode não mandar o campo (agente velho): `safeFavoriteIds`
+//  devolve conjunto vazio e nenhuma estrela aparece.
 //
 //  ####  MORA AQUI, E NÃO NA PÁGINA DA FICHA  ####
 //
@@ -40,7 +62,7 @@
 //  vira TypeError no render e derruba a página.
 // ============================================================
 
-import { ChevronDown, ChevronRight, Loader2, Plus, Search, Trash2 } from 'lucide-react';
+import { Loader2, Plus, Search, Star, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
@@ -55,6 +77,7 @@ import {
   messageOf,
   OWNED_SOURCE_LABELS,
   ownedMatches,
+  safeFavoriteIds,
   safeOwned,
   safeOwnedList,
   safeSkin,
@@ -88,6 +111,9 @@ const VIEWS: readonly { id: View; label: string }[] = [
   { id: 'history', label: 'Histórico' },
 ];
 
+/** As três listas do bloco "O que ele tem", uma por aba. */
+type ListTab = 'all' | 'favorites' | 'expired';
+
 /** A partir de quantas posses a lista ganha a busca. */
 const SEARCH_THRESHOLD = 8;
 
@@ -95,15 +121,17 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
   const [view, setView] = useState<View>('skins');
   const [live, setLive] = useState<WorkshopOwned[] | null>(null);
   const [expired, setExpired] = useState<WorkshopOwned[]>([]);
+  /** Ids de skin que ele favoritou no jogo. Só leitura (ver o topo). */
+  const [favorites, setFavorites] = useState<ReadonlySet<number>>(() => new Set<number>());
+  const [list, setList] = useState<ListTab>('all');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [giving, setGiving] = useState(false);
   /** O modal está com uma requisição no ar: fechar fica travado. */
   const [givingBusy, setGivingBusy] = useState(false);
   const [query, setQuery] = useState('');
-  const [showExpired, setShowExpired] = useState(false);
-  const [livePage, setLivePage] = useState(1);
-  const [expiredPage, setExpiredPage] = useState(1);
+  /** Uma página só: trocar de aba, buscar ou mudar o tamanho volta à 1. */
+  const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZES[0] ?? 20);
 
   const load = useCallback(async () => {
@@ -112,6 +140,7 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
 
       setLive(safeOwnedList(response.live));
       setExpired(safeOwnedList(response.expired));
+      setFavorites(safeFavoriteIds(response.favorites));
       setError(null);
     } catch (cause) {
       setLive((current) => current ?? []);
@@ -145,6 +174,7 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
   // Com a busca escondida, um filtro digitado antes não pode sumir
   // com linhas sem que se veja por quê.
   const needle = searchable ? query : '';
+  const filtering = needle.trim() !== '';
   const shownLive = useMemo(
     () => (live ?? []).filter((owned) => ownedMatches(owned, needle)),
     [live, needle],
@@ -153,24 +183,73 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
     () => expired.filter((owned) => ownedMatches(owned, needle)),
     [expired, needle],
   );
-  const filtering = needle.trim() !== '';
+  const shownFavorites = useMemo(
+    () => shownLive.filter((owned) => favorites.has(owned.skinId)),
+    [shownLive, favorites],
+  );
+  // Quantas das posses VIVAS ele favoritou, sem contar a busca: é o que
+  // decide se a aba Favoritas existe. A conta é desta lista, e não do
+  // conjunto todo — favoritar não exige ter (02 §5.4), e uma aba que
+  // prometesse 3 e mostrasse 1 pareceria erro de tela.
+  const favoriteLive = useMemo(
+    () => (live ?? []).filter((owned) => favorites.has(owned.skinId)).length,
+    [live, favorites],
+  );
+
+  // As contagens do rótulo acompanham a busca: com um filtro digitado, é
+  // ela que diz em qual aba o que se procura está.
+  const tabs = useMemo(() => {
+    const result: { id: ListTab; label: string; count: number }[] = [
+      { id: 'all', label: 'Todas', count: shownLive.length },
+    ];
+
+    if (favoriteLive > 0) {
+      result.push({ id: 'favorites', label: 'Favoritas', count: shownFavorites.length });
+    }
+
+    if (expired.length > 0) {
+      result.push({ id: 'expired', label: 'Vencidas', count: shownExpired.length });
+    }
+
+    return result;
+  }, [shownLive.length, favoriteLive, shownFavorites.length, expired.length, shownExpired.length]);
+
+  // A aba pode sumir debaixo do pé: tirar a última favorita apaga a
+  // Favoritas, e quem estava nela cai em Todas em vez de ficar numa aba
+  // que não existe mais.
+  const active: ListTab = tabs.some((tab) => tab.id === list) ? list : 'all';
+  const rows =
+    active === 'favorites' ? shownFavorites : active === 'expired' ? shownExpired : shownLive;
 
   // Tirar uma skin pode deixar a página guardada além do fim.
-  const liveCurrent = clampPage(livePage, shownLive.length, pageSize);
-  const expiredCurrent = clampPage(expiredPage, shownExpired.length, pageSize);
-  const livePageRows = useMemo(
-    () => slicePage(shownLive, liveCurrent, pageSize),
-    [shownLive, liveCurrent, pageSize],
-  );
-  const expiredPageRows = useMemo(
-    () => slicePage(shownExpired, expiredCurrent, pageSize),
-    [shownExpired, expiredCurrent, pageSize],
-  );
+  const current = clampPage(page, rows.length, pageSize);
+  const pageRows = useMemo(() => slicePage(rows, current, pageSize), [rows, current, pageSize]);
+
+  function changeList(id: ListTab): void {
+    setList(id);
+    setPage(1);
+  }
 
   function changePageSize(size: number): void {
     setPageSize(size);
-    setLivePage(1);
-    setExpiredPage(1);
+    setPage(1);
+  }
+
+  /** O que dizer quando a aba ativa não tem linha nenhuma. */
+  function emptyMessage(): string {
+    if (active === 'favorites') {
+      return filtering
+        ? 'Nenhuma favorita dele bate com a busca.'
+        : 'Nenhuma das skins que ele tem está favoritada.';
+    }
+
+    if (active === 'expired') {
+      return filtering ? 'Nenhuma vencida bate com a busca.' : 'Nada aqui.';
+    }
+
+    return filtering
+      ? 'Nenhuma skin dele bate com a busca.'
+      : 'Nenhuma skin valendo agora. Veja as Vencidas.';
   }
 
   return (
@@ -223,101 +302,107 @@ export function PlayerSkins({ steamId, servers }: PlayerSkinsProps) {
               </Button>
             }
           >
-            {searchable && (
-              <div className="border-b border-border px-4 py-2">
-                <div className="relative max-w-sm">
-                  <Search
-                    aria-hidden="true"
-                    className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
-                  />
-                  <Input
-                    value={query}
-                    placeholder="Buscar por nome, item ou Workshop ID"
-                    aria-label="Buscar nas skins do jogador"
-                    className="h-8 pl-7"
-                    onChange={(event) => {
-                      setQuery(event.target.value);
-                      setLivePage(1);
-                      setExpiredPage(1);
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {live === null && error === null ? (
-              <div className="p-3">
-                <StateBlock variant="loading" title="Lendo…" />
-              </div>
-            ) : live === null || live.length === 0 ? (
-              <p className="px-4 py-3 text-sm text-muted">
-                Este jogador não tem skin nenhuma. Ele ainda aplica as liberadas para todos.
-              </p>
-            ) : shownLive.length === 0 ? (
-              <p className="px-4 py-3 text-sm text-muted">Nenhuma skin dele bate com a busca.</p>
-            ) : (
-              <>
-                <OwnedRows
-                  rows={livePageRows}
-                  busy={busy}
-                  onRevoke={(owned) => void revoke(owned)}
-                />
-                <Pagination
-                  className="border-t border-border px-4 py-2"
-                  page={liveCurrent}
-                  pageSize={pageSize}
-                  total={shownLive.length}
-                  onPageChange={setLivePage}
-                  onPageSizeChange={changePageSize}
-                />
-              </>
-            )}
-          </Block>
-
-          {expired.length > 0 && (
-            <Block
-              title="Vencidas"
-              count={expired.length}
-              aside={
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  aria-expanded={showExpired}
-                  onClick={() => setShowExpired((value) => !value)}
+            {live !== null && live.length + expired.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2">
+                <div
+                  role="tablist"
+                  aria-label="Listas das skins do jogador"
+                  className="inline-flex items-stretch border border-border bg-surface"
                 >
-                  {showExpired ? (
-                    <ChevronDown aria-hidden="true" className="h-4 w-4" />
-                  ) : (
-                    <ChevronRight aria-hidden="true" className="h-4 w-4" />
-                  )}
-                  {showExpired ? 'Esconder' : 'Mostrar'}
-                </Button>
-              }
+                  {tabs.map((tab, index) => (
+                    <div key={tab.id} role="presentation" className="flex items-stretch">
+                      {index > 0 && <span aria-hidden className="my-1 w-px bg-border" />}
+
+                      <button
+                        type="button"
+                        role="tab"
+                        id={`player-skins-list-tab-${tab.id}`}
+                        aria-selected={active === tab.id}
+                        aria-controls="player-skins-list-panel"
+                        title={
+                          tab.id === 'favorites'
+                            ? 'As skins que o jogador favoritou no menu do jogo. Quem marca é ele; o painel não mexe nisso.'
+                            : undefined
+                        }
+                        onClick={() => changeList(tab.id)}
+                        className={cn(
+                          'flex items-center gap-1.5 px-3 py-1.5 font-condensed text-2xs font-bold uppercase tracking-wide',
+                          active === tab.id
+                            ? 'bg-surface-2 text-foreground'
+                            : 'text-muted hover:text-foreground',
+                        )}
+                      >
+                        {tab.id === 'favorites' && (
+                          <Star
+                            aria-hidden="true"
+                            className={cn('h-3 w-3', active === tab.id && 'fill-amber text-amber')}
+                          />
+                        )}
+                        {tab.label}
+                        <span className="font-mono text-2xs font-normal opacity-70">
+                          ({tab.count})
+                        </span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                {searchable && (
+                  <div className="relative min-w-0 flex-1 basis-56 sm:max-w-sm">
+                    <Search
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted"
+                    />
+                    <Input
+                      value={query}
+                      placeholder="Buscar por nome, item ou Workshop ID"
+                      aria-label="Buscar nas skins do jogador"
+                      className="h-8 pl-7"
+                      onChange={(event) => {
+                        setQuery(event.target.value);
+                        setPage(1);
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div
+              role="tabpanel"
+              id="player-skins-list-panel"
+              aria-labelledby={`player-skins-list-tab-${active}`}
             >
-              {showExpired &&
-                (shownExpired.length === 0 ? (
-                  <p className="px-4 py-3 text-sm text-muted">
-                    {filtering ? 'Nenhuma vencida bate com a busca.' : 'Nada aqui.'}
-                  </p>
-                ) : (
-                  <>
-                    <OwnedRows
-                      rows={expiredPageRows}
-                      busy={busy}
-                      onRevoke={(owned) => void revoke(owned)}
-                    />
-                    <Pagination
-                      className="border-t border-border px-4 py-2"
-                      page={expiredCurrent}
-                      pageSize={pageSize}
-                      total={shownExpired.length}
-                      onPageChange={setExpiredPage}
-                      onPageSizeChange={changePageSize}
-                    />
-                  </>
-                ))}
-            </Block>
-          )}
+              {live === null && error === null ? (
+                <div className="p-3">
+                  <StateBlock variant="loading" title="Lendo…" />
+                </div>
+              ) : live === null || live.length + expired.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-muted">
+                  Este jogador não tem skin nenhuma. Ele ainda aplica as liberadas para todos.
+                </p>
+              ) : rows.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-muted">{emptyMessage()}</p>
+              ) : (
+                <>
+                  <OwnedRows
+                    rows={pageRows}
+                    favorites={favorites}
+                    busy={busy}
+                    onRevoke={(owned) => void revoke(owned)}
+                  />
+                  <Pagination
+                    className="border-t border-border px-4 py-2"
+                    page={current}
+                    pageSize={pageSize}
+                    total={rows.length}
+                    onPageChange={setPage}
+                    onPageSizeChange={changePageSize}
+                  />
+                </>
+              )}
+            </div>
+          </Block>
 
           <Dialog
             open={giving}
@@ -408,10 +493,13 @@ function Tag({ tone, title, children }: { tone?: string; title?: string; childre
 
 function OwnedRows({
   rows,
+  favorites,
   busy,
   onRevoke,
 }: {
   readonly rows: readonly WorkshopOwned[];
+  /** Ids de skin favoritados pelo jogador. A estrela é um selo, não um botão. */
+  readonly favorites: ReadonlySet<number>;
   readonly busy: boolean;
   readonly onRevoke: (owned: WorkshopOwned) => void;
 }) {
@@ -420,6 +508,7 @@ function OwnedRows({
       {rows.map((owned) => {
         const skin = owned.skin;
         const permanent = owned.expiresAt === null;
+        const favorite = favorites.has(owned.skinId);
 
         return (
           <li
@@ -438,6 +527,17 @@ function OwnedRows({
 
               <div className="min-w-0 space-y-0.5">
                 <p className="flex flex-wrap items-center gap-1.5">
+                  {/* Selo, e não botão: favoritar é do jogador, no jogo. */}
+                  {favorite && (
+                    <span
+                      role="img"
+                      aria-label="Favorita do jogador"
+                      title="Favorita do jogador — ele marcou esta skin no menu do jogo. O painel não marca nem desmarca."
+                      className="flex shrink-0 items-center"
+                    >
+                      <Star aria-hidden="true" className="h-3.5 w-3.5 fill-amber text-amber" />
+                    </span>
+                  )}
                   <span className="truncate font-medium text-foreground">
                     {skin?.label ?? `skin #${String(owned.skinId)}`}
                   </span>

@@ -6256,11 +6256,23 @@ export const agent = {
   revokeWorkshopOwned: (ownedId: number) =>
     api<{ ok: true }>(`/api/workshop/owned/${String(ownedId)}`, { method: 'DELETE' }),
 
-  /** A aba Skins da ficha: posse viva e vencida, com a skin resolvida. */
+  /**
+   * A aba Skins da ficha: posse viva e vencida, com a skin resolvida.
+   *
+   * `favorites` são os ids de skin que o JOGADOR marcou no menu do jogo
+   * (Docs/OrigemZWorkshop/02 §5.4). São só leitura aqui: o painel não
+   * marca nem desmarca favorita — não há rota para isso, e nem deve
+   * haver. Vêm sem filtro de servidor e podem apontar para uma skin que
+   * ele não possui: favoritar é "quero achar rápido", não "tenho".
+   */
   playerSkins: (steamId: string) =>
-    api<{ ok: true; steamId: string; live: WorkshopOwned[]; expired: WorkshopOwned[] }>(
-      `/api/players/${encodeURIComponent(steamId)}/skins`,
-    ),
+    api<{
+      ok: true;
+      steamId: string;
+      live: WorkshopOwned[];
+      expired: WorkshopOwned[];
+      favorites: number[];
+    }>(`/api/players/${encodeURIComponent(steamId)}/skins`),
 
   // ---- Registro ---------------------------------------------
 
