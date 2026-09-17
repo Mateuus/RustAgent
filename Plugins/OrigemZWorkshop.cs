@@ -228,6 +228,18 @@ namespace Oxide.Plugins
 
             [JsonProperty("InventoryButtonOffsetMax")]
             public string InventoryButtonOffsetMax = "-482 46";
+
+            /// <summary>
+            /// A grade de skins ROLA (ScrollView do CUI) em vez de paginar de
+            /// 12 em 12. Pedido do dono em 17/09/2026, para testar no jogo.
+            ///
+            /// O projeto anterior derrubou o jogador com ScrollView
+            /// (core/src/types/ui-document.ts:23). Se derrubar de novo:
+            /// `origemz.skins.scroll 0` no console desliga na hora, sem
+            /// recarregar o plugin.
+            /// </summary>
+            [JsonProperty("GridScroll")]
+            public bool GridScroll = true;
         }
 
         private PluginConfig _config;
@@ -1496,12 +1508,12 @@ namespace Oxide.Plugins
             if (active != null && active.info != null && active.info.shortname == shortname &&
                 active.parent == inventory.containerBelt)
             {
-                result.Add(new Instance { Item = active, Where = "na mão" });
+                result.Add(new Instance { Item = active, Where = "Na mão" });
             }
 
-            AddInstances(result, inventory.containerBelt, shortname, active, "barra");
-            AddInstances(result, inventory.containerWear, shortname, null, "roupa");
-            AddInstances(result, inventory.containerMain, shortname, null, "inventário");
+            AddInstances(result, inventory.containerBelt, shortname, active, "Barra");
+            AddInstances(result, inventory.containerWear, shortname, null, "Roupa");
+            AddInstances(result, inventory.containerMain, shortname, null, "Inventário");
 
             if (inventory.containerWear != null && inventory.containerWear.itemList != null)
             {
@@ -1509,7 +1521,7 @@ namespace Oxide.Plugins
                 {
                     if (worn == null || worn.contents == null) continue;
 
-                    AddInstances(result, worn.contents, shortname, null, "mochila");
+                    AddInstances(result, worn.contents, shortname, null, "Mochila");
                 }
             }
 
@@ -1528,7 +1540,7 @@ namespace Oxide.Plugins
             {
                 if (item == null || item == skip || item.info == null || item.info.shortname != shortname) continue;
 
-                string label = where == "barra" ? "barra " + (item.position + 1) : where;
+                string label = where == "Barra" ? "Barra " + (item.position + 1) : where;
                 result.Add(new Instance { Item = item, Where = label });
             }
         }
@@ -2270,6 +2282,14 @@ namespace Oxide.Plugins
         private const int GridRows = 3;
         private const int GridPageSize = GridColumns * GridRows;
         private const int TargetsPageSize = 4;
+
+        /// <summary>
+        /// Quantas células a grade ROLÁVEL leva por página. Acima disto o
+        /// paginador volta a aparecer: cada célula custa ~2,3 KB, e uma
+        /// grade infinita num AddUI só não foi medida.
+        /// </summary>
+        private const int ScrollPageSize = 48;
+        private const string ScrollCommand = "origemz.skins.scroll";
         private const float CommandCooldownSeconds = 0.08f;
         private const int SearchMinLength = 2;
         private const int SearchMaxLength = 40;
@@ -2855,6 +2875,8 @@ namespace Oxide.Plugins
         private class GridView
         {
             public string Token = "";
+            /// <summary>A grade rola (config `GridScroll`) em vez de paginar de 12 em 12.</summary>
+            public bool Scroll;
             public readonly List<GridCell> Cells = new List<GridCell>();
             public int Page;
             public int Pages = 1;
@@ -3156,7 +3178,9 @@ namespace Oxide.Plugins
             }
 
             int count = list.Count + (withDefault ? 1 : 0);
-            view.Pages = Math.Max(1, (count + GridPageSize - 1) / GridPageSize);
+            view.Scroll = _config.GridScroll;
+            int pageSize = view.Scroll ? ScrollPageSize : GridPageSize;
+            view.Pages = Math.Max(1, (count + pageSize - 1) / pageSize);
             session.GridPage = Math.Min(Math.Max(0, session.GridPage), view.Pages - 1);
             view.Page = session.GridPage;
 
@@ -3164,8 +3188,8 @@ namespace Oxide.Plugins
             ulong targetSkin = target != null ? EffectiveSkin(viewer.SteamId, target) : 0uL;
             string targetShortname = target != null ? target.info.shortname : "";
 
-            int start = view.Page * GridPageSize;
-            int end = Math.Min(count, start + GridPageSize);
+            int start = view.Page * pageSize;
+            int end = Math.Min(count, start + pageSize);
 
             for (int i = start; i < end; i++)
             {
@@ -3279,7 +3303,7 @@ namespace Oxide.Plugins
             view.SkinId = entry.SkinId;
             view.Label = entry.Label;
             view.Rarity = entry.Rarity;
-            view.Sub = entry.ItemName + (entry.Rarity.Length > 0 ? " · " + RarityLabel(entry.Rarity) : "");
+            view.Sub = entry.ItemName;
             view.Description = entry.Description;
 
             long expiresAt;
@@ -3450,7 +3474,7 @@ namespace Oxide.Plugins
             if ((regions & Region.Head) != 0) first.Add(BuildHead(ComputeHead(frame, session)));
             if ((regions & Region.Side) != 0) first.Add(BuildSide(ComputeSide(frame, session)));
             if ((regions & Region.Detail) != 0) first.Add(BuildDetail(ComputeDetail(frame, session)));
-            if ((regions & Region.Grid) != 0) second.Add(BuildGrid(ComputeGrid(frame, session)));
+            if ((regions & Region.Grid) != 0) second.AddRange(BuildGrid(ComputeGrid(frame, session)));
             if ((regions & Region.Targets) != 0) second.Add(BuildTargets(ComputeTargets(frame, session)));
 
             foreach (string json in Pack(first, AddUiByteLimit)) CuiHelper.AddUi(player, json);
@@ -3549,6 +3573,19 @@ namespace Oxide.Plugins
             }
         }
 
+        /// <summary>O fundo da célula: a cor da raridade, bem escura, para o ícone continuar legível.</summary>
+        private static string RarityFill(string rarity)
+        {
+            switch (rarity)
+            {
+                case "uncommon": return Hex("#1E3319");
+                case "rare": return Hex("#172B47");
+                case "epic": return Hex("#2E1B45");
+                case "legendary": return Hex("#4A2A0E");
+                default: return ColSurface2;
+            }
+        }
+
         private static readonly string RarityUncommon = Hex("#4E9A3F");
         private static readonly string RarityRare = Hex("#3C78C8");
         private static readonly string RarityEpic = Hex("#8A4FC7");
@@ -3611,6 +3648,24 @@ namespace Oxide.Plugins
             public string Json()
             {
                 return CuiHelper.ToJson(Ui);
+            }
+
+            /// <summary>
+            /// Um array JSON por elemento, na ordem. É o que deixa o `Pack`
+            /// dividir UMA região em vários AddUI (a grade rolável passa de
+            /// 40 KB) sem nunca mandar um filho antes do pai.
+            /// </summary>
+            public List<string> Parts()
+            {
+                List<string> parts = new List<string>(Ui.Count);
+                foreach (CuiElement element in Ui)
+                {
+                    CuiElementContainer single = new CuiElementContainer();
+                    single.Add(element);
+                    parts.Add(CuiHelper.ToJson(single));
+                }
+
+                return parts;
             }
         }
 
@@ -3929,10 +3984,13 @@ namespace Oxide.Plugins
         private const float CellGap = 8f;
         private const float GridPad = 12f;
 
-        private static string BuildGrid(GridView view)
+        private static List<string> BuildGrid(GridView view)
         {
             Canvas canvas = new Canvas("OZSk.G");
             Box grid = RegionRoot(canvas, UiGrid, SideWidth, HeaderHeight, GridWidth, BodyHeight, ColTransparent);
+
+            float gridBottom = GridPad + GridRows * CellHeight + (GridRows - 1) * CellGap;
+            bool paged = view.Pages > 1;
 
             if (view.Cells.Count == 0)
             {
@@ -3940,17 +3998,82 @@ namespace Oxide.Plugins
                       ColMuted, TextAnchor.MiddleCenter, false);
             }
 
-            for (int i = 0; i < view.Cells.Count; i++)
+            if (view.Scroll)
             {
-                float cx = GridPad + (i % GridColumns) * (CellWidth + CellGap);
-                float cy = GridPad + (i / GridColumns) * (CellHeight + CellGap);
-                GridCellBox(canvas, grid, cx, cy, view.Cells[i], view.Token);
+                // ####  A GRADE ROLÁVEL  ####
+                //
+                // A área visível vai do topo até a pesquisa (ou até o
+                // paginador, se houver mais de uma página). O conteúdo é
+                // ancorado no TOPO da área e cresce para baixo: âncora
+                // mínima negativa, em fração da área visível, para tudo
+                // continuar relativo e escalar com a resolução.
+                float viewportBottom = paged ? gridBottom : gridBottom + 36f;
+                float viewportHeight = viewportBottom - GridPad;
+                float viewportWidth = GridWidth - GridPad - 4f;
+                int rows = (view.Cells.Count + GridColumns - 1) / GridColumns;
+                float contentHeight = Math.Max(viewportHeight,
+                                               rows * CellHeight + Math.Max(0, rows - 1) * CellGap + 4f);
+                float bottomAnchor = 1f - contentHeight / viewportHeight;
+
+                string scrollName = canvas.NextName();
+                CuiElement scroll = new CuiElement { Name = scrollName, Parent = UiGrid };
+                scroll.Components.Add(new CuiScrollViewComponent
+                {
+                    Vertical = true,
+                    Horizontal = false,
+                    MovementType = UnityEngine.UI.ScrollRect.MovementType.Clamped,
+                    Elasticity = 0.25f,
+                    Inertia = true,
+                    DecelerationRate = 0.3f,
+                    ScrollSensitivity = 24f,
+                    ContentTransform = new CuiRectTransform
+                    {
+                        AnchorMin = "0 " + F(bottomAnchor),
+                        AnchorMax = "1 1",
+                        OffsetMin = "0 0",
+                        OffsetMax = "0 0",
+                    },
+                    VerticalScrollbar = new CuiScrollbar
+                    {
+                        Size = 6f,
+                        AutoHide = false,
+                        HandleColor = ColRust,
+                        HighlightColor = ColText,
+                        PressedColor = ColText,
+                        TrackColor = ColSurface,
+                    },
+                });
+                scroll.Components.Add(Rect(grid, GridPad, GridPad, viewportWidth, viewportHeight));
+                canvas.Ui.Add(scroll);
+
+                // Os filhos se posicionam no CONTEÚDO, que tem a altura inteira.
+                Box content = new Box(scrollName, viewportWidth - 10f, contentHeight);
+
+                for (int i = 0; i < view.Cells.Count; i++)
+                {
+                    float cx = (i % GridColumns) * (CellWidth + CellGap);
+                    float cy = (i / GridColumns) * (CellHeight + CellGap);
+                    GridCellBox(canvas, content, cx, cy, view.Cells[i], view.Token);
+                }
+
+                if (paged)
+                {
+                    Pager(canvas, grid, GridPad, gridBottom + 8, GridWidth - 2 * GridPad, 28, view.Page, view.Pages,
+                          MenuPageCommand + " " + view.Token, 130, "‹ ANTERIOR", "PRÓXIMA ›", null, null);
+                }
             }
+            else
+            {
+                for (int i = 0; i < view.Cells.Count; i++)
+                {
+                    float cx = GridPad + (i % GridColumns) * (CellWidth + CellGap);
+                    float cy = GridPad + (i / GridColumns) * (CellHeight + CellGap);
+                    GridCellBox(canvas, grid, cx, cy, view.Cells[i], view.Token);
+                }
 
-            float gridBottom = GridPad + GridRows * CellHeight + (GridRows - 1) * CellGap;
-
-            Pager(canvas, grid, GridPad, gridBottom + 8, GridWidth - 2 * GridPad, 28, view.Page, view.Pages,
-                  MenuPageCommand + " " + view.Token, 130, "‹ ANTERIOR", "PRÓXIMA ›", null, null);
+                Pager(canvas, grid, GridPad, gridBottom + 8, GridWidth - 2 * GridPad, 28, view.Page, view.Pages,
+                      MenuPageCommand + " " + view.Token, 130, "‹ ANTERIOR", "PRÓXIMA ›", null, null);
+            }
 
             // A pesquisa (03 §3.4): o cliente anexa o texto ao comando
             // quando o campo perde o foco ou no Enter.
@@ -3987,16 +4110,21 @@ namespace Oxide.Plugins
                            "X", 12, ColText);
             }
 
-            return canvas.Json();
+            return canvas.Parts();
         }
 
         private static void GridCellBox(Canvas canvas, Box grid, float x, float y, GridCell cell, string token)
         {
-            string fill = cell.Applied ? ColAppliedFill : cell.Picked ? ColPicked : ColSurface2;
-            string border = cell.Applied ? ColOlive : RarityColor(cell.Rarity);
+            // ####  A COR DA RARIDADE É O FUNDO DA CÉLULA  ####
+            //
+            // Pedido do dono (17/09/2026): o fundo e a faixa de baixo levam a
+            // cor da raridade, e a raridade vira uma linha de texto. A
+            // escolha e o "aplicado" passam a ser a BORDA (branca e verde),
+            // para não brigar com a cor.
+            string rarity = RarityColor(cell.Rarity);
+            string fill = rarity != null ? RarityFill(cell.Rarity) : cell.Picked ? ColPicked : ColSurface2;
+            string border = cell.Applied ? ColOlive : cell.Picked ? ColText : null;
 
-            // A célula inteira é o botão; com borda, o botão tem a cor da
-            // borda e um painel por dentro, 2 px menor.
             string name = Button(canvas, grid, x, y, CellWidth, CellHeight, border ?? fill,
                                  MenuPickCommand + " " + token + " " + cell.PickId, canvas.NextName());
             Box box = new Box(name, CellWidth, CellHeight);
@@ -4006,13 +4134,17 @@ namespace Oxide.Plugins
                 Panel(canvas, box, 2, 2, CellWidth - 4, CellHeight - 4, fill);
             }
 
-            if (cell.Picked)
+            if (rarity != null)
+            {
+                Panel(canvas, box, 2, CellHeight - 6, CellWidth - 4, 4, rarity);
+            }
+            else if (cell.Picked)
             {
                 Panel(canvas, box, 2, CellHeight - 5, CellWidth - 4, 3, ColRust);
             }
 
             bool dim = cell.Locked || cell.Syncing;
-            Icon(canvas, box, 24, 10, 80, 80, cell.ItemId, cell.SkinId, dim ? ColIconDim : "1 1 1 1");
+            Icon(canvas, box, 28, 8, 72, 72, cell.ItemId, cell.SkinId, dim ? ColIconDim : "1 1 1 1");
 
             if (dim)
             {
@@ -4020,16 +4152,26 @@ namespace Oxide.Plugins
             }
 
             bool mixed = cell.ItemName.Length > 0;
-            Label(canvas, box, 6, 92, CellWidth - 12, 18, Shorten(cell.Label, 20), 11, ColText,
+            float line = 82f;
+            Label(canvas, box, 6, line, CellWidth - 12, 16, Shorten(cell.Label, 20), 11, ColText,
                   TextAnchor.MiddleCenter, true);
+            line += 16f;
 
             if (mixed)
             {
-                Label(canvas, box, 6, 109, CellWidth - 12, 14, Shorten(cell.ItemName, 22), 9, ColMuted,
+                Label(canvas, box, 6, line, CellWidth - 12, 13, Shorten(cell.ItemName, 22), 9, ColMuted,
                       TextAnchor.MiddleCenter, false);
+                line += 13f;
             }
 
-            Label(canvas, box, 6, mixed ? 122 : 112, CellWidth - 12, 16, cell.State, 10, cell.StateColor,
+            if (cell.PickId != 0)
+            {
+                Label(canvas, box, 6, line, CellWidth - 12, 14, RarityLabel(cell.Rarity), 10,
+                      rarity ?? ColMuted, TextAnchor.MiddleCenter, true);
+                line += 14f;
+            }
+
+            Label(canvas, box, 6, line, CellWidth - 12, 16, cell.State, 10, cell.StateColor,
                   TextAnchor.MiddleCenter, false);
         }
 
@@ -4061,9 +4203,14 @@ namespace Oxide.Plugins
             float tw = detail.W - tx - 16f;
 
             Label(canvas, detail, tx, 18, tw, 26, Shorten(view.Label, 30), 18, ColText, TextAnchor.MiddleLeft, true);
-            Label(canvas, detail, tx, 46, tw, 18, view.Sub, 12, ColMuted, TextAnchor.MiddleLeft, false);
-            Label(canvas, detail, tx, 70, tw, 18, view.State, 12, view.StateColor, TextAnchor.MiddleLeft, true);
-            Label(canvas, detail, tx, 90, tw, 18, view.Expiry, 11, view.ExpiryColor, TextAnchor.MiddleLeft, false);
+            Label(canvas, detail, tx, 44, tw, 16, view.Sub, 12, ColMuted, TextAnchor.MiddleLeft, false);
+            if (view.SkinId != 0uL)
+            {
+                Label(canvas, detail, tx, 62, tw, 16, RarityLabel(view.Rarity).ToUpperInvariant(), 11,
+                      RarityColor(view.Rarity) ?? ColMuted, TextAnchor.MiddleLeft, true);
+            }
+            Label(canvas, detail, tx, 82, tw, 18, view.State, 12, view.StateColor, TextAnchor.MiddleLeft, true);
+            Label(canvas, detail, tx, 102, tw, 18, view.Expiry, 11, view.ExpiryColor, TextAnchor.MiddleLeft, false);
 
             // Até 3 linhas: o limite do agente é 280 caracteres (02 §4.1).
             Label(canvas, detail, 16, 136, detail.W - 32, 58, Shorten(view.Description, 280), 11, ColText,
@@ -4136,6 +4283,17 @@ namespace Oxide.Plugins
             return canvas.Json();
         }
 
+        /// <summary>Uma cor por lugar do item, para o olho achar a linha (pedido do dono, 17/09/2026).</summary>
+        private static string WhereColor(string where)
+        {
+            if (where.StartsWith("Na mão", StringComparison.Ordinal)) return ColAmber;
+            if (where.StartsWith("Barra", StringComparison.Ordinal)) return RarityRare;
+            if (where.StartsWith("Roupa", StringComparison.Ordinal)) return RarityEpic;
+            if (where.StartsWith("Mochila", StringComparison.Ordinal)) return RarityLegendary;
+            if (where.StartsWith("Inventário", StringComparison.Ordinal)) return RarityUncommon;
+            return ColText;
+        }
+
         private static void TargetRowBox(Canvas canvas, Box parent, float x, float y, float w, TargetRow row, string token)
         {
             string name = Button(canvas, parent, x, y, w, TargetRowHeight, row.Selected ? ColPicked : ColSurface2,
@@ -4150,7 +4308,7 @@ namespace Oxide.Plugins
 
             // O ícone com a skin ATUAL do item.
             Icon(canvas, box, 8, 4, 36, 36, row.ItemId, row.SkinId, "1 1 1 1");
-            Label(canvas, box, 52, 4, 160, 18, row.Where, 12, ColText, TextAnchor.MiddleLeft, true);
+            Label(canvas, box, 52, 4, 160, 18, row.Where, 12, WhereColor(row.Where), TextAnchor.MiddleLeft, true);
 
             if (row.Condition >= 0f)
             {
@@ -4222,6 +4380,30 @@ namespace Oxide.Plugins
         //  alvos) e devolve o tamanho do JSON de cada uma e dos dois
         //  `AddUI` da abertura. Não depende de jogador nem de catálogo.
         // ============================================================
+
+        /// <summary>
+        /// `origemz.skins.scroll 0|1`: liga e desliga a grade rolável na hora
+        /// e redesenha quem estiver com o menu aberto. Sem argumento, só diz
+        /// o estado. Servidor, RCON ou admin.
+        /// </summary>
+        [ConsoleCommand(ScrollCommand)]
+        private void CmdScroll(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null)
+            {
+                BasePlayer player = arg.Player();
+                if (player == null || !IsAdmin(player)) return;
+            }
+
+            if (arg.HasArgs(1))
+            {
+                _config.GridScroll = arg.GetString(0) == "1" || arg.GetString(0).ToLowerInvariant() == "true";
+                SaveConfig();
+                RedrawAllMenus(Region.Grid);
+            }
+
+            arg.ReplyWith("{\"ok\":true,\"gridScroll\":" + (_config.GridScroll ? "true" : "false") + "}");
+        }
 
         [ConsoleCommand(BytesCommand)]
         private void CmdBytes(ConsoleSystem.Arg arg)
@@ -4334,7 +4516,7 @@ namespace Oxide.Plugins
                     Uid = 18446744073709551000uL + (ulong)i,
                     ItemId = itemId,
                     SkinId = skin,
-                    Where = "inventário",
+                    Where = "Inventário",
                     Condition = 0.33f,
                     Ammo = 128,
                     Applied = true,
@@ -4345,7 +4527,7 @@ namespace Oxide.Plugins
             string window = BuildWindow(token);
             string headJson = BuildHead(head);
             string sideJson = BuildSide(side);
-            string gridJson = BuildGrid(grid);
+            string gridJson = Pack(BuildGrid(grid), int.MaxValue)[0];
             string detailJson = BuildDetail(detail);
             string targetsJson = BuildTargets(targets);
 
