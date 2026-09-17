@@ -93,6 +93,7 @@ function toInput(skin: WorkshopSkin): WorkshopSkinInput {
     openToAll: skin.openToAll,
     hideInStreamer: skin.hideInStreamer,
     enabled: skin.enabled,
+    season: skin.season,
     servers: [...skin.servers],
   };
 }
@@ -520,6 +521,21 @@ function SkinRows({
                 aria-label="Some do item de quem está em modo streamer"
                 className="h-3.5 w-3.5 shrink-0 text-muted"
               />
+            )}
+            {skin.season && (
+              // ####  SELO, E NÃO COLUNA  ####
+              //
+              // A tabela já tem onze colunas, e "de temporada" é uma
+              // marca de poucas skins: uma coluna inteira ficaria
+              // vazia em toda linha para dizer "não". Aqui ela fica
+              // do lado do nome, onde o admin procura a skin que vai
+              // sair no próximo wipe.
+              <span
+                className="border border-amber px-1.5 py-0.5 font-condensed text-2xs font-bold uppercase tracking-wide text-amber"
+                title="Skin de temporada: a posse dela sai no wipe em que você escolher “Remover da posse”. Por padrão, nada é removido."
+              >
+                temporada
+              </span>
             )}
             {!skin.enabled && (
               <span

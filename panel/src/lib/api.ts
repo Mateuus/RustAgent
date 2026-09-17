@@ -5336,6 +5336,14 @@ export const agent = {
        * de NÃO virar. Ver Docs\Ranking\20 §3.4.
        */
       openRankingSeason?: boolean | null;
+      /**
+       * Este wipe tira da posse as skins de temporada?
+       *
+       * Só dois estados, e ausente é `keep`: o dono pediu "por
+       * padrão a skin NÃO é removida", então um wipe em que ninguém
+       * marcou nada não encosta na posse de ninguém.
+       */
+      seasonSkins?: SeasonSkinsPolicy;
     },
   ) => {
     const { idempotencyKey, ...body } = input;
@@ -7330,6 +7338,20 @@ export const BP_POLICIES = ['keep', 'wipe', 'wipe_except_vip'] as const;
 
 export type BpPolicy = (typeof BP_POLICIES)[number];
 
+/**
+ * O que um wipe faz com a POSSE das skins de temporada.
+ *
+ *   keep   ninguém perde skin nenhuma — é o padrão
+ *   clear  a posse de toda skin marcada "Skin de temporada" sai
+ *
+ * A escolha é de CADA wipe, e não da skin: uma skin de temporada
+ * costuma atravessar dois ou três wipes antes de sair. Ver
+ * Docs/OrigemZWorkshop/02 §4.6.
+ */
+export const SEASON_SKINS_POLICIES = ['keep', 'clear'] as const;
+
+export type SeasonSkinsPolicy = (typeof SEASON_SKINS_POLICIES)[number];
+
 /** O que fazer quando o wipe da casa e o da Facepunch caem juntos. */
 export const COLLISION_POLICIES = ['reanchor', 'absorb', 'ignore'] as const;
 
@@ -7369,12 +7391,14 @@ export interface WipeCadenceSettings {
   /** A zona IANA em que aquele `HH:MM` é lido. */
   readonly timeZone: string;
   readonly bpPolicy: BpPolicy;
+  /** O que os wipes desta cadência fazem com as skins de temporada. */
+  readonly seasonSkins: SeasonSkinsPolicy;
 }
 
 export interface WipeSettings {
   readonly cadence: WipeCadenceSettings;
   /** O forçado não tem `enabled`: ele acontece com ou sem nós. */
-  readonly forced: { readonly bpPolicy: BpPolicy };
+  readonly forced: { readonly bpPolicy: BpPolicy; readonly seasonSkins: SeasonSkinsPolicy };
   readonly collision: {
     readonly policy: CollisionPolicy;
     /** A janela do `absorb`, em horas. Ignorada nas outras duas. */
@@ -8031,6 +8055,15 @@ export interface WorkshopSkinInput {
   hideInStreamer: boolean;
   /** Desligada some do menu, sem perder o cadastro nem a posse. */
   enabled: boolean;
+  /**
+   * **Skin de temporada**: a posse dela PODE sair num wipe.
+   *
+   * É uma MARCA, e só — nada no jogo muda por causa dela. Quem apaga
+   * é o wipe em que o admin escolher "Remover da posse"; por padrão
+   * nada é removido, e uma skin pode atravessar vários wipes. Ver
+   * Docs/OrigemZWorkshop/02 §4.6.
+   */
+  season: boolean;
   /** Em que servidores ela vale. Vazio = em nenhum. */
   servers: string[];
 }
@@ -8049,6 +8082,8 @@ export interface WorkshopSkin {
   openToAll: boolean;
   hideInStreamer: boolean;
   enabled: boolean;
+  /** "Skin de temporada": a posse dela pode sair num wipe. */
+  season: boolean;
   servers: string[];
   /** Cadastrada pelo painel ou pelo `/skin add` do jogo. */
   source: WorkshopSkinSource;
