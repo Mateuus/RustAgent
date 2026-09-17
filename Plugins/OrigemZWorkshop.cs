@@ -171,6 +171,7 @@ namespace Oxide.Plugins
         private const string MenuTargetCommand = "origemz.skins.target";
         private const string MenuTargetsCommand = "origemz.skins.targets";
         private const string MenuMineCommand = "origemz.skins.mine";
+        private const string MenuSortCommand = "origemz.skins.sort";
         private const string MenuSearchCommand = "origemz.skins.search";
         private const string MenuApplyCommand = "origemz.skins.apply";
 
@@ -2275,6 +2276,8 @@ namespace Oxide.Plugins
             public int TargetPage;
 
             public bool Mine;
+            /// <summary>A grade ordenada por raridade (lendária primeiro) em vez da ordem do catálogo.</summary>
+            public bool ByRarity;
             public string Search = "";
 
             public float NextCommand;
@@ -2724,6 +2727,18 @@ namespace Oxide.Plugins
             Redraw(player, session, Region.AllButWindow);
         }
 
+        [ConsoleCommand(MenuSortCommand)]
+        private void CmdMenuSort(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            session.ByRarity = arg.GetInt(1, 0) == 1;
+            session.GridPage = 0;
+            Redraw(player, session, Region.Head | Region.Grid);
+        }
+
         [ConsoleCommand(MenuSearchCommand)]
         private void CmdMenuSearch(ConsoleSystem.Arg arg)
         {
@@ -2828,6 +2843,7 @@ namespace Oxide.Plugins
             public int Usable;
             public int Total;
             public bool Mine;
+            public bool ByRarity;
             public bool OnAir;
         }
 
@@ -3051,7 +3067,13 @@ namespace Oxide.Plugins
 
         private HeadView ComputeHead(Frame frame, MenuSession session)
         {
-            HeadView view = new HeadView { Token = session.Token, Mine = session.Mine, OnAir = frame.Viewer.OnAir };
+            HeadView view = new HeadView
+            {
+                Token = session.Token,
+                Mine = session.Mine,
+                ByRarity = session.ByRarity,
+                OnAir = frame.Viewer.OnAir,
+            };
 
             foreach (SkinEntry entry in _catalog.Ordered)
             {
@@ -3146,6 +3168,37 @@ namespace Oxide.Plugins
             return view;
         }
 
+        /// <summary>
+        /// Lendária primeiro, sem raridade por último. ESTÁVEL: dentro da mesma
+        /// raridade continua a ordem do catálogo (`sort`, depois o nome). O
+        /// `List.Sort` do .NET não é estável, então a posição original
+        /// desempata.
+        /// </summary>
+        private static void SortByRarity(List<SkinEntry> list)
+        {
+            Dictionary<SkinEntry, int> position = new Dictionary<SkinEntry, int>(list.Count);
+            for (int i = 0; i < list.Count; i++) position[list[i]] = i;
+
+            list.Sort((a, b) =>
+            {
+                int byRarity = RarityRank(b.Rarity).CompareTo(RarityRank(a.Rarity));
+                return byRarity != 0 ? byRarity : position[a].CompareTo(position[b]);
+            });
+        }
+
+        private static int RarityRank(string rarity)
+        {
+            switch (rarity)
+            {
+                case "legendary": return 5;
+                case "epic": return 4;
+                case "rare": return 3;
+                case "uncommon": return 2;
+                case "common": return 1;
+                default: return 0;
+            }
+        }
+
         private GridView ComputeGrid(Frame frame, MenuSession session)
         {
             Viewer viewer = frame.Viewer;
@@ -3192,6 +3245,8 @@ namespace Oxide.Plugins
                     ? "Nenhuma skin neste servidor ainda."
                     : "Você ainda não tem skins aqui. Desligue \"só as minhas\" para ver todas.";
             }
+
+            if (session.ByRarity) SortByRarity(list);
 
             int count = list.Count + (withDefault ? 1 : 0);
             view.Scroll = _config.GridScroll;
@@ -3905,19 +3960,24 @@ namespace Oxide.Plugins
 
             // Só a faixa entre o título e o fechar: a raiz de uma região
             // bloqueia clique onde está, e não pode cobrir o "X".
-            Box head = RegionRoot(canvas, UiHead, 150, 0, 990, HeaderHeight, ColTransparent);
+            // 150 → 1180 na janela de 1240: o "X" começa em 1192.
+            Box head = RegionRoot(canvas, UiHead, 150, 0, 1030, HeaderHeight, ColTransparent);
 
             if (view.OnAir)
             {
-                Label(canvas, head, 0, 0, 480, HeaderHeight,
+                Label(canvas, head, 0, 0, 420, HeaderHeight,
                       "Modo streamer ligado: skins com logo ficam escondidas até você desligar.",
-                      11, ColAmber, TextAnchor.MiddleLeft, true);
+                      10, ColAmber, TextAnchor.MiddleLeft, true);
             }
 
-            Label(canvas, head, 490, 0, 300, HeaderHeight,
+            Label(canvas, head, 420, 0, 240, HeaderHeight,
                   view.Usable + " de " + view.Total + " obtidas", 12, ColMuted, TextAnchor.MiddleRight, false);
 
-            TextButton(canvas, head, 806, 12, 160, 28, view.Mine ? ColRust : ColSurface2,
+            TextButton(canvas, head, 676, 12, 160, 28, view.ByRarity ? ColRust : ColSurface2,
+                       MenuSortCommand + " " + view.Token + " " + (view.ByRarity ? "0" : "1"),
+                       view.ByRarity ? "ORDEM: RARIDADE" : "ORDEM: PADRÃO", 11, ColText);
+
+            TextButton(canvas, head, 850, 12, 160, 28, view.Mine ? ColRust : ColSurface2,
                        MenuMineCommand + " " + view.Token + " " + (view.Mine ? "0" : "1"),
                        // Sem "✓": não se sabe se a RobotoCondensed tem o glifo.
                        view.Mine ? "SÓ AS MINHAS: SIM" : "SÓ AS MINHAS: NÃO", 11, ColText);
