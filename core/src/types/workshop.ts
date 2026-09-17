@@ -158,6 +158,16 @@ export const workshopSkinInputSchema = z.object({
   /** Desligada some do menu, sem perder o cadastro nem a posse. */
   enabled: z.boolean().default(true),
 
+  /**
+   * **Skin de temporada**: a posse dela PODE sair num wipe.
+   *
+   * É uma MARCA, e só. Nada no jogo muda por causa dela: o menu de
+   * skins apenas informa (03 §3.5), e quem de fato apaga é o wipe,
+   * chamando `WorkshopCatalog.removeSeasonOwnership`. `false` por
+   * padrão — "por padrão não é removida" (decisão do dono, 17/09/2026).
+   */
+  season: z.boolean().default(false),
+
   /** Em que servidores ela vale. Vazio = em nenhum. */
   servers: z.array(z.string().min(1)).max(50).default([]),
 });
@@ -321,6 +331,44 @@ export const ownedListQuerySchema = z
 export type OwnedListQuery = z.infer<typeof ownedListQuerySchema>;
 
 // ------------------------------------------------------------
+//  FAVORITAS
+// ------------------------------------------------------------
+
+/**
+ * O teto de favoritas por jogador.
+ *
+ * O MESMO número do `MaxFavoritesPerPlayer` do plugin: a tela recusa
+ * o 201º clique e o agente também. Sem teto, um script de console
+ * marcaria o catálogo inteiro e a carga da posse cresceria sem fim.
+ */
+export const MAX_FAVORITES_PER_PLAYER = 200;
+
+/**
+ * A favorita que o jogador marcou no menu, como o plugin a manda
+ * (02 §5.4).
+ *
+ * ####  É `on`, E NÃO "alterna"  ####
+ *
+ * O plugin diz o estado que ele quer, e não "inverta". O console
+ * repete linha em reconexão, e um "alterne" repetido desfaria o
+ * clique do jogador em silêncio. Com `on`, mandar duas vezes é o
+ * mesmo que mandar uma.
+ *
+ * Não tem `requestId`: não há resposta a entregar. A confirmação é a
+ * própria carga da posse, que volta com as favoritas dentro.
+ */
+export const workshopFavoriteRequestSchema = z.object({
+  kind: z.literal('fav'),
+  secret: z.string().min(1),
+  steamId: steamIdSchema,
+  /** O `id` da skin NESTE agente (o mesmo `id` do `sync`). */
+  skinId: z.number().int().positive(),
+  on: z.boolean(),
+});
+
+export type WorkshopFavoriteRequest = z.infer<typeof workshopFavoriteRequestSchema>;
+
+// ------------------------------------------------------------
 //  REGISTRO
 // ------------------------------------------------------------
 
@@ -378,6 +426,15 @@ export interface WorkshopPayloadSkin {
   readonly sort: number;
   readonly openToAll: boolean;
   readonly hideInStreamer: boolean;
+  /**
+   * "Skin de temporada" (02 §4.6).
+   *
+   * Vai SEMPRE, como os outros dois booleanos — e não "pode faltar"
+   * como a descrição: o menu desenha uma linha por causa dela, e um
+   * campo ausente viraria "não é de temporada" num plugin velho, que
+   * é justamente a leitura errada que custa caro.
+   */
+  readonly season: boolean;
 }
 
 /**
@@ -417,6 +474,19 @@ export interface WorkshopOwnedPayload {
   readonly secret: string;
   readonly steamId: string;
   readonly skins: readonly WorkshopOwnedPayloadSkin[];
+  /**
+   * As favoritas dele, por `id` de skin do catálogo (02 §5.2).
+   *
+   * Vêm na MESMA carga da posse porque são a mesma pergunta ("o que é
+   * deste jogador?") e porque o plugin troca os dois conjuntos de uma
+   * vez: uma carga separada abriria a janela em que a posse é nova e a
+   * favorita é velha.
+   *
+   * Inteira, nunca delta; ordenada por `id`; filtrada pelo catálogo
+   * daquele servidor, como `skins`. **Pode vir vazia, e a lista vazia
+   * é mandada.**
+   */
+  readonly favorites: readonly number[];
 }
 
 /** O que o `origemz.workshop.status` responde (plugin 0.3.0). */
@@ -434,8 +504,9 @@ export interface WorkshopStatus {
  *   applied  aplicou o catálogo; confirma quantas skins ficaram.
  *   add      um admin digitou `/skin add` no jogo.
  *   give     um admin digitou `/skin give` no jogo.
+ *   fav      um jogador favoritou (ou desfavoritou) no menu.
  */
-export const WORKSHOP_PUSH_KINDS = ['ready', 'applied', 'add', 'give'] as const;
+export const WORKSHOP_PUSH_KINDS = ['ready', 'applied', 'add', 'give', 'fav'] as const;
 export type WorkshopPushKind = (typeof WORKSHOP_PUSH_KINDS)[number];
 
 export interface WorkshopPush {

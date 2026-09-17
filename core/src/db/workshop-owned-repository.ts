@@ -27,10 +27,31 @@
 //
 //  "Apaguei a skin 12" precisa sobreviver à skin 12. O alvo é
 //  gravado em texto, com o nome que tinha naquela hora.
+//
+//  ####  AS FAVORITAS MORAM AQUI, E NÃO NUM ARQUIVO PRÓPRIO  ####
+//
+//  Decisão de 17/09/2026, ao trazer a favorita do plugin para o
+//  agente (migração 100). Ela é uma tabela à parte, mas a MESMA
+//  pergunta: "o que é deste jogador?". Três motivos:
+//
+//    1. ela desce na MESMA carga da posse (`origemz.workshop.owned`
+//       leva `skins` e `favorites`): quem monta a carga precisa das
+//       duas na mão, e um segundo repositório seria um quarto
+//       parâmetro em toda a fiação (index.ts, rotas, serviço, testes)
+//       por três métodos;
+//    2. a forma é a mesma: `(steam_id, skin_ref)` único, sem
+//       `server_id`, cascata pela skin, mesmo CHECK de SteamID64;
+//    3. esta classe já não é só "posse" — ela guarda o registro
+//       (`workshop_audit`), que também não é posse.
+//
+//  O que NÃO veio junto: favoritar não vai para o registro. É
+//  preferência de tela, um clique por segundo se o jogador quiser, e
+//  o 02 §6.2 já deixou "aplicar" de fora pelo mesmo motivo.
 // ============================================================
 
 import {
   grantOwnershipInputSchema,
+  MAX_FAVORITES_PER_PLAYER,
   OWNED_SOURCES,
   revokeOwnershipInputSchema,
   type GrantOwnershipInput,
@@ -186,6 +207,35 @@ export interface GrantOwnershipResult {
   readonly created: boolean;
   /** A linha como estava antes, se havia uma. */
   readonly previous: OwnedSkin | null;
+}
+
+export interface FavoriteResult {
+  /** O estado DEPOIS da escrita. */
+  readonly on: boolean;
+  /** `false` quando já estava assim: quem chama pode não reenviar nada. */
+  readonly changed: boolean;
+  /** Quantas favoritas o jogador tem agora. */
+  readonly count: number;
+}
+
+/**
+ * O jogador já tem 200 favoritas.
+ *
+ * Classe própria (e não um `RangeError` genérico) porque quem chama
+ * tem de distinguir "o teto" de "o banco caiu": no teto, a resposta é
+ * uma frase para o jogador e o reenvio FORÇADO da verdade, que desfaz
+ * o otimismo da tela dele.
+ */
+export class FavoritesFullError extends RangeError {
+  readonly count: number;
+
+  constructor(count: number) {
+    super(
+      `o jogador já tem ${String(count)} skins favoritas (o teto é ${String(MAX_FAVORITES_PER_PLAYER)})`,
+    );
+    this.name = 'FavoritesFullError';
+    this.count = count;
+  }
 }
 
 export interface AuditFilter {
@@ -461,6 +511,159 @@ export class WorkshopOwnedRepository {
     if (owned === null) throw new Error(`a posse ${String(id)} sumiu logo depois de ser gravada`);
 
     return owned;
+  }
+
+  // ======================================================
+  //  A TEMPORADA — o que o wipe apaga
+  // ======================================================
+
+  /**
+   * As posses de skins marcadas como "Skin de temporada".
+   *
+   * Vivas E vencidas: o wipe apaga a linha, e uma vencida que
+   * sobrasse voltaria a valer se alguém a renovasse.
+   */
+  seasonOwned(): readonly OwnedSkin[] {
+    return (
+      this.#db
+        .prepare(
+          `SELECT o.* FROM workshop_owned_skins o
+             JOIN workshop_skins s ON s.id = o.skin_ref
+            WHERE s.season = 1
+            ORDER BY o.id ASC`,
+        )
+        .all() as OwnedRow[]
+    ).map(toOwned);
+  }
+
+  /**
+   * Apaga TODAS as posses de skin de temporada, numa transação.
+   *
+   * @returns as linhas removidas, para quem chama saber a quem
+   *          reenviar a posse. A contagem é o `length`.
+   */
+  deleteSeasonOwned(): readonly OwnedSkin[] {
+    return this.#db.transaction((): readonly OwnedSkin[] => {
+      const doomed = this.seasonOwned();
+
+      if (doomed.length === 0) return [];
+
+      this.#db.prepare(
+        `DELETE FROM workshop_owned_skins
+          WHERE skin_ref IN (SELECT id FROM workshop_skins WHERE season = 1)`,
+      ).run();
+
+      return doomed;
+    })();
+  }
+
+  // ======================================================
+  //  FAVORITAS (migração 100)
+  // ======================================================
+
+  /**
+   * As favoritas do jogador, por `id` de skin, em ordem crescente.
+   *
+   * A ordem é a do `id` e não a da marcação: é assim que ela desce na
+   * carga, e uma lista ordenada faz a digital de envio
+   * (`JSON.stringify` do payload) só mudar quando o CONJUNTO muda.
+   */
+  listFavorites(steamId: string): readonly number[] {
+    return (
+      this.#db
+        .prepare('SELECT skin_ref FROM workshop_favorites WHERE steam_id = ? ORDER BY skin_ref ASC')
+        .all(steamId) as { skin_ref: number }[]
+    ).map((row) => row.skin_ref);
+  }
+
+  isFavorite(steamId: string, skinRef: number): boolean {
+    return (
+      this.#db
+        .prepare('SELECT 1 FROM workshop_favorites WHERE steam_id = ? AND skin_ref = ?')
+        .get(steamId, skinRef) !== undefined
+    );
+  }
+
+  countFavorites(steamId: string): number {
+    return (
+      this.#db.prepare('SELECT count(*) AS n FROM workshop_favorites WHERE steam_id = ?').get(steamId) as {
+        n: number;
+      }
+    ).n;
+  }
+
+  /**
+   * Põe a favorita no estado pedido.
+   *
+   * ####  É `on`, E NÃO "ALTERNE"  ####
+   *
+   * O plugin manda o estado que quer, porque o console repete linha em
+   * reconexão: um "alterne" repetido desfaria o clique do jogador em
+   * silêncio. Chamar duas vezes com o mesmo `on` é o mesmo que chamar
+   * uma.
+   *
+   * @throws FavoritesFullError quando o jogador já está no teto e a
+   *         favorita é NOVA. Desfavoritar nunca é recusado — senão
+   *         quem bateu no teto não teria como sair dele.
+   */
+  setFavorite(
+    steamId: string,
+    skinRef: number,
+    on: boolean,
+    now: number = Date.now(),
+  ): FavoriteResult {
+    return this.#db.transaction((): FavoriteResult => {
+      const before = this.isFavorite(steamId, skinRef);
+
+      if (on === before) {
+        return { on, changed: false, count: this.countFavorites(steamId) };
+      }
+
+      if (!on) {
+        this.#db
+          .prepare('DELETE FROM workshop_favorites WHERE steam_id = ? AND skin_ref = ?')
+          .run(steamId, skinRef);
+
+        return { on: false, changed: true, count: this.countFavorites(steamId) };
+      }
+
+      const count = this.countFavorites(steamId);
+
+      if (count >= MAX_FAVORITES_PER_PLAYER) throw new FavoritesFullError(count);
+
+      this.#db
+        .prepare(
+          `INSERT INTO workshop_favorites (steam_id, skin_ref, created_at)
+           VALUES (@steam_id, @skin_ref, @now)`,
+        )
+        .run({ steam_id: steamId, skin_ref: skinRef, now });
+
+      return { on: true, changed: true, count: count + 1 };
+    })();
+  }
+
+  /**
+   * Inverte a favorita e devolve o estado NOVO.
+   *
+   * É o que a tela chama quando ela só sabe "o jogador clicou na
+   * estrela". O caminho do plugin usa `setFavorite`, que é idempotente
+   * — ver o porquê lá.
+   *
+   * @throws FavoritesFullError quando o clique tentaria passar do teto.
+   */
+  toggleFavorite(steamId: string, skinRef: number, now: number = Date.now()): FavoriteResult {
+    return this.#db.transaction((): FavoriteResult =>
+      this.setFavorite(steamId, skinRef, !this.isFavorite(steamId, skinRef), now),
+    )();
+  }
+
+  /** Tira a favorita. @returns `true` quando havia uma para tirar. */
+  removeFavorite(steamId: string, skinRef: number): boolean {
+    return (
+      this.#db
+        .prepare('DELETE FROM workshop_favorites WHERE steam_id = ? AND skin_ref = ?')
+        .run(steamId, skinRef).changes > 0
+    );
   }
 
   // ======================================================
