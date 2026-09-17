@@ -31,7 +31,7 @@
 
 import { History, Loader2, Package, Search, Trash2, UserRound } from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -439,6 +439,11 @@ function OwnedSection({
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<{ outcome: BatchOutcome; verb: string } | null>(null);
 
+  // Cada recarga ganha um número; resposta de recarga antiga é
+  // descartada. Sem isso, dois cliques rápidos no filtro deixavam a
+  // resposta mais lenta (e velha) por cima da nova, sem aviso.
+  const generation = useRef(0);
+
   const fetchPage = useCallback(
     async (cursor?: number) => {
       const response = await agent.workshopOwned({
@@ -457,14 +462,18 @@ function OwnedSection({
   );
 
   const reload = useCallback(async () => {
+    const mine = ++generation.current;
+
     try {
       const { list, next } = await fetchPage();
+      if (mine !== generation.current) return;
 
       setRows(list);
       setNextCursor(next);
       setError(null);
       setChecked(new Set());
     } catch (cause) {
+      if (mine !== generation.current) return;
       setRows((current) => current ?? []);
       setError(messageOf(cause));
     }
@@ -480,7 +489,10 @@ function OwnedSection({
     setLoadingMore(true);
 
     try {
+      const mine = generation.current;
       const { list, next } = await fetchPage(nextCursor);
+      // Uma recarga (outro filtro) começou no meio: esta página é de outra lista.
+      if (mine !== generation.current) return;
 
       setRows([...rows, ...list]);
       setNextCursor(next);

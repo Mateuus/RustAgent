@@ -28,7 +28,7 @@
 // ============================================================
 
 import { Loader2, RefreshCw, Search } from 'lucide-react';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
@@ -303,6 +303,11 @@ export function AuditPanel({ servers, initialSteamId = '', fixedSteamId }: Audit
   const [hasMore, setHasMore] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Cada recarga ganha um número; resposta de recarga antiga é
+  // descartada. Sem isso, dois cliques rápidos no filtro deixavam a
+  // resposta mais lenta (e velha) por cima da nova, sem aviso.
+  const generation = useRef(0);
+
   const fetchPage = useCallback(
     async (before?: number) => {
       const response = await agent.workshopAudit({
@@ -318,19 +323,22 @@ export function AuditPanel({ servers, initialSteamId = '', fixedSteamId }: Audit
   );
 
   const reload = useCallback(async () => {
+    const mine = ++generation.current;
     setBusy(true);
 
     try {
       const { page, more } = await fetchPage();
+      if (mine !== generation.current) return;
 
       setEntries(page);
       setHasMore(more);
       setError(null);
     } catch (cause) {
+      if (mine !== generation.current) return;
       setError(messageOf(cause));
       setEntries((current) => current ?? []);
     } finally {
-      setBusy(false);
+      if (mine === generation.current) setBusy(false);
     }
   }, [fetchPage]);
 
@@ -344,8 +352,12 @@ export function AuditPanel({ servers, initialSteamId = '', fixedSteamId }: Audit
     setBusy(true);
 
     try {
-      const before = Math.min(...entries.map((entry) => entry.id));
+      // reduce, e não Math.min(...lista): o spread estoura com listas enormes.
+      const before = entries.reduce((min, entry) => Math.min(min, entry.id), Infinity);
+      const mine = generation.current;
       const { page, more } = await fetchPage(before);
+      // Uma recarga (outro filtro) começou no meio: esta página é de outra lista.
+      if (mine !== generation.current) return;
 
       setEntries([...entries, ...page]);
       setHasMore(more);

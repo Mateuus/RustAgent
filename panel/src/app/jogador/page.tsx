@@ -309,6 +309,10 @@ function Jogador() {
 
             {tab === 'skins' && (
               <PlayerSkins
+                // A key zera o rascunho de "Dar skin" ao trocar de ficha:
+                // sem ela, voltar/avançar no navegador mantinha a skin
+                // escolhida apontando para outro jogador.
+                key={steamId}
                 steamId={steamId}
                 // A ficha só tem o id do servidor; o Registro mostra o id.
                 servers={servers.map((server) => ({ id: server.serverId, name: server.serverId }))}
