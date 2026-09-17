@@ -4911,8 +4911,17 @@ namespace Oxide.Plugins
             string detailJson = BuildDetail(detail);
             string targetsJson = BuildTargets(targets);
 
-            List<string> first = Pack(new List<string> { window, headJson, sideJson, detailJson }, int.MaxValue);
-            List<string> second = Pack(new List<string> { gridJson, targetsJson }, int.MaxValue);
+            // A abertura como o Redraw a manda: grade e lateral saem elemento
+            // por elemento, e o Pack corta no limite. Medir a região inteira
+            // num AddUI só acusaria um estouro que não acontece.
+            List<string> firstParts = new List<string> { window, headJson };
+            firstParts.AddRange(BuildSide(side));
+            firstParts.Add(detailJson);
+            List<string> secondParts = BuildGrid(grid);
+            secondParts.Add(targetsJson);
+
+            List<string> first = Pack(firstParts, AddUiByteLimit);
+            List<string> second = Pack(secondParts, AddUiByteLimit);
 
             JObject regions = new JObject
             {
@@ -4924,8 +4933,18 @@ namespace Oxide.Plugins
                 ["targets"] = Bytes(targetsJson),
             };
 
-            int firstBytes = Bytes(first[0]);
-            int secondBytes = Bytes(second[0]);
+            JArray sends = new JArray();
+            int largest = 0;
+            foreach (string json in first)
+            {
+                sends.Add(Bytes(json));
+                largest = Math.Max(largest, Bytes(json));
+            }
+            foreach (string json in second)
+            {
+                sends.Add(Bytes(json));
+                largest = Math.Max(largest, Bytes(json));
+            }
 
             bool under = true;
             foreach (JProperty property in regions.Properties())
@@ -4938,9 +4957,9 @@ namespace Oxide.Plugins
                 ["ok"] = true,
                 ["limit"] = AddUiByteLimit,
                 ["regions"] = regions,
-                ["open"] = new JArray(firstBytes, secondBytes),
+                ["open"] = sends,
                 ["regionsUnderLimit"] = under,
-                ["openUnderLimit"] = firstBytes < AddUiByteLimit && secondBytes < AddUiByteLimit,
+                ["openUnderLimit"] = largest < AddUiByteLimit,
             };
 
             return reply.ToString(Formatting.None);
