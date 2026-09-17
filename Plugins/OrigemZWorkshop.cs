@@ -525,6 +525,7 @@ namespace Oxide.Plugins
             CloseMenu(player, false);
             TouchOwned(player.UserIDString);
             _ownedBatches.Remove(player.UserIDString);
+            _nextApply.Remove(player.userID);
         }
 
         private void OnPlayerDeath(BasePlayer player, HitInfo info)
@@ -1351,7 +1352,9 @@ namespace Oxide.Plugins
             return new Viewer
             {
                 SteamId = steamId,
-                Admin = permission.UserHasPermission(steamId, AdminPermission),
+                // O mesmo critério do /skin add e do /skin give: admin nativo
+                // do servidor ou a permissão. Dois critérios confundiam o teste.
+                Admin = IsAdmin(player),
                 Owned = owned,
                 Now = NowMs(),
                 OnAir = _streamers.Contains(steamId),
@@ -1610,12 +1613,15 @@ namespace Oxide.Plugins
 
             // 7. trava de frequência
             float now = Time.realtimeSinceStartup;
-            if (now < session.NextApply)
+            // Por jogador, e não por sessão: fechar e reabrir o menu criava
+            // uma sessão nova com o relógio zerado e furava a trava.
+            float next;
+            if (_nextApply.TryGetValue(player.userID, out next) && now < next)
             {
                 return "Calma: uma aplicação a cada meio segundo.";
             }
 
-            session.NextApply = now + ApplyCooldownSeconds;
+            _nextApply[player.userID] = now + ApplyCooldownSeconds;
 
             // ####  MODO STREAMER: A ESCOLHA É GUARDADA, NÃO VESTIDA  ####
             //
@@ -1846,6 +1852,9 @@ namespace Oxide.Plugins
 
         private readonly Dictionary<string, PendingRequest> _pendingRequests =
             new Dictionary<string, PendingRequest>();
+
+        /// <summary>Quando cada jogador pode aplicar de novo (02 §6.2, item 7).</summary>
+        private readonly Dictionary<ulong, float> _nextApply = new Dictionary<ulong, float>();
 
         private bool IsAdmin(BasePlayer player)
         {
@@ -2242,7 +2251,6 @@ namespace Oxide.Plugins
             public bool Mine;
             public string Search = "";
 
-            public float NextApply;
             public float NextCommand;
             public string Message = "";
             public bool MessageOk;

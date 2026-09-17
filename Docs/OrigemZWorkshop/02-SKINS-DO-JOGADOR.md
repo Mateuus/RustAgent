@@ -72,7 +72,7 @@ Qualquer um destes libera — é um **OU**:
 
 1. a skin está **liberada para todos** (skin da casa);
 2. o jogador tem uma **posse viva** dela: sem prazo, ou com prazo no futuro;
-3. o jogador tem `origemzworkshop.admin`.
+3. o jogador é admin: tem `origemzworkshop.admin` **ou** é admin nativo do servidor (`player.IsAdmin`). É o mesmo critério do `/skin add` e do `/skin give`.
 
 E, em todos os casos, a skin precisa estar **ligada** e **vinculada ao servidor** (a junção
 `workshop_skin_servers` continua valendo).
@@ -447,7 +447,7 @@ Na ordem, e recusando com uma mensagem na própria tela:
 4. a skin está no catálogo deste servidor e o jogador pode usá-la (§3). A skin 0 sempre passa;
 5. o item não é de redirect (`info.isRedirectOf == null`);
 6. o item já não está com essa skin (se estiver, a tela diz "já aplicada" e não faz nada);
-7. trava de frequência: **uma aplicação a cada 0,5 s** por jogador.
+7. trava de frequência: **uma aplicação a cada 0,5 s** por jogador. O relógio é **do jogador**, e não da sessão do menu: fechar e reabrir o menu não o zera.
 
 **Aplicar não vai para a auditoria** (01 §5): é uso, não configuração.
 
