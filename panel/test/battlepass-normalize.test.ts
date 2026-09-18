@@ -258,6 +258,7 @@ describe('o cardápio de fontes', () => {
       hint: null,
       warning: null,
       recommended: false,
+      feed: 'batch',
     });
     const gather = caveatOf({
       source: 'gather.stone',
@@ -265,12 +266,20 @@ describe('o cardápio de fontes', () => {
       hint: null,
       warning: null,
       recommended: false,
+      feed: 'batch',
     });
 
     expect(sleeper).toContain('machado');
     expect(gather).toContain('ranking');
     expect(
-      caveatOf({ source: 'quest.completed', label: 'Missão', hint: null, warning: null, recommended: false }),
+      caveatOf({
+        source: 'quest.completed',
+        label: 'Missão',
+        hint: null,
+        warning: null,
+        recommended: false,
+        feed: 'batch',
+      }),
     ).toBeNull();
   });
 
@@ -281,6 +290,7 @@ describe('o cardápio de fontes', () => {
       hint: null,
       warning: 'Medido em 20/09: dobra o XP de quem farma base vazia.',
       recommended: false,
+      feed: 'batch',
     });
 
     expect(warning).toBe('Medido em 20/09: dobra o XP de quem farma base vazia.');
@@ -294,6 +304,7 @@ describe('buildXpRows', () => {
     hint: null,
     warning: null,
     recommended: false,
+    feed: 'batch',
   });
 
   const rule = (key: string): BattlePassXpRule => ({

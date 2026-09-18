@@ -565,6 +565,14 @@ export interface XpRow {
   readonly hint: string | null;
   readonly warning: string | null;
   readonly recommended: boolean;
+  /**
+   * De onde o XP chega — e o que decide se a linha pede um valor.
+   *
+   * `event` é a missão: quem diz quanto ela paga é a recompensa
+   * dela. A órfã cai em `batch`, porque sem cardápio não há como
+   * saber, e esconder o campo de quem precisa dele é pior.
+   */
+  readonly feed: 'batch' | 'event';
   /** `null` = está no cardápio e ainda não foi configurada. */
   readonly rule: BattlePassXpRule | null;
   /** Gravada, mas fora do cardápio: ela pode não medir mais nada. */
@@ -601,6 +609,7 @@ export function buildXpRows(
       hint: source.hint,
       warning: caveatOf(source),
       recommended: source.recommended,
+      feed: source.feed,
       rule,
       orphan: false,
     });
@@ -613,12 +622,14 @@ export function buildXpRows(
       source: rule.source,
       label: rule.label ?? rule.source,
       hint: null,
+      feed: 'batch',
       // A pegadinha continua valendo mesmo sem cardápio: é a chave da
       // fonte que a denuncia, e não o verbete do agente.
       warning: caveatOf({
         source: rule.source,
         label: rule.source,
         hint: null,
+        feed: 'batch',
         warning: null,
         recommended: false,
       }),
