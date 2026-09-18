@@ -929,3 +929,152 @@ describe('o XP de missão', () => {
     expect(xpSourceOf(QUEST_XP_SOURCE)?.feed).toBe('event');
   });
 });
+
+// ============================================================
+//  A PENALIDADE  (XP negativo)
+// ============================================================
+
+describe('o XP negativo', () => {
+  it('a penalidade tira XP de quem tem', () => {
+    const h = harness();
+    const season = live(h, [
+      { source: 'pvp.kills', amount: 100 },
+      { source: 'team.kills', amount: -50 },
+    ]);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'pvp.kills': 3 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(xpOf(h, season, FULANO)).toBe(300);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'team.kills': 2 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(xpOf(h, season, FULANO)).toBe(200);
+  });
+
+  it('o XP não passa de zero para baixo', () => {
+    // ####  O PISO  ####
+    //
+    // Decisão do dono em 18/09/2026. Um buraco de -3.000 XP que o
+    // jogador nunca recupera faz ele desistir da temporada — e o que
+    // a penalidade existe para corrigir é o comportamento de hoje,
+    // não o saldo do mês inteiro.
+    const h = harness();
+    const season = live(h, [{ source: 'team.kills', amount: -500 }]);
+
+    const first = h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'team.kills': 1 } }], localDay: DAY },
+      NOW,
+    );
+
+    // Ele não tinha nada: não há o que tirar.
+    expect(first.granted).toBe(0);
+    expect(xpOf(h, season, FULANO)).toBe(0);
+  });
+
+  it('a penalidade para no que ele tem, e não no que ela vale', () => {
+    const h = harness();
+    const season = live(h, [
+      { source: 'pvp.kills', amount: 100 },
+      { source: 'team.kills', amount: -500 },
+    ]);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'pvp.kills': 2 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(xpOf(h, season, FULANO)).toBe(200);
+
+    // A penalidade vale 500 e ele só tem 200: tira 200, não 500.
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'team.kills': 1 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(xpOf(h, season, FULANO)).toBe(0);
+  });
+
+  it('o nível NÃO desce quando o XP cai', () => {
+    // ####  O QUE ELE ALCANÇOU É DELE  ####
+    //
+    // O 01 §2 já dizia "o nível nunca desce", e a penalidade não
+    // muda isso: o XP cai, o próximo nível volta a ficar longe, mas
+    // o que já estava disponível continua disponível — senão uma
+    // morte boba trancaria recompensa que ele viu destravada.
+    const h = harness();
+    const season = live(h, [
+      { source: 'pvp.kills', amount: 100 },
+      { source: 'team.kills', amount: -1000 },
+    ]);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'pvp.kills': 25 } }], localDay: DAY },
+      NOW,
+    );
+
+    // 2.500 XP, com 1.000 por nível: nível 3.
+    expect(xpOf(h, season, FULANO)).toBe(2500);
+    expect(h.repository.progressOf(SERVER, FULANO, season)?.level).toBe(3);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'team.kills': 2 } }], localDay: DAY },
+      NOW,
+    );
+
+    // O XP caiu para 500 — que sozinho daria nível 1.
+    expect(xpOf(h, season, FULANO)).toBe(500);
+    // E o nível ficou.
+    expect(h.repository.progressOf(SERVER, FULANO, season)?.level).toBe(3);
+  });
+
+  it('a penalidade não abre espaço no teto do ganho', () => {
+    // Somar a penalidade ao acumulado do dia deixaria quem perdeu
+    // 200 ganhar 200 além do que o admin permitiu — o teto viraria
+    // um saldo, e não um limite.
+    const h = harness();
+    const season = live(h, [
+      { source: 'pvp.kills', amount: 100, dailyCap: 300 },
+      { source: 'team.kills', amount: -100 },
+    ]);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'pvp.kills': 3 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(xpOf(h, season, FULANO)).toBe(300);
+
+    h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'team.kills': 1 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(xpOf(h, season, FULANO)).toBe(200);
+
+    // O teto de `pvp.kills` continua estourado: os 300 do dia já
+    // foram, e a penalidade de outra fonte não os devolve.
+    const again = h.service.creditBatchXp(
+      { serverId: SERVER, players: [{ steamId: FULANO, metrics: { 'pvp.kills': 3 } }], localDay: DAY },
+      NOW,
+    );
+
+    expect(again.granted).toBe(0);
+    expect(xpOf(h, season, FULANO)).toBe(200);
+  });
+
+  it('as fontes de penalidade continuam nascendo desligadas', () => {
+    // O cardápio OFERECE; a configuração padrão não liga. Vale para
+    // `sleeper.kills` (paga quem anda de machado por base vazia) e
+    // vale aqui: ninguém deve perder XP por uma regra que o admin
+    // não escolheu.
+    for (const key of ['team.kills', 'suicides', 'pvp.deaths']) {
+      expect(xpSourceOf(key)?.defaultEnabled ?? false).toBe(false);
+    }
+  });
+});

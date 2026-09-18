@@ -463,8 +463,31 @@ export const xpRuleInputSchema = z.object({
   /** Desligada não conta, e não apaga o que já foi contado. */
   enabled: z.boolean().default(true),
 
-  /** Quanto XP rende cada ocorrência. */
-  amount: z.number().int().min(0).max(1_000_000).default(0),
+  /**
+   * Quanto XP rende cada ocorrência — de −1.000.000 a 1.000.000.
+   *
+   * ####  NEGATIVO É PENALIDADE  ####
+   *
+   * Pedido do dono, 18/09/2026: "permitir não ganhar xp caso matar
+   * colega de equipe, ou ganhar xp negativa". Fontes como
+   * `team.kills` e `suicides` podem TIRAR XP, e `0` continua sendo
+   * "essa fonte não mexe em nada".
+   *
+   * Duas coisas que a penalidade NÃO faz, e é de propósito:
+   *
+   *   piso em zero    o XP não fica negativo. Quem está zerado e
+   *                   mata o colega continua em zero — um buraco de
+   *                   −3.000 XP que ele nunca recupera faz o jogador
+   *                   desistir da temporada.
+   *   o nível fica    "o nível nunca desce" (01 §2). O XP cai e pode
+   *                   travar o PRÓXIMO nível, mas o que ele já
+   *                   alcançou é dele: o que foi resgatado continua
+   *                   resgatado, e o que estava disponível continua
+   *                   disponível.
+   *
+   * Quem aplica as duas é o `creditXp` do repositório, num lugar só.
+   */
+  amount: z.number().int().min(-1_000_000).max(1_000_000).default(0),
 
   /**
    * O máximo que ESSA fonte rende por dia. `null` = sem teto.
@@ -473,6 +496,20 @@ export const xpRuleInputSchema = z.object({
    * de 100 XP por dia, caçar teto de 100 XP por dia". Não é um teto
    * único somando tudo — é justamente isso que deixa a missão
    * generosa e o farm contido sem escolher entre as duas coisas.
+   *
+   * ####  O TETO É DO GANHO; A PENALIDADE PASSA INTEIRA  ####
+   *
+   * Decisão de 18/09/2026, quando o `amount` passou a aceitar
+   * negativo. O teto é "o máximo que essa fonte RENDE por dia", e
+   * quem tira não rende: uma penalidade não consulta o acumulado do
+   * dia nem o alimenta.
+   *
+   * O contrário seria pior de dois jeitos. Limitar a penalidade pelo
+   * teto daria "matou três colegas hoje, do quarto em diante é de
+   * graça" — um moedor ao contrário, que premia a reincidência. E
+   * somar a penalidade ao acumulado abriria espaço no teto: quem
+   * perdeu 200 hoje poderia ganhar 200 além do que o admin permitiu,
+   * bastando trocar o sinal da fonte no meio do dia.
    */
   dailyCap: z.number().int().min(1).max(10_000_000).nullish().default(null),
 

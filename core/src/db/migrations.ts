@@ -9775,6 +9775,71 @@ CREATE UNIQUE INDEX idx_vips_active
 CREATE INDEX idx_vips_server ON vips (server_id) WHERE revoked_at IS NULL;
 `;
 
+// ------------------------------------------------------------
+//  106 - a regra de XP aceita penalidade
+//
+//  ####  A TERCEIRA VEZ DO MESMO DEFEITO  ####
+//
+//  `battlepass_xp_rules.amount` nasceu com CHECK (amount >= 0), de
+//  quando o XP so somava. O dono pediu em 18/09/2026 que matar
+//  colega de equipe pudesse TIRAR XP, o zod passou a aceitar
+//  negativo -- e o SQLite continuou recusando. Salvar a regra volta
+//  "CHECK constraint failed: amount >= 0".
+//
+//  E o mesmo par que ja aconteceu com `kind: 'skin'` (101) e com
+//  `kind: 'xp'` (105): o zod aceita, o banco recusa, e a feature
+//  fica completa e inerte. Das tres vezes quem denunciou foi um
+//  TESTE que tentou gravar de verdade -- nao o typecheck, que passa
+//  limpo nas tres.
+//
+//  ####  O PISO NAO MORA AQUI  ####
+//
+//  O CHECK vai embora e nao volta como `amount >= -1000000`: a
+//  faixa e do zod (types/battlepass.ts), e repetir numero em dois
+//  lugares e garantir que um dia eles divirjam. O que o banco
+//  guarda e que `amount` e inteiro.
+//
+//  O PISO DO SALDO e outra coisa, e continua no credito: o XP do
+//  jogador nunca fica negativo (`Math.max(wanted, -before.xp)` em
+//  battlepass-repository.ts). Uma regra pode valer -500; o saldo
+//  dele para em zero.
+//
+//  A forma e a da 101, 103, 104 e 105: renomeia, cria, copia,
+//  dropa, recria o indice depois do DROP. `battlepass_xp_rules` nao
+//  tem dependentes, entao o passo "as dependentes saem do caminho"
+//  nao existe aqui -- fica dito porque quem copiar este bloco para
+//  uma tabela COM dependentes precisa saber que ele falta.
+// ------------------------------------------------------------
+const BATTLEPASS_XP_PENALTY_SCHEMA = `
+ALTER TABLE battlepass_xp_rules RENAME TO battlepass_xp_rules_105;
+
+CREATE TABLE battlepass_xp_rules (
+  season_id INTEGER NOT NULL REFERENCES battlepass_seasons(id) ON DELETE CASCADE,
+  source TEXT NOT NULL CHECK (source <> ''),
+
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+
+  -- Sem CHECK de sinal: negativo e penalidade, e a faixa e do zod.
+  amount INTEGER NOT NULL DEFAULT 0,
+  daily_cap INTEGER CHECK (daily_cap IS NULL OR daily_cap > 0),
+
+  -- O rotulo que o jogador le. NULL = o do cardapio do agente.
+  label TEXT CHECK (label IS NULL OR label <> ''),
+
+  updated_at INTEGER NOT NULL,
+
+  PRIMARY KEY (season_id, source)
+);
+
+INSERT INTO battlepass_xp_rules
+  (season_id, source, enabled, amount, daily_cap, label, updated_at)
+SELECT
+   season_id, source, enabled, amount, daily_cap, label, updated_at
+  FROM battlepass_xp_rules_105;
+
+DROP TABLE battlepass_xp_rules_105;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -10104,6 +10169,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // mesmo id em paralelo, subiu primeiro, e esta aqui foi PULADA em
   // silencio. Ver o cabecalho de BATTLEPASS_XP_EVENT_SCHEMA.
   { id: 105, name: 'battlepass-xp-reward', sql: BATTLEPASS_XP_EVENT_SCHEMA },
+  // 18/09/2026: a regra de XP aceita penalidade -- matar colega de
+  // equipe pode TIRAR XP. O id 106 foi conferido livre em todas as
+  // branches locais antes de ser usado.
+  { id: 106, name: 'battlepass-xp-penalty', sql: BATTLEPASS_XP_PENALTY_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

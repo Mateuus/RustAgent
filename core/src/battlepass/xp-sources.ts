@@ -32,6 +32,21 @@
 //           concede (a missão diz quanto vale), e a regra serve para
 //           desligar e para o teto.
 //
+//  ####  ALGUMAS DELAS FAZEM MAIS SENTIDO TIRANDO XP  ####
+//
+//  Desde 18/09/2026 o `amount` da regra aceita valor NEGATIVO
+//  (types/battlepass.ts), e foi o dono quem pediu: "permitir não
+//  ganhar xp caso matar colega de equipe, ou ganhar xp negativa".
+//
+//  Abater colega de equipe, se matar e morrer são justamente as
+//  fontes cuja versão POSITIVA é um moedor — dois amigos em rodízio
+//  rendem o dia inteiro. Com sinal negativo elas viram o contrário:
+//  um custo. A `note` de cada uma diz isso, porque é a única coisa
+//  que o admin lê antes de escolher o número.
+//
+//  O que NÃO muda: elas continuam nascendo DESLIGADAS. O cardápio
+//  oferece; quem liga — e quem decide o sinal — é o administrador.
+//
 //  ####  O QUE FICOU DE FORA, E POR QUÊ  ####
 //
 //    shot.distance   é RECORDE, não contador: ele chega em
@@ -135,7 +150,10 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: 'Pagar por morrer premia quem se deixa matar. Se ligar, ponha teto.',
+    note:
+      'Pagar por morrer premia quem se deixa matar. Se ligar, ponha teto. ' +
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
 
   {
@@ -156,7 +174,9 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: null,
+    note:
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
 
   {
@@ -166,7 +186,9 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: null,
+    note:
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
   {
     source: 'suicides',
@@ -175,7 +197,10 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: 'O `kill` do console é de graça e sem espera: ligado sem teto, isto é um moedor.',
+    note:
+      'O `kill` do console é de graça e sem espera: ligado sem teto, isto é um moedor. ' +
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
 
   {
@@ -185,7 +210,10 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'abate',
     defaultEnabled: false,
-    note: 'Dois jogadores da mesma equipe se matando em rodízio rendem o dia inteiro.',
+    note:
+      'Dois jogadores da mesma equipe se matando em rodízio rendem o dia inteiro — foi ' +
+      'por esta fonte que o XP negativo foi pedido. Faz sentido como PENALIDADE: com ' +
+      'valor negativo ela tira XP em vez de dar. O XP para em zero, e o nível não desce.',
   },
   {
     source: 'team.deaths',
@@ -194,7 +222,9 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: null,
+    note:
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
   {
     source: 'sleeper.kills',
@@ -214,7 +244,9 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: null,
+    note:
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
   {
     source: 'trap.kills',
@@ -232,7 +264,9 @@ export const XP_SOURCES: readonly XpSource[] = [
     feed: 'batch',
     unit: 'morte',
     defaultEnabled: false,
-    note: null,
+    note:
+      'Faz sentido como PENALIDADE: com valor negativo ela tira XP em vez de dar. ' +
+      'O XP para em zero, e o nível não desce.',
   },
 
   {

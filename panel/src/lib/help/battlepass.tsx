@@ -26,6 +26,7 @@ import { HelpExample, HelpWarn, type HelpTopic } from '@/components/ui/help-tip'
 
 export const BATTLEPASS_HELP: {
   readonly catalog: HelpTopic;
+  readonly penalty: HelpTopic;
   readonly dailyCap: HelpTopic;
   readonly xpCurve: HelpTopic;
   readonly retroactive: HelpTopic;
@@ -56,6 +57,34 @@ export const BATTLEPASS_HELP: {
           com o agente desta versão sem a rota do cardápio, esta aba mostra só as fontes que já
           foram gravadas e não oferece nenhuma nova. É a recusa aparecendo na tela, e não um menu
           vazio fingindo que não há o que ligar.
+        </HelpWarn>
+      </>
+    ),
+  },
+
+  /** O (?) da coluna "XP por vez" — o que um valor negativo faz. */
+  penalty: {
+    title: 'XP por vez (e o valor negativo)',
+    short: 'Quanto cada ocorrência rende. Negativo TIRA XP, e zero não mexe em nada.',
+    body: (
+      <>
+        <p>
+          O valor é <strong>por ocorrência</strong>: com 50 em “Abater jogador”, três abates no
+          mesmo minuto valem 150. <strong>Um valor negativo tira XP</strong> em vez de dar — é
+          assim que abater colega de equipe, se matar ou morrer viram custo, e não renda.
+        </p>
+        <HelpExample>
+          “Abater colega de equipe” com <strong>−200</strong>: quem mata um aliado perde 200 XP. Se
+          ele tinha 150, fica com <strong>zero</strong> — e não com −50.
+        </HelpExample>
+        <p>
+          O XP <strong>nunca fica negativo</strong> e o <strong>nível não desce</strong>. Quem
+          chegou ao nível 12 continua no 12: o que ele já resgatou é dele, e o que estava
+          disponível continua disponível. O que a penalidade faz é <em>adiar o próximo</em> nível.
+        </p>
+        <HelpWarn>
+          o teto diário é do <strong>ganho</strong>. Uma fonte que tira XP não é limitada por ele —
+          senão o terceiro colega abatido no dia sairia de graça, e a reincidência seria premiada.
         </HelpWarn>
       </>
     ),

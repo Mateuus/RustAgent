@@ -28,17 +28,39 @@
 //  `gather.*` morre em silêncio se o ranking correspondente for
 //  desligado. São `HelpTip` ao lado do nome — nota de rodapé
 //  ninguém lê, e a reclamação chega antes.
+//
+//  ####  A LINHA QUE TIRA XP SE LÊ DE LONGE  ####
+//
+//  Desde 18/09/2026 o valor aceita negativo: `team.kills` a −200
+//  DESCONTA 200 por colega abatido (o dono). Um sinal de menos num
+//  campo numérico, no meio de vinte linhas, não é aviso nenhum — e
+//  esta é justamente a linha que ninguém quer ligar por engano.
+//
+//  Então a linha inteira muda: selo PENALIDADE ao lado do nome,
+//  borda de acento no campo, e a frase do `penaltyNoteOf` embaixo
+//  dele, dizendo o que acontece e o que NÃO acontece (o XP para em
+//  zero, o nível não desce). A marca acompanha o RASCUNHO, e não o
+//  que está gravado: ela aparece enquanto o admin digita, que é o
+//  momento em que ele ainda pode mudar de ideia.
+//
+//  A cor é borda e ícone, nunca texto colorido: `--rust-red` mede
+//  3,74:1 sobre o fundo e não passa nos 4,5:1 de texto corrido
+//  (globals.css).
 // ============================================================
 
-import { Trash2 } from 'lucide-react';
+import { AlertTriangle, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import {
   buildXpRows,
   messageOf,
+  penaltyNoteOf,
   periodLabel,
   safeXpRules,
   safeXpSources,
+  xpAmountKind,
+  XP_AMOUNT_MAX,
+  XP_AMOUNT_MIN,
   type XpRow,
 } from '@/components/battlepass/normalize';
 import { SeasonPicker } from '@/components/battlepass/season-picker';
@@ -204,7 +226,12 @@ export function TabXp({
                   <tr>
                     <th className="px-3 py-2">Fonte</th>
                     <th className="w-36 px-3 py-2">Ligada</th>
-                    <th className="w-28 px-3 py-2">XP por vez</th>
+                    <th className="w-28 px-3 py-2">
+                      <span className="inline-flex items-center gap-1">
+                        XP por vez
+                        <HelpTip topic={BATTLEPASS_HELP.penalty} />
+                      </span>
+                    </th>
                     <th className="w-32 px-3 py-2">
                       <span className="inline-flex items-center gap-1">
                         Teto diário
@@ -274,6 +301,11 @@ function RuleRow({
     label: label.trim() === '' ? null : label.trim(),
   };
 
+  // A marca segue o RASCUNHO: o admin vê a linha virar penalidade
+  // enquanto digita o menos, e não depois de salvar.
+  const penalty = xpAmountKind(body.amount) === 'penalty';
+  const penaltyNote = penaltyNoteOf(body.amount);
+
   const dirty =
     row.rule === null ||
     row.rule.enabled !== body.enabled ||
@@ -291,6 +323,13 @@ function RuleRow({
 
           {row.warning !== null && <HelpTip topic={caveatTopic(row.label, row.warning)} />}
 
+          {penalty && (
+            <span className="inline-flex items-center gap-1 border border-rust px-1 text-2xs uppercase text-foreground">
+              <AlertTriangle aria-hidden="true" className="h-3 w-3 shrink-0 text-rust" />
+              penalidade
+            </span>
+          )}
+
           {row.recommended && (
             <span className="border border-olive px-1 text-2xs uppercase text-foreground">
               recomendada
@@ -307,6 +346,13 @@ function RuleRow({
         <p className="font-mono text-2xs text-muted">{row.source}</p>
 
         {row.hint !== null && <p className="mt-0.5 text-2xs text-muted">{row.hint}</p>}
+
+        {penaltyNote !== null && (
+          <p className="mt-1 flex items-start gap-1 border-l-2 border-rust bg-surface-2 px-2 py-1 text-2xs text-foreground">
+            <AlertTriangle aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0 text-rust" />
+            <span>{penaltyNote}</span>
+          </p>
+        )}
 
         {row.orphan && (
           <p className="mt-0.5 text-2xs text-muted">
@@ -342,14 +388,31 @@ function RuleRow({
             cada missão paga o seu — o valor fica na recompensa dela
           </span>
         ) : (
-          <input
-            type="number"
-            min={0}
-            aria-label={`XP por ocorrência de ${row.label}`}
-            className={INPUT}
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-          />
+          <>
+            <input
+              type="number"
+              // Negativo é PENALIDADE (o dono, 18/09/2026), e a faixa
+              // é a MESMA do agente: um `min={0}` aqui recusaria na
+              // tela o que o schema aceita, e o admin não teria onde
+              // digitar a multa que ele acabou de pedir.
+              min={XP_AMOUNT_MIN}
+              max={XP_AMOUNT_MAX}
+              aria-label={`XP por ocorrência de ${row.label}`}
+              className={cn(INPUT, penalty && 'border-rust')}
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+            />
+
+            {penalty && (
+              // A frase inteira mora na coluna da fonte, que tem
+              // largura para ela; aqui cabe o verbo, e ele basta
+              // para ler a COLUNA de cima a baixo e ver qual linha
+              // tira em vez de dar.
+              <p className="mt-1 font-condensed text-2xs uppercase tracking-wide text-foreground">
+                tira XP
+              </p>
+            )}
+          </>
         )}
       </td>
 
