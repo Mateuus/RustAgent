@@ -670,6 +670,18 @@ export interface DeliveryOutcome {
   readonly ok: boolean;
   /** O código cru quando deu errado. */
   readonly code?: string | null;
+  /**
+   * A frase ACIONÁVEL do jogador, quando existe uma.
+   *
+   * Só quando ele tem o que fazer a respeito — "Libere 2 slots na
+   * mochila" —, e é por isso que ela não sai do código: `ITEM_UNKNOWN`
+   * e `WALLET_FAILED` são problema do admin, e repeti-los no rodapé
+   * daria ao jogador uma tarefa que não é dele.
+   *
+   * Não vai para o banco: a caixa guarda o código. Esta é a frase de
+   * UMA resposta, e quem a costura no rodapé é o `BattlePassSync`.
+   */
+  readonly message?: string | null;
 }
 
 /** O pedido de resgate, como o jogo e o painel o mandam. */

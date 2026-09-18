@@ -97,6 +97,7 @@ import { WorkshopService } from './game/workshop.js';
 import { BattlePassSync } from './game/battlepass.js';
 import { WorkshopCatalog } from './game/workshop-catalog.js';
 import { BattlePassRepository } from './db/battlepass-repository.js';
+import { BattlePassDeliveryService } from './battlepass/delivery.js';
 import { BattlePassService, passGranterOf } from './battlepass/service.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
@@ -3027,6 +3028,22 @@ async function main(): Promise<void> {
         return { ok: outcome.status === 'ok', message: describePurchase(outcome) };
       },
     },
+    // ####  QUEM PÕE NA MÃO O QUE O RESGATE PROMETEU  ####
+    //
+    // Sem isto todo resgate cai inteiro na caixa de pendências: a
+    // interface existia, o tradutor existia, e nada os ligava. Ele
+    // pergunta ao plugin se cabe ANTES de entregar e usa o MESMO
+    // `QuestRewardService` das missões e do KOTH — uma segunda
+    // tradução daria dois jeitos de pôr uma AK na mão de alguém.
+    // Ver battlepass/delivery.ts.
+    deliver: new BattlePassDeliveryService({
+      rewards: questRewards,
+      rconOf: (serverId) => supervisor.contextOf(serverId)?.rcon ?? null,
+      // O kit entra na conta de espaço com TODOS os itens dele: o
+      // mesmo caminho que o resgate de missão usa logo acima.
+      kitItemsOf: (slug) => kits.list().find((kit) => kit.slug === slug)?.items ?? null,
+      logger,
+    }),
     logger,
   });
 

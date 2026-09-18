@@ -1163,6 +1163,15 @@ export class BattlePassSync {
     }
 
     let owed = 0;
+    /**
+     * O que o JOGADOR tem a fazer, dito pelo entregador.
+     *
+     * "1 item não coube" não diz o que fazer; "libere 2 slots" diz.
+     * Só a primeira frase entra: num lote de 17 níveis o motivo é o
+     * mesmo em todos, e repeti-lo dezessete vezes estouraria o
+     * rodapé.
+     */
+    let hint = '';
 
     for (const result of results) {
       const outcomes = await delivery.deliver({
@@ -1182,6 +1191,10 @@ export class BattlePassSync {
       );
 
       owed += settled.pending.length;
+
+      if (hint === '') {
+        hint = outcomes.find((outcome) => !outcome.ok && (outcome.message ?? '') !== '')?.message ?? '';
+      }
     }
 
     if (owed === 0) {
@@ -1190,9 +1203,11 @@ export class BattlePassSync {
         : `${String(results.length)} níveis resgatados! Confira a mochila.`;
     }
 
+    const tail = hint === '' ? '' : ` ${hint}`;
+
     return owed === 1
-      ? 'Resgatado, mas 1 item não coube: ele ficou na sua caixa.'
-      : `Resgatado, mas ${String(owed)} itens não couberam: eles ficaram na sua caixa.`;
+      ? `Resgatado, mas 1 item não coube: ele ficou na sua caixa.${tail}`
+      : `Resgatado, mas ${String(owed)} itens não couberam: eles ficaram na sua caixa.${tail}`;
   }
 
   /**
