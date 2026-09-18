@@ -178,7 +178,15 @@ são categorias de tela do jogo, não de item, e não aparecem aqui.
 | skin da casa | **Grátis** | normal |
 | não possui | **Bloqueada** | ícone esmaecido + cadeado |
 | "não sei" (02 §5.3) | **Sincronizando** | cadeado cinza |
+| skin oficial que a Steam não liberou (02 §3.1) | **Precisa da DLC** (ou **Skin da loja Steam**), em âmbar | ícone esmaecido + cadeado |
 | skin 0 | **Padrão** | normal |
+
+**A skin de DLC bloqueada continua na grade** — apagada, com o motivo. Esconder faria o jogador
+achar que o sistema comeu o prêmio dele; é a mesma regra da faixa paga do passe. E o estado sai
+em **âmbar**, e não no cinza de "não obtida", porque aqui não adianta ir ao nosso site: o dono
+da tranca é a Steam. No detalhe, quem já recebeu a skin da casa lê ainda *"Esta skin é sua na
+OrigemZ: ela funciona assim que a Steam liberar"*; o botão de "Aplicar em" vira o `deadButton`
+**PRECISA DA DLC** (ou **SÓ NA STEAM**).
 
 **Armadilha MEDIDA** (`ui-cui.ts:198`): `SkinId = 0` num item sem skins **derruba o jogador**.
 Para a célula **Padrão**, omita o `SkinId`; não mande 0.
@@ -390,6 +398,7 @@ Todos com o **token da sessão** do jogador, gerado ao abrir e descartado ao fec
 | `origemz.skins.close` | `token` **opcional** | fechar a própria tela é sempre seguro, e é a saída de quem ficou com o menu preso (pelo F1) |
 | `origemz.skins.search` | só o `token` | limpa a pesquisa. É o que o **X** do campo manda |
 | `origemz.skins.bytes` | nenhum | só servidor/RCON ou admin: mede o pior caso de cada região (§6) |
+| `origemz.skins.dlccost` | `<steamId>` | só servidor/RCON ou admin: mede o custo da trava de DLC (02 §3.1) com o catálogo real — quantas skins são oficiais, o custo de abrir o menu com o cache vazio, o de um clique seguinte, e o de 48 células se o cache não existisse |
 
 No `origemz.skins.cat`, a categoria `all` é TODAS. Com `página`, e a categoria já aberta, só a
 lateral muda.
@@ -490,25 +499,27 @@ OZSkins.Side / .Grid / .Detail / .Targets            — como acima
 - A lateral pagina a categoria aberta com **3 a 8 itens por página**. O número depende de
   quantas categorias aparecem, para tudo caber nos 560 px sem ScrollView.
 
-**Medido** em 17/09/2026, fora do servidor. O `OrigemZWorkshop.MeasureWorstCase()` (o mesmo
-código do `origemz.skins.bytes`) foi compilado com as DLLs do server01 num executável net48 e
-rodado. O cenário é o pior caso: as 13 categorias à mostra com a primeira aberta e 8 itens de
-nome longo, 12 células lendárias, bloqueadas e de grade misturada, pesquisa de 37
-caracteres, descrição de 280 caracteres e 4 alvos com condição, munição e "Aplicada".
+**Remedido** em 18/09/2026, fora do servidor. O `OrigemZWorkshop.MeasureWorstCase()` (o mesmo
+código do `origemz.skins.bytes`) foi compilado com as DLLs do server01 num executável e rodado.
+O cenário é o pior caso: as 13 categorias à mostra com a primeira aberta e 8 itens de nome
+longo, as células lendárias, bloqueadas e de grade misturada, pesquisa de 37 caracteres,
+descrição de 280 caracteres e 4 alvos com condição, munição e o botão morto.
 
-| Região | Bytes |
-|---|---|
-| Janela | 2.821 |
-| Cabeçalho | 1.327 |
-| Lateral | 20.519 |
-| Grade | 27.779 |
-| Detalhe | 2.834 |
-| Aplicar em | 8.318 |
-| **1º `AddUI` da abertura** | **27.498** |
-| **2º `AddUI` da abertura** | **36.096** |
+| Região | Bytes (v0.6.0) | v0.5.0 |
+|---|---|---|
+| Janela | 2.792 | 2.792 |
+| Cabeçalho | 3.053 | 3.053 |
+| Lateral | 21.302 | 21.302 |
+| Grade | 32.245 | 32.209 |
+| Detalhe | 3.152 | 3.104 |
+| Aplicar em | 8.323 | 8.321 |
+| **1º `AddUI` da abertura** | **30.296** | 30.248 |
+| **2º `AddUI` da abertura** | **32.245** | 32.209 |
 
-Todas as regiões ficam abaixo de 40 KB. **O `AddUI` de ~36 KB direto pelo plugin continua sendo
-a medição 0.4** (§8).
+Todas as regiões ficam abaixo de 40 KB. A trava de DLC da v0.6.0 (02 §3.1) custou **+36 bytes
+na grade, +48 no detalhe e +2 em "Aplicar em"**: os textos dela passaram a ser os mais longos
+que cada região sabe escrever, e o `MeasureWorstCase` foi ajustado para usá-los. **O `AddUI` de
+~32 KB direto pelo plugin continua sendo a medição 0.4** (§8).
 
 ---
 
