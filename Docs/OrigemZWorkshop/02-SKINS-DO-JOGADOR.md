@@ -90,6 +90,54 @@ daí, o jogador só não consegue aplicar de novo.
 **Aplicar não consome a skin.** Uma posse serve para quantos itens o jogador quiser, quantas
 vezes quiser.
 
+### 3.1 A skin oficial do Rust — quem manda é a Steam (v0.6.0)
+
+Acima de tudo o que está acima existe um dono que não somos nós. Se a skin cadastrada é uma
+skin **oficial** do Rust — vendida na loja da Facepunch ou entregue num DLC —, quem diz se o
+jogador pode usá-la é a **Steam**. Decisão do dono, 18/09/2026: *"só DLC mesmo, quem tem pode
+usar"*.
+
+Essa recusa **vence as três de cima**: a posse comprada no site, o "liberada para todos" e o
+admin. Se a casa deu a skin e a Steam diz que o jogador não a tem, ele **não a aplica**. É o
+que mantém o servidor fora da mira da Facepunch, cuja regra é respeitar a checagem de posse em
+vez de burlá-la.
+
+**A recusa é na hora de USAR, e nunca no cadastro.** Uma skin nossa do Workshop pode ser
+aprovada pela Facepunch e virar oficial depois; se o cadastro barrasse oficiais, a skin que já
+está no catálogo pararia de funcionar no dia da aprovação e ninguém entenderia por quê.
+Cadastrada ela fica, no catálogo ela aparece, prêmio ela continua sendo.
+
+**Como o plugin sabe que uma skin é oficial** (medido no server01 em 18/09/2026):
+`ItemSkinDirectory.ForItem(definition)` lista as skins oficiais daquele item — 12 para
+`rifle.ak`, 2 para `pickaxe`, 2 para `metal.facemask`; as do Workshop não estão lá. O número
+que o nosso catálogo guarda é o **Workshop ID** (10 dígitos, não cabe em `int`) e o que o
+`PlayerBlueprints.CheckSkinOwnership` recebe é o **id de definição de inventário Steam** (5
+dígitos). A ponte entre os dois é o `SteamInventoryItem.workshopID` — e é por ela que uma skin
+nossa aprovada passa a ser reconhecida sem ninguém mexer no cadastro.
+
+**A ponte existe e vem preenchida**, medido no server01 em 18/09/2026 com
+`origemz.dlcprobe.skins rifle.ak`: das 12 oficiais da AK, a `10135` traz `workshopID`
+`615766181`, a `10137` traz `618543834` e a `10138` traz `566540646`. As oficiais **nasceram no
+Workshop e foram aprovadas** — é o caminho que o dono descreveu, e ele está coberto. As três
+vêm com `DlcItem` nulo: são skins de loja Steam, não de DLC, e é por isso que a frase da tela
+distingue as duas.
+
+**O custo, medido no mesmo dia** (`origemz.skins.dlccost`, `origemz.dlcprobe.cost`): o
+diretório de skins do jogo tem **619** entradas e a busca nele é linear, então cada pergunta
+custa **~12,8 µs** aquecida e **~29 µs** a frio. Uma página cheia da grade são 48 perguntas —
+**1.389,9 µs por desenho**, e o menu redesenha a cada clique. Daí as duas defesas do plugin: as
+contagens não perguntam nada, e a resposta fica guardada por jogador até o menu abrir de novo.
+Com o catálogo de hoje, que não tem nenhuma skin oficial, o custo é **zero**.
+
+**Quem responde é o jogo, não nós.** O `CheckSkinOwnership` já cobre a licença do DLC
+(`SteamDLCItem.HasLicense`), o item comprado na loja e o desbloqueio por outro item Steam.
+Reescrever essa regra aqui seria o contorno que a Facepunch proíbe. Erro de leitura responde
+**não**: o risco de deixar aplicar sem posse é o servidor, o de recusar é uma frase na tela.
+
+**Ter e poder usar deixaram de ser a mesma coisa.** A skin de DLC que a casa deu continua
+contando em "obtidas" e continua aparecendo com o filtro "só as minhas" ligado — senão o prêmio
+some da tela do dono dele. O que ela não faz é ser aplicada.
+
 ---
 
 ## 4. Os dados — migrações **097** e **100**

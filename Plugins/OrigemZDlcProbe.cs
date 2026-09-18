@@ -6,7 +6,13 @@ using Oxide.Core.Plugins;
 namespace Oxide.Plugins
 {
     // ============================================================
-    //  OrigemZDlcProbe  -  SONDA DESCARTAVEL. Apague depois de usar.
+    //  OrigemZDlcProbe  -  a regua da trava de DLC do OrigemZWorkshop.
+    //
+    //  NAO CARREGUE EM PRODUCAO sem precisar: ela le o estado Steam de
+    //  outro jogador e roda medicoes em laco. Ela nasceu descartavel e
+    //  ficou porque a trava de DLC (Docs/OrigemZWorkshop/02 §3.1)
+    //  depende de tres respostas que so o jogo ao vivo da -- e quando
+    //  alguma delas mudar, e aqui que se remede em vez de adivinhar.
     //
     //  ####  A PERGUNTA QUE ELA RESPONDE  ####
     //
@@ -43,8 +49,8 @@ namespace Oxide.Plugins
     //
     //  Nao da, nao tira e nao altera nada. So le e responde.
     // ============================================================
-    [Info("OrigemZDlcProbe", "OrigemZ", "0.1.0")]
-    [Description("Sonda descartavel: o servidor enxerga a posse de skin/DLC do jogador?")]
+    [Info("OrigemZDlcProbe", "OrigemZ", "0.2.0")]
+    [Description("Sonda: o servidor enxerga a posse de skin/DLC do jogador, e quanto custa perguntar?")]
     public class OrigemZDlcProbe : RustPlugin
     {
         // ####  A RESPOSTA VOLTA CASADA, NAO NO CONSOLE  ####
@@ -203,6 +209,250 @@ namespace Oxide.Plugins
             }
 
             return "DA: o servidor enxerga " + itemCount + " itens do inventario Steam deste jogador";
+        }
+
+
+        // ####  A SEGUNDA PERGUNTA: O QUE E DLC, AFINAL  ####
+        //
+        // A primeira sonda respondeu que o servidor ENXERGA a posse.
+        // Falta saber COMO reconhecer uma skin de DLC -- porque o
+        // numero que o nosso catalogo guarda e o Workshop ID, e o que
+        // o `CheckSkinOwnership` recebe e a definicao de inventario
+        // Steam. Sao dois numeros diferentes para a mesma coisa.
+        //
+        // A hipotese, lida no decompilado: `ItemSkinDirectory` e o
+        // catalogo das skins OFICIAIS que o jogo conhece; as nossas,
+        // publicadas no Workshop, nao estao la. Se for verdade, o
+        // agente descobre sozinho o que e DLC -- e o admin nao precisa
+        // marcar nada no cadastro.
+        //
+        // Esta sonda lista o que o jogo sabe sobre um item, para a
+        // hipotese ser confirmada ou morrer.
+        [ConsoleCommand("origemz.dlcprobe.skins")]
+        private void CmdProbeSkins(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null) return;
+
+            string shortname = arg.GetString(0);
+
+            if (string.IsNullOrEmpty(shortname))
+            {
+                arg.ReplyWith("uso: origemz.dlcprobe.skins <shortname>");
+                return;
+            }
+
+            ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
+
+            if (definition == null)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"ITEM_NOT_FOUND\"}");
+                return;
+            }
+
+            var report = new StringBuilder();
+
+            report.Append("{\"ok\":true");
+            report.Append(",\"shortname\":\"").Append(Escape(shortname)).Append('"');
+            report.Append(",\"itemId\":").Append(definition.itemid);
+
+            try
+            {
+                ItemSkinDirectory.Skin[] skins = ItemSkinDirectory.ForItem(definition);
+
+                report.Append(",\"officialCount\":").Append(skins.Length);
+                report.Append(",\"official\":[");
+
+                for (int i = 0; i < skins.Length && i < 12; i++)
+                {
+                    if (i > 0) report.Append(',');
+
+                    ItemSkinDirectory.Skin skin = skins[i];
+
+                    report.Append("{\"id\":").Append(skin.id);
+                    report.Append(",\"name\":\"").Append(Escape(skin.name)).Append('"');
+
+                    // `invItem` e o que diz se aquilo e item de loja
+                    // Steam -- e e o unico lugar com a categoria.
+                    //
+                    // O `workshopID` e a PONTE que o desenho precisa: o
+                    // nosso catalogo guarda o Workshop ID, e o
+                    // `CheckSkinOwnership` quer o id de inventario. Se
+                    // este campo vier preenchido no servidor, da para ir
+                    // de um ao outro sem o admin marcar nada.
+                    //
+                    // O `DlcItem` separa "skin de DLC" (uma licenca de
+                    // outro appid) de "skin da loja" (um item comprado).
+                    try
+                    {
+                        SteamInventoryItem inv = skin.invItem;
+
+                        report.Append(",\"hasInvItem\":").Append(Lower(inv != null));
+
+                        if (inv != null)
+                        {
+                            report.Append(",\"invId\":").Append(inv.id);
+                            report.Append(",\"category\":\"").Append(inv.category.ToString()).Append('"');
+                            report.Append(",\"workshopId\":").Append(inv.workshopID);
+                            report.Append(",\"isDlc\":").Append(Lower(inv.DlcItem != null));
+
+                            if (inv.DlcItem != null)
+                            {
+                                report.Append(",\"dlcAppId\":").Append(inv.DlcItem.dlcAppID);
+                                report.Append(",\"dlcBypass\":").Append(Lower(inv.DlcItem.bypassLicenseCheck));
+                            }
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        report.Append(",\"invError\":\"").Append(Escape(error.Message)).Append('"');
+                    }
+
+                    report.Append('}');
+                }
+
+                report.Append(']');
+
+                // A pergunta que decide o desenho: o `id` do diretorio
+                // cabe num int, e o Workshop ID nao. Se todos couberem,
+                // os dois numeros NAO se confundem -- e "esta no
+                // diretorio" vira o teste de "e oficial".
+                report.Append(",\"veredito\":\"");
+                report.Append(skins.Length == 0
+                    ? "este item nao tem skin oficial: toda skin dele e de Workshop"
+                    : "o item tem " + skins.Length + " skins oficiais, e os ids acima sao de inventario Steam");
+                report.Append('"');
+            }
+            catch (Exception error)
+            {
+                report.Append(",\"error\":\"").Append(Escape(error.Message)).Append('"');
+            }
+
+            report.Append('}');
+
+            arg.ReplyWith(report.ToString());
+        }
+
+        // ####  A TERCEIRA PERGUNTA: QUANTO CUSTA PERGUNTAR  ####
+        //
+        // O menu de skins mostra 48 celulas por pagina, e as contagens
+        // da lateral percorrem o catalogo inteiro. Se conferir a posse
+        // for caro, conferir uma vez por celula a cada desenho vira
+        // trabalho de servidor -- e o desenho tem de ser outro (cache
+        // por jogador, ou resolver so as poucas skins oficiais).
+        //
+        // O custo NAO e o `HasItem` (um laco sobre os itens Steam do
+        // jogador, que sao poucos): e o
+        // `ItemSkinDirectory.FindByInventoryDefinitionId`, que percorre
+        // LINEARMENTE o diretorio inteiro do jogo a cada chamada. Por
+        // isso a sonda mede tambem o pior caso -- o id que esta no FIM
+        // do array, onde o laco so para na ultima volta.
+        //
+        //   origemz.dlcprobe.cost <steamId> [repeticoes]
+        [ConsoleCommand("origemz.dlcprobe.cost")]
+        private void CmdProbeCost(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null) return;
+
+            string steamId = arg.GetString(0);
+
+            if (string.IsNullOrEmpty(steamId))
+            {
+                arg.ReplyWith("uso: origemz.dlcprobe.cost <steamId> [repeticoes]");
+                return;
+            }
+
+            BasePlayer player = FindPlayer(steamId);
+
+            if (player == null || player.blueprints == null)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"PLAYER_NOT_FOUND\"}");
+                return;
+            }
+
+            int repeats;
+            if (!int.TryParse(arg.GetString(1), out repeats) || repeats <= 0) repeats = 48;
+
+            var report = new StringBuilder();
+            report.Append("{\"ok\":true");
+            report.Append(",\"steamId\":\"").Append(player.UserIDString).Append('"');
+            report.Append(",\"repeats\":").Append(repeats);
+
+            try
+            {
+                ItemSkinDirectory.Skin[] all = ItemSkinDirectory.Instance.skins;
+                report.Append(",\"directorySize\":").Append(all.Length);
+
+                // O id do fim do array: o pior caso do laco linear.
+                int worstId = 0;
+                for (int i = all.Length - 1; i >= 0; i--)
+                {
+                    if (all[i].isSkin && all[i].id != 0) { worstId = all[i].id; break; }
+                }
+
+                report.Append(",\"worstId\":").Append(worstId);
+
+                // Aquece: a primeira chamada carrega o ScriptableObject do
+                // `invItem` do disco e mediria o carregamento, nao a
+                // pergunta.
+                for (int i = 0; i < 200; i++) player.blueprints.CheckSkinOwnership(worstId, player);
+
+                report.Append(",\"worstCaseUs\":").Append(Round(Measure(player, worstId, repeats)));
+
+                // E um id que NAO esta no diretorio: o Workshop ID de uma
+                // skin nossa, cortado para int. E o caso que o plugin mais
+                // faria se conferisse tudo -- e tambem percorre o array
+                // inteiro, sem achar.
+                report.Append(",\"missingUs\":").Append(Round(Measure(player, int.MaxValue - 7, repeats)));
+
+                // O custo de RESOLVER o que e oficial, que e o que o
+                // plugin faria uma vez por skin na carga do catalogo.
+                ItemDefinition ak = ItemManager.FindItemDefinition("rifle.ak");
+
+                if (ak != null)
+                {
+                    for (int i = 0; i < 20; i++) ItemSkinDirectory.ForItem(ak);
+
+                    long started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    for (int i = 0; i < repeats; i++) ItemSkinDirectory.ForItem(ak);
+                    report.Append(",\"forItemUs\":").Append(Round(Micros(started)));
+                }
+            }
+            catch (Exception error)
+            {
+                report.Append(",\"error\":\"").Append(Escape(error.Message)).Append('"');
+            }
+
+            report.Append('}');
+            arg.ReplyWith(report.ToString());
+        }
+
+        /// Microssegundos gastos por `repeats` chamadas de CheckSkinOwnership.
+        private static double Measure(BasePlayer player, int skinItemId, int repeats)
+        {
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            for (int i = 0; i < repeats; i++)
+            {
+                player.blueprints.CheckSkinOwnership(skinItemId, player);
+            }
+
+            return Micros(started);
+        }
+
+        /// Ticks do Stopwatch -> microssegundos. O DateTime do Windows
+        /// anda de 15 em 15 ms e nao enxergaria nada disto.
+        private static double Micros(long started)
+        {
+            long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+
+            return System.Diagnostics.Stopwatch.Frequency > 0L
+                ? elapsed * 1000000d / System.Diagnostics.Stopwatch.Frequency
+                : 0d;
+        }
+
+        private static string Round(double micros)
+        {
+            return micros.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         private static BasePlayer FindPlayer(string steamId)

@@ -159,6 +159,24 @@
 //  vinculada ao servidor = estar no catálogo: o agente só manda essas.
 //  Posse removida ou vencida NÃO despinta o que já foi pintado.
 //
+//  ####  MENOS UMA COISA: A SKIN OFICIAL, QUE É DO STEAM  ####
+//
+//  Acima de tudo isso existe um dono que não somos nós. Se a skin
+//  cadastrada é uma skin OFICIAL do Rust — uma que a Facepunch vende
+//  na loja ou entrega num DLC —, quem diz se o jogador pode usá-la é
+//  a Steam, e não o nosso banco. A concessão da casa não vale contra
+//  ela: nem a posse comprada no site, nem "liberada para todos", nem
+//  o admin. É o que mantém o servidor fora da mira da Facepunch, cuja
+//  regra é justamente essa: respeitar a checagem de posse em vez de
+//  burlá-la.
+//
+//  E a recusa é na hora de USAR, nunca no cadastro. Uma skin NOSSA do
+//  Workshop pode ser aprovada pela Facepunch e virar oficial depois;
+//  se o cadastro barrasse oficiais, ela pararia de funcionar no dia da
+//  aprovação e ninguém entenderia por quê. Cadastrada ela fica, no
+//  catálogo ela aparece, prêmio ela continua sendo — só não é aplicada
+//  por quem a Steam diz que não a tem (`Access.NeedsDlc`, §7).
+//
 // ============================================================
 //  ####  ARMADILHAS MEDIDAS  ####
 //
@@ -183,6 +201,17 @@
 //  6. NENHUM `Puts` sai no frame em que um comando do agente responde:
 //     ele entra na resposta casada e a transforma em algo que não é
 //     JSON. Todo push passa por `timer.Once`.
+//
+//  7. "Timed out waiting for plugin to be compiled" NÃO É ERRO DESTE
+//     ARQUIVO. MEDIDO em 18/09/2026: o recarregamento falhou DUAS
+//     vezes e o menu ficou fora do ar, e o log dizia, logo antes,
+//     `Shutting down compiler because idle shutdown` — o compilador
+//     do Oxide se desligou por ociosidade no meio da compilação. São
+//     6.500 linhas e ~52 KB de assembly: este arquivo é grande o
+//     bastante para cair nessa janela. Com o compilador quente (basta
+//     ter compilado outro plugin antes) a 0.6.0 subiu de primeira, em
+//     0,01 s. Antes de procurar ponto-e-vírgula, leia o log e
+//     recarregue de novo.
 //
 // ============================================================
 //  ####  O CONTRATO COM O AGENTE  ####
@@ -228,7 +257,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZWorkshop", "OrigemZ", "0.5.0")]
+    [Info("OrigemZWorkshop", "OrigemZ", "0.6.0")]
     [Description("Menu de skins, posse por jogador e cadastro de skins do Steam Workshop da OrigemZ.")]
     public class OrigemZWorkshop : RustPlugin
     {
@@ -238,6 +267,7 @@ namespace Oxide.Plugins
         private const string StatusCommand = "origemz.workshop.status";
         private const string ReplyCommand = "origemz.workshop.reply";
         private const string BytesCommand = "origemz.skins.bytes";
+        private const string DlcCostCommand = "origemz.skins.dlccost";
 
         // Os comandos da tela (03 §5). Digitados pelo CLIENTE, então
         // conferem tudo de novo: um jogador pode mandá-los pelo F1 com
@@ -446,6 +476,26 @@ namespace Oxide.Plugins
             public int ItemId;
             public string ItemName = "";
             public string Category = "";
+
+            /// <summary>
+            /// A skin é OFICIAL do Rust? Então este é o id de definição de
+            /// inventário Steam dela — o número que o `CheckSkinOwnership`
+            /// recebe. `0` = skin só do Workshop, e a Steam não tem nada a
+            /// dizer sobre ela.
+            ///
+            /// Resolvido uma vez por carga do catálogo (`MarkOfficialSkins`),
+            /// e não a cada desenho: o `ItemSkinDirectory` procura em laço
+            /// linear sobre TODAS as skins do jogo.
+            /// </summary>
+            public int InventoryDefinitionId;
+
+            /// <summary>
+            /// Sendo oficial, ela vem de um DLC (e não da loja de skins)?
+            /// Só muda a FRASE: "precisa da DLC" e "comprada na Steam" não
+            /// são a mesma notícia para quem lê.
+            /// </summary>
+            public bool Dlc;
+
             /// <summary>Nome da skin + nome do item + shortname, sem acento e minúsculo.</summary>
             public string SearchKey = "";
         }
@@ -685,6 +735,7 @@ namespace Oxide.Plugins
             TouchOwned(player.UserIDString);
             _ownedBatches.Remove(player.UserIDString);
             _nextApply.Remove(player.userID);
+            _steamOwned.Remove(player.userID);
         }
 
         private void OnPlayerDeath(BasePlayer player, HitInfo info)
@@ -922,6 +973,8 @@ namespace Oxide.Plugins
                 }
             }
 
+            MarkOfficialSkins(next);
+
             Comparison<SkinEntry> order = CompareSkins;
 
             next.Ordered.Sort(order);
@@ -1059,6 +1112,145 @@ namespace Oxide.Plugins
                 default:
                     // "common", vazio ou desconhecido: sem borda (03 §2).
                     return "";
+            }
+        }
+
+        /// <summary>
+        /// Marca no catálogo recém-lido quais skins são OFICIAIS do Rust.
+        ///
+        /// ####  POR QUE ISTO RODA NA CARGA, E NÃO NO DESENHO  ####
+        ///
+        /// `ItemSkinDirectory.ForItem` percorre em laço LINEAR o diretório
+        /// inteiro do jogo, e `Skin.invItem` carrega um ScriptableObject do
+        /// disco na primeira leitura. Fazer isso por célula da grade seria
+        /// pagar o diretório inteiro 48 vezes por desenho. Aqui é uma
+        /// varredura por ITEM que tem skin no catálogo — e só no `sync`.
+        ///
+        /// MEDIDO no server01 em 18/09/2026 (`origemz.dlcprobe.cost`): o
+        /// diretório tem 619 skins, a busca linear nele custa até 2.569,5 µs
+        /// no pior caso e o `ForItem` 2.214,2 µs. É essa conta que cada
+        /// célula pagaria se a resolução não morasse aqui.
+        ///
+        /// ####  OS DOIS NÚMEROS DA MESMA SKIN  ####
+        ///
+        /// O catálogo guarda o Workshop ID (10 dígitos, não cabe em `int`);
+        /// o `CheckSkinOwnership` quer o id de definição de inventário
+        /// Steam (5 dígitos, cabe). O `SteamInventoryItem.workshopID` é a
+        /// ponte entre os dois, e é por ela que uma skin nossa aprovada
+        /// pela Facepunch passa a ser reconhecida como oficial sem que
+        /// ninguém mexa no cadastro.
+        ///
+        /// A ponte EXISTE e vem preenchida — MEDIDO no server01 em
+        /// 18/09/2026: das 12 skins oficiais da `rifle.ak`, a 10135 tem
+        /// `workshopID` 615766181, a 10137 tem 618543834 e a 10138 tem
+        /// 566540646. Ou seja: as oficiais nasceram no Workshop e foram
+        /// aprovadas, que é exatamente o caminho que esta feature precisa
+        /// atravessar.
+        ///
+        /// O caso de o admin ter cadastrado o PRÓPRIO id de inventário
+        /// também é coberto — o `RejectsInventoryId` recusa isso hoje, mas
+        /// um catálogo gravado por uma versão antiga do plugin pode
+        /// trazê-lo do disco.
+        /// </summary>
+        private static void MarkOfficialSkins(Catalog next)
+        {
+            foreach (KeyValuePair<string, List<SkinEntry>> pair in next.ByShortname)
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(pair.Key);
+                if (definition == null) continue;
+
+                ItemSkinDirectory.Skin[] official;
+                try
+                {
+                    official = ItemSkinDirectory.ForItem(definition);
+                }
+                catch (Exception)
+                {
+                    // O diretório LANÇA quando não abre. Sem ele não dá para
+                    // afirmar que a skin é oficial, e afirmar errado aqui
+                    // tiraria de todo mundo uma skin que é da casa.
+                    continue;
+                }
+
+                if (official == null || official.Length == 0) continue;
+
+                List<OfficialSkin> resolved = ResolveOfficial(official);
+
+                foreach (SkinEntry entry in pair.Value)
+                {
+                    MatchOfficial(resolved, entry);
+                }
+            }
+        }
+
+        /// <summary>O que interessa de uma skin oficial, já lido do asset.</summary>
+        private class OfficialSkin
+        {
+            public int InventoryDefinitionId;
+            public ulong WorkshopId;
+            public bool Dlc;
+        }
+
+        /// <summary>
+        /// Lê o `invItem` de cada skin oficial do item UMA vez.
+        ///
+        /// `ItemSkinDirectory.Skin` é STRUCT, e o `invItem` dela guarda o
+        /// asset carregado num campo da própria cópia: ler duas vezes de
+        /// cópias diferentes carrega duas vezes. Como o catálogo tem várias
+        /// skins do mesmo item, ler por entrada multiplicaria isso pelo
+        /// número de skins cadastradas daquele item.
+        /// </summary>
+        private static List<OfficialSkin> ResolveOfficial(ItemSkinDirectory.Skin[] official)
+        {
+            List<OfficialSkin> resolved = new List<OfficialSkin>();
+
+            foreach (ItemSkinDirectory.Skin skin in official)
+            {
+                if (skin.id == 0) continue;
+
+                OfficialSkin one = new OfficialSkin { InventoryDefinitionId = skin.id };
+
+                try
+                {
+                    SteamInventoryItem inv = skin.invItem;
+                    if (inv != null)
+                    {
+                        one.WorkshopId = inv.workshopID;
+                        one.Dlc = inv.DlcItem != null;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Um asset que não abre não deixa de ser uma skin
+                    // oficial: o id dela continua valendo para a pergunta.
+                }
+
+                resolved.Add(one);
+            }
+
+            return resolved;
+        }
+
+        /// <summary>
+        /// Acha entre as skins oficiais do item a que corresponde ao número
+        /// cadastrado e marca a entrada com o id de inventário dela (e se
+        /// ela é de DLC). Não achando nenhuma, a entrada fica como está:
+        /// uma skin só do Workshop.
+        /// </summary>
+        private static void MatchOfficial(List<OfficialSkin> official, SkinEntry entry)
+        {
+            foreach (OfficialSkin skin in official)
+            {
+                // Cadastrada pelo id de inventário (só de catálogo antigo),
+                // ou pelo Workshop ID de uma skin que a Facepunch aprovou.
+                bool byInventoryId = entry.SkinId <= int.MaxValue &&
+                                     skin.InventoryDefinitionId == (int)entry.SkinId;
+
+                if (!byInventoryId && (skin.WorkshopId == 0uL || skin.WorkshopId != entry.SkinId)) continue;
+
+                entry.InventoryDefinitionId = skin.InventoryDefinitionId;
+                entry.Dlc = skin.Dlc;
+                return;
             }
         }
 
@@ -1632,6 +1824,12 @@ namespace Oxide.Plugins
             /// <summary>"Não sei": a posse deste jogador ainda não chegou.</summary>
             Syncing,
             Locked,
+            /// <summary>
+            /// A skin é OFICIAL do Rust e a Steam diz que este jogador não a
+            /// tem. Vence tudo o que vem abaixo — inclusive a concessão da
+            /// casa e o admin.
+            /// </summary>
+            NeedsDlc,
         }
 
         /// <summary>Quem está olhando, resolvido uma vez por desenho.</summary>
@@ -1645,6 +1843,75 @@ namespace Oxide.Plugins
             public bool OnAir;
             /// <summary>Nunca nulo.</summary>
             public HashSet<int> Favorites;
+
+            /// <summary>Quem perguntar à Steam precisa dele. Pode ser nulo.</summary>
+            public BasePlayer Player;
+
+            /// <summary>
+            /// id de inventário Steam → a Steam disse que ele tem. Nunca
+            /// nulo, e NÃO morre com o `Viewer`: ele vem de `_steamOwned` e
+            /// vive enquanto o menu está aberto (§7).
+            /// </summary>
+            public Dictionary<int, bool> SteamOwned;
+        }
+
+        /// <summary>
+        /// A resposta da Steam por jogador, guardada entre desenhos.
+        ///
+        /// ####  POR QUE ELA NÃO É PERGUNTADA A CADA DESENHO  ####
+        ///
+        /// A pergunta não é barata: `CheckSkinOwnership` chama o
+        /// `ItemSkinDirectory.FindByInventoryDefinitionId`, que percorre em
+        /// laço LINEAR o diretório de skins do jogo inteiro — e a grade
+        /// redesenha até 48 células a cada clique do menu.
+        ///
+        /// São duas defesas, e as duas importam:
+        ///
+        ///   - o `Obtained` (as contagens, que passam pelo catálogo inteiro)
+        ///     não pergunta à Steam. Só o desenho das células visíveis, do
+        ///     detalhe e do botão pergunta — 48 por página, no pior caso;
+        ///   - e aqui a resposta fica guardada, então cada skin oficial é
+        ///     perguntada UMA vez por abertura de menu, e não 48.
+        ///
+        /// ####  MEDIDO no server01 em 18/09/2026  ####
+        ///
+        /// Uma página cheia da grade, 48 perguntas sem cache nenhum:
+        /// **1.389,9 µs** (`origemz.skins.dlccost`, com o dono no jogo).
+        /// São ~29 µs por pergunta a frio, e ~12,8 µs já aquecida
+        /// (`origemz.dlcprobe.cost` com 200 repetições: 2.569,5 µs).
+        ///
+        /// Isso é 0,6 a 1,4 ms POR DESENHO — e o menu redesenha a cada
+        /// clique. Com o cache, a mesma pergunta vira uma consulta a
+        /// dicionário, e o catálogo inteiro custa uma rodada por abertura.
+        ///
+        /// Os campos `coldUs` e `warmUs` daquela corrida (55,5 e 4,8) NÃO
+        /// medem isso: o catálogo do server01 não tinha nenhuma skin
+        /// oficial naquele dia, então os dois cronometraram um laço vazio.
+        /// Quando a primeira skin de DLC entrar no catálogo, é ali que o
+        /// custo real de abrir o menu vai aparecer — remeça.
+        ///
+        /// O cache é limpo quando o menu abre e quando o jogador sai: quem
+        /// acabou de comprar o DLC fecha e abre a tela — e não precisa de
+        /// relog —, e a resposta nunca fica velha mais do que uma sessão de
+        /// menu.
+        /// </summary>
+        private readonly Dictionary<ulong, Dictionary<int, bool>> _steamOwned =
+            new Dictionary<ulong, Dictionary<int, bool>>();
+
+        private static readonly Dictionary<int, bool> NoSteamAnswers = new Dictionary<int, bool>();
+
+        private Dictionary<int, bool> SteamAnswersOf(BasePlayer player)
+        {
+            if (player == null) return NoSteamAnswers;
+
+            Dictionary<int, bool> answers;
+            if (!_steamOwned.TryGetValue(player.userID, out answers))
+            {
+                answers = new Dictionary<int, bool>();
+                _steamOwned[player.userID] = answers;
+            }
+
+            return answers;
         }
 
         private static readonly HashSet<int> NoFavorites = new HashSet<int>();
@@ -1672,7 +1939,47 @@ namespace Oxide.Plugins
                 Favorites = FavoritesOf(steamId),
                 Now = NowMs(),
                 OnAir = _streamers.Contains(steamId),
+                Player = player,
+                SteamOwned = SteamAnswersOf(player),
             };
+        }
+
+        /// <summary>
+        /// A Steam deixa este jogador usar esta skin? Verdade também quando
+        /// a skin NÃO é oficial: aí a pergunta não existe.
+        ///
+        /// A resposta do jogo é o `PlayerBlueprints.CheckSkinOwnership`, e
+        /// não uma regra nossa: ele já cobre a licença do DLC
+        /// (`SteamDLCItem.HasLicense`), o item comprado na loja e o
+        /// desbloqueio por outro item Steam. Reescrever isso aqui seria
+        /// justamente o tipo de contorno que a Facepunch proíbe.
+        ///
+        /// Erro de leitura responde NÃO. Uma skin oficial que a gente não
+        /// conseguiu conferir é uma skin que o jogador não aplica: o risco
+        /// de deixar aplicar sem posse é o servidor; o de recusar é uma
+        /// frase na tela.
+        /// </summary>
+        private static bool SteamAllows(Viewer viewer, SkinEntry entry)
+        {
+            if (entry.InventoryDefinitionId == 0) return true;
+
+            BasePlayer player = viewer.Player;
+            if (player == null || player.blueprints == null) return false;
+
+            bool allowed;
+            if (viewer.SteamOwned.TryGetValue(entry.InventoryDefinitionId, out allowed)) return allowed;
+
+            try
+            {
+                allowed = player.blueprints.CheckSkinOwnership(entry.InventoryDefinitionId, player);
+            }
+            catch (Exception)
+            {
+                allowed = false;
+            }
+
+            viewer.SteamOwned[entry.InventoryDefinitionId] = allowed;
+            return allowed;
         }
 
         /// <summary>
@@ -1686,6 +1993,12 @@ namespace Oxide.Plugins
         private static Access AccessOf(Viewer viewer, SkinEntry entry, out long expiresAt)
         {
             expiresAt = 0;
+
+            // PRIMEIRO de tudo, e por isso vence tudo: numa skin oficial do
+            // Rust quem decide é a Steam. A posse comprada no site, o
+            // "liberada para todos" e o admin ficam todos abaixo disto — se
+            // a casa deu a skin e o jogador não tem o DLC, ele não aplica.
+            if (!SteamAllows(viewer, entry)) return Access.NeedsDlc;
 
             if (viewer.Owned != null)
             {
@@ -1709,6 +2022,45 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// A casa deu esta skin a ele? É a MESMA conta do `Access.Owned` e
+        /// do `Access.Free`, sem a trava da Steam por cima — serve para
+        /// dizer ao dono de um prêmio bloqueado que o prêmio continua dele.
+        /// </summary>
+        private static bool HouseGranted(Viewer viewer, SkinEntry entry)
+        {
+            if (entry.OpenToAll) return true;
+
+            long expiry;
+            return viewer.Owned != null && viewer.Owned.Skins.TryGetValue(entry.Id, out expiry) &&
+                   (expiry == 0 || expiry > viewer.Now);
+        }
+
+        // ---- a frase do `NeedsDlc`, num lugar só -------------------
+        //
+        // A célula, o detalhe, o botão e a recusa do comando dizem a MESMA
+        // coisa, e ela é DIFERENTE de "você não tem esta skin": aqui não há
+        // o que comprar no nosso site, e ninguém da casa pode liberar. O
+        // jogador precisa saber que o dono da tranca é a Steam, senão ele
+        // vem cobrar da gente um prêmio que ele acha que sumiu.
+
+        private static string NeedsDlcState(SkinEntry entry)
+        {
+            return entry != null && entry.Dlc ? "Precisa da DLC" : "Skin da loja Steam";
+        }
+
+        private static string NeedsDlcButton(SkinEntry entry)
+        {
+            return entry != null && entry.Dlc ? "PRECISA DA DLC" : "SÓ NA STEAM";
+        }
+
+        private static string NeedsDlcReason(SkinEntry entry)
+        {
+            return entry != null && entry.Dlc
+                ? "Esta skin vem com um DLC do Rust: só quem tem o DLC na Steam pode usá-la."
+                : "Esta skin é oficial do Rust: só quem a tem na conta Steam pode usá-la.";
+        }
+
+        /// <summary>
         /// O jogador TEM a skin: posse viva ou skin da casa. Diferente de
         /// `CanUse`, que também é verdade para o admin. É o que conta nas
         /// telas ("obtidas", "só as minhas", o cadeado): o admin vê o mesmo
@@ -1716,9 +2068,24 @@ namespace Oxide.Plugins
         /// </summary>
         private static bool Obtained(Viewer viewer, SkinEntry entry)
         {
-            long ignored;
-            Access access = AccessOf(viewer, entry, out ignored);
-            return access == Access.Owned || access == Access.Free;
+            // É o `HouseGranted`, e não o `AccessOf`, DE PROPÓSITO — por
+            // duas razões que andam juntas:
+            //
+            // 1. TER e PODER USAR deixaram de ser a mesma coisa. Uma skin
+            //    de DLC que a casa deu continua sendo dele: ela tem de
+            //    contar em "obtidas" e continuar aparecendo com o filtro
+            //    "só as minhas" ligado, ou o prêmio some da tela do dono
+            //    dele e ele vem cobrar da gente;
+            //
+            // 2. isto aqui roda sobre o catálogo INTEIRO a cada desenho
+            //    (as contagens da lateral e do cabeçalho). Passar por
+            //    `AccessOf` traria a pergunta à Steam junto, e o custo
+            //    deixaria de ser o das 48 células visíveis para ser o do
+            //    catálogo todo.
+            //
+            // Para skin que não é oficial os dois caminhos dão a MESMA
+            // resposta: `Owned` ou `Free`.
+            return HouseGranted(viewer, entry);
         }
 
         private static bool CanUse(Viewer viewer, SkinEntry entry)
@@ -2073,6 +2440,12 @@ namespace Oxide.Plugins
                 Access access = AccessOf(viewer, entry, out ignored);
                 if (!IsUsable(access))
                 {
+                    // A recusa vale para QUALQUER caminho: o botão da tela
+                    // já sai morto, mas o `origemz.skins.apply` pode ser
+                    // digitado no F1 por quem nunca viu a grade — e o
+                    // `/skin` abre o mesmo menu, com a mesma sessão.
+                    if (access == Access.NeedsDlc) return NeedsDlcReason(entry);
+
                     return access == Access.Syncing
                         ? "Suas skins ainda estão carregando. Tente em instantes."
                         : "Você ainda não tem esta skin.";
@@ -3232,6 +3605,11 @@ namespace Oxide.Plugins
 
             session = new MenuSession { Token = Guid.NewGuid().ToString("N").Substring(0, 16) };
 
+            // Abriu o menu: as respostas da Steam recomeçam do zero (§7).
+            // É o que dá ao jogador que acabou de comprar o DLC um jeito de
+            // ver a skin liberar sem precisar de relog.
+            _steamOwned.Remove(player.userID);
+
             if (search != null)
             {
                 SetSearch(session, search);
@@ -4263,7 +4641,7 @@ namespace Oxide.Plugins
 
                 long expiresAt;
                 Access access = AccessOf(viewer, entry, out expiresAt);
-                DescribeCell(cell, access, expiresAt, viewer.Now);
+                DescribeCell(cell, entry, access, expiresAt, viewer.Now);
                 view.Cells.Add(cell);
             }
 
@@ -4271,7 +4649,7 @@ namespace Oxide.Plugins
         }
 
         /// <summary>O estado da célula (03 §3.3), na ordem de precedência da tabela.</summary>
-        private static void DescribeCell(GridCell cell, Access access, long expiresAt, long now)
+        private static void DescribeCell(GridCell cell, SkinEntry entry, Access access, long expiresAt, long now)
         {
             // "Pode sair da posse" só faz sentido para quem TEM a posse.
             if (access != Access.Owned) cell.Season = false;
@@ -4313,6 +4691,15 @@ namespace Oxide.Plugins
                     cell.State = "Sincronizando";
                     cell.StateColor = ColMuted;
                     cell.Syncing = true;
+                    break;
+                case Access.NeedsDlc:
+                    // Continua na grade, apagada e com cadeado como as
+                    // outras — esconder faria o jogador achar que o sistema
+                    // comeu o prêmio dele. O que muda é a cor do estado: em
+                    // âmbar, porque aqui não adianta ir ao nosso site.
+                    cell.State = NeedsDlcState(entry);
+                    cell.StateColor = ColAmber;
+                    cell.Locked = true;
                     break;
                 default:
                     cell.State = "Não obtida";
@@ -4395,6 +4782,23 @@ namespace Oxide.Plugins
                     view.StateColor = ColMuted;
                     view.Note = "Carregando suas skins…";
                     view.NoteColor = ColMuted;
+                    break;
+                case Access.NeedsDlc:
+                    // Sem a linha da loja do site: esta não está lá, e
+                    // mandar o jogador para lá seria mentir.
+                    view.State = NeedsDlcState(entry);
+                    view.StateColor = ColRust;
+                    view.Note = NeedsDlcReason(entry);
+                    view.NoteColor = ColAmber;
+
+                    // E se a casa JÁ deu a skin a ele, dizer isso na cara: o
+                    // prêmio não sumiu, está guardado esperando a Steam.
+                    if (HouseGranted(frame.Viewer, entry))
+                    {
+                        view.Expiry = "Esta skin é sua na OrigemZ: ela funciona assim que a Steam liberar.";
+                        view.ExpiryColor = ColOlive;
+                    }
+
                     break;
                 default:
                     view.State = "Bloqueada";
@@ -4497,6 +4901,12 @@ namespace Oxide.Plugins
                 if (access == Access.Syncing)
                 {
                     view.Button = "SINCRONIZANDO";
+                    return view;
+                }
+
+                if (access == Access.NeedsDlc)
+                {
+                    view.Button = NeedsDlcButton(frame.Pick);
                     return view;
                 }
             }
@@ -5774,6 +6184,174 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// `origemz.skins.dlccost <steamId>` — quanto custa a trava de DLC,
+        /// com o catálogo de verdade e um jogador de verdade.
+        ///
+        /// ####  POR QUE ELE EXISTE  ####
+        ///
+        /// O desenho da trava (02 §3.1) escolheu perguntar à Steam só pelas
+        /// skins OFICIAIS, e guardar a resposta por abertura de menu. Os
+        /// dois "sós" são uma aposta sobre o custo da pergunta — e aposta
+        /// sobre custo, neste projeto, se mede. Este comando é a régua:
+        ///
+        ///   official      quantas skins do catálogo são oficiais (as
+        ///                 outras não custam nada: a pergunta nem existe);
+        ///   coldUs        o custo REAL de abrir o menu com o cache vazio —
+        ///                 uma pergunta por skin oficial;
+        ///   warmUs        as mesmas perguntas com o cache quente, que é o
+        ///                 que todo clique seguinte paga;
+        ///   worstDrawUs   48 perguntas sem cache nenhum: o desenho de uma
+        ///                 página cheia da grade se o cache não existisse.
+        ///
+        /// Sem skin oficial no catálogo, o `worstDrawUs` usa as skins
+        /// oficiais da AK como amostra — senão o número seria zero e não
+        /// diria nada sobre o dia em que a primeira skin de DLC entrar.
+        ///
+        /// ####  A PRIMEIRA CORRIDA, no server01 em 18/09/2026  ####
+        ///
+        ///     skins 1 · official 0 · dlc 0 · sampled 12 · cells 48
+        ///     coldUs 55,5 · warmUs 4,8 · worstDrawUs 1.389,9
+        ///
+        /// Com o catálogo sem nenhuma oficial (`official 0`), o custo de
+        /// hoje é ZERO — e é preciso ler os campos sabendo disso: o `cold`
+        /// e o `warm` acima cronometraram um LAÇO VAZIO, não a pergunta.
+        /// Quem respondeu alguma coisa foi o `worstDrawUs`, que usa a
+        /// amostra da AK: 1.389,9 µs para 48 perguntas, ~29 µs cada.
+        ///
+        /// RODE ISTO DE NOVO no dia em que a primeira skin oficial entrar
+        /// no catálogo. Só nesse dia o `coldUs` passa a medir o que o nome
+        /// dele promete.
+        /// </summary>
+        [ConsoleCommand(DlcCostCommand)]
+        private void CmdDlcCost(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null)
+            {
+                BasePlayer admin = arg.Player();
+                if (admin == null || !IsAdmin(admin)) return;
+            }
+
+            BasePlayer player = FindPlayer(arg.GetString(0));
+            if (player == null || player.blueprints == null)
+            {
+                arg.ReplyWith("{\"ok\":false,\"error\":\"PLAYER_NOT_FOUND\"," +
+                              "\"use\":\"" + DlcCostCommand + " <steamId de quem está online>\"}");
+                return;
+            }
+
+            List<SkinEntry> official = new List<SkinEntry>();
+            int dlc = 0;
+            foreach (SkinEntry entry in _catalog.Ordered)
+            {
+                if (entry.InventoryDefinitionId == 0) continue;
+
+                official.Add(entry);
+                if (entry.Dlc) dlc++;
+            }
+
+            // A amostra do pior caso: as oficiais do catálogo, e na falta
+            // delas as da AK — que existem em qualquer servidor.
+            List<int> sample = new List<int>();
+            foreach (SkinEntry entry in official) sample.Add(entry.InventoryDefinitionId);
+
+            if (sample.Count == 0) sample.AddRange(SampleOfficialIds("rifle.ak"));
+
+            Viewer viewer = ViewerOf(player);
+
+            // Frio de verdade: a primeira pergunta de cada skin também
+            // carrega o asset do `invItem` dela, e é isso que o jogador
+            // paga ao abrir o menu.
+            _steamOwned.Remove(player.userID);
+            viewer.SteamOwned = SteamAnswersOf(player);
+
+            long started = Ticks();
+            foreach (SkinEntry entry in official) SteamAllows(viewer, entry);
+            double coldUs = Micros(started);
+
+            started = Ticks();
+            foreach (SkinEntry entry in official) SteamAllows(viewer, entry);
+            double warmUs = Micros(started);
+
+            double worstDrawUs = -1d;
+            if (sample.Count > 0)
+            {
+                started = Ticks();
+                for (int i = 0; i < ScrollPageSize; i++)
+                {
+                    try
+                    {
+                        player.blueprints.CheckSkinOwnership(sample[i % sample.Count], player);
+                    }
+                    catch (Exception)
+                    {
+                        // Um id que o diretório não abre não estraga a
+                        // medição: ele custou o mesmo laço.
+                    }
+                }
+
+                worstDrawUs = Micros(started);
+            }
+
+            // O cache volta a nascer do zero: a medição não pode deixar
+            // respostas suas para o próximo menu do jogador.
+            _steamOwned.Remove(player.userID);
+
+            JObject reply = new JObject
+            {
+                ["ok"] = true,
+                ["steamId"] = player.UserIDString,
+                ["skins"] = _catalog.ById.Count,
+                ["official"] = official.Count,
+                ["dlc"] = dlc,
+                ["sampled"] = sample.Count,
+                ["cells"] = ScrollPageSize,
+                ["coldUs"] = Math.Round(coldUs, 1),
+                ["warmUs"] = Math.Round(warmUs, 1),
+                ["worstDrawUs"] = Math.Round(worstDrawUs, 1),
+            };
+
+            arg.ReplyWith(reply.ToString(Formatting.None));
+        }
+
+        private static List<int> SampleOfficialIds(string shortname)
+        {
+            List<int> ids = new List<int>();
+
+            try
+            {
+                ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
+                if (definition == null) return ids;
+
+                foreach (ItemSkinDirectory.Skin skin in ItemSkinDirectory.ForItem(definition))
+                {
+                    if (skin.id != 0) ids.Add(skin.id);
+                }
+            }
+            catch (Exception)
+            {
+                // Sem diretório não há amostra, e o `worstDrawUs` sai 0.
+            }
+
+            return ids;
+        }
+
+        /// Ticks do Stopwatch, e não `DateTime`: no Windows o relógio do
+        /// sistema anda de 15 em 15 ms e não enxergaria nada disto.
+        private static long Ticks()
+        {
+            return System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        private static double Micros(long started)
+        {
+            long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+
+            return System.Diagnostics.Stopwatch.Frequency > 0L
+                ? elapsed * 1000000d / System.Diagnostics.Stopwatch.Frequency
+                : 0d;
+        }
+
+        /// <summary>
         /// Público e estático de propósito: um teste fora do servidor pode
         /// chamá-lo sem instanciar o plugin.
         /// </summary>
@@ -5830,8 +6408,11 @@ namespace Oxide.Plugins
                     Label = longName,
                     ItemName = longItem,
                     Rarity = "legendary",
-                    State = "Sincronizando",
-                    StateColor = ColMuted,
+                    // O estado mais LONGO que a célula sabe escrever (0.6.0:
+                    // ele passou a ser o da skin oficial, não o
+                    // "Sincronizando").
+                    State = "Skin da loja Steam",
+                    StateColor = ColAmber,
                     Locked = true,
                     Picked = i == 0,
                 });
@@ -5845,9 +6426,13 @@ namespace Oxide.Plugins
                 Label = longName,
                 Sub = longItem + " · Lendária",
                 Rarity = "legendary",
-                State = "Bloqueada",
+                State = "Precisa da DLC",
                 StateColor = ColRust,
-                Expiry = "Expira em 6d (23/09/2026)",
+                // A linha mais longa que a região do detalhe escreve, que a
+                // 0.6.0 passou a ser esta (a do prazo tem 25 caracteres). A
+                // `Note` da loja e esta `Expiry` não aparecem juntas na
+                // vida real; aqui somam-se de propósito, como o resto.
+                Expiry = "Esta skin é sua na OrigemZ: ela funciona assim que a Steam liberar.",
                 ExpiryColor = ColAmber,
                 Description = new string('x', 280),
                 Note = "Disponível na loja: https://origemz.com.br/loja/skins/categoria/armas/rifles",
@@ -5860,7 +6445,7 @@ namespace Oxide.Plugins
                 ItemName = longItem,
                 Page = 1,
                 Pages = 3,
-                Button = "JÁ APLICADA",
+                Button = "PRECISA DA DLC",
                 Message = "Skin guardada: ela aparece quando você desligar o modo streamer.",
                 MessageOk = true,
             };
