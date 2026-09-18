@@ -71,9 +71,9 @@ interface Spy {
   /**
    * As respostas do `give.check`, uma por pergunta.
    *
-   * Fila, e nao um valor so, porque a mochila MUDA entre um nivel e
-   * o outro do lote: o primeiro cabe, o segundo ja nao. Vazia = vale
-   * a ultima resposta para sempre.
+   * Fila, e não um valor só, porque a mochila MUDA entre um nível e
+   * o outro do lote: o primeiro cabe, o segundo já não. Vazia = vale
+   * a última resposta para sempre.
    */
   readonly rooms: RoomAnswer[];
   room: RoomAnswer;
@@ -529,7 +529,7 @@ describe('o resgate com o entregador ligado', () => {
 
     // E o jogador lê o que fazer, e não só que "não coube".
     expect(lastReply(h).message).toBe(
-      'Resgatado, mas 1 item não coube: ele ficou na sua caixa. Libere 2 slots na mochila para receber o que ficou na caixa.',
+      'Resgatado, mas 1 item não coube: ele ficou na sua caixa. Libere 2 slots na mochila.',
     );
   });
 
@@ -575,7 +575,7 @@ describe('o resgate com o entregador ligado', () => {
     ]);
     expect(h.state.given).toEqual([{ shortname: 'rifle.ak', amount: 1 }]);
     expect(lastReply(h).message).toBe(
-      'Resgatado, mas 1 item não coube: ele ficou na sua caixa. Libere 3 slots na mochila para receber o que ficou na caixa.',
+      'Resgatado, mas 1 item não coube: ele ficou na sua caixa. Libere 3 slots na mochila.',
     );
   });
 

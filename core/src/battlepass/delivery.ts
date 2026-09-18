@@ -158,7 +158,10 @@ export function claimTitle(level: number, lane: BattlePassLane): string {
 export function missingRoomMessage(missingSlots: number): string {
   const slots = missingSlots === 1 ? '1 slot' : `${String(missingSlots)} slots`;
 
-  return `Libere ${slots} na mochila para receber o que ficou na caixa.`;
+  // Onde o prêmio está já foi dito pela frase do rodapé ("ficou na
+  // sua caixa"); esta acrescenta o que ELE tem a fazer, e repetir a
+  // caixa aqui deixaria as duas metades dizendo a mesma coisa.
+  return `Libere ${slots} na mochila.`;
 }
 
 export class BattlePassDeliveryService implements BattlePassDelivery {
