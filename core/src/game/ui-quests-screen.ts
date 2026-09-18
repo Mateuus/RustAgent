@@ -469,6 +469,8 @@ export interface QuestRewardLine {
   readonly icon:
     | { readonly kind: 'item'; readonly itemId: number; readonly skinId: string }
     | { readonly kind: 'coin' }
+    /** Um PNG guardado no servidor: a arte própria do item custom. */
+    | { readonly kind: 'stored'; readonly key: string }
     | null;
 }
 
@@ -561,6 +563,59 @@ export interface QuestsCatalog {
   } | null;
   /** O nome do ranking daquela metrica. `null` = nao esta no catalogo. */
   readonly rankingLabelOf?: (metric: string) => string | null;
+  /**
+   * O item custom daquele par (item base, skin). `null` = e um item
+   * do jogo.
+   *
+   * `iconKey` e a chave do PNG proprio no OrigemZImages, ou `null`
+   * quando o admin nao cadastrou arte — ai o icone e o do item base.
+   */
+  readonly customItemOf?: (
+    shortname: string,
+    skinId: string,
+  ) => { readonly displayName: string; readonly iconKey: string | null } | null;
+}
+
+/**
+ * O ícone de um prêmio que é item.
+ *
+ * ####  O QUADRADO BRANCO  ####
+ *
+ * Em 17/09/2026 a "Fornecedor Bleik (cópia)" mostrou, na caixa do NPC
+ * Malkor, um quadrado branco no lugar do ícone. O prêmio era um item
+ * custom: o item base com uma skin que NÃO existe no Workshop — ela
+ * só marca o item. O cliente procura essa skin para desenhar, não
+ * acha, e o `Image` fica sem sprite e com a cor dele: branco.
+ *
+ * Então item custom nunca vai com a skin dele: vai a arte própria
+ * (quando o admin cadastrou), ou o item base com skin 0. Item que o
+ * catálogo não conhece não tem ícone — e o espaço some, em vez de
+ * virar um quadrado vazio.
+ *
+ * É a regra dos dois lugares que desenham este ícone: o modal desta
+ * tela e a caixa do NPC (`describeQuest` no index).
+ */
+export function rewardIconOf(
+  reward: { readonly shortname: string; readonly skinId: string },
+  catalog: QuestsCatalog,
+): {
+  readonly itemId: number | null;
+  readonly skinId: string;
+  readonly imageKey: string | null;
+  readonly displayName: string | null;
+} {
+  const item = catalog.itemOf?.(reward.shortname) ?? null;
+  const custom =
+    reward.skinId === '0' || reward.skinId === ''
+      ? null
+      : (catalog.customItemOf?.(reward.shortname, reward.skinId) ?? null);
+
+  return {
+    itemId: item?.itemId ?? null,
+    skinId: custom === null ? reward.skinId : '0',
+    imageKey: custom?.iconKey ?? null,
+    displayName: custom?.displayName ?? item?.displayName ?? null,
+  };
 }
 
 export interface QuestsScreenReader {
@@ -924,16 +979,20 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
       };
 
     case 'item': {
-      const item = catalog.itemOf?.(reward.shortname) ?? null;
+      // O nome do item custom, e não o do item base: "1x Troféu Bleik
+      // Store" é o que o jogador recebe, e não "1x Discord Trophy".
+      const icon = rewardIconOf(reward, catalog);
 
       return {
-        text: `${String(reward.amount)}x ${item?.displayName ?? reward.shortname}`,
-        // O ícone é resolvido pelo CLIENTE, a partir do `itemId` — o
-        // agente não manda imagem nenhuma. Ver `itemImage`.
+        text: `${String(reward.amount)}x ${icon.displayName ?? reward.shortname}`,
+        // O ícone do item é resolvido pelo CLIENTE, a partir do
+        // `itemId`; a arte própria vem do servidor. Ver `rewardIconOf`.
         icon:
-          item === null
-            ? null
-            : { kind: 'item', itemId: item.itemId, skinId: reward.skinId },
+          icon.imageKey !== null
+            ? { kind: 'stored', key: icon.imageKey }
+            : icon.itemId === null
+              ? null
+              : { kind: 'item', itemId: icon.itemId, skinId: icon.skinId },
       };
     }
 
@@ -1622,20 +1681,24 @@ function detailElements(detail: QuestDetail): UiElement[] {
       // marcador, em vez de ficar com um quadrado vazio.
       if (reward.icon !== null) {
         box.push(
-          reward.icon.kind === 'coin'
-            ? {
+          reward.icon.kind === 'item'
+            ? itemImage(`${id}i`, reward.icon, iconRect(cursor))
+            : {
                 id: `${id}i`,
                 name: `${id}i`,
                 type: 'image',
                 rect: iconRect(cursor),
-                // O PNG vive em `Assets/ui/ozcoin.png` e é o agente
-                // que o entrega ao servidor; aqui vai só a chave.
-                source: { kind: 'stored', key: COIN_IMAGE_KEY },
+                // O PNG da moeda vive em `Assets/ui/ozcoin.png`; o do
+                // item custom, em `Assets/items/`. O agente entrega os
+                // dois ao servidor; aqui vai só a chave.
+                source: {
+                  kind: 'stored',
+                  key: reward.icon.kind === 'coin' ? COIN_IMAGE_KEY : reward.icon.key,
+                },
                 // Branco: `color` numa imagem TINGE.
                 color: C.white,
                 children: [],
-              }
-            : itemImage(`${id}i`, reward.icon, iconRect(cursor)),
+              },
         );
       }
 

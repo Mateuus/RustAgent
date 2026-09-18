@@ -2315,6 +2315,214 @@ namespace Oxide.Plugins
             return amount;
         }
 
+        // ========================================================
+        //  origemz.give.check <steamId> <base64>
+        //
+        //  CABE TUDO? A pergunta que o resgate de missao faz ANTES
+        //  de marcar a missao como resgatada.
+        //
+        //  ####  O DEFEITO QUE TROUXE ESTE COMANDO  ####
+        //
+        //  Em 17/09/2026 o dono resgatou uma missao de NPC com a
+        //  mochila cheia: a missao virou "resgatada" e o item nao
+        //  chegou - nem na mochila, nem no chao. O give `auto` joga
+        //  a sobra aos pes de quem recebe, e o que cai numa zona
+        //  segura, ao lado do balcao, nao e garantia de nada.
+        //
+        //  A saida nao e largar melhor: e nao entregar o que nao
+        //  cabe. O agente pergunta, e so resgata com "cabe".
+        //
+        //  ####  VARIOS ITENS, UMA CONTA SO  ####
+        //
+        //  O FitsEntirely do mode=inventory responde por UM item. Uma
+        //  missao que da 500 de madeira e uma AK disputa os mesmos
+        //  slots livres - somar duas respostas "cabe" separadas daria
+        //  um "cabe" falso. Aqui as pilhas existentes sao usadas
+        //  primeiro (por item), e o que sobra vira SLOTS, somados e
+        //  comparados com os slots livres da mochila e da barra.
+        //
+        //  A roupa fica de fora da conta: ela so aceita vestivel, um
+        //  por parte do corpo. Contar com ela prometeria espaco que o
+        //  GiveItem nao usa.
+        //
+        //  Payload: {"items":[{"shortname":"wood","amount":500,
+        //            "skinId":"0"}]}
+        //
+        //  Resposta:
+        //  {"ok":true,"fits":false,"slotsNeeded":3,"freeSlots":1,
+        //   "missingSlots":2}
+        //
+        //  Nao muda nada no inventario: as sondas nascem e morrem
+        //  aqui dentro.
+        // ========================================================
+        private const string GiveCheckCommand = "origemz.give.check";
+
+        [ConsoleCommand(GiveCheckCommand)]
+        private void CommandGiveCheck(ConsoleSystem.Arg arg)
+        {
+            try
+            {
+                arg.ReplyWith(HandleGiveCheck(arg));
+            }
+            catch (Exception ex)
+            {
+                PrintError(GiveCheckCommand + " falhou: " + ex);
+                arg.ReplyWith(BuildError(ErrorInternal));
+            }
+        }
+
+        private string HandleGiveCheck(ConsoleSystem.Arg arg)
+        {
+            if (!arg.HasArgs(2))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            string steamId = arg.GetString(0, "").Trim();
+
+            if (!IsSteamId64(steamId))
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            JObject payload = QuestDecode(arg.GetString(1));
+            JArray items = payload == null ? null : payload["items"] as JArray;
+
+            if (items == null)
+            {
+                return BuildError(ErrorInvalidArgs);
+            }
+
+            BasePlayer player = FindConnectedPlayer(steamId);
+
+            if (player == null || player.inventory == null)
+            {
+                return BuildError(ErrorPlayerNotFound);
+            }
+
+            // Morto ou dormindo nao recebe - a mesma regra do give.
+            // Responder "cabe" aqui mandaria o resgate para um give
+            // que vai recusar depois do claim.
+            string rejection = CheckDeliveryEligibility(player);
+
+            if (rejection != null)
+            {
+                return BuildError(rejection);
+            }
+
+            // Mesmo item e mesma skin viram uma conta so: duas
+            // recompensas de 600 de madeira disputam as mesmas pilhas.
+            var totals = new Dictionary<string, long>(StringComparer.Ordinal);
+            var definitions = new Dictionary<string, ItemDefinition>(StringComparer.Ordinal);
+            var skins = new Dictionary<string, ulong>(StringComparer.Ordinal);
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                JObject entry = items[i] as JObject;
+
+                if (entry == null)
+                {
+                    return BuildError(ErrorInvalidArgs);
+                }
+
+                string shortname = ((string)entry["shortname"] ?? "").Trim().ToLowerInvariant();
+                long amount = entry["amount"] == null ? 0 : (long)entry["amount"];
+                ulong skinId;
+
+                if (!ulong.TryParse((string)entry["skinId"] ?? "0", NumberStyles.None,
+                                    CultureInfo.InvariantCulture, out skinId))
+                {
+                    return BuildError(ErrorInvalidArgs);
+                }
+
+                if (shortname.Length == 0 || amount <= 0 || amount > MaxGiveAmount)
+                {
+                    return BuildError(ErrorInvalidArgs);
+                }
+
+                ItemDefinition definition = ItemManager.FindItemDefinition(shortname);
+
+                if (definition == null)
+                {
+                    return BuildError(ErrorItemNotFound);
+                }
+
+                string key = shortname + "|" + skinId.ToString(CultureInfo.InvariantCulture);
+                long current;
+
+                totals[key] = (totals.TryGetValue(key, out current) ? current : 0) + amount;
+                definitions[key] = definition;
+                skins[key] = skinId;
+            }
+
+            PlayerInventory inventory = player.inventory;
+            long freeSlots = FreeSlotsOf(inventory.containerMain) + FreeSlotsOf(inventory.containerBelt);
+            long slotsNeeded = 0;
+
+            foreach (KeyValuePair<string, long> total in totals)
+            {
+                ItemDefinition definition = definitions[total.Key];
+                Item probe = ItemManager.Create(definition, 1, skins[total.Key]);
+
+                if (probe == null)
+                {
+                    // Sem sonda nao ha conta. Dizer "nao cabe" e o
+                    // lado certo: a recompensa espera, e o log conta.
+                    PrintWarning(GiveCheckCommand + ": sonda nao criada para " + definition.shortname + ".");
+                    return BuildError(ErrorItemCreateFailed);
+                }
+
+                try
+                {
+                    int maxStack = probe.MaxStackable();
+
+                    if (maxStack < 1)
+                    {
+                        maxStack = 1;
+                    }
+
+                    long room = CountStackRoom(player, inventory.containerMain, probe, maxStack)
+                              + CountStackRoom(player, inventory.containerBelt, probe, maxStack);
+                    long remaining = total.Value - room;
+
+                    if (remaining > 0)
+                    {
+                        slotsNeeded += (remaining + maxStack - 1) / maxStack;
+                    }
+                }
+                finally
+                {
+                    probe.Remove();
+                }
+            }
+
+            long missing = slotsNeeded - freeSlots;
+
+            if (missing < 0)
+            {
+                missing = 0;
+            }
+
+            return "{\"ok\":true,\"fits\":" + (missing == 0 ? "true" : "false") +
+                ",\"slotsNeeded\":" + slotsNeeded.ToString(CultureInfo.InvariantCulture) +
+                ",\"freeSlots\":" + freeSlots.ToString(CultureInfo.InvariantCulture) +
+                ",\"missingSlots\":" + missing.ToString(CultureInfo.InvariantCulture) + "}";
+        }
+
+        // Slots vazios de um conteiner. Travado conta zero: o jogo
+        // nao poe nada ali.
+        private static long FreeSlotsOf(ItemContainer container)
+        {
+            if (container == null || container.itemList == null || container.IsLocked())
+            {
+                return 0;
+            }
+
+            int free = container.capacity - container.itemList.Count;
+
+            return free < 0 ? 0 : free;
+        }
+
         [ConsoleCommand(GiveCommand)]
         private void CommandGive(ConsoleSystem.Arg arg)
         {
@@ -10709,6 +10917,9 @@ namespace Oxide.Plugins
                         // decide.
                         RewardItemId = (int?)offer["rewardItemId"] ?? 0,
                         RewardSkinId = (ulong?)offer["rewardSkinId"] ?? 0UL,
+                        // A arte propria do item custom. Ausente no
+                        // agente antigo, e ai o cartao usa o itemid.
+                        RewardImage = (string)offer["rewardImage"],
                         Offers = (bool?)offer["offers"] ?? true,
                         // O padrao e `true` para o agente antigo, que
                         // nao manda o campo: ali dar e receber eram
@@ -11126,6 +11337,37 @@ namespace Oxide.Plugins
         /// <summary>Quem esta com a caixa aberta, e de qual NPC.</summary>
         private Dictionary<ulong, string> _questNpcDialogs = new Dictionary<ulong, string>();
 
+        // ####  O QUADRADO BRANCO DO ITEM CUSTOM  ####
+        //
+        // Em 17/09/2026 o cartao da "Fornecedor Bleik (copia)", no NPC
+        // Malkor, mostrou um quadrado branco. O premio era um item
+        // custom: o item base com uma skin que NAO existe no Workshop
+        // - ela so marca o item. O cliente procura aquela skin para
+        // desenhar, nao acha, e o Image fica sem sprite e pintado com
+        // a cor dele, que e branca.
+        //
+        // O agente agora manda a skin 0 para item custom (o icone do
+        // item base) e, quando o admin cadastrou arte propria, a chave
+        // dela - o PNG que o OrigemZItems ja usa, no OrigemZImages.
+        //
+        // Dependencia MOLE, como no OrigemZUI: sem o OrigemZImages o
+        // cartao desenha o item base, e nada mais quebra.
+        [PluginReference]
+        private Plugin OrigemZImages;
+
+        /// <summary>O CRC do PNG no OrigemZImages. 0 = nao existe (ainda).</summary>
+        private uint QuestImageCrc(string key)
+        {
+            if (string.IsNullOrEmpty(key) || OrigemZImages == null)
+            {
+                return 0U;
+            }
+
+            object raw = OrigemZImages.Call("GetImage", key);
+
+            return raw is uint ? (uint)raw : 0U;
+        }
+
         /// <summary>O icone do item, sem o `skinid` que derruba o cliente.</summary>
         private class QuestItemIcon : ICuiComponent
         {
@@ -11347,8 +11589,35 @@ namespace Oxide.Plugins
                 RectTransform = { AnchorMin = "0 0", AnchorMax = "1 0", OffsetMax = "0 1" }
             }, card);
 
-            // O icone do item do premio, quando o premio e item.
-            if (offer.RewardItemId != 0)
+            // O icone do premio: a arte propria do item custom, se
+            // houver e ja estiver no servidor; senao o icone do item
+            // pelo itemid; senao nada - e o texto encosta na esquerda,
+            // sem um quadrado vazio no lugar.
+            uint png = QuestImageCrc(offer.RewardImage);
+            bool comIcone = png != 0U || offer.RewardItemId != 0;
+            CuiRectTransformComponent iconeRect = new CuiRectTransformComponent
+            {
+                AnchorMin = "0 0.5", AnchorMax = "0 0.5",
+                OffsetMin = "10 -19", OffsetMax = "48 19"
+            };
+
+            if (png != 0U)
+            {
+                container.Add(new CuiElement
+                {
+                    Parent = card,
+                    Components =
+                    {
+                        new CuiRawImageComponent
+                        {
+                            Png = png.ToString(CultureInfo.InvariantCulture),
+                            Color = "1 1 1 1"
+                        },
+                        iconeRect
+                    }
+                });
+            }
+            else if (offer.RewardItemId != 0)
             {
                 container.Add(new CuiElement
                 {
@@ -11356,16 +11625,12 @@ namespace Oxide.Plugins
                     Components =
                     {
                         new QuestItemIcon { ItemId = offer.RewardItemId, SkinId = offer.RewardSkinId },
-                        new CuiRectTransformComponent
-                        {
-                            AnchorMin = "0 0.5", AnchorMax = "0 0.5",
-                            OffsetMin = "10 -19", OffsetMax = "48 19"
-                        }
+                        iconeRect
                     }
                 });
             }
 
-            int textoEsquerda = offer.RewardItemId != 0 ? 58 : 14;
+            int textoEsquerda = comIcone ? 58 : 14;
 
             container.Add(new CuiLabel
             {
@@ -12371,6 +12636,11 @@ namespace Oxide.Plugins
             public int RewardItemId;
             /// <summary>A skin dele. 0 = a arte padrao do item.</summary>
             public ulong RewardSkinId;
+            /// <summary>
+            /// A chave do PNG no OrigemZImages (`item.&lt;id&gt;`), para o
+            /// item custom. Vazia = desenha pelo itemid.
+            /// </summary>
+            public string RewardImage;
             /// <summary>Ele OFERECE, ou so recebe a missao pronta?</summary>
             public bool Offers;
             /// <summary>

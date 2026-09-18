@@ -96,7 +96,7 @@ import { WorkshopService } from './game/workshop.js';
 import { WorkshopCatalog } from './game/workshop-catalog.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
-import { CustomItemsSync } from './game/custom-items-sync.js';
+import { CustomItemsSync, itemIconKey } from './game/custom-items-sync.js';
 import { IMAGE_FAMILIES, ImageLibrary } from './game/image-library.js';
 import { loadKitIcons, loadStoreIcons } from './game/card-icons.js';
 import { readItemIcon } from './http/routes/custom-items.js';
@@ -118,6 +118,7 @@ import { MapImageKeeper } from './game/map-image.js';
 import { gridLabel } from './game/grid.js';
 import { describePlace, MonumentReader } from './game/monuments.js';
 import { gatherShortnamesOf } from './rankings/plugin-metrics.js';
+import { checkInventoryRoom, roomItemsOf } from './quests/inventory-room.js';
 import { PlayersReader, type PlayersSnapshot } from './game/players.js';
 // O nome do `.cs` que serve o `origemz.players` E o lote de stats:
 // é o mesmo arquivo, e o `coverage` do ranking pergunta por ele.
@@ -141,6 +142,7 @@ import { QuestsService, type QuestCompletedEvent } from './quests/service.js';
 import {
   createQuestsScreenProvider,
   parseQuestsScreenId,
+  rewardIconOf,
   rewardLine,
   type QuestsScreenProvider,
 } from './game/ui-quests-screen.js';
@@ -2536,6 +2538,31 @@ async function main(): Promise<void> {
   questsService = new QuestsService({
     repository: questsRepository,
     logger,
+    // ####  CABE TUDO? PERGUNTADO ANTES DO RESGATE  ####
+    //
+    // Mochila cheia fazia a missão virar resgatada com o prêmio
+    // perdido (17/09/2026). O plugin mede — só ele vê a mochila — e o
+    // resgate para se faltar slot. Ver quests/inventory-room.ts.
+    inventory: {
+      missingSlotsFor: async ({ serverId, steamId, rewards }) => {
+        const items = roomItemsOf(
+          rewards,
+          (slug) => kits.list().find((kit) => kit.slug === slug)?.items ?? null,
+        );
+
+        if (items.length === 0) {
+          return 0;
+        }
+
+        const room = await checkInventoryRoom(
+          supervisor.contextOf(serverId)?.rcon ?? null,
+          steamId,
+          items,
+        );
+
+        return room.missingSlots;
+      },
+    },
     // ####  O QUADRANTE E O LUGAR DO NPC  ####
     //
     // Pedido do dono em 16/09/2026: "188, 727" não se acha no mapa.
@@ -2775,6 +2802,20 @@ async function main(): Promise<void> {
       return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
     },
     rankingLabelOf: (metric: string) => rankingsRepository.getByMetric(metric)?.label ?? null,
+    // O item custom é o item base com uma skin que só o marca. Ver
+    // `rewardIconOf`: é daqui que sai o nome dele e a arte própria.
+    customItemOf: (shortname: string, skinId: string) => {
+      const custom = customItemsRepository
+        .list()
+        .find((item) => item.baseShortname === shortname && item.skinId === skinId);
+
+      return custom === undefined
+        ? null
+        : {
+            displayName: custom.displayName,
+            iconKey: custom.iconFile === null ? null : itemIconKey(custom.id),
+          };
+    },
   };
 
   questScreens = createQuestsScreenProvider({
@@ -2986,7 +3027,7 @@ async function main(): Promise<void> {
       // desses que o cliente sabe desenhar a partir de um número —
       // os outros ficam sem, e não com um quadrado vazio.
       const item = quest.rewards.find((reward) => reward.kind === 'item');
-      const found = item === undefined ? null : itemsRepository.get(item.shortname);
+      const icon = item === undefined ? null : rewardIconOf(item, questScreenCatalog);
 
       return {
         goal: quest.objectives
@@ -2994,11 +3035,15 @@ async function main(): Promise<void> {
           .filter((text) => text !== '')
           .join(' · '),
         reward: rewardLine(quest.rewards, questScreenCatalog),
-        rewardItemId: found?.itemId ?? null,
+        rewardItemId: icon?.itemId ?? null,
         // O skinId viaja como string no cadastro (ids de workshop
         // passam de 2^31): aqui ele vira número para o CUI, e um
         // valor que não couber volta a ser "a arte padrão".
-        rewardSkinId: Number(item?.skinId ?? 0) || 0,
+        //
+        // Item custom vai com 0: a skin dele não existe no Workshop, e
+        // o cliente a desenhava como um quadrado branco (17/09/2026).
+        rewardSkinId: Number(icon?.skinId ?? 0) || 0,
+        rewardImage: icon?.imageKey ?? null,
       };
     },
     // Resgatar no balcão: o jogador voltou ao NPC com a missão
@@ -4531,13 +4576,18 @@ async function runQuestAction(input: {
       const result = await service.claim({ playerQuestId });
       const message = result.outcomes.map((outcome) => outcome.message).join(' ');
 
+      // ####  PENDENTE NÃO É PERDIDO  ####
+      //
+      // Desde 17/09/2026 a missão com entrega falhada continua
+      // concluída, e o próximo clique entrega só o que faltou. A
+      // frase manda tentar de novo em vez de esperar um admin.
       return {
         ok: !result.pending,
         message:
           message === ''
             ? 'Missão resgatada.'
             : result.pending
-              ? `${message} Um administrador foi avisado do que faltou.`
+              ? `${message} O que faltou continua esperando: resgate de novo quando puder.`
               : message,
       };
     }
