@@ -505,6 +505,11 @@ export function safeXpSource(value: unknown): BattlePassXpSource | null {
     // campo, a tela não sugere nada — `sleeper.kills` não pode nascer
     // ligado por omissão.
     recommended: source.recommended === true,
+    // Lado seguro aqui é `batch`: com ele a tela PEDE o valor, e o
+    // pior caso é um campo a mais. Cair em `event` por omissão
+    // esconderia o campo de uma fonte que precisa dele, e a fonte
+    // passaria a pagar zero sem ninguém ver onde mexer.
+    feed: source.feed === 'event' ? 'event' : 'batch',
   };
 }
 

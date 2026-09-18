@@ -8635,6 +8635,19 @@ export interface BattlePassXpSource {
   warning: string | null;
   /** O agente sugere ligar. `sleeper.kills` nunca nasce ligada. */
   recommended: boolean;
+  /**
+   * De onde o XP daquela fonte chega — e é o que decide se a tela
+   * pede um valor.
+   *
+   * `batch`  o delta de 60 s. A regra diz quanto vale cada ocorrência,
+   *          e o campo "XP por vez" é dela.
+   * `event`  o fato chega inteiro e JÁ TRAZ o valor. É o caso da
+   *          missão: quem diz quanto ela paga é a recompensa dela, na
+   *          tela de missões. A regra aqui só liga, desliga e limita
+   *          o dia — pedir um número seria oferecer um campo que o
+   *          agente ignora, e o admin digitaria 800 esperando 800.
+   */
+  feed: 'batch' | 'event';
 }
 
 /** O XP e o nível de um jogador NAQUELE servidor. */

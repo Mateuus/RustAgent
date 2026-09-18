@@ -327,14 +327,30 @@ function RuleRow({
       </td>
 
       <td className="px-3 py-2">
-        <input
-          type="number"
-          min={0}
-          aria-label={`XP por ocorrência de ${row.label}`}
-          className={INPUT}
-          value={amount}
-          onChange={(event) => setAmount(event.target.value)}
-        />
+        {row.feed === 'event' ? (
+          // ####  QUEM DIZ QUANTO VALE É A MISSÃO  ####
+          //
+          // O agente ignora o `amount` desta fonte: o XP de uma
+          // missão é o que a recompensa DELA promete, e é o número
+          // que o jogador leu antes de aceitar. Oferecer o campo
+          // aqui faria o admin digitar 800 esperando 800 — e nada
+          // aconteceria, sem nada dizendo por quê.
+          //
+          // A linha continua existindo porque o resto dela vale: é
+          // por aqui que a fonte liga, desliga e ganha teto diário.
+          <span className="text-2xs text-text-muted">
+            cada missão paga o seu — o valor fica na recompensa dela
+          </span>
+        ) : (
+          <input
+            type="number"
+            min={0}
+            aria-label={`XP por ocorrência de ${row.label}`}
+            className={INPUT}
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+          />
+        )}
       </td>
 
       <td className="px-3 py-2">
