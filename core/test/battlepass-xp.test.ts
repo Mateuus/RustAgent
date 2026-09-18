@@ -215,7 +215,11 @@ describe('102 — o XP como recompensa, sobre um banco na 101', () => {
       .prepare('SELECT id, quest_id, seq, kind, payload FROM quest_rewards ORDER BY seq')
       .all();
 
-    expect(runMigrations(db).map((migration) => migration.id)).toEqual([102]);
+    // `toContain`, e não `toEqual([102])`: um banco semeado na 101
+    // recebe tudo o que veio depois dela, e a 103 — a loja que vende
+    // o passe — entrou pela mesma branch de integração. O que este
+    // caso prova é sobre a 102; quantas vieram junto é outra coisa.
+    expect(runMigrations(db).map((migration) => migration.id)).toContain(102);
 
     // Reconstruir tabela com INSERT ... SELECT é onde se perde dado
     // em silêncio — e o `id` precisa sobreviver, porque o registro
