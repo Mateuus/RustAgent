@@ -997,6 +997,7 @@ describe('os NPCs', () => {
         // cartão mostra só o título, e não um quadrado vazio.
         rewardItemId: null,
         rewardSkinId: 0,
+        rewardImage: null,
         // Ele OFERECE esta: sem `turnInNpcId`, dar e receber são o
         // mesmo boneco — e por isso ele também é o balcão, sem
         // outro nome a dizer.

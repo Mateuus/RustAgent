@@ -53,7 +53,7 @@ import type {
   QuestsRepository,
 } from '../db/quests-repository.js';
 import { describeContainerSelectors } from '../game/quest-containers.js';
-import { ApiError } from '../http/error-response.js';
+import { ApiError, isApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import {
   type QuestObjective,
@@ -62,6 +62,7 @@ import {
   type QuestSnapshot,
   type QuestSettings,
 } from '../types/quests.js';
+import { inventoryFullMessage } from './inventory-room.js';
 import { parseRequires } from './requires.js';
 import type { QuestRewardService, RewardOutcome } from './rewards.js';
 
@@ -230,8 +231,30 @@ export interface QuestNpcLocator {
   }>;
 }
 
+/**
+ * Quantos slots faltam para receber os itens de um prêmio.
+ *
+ * Ver `quests/inventory-room.ts`. Quem responde é o plugin, pelo
+ * `origemz.give.check`: só ele vê a mochila.
+ */
+export interface QuestInventoryRoom {
+  /**
+   * `0` = cabe tudo.
+   *
+   * Lança quando não dá para saber — e a frase do erro é a que o
+   * jogador lê. Não saber nunca vira "cabe".
+   */
+  missingSlotsFor(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly rewards: readonly QuestReward[];
+  }): Promise<number>;
+}
+
 export interface QuestsServiceDeps {
   readonly repository: QuestsRepository;
+  /** Ausente = o resgate não confere espaço (os testes antigos). */
+  readonly inventory?: QuestInventoryRoom;
   /** Ausente = a frase do NPC fica com as coordenadas. */
   readonly locator?: QuestNpcLocator;
   readonly logger: Logger;
@@ -371,6 +394,8 @@ const DAY_MS = 86_400_000;
 const NPC_TALK_TTL_MS = 5 * MINUTE_MS;
 
 export class QuestsService {
+  /** As tentativas com um resgate em curso. Ver `claim`. */
+  readonly #claiming = new Set<number>();
   readonly #deps: QuestsServiceDeps;
 
   /**
@@ -1129,17 +1154,30 @@ export class QuestsService {
   /**
    * O jogador resgata.
    *
-   * ####  A ORDEM É A DO §6.4 DO PLANO, E ELA É DELIBERADA  ####
+   * ####  A ORDEM MUDOU EM 17/09/2026  ####
    *
-   *   conferir -> marcar 'claimed' -> COMMIT -> entregar
+   * Era "marcar 'claimed' -> entregar": o medo era a queda no meio
+   * entregar duas vezes. O preço apareceu no jogo — mochila cheia, a
+   * missão virou resgatada, o cooldown começou, e o item não chegou.
+   * O jogador perdia o prêmio e não tinha botão para pedi-lo de novo.
    *
-   * Marcar antes de entregar. O inverso — entregar e depois marcar
-   * — dá, numa queda no meio, um jogador que recebeu duas vezes.
-   * Neste sentido dá um jogador que precisa de um clique do admin,
-   * e o painel mostra exatamente quem.
+   * Agora é:
    *
-   * É o oposto do que a loja faz (ela debita e estorna se falhar), e
-   * a diferença é qual erro dói mais: lá o jogador PAGOU.
+   *   conferir o espaço -> cobrar o material (uma vez) ->
+   *   entregar o que ainda falta -> SÓ ENTÃO marcar 'claimed'
+   *
+   * Enquanto alguma recompensa não saiu, a missão continua
+   * `completed`: o botão RESGATAR continua lá, o cooldown não começa
+   * e a missão não reinicia. O clique seguinte entrega SÓ o que
+   * faltou — `player_quest_rewards` diz o que já saiu, por posição.
+   *
+   * ####  E A ENTREGA EM DOBRO?  ####
+   *
+   * Moeda e ponto têm idempotência na ponta (`reference` da carteira,
+   * `eventId` do ranking). Item e kit são gravados como entregues
+   * logo depois do `give` responder; a janela que sobra é uma queda
+   * do agente entre a resposta do plugin e essa escrita. Dois cliques
+   * ao mesmo tempo não passam: `#claiming` segura a tentativa.
    *
    * @throws {ApiError} 404 tentativa inexistente, 409 quando ela
    * não está pronta para resgate.
@@ -1148,6 +1186,34 @@ export class QuestsService {
     readonly playerQuestId: number;
     readonly actor?: string | null;
     /** A distância medida da entrega. Ver `DeliverRewardsInput`. */
+    readonly distanceMeters?: number;
+  }): Promise<ClaimResult> {
+    // ####  UM RESGATE POR VEZ, POR TENTATIVA  ####
+    //
+    // O `WHERE status = 'completed'` do UPDATE protegia quando o
+    // `claimed` vinha antes da entrega. Agora ele vem DEPOIS, e dois
+    // cliques no mesmo segundo entregariam os dois. O agente é um
+    // processo só: um conjunto em memória basta.
+    if (this.#claiming.has(input.playerQuestId)) {
+      throw new ApiError(
+        'QUEST_CLAIM_BUSY',
+        'Seu resgate já está sendo processado. Aguarde um instante.',
+        409,
+      );
+    }
+
+    this.#claiming.add(input.playerQuestId);
+
+    try {
+      return await this.#claim(input);
+    } finally {
+      this.#claiming.delete(input.playerQuestId);
+    }
+  }
+
+  async #claim(input: {
+    readonly playerQuestId: number;
+    readonly actor?: string | null;
     readonly distanceMeters?: number;
   }): Promise<ClaimResult> {
     const before = this.#deps.repository.attempt(input.playerQuestId);
@@ -1182,7 +1248,29 @@ export class QuestsService {
       );
     }
 
-    // ####  O `consume` RODA ANTES DO PRÊMIO  ####
+    // O que já saiu numa tentativa anterior não entra na conta de
+    // nada: nem do espaço, nem da entrega.
+    const known = this.#deps.repository.rewardOutcomesOf(attempt.id);
+    const pending = new Set<number>();
+
+    for (const [index] of attempt.snapshot.rewards.entries()) {
+      if (known.get(index)?.ok !== true) {
+        pending.add(index);
+      }
+    }
+
+    // ####  1. O ESPAÇO, ANTES DE TUDO  ####
+    //
+    // Antes do material: cobrar as 300 pedras e então dizer "não
+    // cabe" deixaria o jogador sem as pedras e sem o prêmio até o
+    // próximo clique. A conta é conservadora por isso — o espaço que
+    // o material liberaria não entra nela.
+    await this.#assertRoom(
+      attempt,
+      attempt.snapshot.rewards.filter((_, index) => pending.has(index)),
+    );
+
+    // ####  2. O `consume` RODA ANTES DO PRÊMIO  ####
     //
     // §7.4 do plano. Se o material não sai, o resgate PARA aqui: a
     // missão continua `completed`, e o jogador junta o que falta e
@@ -1205,20 +1293,25 @@ export class QuestsService {
       // Quem levou as 300 pedras ao NPC não as tem mais. Cobrar o
       // total no resgate o obrigaria a juntar tudo outra vez para
       // receber o prêmio do que já entregou. Ver a migração 079.
-      const pending = toConsume
+      //
+      // E, desde 17/09/2026, o que o RESGATE cobrou também conta
+      // como pago: uma entrega que falhou depois da cobrança não
+      // pode cobrar de novo no clique seguinte.
+      const toTake = toConsume
         .map((objective) => ({
+          seq: objective.seq,
           shortname: objective.target as string,
           amount: objective.amount - (attempt.paid[objective.seq] ?? 0),
         }))
         .filter((item) => item.amount > 0);
 
       const taken =
-        pending.length === 0
+        toTake.length === 0
           ? { complete: true }
           : await this.#deps.consumer.take({
               serverId: attempt.serverId,
               steamId: attempt.steamId,
-              items: pending,
+              items: toTake.map(({ shortname, amount }) => ({ shortname, amount })),
             });
 
       if (!taken.complete) {
@@ -1229,8 +1322,38 @@ export class QuestsService {
           409,
         );
       }
+
+      this.#deps.repository.markPaid(
+        attempt.id,
+        toTake.map((item) => ({ objectiveSeq: item.seq, amount: item.amount })),
+      );
     }
 
+    // ####  A DISTÂNCIA É MEDIDA AQUI, E NÃO RECEBIDA  ####
+    //
+    // Quem chama pode passá-la (o painel, num caso de suporte), mas
+    // o normal é o agente medir: o jogador clicou em RESGATAR, e a
+    // conta sai das coordenadas do banco. Ver `deliveryDistanceOf`.
+    const distance = input.distanceMeters ?? this.deliveryDistanceOf(attempt.id) ?? undefined;
+
+    // ####  3. ENTREGAR SÓ O QUE FALTA  ####
+    const fresh =
+      pending.size === 0
+        ? []
+        : await this.#deliver(attempt, distance, input.actor ?? undefined, pending);
+
+    const outcomes = this.#fullPicture(attempt, known, fresh);
+
+    if (outcomes.some((item) => !item.ok)) {
+      // ####  A MISSÃO CONTINUA CONCLUÍDA  ####
+      //
+      // O que saiu está gravado; o que falhou está gravado e virou
+      // pendência no painel. O jogador clica de novo depois de
+      // resolver (liberar espaço, renascer), e só o resto sai.
+      return { playerQuestId: attempt.id, questId: attempt.questId, outcomes, pending: true };
+    }
+
+    // ####  4. TUDO SAIU: AGORA SIM, RESGATADA  ####
     const quest = this.#deps.repository.get(attempt.questId);
     const now = this.#now();
 
@@ -1242,18 +1365,18 @@ export class QuestsService {
     // inclusive para quem aceitou antes.
     //
     // O `null` é defesa, e não um caso previsto: `player_quests`
-    // referencia `quests` com ON DELETE CASCADE (migração 046,
-    // CONFERIDO com PRAGMA foreign_keys ligado), então uma quest
-    // apagada leva esta tentativa junto e o `attempt` acima já
-    // teria devolvido 404. Fica porque custa nada e porque um dia
-    // essa FK pode mudar.
+    // referencia `quests` com ON DELETE CASCADE (migração 046), então
+    // uma quest apagada leva esta tentativa junto.
     const cooldownUntil = quest === null ? null : this.#cooldownUntil(quest, attempt.serverId, now);
 
     if (!this.#deps.repository.claim(input.playerQuestId, cooldownUntil, now)) {
-      // Outro clique ganhou a corrida entre a leitura e o UPDATE. O
-      // `WHERE status = 'completed'` do repositório é quem impede a
-      // entrega em dobro.
-      throw new ApiError('QUEST_ALREADY_CLAIMED', 'Esta quest já foi resgatada.', 409);
+      // Só um admin mexendo na tentativa no meio do clique chega
+      // aqui — os cliques do jogador passam um de cada vez. O prêmio
+      // já saiu inteiro; recusar agora mentiria sobre isso.
+      this.#deps.logger.warn(
+        { playerQuestId: attempt.id, questId: attempt.questId },
+        'recompensa entregue, mas a tentativa já não estava concluída na hora de marcar',
+      );
     }
 
     this.#deps.repository.recordEvent(
@@ -1269,22 +1392,93 @@ export class QuestsService {
       now,
     );
 
-    // ####  A DISTÂNCIA É MEDIDA AQUI, E NÃO RECEBIDA  ####
-    //
-    // Quem chama pode passá-la (o painel, num caso de suporte), mas
-    // o normal é o agente medir: o jogador clicou em RESGATAR, e a
-    // conta sai das coordenadas do banco. Ver `deliveryDistanceOf`.
-    const distance = input.distanceMeters ?? this.deliveryDistanceOf(attempt.id) ?? undefined;
     this.#deps.onLiveChanged?.({ serverId: attempt.serverId, steamId: attempt.steamId });
 
-    const outcomes = await this.#deliver(attempt, distance);
+    return { playerQuestId: attempt.id, questId: attempt.questId, outcomes, pending: false };
+  }
 
-    return {
-      playerQuestId: attempt.id,
-      questId: attempt.questId,
-      outcomes,
-      pending: outcomes.some((item) => !item.ok),
-    };
+  /**
+   * Cabe? Se não, PARA com a frase que diz quantos slots liberar.
+   *
+   * Sem item nem kit entre o que falta, não há o que medir — moeda e
+   * ponto não ocupam slot, e perguntar ao plugin seria uma ida ao
+   * RCON por nada.
+   */
+  async #assertRoom(attempt: PlayerQuestRecord, rewards: readonly QuestReward[]): Promise<void> {
+    const inventory = this.#deps.inventory;
+
+    if (inventory === undefined || !rewards.some((r) => r.kind === 'item' || r.kind === 'kit')) {
+      return;
+    }
+
+    let missing: number;
+
+    try {
+      missing = await inventory.missingSlotsFor({
+        serverId: attempt.serverId,
+        steamId: attempt.steamId,
+        rewards,
+      });
+    } catch (cause) {
+      this.#deps.logger.warn(
+        {
+          playerQuestId: attempt.id,
+          questId: attempt.questId,
+          err: cause instanceof Error ? cause.message : String(cause),
+          reason: (cause as { reason?: unknown }).reason,
+        },
+        'não deu para conferir o espaço do inventário; o resgate espera',
+      );
+
+      if (isApiError(cause)) {
+        throw cause;
+      }
+
+      throw new ApiError(
+        'QUEST_INVENTORY_UNCHECKED',
+        'Não deu para conferir o seu inventário agora. Tente resgatar de novo em instantes.',
+        503,
+      );
+    }
+
+    if (missing > 0) {
+      throw new ApiError('QUEST_INVENTORY_FULL', inventoryFullMessage(missing), 409);
+    }
+  }
+
+  /**
+   * O quadro COMPLETO das recompensas: o que acabou de sair e o que
+   * já estava entregue.
+   *
+   * Devolver só as reprocessadas faria o chat e o painel parecerem
+   * dizer que a missão só dava aquelas.
+   */
+  #fullPicture(
+    attempt: PlayerQuestRecord,
+    known: ReadonlyMap<number, { readonly ok: boolean; readonly code: string | null; readonly message: string | null }>,
+    fresh: readonly RewardOutcome[],
+  ): readonly RewardOutcome[] {
+    const byIndex = new Map(
+      fresh.filter((outcome) => outcome.index !== undefined).map((o) => [o.index as number, o]),
+    );
+
+    return attempt.snapshot.rewards.map((reward, index) => {
+      const now = byIndex.get(index);
+
+      if (now !== undefined) {
+        return now;
+      }
+
+      const before = known.get(index);
+
+      return {
+        index,
+        kind: reward.kind,
+        ok: true,
+        code: before?.code ?? null,
+        message: before?.message ?? 'Esta recompensa já tinha sido entregue.',
+      };
+    });
   }
 
   /**
@@ -1327,10 +1521,23 @@ export class QuestsService {
       );
     }
 
+    // ####  A CONCLUÍDA COM ENTREGA PENDENTE É UM RESGATE  ####
+    //
+    // Desde 17/09/2026 a recompensa que falha deixa a missão em
+    // `completed`. Reentregar ali é exatamente o resgate: confere o
+    // espaço, entrega o que falta e só então marca.
+    if (attempt.status === 'completed') {
+      return await this.claim({
+        playerQuestId: attempt.id,
+        actor: input.actor,
+        ...(input.distanceMeters === undefined ? {} : { distanceMeters: input.distanceMeters }),
+      });
+    }
+
     if (attempt.status !== 'claimed') {
       throw new ApiError(
         'QUEST_NOT_CLAIMED',
-        'Só dá para reentregar a recompensa de uma quest já resgatada.',
+        'Só dá para reentregar a recompensa de uma quest concluída ou resgatada.',
         409,
       );
     }

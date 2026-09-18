@@ -1005,6 +1005,46 @@ export class QuestsRepository {
     run();
   }
 
+  /**
+   * Marca como PAGO o material que o resgate acabou de cobrar.
+   *
+   * Diferente do `payAtCounter`, não mexe no contador: o objetivo já
+   * estava cheio, e somar de novo mostraria 600/300 na tela. Só o
+   * `paid` anda — é ele que faz o próximo clique de resgate não
+   * cobrar outra vez quando a entrega falhou depois da cobrança.
+   *
+   * UPDATE, e não upsert: um objetivo concluído tem linha. Criar uma
+   * com `value = 0` desfaria a conclusão na tela.
+   */
+  markPaid(
+    playerQuestId: number,
+    entries: readonly { readonly objectiveSeq: number; readonly amount: number }[],
+    now: number = Date.now(),
+  ): void {
+    const pay = this.#db.prepare(
+      `UPDATE player_quest_progress
+          SET paid = paid + @amount, updated_at = @at
+        WHERE player_quest_id = @player_quest_id AND objective_seq = @objective_seq`,
+    );
+
+    const run = this.#db.transaction(() => {
+      for (const entry of entries) {
+        if (entry.amount <= 0) {
+          continue;
+        }
+
+        pay.run({
+          player_quest_id: playerQuestId,
+          objective_seq: entry.objectiveSeq,
+          amount: Math.trunc(entry.amount),
+          at: now,
+        });
+      }
+    });
+
+    run();
+  }
+
   // ======================================================
   //  O DESFECHO DE CADA RECOMPENSA
   // ======================================================

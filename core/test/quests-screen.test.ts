@@ -34,6 +34,7 @@ import {
   QUESTS_SCREEN_ID,
   questsScreenId,
   readQuestsView,
+  rewardIconOf,
   type QuestCard,
   type QuestDetail,
   type QuestsScreenReader,
@@ -995,6 +996,69 @@ describe('o detalhe', () => {
       // NOME do ranking, que `trophy.bleik` não dizia.
       { text: '2 pontos em Bleik Store', icon: null },
     ]);
+  });
+
+  // ####  O QUADRADO BRANCO DO ITEM CUSTOM  ####
+  //
+  // 17/09/2026, "Fornecedor Bleik (cópia)" no NPC Malkor: o prêmio
+  // era o item base com uma skin que só marca o item custom, e o
+  // cliente a desenhava como um quadrado branco.
+  describe('o ícone do item custom', () => {
+    const catalogo = (iconKey: string | null) => ({
+      itemOf: (shortname: string) =>
+        shortname === 'discord.trophy' ? { itemId: 1_651_220_691, displayName: 'Discord Trophy' } : null,
+      customItemOf: (shortname: string, skinId: string) =>
+        shortname === 'discord.trophy' && skinId === '1552602728526292'
+          ? { displayName: 'Troféu Bleik Store', iconKey }
+          : null,
+    });
+    const trofeu = { shortname: 'discord.trophy', skinId: '1552602728526292' };
+
+    it('com arte própria, usa o PNG guardado e o nome do item custom', async () => {
+      const result = await readQuestsView({
+        reader: reader({
+          offersFor: () => Promise.resolve([questWith([{ kind: 'item', ...trofeu, amount: 1 }])]),
+        }),
+        serverId: 'pvp1',
+        steamId: '76561198000000001',
+        target: { tab: null, page: 0, detail: { kind: 'offer', id: 'minerador' }, npcId: null },
+        catalog: catalogo('item.trofeu-bleik-store'),
+      });
+
+      expect(result.detail?.rewards).toEqual([
+        { text: '1x Troféu Bleik Store', icon: { kind: 'stored', key: 'item.trofeu-bleik-store' } },
+      ]);
+
+      const screen = buildQuestsScreen({ view: result, screenId: 'tela-missoes:info:minerador' });
+      const icon = walk(screen.elements).find((element) => element.id === 'qdr0i');
+
+      expect(icon).toMatchObject({
+        type: 'image',
+        source: { kind: 'stored', key: 'item.trofeu-bleik-store' },
+      });
+    });
+
+    it('sem arte própria, é o item base SEM a skin que o cliente não conhece', () => {
+      expect(rewardIconOf(trofeu, catalogo(null))).toEqual({
+        itemId: 1_651_220_691,
+        skinId: '0',
+        imageKey: null,
+        displayName: 'Troféu Bleik Store',
+      });
+    });
+
+    it('a skin de verdade, do Workshop, continua indo', () => {
+      expect(
+        rewardIconOf({ shortname: 'discord.trophy', skinId: '2913184823' }, catalogo(null)),
+      ).toMatchObject({ skinId: '2913184823', imageKey: null, displayName: 'Discord Trophy' });
+    });
+
+    it('item que o catálogo não conhece fica sem ícone', () => {
+      expect(rewardIconOf({ shortname: 'sumiu', skinId: '0' }, catalogo(null))).toMatchObject({
+        itemId: null,
+        imageKey: null,
+      });
+    });
   });
 
   // "2 pontos" sozinho foi a pergunta do dono olhando a tela: "2

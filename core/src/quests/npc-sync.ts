@@ -79,6 +79,15 @@ export interface QuestNpcOffer {
   /** A skin dele. `0` = a arte padrão do item. */
   readonly rewardSkinId: number;
   /**
+   * A arte própria do item custom: a chave do PNG no OrigemZImages.
+   *
+   * `null` = desenha pelo `rewardItemId`. Ver `rewardIconOf` em
+   * game/ui-quests-screen.ts — o item custom é o item base com uma
+   * skin que não existe no Workshop, e o cliente a desenhava como um
+   * quadrado branco.
+   */
+  readonly rewardImage: string | null;
+  /**
    * Este boneco OFERECE esta missão, ou só a recebe?
    *
    * `false` = ele é o balcão de entrega e nada mais: o cartão dela
@@ -127,6 +136,7 @@ export interface QuestNpcSyncDeps {
     readonly reward: string;
     readonly rewardItemId: number | null;
     readonly rewardSkinId: number;
+    readonly rewardImage?: string | null;
   };
   /**
    * O jogador clicou em aceitar dentro da caixa do NPC.
@@ -413,6 +423,7 @@ export class QuestNpcSync {
         reward: described?.reward ?? '',
         rewardItemId: described?.rewardItemId ?? null,
         rewardSkinId: described?.rewardSkinId ?? 0,
+        rewardImage: described?.rewardImage ?? null,
         offers: dele,
         turnIn: balcao,
         turnInName: nomeDoPagador,
