@@ -68,7 +68,12 @@
 
 import { randomUUID } from 'node:crypto';
 
-import type { BattlePassService, ClaimResult } from '../battlepass/service.js';
+import type {
+  BattlePassDelivery,
+  BattlePassService,
+  ClaimResult,
+  RedeliverResult,
+} from '../battlepass/service.js';
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
@@ -84,7 +89,6 @@ import {
   claimExceptionsOf,
   payloadOriginOf,
   xpToReach,
-  type BattlePassLane,
   type BattlePassPayload,
   type BattlePassPayloadLevel,
   type BattlePassPayloadPending,
@@ -94,11 +98,9 @@ import {
   type BattlePassProgressPayload,
   type BattlePassReply,
   type BattlePassStatus,
-  type DeliveryOutcome,
   type PendingDelivery,
   type TrackCell,
 } from '../types/battlepass.js';
-import type { QuestReward } from '../types/quests.js';
 import { toError } from '../util.js';
 import { firstJsonLine } from './plugin-contract.js';
 import { encodePushPayload, pushErrorSchema, pushOkSchema } from './plugin-push.js';
@@ -216,24 +218,12 @@ export interface BattlePassStore {
 /**
  * Quem põe na mão o que o resgate prometeu.
  *
- * ####  AUSENTE, O RESGATE VAI INTEIRO PARA A CAIXA  ####
- *
- * E isso é um desfecho VÁLIDO, não um defeito: a caixa existe
- * exatamente para a promessa que ainda não chegou (01 §7), e o
- * jogador lê isso na frase do rodapé. O que não pode acontecer é o
- * resgate dizer "confira a mochila" quando ninguém entregou nada.
+ * A porta mudou de casa em 18/09/2026: ela mora no
+ * `battlepass/service.ts`, porque a REENTREGA da caixa é regra e
+ * precisa dela lá. Este `export` continua para quem já a importava
+ * daqui.
  */
-export interface BattlePassDelivery {
-  /** NUNCA lança: toda falha vira um `DeliveryOutcome` com o código cru. */
-  deliver(input: {
-    readonly serverId: string;
-    readonly steamId: string;
-    readonly claimId: number;
-    readonly level: number;
-    readonly lane: BattlePassLane;
-    readonly rewards: readonly QuestReward[];
-  }): Promise<readonly DeliveryOutcome[]>;
-}
+export type { BattlePassDelivery };
 
 export interface BattlePassSyncDeps {
   /** A porta ÚNICA do módulo. Toda regra sai daqui. */
@@ -927,7 +917,12 @@ export class BattlePassSync {
       return;
     }
 
-    if (push.kind === 'claimAll' || push.kind === 'box' || push.kind === 'buy') {
+    if (
+      push.kind === 'claimAll' ||
+      push.kind === 'box' ||
+      push.kind === 'retry' ||
+      push.kind === 'buy'
+    ) {
       const request = battlePassPlayerPushSchema.safeParse(parsed);
 
       if (!request.success) {
@@ -940,6 +935,7 @@ export class BattlePassSync {
       this.#once(`${data.kind}:${data.requestId}`, () => {
         if (data.kind === 'claimAll') return this.#handleClaimAll(serverId, data);
         if (data.kind === 'box') return this.#handleBox(serverId, data);
+        if (data.kind === 'retry') return this.#handleRetry(serverId, data);
 
         return this.#handleBuy(serverId, data);
       });
@@ -1067,6 +1063,56 @@ export class BattlePassSync {
           : `Você tem ${String(pending.length)} ${pending.length === 1 ? 'item esperando' : 'itens esperando'} na caixa.`;
 
       await this.#answer(serverId, push.steamId, push.requestId, true, message);
+    } catch (cause) {
+      await this.#answer(serverId, push.steamId, push.requestId, false, this.#refusal(cause));
+    }
+  }
+
+  /**
+   * "Resgatar tudo" DENTRO da caixa. NUNCA lança.
+   *
+   * ####  O DEFEITO QUE ELE CONSERTA  ####
+   *
+   * Até 18/09/2026 a caixa mostrava a promessa e não havia como
+   * pegá-la: o `box` só apagava o ponto de notificação. O jogador
+   * liberava espaço e a recompensa continuava lá.
+   *
+   * Quem pergunta de novo se cabe, agrupa por resgate e fecha o que
+   * saiu é o serviço; aqui é só o fio — e a frase.
+   */
+  async #handleRetry(serverId: string, push: BattlePassPlayerPush): Promise<void> {
+    const delivery = this.#deps.deliver;
+
+    if (delivery === undefined) {
+      // Sem entregador ligado não há reentrega possível, e prometer
+      // "já vai" seria mentir para quem acabou de abrir espaço.
+      await this.#answer(
+        serverId,
+        push.steamId,
+        push.requestId,
+        false,
+        'A entrega está desligada neste servidor agora. Os seus prêmios continuam guardados.',
+      );
+
+      return;
+    }
+
+    try {
+      const result = await this.#deps.service.redeliver(
+        serverId,
+        push.steamId,
+        delivery,
+        actorOf(serverId, push.steamId),
+        this.#now(),
+      );
+
+      await this.#answer(
+        serverId,
+        push.steamId,
+        push.requestId,
+        result.delivered > 0,
+        retryMessage(result),
+      );
     } catch (cause) {
       await this.#answer(serverId, push.steamId, push.requestId, false, this.#refusal(cause));
     }
@@ -1359,6 +1405,41 @@ export class BattlePassSync {
 /** O ator do registro: o pedido nasceu no JOGO, e não no painel. */
 function actorOf(serverId: string, steamId: string) {
   return { name: `jogo:${steamId}`, source: 'game' as const, serverId };
+}
+
+/** "item"/"itens", para a frase não sair no plural com um só. */
+function items(count: number): string {
+  return count === 1 ? '1 item' : `${String(count)} itens`;
+}
+
+/** O mesmo, com o verbo concordando: "1 item continua", "3 itens continuam". */
+function stillWaiting(count: number): string {
+  return `${items(count)} ${count === 1 ? 'continua' : 'continuam'} na caixa`;
+}
+
+/**
+ * A frase da reentrega.
+ *
+ * Os quatro desfechos são diferentes para o jogador, e o pior deles é
+ * o "nada coube": ele acabou de abrir espaço e precisa saber que
+ * ainda falta — com quanto falta, que é o que o `hint` traz.
+ */
+function retryMessage(result: RedeliverResult): string {
+  const tail = result.hint === '' ? '' : ` ${result.hint}`;
+
+  if (result.delivered === 0 && result.owed === 0) {
+    return 'A sua caixa está vazia.';
+  }
+
+  if (result.owed === 0) {
+    return `Pronto! ${items(result.delivered)} na sua mochila.`;
+  }
+
+  if (result.delivered === 0) {
+    return `Ainda não coube nada: ${stillWaiting(result.owed)}.${tail}`;
+  }
+
+  return `${items(result.delivered)} na mochila; ${stillWaiting(result.owed)}.${tail}`;
 }
 
 /**

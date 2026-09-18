@@ -989,9 +989,19 @@ export interface BattlePassStatus {
  *   claim     um nível, uma faixa.
  *   claimAll  o botão "resgatar tudo".
  *   box       ele abriu a caixa: o ponto de notificação some.
+ *   retry     o "resgatar tudo" de DENTRO da caixa: entregar de novo
+ *             o que ficou devendo.
  *   buy       ele clicou em ativar o passe.
  */
-export const BATTLEPASS_PUSH_KINDS = ['ready', 'open', 'claim', 'claimAll', 'box', 'buy'] as const;
+export const BATTLEPASS_PUSH_KINDS = [
+  'ready',
+  'open',
+  'claim',
+  'claimAll',
+  'box',
+  'retry',
+  'buy',
+] as const;
 export type BattlePassPushKind = (typeof BATTLEPASS_PUSH_KINDS)[number];
 
 /** O `requestId` do plugin: ele volta igual no `reply`. */
@@ -1028,9 +1038,9 @@ export const battlePassClaimPushSchema = z.object({
   lane: z.enum(BATTLEPASS_LANES),
 });
 
-/** "Resgatar tudo", "abrir a caixa" e "ativar o passe": a mesma forma. */
+/** "Resgatar tudo", "abrir a caixa", "pegar na caixa" e "ativar o passe": a mesma forma. */
 export const battlePassPlayerPushSchema = z.object({
-  kind: z.enum(['claimAll', 'box', 'buy']),
+  kind: z.enum(['claimAll', 'box', 'retry', 'buy']),
   secret: z.string().min(1),
   requestId: requestIdSchema,
   steamId: steamIdSchema,

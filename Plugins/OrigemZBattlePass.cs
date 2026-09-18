@@ -220,6 +220,10 @@ namespace Oxide.Plugins
         private const string MenuClaimCommand = "origemz.passe.claim";
         private const string MenuClaimAllCommand = "origemz.passe.claimall";
         private const string MenuBoxCommand = "origemz.passe.box";
+
+        /// <summary>"Resgatar tudo" DENTRO da caixa: entregar de novo o que ficou devendo.</summary>
+        private const string MenuRetryCommand = "origemz.passe.retry";
+
         private const string MenuBuyCommand = "origemz.passe.buy";
 
         /// <summary>Só existe com a rolagem desligada (ver `TrackScroll`), e é a rede de segurança dela.</summary>
@@ -1620,6 +1624,39 @@ namespace Oxide.Plugins
             Redraw(player, session, Region.Head | Region.Box);
         }
 
+        /// <summary>
+        /// "Resgatar tudo" dentro da caixa.
+        ///
+        /// ####  ELE EXISTE PORQUE A CAIXA NÃO ENTREGAVA  ####
+        ///
+        /// Até 18/09/2026 a caixa mostrava a promessa e não havia como
+        /// pegá-la: o jogador liberava espaço e a recompensa continuava
+        /// lá. Quem pergunta de novo se cabe e entrega é o AGENTE — daqui
+        /// sai só o pedido, como em todo o resto desta tela.
+        /// </summary>
+        [ConsoleCommand(MenuRetryCommand)]
+        private void CmdMenuRetry(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            if (session.Busy) return;
+
+            // ####  O PLUGIN DECIDE ANTES DE GRITAR  ####
+            //
+            // Caixa vazia não vira pedido: o agente responderia "a sua
+            // caixa está vazia", e um pedido por clique perdido vira
+            // console cheio de linha que ninguém lê.
+            Frame frame = Prepare(player);
+            if (WaitingCount(frame) == 0) return;
+
+            session.Busy = true;
+            Request(player, session, "retry", new JObject { ["steamId"] = player.UserIDString });
+
+            Redraw(player, session, Region.Box | Region.Foot);
+        }
+
         [ConsoleCommand(MenuBuyCommand)]
         private void CmdMenuBuy(ConsoleSystem.Arg arg)
         {
@@ -1855,6 +1892,19 @@ namespace Oxide.Plugins
             return count;
         }
 
+        /// <summary>
+        /// Quantas recompensas ESPERAM na caixa.
+        ///
+        /// Diferente do `ClaimableCount`, que olha só a trilha: o que já
+        /// foi resgatado e não coube não está mais disponível em faixa
+        /// nenhuma, e era por isso que o rodapé dizia "NADA PARA
+        /// RESGATAR" com o prêmio do jogador guardado.
+        /// </summary>
+        private static int WaitingCount(Frame frame)
+        {
+            return frame.Known ? frame.Progress.Pending.Count : 0;
+        }
+
         private static bool CanBuy(Frame frame)
         {
             if (!frame.Season.Has || !frame.Season.PaidLane) return false;
@@ -1945,7 +1995,17 @@ namespace Oxide.Plugins
             /// <summary>De qual servidor é a trilha. Sem isto, a 1ª queixa é "meu nível sumiu" (01 §1.4).</summary>
             public string ServerName = "";
 
+            /// <summary>Quantas FAIXAS da trilha estão prontas para resgatar.</summary>
             public int Count;
+
+            /// <summary>
+            /// Quantas recompensas esperam na CAIXA.
+            ///
+            /// O botão conta as duas coisas: com pendência esperando ele
+            /// não pode dizer "nada para resgatar" (defeito de 18/09/2026).
+            /// </summary>
+            public int Waiting;
+
             public bool Busy;
             public string Message = "";
             public bool MessageOk;
@@ -1966,6 +2026,9 @@ namespace Oxide.Plugins
 
             /// <summary>Quantas linhas ficaram de fora do desenho. Elas continuam devendo.</summary>
             public int More;
+
+            /// <summary>Um pedido do jogador está em andamento: o botão vira "aguarde".</summary>
+            public bool Busy;
 
             public string Empty = "";
         }
@@ -2192,6 +2255,7 @@ namespace Oxide.Plugins
             {
                 Token = session.Token,
                 Count = ClaimableCount(frame, session),
+                Waiting = WaitingCount(frame),
                 Busy = session.Busy,
                 ServerName = frame.Season.ServerName,
                 Message = session.Message,
@@ -2202,7 +2266,7 @@ namespace Oxide.Plugins
 
         private BoxView ComputeBox(Frame frame, MenuSession session)
         {
-            BoxView view = new BoxView { Token = session.Token };
+            BoxView view = new BoxView { Token = session.Token, Busy = session.Busy };
 
             if (!frame.Known)
             {
@@ -3171,6 +3235,17 @@ namespace Oxide.Plugins
                 TextButton(canvas, foot, x, 11, 320, 34, ColRust, MenuClaimAllCommand + " " + view.Token,
                            "RESGATAR TUDO (" + view.Count + ")", 13, ColText);
             }
+            else if (view.Waiting > 0)
+            {
+                // ####  O BOTÃO CONTA A CAIXA, E NÃO SÓ A TRILHA  ####
+                //
+                // O que foi resgatado e não coube saiu da trilha e ficou
+                // esperando. Até 18/09/2026 o rodapé olhava só a trilha e
+                // dizia "NADA PARA RESGATAR" com o prêmio do jogador
+                // guardado — que foi exatamente a queixa do dono.
+                TextButton(canvas, foot, x, 11, 320, 34, ColRust, MenuRetryCommand + " " + view.Token,
+                           "PEGAR O QUE ESTÁ NA CAIXA (" + view.Waiting + ")", 13, ColText);
+            }
             else
             {
                 DeadButton(canvas, foot, x, 11, 320, 34, "NADA PARA RESGATAR", 13);
@@ -3207,10 +3282,29 @@ namespace Oxide.Plugins
             Box body = new Box(inner, BoxWidth - 2, height - 2);
 
             Panel(canvas, body, 0, 0, body.W, 2, ColRust);
-            Label(canvas, body, 12, 2, body.W - 60, BoxHeadHeight, "O QUE ESTÁ ESPERANDO", 12, ColText,
+            Label(canvas, body, 12, 2, body.W - 206, BoxHeadHeight, "O QUE ESTÁ ESPERANDO", 12, ColText,
                   TextAnchor.MiddleLeft, true);
             TextButton(canvas, body, body.W - 34, 6, 24, 24, ColSurface2, MenuBoxCommand + " " + view.Token,
                        "X", 11, ColMuted);
+
+            // ####  A CAIXA PRECISA TER COMO ENTREGAR  ####
+            //
+            // Ela mostrava a promessa e não havia como pegá-la: o dono
+            // liberava espaço e a recompensa continuava lá (18/09/2026).
+            // Quem pergunta de novo se cabe é o agente; daqui sai o
+            // pedido.
+            if (view.Rows.Count > 0)
+            {
+                if (view.Busy)
+                {
+                    DeadButton(canvas, body, body.W - 180, 6, 140, 24, "AGUARDE…", 11);
+                }
+                else
+                {
+                    TextButton(canvas, body, body.W - 180, 6, 140, 24, ColRust,
+                               MenuRetryCommand + " " + view.Token, "RESGATAR TUDO", 11, ColText);
+                }
+            }
 
             if (view.Rows.Count == 0)
             {
@@ -3359,7 +3453,10 @@ namespace Oxide.Plugins
             {
                 Token = token,
                 ServerName = "ORIGEMZ PVP 1",
-                Count = 99,
+                // `Count` zerado de propósito: o botão da CAIXA tem o
+                // rótulo mais longo dos dois, e o pior caso é o maior.
+                Count = 0,
+                Waiting = 99,
                 Message = "Entreguei 6 de 17: faltou espaço na mochila para o resto, e ele continua esperando.",
                 MessageOk = true,
                 Note = "Trilha do servidor ORIGEMZ PVP 1 · o XP e o nível são deste servidor.",
