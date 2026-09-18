@@ -2525,8 +2525,9 @@ namespace Oxide.Plugins
             else if (level.Xp <= 0)
             {
                 // Nível sem XP na carga: a trilha existe, a régua não. Dizer
-                // "faltam 0" seria afirmar que já dá para levar.
-                view.GapText = "";
+                // "faltam 0" seria afirmar que já dá para levar; o silêncio
+                // deixaria o modal com uma barra vazia sem explicação.
+                view.GapText = "Esta temporada não informa o XP deste nível.";
             }
             else if (level.Number <= frame.Progress.Level || frame.Progress.Xp >= level.Xp)
             {
@@ -3727,11 +3728,16 @@ namespace Oxide.Plugins
             DetailRow(canvas, body, 96, "Total acumulado para alcançá-lo", view.TotalText);
 
             // A barra mede ESTE degrau, e não a temporada: um nível três
-            // passos à frente nasce com a barra vazia, que é a verdade.
-            Panel(canvas, body, 16, 126, body.W - 32, 8, ColSurface2);
-            if (view.StepFill > 0f)
+            // passos à frente nasce com a barra vazia, que é a verdade. Sem
+            // régua nenhuma ela não é desenhada — barra vazia por falta de
+            // dado e barra vazia por distância se leriam igual.
+            if (view.TotalText.Length > 0)
             {
-                Panel(canvas, body, 16, 126, (body.W - 32) * Mathf.Clamp01(view.StepFill), 8, ColRust);
+                Panel(canvas, body, 16, 126, body.W - 32, 8, ColSurface2);
+                if (view.StepFill > 0f)
+                {
+                    Panel(canvas, body, 16, 126, (body.W - 32) * Mathf.Clamp01(view.StepFill), 8, ColRust);
+                }
             }
 
             if (view.GapText.Length > 0)
