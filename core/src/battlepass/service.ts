@@ -121,6 +121,60 @@ export interface ClaimResult {
   readonly rewards: readonly QuestReward[];
 }
 
+/**
+ * Quem PÕE o prêmio na mão do jogador.
+ *
+ * ####  A PORTA MORA AQUI, E QUEM A CUMPRE É A delivery.ts  ####
+ *
+ * Este arquivo não entrega nada — mas a REENTREGA da caixa é regra
+ * (o que ainda deve, agrupado por resgate, sem renumerar posição), e
+ * regra mora aqui. Então o serviço declara de quem precisa e recebe
+ * o entregador pronto; o `BattlePassSync` passa o mesmo que já usa
+ * no clique.
+ *
+ * ####  AUSENTE, O RESGATE VAI INTEIRO PARA A CAIXA  ####
+ *
+ * E isso é um desfecho VÁLIDO, não um defeito: a caixa existe
+ * exatamente para a promessa que ainda não chegou (01 §7), e o
+ * jogador lê isso na frase do rodapé. O que não pode acontecer é o
+ * resgate dizer "confira a mochila" quando ninguém entregou nada.
+ */
+export interface BattlePassDelivery {
+  /** NUNCA lança: toda falha vira um `DeliveryOutcome` com o código cru. */
+  deliver(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly claimId: number;
+    readonly level: number;
+    readonly lane: BattlePassLane;
+    /** O snapshot INTEIRO do resgate: o índice é a posição. */
+    readonly rewards: readonly QuestReward[];
+    /**
+     * Só estas posições saem agora. Ausente = o resgate inteiro.
+     *
+     * É o que a reentrega usa para pedir o que ficou devendo sem
+     * encurtar a lista — encurtar renumeraria, e a posição compõe a
+     * referência da carteira e o `eventId`.
+     */
+    readonly only?: ReadonlySet<number> | undefined;
+  }): Promise<readonly DeliveryOutcome[]>;
+}
+
+/** O desfecho de uma reentrega da caixa. A frase é de quem chamou. */
+export interface RedeliverResult {
+  /** Quantas posições saíram agora. */
+  readonly delivered: number;
+  /** Quantas continuam esperando na caixa. */
+  readonly owed: number;
+  /**
+   * O que o JOGADOR tem a fazer, dito pelo entregador.
+   *
+   * "1 item não coube" não diz o que fazer; "libere 2 slots" diz. Só
+   * a primeira frase entra: o motivo costuma ser o mesmo em todas.
+   */
+  readonly hint: string;
+}
+
 /** O crédito de XP pedido pela frente B. */
 export interface CreditXpRequest {
   readonly serverId: string;
@@ -227,6 +281,17 @@ function isUniqueViolation(cause: unknown): boolean {
 
 export class BattlePassService {
   readonly #deps: BattlePassServiceDeps;
+
+  /**
+   * Quem já está sendo reentregue agora — `<servidor>:<steamId>`.
+   *
+   * O plugin já trava o botão e o fio já descarta o pedido repetido,
+   * mas nenhum dos dois alcança um segundo CLIENTE (o painel, o
+   * site). Duas reentregas em paralelo leriam a mesma caixa e
+   * entregariam duas vezes o que ocupa slot — o dedupe da carteira
+   * não protege item.
+   */
+  readonly #redelivering = new Set<string>();
 
   constructor(deps: BattlePassServiceDeps) {
     this.#deps = deps;
@@ -1221,6 +1286,130 @@ export class BattlePassService {
     }
 
     return before;
+  }
+
+  /**
+   * "Resgatar tudo" DENTRO da caixa: tenta entregar de novo o que
+   * ficou devendo.
+   *
+   * ####  ATÉ 18/09/2026 ESTE CAMINHO NÃO EXISTIA  ####
+   *
+   * A caixa mostrava a promessa e não havia como pegá-la: o
+   * `openBox` só apaga o ponto de notificação, o `claimFor` é a
+   * virada do mês e o `settle` recebe o desfecho de uma entrega que
+   * já aconteceu. O jogador liberava espaço e o prêmio continuava
+   * lá, inalcançável.
+   *
+   * ####  PERGUNTA-SE DE NOVO SE CABE  ####
+   *
+   * A mochila mudou desde a primeira tentativa — é justamente por
+   * isso que ele está clicando. Quem pergunta é o entregador, com a
+   * mesma regra do clique: NÃO SABER nunca vira "cabe", e o que não
+   * couber continua na caixa, sem virar "entregue".
+   *
+   * ####  A POSIÇÃO NUNCA É RENUMERADA  ####
+   *
+   * O pedido leva o snapshot INTEIRO do resgate e o conjunto das
+   * posições que ainda devem. A chave `(resgate, posição)` fica
+   * estável entre o clique e a reentrega — é ela que faz o site
+   * responder `idempotent` em vez de creditar duas vezes (02 §6.3).
+   *
+   * Caixa vazia não é recusa: devolve zerado, e a frase é de quem
+   * chamou.
+   *
+   * @throws ApiError quando a reentrega deste jogador já está em
+   *         andamento — duas em paralelo entregariam duas vezes o
+   *         que ocupa slot.
+   */
+  async redeliver(
+    serverId: string,
+    steamId: string,
+    delivery: BattlePassDelivery,
+    actor: BattlePassActor,
+    now: number = Date.now(),
+  ): Promise<RedeliverResult> {
+    const key = `${serverId}:${steamId}`;
+
+    if (this.#redelivering.has(key)) {
+      throw new ApiError(
+        'BATTLEPASS_REDELIVER_BUSY',
+        'Ainda estou entregando o que você pediu. Aguarde um instante.',
+        409,
+      );
+    }
+
+    const waiting = this.#deps.repository.pendingOf(serverId, steamId);
+
+    if (waiting.length === 0) return { delivered: 0, owed: 0, hint: '' };
+
+    // As posições que ainda devem, agrupadas pelo resgate que as
+    // prometeu: o entregador trabalha por resgate, porque é o
+    // `claimId` que forma a referência da carteira.
+    const positionsOf = new Map<number, Set<number>>();
+    const originOf = new Map<number, BattlePassPendingOrigin>();
+
+    for (const item of waiting) {
+      const positions = positionsOf.get(item.claimId);
+
+      if (positions === undefined) {
+        positionsOf.set(item.claimId, new Set([item.idx]));
+        originOf.set(item.claimId, item.origin);
+        continue;
+      }
+
+      positions.add(item.idx);
+    }
+
+    this.#redelivering.add(key);
+
+    let delivered = 0;
+    let owed = 0;
+    let hint = '';
+
+    try {
+      for (const [claimId, positions] of positionsOf) {
+        const claim = this.#deps.repository.getClaim(claimId);
+
+        // Pendência de um resgate que sumiu não tem o que reentregar:
+        // o snapshot dela morava lá.
+        if (claim === null) continue;
+
+        const outcomes = await delivery.deliver({
+          serverId,
+          steamId,
+          claimId,
+          level: claim.level,
+          lane: claim.lane,
+          rewards: claim.snapshot,
+          only: positions,
+        });
+
+        this.settle(claimId, outcomes, originOf.get(claimId) ?? 'inventory', now);
+
+        for (const outcome of outcomes) {
+          if (outcome.ok) {
+            delivered += 1;
+            continue;
+          }
+
+          owed += 1;
+
+          if (hint === '') hint = outcome.message ?? '';
+        }
+      }
+    } finally {
+      this.#redelivering.delete(key);
+    }
+
+    this.#log(
+      actor,
+      'box.redeliver',
+      `${String(waiting.length)} na caixa de ${steamId}`,
+      { server: serverId, delivered, owed },
+      steamId,
+    );
+
+    return { delivered, owed, hint };
   }
 
   // ======================================================

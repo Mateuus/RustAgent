@@ -605,3 +605,155 @@ describe('o resgate com o entregador ligado', () => {
     expect(lastReply(h)).toMatchObject({ ok: false, message: 'Você já resgatou o nível 1.' });
   });
 });
+
+// ============================================================
+//  A REENTREGA DA CAIXA
+//
+//  ####  O DEFEITO DE 18/09/2026  ####
+//
+//  O dono resgatou o nível 1, a sucata não coube, e a caixa abriu
+//  dizendo "50x Sucata · não coube na mochila". E não havia como
+//  pegar: ele liberava espaço e a recompensa continuava lá. Os
+//  casos abaixo são os modos de o conserto ficar pior que o
+//  defeito.
+// ============================================================
+
+describe('"resgatar tudo" dentro da caixa', () => {
+  it('a pendência que cabe é entregue e some da caixa', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    // 1. resgata com a mochila cheia: a AK fica devendo.
+    h.state.room = { fits: false, missingSlots: 2 };
+    h.sync.handleLine(
+      SERVER,
+      pluginLine({ kind: 'claim', secret, requestId: 'c1', steamId: PLAYER, level: 1, lane: 'free' }),
+    );
+    await settle();
+
+    expect(h.service.pendingOf(SERVER, PLAYER)).toHaveLength(1);
+
+    // 2. ele libera espaço e clica em "resgatar tudo" na caixa.
+    h.state.room = { fits: true };
+    h.sent.length = 0;
+    h.sync.handleLine(SERVER, pluginLine({ kind: 'retry', secret, requestId: 'x1', steamId: PLAYER }));
+    await settle();
+
+    expect(h.state.given).toEqual([{ shortname: 'rifle.ak', amount: 1 }]);
+    expect(h.service.pendingOf(SERVER, PLAYER)).toEqual([]);
+    expect(lastReply(h)).toMatchObject({ ok: true, message: 'Pronto! 1 item na sua mochila.' });
+
+    // A casa só fecha quando nada mais deve — e agora nada deve.
+    expect(h.sync.buildProgressPayload(SERVER, PLAYER)?.claims).toEqual([
+      { level: 1, lane: 'free', state: 'claimed' },
+    ]);
+    expect(h.sync.buildProgressPayload(SERVER, PLAYER)?.pending).toEqual([]);
+  });
+
+  it('a pendência que NÃO cabe continua na caixa, e não vira "entregue"', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    h.state.room = { fits: false, missingSlots: 2 };
+    h.sync.handleLine(
+      SERVER,
+      pluginLine({ kind: 'claim', secret, requestId: 'c2', steamId: PLAYER, level: 1, lane: 'free' }),
+    );
+    await settle();
+
+    // Ele clica sem ter liberado nada: a mochila continua cheia.
+    h.sent.length = 0;
+    h.sync.handleLine(SERVER, pluginLine({ kind: 'retry', secret, requestId: 'x2', steamId: PLAYER }));
+    await settle();
+
+    expect(h.state.given).toEqual([]);
+
+    const pending = h.service.pendingOf(SERVER, PLAYER);
+
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ idx: 0, code: 'INVENTORY_FULL', deliveredAt: null });
+    // A tentativa contou, e é o que diz que ele já pediu uma vez.
+    expect(pending[0]?.attempts).toBe(2);
+    expect(h.sync.buildProgressPayload(SERVER, PLAYER)?.claims).toEqual([
+      { level: 1, lane: 'free', state: 'pending' },
+    ]);
+
+    // E a frase diz o que fazer, em vez de "pronto".
+    expect(lastReply(h)).toMatchObject({
+      ok: false,
+      message: 'Ainda não coube nada: 1 item continua na caixa. Libere 2 slots na mochila.',
+    });
+  });
+
+  it('não reentrega o que já saiu: a moeda não é creditada duas vezes', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    // O nível 1 dá AK + 500 OZCoin. Sem espaço, a AK fica devendo e a
+    // moeda (que não ocupa slot) é creditada na hora.
+    h.state.room = { fits: false, missingSlots: 1 };
+    h.sync.handleLine(
+      SERVER,
+      pluginLine({ kind: 'claim', secret, requestId: 'c3', steamId: PLAYER, level: 1, lane: 'free' }),
+    );
+    await settle();
+
+    expect(h.state.credited).toHaveLength(1);
+    expect(h.service.pendingOf(SERVER, PLAYER).map((item) => item.idx)).toEqual([0]);
+
+    h.state.room = { fits: true };
+    h.sync.handleLine(SERVER, pluginLine({ kind: 'retry', secret, requestId: 'x3', steamId: PLAYER }));
+    await settle();
+
+    // A posição 1 não foi pedida de novo: ela já estava na mochila, e
+    // reentregá-la creditaria 500 OZCoin de graça.
+    expect(h.state.credited).toHaveLength(1);
+    expect(h.state.given).toEqual([{ shortname: 'rifle.ak', amount: 1 }]);
+    expect(h.service.pendingOf(SERVER, PLAYER)).toEqual([]);
+  });
+
+  it('a caixa vazia não é recusa nem promessa: ela diz que está vazia', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    h.sent.length = 0;
+    h.sync.handleLine(SERVER, pluginLine({ kind: 'retry', secret, requestId: 'x4', steamId: PLAYER }));
+    await settle();
+
+    expect(h.state.given).toEqual([]);
+    expect(lastReply(h)).toMatchObject({ ok: false, message: 'A sua caixa está vazia.' });
+  });
+
+  it('o rodapé tem como contar a caixa: a pendência viaja no progresso', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    h.state.room = { fits: false, missingSlots: 2 };
+    h.sync.handleLine(SERVER, pluginLine({ kind: 'claimAll', secret, requestId: 'c4', steamId: PLAYER }));
+    await settle();
+
+    const progress = h.sync.buildProgressPayload(SERVER, PLAYER);
+
+    // Nada mais a RESGATAR (as duas casas viraram resgate), e ainda
+    // assim há o que pegar. É desta lista que o botão do rodapé sai
+    // de "NADA PARA RESGATAR".
+    expect(progress?.claims.every((cell) => cell.state === 'pending')).toBe(true);
+    expect(progress?.pending.length).toBeGreaterThan(0);
+    expect(progress?.pending[0]).toMatchObject({ origin: 'full' });
+  });
+});

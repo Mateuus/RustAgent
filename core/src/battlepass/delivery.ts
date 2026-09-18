@@ -4,7 +4,7 @@
 //  ####  ELE É O ADAPTADOR, E NÃO UM SEGUNDO ENTREGADOR  ####
 //
 //  As duas pontas já existiam e não se falavam. De um lado o
-//  `BattlePassSync` pede (`BattlePassDelivery`, em game/battlepass.ts);
+//  `BattlePassSync` pede (`BattlePassDelivery`, em battlepass/service.ts);
 //  do outro o `QuestRewardService` traduz cada recompensa para quem
 //  já sabe entregá-la — a loja, a carteira, os kits, o ranking, o
 //  catálogo do Workshop, o passe. No meio não havia nada, e todo
@@ -68,10 +68,23 @@
 //  lista antes de entregar quebraria a proteção exatamente no
 //  caminho do retry (`quests/rewards.ts:181`). Quem pula é o `only`.
 //
+//  ------------------------------------------------------------
+//  ####  A REENTREGA DA CAIXA CHEGA PELO MESMO `deliver`  ####
+//
+//  Quem clica "resgatar tudo" DENTRO da caixa manda o snapshot
+//  inteiro do resgate e o conjunto `only` com as posições que ainda
+//  devem (`BattlePassService.redeliver`). Não há um segundo
+//  entregador aqui: só a lista de quem pergunta e de quem sai é
+//  menor.
+//
+//  E as posições de fora do `only` NÃO viram desfecho: reportá-las
+//  como "não entregue" reabriria na caixa o que já saiu da mochila
+//  na primeira tentativa.
+//
 //  Ver Docs/BattlePass/02-O-PASSE-DO-JOGADOR.md §6.
 // ============================================================
 
-import type { BattlePassDelivery } from '../game/battlepass.js';
+import type { BattlePassDelivery } from './service.js';
 import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
 import {
@@ -185,6 +198,7 @@ export class BattlePassDeliveryService implements BattlePassDelivery {
     readonly level: number;
     readonly lane: BattlePassLane;
     readonly rewards: readonly QuestReward[];
+    readonly only?: ReadonlySet<number> | undefined;
   }): Promise<readonly DeliveryOutcome[]> {
     try {
       return await this.#deliver(input);
@@ -197,12 +211,11 @@ export class BattlePassDeliveryService implements BattlePassDelivery {
       );
 
       // Tudo devendo, e com o motivo: o resgate continua `pending` e
-      // o painel sabe o que reentregar.
-      return input.rewards.map((_reward, idx) => ({
-        idx,
-        ok: false,
-        code: shortCode(error.message),
-      }));
+      // o painel sabe o que reentregar. "Tudo" aqui é o que foi
+      // PEDIDO — numa reentrega, o que já saiu não volta a dever.
+      return input.rewards.flatMap((_reward, idx) =>
+        wanted(input.only, idx) ? [{ idx, ok: false, code: shortCode(error.message) }] : [],
+      );
     }
   }
 
@@ -217,11 +230,13 @@ export class BattlePassDeliveryService implements BattlePassDelivery {
     readonly level: number;
     readonly lane: BattlePassLane;
     readonly rewards: readonly QuestReward[];
+    readonly only?: ReadonlySet<number> | undefined;
   }): Promise<readonly DeliveryOutcome[]> {
     const blocked = await this.#blocked(input);
     const only = new Set<number>();
 
     for (const [idx] of input.rewards.entries()) {
+      if (!wanted(input.only, idx)) continue;
       if (!blocked.has(idx)) only.add(idx);
     }
 
@@ -249,6 +264,11 @@ export class BattlePassDeliveryService implements BattlePassDelivery {
     const outcomes: DeliveryOutcome[] = [];
 
     for (const [idx] of input.rewards.entries()) {
+      // Posição que ninguém pediu não vira desfecho: dizer "não
+      // entregue" do que já saiu na primeira tentativa a reabriria
+      // na caixa.
+      if (!wanted(input.only, idx)) continue;
+
       const stop = blocked.get(idx);
 
       if (stop !== undefined) {
@@ -283,16 +303,23 @@ export class BattlePassDeliveryService implements BattlePassDelivery {
     readonly steamId: string;
     readonly claimId: number;
     readonly rewards: readonly QuestReward[];
+    readonly only?: ReadonlySet<number> | undefined;
   }): Promise<ReadonlyMap<number, BlockedReward>> {
     const roomIndexes = input.rewards.flatMap((reward, idx) =>
-      reward.kind === 'item' || reward.kind === 'kit' ? [idx] : [],
+      wanted(input.only, idx) && (reward.kind === 'item' || reward.kind === 'kit') ? [idx] : [],
     );
 
     // Só moeda, ponto, XP, VIP ou skin: nada ocupa slot, e perguntar
     // ao plugin seria uma ida ao RCON por nada.
     if (roomIndexes.length === 0) return new Map();
 
-    const items = roomItemsOf(input.rewards, this.#deps.kitItemsOf);
+    // A conta de espaço é a do que VAI SAIR agora. Numa reentrega,
+    // medir o snapshot inteiro cobraria slot pelo que já está na
+    // mochila desde a primeira tentativa — e a caixa nunca esvaziaria.
+    const items = roomItemsOf(
+      roomIndexes.map((idx) => input.rewards[idx] as QuestReward),
+      this.#deps.kitItemsOf,
+    );
 
     // Um kit que foi apagado depois de a temporada prometê-lo não
     // tem itens para medir. A entrega dele falha por conta própria,
@@ -335,6 +362,16 @@ export class BattlePassDeliveryService implements BattlePassDelivery {
 
     return blockAll(roomIndexes, 'INVENTORY_FULL', missingRoomMessage(missingSlots));
   }
+}
+
+/**
+ * Esta posição foi pedida?
+ *
+ * `only` ausente é o resgate inteiro — o caminho do clique. Presente,
+ * é a reentrega da caixa, e ele traz só o que ainda deve.
+ */
+function wanted(only: ReadonlySet<number> | undefined, idx: number): boolean {
+  return only === undefined || only.has(idx);
 }
 
 function blockAll(
