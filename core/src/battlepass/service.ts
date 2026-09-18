@@ -70,6 +70,7 @@ import type { QuestReward } from '../types/quests.js';
 import type { AuditFilter, BattlePassRepository, ProgressPage } from '../db/battlepass-repository.js';
 import { ApiError } from '../http/error-response.js';
 import { localDayOf } from '../rankings/periods.js';
+import type { PassGranter } from '../store/service.js';
 import { xpDayKey } from './xp-day.js';
 import { isBatchXpSource, whyNotXpSource, XP_SOURCES, type XpSource } from './xp-sources.js';
 
@@ -1361,6 +1362,44 @@ export class BattlePassService {
       detail,
     });
   }
+}
+
+/**
+ * O serviço do passe visto por quem VENDE — a loja in-game e a fila
+ * do site.
+ *
+ * ####  POR QUE ELE É UMA FUNÇÃO, E NÃO UM OBJETO NO `index.ts`  ####
+ *
+ * São os dois canais de venda ligando no mesmo `StoreService`
+ * (`store/service.ts:1018`), e o que muda entre eles é uma palavra:
+ * a origem. Montar o adaptador à mão em cada lugar faria a segunda
+ * cópia divergir da primeira no primeiro ajuste — e o teste
+ * exercitaria uma terceira, escrita dentro dele.
+ *
+ * O ator do registro acompanha a ORIGEM. Fixá-lo em `loja` faria a
+ * auditoria contar uma venda do site como venda dentro do jogo.
+ */
+export function passGranterOf(service: BattlePassService): PassGranter {
+  return {
+    // De que mês é a compra. A régua do calendário é a do passe — e
+    // ela já usa `localDayOf`, a mesma do resto do processo.
+    periodNow: (now) => service.periodNow(now),
+    hasPass: (serverId, steamId, period) => service.hasPass(serverId, steamId, period),
+    grant: (input) => {
+      service.grant(
+        {
+          serverId: input.serverId,
+          steamId: input.steamId,
+          // O mês do PLANO CONGELADO. Ver store/service.ts.
+          period: input.period,
+          origin: input.origin,
+          sourceRef: input.sourceRef,
+          createdBy: input.createdBy,
+        },
+        { name: input.origin, source: 'system' },
+      );
+    },
+  };
 }
 
 /** `2026-12` -> `2027-01`. A conta do mês seguinte, sem `Date`. */

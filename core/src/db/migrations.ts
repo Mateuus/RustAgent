@@ -9624,6 +9624,78 @@ DROP TABLE store_offer_perks_102;
 CREATE INDEX idx_store_offer_perks_offer ON store_offer_perks (offer_id, position);
 `;
 
+// ------------------------------------------------------------
+//  104 - a fila do site aprende a entregar o passe
+//
+//  ####  O DEFEITO QUE ELA CONSERTA  ####
+//
+//  `site_deliveries.kind` tem CHECK com a lista dos sete tipos que
+//  o site sabia mandar, e `pass` nao esta nela (a lista foi escrita
+//  na 097). Enfileirar um passe vindo do site volta "CHECK
+//  constraint failed" -- e o custo disso nao e um erro na tela: a
+//  tarefa nao vira ACK nenhum e fica PENDING do lado de la,
+//  ocupando a cabeca da pagina da fila para sempre.
+//
+//  Medido com sonda antes de escrever isto, e nao deduzido.
+//
+//  ####  A FORMA E A DA 038 E DA 097  ####
+//
+//  SQLite nao altera CHECK: renomeia, cria, copia, dropa, recria os
+//  dois indices depois do DROP -- nome de indice e global no schema
+//  e o RENAME nao o move. As linhas antigas passam inteiras: elas
+//  sao o comprovante de entregas ja confirmadas, e o site ainda as
+//  cita quando alguem reclama de uma compra.
+//
+//  `site_deliveries` nao tem dependentes, entao o passo "as
+//  dependentes saem do caminho" da 103 nao existe aqui. Fica dito
+//  porque quem copiar este bloco para uma tabela COM dependentes
+//  precisa saber que ele falta (foreign_keys = ON em database.ts).
+// ------------------------------------------------------------
+const SITE_DELIVERY_PASS_SCHEMA = `
+ALTER TABLE site_deliveries RENAME TO site_deliveries_103;
+
+CREATE TABLE site_deliveries (
+  id TEXT PRIMARY KEY,
+
+  server_id TEXT NOT NULL,
+  steam_id  TEXT NOT NULL,
+
+  -- vip_revoke e skin_revoke nao entregam nada: eles TIRAM.
+  -- pass concede o direito ao passe daquele mes, NAQUELE servidor.
+  kind TEXT NOT NULL
+    CHECK (kind IN ('item', 'kit', 'vip', 'vehicle', 'vip_revoke', 'skin',
+                    'skin_revoke', 'pass')),
+
+  payload TEXT NOT NULL,
+  source_ref TEXT,
+
+  state TEXT NOT NULL
+    CHECK (state IN ('reserved', 'delivered', 'failed', 'indeterminate', 'expired')),
+
+  reason TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+
+  reserved_at INTEGER NOT NULL,
+  acked_at    INTEGER,
+  updated_at  INTEGER NOT NULL
+);
+
+INSERT INTO site_deliveries
+  (id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at)
+SELECT
+   id, server_id, steam_id, kind, payload, source_ref, state, reason,
+   attempts, reserved_at, acked_at, updated_at
+  FROM site_deliveries_103;
+
+DROP TABLE site_deliveries_103;
+
+CREATE INDEX idx_site_deliveries_open ON site_deliveries (updated_at DESC)
+  WHERE acked_at IS NULL;
+
+CREATE INDEX idx_site_deliveries_player ON site_deliveries (steam_id, reserved_at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { id: 1, name: 'servers', sql: SERVERS_SCHEMA },
   { id: 2, name: 'plugins', sql: PLUGINS_SCHEMA },
@@ -9934,6 +10006,12 @@ export const MIGRATIONS: readonly Migration[] = [
   // nada; repetir um vira migracao PULADA em silencio no merge --
   // ver a nota da 087.
   { id: 103, name: 'store-offer-pass', sql: STORE_OFFER_PASS_SCHEMA },
+  // 17/09/2026: a fila do site aprende `pass`. O id 104 foi conferido
+  // livre em TODAS as branches locais antes de ser usado -- id
+  // repetido vira migracao PULADA em silencio no merge. Sem esta, a
+  // tarefa de passe nem entra na fila: o CHECK da 097 a recusa, e ela
+  // fica pendente do lado do site sem virar ACK nenhum.
+  { id: 104, name: 'site-delivery-pass', sql: SITE_DELIVERY_PASS_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

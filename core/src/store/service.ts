@@ -186,11 +186,43 @@ export interface PassGranter {
     readonly steamId: string;
     /** O mês do PLANO CONGELADO, nunca o de hoje. */
     readonly period: string;
-    readonly origin: 'loja';
+    readonly origin: DeliveryOrigin;
     /** A referência da compra: é o que liga o direito ao pagamento. */
     readonly sourceRef: string | null;
     readonly createdBy: string;
   }): void | Promise<void>;
+}
+
+/**
+ * Quem vendeu o que a entrega está concedendo.
+ *
+ * São os dois canais de venda que chegam ao `deliverPlan`: a loja
+ * dentro do jogo, que debita OzCoin aqui, e a fila do site, que
+ * cobrou lá e manda a tarefa. O painel não aparece porque o que o
+ * admin dá à mão não passa por aqui.
+ *
+ * As palavras são as de `BATTLEPASS_ENTITLEMENT_ORIGINS`
+ * (`types/battlepass.ts:527`), e são as mesmas do VIP, de propósito:
+ * quem lê os dois registros lê a mesma palavra para a mesma coisa.
+ */
+export type DeliveryOrigin = 'loja' | 'site';
+
+/**
+ * De onde veio a entrega, para o que ela concede como DIREITO.
+ *
+ * Só o passe lê isto hoje. Item, kit e veículo não têm onde anotar
+ * procedência — eles viram um `origemz.give` e acabam —, e o VIP tem
+ * o registro dele próprio, escrito pela `VipList`.
+ */
+export interface DeliverySource {
+  /**
+   * A referência da compra. `null` = a entrega não sabe.
+   *
+   * Na loja in-game é a `reference` do débito; na fila do site é o
+   * `sourceRef` da tarefa (ou o id dela).
+   */
+  readonly reference: string | null;
+  readonly origin: DeliveryOrigin;
 }
 
 /** O que a loja precisa da ficha do jogador. E nada além. */
@@ -867,7 +899,10 @@ export class StoreService {
       // O MESMO plano que foi gravado na linha: entregar a partir
       // dele, e não da oferta, é o que faz a compra e a
       // reconciliação entregarem a mesma coisa.
-      await this.deliverPlan(input.serverId, input.steamId, plan, reference);
+      await this.deliverPlan(input.serverId, input.steamId, plan, {
+        reference,
+        origin: 'loja',
+      });
     } catch (error) {
       return await this.#refund(purchase, toError(error));
     }
@@ -931,14 +966,14 @@ export class StoreService {
     steamId: string,
     plan: DeliveryPlan,
     /**
-     * A referência da compra, para o que é DIREITO e não item.
+     * De onde veio a compra, para o que é DIREITO e não item.
      *
-     * Um `origemz.give` não tem onde anotar de onde veio; uma linha
-     * de `battlepass_entitlements` tem, e é ela que responde "de onde
-     * veio este passe?" sem busca por horário. Ausente = a entrega
-     * não sabe (a fila do site ainda não a manda — frente G).
+     * Ausente = a loja in-game, que é quem sempre chamou. A fila do
+     * site passa a sua (`site/deliveries.ts`), e é por ela que a
+     * ficha do jogador distingue "comprou no jogo" de "comprou no
+     * site" — ver `DeliverySource`.
      */
-    reference?: string | null,
+    source: DeliverySource = { reference: null, origin: 'loja' },
   ): Promise<void> {
     const rcon = this.#deps.servers.contextOf(serverId)?.rcon ?? disconnectedRcon(serverId);
     const units = plan.units;
@@ -1037,12 +1072,16 @@ export class StoreService {
         serverId,
         steamId,
         period: plan.pass.period,
-        origin: 'loja',
+        // Quem VENDEU, e a ficha do jogador mostra isso. A loja
+        // in-game debitou OzCoin daqui; o site cobrou lá e mandou
+        // pela fila. Gravar os dois como `loja` faria o suporte
+        // procurar no extrato errado.
+        origin: source.origin,
         // A `reference` é o que liga o direito ao pagamento no
         // ledger do site. Sem ela, "de onde veio este passe?" vira
         // busca por horário.
-        sourceRef: reference ?? null,
-        createdBy: 'loja',
+        sourceRef: source.reference,
+        createdBy: source.origin,
       });
     }
   }
@@ -1285,7 +1324,10 @@ export class StoreService {
     }
 
     try {
-      await this.deliverPlan(purchase.serverId, purchase.steamId, plan, purchase.reference);
+      await this.deliverPlan(purchase.serverId, purchase.steamId, plan, {
+        reference: purchase.reference,
+        origin: 'loja',
+      });
     } catch (error) {
       const outcome = await this.#refund(
         this.#reread(purchase.serverId, purchase.id, purchase),

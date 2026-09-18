@@ -18,14 +18,20 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { BattlePassService, passGranterOf } from '../src/battlepass/service.js';
+import { BattlePassRepository } from '../src/db/battlepass-repository.js';
 import { openDatabase, MEMORY_DATABASE } from '../src/db/database.js';
 import { runMigrations } from '../src/db/migrations.js';
+import { ServersRepository } from '../src/db/servers-repository.js';
 import { SiteDeliveriesRepository } from '../src/db/site-deliveries-repository.js';
+import { StoreRepository } from '../src/db/store-repository.js';
+import { WalletsRepository } from '../src/db/wallets-repository.js';
 import { ApiError } from '../src/http/error-response.js';
 import { createLogger } from '../src/logger.js';
 import { SiteClient } from '../src/site/client.js';
 import { SiteDeliveries, ackOf, planOfPayload } from '../src/site/deliveries.js';
-import type { DeliveryPlan } from '../src/store/service.js';
+import { StoreService, type DeliveryPlan } from '../src/store/service.js';
+import { LocalWallet } from '../src/store/wallet.js';
 
 const SERVER = 'pvp1';
 const STEAM_ID = '76561198000000000';
@@ -74,6 +80,8 @@ function fakeFetch(responses: readonly Canned[]): {
 interface Delivered {
   readonly steamId: string;
   readonly plan: DeliveryPlan;
+  /** De onde a entrega veio, para o que ela concede como direito. */
+  readonly reference: string;
 }
 
 interface Revoked {
@@ -124,7 +132,11 @@ function harness(
         await options.deliver();
       }
 
-      delivered.push({ steamId: input.steamId, plan: input.plan });
+      delivered.push({
+        steamId: input.steamId,
+        plan: input.plan,
+        reference: input.reference,
+      });
     },
     revokeVip:
       options.withoutVips === true
@@ -544,6 +556,31 @@ describe('o vocabulário do payload', () => {
     expect(planOfPayload('vehicle', { prefab: 'minicopter', fuel: 1001 })).toBeNull();
   });
 
+  it('o passe é UM MÊS, e o mês vem do payload', () => {
+    const plan = planOfPayload('pass', { period: '2026-09' });
+
+    expect(plan?.pass).toEqual({ period: '2026-09' });
+    // Ele não entrega item nenhum: o que nasce é uma linha de
+    // direito, e ela não tem quantidade.
+    expect(plan?.items).toEqual([]);
+    expect(plan?.vip).toBeNull();
+    expect(plan?.units).toBe(1);
+  });
+
+  it('passe sem mês, ou com mês impossível, NÃO é entrega', () => {
+    // Campo esquecido não pode virar "o mês de hoje". Na virada do
+    // dia 1 o jogador pagaria por setembro e receberia outubro — ou
+    // receberia um mês que já é dele, e aí o `grant` é no-op, o ACK
+    // diz `delivered` e o dinheiro some sem nenhuma tela acusar.
+    expect(planOfPayload('pass', {})).toBeNull();
+    expect(planOfPayload('pass', { period: '2026-13' })).toBeNull();
+    expect(planOfPayload('pass', { period: '2026-00' })).toBeNull();
+    // `2026-9` é a grafia que um `${year}-${month}` sem padding
+    // produz, e ela não é o formato do resto do projeto.
+    expect(planOfPayload('pass', { period: '2026-9' })).toBeNull();
+    expect(planOfPayload('pass', { period: 202_609 })).toBeNull();
+  });
+
   it('o VIP vitalício é days null, e continua valendo', () => {
     // Código morto na fase 1 — nada no site cria tarefa deste kind —,
     // e testado assim mesmo: ramo não exercitado sem teste apodrece
@@ -759,5 +796,280 @@ describe('a concessão de VIP vinda da fila', () => {
     expect(acksOf(calls)).toEqual([
       { id: 'DLV-9f3a1c2b7e04', status: 'deferred', reason: 'PLAYER_OFFLINE' },
     ]);
+  });
+});
+
+/** Uma tarefa de passe, como o site a manda (Docs/37 §2). */
+function passTask(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'DLV-3c7e15a9b206',
+    steamId: STEAM_ID,
+    kind: 'pass',
+    payload: { period: '2026-09' },
+    sourceRef: 'ITM-7a10f3c4d885',
+    ...over,
+  };
+}
+
+/**
+ * A tabela ja conhece o kind `pass`?
+ *
+ * ####  POR QUE ISTO E UMA SONDA, E NAO UM `.skip` ESCRITO A MAO  ####
+ *
+ * O `kind` da fila e um `CHECK (kind IN (...))` da migracao 097
+ * (`migrations.ts:8286`), e `pass` ainda nao esta la: a migracao que
+ * amplia a lista nao foi escrita nesta frente, porque o id seguinte
+ * precisa ser conferido contra todas as branches vivas (Docs/37 §7).
+ * Sem ela o `reserve` devolve `false`, e a fila nao chega a entregar.
+ *
+ * Um `.skip` fixo esconderia isso ate alguem lembrar de tira-lo. A
+ * sonda tenta a reserva de verdade, pelo caminho de producao: no dia
+ * em que a migracao entrar, estes casos voltam a rodar sozinhos.
+ */
+function queueAcceptsPass(): boolean {
+  const db = openDatabase({ file: MEMORY_DATABASE });
+
+  runMigrations(db);
+
+  return new SiteDeliveriesRepository(db).reserve(
+    {
+      id: 'PROBE',
+      serverId: SERVER,
+      steamId: STEAM_ID,
+      kind: 'pass',
+      payload: '{}',
+      sourceRef: null,
+    },
+    NOW,
+  );
+}
+
+describe.skipIf(!queueAcceptsPass())('o passe de batalha vindo da fila do site', () => {
+  it('concede com o jogador OFFLINE: o direito é uma linha, não um item', async () => {
+    // É a lição que o VIP já pagou: esperar o jogador deixava a
+    // compra invisível até ele entrar e, passando do TTL de 30 dias,
+    // o site devolvia ao inventário uma coisa que tinha sido paga.
+    const { queue, repository, calls, delivered } = harness([page([passTask()]), ACK_OK], {
+      online: [],
+    });
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.plan.pass).toEqual({ period: '2026-09' });
+    expect(repository.get('DLV-3c7e15a9b206')?.state).toBe('delivered');
+    expect(acksOf(calls)).toEqual([{ id: 'DLV-3c7e15a9b206', status: 'delivered' }]);
+  });
+
+  it('nem pergunta quem está online', async () => {
+    // `null` é "não deu para perguntar", e adia QUALQUER entrega que
+    // toque o inventário. O passe passa direto.
+    const { queue, calls, delivered } = harness([page([passTask()]), ACK_OK], { online: null });
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(1);
+    expect(acksOf(calls)[0]?.status).toBe('delivered');
+  });
+
+  it('a MESMA entrega duas vezes concede UMA vez', async () => {
+    const { queue, calls, delivered } = harness(
+      [page([passTask()]), ACK_OK, page([passTask()]), ACK_OK],
+      { online: [] },
+    );
+
+    await queue.poll();
+    await queue.poll();
+
+    // O dedupe é a linha local, e ela é anterior ao `grant`: a
+    // segunda volta nem chega ao caminho da entrega.
+    expect(delivered).toHaveLength(1);
+    // Mas o desfecho é reenviado, e isso é de propósito: repetir um
+    // `delivered` não muda nada no site, e é o que torna seguro
+    // repetir um lote depois de um timeout.
+    expect(acksOf(calls)).toEqual([
+      { id: 'DLV-3c7e15a9b206', status: 'delivered' },
+      { id: 'DLV-3c7e15a9b206', status: 'delivered' },
+    ]);
+  });
+
+  it('a referência que desce é a do site; sem ela, o id da tarefa', async () => {
+    const withRef = harness([page([passTask()]), ACK_OK], { online: [] });
+
+    await withRef.queue.poll();
+
+    expect(withRef.delivered[0]?.reference).toBe('ITM-7a10f3c4d885');
+
+    const without = harness([page([passTask({ sourceRef: null })]), ACK_OK], { online: [] });
+
+    await without.queue.poll();
+
+    // Sem o pedido do lado de lá, o que sobra é o id da tarefa — que
+    // sempre existe, e é o mesmo que viaja no ACK.
+    expect(without.delivered[0]?.reference).toBe('DLV-3c7e15a9b206');
+  });
+
+  it('mês torto não é entrega adiada: é PAYLOAD_INVALID', async () => {
+    // `failed` devolve o item ao inventário do site, e é o certo:
+    // nenhuma espera conserta um mês que não existe.
+    const { queue, calls, delivered } = harness(
+      [page([passTask({ payload: { period: 'setembro' } })]), ACK_OK],
+      { online: [] },
+    );
+
+    await queue.poll();
+
+    expect(delivered).toHaveLength(0);
+    expect(acksOf(calls)).toEqual([
+      { id: 'DLV-3c7e15a9b206', status: 'failed', reason: 'PAYLOAD_INVALID' },
+    ]);
+  });
+});
+
+/**
+ * A cadeia inteira do direito: o plano da fila entra no
+ * `deliverPlan` e sai uma linha de `battlepass_entitlements`.
+ *
+ * ####  NADA AQUI É DUBLÊ, E ESSE É O PONTO  ####
+ *
+ * O `StoreService` e o `BattlePassService` são os de produção,
+ * ligados pelo MESMO `passGranterOf` que o `index.ts` usa. É o único
+ * jeito de a idempotência por `(servidor, jogador, mês)` ser provada
+ * pelo índice único do banco, e não por um `Set` escrito dentro do
+ * teste.
+ */
+function passHarness(): {
+  readonly store: StoreService;
+  readonly battlePass: BattlePassService;
+} {
+  const db = openDatabase({ file: MEMORY_DATABASE });
+
+  runMigrations(db);
+
+  const servers = new ServersRepository(db);
+
+  servers.create({
+    id: SERVER,
+    name: SERVER,
+    identity: SERVER,
+    gamePort: 28_015,
+    rconPort: 28_016,
+    queryPort: 28_017,
+    appPort: 28_082,
+    installDir: 'F:\\Servers\\pvp1',
+  });
+
+  const battlePass = new BattlePassService({
+    repository: new BattlePassRepository(db),
+    serverIds: () => servers.list().map((server) => server.id),
+    onChange: () => undefined,
+  });
+
+  const store = new StoreService({
+    repository: new StoreRepository(db),
+    wallet: new LocalWallet(new WalletsRepository(db)),
+    // O plano do passe não manda comando nenhum: não há item para
+    // dar nem veículo para nascer.
+    servers: { contextOf: () => null },
+    pass: passGranterOf(battlePass),
+    logger: silent,
+    now: () => NOW,
+  });
+
+  return { store, battlePass };
+}
+
+/** O que a fila monta a partir de `{ "period": "2026-09" }`. */
+const PASS_PLAN: DeliveryPlan = {
+  items: [],
+  vehicle: null,
+  vip: null,
+  pass: { period: '2026-09' },
+  units: 1,
+};
+
+describe('o direito do passe, do plano até a linha do banco', () => {
+  it('nasce com origem `site` e com a referência da entrega', async () => {
+    const { store, battlePass } = passHarness();
+
+    await store.deliverPlan(SERVER, STEAM_ID, PASS_PLAN, {
+      reference: 'ITM-7a10f3c4d885',
+      origin: 'site',
+    });
+
+    const [entitlement] = battlePass.entitlementsOf(STEAM_ID);
+
+    expect(entitlement?.period).toBe('2026-09');
+    // O passe vale só no servidor onde foi comprado, e a fila é a
+    // dele: o servidor não viaja no payload porque ele É a fila.
+    expect(entitlement?.serverId).toBe(SERVER);
+    // Quem vendeu foi o SITE. Gravar `loja` mandaria o suporte
+    // procurar a venda no extrato errado.
+    expect(entitlement?.origin).toBe('site');
+    expect(entitlement?.sourceRef).toBe('ITM-7a10f3c4d885');
+  });
+
+  it('o mês é o do PLANO, e não o do relógio da entrega', async () => {
+    // O relógio deste agente é 2023-11 (`NOW`) e o plano promete
+    // 2026-09. Se a entrega resolvesse o mês sozinha, um passe pago
+    // no dia 30 às 23h58 e entregue às 00h05 nasceria no mês errado.
+    const { store, battlePass } = passHarness();
+
+    expect(battlePass.periodNow(NOW)).not.toBe('2026-09');
+
+    await store.deliverPlan(SERVER, STEAM_ID, PASS_PLAN, {
+      reference: 'ITM-7a10f3c4d885',
+      origin: 'site',
+    });
+
+    expect(battlePass.entitlementsOf(STEAM_ID)[0]?.period).toBe('2026-09');
+  });
+
+  it('um mês já concedido volta como sucesso, e não como erro', async () => {
+    // O caso é normal, e não acidente: a mesma tarefa reenviada, ou
+    // o jogador que comprou no site o mês que já ganhou do painel.
+    // Se isto lançasse, o ACK sairia `failed` e o site devolveria ao
+    // inventário uma compra que ESTÁ honrada aqui.
+    const { store, battlePass } = passHarness();
+
+    await store.deliverPlan(SERVER, STEAM_ID, PASS_PLAN, {
+      reference: 'ITM-7a10f3c4d885',
+      origin: 'site',
+    });
+
+    await expect(
+      store.deliverPlan(SERVER, STEAM_ID, PASS_PLAN, {
+        reference: 'ITM-9b22e7a10c34',
+        origin: 'site',
+      }),
+    ).resolves.toBeUndefined();
+
+    // Uma linha, e é a PRIMEIRA: o índice único parcial recusa o
+    // segundo direito vivo do mesmo mês, e a referência gravada
+    // continua sendo a da compra que de fato o criou.
+    const entitlements = battlePass.entitlementsOf(STEAM_ID);
+
+    expect(entitlements).toHaveLength(1);
+    expect(entitlements[0]?.sourceRef).toBe('ITM-7a10f3c4d885');
+  });
+
+  it('agente sem o concessor do passe FALHA antes de dizer que deu certo', async () => {
+    // Sem isto a fila ACKaria `delivered` para uma tarefa que não
+    // concedeu nada, e o site fecharia a venda.
+    const db = openDatabase({ file: MEMORY_DATABASE });
+
+    runMigrations(db);
+
+    const store = new StoreService({
+      repository: new StoreRepository(db),
+      wallet: new LocalWallet(new WalletsRepository(db)),
+      servers: { contextOf: () => null },
+      logger: silent,
+      now: () => NOW,
+    });
+
+    await expect(
+      store.deliverPlan(SERVER, STEAM_ID, PASS_PLAN, { reference: null, origin: 'site' }),
+    ).rejects.toThrow('PASS_GRANTER_UNAVAILABLE');
   });
 });

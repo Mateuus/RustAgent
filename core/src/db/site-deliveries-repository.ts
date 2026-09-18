@@ -59,7 +59,24 @@ export type SiteDeliveryKind =
   // tabela os aceita desde a migracao 097; quem os executa e o
   // `#skin` de site/deliveries.ts.
   | 'skin'
-  | 'skin_revoke';
+  | 'skin_revoke'
+  /**
+   * O passe de batalha de um mes, comprado no site (Docs/37).
+   *
+   * ####  O CHECK DA TABELA AINDA NAO O ACEITA  ####
+   *
+   * O `kind` da coluna e um `CHECK (kind IN (...))` escrito na
+   * migracao 097 (migrations.ts:8286), e `pass` nao esta la. Sem a
+   * migracao que amplia a lista, o `reserve` abaixo devolve `false`
+   * para toda tarefa de passe e a fila fica sem ACK — a tarefa
+   * permanece em `pending` e ocupa a cabeca da pagina.
+   *
+   * A migracao NAO foi escrita nesta frente de proposito: o id
+   * seguinte (104) precisa ser conferido contra todas as branches
+   * vivas antes de ser usado, e essa conferencia e do dono do
+   * repositorio. Ver Docs/37 §7.
+   */
+  | 'pass';
 
 export interface SiteDeliveryRow {
   readonly id: string;
