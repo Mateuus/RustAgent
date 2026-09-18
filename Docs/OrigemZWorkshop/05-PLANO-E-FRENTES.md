@@ -330,3 +330,21 @@ consequência da decisão, e não defeito.
 - **O lado do site.** É de quem mantém o OrigemZSite (04 §5).
 - **Atualizar o 00 e o 01.** O cabeçalho deles já aponta para cá. Quem fechar a
   `skins-do-jogador` acrescenta ao 01 §8 ("onde está cada coisa") a tabela final de arquivos.
+
+---
+
+## 9. Ao recarregar o plugin: um erro que parece de sintaxe e não é
+
+**MEDIDO em 18/09/2026.** O `oxide.reload OrigemZWorkshop` falhou **duas vezes** com
+
+```text
+Timed out waiting for plugin to be compiled: OrigemZWorkshop
+```
+
+e o menu ficou fora do ar. Não era o código: o log trazia, logo antes,
+`Shutting down compiler because idle shutdown` — **o compilador do Oxide se desligou por
+ociosidade no meio da compilação.** Este arquivo tem ~6.500 linhas e gera ~52 KB de assembly, e
+é grande o bastante para cair nessa janela.
+
+Com o compilador quente — basta ter compilado qualquer outro plugin antes — a 0.6.0 subiu de
+primeira, em `0.01s`. **Antes de procurar ponto-e-vírgula, leia o log e recarregue de novo.**

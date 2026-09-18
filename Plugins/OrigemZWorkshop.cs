@@ -202,6 +202,17 @@
 //     ele entra na resposta casada e a transforma em algo que não é
 //     JSON. Todo push passa por `timer.Once`.
 //
+//  7. "Timed out waiting for plugin to be compiled" NÃO É ERRO DESTE
+//     ARQUIVO. MEDIDO em 18/09/2026: o recarregamento falhou DUAS
+//     vezes e o menu ficou fora do ar, e o log dizia, logo antes,
+//     `Shutting down compiler because idle shutdown` — o compilador
+//     do Oxide se desligou por ociosidade no meio da compilação. São
+//     6.500 linhas e ~52 KB de assembly: este arquivo é grande o
+//     bastante para cair nessa janela. Com o compilador quente (basta
+//     ter compilado outro plugin antes) a 0.6.0 subiu de primeira, em
+//     0,01 s. Antes de procurar ponto-e-vírgula, leia o log e
+//     recarregue de novo.
+//
 // ============================================================
 //  ####  O CONTRATO COM O AGENTE  ####
 //
@@ -1115,6 +1126,11 @@ namespace Oxide.Plugins
         /// pagar o diretório inteiro 48 vezes por desenho. Aqui é uma
         /// varredura por ITEM que tem skin no catálogo — e só no `sync`.
         ///
+        /// MEDIDO no server01 em 18/09/2026 (`origemz.dlcprobe.cost`): o
+        /// diretório tem 619 skins, a busca linear nele custa até 2.569,5 µs
+        /// no pior caso e o `ForItem` 2.214,2 µs. É essa conta que cada
+        /// célula pagaria se a resolução não morasse aqui.
+        ///
         /// ####  OS DOIS NÚMEROS DA MESMA SKIN  ####
         ///
         /// O catálogo guarda o Workshop ID (10 dígitos, não cabe em `int`);
@@ -1123,6 +1139,13 @@ namespace Oxide.Plugins
         /// ponte entre os dois, e é por ela que uma skin nossa aprovada
         /// pela Facepunch passa a ser reconhecida como oficial sem que
         /// ninguém mexa no cadastro.
+        ///
+        /// A ponte EXISTE e vem preenchida — MEDIDO no server01 em
+        /// 18/09/2026: das 12 skins oficiais da `rifle.ak`, a 10135 tem
+        /// `workshopID` 615766181, a 10137 tem 618543834 e a 10138 tem
+        /// 566540646. Ou seja: as oficiais nasceram no Workshop e foram
+        /// aprovadas, que é exatamente o caminho que esta feature precisa
+        /// atravessar.
         ///
         /// O caso de o admin ter cadastrado o PRÓPRIO id de inventário
         /// também é coberto — o `RejectsInventoryId` recusa isso hoje, mas
@@ -1849,6 +1872,23 @@ namespace Oxide.Plugins
         ///     detalhe e do botão pergunta — 48 por página, no pior caso;
         ///   - e aqui a resposta fica guardada, então cada skin oficial é
         ///     perguntada UMA vez por abertura de menu, e não 48.
+        ///
+        /// ####  MEDIDO no server01 em 18/09/2026  ####
+        ///
+        /// Uma página cheia da grade, 48 perguntas sem cache nenhum:
+        /// **1.389,9 µs** (`origemz.skins.dlccost`, com o dono no jogo).
+        /// São ~29 µs por pergunta a frio, e ~12,8 µs já aquecida
+        /// (`origemz.dlcprobe.cost` com 200 repetições: 2.569,5 µs).
+        ///
+        /// Isso é 0,6 a 1,4 ms POR DESENHO — e o menu redesenha a cada
+        /// clique. Com o cache, a mesma pergunta vira uma consulta a
+        /// dicionário, e o catálogo inteiro custa uma rodada por abertura.
+        ///
+        /// Os campos `coldUs` e `warmUs` daquela corrida (55,5 e 4,8) NÃO
+        /// medem isso: o catálogo do server01 não tinha nenhuma skin
+        /// oficial naquele dia, então os dois cronometraram um laço vazio.
+        /// Quando a primeira skin de DLC entrar no catálogo, é ali que o
+        /// custo real de abrir o menu vai aparecer — remeça.
         ///
         /// O cache é limpo quando o menu abre e quando o jogador sai: quem
         /// acabou de comprar o DLC fecha e abre a tela — e não precisa de
@@ -6166,6 +6206,21 @@ namespace Oxide.Plugins
         /// Sem skin oficial no catálogo, o `worstDrawUs` usa as skins
         /// oficiais da AK como amostra — senão o número seria zero e não
         /// diria nada sobre o dia em que a primeira skin de DLC entrar.
+        ///
+        /// ####  A PRIMEIRA CORRIDA, no server01 em 18/09/2026  ####
+        ///
+        ///     skins 1 · official 0 · dlc 0 · sampled 12 · cells 48
+        ///     coldUs 55,5 · warmUs 4,8 · worstDrawUs 1.389,9
+        ///
+        /// Com o catálogo sem nenhuma oficial (`official 0`), o custo de
+        /// hoje é ZERO — e é preciso ler os campos sabendo disso: o `cold`
+        /// e o `warm` acima cronometraram um LAÇO VAZIO, não a pergunta.
+        /// Quem respondeu alguma coisa foi o `worstDrawUs`, que usa a
+        /// amostra da AK: 1.389,9 µs para 48 perguntas, ~29 µs cada.
+        ///
+        /// RODE ISTO DE NOVO no dia em que a primeira skin oficial entrar
+        /// no catálogo. Só nesse dia o `coldUs` passa a medir o que o nome
+        /// dele promete.
         /// </summary>
         [ConsoleCommand(DlcCostCommand)]
         private void CmdDlcCost(ConsoleSystem.Arg arg)

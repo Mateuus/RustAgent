@@ -115,6 +115,20 @@ que o nosso catálogo guarda é o **Workshop ID** (10 dígitos, não cabe em `in
 dígitos). A ponte entre os dois é o `SteamInventoryItem.workshopID` — e é por ela que uma skin
 nossa aprovada passa a ser reconhecida sem ninguém mexer no cadastro.
 
+**A ponte existe e vem preenchida**, medido no server01 em 18/09/2026 com
+`origemz.dlcprobe.skins rifle.ak`: das 12 oficiais da AK, a `10135` traz `workshopID`
+`615766181`, a `10137` traz `618543834` e a `10138` traz `566540646`. As oficiais **nasceram no
+Workshop e foram aprovadas** — é o caminho que o dono descreveu, e ele está coberto. As três
+vêm com `DlcItem` nulo: são skins de loja Steam, não de DLC, e é por isso que a frase da tela
+distingue as duas.
+
+**O custo, medido no mesmo dia** (`origemz.skins.dlccost`, `origemz.dlcprobe.cost`): o
+diretório de skins do jogo tem **619** entradas e a busca nele é linear, então cada pergunta
+custa **~12,8 µs** aquecida e **~29 µs** a frio. Uma página cheia da grade são 48 perguntas —
+**1.389,9 µs por desenho**, e o menu redesenha a cada clique. Daí as duas defesas do plugin: as
+contagens não perguntam nada, e a resposta fica guardada por jogador até o menu abrir de novo.
+Com o catálogo de hoje, que não tem nenhuma skin oficial, o custo é **zero**.
+
 **Quem responde é o jogo, não nós.** O `CheckSkinOwnership` já cobre a licença do DLC
 (`SteamDLCItem.HasLicense`), o item comprado na loja e o desbloqueio por outro item Steam.
 Reescrever essa regra aqui seria o contorno que a Facepunch proíbe. Erro de leitura responde

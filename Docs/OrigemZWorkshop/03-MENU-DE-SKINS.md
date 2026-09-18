@@ -400,6 +400,12 @@ Todos com o **token da sessão** do jogador, gerado ao abrir e descartado ao fec
 | `origemz.skins.bytes` | nenhum | só servidor/RCON ou admin: mede o pior caso de cada região (§6) |
 | `origemz.skins.dlccost` | `<steamId>` | só servidor/RCON ou admin: mede o custo da trava de DLC (02 §3.1) com o catálogo real — quantas skins são oficiais, o custo de abrir o menu com o cache vazio, o de um clique seguinte, e o de 48 células se o cache não existisse |
 
+**A primeira corrida do `dlccost`**, no server01 em 18/09/2026: `official 0 · sampled 12 ·
+coldUs 55,5 · warmUs 4,8 · worstDrawUs 1.389,9`. Como o catálogo não tinha nenhuma skin
+oficial, o `cold` e o `warm` cronometraram um **laço vazio** e não dizem nada; quem respondeu
+foi o `worstDrawUs` — 48 perguntas sem cache, ~29 µs cada. **Remeça no dia em que a primeira
+skin oficial entrar no catálogo**, que é quando o `coldUs` passa a medir o que promete.
+
 No `origemz.skins.cat`, a categoria `all` é TODAS. Com `página`, e a categoria já aberta, só a
 lateral muda.
 
