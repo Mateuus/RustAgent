@@ -328,7 +328,16 @@ export function buildResult(
  * Lista vazia = não tem nenhum.
  */
 export interface VipReader {
-  activeOf(steamId: string): readonly { readonly tier: string; readonly expiresAt: number | null }[];
+  /**
+   * `where` é o SERVIDOR em que a tela está aberta — a resposta traz
+   * o VIP dele mais o de rede. O cabeçalho da loja do `pve` não pode
+   * anunciar o VIP que a pessoa comprou no `pvp1`: ela veria o
+   * benefício escrito na tela e nada funcionando.
+   */
+  activeOf(
+    steamId: string,
+    where: string,
+  ): readonly { readonly tier: string; readonly expiresAt: number | null }[];
 }
 
 export interface HeaderProviderOptions {
@@ -373,7 +382,7 @@ export function createHeaderProvider(
     }
 
     if (options.vips !== undefined) {
-      const vip = activeVip(options.vips, input.steamId);
+      const vip = activeVip(options.vips, input.serverId, input.steamId);
 
       // ####  SEM VIP, O CABEÇALHO NÃO DIZ NADA  ####
       //
@@ -405,11 +414,12 @@ export function createHeaderProvider(
  */
 function activeVip(
   vips: VipReader,
+  serverId: string,
   steamId: string,
 ): { readonly tier: string; readonly expiresAt: number | null } | null {
   let best: { readonly tier: string; readonly expiresAt: number | null } | null = null;
 
-  for (const vip of vips.activeOf(steamId)) {
+  for (const vip of vips.activeOf(steamId, serverId)) {
     if (best === null || vip.expiresAt === null) {
       best = vip;
       continue;

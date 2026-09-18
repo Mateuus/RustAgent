@@ -472,10 +472,15 @@ a linha de comando do console do jogo, e um espaço fatiaria o comando).
 ```json
 {
   "grants": [
-    { "steamId": "76561198123456789", "tier": "gold", "expiresAt": "2026-10-01T00:00:00.000Z" }
+    {
+      "steamId": "76561198123456789",
+      "tier": "gold",
+      "serverId": "pvp1",
+      "expiresAt": "2026-10-01T00:00:00.000Z"
+    }
   ],
   "revocations": [
-    { "steamId": "76561198987654321", "tier": "silver" }
+    { "steamId": "76561198987654321", "tier": "silver", "serverId": "pvp1" }
   ]
 }
 ```
@@ -497,8 +502,23 @@ tudo". Se uma delas vier e não for um array, o assunto inteiro é `INVALID_SHAP
 | Campo | Tipo | Regra |
 |---|---|---|
 | `steamId` | string | **SteamID64, 17 dígitos, sempre texto**. Um número JSON aqui passa de 2^53 e o VIP iria para a conta errada, sem erro no caminho |
-| `tier` | string | 1–32. Comparado em minúsculas. Precisa existir em algum `OrigemZVip.json` deste agente — senão `VIP_UNKNOWN_TIER` |
+| `tier` | string | 1–32. Comparado em minúsculas. Precisa existir no `OrigemZVip.json` do servidor de destino — senão `VIP_UNKNOWN_TIER`. Num VIP de rede, basta existir em algum |
+| `serverId` | string · *ausente* | **onde o VIP vale**. Ausente = a rede inteira. Id que este agente não conhece ⇒ `UNKNOWN_SERVER` naquela linha |
 | `expiresAt` | ISO 8601 · null | **obrigatório em `grants`**; `null` = vitalício, de propósito |
+
+> ####  DESDE 17/09/2026, O VIP TEM SERVIDOR  ####
+>
+> Antes ele era da REDE: quem comprava no `pvp1` era VIP em todos os servidores da máquina. O dono
+> mudou a regra — **o VIP vale onde foi vendido** —, e o `serverId` é como se diz isso.
+>
+> **Ausente continua sendo a rede**, e isso é compatibilidade deliberada: um lote publicado antes
+> desta mudança não pode trocar de sentido no deploy. O campo já é aceito porque quem **recebe**
+> aprende primeiro; quando o site passar a carimbar o servidor na concessão manual, o lote já chega
+> inteiro.
+>
+> O escopo é **identidade**: o `gold` do `pvp1` e o `gold` de rede são duas concessões, com dois
+> vencimentos. Conceder no `pvp1` quem já tem o de rede **cria uma linha nova** (estender a de rede
+> daria tempo em todos por um pagamento de um só), e revogar uma **não** toca na outra.
 
 > ####  `expiresAt` AUSENTE NÃO É VITALÍCIO — É ERRO  ####
 >
@@ -511,8 +531,8 @@ tudo". Se uma delas vier e não for um array, o assunto inteiro é `INVALID_SHAP
 
 - **`grants`** → `grant` com `origin: "loja"` e `createdBy: "site"`. Conceder de novo **renova**
   (estende o vencimento) e aplica no jogador que estiver no ar, na hora.
-- **`revocations`** → `revoke`. A linha **fica** no banco, com `revoked_at` — apagar destruiria
-  "quem já foi VIP, de onde veio e quem tirou".
+- **`revocations`** → `revoke` **naquele escopo**. A linha **fica** no banco, com `revoked_at` —
+  apagar destruiria "quem já foi VIP, de onde veio e quem tirou".
 
 > ####  REVOGAR O QUE JÁ VENCEU NÃO É FALHA  ####
 >

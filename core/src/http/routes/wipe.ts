@@ -627,7 +627,7 @@ export function registerWipeRoutes(app: FastifyInstance, deps: WipeRoutesDeps): 
     const tiers =
       steamId === undefined || deps.vips === undefined
         ? []
-        : deps.vips.activeOf(steamId, now).map((vip) => vip.tier);
+        : deps.vips.activeOf(steamId, id, now).map((vip) => vip.tier);
 
     // A MESMA decisão do chat e da tela do jogo. Ver
     // wipe/next-wipe.ts: uma segunda conta aqui faria a rota do

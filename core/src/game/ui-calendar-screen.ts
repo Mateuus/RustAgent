@@ -1091,9 +1091,15 @@ export interface CalendarMapQueueReader extends WipeMapPoolReader {
   list(serverId: string): readonly MapPoolEntry[];
 }
 
-/** Quem tem VIP agora. O recorte de `VipsRepository` e do `VipList`. */
+/**
+ * Quem tem VIP agora. O recorte de `VipsRepository` e do `VipList`.
+ *
+ * `where` é o servidor em que a tela está aberta: a prioridade de
+ * wipe é um benefício DAQUELE servidor, e lê-la sem escopo daria
+ * vaga de VIP no `pve` a quem comprou no `pvp1`.
+ */
 export interface CalendarVipReader {
-  activeOf(steamId: string, now?: number): readonly { readonly tier: string }[];
+  activeOf(steamId: string, where: string, now?: number): readonly { readonly tier: string }[];
 }
 
 export interface CalendarScreenProviderOptions {
@@ -1202,7 +1208,7 @@ export function createCalendarScreenProvider(
       const tiers =
         input.steamId === undefined
           ? []
-          : options.vips.activeOf(input.steamId, now).map((vip) => vip.tier);
+          : options.vips.activeOf(input.steamId, input.serverId, now).map((vip) => vip.tier);
 
       // Sem VIP nenhum não há hierarquia a consultar, e ler o config
       // do plugin seria ir ao disco para confirmar um zero.

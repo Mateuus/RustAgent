@@ -448,11 +448,19 @@ export interface SiteDeliveriesOptions {
    * concessão usaria: é configuração faltando, e o site precisa
    * saber que não foi feito.
    *
-   * Ela não recebe `serverId` porque o VIP não tem um: a tabela é
-   * do AGENTE e vale em todos os servidores dele.
+   * ####  ELA RECEBE `serverId`, E ISSO É A CORREÇÃO  ####
+   *
+   * Desde a migração 102 o VIP tem escopo, e esta fila é a DE UM
+   * servidor: o site pediu para tirar o VIP daquele servidor, não o
+   * de todos. Sem o escopo, a revogação de um estorno no `pvp1`
+   * derrubaria o VIP de REDE que o jogador comprou à parte.
    */
   readonly revokeVip?:
-    | ((input: { readonly steamId: string; readonly tier: string }) => Promise<void>)
+    | ((input: {
+        readonly serverId: string;
+        readonly steamId: string;
+        readonly tier: string;
+      }) => Promise<void>)
     | undefined;
   /**
    * Quem dá e quem tira a posse de skin (`site/skin-deliveries.ts`).
@@ -897,7 +905,7 @@ export class SiteDeliveries {
     }
 
     try {
-      await revoke({ steamId, tier: wanted.tier });
+      await revoke({ serverId: this.#options.serverId, steamId, tier: wanted.tier });
     } catch (error) {
       if (error instanceof ApiError && error.code === 'VIP_NOT_FOUND') {
         // O `reason` NÃO viaja: a lista do fio é fechada (Docs\20

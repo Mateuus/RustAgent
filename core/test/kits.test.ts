@@ -604,6 +604,7 @@ describe('o nível exigido', () => {
     harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -627,6 +628,7 @@ describe('o nível exigido', () => {
     harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -645,6 +647,7 @@ describe('o nível exigido', () => {
     harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -667,6 +670,7 @@ describe('o nível exigido', () => {
       {
         steamId: STEAM_ID,
         tier: 'gold',
+        serverId: null,
         expiresAt: Date.now() - 1_000,
         origin: 'loja',
         createdBy: 'admin',

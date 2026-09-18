@@ -29,6 +29,15 @@
 //  Quem já tem 20 dias e compra 30 fica com 50. A tela DIZ isso
 //  antes de o botão ser apertado, porque é a pergunta que quem
 //  administra faz na hora ("vou perder os dias dele?").
+//
+//  ####  E O ONDE NÃO TEM PADRÃO, DE PROPÓSITO  ####
+//
+//  Desde a migração 102 o VIP vale no servidor em que foi vendido, e
+//  `null` — a rede inteira — virou uma ESCOLHA de quem vende. Um
+//  padrão aqui seria decidir isso por quem clica: se caísse em
+//  "rede", o benefício mais caro sairia de graça por distração; se
+//  caísse num servidor, alguém venderia menos do que prometeu. Então
+//  o seletor começa vazio e o botão só acende depois da resposta.
 // ============================================================
 
 import { useEffect, useState } from 'react';
@@ -41,6 +50,14 @@ import { agent, type Vip, type VipTier } from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
+/**
+ * O valor do seletor que quer dizer "a rede inteira".
+ *
+ * Uma palavra, e não `''`: vazio é "ainda não escolheu", e os dois
+ * precisam ser distinguíveis para o botão saber quando acender.
+ */
+const REDE = '*';
+
 /** Os prazos que se vende. O resto vai no campo de dias. */
 const PRESETS: readonly { days: number | null; label: string }[] = [
   { days: 7, label: '7 dias' },
@@ -48,6 +65,20 @@ const PRESETS: readonly { days: number | null; label: string }[] = [
   { days: 90, label: '90 dias' },
   { days: null, label: 'Vitalício' },
 ];
+
+/**
+ * Aquele servidor declara aquele nível?
+ *
+ * A lista vem do `OrigemZVip.json` de cada um (`GET /vips/tiers`), e
+ * o agente RECUSA a concessão quando não bate. Avisar antes do clique
+ * é melhor que traduzir o 400 depois dele — e sem os níveis
+ * carregados a tela não afirma nada.
+ */
+function nivelExisteAqui(tiers: VipTier[] | null, tier: string, serverId: string): boolean {
+  const level = tiers?.find((option) => option.tier === tier);
+
+  return level === undefined || level.servers.includes(serverId);
+}
 
 interface VipDialogProps {
   readonly open: boolean;
@@ -65,6 +96,9 @@ export function VipDialog({ open, steamId, current = [], onClose, onDone }: VipD
 
   const [id, setId] = useState(steamId ?? '');
   const [tier, setTier] = useState('');
+  /** `''` = ainda não escolheu; `REDE` = todos. Ver o cabeçalho. */
+  const [where, setWhere] = useState('');
+  const [servers, setServers] = useState<{ id: string; name: string }[]>([]);
   const [days, setDays] = useState<number | null>(30);
   const [origin, setOrigin] = useState<'loja' | 'painel'>('painel');
   const [busy, setBusy] = useState(false);
@@ -81,10 +115,26 @@ export function VipDialog({ open, steamId, current = [], onClose, onDone }: VipD
         setTiersMessage(cause instanceof Error ? cause.message : String(cause));
         setTiers([]);
       }
+
+      try {
+        const response = await agent.servers();
+
+        setServers(response.servers.map((server) => ({ id: server.id, name: server.name })));
+      } catch {
+        // Sem a lista, resta a rede — e o seletor diz isso em vez de
+        // ficar vazio sem explicação.
+        setServers([]);
+      }
     })();
   }, []);
 
-  const renewing = current.find((vip) => vip.tier === tier && vip.active);
+  // O VIP de REDE e o do `pvp1` são DUAS concessões: só é renovação
+  // quando o escopo também bate. Sem isto a tela prometeria somar
+  // dias a uma linha que não vai ser tocada.
+  const scope = where === REDE ? null : where;
+  const renewing = current.find(
+    (vip) => vip.tier === tier && vip.active && vip.serverId === scope,
+  );
 
   async function submit(): Promise<void> {
     setBusy(true);
@@ -93,6 +143,7 @@ export function VipDialog({ open, steamId, current = [], onClose, onDone }: VipD
       const response = await agent.grantVip({
         steamId: id.trim(),
         tier,
+        serverId: scope,
         // A conta da tela: dias viram a data de vencimento. `null` é
         // vitalício, e vai explícito.
         expiresAt: days === null ? null : new Date(Date.now() + days * 86_400_000).toISOString(),
@@ -126,10 +177,7 @@ export function VipDialog({ open, steamId, current = [], onClose, onDone }: VipD
             onChange={(event) => setId(event.target.value.trim())}
             className="font-mono"
           />
-          <p className="mt-1 text-2xs text-muted">
-            17 dígitos, começando em 7656. O VIP é da <strong>rede</strong>: vale em todos os
-            servidores deste agente.
-          </p>
+          <p className="mt-1 text-2xs text-muted">17 dígitos, começando em 7656.</p>
         </div>
 
         <div>
@@ -160,6 +208,34 @@ export function VipDialog({ open, steamId, current = [], onClose, onDone }: VipD
               . É nele que o jogador entra.
             </p>
           )}
+        </div>
+
+        <div>
+          <Label>Onde vale</Label>
+          <select
+            value={where}
+            disabled={busy}
+            onChange={(event) => setWhere(event.target.value)}
+            className="h-9 w-full border border-border bg-surface-2 px-3 text-sm text-foreground"
+          >
+            <option value="">Escolha onde este VIP vale…</option>
+            {servers.map((server) => (
+              <option key={server.id} value={server.id}>
+                Só em {server.name} ({server.id})
+              </option>
+            ))}
+            <option value={REDE}>A rede inteira — todos os servidores deste agente</option>
+          </select>
+
+          <p className="mt-1 text-2xs text-muted">
+            {where === ''
+              ? 'Um VIP vale no servidor em que foi vendido. A rede inteira é uma escolha, e costuma ser o pacote mais caro.'
+              : where === REDE
+                ? 'Vale em todos os servidores, inclusive nos que forem criados depois.'
+                : nivelExisteAqui(tiers, tier, where)
+                  ? 'Os outros servidores não ficam sabendo deste VIP.'
+                  : `Atenção: ${where} não declara o nível ${tier} no OrigemZVip.json dele — o agente vai recusar, porque ali este VIP não viraria efeito nenhum.`}
+          </p>
         </div>
 
         <div>
@@ -238,7 +314,7 @@ export function VipDialog({ open, steamId, current = [], onClose, onDone }: VipD
 
           <Button
             variant="primary"
-            disabled={busy || id.trim() === '' || tier === ''}
+            disabled={busy || id.trim() === '' || tier === '' || where === ''}
             onClick={() => void submit()}
           >
             {busy ? 'Gravando…' : renewing === undefined ? 'Conceder' : 'Renovar'}
