@@ -17,10 +17,34 @@ documento da camada dele, e **esta seção dele**.
                                          └──→ E — o painel
   D — o plugin e a tela ──(usa o contrato do 02 §5)───┘
   F — skin como recompensa ──── independente, entra quando quiser
+  H — o fio entre o agente e o plugin ──(depois de A e D)──→ é o que faz funcionar
 ```
 
 A **D é a maior**: virou um plugin novo depois de o dono escolher o caminho do
 menu de skins. Ela começa cedo justamente por isso.
+
+### A frente H, e por que ela faltava
+
+**Ela não estava no plano original, e essa foi a falha dele.** As sete primeiras
+frentes entregaram, todas verdes, com 3.041 testes passando — e **o jogador não
+conseguia usar o passe**. Faltava o transporte: ninguém montava e mandava a
+carga, ninguém lia o push do plugin, e o card da home não existia. Os tipos do
+contrato estavam escritos, e **nada os usava**.
+
+O motivo de passar despercebido: ele cai no vão entre duas frentes que parecem
+cobri-lo. A **A** escreve os tipos do transporte e acha que entregou o contrato;
+a **D** implementa o lado que recebe e **não pode** implementar o lado que
+envia. Nenhuma das duas está errada — o dono do meio é que não foi nomeado.
+
+E ele não é pequeno: nas skins, o equivalente é `core/src/game/workshop.ts`,
+**1.300 linhas** de segredo, base64, pedaços, dedup e debounce. É do tamanho da
+frente do banco.
+
+> **A lição, para o próximo plano:** liste as camadas e confira se existe uma
+> frente para **cada seta**, não só para cada caixa. A pergunta que teria pego
+> isto é *"quem envia?"*, seguida de *"quem lê a resposta?"*. E o teste barato
+> no fim: `grep` pelas constantes do contrato no `core/src/` — se elas só
+> aparecem no arquivo que as declara, ninguém as usa.
 
 - **A vai primeiro**, porque é ela que cria os tipos e a migração 101. **B, C e
   E** partem do commit da A.
@@ -258,6 +282,40 @@ trilha que nunca fecha.
 
 **Depende da sonda** do §10: se `CheckSkinOwnership` não for consultável no
 servidor, esta frente encolhe para "só skin nossa do Workshop".
+
+---
+
+## 8.1 Frente H — o fio entre o agente e o plugin
+
+**Depende de:** A (os tipos e o serviço) e D (o lado que recebe).
+**É a frente que faz o passe funcionar.**
+
+### O que fazer
+
+- **`core/src/game/battlepass.ts`** — o serviço de carga, no molde de
+  `core/src/game/workshop.ts`: segredo por processo, `buildPayload` público,
+  `chunkCommands` no mesmo formato **mesmo com um pedaço só**, dedup por
+  digital, debounce, e `handleLine` que **só arma `setTimeout`**.
+- **O handler do `#OZPASSE#`**: `ready` (handshake, sem segredo), `open`,
+  `claim`, `claimAll`, `box`, `buy` — cada um chamando o serviço, que já tem
+  todas as regras, e respondendo por `origemz.passe.reply`.
+- **O card na home** (`ui-home-screen.ts`), pela receita do
+  [03](03-MENU-DO-PASSE.md) §7, com **upgrade idempotente no boot** — nunca o
+  reset do preset, que descarta a edição do admin.
+- A fiação em `core/src/index.ts`.
+
+### A exigência que o plugin faz
+
+Depois de responder um `claim`/`claimAll`/`buy` pelo `reply`, **mande um
+`progress`**. É a carga que apaga o otimismo do clique — sem ela, um resgate
+recusado fica na tela parecendo em andamento.
+
+### Pronto quando
+
+Testes com RCON falso provando: a carga sai em pedaços e no formato certo mesmo
+com um pedaço só; **push sem o segredo não faz nada**; o `ready` do plugin
+provoca a carga; um `claim` do jogo chama o serviço, responde pelo `reply` e é
+seguido de um `progress`; pedido repetido vira uma escrita só.
 
 ---
 
