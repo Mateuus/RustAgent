@@ -57,6 +57,7 @@
 
 import type { OfferBadge } from '../db/store-repository.js';
 import type { Logger } from '../logger.js';
+import type { PlayerTrack } from '../types/battlepass.js';
 import {
   describeBpPolicy,
   describeNextWipeMap,
@@ -174,7 +175,51 @@ export const HOME_SLOTS = {
   questList: 'hm-quest-lista',
   questNote: 'hm-quest-nota',
   questButton: 'hm-quest-btn',
+
+  /**
+   * A linha viva do cartão do passe: nível, prêmio pronto, XP.
+   *
+   * É o ÚNICO slot dele. O cartão nasceu com três elementos por
+   * causa do teto de bytes da carga inicial — ver `passCard` —, e
+   * tudo o que muda passa por esta linha.
+   */
+  passNote: 'hm-passe-nota',
+  /**
+   * O cartão do passe INTEIRO, que é o botão dele.
+   *
+   * O id é o mesmo do cartão (`CARD_ID.pass`) porque são o mesmo
+   * elemento — ver `passCard`. É por aqui que a AÇÃO é reposta no
+   * caminho do modelo: ela roda um comando, e comando gravado no
+   * documento é coisa que o admin pode trocar sem saber que quebra
+   * o botão.
+   */
+  passButton: 'hm-passe',
 } as const;
+
+/**
+ * O título do cartão do passe.
+ *
+ * "PASSE DE BATALHA" mede 121 px em RobotoCondensed-Bold 15, e a
+ * faixa do título num cartão de cinco colunas tem 160 px — cabe,
+ * com folga de 39 px. Ver a trava em test/ui-home-screen.test.ts.
+ */
+const PASS_CARD_TITLE = 'PASSE DE BATALHA';
+
+/**
+ * O comando que o botão roda COMO O JOGADOR.
+ *
+ * COM a barra: o OrigemZUI manda `chat.say <comando>`, e sem a barra
+ * a palavra sairia no chat como mensagem. É o mesmo formato do
+ * `/skins` da aba SKINS — e, como lá, ele NÃO pode virar atalho do
+ * documento: `/passe` é do OrigemZBattlePass.
+ */
+export const PASS_CARD_COMMAND = '/passe';
+
+const PASS_CARD_ACTION: UiAction = {
+  id: 'hm-passe-a',
+  kind: 'chat',
+  command: PASS_CARD_COMMAND,
+};
 
 /**
  * O nome de quem abriu, dentro do texto do ADMIN.
@@ -321,6 +366,32 @@ export interface HomeView {
   readonly wipeNote: string;
   readonly quests: readonly HomeQuestLine[];
   readonly questNote: string;
+  /** `null` = não há temporada no ar, e aí vale `passNote`. */
+  readonly pass: HomePassView | null;
+  readonly passNote: string;
+}
+
+/**
+ * O passe daquele jogador, no tamanho de um cartão.
+ *
+ * ####  A TELA DO PASSE NÃO É DAQUI  ####
+ *
+ * Quem a desenha é o `OrigemZBattlePass.cs` — ela tem rolagem e
+ * tooltip, que o modelo do OrigemZUI não sabe fazer (03 §1). O
+ * cartão é só a VITRINE: em que nível ele está, quanto falta, e se
+ * há prêmio esperando o clique. O botão abre o menu do plugin.
+ */
+export interface HomePassView {
+  /** "SETEMBRO 2026" — o nome que o admin deu à temporada. */
+  readonly season: string;
+  readonly level: number;
+  readonly levels: number;
+  /** `2.400 / 3.000 XP`, ou a frase do último nível. */
+  readonly progress: string;
+  /** Quantos níveis estão esperando o clique AGORA. */
+  readonly ready: number;
+  /** Ele comprou o passe deste mês neste servidor. */
+  readonly paid: boolean;
 }
 
 /**
@@ -347,6 +418,8 @@ export function emptyHomeView(): HomeView {
     wipeNote: 'Carregando a agenda…',
     quests: [],
     questNote: 'Carregando as suas missões…',
+    pass: null,
+    passNote: 'Carregando o passe…',
   };
 }
 
@@ -410,6 +483,17 @@ export interface HomeQuestsReader {
   }[];
 }
 
+/**
+ * O que esta tela precisa do PASSE. E nada além.
+ *
+ * Uma interface mínima, como as de cima: a assinatura é a do
+ * `BattlePassService.trackOf`, e é assim que o teste pode montar
+ * uma trilha sem levantar o módulo inteiro.
+ */
+export interface HomePassReader {
+  trackOf(serverId: string, steamId: string): PlayerTrack;
+}
+
 export interface HomeScreenDeps {
   readonly rankings: RankingScreenReader;
   readonly store: HomeStoreReader;
@@ -417,6 +501,14 @@ export interface HomeScreenDeps {
   readonly quests: HomeQuestsReader | null;
   /** `null` = a agenda ainda não foi montada. Ver o index.ts. */
   readonly wipe: NextWipeDeps | null;
+  /**
+   * O passe de batalha. `null` = ele não está de pé nesta subida.
+   *
+   * O leitor é o `BattlePassService.trackOf` — a MESMA resposta que
+   * desce para o plugin e que o painel mostra na aba Jogadores. Uma
+   * segunda consulta daria um nível diferente na mesma tela.
+   */
+  readonly pass?: HomePassReader | null;
   /** O nome de quem está olhando. Ausente = sem saudação. */
   readonly nameOf?: (steamId: string) => string | null;
   readonly logger?: Logger;
@@ -446,7 +538,90 @@ export async function readHomeView(input: ReadHomeViewInput): Promise<HomeView> 
     ...readOffer(input),
     ...readWipe(input),
     ...readQuests(input),
+    // ####  O PASSE TEM O `try` DELE, COMO OS OUTROS QUATRO  ####
+    //
+    // Ele é o bloco mais NOVO desta tela e o único cuja outra ponta
+    // é um plugin que pode não estar carregado. Sem o `try` próprio,
+    // uma temporada meio montada derrubaria a HOME inteira — e a
+    // home é a tela de entrada do menu.
+    ...readPass(input),
   };
+}
+
+/**
+ * O passe daquele jogador: nível, barra e o que espera o clique.
+ *
+ * ####  "AUSENTE NÃO É VAZIO", TAMBÉM AQUI  ####
+ *
+ * Sem temporada, o cartão diz "nenhuma temporada no ar" — que é
+ * verdade. Sem leitor (o módulo não subiu) ou com erro, ele diz que
+ * não conseguiu ler — que é diferente, e é o que faz alguém olhar o
+ * log em vez de procurar a temporada que sumiu.
+ */
+function readPass(input: ReadHomeViewInput): Pick<HomeView, 'pass' | 'passNote'> {
+  const reader = input.deps.pass ?? null;
+
+  if (reader === null) {
+    return { pass: null, passNote: 'O passe de batalha não está de pé neste servidor.' };
+  }
+
+  if (input.steamId === undefined) {
+    // A carga inicial vai sem jogador. Prometer um nível aqui seria
+    // mostrar o de ninguém.
+    return { pass: null, passNote: 'Abra o menu no jogo para ver o seu passe.' };
+  }
+
+  try {
+    const track = reader.trackOf(input.serverId, input.steamId);
+
+    if (track.season === null) {
+      return { pass: null, passNote: 'Nenhuma temporada no ar por enquanto.' };
+    }
+
+    // O que está esperando o clique. Casa vazia não conta: ela não dá
+    // nada, e contá-la faria o cartão prometer seis e entregar
+    // quatro — a mesma regra do `claimAll`.
+    const ready = track.cells.filter(
+      (cell) => cell.state === 'available' && cell.rewards.length > 0,
+    ).length;
+
+    const progress =
+      track.progress.neededForNext === null
+        ? 'trilha concluída'
+        : `${track.progress.intoLevel.toLocaleString('pt-BR')} / ${track.progress.neededForNext.toLocaleString('pt-BR')} XP para o próximo`;
+
+    // ####  ESTA LINHA É TUDO O QUE O CARTÃO TEM  ####
+    //
+    // Ele não tem barra de progresso nem linha de nível separada
+    // (ver `passCard`), então o nível abre a frase e o resto dela é
+    // o que MUDA. A ordem é a da ação: o que espera o clique ganha
+    // do que espera na caixa, que ganha do que só informa.
+    const state =
+      ready > 0
+        ? `${plural(ready, 'prêmio pronto', 'prêmios prontos')} para resgatar`
+        : track.pending.length > 0
+          ? `${plural(track.pending.length, 'item esperando', 'itens esperando')} na caixa`
+          : progress;
+
+    return {
+      pass: {
+        season: track.season.label,
+        level: track.progress.level,
+        levels: track.season.levels,
+        progress,
+        ready,
+        paid: track.paid,
+      },
+      passNote: `Nível ${String(track.progress.level)} de ${String(track.season.levels)} — ${state}`,
+    };
+  } catch (error) {
+    input.deps.logger?.error(
+      { server: input.serverId, err: toError(error) },
+      'não consegui ler o passe para a HOME; o cartão sai com o aviso',
+    );
+
+    return { pass: null, passNote: 'Não consegui ler o seu passe agora.' };
+  }
 }
 
 function playerNameOf(deps: HomeScreenDeps, steamId: string | undefined): string {
@@ -839,17 +1014,31 @@ export interface HomeCards {
   readonly offer: boolean;
   readonly wipe: boolean;
   readonly quest: boolean;
+  /**
+   * O PASSE, que é a exceção da regra acima.
+   *
+   * A tela dele não está no documento: quem a desenha é o
+   * `OrigemZBattlePass.cs` (03 §1). Então o que decide este cartão é
+   * a presença DELE PRÓPRIO no documento — ver `cardsOf`.
+   */
+  readonly pass: boolean;
 }
 
-/** A tela que cada cartão abre. */
-export const HOME_CARD_TARGET: Readonly<Record<keyof HomeCards, string>> = {
+/**
+ * A tela que cada cartão abre.
+ *
+ * O passe não está aqui de propósito: ele não abre tela do
+ * documento, e pôr um endereço falso faria `cardsOf` procurar por
+ * uma tela que nunca vai existir.
+ */
+export const HOME_CARD_TARGET: Readonly<Record<Exclude<keyof HomeCards, 'pass'>, string>> = {
   rank: RANKING_SCREEN_ID,
   offer: STORE_SCREEN_ID,
   wipe: CALENDAR_SCREEN_ID,
   quest: QUESTS_SCREEN_ID,
 };
 
-const ALL_CARDS: HomeCards = { rank: true, offer: true, wipe: true, quest: true };
+const ALL_CARDS: HomeCards = { rank: true, offer: true, wipe: true, quest: true, pass: true };
 
 /** O id do cartão de cada assunto, para escondê-lo no modelo. */
 const CARD_ID: Readonly<Record<keyof HomeCards, string>> = {
@@ -857,7 +1046,11 @@ const CARD_ID: Readonly<Record<keyof HomeCards, string>> = {
   offer: 'hm-loja',
   wipe: 'hm-wipe',
   quest: 'hm-quest',
+  pass: 'hm-passe',
 };
+
+/** A ordem das colunas. É ela que `columnRect` divide. */
+const CARD_ORDER = ['rank', 'offer', 'wipe', 'quest', 'pass'] as const;
 
 /**
  * Quais cartões cabem NESTE documento.
@@ -875,7 +1068,24 @@ export function cardsOf(document: UiDocument): HomeCards {
     offer: has(HOME_CARD_TARGET.offer),
     wipe: has(HOME_CARD_TARGET.wipe),
     quest: has(HOME_CARD_TARGET.quest),
+    // ####  O PASSE SE PROVA PELO PRÓPRIO CARTÃO  ####
+    //
+    // Ele não tem tela no documento, então a pergunta "este servidor
+    // mostra o passe?" não tem onde ser feita — a não ser no
+    // desenho. Menu novo nasce com o cartão (o preset o gera); menu
+    // antigo o ganha pelo upgrade do boot (ui-pass-card.ts); e o
+    // admin que o apagar no editor fica sem ele, que é o que apagar
+    // significa.
+    pass: hasElement(document, CARD_ID.pass),
   };
+}
+
+/** Há um elemento com este id em alguma tela do documento? */
+function hasElement(document: UiDocument, id: string): boolean {
+  const seek = (elements: readonly UiElement[]): boolean =>
+    elements.some((element) => element.id === id || seek(element.children));
+
+  return document.screens.some((screen) => seek(screen.elements));
 }
 
 /** O título de um cartão, no estilo dos títulos do painel. */
@@ -1029,6 +1239,18 @@ const CARD_ICON = {
   /** `note` — o bilhete de uma missão. */
   quest: (rect: Rect): UiElement =>
     itemImage('hm-quest-titulo-is', { itemId: 1_414_245_162, skinId: '0' }, rect),
+  /**
+   * `xmas.present.large` — o presente, que é o que a trilha entrega.
+   *
+   * Item do jogo, como três dos outros quatro: o cliente já tem a
+   * arte, então não há download nenhum. Uma arte própria custaria um
+   * upload e um CRC que o agente não conhece (ver game/ui-images.ts).
+   *
+   * O id foi LIDO do catálogo de itens que o agente gravou, e não
+   * deduzido: o primeiro palpite caiu em `xmas.window.garland`.
+   */
+  pass: (rect: Rect): UiElement =>
+    itemImage('hm-passe-titulo-is', { itemId: -1_622_660_759, skinId: '0' }, rect),
 } as const;
 
 /** As medidas do cabeçalho de um cartão. */
@@ -1139,7 +1361,7 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
   // escondida, três cartões ocupam a tela inteira em vez de deixarem
   // um buraco de 25% onde ela estava. É o que o layout de código
   // pode fazer e o modelo desenhado não — lá a posição é do admin.
-  const shown = (['rank', 'offer', 'wipe', 'quest'] as const).filter((key) => cards[key]);
+  const shown = CARD_ORDER.filter((key) => cards[key]);
   const rectOf = (key: (typeof shown)[number]): Rect =>
     columnRect(shown.indexOf(key), shown.length);
 
@@ -1159,6 +1381,11 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
 
   if (cards.quest) {
     body.push(card('hm-quest', rectOf('quest'), questCard(view)));
+  }
+
+  if (cards.pass) {
+    // Sem `card()`: a raiz dele já é o botão. Ver `passCard`.
+    body.push(passCard(view, rectOf('pass')));
   }
 
   return {
@@ -1647,6 +1874,90 @@ function questRows(view: HomeView, room: number): UiElement[] {
   });
 }
 
+/**
+ * O passe, no cartão da home.
+ *
+ * ####  ELE NÃO ABRE TELA: ELE RODA UM COMANDO  ####
+ *
+ * A tela do passe é do `OrigemZBattlePass.cs`, e o OrigemZUI não tem
+ * como navegar até ela — é o mesmo caso da aba SKINS. O botão roda
+ * `/passe` COMO O JOGADOR (`kind: 'chat'`), o plugin abre o menu
+ * dele e fecha o menu principal por cima.
+ *
+ * ####  ELE TEM TRÊS PEÇAS, E ISSO FOI MEDIDO  ####
+ *
+ * A carga inicial do menu inteiro tem teto de 50.000 bytes
+ * (`UI_DOC_MAX_BYTES`) e só a tela de ENTRADA viaja nela — que é
+ * esta. MEDIDO em 17/09/2026, com `buildMainMenu()`:
+ *
+ *   sem este cartão .............. 45.532 bytes
+ *   a moldura dele, vazia ........ +   668
+ *   cada texto ................... +  ~480
+ *   o bloco do ícone ............. +   724  (fundo + arte)
+ *   a régua do cabeçalho ......... +   356
+ *   a moldura vermelha do botão .. +  ~360
+ *
+ * O desenho completo — cabeçalho com ícone e régua, linha de apoio,
+ * nível, barra de progresso e nota — dava treze elementos e levava a
+ * carga a 51.312: ACIMA DO TETO, com o envio recusado inteiro e o
+ * menu do servidor parando de atualizar. E a trava de
+ * `test/ui-home-screen.test.ts` é mais curta que o teto (47.800),
+ * de propósito: ela deixa 2.268 bytes para este cartão, e é dentro
+ * deles que ele tem de caber.
+ *
+ * ####  E O CARTÃO INTEIRO É O BOTÃO  ####
+ *
+ * Os outros quatro são painel + painel interno + um botão no rodapé
+ * (que é painel vermelho + botão dentro): quatro elementos só de
+ * moldura e ação. Aqui a raiz JÁ é o botão, e os dois textos moram
+ * dentro dela — 47.436 bytes na carga, contra 47.812 do mesmo
+ * conteúdo com as molduras. Sobram 364 bytes sob a trava.
+ *
+ * O que se ganha além dos bytes: a área de clique é o cartão todo, e
+ * não uma faixa de 26 px no pé. O que se perde é o contorno vermelho
+ * do conceito — e é por isso que o chevron vai no título: ele é o
+ * que diz "isto leva a algum lugar" quando não há botão desenhado.
+ *
+ * Sobram duas peças:
+ *
+ *   título   o assunto, e o chevron que promete a tela
+ *   linha    o que MUDA — nível, prêmio pronto, item na caixa, XP
+ *
+ * O ícone, a régua e a barra de progresso são o que volta primeiro
+ * se a home emagrecer em outro lugar; o comentário da trava lista o
+ * que sai antes deles. Até lá, o que a barra diria está na linha, em
+ * letras.
+ */
+function passCard(view: HomeView, rect: Rect): UiElement {
+  const pass = view.pass;
+
+  return {
+    ...button(CARD_ID.pass, '', rect, PASS_CARD_ACTION, {
+      // O mesmo fundo dos outros cartões; o que muda é o realce do
+      // ponteiro, que aqui é a única pista de que ele é clicável.
+      color: C.surface,
+      textColor: C.text,
+      hoverColor: C.surface2,
+    }),
+    children: [
+      label('hm-passe-titulo', `${PASS_CARD_TITLE}   ›`, band(HEAD.titleTop, 20), {
+        size: 15,
+        align: 'MiddleLeft',
+        font: 'RobotoCondensed-Bold.ttf',
+      }),
+
+      label(HOME_SLOTS.passNote, view.passNote, fill(PAD, HEAD.subTop + 6, PAD, PAD), {
+        size: 12,
+        // Prêmio pronto sai em oliva — a cor de "deu certo" do
+        // painel, a mesma da missão pronta. É o que separa "falta
+        // jogar" de "falta clicar".
+        color: pass !== null && pass.ready > 0 ? C.olive : C.text,
+        align: 'UpperLeft',
+      }),
+    ],
+  };
+}
+
 /** Uma coluna de largura fixa colada à direita da linha. */
 function colRight(width: number): Rect {
   return {
@@ -1797,6 +2108,22 @@ function slotsOf(options: BuildHomeScreenOptions): Record<string, SlotValue> {
     [HOME_SLOTS.questButton]: {
       action: { id: 'hm-quest-a', kind: 'navigate', screenId: QUESTS_SCREEN_ID },
     },
+
+    // ####  O CARTÃO DO PASSE  ####
+    //
+    // Sem temporada, a linha do nível sai VAZIA e a nota explica o
+    // porquê: o cartão continua no lugar que o admin deu a ele.
+    // Escondê-lo inteiro faria o desenho pular de lugar entre duas
+    // temporadas.
+    [HOME_SLOTS.passNote]: { text: view.passNote },
+    // ####  A AÇÃO SÓ ENTRA COM O CARTÃO VISÍVEL  ####
+    //
+    // O cartão do passe e o botão dele são o MESMO elemento, então
+    // as duas chaves são a mesma string — e num objeto literal a
+    // última ganha. Sem a condição, repor a ação desfaria o
+    // `{ hide: true }` de `hiddenCards` e o cartão voltaria a
+    // aparecer num servidor que não o mostra.
+    ...(cards.pass ? { [HOME_SLOTS.passButton]: { action: PASS_CARD_ACTION } } : {}),
   };
 }
 
