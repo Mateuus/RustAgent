@@ -243,10 +243,18 @@ describe('101 — o passe, sobre um banco na 100', () => {
       .prepare('SELECT id, quest_id, seq, kind, payload FROM quest_rewards ORDER BY seq')
       .all();
 
-    // A 102 vem junto: ela reconstroi a MESMA tabela para aceitar
-    // o `kind: 'xp'`, e o que este caso guarda e que nenhuma das
-    // duas reconstrucoes perde linha.
-    expect(runMigrations(db).map((migration) => migration.id)).toEqual([101, 102]);
+    // `toContain`, e não `toEqual`: a lista cresce a cada migração
+    // nova acima da 100 — a 103, da loja que vende o passe, já
+    // entrou, e a próxima entrará sem avisar. O que este teste prova
+    // é sobre a 101 e a 102, não que elas sejam as últimas do array.
+    //
+    // As duas juntas porque reconstroem a MESMA tabela — a 101 para
+    // aceitar `kind: 'skin'`, a 102 para `kind: 'xp'` — e o que este
+    // caso guarda é que nenhuma das duas reconstruções perde linha.
+    const applied = runMigrations(db).map((migration) => migration.id);
+
+    expect(applied).toContain(101);
+    expect(applied).toContain(102);
 
     // A 101 RECONSTRÓI `quest_rewards` para abrir o CHECK do `kind`.
     // Recriar tabela com INSERT ... SELECT é onde se perde dado em

@@ -1158,8 +1158,9 @@ export interface StoreCategory {
  *   bundle   um kit: vários itens, e o modal LISTA o que vem dentro
  *   vip      um nível com prazo, mais as vantagens em texto
  *   vehicle  um veículo que nasce no mundo
+ *   pass     o passe de batalha daquele mês, naquele servidor
  */
-export type OfferKind = 'item' | 'bundle' | 'vip' | 'vehicle';
+export type OfferKind = 'item' | 'bundle' | 'vip' | 'vehicle' | 'pass';
 
 /** A etiqueta no canto do card, no jogo. Cada uma tem cor própria. */
 export type OfferBadge = 'promo' | 'novo' | 'destaque';
@@ -1198,6 +1199,14 @@ export interface StoreOffer {
   vip: { tier: string; days: number | null } | null;
   /** `null` fora de `vehicle`. */
   vehicle: { prefab: string; fuel: number } | null;
+  /**
+   * `null` fora de `pass`.
+   *
+   * Dentro dele, `period: null` — que é o caso normal — quer dizer
+   * "o mês corrente no instante da compra". Quem resolve o mês é o
+   * agente, e ele o congela no plano da compra.
+   */
+  pass?: { period: string | null } | null;
   createdAt: string;
   updatedAt: string;
 }

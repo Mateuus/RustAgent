@@ -9,8 +9,10 @@
 //    bundle   um kit: a lista do que vem dentro
 //    vip      o nível, o prazo e as vantagens em texto
 //    vehicle  o prefab e o combustível
+//    pass     o mês do passe de batalha — e ele quase sempre fica
+//             em branco, que quer dizer "o mês corrente"
 //
-//  Mostrar os campos dos quatro ao mesmo tempo faria o admin
+//  Mostrar os campos dos cinco ao mesmo tempo faria o admin
 //  preencher "dias de VIP" numa oferta de sucata — e o agente
 //  aceitaria, porque as colunas são anuláveis. O formulário some com
 //  o que não se aplica; a API recusa o resto.
@@ -87,6 +89,11 @@ const KINDS: readonly { value: OfferKind; label: string; hint: string }[] = [
   { value: 'bundle', label: 'Kit', hint: 'vários itens numa compra; o modal lista o que vem' },
   { value: 'vip', label: 'VIP', hint: 'um nível com prazo, mais as vantagens que você listar' },
   { value: 'vehicle', label: 'Veículo', hint: 'nasce ao lado do jogador, se houver espaço' },
+  {
+    value: 'pass',
+    label: 'Passe',
+    hint: 'o passe de batalha do mês, e ele vale só no servidor onde foi comprado',
+  },
 ];
 
 /**
@@ -194,6 +201,9 @@ export function StoreOfferDialog({
   );
   const [prefab, setPrefab] = useState(offer?.vehicle?.prefab ?? '');
   const [fuel, setFuel] = useState(offer?.vehicle?.fuel ?? DEFAULT_VEHICLE_FUEL);
+  // Em branco = o mês corrente no instante da COMPRA, que é o
+  // produto: "o passe deste mês". Ver o campo no formulário.
+  const [passPeriod, setPassPeriod] = useState(offer?.pass?.period ?? '');
 
   const [busy, setBusy] = useState(false);
 
@@ -312,6 +322,11 @@ export function StoreOfferDialog({
           ? { tier: tier.trim(), days: days.trim() === '' ? null : Number(days) }
           : null,
       vehicle: kind === 'vehicle' ? { prefab: prefab.trim(), fuel } : null,
+      // Vazio vira `null`, e `null` é o caso normal: quem resolve o
+      // mês é o agente, no instante da compra. Mandar o mês de hoje
+      // daqui congelaria na OFERTA um mês que vence sozinho.
+      pass:
+        kind === 'pass' ? { period: passPeriod.trim() === '' ? null : passPeriod.trim() } : null,
     };
 
     setBusy(true);
@@ -673,6 +688,33 @@ export function StoreOfferDialog({
           </div>
         )}
 
+        {/* ---- passe de batalha ---- */}
+        {kind === 'pass' && (
+          <div className="space-y-3 border-l-2 border-l-amber pl-3">
+            <div>
+              <Label>Mês do passe</Label>
+              <Input
+                value={passPeriod}
+                placeholder="o mês corrente"
+                disabled={busy}
+                onChange={(event) => setPassPeriod(event.target.value.trim())}
+                className="font-mono"
+              />
+              <p className="mt-1 text-2xs leading-relaxed text-muted">
+                Em branco &mdash; e este é o caso normal &mdash; a oferta vende{' '}
+                <strong>o passe do mês corrente</strong>, e quem resolve qual mês é a compra. Para
+                fixar um mês, escreva no formato <code>2026-10</code>.
+              </p>
+            </div>
+
+            <p className="text-2xs leading-relaxed text-muted">
+              O passe vale <strong>só no servidor onde foi comprado</strong>, como o XP. Comprar
+              duas vezes o mesmo mês é recusado antes de cobrar &mdash; ao contrário do VIP, não há
+              prazo a somar.
+            </p>
+          </div>
+        )}
+
         {/* ---- itens ---- */}
         {kind !== 'vehicle' && (
           <div>
@@ -767,6 +809,8 @@ export function StoreOfferDialog({
                 ? 'Uma oferta de item entrega exatamente um. A quantidade acima é o que vem por compra.'
                 : 'O modal do jogo mostra esta lista antes de o jogador confirmar — é o que justifica pagar por um pacote.'}
               {kind === 'vip' && ' Num VIP, os itens são o extra que vem junto do nível.'}
+              {kind === 'pass' &&
+                ' Num passe, os itens são o extra: o que a compra concede é o direito do mês.'}
             </p>
           </div>
         )}

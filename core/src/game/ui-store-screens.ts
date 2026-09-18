@@ -59,7 +59,7 @@
 // ============================================================
 
 import type { OfferBadge, StoreOffer } from '../db/store-repository.js';
-import { vehicleFuelOf, type StoreCatalogEntry } from '../store/service.js';
+import { passPeriodLabel, vehicleFuelOf, type StoreCatalogEntry } from '../store/service.js';
 import type { UiAction, UiElement, UiScreen } from '../types/ui-document.js';
 
 import { storeIconKey } from './card-icons.js';
@@ -340,6 +340,14 @@ export interface BuildStoreScreenOptions {
    */
   readonly vehicleSpace?: boolean | null;
   /**
+   * O passe daquele jogador, para o modal de uma oferta `pass`.
+   *
+   * `null` = a oferta não é passe, ou não deu para perguntar. Aí o
+   * modal mostra só o nome e o preço — e o botão continua lá, pelo
+   * mesmo motivo do veículo: recusar sem certeza é pior.
+   */
+  readonly pass?: StorePassView | null;
+  /**
    * O tamanho da tela em que o modal é desenhado.
    *
    * ####  SEM ELE, A LISTA PAGINA PELO NÚMERO ERRADO  ####
@@ -379,7 +387,35 @@ export function buildStoreScreen(options: BuildStoreScreenOptions): UiScreen {
         options.vehicleSpace ?? null,
         options.bundleTemplate ?? null,
         options.viewport,
+        options.pass ?? null,
       );
+}
+
+/**
+ * O que a tela de compra precisa dizer sobre o passe (04 §7).
+ *
+ * ####  CADA CAMPO AQUI EVITA UMA RECLAMAÇÃO PREVISÍVEL  ####
+ *
+ * Não é enfeite: um passe é um mês nominal, de um servidor só, e
+ * quem paga sem ver isso abre suporte — e tem razão. O `level` é o
+ * argumento de venda do passe comprado tarde, e ele é DAQUELE
+ * jogador, nunca um número genérico.
+ */
+export interface StorePassView {
+  /** `2026-10`. O mês que a compra vai congelar no plano. */
+  readonly period: string;
+  /** Onde o passe vale — e só ali. */
+  readonly serverName: string;
+  /** Quantos dias do mês ainda restam, contando hoje. */
+  readonly daysLeft: number;
+  /** Já tem? Então o botão de comprar NÃO é desenhado. */
+  readonly owned: boolean;
+  /** O nível alcançado naquele servidor. É o que o retroativo entrega. */
+  readonly level: number;
+  /** O retroativo está ligado nesta temporada? */
+  readonly retroactive: boolean;
+  /** Há temporada no ar neste servidor? `false` = comprou, mas a trilha ainda não abriu. */
+  readonly seasonReady: boolean;
 }
 
 // ============================================================
@@ -716,6 +752,7 @@ function buildItemScreen(
   vehicleSpace: boolean | null,
   bundleTemplate: UiScreen | null,
   viewport: Size | undefined,
+  pass: StorePassView | null,
 ): UiScreen {
   // A página entra no id que VOLTA: o plugin compara com o que
   // pediu e descarta o que não bate — ver `screenId` em
@@ -777,7 +814,15 @@ function buildItemScreen(
   // pior que deixar tentar — a compra confere de novo antes de
   // cobrar, e devolve a mesma recusa com o mesmo texto.
   const noSpace = offer.kind === 'vehicle' && vehicleSpace === false;
-  const canBuy = affordable && !noSpace;
+
+  // ####  QUEM JÁ TEM NÃO VÊ UM BOTÃO QUE VAI RECUSAR  ####
+  //
+  // A compra recusaria isto antes de cobrar (04 §3), então o botão
+  // só levaria a um aviso. `null` — não deu para perguntar — NÃO
+  // esconde nada, pelo mesmo critério do veículo: recusar sem
+  // certeza é pior, e a compra confere de novo antes de cobrar.
+  const owned = offer.kind === 'pass' && pass?.owned === true;
+  const canBuy = affordable && !noSpace && !owned;
 
   // ####  KIT, VIP E VEÍCULO NÃO TÊM QUANTIDADE  ####
   //
@@ -788,7 +833,7 @@ function buildItemScreen(
   // isto é o pacote, isto é o preço. Item solto continua com ele,
   // que é onde comprar dez de uma vez faz sentido.
   const stacks = offer.kind === 'item';
-  const lines = contentRows(offer, nameOf);
+  const lines = contentRows(offer, nameOf, pass);
   const page = target.page ?? 0;
 
   // ####  O MODELO DE ITEM VALE SÓ PARA ITEM SOLTO  ####
@@ -801,7 +846,7 @@ function buildItemScreen(
     return fillTemplate(template, id, {
       [SLOTS.nome]: { text: offer.name },
       [SLOTS.icone]: offerImageSlot(offer),
-      [SLOTS.descricao]: { text: offerSummary(offer) },
+      [SLOTS.descricao]: { text: offerSummary(offer, pass) },
       [SLOTS.quantidade]: { text: String(quantity) },
       [SLOTS.total]: { text: formatNumber(total), color: canBuy ? C.amber : C.rust },
       [SLOTS.saldo]:
@@ -850,7 +895,7 @@ function buildItemScreen(
     return fillTemplate(bundleTemplate, id, {
       [SLOTS.pacoteNome]: { text: offer.name },
       [SLOTS.pacoteIcone]: offerImageSlot(offer),
-      [SLOTS.pacoteResumo]: { text: offerSummary(offer) },
+      [SLOTS.pacoteResumo]: { text: offerSummary(offer, pass) },
       [SLOTS.pacoteTitulo]:
         lines.length === 0
           ? { hide: true }
@@ -860,9 +905,7 @@ function buildItemScreen(
                   ? // Com abas, o título viraria um terceiro rótulo
                     // dizendo o que as abas já dizem.
                     ''
-                  : offer.kind === 'vip'
-                    ? 'O QUE VOCÊ GANHA'
-                    : 'O QUE VEM NO KIT',
+                  : listTitleOf(offer),
             },
       // A lista entra no elemento que o admin posicionou — e as setas
       // vão DENTRO dele, que é o único lugar cujo tamanho este
@@ -918,7 +961,7 @@ function buildItemScreen(
 
     label(
       'qtd',
-      offerSummary(offer),
+      offerSummary(offer, pass),
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
@@ -1082,7 +1125,7 @@ function buildItemScreen(
       body.push(
         label(
           'lst',
-          offer.kind === 'vip' ? 'O QUE VOCÊ GANHA' : 'O QUE VEM NO KIT',
+          listTitleOf(offer),
           {
             anchorMin: { x: 0, y: 1 },
             anchorMax: { x: 1, y: 1 },
@@ -1143,10 +1186,20 @@ function buildItemScreen(
         },
         C.surface2,
         [
-          label('nol', noSpace ? 'SEM ESPAÇO AQUI' : 'SALDO INSUFICIENTE', fill(), {
-            size: 11,
-            color: C.textMuted,
-          }),
+          // ####  O MOTIVO CERTO, E NÃO "SEM SALDO" PARA TUDO  ####
+          //
+          // Três coisas escondem o botão, e dizer "saldo" nas três
+          // faria quem já tem o passe achar que está sem dinheiro —
+          // a mesma armadilha do `store-unavailable` na compra.
+          label(
+            'nol',
+            owned ? 'VOCÊ JÁ TEM' : noSpace ? 'SEM ESPAÇO AQUI' : 'SALDO INSUFICIENTE',
+            fill(),
+            {
+              size: 11,
+              color: C.textMuted,
+            },
+          ),
         ],
       ),
     );
@@ -1297,7 +1350,11 @@ export function buildResultScreen(options: {
  * paga 500 OZ por "Kit Base" precisa ver o que está levando ANTES de
  * clicar — e um VIP precisa mostrar por que vale.
  */
-function contentRows(offer: StoreOffer, nameOf: NameResolver): readonly ContentRow[] {
+function contentRows(
+  offer: StoreOffer,
+  nameOf: NameResolver,
+  pass: StorePassView | null,
+): readonly ContentRow[] {
   if (offer.kind === 'vip') {
     // As vantagens primeiro: é o que vende o VIP. Os itens que vêm
     // junto são o extra, e vêm depois. (Com os dois, o modal separa
@@ -1305,7 +1362,70 @@ function contentRows(offer: StoreOffer, nameOf: NameResolver): readonly ContentR
     return [...offer.perks.map((text) => ({ text, item: null })), ...itemLines(offer, nameOf)];
   }
 
+  if (offer.kind === 'pass') {
+    // As linhas do passe vêm primeiro pelo mesmo motivo das
+    // vantagens do VIP: é o que o jogador precisa ler ANTES de
+    // pagar. Os itens que venham junto são o extra.
+    return [...passLines(pass), ...itemLines(offer, nameOf)];
+  }
+
   return offer.kind === 'item' ? [] : itemLines(offer, nameOf);
+}
+
+/**
+ * As quatro linhas que a tela do passe precisa dizer (04 §7).
+ *
+ * ####  SEM ELAS, O CARD "PASSE DE BATALHA" MENTE POR OMISSÃO  ####
+ *
+ * Um passe é de um MÊS, de um SERVIDOR, e comprar no dia 30 é
+ * comprar um dia. Cada uma dessas três coisas é uma reclamação
+ * previsível — e a quarta, o retroativo, é o principal argumento de
+ * venda de quem compra tarde, e desaparece se ninguém disser.
+ *
+ * Vazio quando não deu para perguntar: uma linha inventada sobre o
+ * que o jogador tem seria pior que nenhuma.
+ */
+function passLines(pass: StorePassView | null): readonly ContentRow[] {
+  if (pass === null) {
+    return [];
+  }
+
+  const rows: ContentRow[] = [
+    { text: `Vale só no servidor ${pass.serverName}`, item: null },
+    {
+      text:
+        pass.daysLeft === 1
+          ? 'Falta 1 dia para o mês acabar'
+          : `Faltam ${formatNumber(pass.daysLeft)} dias para o mês acabar`,
+      item: null,
+    },
+  ];
+
+  if (!pass.seasonReady) {
+    // Comprou um mês que ainda não abriu. Dizer isso é melhor que
+    // deixá-lo procurar a trilha que não existe — e o direito fica
+    // gravado, então a compra não se perde.
+    rows.push({ text: 'A temporada deste mês ainda não começou', item: null });
+  } else if (!pass.retroactive) {
+    // O retroativo é uma chave do admin (01 §5), e desligada ela
+    // muda o que a compra entrega. A tela conta.
+    rows.push({ text: 'A faixa paga vale do próximo nível em diante', item: null });
+  } else if (pass.level > 1) {
+    // O número é DAQUELE jogador. Um genérico ("resgate os níveis
+    // que você já tem") não vende nada.
+    rows.push({
+      text: `Resgate na hora os ${formatNumber(pass.level)} níveis que você já alcançou`,
+      item: null,
+    });
+  } else {
+    rows.push({ text: 'As recompensas pagas destravam conforme você sobe de nível', item: null });
+  }
+
+  if (pass.owned) {
+    rows.push({ text: 'Você já tem o passe deste mês', item: null });
+  }
+
+  return rows;
 }
 
 /**
@@ -1970,7 +2090,33 @@ function offerTitle(offer: StoreOffer): string {
  * É o subtítulo do modal, e ele muda com o formato: quantas unidades
  * vêm num item, quantos itens tem o kit, quanto tempo dura o VIP.
  */
-function offerSummary(offer: StoreOffer): string {
+/**
+ * O título da lista, e ele muda com o formato.
+ *
+ * "O QUE VEM NO KIT" sobre as linhas de um passe seria uma promessa
+ * falsa: o que vem é um direito de um mês, e não um pacote de
+ * coisas.
+ */
+function listTitleOf(offer: StoreOffer): string {
+  if (offer.kind === 'vip') {
+    return 'O QUE VOCÊ GANHA';
+  }
+
+  return offer.kind === 'pass' ? 'O PASSE DESTE MÊS' : 'O QUE VEM NO KIT';
+}
+
+function offerSummary(offer: StoreOffer, pass: StorePassView | null): string {
+  if (offer.kind === 'pass') {
+    // ####  "PASSE DE OUTUBRO DE 2026", E NÃO "PASSE DE BATALHA"  ####
+    //
+    // O mês é o produto. Sem ele no subtítulo, quem compra no dia 1
+    // e quem compra no dia 30 leem a mesma frase e compram coisas
+    // muito diferentes.
+    const period = pass?.period ?? offer.pass?.period ?? null;
+
+    return period === null ? 'Passe de batalha do mês' : `Passe de ${passPeriodLabel(period)}`;
+  }
+
   if (offer.kind === 'vip') {
     const days = offer.vip?.days ?? null;
     const tier = (offer.vip?.tier ?? '').toUpperCase();

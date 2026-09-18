@@ -44,6 +44,7 @@ import {
   parseStoreScreenId,
   STORE_SCREEN_ID,
   type NameResolver,
+  type StorePassView,
 } from './ui-store-screens.js';
 import {
   BUNDLE_TEMPLATE_ID,
@@ -69,6 +70,19 @@ export interface StoreScreenProviderOptions {
    * nunca vazio.
    */
   readonly nameOf?: NameResolver;
+  /**
+   * O passe daquele jogador NAQUELE servidor, para o modal.
+   *
+   * ####  POR QUE UMA FUNÇÃO, E NÃO O SERVIÇO DO PASSE  ####
+   *
+   * O mesmo motivo do `VipGranter` na loja: este arquivo desenha uma
+   * tela e não deve aprender o que é uma temporada. Ele pergunta
+   * "como está o passe deste jogador?" e pinta a resposta.
+   *
+   * Ausente = o modal do passe sai com nome e preço, e o botão
+   * continua lá — a compra confere de novo antes de cobrar.
+   */
+  readonly passOf?: (serverId: string, steamId: string) => StorePassView | null;
 }
 
 /**
@@ -101,6 +115,7 @@ export function createStoreScreenProvider(
     // modal ele decide se o botão de comprar existe.
     let balance: number | null = null;
     let vehicleSpace: boolean | null = null;
+    let pass: StorePassView | null = null;
 
     if (target.kind === 'item' && input.steamId !== undefined) {
       const steamId = input.steamId;
@@ -127,6 +142,12 @@ export function createStoreScreenProvider(
       if (offer?.kind === 'vehicle') {
         vehicleSpace = await options.store.hasVehicleSpace(input.serverId, steamId);
       }
+
+      // O mês, o servidor, os dias que restam e o que o retroativo
+      // dá (04 §7). Sem ida à rede: é leitura do banco local.
+      if (offer?.kind === 'pass') {
+        pass = options.passOf?.(input.serverId, steamId) ?? null;
+      }
     }
 
     const bundleTemplate = findTemplate(input.document.screens, BUNDLE_TEMPLATE_ID);
@@ -136,6 +157,7 @@ export function createStoreScreenProvider(
       target,
       balance,
       vehicleSpace,
+      pass,
       // ####  O TAMANHO DA TELA, PARA MEDIR O SLOT DA LISTA  ####
       //
       // Com shell, é o slot de CONTEÚDO, e não a tela do jogo — é o

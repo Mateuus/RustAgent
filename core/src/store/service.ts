@@ -55,6 +55,9 @@ import type {
 import { firstJsonLine } from '../game/plugin-contract.js';
 import type { Logger } from '../logger.js';
 import { disconnectedRcon, type OpsRcon } from '../ops/service.js';
+// A conta de fuso deste projeto é UMA, e ela mora ali. Um segundo
+// "dia de hoje" aqui daria duas viradas de mês na mesma tela.
+import { localDayOf } from '../rankings/periods.js';
 import { toError } from '../util.js';
 
 import {
@@ -147,6 +150,49 @@ export interface VipGranter {
   }): Promise<unknown>;
 }
 
+/**
+ * Quem sabe conceder o passe de batalha.
+ *
+ * A oferta de passe não entrega item nenhum por si — ela concede um
+ * DIREITO no sistema que JÁ existe (battlepass/service.ts): uma
+ * linha de `battlepass_entitlements`, com o índice único parcial que
+ * recusa dois direitos vivos para o mesmo jogador, no mesmo servidor,
+ * no mesmo mês.
+ *
+ * Reimplementar isso aqui criaria um segundo lugar onde o direito
+ * nasce — e o primeiro defeito seria um passe comprado que ninguém
+ * sabe expirar, exatamente como o "VIP comprado que nunca expira" do
+ * `VipGranter` logo acima.
+ *
+ * ####  POR QUE ELA TEM TRÊS MÉTODOS, E NÃO UM  ####
+ *
+ * `grant` entrega; os outros dois acontecem ANTES do débito:
+ *
+ *   periodNow  de que mês é a compra. A régua do calendário é de um
+ *              lado só (rankings/periods.ts), e o resultado vai para
+ *              o plano congelado — nunca é relido na entrega.
+ *   hasPass    já tem o passe deste mês aqui? Comprar de novo não
+ *              soma prazo como no VIP: o mês de outubro já é dele, e
+ *              um segundo outubro não existe. A recusa é ANTES de
+ *              cobrar (Docs/BattlePass/04 §3).
+ */
+export interface PassGranter {
+  /** O mês corrente do agente, `YYYY-MM`. */
+  periodNow(now: number): string;
+  /** Há direito vivo daquele mês, naquele servidor, para aquele jogador? */
+  hasPass(serverId: string, steamId: string, period: string): boolean;
+  grant(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    /** O mês do PLANO CONGELADO, nunca o de hoje. */
+    readonly period: string;
+    readonly origin: 'loja';
+    /** A referência da compra: é o que liga o direito ao pagamento. */
+    readonly sourceRef: string | null;
+    readonly createdBy: string;
+  }): void | Promise<void>;
+}
+
 /** O que a loja precisa da ficha do jogador. E nada além. */
 export interface StoreHistory {
   recordAction(event: PlayerEventInput): void;
@@ -158,6 +204,15 @@ export interface StoreServiceDeps {
   readonly servers: StoreServers;
   /** Ausente = ofertas de VIP falham na entrega e são estornadas. */
   readonly vips?: VipGranter | undefined;
+  /**
+   * Ausente = ofertas de passe são recusadas ANTES do débito.
+   *
+   * Diferente do VIP de propósito: sem o concessor não há de quem
+   * perguntar de que mês é a compra, e um plano sem mês é uma
+   * promessa que a entrega não sabe cumprir. Cobrar para estornar em
+   * seguida seria susto no extrato por configuração faltando.
+   */
+  readonly pass?: PassGranter | undefined;
   readonly logger: Logger;
   readonly history?: StoreHistory | undefined;
   /** Injetáveis para o teste não depender do relógio nem do acaso. */
@@ -240,6 +295,20 @@ export type PurchaseOutcome =
   | { readonly status: 'over-limit'; readonly price: number; readonly limit: number }
   /** O pareamento não está `active`: a loja NÃO cobra. */
   | { readonly status: 'store-unavailable' }
+  /**
+   * Já tem o passe daquele mês NAQUELE servidor. NADA foi cobrado.
+   *
+   * Desfecho normal, e não erro — como o veículo sem espaço. Comprar
+   * de novo não soma prazo (é o que o VIP faz, e é por isso que ele
+   * não sofre disto): o mês já é dele, e um segundo não existe.
+   *
+   * A recusa é por `(servidor, jogador, mês)`: comprar no `pvp1` não
+   * impede comprar no `pvp2` — são duas trilhas, e é o comportamento
+   * pretendido.
+   */
+  | { readonly status: 'pass-owned'; readonly period: string }
+  /** Oferta de passe num agente sem o concessor. NADA foi cobrado. */
+  | { readonly status: 'pass-unavailable' }
   /** Já há compra aberta deste jogador. NADA foi cobrado. */
   | { readonly status: 'already-in-flight'; readonly purchase: StorePurchase }
   /**
@@ -293,6 +362,20 @@ export interface DeliveryPlan {
   readonly vehicle: OfferVehicle | null;
   readonly vip: OfferVip | null;
   /**
+   * O passe de batalha prometido, com o MÊS JÁ RESOLVIDO.
+   *
+   * ####  É AQUI QUE O MÊS PARA DE DEPENDER DO RELÓGIO  ####
+   *
+   * Quando o débito volta `unknown`, a compra fica aberta e quem a
+   * fecha é o reconciliador — a cada 60 s, com teto de 6 horas
+   * (settle.ts). Se essas horas atravessarem a meia-noite do dia 1,
+   * um passe pago em setembro seria ativado como sendo de outubro.
+   *
+   * Por isso o `period` é resolvido na COMPRA e gravado aqui: a
+   * entrega ativa o mês que foi prometido, e não o mês de hoje.
+   */
+  readonly pass: DeliveryPass | null;
+  /**
    * Quantas unidades. O `deliverPlan` multiplica `amount` e `days`
    * por ele.
    *
@@ -302,8 +385,20 @@ export interface DeliveryPlan {
   readonly units: number;
 }
 
-/** A oferta vira plano. É o congelamento descrito acima. */
-export function planOf(offer: StoreOffer, units: number): DeliveryPlan {
+/** O passe de um mês, congelado no instante da compra. */
+export interface DeliveryPass {
+  /** `2026-09`. Resolvido na compra, NUNCA relido na entrega. */
+  readonly period: string;
+}
+
+/**
+ * A oferta vira plano. É o congelamento descrito acima.
+ *
+ * @param period o mês que a compra de um passe promete. Ele vem de
+ * fora porque quem conhece o calendário é o concessor do passe, e
+ * esta função é pura — ver `#passOf` na compra.
+ */
+export function planOf(offer: StoreOffer, units: number, period?: string | null): DeliveryPlan {
   return {
     items: offer.items,
     // Só a oferta marcada como veículo spawna veículo: uma oferta de
@@ -311,6 +406,10 @@ export function planOf(offer: StoreOffer, units: number): DeliveryPlan {
     // entregaria um carro que ninguém comprou.
     vehicle: offer.kind === 'vehicle' ? offer.vehicle : null,
     vip: offer.vip,
+    // Mesma disciplina do veículo, e com um motivo a mais: sem mês
+    // resolvido não há passe a prometer. `null` aqui faz a entrega
+    // não conceder nada — e a compra já recusou antes de cobrar.
+    pass: offer.kind === 'pass' && period != null ? { period } : null,
     units,
   };
 }
@@ -339,6 +438,7 @@ export function planFromJson(raw: string | null): DeliveryPlan | null {
       items: parsed.items,
       vehicle: parsed.vehicle,
       vip: parsed.vip,
+      pass: parsed.pass,
       units: parsed.units,
     };
   } catch {
@@ -363,6 +463,17 @@ const deliveryPlanSchema = z.object({
     .default(null),
   vip: z
     .object({ tier: z.string().min(1).max(32), days: z.number().int().min(1).max(3650).nullable() })
+    .nullable()
+    .default(null),
+  // ####  `.default(null)` NÃO É ENFEITE  ####
+  //
+  // Toda compra em voo no momento do deploy tem um plano gravado SEM
+  // este campo. Sem o padrão, `planFromJson` devolveria `null` para
+  // todas elas — e `null` é "não sei o que prometi", que vira
+  // `PLAN_MISSING` e conferência humana. Um campo novo obrigatório
+  // aqui transforma cada deploy numa fila de suporte.
+  pass: z
+    .object({ period: z.string().regex(/^\d{4}-\d{2}$/) })
     .nullable()
     .default(null),
   // Congelado como 1 nas tarefas da fila: o plano JÁ está
@@ -519,7 +630,52 @@ export class StoreService {
       }
     }
 
-    const units = Math.max(1, Math.trunc(input.quantity));
+    // ####  O PASSE TAMBÉM É CONFERIDO ANTES DO DÉBITO  ####
+    //
+    // Pela mesma razão do veículo, e com um motivo a mais: "já tem o
+    // passe deste mês" é um caso NORMAL, não um acidente. Deixá-lo
+    // para o `deliverPlan` o transformaria em exceção → estorno →
+    // chamado de suporte, e o extrato do jogador mostraria uma
+    // cobrança e uma devolução por ter clicado no botão errado.
+    //
+    // O mês sai daqui resolvido e vai para o plano congelado: da
+    // entrega em diante ninguém mais olha o calendário.
+    let passPeriod: string | null = null;
+
+    if (offer.kind === 'pass') {
+      const granter = this.#deps.pass;
+
+      if (granter === undefined) {
+        // Configuração faltando, e não culpa de quem clicou. Recusa
+        // sem cobrar: cobrar para estornar em seguida seria susto no
+        // extrato por um problema que é nosso.
+        this.#deps.logger.error(
+          { serverId: input.serverId, steamId: input.steamId, offerId: offer.id },
+          'uma oferta de passe foi comprada num agente sem o concessor do passe',
+        );
+
+        return { status: 'pass-unavailable' };
+      }
+
+      // A oferta com mês fixo manda; sem ele, é o mês corrente — que
+      // é o produto da primeira versão.
+      passPeriod = offer.pass?.period ?? granter.periodNow(this.#now());
+
+      if (granter.hasPass(input.serverId, input.steamId, passPeriod)) {
+        return { status: 'pass-owned', period: passPeriod };
+      }
+    }
+
+    // ####  O PASSE NÃO TEM QUANTIDADE  ####
+    //
+    // A vitrine já não oferece o seletor (só item o tem), mas a rota
+    // HTTP aceita `quantity` até 1000. Três passes do mesmo mês
+    // seriam TRÊS PREÇOS e UM direito — o `grant` é idempotente por
+    // mês, e é isso que faz a diferença virar dinheiro perdido.
+    //
+    // Fixado, e não recusado: quem clicou quer o passe, e devolver
+    // erro por um número que ele não escolheu seria um menu travado.
+    const units = offer.kind === 'pass' ? 1 : Math.max(1, Math.trunc(input.quantity));
     const total = offer.price * units;
 
     // ####  UMA COMPRA EM VOO POR JOGADOR  ####
@@ -567,7 +723,7 @@ export class StoreService {
 
     const purchaseId = this.#newId();
     const reference = this.#deps.newReference?.(input.serverId, purchaseId) ?? purchaseId;
-    const plan = planOf(offer, units);
+    const plan = planOf(offer, units, passPeriod);
 
     // O site valida `productId` com teto de 100 chars e devolve
     // 400 `INVALID_PRODUCT_ID` acima disso — um `rejected`, que
@@ -711,7 +867,7 @@ export class StoreService {
       // O MESMO plano que foi gravado na linha: entregar a partir
       // dele, e não da oferta, é o que faz a compra e a
       // reconciliação entregarem a mesma coisa.
-      await this.deliverPlan(input.serverId, input.steamId, plan);
+      await this.deliverPlan(input.serverId, input.steamId, plan, reference);
     } catch (error) {
       return await this.#refund(purchase, toError(error));
     }
@@ -770,7 +926,20 @@ export class StoreService {
    * quem chama traduz. Ela não devolve desfecho porque a compra e
    * a fila fecham de jeitos diferentes.
    */
-  async deliverPlan(serverId: string, steamId: string, plan: DeliveryPlan): Promise<void> {
+  async deliverPlan(
+    serverId: string,
+    steamId: string,
+    plan: DeliveryPlan,
+    /**
+     * A referência da compra, para o que é DIREITO e não item.
+     *
+     * Um `origemz.give` não tem onde anotar de onde veio; uma linha
+     * de `battlepass_entitlements` tem, e é ela que responde "de onde
+     * veio este passe?" sem busca por horário. Ausente = a entrega
+     * não sabe (a fila do site ainda não a manda — frente G).
+     */
+    reference?: string | null,
+  ): Promise<void> {
     const rcon = this.#deps.servers.contextOf(serverId)?.rcon ?? disconnectedRcon(serverId);
     const units = plan.units;
 
@@ -825,6 +994,54 @@ export class StoreService {
         // multiplicados pelas unidades.
         expiresAt: days === null ? null : this.#now() + days * units * 24 * 60 * 60 * 1000,
         origin: 'loja',
+        createdBy: 'loja',
+      });
+    }
+
+    // ---- o passe de batalha ----
+    //
+    // ####  ELE É O ÚLTIMO, E ISSO RESOLVE O ESTORNO  ####
+    //
+    // A pergunta em aberto do Docs/BattlePass/04 §9 é "estorno de um
+    // passe já resgatado devolve o valor inteiro e o jogador fica com
+    // os itens?". Nesta ordem ela não chega a existir na compra: o
+    // `#refund` só roda quando algum passo LANÇA, e depois do passe
+    // não há passo nenhum. Nenhuma compra é estornada com o direito
+    // já concedido.
+    //
+    // O que sobra é o estorno pedido por GENTE — chargeback, ban,
+    // engano —, e ele não passa por aqui. O caminho dele é o
+    // `revokeEntitlement` do painel, que registra quem mandou. Tirar
+    // o direito sozinho exigiria decidir o que fazer com as
+    // recompensas já resgatadas, que tocaram o inventário e não
+    // voltam: é decisão de produto, e não de código.
+    if (plan.pass !== null) {
+      if (this.#deps.pass === undefined) {
+        // O concessor existia na compra e sumiu antes da entrega
+        // (reconciliação depois de um restart com outra
+        // configuração). Falha ANTES de dizer que deu certo — o
+        // estorno cuida do resto, no molde do VIP.
+        throw new Error('PASS_GRANTER_UNAVAILABLE');
+      }
+
+      // ####  O MÊS É O DO PLANO, E O `units` NÃO ENTRA NA CONTA  ####
+      //
+      // Nada aqui olha o relógio: entre a cobrança e esta linha podem
+      // ter passado horas, e a virada do dia 1 no meio faria um passe
+      // pago em setembro nascer como outubro.
+      //
+      // E não há o que multiplicar: o mês é um só. O `grant` é
+      // idempotente por `(servidor, jogador, mês)` — reentregar a
+      // mesma compra não cria um segundo direito.
+      await this.#deps.pass.grant({
+        serverId,
+        steamId,
+        period: plan.pass.period,
+        origin: 'loja',
+        // A `reference` é o que liga o direito ao pagamento no
+        // ledger do site. Sem ela, "de onde veio este passe?" vira
+        // busca por horário.
+        sourceRef: reference ?? null,
         createdBy: 'loja',
       });
     }
@@ -1068,7 +1285,7 @@ export class StoreService {
     }
 
     try {
-      await this.deliverPlan(purchase.serverId, purchase.steamId, plan);
+      await this.deliverPlan(purchase.serverId, purchase.steamId, plan, purchase.reference);
     } catch (error) {
       const outcome = await this.#refund(
         this.#reread(purchase.serverId, purchase.id, purchase),
@@ -1237,5 +1454,90 @@ Compre OzCoins no site OrigemZ.`;
 
     case 'already-in-flight':
       return 'Você tem uma compra em andamento. Aguarde ou confira seu inventário.';
+
+    case 'pass-owned':
+      // Diz DE QUE MÊS, e diz que é deste servidor. Sem as duas
+      // coisas, quem joga em dois servidores lê "já tem" e conclui
+      // que o passe que ele comprou no outro vale aqui.
+      return (
+        `Você já tem o passe de ${passPeriodLabel(outcome.period)} neste servidor. ` +
+        'Ele vale até o fim do mês.'
+      );
+
+    case 'pass-unavailable':
+      // Sem detalhe técnico: quem clicou não resolve configuração
+      // faltando, e o log já tem o servidor e a oferta.
+      return 'O passe de batalha não está disponível agora. Avise a administração.';
   }
+}
+
+// ------------------------------------------------------------
+//  O MÊS DO PASSE, EM PORTUGUÊS
+//
+//  Funções puras do formato, no mesmo lugar e pelo mesmo motivo que
+//  `vehicleFuelOf`: a tela da loja as usa, e ela já lê deste arquivo.
+// ------------------------------------------------------------
+
+const MONTHS = [
+  'janeiro',
+  'fevereiro',
+  'março',
+  'abril',
+  'maio',
+  'junho',
+  'julho',
+  'agosto',
+  'setembro',
+  'outubro',
+  'novembro',
+  'dezembro',
+] as const;
+
+/**
+ * `2026-10` vira `outubro de 2026`.
+ *
+ * Nunca lança: é texto de tela, e um período estranho vale mais cru
+ * do que como um erro no meio de um modal de compra.
+ */
+export function passPeriodLabel(period: string): string {
+  const year = period.slice(0, 4);
+  const month = MONTHS[Number(period.slice(5, 7)) - 1];
+
+  return month === undefined ? period : `${month} de ${year}`;
+}
+
+/**
+ * Quantos dias daquele mês ainda restam, contando HOJE.
+ *
+ * ####  COMPRAR NO DIA 30 É COMPRAR UM DIA  ####
+ *
+ * É o número que a tela precisa dizer ANTES de cobrar (04 §7): é o
+ * preço honesto de vender um mês nominal, e quem não o vê antes de
+ * pagar vai abrir suporte — e vai ter razão.
+ *
+ * O fuso é o do AGENTE, a mesma régua do resto do projeto
+ * (`localDayOf`). O do jogador daria dois "dia 1" na mesma tela.
+ */
+export function daysLeftInPeriod(period: string, now: number, timeZone?: string): number {
+  const today = localDayOf(now, timeZone);
+  const current = `${String(today.year)}-${String(today.month).padStart(2, '0')}`;
+  const year = Number(period.slice(0, 4));
+  const month = Number(period.slice(5, 7));
+
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+    return 0;
+  }
+
+  // O dia 0 do mês SEGUINTE é o último deste — a conta que não
+  // precisa saber de ano bissexto.
+  const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+  if (current > period) {
+    // Mês vencido. Acontece com uma oferta de mês fixo que o admin
+    // esqueceu ligada.
+    return 0;
+  }
+
+  // Mês futuro: ele ainda vem inteiro.
+  return current < period ? days : days - today.day + 1;
 }

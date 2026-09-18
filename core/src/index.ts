@@ -172,7 +172,7 @@ import { UiSync } from './game/ui-sync.js';
 import { WipeClock } from './game/wipe.js';
 import { StoreRepository } from './db/store-repository.js';
 import { WalletsRepository } from './db/wallets-repository.js';
-import { StoreService } from './store/service.js';
+import { daysLeftInPeriod, StoreService } from './store/service.js';
 import { LocalWallet, type Wallet } from './store/wallet.js';
 import { SiteWallet } from './store/site-wallet.js';
 import { SiteClient } from './site/client.js';
@@ -1268,6 +1268,37 @@ async function main(): Promise<void> {
       : 'a carteira é a do SITE (o site externo é o dono do saldo)',
   );
 
+  // O passe de batalha. O catalogo (temporada, trilha, regras de XP)
+  // e da rede; o XP, o direito comprado e o resgate sao POR
+  // SERVIDOR. Ver db/battlepass-repository.ts e a migracao 101.
+  //
+  // Ele nasce ANTES da loja de propósito: é a loja que o injeta,
+  // como injeta a lista de VIPs. Um segundo lugar onde o direito
+  // nasce produziria passes que ninguém sabe expirar.
+  const battlePassRepository = new BattlePassRepository(db);
+  // A porta UNICA do modulo: o painel, o jogo e o site entram por
+  // ela. Sem `timeZone`, vale a da maquina do agente -- a mesma
+  // regua do resto do processo (rankings/periods.ts).
+  const battlePass = new BattlePassService({
+    repository: battlePassRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    // ####  O DIA DO TETO E O DIA DA DIARIA SAO O MESMO  ####
+    //
+    // "Farm teto de 100 XP por dia" precisa saber quando o dia vira,
+    // e o projeto ja decidiu isso uma vez: `reset_at_minute`, das
+    // missoes, contando dias de CALENDARIO e nao 24 horas. Um
+    // segundo relogio aqui discordaria do outro duas vezes por ano.
+    //
+    // O repositorio de missoes nasce mais abaixo (ele depende do
+    // supervisor); a funcao so e chamada quando ha XP para creditar,
+    // muito depois do boot.
+    resetAtMinuteOf: (serverId) => questsRepository.settingsOf(serverId).resetAtMinute,
+    // A carga para o plugin e a tela sao da frente D; enquanto ela
+    // nao existe, mudar a trilha nao tem a quem avisar -- e o aviso
+    // e uma funcao vazia em vez de um `?.` espalhado pelo servico.
+    onChange: () => undefined,
+  });
+
   const store = new StoreService({
     repository: storeRepository,
     wallet,
@@ -1276,6 +1307,32 @@ async function main(): Promise<void> {
     // painel: ele expira, aparece na lista e sincroniza com o
     // plugin. Um segundo caminho seria um VIP que nunca vence.
     vips,
+    // O passe comprado nasce pela MESMA porta do concedido no painel
+    // e do que vier do site: uma linha de `battlepass_entitlements`,
+    // com o índice único parcial recusando dois direitos vivos no
+    // mesmo mês. A loja só sabe que existe um `grant`.
+    pass: {
+      // De que mês é a compra. A régua do calendário é a do passe —
+      // e ela já usa `localDayOf`, a mesma do resto do processo.
+      periodNow: (now) => battlePass.periodNow(now),
+      hasPass: (serverId, steamId, period) => battlePass.hasPass(serverId, steamId, period),
+      grant: (input) => {
+        battlePass.grant(
+          {
+            serverId: input.serverId,
+            steamId: input.steamId,
+            // O mês do PLANO CONGELADO. Ver store/service.ts.
+            period: input.period,
+            origin: input.origin,
+            sourceRef: input.sourceRef,
+            createdBy: input.createdBy,
+          },
+          // Quem deu foi a loja, e o registro do passe diz isso: a
+          // ficha do jogador separa "comprou" de "um admin deu".
+          { name: 'loja', source: 'system' },
+        );
+      },
+    },
     logger,
     history: directory,
     // A carteira DAQUELE servidor: o débito precisa sair com o
@@ -1403,33 +1460,6 @@ async function main(): Promise<void> {
   // A skin vendida ou sorteada no site vira posse pela MESMA porta do
   // painel. Ver site/skin-deliveries.ts.
   const skinDeliveries = createSkinDeliveryHandlers({ catalog: workshopCatalog, audit: workshopOwned });
-
-  // O passe de batalha. O catalogo (temporada, trilha, regras de XP)
-  // e da rede; o XP, o direito comprado e o resgate sao POR
-  // SERVIDOR. Ver db/battlepass-repository.ts e a migracao 101.
-  const battlePassRepository = new BattlePassRepository(db);
-  // A porta UNICA do modulo: o painel, o jogo e o site entram por
-  // ela. Sem `timeZone`, vale a da maquina do agente -- a mesma
-  // regua do resto do processo (rankings/periods.ts).
-  const battlePass = new BattlePassService({
-    repository: battlePassRepository,
-    serverIds: () => repository.list().map((server) => server.id),
-    // ####  O DIA DO TETO E O DIA DA DIARIA SAO O MESMO  ####
-    //
-    // "Farm teto de 100 XP por dia" precisa saber quando o dia vira,
-    // e o projeto ja decidiu isso uma vez: `reset_at_minute`, das
-    // missoes, contando dias de CALENDARIO e nao 24 horas. Um
-    // segundo relogio aqui discordaria do outro duas vezes por ano.
-    //
-    // O repositorio de missoes nasce mais abaixo (ele depende do
-    // supervisor); a funcao so e chamada quando ha XP para creditar,
-    // muito depois do boot.
-    resetAtMinuteOf: (serverId) => questsRepository.settingsOf(serverId).resetAtMinute,
-    // A carga para o plugin e a tela sao da frente D; enquanto ela
-    // nao existe, mudar a trilha nao tem a quem avisar -- e o aviso
-    // e uma funcao vazia em vez de um `?.` espalhado pelo servico.
-    onChange: () => undefined,
-  });
 
   for (const [id, client] of siteClients) {
     if (!siteWallets.has(id)) {
@@ -1603,6 +1633,31 @@ async function main(): Promise<void> {
     wallet,
     logger,
     nameOf: (shortname) => itemsRepository.get(shortname)?.displayName ?? shortname,
+    // ####  O QUE A TELA DO PASSE PRECISA DIZER  ####
+    //
+    // De que MÊS ele é, de qual SERVIDOR, quantos DIAS restam e o
+    // que o retroativo dá — cada uma dessas linhas evita uma
+    // reclamação previsível (Docs/BattlePass/04 §7). O número de
+    // níveis é DAQUELE jogador: um genérico não vende nada.
+    passOf: (serverId, steamId) => {
+      const now = Date.now();
+      const period = battlePass.periodNow(now);
+      const track = battlePass.trackOf(serverId, steamId);
+
+      return {
+        period,
+        // O nome que o admin deu, e não o id: é o que o jogador vê
+        // na lista de servidores.
+        serverName: repository.get(serverId)?.name ?? serverId,
+        daysLeft: daysLeftInPeriod(period, now),
+        owned: track.paid,
+        level: track.progress.level,
+        retroactive: track.season?.retroactive ?? true,
+        // A temporada do MÊS CORRENTE: uma `active` de outro mês não
+        // conta — o passe comprado hoje é do mês de hoje.
+        seasonReady: track.season?.period === period,
+      };
+    },
   });
 
   const uiDocuments = new UiDocumentsRepository(db, logger);
