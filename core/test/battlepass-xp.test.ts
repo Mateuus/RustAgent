@@ -163,7 +163,7 @@ function xpOf(h: Harness, seasonId: number, steamId: string, serverId = SERVER):
 }
 
 // ============================================================
-//  A MIGRAÇÃO 102
+//  A MIGRAÇÃO 105 (nasceu 102 — o VIP pegou o id primeiro)
 // ============================================================
 
 /** Um banco parado na migração `upTo`, como em migrations.test.ts. */
@@ -188,7 +188,7 @@ function databaseAt(upTo: number): AgentDatabase {
   return db;
 }
 
-describe('102 — o XP como recompensa, sobre um banco na 101', () => {
+describe('105 — o XP como recompensa, sobre um banco na 101', () => {
   /** Um banco na 101 com uma quest que já paga três recompensas. */
   function seeded(): AgentDatabase {
     const db = databaseAt(101);
@@ -219,7 +219,7 @@ describe('102 — o XP como recompensa, sobre um banco na 101', () => {
     // recebe tudo o que veio depois dela, e a 103 — a loja que vende
     // o passe — entrou pela mesma branch de integração. O que este
     // caso prova é sobre a 102; quantas vieram junto é outra coisa.
-    expect(runMigrations(db).map((migration) => migration.id)).toContain(102);
+    expect(runMigrations(db).map((migration) => migration.id)).toContain(105);
 
     // Reconstruir tabela com INSERT ... SELECT é onde se perde dado
     // em silêncio — e o `id` precisa sobreviver, porque o registro
@@ -289,7 +289,7 @@ describe('102 — o XP como recompensa, sobre um banco na 101', () => {
   });
 
   it('a chave do XP de evento existe, e recusa o mesmo evento duas vezes', () => {
-    const db = databaseAt(102);
+    const db = databaseAt(105);
 
     const insert = db.prepare(
       `INSERT OR IGNORE INTO battlepass_xp_events

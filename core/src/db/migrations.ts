@@ -9346,7 +9346,24 @@ CREATE INDEX idx_quest_rewards_quest ON quest_rewards (quest_id, seq);
 `;
 
 // ------------------------------------------------------------
-//  102 - o XP como recompensa, e a prova de que ele so entra uma vez
+//  105 - o XP como recompensa, e a prova de que ele so entra uma vez
+//
+//  ####  ELA NASCEU 102 E FOI RENUMERADA EM 18/09/2026  ####
+//
+//  A frente do VIP escolheu o MESMO id 102 para a `vip-server-scope`,
+//  em paralelo e sem que uma soubesse da outra. O agente do VIP subiu
+//  primeiro, gravou a 102 dele em `schema_migrations`, e quando o
+//  agente do passe subiu ele viu "102 ja aplicada" e PULOU esta aqui
+//  -- em silencio, com a tabela `battlepass_xp_events` nunca criada e
+//  o CHECK de `quest_rewards` ainda recusando `kind: 'xp'`.
+//
+//  O boot chegou a avisar ("migracao aplicada com nome diferente do
+//  que este agente conhece"), e foi assim que apareceu. Sem esse
+//  aviso, o sintoma seria uma missao que paga XP e nao paga.
+//
+//  Quem renumera e quem AINDA NAO FOI APLICADO: a 102 do VIP ja esta
+//  em banco, a desta aqui nao estava. O 105 foi conferido livre em
+//  todas as branches locais antes de ser usado.
 //
 //  ####  POR QUE O CHECK PRECISA ABRIR DE NOVO  ####
 //
@@ -9993,12 +10010,6 @@ export const MIGRATIONS: readonly Migration[] = [
   // branch de integracao, e uma migracao a mais e uma chance a mais
   // de colidir id. Ver o cabecalho de QUEST_REWARD_SKIN_SCHEMA.
   { id: 101, name: 'battlepass', sql: `${BATTLEPASS_SCHEMA}\n${QUEST_REWARD_SKIN_SCHEMA}` },
-  // 17/09/2026: o XP do passe -- `quest_rewards.kind` passa a
-  // aceitar 'xp', e o XP concedido por evento ganha a chave que
-  // o impede de sair duas vezes. A 102 estava livre em todas as
-  // branches vivas, conferido antes de usar: id repetido vira uma
-  // migracao PULADA em silencio no merge.
-  { id: 102, name: 'battlepass-xp-reward', sql: BATTLEPASS_XP_EVENT_SCHEMA },
   // 17/09/2026: a loja aprende o quinto formato -- o passe de
   // batalha. O id 103 foi conferido livre em todas as branches vivas
   // em 17/09/2026 antes de ser usado; a 102 e da frente do XP, que
@@ -10012,6 +10023,14 @@ export const MIGRATIONS: readonly Migration[] = [
   // tarefa de passe nem entra na fila: o CHECK da 097 a recusa, e ela
   // fica pendente do lado do site sem virar ACK nenhum.
   { id: 104, name: 'site-delivery-pass', sql: SITE_DELIVERY_PASS_SCHEMA },
+  // 17/09/2026: o XP do passe -- `quest_rewards.kind` passa a
+  // aceitar 'xp', e o XP concedido por evento ganha a chave que
+  // o impede de sair duas vezes.
+  //
+  // Nasceu 102 e virou 105 em 18/09/2026: a frente do VIP escolheu o
+  // mesmo id em paralelo, subiu primeiro, e esta aqui foi PULADA em
+  // silencio. Ver o cabecalho de BATTLEPASS_XP_EVENT_SCHEMA.
+  { id: 105, name: 'battlepass-xp-reward', sql: BATTLEPASS_XP_EVENT_SCHEMA },
 ];
 
 /** Linha da tabela de controle. */

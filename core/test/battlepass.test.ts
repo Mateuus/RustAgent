@@ -246,7 +246,7 @@ describe('101 — o passe, sobre um banco na 100', () => {
     // `toContain`, e não `toEqual`: a lista cresce a cada migração
     // nova acima da 100 — a 103, da loja que vende o passe, já
     // entrou, e a próxima entrará sem avisar. O que este teste prova
-    // é sobre a 101 e a 102, não que elas sejam as últimas do array.
+    // é sobre a 101 e a 105, não que elas sejam as últimas do array.
     //
     // As duas juntas porque reconstroem a MESMA tabela — a 101 para
     // aceitar `kind: 'skin'`, a 102 para `kind: 'xp'` — e o que este
@@ -254,7 +254,7 @@ describe('101 — o passe, sobre um banco na 100', () => {
     const applied = runMigrations(db).map((migration) => migration.id);
 
     expect(applied).toContain(101);
-    expect(applied).toContain(102);
+    expect(applied).toContain(105);
 
     // A 101 RECONSTRÓI `quest_rewards` para abrir o CHECK do `kind`.
     // Recriar tabela com INSERT ... SELECT é onde se perde dado em
