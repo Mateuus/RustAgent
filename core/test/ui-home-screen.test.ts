@@ -264,7 +264,10 @@ describe('os cartões e o que o servidor esconde', () => {
     const menu = buildMainMenu();
     const semLoja = applyHidden(menu, ['tela-loja']);
 
-    expect(cardsOf(menu)).toEqual({ rank: true, offer: true, wipe: true, quest: true });
+    // O PASSE é a exceção da regra, e por isso está nesta lista: a
+    // tela dele não é do documento (quem a desenha é o
+    // OrigemZBattlePass), então o que o prova é o próprio cartão.
+    expect(cardsOf(menu)).toEqual({ rank: true, offer: true, wipe: true, quest: true, pass: true });
     expect(cardsOf(semLoja).offer).toBe(false);
 
     const screen = buildHomeScreen({ view: view(), cards: cardsOf(semLoja) });
@@ -274,7 +277,7 @@ describe('os cartões e o que o servidor esconde', () => {
     // de 25% onde a loja estava.
     const cards = screen.elements.filter((element) => element.id.startsWith('hm-') && element.id !== 'hm-banner');
 
-    expect(cards).toHaveLength(3);
+    expect(cards).toHaveLength(4);
     expect(cards.at(-1)?.rect.anchorMax.x).toBe(1);
   });
 
