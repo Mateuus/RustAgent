@@ -145,6 +145,8 @@
 //      #OZPASSE#{"kind":"claimAll","secret":…,"requestId":…,"steamId":…}
 //      #OZPASSE#{"kind":"box","secret":…,"requestId":…,"steamId":…}
 //      #OZPASSE#{"kind":"buy","secret":…,"requestId":…,"steamId":…}
+//      #OZPASSE#{"kind":"parts","secret":…,"requestId":…,
+//                "steamId":…,"level":N,"lane":"free"|"paid"}
 //
 //  O `ready` é o handshake e vai SEM segredo — é ele que PEDE as
 //  cargas, e o segredo só existe depois que o catálogo chega. Todo o
@@ -163,6 +165,25 @@
 //
 //  A `message` é o que o jogador lê no rodapé, em português, escrita
 //  pelo agente — ele é quem sabe quantos slots faltaram.
+//
+//  ####  O `parts` TEM COMANDO PRÓPRIO DE VOLTA  ####
+//
+//  Ele responde por `origemz.passe.parts.reply`, e não pelo `reply`:
+//
+//      {"requestId":…,"ok":true,"steamId":…,"level":N,"lane":"paid",
+//       "rows":[{"label":"2x Metal Refinado","kind":"item",
+//                "shortname":"metal.refined","inKit":true}, …],
+//       "note":"…"}
+//
+//  Duas razões. O `reply` carrega uma FRASE, e aqui o que volta é uma
+//  LISTA. E toda resposta dele arrasta uma carga de progresso
+//  forçada atrás de si — que existe para apagar o otimismo de um
+//  resgate. Um clique que só LÊ não escreve nada no banco, e pagar um
+//  `progress` inteiro por ele seria cobrar a banda da escrita pela
+//  leitura.
+//
+//  `skinId` ausente = sem skin. Ele NUNCA vem como `"0"`: é o campo
+//  que derruba o cliente no `CuiImageComponent` (armadilha 3).
 //
 //  ####  DEPOIS DA RESPOSTA, O AGENTE MANDA O PROGRESSO  ####
 //
@@ -213,13 +234,36 @@
 //  a trilha inteira já ocupa quatro `AddUI`. Então o ALVO do clique é
 //  a TARJA DO NÍVEL, que já existia como painel e virou botão — trocar
 //  `CuiImageComponent` por `CuiButtonComponent` não acrescenta
-//  elemento nenhum. O "[i]" existe como rótulo separado porque um
-//  clique sem marca visível é um clique que ninguém dá; ele e o texto
-//  de XP são os DOIS únicos elementos que este trabalho acrescentou ao
-//  card.
+//  elemento nenhum. A marca do clique existe como elemento separado
+//  porque um clique sem marca visível é um clique que ninguém dá; ela
+//  e o texto de XP são os DOIS únicos elementos que este trabalho
+//  acrescentou ao card.
+//
+//  Essa marca era o rótulo "[i]" até 19/09/2026, e o dono apontou que
+//  ao lado do "faltam 62.200 XP" ela se lia como marcação de texto, e
+//  não como botão. Hoje é o ⓘ do `IconPng`, sobreposto à tarja: um
+//  PNG no lugar de um rótulo, UM elemento pelo outro.
 //
 //  O modal é uma região própria (`Region.Detail`), desenhada só quando
 //  aberta: a abertura do menu continua custando o que custava.
+//
+//  ####  E UM SEGUNDO MODAL, PORQUE O KIT NÃO SE ABRE SOZINHO  ####
+//
+//  A faixa paga do nível 22 diz "MetalFacemaskOrigemZ + 2.500 OZCoin
+//  +1": o agente concatena e corta em duas, e o "+1" não diz o que é.
+//  Pior: quando a recompensa é um KIT, nada na tela diz o que tem
+//  dentro dele — e é justamente o que decide se vale a pena.
+//
+//  Clicar na recompensa DENTRO do modal do nível abre a lista
+//  completa e rolável (`Region.Parts`), uma linha por coisa, com o
+//  conteúdo do kit recuado sob o nome dele.
+//
+//  Esses itens NÃO vêm na carga da temporada. Mandá-los seria 22
+//  níveis × 2 faixas × N itens (e um kit sozinho vai a 60), em todo
+//  `sync` e para todo servidor, por uma tela que se abre com dois
+//  cliques deliberados. Então o clique vira pedido ao agente, como o
+//  `claim` — e enquanto a resposta não chega, a tela DIZ que está
+//  carregando: ausente não é vazio.
 // ============================================================
 
 using System;
@@ -249,6 +293,17 @@ namespace Oxide.Plugins
         private const string BytesCommand = "origemz.passe.bytes";
         private const string ScrollCommand = "origemz.passe.scroll";
 
+        /// <summary>
+        /// A resposta do agente ao `parts`: o que aquela faixa dá, item a
+        /// item.
+        ///
+        /// Comando PRÓPRIO, e não o `reply`: aquele carrega uma FRASE e
+        /// arrasta uma carga de progresso atrás de si, que existe para
+        /// apagar o otimismo de um resgate. Um clique que só LÊ não muda
+        /// nada no banco.
+        /// </summary>
+        private const string PartsReplyCommand = "origemz.passe.parts.reply";
+
         // Os comandos da tela. Digitados pelo CLIENTE, então conferem
         // tudo de novo: um jogador pode mandá-los pelo F1 com qualquer
         // argumento. O `open` é o único sem token — é ele que cria um.
@@ -260,6 +315,12 @@ namespace Oxide.Plugins
 
         /// <summary>Abre (e fecha) o modal de detalhe de UM nível. Ver `CmdMenuDetail`.</summary>
         private const string MenuDetailCommand = "origemz.passe.detail";
+
+        /// <summary>
+        /// Abre (e fecha) o SEGUNDO modal: o que aquela faixa dá, item a
+        /// item. Ver `CmdMenuParts`.
+        /// </summary>
+        private const string MenuPartsCommand = "origemz.passe.parts";
 
         /// <summary>"Resgatar tudo" DENTRO da caixa: entregar de novo o que ficou devendo.</summary>
         private const string MenuRetryCommand = "origemz.passe.retry";
@@ -501,6 +562,24 @@ namespace Oxide.Plugins
             public string Origin = "";
         }
 
+        /// <summary>
+        /// Uma linha do segundo modal: UMA coisa que aquela faixa dá.
+        ///
+        /// O `ItemId` é resolvido AQUI, pelo shortname, como no `sync`: o
+        /// agente não conhece o `itemid` do jogo. Item que o Rust não
+        /// reconhece fica sem ícone e com o nome — nunca uma linha vazia.
+        /// </summary>
+        private class PartRow
+        {
+            public string Label = "";
+            public string Kind = "";
+            public int ItemId;
+            public ulong SkinId;
+
+            /// <summary>Veio de DENTRO do kit da linha acima: entra recuada.</summary>
+            public bool InKit;
+        }
+
         private readonly Dictionary<string, Progress> _progress = new Dictionary<string, Progress>();
 
         /// <summary>O segredo do `sync`. Vazio = nenhum push sai daqui, e nenhum progresso entra.</summary>
@@ -559,6 +638,7 @@ namespace Oxide.Plugins
             foreach (MenuSession session in _menus.Values)
             {
                 if (session.FlashTimer != null) session.FlashTimer.Destroy();
+                if (session.PartsTimer != null) session.PartsTimer.Destroy();
             }
 
             _menus.Clear();
@@ -1135,6 +1215,123 @@ namespace Oxide.Plugins
             }
         }
 
+        /// <summary>
+        /// A lista de itens de UMA faixa, vinda do agente.
+        ///
+        /// ####  ELA SÓ ENTRA NO MODAL QUE AINDA ESTÁ ESPERANDO POR ELA  ####
+        ///
+        /// O `requestId` tem de bater com o da sessão. Sem essa conferência,
+        /// a resposta de um clique que o jogador já abandonou entraria no
+        /// modal que ele abriu depois — e ele leria os itens do nível
+        /// errado sem nada na tela dizendo isso.
+        ///
+        /// Um id desconhecido não é erro: é um pedido que venceu, ou um
+        /// plugin recarregado. O agente fez a parte dele.
+        /// </summary>
+        [ConsoleCommand(PartsReplyCommand)]
+        private void CmdPartsReply(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null) return;
+
+            try
+            {
+                JObject payload = DecodePayload(arg.GetString(0));
+                if (payload == null)
+                {
+                    arg.ReplyWith(Fail("INVALID_PAYLOAD", "O payload não é Base64 de um objeto JSON."));
+                    return;
+                }
+
+                string requestId = Text(payload, "requestId");
+                BasePlayer player = FindOnline(Text(payload, "steamId"));
+                MenuSession session = null;
+
+                if (player != null) _menus.TryGetValue(player.userID, out session);
+
+                if (requestId.Length == 0 || session == null || session.PartsRequestId != requestId)
+                {
+                    arg.ReplyWith("{\"ok\":true,\"unknown\":true}");
+                    return;
+                }
+
+                session.PartsRequestId = "";
+                if (session.PartsTimer != null)
+                {
+                    session.PartsTimer.Destroy();
+                    session.PartsTimer = null;
+                }
+
+                session.PartsFailed = !Flag(payload, "ok", false);
+                session.PartsNote = Text(payload, "note").Trim();
+                session.PartsRows.Clear();
+
+                JArray rows = payload["rows"] as JArray;
+                if (rows != null)
+                {
+                    foreach (JToken entry in rows)
+                    {
+                        JObject row = entry as JObject;
+                        if (row == null) continue;
+
+                        PartRow part = ReadPart(row);
+                        if (part != null) session.PartsRows.Add(part);
+                    }
+                }
+
+                Redraw(player, session, Region.Parts);
+
+                arg.ReplyWith("{\"ok\":true}");
+            }
+            catch (Exception cause)
+            {
+                arg.ReplyWith(Fail("EXCEPTION", cause.Message));
+            }
+        }
+
+        /// <summary>
+        /// Uma linha da lista. O item é resolvido AQUI pelo shortname, como
+        /// no `ReadReward`: o agente não conhece o `itemid` do jogo.
+        ///
+        /// `null` = a linha não tem nem texto: não vale um lugar na tela.
+        /// </summary>
+        private static PartRow ReadPart(JObject row)
+        {
+            PartRow part = new PartRow
+            {
+                Label = Text(row, "label").Trim(),
+                Kind = Text(row, "kind").Trim().ToLowerInvariant(),
+                InKit = Flag(row, "inKit", false),
+            };
+
+            string shortname = Text(row, "shortname").Trim().ToLowerInvariant();
+
+            ulong skinId;
+            if (ulong.TryParse(Text(row, "skinId"), NumberStyles.None, CultureInfo.InvariantCulture, out skinId))
+            {
+                part.SkinId = skinId;
+            }
+
+            if (shortname.Length > 0)
+            {
+                ItemDefinition def = ItemManager.FindItemDefinition(shortname);
+                if (def != null)
+                {
+                    part.ItemId = def.itemid;
+
+                    if (part.Label.Length == 0)
+                    {
+                        part.Label = def.displayName != null ? def.displayName.english : shortname;
+                    }
+                }
+                else if (part.Label.Length == 0)
+                {
+                    part.Label = shortname;
+                }
+            }
+
+            return part.Label.Length == 0 ? null : part;
+        }
+
         // ============================================================
         //  §7  O DIAGNÓSTICO  -  origemz.passe.status
         // ============================================================
@@ -1210,6 +1407,15 @@ namespace Oxide.Plugins
             // O mesmo ✓ do OrigemZWorkshop (`check`): é PNG nosso, já
             // desenhado, e o jogador o lê como "já é seu".
             { "check", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADz0lEQVR42u2bz2sTURDHZ7IRi/iDVCh4EQX/AaEtFC8qPXnVowdRSq/17qH/Qa+iKHr3KIp4EgRBD4J6UcGTCpa2WEHQJtmPB+fJuCTN22TTZtMdWBJ2k81+v+/NfGfmvYhUVllllVVWWWV71XTcAAEqIok7lapquidGE0i6nK+N/QwAElVtA1MickFEjovIdxF5oqrvAVVVxnrkgavAN/6338BKmAnmImMFvm6vVxzopjtSO3ezlzuUEXzNXqeATaANtDIzIAW27P25bKyolTzaC9AQkYcictguJR3inIpIKiLXsveplRh83eTttojMiEhrGzxq106EW5R9BiSq2rTgdlFEmiJS7/GdVEQ2Sq9+LugtuIDXy0IMuOzvUWbw8wao7aJ8NwsEvQD2l1YKndZPA2sGvt0DfFCEl8AkoGUFX7NjEvjkRj8WfKO0OUAYNTteZMB1s0DOqqXGXeuEMoAPfn8rMuilRsBPYLa04O3B99nrciaabwc+fObKuER8L3exEX/JE1jmiD9noNMc4G8VOvJAAtTtSIYtI67AOQmsR8pdAP+0sLJ3O80clpw4uTsKvIqM+OH6G/teLc/zdQP4r3sCzInIecu1X4vIY8vDE1VtF1zgqKqmNpLzVuDUe+T3Yp2fs6r6duDncmXmJPCoA+PvgJmiI2yfcheOuULkzqZ9DThiGVSYYr7DArBRJAlO7pZyFDjhMwuFDYYbhWXXT+vmc4WQ0KGltRUR8YPWLxcqdzYDJoCPPaJvuwgSnNzNWuaWp7q7F8AXokzO948CP5yfEUHCmbwkZPp5q30UOAcKre4cAQeBr5HJR9uNSrQvOrlrZGJNzG99Glp156bkncjcO9uU6ElCpsB5EBn0gjuuAdNDK3BCBgWcsqkdMzLBVVoxJDiSb+as7gDmh17gON+cMVcojAQ38ou7Knc5SDjmfLTZJwn7uvTzmjnkbmXHS1s3VRsFkDDRRz8v/NaDQuVuABKe90nCokut++rn7Won17lDPUeeng1e14FnA/TzdreZ6UcgJwnZZCqNJG1j5Pp5Jo9JnyS0Iqa97+ddGsl+3oAkMBb9vCGRMJx+3g6TsDUg+Kel2sbShYRWRKDrJHev+unnjQoJQSZXcqzY+gJnHThZ9rW7JLOI0YuE4vt5I7SMFbOS0zSSFkq9fBXR3Pyd0f8U+GXv75d6+SrHai4dip+XFvTq47hx0QfGG8BnB3wTuAtM+jacjONu8bC6BBwSkdPyd//eB1X9kl19kr20e3snFlhH6v8CBjboO3tm735llVVWWWWVjb79AVFUcsSCjjxVAAAAAElFTkSuQmCC" },
+            // ####  O ⓘ QUE SUBSTITUIU O "[i]"  ####
+            //
+            // O rótulo "[i]" ficava ao lado do "faltam 62.200 XP" e se lia
+            // como marcação de texto, não como botão — foi o que o dono
+            // apontou olhando a tela (19/09/2026). Este é o mesmo desenho dos
+            // outros quatro: 64×64, branco sobre transparente, tingido pelo
+            // CUI. Ele troca UM elemento por UM elemento na tarja: a régua de
+            // bytes por nível não muda.
+            { "info", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAACcElEQVR42u2b/bGDIAzAHYERHMERGMURHMENOoIjMMIboSMwgiPweHfpXe9VIZEkrTW5y19VgV8hHxC6lFJ3Ze0MgHwjLqvPOmcNWX+yrulVVvgtwLMe3j0lgD7rlPWe2uUO3+rPAMDDPyglAdr4OAAepq+W/HCB4JjqIb1PQuvSaBn8uGPMtGWFvqgCWIidjPDOBFO335lNHp5Z4B2KLBoAHMGy//0zt6xDwywb4BsrwWM4KQDYwUeYkpw+3ME3IzcE7sHPwsGLgzbYIGAbviMaHJJeCDsg+8QCYEEYH5f043iH7FsTgFHC8jJrDcJ4FEBfsb6tgx8hkAktfhwBYS0FS6WPBqHB7xnUe+NSWioRIwmA5/S1hI5KgH2IpwAoJTZDYydr4hq9QymBQgHwFT/fmjXWpDXLmynfpqz9yODupGfAo42ItQVblv+QO/kAG4B1330JwFRwJY4xgJHwAv/b2HPhUwnAnhW9CQQwnHHAlt4wITJ2fWrG+Zz5QtXOYCx0PPG+f6x5A4z7kIj3H+cEz+qTXp4wbwEIGKPBpLNAjLGlU80dYqI/f2IAvhYVPj+8YvzmyQD0Bbf+AmBPuhMDqI7LABgAA2BG0NygBUL6obAWAFIorJkMaQEgJUOa6bAGAHI6rLkhogGAvCGitSWmAeDwlpjGpqgGgMObotLb4hoAmrbFpQ9GNAA0H4xIHo29cyMUfTQmfTgqWTDBdjgqeTz+jkIJ8vG4RoGE1uAPF0hcvkTGiqQQIfKzYfzaMjkrlCRCiOkLS2WtWJpoGLdmxZK+oFzeLkwkuzJjl6bs2hxyaVzy4qRdnT2bXh7AL/7cW1W8pf6KAAAAAElFTkSuQmCC" },
         };
 
         /// <summary>Nome do ícone → CRC no FileStorage. Vazio até o boot.</summary>
@@ -1273,6 +1479,7 @@ namespace Oxide.Plugins
         private const string UiFoot = "OZPass.Foot";
         private const string UiBox = "OZPass.Box";
         private const string UiDetail = "OZPass.Detail";
+        private const string UiParts = "OZPass.Parts";
 
         [Flags]
         private enum Region
@@ -1284,7 +1491,9 @@ namespace Oxide.Plugins
             Foot = 8,
             Box = 16,
             Detail = 32,
-            AllButWindow = Head | Track | Foot | Box | Detail,
+            /// <summary>O segundo modal: os itens de UMA faixa. Fica por cima do `Detail`.</summary>
+            Parts = 64,
+            AllButWindow = Head | Track | Foot | Box | Detail | Parts,
             All = Window | AllButWindow,
         }
 
@@ -1306,6 +1515,43 @@ namespace Oxide.Plugins
 
             /// <summary>O modal existe no cliente. Mesma razão do `BoxDrawn`.</summary>
             public bool DetailDrawn;
+
+            // ---- o segundo modal: os itens de UMA faixa ----
+            //
+            // ####  ELE É PEDIDO AO AGENTE, E POR ISSO TEM ESTADO  ####
+            //
+            // A carga do `sync` traz a linha INTEIRA já concatenada
+            // ("MetalFacemaskOrigemZ + 2.500 OZCoin +1") e não traz as
+            // partes — nem, num kit, o que ele tem dentro. Quem sabe disso
+            // é o agente, e ele responde por RCON depois do clique.
+            //
+            // Entre o clique e a resposta a tela diz que está carregando.
+            // Ausente NÃO é vazio: um modal em branco pareceria erro, e o
+            // jogador clicaria de novo.
+
+            /// <summary>Que nível o modal de itens mostra. 0 = fechado.</summary>
+            public int PartsLevel;
+
+            /// <summary>`free` ou `paid`. Vazio = fechado.</summary>
+            public string PartsLane = "";
+
+            /// <summary>O pedido no ar. Vazio = a resposta já chegou (ou desistiu).</summary>
+            public string PartsRequestId = "";
+
+            /// <summary>O relógio da desistência DESTE pedido. Ver `RequestParts`.</summary>
+            public Timer PartsTimer;
+
+            /// <summary>O aviso embaixo da lista: kit apagado, faixa vazia, ou o erro.</summary>
+            public string PartsNote = "";
+
+            /// <summary>A resposta chegou e deu errado: a lista dá lugar ao `PartsNote`.</summary>
+            public bool PartsFailed;
+
+            /// <summary>O que o agente respondeu. Vazio COM pedido no ar = carregando.</summary>
+            public readonly List<PartRow> PartsRows = new List<PartRow>();
+
+            /// <summary>O modal existe no cliente. Mesma razão do `BoxDrawn`.</summary>
+            public bool PartsDrawn;
 
             /// <summary>Há um pedido no ar: os botões ficam mudos até a resposta.</summary>
             public bool Busy;
@@ -1454,6 +1700,11 @@ namespace Oxide.Plugins
             {
                 _menus.Remove(player.userID);
                 if (session.FlashTimer != null) session.FlashTimer.Destroy();
+
+                // O relógio do detalhe da faixa morre com a sessão: sem
+                // isto, ele acordaria daqui a 20 s para desenhar num menu
+                // que não existe mais.
+                CloseParts(session);
             }
 
             // Pelo NOME, e sempre: é o que livra quem ficou com um resto na
@@ -1701,7 +1952,152 @@ namespace Oxide.Plugins
 
             session.DetailLevel = session.DetailLevel == number ? 0 : number;
 
-            Redraw(player, session, Region.Detail);
+            // ####  MEXER NO NÍVEL FECHA O QUE ESTAVA POR CIMA DELE  ####
+            //
+            // Fechar, porque uma lista sozinha na tela não diz de que nível
+            // ela é. E TROCAR, porque o modal de itens guarda o próprio
+            // número: sem isto, clicar no nível 7 com o detalhe do 22 aberto
+            // deixaria os itens do 22 por cima da tela do 7, sem nada
+            // dizendo isso.
+            CloseParts(session);
+
+            Redraw(player, session, Region.Detail | Region.Parts);
+        }
+
+        /// <summary>
+        /// Abre e fecha o SEGUNDO modal: o que aquela faixa dá, item a item.
+        ///
+        /// ####  O QUE O CARD E O MODAL DO NÍVEL NÃO CONSEGUEM DIZER  ####
+        ///
+        /// A faixa paga do nível 22 diz "MetalFacemaskOrigemZ + 2.500 OZCoin
+        /// +1": a linha vem CONCATENADA do agente, cortada em duas
+        /// recompensas, e o "+1" não diz o que é. E quando a recompensa é um
+        /// KIT, nada na tela diz o que tem dentro dele.
+        ///
+        /// Aqui cada coisa é uma linha, com ícone e quantidade, e o conteúdo
+        /// do kit vem recuado sob o nome dele. A lista ROLA, porque um kit
+        /// vai a 60 itens.
+        ///
+        /// ####  ELE PRECISA PEDIR AO AGENTE  ####
+        ///
+        /// O plugin NÃO sabe as partes: a carga da temporada manda a linha
+        /// pronta, e mandar as de toda faixa de todo nível seria a trilha
+        /// inteira outra vez, em todo `sync`, para uma tela que se abre com
+        /// dois cliques. Então o clique vira pedido, como o `claim` — e a
+        /// tela diz "carregando" até a resposta.
+        ///
+        /// A MESMA faixa fecha (é um interruptor, como o nível); outra faixa
+        /// troca o conteúdo. Fechar volta para o modal do nível, que continua
+        /// atrás: quem abriu para ver o detalhe não quer recomeçar da trilha.
+        /// </summary>
+        [ConsoleCommand(MenuPartsCommand)]
+        private void CmdMenuParts(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            int number = arg.GetInt(1, 0);
+            string lane = arg.GetString(2, "").Trim().ToLowerInvariant();
+
+            // Tudo o que chega do cliente é conferido de novo: este comando
+            // pode ser digitado no F1 com qualquer argumento.
+            if (lane != LaneFree && lane != LanePaid) return;
+
+            Level level = LevelOf(number);
+            if (level == null) return;
+
+            Reward reward = RewardOf(level, lane);
+
+            // Faixa que não dá nada não abre modal nenhum: não há lista, e a
+            // tela do nível já diz isso por extenso.
+            if (!reward.Has) return;
+
+            if (session.PartsLevel == number && session.PartsLane == lane)
+            {
+                CloseParts(session);
+                Redraw(player, session, Region.Parts);
+                return;
+            }
+
+            CloseParts(session);
+            session.PartsLevel = number;
+            session.PartsLane = lane;
+
+            RequestParts(player, session, number, lane);
+
+            Redraw(player, session, Region.Parts);
+        }
+
+        /// <summary>
+        /// Esquece o modal de itens: o nível, a faixa, a lista e o pedido no
+        /// ar.
+        ///
+        /// O relógio da desistência morre junto. Sem isso, a resposta de um
+        /// pedido abandonado voltaria a escrever num modal que o jogador já
+        /// fechou — ou pior, no que ele abriu depois.
+        /// </summary>
+        private static void CloseParts(MenuSession session)
+        {
+            if (session.PartsTimer != null)
+            {
+                session.PartsTimer.Destroy();
+                session.PartsTimer = null;
+            }
+
+            session.PartsLevel = 0;
+            session.PartsLane = "";
+            session.PartsRequestId = "";
+            session.PartsNote = "";
+            session.PartsFailed = false;
+            session.PartsRows.Clear();
+        }
+
+        /// <summary>
+        /// Pede ao agente o que aquela faixa dá, e arma o relógio da
+        /// desistência.
+        ///
+        /// ####  POR QUE ELE NÃO USA O `Request`  ####
+        ///
+        /// Aquele marca a sessão como ocupada e faz a resposta virar uma
+        /// FRASE no rodapé — é o caminho de quem ESCREVE (resgatar, comprar).
+        /// Este só lê: os botões de resgate continuam vivos enquanto a lista
+        /// carrega, e a resposta é uma lista, não uma frase.
+        /// </summary>
+        private void RequestParts(BasePlayer player, MenuSession session, int level, string lane)
+        {
+            if (_secret.Length == 0)
+            {
+                session.PartsFailed = true;
+                session.PartsNote = "O servidor ainda está sincronizando o passe. Tente em instantes.";
+                return;
+            }
+
+            string requestId = Guid.NewGuid().ToString("N").Substring(0, 16);
+            session.PartsRequestId = requestId;
+
+            ulong userId = player.userID;
+            session.PartsTimer = timer.Once(RequestTimeoutSeconds, delegate
+            {
+                MenuSession live;
+                if (!_menus.TryGetValue(userId, out live) || live != session) return;
+                if (live.PartsRequestId != requestId) return;
+
+                live.PartsRequestId = "";
+                live.PartsFailed = true;
+                live.PartsNote = "O servidor não respondeu. Feche e abra esta recompensa de novo.";
+
+                BasePlayer again = BasePlayer.FindByID(userId);
+                if (again != null && again.IsConnected) Redraw(again, live, Region.Parts);
+            });
+
+            Push("parts", new JObject
+            {
+                ["requestId"] = requestId,
+                ["steamId"] = player.UserIDString,
+                ["level"] = level,
+                ["lane"] = lane,
+            });
         }
 
         /// <summary>
@@ -2118,6 +2514,41 @@ namespace Oxide.Plugins
             public bool Busy;
 
             public Dictionary<string, string> Icons = new Dictionary<string, string>();
+        }
+
+        /// <summary>
+        /// O segundo modal: o que UMA faixa dá, item a item.
+        ///
+        /// ####  TRÊS ESTADOS, E O VAZIO NÃO É UM DELES  ####
+        ///
+        /// `Loading` = o pedido está no ar. `Failed` = veio resposta e ela
+        /// diz que não deu. Só o terceiro mostra lista — e uma lista vazia
+        /// sem `Note` seria a tela dizendo "esta faixa não dá nada", que é
+        /// exatamente o que ela NÃO pode dizer aqui: o jogador só chegou até
+        /// aqui porque a faixa dá alguma coisa.
+        /// </summary>
+        private class PartsView
+        {
+            public string Token = "";
+            public int Level;
+            public string Lane = "";
+
+            /// <summary>"NÍVEL 22 · RECOMPENSA DO PASSE".</summary>
+            public string Title = "";
+
+            /// <summary>A linha inteira que o card mostra cortada. É o resumo de cima.</summary>
+            public string Summary = "";
+
+            /// <summary>O pedido está no ar: a tela diz que está carregando.</summary>
+            public bool Loading;
+
+            /// <summary>A resposta veio e não deu certo: a lista dá lugar ao aviso.</summary>
+            public bool Failed;
+
+            /// <summary>O aviso de baixo: kit apagado, ou o motivo da falha.</summary>
+            public string Note = "";
+
+            public readonly List<PartRow> Rows = new List<PartRow>();
         }
 
         private class FootView
@@ -2555,6 +2986,43 @@ namespace Oxide.Plugins
             return view;
         }
 
+        /// <summary>
+        /// O modal de itens, do que a sessão guarda. `null` = fechado, ou
+        /// apontando para um nível/faixa que a temporada nova não tem mais.
+        ///
+        /// O `Summary` é a linha do agente — a mesma que o card corta. Ela
+        /// fica no topo da lista de propósito: é o que o jogador acabou de
+        /// clicar, e vê-la inteira já responde metade da pergunta.
+        /// </summary>
+        private PartsView ComputeParts(MenuSession session)
+        {
+            if (session.PartsLevel == 0 || session.PartsLane.Length == 0) return null;
+
+            Level level = LevelOf(session.PartsLevel);
+            if (level == null) return null;
+
+            Reward reward = RewardOf(level, session.PartsLane);
+            if (!reward.Has) return null;
+
+            bool paid = session.PartsLane == LanePaid;
+
+            PartsView view = new PartsView
+            {
+                Token = session.Token,
+                Level = level.Number,
+                Lane = session.PartsLane,
+                Title = "NÍVEL " + level.Number + " · " + (paid ? "RECOMPENSA DO PASSE" : "RECOMPENSA GRÁTIS"),
+                Summary = reward.Label,
+                Loading = session.PartsRequestId.Length > 0,
+                Failed = session.PartsFailed,
+                Note = session.PartsNote,
+            };
+
+            view.Rows.AddRange(session.PartsRows);
+
+            return view;
+        }
+
         // ---- a única porta de desenho ------------------------------
 
         /// <summary>
@@ -2587,6 +3055,14 @@ namespace Oxide.Plugins
             if ((regions & (Region.Track | Region.Box)) != 0 && session.DetailLevel != 0)
             {
                 regions |= Region.Detail;
+            }
+
+            // E o modal de ITENS fica por cima do modal do nível, pela mesma
+            // regra: quem redesenha o de baixo tem de redesenhar o de cima,
+            // senão o jogador vê a lista sumir atrás do que ele não mexeu.
+            if ((regions & Region.Detail) != 0 && session.PartsLevel != 0)
+            {
+                regions |= Region.Parts;
             }
 
             Frame frame = Prepare(player);
@@ -2638,6 +3114,33 @@ namespace Oxide.Plugins
                     {
                         CuiHelper.DestroyUi(player, UiDetail);
                         session.DetailDrawn = false;
+                    }
+                }
+            }
+
+            // Depois do `Detail`, sempre: quem desenha por último fica por
+            // cima, e este é o modal de cima.
+            if ((regions & Region.Parts) != 0)
+            {
+                PartsView parts = session.DetailLevel != 0 ? ComputeParts(session) : null;
+
+                if (parts != null)
+                {
+                    second.AddRange(BuildParts(parts));
+                    session.PartsDrawn = true;
+                }
+                else
+                {
+                    // Fechado, ou apontando para uma faixa que a temporada
+                    // nova não tem mais. A sessão esquece os dois números
+                    // junto com o pedido no ar: senão a resposta que ainda
+                    // está viajando entraria numa tela que não existe.
+                    CloseParts(session);
+
+                    if (session.PartsDrawn)
+                    {
+                        CuiHelper.DestroyUi(player, UiParts);
+                        session.PartsDrawn = false;
                     }
                 }
             }
@@ -3347,10 +3850,32 @@ namespace Oxide.Plugins
             Label(canvas, stripBox, 82, 0, stripBox.W - 108, strip, card.XpText, card.Milestone ? 11 : 10,
                   card.XpLive ? ColText : ColMuted, TextAnchor.MiddleRight, false);
 
-            // A marca do clique. Um alvo sem marca é um alvo que ninguém
-            // encontra — e este é o único elemento que o modal custa no card.
-            Label(canvas, stripBox, stripBox.W - 24, 0, 18, strip, "[i]", 10,
-                  card.Current ? ColText : ColMuted, TextAnchor.MiddleCenter, true);
+            // ####  A MARCA DO CLIQUE É UM ÍCONE, E NÃO UM "[i]"  ####
+            //
+            // Um alvo sem marca é um alvo que ninguém encontra. Mas o "[i]"
+            // que estava aqui era TEXTO entre colchetes, e ao lado de
+            // "faltam 62.200 XP" ele se lia como marcação, não como botão —
+            // o dono apontou isso vendo a tela (19/09/2026).
+            //
+            // O ⓘ é um dos nossos PNGs do FileStorage, como o cadeado e o
+            // ✓: sobreposto à tarja, no canto direito, ele é a marca e não
+            // uma palavra. O custo é NEUTRO — um elemento saiu, um entrou —,
+            // e isso importa porque são 22 cards.
+            //
+            // Sem o CRC (o FileStorage ainda não respondeu) volta o
+            // caractere, que é feio e existe: uma tarja sem marca nenhuma
+            // seria um clique invisível.
+            string infoCrc = IconCrc(icons, "info");
+            if (infoCrc.Length > 0)
+            {
+                Png(canvas, stripBox, stripBox.W - 22, (strip - 14f) / 2f, 14, 14, infoCrc,
+                    card.Current ? ColText : ColMuted);
+            }
+            else
+            {
+                Label(canvas, stripBox, stripBox.W - 24, 0, 18, strip, "i", 10,
+                      card.Current ? ColText : ColMuted, TextAnchor.MiddleCenter, true);
+            }
 
             Tip(canvas, stripName, "Ver o detalhe deste nível.");
 
@@ -3799,7 +4324,18 @@ namespace Oxide.Plugins
                 : paid ? ColPaidFill
                 : ColSurface2;
 
-            string name = Panel(canvas, parent, x, y, w, h, fill, canvas.NextName());
+            // ####  A FAIXA INTEIRA ABRE O SEGUNDO MODAL  ####
+            //
+            // Ela já era um painel: virar botão troca o componente e não
+            // acrescenta elemento nenhum — o mesmo truque da tarja do nível.
+            // O alvo é grande (526 × 100) e o botão de RESGATAR, que é filho
+            // dela, continua recebendo o clique dele por cima.
+            //
+            // É aqui que o kit deixa de ser uma promessa fechada: "Kit
+            // Inicial" vira os seis itens que ele tem dentro.
+            string name = Button(canvas, parent, x, y, w, h, fill,
+                                 MenuPartsCommand + " " + view.Token + " " + view.Level + " " + key,
+                                 canvas.NextName());
             Box box = new Box(name, w, h);
 
             if (paid)
@@ -3808,6 +4344,12 @@ namespace Oxide.Plugins
             }
 
             Label(canvas, box, 16, 6, 300, 16, title, 11, paid ? ColAmber : ColMuted, TextAnchor.MiddleLeft, true);
+
+            // A marca do clique, no mesmo ⓘ da tarja do nível: o jogador já
+            // aprendeu esse símbolo um modal atrás.
+            string infoCrc = IconCrc(view.Icons, "info");
+            Label(canvas, box, w - 150, 5, 110, 18, "VER OS ITENS", 10, ColMuted, TextAnchor.MiddleRight, true);
+            if (infoCrc.Length > 0) Png(canvas, box, w - 34, 7, 14, 14, infoCrc, ColMuted);
 
             float iconSize = 64f;
             float iconY = (h - iconSize) / 2f;
@@ -3886,6 +4428,193 @@ namespace Oxide.Plugins
                 case StateAvailable: return ColAmber;
                 case StatePending: return ColAmber;
                 default: return ColMuted;
+            }
+        }
+
+        // ---- o segundo modal: os itens de uma faixa ----------------
+
+        // ####  ELE É MENOR QUE O MODAL DO NÍVEL, DE PROPÓSITO  ####
+        //
+        // 470 × 390 dentro de 560 × 430: sobram ~45 px de cada lado, e o
+        // modal do nível continua aparecendo ao redor. É assim que a tela
+        // diz "há uma coisa atrás desta" sem gastar elemento nenhum — e é
+        // o que faz o X de cima parecer o que ele é: voltar, e não sair.
+        private const float PartsWidth = 470f;
+        private const float PartsHeight = 390f;
+
+        /// <summary>O quanto ele desce em relação ao centro, para o topo do modal do nível respirar.</summary>
+        private const float PartsDrop = 14f;
+
+        private const float PartsHeadHeight = 52f;
+        private const float PartsRowHeight = 30f;
+
+        /// <summary>O recuo de uma linha que veio de dentro de um kit.</summary>
+        private const float PartsKitIndent = 22f;
+
+        /// <summary>
+        /// O teto de linhas desenhadas.
+        ///
+        /// Um kit vai a 60 itens (`MAX_LOADOUT_ITEMS` do agente) e a faixa
+        /// pode ter mais de uma recompensa. O teto não é estético: cada
+        /// linha custa dois elementos, e sem ele uma faixa absurda viraria
+        /// uma dúzia de `AddUI` no clique de um jogador só.
+        /// </summary>
+        private const int PartsMaxRows = 80;
+
+        /// <summary>
+        /// O modal de itens de UMA faixa.
+        ///
+        /// ####  O QUE ELE RESPONDE  ####
+        ///
+        /// "MetalFacemaskOrigemZ + 2.500 OZCoin +1" é o que o card cabe. O
+        /// que ele esconde: o que é o "+1", e — quando a recompensa é um kit
+        /// — o que tem DENTRO dele. Aqui cada coisa tem a sua linha, com
+        /// ícone, nome e quantidade, e o conteúdo do kit entra recuado sob o
+        /// nome dele.
+        ///
+        /// O ícone de item do jogo custa zero de banda: o cliente já tem a
+        /// arte, e o que viaja é o `itemid`.
+        ///
+        /// ####  AUSENTE NÃO É VAZIO  ####
+        ///
+        /// Enquanto o agente não responde, a tela DIZ que está carregando.
+        /// Um modal em branco pareceria erro — e o jogador clicaria de novo,
+        /// que é justamente o que fecharia a tela que ele está esperando.
+        /// </summary>
+        private static List<string> BuildParts(PartsView view)
+        {
+            Canvas canvas = new Canvas("OZP.P");
+
+            Box frame = RegionRoot(canvas, UiParts, (WinWidth - PartsWidth) / 2f,
+                                   (WinHeight - PartsHeight) / 2f + PartsDrop, PartsWidth, PartsHeight,
+                                   ColBorder);
+
+            string innerName = Panel(canvas, frame, 1, 1, PartsWidth - 2, PartsHeight - 2, ColBg,
+                                     canvas.NextName());
+            Box body = new Box(innerName, PartsWidth - 2, PartsHeight - 2);
+
+            // O acento âmbar (e não o ferrugem do modal do nível) é o que
+            // separa as duas camadas de um olhar só.
+            Panel(canvas, body, 0, 0, body.W, 2, ColAmber);
+
+            Label(canvas, body, 14, 6, body.W - 60, 24, view.Title, 12, ColText, TextAnchor.MiddleLeft, true);
+
+            // O X volta para o modal do nível, e não para a trilha: é o
+            // mesmo comando que abriu, e ele é um interruptor.
+            TextButton(canvas, body, body.W - 38, 8, 24, 24, ColSurface2,
+                       MenuPartsCommand + " " + view.Token + " " + view.Level + " " + view.Lane,
+                       "X", 11, ColText);
+
+            // A linha do agente, inteira. No card ela vem cortada em "+1"; é
+            // o que o jogador clicou, e vale a largura toda.
+            Label(canvas, body, 14, 28, body.W - 28, 20, Shorten(view.Summary, 62), 11, ColMuted,
+                  TextAnchor.MiddleLeft, false);
+
+            Panel(canvas, body, 0, PartsHeadHeight - 1, body.W, 1, ColBorder);
+
+            // O rodapé cresce quando há aviso: a lista encolhe para caber
+            // os dois. Sobrepor um no outro é o que produz texto ilegível
+            // em cima de texto.
+            float footer = view.Note.Length > 0 ? 48f : 24f;
+            float viewport = body.H - PartsHeadHeight - footer;
+
+            if (view.Loading)
+            {
+                Label(canvas, body, 14, PartsHeadHeight, body.W - 28, viewport,
+                      "Carregando o que esta recompensa dá…", 12, ColMuted, TextAnchor.MiddleCenter, false);
+            }
+            else if (view.Failed || view.Rows.Count == 0)
+            {
+                // A recusa não é só a cor: o texto diz o que houve, e o aviso
+                // de baixo (`Note`) diz o porquê.
+                Label(canvas, body, 14, PartsHeadHeight, body.W - 28, viewport,
+                      view.Note.Length > 0 ? view.Note : "Não deu para ler esta recompensa agora.",
+                      12, ColMuted, TextAnchor.MiddleCenter, false);
+            }
+            else
+            {
+                DrawParts(canvas, body, view, viewport);
+            }
+
+            if (view.Note.Length > 0 && !view.Failed && view.Rows.Count > 0)
+            {
+                // ####  O AVISO TEM BORDA, E NÃO SÓ COR  ####
+                //
+                // "este kit saiu do catálogo" muda a decisão de quem está
+                // olhando. A barra âmbar à esquerda é a forma; a cor
+                // acompanha.
+                Panel(canvas, body, 14, body.H - 44, 3, 24, ColAmber);
+                Label(canvas, body, 22, body.H - 44, body.W - 36, 24, Shorten(view.Note, 84), 10, ColText,
+                      TextAnchor.MiddleLeft, false);
+            }
+
+            Label(canvas, body, 14, body.H - 18, body.W - 28, 16,
+                  "Clique de novo na recompensa para voltar ao nível.", 10, ColMuted,
+                  TextAnchor.MiddleLeft, false);
+
+            return canvas.Parts();
+        }
+
+        /// <summary>
+        /// As linhas, com rolagem quando não cabem.
+        ///
+        /// A receita do `ScrollArea` é a medida no jogo em 17/09/2026: quem
+        /// desenha dentro deixa `ScrollGutter` livre à direita, senão a barra
+        /// cobre a quantidade.
+        /// </summary>
+        private static void DrawParts(Canvas canvas, Box body, PartsView view, float viewport)
+        {
+            int shown = Math.Min(view.Rows.Count, PartsMaxRows);
+            int more = view.Rows.Count - shown;
+            float content = (shown + (more > 0 ? 1 : 0)) * PartsRowHeight;
+
+            Box area = body;
+            float rowWidth = body.W - 28;
+            float left = 14f;
+            float top = PartsHeadHeight;
+
+            if (content > viewport)
+            {
+                area = ScrollArea(canvas, body, 14, PartsHeadHeight, body.W - 28, viewport, content, false, 0f);
+                rowWidth = area.W - ScrollGutter;
+                left = 0f;
+                top = 0f;
+            }
+
+            for (int i = 0; i < shown; i++)
+            {
+                PartRow row = view.Rows[i];
+                float y = top + i * PartsRowHeight;
+                float indent = row.InKit ? PartsKitIndent : 0f;
+                float x = left + indent;
+
+                // ####  O KIT É UM CABEÇALHO, E NÃO UMA LINHA COMO AS OUTRAS  ####
+                //
+                // Sem isso, "Kit Inicial" e os seis itens dele se leriam como
+                // sete recompensas. O âmbar e a sigla marcam onde o grupo
+                // começa; o recuo das linhas de baixo mostra até onde ele vai.
+                bool header = row.Kind == "kit" && !row.InKit;
+
+                if (row.ItemId != 0)
+                {
+                    Icon(canvas, area, x, y + 3, 24, 24, row.ItemId, row.SkinId, "1 1 1 1");
+                }
+                else
+                {
+                    Label(canvas, area, x, y, 24, PartsRowHeight, KindMark(row.Kind), header ? 10 : 11,
+                          header ? ColAmber : ColMuted, TextAnchor.MiddleCenter, true);
+                }
+
+                float textX = x + 30;
+                Label(canvas, area, textX, y, rowWidth - textX + left, PartsRowHeight,
+                      Shorten(row.Label, row.InKit ? 46 : 50), header ? 12 : 12,
+                      header ? ColAmber : ColText, TextAnchor.MiddleLeft, header);
+            }
+
+            if (more > 0)
+            {
+                Label(canvas, area, left, top + shown * PartsRowHeight, rowWidth, PartsRowHeight,
+                      "e mais " + more + " itens nesta recompensa", 10, ColMuted, TextAnchor.MiddleLeft, false);
             }
         }
 
@@ -4029,6 +4758,32 @@ namespace Oxide.Plugins
             FillWorst(detail.Paid, longLabel, itemId, skin, true, true, StateLocked);
             detail.Paid.Tip = "Ative o passe para levar esta recompensa — ela fica guardada até lá.";
 
+            // O modal de itens no pior caso: o teto de linhas, todas com
+            // ícone e rótulo longo, recuadas sob um kit, e ainda devendo — e
+            // com o aviso do kit apagado embaixo, que é o rodapé mais alto.
+            PartsView parts = new PartsView
+            {
+                Token = token,
+                Level = 17,
+                Lane = LanePaid,
+                Title = "NÍVEL 17 · RECOMPENSA DO PASSE",
+                Summary = longLabel + " + 2.500 OZCoin +1",
+                Note = "O kit kit-inicial-de-metal saiu do catálogo deste servidor: fale com um admin antes de resgatar.",
+            };
+
+            parts.Rows.Add(new PartRow { Label = "Kit Inicial de Metal", Kind = "kit" });
+            for (int i = 0; i < PartsMaxRows + 12; i++)
+            {
+                parts.Rows.Add(new PartRow
+                {
+                    Label = longLabel,
+                    Kind = "item",
+                    ItemId = itemId,
+                    SkinId = skin,
+                    InKit = true,
+                });
+            }
+
             string window = BuildWindow(token);
             string headJson = BuildHead(head);
             string footJson = BuildFoot(foot);
@@ -4038,6 +4793,8 @@ namespace Oxide.Plugins
             string trackJson = Pack(trackParts, int.MaxValue)[0];
             List<string> detailParts = BuildDetail(detail);
             string detailJson = Pack(detailParts, int.MaxValue)[0];
+            List<string> partsParts = BuildParts(parts);
+            string partsJson = Pack(partsParts, int.MaxValue)[0];
 
             // A abertura como o `Redraw` a manda: a trilha sai elemento por
             // elemento e o `Pack` corta no limite. Medir a região inteira num
@@ -4057,6 +4814,7 @@ namespace Oxide.Plugins
                 ["foot"] = Bytes(footJson),
                 ["box"] = Bytes(boxJson),
                 ["detail"] = Bytes(detailJson),
+                ["parts"] = Bytes(partsJson),
             };
 
             JArray sends = new JArray();
@@ -4083,6 +4841,11 @@ namespace Oxide.Plugins
                 ["open"] = sends,
                 ["sends"] = sends.Count,
                 ["bytesPerLevel"] = levels > 0 ? Bytes(trackJson) / levels : 0,
+                // O modal de itens NÃO entra na abertura: ele só existe
+                // depois de dois cliques. O que interessa dele é em quantos
+                // `AddUI` o pior caso cai — um kit de 80 linhas passa do
+                // limite e o `Pack` o corta, como já faz com a trilha.
+                ["partsSends"] = Pack(partsParts, AddUiByteLimit).Count,
                 ["openUnderLimit"] = largest < AddUiByteLimit,
             };
 

@@ -44,10 +44,12 @@ import {
 } from '../src/game/battlepass.js';
 import { decodePushPayload } from '../src/game/plugin-push.js';
 import {
+  BATTLEPASS_PARTS_REPLY,
   BATTLEPASS_PROGRESS,
   BATTLEPASS_REPLY,
   BATTLEPASS_SYNC,
   seasonInputSchema,
+  type BattlePassPartsPayload,
   type BattlePassPayload,
   type BattlePassProgressPayload,
   type SeasonInput,
@@ -79,6 +81,17 @@ interface Harness {
   readonly online: Map<string, string[]>;
   /** As compras que o botão ATIVAR O PASSE pediu à loja. */
   readonly bought: string[];
+  /**
+   * Os kits que o catálogo conhece AGORA.
+   *
+   * Mutável de propósito: apagar um é o caso que a trilha não
+   * consegue evitar — o admin some com o kit depois de a temporada
+   * tê-lo prometido.
+   */
+  readonly kits: Map<
+    string,
+    { name: string; items: { shortname: string; amount: number; skinId: string }[] }
+  >;
   connected: boolean;
   /** A oferta de passe que a "loja" conhece. `null` = fora de venda. */
   offer: { id: string; price: number } | null;
@@ -114,6 +127,18 @@ function harness(): Harness {
       [OTHER, []],
     ]),
     bought: [] as string[],
+    kits: new Map([
+      [
+        'inicial',
+        {
+          name: 'Kit Inicial',
+          items: [
+            { shortname: 'rifle.ak', amount: 1, skinId: '0' },
+            { shortname: 'metal.refined', amount: 250, skinId: '0' },
+          ],
+        },
+      ],
+    ]),
     connected: true,
     offer: { id: 'passe-outubro', price: 2500 } as { id: string; price: number } | null,
     buyOk: true,
@@ -139,7 +164,8 @@ function harness(): Harness {
       if (
         command.startsWith(BATTLEPASS_SYNC) ||
         command.startsWith(BATTLEPASS_PROGRESS) ||
-        command.startsWith(BATTLEPASS_REPLY)
+        command.startsWith(BATTLEPASS_REPLY) ||
+        command.startsWith(BATTLEPASS_PARTS_REPLY)
       ) {
         return Promise.resolve(JSON.stringify({ ok: true }));
       }
@@ -174,8 +200,13 @@ function harness(): Harness {
     serverNameOf: (id) => servers.get(id)?.name ?? id,
     catalog: {
       itemOf: (shortname) =>
-        shortname === 'rifle.ak' ? { itemId: 1_545_779_598, displayName: 'Assault Rifle' } : null,
+        shortname === 'rifle.ak'
+          ? { itemId: 1_545_779_598, displayName: 'Assault Rifle' }
+          : shortname === 'metal.refined'
+            ? { itemId: 69_511_070, displayName: 'Metal Refinado' }
+            : null,
     },
+    kitOf: (slug) => state.kits.get(slug) ?? null,
     store: {
       passOffer: () => state.offer,
       buy: (input) => {
@@ -961,6 +992,193 @@ describe('o que o plugin grita no console', () => {
     const bruto = `${BATTLEPASS_MARKER}{"kind":"ready"}\n{"ok":true,"levels":5}`;
 
     expect(cleanReply(bruto)).toBe('{"ok":true,"levels":5}');
+  });
+});
+
+// ============================================================
+//  O DETALHE DE UMA FAIXA  -  o segundo modal
+//
+//  ####  O QUE ESTE BLOCO PROTEGE  ####
+//
+//  A linha que desce no `sync` é a INTEIRA e já cortada em "+N", e um
+//  kit é uma recompensa só — nada nela diz o que ele tem dentro. Os
+//  modos de isso quebrar em silêncio:
+//
+//    lista concatenada     o segundo modal repetiria o card, e o
+//                          jogador continuaria sem saber o que é o
+//                          "+1"
+//    kit não aberto        "kit inicial" e nada mais; a tela promete
+//                          uma caixa fechada
+//    kit apagado           lista vazia, que se lê como "esta faixa
+//                          não dá nada" — e ela dá
+//    skinId "0"            o campo que derruba o cliente no
+//                          `CuiImageComponent` (armadilha 3 do plugin)
+//    progresso de brinde   um clique que só LÊ arrastando a carga de
+//                          escrita atrás de si
+// ============================================================
+
+/** Pede o detalhe de uma faixa, como o plugin o pede. */
+async function askParts(
+  h: Harness,
+  secret: string,
+  input: { requestId: string; level: number; lane: 'free' | 'paid' },
+): Promise<void> {
+  h.sync.handleLine(
+    SERVER,
+    pluginLine({ kind: 'parts', secret, steamId: PLAYER, ...input }),
+  );
+
+  await settle();
+}
+
+/** O último detalhe que saiu pelo RCON. */
+function lastParts(h: Harness): BattlePassPartsPayload {
+  const command = commandsOf(h, BATTLEPASS_PARTS_REPLY).at(-1);
+
+  if (command === undefined) throw new Error('nenhum parts saiu');
+
+  return decodePushPayload(
+    command.slice(BATTLEPASS_PARTS_REPLY.length + 1),
+  ) as unknown as BattlePassPartsPayload;
+}
+
+describe('o que uma faixa dá, item a item', () => {
+  it('cada recompensa vira uma linha, e o kit vem ABERTO', async () => {
+    const h = harness();
+    const season = publish(h);
+
+    h.service.setTrackCell(
+      season,
+      3,
+      'paid',
+      {
+        rewards: [
+          questRewardSchema.parse({ kind: 'kit', slug: 'inicial' }),
+          questRewardSchema.parse({ kind: 'coins', amount: 2500 }),
+        ],
+        milestone: false,
+      },
+      PANEL,
+    );
+
+    const secret = await grabSecret(h);
+
+    h.sent.length = 0;
+    await askParts(h, secret, { requestId: 'parts-1', level: 3, lane: 'paid' });
+
+    const parts = lastParts(h);
+
+    expect(parts.ok).toBe(true);
+    expect(parts.requestId).toBe('parts-1');
+    expect(parts.note).toBe('');
+
+    // O nome do KIT, e não o slug — e os itens dele logo abaixo,
+    // marcados como de dentro. É a única coisa que o card não tinha
+    // como dizer.
+    expect(parts.rows).toEqual([
+      { label: 'Kit Inicial', kind: 'kit' },
+      { label: '1x Assault Rifle', kind: 'item', shortname: 'rifle.ak', inKit: true },
+      { label: '250x Metal Refinado', kind: 'item', shortname: 'metal.refined', inKit: true },
+      { label: '2.500 OZCoin', kind: 'coins' },
+    ]);
+  });
+
+  it('o `skinId` NÃO viaja quando é zero', async () => {
+    const h = harness();
+    const season = publish(h);
+
+    h.service.setTrackCell(season, 4, 'free', { rewards: [AK], milestone: false }, PANEL);
+
+    const secret = await grabSecret(h);
+
+    h.sent.length = 0;
+    await askParts(h, secret, { requestId: 'parts-2', level: 4, lane: 'free' });
+
+    const row = lastParts(h).rows[0];
+
+    // O `'0'` explícito é o campo que derruba o jogador no
+    // `CuiImageComponent`: ausente é o contrato.
+    expect(row).toEqual({ label: '1x Assault Rifle', kind: 'item', shortname: 'rifle.ak' });
+    expect(row && 'skinId' in row).toBe(false);
+  });
+
+  it('kit apagado vira AVISO, e não lista vazia', async () => {
+    const h = harness();
+    const season = publish(h);
+
+    h.service.setTrackCell(
+      season,
+      3,
+      'free',
+      { rewards: [questRewardSchema.parse({ kind: 'kit', slug: 'inicial' })], milestone: false },
+      PANEL,
+    );
+
+    const secret = await grabSecret(h);
+
+    // O admin apaga o kit DEPOIS de a trilha tê-lo prometido. A
+    // trilha congela no resgate; a tela mostra o catálogo de agora.
+    h.kits.delete('inicial');
+
+    h.sent.length = 0;
+    await askParts(h, secret, { requestId: 'parts-3', level: 3, lane: 'free' });
+
+    const parts = lastParts(h);
+
+    expect(parts.ok).toBe(true);
+    // A faixa continua dizendo que dá o kit: inventar a lista dele
+    // seria prometer item por item o que ninguém vai entregar.
+    expect(parts.rows).toEqual([{ label: 'kit inicial', kind: 'kit' }]);
+    expect(parts.note).toContain('saiu do catálogo');
+  });
+
+  it('um clique que só LÊ não arrasta o progresso atrás de si', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    // O catálogo puxa o progresso atrás de si por relógio próprio:
+    // deixa ele sair ANTES, senão o que se mede aqui é o dele.
+    await settle();
+
+    h.sent.length = 0;
+    await askParts(h, secret, { requestId: 'parts-4', level: 1, lane: 'free' });
+
+    const commands = h.sent.map((entry) => entry.command.split(' ')[0]);
+
+    expect(commands).toContain(BATTLEPASS_PARTS_REPLY);
+    // O `reply` arrasta um `progress` forçado porque ele apaga o
+    // otimismo de um resgate. Aqui nada foi escrito no banco.
+    expect(commands).not.toContain(BATTLEPASS_PROGRESS);
+    expect(commands).not.toContain(BATTLEPASS_REPLY);
+  });
+
+  it('a mesma linha duas vezes vira UM detalhe só', async () => {
+    const h = harness();
+
+    publish(h);
+
+    const secret = await grabSecret(h);
+
+    h.sent.length = 0;
+    await askParts(h, secret, { requestId: 'parts-5', level: 1, lane: 'free' });
+    await askParts(h, secret, { requestId: 'parts-5', level: 1, lane: 'free' });
+
+    expect(commandsOf(h, BATTLEPASS_PARTS_REPLY)).toHaveLength(1);
+  });
+
+  it('sem o segredo, o detalhe não sai', async () => {
+    const h = harness();
+
+    publish(h);
+    await grabSecret(h);
+
+    h.sent.length = 0;
+    await askParts(h, 'segredo-de-mentira', { requestId: 'parts-6', level: 1, lane: 'free' });
+
+    expect(commandsOf(h, BATTLEPASS_PARTS_REPLY)).toHaveLength(0);
   });
 });
 
