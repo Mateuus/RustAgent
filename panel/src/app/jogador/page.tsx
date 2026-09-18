@@ -899,7 +899,9 @@ function VipDoJogador({ steamId }: { readonly steamId: string }) {
     setBusy(true);
 
     try {
-      const response = await agent.revokeVip(vip.steamId, vip.tier);
+      // O escopo vem da própria linha: revogar o VIP do `pvp1` não
+      // pode derrubar o de rede, que é outra concessão.
+      const response = await agent.revokeVip(vip.steamId, vip.tier, vip.serverId);
 
       toast.success('VIP revogado', { description: response.message });
       await load();
@@ -944,7 +946,13 @@ function VipDoJogador({ steamId }: { readonly steamId: string }) {
                 >
                   <div className="min-w-0">
                     <p className="font-condensed text-sm font-bold uppercase tracking-wide">
-                      {vip.tier}
+                      {vip.tier}{' '}
+                      {/* Onde ele vale. É o que responde ao "comprei
+                          VIP e não tenho" — quase sempre, comprou no
+                          outro servidor. */}
+                      <span className="font-mono text-2xs font-normal normal-case text-muted">
+                        {vip.serverId === null ? 'na rede' : `em ${vip.serverId}`}
+                      </span>
                     </p>
                     <p className="mt-1 text-2xs text-muted">
                       desde {formatDateTime(vip.createdAt)} ·{' '}
@@ -964,7 +972,11 @@ function VipDoJogador({ steamId }: { readonly steamId: string }) {
                     icon={null}
                     label="Revogar"
                     confirmLabel="Revogar mesmo"
-                    hint={`Ele sai do grupo ${vip.tier} em todos os servidores. A linha fica no histórico.`}
+                    hint={
+                      vip.serverId === null
+                        ? `Ele sai do grupo ${vip.tier} em todos os servidores. A linha fica no histórico.`
+                        : `Ele sai do grupo ${vip.tier} em ${vip.serverId}. O VIP dele em outros servidores não é tocado, e a linha fica no histórico.`
+                    }
                     onConfirm={() => void revoke(vip)}
                   />
                 </li>

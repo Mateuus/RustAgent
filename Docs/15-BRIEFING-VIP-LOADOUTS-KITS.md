@@ -128,15 +128,33 @@ Duas portas, um estado só. E o estado é do **agente**, não do plugin: o plugi
 guarda um cache descartável e o repovoa a cada `origemz.vip.sync`. Se a fonte
 fosse o jogo, um wipe ou um `oxide.reload` apagaria VIP comprado com dinheiro.
 
-**O VIP é de REDE, e não de servidor.** Quem compra compra da rede — e a
-alternativa produziria a pergunta "comprei no PVP e não tenho no PVE?" com a
-resposta errada. O que é por servidor é o **grupo do Oxide**, que é como o VIP
-vira efeito dentro do jogo.
+> ### ⚠️ REVOGADO EM 17/09/2026 — O VIP É DO SERVIDOR
+>
+> O parágrafo abaixo descreve a regra ORIGINAL, e ela não vale mais. O dono
+> decidiu o contrário: **o VIP vale no servidor onde foi comprado**. A resposta a
+> "comprei no PVP e não tenho no PVE?" passou a ser "sim, e é assim que foi
+> vendido" — quem quiser nos dois compra nos dois, ou compra o VIP de **rede**,
+> que continua existindo como escolha de quem vende (`serverId: null`).
+>
+> O que mudou no código: a tabela `vips` ganhou `server_id` (migração **102**), o
+> payload do `origemz.vip.sync` de cada servidor leva só quem vale nele, a
+> reconciliação compara contra esse recorte e a adoção carimba o servidor em que
+> o jogador foi encontrado. O plugin **não mudou**: ele continua recebendo "quem é
+> VIP aqui". Ver `db/vips-repository.ts` e `vip/service.ts`.
+>
+> ~~O VIP é de REDE, e não de servidor. Quem compra compra da rede — e a
+> alternativa produziria a pergunta "comprei no PVP e não tenho no PVE?" com a
+> resposta errada.~~ O que é por servidor é o **grupo do Oxide**, que é como o VIP
+> vira efeito dentro do jogo — e isso continua verdade.
 
 ### A tabela (migração 010)
 
 > **Sua faixa de migrações é 010 a 014.** A 006 é a de jogadores; a outra frente
 > usa 007–009. Nunca edite uma migração já aplicada.
+
+> A tabela abaixo é a da migração 010, **como ela nasceu**. A 102 acrescentou
+> `server_id TEXT` (NULL = a rede inteira) e trocou o índice único por
+> `(steam_id, tier, COALESCE(server_id, '*')) WHERE revoked_at IS NULL`.
 
 ```sql
 CREATE TABLE vips (

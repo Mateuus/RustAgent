@@ -64,7 +64,7 @@
 import { createHash } from 'node:crypto';
 
 import type { MetaRepository } from '../db/meta-repository.js';
-import type { VipOrigin, VipsRepository } from '../db/vips-repository.js';
+import { ANY_SERVER, type VipOrigin, type VipsRepository } from '../db/vips-repository.js';
 import type { Logger } from '../logger.js';
 import type { SiteClient } from '../site/client.js';
 import { stableStringify } from '../store/catalog-mirror.js';
@@ -183,11 +183,17 @@ export function versionOf(payload: Omit<VipMirrorPayload, 'version' | 'generated
  */
 export function buildVipMirror(
   repository: VipsRepository,
+  serverId: string,
   now: number,
   tiers: readonly string[] = [],
 ): { readonly payload: VipMirrorPayload; readonly version: string } {
   const vips = repository
-    .active(now)
+    // O retrato é DAQUELE servidor: o site guarda uma linha por
+    // `server_id` e a trata como substitutiva ("quem sumiu não é VIP
+    // mais"). Mandar a tabela inteira para todos faria o site ver o
+    // VIP do `pvp1` como se ele valesse no `pve` — o mesmo vazamento
+    // que a migração 102 fechou aqui dentro, só que do lado de lá.
+    .activeIn(serverId, now)
     .map((vip) => ({
       steamId: vip.steamId,
       tier: vip.tier,
@@ -213,19 +219,31 @@ export function buildVipMirror(
   return { payload: { ...body, version, generatedAt: new Date(now).toISOString() }, version };
 }
 
-/** O estado do espelho, para a tela de diagnóstico. */
+/**
+ * O estado do espelho, para a tela de diagnóstico.
+ *
+ * ####  NÃO HÁ MAIS UM HASH SÓ  ####
+ *
+ * Desde que o VIP tem servidor (migração 102), cada destino recebe um
+ * retrato DIFERENTE — o dele mais a rede. Um `version` global voltou
+ * a ser o que ele nunca deveria ter sido: um número que casa com um
+ * servidor e mente sobre os outros. Por isso o hash esperado mora em
+ * `mirrored[]`, ao lado do que aquele destino confirmou.
+ */
 export interface VipMirrorStatus {
-  /** O hash do estado COMO ELE ESTÁ AGORA. */
-  readonly version: string;
-  /** Quantos VIPs esse hash representa. É o que a tela mostra. */
+  /** Quantas concessões valem agora, somando TODOS os escopos. */
   readonly count: number;
-  /** Todos os destinos já confirmaram a `version` acima? */
+  /** Todos os destinos já confirmaram o retrato DELES? */
   readonly inSync: boolean;
   readonly mirrored: readonly {
     readonly serverId: string;
+    /** O hash do retrato daquele servidor AGORA. */
+    readonly expected: string;
     /** A que aquele destino confirmou. `null` = nunca recebeu. */
     readonly version: string | null;
     readonly at: number | null;
+    /** Quantos VIPs valem ali — os do servidor mais os de rede. */
+    readonly count: number;
   }[];
   readonly lastPushAt: number | null;
   readonly lastPushError: string | null;
@@ -314,18 +332,28 @@ export class VipSiteMirror {
   }
 
   get status(): VipMirrorStatus {
-    const { payload, version } = buildVipMirror(this.#options.repository, this.#now(), this.#tiers);
+    const now = this.#now();
 
-    const mirrored = [...this.#options.clients.keys()].map((serverId) => ({
-      serverId,
-      version: this.#options.meta.read(versionKey(serverId)),
-      at: toEpoch(this.#options.meta.read(mirroredAtKey(serverId))),
-    }));
+    const mirrored = [...this.#options.clients.keys()].map((serverId) => {
+      const { payload, version } = buildVipMirror(
+        this.#options.repository,
+        serverId,
+        now,
+        this.#tiers,
+      );
+
+      return {
+        serverId,
+        expected: version,
+        version: this.#options.meta.read(versionKey(serverId)),
+        at: toEpoch(this.#options.meta.read(mirroredAtKey(serverId))),
+        count: payload.vips.length,
+      };
+    });
 
     return {
-      version,
-      count: payload.vips.length,
-      inSync: mirrored.every((entry) => entry.version === version),
+      count: this.#options.repository.activeIn(ANY_SERVER, now).length,
+      inSync: mirrored.every((entry) => entry.version === entry.expected),
       mirrored,
       lastPushAt: this.#lastPushAt,
       lastPushError: this.#lastPushError,
@@ -410,27 +438,39 @@ export class VipSiteMirror {
 
   async #pushOnce(): Promise<void> {
     const now = this.#now();
-    const { payload, version } = buildVipMirror(this.#options.repository, now, this.#tiers);
-    const body = JSON.stringify(payload);
-
-    if (Buffer.byteLength(body, 'utf8') > VIP_MIRROR_MAX_BYTES) {
-      // Truncar aqui é pior que no catálogo: o retrato SUBSTITUI, e
-      // meio retrato faria o site revogar o VIP de quem ficou de
-      // fora do corte. Um espelho velho é recuperável; um VIP pago
-      // apagado por corte de página, não.
-      this.#lastPushError = 'VIP_MIRROR_TOO_LARGE';
-      this.#options.logger.error(
-        { bytes: Buffer.byteLength(body, 'utf8'), max: VIP_MIRROR_MAX_BYTES, vips: payload.vips.length },
-        'vip mirror is too large to send',
-      );
-
-      return;
-    }
 
     for (const [serverId, client] of this.#options.clients) {
       const mutedUntil = this.#mutedUntil.get(serverId);
 
       if (mutedUntil !== undefined && now < mutedUntil) {
+        continue;
+      }
+
+      // O retrato é montado DENTRO do laço: cada destino recebe o
+      // dele. Montar um só, fora, era o que contava ao site que o VIP
+      // do `pvp1` valia no `pve`.
+      const { payload, version } = buildVipMirror(
+        this.#options.repository,
+        serverId,
+        now,
+        this.#tiers,
+      );
+      const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+
+      if (bytes > VIP_MIRROR_MAX_BYTES) {
+        // Truncar aqui é pior que no catálogo: o retrato SUBSTITUI, e
+        // meio retrato faria o site revogar o VIP de quem ficou de
+        // fora do corte. Um espelho velho é recuperável; um VIP pago
+        // apagado por corte de página, não.
+        //
+        // E o `continue` é por DESTINO: o retrato grande demais de um
+        // servidor não pode calar os outros, que provavelmente cabem.
+        this.#lastPushError = 'VIP_MIRROR_TOO_LARGE';
+        this.#options.logger.error(
+          { serverId, bytes, max: VIP_MIRROR_MAX_BYTES, vips: payload.vips.length },
+          'vip mirror is too large to send',
+        );
+
         continue;
       }
 

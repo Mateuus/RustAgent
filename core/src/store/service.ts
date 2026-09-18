@@ -140,6 +140,12 @@ export interface VipGranter {
   grant(input: {
     readonly steamId: string;
     readonly tier: string;
+    /**
+     * Onde o VIP vale. A loja sempre manda o servidor DA COMPRA —
+     * `null` (a rede) existe no concessor, mas não se vende por
+     * aqui: quem clicou clicou dentro de um servidor.
+     */
+    readonly serverId: string | null;
     /** Epoch ms. `null` = vitalício. */
     readonly expiresAt: number | null;
     readonly origin: 'loja';
@@ -820,6 +826,10 @@ export class StoreService {
       await this.#deps.vips.grant({
         steamId,
         tier: plan.vip.tier,
+        // O VIP é do servidor onde a compra aconteceu — in-game ou
+        // pela fila do site, que chega aqui pelo MESMO `deliverPlan`,
+        // com o `serverId` da fila daquele servidor.
+        serverId,
         // Comprar duas vezes compra o DOBRO de tempo: o `grant`
         // ESTENDE o que já existe. Por isso os dias são
         // multiplicados pelas unidades.

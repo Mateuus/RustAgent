@@ -864,6 +864,8 @@ export interface Vip {
   steamId: string;
   /** `bronze` | `silver` | `gold` — o Tier do OrigemZVip.json. */
   tier: string;
+  /** Onde ele vale. `null` = a REDE inteira. */
+  serverId: string | null;
   /** ISO-8601. `null` = vitalício. */
   expiresAt: string | null;
   origin: VipOrigin;
@@ -4608,16 +4610,22 @@ export const agent = {
       `/api/servers/${encodeURIComponent(id)}/ui/push`,
       { method: 'POST' },
     ),
-  // ---- O VIP da rede ---------------------------------------
+  // ---- O VIP, e ONDE ele vale ------------------------------
   //
   // PAGINADO desde a primeira versão, como a lista de jogadores:
   // uma rede com meses de vida acumula concessões, e uma chamada
   // que devolvesse todas travaria o navegador.
+  //
+  // O `serverId` atravessa as três chamadas (conceder, revogar,
+  // listar) porque escopo é IDENTIDADE: `null` é o VIP da REDE, e
+  // um id é o VIP daquele servidor. Ver a migração 102.
 
   vips: (options: {
     active?: boolean;
     query?: string;
     tier?: string;
+    /** Só os que valem naquele servidor. Ausente = todos. */
+    server?: string;
     limit: number;
     offset: number;
   }) => {
@@ -4633,6 +4641,10 @@ export const agent = {
 
     if (options.tier !== undefined && options.tier !== '') {
       params.set('tier', options.tier);
+    }
+
+    if (options.server !== undefined && options.server !== '') {
+      params.set('server', options.server);
     }
 
     params.set('limit', String(options.limit));
@@ -4656,6 +4668,8 @@ export const agent = {
   grantVip: (input: {
     steamId: string;
     tier: string;
+    /** `null` = vale na REDE inteira. */
+    serverId: string | null;
     expiresAt: string | null;
     origin?: 'loja' | 'painel';
   }) =>
@@ -4667,12 +4681,20 @@ export const agent = {
       message: string;
     }>('/api/vips', { method: 'POST', body: input }),
 
-  /** Revoga. A linha continua no histórico, com quem revogou. */
-  revokeVip: (steamId: string, tier: string) =>
-    api<{ ok: true; vip: Vip; results: VipSyncResult[]; message: string }>(
-      `/api/vips/${encodeURIComponent(steamId)}/${encodeURIComponent(tier)}`,
+  /**
+   * Revoga. A linha continua no histórico, com quem revogou.
+   *
+   * `serverId` é de QUAL concessão: o `gold` do `pvp1` e o `gold` de
+   * rede são duas, pagas à parte, e tirar uma não derruba a outra.
+   */
+  revokeVip: (steamId: string, tier: string, serverId: string | null) => {
+    const query = serverId === null ? '' : `?server=${encodeURIComponent(serverId)}`;
+
+    return api<{ ok: true; vip: Vip; results: VipSyncResult[]; message: string }>(
+      `/api/vips/${encodeURIComponent(steamId)}/${encodeURIComponent(tier)}${query}`,
       { method: 'DELETE' },
-    ),
+    );
+  },
 
   /** O que este jogador tem agora, e o que ele já teve. */
   playerVips: (steamId: string) =>
@@ -7981,15 +8003,26 @@ export interface SiteVipMirrorView {
   running: boolean;
   /** Só preenchido quando algo está parado. Em regime, `null`. */
   reason: string | null;
-  version: string | null;
-  /** Quantos VIPs o retrato representa. `null` = não há espelho. */
+  /** Quantos VIPs o agente conhece, em todos os escopos. `null` = não há espelho. */
   count: number | null;
   inSync: boolean | null;
   /** O site ainda não tem `/api/agent/vip/mirror`. Ver Docs/24. */
   routeMissing: boolean;
   lastPushAt: string | null;
   lastPushError: string | null;
-  mirrored: { serverId: string; version: string | null; at: string | null }[];
+  /**
+   * Um por destino. O hash ESPERADO vem junto porque ele é por
+   * servidor: cada um recebe o retrato dele mais o da rede, desde que
+   * o VIP passou a ter escopo.
+   */
+  mirrored: {
+    serverId: string;
+    expected: string;
+    version: string | null;
+    at: string | null;
+    /** Quantos VIPs valem naquele servidor. */
+    count: number;
+  }[];
 }
 
 /** `GET /api/site/status` — a primeira tela de "a loja parou". */

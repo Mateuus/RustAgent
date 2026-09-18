@@ -49,6 +49,8 @@ const STEAM_ID = /^\d{17}$/;
 interface Grant {
   readonly steamId: string;
   readonly tier: string;
+  /** Onde ele vale. `null` = a REDE inteira. Ver `serverOf`. */
+  readonly serverId: string | null;
   /** Epoch ms. `null` = vitalício, e ele é DE PROPÓSITO. */
   readonly expiresAt: number | null;
 }
@@ -56,6 +58,7 @@ interface Grant {
 interface Revocation {
   readonly steamId: string;
   readonly tier: string;
+  readonly serverId: string | null;
 }
 
 export interface VipsWork {
@@ -67,6 +70,35 @@ export interface VipsApplierDeps {
   readonly vips: VipList;
   /** Fica no histórico como quem concedeu. */
   readonly actor?: string;
+}
+
+/**
+ * Onde o lote manda o VIP valer.
+ *
+ * ####  AUSENTE É A REDE, E ISSO É COMPATIBILIDADE  ####
+ *
+ * Este canal nasceu quando o VIP era da rede inteira (§5 do Docs\23),
+ * e o site ainda publica lotes sem escopo — então ausente continua
+ * significando o que sempre significou, e nenhum lote em voo muda de
+ * sentido no deploy.
+ *
+ * O campo já é aceito porque a ordem do deploy é essa: quem RECEBE
+ * aprende primeiro, quem manda depois. Quando o site passar a
+ * carimbar o servidor na concessão manual, o lote já chega inteiro.
+ *
+ * Um id que este agente não conhece NÃO é recusado aqui: a régua é
+ * do concessor (`VipList.grant`), que responde `UNKNOWN_SERVER` e faz
+ * o código subir no `errors[]` do ACK — o mesmo caminho do tier que
+ * não existe.
+ */
+function serverOf(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  return trimmed === '' || trimmed.length > 64 ? null : trimmed;
 }
 
 /** Um `tier` do contrato: texto curto, comparado em minúsculas. */
@@ -142,7 +174,7 @@ export function vipsApplier(deps: VipsApplierDeps): DomainApplier<VipsWork> {
           expiresAt = parsed;
         }
 
-        grants.push({ steamId, tier, expiresAt });
+        grants.push({ steamId, tier, serverId: serverOf(row.serverId), expiresAt });
       }
 
       for (const [index, raw] of (rawRevocations as readonly unknown[]).entries()) {
@@ -158,7 +190,7 @@ export function vipsApplier(deps: VipsApplierDeps): DomainApplier<VipsWork> {
           continue;
         }
 
-        revocations.push({ steamId, tier });
+        revocations.push({ steamId, tier, serverId: serverOf(row.serverId) });
       }
 
       return { work: { grants, revocations }, errors };
@@ -176,6 +208,7 @@ export function vipsApplier(deps: VipsApplierDeps): DomainApplier<VipsWork> {
           await deps.vips.grant({
             steamId: grant.steamId,
             tier: grant.tier,
+            serverId: grant.serverId,
             expiresAt: grant.expiresAt,
             // `loja` é a origem de tudo que vem da venda, e é o que
             // a tela local já sabe desenhar. `adotado` continua
@@ -197,7 +230,7 @@ export function vipsApplier(deps: VipsApplierDeps): DomainApplier<VipsWork> {
 
       for (const revocation of work.revocations) {
         try {
-          await deps.vips.revoke(revocation.steamId, revocation.tier, actor);
+          await deps.vips.revoke(revocation.steamId, revocation.tier, revocation.serverId, actor);
           revoked += 1;
         } catch (error) {
           if (error instanceof ApiError && error.code === 'VIP_NOT_FOUND') {

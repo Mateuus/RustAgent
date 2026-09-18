@@ -2,10 +2,10 @@
 //  routes/vips.ts  -  o VIP da rede, e o espelho dele em cada
 //  servidor.
 //
-//      GET    /vips?active=1&q=&tier=&limit=&offset=
+//      GET    /vips?active=1&q=&tier=&server=&limit=&offset=
 //      GET    /vips/tiers                    os níveis que existem
 //      POST   /vips                          concede ou RENOVA
-//      DELETE /vips/:steamId/:tier           revoga (a linha fica)
+//      DELETE /vips/:steamId/:tier?server=   revoga (a linha fica)
 //      GET    /players/:steamId/vips         o que este jogador tem
 //      POST   /servers/:id/vips/sync         reempurra agora
 //
@@ -20,6 +20,14 @@
 //  linha: quem administra tem o SteamID na mão, não o número da
 //  tabela.
 //
+//  ####  E O ESCOPO ACOMPANHA O JOGADOR E O NÍVEL  ####
+//
+//  Desde a migração 102 uma concessão é `(steamId, tier, servidor)` —
+//  e `null` no servidor é o VIP de REDE. Por isso o `server` aparece
+//  no corpo da concessão, na query da revogação e no filtro da lista:
+//  os três respondem "onde", e o ausente significa a rede, que é o
+//  que esta rota fazia antes de existir escopo nenhum.
+//
 //  ####  A ROTA NÃO DECIDE REGRA  ####
 //
 //  Renovar-estende-o-vencimento, o nível precisa existir, revogar
@@ -30,6 +38,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import { ANY_SERVER } from '../../db/vips-repository.js';
 import type { VipList } from '../../vip/service.js';
 import { ApiError } from '../error-response.js';
 import { operatorOf } from './admin.js';
@@ -38,6 +47,17 @@ export interface VipRoutesDeps {
   readonly vips: VipList;
   /** Só para conferir que o `:id` de `/servers/:id/vips/sync` existe. */
   readonly servers: { ids(): readonly string[] };
+}
+
+/**
+ * "no pvp1" / "na rede" — o pedaço de frase que diz ONDE.
+ *
+ * A mensagem de sucesso precisa dizer o escopo: é ela que o operador
+ * lê depois de clicar, e "agora é VIP gold" sem o onde é exatamente a
+ * frase que fazia todo mundo achar que o VIP valia em tudo.
+ */
+function whereLabel(serverId: string | null): string {
+  return serverId === null ? 'na rede' : `em ${serverId}`;
 }
 
 /** Tamanho de página: o padrão e o teto. */
@@ -49,6 +69,13 @@ const listQuery = z.object({
   active: z.enum(['0', '1']).optional(),
   q: z.string().optional(),
   tier: z.string().optional(),
+  /**
+   * Só os que valem naquele servidor — os dele MAIS os de rede.
+   *
+   * Ausente = todos, de todos os escopos. Numa tela de listagem o
+   * ausente é seguro: quem lista não concede nada.
+   */
+  server: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_VIPS_LIMIT).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
@@ -56,6 +83,16 @@ const listQuery = z.object({
 const steamParams = z.object({ steamId: z.string().min(1) });
 const revokeParams = steamParams.extend({ tier: z.string().min(1) });
 const serverParams = z.object({ id: z.string().min(1) });
+
+/**
+ * De qual escopo se revoga.
+ *
+ * Ausente = o VIP de REDE, a mesma leitura do `serverId` do corpo da
+ * concessão. Escopo é IDENTIDADE desde a migração 102: o `gold` do
+ * `pvp1` e o `gold` de rede são duas concessões, pagas à parte, e
+ * tirar uma não pode derrubar a outra.
+ */
+const revokeQuery = z.object({ server: z.string().min(1).optional() });
 
 /**
  * O corpo da concessão.
@@ -76,6 +113,17 @@ const grantBody = z
   .object({
     steamId: z.string().min(1),
     tier: z.string().trim().min(1).max(32),
+    /**
+     * Onde o VIP vale. `null` (ou ausente) = a REDE inteira.
+     *
+     * ####  AUSENTE É A REDE, E A TELA NUNCA OMITE  ####
+     *
+     * O default preserva o significado de quem chamava esta rota
+     * antes da migração 102 — todo VIP era de rede. O painel manda
+     * sempre, com o seletor de servidor ao lado do de nível: é lá
+     * que a escolha fica visível para quem concede.
+     */
+    serverId: z.string().trim().min(1).max(64).nullable().default(null),
     expiresAt: z.string().datetime({ offset: true }).nullable(),
     /**
      * De onde veio. `loja` é a compra; `painel`, a mão de um admin.
@@ -97,12 +145,13 @@ export function registerVipRoutes(app: FastifyInstance, deps: VipRoutesDeps): vo
    * página que não existe.
    */
   app.get('/vips', async (request) => {
-    const { active, q, tier, limit, offset } = listQuery.parse(request.query);
+    const { active, q, tier, server, limit, offset } = listQuery.parse(request.query);
 
     const page = deps.vips.list({
       active: active === undefined ? undefined : active === '1',
       query: q,
       tier,
+      where: server,
       limit: limit ?? DEFAULT_VIPS_LIMIT,
       offset: offset ?? 0,
     });
@@ -166,6 +215,7 @@ export function registerVipRoutes(app: FastifyInstance, deps: VipRoutesDeps): vo
     const { vip, outcome, results } = await deps.vips.grant({
       steamId: body.steamId,
       tier: body.tier,
+      serverId: body.serverId,
       expiresAt: body.expiresAt === null ? null : Date.parse(body.expiresAt),
       origin: body.origin,
       createdBy: operatorOf(request),
@@ -180,8 +230,8 @@ export function registerVipRoutes(app: FastifyInstance, deps: VipRoutesDeps): vo
       results,
       message:
         (outcome === 'created'
-          ? `${vip.steamId} agora é VIP ${vip.tier}`
-          : `O VIP ${vip.tier} de ${vip.steamId} foi renovado`) +
+          ? `${vip.steamId} agora é VIP ${vip.tier} ${whereLabel(vip.serverId)}`
+          : `O VIP ${vip.tier} de ${vip.steamId} ${whereLabel(vip.serverId)} foi renovado`) +
         (vip.expiresAt === null
           ? ' (vitalício).'
           : ` até ${new Date(vip.expiresAt).toLocaleDateString('pt-BR')}.`) +
@@ -201,8 +251,14 @@ export function registerVipRoutes(app: FastifyInstance, deps: VipRoutesDeps): vo
    */
   app.delete('/vips/:steamId/:tier', async (request) => {
     const { steamId, tier } = revokeParams.parse(request.params);
+    const { server } = revokeQuery.parse(request.query);
 
-    const { vip, results } = await deps.vips.revoke(steamId, tier, operatorOf(request));
+    const { vip, results } = await deps.vips.revoke(
+      steamId,
+      tier,
+      server ?? null,
+      operatorOf(request),
+    );
     const pending = results.filter((result) => result.skipped !== null);
 
     return {
@@ -210,7 +266,8 @@ export function registerVipRoutes(app: FastifyInstance, deps: VipRoutesDeps): vo
       vip,
       results,
       message:
-        `${steamId} deixou de ser VIP ${vip.tier}. A linha fica no histórico com quem revogou.` +
+        `${steamId} deixou de ser VIP ${vip.tier} ${whereLabel(vip.serverId)}. A linha fica no ` +
+        'histórico com quem revogou.' +
         (pending.length === 0
           ? ''
           : ` ${String(pending.length)} servidor(es) não receberam a mudança agora — o grupo do ` +
@@ -230,7 +287,11 @@ export function registerVipRoutes(app: FastifyInstance, deps: VipRoutesDeps): vo
 
     return {
       ok: true,
-      active: deps.vips.activeOf(steamId),
+      // A ficha mostra TUDO o que a pessoa tem, em todos os
+      // servidores — é a tela de quem atende "comprei e não tenho",
+      // e a resposta costuma ser "comprou no outro". Cada linha diz
+      // o `serverId` dela.
+      active: deps.vips.activeOf(steamId, ANY_SERVER),
       history: deps.vips.historyOf(steamId),
     };
   });

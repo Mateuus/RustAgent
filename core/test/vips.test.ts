@@ -16,7 +16,10 @@
 //    5. o SteamID atravessa a API e o payload sem perder dígito;
 //    6. o que acontece na CORRIDA: uma concessão feita no meio da
 //       reconciliação não pode ser desfeita por ela — e uma
-//       revogação, tampouco.
+//       revogação, tampouco;
+//    7. o ESCOPO (migração 102): o VIP comprado no `pvp1` não vaza
+//       para o `pvp2` — nem pelo grupo do Oxide, nem pelo payload,
+//       nem pela adoção — e o de REDE continua valendo nos dois.
 //
 //  Banco em memória e um RCON de mentira que se comporta como o
 //  servidor: guarda os grupos do Oxide, responde ao
@@ -35,7 +38,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MEMORY_DATABASE, openDatabase, type AgentDatabase } from '../src/db/database.js';
 import { runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
-import { extendExpiry, VipsRepository } from '../src/db/vips-repository.js';
+import { ANY_SERVER, extendExpiry, VipsRepository } from '../src/db/vips-repository.js';
 import { decodePushPayload } from '../src/game/plugin-push.js';
 import { isApiError } from '../src/http/error-response.js';
 import { createLogger } from '../src/logger.js';
@@ -315,6 +318,7 @@ describe('renovar soma sobre o VENCIMENTO', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: agora + 20 * DAY,
       origin: 'loja',
       createdBy: 'admin',
@@ -323,6 +327,7 @@ describe('renovar soma sobre o VENCIMENTO', () => {
     const renovado = await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: Date.now() + 30 * DAY,
       origin: 'loja',
       createdBy: 'admin',
@@ -361,6 +366,7 @@ describe('um VIP ativo por (jogador, nível)', () => {
     harness.repository.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'painel',
       createdBy: 'admin',
@@ -372,6 +378,7 @@ describe('um VIP ativo por (jogador, nível)', () => {
       harness.repository.grant({
         steamId: STEAM_ID,
         tier: 'gold',
+        serverId: null,
         expiresAt: null,
         origin: 'painel',
         createdBy: 'admin',
@@ -382,8 +389,8 @@ describe('um VIP ativo por (jogador, nível)', () => {
     expect(() =>
       harness.db
         .prepare(
-          `INSERT INTO vips (steam_id, tier, expires_at, origin, created_at)
-           VALUES (@steam_id, 'gold', NULL, 'painel', 1)`,
+          `INSERT INTO vips (steam_id, tier, server_id, expires_at, origin, created_at)
+           VALUES (@steam_id, 'gold', NULL, NULL, 'painel', 1)`,
         )
         .run({ steam_id: STEAM_ID }),
     ).toThrow();
@@ -397,16 +404,17 @@ describe('um VIP ativo por (jogador, nível)', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
     });
 
-    await expect(harness.vips.revoke(STEAM_ID, 'bronze', 'site')).rejects.toThrow(
+    await expect(harness.vips.revoke(STEAM_ID, 'bronze', null, 'site')).rejects.toThrow(
       /VIP_NOT_FOUND|bronze/,
     );
 
-    const ativos = harness.repository.activeOf(STEAM_ID);
+    const ativos = harness.repository.activeOf(STEAM_ID, ANY_SERVER);
 
     expect(ativos.map((vip) => vip.tier)).toEqual(['gold']);
   });
@@ -415,16 +423,18 @@ describe('um VIP ativo por (jogador, nível)', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
     });
 
-    await harness.vips.revoke(STEAM_ID, 'gold', 'admin');
+    await harness.vips.revoke(STEAM_ID, 'gold', null, 'admin');
 
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -453,6 +463,7 @@ describe('o nível vem do OrigemZVip.json', () => {
       harness.vips.grant({
         steamId: STEAM_ID,
         tier: 'diamante',
+        serverId: null,
         expiresAt: null,
         origin: 'loja',
         createdBy: 'admin',
@@ -461,11 +472,253 @@ describe('o nível vem do OrigemZVip.json', () => {
   });
 });
 
+// ============================================================
+//  O ESCOPO  (migração 102)
+//
+//  O VIP é do servidor onde foi comprado. Estes casos são a razão de
+//  a coluna existir: antes deles, o benefício comprado no `pvp1`
+//  valia no `pvp2` — e ninguém descobria isso por um erro, e sim por
+//  um jogador contando ao outro.
+// ============================================================
+describe('o VIP é do servidor onde foi comprado', () => {
+  it('o grupo do Oxide só é dado NAQUELE servidor', async () => {
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp1',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    expect(harness.servers.get('pvp1')?.groups.get('origemz.vip.gold')?.has(STEAM_ID)).toBe(true);
+    expect(harness.servers.get('pvp2')?.groups.get('origemz.vip.gold')?.has(STEAM_ID)).toBe(false);
+  });
+
+  it('e o payload do OUTRO servidor não fala dele', async () => {
+    // O cache do `OrigemZAgent` é por servidor, e é dele que a fila,
+    // o chat e o `origemz.vip.apply` leem. Mandar a tabela inteira
+    // para todos era o vazamento inteiro, em uma linha só.
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp1',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    expect(harness.servers.get('pvp1')?.lastVipPayload?.players[STEAM_ID]?.[0]?.tier).toBe('gold');
+    expect(harness.servers.get('pvp2')?.lastVipPayload?.players[STEAM_ID]).toBeUndefined();
+  });
+
+  it('o VIP de REDE continua valendo nos dois', async () => {
+    // O dono quis poder vender os dois. `null` é a escolha de quem
+    // vende, e não o que sobra de quem esqueceu de dizer onde.
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: null,
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    for (const server of harness.servers.values()) {
+      expect(server.groups.get('origemz.vip.gold')?.has(STEAM_ID)).toBe(true);
+    }
+  });
+
+  it('comprar no segundo servidor não estende o do primeiro: são duas linhas', async () => {
+    const agora = Date.now();
+
+    const primeiro = await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp1',
+      expiresAt: agora + 30 * DAY,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    const segundo = await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp2',
+      expiresAt: agora + 30 * DAY,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    // Duas COMPRAS, dois direitos. Se a segunda tivesse estendido a
+    // primeira, o jogador teria pago dois VIPs e recebido 60 dias num
+    // servidor só.
+    expect(primeiro.outcome).toBe('created');
+    expect(segundo.outcome).toBe('created');
+    expect(harness.repository.activeOf(STEAM_ID, ANY_SERVER)).toHaveLength(2);
+
+    // E renovar o do `pvp1` mexe só nele.
+    const renovado = await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp1',
+      expiresAt: agora + 30 * DAY,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    expect(renovado.outcome).toBe('extended');
+    expect(harness.repository.activeOf(STEAM_ID, ANY_SERVER)).toHaveLength(2);
+  });
+
+  it('revogar o de um servidor não derruba o de rede', async () => {
+    // É o caminho do estorno: o site manda tirar o VIP vendido no
+    // `pvp1`, e o de rede foi pago à parte.
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: null,
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp1',
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    await harness.vips.revoke(STEAM_ID, 'gold', 'pvp1', 'site');
+
+    const ativos = harness.repository.activeOf(STEAM_ID, ANY_SERVER);
+
+    expect(ativos).toHaveLength(1);
+    expect(ativos[0]?.serverId).toBeNull();
+    // E o benefício continua de pé nos dois: o de rede vale ali
+    // também.
+    expect(harness.servers.get('pvp1')?.groups.get('origemz.vip.gold')?.has(STEAM_ID)).toBe(true);
+  });
+
+  it('o mesmo nível de rede E do servidor vira UMA entrada no payload, com o prazo maior', async () => {
+    // Duas linhas do mesmo tier deixariam o plugin escolher entre
+    // elas, e a escolha dele é a ordem do array — ou seja, sorte.
+    const agora = Date.now();
+
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: null,
+      expiresAt: agora + 10 * DAY,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: 'pvp1',
+      expiresAt: agora + 40 * DAY,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    const entradas = harness.servers.get('pvp1')?.lastVipPayload?.players[STEAM_ID] ?? [];
+
+    expect(entradas).toHaveLength(1);
+    expect(Date.parse(entradas[0]?.expiresAt ?? '')).toBeGreaterThan(agora + 39 * DAY);
+
+    // E o `pvp2` continua vendo só o de rede, com o prazo dele.
+    const vizinho = harness.servers.get('pvp2')?.lastVipPayload?.players[STEAM_ID] ?? [];
+
+    expect(vizinho).toHaveLength(1);
+    expect(Date.parse(vizinho[0]?.expiresAt ?? '')).toBeLessThan(agora + 11 * DAY);
+  });
+
+  it('o índice único vale POR ESCOPO, e o de rede não escapa pelo NULL', () => {
+    // Em SQLite dois NULL não colidem num índice único: sem o
+    // `COALESCE(server_id, '*')` da migração 102, o par de REDE
+    // aceitaria uma segunda linha aberta — as duas datas de
+    // vencimento sem resposta para "qual vale?" que a 010 existia
+    // para impedir.
+    harness.repository.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: null,
+      expiresAt: null,
+      origin: 'painel',
+      createdBy: 'admin',
+    });
+
+    const inserirCru = (serverId: string | null): void => {
+      harness.db
+        .prepare(
+          `INSERT INTO vips (steam_id, tier, server_id, expires_at, origin, created_at)
+           VALUES (@steam_id, 'gold', @server_id, NULL, 'painel', 1)`,
+        )
+        .run({ steam_id: STEAM_ID, server_id: serverId });
+    };
+
+    expect(() => inserirCru(null)).toThrow();
+
+    // Mas um servidor entra: é outra concessão.
+    expect(() => inserirCru('pvp1')).not.toThrow();
+    expect(() => inserirCru('pvp1')).toThrow();
+    expect(harness.repository.activeOf(STEAM_ID, ANY_SERVER)).toHaveLength(2);
+  });
+
+  it('um servidor que este agente não conhece é recusado', async () => {
+    // Um `pvp01` onde o certo é `pvp1` gravaria uma concessão que
+    // NENHUM servidor lê: ativa na tela, paga, e invisível no jogo.
+    await expect(
+      harness.vips.grant({
+        steamId: STEAM_ID,
+        tier: 'gold',
+        serverId: 'pvp01',
+        expiresAt: null,
+        origin: 'loja',
+        createdBy: 'loja',
+      }),
+    ).rejects.toThrow(/pvp01/);
+
+    expect(harness.repository.activeOf(STEAM_ID, ANY_SERVER)).toHaveLength(0);
+  });
+
+  it('a reconciliação não tira do grupo o VIP de rede, nem adota de um servidor para o outro', async () => {
+    await harness.vips.grant({
+      steamId: STEAM_ID,
+      tier: 'gold',
+      serverId: null,
+      expiresAt: null,
+      origin: 'loja',
+      createdBy: 'loja',
+    });
+
+    // Alguém pôs OUTRO jogador no grupo do `pvp1`, à mão.
+    harness.servers.get('pvp1')?.groups.get('origemz.vip.gold')?.add(OTHER_ID);
+
+    const resultado = await harness.vips.reconcile('pvp1');
+
+    expect(resultado.removed).toEqual([]);
+    expect(resultado.adopted).toEqual([OTHER_ID]);
+
+    // A adoção é do `pvp1`, e o `pvp2` não fica sabendo dela.
+    await harness.vips.reconcile('pvp2');
+
+    expect(harness.servers.get('pvp2')?.groups.get('origemz.vip.gold')?.has(OTHER_ID)).toBe(false);
+    expect(harness.servers.get('pvp2')?.lastVipPayload?.players[OTHER_ID]).toBeUndefined();
+  });
+});
+
 describe('conceder põe no grupo e empurra o estado', () => {
   it('o jogador entra no grupo do nível, nos dois servidores', async () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -493,6 +746,7 @@ describe('conceder põe no grupo e empurra o estado', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -514,6 +768,7 @@ describe('conceder põe no grupo e empurra o estado', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'silver',
+      serverId: null,
       expiresAt: null,
       origin: 'painel',
       createdBy: 'admin',
@@ -533,6 +788,7 @@ describe('o prazo', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: agora + 60_000,
       origin: 'loja',
       createdBy: 'admin',
@@ -550,7 +806,7 @@ describe('o prazo', () => {
     // E o payload que ficou no plugin não tem mais o jogador.
     expect(pvp1?.lastVipPayload?.players[STEAM_ID]).toBeUndefined();
 
-    const linha = harness.repository.latestOf(STEAM_ID, 'gold');
+    const linha = harness.repository.latestOf(STEAM_ID, 'gold', ANY_SERVER);
 
     // Revogado pelo RELÓGIO: `revoked_at` preenchido e `revoked_by`
     // nulo. É a assinatura de "ninguém revogou, o prazo acabou".
@@ -564,6 +820,7 @@ describe('o prazo', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: agora + 60_000,
       origin: 'loja',
       createdBy: 'admin',
@@ -584,6 +841,7 @@ describe('o prazo', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: agora + 60_000,
       origin: 'loja',
       createdBy: 'admin',
@@ -608,6 +866,7 @@ describe('o prazo', () => {
       harness.vips.grant({
         steamId: STEAM_ID,
         tier: 'gold',
+        serverId: null,
         expiresAt: Date.now() - 1_000,
         origin: 'loja',
         createdBy: 'admin',
@@ -632,9 +891,13 @@ describe('a reconciliação', () => {
     // Ele CONTINUA no grupo: adotar não é mexer no Oxide.
     expect(pvp1?.groups.get('origemz.vip.gold')?.has(OTHER_ID)).toBe(true);
 
-    const adotado = harness.repository.latestOf(OTHER_ID, 'gold');
+    const adotado = harness.repository.latestOf(OTHER_ID, 'gold', 'pvp1');
 
     expect(adotado?.origin).toBe('adotado');
+    // E a adoção é DAQUELE servidor: o grupo em que ele estava é do
+    // `pvp1`, e adotar como VIP de rede daria o benefício no `pvp2`
+    // sem ninguém ter decidido isso.
+    expect(adotado?.serverId).toBe('pvp1');
     // Vitalício: o agente não sabe que prazo alguém combinou por
     // fora, e inventar uma data faria o relógio tirar sozinho um
     // benefício que ele não deu.
@@ -647,6 +910,7 @@ describe('a reconciliação', () => {
     await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -658,7 +922,7 @@ describe('a reconciliação', () => {
       pvp1.connected = false;
     }
 
-    await harness.vips.revoke(STEAM_ID, 'gold', 'admin');
+    await harness.vips.revoke(STEAM_ID, 'gold', null, 'admin');
 
     if (pvp1 !== undefined) {
       pvp1.connected = true;
@@ -693,6 +957,7 @@ describe('o SteamID atravessa a API e o payload sem perder dígito', () => {
     const { vip } = await harness.vips.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'loja',
       createdBy: 'admin',
@@ -720,6 +985,7 @@ describe('o SteamID atravessa a API e o payload sem perder dígito', () => {
       harness.vips.grant({
         steamId: '12345',
         tier: 'gold',
+        serverId: null,
         expiresAt: null,
         origin: 'loja',
         createdBy: 'admin',
@@ -761,6 +1027,7 @@ describe('a corrida entre a reconciliação e quem mexe no VIP', () => {
         harness.repository.grant({
           steamId: STEAM_ID,
           tier: 'gold',
+          serverId: null,
           expiresAt: null,
           origin: 'loja',
           createdBy: 'loja',
@@ -790,6 +1057,7 @@ describe('a corrida entre a reconciliação e quem mexe no VIP', () => {
     harness.repository.grant({
       steamId: STEAM_ID,
       tier: 'gold',
+      serverId: null,
       expiresAt: null,
       origin: 'painel',
       createdBy: 'admin',
@@ -804,7 +1072,7 @@ describe('a corrida entre a reconciliação e quem mexe no VIP', () => {
     server.onCommand = (command): void => {
       if (!injected && command.startsWith('oxide.show group ')) {
         injected = true;
-        harness.repository.revoke(STEAM_ID, 'gold', 'admin');
+        harness.repository.revoke(STEAM_ID, 'gold', null, 'admin');
       }
     };
 

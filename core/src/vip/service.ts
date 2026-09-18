@@ -1,8 +1,23 @@
 // ============================================================
-//  service.ts  -  a VipList: o direito de rede, e os dois lugares
-//  onde ele vira efeito dentro do jogo.
+//  service.ts  -  a VipList: quem é VIP, ONDE, e os dois lugares
+//  onde isso vira efeito dentro do jogo.
 //
-//  A fonte é a tabela `vips`. Cada servidor recebe o MESMO estado
+//  ------------------------------------------------------------
+//  ####  O VIP É DO SERVIDOR ONDE FOI COMPRADO  ####
+//
+//  Decisão do dono em 17/09/2026, que desfaz a do briefing
+//  (Docs\15: "o VIP é de REDE"). Quem compra no `pvp1` é VIP no
+//  `pvp1`; o VIP de REDE continua existindo, mas agora é uma escolha
+//  de quem vende (`serverId: null`), e não o que acontece sozinho.
+//
+//  Na prática isto quer dizer que TODA pergunta feita aqui tem um
+//  servidor junto: o payload de cada um leva só quem vale nele, a
+//  reconciliação compara o grupo do Oxide com esse recorte, e a
+//  adoção carimba o servidor em que o jogador foi encontrado. Ver
+//  db/vips-repository.ts.
+//
+//  ------------------------------------------------------------
+//  A fonte é a tabela `vips`. Cada servidor recebe o estado DELE
 //  por dois caminhos, e os dois precisam existir:
 //
 //    1. o GRUPO DO OXIDE — é o que faz a fila, o chat e os plugins
@@ -156,6 +171,8 @@ export interface VipView {
   readonly id: number;
   readonly steamId: string;
   readonly tier: string;
+  /** Onde ele vale. `null` = a REDE inteira. */
+  readonly serverId: string | null;
   readonly expiresAt: string | null;
   readonly origin: VipOrigin;
   readonly createdAt: string;
@@ -179,6 +196,13 @@ export interface VipView {
 export interface GrantVipInput {
   readonly steamId: string;
   readonly tier: string;
+  /**
+   * Onde o VIP vale. `null` = a REDE inteira.
+   *
+   * Obrigatório, sem default: quem concede responde onde. Ver
+   * `VipGrantInput`, em db/vips-repository.ts.
+   */
+  readonly serverId: string | null;
   /** Epoch ms. `null` = vitalício. */
   readonly expiresAt: number | null;
   readonly origin: VipOrigin;
@@ -230,6 +254,8 @@ export class VipList {
     readonly active?: boolean | undefined;
     readonly query?: string | undefined;
     readonly tier?: string | undefined;
+    /** Só os que valem naquele servidor. Ausente = todos. */
+    readonly where?: string | undefined;
     readonly limit: number;
     readonly offset: number;
   }): { readonly vips: readonly VipView[]; readonly total: number } {
@@ -239,11 +265,17 @@ export class VipList {
     return { vips: page.vips.map((vip) => toVipView(vip, now)), total: page.total };
   }
 
-  /** Os níveis que este jogador tem AGORA. */
-  activeOf(steamId: string): readonly VipView[] {
+  /**
+   * Os níveis que este jogador tem AGORA valendo em `where`.
+   *
+   * `where` é o id de um servidor — e a resposta inclui o VIP de
+   * rede. `ANY_SERVER` só para a FICHA, que mostra o que a pessoa
+   * tem sem decidir nada com isso.
+   */
+  activeOf(steamId: string, where: string): readonly VipView[] {
     const now = Date.now();
 
-    return this.#deps.repository.activeOf(steamId, now).map((vip) => toVipView(vip, now));
+    return this.#deps.repository.activeOf(steamId, where, now).map((vip) => toVipView(vip, now));
   }
 
   /** Tudo o que já houve com ele, do mais novo ao mais antigo. */
@@ -305,7 +337,8 @@ export class VipList {
 
     const tier = input.tier.trim().toLowerCase();
 
-    await this.#assertKnownTier(tier);
+    this.#assertKnownServer(input.serverId);
+    await this.#assertKnownTier(tier, input.serverId);
 
     if (input.expiresAt !== null && input.expiresAt <= Date.now()) {
       throw new ApiError(
@@ -322,6 +355,10 @@ export class VipList {
       {
         steamId: vip.steamId,
         tier: vip.tier,
+        // `null` no log é a REDE. Sai explícito porque é a primeira
+        // pergunta de quem investiga "ele diz que comprou e não
+        // tem": comprou onde?
+        serverId: vip.serverId,
         expiresAt: vip.expiresAt,
         origin: vip.origin,
         by: vip.createdBy,
@@ -347,28 +384,37 @@ export class VipList {
    * 010. Apagar responderia "quem é VIP?" e destruiria "quem JÁ
    * foi, de onde veio, e quem tirou".
    *
-   * @throws {ApiError} 404 quando não há concessão aberta.
+   * ####  O ESCOPO FAZ PARTE DA IDENTIDADE  ####
+   *
+   * Revogar o `gold` do `pvp1` não toca no `gold` de REDE do mesmo
+   * jogador: são duas concessões, provavelmente pagas à parte. Quem
+   * quer tirar as duas chama duas vezes — e é bom que precise
+   * dizer isso em voz alta.
+   *
+   * @throws {ApiError} 404 quando não há concessão aberta NAQUELE
+   * escopo.
    */
   async revoke(
     steamId: string,
     tier: string,
+    serverId: string | null,
     revokedBy: string | null,
   ): Promise<{ readonly vip: VipView; readonly results: readonly VipSyncResult[] }> {
     assertSteamId(steamId);
 
     const normalized = tier.trim().toLowerCase();
-    const vip = this.#deps.repository.revoke(steamId, normalized, revokedBy);
+    const vip = this.#deps.repository.revoke(steamId, normalized, serverId, revokedBy);
 
     if (vip === null) {
       throw new ApiError(
         'VIP_NOT_FOUND',
-        `${steamId} não tem VIP "${normalized}" ativo neste agente. Ele pode ter sido revogado em ` +
-          'outra aba, ou vencido — recarregue a tela.',
+        `${steamId} não tem VIP "${normalized}" ativo ${whereLabel(serverId)}. Ele pode ter sido ` +
+          'revogado em outra aba, ou vencido — recarregue a tela.',
         404,
       );
     }
 
-    this.#deps.logger.warn({ steamId, tier: normalized, by: revokedBy }, 'VIP revogado');
+    this.#deps.logger.warn({ steamId, tier: normalized, serverId, by: revokedBy }, 'VIP revogado');
     this.#record(vip, 'perdeu');
     this.#deps.onChanged?.();
 
@@ -396,11 +442,14 @@ export class VipList {
     const touched = new Set<string>();
 
     for (const vip of expired) {
-      this.#deps.repository.revoke(vip.steamId, vip.tier, null, now);
+      // O `revokedBy` nulo é a assinatura do relógio; o `vip.serverId`
+      // é o escopo daquela linha, e passá-lo é o que impede o
+      // vencimento do VIP de um servidor de fechar o de rede.
+      this.#deps.repository.revoke(vip.steamId, vip.tier, vip.serverId, null, now);
       touched.add(vip.steamId);
 
       this.#deps.logger.info(
-        { steamId: vip.steamId, tier: vip.tier },
+        { steamId: vip.steamId, tier: vip.tier, serverId: vip.serverId },
         'VIP vencido: prazo acabou, benefício retirado',
       );
 
@@ -543,7 +592,9 @@ export class VipList {
     }
 
     const now = Date.now();
-    const active = this.#deps.repository.active(now);
+    // Só quem vale NESTE servidor: os VIPs dele mais os de rede. Com
+    // a lista inteira, o `pve` poria no grupo quem comprou no `pvp1`.
+    const active = this.#deps.repository.activeIn(serverId, now);
 
     // Quem deveria estar em CADA grupo: só o nível mais alto de
     // cada jogador. Ver o cabeçalho.
@@ -605,10 +656,10 @@ export class VipList {
         // a mesma limpeza no próximo `apply`.
         const hasOther = (byPlayer.get(steamId) ?? []).length > 0;
 
-        // A linha mais recente daquele par, revogada ou não. Ver
+        // A linha mais recente daquele par AQUI, revogada ou não. Ver
         // `latestOf`: sem ela, revogar um VIP com o servidor fora
         // do ar faria a reconexão ADOTÁ-LO de volta.
-        const known = this.#deps.repository.latestOf(steamId, level.tier);
+        const known = this.#deps.repository.latestOf(steamId, level.tier, serverId);
 
         if (hasOther || known !== null) {
           // ####  O RETRATO É VELHO, E TIRAR É IRREVERSÍVEL  ####
@@ -626,7 +677,7 @@ export class VipList {
           // RCON que já foi pago. E repare que só ela é ao vivo no
           // laço: era o `latestOf` decidindo com dado novo em cima
           // de um retrato velho que produzia a remoção.
-          if (this.#topGroupNow(steamId, levels) === level.group) {
+          if (this.#topGroupNow(serverId, steamId, levels) === level.group) {
             continue;
           }
 
@@ -646,6 +697,14 @@ export class VipList {
           {
             steamId,
             tier: level.tier,
+            // ####  A ADOÇÃO É DESTE SERVIDOR, NUNCA DA REDE  ####
+            //
+            // O grupo do Oxide em que ele foi encontrado é de UM
+            // servidor: foi ali que alguém tomou a decisão. Adotar
+            // como VIP de rede ALARGARIA, sozinho, um benefício que
+            // ninguém concedeu nos outros — e o agente faria isso
+            // toda vez que alguém mexesse num grupo à mão.
+            serverId,
             // Vitalício: o agente não tem como saber que prazo
             // alguém combinou por fora, e inventar uma data faria o
             // relógio tirar, sozinho, um benefício que ele não deu.
@@ -670,7 +729,7 @@ export class VipList {
         // O simétrico da remoção, e pelo mesmo motivo: uma
         // revogação feita no meio da passada seria DESFEITA aqui,
         // devolvendo o grupo a quem acabou de perdê-lo.
-        if (this.#topGroupNow(steamId, levels) !== level.group) {
+        if (this.#topGroupNow(serverId, steamId, levels) !== level.group) {
           continue;
         }
 
@@ -736,11 +795,31 @@ export class VipList {
   //  Ajudantes
   // ------------------------------------------------------
 
-  /** O estado COMPLETO, no formato que o plugin espera. */
-  #payload(now: number = Date.now()): { readonly players: Record<string, unknown[]> } {
+  /**
+   * O estado COMPLETO **daquele servidor**, no formato que o plugin
+   * espera.
+   *
+   * ####  ESTE RECORTE É A MUDANÇA INTEIRA  ####
+   *
+   * O cache do `OrigemZAgent` é por servidor (cada um tem o seu), e é
+   * dele que a fila, o chat e o `origemz.vip.apply` leem. Mandar a
+   * tabela toda para todos era o que fazia o VIP comprado no `pvp1`
+   * valer no `pve` — e o plugin não muda nada para isso ser
+   * corrigido: ele continua recebendo "quem é VIP aqui".
+   *
+   * ####  DUAS LINHAS DO MESMO NÍVEL VIRAM UMA  ####
+   *
+   * Quem tem `gold` de rede e `gold` deste servidor aparece uma vez
+   * só, com o vencimento que dura MAIS (vitalício ganha de todos).
+   * Duas entradas do mesmo tier deixariam o plugin escolher, e a
+   * escolha dele é a ordem do array — ou seja, sorte.
+   */
+  #payload(serverId: string, now: number = Date.now()): {
+    readonly players: Record<string, unknown[]>;
+  } {
     const players: Record<string, { tier: string; expiresAt: string | null }[]> = {};
 
-    for (const vip of this.#deps.repository.active(now)) {
+    for (const vip of this.#deps.repository.activeIn(serverId, now)) {
       const grants = players[vip.steamId];
 
       const grant = {
@@ -753,8 +832,22 @@ export class VipList {
 
       if (grants === undefined) {
         players[vip.steamId] = [grant];
-      } else {
+        continue;
+      }
+
+      const same = grants.find((entry) => entry.tier === grant.tier);
+
+      if (same === undefined) {
         grants.push(grant);
+        continue;
+      }
+
+      // `null` é vitalício e ganha de qualquer data. Entre duas datas
+      // vence a maior — e a comparação de texto serve porque as duas
+      // saem do mesmo `toISOString()`: UTC, com o mesmo formato e o
+      // mesmo comprimento, a ordem alfabética é a cronológica.
+      if (same.expiresAt !== null && (grant.expiresAt === null || grant.expiresAt > same.expiresAt)) {
+        same.expiresAt = grant.expiresAt;
       }
     }
 
@@ -765,7 +858,7 @@ export class VipList {
     return pushState({
       rcon: this.#rconOf(serverId),
       command: VIP_SYNC_COMMAND,
-      payload: this.#payload(),
+      payload: this.#payload(serverId),
       logger: this.#deps.logger,
       trigger,
     });
@@ -821,7 +914,7 @@ export class VipList {
       return false;
     }
 
-    const tiers = this.#deps.repository.activeOf(steamId).map((vip) => vip.tier);
+    const tiers = this.#deps.repository.activeOf(steamId, serverId).map((vip) => vip.tier);
     const wanted = highestLevel(levels, tiers);
     let changed = false;
 
@@ -851,8 +944,12 @@ export class VipList {
    * que a decisão vai virar comando de console. Ver a remoção, no
    * `#reconcileOnce`.
    */
-  #topGroupNow(steamId: string, levels: readonly VipTierLevel[]): string | null {
-    const tiers = this.#deps.repository.activeOf(steamId).map((vip) => vip.tier);
+  #topGroupNow(
+    serverId: string,
+    steamId: string,
+    levels: readonly VipTierLevel[],
+  ): string | null {
+    const tiers = this.#deps.repository.activeOf(steamId, serverId).map((vip) => vip.tier);
 
     return highestLevel(levels, tiers)?.group ?? null;
   }
@@ -898,21 +995,63 @@ export class VipList {
   }
 
   /**
-   * @throws {ApiError} 400 quando nenhum servidor conhece o nível.
+   * @throws {ApiError} 404 quando o servidor pedido não existe aqui.
    *
-   * Recusar é melhor que aceitar: um VIP de um nível que não existe
-   * em servidor nenhum é dinheiro cobrado por um benefício que
+   * Um id errado (um `pvp01` onde o certo é `pvp1`) gravaria uma
+   * concessão que NENHUM servidor lê: ela ficaria na tela como ativa,
+   * o jogador pagaria, e nada no caminho acusaria o engano. `null` é
+   * a rede, e passa.
+   */
+  #assertKnownServer(serverId: string | null): void {
+    if (serverId === null || this.#deps.servers.ids().includes(serverId)) {
+      return;
+    }
+
+    throw new ApiError(
+      'UNKNOWN_SERVER',
+      `Não existe servidor com o id "${serverId}" neste agente. Os que existem: ` +
+        `${this.#deps.servers.ids().join(', ') || '(nenhum)'}. Para um VIP que vale em todos, ` +
+        'não mande servidor nenhum.',
+      404,
+    );
+  }
+
+  /**
+   * @throws {ApiError} 400 quando o nível não existe ONDE o VIP vai
+   * valer.
+   *
+   * Recusar é melhor que aceitar: um VIP de um nível que aquele
+   * servidor não declara é dinheiro cobrado por um benefício que
    * nunca chega — e ele ficaria na tela como ativo, sem nada
    * acusando o problema.
+   *
+   * ####  A PERGUNTA MUDOU JUNTO COM O ESCOPO  ####
+   *
+   * Antes bastava que ALGUM servidor conhecesse o nível, porque o VIP
+   * valia em todos. Agora, um `gold` que só o `pvp1` declara é um
+   * `gold` que não vira nada no `pve` — e vender ali é o mesmo
+   * dinheiro cobrado por nada. O VIP de REDE mantém a regra antiga:
+   * ele vale onde existir, e recusá-lo porque um servidor não declara
+   * o nível tiraria do ar a venda que funciona nos outros.
    */
-  async #assertKnownTier(tier: string): Promise<void> {
+  async #assertKnownTier(tier: string, serverId: string | null): Promise<void> {
     const known = await this.knownTiers();
+    const level = known.get(tier);
 
-    if (known.has(tier)) {
+    if (level !== undefined && (serverId === null || level.servers.includes(serverId))) {
       return;
     }
 
     const names = [...known.keys()];
+
+    if (level !== undefined && serverId !== null) {
+      throw new ApiError(
+        'UNKNOWN_VIP_TIER',
+        `O servidor "${serverId}" não conhece o nível "${tier}" — ele existe em ` +
+          `${level.servers.join(', ')}. Um VIP desse nível ali não viraria efeito nenhum.`,
+        400,
+      );
+    }
 
     throw new ApiError(
       'UNKNOWN_VIP_TIER',
@@ -932,14 +1071,15 @@ export class VipList {
   /**
    * A linha do tempo da ficha do jogador.
    *
-   * O evento é gravado no PRIMEIRO servidor conhecido: a tabela
-   * `player_events` exige um `server_id` (chave estrangeira), e o
-   * VIP é de rede — não há um servidor certo. Sem servidor nenhum
-   * cadastrado, o evento simplesmente não entra: perder uma linha
-   * de histórico é melhor que derrubar uma concessão que já valeu.
+   * O evento vai para o servidor DA CONCESSÃO. O VIP de rede não tem
+   * um, e aí cai no primeiro conhecido: a tabela `player_events`
+   * exige um `server_id` (chave estrangeira) e nenhum deles é mais
+   * certo que o outro. Sem servidor nenhum cadastrado, o evento
+   * simplesmente não entra — perder uma linha de histórico é melhor
+   * que derrubar uma concessão que já valeu.
    */
   #record(vip: VipRecord, what: 'ganhou' | 'renovou' | 'perdeu' | 'venceu'): void {
-    const serverId = this.#deps.servers.ids()[0];
+    const serverId = vip.serverId ?? this.#deps.servers.ids()[0];
 
     if (this.#deps.history === undefined || serverId === undefined) {
       return;
@@ -950,12 +1090,17 @@ export class VipList {
         ? 'vitalício'
         : `até ${new Date(vip.expiresAt).toLocaleDateString('pt-BR')}`;
 
+    // O escopo entra na frase: a ficha é lida por quem atende o
+    // jogador, e "comprei VIP e não tenho" quase sempre é "comprou
+    // no outro servidor".
+    const scope = vip.serverId === null ? ' na rede' : ` em ${vip.serverId}`;
+
     const detail =
       what === 'perdeu'
-        ? `VIP ${vip.tier} revogado`
+        ? `VIP ${vip.tier}${scope} revogado`
         : what === 'venceu'
-          ? `VIP ${vip.tier} venceu`
-          : `VIP ${vip.tier} ${what} (${when})`;
+          ? `VIP ${vip.tier}${scope} venceu`
+          : `VIP ${vip.tier}${scope} ${what} (${when})`;
 
     try {
       this.#deps.history.recordAction({
@@ -1017,11 +1162,17 @@ function toIso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
+/** "no pvp1" / "na rede" — o pedaço de frase que diz ONDE. */
+function whereLabel(serverId: string | null): string {
+  return serverId === null ? 'na rede' : `em "${serverId}"`;
+}
+
 function toVipView(vip: VipRecord | VipListRecord, now: number): VipView {
   return {
     id: vip.id,
     steamId: vip.steamId,
     tier: vip.tier,
+    serverId: vip.serverId,
     expiresAt: toIso(vip.expiresAt),
     origin: vip.origin,
     // `created_at` é NOT NULL: o `?? ''` é só o tipo.
