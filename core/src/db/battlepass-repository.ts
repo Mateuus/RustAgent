@@ -393,9 +393,19 @@ export interface CreditXpInput {
 
 /** O desfecho de um crédito de XP. */
 export interface XpCredit {
-  /** Quanto XP realmente entrou, depois do teto. */
+  /**
+   * Quanto XP realmente entrou, depois do teto — ou saiu, depois do
+   * piso. NEGATIVO é uma penalidade que pegou (ver `amount` em
+   * types/battlepass.ts).
+   */
   readonly granted: number;
-  /** Quanto foi cortado pelo teto — e NÃO fica para amanhã. */
+  /**
+   * A MAGNITUDE do que não aconteceu, sempre positiva.
+   *
+   * No ganho é o que o teto do dia cortou — e que NÃO fica para
+   * amanhã. Na penalidade é o que o piso engoliu: quem tinha 100 e
+   * levou uma multa de 300 perdeu 100 e tem `capped: 200`.
+   */
   readonly capped: number;
   readonly progress: PlayerProgress;
   /** O nível de antes, para quem quiser avisar "você subiu". */
@@ -854,6 +864,14 @@ export class BattlePassRepository {
    * O excedente NÃO fica para amanhã (01 §3.2): ele não acontece. O
    * `capped` existe para quem quiser dizer isso na tela, não para
    * guardar em lugar nenhum.
+   *
+   * ####  E SUBTRAI, QUANDO O `amount` É NEGATIVO  ####
+   *
+   * Uma penalidade entra por AQUI, pelo mesmo caminho e pela mesma
+   * transação — inclusive a do lote, cuja idempotência continua
+   * sendo o `batchId`. O que muda são dois limites, ambos escritos
+   * abaixo: a penalidade não passa pelo teto do dia, e ela para em
+   * zero. O nível, esse não desce nunca.
    */
   creditXp(input: CreditXpInput, now: number = Date.now()): XpCredit {
     return this.#db.transaction((): XpCredit => {
@@ -884,20 +902,37 @@ export class BattlePassRepository {
         };
       }
 
-      const wanted = Math.max(0, Math.trunc(input.amount));
-      const granted = wanted === 0 ? 0 : this.#allowedBy(input, wanted);
+      const wanted = Math.trunc(input.amount);
+      // ####  O GANHO PASSA PELO TETO; A PENALIDADE, PELO PISO  ####
+      //
+      // São dois limites diferentes e nenhum deles é o outro. O
+      // ganho é cortado pelo que a fonte já rendeu hoje; a
+      // penalidade é cortada pelo XP que o jogador tem — ela para em
+      // zero, e não abre buraco (ver `amount` em types/battlepass).
+      //
+      // O teto não olha para a penalidade de propósito: ele é "o
+      // máximo que essa fonte RENDE por dia", e quem tira não rende.
+      const granted =
+        wanted === 0 ? 0 : wanted < 0 ? Math.max(wanted, -before.xp) : this.#allowedBy(input, wanted);
 
       if (granted === 0) {
         return {
           granted: 0,
-          capped: wanted,
+          // A MAGNITUDE do que não entrou: o teto, quando o pedido
+          // era ganho; o piso, quando era penalidade.
+          capped: Math.abs(wanted),
           progress: before,
           levelBefore: before.level,
           applied: true,
         };
       }
 
-      this.#bumpDaily(input, granted, now);
+      // Só o ganho entra no acumulado do dia. Somar a penalidade ali
+      // abriria espaço no teto: quem perdeu 200 hoje ganharia 200
+      // além do que o admin permitiu.
+      if (granted > 0) {
+        this.#bumpDaily(input, granted, now);
+      }
 
       if (input.eventId !== undefined) {
         // A linha do evento nasceu com zero: agora ela diz quanto
@@ -909,8 +944,25 @@ export class BattlePassRepository {
           .run({ xp: granted, event: input.eventId });
       }
 
+      // O piso já foi aplicado no `granted`, então esta soma nunca
+      // fica negativa — é o único lugar em que o XP é escrito, e ele
+      // não precisa de um segundo clamp que divergiria do primeiro.
       const xp = before.xp + granted;
-      const level = levelAt(input.season.xpCurve, input.season.levels, xp);
+      // ####  O NÍVEL NUNCA DESCE  ####
+      //
+      // O 01 §2 é explícito, e a penalidade não muda isso: o que ele
+      // alcançou é dele. O XP cai, o próximo nível pode voltar a
+      // ficar longe, mas o que já estava disponível continua
+      // disponível e o que foi resgatado continua resgatado.
+      //
+      // O `level` é a coluna que a trilha lê — guardar o MAIOR entre
+      // o de antes e o que o XP novo daria é tudo o que a regra
+      // precisa. Recalcular sem esse máximo trancaria recompensa já
+      // aberta, que é a queixa que não se desfaz.
+      const level = Math.max(
+        before.level,
+        levelAt(input.season.xpCurve, input.season.levels, xp),
+      );
 
       this.#db
         .prepare(
@@ -939,7 +991,7 @@ export class BattlePassRepository {
 
       return {
         granted,
-        capped: wanted - granted,
+        capped: Math.abs(wanted - granted),
         progress: saved,
         levelBefore: before.level,
         applied: true,

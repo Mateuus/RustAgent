@@ -462,6 +462,19 @@ export function cellKey(level: number, lane: BattlePassLane): string {
 //  O XP
 // ------------------------------------------------------------
 
+/**
+ * A faixa do valor de uma fonte — a MESMA do agente
+ * (`core/src/types/battlepass.ts`, `xpRuleInputSchema.amount`).
+ *
+ * O mínimo é negativo porque negativo é PENALIDADE: a fonte tira XP
+ * em vez de dar (o dono, 18/09/2026). Deixar o piso em zero aqui
+ * seria pior do que recusar — o `integer` truncaria o −200 gravado
+ * para 0, a tela mostraria uma fonte inofensiva, e o primeiro
+ * "Salvar" apagaria a penalidade sem ninguém ter pedido.
+ */
+export const XP_AMOUNT_MIN = -1_000_000;
+export const XP_AMOUNT_MAX = 1_000_000;
+
 export function safeXpRule(value: unknown): BattlePassXpRule {
   const rule = fields(value);
 
@@ -470,7 +483,7 @@ export function safeXpRule(value: unknown): BattlePassXpRule {
     source: text(rule.source),
     // Lado seguro: regra que chegou sem o campo NÃO paga XP.
     enabled: rule.enabled === true,
-    amount: integer(rule.amount, 0),
+    amount: integer(rule.amount, 0, XP_AMOUNT_MIN),
     // `null` = sem teto, que é o que o contrato diz. Um número
     // inventado aqui apertaria a torneira sem ninguém ter pedido.
     dailyCap: nullableNumber(rule.dailyCap),
@@ -640,6 +653,45 @@ export function buildXpRows(
   }
 
   return rows;
+}
+
+/**
+ * O que a linha FAZ com o XP do jogador.
+ *
+ *   gain     dá XP
+ *   penalty  TIRA XP — o valor é negativo
+ *   off      zero: a fonte não mexe em nada, mesmo ligada
+ *
+ * A tela pinta a linha por isto, e não por um `< 0` espalhado pelo
+ * JSX: "tira" e "dá" são estados da linha inteira (o selo, a borda,
+ * a frase de apoio), e três lugares perguntando a mesma coisa
+ * divergem no primeiro ajuste.
+ */
+export type XpAmountKind = 'gain' | 'penalty' | 'off';
+
+export function xpAmountKind(amount: number): XpAmountKind {
+  if (!Number.isFinite(amount) || amount === 0) return 'off';
+
+  return amount < 0 ? 'penalty' : 'gain';
+}
+
+/**
+ * A frase da linha que TIRA XP. `null` quando ela não tira.
+ *
+ * O sinal de menos no campo é fácil demais de não ver numa tabela de
+ * vinte fontes — e essa é justamente a linha que ninguém quer ligar
+ * por engano. A frase diz o que acontece, com o número em positivo
+ * ("tira 200"), e já responde às duas perguntas seguintes: o XP não
+ * fica negativo, e o nível alcançado não volta atrás.
+ */
+export function penaltyNoteOf(amount: number): string | null {
+  if (xpAmountKind(amount) !== 'penalty') return null;
+
+  return (
+    `Esta fonte TIRA ${Math.abs(Math.trunc(amount)).toLocaleString('pt-BR')} XP por ocorrência. ` +
+    'O XP para em zero — nunca fica negativo — e o nível já alcançado não desce: ' +
+    'o que ele resgatou continua dele, e o que estava disponível continua disponível.'
+  );
 }
 
 // ------------------------------------------------------------

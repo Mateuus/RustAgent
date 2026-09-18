@@ -140,12 +140,21 @@ export interface CreditXpRequest {
 }
 
 export interface CreditXpResult {
+  /** NEGATIVO quando a regra é uma penalidade e ela pegou. */
   readonly granted: number;
+  /** A magnitude do que não aconteceu: o teto, ou o piso. */
   readonly capped: number;
   readonly level: number;
   readonly levelBefore: number;
-  /** Por que não entrou nada, quando não entrou. */
-  readonly reason: 'ok' | 'no_season' | 'no_rule' | 'disabled' | 'capped';
+  /**
+   * Por que não entrou nada, quando não entrou.
+   *
+   * `floored` é o par da penalidade com o `capped`: o XP do jogador
+   * já estava em zero e não havia o que tirar. Os dois são "nada
+   * aconteceu", e separá-los é o que evita explicar uma multa
+   * dizendo "o teto do dia estava cheio".
+   */
+  readonly reason: 'ok' | 'no_season' | 'no_rule' | 'disabled' | 'capped' | 'floored';
 }
 
 /** Um jogador do lote, com o delta de 60 s dele. */
@@ -166,11 +175,17 @@ export interface XpLevelUp {
 export interface BatchXpResult {
   /** `false` = não há temporada no ar ali, e nada foi olhado. */
   readonly season: boolean;
-  /** O XP que entrou no lote inteiro. */
+  /**
+   * O XP que entrou no lote inteiro, LÍQUIDO: as penalidades da
+   * rodada já estão descontadas, e o número pode ser negativo.
+   */
   readonly granted: number;
-  /** O que o teto cortou — e que NÃO fica para amanhã. */
+  /** O que o teto cortou — e que NÃO fica para amanhã. Sempre positivo. */
   readonly capped: number;
-  /** Quem recebeu alguma coisa. É por eles que a trilha é reenviada. */
+  /**
+   * Quem teve a trilha MEXIDA — recebeu ou perdeu. É por eles que
+   * ela é reenviada: quem levou multa precisa ver o número cair.
+   */
   readonly touched: readonly string[];
   readonly levelUps: readonly XpLevelUp[];
 }
@@ -535,6 +550,17 @@ export class BattlePassService {
    * caminho que dobra o XP numa rodada repetida (02 §1.1).
    *
    * O XP que estoura o teto NÃO fica para amanhã: ele não acontece.
+   *
+   * ####  A REGRA COM VALOR NEGATIVO TIRA XP  ####
+   *
+   * `team.kills` a −200 desconta 200 por colega abatido (o dono,
+   * 18/09/2026). O piso é zero e o nível não desce — quem aplica as
+   * duas coisas é o repositório.
+   *
+   * O aviso ao jogador sai TAMBÉM na penalidade: `granted !== 0`, e
+   * não `> 0`. Avisar só o ganho deixaria o XP cair com a tela
+   * parada no número velho até o próximo evento qualquer — e o
+   * jogador descobriria a multa por um número que mudou sozinho.
    */
   creditXp(request: CreditXpRequest, now: number = Date.now()): CreditXpResult {
     const season = this.activeSeason(request.serverId);
@@ -568,7 +594,7 @@ export class BattlePassService {
       now,
     );
 
-    if (credit.granted > 0) {
+    if (credit.granted !== 0) {
       this.#deps.onPlayerChange?.(request.serverId, request.steamId);
     }
 
@@ -577,7 +603,9 @@ export class BattlePassService {
       capped: credit.capped,
       level: credit.progress.level,
       levelBefore: credit.levelBefore,
-      reason: credit.granted === 0 ? 'capped' : 'ok',
+      // Nada entrou nem saiu: o teto do dia estava cheio, ou o XP já
+      // estava em zero e a penalidade não tinha o que tirar.
+      reason: credit.granted === 0 ? (rule.amount < 0 ? 'floored' : 'capped') : 'ok',
     };
   }
 
@@ -688,10 +716,13 @@ export class BattlePassService {
     // As regras de lote, lidas UMA vez: trezentos jogadores vezes
     // dezenove métricas seriam seis mil consultas por rodada, a cada
     // minuto, por servidor.
+    // `!== 0` e não `> 0`: a regra negativa é uma PENALIDADE e entra
+    // pelo mesmo caminho, na mesma transação. Só o zero é "essa
+    // fonte não mexe em nada".
     const rules = new Map(
       this.#deps.repository
         .xpRules(season.id)
-        .filter((rule) => rule.enabled && rule.amount > 0 && isBatchXpSource(rule.source))
+        .filter((rule) => rule.enabled && rule.amount !== 0 && isBatchXpSource(rule.source))
         .map((rule) => [rule.source, rule] as const),
     );
 
@@ -706,7 +737,11 @@ export class BattlePassService {
     let capped = 0;
 
     for (const player of input.players) {
-      let got = 0;
+      // Um BOOLEANO, e não a soma do que ele levou: com penalidade
+      // na mesma rodada, um ganho de 200 e uma multa de 200 se
+      // cancelariam numa soma, e o jogador que TEVE a trilha
+      // mexida ficaria de fora do reenvio.
+      let moved = false;
 
       for (const [metric, delta] of Object.entries(player.metrics)) {
         const rule = rules.get(metric);
@@ -732,7 +767,8 @@ export class BattlePassService {
 
         granted += credit.granted;
         capped += credit.capped;
-        got += credit.granted;
+
+        if (credit.granted !== 0) moved = true;
 
         if (credit.progress.level > credit.levelBefore) {
           const up = levelUps.find((item) => item.steamId === player.steamId);
@@ -753,7 +789,7 @@ export class BattlePassService {
         }
       }
 
-      if (got > 0) {
+      if (moved) {
         touched.push(player.steamId);
       }
     }
