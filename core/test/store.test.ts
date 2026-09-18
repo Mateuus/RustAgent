@@ -714,7 +714,10 @@ describe('o mês do passe', () => {
 
     // É o que o settle faz com a prova na mão: entrega o PLANO, e
     // não a oferta de hoje.
-    await harness.service.deliverPlan(SERVER, STEAM_ID, plan, purchase?.reference ?? null);
+    await harness.service.deliverPlan(SERVER, STEAM_ID, plan, {
+      reference: purchase?.reference ?? null,
+      origin: 'loja',
+    });
 
     expect(harness.pass.granted).toEqual([
       {

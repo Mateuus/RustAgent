@@ -95,7 +95,7 @@ import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
 import { WorkshopCatalog } from './game/workshop-catalog.js';
 import { BattlePassRepository } from './db/battlepass-repository.js';
-import { BattlePassService } from './battlepass/service.js';
+import { BattlePassService, passGranterOf } from './battlepass/service.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync } from './game/custom-items-sync.js';
@@ -1311,28 +1311,10 @@ async function main(): Promise<void> {
     // e do que vier do site: uma linha de `battlepass_entitlements`,
     // com o índice único parcial recusando dois direitos vivos no
     // mesmo mês. A loja só sabe que existe um `grant`.
-    pass: {
-      // De que mês é a compra. A régua do calendário é a do passe —
-      // e ela já usa `localDayOf`, a mesma do resto do processo.
-      periodNow: (now) => battlePass.periodNow(now),
-      hasPass: (serverId, steamId, period) => battlePass.hasPass(serverId, steamId, period),
-      grant: (input) => {
-        battlePass.grant(
-          {
-            serverId: input.serverId,
-            steamId: input.steamId,
-            // O mês do PLANO CONGELADO. Ver store/service.ts.
-            period: input.period,
-            origin: input.origin,
-            sourceRef: input.sourceRef,
-            createdBy: input.createdBy,
-          },
-          // Quem deu foi a loja, e o registro do passe diz isso: a
-          // ficha do jogador separa "comprou" de "um admin deu".
-          { name: 'loja', source: 'system' },
-        );
-      },
-    },
+    // A mesma porta para os dois canais de venda: o que muda entre a
+    // compra in-game e a fila do site é a ORIGEM, e ela viaja no
+    // pedido. Ver `passGranterOf`.
+    pass: passGranterOf(battlePass),
     logger,
     history: directory,
     // A carteira DAQUELE servidor: o débito precisa sair com o
@@ -1477,7 +1459,14 @@ async function main(): Promise<void> {
         // O MESMO caminho da compra in-game, e não um segundo: um
         // ajuste que só um dos dois recebesse apareceria como
         // "às vezes o item vem sem skin".
-        deliver: (input) => store.deliverPlan(input.serverId, input.steamId, input.plan),
+        deliver: (input) =>
+          store.deliverPlan(input.serverId, input.steamId, input.plan, {
+            // Quem vendeu foi o SITE. O passe comprado lá grava a
+            // origem na linha do direito, e é por ela que a ficha
+            // separa "comprou no jogo" de "comprou no site".
+            origin: 'site',
+            reference: input.reference,
+          }),
         // Tirar VIP não é entregar, e por isso não passa pelo
         // `deliverPlan`: quem manda no VIP é a `VipList`, e é ela
         // que grava a revogação, tira o grupo de quem está no ar e
