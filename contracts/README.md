@@ -29,6 +29,7 @@ Cada resposta traz um `origin`, e ele é a coisa mais importante do arquivo:
 |---|---|
 | `observed` | **copiado de uma resposta real** do dev, na data do bloco `probe` |
 | `manual` | o que o manual descreve, **ainda não verificado** contra o site |
+| `proposal` | corpo de um contrato **futuro** (o campo `proposal` diz qual, ex. `oz-rust/8`). O site **não** o aceita ainda; a etiqueta `contract` só sobe quando ele aceitar |
 
 Um `manual` que ninguém confirmou é exatamente o tipo de linha que produziu as
 divergências de `skinId` e `prefab`. Quem sondar uma rota e confirmar o corpo, **troca o
@@ -38,6 +39,13 @@ O bloco `agent`, quando existe, é o que o `SiteClient` deste repositório concl
 resposta — e é o que `core/test/site-fixtures.test.ts` confere a cada `npm test`. Uma
 fixture que mude sem o cliente acompanhar quebra o teste **aqui**, que é onde se quer que
 ela quebre.
+
+### As propostas em aberto
+
+- **`oz-rust/8` — skins do Workshop** ([Docs/OrigemZWorkshop/04](../Docs/OrigemZWorkshop/04-ENTREGA-PELO-SITE.md)):
+  as rotas `skins-mirror-version` e `skins-mirror`, e os casos `skin` e `skin_revoke` em
+  `deliveries-pending`. O lado do agente está pronto; o 404 do espelho é esperado até o site
+  publicar as rotas.
 
 ## Como regerar a parte `observed`
 

@@ -142,8 +142,9 @@ function settings(timeZone = 'UTC'): WipeSettings {
       timeOfDay: '16:00',
       timeZone,
       bpPolicy: 'keep',
+      seasonSkins: 'keep',
     },
-    forced: { bpPolicy: 'keep' },
+    forced: { bpPolicy: 'keep', seasonSkins: 'keep' },
     collision: { policy: 'absorb', windowHours: 36 },
   };
 }

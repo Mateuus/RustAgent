@@ -4,24 +4,25 @@
 //  ####  O QUE ESTE ARQUIVO PROTEGE  ####
 //
 //  Esta feature falha CALADA por natureza: o servidor aceita
-//  qualquer `ulong` em `item.skin` e nunca reclama. Os casos abaixo
-//  são os que produzem esse silêncio — ou, pior, um cadastro que
-//  aparece numa porta e não na outra:
+//  qualquer `ulong` em `item.skin` e nunca reclama, e o menu mostra
+//  cadeado no que o plugin não sabe. Os casos abaixo são os que
+//  produzem esse silêncio:
 //
-//    migração que perde dado   as skins e as ligações de servidor
-//                              da 095 somem na reconstrução
-//    duas portas, duas regras  o painel confere a Steam e o
-//                              `/skin add` do jogo não
-//    aviso forjado             um jogador digita `#OZWORKSHOP#` no
-//                              chat e cadastra uma skin
-//    carga grande demais       o frame é truncado e o plugin troca
-//                              uma carga boa por meia
-//    acesso vencido na carga   o jogador continua pintando depois
-//                              do prazo
-//    coleção ambígua           duas máscaras na "neve", e o
-//                              `/skin neve` escolhe uma ao acaso
+//    migração que perde posse   um acesso de coleção que não vira
+//                               posse, um grupo descartado sem
+//                               registro, uma skin grátis que vira
+//                               cadeado
+//    duas regras de prazo       o painel soma, o site substitui
+//    duas portas, duas regras   o painel confere a Steam e o
+//                               `/skin add` do jogo não
+//    aviso forjado              um jogador digita `#OZWORKSHOP#` no
+//                               chat e se dá uma skin
+//    carga grande demais        o frame é truncado e o plugin troca
+//                               uma carga boa por meia
+//    lista vazia não mandada    o plugin fica em "não sei" para
+//                               sempre com quem não tem nada
 //    comando de dentro do gancho  a linha volta pelo console e o
-//                              agente entra em laço com ele mesmo
+//                               agente entra em laço com ele mesmo
 // ============================================================
 
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -35,27 +36,35 @@ import { MetaRepository } from '../src/db/meta-repository.js';
 import { applyMigration, MIGRATIONS, runMigrations } from '../src/db/migrations.js';
 import { ServersRepository } from '../src/db/servers-repository.js';
 import { StreamerRepository } from '../src/db/streamer-repository.js';
-import { WorkshopAccessRepository } from '../src/db/workshop-access-repository.js';
+import {
+  DAY_MS,
+  FavoritesFullError,
+  renewedExpiry,
+  WorkshopOwnedRepository,
+} from '../src/db/workshop-owned-repository.js';
 import { WorkshopSkinsRepository } from '../src/db/workshop-repository.js';
 import { decodePushPayload, MAX_PUSH_BYTES } from '../src/game/plugin-push.js';
 import type { WorkshopLookup, WorkshopLookupFn } from '../src/game/steam-workshop.js';
 import {
   WORKSHOP_CHUNK_CHARS,
   WORKSHOP_MARKER,
+  WORKSHOP_OWNED,
   WORKSHOP_REPLY,
   WORKSHOP_SYNC,
   WorkshopService,
 } from '../src/game/workshop.js';
 import { WorkshopCatalog, type WorkshopActor } from '../src/game/workshop-catalog.js';
 import { ApiError, apiErrorToResponse, isApiError, zodErrorToResponse } from '../src/http/error-response.js';
+import { registerPlayerRoutes } from '../src/http/routes/players.js';
 import { registerWorkshopRoutes } from '../src/http/routes/workshop.js';
+import type { PlayerDirectory } from '../src/players/service.js';
 import { STREAMER_MARKER } from '../src/types/streamer-transport.js';
 import {
-  collectionSlugSchema,
-  normalizePermission,
-  workshopGrantBodySchema,
+  grantOwnershipInputSchema,
+  MAX_FAVORITES_PER_PLAYER,
   workshopSkinBodySchema,
   workshopSkinInputSchema,
+  type WorkshopOwnedPayload,
   type WorkshopPayload,
   type WorkshopSkinBody,
 } from '../src/types/workshop.js';
@@ -64,7 +73,10 @@ const silent = pino({ level: 'silent' });
 const SERVER = 'server01';
 const OTHER = 'server02';
 const PLAYER = '76561190000000001';
+const PLAYER_2 = '76561190000000002';
+const PLAYER_3 = '76561190000000003';
 const PANEL: WorkshopActor = { name: 'admin', source: 'panel' };
+const T0 = 1_800_000_000_000;
 
 /** O que a Steam respondeu para o 3802433262, MEDIDO em 16/09/2026. */
 const FACEMASK: WorkshopLookup = {
@@ -79,20 +91,29 @@ const FACEMASK: WorkshopLookup = {
   },
 };
 
+interface SentCommand {
+  readonly server: string;
+  readonly command: string;
+}
+
 interface Harness {
   readonly db: AgentDatabase;
   readonly service: WorkshopService;
   readonly catalog: WorkshopCatalog;
   readonly skins: WorkshopSkinsRepository;
-  readonly access: WorkshopAccessRepository;
+  readonly owned: WorkshopOwnedRepository;
   readonly items: ItemsRepository;
   readonly servers: ServersRepository;
   readonly streamers: StreamerRepository;
   readonly meta: MetaRepository;
-  /** Todo comando que saiu pelo RCON, na ordem. */
-  readonly sent: string[];
+  /** Todo comando que saiu pelo RCON, na ordem, com o servidor. */
+  readonly sent: SentCommand[];
   /** Workshop ID -> o que a "Steam" responde. Ausente = não existe. */
   readonly steam: Map<string, WorkshopLookup>;
+  /** servidor -> quem está online. */
+  readonly online: Map<string, string[]>;
+  /** Quem teve a posse avisada pelo catálogo. */
+  readonly ownershipChanged: string[];
   connected: boolean;
   now: number;
 }
@@ -128,13 +149,14 @@ function seedItems(items: ItemsRepository): void {
       item('hoodie', 'Hoodie', 1751045826),
       item('hatchet', 'Hatchet', -1469578201),
       item('rifle.ak', 'Assault Rifle', 1545779598),
+      item('rock', 'Rock', 963906841),
     ],
     protocol: '2633.288.1',
     at: 1_000,
   });
 }
 
-function harness(): Harness {
+function harness(options: { storeUrl?: string } = {}): Harness {
   const db = openDatabase({ file: MEMORY_DATABASE });
 
   runMigrations(db);
@@ -146,7 +168,7 @@ function harness(): Harness {
   seedItems(items);
 
   const skins = new WorkshopSkinsRepository(db);
-  const access = new WorkshopAccessRepository(db);
+  const owned = new WorkshopOwnedRepository(db);
   const streamers = new StreamerRepository(db);
   const meta = new MetaRepository(db);
   const steam = new Map<string, WorkshopLookup>([['3802433262', FACEMASK]]);
@@ -156,48 +178,75 @@ function harness(): Harness {
   const state = {
     db,
     skins,
-    access,
+    owned,
     items,
     servers,
     streamers,
     meta,
-    sent: [] as string[],
+    sent: [] as SentCommand[],
     steam,
+    online: new Map<string, string[]>([
+      [SERVER, []],
+      [OTHER, []],
+    ]),
+    ownershipChanged: [] as string[],
     connected: true,
-    now: 1_800_000_000_000,
+    now: T0,
   } as Omit<Harness, 'service' | 'catalog'> & { service: WorkshopService; catalog: WorkshopCatalog };
 
-  const rcon = {
+  const rconOf = (server: string) => ({
     get isConnected() {
       return state.connected;
     },
     send: (command: string) => {
-      state.sent.push(command);
+      state.sent.push({ server, command });
 
-      if (command.startsWith(WORKSHOP_SYNC) || command.startsWith(WORKSHOP_REPLY)) {
+      if (
+        command.startsWith(WORKSHOP_SYNC) ||
+        command.startsWith(WORKSHOP_OWNED) ||
+        command.startsWith(WORKSHOP_REPLY)
+      ) {
         return Promise.resolve(JSON.stringify({ ok: true }));
       }
 
       return Promise.resolve('');
     },
-  };
+  });
+
+  const rcons = new Map([
+    [SERVER, rconOf(SERVER)],
+    [OTHER, rconOf(OTHER)],
+  ]);
 
   state.catalog = new WorkshopCatalog({
     skins,
-    access,
+    owned,
     items,
     serverIds: () => [SERVER, OTHER],
     lookup,
     onChange: () => undefined,
+    onOwnershipChange: (steamId) => {
+      state.ownershipChanged.push(steamId);
+      state.service.handleOwnershipChanged(steamId);
+    },
   });
 
   state.service = new WorkshopService({
     skins,
-    access,
+    owned,
     catalog: state.catalog,
     meta,
     streamers,
-    servers: { ids: () => [SERVER, OTHER], contextOf: () => ({ rcon }) },
+    servers: {
+      ids: () => [SERVER, OTHER],
+      contextOf: (id) => {
+        const rcon = rcons.get(id);
+
+        return rcon === undefined ? null : { rcon };
+      },
+      onlineOf: (id) => state.online.get(id) ?? [],
+    },
+    ...(options.storeUrl === undefined ? {} : { storeUrl: options.storeUrl }),
     logger: silent,
     now: () => state.now,
   });
@@ -226,20 +275,47 @@ function addSkin(h: Harness, patch: Record<string, unknown> = {}) {
   });
 }
 
-/** Remonta a última carga que saiu, juntando os pedaços. */
-function lastPayload(h: Harness): WorkshopPayload {
-  const commands = h.sent.filter((line) => line.startsWith(`${WORKSHOP_SYNC} `));
+/** Dá a posse direto no repositório, sem registro nem aviso. */
+function give(h: Harness, steamId: string, skinRef: number, extra: { days?: number | null; expiresAt?: number | null } = {}) {
+  return h.owned.grantOwnership(
+    { steamId, skinRef, source: 'panel', createdBy: 'teste', ...extra },
+    h.now,
+  );
+}
+
+/** Remonta o último lote de um comando, juntando os pedaços. */
+function lastBatch(h: Harness, prefix: string, server?: string): unknown {
+  const commands = h.sent
+    .filter((entry) => server === undefined || entry.server === server)
+    .map((entry) => entry.command)
+    .filter((line) => line.startsWith(`${prefix} `));
   const last = commands.at(-1);
 
-  if (last === undefined) throw new Error('nenhum sync saiu');
+  if (last === undefined) throw new Error(`nenhum ${prefix} saiu`);
 
-  const [, batch, , total] = last.split(' ');
+  const tail = (line: string) => line.slice(prefix.length + 1).split(' ');
+  const [batch, , total] = tail(last);
   const parts = commands
-    .filter((line) => line.split(' ')[1] === batch)
+    .filter((line) => tail(line)[0] === batch)
     .slice(-Number(total))
-    .map((line) => line.split(' ')[4] ?? '');
+    .map((line) => tail(line)[3] ?? '');
 
-  return decodePushPayload(parts.join('')) as WorkshopPayload;
+  return decodePushPayload(parts.join(''));
+}
+
+function lastPayload(h: Harness): WorkshopPayload {
+  return lastBatch(h, WORKSHOP_SYNC) as WorkshopPayload;
+}
+
+function lastOwned(h: Harness, steamId: string, server?: string): WorkshopOwnedPayload {
+  return lastBatch(h, `${WORKSHOP_OWNED} ${steamId}`, server) as WorkshopOwnedPayload;
+}
+
+function ownedCommands(h: Harness, steamId: string, server?: string): string[] {
+  return h.sent
+    .filter((entry) => server === undefined || entry.server === server)
+    .map((entry) => entry.command)
+    .filter((line) => line.startsWith(`${WORKSHOP_OWNED} ${steamId} `));
 }
 
 async function grabSecret(h: Harness): Promise<string> {
@@ -265,20 +341,27 @@ async function expectApiError(promise: Promise<unknown> | (() => unknown), code:
   throw new Error(`esperava ${code}, e nada lançou`);
 }
 
+/** Um banco com todas as migrações MENOS as de `skip`. */
+function databaseWithout(skip: (id: number) => boolean): AgentDatabase {
+  const db = openDatabase({ file: MEMORY_DATABASE });
+
+  db.exec(`CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)`);
+
+  for (const migration of MIGRATIONS.filter((m) => !skip(m.id))) {
+    applyMigration(db, migration);
+    db.prepare('INSERT INTO schema_migrations VALUES (?, ?, 0)').run(migration.id, migration.name);
+  }
+
+  return db;
+}
+
 // ============================================================
-//  A MIGRAÇÃO 096
+//  AS MIGRAÇÕES
 // ============================================================
 
-describe('a migração 096', () => {
-  it('reconstrói as skins sem perder linha nem ligação de servidor', () => {
-    const db = openDatabase({ file: MEMORY_DATABASE });
-
-    db.exec(`CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)`);
-
-    for (const migration of MIGRATIONS.filter((m) => m.id <= 95)) {
-      applyMigration(db, migration);
-      db.prepare('INSERT INTO schema_migrations VALUES (?, ?, 0)').run(migration.id, migration.name);
-    }
+describe('as migrações 096 e 097', () => {
+  it('a skin da 095 atravessa as duas reconstruções sem perder linha nem servidor', () => {
+    const db = databaseWithout((id) => id > 95);
 
     seedServers(new ServersRepository(db));
 
@@ -293,25 +376,237 @@ describe('a migração 096', () => {
     runMigrations(db);
 
     const skins = new WorkshopSkinsRepository(db);
-    const skin = skins.get(7);
 
-    expect(skin).toMatchObject({
+    expect(skins.get(7)).toMatchObject({
       label: 'Pedra',
       shortname: 'rock',
       skinId: '3071657601',
-      permission: 'origemzworkshop.pedra',
+      description: null,
+      rarity: null,
+      sort: 0,
       hideInStreamer: false,
-      collectionId: null,
       openToAll: false,
       source: 'panel',
       servers: [SERVER, OTHER],
       createdAt: 5,
     });
+    expect(skins.get(7)).not.toHaveProperty('permission');
 
     // E a cascata continua de pé DEPOIS da reconstrução.
     skins.remove(7);
     expect(db.prepare('SELECT count(*) AS n FROM workshop_skin_servers').get()).toEqual({ n: 0 });
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  describe('a 097 com dados fabricados', () => {
+    /**
+     * Um banco de dev de verdade: 098 e 099 JÁ aplicadas, a 097 não.
+     *
+     *   skin 1  máscara, permissão vip, avulsa
+     *   skin 2  moletom, na coleção "neve" (aberta e ligada)
+     *   skin 3  AK, na "neve"
+     *   skin 4  machado, na "fechada" (aberta, mas DESLIGADA)
+     *   skin 5  pedra, na "vipcol" (permissão vip)
+     *   coleção "vazia", sem skin nenhuma
+     */
+    function fabricated(): AgentDatabase {
+      // A 100 reconstrói a tabela que a 097 deixa: ela também fica de
+      // fora, e as duas rodam juntas no `runMigrations`.
+      const db = databaseWithout((id) => id === 97 || id === 100);
+
+      seedServers(new ServersRepository(db));
+
+      db.exec(`
+        INSERT INTO workshop_collections (id, slug, label, permission, open_to_all, enabled, created_at, updated_at) VALUES
+          (1, 'neve', 'Neve', NULL, 1, 1, 1, 1),
+          (2, 'fechada', 'Fechada', NULL, 1, 0, 1, 1),
+          (3, 'vipcol', 'Vip', 'origemzworkshop.vip', 0, 1, 1, 1),
+          (4, 'vazia', 'Vazia', 'origemzworkshop.vazia', 0, 1, 1, 1);
+
+        INSERT INTO workshop_skins (id, label, shortname, skin_id, permission, collection_id, open_to_all, source, created_at, updated_at) VALUES
+          (1, 'Máscara', 'metal.facemask', '11', 'origemzworkshop.vip', NULL, 0, 'panel', 1, 1),
+          (2, 'Moletom', 'hoodie', '22', NULL, 1, 0, 'panel', 1, 1),
+          (3, 'AK', 'rifle.ak', '33', NULL, 1, 0, 'game', 1, 1),
+          (4, 'Machado', 'hatchet', '44', NULL, 2, 0, 'panel', 1, 1),
+          (5, 'Pedra', 'rock', '55', NULL, 3, 0, 'panel', 1, 1);
+
+        INSERT INTO workshop_skin_servers VALUES (1, '${SERVER}'), (3, '${OTHER}');
+
+        INSERT INTO workshop_grants (id, subject_type, subject, target_type, skin_ref, collection_ref, expires_at, note, created_by, created_at, updated_at) VALUES
+          (1, 'player', '${PLAYER}', 'skin', 1, NULL, NULL, 'compra antiga', 'admin', 100, 100),
+          (2, 'player', '${PLAYER}', 'collection', NULL, 1, ${String(T0 + 1000)}, '', 'admin', 50, 50),
+          (3, 'player', '${PLAYER}', 'skin', 2, NULL, ${String(T0 + 5000)}, '', NULL, 200, 200),
+          (4, 'player', '${PLAYER_2}', 'skin', 3, NULL, NULL, '', 'admin', 10, 10),
+          (5, 'player', '${PLAYER_2}', 'collection', NULL, 1, ${String(T0 + 1000)}, '', 'admin', 10, 10),
+          (6, 'group', 'vip', 'skin', 1, NULL, NULL, '', 'admin', 10, 10),
+          (7, 'group', 'vip', 'collection', NULL, 3, NULL, '', 'admin', 10, 10),
+          (8, 'player', '${PLAYER_3}', 'collection', NULL, 4, NULL, '', 'admin', 10, 10),
+          (9, 'player', 'Fulano', 'skin', 1, NULL, NULL, '', 'admin', 10, 10),
+          (10, 'player', '${PLAYER_3}', 'skin', 1, NULL, ${String(T0 - 10)}, '', 'admin', 10, 10);
+
+        INSERT INTO workshop_audit (at, actor, source, action, target, detail)
+          VALUES (1, 'admin', 'panel', 'skin.create', 'skin #1', '{}');
+
+        INSERT INTO site_deliveries (id, server_id, steam_id, kind, payload, state, reserved_at, updated_at)
+          VALUES ('DLV-velha', '${SERVER}', '${PLAYER}', 'vip', '{}', 'delivered', 1, 1);
+      `);
+
+      return db;
+    }
+
+    it('roda sozinha num banco que já tem a 098 e a 099', () => {
+      const db = fabricated();
+
+      expect(runMigrations(db).map((migration) => migration.id)).toEqual([97, 100]);
+      expect(runMigrations(db)).toEqual([]);
+    });
+
+    it('acesso de jogador vira posse; coleção expande; permanente vence; entre prazos, o maior', () => {
+      const db = fabricated();
+
+      runMigrations(db);
+
+      const owned = new WorkshopOwnedRepository(db);
+      const rows = owned.listOwned({ limit: 100 }).owned.map((row) => ({
+        steamId: row.steamId,
+        skinRef: row.skinRef,
+        expiresAt: row.expiresAt,
+        source: row.source,
+      }));
+
+      expect(rows.sort((a, b) => (a.steamId + String(a.skinRef)).localeCompare(b.steamId + String(b.skinRef)))).toEqual([
+        { steamId: PLAYER, skinRef: 1, expiresAt: null, source: 'migration' },
+        // neve (T0+1000) e acesso direto (T0+5000): o maior.
+        { steamId: PLAYER, skinRef: 2, expiresAt: T0 + 5000, source: 'migration' },
+        // só pela neve.
+        { steamId: PLAYER, skinRef: 3, expiresAt: T0 + 1000, source: 'migration' },
+        { steamId: PLAYER_2, skinRef: 2, expiresAt: T0 + 1000, source: 'migration' },
+        // permanente direto + neve com prazo: permanente vence.
+        { steamId: PLAYER_2, skinRef: 3, expiresAt: null, source: 'migration' },
+        // vencida atravessa com o mesmo prazo.
+        { steamId: PLAYER_3, skinRef: 1, expiresAt: T0 - 10, source: 'migration' },
+      ]);
+
+      expect(owned.find(PLAYER, 1)).toMatchObject({ note: 'compra antiga', createdBy: 'admin', createdAt: 100 });
+      // A mais antiga das origens fundidas.
+      expect(owned.find(PLAYER, 2)).toMatchObject({ createdAt: 50, createdBy: 'admin' });
+    });
+
+    it('coleção aberta e LIGADA propaga o "para todos"; desligada não', () => {
+      const db = fabricated();
+
+      runMigrations(db);
+
+      const skins = new WorkshopSkinsRepository(db);
+
+      expect([1, 2, 3, 4, 5].map((id) => skins.get(id)?.openToAll)).toEqual([false, true, true, false, false]);
+      expect(skins.get(3)).toMatchObject({ source: 'game', servers: [OTHER] });
+      expect(skins.get(1)?.servers).toEqual([SERVER]);
+    });
+
+    it('grupo, permissão e coleção descartados ficam no registro', () => {
+      const db = fabricated();
+
+      runMigrations(db);
+
+      const audit = new WorkshopOwnedRepository(db).audit({ limit: 100 });
+      const byAction = (action: string) => audit.filter((entry) => entry.action === action);
+
+      expect(byAction('migration.group-grant-dropped').map((e) => e.target).sort()).toEqual([
+        'coleção "vipcol"',
+        'skin #1 "Máscara" (metal.facemask)',
+      ]);
+      expect(byAction('migration.group-grant-dropped')[0]?.detail).toMatchObject({ subjectType: 'group', subject: 'vip' });
+
+      expect(byAction('migration.permission-dropped').map((e) => [e.target, e.detail])).toEqual(
+        expect.arrayContaining([
+          ['origemzworkshop.vip', { skins: [1], collections: ['vipcol'] }],
+          ['origemzworkshop.vazia', { skins: [], collections: ['vazia'] }],
+        ]),
+      );
+      expect(byAction('migration.permission-dropped')).toHaveLength(2);
+
+      expect(byAction('migration.collection-dropped')).toHaveLength(4);
+      expect(byAction('migration.invalid-grant-dropped')).toHaveLength(1);
+
+      const expanded = byAction('migration.collection-grant-expanded');
+
+      expect(expanded).toHaveLength(3);
+      // Coleção vazia: registrada, sem posse nenhuma.
+      expect(expanded.find((e) => e.steamId === PLAYER_3)?.detail['skins']).toEqual([]);
+
+      expect(byAction('migration.097')[0]?.detail).toEqual({
+        grants: 10,
+        owned: 6,
+        collectionGrantsExpanded: 3,
+        groupGrantsDropped: 2,
+        invalidGrantsDropped: 1,
+        permissionsDropped: 2,
+        collectionsDropped: 4,
+      });
+
+      // O registro de antes continua lá.
+      expect(byAction('skin.create')).toHaveLength(1);
+    });
+
+    it('as tabelas velhas somem, a cascata vale e os CHECKs novos aceitam o que devem', () => {
+      const db = fabricated();
+
+      runMigrations(db);
+
+      const tables = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[]).map(
+        (row) => row.name,
+      );
+
+      expect(tables).not.toContain('workshop_grants');
+      expect(tables).not.toContain('workshop_collections');
+      expect(tables.filter((name) => /_(09[679]|100)$/.test(name))).toEqual([]);
+      expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+
+      // Apagar a skin leva a posse.
+      new WorkshopSkinsRepository(db).remove(3);
+      expect(new WorkshopOwnedRepository(db).listOwned({ skinRef: 3 }).owned).toEqual([]);
+
+      // A fila do site: a entrega velha ficou, e o kind novo entra.
+      expect(db.prepare(`SELECT kind FROM site_deliveries WHERE id = 'DLV-velha'`).get()).toEqual({ kind: 'vip' });
+      db.prepare(
+        `INSERT INTO site_deliveries (id, server_id, steam_id, kind, payload, state, reserved_at, updated_at)
+         VALUES ('DLV-skin', ?, ?, 'skin', '{}', 'reserved', 1, 1), ('DLV-rev', ?, ?, 'skin_revoke', '{}', 'reserved', 1, 1)`,
+      ).run(SERVER, PLAYER, SERVER, PLAYER);
+      expect(() =>
+        db.prepare(
+          `INSERT INTO site_deliveries (id, server_id, steam_id, kind, payload, state, reserved_at, updated_at)
+           VALUES ('DLV-x', ?, ?, 'caixa', '{}', 'reserved', 1, 1)`,
+        ).run(SERVER, PLAYER),
+      ).toThrow(/CHECK/);
+
+      // O registro aceita a origem 'site'.
+      new WorkshopOwnedRepository(db).log({ actor: 'site:order:1', source: 'site', action: 'site.delivered', target: 'x' });
+
+      // A posse recusa SteamID torto e origem desconhecida.
+      expect(() =>
+        db.prepare(
+          `INSERT INTO workshop_owned_skins (steam_id, skin_ref, source, created_by, created_at, updated_at)
+           VALUES ('123', 1, 'panel', 'x', 1, 1)`,
+        ).run(),
+      ).toThrow(/CHECK/);
+      expect(() =>
+        db.prepare(
+          `INSERT INTO workshop_owned_skins (steam_id, skin_ref, source, created_by, created_at, updated_at)
+           VALUES (?, 1, 'grupo', 'x', 1, 1)`,
+        ).run(PLAYER_2),
+      ).toThrow(/CHECK/);
+    });
+
+    it('num banco novo, sem nada, ela também passa', () => {
+      const db = openDatabase({ file: MEMORY_DATABASE });
+
+      expect(runMigrations(db).map((migration) => migration.id)).toContain(97);
+      expect(new WorkshopOwnedRepository(db).audit({ limit: 5 })[0]).toMatchObject({
+        action: 'migration.097',
+        detail: { grants: 0, owned: 0 },
+      });
+    });
   });
 });
 
@@ -329,29 +624,126 @@ describe('as réguas', () => {
     expect(parse('18446744073709551615')).toBe(true);
   });
 
-  it('a permissão é opcional, e quando vem é normalizada', () => {
-    expect(body({ permission: '' }).permission).toBeNull();
-    expect(body({ permission: null }).permission).toBeNull();
-    expect(body({ permission: 'VIP Ouro' }).permission).toBe('origemzworkshop.vip-ouro');
-    expect(normalizePermission(normalizePermission('vip'))).toBe('origemzworkshop.vip');
+  it('descrição em branco é nula; raridade só da lista; sem permissão nem coleção', () => {
+    expect(body({ description: '   ' }).description).toBeNull();
+    expect(body({ description: 'Brasa viva' }).description).toBe('Brasa viva');
+    expect(workshopSkinBodySchema.safeParse({ ...body(), description: 'x'.repeat(281) }).success).toBe(false);
+    expect(body({ rarity: 'epic' }).rarity).toBe('epic');
+    expect(body().rarity).toBeNull();
+    expect(workshopSkinBodySchema.safeParse({ ...body(), rarity: 'mythic' }).success).toBe(false);
+    expect(body({ sort: 5 }).sort).toBe(5);
+    expect(body({ permission: 'vip', collectionId: 3 })).not.toHaveProperty('permission');
   });
 
-  it('a coleção não pode ter o nome de um subcomando do /skin', () => {
-    expect(collectionSlugSchema.safeParse('neve').success).toBe(true);
-    expect(collectionSlugSchema.safeParse('Neve').success).toBe(true);
-    expect(collectionSlugSchema.safeParse('add').success).toBe(false);
-    expect(collectionSlugSchema.safeParse('ajuda').success).toBe(false);
-    expect(collectionSlugSchema.safeParse('com espaço').success).toBe(false);
+  it('a posse exige SteamID64, e dias OU data — nunca os dois', () => {
+    const parse = (patch: Record<string, unknown>) =>
+      grantOwnershipInputSchema.safeParse({
+        steamId: PLAYER,
+        skinRef: 1,
+        source: 'panel',
+        createdBy: 'admin',
+        ...patch,
+      }).success;
+
+    expect(parse({})).toBe(true);
+    expect(parse({ days: 30 })).toBe(true);
+    expect(parse({ expiresAt: T0 })).toBe(true);
+    expect(parse({ days: 30, expiresAt: T0 })).toBe(false);
+    expect(parse({ days: 0 })).toBe(false);
+    expect(parse({ days: 3651 })).toBe(false);
+    expect(parse({ steamId: 'Fulano' })).toBe(false);
+    expect(parse({ source: 'group' })).toBe(false);
+  });
+});
+
+// ============================================================
+//  A TABELA DE RENOVAÇÃO (02 §4.2)
+// ============================================================
+
+describe('a tabela de renovação', () => {
+  const now = T0;
+  const live = { expiresAt: now + 10 * DAY_MS };
+  const dead = { expiresAt: now - 1 };
+  const forever = { expiresAt: null };
+
+  it.each([
+    ['nada + permanente', null, {}, null],
+    ['nada + dias', null, { days: 7 }, now + 7 * DAY_MS],
+    ['nada + data', null, { expiresAt: now + 5 }, now + 5],
+    ['permanente + permanente', forever, {}, null],
+    ['permanente + dias (nunca encurta)', forever, { days: 7 }, null],
+    ['permanente + data (nunca encurta)', forever, { expiresAt: now + 5 }, null],
+    ['prazo + permanente', live, {}, null],
+    ['prazo + dias SOMA', live, { days: 7 }, now + 17 * DAY_MS],
+    ['prazo + data menor não encurta', live, { expiresAt: now + DAY_MS }, now + 10 * DAY_MS],
+    ['prazo + data maior estende', live, { expiresAt: now + 20 * DAY_MS }, now + 20 * DAY_MS],
+    ['vencida + dias conta de agora', dead, { days: 7 }, now + 7 * DAY_MS],
+    ['vencida + permanente', dead, {}, null],
+    ['vencida + data', dead, { expiresAt: now + 5 }, now + 5],
+  ] as const)('%s', (_label, current, request, expected) => {
+    expect(renewedExpiry(current, request, now)).toBe(expected);
   });
 
-  it('o acesso de jogador exige SteamID64, e o de grupo, um nome do Oxide', () => {
-    const grant = (subjectType: string, subject: string) =>
-      workshopGrantBodySchema.safeParse({ subjectType, subject, targetType: 'skin', targetId: 1 });
+  it('no banco: uma linha só por par, e a vencida renasce com quem deu agora', () => {
+    const h = harness();
+    const mask = addSkin(h);
 
-    expect(grant('player', PLAYER).success).toBe(true);
-    expect(grant('player', 'Fulano').success).toBe(false);
-    expect(grant('group', 'VIP').success).toBe(true);
-    expect(grant('group', 'vip ouro').success).toBe(false);
+    const first = give(h, PLAYER, mask.id, { days: 1 });
+
+    expect(first.created).toBe(true);
+
+    const summed = give(h, PLAYER, mask.id, { days: 2 });
+
+    expect(summed.created).toBe(false);
+    expect(summed.owned.expiresAt).toBe(T0 + 3 * DAY_MS);
+    expect(summed.owned.id).toBe(first.owned.id);
+
+    // Vence; dar de novo conta de agora e troca o autor.
+    h.now = T0 + 4 * DAY_MS;
+
+    const reborn = h.owned.grantOwnership(
+      { steamId: PLAYER, skinRef: mask.id, days: 1, source: 'site', sourceRef: 'DLV-1', createdBy: 'site:order:9' },
+      h.now,
+    );
+
+    expect(reborn).toMatchObject({ created: true, previous: { expiresAt: T0 + 3 * DAY_MS } });
+    expect(reborn.owned).toMatchObject({
+      expiresAt: h.now + DAY_MS,
+      source: 'site',
+      sourceRef: 'DLV-1',
+      createdBy: 'site:order:9',
+      createdAt: h.now,
+    });
+
+    // Permanente, e depois dias: continua permanente.
+    give(h, PLAYER, mask.id);
+    expect(give(h, PLAYER, mask.id, { days: 30 }).owned.expiresAt).toBeNull();
+
+    expect(h.owned.listOwned({ steamId: PLAYER }).owned).toHaveLength(1);
+  });
+
+  it('prazo que já passou é recusado nas duas camadas', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    expect(() => give(h, PLAYER, mask.id, { expiresAt: T0 - 1 })).toThrow(RangeError);
+    await expectApiError(
+      () =>
+        h.catalog.grantOwnership(
+          { steamId: PLAYER, skinRef: mask.id, expiresAt: T0 - 1, source: 'panel', createdBy: 'admin' },
+          T0,
+        ),
+      'OWNED_ALREADY_EXPIRED',
+    );
+    await expectApiError(
+      () =>
+        h.catalog.grantOwnership(
+          { steamId: PLAYER, skinRef: mask.id, days: 1, expiresAt: T0 + 5, source: 'panel', createdBy: 'admin' },
+          T0,
+        ),
+      'INVALID_OWNERSHIP',
+    );
+    expect(h.owned.listOwned({ steamId: PLAYER }).owned).toHaveLength(0);
   });
 });
 
@@ -409,15 +801,19 @@ describe('o cadastro', () => {
     await expectApiError(h.catalog.createSkin(body({ label: 'Outra' }), PANEL), 'DUPLICATE_MARK');
   });
 
-  it('várias skins do MESMO item convivem — o jogador escolhe na caixa', async () => {
+  it('várias skins do MESMO item convivem, na ordem do `sort` e depois do nome', async () => {
     const h = harness();
 
     h.steam.set('111', { status: 'unavailable', reason: 'x' });
+    h.steam.set('222', { status: 'unavailable', reason: 'x' });
 
-    await h.catalog.createSkin(body(), PANEL);
-    await h.catalog.createSkin(body({ skinId: '111', label: 'Máscara 2' }), PANEL);
+    await h.catalog.createSkin(body({ label: 'Zeta', sort: 0 }), PANEL);
+    await h.catalog.createSkin(body({ skinId: '111', label: 'Alfa', sort: 0 }), PANEL);
+    await h.catalog.createSkin(body({ skinId: '222', label: 'Primeira', sort: -1 }), PANEL);
 
-    expect(h.skins.list().map((skin) => skin.skinId).sort()).toEqual(['111', '3802433262']);
+    expect(h.skins.list().map((skin) => skin.label)).toEqual(['Primeira', 'Alfa', 'Zeta']);
+    expect(h.catalog.findSkinByMark(' METAL.FACEMASK ', '111')?.label).toBe('Alfa');
+    expect(h.catalog.findSkinByMark('metal.facemask', '999')).toBeNull();
   });
 
   it('registra quem cadastrou e de onde', async () => {
@@ -425,7 +821,7 @@ describe('o cadastro', () => {
 
     await h.catalog.createSkin(body(), { name: 'jogo:Fulano', source: 'game', serverId: SERVER });
 
-    const [entry] = h.access.audit({ limit: 10 });
+    const [entry] = h.owned.audit({ limit: 10 });
 
     expect(entry).toMatchObject({
       action: 'skin.create',
@@ -436,280 +832,235 @@ describe('o cadastro', () => {
     expect(h.skins.list()[0]?.source).toBe('game');
   });
 
-  it('a edição só consulta a Steam quando a marca muda', async () => {
+  it('a edição só consulta a Steam quando a marca muda, e grava descrição e raridade', async () => {
     const h = harness();
     const { skin } = await h.catalog.createSkin(body(), PANEL);
 
     // A Steam "cai" depois do cadastro: renomear continua valendo.
     h.steam.clear();
 
-    const { skin: saved } = await h.catalog.updateSkin(skin.id, body({ label: 'Novo nome' }), PANEL);
-
-    expect(saved.label).toBe('Novo nome');
-    expect(saved.workshopTitle).toBe('MetalFacemaskOrigemZ');
-
-    const [entry] = h.access.audit({ limit: 1 });
-
-    expect(entry?.action).toBe('skin.update');
-    expect(entry?.detail['changed']).toHaveProperty('label');
-  });
-});
-
-// ============================================================
-//  AS COLEÇÕES
-// ============================================================
-
-describe('as coleções', () => {
-  it('cabe uma skin por item em cada coleção', async () => {
-    const h = harness();
-    const neve = h.catalog.createCollection(
-      { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true },
+    const { skin: saved } = await h.catalog.updateSkin(
+      skin.id,
+      body({ label: 'Novo nome', description: 'Linda', rarity: 'legendary', sort: 3 }),
       PANEL,
     );
 
-    const mask1 = addSkin(h);
-    const mask2 = addSkin(h, { skinId: '222', label: 'Máscara 2' });
-    const hoodie = addSkin(h, { shortname: 'hoodie', skinId: '333', label: 'Moletom' });
-
-    await expectApiError(
-      () => h.catalog.setCollectionSkins(neve.id, [mask1.id, mask2.id], PANEL),
-      'COLLECTION_ITEM_TAKEN',
-    );
-
-    // A recusa não deixou a coleção pela metade.
-    expect(h.skins.skinsOfCollection(neve.id)).toHaveLength(0);
-
-    const saved = h.catalog.setCollectionSkins(neve.id, [mask1.id, hoodie.id], PANEL);
-
-    expect(saved.map((skin) => skin.shortname).sort()).toEqual(['hoodie', 'metal.facemask']);
-
-    // E pelo formulário da skin também.
-    await expectApiError(
-      h.catalog.updateSkin(mask2.id, body({ skinId: '222', label: 'Máscara 2', collectionId: neve.id }), PANEL),
-      'COLLECTION_ITEM_TAKEN',
-    );
-  });
-
-  it('apagar a coleção SOLTA as skins, e não as apaga', () => {
-    const h = harness();
-    const neve = h.catalog.createCollection(
-      { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true },
-      PANEL,
-    );
-    const mask = addSkin(h, { collectionId: neve.id });
-
-    h.access.upsertGrant(
-      { subjectType: 'player', subject: PLAYER, targetType: 'collection', targetId: neve.id, expiresAt: null, note: '' },
-      null,
-    );
-
-    h.catalog.removeCollection(neve.id, PANEL);
-
-    expect(h.skins.get(mask.id)?.collectionId).toBeNull();
-    // O acesso caiu na cascata — e o registro diz de quem era.
-    expect(h.access.listGrants()).toHaveLength(0);
-    expect(h.access.audit({ limit: 1 })[0]?.detail['grantsRemoved']).toEqual([`player:${PLAYER}`]);
-  });
-
-  it('o nome do comando é único', async () => {
-    const h = harness();
-    const input = { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true };
-
-    h.catalog.createCollection(input, PANEL);
-    await expectApiError(() => h.catalog.createCollection(input, PANEL), 'DUPLICATE_COLLECTION');
-  });
-});
-
-// ============================================================
-//  OS ACESSOS
-// ============================================================
-
-describe('os acessos', () => {
-  it('liberar de novo RENOVA, e não empilha', () => {
-    const h = harness();
-    const mask = addSkin(h);
-    const grant = (expiresAt: number | null) =>
-      h.catalog.grant(
-        workshopGrantBodySchema.parse({
-          subjectType: 'player',
-          subject: PLAYER,
-          targetType: 'skin',
-          targetId: mask.id,
-          expiresAt,
-        }),
-        PANEL,
-        h.now,
-      );
-
-    grant(h.now + 1000);
-    grant(null);
-
-    const grants = h.access.listGrants({ subject: PLAYER });
-
-    expect(grants).toHaveLength(1);
-    expect(grants[0]?.expiresAt).toBeNull();
-    expect(h.access.audit({ limit: 10, steamId: PLAYER }).map((entry) => entry.action)).toEqual([
-      'grant.update',
-      'grant.create',
-    ]);
-  });
-
-  it('recusa prazo que já passou', async () => {
-    const h = harness();
-    const mask = addSkin(h);
-
-    await expectApiError(
-      () =>
-        h.catalog.grant(
-          workshopGrantBodySchema.parse({
-            subjectType: 'player',
-            subject: PLAYER,
-            targetType: 'skin',
-            targetId: mask.id,
-            expiresAt: h.now - 1,
-          }),
-          PANEL,
-          h.now,
-        ),
-      'GRANT_ALREADY_EXPIRED',
-    );
-  });
-
-  it('acesso para skin que não existe é recusado', async () => {
-    const h = harness();
-
-    await expectApiError(
-      () =>
-        h.catalog.grant(
-          workshopGrantBodySchema.parse({
-            subjectType: 'group',
-            subject: 'vip',
-            targetType: 'collection',
-            targetId: 99,
-          }),
-          PANEL,
-        ),
-      'WORKSHOP_COLLECTION_NOT_FOUND',
-    );
-  });
-
-  it('o vencimento fica registrado, inclusive o que venceu com o agente parado', () => {
-    const h = harness();
-    const mask = addSkin(h);
-
-    h.access.upsertGrant(
-      { subjectType: 'player', subject: PLAYER, targetType: 'skin', targetId: mask.id, expiresAt: h.now + 500, note: '' },
-      'admin',
-      h.now,
-    );
-
-    // O relógio arma e grava "conferido até agora".
-    h.service.scheduleExpiry();
-    h.service.stop();
-
-    // O agente "reinicia" depois do prazo.
-    h.now += 10_000;
-
-    const restarted = new WorkshopService({
-      skins: h.skins,
-      access: h.access,
-      catalog: h.catalog,
-      meta: h.meta,
-      streamers: h.streamers,
-      servers: { ids: () => [], contextOf: () => null },
-      now: () => h.now,
+    expect(saved).toMatchObject({
+      label: 'Novo nome',
+      description: 'Linda',
+      rarity: 'legendary',
+      sort: 3,
+      workshopTitle: 'MetalFacemaskOrigemZ',
     });
 
-    restarted.scheduleExpiry();
-    restarted.stop();
+    const [entry] = h.owned.audit({ limit: 1 });
 
-    const expired = h.access.audit({ limit: 5, steamId: PLAYER }).filter((e) => e.action === 'grant.expire');
+    expect(entry?.action).toBe('skin.update');
+    expect(entry?.detail['changed']).toHaveProperty('rarity');
+  });
 
-    expect(expired).toHaveLength(1);
-    expect(expired[0]?.source).toBe('system');
+  it('apagar a skin leva a posse e o registro diz de quem era', () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    give(h, PLAYER, mask.id, { days: 3 });
+    h.catalog.removeSkin(mask.id, PANEL);
+
+    expect(h.owned.listOwned({ steamId: PLAYER }).owned).toHaveLength(0);
+    expect(h.owned.audit({ limit: 1 })[0]?.detail['ownersRemoved']).toEqual([
+      { steamId: PLAYER, expiresAt: T0 + 3 * DAY_MS, source: 'panel' },
+    ]);
   });
 });
 
 // ============================================================
-//  A CARGA
+//  A POSSE — as regras
 // ============================================================
 
-describe('a carga', () => {
-  it('leva só as skins LIGADAS daquele servidor', async () => {
+describe('a posse', () => {
+  it('dar registra, avisa e devolve a skin', () => {
     const h = harness();
+    const mask = addSkin(h);
 
-    addSkin(h);
-    addSkin(h, { skinId: '2', label: 'Desligada', enabled: false });
-    addSkin(h, { skinId: '3', label: 'Do outro', servers: [OTHER] });
+    const result = h.catalog.grantOwnership(
+      { steamId: PLAYER, skinRef: mask.id, days: 30, source: 'site', sourceRef: 'DLV-5b9', createdBy: 'site:order:1234' },
+      T0,
+    );
 
-    await h.service.sync(SERVER, 'manual');
-
-    expect(lastPayload(h).skins.map((skin) => skin.label)).toEqual(['Máscara OrigemZ']);
+    expect(result).toMatchObject({ created: true, skin: { id: mask.id }, owned: { expiresAt: T0 + 30 * DAY_MS } });
+    expect(h.ownershipChanged).toEqual([PLAYER]);
+    expect(h.owned.audit({ limit: 1, steamId: PLAYER })[0]).toMatchObject({
+      action: 'owned.grant',
+      source: 'site',
+      actor: 'site:order:1234',
+      detail: { sourceRef: 'DLV-5b9', days: 30, created: true, workshopId: '3802433262' },
+    });
+    h.service.stop();
   });
 
-  it('coleção só desce onde tem skin, e acesso só desce vivo e para o que desceu', async () => {
+  it('skin desligada ou em servidor nenhum ainda recebe posse (o jogador pagou)', () => {
     const h = harness();
-    const neve = h.skins.addCollection(
-      { slug: 'neve', label: 'Neve', permission: null, openToAll: false, enabled: true },
-      null,
-    );
-    const vazia = h.skins.addCollection(
-      { slug: 'vazia', label: 'Vazia', permission: null, openToAll: false, enabled: true },
-      null,
-    );
-    const mask = addSkin(h, { collectionId: neve.id });
-    const elsewhere = addSkin(h, { skinId: '9', label: 'Longe', servers: [OTHER] });
+    const off = addSkin(h, { enabled: false, servers: [] });
 
-    const grant = (targetType: 'skin' | 'collection', targetId: number, expiresAt: number | null) =>
-      h.access.upsertGrant(
-        { subjectType: 'player', subject: PLAYER, targetType, targetId, expiresAt, note: '' },
-        null,
-        h.now - 10,
-      );
+    expect(
+      h.catalog.grantOwnership({ steamId: PLAYER, skinRef: off.id, source: 'site', createdBy: 'site:x' }, T0).created,
+    ).toBe(true);
+    h.service.stop();
+  });
 
-    grant('skin', mask.id, null);
-    grant('collection', neve.id, h.now + 60_000);
-    grant('skin', elsewhere.id, null); // a skin não está neste servidor
-    grant('collection', vazia.id, null); // a coleção não desce aqui
-    h.access.upsertGrant(
-      { subjectType: 'group', subject: 'vip', targetType: 'skin', targetId: mask.id, expiresAt: h.now - 1, note: '' },
-      null,
-      h.now - 10,
+  it('skin que não existe é 404', async () => {
+    const h = harness();
+
+    await expectApiError(
+      () => h.catalog.grantOwnership({ steamId: PLAYER, skinRef: 99, source: 'panel', createdBy: 'admin' }),
+      'WORKSHOP_SKIN_NOT_FOUND',
     );
+  });
+
+  it('tirar sem posse não é erro: devolve null, registra, e não avisa', () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    expect(
+      h.catalog.revokeOwnership({
+        steamId: PLAYER,
+        skinRef: mask.id,
+        source: 'site',
+        sourceRef: 'DLV-refund',
+        createdBy: 'site:refund:1',
+      }),
+    ).toBeNull();
+    expect(h.ownershipChanged).toEqual([]);
+    expect(h.owned.audit({ limit: 1 })[0]).toMatchObject({
+      action: 'owned.revoke',
+      source: 'site',
+      steamId: PLAYER,
+      detail: { removed: false, sourceRef: 'DLV-refund' },
+    });
+  });
+
+  it('tirar leva a linha inteira, qualquer que seja a origem', () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    give(h, PLAYER, mask.id, { days: 10 });
+
+    const removed = h.catalog.revokeOwnership({
+      steamId: PLAYER,
+      skinRef: mask.id,
+      source: 'site',
+      createdBy: 'site:refund:1',
+    });
+
+    expect(removed).toMatchObject({ steamId: PLAYER, source: 'panel' });
+    expect(h.owned.find(PLAYER, mask.id)).toBeNull();
+    expect(h.ownershipChanged).toEqual([PLAYER]);
+    h.service.stop();
+  });
+
+  it('tirar pelo id: 404 quando não existe', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const { owned } = give(h, PLAYER, mask.id);
+
+    expect(h.catalog.revokeOwnershipById(owned.id, PANEL).id).toBe(owned.id);
+    await expectApiError(() => h.catalog.revokeOwnershipById(owned.id, PANEL), 'OWNED_NOT_FOUND');
+    h.service.stop();
+  });
+
+  it('a lista pagina por cursor e filtra as vencidas', () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const ak = addSkin(h, { shortname: 'rifle.ak', skinId: '77', label: 'AK' });
+
+    give(h, PLAYER, mask.id);
+    give(h, PLAYER, ak.id, { expiresAt: T0 + 10 });
+    give(h, PLAYER_2, mask.id);
+
+    const first = h.owned.listOwned({ skinRef: mask.id, limit: 1 });
+
+    expect(first.owned).toHaveLength(1);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = h.owned.listOwned({ skinRef: mask.id, limit: 1, cursor: first.nextCursor ?? 0 });
+
+    expect(second.owned).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+    expect(new Set([...first.owned, ...second.owned].map((o) => o.steamId))).toEqual(new Set([PLAYER, PLAYER_2]));
+
+    expect(h.owned.listOwned({ steamId: PLAYER, includeExpired: false }, T0 + 20).owned.map((o) => o.skinRef)).toEqual([
+      mask.id,
+    ]);
+    expect(h.owned.liveOwnerCounts(T0 + 20).get(mask.id)).toBe(2);
+    expect(h.owned.liveOwnerCounts(T0 + 20).get(ak.id)).toBeUndefined();
+  });
+});
+
+// ============================================================
+//  A CARGA DO CATÁLOGO
+// ============================================================
+
+describe('a carga do catálogo', () => {
+  it('leva só as skins LIGADAS daquele servidor, sem coleção nem acesso', async () => {
+    const h = harness();
+
+    addSkin(h, { description: 'Brilha', rarity: 'rare', sort: 2 });
+    addSkin(h, { skinId: '2', label: 'Desligada', enabled: false });
+    addSkin(h, { skinId: '3', label: 'Do outro', servers: [OTHER] });
+    addSkin(h, { skinId: '4', label: 'Casa', openToAll: true, sort: 1, season: true });
 
     await h.service.sync(SERVER, 'manual');
 
     const payload = lastPayload(h);
 
-    expect(payload.collections.map((c) => c.slug)).toEqual(['neve']);
-    expect(payload.skins[0]?.collectionId).toBe(neve.id);
-    expect(payload.grants).toEqual([
-      { subjectType: 'player', subject: PLAYER, targetType: 'collection', targetId: neve.id, expiresAt: h.now + 60_000 },
-      { subjectType: 'player', subject: PLAYER, targetType: 'skin', targetId: mask.id, expiresAt: null },
-    ].sort((a, b) => (a.targetType < b.targetType ? -1 : 1)));
+    expect(Object.keys(payload).sort()).toEqual(['secret', 'skins', 'streamers']);
+    expect(payload.skins).toEqual([
+      {
+        id: 4,
+        label: 'Casa',
+        shortname: 'metal.facemask',
+        skinId: '4',
+        sort: 1,
+        openToAll: true,
+        hideInStreamer: true,
+        // "Skin de temporada" vai SEMPRE, ao contrário da descrição:
+        // ausente, um plugin velho leria "não é de temporada".
+        season: true,
+      },
+      {
+        id: 1,
+        label: 'Máscara OrigemZ',
+        shortname: 'metal.facemask',
+        skinId: '3802433262',
+        description: 'Brilha',
+        rarity: 'rare',
+        sort: 2,
+        openToAll: false,
+        hideInStreamer: true,
+        season: false,
+      },
+    ]);
+  });
+
+  it('o endereço da loja só desce quando configurado', async () => {
+    const h = harness({ storeUrl: ' origemz.com.br/skins ' });
+
+    await h.service.sync(SERVER, 'manual');
+    expect(lastPayload(h).storeUrl).toBe('origemz.com.br/skins');
+
+    const blank = harness({ storeUrl: '' });
+
+    await blank.service.sync(SERVER, 'manual');
+    expect(lastPayload(blank)).not.toHaveProperty('storeUrl');
   });
 
   it('carga maior que o frame desce em pedaços que remontam o original', async () => {
     const h = harness();
 
-    addSkin(h);
-
-    for (let index = 0; index < 1500; index += 1) {
-      h.access.upsertGrant(
-        {
-          subjectType: 'player',
-          subject: `7656119${String(index).padStart(10, '0')}`,
-          targetType: 'skin',
-          targetId: 1,
-          expiresAt: null,
-          note: '',
-        },
-        null,
-      );
-    }
+    insertManySkins(h, 1500, [SERVER]);
 
     const outcome = await h.service.sync(SERVER, 'manual');
-    const commands = h.sent.filter((line) => line.startsWith(`${WORKSHOP_SYNC} `));
+    const commands = h.sent.map((e) => e.command).filter((line) => line.startsWith(`${WORKSHOP_SYNC} `));
 
     expect(outcome).toMatchObject({ status: 'sent' });
     expect(commands.length).toBeGreaterThan(1);
@@ -723,7 +1074,7 @@ describe('a carga', () => {
       expect(Buffer.byteLength(command)).toBeLessThanOrEqual(MAX_PUSH_BYTES);
     }
 
-    expect(lastPayload(h).grants).toHaveLength(1500);
+    expect(lastPayload(h).skins).toHaveLength(1500);
   });
 
   it('sem RCON é pulado; o que não mudou não sai; o forçado sai', async () => {
@@ -743,7 +1094,7 @@ describe('a carga', () => {
     const h = harness();
 
     h.streamers.save(PLAYER, { allowed: true, active: true, hideLogo: true });
-    h.streamers.save('76561190000000002', { allowed: true, active: true, hideLogo: false });
+    h.streamers.save(PLAYER_2, { allowed: true, active: true, hideLogo: false });
 
     await h.service.sync(SERVER, 'manual');
 
@@ -769,38 +1120,284 @@ describe('a carga', () => {
   });
 });
 
+/** Muitas skins de uma vez, por SQL: o `add` relê a junção a cada linha. */
+function insertManySkins(h: Harness, count: number, servers: readonly string[]): number[] {
+  const insert = h.db.prepare(
+    `INSERT INTO workshop_skins (label, shortname, skin_id, created_at, updated_at)
+     VALUES (?, 'hoodie', ?, 1, 1)`,
+  );
+  const link = h.db.prepare('INSERT INTO workshop_skin_servers VALUES (?, ?)');
+  const ids: number[] = [];
+
+  h.db.transaction(() => {
+    for (let index = 0; index < count; index += 1) {
+      const id = Number(insert.run(`Moletom número ${String(index)}`, String(900_000 + index)).lastInsertRowid);
+
+      ids.push(id);
+
+      for (const server of servers) link.run(id, server);
+    }
+  })();
+
+  return ids;
+}
+
 // ============================================================
-//  O /skin add DO JOGO
+//  A CARGA DA POSSE
 // ============================================================
 
-describe('o /skin add do jogo', () => {
-  function addLine(secret: string, patch: Record<string, unknown> = {}): string {
+describe('a carga da posse', () => {
+  it('a lista VAZIA é mandada, com o steamId antes do lote', async () => {
+    const h = harness();
+
+    addSkin(h);
+
+    const outcome = await h.service.syncOwned(SERVER, PLAYER, 'manual');
+    const [command] = ownedCommands(h, PLAYER);
+
+    expect(outcome).toMatchObject({ status: 'sent', parts: 1 });
+    expect(command).toMatch(new RegExp(`^${WORKSHOP_OWNED.replace(/\./g, '\\.')} ${PLAYER} [0-9a-f]{12} 0 1 [A-Za-z0-9+/=]+$`));
+    expect(lastOwned(h, PLAYER)).toEqual({ favorites: [], secret: expect.any(String), steamId: PLAYER, skins: [] });
+  });
+
+  it('só as vivas, só as do catálogo daquele servidor, e 0 = permanente', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const other = addSkin(h, { skinId: '8', label: 'Longe', servers: [OTHER] });
+    const off = addSkin(h, { skinId: '9', label: 'Desligada', enabled: false });
+    const timed = addSkin(h, { skinId: '10', label: 'Prazo' });
+    const gone = addSkin(h, { skinId: '11', label: 'Vencida' });
+
+    give(h, PLAYER, mask.id);
+    give(h, PLAYER, other.id);
+    give(h, PLAYER, off.id);
+    give(h, PLAYER, timed.id, { expiresAt: T0 + 60_000 });
+    give(h, PLAYER, gone.id, { expiresAt: T0 + 10 });
+
+    h.now = T0 + 20;
+    await h.service.syncOwned(SERVER, PLAYER, 'manual');
+
+    expect(lastOwned(h, PLAYER, SERVER).skins).toEqual([
+      { id: mask.id, expiresAt: 0 },
+      { id: timed.id, expiresAt: T0 + 60_000 },
+    ]);
+
+    await h.service.syncOwned(OTHER, PLAYER, 'manual');
+    expect(lastOwned(h, PLAYER, OTHER).skins).toEqual([{ id: other.id, expiresAt: 0 }]);
+  });
+
+  it('posse maior que o frame desce em pedaços que remontam o original', async () => {
+    const h = harness();
+    const ids = insertManySkins(h, 4000, [SERVER]);
+
+    h.db.transaction(() => {
+      for (const id of ids) give(h, PLAYER, id, { expiresAt: T0 + 1_000_000_000 + id });
+    })();
+
+    const outcome = await h.service.syncOwned(SERVER, PLAYER, 'manual');
+    const commands = ownedCommands(h, PLAYER);
+
+    expect(outcome).toMatchObject({ status: 'sent' });
+    expect(commands.length).toBeGreaterThan(1);
+
+    const batches = new Set<string>();
+
+    for (const [index, command] of commands.entries()) {
+      const [, steamId, batch, part, total, piece] = command.split(' ');
+
+      expect(steamId).toBe(PLAYER);
+      batches.add(batch ?? '');
+      expect(Number(part)).toBe(index);
+      expect(Number(total)).toBe(commands.length);
+      expect((piece ?? '').length).toBeLessThanOrEqual(WORKSHOP_CHUNK_CHARS);
+      expect(Buffer.byteLength(command)).toBeLessThanOrEqual(MAX_PUSH_BYTES);
+    }
+
+    expect(batches.size).toBe(1);
+    expect(lastOwned(h, PLAYER).skins).toHaveLength(4000);
+  });
+
+  it('o que não mudou não sai de novo; o forçado sai', async () => {
+    const h = harness();
+
+    await h.service.syncOwned(SERVER, PLAYER, 'manual');
+    expect(await h.service.syncOwned(SERVER, PLAYER, 'manual')).toEqual({ status: 'unchanged' });
+    expect((await h.service.syncOwned(SERVER, PLAYER, 'player-joined', true)).status).toBe('sent');
+
+    h.connected = false;
+    expect((await h.service.syncOwned(SERVER, PLAYER, 'manual', true)).status).toBe('skipped');
+  });
+
+  it('quem entra recebe a posse — forçada, por relógio', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    give(h, PLAYER, mask.id);
+    await h.service.syncOwned(SERVER, PLAYER, 'manual');
+
+    const before = ownedCommands(h, PLAYER).length;
+
+    h.service.handlePlayersJoined(SERVER, [PLAYER, PLAYER_2]);
+    expect(ownedCommands(h, PLAYER)).toHaveLength(before);
+
+    await settle();
+
+    // Forçada: a mesma carga sai de novo.
+    expect(ownedCommands(h, PLAYER)).toHaveLength(before + 1);
+    expect(lastOwned(h, PLAYER_2).skins).toEqual([]);
+    h.service.stop();
+  });
+
+  it('a posse que muda desce em CADA servidor onde ele está, e só neles', async () => {
+    const h = harness();
+    const mask = addSkin(h, { servers: [SERVER, OTHER] });
+
+    h.online.set(OTHER, [PLAYER]);
+
+    h.catalog.grantOwnership({ steamId: PLAYER, skinRef: mask.id, source: 'panel', createdBy: 'admin' }, T0);
+    // Offline em todo lugar: nada sai.
+    h.catalog.grantOwnership({ steamId: PLAYER_2, skinRef: mask.id, source: 'panel', createdBy: 'admin' }, T0);
+
+    await settle();
+
+    expect(ownedCommands(h, PLAYER, SERVER)).toEqual([]);
+    expect(lastOwned(h, PLAYER, OTHER).skins).toEqual([{ id: mask.id, expiresAt: 0 }]);
+    expect(ownedCommands(h, PLAYER_2)).toEqual([]);
+
+    // E tirar reenvia a lista, agora vazia.
+    h.catalog.revokeOwnership({ steamId: PLAYER, skinRef: mask.id, source: 'panel', createdBy: 'admin' });
+    await settle();
+    expect(lastOwned(h, PLAYER, OTHER).skins).toEqual([]);
+    h.service.stop();
+  });
+
+  it('o plugin que sobe recebe o catálogo e DEPOIS a posse de todos os online', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    give(h, PLAYER, mask.id);
+    h.online.set(SERVER, [PLAYER, PLAYER_2]);
+
+    h.service.handleLine(SERVER, `[OrigemZWorkshop] ${WORKSHOP_MARKER}{"kind":"ready"}`);
+    await settle();
+
+    const commands = h.sent.filter((e) => e.server === SERVER).map((e) => e.command.split(' ')[0]);
+
+    expect(commands).toEqual([WORKSHOP_SYNC, WORKSHOP_OWNED, WORKSHOP_OWNED]);
+    expect(lastOwned(h, PLAYER).skins).toEqual([{ id: mask.id, expiresAt: 0 }]);
+    expect(lastOwned(h, PLAYER_2).skins).toEqual([]);
+
+    // E o RCON que volta faz o mesmo, forçado.
+    h.service.handleRconConnected(SERVER);
+    await settle();
+    expect(h.sent.filter((e) => e.server === SERVER)).toHaveLength(6);
+    h.service.stop();
+  });
+
+  it('uma skin nova no servidor chega à posse de quem já a tinha', async () => {
+    const h = harness();
+    const mask = addSkin(h, { servers: [] });
+
+    give(h, PLAYER, mask.id);
+    h.online.set(SERVER, [PLAYER]);
+
+    await h.service.syncAll('startup');
+    expect(lastOwned(h, PLAYER, SERVER).skins).toEqual([]);
+
+    h.skins.setServers(mask.id, [SERVER]);
+    h.service.handleCatalogChanged();
+    await settle();
+
+    expect(lastOwned(h, PLAYER, SERVER).skins).toEqual([{ id: mask.id, expiresAt: 0 }]);
+    h.service.stop();
+  });
+
+  it('o vencimento reenvia SÓ quem venceu e fica registrado, inclusive com o agente parado', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    give(h, PLAYER, mask.id, { expiresAt: T0 + 500 });
+    give(h, PLAYER_2, mask.id);
+    h.online.set(SERVER, [PLAYER, PLAYER_2]);
+
+    // O relógio arma e grava "conferido até agora".
+    h.service.scheduleExpiry();
+    h.service.stop();
+
+    // O agente "reinicia" depois do prazo.
+    h.now += 10_000;
+
+    const sent: SentCommand[] = [];
+    const restarted = new WorkshopService({
+      skins: h.skins,
+      owned: h.owned,
+      catalog: h.catalog,
+      meta: h.meta,
+      streamers: h.streamers,
+      servers: {
+        ids: () => [SERVER],
+        contextOf: () => ({
+          rcon: {
+            isConnected: true,
+            send: (command: string) => {
+              sent.push({ server: SERVER, command });
+              return Promise.resolve('{"ok":true}');
+            },
+          } as never,
+        }),
+        onlineOf: (id) => h.online.get(id) ?? [],
+      },
+      now: () => h.now,
+    });
+
+    restarted.scheduleExpiry();
+    await settle();
+    restarted.stop();
+
+    const expired = h.owned.audit({ limit: 5, steamId: PLAYER }).filter((e) => e.action === 'owned.expired');
+
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({ source: 'system', at: T0 + 500 });
+
+    // Só o PLAYER, e com a lista vazia.
+    expect(sent.map((e) => e.command.split(' ')[1])).toEqual([PLAYER]);
+    expect(lastBatch({ sent } as unknown as Harness, `${WORKSHOP_OWNED} ${PLAYER}`)).toMatchObject({ skins: [] });
+  });
+});
+
+// ============================================================
+//  O /skin add E O /skin give DO JOGO
+// ============================================================
+
+describe('os comandos de admin no jogo', () => {
+  function line(kind: 'add' | 'give', secret: string, patch: Record<string, unknown> = {}): string {
     return `[OrigemZWorkshop] ${WORKSHOP_MARKER}${JSON.stringify({
-      kind: 'add',
+      kind,
       secret,
       requestId: 'req-1',
       steamId: PLAYER,
-      playerName: 'Fulano',
+      playerName: 'Admin',
       shortname: 'metal.facemask',
       skinId: '3802433262',
+      ...(kind === 'give' ? { targetSteamId: PLAYER_2, targetName: 'Fulano', days: 30 } : {}),
       ...patch,
     })}`;
   }
 
   function lastReply(h: Harness): Record<string, unknown> {
-    const command = h.sent.filter((line) => line.startsWith(WORKSHOP_REPLY)).at(-1);
+    const command = h.sent.map((e) => e.command).filter((l) => l.startsWith(WORKSHOP_REPLY)).at(-1);
 
     if (command === undefined) throw new Error('nenhuma resposta saiu');
 
     return decodePushPayload(command.slice(WORKSHOP_REPLY.length + 1)) as Record<string, unknown>;
   }
 
-  it('grava no MESMO catálogo do painel, só no servidor de onde veio, e responde', async () => {
+  it('add grava no MESMO catálogo do painel, só no servidor de onde veio, e responde', async () => {
     const h = harness();
     const secret = await grabSecret(h);
     const before = h.sent.length;
 
-    h.service.handleLine(SERVER, addLine(secret));
+    h.service.handleLine(SERVER, line('add', secret));
 
     // Nada sai de dentro do gancho.
     expect(h.sent).toHaveLength(before);
@@ -814,50 +1411,101 @@ describe('o /skin add do jogo', () => {
       shortname: 'metal.facemask',
       source: 'game',
       servers: [SERVER],
-      createdBy: 'jogo:Fulano (76561190000000001)',
+      createdBy: 'jogo:Admin (76561190000000001)',
     });
     expect(lastReply(h)).toMatchObject({ requestId: 'req-1', steamId: PLAYER, ok: true });
     h.service.stop();
   });
 
-  it('a recusa volta ao admin com a frase, e fica no registro', async () => {
+  it('a recusa do add volta ao admin com a frase, e fica no registro', async () => {
     const h = harness();
     const secret = await grabSecret(h);
 
-    h.service.handleLine(SERVER, addLine(secret, { skinId: '404' }));
+    h.service.handleLine(SERVER, line('add', secret, { skinId: '404' }));
     await settle(50);
 
     expect(h.skins.list()).toHaveLength(0);
     expect(lastReply(h)).toMatchObject({ ok: false });
     expect(String(lastReply(h)['message'])).toContain('Steam');
-    expect(h.access.audit({ limit: 1 })[0]).toMatchObject({ action: 'game.add-refused', serverId: SERVER });
+    expect(h.owned.audit({ limit: 1 })[0]).toMatchObject({ action: 'game.add-refused', serverId: SERVER });
     h.service.stop();
   });
 
-  it('sem o segredo — um jogador digitando no chat — não cadastra nada', async () => {
+  it('give dá a posse pelo MESMO grantOwnership, e o jogador online recebe', async () => {
     const h = harness();
-
-    await grabSecret(h);
-
-    h.service.handleLine(SERVER, addLine('chute'));
-    // E a linha de chat, com o nome antes do marcador, nem é lida.
-    h.service.handleLine(SERVER, `[CHAT] Fulano: ${addLine('chute')}`);
-    await settle(50);
-
-    expect(h.skins.list()).toHaveLength(0);
-    expect(h.sent.some((line) => line.startsWith(WORKSHOP_REPLY))).toBe(false);
-  });
-
-  it('o mesmo pedido duas vezes vira UM cadastro e UMA resposta', async () => {
-    const h = harness();
+    const mask = addSkin(h);
     const secret = await grabSecret(h);
 
-    h.service.handleLine(SERVER, addLine(secret));
-    h.service.handleLine(SERVER, addLine(secret));
+    h.online.set(SERVER, [PLAYER_2]);
+    h.service.handleLine(SERVER, line('give', secret));
+    await settle(50);
+
+    expect(h.owned.find(PLAYER_2, mask.id)).toMatchObject({
+      expiresAt: T0 + 30 * DAY_MS,
+      source: 'game',
+      createdBy: 'jogo:Admin (76561190000000001)',
+    });
+    expect(lastReply(h)).toMatchObject({ requestId: 'req-1', steamId: PLAYER, ok: true });
+    expect(String(lastReply(h)['message'])).toContain('Fulano');
+    expect(h.owned.audit({ limit: 1, steamId: PLAYER_2 })[0]).toMatchObject({
+      action: 'owned.grant',
+      source: 'game',
+      serverId: SERVER,
+    });
+
+    await settle();
+    expect(lastOwned(h, PLAYER_2, SERVER).skins).toEqual([{ id: mask.id, expiresAt: T0 + 30 * DAY_MS }]);
+    h.service.stop();
+  });
+
+  it('give sem dias é permanente; give de skin que não existe volta recusado', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(SERVER, line('give', secret, { days: null }));
+    await settle(50);
+    expect(h.owned.find(PLAYER_2, mask.id)?.expiresAt).toBeNull();
+    expect(String(lastReply(h)['message'])).toContain('permanente');
+
+    h.service.handleLine(SERVER, line('give', secret, { requestId: 'req-2', skinId: '999' }));
+    await settle(50);
+    expect(lastReply(h)).toMatchObject({ requestId: 'req-2', ok: false });
+    expect(String(lastReply(h)['message'])).toContain('/skin add');
+    expect(h.owned.audit({ limit: 1 })[0]).toMatchObject({ action: 'game.give-refused', serverId: SERVER });
+    h.service.stop();
+  });
+
+  it('sem o segredo — um jogador digitando no chat — não faz nada', async () => {
+    const h = harness();
+
+    addSkin(h);
+    await grabSecret(h);
+
+    h.service.handleLine(SERVER, line('add', 'chute'));
+    h.service.handleLine(SERVER, line('give', 'chute'));
+    // E a linha de chat, com o nome antes do marcador, nem é lida.
+    h.service.handleLine(SERVER, `[CHAT] Fulano: ${line('give', 'chute')}`);
     await settle(50);
 
     expect(h.skins.list()).toHaveLength(1);
-    expect(h.sent.filter((line) => line.startsWith(WORKSHOP_REPLY))).toHaveLength(1);
+    expect(h.owned.listOwned({ steamId: PLAYER_2 }).owned).toHaveLength(0);
+    expect(h.sent.some((e) => e.command.startsWith(WORKSHOP_REPLY))).toBe(false);
+  });
+
+  it('o mesmo pedido duas vezes vira UMA escrita e UMA resposta; give fora do contrato é descartado', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const secret = await grabSecret(h);
+
+    h.service.handleLine(SERVER, line('give', secret, { days: 1 }));
+    h.service.handleLine(SERVER, line('give', secret, { days: 1 }));
+    h.service.handleLine(SERVER, line('give', secret, { requestId: 'req-3', targetSteamId: 'Fulano' }));
+    await settle(50);
+
+    // Somaria dois dias se tivesse entrado duas vezes.
+    expect(h.owned.find(PLAYER_2, mask.id)?.expiresAt).toBe(T0 + DAY_MS);
+    expect(h.sent.filter((e) => e.command.startsWith(WORKSHOP_REPLY))).toHaveLength(1);
     h.service.stop();
   });
 });
@@ -887,14 +1535,23 @@ async function buildApp(h: Harness): Promise<FastifyInstance> {
 
   await app.register(
     async (api) => {
-      // Sem `workshop`: o cadastro funciona com os servidores parados.
+      // Sem `workshop`: o cadastro e a posse funcionam com os
+      // servidores parados.
       registerWorkshopRoutes(api, {
         repository: h.skins,
-        access: h.access,
+        owned: h.owned,
         catalog: h.catalog,
         items: h.items,
         servers: h.servers,
         lookup: (id) => Promise.resolve(h.steam.get(id) ?? { status: 'not_found' }),
+      });
+
+      // Só a aba Skins da ficha é exercitada aqui.
+      registerPlayerRoutes(api, {
+        directory: {} as PlayerDirectory,
+        streamer: h.streamers,
+        streamerSync: null,
+        skins: { repository: h.skins, owned: h.owned },
       });
     },
     { prefix: '/api' },
@@ -911,67 +1568,168 @@ describe('as rotas', () => {
     const created = await app.inject({
       method: 'POST',
       url: '/api/workshop/skins',
-      payload: { shortname: 'metal.facemask', skinId: '3802433262', servers: [SERVER] },
+      payload: {
+        shortname: 'metal.facemask',
+        skinId: '3802433262',
+        servers: [SERVER],
+        description: 'A da casa',
+        rarity: 'epic',
+        sort: 4,
+        season: true,
+      },
     });
 
     expect(created.statusCode).toBe(201);
 
-    const skin = created.json().skin as { id: number; label: string; permission: string | null };
+    const skin = created.json().skin as Record<string, unknown>;
 
-    expect(skin.label).toBe('MetalFacemaskOrigemZ');
-    expect(skin.permission).toBeNull();
-
-    const collection = await app.inject({
-      method: 'POST',
-      url: '/api/workshop/collections',
-      payload: { slug: 'Neve', label: 'Neve 2026', permission: 'neve' },
+    expect(skin).toMatchObject({
+      label: 'MetalFacemaskOrigemZ',
+      description: 'A da casa',
+      rarity: 'epic',
+      sort: 4,
+      // "Skin de temporada" entra pelo corpo e sai na resposta.
+      season: true,
+      owners: 0,
     });
+    expect(skin).not.toHaveProperty('permission');
+    expect(skin).not.toHaveProperty('collectionId');
 
-    expect(collection.statusCode).toBe(201);
-    expect(collection.json().collection).toMatchObject({ slug: 'neve', permission: 'origemzworkshop.neve' });
-
-    const collectionId = collection.json().collection.id as number;
-
-    const linked = await app.inject({
-      method: 'PUT',
-      url: `/api/workshop/collections/${String(collectionId)}/skins`,
-      payload: { skinIds: [skin.id] },
-    });
-
-    expect(linked.statusCode).toBe(200);
+    const skinId = skin['id'] as number;
 
     const granted = await app.inject({
       method: 'POST',
-      url: '/api/workshop/grants',
-      payload: {
-        subjectType: 'player',
-        subject: PLAYER,
-        targetType: 'collection',
-        targetId: collectionId,
-        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
-      },
+      url: '/api/workshop/owned',
+      payload: { steamId: PLAYER, skinId, days: 7, note: 'prêmio do evento' },
     });
 
     expect(granted.statusCode).toBe(201);
-    expect(granted.json().grant).toMatchObject({ targetLabel: '/skin neve — Neve 2026', expired: false });
-
-    const listed = await app.inject({
-      method: 'GET',
-      url: `/api/workshop/grants?subjectType=player&subject=${PLAYER}`,
+    expect(granted.json()).toMatchObject({
+      created: true,
+      owned: {
+        steamId: PLAYER,
+        skinId,
+        expired: false,
+        source: 'panel',
+        note: 'prêmio do evento',
+        skin: { label: 'MetalFacemaskOrigemZ', workshopId: '3802433262', rarity: 'epic' },
+      },
     });
 
-    expect(listed.json().count).toBe(1);
+    const renewed = await app.inject({
+      method: 'POST',
+      url: '/api/workshop/owned',
+      payload: { steamId: PLAYER, skinId, expiresAt: null },
+    });
 
-    const grantId = listed.json().grants[0].id as number;
+    expect(renewed.json()).toMatchObject({ created: false, owned: { expiresAt: null } });
 
-    expect((await app.inject({ method: 'DELETE', url: `/api/workshop/grants/${String(grantId)}` })).statusCode).toBe(200);
+    const listed = await app.inject({ method: 'GET', url: `/api/workshop/owned?steamId=${PLAYER}` });
+
+    expect(listed.json()).toMatchObject({ count: 1, nextCursor: null });
+
+    // O PUT é o formulário INTEIRO (nunca um merge): sem `season`, a
+    // marca volta ao padrão, que é "não é de temporada".
+    const edited = await app.inject({
+      method: 'PUT',
+      url: `/api/workshop/skins/${String(skinId)}`,
+      payload: { shortname: 'metal.facemask', skinId: '3802433262', servers: [SERVER] },
+    });
+
+    expect(edited.json().skin).toMatchObject({ season: false });
+
+    const skins = await app.inject({ method: 'GET', url: '/api/workshop/skins' });
+
+    expect(skins.json().skins[0].owners).toBe(1);
+    expect(skins.json().skins[0].season).toBe(false);
+
+    const ownedId = listed.json().owned[0].id as number;
+
+    expect((await app.inject({ method: 'DELETE', url: `/api/workshop/owned/${String(ownedId)}` })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'DELETE', url: `/api/workshop/owned/${String(ownedId)}` })).statusCode).toBe(404);
 
     const audit = await app.inject({ method: 'GET', url: `/api/workshop/audit?steamId=${PLAYER}` });
 
     expect(audit.json().entries.map((entry: { action: string }) => entry.action)).toEqual([
-      'grant.revoke',
-      'grant.create',
+      'owned.revoke',
+      'owned.grant',
+      'owned.grant',
     ]);
+  });
+
+  it('a lista da posse exige steamId ou skinId, e recusa dias com data', async () => {
+    const h = harness();
+    const app = await buildApp(h);
+
+    expect((await app.inject({ method: 'GET', url: '/api/workshop/owned' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/workshop/owned?skinId=1' })).statusCode).toBe(200);
+
+    const both = await app.inject({
+      method: 'POST',
+      url: '/api/workshop/owned',
+      payload: { steamId: PLAYER, skinId: 1, days: 3, expiresAt: new Date(T0).toISOString() },
+    });
+
+    expect(both.statusCode).toBe(400);
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/api/workshop/owned',
+      payload: { steamId: PLAYER, skinId: 99 },
+    });
+
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error).toBe('WORKSHOP_SKIN_NOT_FOUND');
+  });
+
+  it('coleções e acessos não existem mais', async () => {
+    const h = harness();
+    const app = await buildApp(h);
+
+    expect((await app.inject({ method: 'GET', url: '/api/workshop/collections' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/api/workshop/grants' })).statusCode).toBe(404);
+  });
+
+  it('a ficha do jogador separa a posse viva da vencida', async () => {
+    const h = harness();
+    const app = await buildApp(h);
+    const mask = addSkin(h, { rarity: 'rare' });
+    const ak = addSkin(h, { shortname: 'rifle.ak', skinId: '77', label: 'AK', season: true });
+
+    h.now = Date.now();
+    give(h, PLAYER, mask.id);
+    h.db
+      .prepare(
+        `INSERT INTO workshop_owned_skins (steam_id, skin_ref, expires_at, source, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'site', 'site:x', 1, 1)`,
+      )
+      .run(PLAYER, ak.id, 1000);
+
+    // Favoritar não é possuir: a favorita da AK vencida continua lá.
+    h.owned.setFavorite(PLAYER, ak.id, true);
+
+    const response = await app.inject({ method: 'GET', url: `/api/players/${PLAYER}/skins` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      steamId: PLAYER,
+      live: [
+        {
+          skinId: mask.id,
+          expiresAt: null,
+          skin: { label: 'Máscara OrigemZ', rarity: 'rare', season: false },
+        },
+      ],
+      expired: [
+        { skinId: ak.id, source: 'site', expired: true, skin: { shortname: 'rifle.ak', season: true } },
+      ],
+      favorites: [ak.id],
+    });
+
+    const nobody = await app.inject({ method: 'GET', url: `/api/players/${PLAYER_3}/skins` });
+
+    expect(nobody.json()).toMatchObject({ live: [], expired: [], favorites: [] });
+    expect((await app.inject({ method: 'GET', url: '/api/players/123/skins' })).statusCode).toBe(400);
   });
 
   it('a consulta prévia sugere o item pela tag e julga o escolhido', async () => {
@@ -1012,5 +1770,380 @@ describe('as rotas', () => {
 
     expect(response.statusCode).toBe(503);
     expect(response.json().error).toBe('WORKSHOP_UNAVAILABLE');
+  });
+});
+
+// ============================================================
+//  AS FAVORITAS E A SKIN DE TEMPORADA (migração 100)
+// ============================================================
+
+describe('a migração 100', () => {
+  /** Um banco parado na 099, com skin, posse, junção e registro. */
+  function at099(): AgentDatabase {
+    const db = databaseWithout((id) => id === 100);
+
+    seedServers(new ServersRepository(db));
+
+    db.exec(`
+      INSERT INTO workshop_skins
+        (id, label, shortname, skin_id, description, rarity, sort_order, open_to_all,
+         hide_in_streamer, enabled, source, created_by, created_at, updated_at)
+      VALUES
+        (7, 'Máscara', 'metal.facemask', '11', 'Brilha', 'epic', 3, 0, 1, 1, 'panel', 'admin', 5, 6),
+        (8, 'AK', 'rifle.ak', '22', NULL, NULL, 0, 1, 0, 0, 'game', NULL, 7, 8);
+
+      INSERT INTO workshop_skin_servers VALUES (7, '${SERVER}'), (7, '${OTHER}'), (8, '${OTHER}');
+
+      INSERT INTO workshop_owned_skins
+        (id, steam_id, skin_ref, expires_at, source, source_ref, note, created_by, created_at, updated_at)
+      VALUES
+        (41, '${PLAYER}', 7, NULL, 'site', 'DLV-1', 'comprou', 'site:order:9', 100, 200),
+        (42, '${PLAYER_2}', 8, ${String(T0 + 5000)}, 'panel', NULL, NULL, 'admin', 300, 400);
+
+      INSERT INTO workshop_audit (at, actor, source, action, target, detail)
+        VALUES (1, 'admin', 'panel', 'skin.create', 'skin #7', '{}');
+    `);
+
+    return db;
+  }
+
+  it('atravessa posse, junção e registro sem perder nada, e toda skin nasce comum', () => {
+    const db = at099();
+
+    expect(runMigrations(db).map((migration) => migration.id)).toEqual([100]);
+    expect(runMigrations(db)).toEqual([]);
+
+    const skins = new WorkshopSkinsRepository(db);
+    const owned = new WorkshopOwnedRepository(db);
+
+    expect(skins.get(7)).toMatchObject({
+      label: 'Máscara',
+      description: 'Brilha',
+      rarity: 'epic',
+      sort: 3,
+      openToAll: false,
+      hideInStreamer: true,
+      enabled: true,
+      // "por padrão não é removida": a marca nasce desligada em tudo
+      // que já existia.
+      season: false,
+      source: 'panel',
+      createdBy: 'admin',
+      servers: [SERVER, OTHER],
+      createdAt: 5,
+    });
+    expect(skins.get(8)).toMatchObject({ openToAll: true, enabled: false, season: false, servers: [OTHER] });
+
+    // O `id` da posse é preservado: o detalhe do registro guarda
+    // `ownedId`, e renumerar mentiria sobre as linhas antigas.
+    expect(owned.get(41)).toMatchObject({
+      steamId: PLAYER,
+      skinRef: 7,
+      expiresAt: null,
+      source: 'site',
+      sourceRef: 'DLV-1',
+      note: 'comprou',
+      createdBy: 'site:order:9',
+      createdAt: 100,
+      updatedAt: 200,
+    });
+    expect(owned.get(42)).toMatchObject({ steamId: PLAYER_2, skinRef: 8, expiresAt: T0 + 5000 });
+
+    // E o registro de antes continua lá — a 100 não escreve nele.
+    expect(owned.audit({ limit: 10 }).map((entry) => entry.action)).toEqual([
+      'skin.create',
+      'migration.097',
+    ]);
+
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(db.prepare('PRAGMA integrity_check').all()).toEqual([{ integrity_check: 'ok' }]);
+    expect(
+      (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as { name: string }[])
+        .map((row) => row.name)
+        .filter((name) => /_(099|100)$/.test(name)),
+    ).toEqual([]);
+  });
+
+  it('a cascata da skin continua de pé DEPOIS da reconstrução, e leva a favorita junto', () => {
+    const db = at099();
+
+    runMigrations(db);
+
+    const skins = new WorkshopSkinsRepository(db);
+    const owned = new WorkshopOwnedRepository(db);
+
+    owned.setFavorite(PLAYER, 7, true);
+    expect(owned.listFavorites(PLAYER)).toEqual([7]);
+
+    skins.remove(7);
+
+    expect(owned.listFavorites(PLAYER)).toEqual([]);
+    expect(owned.listOwned({ skinRef: 7 }).owned).toEqual([]);
+    expect(db.prepare('SELECT count(*) AS n FROM workshop_skin_servers').get()).toEqual({ n: 1 });
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  it('os CHECKs novos recusam SteamID torto, season fora de 0/1 e o par repetido', () => {
+    const db = at099();
+
+    runMigrations(db);
+
+    expect(() =>
+      db.prepare(`INSERT INTO workshop_favorites (steam_id, skin_ref, created_at) VALUES ('123', 7, 1)`).run(),
+    ).toThrow(/CHECK/);
+
+    db.prepare('INSERT INTO workshop_favorites (steam_id, skin_ref, created_at) VALUES (?, 7, 1)').run(PLAYER);
+    expect(() =>
+      db.prepare('INSERT INTO workshop_favorites (steam_id, skin_ref, created_at) VALUES (?, 7, 2)').run(PLAYER),
+    ).toThrow(/UNIQUE/);
+
+    expect(() => db.prepare('UPDATE workshop_skins SET season = 2 WHERE id = 7').run()).toThrow(/CHECK/);
+
+    // E a marca única da skin sobreviveu à reconstrução.
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO workshop_skins (label, shortname, skin_id, created_at, updated_at)
+           VALUES ('Cópia', 'metal.facemask', '11', 1, 1)`,
+        )
+        .run(),
+    ).toThrow(/UNIQUE/);
+  });
+});
+
+/** A estrela do menu, como o plugin a grita (02 §5.4). */
+function favLine(secret: string, patch: Record<string, unknown> = {}): string {
+  return `[OrigemZWorkshop] ${WORKSHOP_MARKER}${JSON.stringify({
+    kind: 'fav',
+    secret,
+    steamId: PLAYER,
+    skinId: 1,
+    on: true,
+    ...patch,
+  })}`;
+}
+
+describe('as favoritas', () => {
+  it('alternar devolve o estado novo, e o segundo clique desfaz', () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    expect(h.owned.listFavorites(PLAYER)).toEqual([]);
+    expect(h.owned.toggleFavorite(PLAYER, mask.id, h.now)).toEqual({ on: true, changed: true, count: 1 });
+    expect(h.owned.listFavorites(PLAYER)).toEqual([mask.id]);
+    expect(h.owned.toggleFavorite(PLAYER, mask.id, h.now)).toEqual({ on: false, changed: true, count: 0 });
+    expect(h.owned.listFavorites(PLAYER)).toEqual([]);
+
+    // E ela é DE UM jogador: marcar a dele não marca a de ninguém.
+    h.owned.setFavorite(PLAYER, mask.id, true, h.now);
+    expect(h.owned.listFavorites(PLAYER_2)).toEqual([]);
+  });
+
+  it('`on` é idempotente: a mesma linha duas vezes não desfaz o clique', () => {
+    const h = harness();
+    const mask = addSkin(h);
+
+    expect(h.owned.setFavorite(PLAYER, mask.id, true, h.now)).toEqual({ on: true, changed: true, count: 1 });
+    expect(h.owned.setFavorite(PLAYER, mask.id, true, h.now)).toEqual({ on: true, changed: false, count: 1 });
+    expect(h.owned.listFavorites(PLAYER)).toEqual([mask.id]);
+
+    expect(h.owned.setFavorite(PLAYER, mask.id, false, h.now)).toEqual({ on: false, changed: true, count: 0 });
+    expect(h.owned.setFavorite(PLAYER, mask.id, false, h.now)).toEqual({ on: false, changed: false, count: 0 });
+  });
+
+  it('o teto é 200: a 201ª é recusada, e DESFAVORITAR nunca é', () => {
+    const h = harness();
+    const ids = insertManySkins(h, MAX_FAVORITES_PER_PLAYER + 1, [SERVER]);
+
+    for (const id of ids.slice(0, MAX_FAVORITES_PER_PLAYER)) {
+      h.owned.setFavorite(PLAYER, id, true, h.now);
+    }
+
+    expect(h.owned.countFavorites(PLAYER)).toBe(MAX_FAVORITES_PER_PLAYER);
+
+    const extra = ids[MAX_FAVORITES_PER_PLAYER] as number;
+
+    expect(() => h.owned.setFavorite(PLAYER, extra, true, h.now)).toThrow(FavoritesFullError);
+    expect(h.owned.isFavorite(PLAYER, extra)).toBe(false);
+
+    // Sair do teto tem de ser possível: `on: false` no teto passa.
+    expect(h.owned.setFavorite(PLAYER, ids[0] as number, false, h.now).count).toBe(
+      MAX_FAVORITES_PER_PLAYER - 1,
+    );
+    expect(h.owned.setFavorite(PLAYER, extra, true, h.now).on).toBe(true);
+
+    // E `removeFavorite` diz se havia o que tirar.
+    expect(h.owned.removeFavorite(PLAYER, extra)).toBe(true);
+    expect(h.owned.removeFavorite(PLAYER, extra)).toBe(false);
+  });
+
+  it('pelo catálogo: a skin que não existe é 404, e o teto vira FAVORITES_FULL', async () => {
+    const h = harness();
+    const ids = insertManySkins(h, MAX_FAVORITES_PER_PLAYER, [SERVER]);
+
+    await expectApiError(() => h.catalog.toggleFavorite(PLAYER, 9999, h.now), 'WORKSHOP_SKIN_NOT_FOUND');
+
+    for (const id of ids) h.owned.setFavorite(PLAYER, id, true, h.now);
+
+    const extra = addSkin(h, { skinId: '999999', label: 'Sobra' });
+
+    await expectApiError(() => h.catalog.setFavorite(PLAYER, extra.id, true, h.now), 'FAVORITES_FULL');
+  });
+
+  it('descem na MESMA carga da posse, filtradas por aquele servidor e em ordem', async () => {
+    const h = harness();
+    const here = addSkin(h);
+    const there = addSkin(h, { skinId: '2', label: 'Do outro', servers: [OTHER] });
+    const off = addSkin(h, { skinId: '3', label: 'Desligada', enabled: false });
+
+    give(h, PLAYER, here.id);
+    h.owned.setFavorite(PLAYER, off.id, true, h.now);
+    h.owned.setFavorite(PLAYER, there.id, true, h.now);
+    h.owned.setFavorite(PLAYER, here.id, true, h.now);
+
+    h.online.set(SERVER, [PLAYER]);
+    await h.service.syncOwned(SERVER, PLAYER, 'manual');
+
+    // Favoritar não é possuir: a lista de posse continua com uma só.
+    expect(lastOwned(h, PLAYER)).toMatchObject({
+      steamId: PLAYER,
+      skins: [{ id: here.id, expiresAt: 0 }],
+      // A desligada e a do outro servidor não têm célula para marcar.
+      favorites: [here.id],
+    });
+
+    // Quem não tem nada recebe as duas listas vazias — a lista vazia é
+    // informação ("não tem nenhuma"), diferente de "ainda não sei".
+    await h.service.syncOwned(SERVER, PLAYER_3, 'manual');
+    expect(lastOwned(h, PLAYER_3)).toMatchObject({ skins: [], favorites: [] });
+  });
+
+  it('a estrela do menu grava e a carga volta; o segredo errado não faz nada', async () => {
+    const h = harness();
+    const mask = addSkin(h);
+    const secret = await grabSecret(h);
+
+    h.online.set(SERVER, [PLAYER]);
+
+    const before = h.sent.length;
+
+    h.service.handleLine(SERVER, favLine(secret, { skinId: mask.id, on: true }));
+
+    // Nada sai de dentro do gancho de console (o laço pelo console).
+    expect(h.sent).toHaveLength(before);
+
+    await settle();
+
+    expect(h.owned.listFavorites(PLAYER)).toEqual([mask.id]);
+    expect(lastOwned(h, PLAYER, SERVER).favorites).toEqual([mask.id]);
+
+    // Segredo errado: um jogador digitando o marcador no chat.
+    h.service.handleLine(SERVER, favLine('chute', { skinId: mask.id, on: false }));
+    await settle();
+    expect(h.owned.listFavorites(PLAYER)).toEqual([mask.id]);
+
+    h.service.stop();
+  });
+
+  it('a MESMA linha duas vezes não alterna, e a recusa reenvia a verdade FORÇADA', async () => {
+    const h = harness();
+    const ids = insertManySkins(h, MAX_FAVORITES_PER_PLAYER, [SERVER]);
+    const extra = addSkin(h, { skinId: '999999', label: 'Sobra' });
+    const secret = await grabSecret(h);
+
+    h.online.set(SERVER, [PLAYER]);
+
+    // O console repete linha em reconexão: `on` é estado, não "alterne".
+    h.service.handleLine(SERVER, favLine(secret, { skinId: ids[0] as number, on: true }));
+    h.service.handleLine(SERVER, favLine(secret, { skinId: ids[0] as number, on: true }));
+    await settle();
+    expect(h.owned.listFavorites(PLAYER)).toEqual([ids[0]]);
+
+    for (const id of ids) h.owned.setFavorite(PLAYER, id, true, h.now);
+
+    // No teto, o plugin já desenhou a estrela: a carga forçada é o que
+    // desfaz o otimismo dele, mesmo sem nada ter mudado no banco.
+    const before = ownedCommands(h, PLAYER, SERVER).length;
+
+    h.service.handleLine(SERVER, favLine(secret, { skinId: extra.id, on: true }));
+    await settle();
+
+    expect(h.owned.isFavorite(PLAYER, extra.id)).toBe(false);
+    expect(ownedCommands(h, PLAYER, SERVER).length).toBeGreaterThan(before);
+
+    h.service.stop();
+  });
+});
+
+describe('a skin de temporada', () => {
+  it('a marca não muda nada sozinha: ela só desce na carga e sai nas rotas', async () => {
+    const h = harness();
+    const seasonal = addSkin(h, { label: 'De temporada', season: true });
+
+    give(h, PLAYER, seasonal.id);
+    h.online.set(SERVER, [PLAYER]);
+
+    await h.service.sync(SERVER, 'manual');
+    await h.service.syncOwned(SERVER, PLAYER, 'manual');
+
+    expect(lastPayload(h).skins[0]).toMatchObject({ id: seasonal.id, season: true });
+    // A posse dela desce como qualquer outra: quem apaga é o wipe.
+    expect(lastOwned(h, PLAYER).skins).toEqual([{ id: seasonal.id, expiresAt: 0 }]);
+  });
+
+  it('removeSeasonOwnership apaga SÓ as de temporada, registra UMA linha e reenvia', async () => {
+    const h = harness();
+    const seasonal = addSkin(h, { label: 'De temporada', season: true });
+    const forever = addSkin(h, { skinId: '2', label: 'Normal' });
+
+    give(h, PLAYER, seasonal.id);
+    give(h, PLAYER, forever.id);
+    give(h, PLAYER_2, seasonal.id, { days: 30 });
+    // Uma VENCIDA de temporada também sai: renovada, ela voltaria a valer.
+    give(h, PLAYER_3, seasonal.id, { expiresAt: T0 + 1000 });
+    h.now = T0 + 2000;
+
+    h.online.set(SERVER, [PLAYER]);
+    h.ownershipChanged.length = 0;
+
+    const result = h.catalog.removeSeasonOwnership(SERVER, h.now);
+
+    expect(result.removed).toBe(3);
+    expect([...result.players].sort()).toEqual([PLAYER, PLAYER_2, PLAYER_3]);
+
+    // A normal fica.
+    expect(h.owned.listOwned({ limit: 100 }).owned.map((row) => row.skinRef)).toEqual([forever.id]);
+
+    // UMA linha, com a contagem — e não uma por jogador.
+    const cleared = h.owned.audit({ limit: 20 }).filter((entry) => entry.action === 'owned.season-cleared');
+
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0]).toMatchObject({
+      actor: 'sistema',
+      source: 'system',
+      serverId: SERVER,
+      steamId: null,
+      detail: { removed: 3, players: 3, skins: [seasonal.id] },
+    });
+
+    // E quem estava online recebe a carga nova.
+    expect([...h.ownershipChanged].sort()).toEqual([PLAYER, PLAYER_2, PLAYER_3]);
+    await settle();
+    expect(lastOwned(h, PLAYER, SERVER).skins).toEqual([{ id: forever.id, expiresAt: 0 }]);
+
+    h.service.stop();
+  });
+
+  it('sem posse de temporada: zero linhas, e o registro ainda diz que rodou', () => {
+    const h = harness();
+
+    addSkin(h, { label: 'Normal' });
+    give(h, PLAYER, 1);
+
+    expect(h.catalog.removeSeasonOwnership()).toEqual({ removed: 0, players: [] });
+    expect(h.owned.listOwned({ limit: 10 }).owned).toHaveLength(1);
+    expect(
+      h.owned.audit({ limit: 10 }).filter((entry) => entry.action === 'owned.season-cleared')[0],
+    ).toMatchObject({ serverId: null, detail: { removed: 0, players: 0, skins: [] } });
   });
 });

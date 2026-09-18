@@ -16,6 +16,7 @@ import type {
   BpPolicy,
   CollisionPolicy,
   MapSource,
+  SeasonSkinsPolicy,
   WipePlan,
   WipePlanKind,
   WipePluginDataFile,
@@ -27,6 +28,23 @@ export const BP_POLICY_LABEL: Readonly<Record<BpPolicy, string>> = {
   keep: 'Mantém os blueprints',
   wipe: 'Zera os blueprints',
   wipe_except_vip: 'Zera, menos para quem tem VIP',
+};
+
+/**
+ * O que o wipe faz com a posse das skins de temporada.
+ *
+ * As palavras são as do dono (17/09/2026), e elas valem nas duas
+ * telas: na configuração da agenda e no botão de wipar agora.
+ */
+export const SEASON_SKINS_LABEL: Readonly<Record<SeasonSkinsPolicy, string>> = {
+  keep: 'Manter na posse',
+  clear: 'Remover da posse',
+};
+
+export const SEASON_SKINS_HINT: Readonly<Record<SeasonSkinsPolicy, string>> = {
+  keep: 'Ninguém perde skin nenhuma. É o padrão, e o que acontece em todo wipe que não marcar o contrário.',
+  clear:
+    'Apaga a posse de TODAS as skins marcadas como "Skin de temporada", de todos os jogadores — vivas e vencidas. Não apaga o cadastro da skin.',
 };
 
 /** A versão curta, para caber numa linha de lista. */

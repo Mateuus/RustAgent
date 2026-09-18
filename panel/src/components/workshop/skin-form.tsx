@@ -6,7 +6,7 @@
 //  ####  UM SÓ, PARA CRIAR E PARA EDITAR  ####
 //
 //  Criar e editar uma skin são a MESMA pergunta — "qual item, qual
-//  arte, e quem pode usar?" —, e a única diferença é de onde vêm os
+//  arte, e como ela aparece no menu?" —, e a única diferença é de onde vêm os
 //  valores iniciais. Dois formulários divergiriam no primeiro campo
 //  novo.
 //
@@ -17,6 +17,13 @@
 //  tags. As tags sugerem o item, e o título vira o nome quando o
 //  campo Nome fica em branco. É o mesmo que o `/skin add` do jogo
 //  faz, e é o que mantém os dois caminhos gravando a mesma linha.
+//
+//  ####  ELE MORA NUM MODAL  ####
+//
+//  Quem o abre é o `SkinsPanel`, dentro do `Dialog` do painel — é a
+//  caixa que dá o título, o X e o Escape. Por isso aqui não há
+//  moldura nem cabeçalho próprio, e o rodapé com Salvar fica preso
+//  embaixo enquanto o resto rola.
 //
 //  ####  ELE NÃO FALA COM A API  ####
 //
@@ -36,14 +43,20 @@ import { useEffect, useState, type ReactNode } from 'react';
 
 import { ItemCombobox } from '@/components/item-combobox';
 import { ItemIcon } from '@/components/item-icon';
-import { messageOf } from '@/components/workshop/normalize';
+import {
+  messageOf,
+  RARITIES,
+  RARITY_LABELS,
+  safeRarity,
+} from '@/components/workshop/normalize';
 import { ServerPicker, type WorkshopServerOption } from '@/components/workshop/server-picker';
 import { Button } from '@/components/ui/button';
+import { HelpTip, type HelpTopic } from '@/components/ui/help-tip';
 import { Input } from '@/components/ui/input';
 import { Toggle } from '@/components/ui/toggle';
+import { WORKSHOP_HELP } from '@/lib/help/workshop';
 import type {
   ApiError,
-  WorkshopCollection,
   WorkshopLookup,
   WorkshopSkin,
   WorkshopSkinInput,
@@ -56,7 +69,6 @@ export interface SkinFormProps {
   /** A skin que está sendo editada, se houver. Ausente = é nova. */
   readonly skin?: WorkshopSkin;
   readonly servers: readonly WorkshopServerOption[];
-  readonly collections: readonly WorkshopCollection[];
   readonly busy: boolean;
   /** A última recusa do agente. Fica na tela até o próximo Salvar. */
   readonly error?: ApiError | null;
@@ -72,14 +84,23 @@ export function blankSkin(): WorkshopSkinInput {
     label: '',
     shortname: '',
     skinId: '',
-    permission: '',
-    collectionId: null,
+    description: null,
+    rarity: null,
+    sort: 0,
     openToAll: false,
     hideInStreamer: true,
     enabled: true,
+    // "Por padrão a skin NÃO é removida" (dono, 17/09/2026): a caixa
+    // nasce desligada, e é o wipe que decide quando remover.
+    season: false,
     servers: [],
   };
 }
+
+/** O teto da descrição, o mesmo do agente (`WORKSHOP_DESCRIPTION_MAX`). */
+const DESCRIPTION_MAX = 280;
+/** O teto da ordem, o mesmo do agente. */
+const SORT_LIMIT = 1_000_000;
 
 /** Só pergunta à Steam a partir daqui: id de Workshop tem 9+ dígitos. */
 const LOOKUP_MIN_DIGITS = 6;
@@ -100,12 +121,6 @@ function wayOut(code: string): string | null {
       return (
         'Esse par item + Workshop ID já está no catálogo — talvez cadastrado pelo jogo, com ' +
         '/skin add. Procure pelo número na lista e edite aquela linha.'
-      );
-
-    case 'COLLECTION_ITEM_TAKEN':
-      return (
-        'A coleção escolhida já tem uma skin deste item. Escolha outra coleção, deixe esta ' +
-        'avulsa, ou troque a skin do item na aba Coleções.'
       );
 
     case 'UNKNOWN_SERVER':
@@ -129,9 +144,6 @@ function wayOut(code: string): string | null {
     case 'WORKSHOP_SKIN_NOT_FOUND':
       return 'A skin que você estava editando foi apagada. Feche o formulário e recarregue a lista.';
 
-    case 'WORKSHOP_COLLECTION_NOT_FOUND':
-      return 'A coleção escolhida foi apagada. Escolha outra, ou deixe a skin avulsa.';
-
     default:
       return null;
   }
@@ -148,7 +160,6 @@ export function SkinForm({
   value,
   skin,
   servers,
-  collections,
   busy,
   error = null,
   onLookup,
@@ -217,7 +228,8 @@ export function SkinForm({
   const suggestions = current?.result?.suggestedShortnames ?? [];
   const verdict = current?.result?.verdict ?? null;
 
-  const permission = draft.permission ?? '';
+  const description = draft.description ?? '';
+  const sortText = String(draft.sort);
   const isNew = skin === undefined;
   const problem =
     skinId === ''
@@ -226,22 +238,23 @@ export function SkinForm({
         ? 'Escolha o item do jogo que vai receber a aparência.'
         : isNew && draft.label.trim() === '' && workshopTitle === null && !looking
           ? 'Dê um nome à skin: a Steam não devolveu um título para usar.'
-          : null;
+          : description.trim().length > DESCRIPTION_MAX
+            ? `A descrição passa de ${String(DESCRIPTION_MAX)} caracteres.`
+            : !Number.isInteger(draft.sort) || Math.abs(draft.sort) > SORT_LIMIT
+              ? 'A ordem é um número inteiro (pode ser negativo).'
+              : null;
 
   return (
-    <section className="space-y-4 border border-border bg-surface p-3">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h4 className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide">
+    <div className="space-y-4">
+      {skin !== undefined && (
+        <p className="flex flex-wrap items-center gap-2 text-2xs text-muted">
           {draft.shortname !== '' && <ItemIcon shortname={draft.shortname} size="sm" />}
-          {isNew ? 'Nova skin' : draft.label || skin.label}
-        </h4>
-        {skin !== undefined && (
-          <span className="text-2xs text-muted">
+          <span>
             {skin.source === 'game' ? 'cadastrada pelo jogo' : 'cadastrada pelo painel'}
             {skin.createdBy === null ? '' : ` · ${skin.createdBy}`}
           </span>
-        )}
-      </header>
+        </p>
+      )}
 
       {/* ---- Workshop ID + prévia ---- */}
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -294,7 +307,7 @@ export function SkinForm({
         </div>
         <span className="mt-1 block text-2xs text-muted">
           O item que recebe a aparência. Pode haver várias skins para o mesmo item — o jogador
-          escolhe na caixa.
+          escolhe no menu de skins.
         </span>
       </div>
 
@@ -308,7 +321,7 @@ export function SkinForm({
           onChange={(event) => patch({ label: event.target.value })}
         />
         <span className="mt-1 block text-2xs text-muted">
-          É o que o jogador lê na caixa do <span className="font-mono">/skin</span>.{' '}
+          É o que o jogador lê no menu de skins.{' '}
           {isNew
             ? 'Em branco, usa o título publicado no Workshop.'
             : 'Em branco, mantém o nome atual.'}
@@ -317,45 +330,64 @@ export function SkinForm({
 
       <label className="block">
         <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-          Permissão (opcional)
+          Descrição (opcional)
         </span>
-        <Input
-          value={permission}
-          maxLength={80}
-          placeholder="origemzworkshop.vip"
-          className="mt-1 h-9 font-mono"
-          onChange={(event) => patch({ permission: event.target.value })}
+        <textarea
+          value={description}
+          rows={3}
+          maxLength={DESCRIPTION_MAX}
+          placeholder="Forjada nas brasas do evento de inverno."
+          className="mt-1 w-full border border-border bg-surface-2 px-2 py-1.5 text-sm text-foreground hover:border-muted"
+          onChange={(event) => patch({ description: event.target.value })}
         />
-        <span className="mt-1 block text-2xs text-muted">
-          Em branco, a skin não tem permissão própria — quem a libera é &quot;para todos&quot;, a
-          coleção, ou um acesso na aba Acessos. Várias skins podem usar a mesma permissão (ex.:{' '}
-          <span className="font-mono text-foreground">origemzworkshop.vip</span> liberando todas as
-          do VIP); o prefixo <span className="font-mono">origemzworkshop.</span> é posto pelo
-          agente se faltar.
+        <span className="mt-1 flex justify-between gap-2 text-2xs text-muted">
+          <span>O texto do painel de detalhe, no menu de skins do jogo.</span>
+          <span className="font-mono">
+            {description.length}/{DESCRIPTION_MAX}
+          </span>
         </span>
       </label>
 
-      <label className="block">
-        <span className="font-condensed text-2xs uppercase tracking-wide text-muted">Coleção</span>
-        <select
-          value={draft.collectionId === null ? '' : String(draft.collectionId)}
-          onChange={(event) =>
-            patch({ collectionId: event.target.value === '' ? null : Number(event.target.value) })
-          }
-          className="mt-1 h-9 w-full border border-border bg-surface-2 px-2 text-sm text-foreground hover:border-muted"
-        >
-          <option value="">nenhuma (avulsa)</option>
-          {collections.map((collection) => (
-            <option key={collection.id} value={String(collection.id)}>
-              /skin {collection.slug} — {collection.label}
-              {collection.enabled ? '' : ' (desligada)'}
-            </option>
-          ))}
-        </select>
-        <span className="mt-1 block text-2xs text-muted">
-          Uma coleção tem no máximo uma skin por item, e a skin mora em uma coleção só.
-        </span>
-      </label>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
+            Raridade
+          </span>
+          <select
+            value={draft.rarity ?? ''}
+            onChange={(event) => patch({ rarity: safeRarity(event.target.value) })}
+            className="mt-1 h-9 w-full border border-border bg-surface-2 px-2 text-sm text-foreground hover:border-muted"
+          >
+            <option value="">nenhuma</option>
+            {RARITIES.map((rarity) => (
+              <option key={rarity} value={rarity}>
+                {RARITY_LABELS[rarity]}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1 block text-2xs text-muted">
+            A cor da borda e o rótulo no menu. Nenhuma = borda neutra.
+          </span>
+        </label>
+
+        <label className="block">
+          <span className="font-condensed text-2xs uppercase tracking-wide text-muted">Ordem</span>
+          <Input
+            type="number"
+            step={1}
+            value={sortText}
+            className="mt-1 h-9 font-mono"
+            onChange={(event) => {
+              const next = event.target.value === '' ? 0 : Number(event.target.value);
+
+              patch({ sort: Number.isFinite(next) ? Math.trunc(next) : 0 });
+            }}
+          />
+          <span className="mt-1 block text-2xs text-muted">
+            Na grade do item, menor primeiro; empate pelo nome.
+          </span>
+        </label>
+      </div>
 
       <div className="space-y-2 border-t border-border pt-3">
         <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
@@ -370,8 +402,8 @@ export function SkinForm({
 
       <div className="space-y-3 border-t border-border pt-3">
         <ToggleRow
-          title="Liberada para todos"
-          detail="Qualquer jogador pode aplicar, sem permissão nem acesso. Desligado, só quem tem a permissão, a coleção ou um acesso."
+          title="Liberada para todos (skin da casa)"
+          detail="Qualquer jogador pode aplicar, sem possuir. Desligado, só aparece no menu de skins (/skins) de quem a possui — recebida pelo site, pelo painel ou por /skin give — e dos admins."
         >
           <Toggle
             on={draft.openToAll}
@@ -403,8 +435,28 @@ export function SkinForm({
         </ToggleRow>
 
         <ToggleRow
+          title="Skin de temporada"
+          topic={WORKSHOP_HELP.season}
+          detail={
+            <>
+              Marque quando a skin for de uma temporada. Ela só sai da posse dos jogadores no{' '}
+              <strong>wipe em que você escolher “Remover da posse”</strong> — por padrão, nada é
+              removido, e uma skin pode atravessar vários wipes.
+            </>
+          }
+        >
+          <Toggle
+            on={draft.season}
+            busy={false}
+            onChange={(season) => patch({ season })}
+            labels={['de temporada', 'permanente']}
+            label="Esta skin é de temporada?"
+          />
+        </ToggleRow>
+
+        <ToggleRow
           title="Esta skin está valendo?"
-          detail="Desligada some da caixa e das coleções, sem perder o cadastro. O que já foi pintado continua pintado."
+          detail="Desligada some do menu, sem perder o cadastro nem a posse de quem a tem. O que já foi pintado continua pintado."
         >
           <Toggle
             on={draft.enabled}
@@ -431,7 +483,10 @@ export function SkinForm({
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+      {/* Preso no fundo da caixa: o formulário é mais alto que a tela,
+          e Salvar não pode ficar lá embaixo. O -mx/-mb cobre o
+          respiro do Dialog para o conteúdo não aparecer por baixo. */}
+      <div className="sticky bottom-0 -mx-3 -mb-3 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-surface px-3 py-3">
         <p className="text-2xs text-muted">{problem}</p>
 
         <div className="flex gap-2">
@@ -449,7 +504,7 @@ export function SkinForm({
                 // título do Workshop (ou manter o nome, na edição).
                 label: draft.label.trim(),
                 shortname: draft.shortname.trim(),
-                permission: permission.trim() === '' ? null : permission.trim(),
+                description: description.trim() === '' ? null : description.trim(),
                 servers: [...draft.servers],
               })
             }
@@ -459,23 +514,36 @@ export function SkinForm({
           </Button>
         </div>
       </div>
-    </section>
+    </div>
   );
 }
 
+/**
+ * Uma linha de interruptor, com o rótulo e o porquê.
+ *
+ * `topic` põe o `(?)` ao lado do rótulo — o mesmo do resto do painel
+ * (ui/help-tip.tsx): passar o mouse mostra a frase curta, clicar abre
+ * o texto inteiro. O `detail` continua sendo o que se lê sem clicar
+ * em nada.
+ */
 function ToggleRow({
   title,
+  topic,
   detail,
   children,
 }: {
   readonly title: string;
+  readonly topic?: HelpTopic;
   readonly detail: ReactNode;
   readonly children: ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
       <div className="max-w-xl">
-        <p className="font-condensed text-2xs uppercase tracking-wide text-muted">{title}</p>
+        <p className="flex items-center gap-1.5 font-condensed text-2xs uppercase tracking-wide text-muted">
+          {title}
+          {topic !== undefined && <HelpTip topic={topic} />}
+        </p>
         <p className="mt-1 text-2xs leading-relaxed text-muted">{detail}</p>
       </div>
       {children}

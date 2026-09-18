@@ -3,29 +3,42 @@
 // ============================================================
 //  audit-panel.tsx  -  tudo o que mudou nas skins, e quem mudou.
 //
-//  ####  TRÊS ORIGENS  ####
+//  ####  QUATRO ORIGENS  ####
 //
-//  O painel (um usuário), o jogo (`/skin add`, com `jogo:<steamId>`)
-//  e o próprio agente (`sistema`: um acesso que venceu). As três
-//  gravam no mesmo registro, mais novo primeiro.
+//  O painel (um usuário), o jogo (`/skin add` e `/skin give`, com
+//  `jogo:<steamId>`), o site (venda e caixa, `site:<ref>`) e o
+//  próprio agente (`sistema`: uma posse que venceu, a migração
+//  097). Todas gravam no mesmo registro, mais novo primeiro.
+//
+//  `grant.*` e `collection.*` só aparecem em linhas antigas, de
+//  antes da 097; os rótulos ficam para que elas continuem legíveis.
 //
 //  ####  O FILTRO É PELO JOGADOR AFETADO  ####
 //
-//  `steamId` é quem RECEBEU o acesso (ou o perdeu), e não quem
+//  `steamId` é quem RECEBEU a posse (ou a perdeu), e não quem
 //  clicou. É a pergunta do suporte: "por que ele não tem a skin?".
+//
+//  A ficha do jogador usa este mesmo painel com `fixedSteamId`: sem
+//  o campo de filtro, e só com as linhas dele.
 //
 //  ####  PÁGINAS POR `before`  ####
 //
-//  Carregar mais pede as entradas com id menor que a menor desta
-//  lista. Offset daria entrada repetida quando alguém grava no meio.
+//  A página seguinte pede as entradas com id menor que a menor desta.
+//  Offset daria entrada repetida quando alguém grava no meio. O
+//  `useCursorPages` (ui/pagination.tsx) guarda o `before` de cada
+//  página já vista, e é isso que faz Anterior e os números voltarem.
+//
+//  A rota não diz o total nem se há mais: pedimos UMA a mais do que
+//  a página mostra, e é essa sobra que diz se existe a próxima.
 // ============================================================
 
 import { Loader2, RefreshCw, Search } from 'lucide-react';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useState, type ReactNode } from 'react';
 
 import { StateBlock } from '@/components/state-block';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Pagination, useCursorPages, type CursorPage } from '@/components/ui/pagination';
 import {
   formatDateTime,
   messageOf,
@@ -40,9 +53,14 @@ export interface AuditPanelProps {
   readonly servers: readonly WorkshopServerOption[];
   /** O filtro com que a aba abre. Vazio = tudo. */
   readonly initialSteamId?: string;
+  /**
+   * Trava o filtro neste jogador e esconde o campo — é a ficha dele.
+   */
+  readonly fixedSteamId?: string;
 }
 
-const PAGE_SIZE = 100;
+/** O registro é lido de passada: cabe mais numa página do que as outras listas. */
+const DEFAULT_PAGE_SIZE = 50;
 
 const ACTION_LABELS: Readonly<Record<string, string>> = {
   'skin.create': 'Skin cadastrada',
@@ -53,17 +71,69 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   'collection.update': 'Coleção alterada',
   'collection.delete': 'Coleção apagada',
   'collection.skins': 'Itens da coleção',
-  'grant.create': 'Acesso liberado',
-  'grant.update': 'Acesso renovado',
-  'grant.revoke': 'Acesso removido',
-  'grant.expire': 'Acesso venceu',
+  'owned.grant': 'Skin dada',
+  'owned.revoke': 'Skin tirada',
+  'owned.expired': 'Posse venceu',
+  'owned.season-cleared': 'Posse de skins de temporada removida no wipe',
+  'site.delivered': 'Entregue pelo site',
   'game.add-refused': 'Cadastro pelo jogo recusado',
+  'game.give-refused': '/skin give recusado',
+  'migration.097': 'Migração 097 (posse)',
+  'migration.group-grant-dropped': 'Migração: acesso de grupo descartado',
+  'migration.invalid-grant-dropped': 'Migração: acesso inválido descartado',
+  'migration.collection-grant-expanded': 'Migração: coleção virou posse',
+  'migration.permission-dropped': 'Migração: permissão descartada',
+  'migration.collection-dropped': 'Migração: coleção removida',
+  // Só em linhas de antes da 097.
+  'grant.create': 'Acesso liberado (antigo)',
+  'grant.update': 'Acesso renovado (antigo)',
+  'grant.revoke': 'Acesso removido (antigo)',
+  'grant.expire': 'Acesso venceu (antigo)',
 };
+
+/** O rótulo de uma ação; uma `migration.*` nova cai no genérico. */
+export function actionLabel(action: string): string {
+  const known = ACTION_LABELS[action];
+
+  if (known !== undefined) return known;
+  if (action.startsWith('migration.')) return `Migração: ${action.slice('migration.'.length)}`;
+
+  return action;
+}
+
+/** As ações que TIRAM algo, em vermelho; as que só registram, em cinza. */
+function actionTone(action: string): string {
+  if (
+    action === 'game.add-refused' ||
+    action === 'game.give-refused' ||
+    action === 'owned.revoke' ||
+    action === 'owned.season-cleared' ||
+    action === 'grant.revoke' ||
+    action === 'skin.delete'
+  ) {
+    return 'text-rust';
+  }
+
+  if (action === 'owned.expired' || action === 'grant.expire' || action.startsWith('migration.')) {
+    return 'text-muted';
+  }
+
+  return 'text-foreground';
+}
 
 const SOURCE_LABELS: Readonly<Record<string, string>> = {
   panel: 'painel',
   game: 'jogo',
   system: 'sistema',
+  site: 'site',
+};
+
+const OWNED_ORIGIN_LABELS: Readonly<Record<string, string>> = {
+  site: 'site',
+  panel: 'painel',
+  game: 'jogo',
+  system: 'sistema',
+  migration: 'migração',
 };
 
 /** Os campos de `detail.changed`, em português. */
@@ -71,16 +141,31 @@ const FIELD_LABELS: Readonly<Record<string, string>> = {
   label: 'nome',
   shortname: 'item',
   skinId: 'Workshop ID',
+  description: 'descrição',
+  rarity: 'raridade',
+  sort: 'ordem',
   permission: 'permissão',
   collectionId: 'coleção',
   openToAll: 'para todos',
   hideInStreamer: 'esconde no streamer',
   enabled: 'valendo',
+  season: 'de temporada',
   servers: 'servidores',
   slug: 'comando',
   workshopTitle: 'título no Workshop',
   previewUrl: 'prévia',
 };
+
+/**
+ * Um número do detalhe, ou `null`.
+ *
+ * O detalhe vem do agente como JSON solto, e a régua do registro é a
+ * mesma do resto do Workshop: campo ausente não derruba o render —
+ * ele vira uma frase mais curta.
+ */
+function numberOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
 
 function formatValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—';
@@ -107,11 +192,70 @@ function subjectOf(detail: Record<string, unknown>): string {
   return detail.subjectType === 'group' ? `grupo ${subject}` : subject;
 }
 
+function noteOf(detail: Record<string, unknown>): string {
+  return typeof detail.note === 'string' && detail.note !== '' ? ` · “${detail.note}”` : '';
+}
+
 /** O detalhe em uma linha. */
-function describeDetail(entry: WorkshopAuditEntry): string {
+export function describeDetail(entry: WorkshopAuditEntry): string {
   const detail = entry.detail;
 
   switch (entry.action) {
+    case 'owned.grant': {
+      const expiry = formatExpiry(detail.expiresAt);
+      const origin = OWNED_ORIGIN_LABELS[String(detail.source)] ?? formatValue(detail.source);
+      const renewed = detail.created === false ? 'renovada' : 'nova';
+      const ref = typeof detail.sourceRef === 'string' ? ` · ${detail.sourceRef}` : '';
+
+      return `${renewed} · ${expiry === null ? 'permanente' : `até ${expiry}`} · ${origin}${ref}${noteOf(detail)}`;
+    }
+
+    case 'owned.revoke': {
+      if (detail.removed === false) return 'não tinha — nada a tirar';
+
+      const expiry = formatExpiry(detail.expiresAt);
+      const origin = OWNED_ORIGIN_LABELS[String(detail.grantedSource)] ?? '';
+      const by = typeof detail.grantedBy === 'string' ? ` por ${detail.grantedBy}` : '';
+
+      return `era ${expiry === null ? 'permanente' : `até ${expiry}`}${origin === '' && by === '' ? '' : ` · dada${origin === '' ? '' : ` pelo ${origin}`}${by}`}`;
+    }
+
+    case 'owned.season-cleared': {
+      // ####  UMA LINHA PARA O WIPE INTEIRO  ####
+      //
+      // O agente grava UMA linha com as contagens, e não uma por
+      // jogador: um wipe com milhares de posses encheria a tela do
+      // registro e esconderia todo o resto daquele dia. Quem tinha o
+      // quê continua em cada `owned.grant`. Ver 02 §4.6.
+      const removed = numberOf(detail.removed);
+      const players = numberOf(detail.players);
+      const skins = Array.isArray(detail.skins) ? detail.skins.length : numberOf(detail.skins);
+
+      if (removed === null) return 'o wipe mandou remover a posse das skins de temporada';
+
+      const de = players === null ? '' : `, de ${String(players)} jogador(es)`;
+      const quantas = skins === null || skins === 0 ? '' : ` · ${String(skins)} skin(s) marcada(s)`;
+
+      return `${String(removed)} posse(s) removida(s)${de}${quantas}`;
+    }
+
+    case 'owned.expired': {
+      const expiry = formatExpiry(detail.expiresAt);
+
+      return expiry === null ? '' : `venceu em ${expiry}`;
+    }
+
+    case 'game.give-refused':
+      return `${formatValue(detail.reason)}: ${formatValue(detail.message)}`;
+
+    case 'migration.097':
+      return [
+        `${formatValue(detail.grants)} acesso(s) lidos`,
+        `${formatValue(detail.owned)} posse(s) criadas`,
+        `${formatValue(detail.groupGrantsDropped)} de grupo descartados`,
+        `${formatValue(detail.permissionsDropped)} permissão(ões) e ${formatValue(detail.collectionsDropped)} coleção(ões) removidas`,
+      ].join(' · ');
+
     case 'grant.create':
     case 'grant.update':
     case 'grant.revoke': {
@@ -188,67 +332,40 @@ function describeDetail(entry: WorkshopAuditEntry): string {
   }
 }
 
-export function AuditPanel({ servers, initialSteamId = '' }: AuditPanelProps) {
-  const [steamId, setSteamId] = useState(initialSteamId);
+export function AuditPanel({ servers, initialSteamId = '', fixedSteamId }: AuditPanelProps) {
+  const [chosenSteamId, setSteamId] = useState(initialSteamId);
   const [draft, setDraft] = useState(initialSteamId);
+  const steamId = fixedSteamId ?? chosenSteamId;
+  const fixed = fixedSteamId !== undefined;
 
-  const [entries, setEntries] = useState<readonly WorkshopAuditEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   const fetchPage = useCallback(
-    async (before?: number) => {
+    async (before: number | null): Promise<CursorPage<WorkshopAuditEntry>> => {
       const response = await agent.workshopAudit({
-        limit: PAGE_SIZE,
+        // Uma a mais: é ela que diz se existe a próxima página.
+        limit: pageSize + 1,
         ...(steamId === '' ? {} : { steamId }),
-        ...(before === undefined ? {} : { before }),
+        ...(before === null ? {} : { before }),
       });
-      const page = (response.entries ?? []).map(safeAuditEntry);
+      const all = (Array.isArray(response.entries) ? response.entries : []).map(safeAuditEntry);
+      const items = all.slice(0, pageSize);
+      // reduce, e não Math.min(...lista): o spread estoura com listas enormes.
+      const lowest = items.reduce((min, entry) => Math.min(min, entry.id), Infinity);
 
-      return { page, more: page.length >= PAGE_SIZE };
+      return {
+        items,
+        next: all.length > pageSize && Number.isFinite(lowest) ? lowest : null,
+      };
     },
-    [steamId],
+    [steamId, pageSize],
   );
 
-  const reload = useCallback(async () => {
-    setBusy(true);
-
-    try {
-      const { page, more } = await fetchPage();
-
-      setEntries(page);
-      setHasMore(more);
-      setError(null);
-    } catch (cause) {
-      setError(messageOf(cause));
-      setEntries((current) => current ?? []);
-    } finally {
-      setBusy(false);
-    }
-  }, [fetchPage]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  async function loadMore(): Promise<void> {
-    if (entries === null || entries.length === 0) return;
-
-    setBusy(true);
-
-    try {
-      const before = Math.min(...entries.map((entry) => entry.id));
-      const { page, more } = await fetchPage(before);
-
-      setEntries([...entries, ...page]);
-      setHasMore(more);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const pages = useCursorPages(fetchPage, pageSize);
+  const entries = pages.items;
+  const busy = pages.busy;
+  const error = pages.error === null ? null : messageOf(pages.error);
+  const reload = pages.reset;
 
   function apply(value: string): void {
     const trimmed = value.trim();
@@ -266,6 +383,7 @@ export function AuditPanel({ servers, initialSteamId = '' }: AuditPanelProps) {
   return (
     <div className="space-y-4">
       <form
+        hidden={fixed}
         className="flex flex-wrap items-start gap-2"
         onSubmit={(event) => {
           event.preventDefault();
@@ -320,10 +438,23 @@ export function AuditPanel({ servers, initialSteamId = '' }: AuditPanelProps) {
         </Button>
       </form>
 
-      {steamId !== '' && (
+      {fixed && (
+        <div className="flex justify-end">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void reload()}>
+            {busy ? (
+              <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw aria-hidden="true" className="h-4 w-4" />
+            )}
+            Atualizar
+          </Button>
+        </div>
+      )}
+
+      {steamId !== '' && !fixed && (
         <p className="text-2xs text-muted">
           Mostrando só o que afetou <span className="font-mono text-foreground">{steamId}</span>.
-          Acessos por grupo não aparecem aqui: eles não têm um jogador afetado.
+          O que não tem um jogador afetado (cadastro, migração) não aparece aqui.
         </p>
       )}
 
@@ -352,7 +483,7 @@ export function AuditPanel({ servers, initialSteamId = '' }: AuditPanelProps) {
                   <HeaderCell>Ação</HeaderCell>
                   <HeaderCell>Alvo</HeaderCell>
                   <HeaderCell>Servidor</HeaderCell>
-                  <HeaderCell>Jogador</HeaderCell>
+                  {!fixed && <HeaderCell>Jogador</HeaderCell>}
                   <HeaderCell>Detalhe</HeaderCell>
                 </tr>
               </thead>
@@ -369,24 +500,17 @@ export function AuditPanel({ servers, initialSteamId = '' }: AuditPanelProps) {
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-2xs">
                       <span
-                        className={cn(
-                          'font-medium',
-                          entry.action === 'game.add-refused' || entry.action === 'grant.revoke'
-                            ? 'text-rust'
-                            : entry.action === 'grant.expire'
-                              ? 'text-muted'
-                              : 'text-foreground',
-                        )}
+                        className={cn('font-medium', actionTone(entry.action))}
                         title={entry.action}
                       >
-                        {ACTION_LABELS[entry.action] ?? entry.action}
+                        {actionLabel(entry.action)}
                       </span>
                     </td>
                     <td className="px-3 py-2 text-2xs text-foreground">{entry.target}</td>
                     <td className="px-3 py-2 text-2xs text-muted">
                       {entry.serverId === null ? '—' : serverName(entry.serverId)}
                     </td>
-                    <td className="px-3 py-2 text-2xs">
+                    <td hidden={fixed} className="px-3 py-2 text-2xs">
                       {entry.steamId === null ? (
                         <span className="text-muted">—</span>
                       ) : (
@@ -409,18 +533,17 @@ export function AuditPanel({ servers, initialSteamId = '' }: AuditPanelProps) {
             </table>
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
-              {entries.length === 1 ? '1 entrada' : `${String(entries.length)} entradas`}
-            </span>
-
-            {hasMore && (
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => void loadMore()}>
-                {busy && <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}
-                Carregar mais
-              </Button>
-            )}
-          </div>
+          <Pagination
+            page={pages.page}
+            pageSize={pageSize}
+            total={pages.total}
+            shown={entries.length}
+            knownPages={pages.knownPages}
+            hasNext={pages.hasNext}
+            busy={busy}
+            onPageChange={pages.goTo}
+            onPageSizeChange={setPageSize}
+          />
         </>
       )}
     </div>

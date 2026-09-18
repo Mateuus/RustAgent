@@ -51,6 +51,14 @@ interface DialogProps {
    * arma, o segundo fecha, e mexer em qualquer coisa desarma.
    */
   readonly guarded?: boolean;
+  /**
+   * No modo `guarded`, o Escape volta a fechar.
+   *
+   * Para o formulário que tem `<select>` nativo (e por isso precisa
+   * do clique duplo fora) mas cujo dono quer a tecla de saída. O
+   * `busy` continua travando o Escape.
+   */
+  readonly escapable?: boolean;
   readonly open: boolean;
   /** Vai no cabeçalho e é quem nomeia a caixa para o leitor de tela. */
   readonly title: string;
@@ -76,6 +84,7 @@ export function Dialog({
   onClose,
   busy = false,
   guarded = false,
+  escapable = false,
   fullScreen = false,
   className,
   children,
@@ -104,7 +113,7 @@ export function Dialog({
       onCancel={(event) => {
         // O Escape também: no modo protegido ele não fecha um
         // formulário longo por um toque de tecla.
-        if (busy || guarded) event.preventDefault();
+        if (busy || (guarded && !escapable)) event.preventDefault();
       }}
       onClick={(event) => {
         // Clique no ::backdrop é despachado no próprio <dialog>;
@@ -131,7 +140,9 @@ export function Dialog({
     >
       {open && (
         <div className={cn('flex flex-col', fullScreen && 'h-full')}>
-          <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-2">
+          {/* Fixo no topo: num formulário alto, quem rola é a caixa, e o
+              título e o X não podem ir embora junto. */}
+          <header className="sticky top-0 z-10 flex shrink-0 items-center justify-between gap-3 border-b border-border bg-surface px-3 py-2">
             <h2
               id={titleId}
               className="flex items-center gap-2 font-condensed text-sm font-bold uppercase tracking-wide"

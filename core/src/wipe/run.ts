@@ -59,7 +59,13 @@ import type { WipesRepository } from '../db/wipes-repository.js';
 import type { Broadcaster } from '../game/broadcast.js';
 import type { Logger } from '../logger.js';
 import type { Operation } from '../ops/operations.js';
-import type { BpPolicy, WipePlan, WipePlanKind, WipeRunStep } from '../types/wipe.js';
+import type {
+  BpPolicy,
+  SeasonSkinsPolicy,
+  WipePlan,
+  WipePlanKind,
+  WipeRunStep,
+} from '../types/wipe.js';
 import { toError } from '../util.js';
 import { backupSaveFolder, checkBackupSpace, type BackupExtra } from './backup.js';
 import { KEEP_CUSTOM_IN_FORCED_REASON, pinnedRejection } from './map-pool.js';
@@ -239,7 +245,44 @@ export interface WipeRunnerDeps {
    * sem ele.
    */
   readonly quests?: WipeQuests | undefined;
+  /**
+   * As SKINS DE TEMPORADA.
+   *
+   * Ausente = o módulo de skins não está montado, e o wipe que
+   * mandou limpar diz isso na frase do passo em vez de mentir que
+   * limpou. Ver `WipeSeasonSkins`.
+   */
+  readonly seasonSkins?: WipeSeasonSkins | undefined;
   readonly logger?: Logger | undefined;
+}
+
+/**
+ * As **skins de temporada**, no wipe.
+ *
+ * ####  UMA PORTA, E NÃO O CATÁLOGO INTEIRO  ####
+ *
+ * A máquina de passos não sabe o que é posse, marca de temporada
+ * nem carga de plugin — ela sabe que ESTE wipe mandou limpar. Quem
+ * sabe o resto é `WorkshopCatalog.removeSeasonOwnership`, que apaga
+ * a posse (viva e vencida) das skins com `season = 1`, grava UMA
+ * linha `owned.season-cleared` no registro e reenvia a posse de
+ * quem está online. Ver Docs/OrigemZWorkshop/02 §4.6.
+ *
+ * Ausente = este agente não tem o módulo de skins montado, e o wipe
+ * segue sem ele — com a frase no passo dizendo isso.
+ */
+export interface WipeSeasonSkins {
+  /**
+   * Apaga a posse das skins de temporada da REDE inteira.
+   *
+   * O `serverId` entra só no registro — a posse é da rede e sai
+   * inteira —, e é ele que deixa o histórico dizer de qual wipe veio
+   * a ordem.
+   */
+  removeSeasonOwnership(serverId?: string | null): {
+    readonly removed: number;
+    readonly players: readonly string[];
+  };
 }
 
 /** O que o wipe precisa das missões. E nada além disso. */
@@ -270,6 +313,18 @@ export interface WipeRunRequest {
   readonly control: WipeServerControl;
   /** Retomada: os passos já `done` não rodam de novo. */
   readonly resume?: boolean;
+  /**
+   * O que ESTE wipe faz com a posse das skins de temporada.
+   *
+   * ####  AUSENTE NÃO É `keep`: É "NINGUÉM DISSE"  ####
+   *
+   * Quem diz explicitamente é o botão de wipar agora, que carrega a
+   * escolha do operador desde o corpo da rota. Nos wipes da agenda
+   * ninguém digita nada, e a resposta vem da configuração daquele
+   * tipo de wipe (`cadence.seasonSkins` / `forced.seasonSkins`) —
+   * é `#seasonSkinsOf` quem resolve, e o padrão dos dois é `keep`.
+   */
+  readonly seasonSkins?: SeasonSkinsPolicy | undefined;
 }
 
 /** De quanto em quanto tempo o passo `esvaziar` reconta os jogadores. */
@@ -1307,6 +1362,36 @@ export class WipeRunner implements WipeExecutor {
       }
     }
 
+    // ####  E AS SKINS DE TEMPORADA SAEM AQUI, NO `pos-wipe`  ####
+    //
+    // Não no `apagar`, que é o passo destrutivo, e por três razões
+    // que se somam:
+    //
+    //   1. a remoção TERMINA reenviando a posse a quem está online
+    //      (`removeSeasonOwnership` cuida disso), e isso quer o
+    //      servidor NO AR — o `apagar` exige o oposto: ele RECUSA
+    //      rodar com o processo de pé;
+    //   2. o `apagar` é fatal. Uma pancada no banco de skins
+    //      derrubaria um wipe que já parou o servidor e já apagou o
+    //      backup do mundo — e o que se perde ali é o mundo, não uma
+    //      lista de posses;
+    //   3. é o mesmo lugar onde o progresso das MISSÕES zera, que é
+    //      o mesmo tipo de trabalho: estado de jogador, no banco do
+    //      agente, que o mundo novo não deve herdar.
+    //
+    // A posse não está em disco: ela é linha do nosso SQLite, e
+    // apagá-la depois de o mundo subir dá exatamente o mesmo
+    // resultado — com o jogador vendo o menu já sem a skin.
+    //
+    // ####  E UM WIPE RETOMADO NÃO REMOVE DUAS VEZES  ####
+    //
+    // Quem garante é a máquina de passos: `pos-wipe` só roda quando
+    // não está `done`, e `#mustRedo` só refaz o `parar`. A remoção
+    // não precisa (nem teria como) ser idempotente — a segunda
+    // passada apagaria a posse que os jogadores reconquistaram
+    // depois do wipe.
+    notes.push(this.#clearSeasonSkins(request, run));
+
     // ####  ESQUECER É O QUE FAZ O RESTO FUNCIONAR  ####
     //
     // O `WipeClock` cacheia a hora do wipe por meia hora. Sem este
@@ -1404,6 +1489,90 @@ export class WipeRunner implements WipeExecutor {
   // ----------------------------------------------------------
   //  §4  Auxiliares
   // ----------------------------------------------------------
+
+  /**
+   * O que ESTE wipe faz com a posse das skins de temporada.
+   *
+   * ####  O OPERADOR MANDA; A CONFIGURAÇÃO É O PADRÃO  ####
+   *
+   * A escolha explícita vem no `WipeRunRequest` — é o botão "wipar
+   * agora", com o rádio da tela. Sem ela (todo wipe da agenda, que
+   * ninguém dispara na mão) vale a configuração DAQUELE tipo de
+   * wipe: a da cadência para um da cadência, a do forçado para o
+   * forçado. Um wipe `manual` da agenda sem escolha explícita cai
+   * em `keep`, que é o padrão de quem não disse nada.
+   *
+   * ####  O `keep` É A RESPOSTA DE TODA DÚVIDA  ####
+   *
+   * Inclusive quando a configuração não puder ser lida. Remover
+   * posse é irreversível e não tem backup — o zip do wipe copia a
+   * pasta do save, e a posse não mora lá. Errar para o lado de
+   * `keep` deixa o admin repetir a escolha no wipe seguinte; errar
+   * para o lado de `clear` não tem volta.
+   */
+  #seasonSkinsOf(request: WipeRunRequest, run: WipeRunRecord): SeasonSkinsPolicy {
+    if (request.seasonSkins !== undefined) {
+      return request.seasonSkins;
+    }
+
+    if (run.kind === 'manual') {
+      return 'keep';
+    }
+
+    try {
+      const settings = this.#deps.schedule.getSettings(request.serverId);
+
+      return run.kind === 'forced' ? settings.forced.seasonSkins : settings.cadence.seasonSkins;
+    } catch (error) {
+      this.#deps.logger?.warn(
+        { server: request.serverId, run: request.runId, err: toError(error) },
+        'não deu para ler a configuração de skins de temporada; este wipe MANTÉM a posse',
+      );
+
+      return 'keep';
+    }
+  }
+
+  /**
+   * Tira da posse as skins de temporada — quando este wipe mandou.
+   *
+   * NUNCA lança: o mundo já nasceu, e nada no `pos-wipe` pode
+   * desfazê-lo. A frase devolvida entra na mensagem do passo, e ela
+   * diz SEMPRE o que aconteceu — inclusive "nenhuma", que é o
+   * desfecho normal e o que o dono pediu como padrão.
+   */
+  #clearSeasonSkins(request: WipeRunRequest, run: WipeRunRecord): string {
+    const policy = this.#seasonSkinsOf(request, run);
+
+    if (policy === 'keep') {
+      return 'skins de temporada: nenhuma posse removida (este wipe manda MANTER)';
+    }
+
+    if (this.#deps.seasonSkins === undefined) {
+      // Alto e bom som: o admin marcou "remover" e nada saiu.
+      request.operation.log(
+        '[wipe] ATENÇÃO: este wipe manda REMOVER a posse das skins de temporada e não há módulo ' +
+          'de skins neste agente. Nenhuma posse foi removida.',
+      );
+
+      return 'skins de temporada: nenhuma posse removida — o módulo de skins não está montado';
+    }
+
+    try {
+      const cleared = this.#deps.seasonSkins.removeSeasonOwnership(request.serverId);
+
+      if (cleared.removed === 0) {
+        return 'skins de temporada: nenhuma posse a remover (nenhuma skin marcada tinha dono)';
+      }
+
+      return (
+        `skins de temporada: ${String(cleared.removed)} posse(s) removida(s), de ` +
+        `${String(cleared.players.length)} jogador(es)`
+      );
+    } catch (error) {
+      return `skins de temporada: NÃO deu para remover a posse (${toError(error).message})`;
+    }
+  }
 
   /**
    * Guarda o que cada jogador sabe, antes de o mundo ser apagado.
