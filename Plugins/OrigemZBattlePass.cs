@@ -89,8 +89,8 @@
 //  (que é do agente, 03 §7) dispara `origemz.passe.open`, sem
 //  argumento — o mesmo caminho pelo qual o botão SKINS abre o menu de
 //  skins. Os outros (`close`, `claim`, `claimall`, `box`, `buy`,
-//  `page`) nascem dos botões desta tela, carregam o token da sessão e
-//  são recusados EM SILÊNCIO quando ele não bate.
+//  `page`, `detail`) nascem dos botões desta tela, carregam o token da
+//  sessão e são recusados EM SILÊNCIO quando ele não bate.
 //
 //  O `sync` é o CATÁLOGO do servidor: temporada, trilha e preço. Ele
 //  traz o `secret` do processo do agente, e é ele que destrava tudo
@@ -183,6 +183,43 @@
 //  é honesto: a tela diz "sincronizando" e não mente sobre nível nem
 //  sobre resgate. "Não sei" é diferente de "não tem" — a mesma regra
 //  do menu de skins (02 §5.3 do Workshop).
+//
+// ============================================================
+//  ####  O CARD RESPONDE "QUANTO FALTA PARA ESTE?"  ####
+//
+//  A curva de XP virou PROGRESSIVA (base 500, passo 250): os degraus
+//  custam 500, 750, 1.000, 1.250… Um card que diz só "NÍVEL 3" esconde
+//  justamente o que passou a importar — por que o 9 demora mais que o
+//  2 —, e o dono pediu o XP na tela depois de ver isso no jogo
+//  (19/09/2026).
+//
+//  São TRÊS números possíveis, e eles respondem a perguntas
+//  diferentes:
+//
+//    custo do degrau      "quanto custa subir daqui para lá"
+//    acumulado do nível   "qual é a marca deste degrau na régua"
+//    quanto falta         "quanto falta PARA ESTE, de onde eu estou"
+//
+//  No card vai o TERCEIRO, porque é a pergunta que o dono escreveu, e
+//  porque é a única das três que muda conforme quem olha — as outras
+//  duas são a mesma para todo mundo e cabem no modal, que tem espaço
+//  para explicar. Nível já alcançado não tem "quanto falta": ali vai o
+//  acumulado, em cinza, para a régua continuar comparável de card a
+//  card (é a leitura da curva: 500, 1.250, 2.250, 3.500…).
+//
+//  ####  O MODAL, E POR QUE ELE NÃO CUSTA UM (i) POR CARD  ####
+//
+//  São 22 níveis: todo elemento novo no card é multiplicado por 22, e
+//  a trilha inteira já ocupa quatro `AddUI`. Então o ALVO do clique é
+//  a TARJA DO NÍVEL, que já existia como painel e virou botão — trocar
+//  `CuiImageComponent` por `CuiButtonComponent` não acrescenta
+//  elemento nenhum. O "[i]" existe como rótulo separado porque um
+//  clique sem marca visível é um clique que ninguém dá; ele e o texto
+//  de XP são os DOIS únicos elementos que este trabalho acrescentou ao
+//  card.
+//
+//  O modal é uma região própria (`Region.Detail`), desenhada só quando
+//  aberta: a abertura do menu continua custando o que custava.
 // ============================================================
 
 using System;
@@ -220,6 +257,9 @@ namespace Oxide.Plugins
         private const string MenuClaimCommand = "origemz.passe.claim";
         private const string MenuClaimAllCommand = "origemz.passe.claimall";
         private const string MenuBoxCommand = "origemz.passe.box";
+
+        /// <summary>Abre (e fecha) o modal de detalhe de UM nível. Ver `CmdMenuDetail`.</summary>
+        private const string MenuDetailCommand = "origemz.passe.detail";
 
         /// <summary>"Resgatar tudo" DENTRO da caixa: entregar de novo o que ficou devendo.</summary>
         private const string MenuRetryCommand = "origemz.passe.retry";
@@ -1232,6 +1272,7 @@ namespace Oxide.Plugins
         private const string UiTrack = "OZPass.Track";
         private const string UiFoot = "OZPass.Foot";
         private const string UiBox = "OZPass.Box";
+        private const string UiDetail = "OZPass.Detail";
 
         [Flags]
         private enum Region
@@ -1242,7 +1283,8 @@ namespace Oxide.Plugins
             Track = 4,
             Foot = 8,
             Box = 16,
-            AllButWindow = Head | Track | Foot | Box,
+            Detail = 32,
+            AllButWindow = Head | Track | Foot | Box | Detail,
             All = Window | AllButWindow,
         }
 
@@ -1258,6 +1300,12 @@ namespace Oxide.Plugins
 
             /// <summary>A caixa existe no cliente. Evita um `destroyUi` por abertura de menu.</summary>
             public bool BoxDrawn;
+
+            /// <summary>Que nível o modal de detalhe está mostrando. 0 = fechado.</summary>
+            public int DetailLevel;
+
+            /// <summary>O modal existe no cliente. Mesma razão do `BoxDrawn`.</summary>
+            public bool DetailDrawn;
 
             /// <summary>Há um pedido no ar: os botões ficam mudos até a resposta.</summary>
             public bool Busy;
@@ -1625,6 +1673,38 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
+        /// Abre e fecha o modal de detalhe de um nível.
+        ///
+        /// ####  O CARD É APERTADO; O MODAL NÃO  ####
+        ///
+        /// Cinco cards por linha, 221 px cada: o rótulo da recompensa sai
+        /// cortado em 34 caracteres, o motivo do cadeado só existe no
+        /// tooltip e os três números do XP não cabem. Aqui cabem — e é o
+        /// mesmo clique de sempre, na tarja do nível.
+        ///
+        /// O MESMO nível fecha (é um interruptor, como a caixa); outro
+        /// nível troca o conteúdo sem fechar. Nada é pedido ao agente: o
+        /// modal só mostra o que a tela já sabe.
+        /// </summary>
+        [ConsoleCommand(MenuDetailCommand)]
+        private void CmdMenuDetail(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            int number = arg.GetInt(1, 0);
+
+            // Nível que não existe nesta temporada não abre nada: o comando
+            // pode chegar digitado no F1 com qualquer número.
+            if (number != 0 && LevelOf(number) == null) return;
+
+            session.DetailLevel = session.DetailLevel == number ? 0 : number;
+
+            Redraw(player, session, Region.Detail);
+        }
+
+        /// <summary>
         /// "Resgatar tudo" dentro da caixa.
         ///
         /// ####  ELE EXISTE PORQUE A CAIXA NÃO ENTREGAVA  ####
@@ -1971,6 +2051,17 @@ namespace Oxide.Plugins
             /// <summary>Só o nível atual tem moldura acesa (03 §3.1, regra 3).</summary>
             public bool Current;
             public bool Milestone;
+
+            /// <summary>
+            /// O XP na tarja. Ver `CardXpText`: "faltam 3.250 XP" para quem
+            /// ainda não chegou, o acumulado para quem já passou, "" quando o
+            /// agente não mandou XP nenhum para o nível.
+            /// </summary>
+            public string XpText = "";
+
+            /// <summary>O texto é o "quanto falta" (e não o acumulado): ele fica mais claro.</summary>
+            public bool XpLive;
+
             public readonly LaneView Free = new LaneView();
             public readonly LaneView Paid = new LaneView();
         }
@@ -1985,6 +2076,47 @@ namespace Oxide.Plugins
             public int OpenRow;
             public string Empty = "";
             public readonly List<CardView> Cards = new List<CardView>();
+            public Dictionary<string, string> Icons = new Dictionary<string, string>();
+        }
+
+        /// <summary>
+        /// O modal de UM nível: o que não cabe no card de 221 px.
+        ///
+        /// Os três números do XP vivem aqui juntos porque é junto que eles
+        /// explicam a curva — o degrau, a marca na régua e a distância. No
+        /// card só cabe um, e lá vai o que responde "quanto falta".
+        /// </summary>
+        private class DetailView
+        {
+            public string Token = "";
+            public int Level;
+            public string Title = "";
+            public bool Milestone;
+            public bool Current;
+
+            /// <summary>Quanto CUSTA este degrau — a diferença para o nível anterior.</summary>
+            public string StepText = "";
+
+            /// <summary>O acumulado que alcança este nível. É a marca dele na régua.</summary>
+            public string TotalText = "";
+
+            /// <summary>"Faltam 2.400 XP", "Você já passou por aqui" ou "Sincronizando…".</summary>
+            public string GapText = "";
+
+            /// <summary>O que o `GapText` diz é uma boa notícia (alcançado) ou uma distância.</summary>
+            public bool Reached;
+
+            /// <summary>Quanto do DEGRAU o jogador já andou, de 0 a 1. Só com progresso conhecido.</summary>
+            public float StepFill;
+
+            public bool Known;
+
+            public readonly LaneView Free = new LaneView();
+            public readonly LaneView Paid = new LaneView();
+
+            /// <summary>Um pedido no ar: os botões de resgate do modal ficam mudos.</summary>
+            public bool Busy;
+
             public Dictionary<string, string> Icons = new Dictionary<string, string>();
         }
 
@@ -2183,6 +2315,8 @@ namespace Oxide.Plugins
                     Milestone = level.Free.Milestone || level.Paid.Milestone,
                 };
 
+                card.XpText = CardXpText(frame, level, out card.XpLive);
+
                 FillLane(frame, session, level, LaneFree, card.Free);
                 FillLane(frame, session, level, LanePaid, card.Paid);
 
@@ -2199,6 +2333,40 @@ namespace Oxide.Plugins
             }
 
             return view;
+        }
+
+        /// <summary>
+        /// O XP que vai na tarja do card.
+        ///
+        /// ####  UM NÚMERO SÓ, E ELE RESPONDE "QUANTO FALTA PARA ESTE?"  ####
+        ///
+        /// A tarja tem 221 px e já carrega o "NÍVEL N". Cabe UM número, e
+        /// dos três possíveis (custo do degrau, acumulado, distância) o que
+        /// o dono pediu é a distância — os outros dois estão no modal, onde
+        /// há espaço para dizer o que são.
+        ///
+        /// Nível já alcançado não tem distância: ali vai o acumulado, em
+        /// cinza. Não é enfeite — é o que deixa a curva LEGÍVEL de card a
+        /// card (500, 1.250, 2.250, 3.500…), que é a pergunta de fundo: por
+        /// que o nível 9 demora mais que o 2.
+        ///
+        /// Sem XP no nível (o agente não mandou), texto nenhum: inventar um
+        /// número aqui seria pior que a tarja de antes.
+        /// </summary>
+        private static string CardXpText(Frame frame, Level level, out bool live)
+        {
+            live = false;
+            if (level.Xp <= 0) return "";
+
+            // Sem progresso, a régua ainda é verdade — ela não depende de
+            // quem olha. O que não se pode é fingir saber a distância.
+            if (!frame.Known || level.Number <= frame.Progress.Level) return Thousands(level.Xp) + " XP";
+
+            long gap = level.Xp - frame.Progress.Xp;
+            if (gap <= 0) return Thousands(level.Xp) + " XP";
+
+            live = true;
+            return "faltam " + Thousands(gap) + " XP";
         }
 
         private void FillLane(Frame frame, MenuSession session, Level level, string lane, LaneView view)
@@ -2301,6 +2469,91 @@ namespace Oxide.Plugins
             return view;
         }
 
+        /// <summary>
+        /// O modal de um nível. `null` quando não há nível aberto.
+        ///
+        /// ####  O CUSTO DO DEGRAU SE CALCULA AQUI  ####
+        ///
+        /// O agente manda o ACUMULADO de cada nível (`levels[].xp`), e é a
+        /// escolha certa: é o número contra o qual o XP do jogador se
+        /// compara, e um custo de degrau mandado à parte seria uma segunda
+        /// fonte para a mesma verdade. O degrau é a diferença para o nível
+        /// ANTERIOR DA LISTA — não `Number - 1`, porque a trilha pode pular
+        /// números e o vizinho na lista é quem realmente veio antes.
+        /// </summary>
+        private DetailView ComputeDetail(Frame frame, MenuSession session)
+        {
+            if (session.DetailLevel == 0) return null;
+
+            List<Level> levels = frame.Season.Levels;
+            Level level = null;
+            long previousXp = 0;
+
+            for (int i = 0; i < levels.Count; i++)
+            {
+                if (levels[i].Number != session.DetailLevel) continue;
+
+                level = levels[i];
+                if (i > 0) previousXp = levels[i - 1].Xp;
+                break;
+            }
+
+            if (level == null) return null;
+
+            DetailView view = new DetailView
+            {
+                Token = session.Token,
+                Level = level.Number,
+                Title = "NÍVEL " + level.Number,
+                Milestone = level.Free.Milestone || level.Paid.Milestone,
+                Current = frame.Known && level.Number == frame.Progress.Level,
+                Known = frame.Known,
+                Busy = session.Busy,
+                Icons = _icons,
+            };
+
+            if (level.Xp > 0)
+            {
+                view.TotalText = Thousands(level.Xp) + " XP";
+                view.StepText = Thousands(Math.Max(0L, level.Xp - previousXp)) + " XP";
+            }
+
+            if (!frame.Known)
+            {
+                view.GapText = "Sincronizando…";
+            }
+            else if (level.Xp <= 0)
+            {
+                // Nível sem XP na carga: a trilha existe, a régua não. Dizer
+                // "faltam 0" seria afirmar que já dá para levar.
+                view.GapText = "";
+            }
+            else if (level.Number <= frame.Progress.Level || frame.Progress.Xp >= level.Xp)
+            {
+                view.GapText = "Você já alcançou este nível.";
+                view.Reached = true;
+                view.StepFill = 1f;
+            }
+            else
+            {
+                view.GapText = "Faltam " + Thousands(level.Xp - frame.Progress.Xp) + " XP.";
+
+                // O quanto do DEGRAU já foi andado — e não o quanto da
+                // temporada. A barra do cabeçalho já mede o degrau atual; esta
+                // mede ESTE degrau, que pode estar três níveis à frente e
+                // nesse caso nasce vazia, que é a verdade.
+                long span = level.Xp - previousXp;
+                view.StepFill = span > 0
+                    ? Mathf.Clamp01((float)(frame.Progress.Xp - previousXp) / span)
+                    : 0f;
+            }
+
+            FillLane(frame, session, level, LaneFree, view.Free);
+            FillLane(frame, session, level, LanePaid, view.Paid);
+
+            return view;
+        }
+
         // ---- a única porta de desenho ------------------------------
 
         /// <summary>
@@ -2324,6 +2577,15 @@ namespace Oxide.Plugins
             if ((regions & Region.Track) != 0 && session.BoxOpen)
             {
                 regions |= Region.Box;
+            }
+
+            // Pelo mesmo motivo, e depois da caixa: o modal é o que fica por
+            // cima de tudo. Ele também mostra o estado das faixas, então um
+            // redesenho da trilha que o deixasse de fora o congelaria no
+            // estado anterior.
+            if ((regions & (Region.Track | Region.Box)) != 0 && session.DetailLevel != 0)
+            {
+                regions |= Region.Detail;
             }
 
             Frame frame = Prepare(player);
@@ -2352,6 +2614,30 @@ namespace Oxide.Plugins
                     // ninguém abriu.
                     CuiHelper.DestroyUi(player, UiBox);
                     session.BoxDrawn = false;
+                }
+            }
+
+            if ((regions & Region.Detail) != 0)
+            {
+                DetailView detail = session.DetailLevel != 0 ? ComputeDetail(frame, session) : null;
+
+                if (detail != null)
+                {
+                    second.AddRange(BuildDetail(detail));
+                    session.DetailDrawn = true;
+                }
+                else
+                {
+                    // Fechado, ou apontando para um nível que a temporada nova
+                    // não tem mais. Nos dois casos a sessão esquece o número:
+                    // senão o próximo `sync` tentaria reabrir um nível morto.
+                    session.DetailLevel = 0;
+
+                    if (session.DetailDrawn)
+                    {
+                        CuiHelper.DestroyUi(player, UiDetail);
+                        session.DetailDrawn = false;
+                    }
                 }
             }
 
@@ -3040,9 +3326,32 @@ namespace Oxide.Plugins
             float strip = card.Milestone ? LevelStrip + MilestoneExtra : LevelStrip;
             float lane = (box.H - strip) / 2f;
 
-            Panel(canvas, box, 0, 0, box.W, strip, card.Current ? ColRust : ColSurface2);
-            Label(canvas, box, 0, 0, box.W, strip, card.LevelText, card.Milestone ? 14 : 12,
+            // ####  A TARJA DO NÍVEL É O BOTÃO DO MODAL  ####
+            //
+            // Ela já existia como painel: virar botão troca o componente e
+            // não acrescenta elemento nenhum — e com 22 níveis na trilha,
+            // cada elemento novo no card é multiplicado por 22. O alvo é
+            // grande (221 × 24) e está no topo do card, que é onde o olho
+            // já está quando lê o número do nível.
+            string stripName = Button(canvas, box, 0, 0, box.W, strip, card.Current ? ColRust : ColSurface2,
+                                      MenuDetailCommand + " " + token + " " + card.Level, canvas.NextName());
+            Box stripBox = new Box(stripName, box.W, strip);
+
+            Label(canvas, stripBox, 8, 0, 74, strip, card.LevelText, card.Milestone ? 14 : 12,
+                  card.Current ? ColText : ColMuted, TextAnchor.MiddleLeft, true);
+
+            // O XP do nível, à direita. Ver `CardXpText`: "faltam …" sai
+            // mais claro porque é a resposta viva; o acumulado de um nível já
+            // alcançado sai em cinza, de régua.
+            Label(canvas, stripBox, 82, 0, stripBox.W - 108, strip, card.XpText, card.Milestone ? 11 : 10,
+                  card.XpLive ? ColText : ColMuted, TextAnchor.MiddleRight, false);
+
+            // A marca do clique. Um alvo sem marca é um alvo que ninguém
+            // encontra — e este é o único elemento que o modal custa no card.
+            Label(canvas, stripBox, stripBox.W - 24, 0, 18, strip, "[i]", 10,
                   card.Current ? ColText : ColMuted, TextAnchor.MiddleCenter, true);
+
+            Tip(canvas, stripName, "Ver o detalhe deste nível.");
 
             LaneBox(canvas, box, 0, strip, box.W, lane, card.Free, card.Level, LaneFree, token, icons);
 
@@ -3356,6 +3665,224 @@ namespace Oxide.Plugins
             return canvas.Parts();
         }
 
+        // ---- o modal de detalhe ------------------------------------
+
+        private const float DetailWidth = 560f;
+        private const float DetailHeight = 430f;
+
+        /// <summary>A altura de um bloco de faixa dentro do modal.</summary>
+        private const float DetailLaneHeight = 100f;
+
+        /// <summary>
+        /// O modal de um nível.
+        ///
+        /// ####  O QUE ELE TEM QUE O CARD NÃO PODE TER  ####
+        ///
+        ///   · os TRÊS números do XP juntos, que é como a curva se explica
+        ///   · o rótulo INTEIRO da recompensa (o card corta em 34)
+        ///   · o estado de cada faixa POR EXTENSO, e não só como selo
+        ///   · o motivo do cadeado em texto na tela, e não só no tooltip
+        ///
+        /// Ele desenha por cima de tudo porque é o último do segundo grupo
+        /// de `Redraw`, e cobre só o próprio retângulo: painel transparente
+        /// de tela cheia engole o clique (armadilha 6).
+        /// </summary>
+        private static List<string> BuildDetail(DetailView view)
+        {
+            Canvas canvas = new Canvas("OZP.D");
+
+            Box frame = RegionRoot(canvas, UiDetail, (WinWidth - DetailWidth) / 2f,
+                                   (WinHeight - DetailHeight) / 2f, DetailWidth, DetailHeight,
+                                   view.Milestone ? ColAmber : ColBorder);
+
+            string innerName = Panel(canvas, frame, 1, 1, DetailWidth - 2, DetailHeight - 2, ColSurface,
+                                     canvas.NextName());
+            Box body = new Box(innerName, DetailWidth - 2, DetailHeight - 2);
+
+            Panel(canvas, body, 0, 0, body.W, 2, ColRust);
+
+            Label(canvas, body, 16, 6, 300, 38, view.Title, 18, ColText, TextAnchor.MiddleLeft, true);
+
+            if (view.Milestone)
+            {
+                Label(canvas, body, 120, 6, 200, 38, "MARCO DA TEMPORADA", 11, ColAmber, TextAnchor.MiddleLeft, true);
+            }
+
+            if (view.Current)
+            {
+                Label(canvas, body, body.W - 240, 6, 180, 38, "VOCÊ ESTÁ AQUI", 11, ColAmber,
+                      TextAnchor.MiddleRight, true);
+            }
+
+            TextButton(canvas, body, body.W - 44, 10, 28, 28, ColSurface2,
+                       MenuDetailCommand + " " + view.Token + " " + view.Level, "X", 12, ColText);
+
+            Panel(canvas, body, 0, 44, body.W, 1, ColBorder);
+
+            // ---- o XP, os três números juntos ----
+
+            Label(canvas, body, 16, 52, 300, 18, "O XP DESTE NÍVEL", 11, ColMuted, TextAnchor.MiddleLeft, true);
+
+            DetailRow(canvas, body, 74, "Custo deste degrau", view.StepText);
+            DetailRow(canvas, body, 96, "Total acumulado para alcançá-lo", view.TotalText);
+
+            // A barra mede ESTE degrau, e não a temporada: um nível três
+            // passos à frente nasce com a barra vazia, que é a verdade.
+            Panel(canvas, body, 16, 126, body.W - 32, 8, ColSurface2);
+            if (view.StepFill > 0f)
+            {
+                Panel(canvas, body, 16, 126, (body.W - 32) * Mathf.Clamp01(view.StepFill), 8, ColRust);
+            }
+
+            if (view.GapText.Length > 0)
+            {
+                Label(canvas, body, 16, 138, body.W - 32, 22, view.GapText, 12,
+                      view.Reached ? ColOlive : ColText, TextAnchor.MiddleLeft, false);
+            }
+
+            Panel(canvas, body, 0, 166, body.W, 1, ColBorder);
+
+            DetailLane(canvas, body, 16, 176, body.W - 32, DetailLaneHeight, view, view.Free, LaneFree,
+                       "RECOMPENSA GRÁTIS");
+            DetailLane(canvas, body, 16, 176 + DetailLaneHeight + 10, body.W - 32, DetailLaneHeight, view,
+                       view.Paid, LanePaid, "RECOMPENSA DO PASSE");
+
+            Label(canvas, body, 16, body.H - 30, body.W - 32, 24,
+                  "Clique de novo na tarja do nível para fechar.", 10, ColMuted, TextAnchor.MiddleLeft, false);
+
+            return canvas.Parts();
+        }
+
+        /// <summary>Uma linha "rótulo … valor" do bloco de XP. Valor vazio some com a linha.</summary>
+        private static void DetailRow(Canvas canvas, Box body, float y, string label, string value)
+        {
+            if (string.IsNullOrEmpty(value)) return;
+
+            Label(canvas, body, 16, y, 340, 20, label, 11, ColMuted, TextAnchor.MiddleLeft, false);
+            Label(canvas, body, body.W - 216, y, 200, 20, value, 13, ColText, TextAnchor.MiddleRight, true);
+        }
+
+        /// <summary>
+        /// Uma faixa dentro do modal: ícone grande, rótulo INTEIRO, o estado
+        /// por extenso e o motivo em texto na tela.
+        ///
+        /// O resgate também mora aqui: quem abriu o detalhe para decidir não
+        /// deveria ter de fechá-lo para agir.
+        /// </summary>
+        private static void DetailLane(Canvas canvas, Box parent, float x, float y, float w, float h,
+                                       DetailView view, LaneView lane, string key, string title)
+        {
+            bool paid = key == LanePaid;
+
+            if (!lane.Has)
+            {
+                string emptyName = Panel(canvas, parent, x, y, w, h, ColLockedFill, canvas.NextName());
+                Box emptyBox = new Box(emptyName, w, h);
+
+                Label(canvas, emptyBox, 16, 10, 300, 18, title, 11, ColMuted, TextAnchor.MiddleLeft, true);
+                Label(canvas, emptyBox, 16, 34, w - 32, 22,
+                      paid ? "Este nível não dá nada na faixa do passe."
+                           : "Este nível não dá nada na faixa grátis.",
+                      12, ColMuted, TextAnchor.MiddleLeft, false);
+                return;
+            }
+
+            bool dim = lane.State == StateLocked || lane.State == StateSyncing;
+            string fill = lane.State == StateClaimed ? ColClaimedFill
+                : dim ? (paid ? ColPaidLockedFill : ColLockedFill)
+                : paid ? ColPaidFill
+                : ColSurface2;
+
+            string name = Panel(canvas, parent, x, y, w, h, fill, canvas.NextName());
+            Box box = new Box(name, w, h);
+
+            if (paid)
+            {
+                Panel(canvas, box, 0, 0, 3, h, dim ? Faded(ColAmber, 0.45f) : ColAmber);
+            }
+
+            Label(canvas, box, 16, 6, 300, 16, title, 11, paid ? ColAmber : ColMuted, TextAnchor.MiddleLeft, true);
+
+            float iconSize = 64f;
+            float iconY = (h - iconSize) / 2f;
+
+            if (lane.ItemId != 0)
+            {
+                Icon(canvas, box, 16, iconY, iconSize, iconSize, lane.ItemId, lane.SkinId,
+                     dim ? ColIconDim : "1 1 1 1");
+            }
+            else if (lane.Icon.Length > 0)
+            {
+                Png(canvas, box, 16, iconY, iconSize, iconSize, lane.Icon, dim ? ColIconDim : "1 1 1 1");
+            }
+            else
+            {
+                Label(canvas, box, 16, iconY, iconSize, iconSize, KindMark(lane.Kind), 16,
+                      dim ? ColMuted : ColAmber, TextAnchor.MiddleCenter, true);
+            }
+
+            // ####  O RÓTULO INTEIRO, QUE É METADE DO PORQUÊ DESTE MODAL  ####
+            //
+            // No card ele sai cortado em 34 caracteres. Aqui há 340 px de
+            // largura e duas linhas de altura: "Fuzil Semiautomático Brasa
+            // Incandescente ×2" cabe sem reticências.
+            float textX = 16 + iconSize + 14;
+            Label(canvas, box, textX, 24, w - textX - 150, 28, lane.Label, 14, dim ? ColMuted : ColText,
+                  TextAnchor.UpperLeft, false);
+
+            // O motivo do cadeado deixa de ser só tooltip: no modal ele é
+            // texto na tela, que é onde alguém decide se compra o passe.
+            if (lane.Tip.Length > 0)
+            {
+                Label(canvas, box, textX, 52, w - textX - 150, 22, lane.Tip, 10, ColMuted,
+                      TextAnchor.UpperLeft, false);
+            }
+
+            // O estado POR EXTENSO, com o mesmo selo do card ao lado: quem
+            // não distingue as cores lê o selo, e quem não lê o selo lê a
+            // palavra (03 §3.1, regra 1).
+            Badge(canvas, box, textX, 76, lane.State, view.Icons);
+            Label(canvas, box, textX + 26, 74, w - textX - 176, 24, DetailStateText(lane.State), 11,
+                  DetailStateColor(lane.State), TextAnchor.MiddleLeft, true);
+
+            if (lane.State != StateAvailable) return;
+
+            if (view.Busy)
+            {
+                DeadButton(canvas, box, w - 140, (h - 34) / 2f, 124, 34, "AGUARDE…", 12);
+            }
+            else
+            {
+                TextButton(canvas, box, w - 140, (h - 34) / 2f, 124, 34, ColRust,
+                           MenuClaimCommand + " " + view.Token + " " + view.Level + " " + key,
+                           "RESGATAR", 12, ColText);
+            }
+        }
+
+        /// <summary>O estado de uma faixa em palavras. É o par do selo do `Badge`.</summary>
+        private static string DetailStateText(int state)
+        {
+            switch (state)
+            {
+                case StateClaimed: return "JÁ RESGATADO";
+                case StateAvailable: return "PRONTO PARA RESGATAR";
+                case StatePending: return "ESPERANDO O SERVIDOR…";
+                case StateSyncing: return "SINCRONIZANDO…";
+                default: return "BLOQUEADO";
+            }
+        }
+
+        private static string DetailStateColor(int state)
+        {
+            switch (state)
+            {
+                case StateClaimed: return ColOlive;
+                case StateAvailable: return ColAmber;
+                case StatePending: return ColAmber;
+                default: return ColMuted;
+            }
+        }
+
         // ============================================================
         //  §11  origemz.passe.bytes  -  o pior caso, medido
         //
@@ -3435,6 +3962,11 @@ namespace Oxide.Plugins
                     LevelText = "NÍVEL " + i,
                     Current = i == 17,
                     Milestone = i % 10 == 0,
+
+                    // O pior caso do XP na tarja é o "faltam …": ele tem a
+                    // palavra a mais, e o número grande em todos os cards.
+                    XpText = "faltam 999.999 XP",
+                    XpLive = true,
                 };
 
                 // O pior caso de BYTES é toda faixa com rótulo longo, ícone,
@@ -3470,6 +4002,27 @@ namespace Oxide.Plugins
                 boxView.Rows.Add(new BoxRow { Label = longLabel, Origin = i % 2 == 0 ? "full" : "season" });
             }
 
+            // O modal do pior caso: marco (a moldura âmbar), nível atual, as
+            // duas faixas com rótulo longo, motivo e botão de resgate.
+            DetailView detail = new DetailView
+            {
+                Token = token,
+                Level = 17,
+                Title = "NÍVEL 17",
+                Milestone = true,
+                Current = true,
+                Known = true,
+                StepText = "999.999 XP",
+                TotalText = "9.999.999 XP",
+                GapText = "Faltam 999.999 XP.",
+                StepFill = 0.6f,
+                Icons = icons,
+            };
+
+            FillWorst(detail.Free, longLabel, itemId, skin, false, true, StateAvailable);
+            FillWorst(detail.Paid, longLabel, itemId, skin, true, true, StateLocked);
+            detail.Paid.Tip = "Ative o passe para levar esta recompensa — ela fica guardada até lá.";
+
             string window = BuildWindow(token);
             string headJson = BuildHead(head);
             string footJson = BuildFoot(foot);
@@ -3477,6 +4030,8 @@ namespace Oxide.Plugins
             string boxJson = Pack(boxParts, int.MaxValue)[0];
             List<string> trackParts = BuildTrack(track);
             string trackJson = Pack(trackParts, int.MaxValue)[0];
+            List<string> detailParts = BuildDetail(detail);
+            string detailJson = Pack(detailParts, int.MaxValue)[0];
 
             // A abertura como o `Redraw` a manda: a trilha sai elemento por
             // elemento e o `Pack` corta no limite. Medir a região inteira num
@@ -3495,6 +4050,7 @@ namespace Oxide.Plugins
                 ["track"] = Bytes(trackJson),
                 ["foot"] = Bytes(footJson),
                 ["box"] = Bytes(boxJson),
+                ["detail"] = Bytes(detailJson),
             };
 
             JArray sends = new JArray();
