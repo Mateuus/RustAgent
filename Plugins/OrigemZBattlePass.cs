@@ -2374,6 +2374,27 @@ namespace Oxide.Plugins
         /// <summary>O fundo de uma faixa já levada: verde bem escuro, para o ✓ não brigar com o texto.</summary>
         private static readonly string ColClaimedFill = Hex("#18200F");
 
+        /// <summary>
+        /// O fundo da faixa PAGA.
+        ///
+        /// ####  ELA PRECISA SE LER COMO PAGA ANTES DA LETRA MIUDA  ####
+        ///
+        /// O dono viu a tela no jogo (18/09/2026) e disse que nao dava
+        /// para saber qual faixa era a paga: ela tinha um "PASSE" de 9
+        /// pontos num canto, e mais nada. E ela e justamente a que
+        /// vende o passe -- se o jogador nao percebe que aquilo e o
+        /// pago, o cadeado nao significa nada.
+        ///
+        /// O tom quente resolve isso sem custar elemento nenhum: e a
+        /// mesma cor de fundo trocada. A barra de acento que vem junto
+        /// custa um elemento por card, e e a linguagem que o projeto
+        /// ja usa -- a barrinha antes de todo titulo do painel.
+        /// </summary>
+        private static readonly string ColPaidFill = Hex("#241B10");
+
+        /// <summary>O mesmo fundo, para quem ja levou: o verde do resgate vence o ambar.</summary>
+        private static readonly string ColPaidLockedFill = Hex("#1C1509");
+
         /// <summary>O fundo do card do nível atual, dentro da moldura acesa.</summary>
         private static readonly string ColCurrentFill = Hex("#241A18");
 
@@ -2410,16 +2431,29 @@ namespace Oxide.Plugins
 
         // ---- a trilha ----------------------------------------------
 
-        private const int TrackColumns = 4;
+        // ####  CINCO POR LINHA, E MAIS TRILHA NA TELA  ####
+        //
+        // Pedido do dono depois de ver a tela no jogo (18/09/2026). A
+        // largura util nao muda -- 1162 px --, entao a quinta coluna
+        // sai da largura do card: 5 * 221 + 4 * 14 = 1161.
+        //
+        // A faixa tambem encolheu (76 -> 64), e e dai que vem "mais
+        // niveis": a area rolavel tem 476 px, e com o card em 152 em
+        // vez de 176 cabem ~2,8 linhas em vez de ~2,5. Com as cinco
+        // colunas, sao ~14 niveis na tela contra os 10 de antes.
+        //
+        // O piso dos 64 px e o icone de marco, que tem 56: abaixo
+        // disso ele encosta na borda da faixa.
+        private const int TrackColumns = 5;
         private const float TrackPad = 12f;
-        private const float CardWidth = 280f;
+        private const float CardWidth = 221f;
         private const float CardGap = 14f;
         private const float LevelStrip = 24f;
 
         /// <summary>O marco ganha TAMANHO, e não só cor (03 §3.1, regra 5): a tarja cresce e o ícone também.</summary>
         private const float MilestoneExtra = 8f;
 
-        private const float LaneHeight = 76f;
+        private const float LaneHeight = 64f;
         private const float CardHeight = LevelStrip + 2 * LaneHeight;
         private static readonly float CardsWidth = TrackColumns * CardWidth + (TrackColumns - 1) * CardGap;
 
@@ -2978,8 +3012,12 @@ namespace Oxide.Plugins
             bool dim = lane.State == StateLocked || lane.State == StateSyncing;
             bool live = lane.State == StateAvailable;
 
+            // A faixa paga tem fundo proprio: ver ColPaidFill. O verde
+            // do resgate vence o ambar, porque "ja levou" e a resposta
+            // mais util quando as duas coisas sao verdade.
             string fill = lane.State == StateClaimed ? ColClaimedFill
-                : dim ? ColLockedFill
+                : dim ? (lane.Paid ? ColPaidLockedFill : ColLockedFill)
+                : lane.Paid ? ColPaidFill
                 : ColSurface2;
 
             string name;
@@ -3027,7 +3065,13 @@ namespace Oxide.Plugins
             // jogador ver o que está deixando na mesa (03 §3.1, regra 2).
             if (lane.Paid)
             {
-                Label(canvas, box, textX, box.H - 18, 60, 14, "PASSE", 9, dim ? Faded(ColAmber, 0.6f) : ColAmber,
+                // A barra de acento na borda esquerda -- um elemento, e a
+                // mesma linguagem da barrinha que abre todo titulo do
+                // painel. Ela e o que se ve de relance; o "PASSE" abaixo
+                // e para quem ja parou para ler.
+                Panel(canvas, box, 0, 0, 3, box.H, dim ? Faded(ColAmber, 0.45f) : ColAmber, canvas.NextName());
+
+                Label(canvas, box, textX, box.H - 16, 60, 14, "PASSE", 10, dim ? Faded(ColAmber, 0.6f) : ColAmber,
                       TextAnchor.MiddleLeft, true);
             }
 
