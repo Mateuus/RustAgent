@@ -564,6 +564,11 @@ export interface QuestsCatalog {
   /** O nome do ranking daquela metrica. `null` = nao esta no catalogo. */
   readonly rankingLabelOf?: (metric: string) => string | null;
   /**
+   * O nome da skin do Workshop, pela MARCA. `null` = nao esta (mais)
+   * no catalogo deste agente.
+   */
+  readonly skinLabelOf?: (shortname: string, workshopId: string) => string | null;
+  /**
    * O item custom daquele par (item base, skin). `null` = e um item
    * do jogo.
    *
@@ -1016,6 +1021,35 @@ function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardL
 
     case 'vip':
       return { text: `VIP ${reward.tier}`, icon: null };
+
+    case 'xp':
+      // "800 XP" sozinho não diz de quê: o jogador tem ponto de
+      // ranking, moeda e agora isto. A palavra "passe" é o que liga
+      // o número à trilha que ele vê no outro menu.
+      return { text: `${reward.amount.toLocaleString('pt-BR')} XP no passe`, icon: null };
+
+    case 'skin': {
+      // ####  O NOME DA SKIN É O DELA, E NÃO O DO ITEM  ####
+      //
+      // "AK Brasa" é o que o jogador vai procurar no menu de skins.
+      // Sem o catálogo do Workshop na mão, a linha cai para o item
+      // base ("skin de AK-47") — que ainda diz o que ele ganha, ao
+      // contrário de um número de Workshop.
+      const item = catalog.itemOf?.(reward.shortname) ?? null;
+      const label =
+        catalog.skinLabelOf?.(reward.shortname, reward.skinId) ??
+        `skin de ${item?.displayName ?? reward.shortname}`;
+
+      return {
+        // O prazo entra na linha: uma skin por 30 dias e uma para
+        // sempre são promessas diferentes, e é aqui que ele decide
+        // se a missão vale a pena.
+        text: reward.days === null ? label : `${label} (${plural(reward.days, 'dia', 'dias')})`,
+        // O cliente desenha o item base COM a skin, pelo mesmo
+        // caminho do item custom: é a única prévia que a tela tem.
+        icon: item === null ? null : { kind: 'item', itemId: item.itemId, skinId: reward.skinId },
+      };
+    }
   }
 }
 

@@ -18,14 +18,22 @@
 //    3. as janelas viraram?       `sweepPeriods`
 //    4. o tempo online do intervalo
 //    5. pagina o `flush` até o fim
-//    6. aplica TUDO numa transação só
+//    6. aplica TUDO numa transação só — e o XP do passe vai DENTRO
 //    7. `ack` — depois do COMMIT, sempre
+//    8. o passe avisa quem subiu de nível — também depois
 //
 //  O passo 2 vem antes do 5 porque um lote que chegasse ANTES da
 //  virada somaria o minério do mundo velho no período do mundo
 //  novo. E o 7 vem depois do 6 porque confirmar antes de gravar
 //  troca uma duplicata inofensiva — que o `batchId` recusa em
 //  `stat_batches` — por uma perda silenciosa.
+//
+//  O XP fica no 6, e não num passo 8.5, pela mesma aritmética: o
+//  delta não traz identificador de ocorrência, então a única
+//  proteção contra contar duas vezes é o `batchId` desta
+//  transação. O aviso do 8 é que sai de fora dela — anunciar um
+//  nível que o rollback desfaz é pior do que avisar meio minuto
+//  depois.
 //
 //  ------------------------------------------------------------
 //  ####  O PASSO 2 CONSERTA UM BURACO QUE NÃO É SÓ DO RANKING  ####
@@ -103,6 +111,39 @@ export interface StatsCollectorPlayers {
   playedSecondsOf(serverId: string): ReadonlyMap<string, number>;
 }
 
+/**
+ * O passe de batalha, como o coletor o enxerga — e nada além.
+ *
+ * ####  O XP DE AÇÃO NASCE DESTE LOTE  ####
+ *
+ * Não há evento de "matou" nem de "farmou": o que chega é este
+ * delta acumulado, sem identificador de ocorrência. A idempotência
+ * disponível é o `batchId`, e ela só cobre o que acontece DENTRO da
+ * transação do lote — por isso `creditBatchXp` é chamado pelo
+ * `onApplied` do `applyBatch`, e não num passo depois
+ * (Docs/BattlePass/02 §1.1).
+ *
+ * Em produção quem satisfaz isto é o `BattlePassService`; no teste,
+ * um objeto de duas funções.
+ */
+export interface StatsCollectorBattlePass {
+  /** Roda DENTRO da transação do lote. Ver `BattlePassService`. */
+  creditBatchXp(input: {
+    readonly serverId: string;
+    readonly players: readonly { readonly steamId: string; readonly metrics: Readonly<Record<string, number>> }[];
+  }): {
+    readonly granted: number;
+    readonly capped: number;
+    readonly touched: readonly string[];
+    readonly levelUps: readonly { readonly steamId: string; readonly to: number }[];
+  };
+  /** Reenvia a trilha de quem mudou. Chamado DEPOIS do commit. */
+  playersChanged(serverId: string, steamIds: readonly string[]): void;
+}
+
+/** O que o passe devolveu lá de dentro, para usar depois do commit. */
+type BatchXpCarry = ReturnType<StatsCollectorBattlePass['creditBatchXp']>;
+
 /** O mundo configurado, como ele vai para a linha de `wipes`. */
 export interface StatsCollectorWorld {
   readonly level: string | null;
@@ -162,6 +203,13 @@ export interface StatsCollectorDeps {
    * `rankings/plugin-metrics.ts`.
    */
   readonly gather?: (() => readonly string[]) | undefined;
+  /**
+   * O passe de batalha, quando este agente tem um.
+   *
+   * Ausente = o coletor roda exatamente como rodava. O XP é carona
+   * do lote, e não condição dele.
+   */
+  readonly battlePass?: StatsCollectorBattlePass | undefined;
   readonly logger?: Logger | undefined;
   readonly intervalMs?: number | undefined;
 }
@@ -183,6 +231,10 @@ export interface StatsRoundResult {
   readonly shrunkPages: number;
   /** `false` = o `batchId` já tinha sido aplicado (o `ack` se perdeu). */
   readonly applied: boolean;
+  /** O XP do passe que este lote rendeu. `0` também quando não há passe. */
+  readonly xpGranted: number;
+  /** O que o teto diário cortou — e que não fica para amanhã. */
+  readonly xpCapped: number;
 }
 
 /** O lote inteiro, montado a partir das páginas. */
@@ -498,6 +550,23 @@ export class StatsCollector {
     // lote com conteúdo.
     const merged = mergePlayers(batch.players, played.deltas);
 
+    // ####  O XP DO PASSE É CARONA DESTA TRANSAÇÃO  ####
+    //
+    // O `creditBatchXp` roda no `onApplied`, lá dentro, e o que ele
+    // devolve fica aqui fora para ser usado DEPOIS do commit: o
+    // aviso de "você subiu de nível" não pode sair de dentro de uma
+    // transação que ainda pode virar rollback.
+    //
+    // O delta que ele lê é o `merged` — o mesmo que o ranking soma,
+    // com o `time.played` já costurado. Aquela métrica não está no
+    // cardápio de XP de propósito: ela só cresce quando a SESSÃO
+    // FECHA, e quem está online há três horas tem o número de ontem.
+    //
+    // A caixa (e não uma variável solta) é do TypeScript: o que uma
+    // closure escreve numa `let` ele continua lendo como `null` aqui
+    // fora, porque não sabe que o `applyBatch` a chamou.
+    const xp: { value: BatchXpCarry | null } = { value: null };
+
     const result =
       batch.batchId === ''
         ? null
@@ -507,6 +576,9 @@ export class StatsCollector {
               batchId: batch.batchId,
               seq: batch.seq,
               players: merged,
+              onApplied: (players) => {
+                xp.value = this.#deps.battlePass?.creditBatchXp({ serverId, players }) ?? null;
+              },
               records: batch.records.map((record) => ({
                 steamId: record.steamId,
                 name: record.name ?? null,
@@ -554,6 +626,15 @@ export class StatsCollector {
 
     this.#status.set(serverId, 'ok');
 
+    // 8. e o passe avisa quem mudou — também depois do COMMIT, pelo
+    // mesmo motivo do `ack`: a tela do jogador é o último lugar onde
+    // se quer descobrir que a transação voltou atrás.
+    const credited = xp.value;
+
+    if (credited !== null && credited.touched.length > 0) {
+      this.#deps.battlePass?.playersChanged(serverId, credited.touched);
+    }
+
     return {
       serverId,
       status: 'ok',
@@ -564,6 +645,8 @@ export class StatsCollector {
       timePlayers: played.deltas.size,
       shrunkPages: batch.shrunkPages,
       applied: result?.applied ?? false,
+      xpGranted: credited?.granted ?? 0,
+      xpCapped: credited?.capped ?? 0,
     };
   }
 
@@ -640,6 +723,14 @@ export class StatsCollector {
       timePlayers: 0,
       shrunkPages: 0,
       applied: false,
+      // ####  "SEM DADOS" NÃO É "ZERO"  ####
+      //
+      // Uma rodada pulada — plugin descarregado, RCON fora — sai com
+      // `status` dizendo isso. O zero daqui é o zero de "não houve
+      // rodada", e quem lê o resultado tem o `status` ao lado para
+      // não confundi-lo com "ninguém ganhou XP".
+      xpGranted: 0,
+      xpCapped: 0,
     };
   }
 

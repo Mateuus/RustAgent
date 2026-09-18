@@ -296,6 +296,27 @@ export interface StatBatchInput {
   readonly periodIds?: readonly number[];
   /** O modo com que abrir um `season` que ainda não existe. */
   readonly seasonMode?: SeasonMode;
+  /**
+   * O que mais fazer com este lote, DENTRO da transação dele.
+   *
+   * ####  ELE EXISTE PORQUE O XP NÃO PODE SER UM SEGUNDO PASSO  ####
+   *
+   * O delta de 60 s não tem identificador de ocorrência: chega
+   * `{"pvp.kills": 3}`, e não três mortes. A única idempotência que
+   * existe é o `batchId` — e ela só cobre o que acontece dentro
+   * desta transação. Um segundo passo que lesse `player_stats`
+   * depois dobraria o XP numa rodada repetida, sem nada acusar
+   * (Docs/BattlePass/02 §1.1).
+   *
+   * Chamado UMA vez, e só quando o lote é novo: `applied: false` não
+   * chega aqui. Lançar aqui derruba o lote inteiro — o `ack` não sai
+   * e o plugin o remanda na volta seguinte, que é melhor do que
+   * contar ranking sem contar XP.
+   *
+   * Efeito de FORA do banco não entra aqui: um aviso disparado
+   * dentro da transação anunciaria o que um rollback desfaz.
+   */
+  readonly onApplied?: (players: readonly StatBatchPlayer[]) => void;
 }
 
 export interface ApplyBatchResult {
@@ -1254,6 +1275,14 @@ export class RankingsRepository {
           }
         }
       }
+
+      // ####  O CARONA DO LOTE: O XP DO PASSE  ####
+      //
+      // Aqui dentro, ao lado de onde os contadores acabaram de ser
+      // somados, e não num passo depois — é o `batchId` desta
+      // transação que impede a rodada repetida de pagar duas vezes.
+      // Ver `onApplied`.
+      input.onApplied?.(input.players);
 
       const recordsInserted = this.#insertRecords(input.records ?? [], periodIds, now);
 

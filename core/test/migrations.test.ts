@@ -502,3 +502,126 @@ describe('085 — a régua do `playtime` mudou de origem', () => {
     db.close();
   });
 });
+
+describe('103 — a loja aprende o formato "pass"', () => {
+  /** Um banco na 102 com uma categoria, um kit e as filhas dele. */
+  function seeded(): AgentDatabase {
+    const db = databaseAt(102);
+    const now = 1_760_000_000_000;
+
+    db.prepare(
+      `INSERT INTO store_categories (id, name, position, enabled, created_at, updated_at)
+       VALUES ('cat', 'Kits', 0, 1, @now, @now)`,
+    ).run({ now });
+
+    db.prepare(
+      `INSERT INTO store_offers
+         (id, category_id, kind, icon_shortname, icon_item_id, icon_skin_id, icon_file,
+          vip_tier, vip_days, vehicle_prefab, vehicle_fuel, name, price, old_price,
+          position, enabled, badge, created_at, updated_at)
+       VALUES ('kit-base', 'cat', 'bundle', 'box.wooden', 1, '0', NULL,
+               NULL, NULL, NULL, 0, 'Kit Base', 500, 900, 0, 1, 'promo', @now, @now)`,
+    ).run({ now });
+
+    db.prepare(
+      `INSERT INTO store_offer_items (id, offer_id, shortname, item_id, skin_id, amount, position)
+       VALUES ('kit-base_i0', 'kit-base', 'wood', 2, '0', 1000, 0)`,
+    ).run();
+
+    db.prepare(
+      `INSERT INTO store_offer_perks (id, offer_id, text, position)
+       VALUES ('kit-base_p0', 'kit-base', 'fila prioritária', 0)`,
+    ).run();
+
+    return db;
+  }
+
+  it('não perde a oferta, os itens nem as vantagens', () => {
+    // ####  A TABELA TEM DEPENDENTES, E ELAS CASCATEIAM  ####
+    //
+    // `store_offer_items` e `store_offer_perks` apontam para
+    // `store_offers(id)` com ON DELETE CASCADE, e o agente roda com
+    // `foreign_keys = ON`. Um DROP da tabela velha sem tirá-las do
+    // caminho antes levaria o conteúdo de TODA oferta da loja — e o
+    // sintoma seria um kit comprável que entrega nada.
+    const db = seeded();
+
+    runMigrations(db);
+
+    expect(db.prepare('SELECT * FROM store_offers').all()).toEqual([
+      expect.objectContaining({
+        id: 'kit-base',
+        kind: 'bundle',
+        name: 'Kit Base',
+        price: 500,
+        old_price: 900,
+        badge: 'promo',
+        // A coluna nova nasce vazia: nenhuma oferta antiga é passe.
+        pass_period: null,
+      }),
+    ]);
+
+    expect(db.prepare('SELECT offer_id, shortname, amount FROM store_offer_items').all()).toEqual([
+      { offer_id: 'kit-base', shortname: 'wood', amount: 1000 },
+    ]);
+
+    expect(db.prepare('SELECT offer_id, text FROM store_offer_perks').all()).toEqual([
+      { offer_id: 'kit-base', text: 'fila prioritária' },
+    ]);
+
+    db.close();
+  });
+
+  it('o CHECK passa a aceitar o kind "pass" — e só ele a mais', () => {
+    const db = seeded();
+    const now = 1_760_000_000_000;
+
+    const insertPass = (kind: string, id: string): void => {
+      db.prepare(
+        `INSERT INTO store_offers
+           (id, category_id, kind, icon_shortname, icon_item_id, icon_skin_id, name,
+            price, position, enabled, created_at, updated_at)
+         VALUES (@id, 'cat', @kind, 'box.wooden', 1, '0', 'Passe', 500, 0, 1, @now, @now)`,
+      ).run({ id, kind, now });
+    };
+
+    // Antes: o zod aceitaria e o banco recusaria — a feature ficaria
+    // completa e inerte.
+    expect(() => insertPass('pass', 'passe-1')).toThrow(/CHECK constraint failed/i);
+
+    runMigrations(db);
+
+    insertPass('pass', 'passe-1');
+
+    expect(
+      db.prepare("SELECT count(*) AS n FROM store_offers WHERE kind = 'pass'").get(),
+    ).toEqual({ n: 1 });
+
+    // O CHECK abriu para UM formato, e não para qualquer texto.
+    expect(() => insertPass('assinatura', 'passe-2')).toThrow(/CHECK constraint failed/i);
+
+    // E a forma do mês continua protegida pelo banco: a régua fina
+    // (mês de 01 a 12) está no zod, mas '2026-1' não chega à tabela.
+    expect(() =>
+      db.prepare("UPDATE store_offers SET pass_period = '2026-1' WHERE id = 'passe-1'").run(),
+    ).toThrow(/CHECK constraint failed/i);
+
+    db.close();
+  });
+
+  it('a categoria continua levando as ofertas dela em cascata', () => {
+    // A FK da oferta para a categoria precisa ter sobrevivido à
+    // reconstrução: sem ela, apagar uma categoria deixaria ofertas
+    // órfãs numa loja que ninguém mais vê.
+    const db = seeded();
+
+    runMigrations(db);
+    db.prepare("DELETE FROM store_categories WHERE id = 'cat'").run();
+
+    expect(db.prepare('SELECT count(*) AS n FROM store_offers').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM store_offer_items').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM store_offer_perks').get()).toEqual({ n: 0 });
+
+    db.close();
+  });
+});

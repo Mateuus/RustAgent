@@ -78,6 +78,7 @@ import {
   TEAM_SCREEN_ID,
   withTeamTab,
 } from './game/ui-team-screen.js';
+import { withPassCard } from './game/ui-pass-card.js';
 import { withSkinsTab } from './game/ui-skins-tab.js';
 import {
   createEventsScreenProvider,
@@ -93,7 +94,11 @@ import { WorkshopOwnedRepository } from './db/workshop-owned-repository.js';
 import { WorkshopSkinsRepository } from './db/workshop-repository.js';
 import { createWorkshopLookup } from './game/steam-workshop.js';
 import { WorkshopService } from './game/workshop.js';
+import { BattlePassSync } from './game/battlepass.js';
 import { WorkshopCatalog } from './game/workshop-catalog.js';
+import { BattlePassRepository } from './db/battlepass-repository.js';
+import { BattlePassDeliveryService } from './battlepass/delivery.js';
+import { BattlePassService, passGranterOf } from './battlepass/service.js';
 import { KothDeliveriesRepository } from './db/koth-deliveries-repository.js';
 import { TeamRanksRepository, TeamSettingsRepository } from './db/team-ranks-repository.js';
 import { CustomItemsSync, itemIconKey } from './game/custom-items-sync.js';
@@ -172,7 +177,7 @@ import { UiSync } from './game/ui-sync.js';
 import { WipeClock } from './game/wipe.js';
 import { StoreRepository } from './db/store-repository.js';
 import { WalletsRepository } from './db/wallets-repository.js';
-import { StoreService } from './store/service.js';
+import { daysLeftInPeriod, describePurchase, StoreService } from './store/service.js';
 import { LocalWallet, type Wallet } from './store/wallet.js';
 import { SiteWallet } from './store/site-wallet.js';
 import { SiteClient } from './site/client.js';
@@ -385,6 +390,11 @@ async function main(): Promise<void> {
   // do modo streamer -- e o gancho de console precisa dele aqui em
   // cima.
   let workshopService: WorkshopService | null = null;
+  // A carga do Passe de Batalha, pela MESMA razão: ela precisa do
+  // supervisor e da loja, e tres ganchos daqui de cima precisam
+  // dela -- o console (o `#OZPASSE#`), a reconexao do RCON e a
+  // entrada do jogador. Ver game/battlepass.ts.
+  let battlePassSync: BattlePassSync | null = null;
   // Os dois da fase de VIP e kits, pela MESMA razão dos de cima:
   // eles precisam do supervisor, e o gancho de reconexão precisa
   // deles. Ver o bloco de montagem, mais abaixo.
@@ -502,6 +512,11 @@ async function main(): Promise<void> {
       // sem skin nenhuma, e todo item nasceria vanilla ate alguem
       // editar a tela.
       workshopService?.handleRconConnected(serverId);
+      // E o Passe de Batalha, que perde MAIS que o cache: o segredo
+      // desta subida do agente vive na memoria do plugin, e sem ele
+      // o OrigemZBattlePass recusa todo pedido da tela. A copia em
+      // disco da temporada nao tem segredo nenhum -- de proposito.
+      battlePassSync?.handleRconConnected(serverId);
 
       // ####  E O VIP E OS KITS PELO MESMO MOTIVO — MAIS UM  ####
       //
@@ -647,6 +662,12 @@ async function main(): Promise<void> {
       // comparacao de string, e o comando sai de um relogio: falar
       // de dentro deste gancho e o laco descrito la em cima.
       workshopService?.handleLine(serverId, line);
+      // E o `#OZPASSE#`: o plugin do passe pedindo a carga depois de
+      // um reload, ou um jogador clicando em resgatar. Recusa na
+      // primeira comparacao de string, confere o segredo, e o
+      // comando sai de um relogio: falar de dentro deste gancho e o
+      // laco descrito la em cima. Ver game/battlepass.ts.
+      battlePassSync?.handleLine(serverId, line);
     },
     // Ver o comentário do `let wipeRunner`, logo acima.
     wipeRunner: {
@@ -802,6 +823,14 @@ async function main(): Promise<void> {
       // posse na memoria do plugin, o menu diz "sincronizando" ate
       // alguem mexer nela. Ver game/workshop.ts.
       workshopService?.handlePlayersJoined(serverId, steamIds);
+
+      // ####  E O PROGRESSO DO PASSE DELE, NA HORA  ####
+      //
+      // O plugin do passe NAO guarda progresso em disco (um nivel
+      // gravado ontem seria mostrado hoje como se fosse verdade),
+      // entao quem entra e desconhecido la. Sem esta linha, a trilha
+      // dele diria "sincronizando" ate o XP mudar alguma coisa.
+      battlePassSync?.handlePlayersJoined(serverId, steamIds);
     },
   });
 
@@ -1268,6 +1297,43 @@ async function main(): Promise<void> {
       : 'a carteira é a do SITE (o site externo é o dono do saldo)',
   );
 
+  // O passe de batalha. O catalogo (temporada, trilha, regras de XP)
+  // e da rede; o XP, o direito comprado e o resgate sao POR
+  // SERVIDOR. Ver db/battlepass-repository.ts e a migracao 101.
+  //
+  // Ele nasce ANTES da loja de propósito: é a loja que o injeta,
+  // como injeta a lista de VIPs. Um segundo lugar onde o direito
+  // nasce produziria passes que ninguém sabe expirar.
+  const battlePassRepository = new BattlePassRepository(db);
+  // A porta UNICA do modulo: o painel, o jogo e o site entram por
+  // ela. Sem `timeZone`, vale a da maquina do agente -- a mesma
+  // regua do resto do processo (rankings/periods.ts).
+  const battlePass = new BattlePassService({
+    repository: battlePassRepository,
+    serverIds: () => repository.list().map((server) => server.id),
+    // ####  O DIA DO TETO E O DIA DA DIARIA SAO O MESMO  ####
+    //
+    // "Farm teto de 100 XP por dia" precisa saber quando o dia vira,
+    // e o projeto ja decidiu isso uma vez: `reset_at_minute`, das
+    // missoes, contando dias de CALENDARIO e nao 24 horas. Um
+    // segundo relogio aqui discordaria do outro duas vezes por ano.
+    //
+    // O repositorio de missoes nasce mais abaixo (ele depende do
+    // supervisor); a funcao so e chamada quando ha XP para creditar,
+    // muito depois do boot.
+    resetAtMinuteOf: (serverId) => questsRepository.settingsOf(serverId).resetAtMinute,
+    // A temporada ou a trilha mudou: o catalogo desce de novo para
+    // todo servidor. O `?.` existe porque a carga nasce la embaixo,
+    // depois dos servidores -- e uma edicao no painel antes disso
+    // seria enviada no `syncAll('startup')` de qualquer jeito.
+    onChange: () => battlePassSync?.handleSeasonChanged(),
+    // E o que e DAQUELE jogador: XP creditado, resgate, direito
+    // comprado. So desce para quem esta online -- quem esta fora
+    // recebe ao entrar.
+    onPlayerChange: (serverId, steamId) =>
+      battlePassSync?.handlePlayerChanged(serverId, steamId),
+  });
+
   const store = new StoreService({
     repository: storeRepository,
     wallet,
@@ -1276,6 +1342,14 @@ async function main(): Promise<void> {
     // painel: ele expira, aparece na lista e sincroniza com o
     // plugin. Um segundo caminho seria um VIP que nunca vence.
     vips,
+    // O passe comprado nasce pela MESMA porta do concedido no painel
+    // e do que vier do site: uma linha de `battlepass_entitlements`,
+    // com o índice único parcial recusando dois direitos vivos no
+    // mesmo mês. A loja só sabe que existe um `grant`.
+    // A mesma porta para os dois canais de venda: o que muda entre a
+    // compra in-game e a fila do site é a ORIGEM, e ela viaja no
+    // pedido. Ver `passGranterOf`.
+    pass: passGranterOf(battlePass),
     logger,
     history: directory,
     // A carteira DAQUELE servidor: o débito precisa sair com o
@@ -1420,7 +1494,14 @@ async function main(): Promise<void> {
         // O MESMO caminho da compra in-game, e não um segundo: um
         // ajuste que só um dos dois recebesse apareceria como
         // "às vezes o item vem sem skin".
-        deliver: (input) => store.deliverPlan(input.serverId, input.steamId, input.plan),
+        deliver: (input) =>
+          store.deliverPlan(input.serverId, input.steamId, input.plan, {
+            // Quem vendeu foi o SITE. O passe comprado lá grava a
+            // origem na linha do direito, e é por ela que a ficha
+            // separa "comprou no jogo" de "comprou no site".
+            origin: 'site',
+            reference: input.reference,
+          }),
         // Tirar VIP não é entregar, e por isso não passa pelo
         // `deliverPlan`: quem manda no VIP é a `VipList`, e é ela
         // que grava a revogação, tira o grupo de quem está no ar e
@@ -1579,6 +1660,31 @@ async function main(): Promise<void> {
     wallet,
     logger,
     nameOf: (shortname) => itemsRepository.get(shortname)?.displayName ?? shortname,
+    // ####  O QUE A TELA DO PASSE PRECISA DIZER  ####
+    //
+    // De que MÊS ele é, de qual SERVIDOR, quantos DIAS restam e o
+    // que o retroativo dá — cada uma dessas linhas evita uma
+    // reclamação previsível (Docs/BattlePass/04 §7). O número de
+    // níveis é DAQUELE jogador: um genérico não vende nada.
+    passOf: (serverId, steamId) => {
+      const now = Date.now();
+      const period = battlePass.periodNow(now);
+      const track = battlePass.trackOf(serverId, steamId);
+
+      return {
+        period,
+        // O nome que o admin deu, e não o id: é o que o jogador vê
+        // na lista de servidores.
+        serverName: repository.get(serverId)?.name ?? serverId,
+        daysLeft: daysLeftInPeriod(period, now),
+        owned: track.paid,
+        level: track.progress.level,
+        retroactive: track.season?.retroactive ?? true,
+        // A temporada do MÊS CORRENTE: uma `active` de outro mês não
+        // conta — o passe comprado hoje é do mês de hoje.
+        seasonReady: track.season?.period === period,
+      };
+    },
   });
 
   const uiDocuments = new UiDocumentsRepository(db, logger);
@@ -1886,6 +1992,36 @@ async function main(): Promise<void> {
     logger.info(
       { uiDocument: stored.slug },
       'a aba SKINS entrou neste menu: ela abre o menu de skins do OrigemZWorkshop',
+    );
+  }
+
+  // ####  E O CARTAO DO PASSE NA HOME  ####
+  //
+  // Menu novo ja nasce com ele; o que estava gravado antes desta
+  // frente nao tem onde o agente derramar o nivel do jogador --
+  // `fillTemplate` preenche o que existe e nao cria o que falta.
+  //
+  // Esta passagem so mexe na home que esta EXATAMENTE como o preset
+  // a gravou: quem editou a tela continua com a edicao dele, e sem
+  // o cartao. Ver game/ui-pass-card.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withPassCard(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'o cartao do PASSE entrou na home deste menu: ele abre a tela do OrigemZBattlePass',
     );
   }
 
@@ -2627,6 +2763,19 @@ async function main(): Promise<void> {
         // `hasMetric` em quests/rewards.ts.
         hasMetric: (metric) => rankingsRepository.getByMetric(metric) !== null,
       },
+      // A skin não entrega nada na mochila: ela LIBERA a posse, pelo
+      // mesmo `grantOwnership` do painel, do site e do `/skin give`.
+      // Pelo catálogo, e não pelo repositório, porque é ele que
+      // registra e reenvia a posse para quem está online.
+      skins: workshopCatalog,
+      // ####  O XP DA MISSÃO É A FONTE PRIORITÁRIA DO PASSE  ####
+      //
+      // E a única que chega como evento de verdade: a chave
+      // `quest:<missão>:<tentativa>:<posição>` faz o botão de
+      // reentregar do painel cair no `INSERT OR IGNORE` em vez de
+      // somar duas vezes. Quem aplica o teto do dia e recalcula o
+      // nível é o passe, e não este arquivo.
+      xp: battlePass,
     })),
     // ####  O NÚMERO DO OBJETIVO `metric`  ####
     //
@@ -2809,6 +2958,11 @@ async function main(): Promise<void> {
       return item === null ? null : { itemId: item.itemId, displayName: screenLabelOf(item) };
     },
     rankingLabelOf: (metric: string) => rankingsRepository.getByMetric(metric)?.label ?? null,
+    // O mesmo motivo do ranking: o cadastro guarda a MARCA
+    // `(rifle.ak, 3120436264)`, e ninguém joga procurando por um
+    // número de Workshop. O nome vem do catálogo, a cada leitura.
+    skinLabelOf: (shortname: string, workshopId: string) =>
+      workshopCatalog.findSkinByMark(shortname, workshopId)?.label ?? null,
     // O item custom é o item base com uma skin que só o marca. Ver
     // `rewardIconOf`: é daqui que sai o nome dele e a arte própria.
     customItemOf: (shortname: string, skinId: string) => {
@@ -2835,6 +2989,75 @@ async function main(): Promise<void> {
     refresh: async (serverId) => questCollector?.flushNow(serverId),
     logger,
   });
+
+  // ####  A CARGA DO PASSE DE BATALHA  ####
+  //
+  // Ela nasce AQUI, e nao junto do servico la em cima, porque
+  // depende de duas coisas desta altura do arquivo: o
+  // `questScreenCatalog` (que transforma `metal.refined` no nome que
+  // o jogador le) e a loja (que responde "o passe esta a venda?").
+  //
+  // O que ela liga: o catalogo da temporada e o progresso de cada
+  // jogador descem pelo console; o clique em resgatar sobe pelo
+  // mesmo caminho. Ver game/battlepass.ts.
+  battlePassSync = new BattlePassSync({
+    service: battlePass,
+    servers: {
+      ids: () => repository.list().map((server) => server.id),
+      contextOf: (serverId) => supervisor.contextOf(serverId),
+      // Os mesmos da posse de skins: quem a varredura de presenca
+      // deixou com sessao aberta. Quem entra recebe no onJoined.
+      onlineOf: (serverId) => playersRepository.openSessions(serverId).map((row) => row.steamId),
+    },
+    // O nome que o admin deu, e nao o id: o XP e POR SERVIDOR, e a
+    // tela precisa dizer de qual ela esta falando.
+    serverNameOf: (serverId) => repository.get(serverId)?.name ?? serverId,
+    catalog: questScreenCatalog,
+    store: {
+      // A oferta de passe DAQUELE mes, entre as ligadas. A de mes
+      // fixo so vale no mes dela; a sem mes vale sempre.
+      passOffer: (_serverId, period) => {
+        const offer = store
+          .catalog()
+          .flatMap((entry) => entry.offers)
+          // `?? period` e o "sem mes fixo vale sempre": a oferta sem
+          // periodo casa com o mes que se pergunta.
+          .find((entry) => entry.kind === 'pass' && (entry.pass?.period ?? period) === period);
+
+        return offer === undefined ? null : { id: offer.id, price: offer.price };
+      },
+      // A MESMA porta do botao da loja: ela confere o mes, recusa
+      // quem ja tem, debita e concede pelo `PassGranter`. Um segundo
+      // caminho aqui seria um passe que ninguem sabe expirar.
+      buy: async (input) => {
+        const outcome = await store.buy({ ...input, quantity: 1 });
+
+        return { ok: outcome.status === 'ok', message: describePurchase(outcome) };
+      },
+    },
+    // ####  QUEM PÕE NA MÃO O QUE O RESGATE PROMETEU  ####
+    //
+    // Sem isto todo resgate cai inteiro na caixa de pendências: a
+    // interface existia, o tradutor existia, e nada os ligava. Ele
+    // pergunta ao plugin se cabe ANTES de entregar e usa o MESMO
+    // `QuestRewardService` das missões e do KOTH — uma segunda
+    // tradução daria dois jeitos de pôr uma AK na mão de alguém.
+    // Ver battlepass/delivery.ts.
+    deliver: new BattlePassDeliveryService({
+      rewards: questRewards,
+      rconOf: (serverId) => supervisor.contextOf(serverId)?.rcon ?? null,
+      // O kit entra na conta de espaço com TODOS os itens dele: o
+      // mesmo caminho que o resgate de missão usa logo acima.
+      kitItemsOf: (slug) => kits.list().find((kit) => kit.slug === slug)?.items ?? null,
+      logger,
+    }),
+    logger,
+  });
+
+  // No boot o envio e FORCADO, pelo mesmo motivo do Workshop: o
+  // agente que subiu agora tem um segredo NOVO, e o plugin do outro
+  // lado ainda usa o da subida anterior.
+  void battlePassSync.syncAll('startup');
 
   // ####  O SEGREDO SEPARA O CLIQUE DO CHAT  ####
   //
@@ -3689,6 +3912,10 @@ async function main(): Promise<void> {
     // A MESMA agenda do calendário e do `{wipe.faltam}` do chat: as
     // três superfícies precisam responder o mesmo wipe.
     wipe: { schedule: wipeSchedule, runs: wipeRuns, mapPool, world: currentWorld },
+    // O passe: o MESMO `trackOf` que desce para o plugin e que o
+    // painel mostra na aba Jogadores. Uma segunda consulta daria um
+    // nível diferente na mesma tela.
+    pass: battlePass,
     // O nome de quem abriu, para a saudação do banner. Sem nome
     // conhecido não há saudação — "Olá, 7656119…" seria pior que
     // nada.
@@ -3780,6 +4007,15 @@ async function main(): Promise<void> {
     // ligados. Lido a cada rodada — criar "Madeira" no painel passa
     // a contar no ciclo seguinte.
     gather: () => gatherShortnamesOf(rankingsRepository.list({ enabledOnly: true })),
+    // ####  O XP DE AÇÃO É CARONA DESTE LOTE  ####
+    //
+    // Não existe evento de "matou" nem de "farmou": o que chega é o
+    // delta acumulado de 60 s, sem identificador de ocorrência. A
+    // única idempotência disponível é o `batchId`, e ela só cobre o
+    // que acontece DENTRO da transação do lote — por isso o passe
+    // entra por aqui, e não como um segundo passo que leria
+    // `player_stats` depois (Docs/BattlePass/02 §1.1).
+    battlePass,
     wipes: detectedWipes,
     players: playersRepository,
     servers: {
@@ -4301,6 +4537,10 @@ async function main(): Promise<void> {
       servers: repository,
       ...(workshopService === null ? {} : { workshop: workshopService }),
     },
+    battlepass: {
+      service: battlePass,
+      servers: repository,
+    },
     worldEvents: {
       events: worldEventsRepository,
       servers: repository,
@@ -4397,6 +4637,10 @@ async function main(): Promise<void> {
         // ficaria sem lista sem nunca receber a de volta.
         customItemsSync.stop();
         workshopService?.stop();
+        // E a carga do passe, pela mesma razao: um relogio de 1 s
+        // armado agora mandaria catalogo e progresso a um servidor
+        // que ja esta descendo.
+        battlePassSync?.stop();
         // E as imagens que esperavam o boot de um servidor: a nova
         // tentativa sairia para um RCON que já não existe.
         imageLibrary.stop();

@@ -4,13 +4,15 @@
 //
 //  ####  ESTE ARQUIVO NÃO ENTREGA NADA  ####
 //
-//  Ele TRADUZ. As cinco recompensas já existem no agente, cada uma
+//  Ele TRADUZ. As sete recompensas já existem no agente, cada uma
 //  com o seu caminho testado, e nenhuma delas é reescrita aqui:
 //
 //    item, vip  ->  StoreService.deliverPlan   (store/service.ts)
 //    coins      ->  Wallet.credit              (store/wallet.ts)
 //    kit        ->  KitsService.claim          (kits/service.ts)
 //    points     ->  o applyEvent do ranking    (db/rankings-repository.ts)
+//    skin       ->  WorkshopCatalog.grantOwnership (game/workshop-catalog.ts)
+//    xp         ->  BattlePassService.grantXp  (battlepass/service.ts)
 //
 //  Escrever uma segunda entrega de item aqui produziria duas
 //  maneiras de pôr uma AK na mão de alguém — e a que tivesse menos
@@ -40,6 +42,8 @@
 //  Ver Docs/OrigemZQuests/01-PLANO-E-CONTRATOS.md §6.
 // ============================================================
 
+import { QUEST_XP_SOURCE } from '../battlepass/xp-sources.js';
+import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import { buildReference } from '../store/reference.js';
 import type { QuestReward } from '../types/quests.js';
@@ -69,6 +73,15 @@ export interface QuestItemDelivery {
       }[];
       readonly vehicle: null;
       readonly vip: { readonly tier: string; readonly days: number | null } | null;
+      /**
+       * Sempre `null`: missão não concede o passe por este caminho.
+       *
+       * O tipo diz isso em vez de omitir o campo — omitido, o dia
+       * em que uma recompensa de passe existir passaria por aqui
+       * sem ninguém notar. O XP do passe entra pela trilha, e não
+       * pela entrega de item (Docs/BattlePass/06 §4).
+       */
+      readonly pass: null;
       readonly units: number;
     },
   ): Promise<void>;
@@ -139,6 +152,83 @@ export interface QuestItemCatalog {
   itemIdOf(shortname: string): number | null;
 }
 
+/**
+ * O pedido de posse, como ESTE arquivo o monta.
+ *
+ * É um subconjunto do `GrantOwnershipRequest` do catálogo: a quest
+ * nunca manda data absoluta (`expiresAt`) nem nota, e a origem é
+ * sempre `system` — quem decidiu foi o agente, e não o painel, o
+ * site ou o admin no jogo.
+ */
+export interface QuestSkinGrant {
+  readonly steamId: string;
+  /** O `id` da skin NESTE agente, achado pela marca. */
+  readonly skinRef: number;
+  /** `null` = permanente. Preenchido, SOMA ao prazo vivo. */
+  readonly days: number | null;
+  readonly source: 'system';
+  /** `quest:<id>:<tentativa>:<posição>`. Vai para o registro. */
+  readonly sourceRef: string;
+  /** Quem deu: `quest:<id>`, `koth:<id>`. */
+  readonly createdBy: string;
+  readonly serverId: string;
+}
+
+/**
+ * O caminho da skin. É o `WorkshopCatalog`, e não o repositório.
+ *
+ * ####  PELO CATÁLOGO, PORQUE ELE AVISA  ####
+ *
+ * `WorkshopOwnedRepository.grantOwnership` grava e pronto. Quem
+ * REGISTRA a concessão e reenvia a posse para o jogador online é o
+ * catálogo — sem esse aviso a skin existe no banco e não aparece no
+ * menu de quem está jogando até ele reconectar.
+ *
+ * A skin é achada pela MARCA `(shortname, workshopId)`, como na
+ * entrega do site: o `id` interno não viaja para fora do agente.
+ */
+export interface QuestSkins {
+  findSkinByMark(
+    shortname: string,
+    workshopId: string,
+  ): { readonly id: number; readonly label: string } | null;
+  grantOwnership(
+    request: QuestSkinGrant,
+    now?: number,
+  ): { readonly owned: { readonly expiresAt: number | null } };
+}
+
+/**
+ * O caminho do XP do passe de batalha.
+ *
+ * ####  É A MESMA PORTA DO PASSE, E NÃO UMA SEGUNDA CONTA  ####
+ *
+ * Quem soma XP, aplica o teto do dia e recalcula o nível é o
+ * `BattlePassService` — aqui só se diz quanto a missão prometeu e
+ * qual é a chave do evento. Uma segunda soma escrita neste arquivo
+ * daria dois jeitos de subir de nível, e o que tivesse menos teste
+ * seria o que roda quando o teto está cheio.
+ *
+ * Ausente = este agente não tem passe, e a recompensa vira pendência
+ * no painel em vez de sumir.
+ */
+export interface QuestXp {
+  grantXp(request: {
+    readonly serverId: string;
+    readonly steamId: string;
+    /** `quest:<missão>:<tentativa>:<posição>`. É a chave do retry. */
+    readonly eventId: string;
+    readonly source: string;
+    readonly amount: number;
+  }): {
+    readonly granted: number;
+    readonly capped: number;
+    readonly level: number;
+    readonly levelBefore: number;
+    readonly reason: 'ok' | 'no_season' | 'disabled' | 'capped' | 'repeated';
+  };
+}
+
 export interface QuestRewardDeps {
   readonly logger: Logger;
   /**
@@ -154,6 +244,8 @@ export interface QuestRewardDeps {
   readonly wallet?: (serverId: string) => QuestWallet;
   readonly kits?: QuestKits;
   readonly points?: QuestPoints;
+  readonly skins?: QuestSkins;
+  readonly xp?: QuestXp;
   readonly now?: () => number;
 }
 
@@ -183,9 +275,13 @@ export interface DeliverRewardsInput {
    * Só estas POSIÇÕES da lista. Ausente = todas.
    *
    * É o que o botão de reentregar manda: as que falharam. Sem isto
-   * ele reprocessava as cinco, e item, kit e VIP saíam de novo —
+   * ele reprocessava todas, e item, kit, VIP e skin saíam de novo —
    * moeda e ponto escapavam por acaso, pela idempotência que os
    * dois têm na ponta.
+   *
+   * Na skin o estrago é o prazo: dar de novo uma posse viva SOMA os
+   * dias (ver `renewedExpiry`), e reprocessar uma que já saiu dobra
+   * o prazo em silêncio — ninguém reclama de ganhar mais.
    */
   readonly only?: ReadonlySet<number>;
   readonly serverId: string;
@@ -311,6 +407,10 @@ export class QuestRewardService {
           return await this.#kit(input, reward);
         case 'points':
           return this.#points(input, reward, index);
+        case 'skin':
+          return this.#skin(input, reward, index);
+        case 'xp':
+          return this.#xp(input, reward, index);
       }
     } catch (cause) {
       // O código CRU de quem entrega — `INVENTORY_FULL`,
@@ -360,6 +460,7 @@ export class QuestRewardService {
       ],
       vehicle: null,
       vip: null,
+      pass: null,
       units: 1,
     });
 
@@ -385,6 +486,7 @@ export class QuestRewardService {
       items: [],
       vehicle: null,
       vip: { tier: reward.tier, days: reward.days },
+      pass: null,
       units: 1,
     });
 
@@ -428,7 +530,7 @@ export class QuestRewardService {
     // Ela nasce de (quest, tentativa, posição da recompensa), que é
     // único e ESTÁVEL: o botão de reentregar do painel manda a
     // mesma, e a carteira do site responde `idempotent` em vez de
-    // creditar duas vezes. É o único dos cinco tipos que tem essa
+    // creditar duas vezes. É o único dos seis tipos que tem essa
     // proteção — ver o cabeçalho de store/reference.ts.
     const scope = input.scope ?? 'quest';
 
@@ -554,6 +656,168 @@ export class QuestRewardService {
       message: applied
         ? `${String(reward.amount)} ponto(s) em ${reward.metric}.`
         : 'Os pontos desta quest já tinham sido somados.',
+    };
+  }
+
+  #skin(
+    input: DeliverRewardsInput,
+    reward: Extract<QuestReward, { kind: 'skin' }>,
+    index: number,
+  ): RewardOutcome {
+    if (this.#deps.skins === undefined) {
+      return missing('skin', 'skins do Workshop');
+    }
+
+    const skin = this.#deps.skins.findSkinByMark(reward.shortname, reward.skinId);
+
+    if (skin === null) {
+      // A skin saiu do catálogo depois de a quest prometê-la. O
+      // snapshot guardou a marca; não há o que liberar. O código é o
+      // mesmo da entrega do site, que descobre isso pelo mesmo
+      // caminho.
+      return {
+        kind: 'skin',
+        ok: false,
+        code: 'SKIN_NOT_IN_CATALOG',
+        message: `A skin ${reward.skinId} em "${reward.shortname}" não está mais no catálogo. Um administrador foi avisado.`,
+      };
+    }
+
+    const scope = input.scope ?? 'quest';
+
+    try {
+      // ####  A POSSE NÃO É UMA CÓPIA NA MOCHILA  ####
+      //
+      // Ela LIBERA a skin para o jogador na rede inteira, e nada
+      // entra no inventário: não há como falhar por mochila cheia, e
+      // ele a aplica quando quiser, no menu de skins.
+      //
+      // O prazo sai daqui em DIAS, e não em data calculada aqui:
+      // quem já tem posse viva ganha a soma, e só o agente sabe
+      // quanto sobrava. Ver `renewedExpiry`.
+      const { owned } = this.#deps.skins.grantOwnership(
+        {
+          steamId: input.steamId,
+          skinRef: skin.id,
+          days: reward.days,
+          source: 'system',
+          // A mesma chave da carteira e do ponto. Aqui ela não
+          // protege de nada — não há índice único atrás dela —, mas
+          // é o que responde "de onde veio esta posse?" no registro.
+          sourceRef: `${scope}:${input.questId}:${String(input.attempt)}:${String(index)}`.slice(
+            0,
+            120,
+          ),
+          createdBy: `${scope}:${input.questId}`.slice(0, 120),
+          serverId: input.serverId,
+        },
+        this.#deps.now?.() ?? Date.now(),
+      );
+
+      return {
+        kind: 'skin',
+        ok: true,
+        code: null,
+        // A frase sai do prazo RESULTANTE, e não do pedido: quem já
+        // tinha a skin para sempre continua com ela para sempre,
+        // mesmo que esta recompensa desse 30 dias.
+        message:
+          reward.days === null || owned.expiresAt === null
+            ? `Skin ${skin.label} liberada para sempre.`
+            : `Skin ${skin.label} liberada por ${String(reward.days)} dia(s).`,
+      };
+    } catch (cause) {
+      // O catálogo recusa com `ApiError`: o código dele já é cru
+      // (`OWNED_ALREADY_EXPIRED`, `INVALID_OWNERSHIP`) e a frase já
+      // está em português. O catch geral do `#one` usaria a FRASE
+      // como código, e o painel mostraria uma frase onde espera um
+      // código.
+      if (cause instanceof ApiError) {
+        return { kind: 'skin', ok: false, code: cause.code, message: cause.message };
+      }
+
+      throw cause;
+    }
+  }
+
+  #xp(
+    input: DeliverRewardsInput,
+    reward: Extract<QuestReward, { kind: 'xp' }>,
+    index: number,
+  ): RewardOutcome {
+    if (this.#deps.xp === undefined) {
+      return missing('xp', 'XP do passe de batalha');
+    }
+
+    const scope = input.scope ?? 'quest';
+    const result = this.#deps.xp.grantXp({
+      serverId: input.serverId,
+      steamId: input.steamId,
+      // ####  A MESMA CHAVE DA CARTEIRA E DO PONTO  ####
+      //
+      // (escopo, missão, tentativa, posição) é único e ESTÁVEL: o
+      // botão de reentregar do painel manda o mesmo, e ele cai no
+      // `INSERT OR IGNORE` de `battlepass_xp_events` em vez de somar
+      // de novo. Renumerar a posição quebraria essa proteção
+      // exatamente no caminho do retry.
+      eventId: `${scope}:${input.questId}:${String(input.attempt)}:${String(index)}`,
+      source: QUEST_XP_SOURCE,
+      amount: reward.amount,
+    });
+
+    if (result.reason === 'no_season') {
+      // ####  ZERO EM SILÊNCIO SERIA PIOR  ####
+      //
+      // A missão anunciou "800 XP" na tela e o jogador aceitou por
+      // causa disso. Sem temporada no ar não há onde somar, e isto
+      // precisa virar pendência no painel — com o motivo — para o
+      // admin decidir: publicar a temporada e reentregar, ou tirar a
+      // recompensa da missão.
+      return {
+        kind: 'xp',
+        ok: false,
+        code: 'BATTLEPASS_NO_SEASON',
+        message: 'Não há temporada do passe no ar neste servidor. Um administrador foi avisado.',
+      };
+    }
+
+    if (result.reason === 'repeated') {
+      // Já tinha pago. Como no ponto de ranking, isto NÃO é falha: é
+      // o retry funcionando como devia.
+      return {
+        kind: 'xp',
+        ok: true,
+        code: null,
+        message: 'O XP desta missão já tinha sido somado.',
+      };
+    }
+
+    if (result.granted === 0) {
+      // O teto do dia daquela fonte está cheio, ou o admin desligou
+      // o XP de missão nesta temporada. Os dois são decisão dele, e
+      // nenhum é erro de entrega — o jogador precisa é entender por
+      // que o número não mudou.
+      return {
+        kind: 'xp',
+        ok: true,
+        code: null,
+        message:
+          result.reason === 'disabled'
+            ? 'O XP de missão está desligado nesta temporada.'
+            : 'Você já bateu o teto de XP de missão de hoje. Amanhã ele zera.',
+      };
+    }
+
+    const levelUp =
+      result.level > result.levelBefore ? ` Você chegou ao nível ${String(result.level)}!` : '';
+    const partial =
+      result.capped > 0 ? ` (o teto de hoje cortou ${result.capped.toLocaleString('pt-BR')})` : '';
+
+    return {
+      kind: 'xp',
+      ok: true,
+      code: null,
+      message: `${result.granted.toLocaleString('pt-BR')} XP no passe${partial}.${levelUp}`,
     };
   }
 

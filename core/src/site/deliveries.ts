@@ -26,13 +26,19 @@
 //  30 dias, e a tarefa nº 51 nunca é vista. Quem comprou hoje espera
 //  o prazo inteiro dos que vieram antes, e o log não acusa nada.
 //
-//  ####  DUAS TAREFAS NÃO MEXEM NO INVENTÁRIO, E NENHUMA ESPERA  ####
+//  ####  O QUE NÃO MEXE NO INVENTÁRIO NÃO ESPERA NINGUÉM  ####
 //
 //  O portão de presença existe porque item, kit e veículo nascem no
 //  MUNDO, ao lado de um corpo. As duas tarefas de VIP não: elas são
 //  uma linha na tabela do agente, e o grupo do Oxide é o reflexo
 //  dela — aplicado na conexão pelo próprio OrigemZVip. Por isso
 //  `vip` e `vip_revoke` pulam a presença (ver `#handle`).
+//
+//  `pass` — o passe de batalha comprado no site (Docs/37) — pula
+//  pelo mesmo motivo: o direito é uma linha de
+//  `battlepass_entitlements`, e o mês é do jogador esteja ele onde
+//  estiver. As RECOMPENSAS do passe é que tocam o inventário, e elas
+//  não passam por aqui: descem pelo resgate, com o portão inteiro.
 //
 //  `vip_revoke` — o estorno, o chargeback, o ban e o vencimento que
 //  o site varre a cada minuto — difere ainda numa segunda coisa:
@@ -60,6 +66,7 @@ import type { SiteDeliveriesRepository, SiteDeliveryKind } from '../db/site-deli
 import { ApiError } from '../http/error-response.js';
 import type { Logger } from '../logger.js';
 import type { DeliveryPlan } from '../store/service.js';
+import { seasonPeriodSchema } from '../types/battlepass.js';
 import { OWNED_MAX_DAYS, workshopShortnameSchema, workshopSkinIdSchema } from '../types/workshop.js';
 import { toError } from '../util.js';
 import type { DeliveryAck, SiteClient } from './client.js';
@@ -203,6 +210,35 @@ const payloadSchemas = {
    */
   vip_revoke: z.object({ tier: z.string().trim().min(1).max(32) }),
   /**
+   * O passe de batalha de UM MÊS, vendido no site (Docs/37).
+   *
+   * ####  O `period` É OBRIGATÓRIO, E ISSO É O CONTRATO  ####
+   *
+   * Ele é o mês que a tela do site PROMETEU ao jogador, e é a mesma
+   * régua da compra in-game: lá o mês é congelado no plano no
+   * instante da compra (`store/service.ts:433`) justamente porque a
+   * entrega pode acontecer horas depois. Aqui o payload É esse
+   * congelamento.
+   *
+   * Um `period` ausente que virasse "o mês de hoje" seria pior que
+   * um erro: na virada do dia 1 o jogador pagaria por setembro e
+   * receberia outubro — ou receberia um mês que ele já tem, e aí o
+   * `grant` é no-op idempotente, o ACK diz `delivered` e o dinheiro
+   * some sem que nenhuma tela acuse nada. É a mesma lição do `days`
+   * da skin logo abaixo: campo esquecido não pode virar default.
+   *
+   * O valor NÃO é calculado pelo site (Docs/BattlePass/04 §8): a
+   * régua do calendário é a do agente — fuso local da máquina,
+   * `rankings/periods.ts:30` —, e o site carimba o que o agente
+   * publica. Site em UTC e agente em `America/Sao_Paulo` discordam
+   * nas três últimas horas de todo mês.
+   *
+   * De QUAL servidor é o passe não viaja no payload: é a fila em que
+   * a tarefa entrou. Cada `SiteDeliveries` é de um servidor pareado,
+   * e o direito vale só ali (Docs/BattlePass/04 §2).
+   */
+  pass: z.object({ period: seasonPeriodSchema }),
+  /**
    * A posse de uma skin do Workshop (Docs/OrigemZWorkshop/04 §3).
    *
    * `workshopId` é TEXTO pelo mesmo motivo do `skinId` do item: é
@@ -279,6 +315,11 @@ export interface DeliveryTask {
  * `skin` e `skin_revoke` também ficam de fora (Docs/OrigemZWorkshop/04
  * §3): a posse é um registro da rede, e não um item na mochila. Quem
  * os executa é `#skin`, e não o `deliver`.
+ *
+ * `pass` fica DENTRO, e isso é de propósito: o direito do passe nasce
+ * no mesmo `deliverPlan` da compra in-game (`store/service.ts:1053`),
+ * que é o único lugar onde ele nasce. O que o passe não faz é esperar
+ * o jogador — ver `#handle`.
  */
 export type DeliveredKind = Exclude<SiteDeliveryKind, 'vip_revoke' | 'skin' | 'skin_revoke'>;
 
@@ -342,6 +383,7 @@ export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPl
       items: items.map((item) => ({ ...item, itemId: 0 })),
       vehicle: null,
       vip: null,
+      pass: null,
       units: 1,
     };
   }
@@ -349,7 +391,17 @@ export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPl
   if (kind === 'vehicle') {
     const vehicle = parsed.data as z.infer<typeof payloadSchemas.vehicle>;
 
-    return { items: [], vehicle, vip: null, units: 1 };
+    return { items: [], vehicle, vip: null, pass: null, units: 1 };
+  }
+
+  if (kind === 'pass') {
+    const pass = parsed.data as z.infer<typeof payloadSchemas.pass>;
+
+    // O mês vai CRU para o plano: o `deliverPlan` concede aquele mês
+    // e não olha o relógio (`store/service.ts:1053`). Resolver o mês
+    // aqui seria a terceira aritmética de calendário do repositório,
+    // e a única régua é a do `periods.ts`.
+    return { items: [], vehicle: null, vip: null, pass: { period: pass.period }, units: 1 };
   }
 
   const vip = parsed.data as z.infer<typeof payloadSchemas.vip>;
@@ -360,6 +412,7 @@ export function planOfPayload(kind: DeliveredKind, payload: unknown): DeliveryPl
     // `days` é o vocabulário do site e `expiresAt` é o do VipList: a
     // tradução acontece AQUI, na fronteira, e não lá dentro.
     vip: { tier: vip.tier, days: vip.days },
+    pass: null,
     units: 1,
   };
 }
@@ -376,6 +429,16 @@ export interface SiteDeliveriesOptions {
     readonly serverId: string;
     readonly steamId: string;
     readonly plan: DeliveryPlan;
+    /**
+     * De onde veio esta entrega, para o que ela concede como DIREITO.
+     *
+     * Um `origemz.give` não tem onde anotar a procedência; uma linha
+     * de `battlepass_entitlements` tem, e é ela que responde "de onde
+     * veio este passe?" sem busca por horário. O valor é o
+     * `sourceRef` do site quando ele vem, e o id da tarefa quando não
+     * vem — nunca `null`, porque a tarefa sempre tem id.
+     */
+    readonly reference: string;
   }) => Promise<void>;
   /**
    * Quem sabe TIRAR o VIP.
@@ -678,7 +741,20 @@ export class SiteDeliveries {
     // Conceder na hora também é o que ALINHA os prazos: o
     // `expires_at` do site nasce no resgate, e é de lá que os 30
     // dias contam nos dois bancos.
-    if (kind !== 'vip') {
+    //
+    // ####  O PASSE PULA PELO MESMO MOTIVO, E SÓ O DIREITO PULA  ####
+    //
+    // O direito do passe é uma linha de `battlepass_entitlements`: o
+    // mês é do jogador esteja ele onde estiver, e o menu do passe lê
+    // a linha quando ele entrar. Esperar aqui repetiria, com o passe,
+    // exatamente o que o VIP pagou caro para aprender.
+    //
+    // As RECOMPENSAS do passe são o contrário — elas tocam o
+    // inventário, e por isso descem pelo caminho do resgate, com os
+    // motivos adiáveis do `DEFERRABLE` lá em cima. Direito e
+    // recompensa viajam separados de propósito; unificá-los faria uma
+    // das duas pontas ficar errada.
+    if (kind !== 'vip' && kind !== 'pass') {
       const online = await this.#options.presence(this.#options.serverId);
 
       if (online === null) {
@@ -693,6 +769,7 @@ export class SiteDeliveries {
     }
 
     // ---- (e) a RESERVA, antes de qualquer comando ----
+    const sourceRef = typeof raw.sourceRef === 'string' ? raw.sourceRef : null;
     const reserved = this.#options.repository.reserve(
       {
         id,
@@ -700,7 +777,7 @@ export class SiteDeliveries {
         steamId,
         kind,
         payload: JSON.stringify(raw.payload),
-        sourceRef: typeof raw.sourceRef === 'string' ? raw.sourceRef : null,
+        sourceRef,
       },
       this.#now(),
     );
@@ -713,7 +790,15 @@ export class SiteDeliveries {
 
     // ---- (f) e (g) a entrega ----
     try {
-      await this.#options.deliver({ serverId: this.#options.serverId, steamId, plan });
+      await this.#options.deliver({
+        serverId: this.#options.serverId,
+        steamId,
+        plan,
+        // O `sourceRef` é o pedido do lado do site; o id da tarefa é
+        // o que o ACK carrega. O primeiro responde melhor "de onde
+        // veio", e o segundo sempre existe.
+        reference: sourceRef ?? id,
+      });
       this.#options.repository.finish(id, 'delivered', null, this.#now());
       this.#options.logger.info(
         {
@@ -722,6 +807,9 @@ export class SiteDeliveries {
           serverId: this.#options.serverId,
           kind,
           sourceRef: raw.sourceRef ?? null,
+          // De que mês foi o passe. É a única parte do plano que não
+          // dá para reconstruir olhando o inventário depois.
+          ...(plan.pass === null ? {} : { period: plan.pass.period }),
         },
         'delivery from the site completed',
       );

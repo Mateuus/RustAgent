@@ -43,6 +43,7 @@ import {
   Settings,
   ShoppingBag,
   Swords,
+  Ticket,
   Trophy,
   type LucideIcon,
   Users,
@@ -190,6 +191,18 @@ const NAV: readonly NavItem[] = [
     label: 'Missões',
     hint: 'O que os jogadores têm para fazer, o que ganham, e como está o progresso de cada um',
     Icon: ScrollText,
+  },
+  // O passe fica colado em Missões porque é a mesma família: os
+  // dois são conteúdo de rede que o jogador CONSOME, e a missão é
+  // a fonte prioritária de XP do passe — quem ajusta uma abre a
+  // outra em seguida. Ele não é vizinho de Servidores: a
+  // temporada e a trilha são montadas uma vez para a rede, e só o
+  // XP e o passe comprado são de cada servidor.
+  {
+    href: '/battlepass/',
+    label: 'Passe',
+    hint: 'A temporada do mês: a trilha de níveis, o que dá XP, quem comprou o passe e o que já resgatou',
+    Icon: Ticket,
   },
   // As regras são de REDE, com exceção por servidor — o mesmo
   // desenho do kit e do ranking. Elas ficam antes das duas de

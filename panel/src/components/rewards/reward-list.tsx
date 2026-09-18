@@ -28,6 +28,7 @@ import type { ReactNode } from 'react';
 
 import { RewardItemField } from '@/components/quests/reward-item-field';
 import { RankingPicker } from '@/components/ranking/ranking-picker';
+import { RewardSkinField } from '@/components/rewards/reward-skin-field';
 import { AddMenu, Field, INPUT } from '@/components/ui/field';
 import type { QuestReward, QuestRewardKind } from '@/lib/api';
 
@@ -37,6 +38,8 @@ export const REWARD_LABELS: Readonly<Record<QuestRewardKind, string>> = {
   kit: 'Kit',
   points: 'Pontos de ranking',
   vip: 'VIP',
+  skin: 'Skin do Workshop',
+  xp: 'XP do passe',
 };
 
 export function blankReward(kind: QuestRewardKind): QuestReward {
@@ -57,6 +60,19 @@ export function blankReward(kind: QuestRewardKind): QuestReward {
       return { kind, metric: '', amount: 1 };
     case 'vip':
       return { kind, tier: 'ouro', days: 7 };
+    case 'skin':
+      // ####  SEM SKIN, E PARA SEMPRE  ####
+      //
+      // A marca nasce vazia pelo mesmo motivo do ranking: não há
+      // palpite honesto para "qual skin". O prazo nasce nulo porque
+      // é o caso normal — é assim que o site a vende, e quem quiser
+      // que ela vença escreve quantos dias.
+      return { kind, shortname: '', skinId: '', days: null };
+    case 'xp':
+      // Um numero redondo e visivel: o XP de missao e a fonte
+      // PRIORITARIA do passe, e quem publicar sem mexer no campo
+      // paga um valor que da para notar na trilha.
+      return { kind, amount: 100 };
   }
 }
 
@@ -206,6 +222,38 @@ export function rewardFields(
         </>
       );
 
+    case 'skin':
+      return (
+        <>
+          {/* Fora do <Field>, que é um <label>: o seletor tem caixa
+              de busca e uma lista de botões dentro, e um <label>
+              em volta de tudo isso rouba o clique deles. */}
+          <div className="sm:col-span-2">
+            <span className="mb-1 block font-condensed text-2xs uppercase tracking-wide text-muted">
+              Skin
+            </span>
+            <RewardSkinField
+              shortname={reward.shortname}
+              skinId={reward.skinId}
+              onChange={(mark) => patch(mark as Partial<QuestReward>)}
+            />
+          </div>
+          <Field label="Dias" hint="Vazio = para sempre.">
+            <input
+              type="number"
+              min={1}
+              className={INPUT}
+              value={reward.days ?? ''}
+              onChange={(event) =>
+                patch({
+                  days: event.target.value === '' ? null : Number(event.target.value),
+                } as Partial<QuestReward>)
+              }
+            />
+          </Field>
+        </>
+      );
+
     case 'vip':
       return (
         <>
@@ -229,6 +277,24 @@ export function rewardFields(
             />
           </Field>
         </>
+      );
+
+    case 'xp':
+      return (
+        // ####  O NÚMERO É DESTA MISSÃO  ####
+        //
+        // Ele não sai da regra de XP da temporada: aquela decide se
+        // a missão dá XP e qual é o teto do dia. É este valor que o
+        // jogador lê na tela antes de aceitar a missão.
+        <Field label="XP do passe" hint="O que ESTA missão paga na trilha.">
+          <input
+            type="number"
+            min={1}
+            className={INPUT}
+            value={reward.amount}
+            onChange={(event) => patch({ amount: Number(event.target.value) } as Partial<QuestReward>)}
+          />
+        </Field>
       );
   }
 }

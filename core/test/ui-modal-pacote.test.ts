@@ -183,6 +183,7 @@ function vipWith(perks: number, items = 0): readonly StoreCatalogEntry[] {
           perks: Array.from({ length: perks }, (_unused, index) => `VANTAGEM ${String(index)}`),
           vip: { tier: 'bronze', days: 30 },
           vehicle: null,
+          pass: null,
           icon: { shortname: 'wood', itemId: 1, skinId: '0', file: null },
           name: 'BRONZE',
           price: 1280,

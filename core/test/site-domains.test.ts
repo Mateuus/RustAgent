@@ -193,6 +193,7 @@ describe('a loja que vem do site', () => {
       perks: [],
       vip: null,
       vehicle: null,
+      pass: null,
     });
 
     const test = loopOf(storeApplier({ repository: store, now: () => NOW }), {

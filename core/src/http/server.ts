@@ -122,6 +122,7 @@ import { registerWorldEventRoutes, type WorldEventRoutesDeps } from './routes/wo
 import { registerTeamRoutes, type TeamRoutesDeps } from './routes/teams.js';
 import { registerKothRoutes, type KothRoutesDeps } from './routes/koth.js';
 import { registerWorkshopRoutes, type WorkshopRoutesDeps } from './routes/workshop.js';
+import { registerBattlePassRoutes, type BattlePassRoutesDeps } from './routes/battlepass.js';
 import { registerRankingRoutes, type RankingRoutesDeps } from './routes/rankings.js';
 import { registerRuleRoutes, type RuleRoutesDeps } from './routes/rules.js';
 
@@ -405,6 +406,15 @@ export interface BuildServerOptions {
    * com o jogo, e ele mora dentro deste bloco.
    */
   readonly workshop?: WorkshopRoutesDeps;
+  /**
+   * O passe de batalha.
+   *
+   * Responde do BANCO, como o catalogo de skins: montar a temporada
+   * de outubro e trabalho de madrugada, com tudo parado. O que
+   * depende do jogo -- a carga para o plugin e a entrega da
+   * recompensa -- nao entra por estas rotas.
+   */
+  readonly battlepass?: BattlePassRoutesDeps;
 }
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
@@ -617,6 +627,14 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       // manual de sync falam com o jogo.
       if (options.workshop !== undefined) {
         registerWorkshopRoutes(api, options.workshop);
+      }
+
+      // O passe de batalha. Do BANCO, pela mesma razao do workshop:
+      // a temporada do mes que vem se monta com os servidores
+      // parados, e e justamente isso que o dono pediu -- os passes
+      // de outubro, novembro e dezembro criados com antecedencia.
+      if (options.battlepass !== undefined) {
+        registerBattlePassRoutes(api, options.battlepass);
       }
 
       // O catálogo de itens. Ele responde do BANCO, e por isso
