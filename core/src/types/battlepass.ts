@@ -833,6 +833,18 @@ export const BATTLEPASS_SYNC = 'origemz.passe.sync';
 export const BATTLEPASS_PROGRESS = 'origemz.passe.progress';
 export const BATTLEPASS_STATUS = 'origemz.passe.status';
 export const BATTLEPASS_REPLY = 'origemz.passe.reply';
+
+/**
+ * A resposta do `parts`, e ela tem comando PRÓPRIO.
+ *
+ * Não vai pelo `reply` por duas razões: ele carrega uma FRASE (e
+ * aqui o que volta é uma lista), e toda resposta dele é seguida de
+ * uma carga de progresso forçada — que existe para apagar o
+ * otimismo de um resgate. Um clique que só LÊ não muda nada no
+ * banco, e pagar um `progress` inteiro por ele seria cobrar a banda
+ * da escrita pela leitura.
+ */
+export const BATTLEPASS_PARTS_REPLY = 'origemz.passe.parts.reply';
 export const BATTLEPASS_OPEN = 'origemz.passe.open';
 
 /**
@@ -1029,6 +1041,9 @@ export interface BattlePassStatus {
  *   retry     o "resgatar tudo" de DENTRO da caixa: entregar de novo
  *             o que ficou devendo.
  *   buy       ele clicou em ativar o passe.
+ *   parts     ele clicou na recompensa dentro do modal do nível e
+ *             quer ver o que ela dá, item a item. A resposta volta
+ *             pelo `origemz.passe.parts.reply`, e NÃO pelo `reply`.
  */
 export const BATTLEPASS_PUSH_KINDS = [
   'ready',
@@ -1038,6 +1053,7 @@ export const BATTLEPASS_PUSH_KINDS = [
   'box',
   'retry',
   'buy',
+  'parts',
 ] as const;
 export type BattlePassPushKind = (typeof BATTLEPASS_PUSH_KINDS)[number];
 
@@ -1083,9 +1099,25 @@ export const battlePassPlayerPushSchema = z.object({
   steamId: steamIdSchema,
 });
 
+/**
+ * "O que tem dentro desta faixa?"
+ *
+ * A mesma forma do `claim` — nível e faixa —, e de propósito: é o
+ * MESMO alvo na tela, só que o clique lê em vez de resgatar.
+ */
+export const battlePassPartsPushSchema = z.object({
+  kind: z.literal('parts'),
+  secret: z.string().min(1),
+  requestId: requestIdSchema,
+  steamId: steamIdSchema,
+  level: z.number().int().min(1).max(MAX_SEASON_LEVELS),
+  lane: z.enum(BATTLEPASS_LANES),
+});
+
 export type BattlePassOpenPush = z.infer<typeof battlePassOpenPushSchema>;
 export type BattlePassClaimPush = z.infer<typeof battlePassClaimPushSchema>;
 export type BattlePassPlayerPush = z.infer<typeof battlePassPlayerPushSchema>;
+export type BattlePassPartsPush = z.infer<typeof battlePassPartsPushSchema>;
 
 /**
  * A resposta do agente a um pedido, pelo `origemz.passe.reply`.
@@ -1099,4 +1131,71 @@ export interface BattlePassReply {
   readonly requestId: string;
   readonly ok: boolean;
   readonly message: string;
+}
+
+/**
+ * Uma linha do segundo modal: UMA coisa que aquela faixa dá.
+ *
+ * ####  POR PARTE, E NÃO CONCATENADA  ####
+ *
+ * O `label` do `sync` é a linha INTEIRA ("MetalFacemaskOrigemZ +
+ * 2.500 OZCoin +1"), montada pelo `rewardLine` para caber em 260 px
+ * de card. Ela responde "o que este nível dá?" e some com o resto
+ * num "+1" quando há mais de duas coisas — e um kit, que é uma
+ * recompensa só, esconde tudo o que tem dentro.
+ *
+ * Aqui cada coisa é uma linha, e o conteúdo do kit vem junto,
+ * marcado com `inKit`.
+ */
+export interface BattlePassPayloadPart {
+  /** "2x Metal Refinado", "2.500 OZCoin", "Kit Inicial". Em português. */
+  readonly label: string;
+  /** `item`, `coins`, `kit`, `points`, `vip`, `skin` ou `xp`. */
+  readonly kind: string;
+  /**
+   * O shortname do item do jogo, quando há um que o cliente saiba
+   * desenhar. O `itemid` é resolvido no PLUGIN, como no `sync`.
+   */
+  readonly shortname?: string;
+  /** Texto, sempre. Ausente = sem skin; NUNCA `'0'` explícito aqui. */
+  readonly skinId?: string;
+  /**
+   * Esta linha veio de DENTRO do kit da linha anterior.
+   *
+   * É o que deixa a lista dizer "o kit é um, e ele tem estas seis
+   * coisas" sem precisar de uma árvore no desenho: a linha entra
+   * recuada, sob o nome do kit.
+   */
+  readonly inKit?: boolean;
+}
+
+/**
+ * O que UMA faixa dá, item a item — a resposta do `parts`.
+ *
+ * ####  ELA É PEDIDA, E NÃO MANDADA NA CARGA  ####
+ *
+ * Ver `BattlePassSync.buildPartsPayload`: o conteúdo de todo kit de
+ * toda faixa de todo nível seria banda paga por uma tela que quase
+ * ninguém abre, e a carga do `sync` já é a maior coisa que desce
+ * para este plugin.
+ *
+ * NÃO é chunkada: um kit tem no máximo 60 itens (`MAX_LOADOUT_ITEMS`)
+ * e a faixa tem poucas recompensas — o pior caso cabe folgado num
+ * comando de RCON.
+ */
+export interface BattlePassPartsPayload {
+  readonly requestId: string;
+  /** `false` = não deu para responder; o `note` diz o quê. */
+  readonly ok: boolean;
+  readonly steamId: string;
+  readonly level: number;
+  readonly lane: BattlePassLane;
+  readonly rows: readonly BattlePassPayloadPart[];
+  /**
+   * O aviso que fica embaixo da lista. `''` = não há nada a dizer.
+   *
+   * É onde mora o kit apagado: a trilha prometeu, o catálogo não tem
+   * mais, e a tela diz isso em vez de mostrar uma lista vazia.
+   */
+  readonly note: string;
 }

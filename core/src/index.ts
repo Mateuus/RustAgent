@@ -3013,6 +3013,17 @@ async function main(): Promise<void> {
     // tela precisa dizer de qual ela esta falando.
     serverNameOf: (serverId) => repository.get(serverId)?.name ?? serverId,
     catalog: questScreenCatalog,
+    // ####  O QUE TEM DENTRO DO KIT, PARA A TELA DIZER  ####
+    //
+    // O mesmo `kits.list()` que o entregador usa logo abaixo, e de
+    // propósito: o que a tela PROMETE item a item tem de ser o que a
+    // entrega vai tirar de lá. `undefined` (kit apagado) vira `null`,
+    // e o agente responde com o aviso em vez de uma lista vazia.
+    kitOf: (slug) => {
+      const kit = kits.list().find((entry) => entry.slug === slug);
+
+      return kit === undefined ? null : { name: kit.name, items: kit.items };
+    },
     store: {
       // A oferta de passe DAQUELE mes, entre as ligadas. A de mes
       // fixo so vale no mes dela; a sem mes vale sempre.

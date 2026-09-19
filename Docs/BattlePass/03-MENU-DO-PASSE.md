@@ -112,6 +112,45 @@ conversão"*.
    (`--rust-red` dá 3,74:1 de contraste); a mesma disciplina vale no CUI.
 5. **Marco ganha destaque de tamanho**, não só de cor.
 
+### 3.2 O XP no card, e o modal de detalhe — pedido do dono, 19/09/2026
+
+Depois de ver o passe rodando, o dono pediu duas coisas: *"temos que mostrar o
+xp para os níveis"* e *"talvez colocamos no card uma opção de abrir um modal
+para saber mais detalhe, colocar (i)"*.
+
+**Por que passou a importar.** A curva de XP virou progressiva (`linear`, base
+500, passo 250): os degraus custam 500, 750, 1.000, 1.250… Um card que diz só
+"NÍVEL 3" esconde justamente o que mudou — por que o nível 9 demora mais que o
+2.
+
+**Que número vai no card.** Há três, e eles respondem a perguntas diferentes:
+
+| Número | Responde |
+|---|---|
+| custo do degrau | "quanto custa subir daqui para lá" |
+| acumulado do nível | "qual é a marca deste degrau na régua" |
+| **quanto falta** | **"quanto falta PARA ESTE, de onde eu estou"** |
+
+No card vai o terceiro — é a pergunta que o dono escreveu, e é a única das três
+que muda conforme quem olha. Nível já alcançado não tem "quanto falta": ali vai
+o acumulado, em cinza, para a régua continuar comparável de card a card (500,
+1.250, 2.250, 3.500…). Nível sem XP na carga não mostra nada: inventar um
+número seria pior que a tarja de antes.
+
+**Como o modal abre.** O alvo do clique é a **tarja do nível**, que já existia
+como painel e virou botão — trocar `CuiImageComponent` por
+`CuiButtonComponent` **não acrescenta elemento nenhum**, e com 22 níveis cada
+elemento novo no card é multiplicado por 22. O `[i]` é um rótulo à direita da
+tarja, e existe porque um clique sem marca visível é um clique que ninguém dá.
+Clicar de novo na mesma tarja fecha; clicar em outra troca o conteúdo.
+
+**O que o modal tem que o card não pode ter:** os três números do XP juntos
+(com uma barra que mede *aquele degrau*, e não a temporada), o rótulo inteiro
+da recompensa (o card corta em 34 caracteres), o estado de cada faixa por
+extenso ao lado do selo, o motivo do cadeado como texto na tela — e o botão de
+resgate, porque quem abriu o detalhe para decidir não deveria ter de fechá-lo
+para agir.
+
 ---
 
 ## 4. A rolagem, e o orçamento de bytes
@@ -180,6 +219,29 @@ DLLs do `server01` — `MeasureWorstCase` é `public static` justamente para iss
 
 > **PENDENTE:** o que continua sem medição é a **tela**, não os bytes. Ninguém
 > viu esta trilha num cliente ainda.
+
+### 4.4 O que o XP no card e o `[i]` custaram — 19/09/2026
+
+O dono vai subir a trilha para **22 níveis**, e cada elemento novo no card é
+multiplicado por 22. A conta, do mesmo `MeasureWorstCase`, antes e depois de
+§3.2:
+
+| Trilha | JSON antes | JSON depois | `AddUI` antes | `AddUI` depois |
+|---|---|---|---|---|
+| 10 níveis | 32.838 | 39.372 | 3 | 3 |
+| 20 níveis | 65.206 | 78.304 | 4 | 4 |
+| **22 níveis** | **71.638** | **86.084** | **4** | **5** |
+| 30 níveis | 97.643 | 117.380 | 5 | 5 |
+| 40 níveis | 130.161 | 156.470 | 6 | 6 |
+
+**3.256 → 3.912 bytes por nível** (+656, +20%), e `openUnderLimit: true` em
+todos os tamanhos, até 60 níveis. Os 656 se repartem assim: a tarja virou botão
+(nome + comando, ~80 bytes) e ganhou tooltip (~55); o texto do XP e o `[i]` são
+**os dois únicos elementos novos** do card, ~260 cada.
+
+O modal é região própria (`Region.Detail`, 8.403 bytes no pior caso) e só é
+desenhado quando aberto: **a abertura do menu continua custando o que
+custava**, mais o que os 22 cards engordaram.
 
 ---
 

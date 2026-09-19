@@ -79,21 +79,27 @@ import type { Logger } from '../logger.js';
 import type { OpsRcon } from '../ops/service.js';
 import {
   BATTLEPASS_OPEN,
+  BATTLEPASS_PARTS_REPLY,
   BATTLEPASS_PROGRESS,
   BATTLEPASS_REPLY,
   BATTLEPASS_STATUS,
   BATTLEPASS_SYNC,
   battlePassClaimPushSchema,
   battlePassOpenPushSchema,
+  battlePassPartsPushSchema,
   battlePassPlayerPushSchema,
   claimExceptionsOf,
   payloadOriginOf,
   xpToReach,
+  type BattlePassLane,
   type BattlePassPayload,
   type BattlePassPayloadLevel,
+  type BattlePassPayloadPart,
   type BattlePassPayloadPending,
   type BattlePassPayloadReward,
   type BattlePassClaimPush,
+  type BattlePassPartsPayload,
+  type BattlePassPartsPush,
   type BattlePassPlayerPush,
   type BattlePassProgressPayload,
   type BattlePassReply,
@@ -101,10 +107,11 @@ import {
   type PendingDelivery,
   type TrackCell,
 } from '../types/battlepass.js';
+import type { QuestReward } from '../types/quests.js';
 import { toError } from '../util.js';
 import { firstJsonLine } from './plugin-contract.js';
 import { encodePushPayload, pushErrorSchema, pushOkSchema } from './plugin-push.js';
-import { rewardLine, type QuestsCatalog } from './ui-quests-screen.js';
+import { rewardIconOf, rewardLine, rewardLineOf, type QuestsCatalog } from './ui-quests-screen.js';
 
 /** O marcador do aviso. O mesmo `Marker` do OrigemZBattlePass.cs. */
 export const BATTLEPASS_MARKER = '#OZPASSE#';
@@ -238,6 +245,32 @@ export interface BattlePassSyncDeps {
    * para a mesma recompensa nas duas telas.
    */
   readonly catalog?: QuestsCatalog | undefined;
+  /**
+   * O kit daquele slug. `null` = ele não existe (mais) no catálogo.
+   *
+   * ####  A TRILHA CONGELA NO RESGATE; A TELA MOSTRA O DE AGORA  ####
+   *
+   * O admin pode apagar um kit depois de a trilha tê-lo prometido.
+   * Quem já resgatou levou o que o kit tinha naquele dia — isso está
+   * gravado. Mas esta tela responde "o que eu VOU levar?", e a única
+   * resposta honesta é o catálogo de hoje: inventar a lista de um kit
+   * que não existe seria prometer item por item o que ninguém vai
+   * entregar.
+   *
+   * Por isso o `null` não é um erro e não some com a linha: a faixa
+   * continua dizendo que dá aquele kit, e o aviso embaixo diz que ele
+   * saiu do catálogo. Ausente não é vazio.
+   */
+  readonly kitOf?:
+    | ((slug: string) => {
+        readonly name: string;
+        readonly items: readonly {
+          readonly shortname: string;
+          readonly amount: number;
+          readonly skinId: string;
+        }[];
+      } | null)
+    | undefined;
   readonly store?: BattlePassStore | undefined;
   readonly deliver?: BattlePassDelivery | undefined;
   readonly logger?: Logger | undefined;
@@ -489,6 +522,144 @@ export class BattlePassSync {
       // Marca de TELA, e não de regra: um marco se resgata como
       // qualquer outro nível.
       ...(cell.milestone ? { milestone: true } : {}),
+    };
+  }
+
+  /**
+   * O que UMA faixa dá, item a item — a resposta do clique no
+   * segundo modal.
+   *
+   * ####  POR QUE ISTO É PEDIDO, E NÃO VEM NA CARGA  ####
+   *
+   * Medido em 19/09/2026, com a temporada de 22 níveis: a carga do
+   * `sync` manda por faixa `kind`, `label`, `shortname`, `skinId` e
+   * `milestone`. Pôr as partes junto significaria mandar, em TODA
+   * carga e para TODO servidor, 22 níveis × 2 faixas × N itens — e um
+   * kit sozinho vai a 60 (`MAX_LOADOUT_ITEMS`). O pior caso é a
+   * ordem de grandeza da trilha inteira OUTRA VEZ, num comando que
+   * já precisa ser cortado em pedaços de 40.000 caracteres e que
+   * volta a sair a cada edição da temporada.
+   *
+   * E ela seria paga por todo mundo a cada `sync`, para uma tela que
+   * se abre com dois cliques deliberados. Aqui o custo é um RCON por
+   * clique, que é o mesmo preço do `claim` — e o plugin já tem o
+   * `requestId`, o relógio de desistência e o "carregando" prontos.
+   *
+   * Pública pelo mesmo motivo do `buildPayload`: provar que o kit
+   * apagado vira aviso (e não lista vazia) não deveria exigir um
+   * console de mentira.
+   */
+  buildPartsPayload(input: {
+    readonly serverId: string;
+    readonly steamId: string;
+    readonly requestId: string;
+    readonly level: number;
+    readonly lane: BattlePassLane;
+  }): BattlePassPartsPayload {
+    const base = {
+      requestId: input.requestId,
+      steamId: input.steamId,
+      level: input.level,
+      lane: input.lane,
+    };
+    const season = this.#deps.service.activeSeason(input.serverId);
+
+    if (season === null) {
+      // Entre duas temporadas, ou trilha desligada neste servidor.
+      // Uma lista vazia diria "esta faixa não dá nada", que é outra
+      // coisa.
+      return {
+        ...base,
+        ok: false,
+        rows: [],
+        note: 'A temporada mudou. Feche e abra o menu do passe.',
+      };
+    }
+
+    const cell = this.#deps.service
+      .track(season.id)
+      .find((entry) => entry.level === input.level && entry.lane === input.lane);
+
+    if (cell === undefined || cell.rewards.length === 0) {
+      return { ...base, ok: true, rows: [], note: 'Este nível não dá nada nesta faixa.' };
+    }
+
+    const rows: BattlePassPayloadPart[] = [];
+    const missing: string[] = [];
+
+    for (const reward of cell.rewards) {
+      if (reward.kind !== 'kit') {
+        rows.push(this.#partOf(reward));
+        continue;
+      }
+
+      const kit = this.#deps.kitOf?.(reward.slug) ?? null;
+
+      // O nome do kit, e não o slug: "Kit Inicial" é o que o jogador
+      // lê na loja e no /kit. Sem o catálogo, o slug é o que sobra —
+      // e é melhor que um espaço em branco.
+      rows.push({ label: kit?.name ?? `kit ${reward.slug}`, kind: 'kit' });
+
+      if (kit === null) {
+        missing.push(reward.slug);
+        continue;
+      }
+
+      for (const item of kit.items) {
+        rows.push({
+          // O MESMO tradutor das outras telas, por uma recompensa de
+          // item montada na hora: o jogador lê "2x Metal Refinado"
+          // aqui e nas missões.
+          ...this.#partOf({
+            kind: 'item',
+            shortname: item.shortname,
+            amount: item.amount,
+            skinId: item.skinId,
+          }),
+          inKit: true,
+        });
+      }
+    }
+
+    return {
+      ...base,
+      ok: true,
+      rows,
+      note:
+        missing.length === 0
+          ? ''
+          : missing.length === 1
+            ? `O kit ${missing[0] ?? ''} saiu do catálogo deste servidor: fale com um admin antes de resgatar.`
+            : `${String(missing.length)} kits desta faixa saíram do catálogo deste servidor: fale com um admin antes de resgatar.`,
+    };
+  }
+
+  /**
+   * UMA recompensa virando UMA linha.
+   *
+   * O ícone segue a regra dos outros dois lugares que o desenham
+   * (`rewardIconOf`): item custom nunca vai com a skin dele, senão o
+   * cliente procura no Workshop uma skin que só marca o item, não
+   * acha, e desenha um quadrado branco.
+   *
+   * `skinId` SÓ existe quando há skin. O `'0'` explícito é o campo
+   * que derruba o jogador no `CuiImageComponent` do plugin — e aqui
+   * ele nem chega a viajar.
+   */
+  #partOf(reward: QuestReward): BattlePassPayloadPart {
+    const line = rewardLineOf(reward, this.#deps.catalog ?? {});
+
+    if (reward.kind !== 'item' && reward.kind !== 'skin') {
+      return { label: line.text, kind: reward.kind };
+    }
+
+    const icon = rewardIconOf(reward, this.#deps.catalog ?? {});
+
+    return {
+      label: line.text,
+      kind: reward.kind,
+      shortname: reward.shortname,
+      ...(icon.skinId === '0' || icon.skinId === '' ? {} : { skinId: icon.skinId }),
     };
   }
 
@@ -917,6 +1088,21 @@ export class BattlePassSync {
       return;
     }
 
+    if (push.kind === 'parts') {
+      const request = battlePassPartsPushSchema.safeParse(parsed);
+
+      if (!request.success) {
+        this.#badPush(serverId, 'parts', request.error.issues.slice(0, 3));
+        return;
+      }
+
+      const data = request.data;
+
+      this.#once(`parts:${data.requestId}`, () => this.#handleParts(serverId, data));
+
+      return;
+    }
+
     if (
       push.kind === 'claimAll' ||
       push.kind === 'box' ||
@@ -1006,6 +1192,73 @@ export class BattlePassSync {
       await this.#answer(serverId, push.steamId, push.requestId, true, settled);
     } catch (cause) {
       await this.#answer(serverId, push.steamId, push.requestId, false, this.#refusal(cause));
+    }
+  }
+
+  /**
+   * "O que tem dentro desta faixa?". NUNCA lança.
+   *
+   * Ele NÃO passa pelo `#answer`: nada foi escrito, então não há
+   * otimismo de clique para desfazer, e mandar um `progress` inteiro
+   * atrás de uma leitura seria cobrar a banda da escrita por ela.
+   *
+   * Um erro aqui vira uma resposta com `ok: false` e o motivo na
+   * tela: um pedido mudo deixaria o modal dizendo "carregando" até o
+   * relógio do plugin desistir, e o jogador não saberia se foi ele
+   * que clicou errado.
+   */
+  async #handleParts(serverId: string, push: BattlePassPartsPush): Promise<void> {
+    let payload: BattlePassPartsPayload;
+
+    try {
+      payload = this.buildPartsPayload({
+        serverId,
+        steamId: push.steamId,
+        requestId: push.requestId,
+        level: push.level,
+        lane: push.lane,
+      });
+    } catch (cause) {
+      this.#deps.logger?.warn(
+        { server: serverId, level: push.level, lane: push.lane, err: toError(cause) },
+        'não deu para montar o detalhe desta faixa do passe',
+      );
+
+      payload = {
+        requestId: push.requestId,
+        steamId: push.steamId,
+        level: push.level,
+        lane: push.lane,
+        ok: false,
+        rows: [],
+        note: 'Não deu para ler esta recompensa agora. Tente de novo.',
+      };
+    }
+
+    const rcon = this.#rconOf(serverId);
+
+    if (rcon === null) {
+      // O RCON caiu entre o clique e a resposta. O plugin desiste
+      // sozinho em 20 s e diz isso na tela; não há nada a consertar
+      // daqui.
+      this.#deps.logger?.warn(
+        { server: serverId, requestId: push.requestId },
+        'o detalhe da faixa não saiu: o RCON caiu entre o pedido e ele',
+      );
+
+      return;
+    }
+
+    try {
+      checkPushReply(
+        await rcon.send(`${BATTLEPASS_PARTS_REPLY} ${encodePushPayload(payload)}`),
+        BATTLEPASS_PARTS_REPLY,
+      );
+    } catch (cause) {
+      this.#deps.logger?.warn(
+        { server: serverId, requestId: push.requestId, err: toError(cause) },
+        'o detalhe da faixa não chegou ao jogo',
+      );
     }
   }
 

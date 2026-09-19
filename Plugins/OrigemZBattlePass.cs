@@ -89,8 +89,8 @@
 //  (que é do agente, 03 §7) dispara `origemz.passe.open`, sem
 //  argumento — o mesmo caminho pelo qual o botão SKINS abre o menu de
 //  skins. Os outros (`close`, `claim`, `claimall`, `box`, `buy`,
-//  `page`) nascem dos botões desta tela, carregam o token da sessão e
-//  são recusados EM SILÊNCIO quando ele não bate.
+//  `page`, `detail`) nascem dos botões desta tela, carregam o token da
+//  sessão e são recusados EM SILÊNCIO quando ele não bate.
 //
 //  O `sync` é o CATÁLOGO do servidor: temporada, trilha e preço. Ele
 //  traz o `secret` do processo do agente, e é ele que destrava tudo
@@ -145,6 +145,8 @@
 //      #OZPASSE#{"kind":"claimAll","secret":…,"requestId":…,"steamId":…}
 //      #OZPASSE#{"kind":"box","secret":…,"requestId":…,"steamId":…}
 //      #OZPASSE#{"kind":"buy","secret":…,"requestId":…,"steamId":…}
+//      #OZPASSE#{"kind":"parts","secret":…,"requestId":…,
+//                "steamId":…,"level":N,"lane":"free"|"paid"}
 //
 //  O `ready` é o handshake e vai SEM segredo — é ele que PEDE as
 //  cargas, e o segredo só existe depois que o catálogo chega. Todo o
@@ -163,6 +165,25 @@
 //
 //  A `message` é o que o jogador lê no rodapé, em português, escrita
 //  pelo agente — ele é quem sabe quantos slots faltaram.
+//
+//  ####  O `parts` TEM COMANDO PRÓPRIO DE VOLTA  ####
+//
+//  Ele responde por `origemz.passe.parts.reply`, e não pelo `reply`:
+//
+//      {"requestId":…,"ok":true,"steamId":…,"level":N,"lane":"paid",
+//       "rows":[{"label":"2x Metal Refinado","kind":"item",
+//                "shortname":"metal.refined","inKit":true}, …],
+//       "note":"…"}
+//
+//  Duas razões. O `reply` carrega uma FRASE, e aqui o que volta é uma
+//  LISTA. E toda resposta dele arrasta uma carga de progresso
+//  forçada atrás de si — que existe para apagar o otimismo de um
+//  resgate. Um clique que só LÊ não escreve nada no banco, e pagar um
+//  `progress` inteiro por ele seria cobrar a banda da escrita pela
+//  leitura.
+//
+//  `skinId` ausente = sem skin. Ele NUNCA vem como `"0"`: é o campo
+//  que derruba o cliente no `CuiImageComponent` (armadilha 3).
 //
 //  ####  DEPOIS DA RESPOSTA, O AGENTE MANDA O PROGRESSO  ####
 //
@@ -183,6 +204,66 @@
 //  é honesto: a tela diz "sincronizando" e não mente sobre nível nem
 //  sobre resgate. "Não sei" é diferente de "não tem" — a mesma regra
 //  do menu de skins (02 §5.3 do Workshop).
+//
+// ============================================================
+//  ####  O CARD RESPONDE "QUANTO FALTA PARA ESTE?"  ####
+//
+//  A curva de XP virou PROGRESSIVA (base 500, passo 250): os degraus
+//  custam 500, 750, 1.000, 1.250… Um card que diz só "NÍVEL 3" esconde
+//  justamente o que passou a importar — por que o 9 demora mais que o
+//  2 —, e o dono pediu o XP na tela depois de ver isso no jogo
+//  (19/09/2026).
+//
+//  São TRÊS números possíveis, e eles respondem a perguntas
+//  diferentes:
+//
+//    custo do degrau      "quanto custa subir daqui para lá"
+//    acumulado do nível   "qual é a marca deste degrau na régua"
+//    quanto falta         "quanto falta PARA ESTE, de onde eu estou"
+//
+//  No card vai o TERCEIRO, porque é a pergunta que o dono escreveu, e
+//  porque é a única das três que muda conforme quem olha — as outras
+//  duas são a mesma para todo mundo e cabem no modal, que tem espaço
+//  para explicar. Nível já alcançado não tem "quanto falta": ali vai o
+//  acumulado, em cinza, para a régua continuar comparável de card a
+//  card (é a leitura da curva: 500, 1.250, 2.250, 3.500…).
+//
+//  ####  O MODAL, E POR QUE ELE NÃO CUSTA UM (i) POR CARD  ####
+//
+//  São 22 níveis: todo elemento novo no card é multiplicado por 22, e
+//  a trilha inteira já ocupa quatro `AddUI`. Então o ALVO do clique é
+//  a TARJA DO NÍVEL, que já existia como painel e virou botão — trocar
+//  `CuiImageComponent` por `CuiButtonComponent` não acrescenta
+//  elemento nenhum. A marca do clique existe como elemento separado
+//  porque um clique sem marca visível é um clique que ninguém dá; ela
+//  e o texto de XP são os DOIS únicos elementos que este trabalho
+//  acrescentou ao card.
+//
+//  Essa marca era o rótulo "[i]" até 19/09/2026, e o dono apontou que
+//  ao lado do "faltam 62.200 XP" ela se lia como marcação de texto, e
+//  não como botão. Hoje é o ⓘ do `IconPng`, sobreposto à tarja: um
+//  PNG no lugar de um rótulo, UM elemento pelo outro.
+//
+//  O modal é uma região própria (`Region.Detail`), desenhada só quando
+//  aberta: a abertura do menu continua custando o que custava.
+//
+//  ####  E UM SEGUNDO MODAL, PORQUE O KIT NÃO SE ABRE SOZINHO  ####
+//
+//  A faixa paga do nível 22 diz "MetalFacemaskOrigemZ + 2.500 OZCoin
+//  +1": o agente concatena e corta em duas, e o "+1" não diz o que é.
+//  Pior: quando a recompensa é um KIT, nada na tela diz o que tem
+//  dentro dele — e é justamente o que decide se vale a pena.
+//
+//  Clicar na recompensa DENTRO do modal do nível abre a lista
+//  completa e rolável (`Region.Parts`), uma linha por coisa, com o
+//  conteúdo do kit recuado sob o nome dele.
+//
+//  Esses itens NÃO vêm na carga da temporada. Mandá-los seria 22
+//  níveis × 2 faixas × N itens (e um kit sozinho vai a 60), em todo
+//  `sync` e para todo servidor, por uma tela que se abre com dois
+//  cliques deliberados. Então o clique vira pedido ao agente, como o
+//  `claim` — e enquanto a resposta não chega, a tela DIZ que está
+//  carregando: ausente não é vazio.
 // ============================================================
 
 using System;
@@ -212,6 +293,17 @@ namespace Oxide.Plugins
         private const string BytesCommand = "origemz.passe.bytes";
         private const string ScrollCommand = "origemz.passe.scroll";
 
+        /// <summary>
+        /// A resposta do agente ao `parts`: o que aquela faixa dá, item a
+        /// item.
+        ///
+        /// Comando PRÓPRIO, e não o `reply`: aquele carrega uma FRASE e
+        /// arrasta uma carga de progresso atrás de si, que existe para
+        /// apagar o otimismo de um resgate. Um clique que só LÊ não muda
+        /// nada no banco.
+        /// </summary>
+        private const string PartsReplyCommand = "origemz.passe.parts.reply";
+
         // Os comandos da tela. Digitados pelo CLIENTE, então conferem
         // tudo de novo: um jogador pode mandá-los pelo F1 com qualquer
         // argumento. O `open` é o único sem token — é ele que cria um.
@@ -220,6 +312,15 @@ namespace Oxide.Plugins
         private const string MenuClaimCommand = "origemz.passe.claim";
         private const string MenuClaimAllCommand = "origemz.passe.claimall";
         private const string MenuBoxCommand = "origemz.passe.box";
+
+        /// <summary>Abre (e fecha) o modal de detalhe de UM nível. Ver `CmdMenuDetail`.</summary>
+        private const string MenuDetailCommand = "origemz.passe.detail";
+
+        /// <summary>
+        /// Abre (e fecha) o SEGUNDO modal: o que aquela faixa dá, item a
+        /// item. Ver `CmdMenuParts`.
+        /// </summary>
+        private const string MenuPartsCommand = "origemz.passe.parts";
 
         /// <summary>"Resgatar tudo" DENTRO da caixa: entregar de novo o que ficou devendo.</summary>
         private const string MenuRetryCommand = "origemz.passe.retry";
@@ -461,6 +562,24 @@ namespace Oxide.Plugins
             public string Origin = "";
         }
 
+        /// <summary>
+        /// Uma linha do segundo modal: UMA coisa que aquela faixa dá.
+        ///
+        /// O `ItemId` é resolvido AQUI, pelo shortname, como no `sync`: o
+        /// agente não conhece o `itemid` do jogo. Item que o Rust não
+        /// reconhece fica sem ícone e com o nome — nunca uma linha vazia.
+        /// </summary>
+        private class PartRow
+        {
+            public string Label = "";
+            public string Kind = "";
+            public int ItemId;
+            public ulong SkinId;
+
+            /// <summary>Veio de DENTRO do kit da linha acima: entra recuada.</summary>
+            public bool InKit;
+        }
+
         private readonly Dictionary<string, Progress> _progress = new Dictionary<string, Progress>();
 
         /// <summary>O segredo do `sync`. Vazio = nenhum push sai daqui, e nenhum progresso entra.</summary>
@@ -519,6 +638,7 @@ namespace Oxide.Plugins
             foreach (MenuSession session in _menus.Values)
             {
                 if (session.FlashTimer != null) session.FlashTimer.Destroy();
+                if (session.PartsTimer != null) session.PartsTimer.Destroy();
             }
 
             _menus.Clear();
@@ -1095,6 +1215,123 @@ namespace Oxide.Plugins
             }
         }
 
+        /// <summary>
+        /// A lista de itens de UMA faixa, vinda do agente.
+        ///
+        /// ####  ELA SÓ ENTRA NO MODAL QUE AINDA ESTÁ ESPERANDO POR ELA  ####
+        ///
+        /// O `requestId` tem de bater com o da sessão. Sem essa conferência,
+        /// a resposta de um clique que o jogador já abandonou entraria no
+        /// modal que ele abriu depois — e ele leria os itens do nível
+        /// errado sem nada na tela dizendo isso.
+        ///
+        /// Um id desconhecido não é erro: é um pedido que venceu, ou um
+        /// plugin recarregado. O agente fez a parte dele.
+        /// </summary>
+        [ConsoleCommand(PartsReplyCommand)]
+        private void CmdPartsReply(ConsoleSystem.Arg arg)
+        {
+            if (arg.Connection != null) return;
+
+            try
+            {
+                JObject payload = DecodePayload(arg.GetString(0));
+                if (payload == null)
+                {
+                    arg.ReplyWith(Fail("INVALID_PAYLOAD", "O payload não é Base64 de um objeto JSON."));
+                    return;
+                }
+
+                string requestId = Text(payload, "requestId");
+                BasePlayer player = FindOnline(Text(payload, "steamId"));
+                MenuSession session = null;
+
+                if (player != null) _menus.TryGetValue(player.userID, out session);
+
+                if (requestId.Length == 0 || session == null || session.PartsRequestId != requestId)
+                {
+                    arg.ReplyWith("{\"ok\":true,\"unknown\":true}");
+                    return;
+                }
+
+                session.PartsRequestId = "";
+                if (session.PartsTimer != null)
+                {
+                    session.PartsTimer.Destroy();
+                    session.PartsTimer = null;
+                }
+
+                session.PartsFailed = !Flag(payload, "ok", false);
+                session.PartsNote = Text(payload, "note").Trim();
+                session.PartsRows.Clear();
+
+                JArray rows = payload["rows"] as JArray;
+                if (rows != null)
+                {
+                    foreach (JToken entry in rows)
+                    {
+                        JObject row = entry as JObject;
+                        if (row == null) continue;
+
+                        PartRow part = ReadPart(row);
+                        if (part != null) session.PartsRows.Add(part);
+                    }
+                }
+
+                Redraw(player, session, Region.Parts);
+
+                arg.ReplyWith("{\"ok\":true}");
+            }
+            catch (Exception cause)
+            {
+                arg.ReplyWith(Fail("EXCEPTION", cause.Message));
+            }
+        }
+
+        /// <summary>
+        /// Uma linha da lista. O item é resolvido AQUI pelo shortname, como
+        /// no `ReadReward`: o agente não conhece o `itemid` do jogo.
+        ///
+        /// `null` = a linha não tem nem texto: não vale um lugar na tela.
+        /// </summary>
+        private static PartRow ReadPart(JObject row)
+        {
+            PartRow part = new PartRow
+            {
+                Label = Text(row, "label").Trim(),
+                Kind = Text(row, "kind").Trim().ToLowerInvariant(),
+                InKit = Flag(row, "inKit", false),
+            };
+
+            string shortname = Text(row, "shortname").Trim().ToLowerInvariant();
+
+            ulong skinId;
+            if (ulong.TryParse(Text(row, "skinId"), NumberStyles.None, CultureInfo.InvariantCulture, out skinId))
+            {
+                part.SkinId = skinId;
+            }
+
+            if (shortname.Length > 0)
+            {
+                ItemDefinition def = ItemManager.FindItemDefinition(shortname);
+                if (def != null)
+                {
+                    part.ItemId = def.itemid;
+
+                    if (part.Label.Length == 0)
+                    {
+                        part.Label = def.displayName != null ? def.displayName.english : shortname;
+                    }
+                }
+                else if (part.Label.Length == 0)
+                {
+                    part.Label = shortname;
+                }
+            }
+
+            return part.Label.Length == 0 ? null : part;
+        }
+
         // ============================================================
         //  §7  O DIAGNÓSTICO  -  origemz.passe.status
         // ============================================================
@@ -1170,6 +1407,15 @@ namespace Oxide.Plugins
             // O mesmo ✓ do OrigemZWorkshop (`check`): é PNG nosso, já
             // desenhado, e o jogador o lê como "já é seu".
             { "check", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAADz0lEQVR42u2bz2sTURDHZ7IRi/iDVCh4EQX/AaEtFC8qPXnVowdRSq/17qH/Qa+iKHr3KIp4EgRBD4J6UcGTCpa2WEHQJtmPB+fJuCTN22TTZtMdWBJ2k81+v+/NfGfmvYhUVllllVVWWWV71XTcAAEqIok7lapquidGE0i6nK+N/QwAElVtA1MickFEjovIdxF5oqrvAVVVxnrkgavAN/6338BKmAnmImMFvm6vVxzopjtSO3ezlzuUEXzNXqeATaANtDIzIAW27P25bKyolTzaC9AQkYcictguJR3inIpIKiLXsveplRh83eTttojMiEhrGzxq106EW5R9BiSq2rTgdlFEmiJS7/GdVEQ2Sq9+LugtuIDXy0IMuOzvUWbw8wao7aJ8NwsEvQD2l1YKndZPA2sGvt0DfFCEl8AkoGUFX7NjEvjkRj8WfKO0OUAYNTteZMB1s0DOqqXGXeuEMoAPfn8rMuilRsBPYLa04O3B99nrciaabwc+fObKuER8L3exEX/JE1jmiD9noNMc4G8VOvJAAtTtSIYtI67AOQmsR8pdAP+0sLJ3O80clpw4uTsKvIqM+OH6G/teLc/zdQP4r3sCzInIecu1X4vIY8vDE1VtF1zgqKqmNpLzVuDUe+T3Yp2fs6r6duDncmXmJPCoA+PvgJmiI2yfcheOuULkzqZ9DThiGVSYYr7DArBRJAlO7pZyFDjhMwuFDYYbhWXXT+vmc4WQ0KGltRUR8YPWLxcqdzYDJoCPPaJvuwgSnNzNWuaWp7q7F8AXokzO948CP5yfEUHCmbwkZPp5q30UOAcKre4cAQeBr5HJR9uNSrQvOrlrZGJNzG99Glp156bkncjcO9uU6ElCpsB5EBn0gjuuAdNDK3BCBgWcsqkdMzLBVVoxJDiSb+as7gDmh17gON+cMVcojAQ38ou7Knc5SDjmfLTZJwn7uvTzmjnkbmXHS1s3VRsFkDDRRz8v/NaDQuVuABKe90nCokut++rn7Won17lDPUeeng1e14FnA/TzdreZ6UcgJwnZZCqNJG1j5Pp5Jo9JnyS0Iqa97+ddGsl+3oAkMBb9vCGRMJx+3g6TsDUg+Kel2sbShYRWRKDrJHev+unnjQoJQSZXcqzY+gJnHThZ9rW7JLOI0YuE4vt5I7SMFbOS0zSSFkq9fBXR3Pyd0f8U+GXv75d6+SrHai4dip+XFvTq47hx0QfGG8BnB3wTuAtM+jacjONu8bC6BBwSkdPyd//eB1X9kl19kr20e3snFlhH6v8CBjboO3tm735llVVWWWWVjb79AVFUcsSCjjxVAAAAAElFTkSuQmCC" },
+            // ####  O ⓘ QUE SUBSTITUIU O "[i]"  ####
+            //
+            // O rótulo "[i]" ficava ao lado do "faltam 62.200 XP" e se lia
+            // como marcação de texto, não como botão — foi o que o dono
+            // apontou olhando a tela (19/09/2026). Este é o mesmo desenho dos
+            // outros quatro: 64×64, branco sobre transparente, tingido pelo
+            // CUI. Ele troca UM elemento por UM elemento na tarja: a régua de
+            // bytes por nível não muda.
+            { "info", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAACcElEQVR42u2b/bGDIAzAHYERHMERGMURHMENOoIjMMIboSMwgiPweHfpXe9VIZEkrTW5y19VgV8hHxC6lFJ3Ze0MgHwjLqvPOmcNWX+yrulVVvgtwLMe3j0lgD7rlPWe2uUO3+rPAMDDPyglAdr4OAAepq+W/HCB4JjqIb1PQuvSaBn8uGPMtGWFvqgCWIidjPDOBFO335lNHp5Z4B2KLBoAHMGy//0zt6xDwywb4BsrwWM4KQDYwUeYkpw+3ME3IzcE7sHPwsGLgzbYIGAbviMaHJJeCDsg+8QCYEEYH5f043iH7FsTgFHC8jJrDcJ4FEBfsb6tgx8hkAktfhwBYS0FS6WPBqHB7xnUe+NSWioRIwmA5/S1hI5KgH2IpwAoJTZDYydr4hq9QymBQgHwFT/fmjXWpDXLmynfpqz9yODupGfAo42ItQVblv+QO/kAG4B1330JwFRwJY4xgJHwAv/b2HPhUwnAnhW9CQQwnHHAlt4wITJ2fWrG+Zz5QtXOYCx0PPG+f6x5A4z7kIj3H+cEz+qTXp4wbwEIGKPBpLNAjLGlU80dYqI/f2IAvhYVPj+8YvzmyQD0Bbf+AmBPuhMDqI7LABgAA2BG0NygBUL6obAWAFIorJkMaQEgJUOa6bAGAHI6rLkhogGAvCGitSWmAeDwlpjGpqgGgMObotLb4hoAmrbFpQ9GNAA0H4xIHo29cyMUfTQmfTgqWTDBdjgqeTz+jkIJ8vG4RoGE1uAPF0hcvkTGiqQQIfKzYfzaMjkrlCRCiOkLS2WtWJpoGLdmxZK+oFzeLkwkuzJjl6bs2hxyaVzy4qRdnT2bXh7AL/7cW1W8pf6KAAAAAElFTkSuQmCC" },
         };
 
         /// <summary>Nome do ícone → CRC no FileStorage. Vazio até o boot.</summary>
@@ -1232,6 +1478,8 @@ namespace Oxide.Plugins
         private const string UiTrack = "OZPass.Track";
         private const string UiFoot = "OZPass.Foot";
         private const string UiBox = "OZPass.Box";
+        private const string UiDetail = "OZPass.Detail";
+        private const string UiParts = "OZPass.Parts";
 
         [Flags]
         private enum Region
@@ -1242,7 +1490,10 @@ namespace Oxide.Plugins
             Track = 4,
             Foot = 8,
             Box = 16,
-            AllButWindow = Head | Track | Foot | Box,
+            Detail = 32,
+            /// <summary>O segundo modal: os itens de UMA faixa. Fica por cima do `Detail`.</summary>
+            Parts = 64,
+            AllButWindow = Head | Track | Foot | Box | Detail | Parts,
             All = Window | AllButWindow,
         }
 
@@ -1258,6 +1509,49 @@ namespace Oxide.Plugins
 
             /// <summary>A caixa existe no cliente. Evita um `destroyUi` por abertura de menu.</summary>
             public bool BoxDrawn;
+
+            /// <summary>Que nível o modal de detalhe está mostrando. 0 = fechado.</summary>
+            public int DetailLevel;
+
+            /// <summary>O modal existe no cliente. Mesma razão do `BoxDrawn`.</summary>
+            public bool DetailDrawn;
+
+            // ---- o segundo modal: os itens de UMA faixa ----
+            //
+            // ####  ELE É PEDIDO AO AGENTE, E POR ISSO TEM ESTADO  ####
+            //
+            // A carga do `sync` traz a linha INTEIRA já concatenada
+            // ("MetalFacemaskOrigemZ + 2.500 OZCoin +1") e não traz as
+            // partes — nem, num kit, o que ele tem dentro. Quem sabe disso
+            // é o agente, e ele responde por RCON depois do clique.
+            //
+            // Entre o clique e a resposta a tela diz que está carregando.
+            // Ausente NÃO é vazio: um modal em branco pareceria erro, e o
+            // jogador clicaria de novo.
+
+            /// <summary>Que nível o modal de itens mostra. 0 = fechado.</summary>
+            public int PartsLevel;
+
+            /// <summary>`free` ou `paid`. Vazio = fechado.</summary>
+            public string PartsLane = "";
+
+            /// <summary>O pedido no ar. Vazio = a resposta já chegou (ou desistiu).</summary>
+            public string PartsRequestId = "";
+
+            /// <summary>O relógio da desistência DESTE pedido. Ver `RequestParts`.</summary>
+            public Timer PartsTimer;
+
+            /// <summary>O aviso embaixo da lista: kit apagado, faixa vazia, ou o erro.</summary>
+            public string PartsNote = "";
+
+            /// <summary>A resposta chegou e deu errado: a lista dá lugar ao `PartsNote`.</summary>
+            public bool PartsFailed;
+
+            /// <summary>O que o agente respondeu. Vazio COM pedido no ar = carregando.</summary>
+            public readonly List<PartRow> PartsRows = new List<PartRow>();
+
+            /// <summary>O modal existe no cliente. Mesma razão do `BoxDrawn`.</summary>
+            public bool PartsDrawn;
 
             /// <summary>Há um pedido no ar: os botões ficam mudos até a resposta.</summary>
             public bool Busy;
@@ -1406,6 +1700,11 @@ namespace Oxide.Plugins
             {
                 _menus.Remove(player.userID);
                 if (session.FlashTimer != null) session.FlashTimer.Destroy();
+
+                // O relógio do detalhe da faixa morre com a sessão: sem
+                // isto, ele acordaria daqui a 20 s para desenhar num menu
+                // que não existe mais.
+                CloseParts(session);
             }
 
             // Pelo NOME, e sempre: é o que livra quem ficou com um resto na
@@ -1622,6 +1921,183 @@ namespace Oxide.Plugins
             }
 
             Redraw(player, session, Region.Head | Region.Box);
+        }
+
+        /// <summary>
+        /// Abre e fecha o modal de detalhe de um nível.
+        ///
+        /// ####  O CARD É APERTADO; O MODAL NÃO  ####
+        ///
+        /// Cinco cards por linha, 221 px cada: o rótulo da recompensa sai
+        /// cortado em 34 caracteres, o motivo do cadeado só existe no
+        /// tooltip e os três números do XP não cabem. Aqui cabem — e é o
+        /// mesmo clique de sempre, na tarja do nível.
+        ///
+        /// O MESMO nível fecha (é um interruptor, como a caixa); outro
+        /// nível troca o conteúdo sem fechar. Nada é pedido ao agente: o
+        /// modal só mostra o que a tela já sabe.
+        /// </summary>
+        [ConsoleCommand(MenuDetailCommand)]
+        private void CmdMenuDetail(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            int number = arg.GetInt(1, 0);
+
+            // Nível que não existe nesta temporada não abre nada: o comando
+            // pode chegar digitado no F1 com qualquer número.
+            if (number != 0 && LevelOf(number) == null) return;
+
+            session.DetailLevel = session.DetailLevel == number ? 0 : number;
+
+            // ####  MEXER NO NÍVEL FECHA O QUE ESTAVA POR CIMA DELE  ####
+            //
+            // Fechar, porque uma lista sozinha na tela não diz de que nível
+            // ela é. E TROCAR, porque o modal de itens guarda o próprio
+            // número: sem isto, clicar no nível 7 com o detalhe do 22 aberto
+            // deixaria os itens do 22 por cima da tela do 7, sem nada
+            // dizendo isso.
+            CloseParts(session);
+
+            Redraw(player, session, Region.Detail | Region.Parts);
+        }
+
+        /// <summary>
+        /// Abre e fecha o SEGUNDO modal: o que aquela faixa dá, item a item.
+        ///
+        /// ####  O QUE O CARD E O MODAL DO NÍVEL NÃO CONSEGUEM DIZER  ####
+        ///
+        /// A faixa paga do nível 22 diz "MetalFacemaskOrigemZ + 2.500 OZCoin
+        /// +1": a linha vem CONCATENADA do agente, cortada em duas
+        /// recompensas, e o "+1" não diz o que é. E quando a recompensa é um
+        /// KIT, nada na tela diz o que tem dentro dele.
+        ///
+        /// Aqui cada coisa é uma linha, com ícone e quantidade, e o conteúdo
+        /// do kit vem recuado sob o nome dele. A lista ROLA, porque um kit
+        /// vai a 60 itens.
+        ///
+        /// ####  ELE PRECISA PEDIR AO AGENTE  ####
+        ///
+        /// O plugin NÃO sabe as partes: a carga da temporada manda a linha
+        /// pronta, e mandar as de toda faixa de todo nível seria a trilha
+        /// inteira outra vez, em todo `sync`, para uma tela que se abre com
+        /// dois cliques. Então o clique vira pedido, como o `claim` — e a
+        /// tela diz "carregando" até a resposta.
+        ///
+        /// A MESMA faixa fecha (é um interruptor, como o nível); outra faixa
+        /// troca o conteúdo. Fechar volta para o modal do nível, que continua
+        /// atrás: quem abriu para ver o detalhe não quer recomeçar da trilha.
+        /// </summary>
+        [ConsoleCommand(MenuPartsCommand)]
+        private void CmdMenuParts(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            MenuSession session = SessionOf(arg, out player);
+            if (session == null) return;
+
+            int number = arg.GetInt(1, 0);
+            string lane = arg.GetString(2, "").Trim().ToLowerInvariant();
+
+            // Tudo o que chega do cliente é conferido de novo: este comando
+            // pode ser digitado no F1 com qualquer argumento.
+            if (lane != LaneFree && lane != LanePaid) return;
+
+            Level level = LevelOf(number);
+            if (level == null) return;
+
+            Reward reward = RewardOf(level, lane);
+
+            // Faixa que não dá nada não abre modal nenhum: não há lista, e a
+            // tela do nível já diz isso por extenso.
+            if (!reward.Has) return;
+
+            if (session.PartsLevel == number && session.PartsLane == lane)
+            {
+                CloseParts(session);
+                Redraw(player, session, Region.Parts);
+                return;
+            }
+
+            CloseParts(session);
+            session.PartsLevel = number;
+            session.PartsLane = lane;
+
+            RequestParts(player, session, number, lane);
+
+            Redraw(player, session, Region.Parts);
+        }
+
+        /// <summary>
+        /// Esquece o modal de itens: o nível, a faixa, a lista e o pedido no
+        /// ar.
+        ///
+        /// O relógio da desistência morre junto. Sem isso, a resposta de um
+        /// pedido abandonado voltaria a escrever num modal que o jogador já
+        /// fechou — ou pior, no que ele abriu depois.
+        /// </summary>
+        private static void CloseParts(MenuSession session)
+        {
+            if (session.PartsTimer != null)
+            {
+                session.PartsTimer.Destroy();
+                session.PartsTimer = null;
+            }
+
+            session.PartsLevel = 0;
+            session.PartsLane = "";
+            session.PartsRequestId = "";
+            session.PartsNote = "";
+            session.PartsFailed = false;
+            session.PartsRows.Clear();
+        }
+
+        /// <summary>
+        /// Pede ao agente o que aquela faixa dá, e arma o relógio da
+        /// desistência.
+        ///
+        /// ####  POR QUE ELE NÃO USA O `Request`  ####
+        ///
+        /// Aquele marca a sessão como ocupada e faz a resposta virar uma
+        /// FRASE no rodapé — é o caminho de quem ESCREVE (resgatar, comprar).
+        /// Este só lê: os botões de resgate continuam vivos enquanto a lista
+        /// carrega, e a resposta é uma lista, não uma frase.
+        /// </summary>
+        private void RequestParts(BasePlayer player, MenuSession session, int level, string lane)
+        {
+            if (_secret.Length == 0)
+            {
+                session.PartsFailed = true;
+                session.PartsNote = "O servidor ainda está sincronizando o passe. Tente em instantes.";
+                return;
+            }
+
+            string requestId = Guid.NewGuid().ToString("N").Substring(0, 16);
+            session.PartsRequestId = requestId;
+
+            ulong userId = player.userID;
+            session.PartsTimer = timer.Once(RequestTimeoutSeconds, delegate
+            {
+                MenuSession live;
+                if (!_menus.TryGetValue(userId, out live) || live != session) return;
+                if (live.PartsRequestId != requestId) return;
+
+                live.PartsRequestId = "";
+                live.PartsFailed = true;
+                live.PartsNote = "O servidor não respondeu. Feche e abra esta recompensa de novo.";
+
+                BasePlayer again = BasePlayer.FindByID(userId);
+                if (again != null && again.IsConnected) Redraw(again, live, Region.Parts);
+            });
+
+            Push("parts", new JObject
+            {
+                ["requestId"] = requestId,
+                ["steamId"] = player.UserIDString,
+                ["level"] = level,
+                ["lane"] = lane,
+            });
         }
 
         /// <summary>
@@ -1971,6 +2447,17 @@ namespace Oxide.Plugins
             /// <summary>Só o nível atual tem moldura acesa (03 §3.1, regra 3).</summary>
             public bool Current;
             public bool Milestone;
+
+            /// <summary>
+            /// O XP na tarja. Ver `CardXpText`: "faltam 3.250 XP" para quem
+            /// ainda não chegou, o acumulado para quem já passou, "" quando o
+            /// agente não mandou XP nenhum para o nível.
+            /// </summary>
+            public string XpText = "";
+
+            /// <summary>O texto é o "quanto falta" (e não o acumulado): ele fica mais claro.</summary>
+            public bool XpLive;
+
             public readonly LaneView Free = new LaneView();
             public readonly LaneView Paid = new LaneView();
         }
@@ -1986,6 +2473,82 @@ namespace Oxide.Plugins
             public string Empty = "";
             public readonly List<CardView> Cards = new List<CardView>();
             public Dictionary<string, string> Icons = new Dictionary<string, string>();
+        }
+
+        /// <summary>
+        /// O modal de UM nível: o que não cabe no card de 221 px.
+        ///
+        /// Os três números do XP vivem aqui juntos porque é junto que eles
+        /// explicam a curva — o degrau, a marca na régua e a distância. No
+        /// card só cabe um, e lá vai o que responde "quanto falta".
+        /// </summary>
+        private class DetailView
+        {
+            public string Token = "";
+            public int Level;
+            public string Title = "";
+            public bool Milestone;
+            public bool Current;
+
+            /// <summary>Quanto CUSTA este degrau — a diferença para o nível anterior.</summary>
+            public string StepText = "";
+
+            /// <summary>O acumulado que alcança este nível. É a marca dele na régua.</summary>
+            public string TotalText = "";
+
+            /// <summary>"Faltam 2.400 XP", "Você já passou por aqui" ou "Sincronizando…".</summary>
+            public string GapText = "";
+
+            /// <summary>O que o `GapText` diz é uma boa notícia (alcançado) ou uma distância.</summary>
+            public bool Reached;
+
+            /// <summary>Quanto do DEGRAU o jogador já andou, de 0 a 1. Só com progresso conhecido.</summary>
+            public float StepFill;
+
+            public bool Known;
+
+            public readonly LaneView Free = new LaneView();
+            public readonly LaneView Paid = new LaneView();
+
+            /// <summary>Um pedido no ar: os botões de resgate do modal ficam mudos.</summary>
+            public bool Busy;
+
+            public Dictionary<string, string> Icons = new Dictionary<string, string>();
+        }
+
+        /// <summary>
+        /// O segundo modal: o que UMA faixa dá, item a item.
+        ///
+        /// ####  TRÊS ESTADOS, E O VAZIO NÃO É UM DELES  ####
+        ///
+        /// `Loading` = o pedido está no ar. `Failed` = veio resposta e ela
+        /// diz que não deu. Só o terceiro mostra lista — e uma lista vazia
+        /// sem `Note` seria a tela dizendo "esta faixa não dá nada", que é
+        /// exatamente o que ela NÃO pode dizer aqui: o jogador só chegou até
+        /// aqui porque a faixa dá alguma coisa.
+        /// </summary>
+        private class PartsView
+        {
+            public string Token = "";
+            public int Level;
+            public string Lane = "";
+
+            /// <summary>"NÍVEL 22 · RECOMPENSA DO PASSE".</summary>
+            public string Title = "";
+
+            /// <summary>A linha inteira que o card mostra cortada. É o resumo de cima.</summary>
+            public string Summary = "";
+
+            /// <summary>O pedido está no ar: a tela diz que está carregando.</summary>
+            public bool Loading;
+
+            /// <summary>A resposta veio e não deu certo: a lista dá lugar ao aviso.</summary>
+            public bool Failed;
+
+            /// <summary>O aviso de baixo: kit apagado, ou o motivo da falha.</summary>
+            public string Note = "";
+
+            public readonly List<PartRow> Rows = new List<PartRow>();
         }
 
         private class FootView
@@ -2183,6 +2746,8 @@ namespace Oxide.Plugins
                     Milestone = level.Free.Milestone || level.Paid.Milestone,
                 };
 
+                card.XpText = CardXpText(frame, level, out card.XpLive);
+
                 FillLane(frame, session, level, LaneFree, card.Free);
                 FillLane(frame, session, level, LanePaid, card.Paid);
 
@@ -2199,6 +2764,40 @@ namespace Oxide.Plugins
             }
 
             return view;
+        }
+
+        /// <summary>
+        /// O XP que vai na tarja do card.
+        ///
+        /// ####  UM NÚMERO SÓ, E ELE RESPONDE "QUANTO FALTA PARA ESTE?"  ####
+        ///
+        /// A tarja tem 221 px e já carrega o "NÍVEL N". Cabe UM número, e
+        /// dos três possíveis (custo do degrau, acumulado, distância) o que
+        /// o dono pediu é a distância — os outros dois estão no modal, onde
+        /// há espaço para dizer o que são.
+        ///
+        /// Nível já alcançado não tem distância: ali vai o acumulado, em
+        /// cinza. Não é enfeite — é o que deixa a curva LEGÍVEL de card a
+        /// card (500, 1.250, 2.250, 3.500…), que é a pergunta de fundo: por
+        /// que o nível 9 demora mais que o 2.
+        ///
+        /// Sem XP no nível (o agente não mandou), texto nenhum: inventar um
+        /// número aqui seria pior que a tarja de antes.
+        /// </summary>
+        private static string CardXpText(Frame frame, Level level, out bool live)
+        {
+            live = false;
+            if (level.Xp <= 0) return "";
+
+            // Sem progresso, a régua ainda é verdade — ela não depende de
+            // quem olha. O que não se pode é fingir saber a distância.
+            if (!frame.Known || level.Number <= frame.Progress.Level) return Thousands(level.Xp) + " XP";
+
+            long gap = level.Xp - frame.Progress.Xp;
+            if (gap <= 0) return Thousands(level.Xp) + " XP";
+
+            live = true;
+            return "faltam " + Thousands(gap) + " XP";
         }
 
         private void FillLane(Frame frame, MenuSession session, Level level, string lane, LaneView view)
@@ -2301,6 +2900,129 @@ namespace Oxide.Plugins
             return view;
         }
 
+        /// <summary>
+        /// O modal de um nível. `null` quando não há nível aberto.
+        ///
+        /// ####  O CUSTO DO DEGRAU SE CALCULA AQUI  ####
+        ///
+        /// O agente manda o ACUMULADO de cada nível (`levels[].xp`), e é a
+        /// escolha certa: é o número contra o qual o XP do jogador se
+        /// compara, e um custo de degrau mandado à parte seria uma segunda
+        /// fonte para a mesma verdade. O degrau é a diferença para o nível
+        /// ANTERIOR DA LISTA — não `Number - 1`, porque a trilha pode pular
+        /// números e o vizinho na lista é quem realmente veio antes.
+        /// </summary>
+        private DetailView ComputeDetail(Frame frame, MenuSession session)
+        {
+            if (session.DetailLevel == 0) return null;
+
+            List<Level> levels = frame.Season.Levels;
+            Level level = null;
+            long previousXp = 0;
+
+            for (int i = 0; i < levels.Count; i++)
+            {
+                if (levels[i].Number != session.DetailLevel) continue;
+
+                level = levels[i];
+                if (i > 0) previousXp = levels[i - 1].Xp;
+                break;
+            }
+
+            if (level == null) return null;
+
+            DetailView view = new DetailView
+            {
+                Token = session.Token,
+                Level = level.Number,
+                Title = "NÍVEL " + level.Number,
+                Milestone = level.Free.Milestone || level.Paid.Milestone,
+                Current = frame.Known && level.Number == frame.Progress.Level,
+                Known = frame.Known,
+                Busy = session.Busy,
+                Icons = _icons,
+            };
+
+            if (level.Xp > 0)
+            {
+                view.TotalText = Thousands(level.Xp) + " XP";
+                view.StepText = Thousands(Math.Max(0L, level.Xp - previousXp)) + " XP";
+            }
+
+            if (!frame.Known)
+            {
+                view.GapText = "Sincronizando…";
+            }
+            else if (level.Xp <= 0)
+            {
+                // Nível sem XP na carga: a trilha existe, a régua não. Dizer
+                // "faltam 0" seria afirmar que já dá para levar; o silêncio
+                // deixaria o modal com uma barra vazia sem explicação.
+                view.GapText = "Esta temporada não informa o XP deste nível.";
+            }
+            else if (level.Number <= frame.Progress.Level || frame.Progress.Xp >= level.Xp)
+            {
+                view.GapText = "Você já alcançou este nível.";
+                view.Reached = true;
+                view.StepFill = 1f;
+            }
+            else
+            {
+                view.GapText = "Faltam " + Thousands(level.Xp - frame.Progress.Xp) + " XP.";
+
+                // O quanto do DEGRAU já foi andado — e não o quanto da
+                // temporada. A barra do cabeçalho já mede o degrau atual; esta
+                // mede ESTE degrau, que pode estar três níveis à frente e
+                // nesse caso nasce vazia, que é a verdade.
+                long span = level.Xp - previousXp;
+                view.StepFill = span > 0
+                    ? Mathf.Clamp01((float)(frame.Progress.Xp - previousXp) / span)
+                    : 0f;
+            }
+
+            FillLane(frame, session, level, LaneFree, view.Free);
+            FillLane(frame, session, level, LanePaid, view.Paid);
+
+            return view;
+        }
+
+        /// <summary>
+        /// O modal de itens, do que a sessão guarda. `null` = fechado, ou
+        /// apontando para um nível/faixa que a temporada nova não tem mais.
+        ///
+        /// O `Summary` é a linha do agente — a mesma que o card corta. Ela
+        /// fica no topo da lista de propósito: é o que o jogador acabou de
+        /// clicar, e vê-la inteira já responde metade da pergunta.
+        /// </summary>
+        private PartsView ComputeParts(MenuSession session)
+        {
+            if (session.PartsLevel == 0 || session.PartsLane.Length == 0) return null;
+
+            Level level = LevelOf(session.PartsLevel);
+            if (level == null) return null;
+
+            Reward reward = RewardOf(level, session.PartsLane);
+            if (!reward.Has) return null;
+
+            bool paid = session.PartsLane == LanePaid;
+
+            PartsView view = new PartsView
+            {
+                Token = session.Token,
+                Level = level.Number,
+                Lane = session.PartsLane,
+                Title = "NÍVEL " + level.Number + " · " + (paid ? "RECOMPENSA DO PASSE" : "RECOMPENSA GRÁTIS"),
+                Summary = reward.Label,
+                Loading = session.PartsRequestId.Length > 0,
+                Failed = session.PartsFailed,
+                Note = session.PartsNote,
+            };
+
+            view.Rows.AddRange(session.PartsRows);
+
+            return view;
+        }
+
         // ---- a única porta de desenho ------------------------------
 
         /// <summary>
@@ -2324,6 +3046,23 @@ namespace Oxide.Plugins
             if ((regions & Region.Track) != 0 && session.BoxOpen)
             {
                 regions |= Region.Box;
+            }
+
+            // Pelo mesmo motivo, e depois da caixa: o modal é o que fica por
+            // cima de tudo. Ele também mostra o estado das faixas, então um
+            // redesenho da trilha que o deixasse de fora o congelaria no
+            // estado anterior.
+            if ((regions & (Region.Track | Region.Box)) != 0 && session.DetailLevel != 0)
+            {
+                regions |= Region.Detail;
+            }
+
+            // E o modal de ITENS fica por cima do modal do nível, pela mesma
+            // regra: quem redesenha o de baixo tem de redesenhar o de cima,
+            // senão o jogador vê a lista sumir atrás do que ele não mexeu.
+            if ((regions & Region.Detail) != 0 && session.PartsLevel != 0)
+            {
+                regions |= Region.Parts;
             }
 
             Frame frame = Prepare(player);
@@ -2352,6 +3091,57 @@ namespace Oxide.Plugins
                     // ninguém abriu.
                     CuiHelper.DestroyUi(player, UiBox);
                     session.BoxDrawn = false;
+                }
+            }
+
+            if ((regions & Region.Detail) != 0)
+            {
+                DetailView detail = session.DetailLevel != 0 ? ComputeDetail(frame, session) : null;
+
+                if (detail != null)
+                {
+                    second.AddRange(BuildDetail(detail));
+                    session.DetailDrawn = true;
+                }
+                else
+                {
+                    // Fechado, ou apontando para um nível que a temporada nova
+                    // não tem mais. Nos dois casos a sessão esquece o número:
+                    // senão o próximo `sync` tentaria reabrir um nível morto.
+                    session.DetailLevel = 0;
+
+                    if (session.DetailDrawn)
+                    {
+                        CuiHelper.DestroyUi(player, UiDetail);
+                        session.DetailDrawn = false;
+                    }
+                }
+            }
+
+            // Depois do `Detail`, sempre: quem desenha por último fica por
+            // cima, e este é o modal de cima.
+            if ((regions & Region.Parts) != 0)
+            {
+                PartsView parts = session.DetailLevel != 0 ? ComputeParts(session) : null;
+
+                if (parts != null)
+                {
+                    second.AddRange(BuildParts(parts));
+                    session.PartsDrawn = true;
+                }
+                else
+                {
+                    // Fechado, ou apontando para uma faixa que a temporada
+                    // nova não tem mais. A sessão esquece os dois números
+                    // junto com o pedido no ar: senão a resposta que ainda
+                    // está viajando entraria numa tela que não existe.
+                    CloseParts(session);
+
+                    if (session.PartsDrawn)
+                    {
+                        CuiHelper.DestroyUi(player, UiParts);
+                        session.PartsDrawn = false;
+                    }
                 }
             }
 
@@ -3040,9 +3830,54 @@ namespace Oxide.Plugins
             float strip = card.Milestone ? LevelStrip + MilestoneExtra : LevelStrip;
             float lane = (box.H - strip) / 2f;
 
-            Panel(canvas, box, 0, 0, box.W, strip, card.Current ? ColRust : ColSurface2);
-            Label(canvas, box, 0, 0, box.W, strip, card.LevelText, card.Milestone ? 14 : 12,
-                  card.Current ? ColText : ColMuted, TextAnchor.MiddleCenter, true);
+            // ####  A TARJA DO NÍVEL É O BOTÃO DO MODAL  ####
+            //
+            // Ela já existia como painel: virar botão troca o componente e
+            // não acrescenta elemento nenhum — e com 22 níveis na trilha,
+            // cada elemento novo no card é multiplicado por 22. O alvo é
+            // grande (221 × 24) e está no topo do card, que é onde o olho
+            // já está quando lê o número do nível.
+            string stripName = Button(canvas, box, 0, 0, box.W, strip, card.Current ? ColRust : ColSurface2,
+                                      MenuDetailCommand + " " + token + " " + card.Level, canvas.NextName());
+            Box stripBox = new Box(stripName, box.W, strip);
+
+            Label(canvas, stripBox, 8, 0, 74, strip, card.LevelText, card.Milestone ? 14 : 12,
+                  card.Current ? ColText : ColMuted, TextAnchor.MiddleLeft, true);
+
+            // O XP do nível, à direita. Ver `CardXpText`: "faltam …" sai
+            // mais claro porque é a resposta viva; o acumulado de um nível já
+            // alcançado sai em cinza, de régua.
+            Label(canvas, stripBox, 82, 0, stripBox.W - 108, strip, card.XpText, card.Milestone ? 11 : 10,
+                  card.XpLive ? ColText : ColMuted, TextAnchor.MiddleRight, false);
+
+            // ####  A MARCA DO CLIQUE É UM ÍCONE, E NÃO UM "[i]"  ####
+            //
+            // Um alvo sem marca é um alvo que ninguém encontra. Mas o "[i]"
+            // que estava aqui era TEXTO entre colchetes, e ao lado de
+            // "faltam 62.200 XP" ele se lia como marcação, não como botão —
+            // o dono apontou isso vendo a tela (19/09/2026).
+            //
+            // O ⓘ é um dos nossos PNGs do FileStorage, como o cadeado e o
+            // ✓: sobreposto à tarja, no canto direito, ele é a marca e não
+            // uma palavra. O custo é NEUTRO — um elemento saiu, um entrou —,
+            // e isso importa porque são 22 cards.
+            //
+            // Sem o CRC (o FileStorage ainda não respondeu) volta o
+            // caractere, que é feio e existe: uma tarja sem marca nenhuma
+            // seria um clique invisível.
+            string infoCrc = IconCrc(icons, "info");
+            if (infoCrc.Length > 0)
+            {
+                Png(canvas, stripBox, stripBox.W - 22, (strip - 14f) / 2f, 14, 14, infoCrc,
+                    card.Current ? ColText : ColMuted);
+            }
+            else
+            {
+                Label(canvas, stripBox, stripBox.W - 24, 0, 18, strip, "i", 10,
+                      card.Current ? ColText : ColMuted, TextAnchor.MiddleCenter, true);
+            }
+
+            Tip(canvas, stripName, "Ver o detalhe deste nível.");
 
             LaneBox(canvas, box, 0, strip, box.W, lane, card.Free, card.Level, LaneFree, token, icons);
 
@@ -3356,6 +4191,433 @@ namespace Oxide.Plugins
             return canvas.Parts();
         }
 
+        // ---- o modal de detalhe ------------------------------------
+
+        private const float DetailWidth = 560f;
+        private const float DetailHeight = 430f;
+
+        /// <summary>A altura de um bloco de faixa dentro do modal.</summary>
+        private const float DetailLaneHeight = 100f;
+
+        /// <summary>
+        /// O modal de um nível.
+        ///
+        /// ####  O QUE ELE TEM QUE O CARD NÃO PODE TER  ####
+        ///
+        ///   · os TRÊS números do XP juntos, que é como a curva se explica
+        ///   · o rótulo INTEIRO da recompensa (o card corta em 34)
+        ///   · o estado de cada faixa POR EXTENSO, e não só como selo
+        ///   · o motivo do cadeado em texto na tela, e não só no tooltip
+        ///
+        /// Ele desenha por cima de tudo porque é o último do segundo grupo
+        /// de `Redraw`, e cobre só o próprio retângulo: painel transparente
+        /// de tela cheia engole o clique (armadilha 6).
+        /// </summary>
+        private static List<string> BuildDetail(DetailView view)
+        {
+            Canvas canvas = new Canvas("OZP.D");
+
+            Box frame = RegionRoot(canvas, UiDetail, (WinWidth - DetailWidth) / 2f,
+                                   (WinHeight - DetailHeight) / 2f, DetailWidth, DetailHeight,
+                                   view.Milestone ? ColAmber : ColBorder);
+
+            string innerName = Panel(canvas, frame, 1, 1, DetailWidth - 2, DetailHeight - 2, ColSurface,
+                                     canvas.NextName());
+            Box body = new Box(innerName, DetailWidth - 2, DetailHeight - 2);
+
+            Panel(canvas, body, 0, 0, body.W, 2, ColRust);
+
+            Label(canvas, body, 16, 6, 300, 38, view.Title, 18, ColText, TextAnchor.MiddleLeft, true);
+
+            if (view.Milestone)
+            {
+                Label(canvas, body, 120, 6, 200, 38, "MARCO DA TEMPORADA", 11, ColAmber, TextAnchor.MiddleLeft, true);
+            }
+
+            if (view.Current)
+            {
+                Label(canvas, body, body.W - 240, 6, 180, 38, "VOCÊ ESTÁ AQUI", 11, ColAmber,
+                      TextAnchor.MiddleRight, true);
+            }
+
+            TextButton(canvas, body, body.W - 44, 10, 28, 28, ColSurface2,
+                       MenuDetailCommand + " " + view.Token + " " + view.Level, "X", 12, ColText);
+
+            Panel(canvas, body, 0, 44, body.W, 1, ColBorder);
+
+            // ---- o XP, os três números juntos ----
+
+            Label(canvas, body, 16, 52, 300, 18, "O XP DESTE NÍVEL", 11, ColMuted, TextAnchor.MiddleLeft, true);
+
+            DetailRow(canvas, body, 74, "Custo deste degrau", view.StepText);
+            DetailRow(canvas, body, 96, "Total acumulado para alcançá-lo", view.TotalText);
+
+            // A barra mede ESTE degrau, e não a temporada: um nível três
+            // passos à frente nasce com a barra vazia, que é a verdade. Sem
+            // régua nenhuma ela não é desenhada — barra vazia por falta de
+            // dado e barra vazia por distância se leriam igual.
+            if (view.TotalText.Length > 0)
+            {
+                Panel(canvas, body, 16, 126, body.W - 32, 8, ColSurface2);
+                if (view.StepFill > 0f)
+                {
+                    Panel(canvas, body, 16, 126, (body.W - 32) * Mathf.Clamp01(view.StepFill), 8, ColRust);
+                }
+            }
+
+            if (view.GapText.Length > 0)
+            {
+                Label(canvas, body, 16, 138, body.W - 32, 22, view.GapText, 12,
+                      view.Reached ? ColOlive : ColText, TextAnchor.MiddleLeft, false);
+            }
+
+            Panel(canvas, body, 0, 166, body.W, 1, ColBorder);
+
+            DetailLane(canvas, body, 16, 176, body.W - 32, DetailLaneHeight, view, view.Free, LaneFree,
+                       "RECOMPENSA GRÁTIS");
+            DetailLane(canvas, body, 16, 176 + DetailLaneHeight + 10, body.W - 32, DetailLaneHeight, view,
+                       view.Paid, LanePaid, "RECOMPENSA DO PASSE");
+
+            Label(canvas, body, 16, body.H - 30, body.W - 32, 24,
+                  "Clique de novo na tarja do nível para fechar.", 10, ColMuted, TextAnchor.MiddleLeft, false);
+
+            return canvas.Parts();
+        }
+
+        /// <summary>Uma linha "rótulo … valor" do bloco de XP. Valor vazio some com a linha.</summary>
+        private static void DetailRow(Canvas canvas, Box body, float y, string label, string value)
+        {
+            if (string.IsNullOrEmpty(value)) return;
+
+            Label(canvas, body, 16, y, 340, 20, label, 11, ColMuted, TextAnchor.MiddleLeft, false);
+            Label(canvas, body, body.W - 216, y, 200, 20, value, 13, ColText, TextAnchor.MiddleRight, true);
+        }
+
+        /// <summary>
+        /// Uma faixa dentro do modal: ícone grande, rótulo INTEIRO, o estado
+        /// por extenso e o motivo em texto na tela.
+        ///
+        /// O resgate também mora aqui: quem abriu o detalhe para decidir não
+        /// deveria ter de fechá-lo para agir.
+        /// </summary>
+        private static void DetailLane(Canvas canvas, Box parent, float x, float y, float w, float h,
+                                       DetailView view, LaneView lane, string key, string title)
+        {
+            bool paid = key == LanePaid;
+
+            if (!lane.Has)
+            {
+                string emptyName = Panel(canvas, parent, x, y, w, h, ColLockedFill, canvas.NextName());
+                Box emptyBox = new Box(emptyName, w, h);
+
+                Label(canvas, emptyBox, 16, 10, 300, 18, title, 11, ColMuted, TextAnchor.MiddleLeft, true);
+                Label(canvas, emptyBox, 16, 34, w - 32, 22,
+                      paid ? "Este nível não dá nada na faixa do passe."
+                           : "Este nível não dá nada na faixa grátis.",
+                      12, ColMuted, TextAnchor.MiddleLeft, false);
+                return;
+            }
+
+            bool dim = lane.State == StateLocked || lane.State == StateSyncing;
+            string fill = lane.State == StateClaimed ? ColClaimedFill
+                : dim ? (paid ? ColPaidLockedFill : ColLockedFill)
+                : paid ? ColPaidFill
+                : ColSurface2;
+
+            // ####  A FAIXA INTEIRA ABRE O SEGUNDO MODAL  ####
+            //
+            // Ela já era um painel: virar botão troca o componente e não
+            // acrescenta elemento nenhum — o mesmo truque da tarja do nível.
+            // O alvo é grande (526 × 100) e o botão de RESGATAR, que é filho
+            // dela, continua recebendo o clique dele por cima.
+            //
+            // É aqui que o kit deixa de ser uma promessa fechada: "Kit
+            // Inicial" vira os seis itens que ele tem dentro.
+            string name = Button(canvas, parent, x, y, w, h, fill,
+                                 MenuPartsCommand + " " + view.Token + " " + view.Level + " " + key,
+                                 canvas.NextName());
+            Box box = new Box(name, w, h);
+
+            if (paid)
+            {
+                Panel(canvas, box, 0, 0, 3, h, dim ? Faded(ColAmber, 0.45f) : ColAmber);
+            }
+
+            Label(canvas, box, 16, 6, 300, 16, title, 11, paid ? ColAmber : ColMuted, TextAnchor.MiddleLeft, true);
+
+            // A marca do clique, no mesmo ⓘ da tarja do nível: o jogador já
+            // aprendeu esse símbolo um modal atrás.
+            string infoCrc = IconCrc(view.Icons, "info");
+            Label(canvas, box, w - 150, 5, 110, 18, "VER OS ITENS", 10, ColMuted, TextAnchor.MiddleRight, true);
+            if (infoCrc.Length > 0) Png(canvas, box, w - 34, 7, 14, 14, infoCrc, ColMuted);
+
+            float iconSize = 64f;
+            float iconY = (h - iconSize) / 2f;
+
+            if (lane.ItemId != 0)
+            {
+                Icon(canvas, box, 16, iconY, iconSize, iconSize, lane.ItemId, lane.SkinId,
+                     dim ? ColIconDim : "1 1 1 1");
+            }
+            else if (lane.Icon.Length > 0)
+            {
+                Png(canvas, box, 16, iconY, iconSize, iconSize, lane.Icon, dim ? ColIconDim : "1 1 1 1");
+            }
+            else
+            {
+                Label(canvas, box, 16, iconY, iconSize, iconSize, KindMark(lane.Kind), 16,
+                      dim ? ColMuted : ColAmber, TextAnchor.MiddleCenter, true);
+            }
+
+            // ####  O RÓTULO INTEIRO, QUE É METADE DO PORQUÊ DESTE MODAL  ####
+            //
+            // No card ele sai cortado em 34 caracteres. Aqui há 340 px de
+            // largura e duas linhas de altura: "Fuzil Semiautomático Brasa
+            // Incandescente ×2" cabe sem reticências.
+            float textX = 16 + iconSize + 14;
+            Label(canvas, box, textX, 24, w - textX - 150, 28, lane.Label, 14, dim ? ColMuted : ColText,
+                  TextAnchor.UpperLeft, false);
+
+            // O motivo do cadeado deixa de ser só tooltip: no modal ele é
+            // texto na tela, que é onde alguém decide se compra o passe.
+            if (lane.Tip.Length > 0)
+            {
+                Label(canvas, box, textX, 52, w - textX - 150, 22, lane.Tip, 10, ColMuted,
+                      TextAnchor.UpperLeft, false);
+            }
+
+            // O estado POR EXTENSO, com o mesmo selo do card ao lado: quem
+            // não distingue as cores lê o selo, e quem não lê o selo lê a
+            // palavra (03 §3.1, regra 1).
+            Badge(canvas, box, textX, 76, lane.State, view.Icons);
+            Label(canvas, box, textX + 26, 74, w - textX - 176, 24, DetailStateText(lane.State), 11,
+                  DetailStateColor(lane.State), TextAnchor.MiddleLeft, true);
+
+            if (lane.State != StateAvailable) return;
+
+            if (view.Busy)
+            {
+                DeadButton(canvas, box, w - 140, (h - 34) / 2f, 124, 34, "AGUARDE…", 12);
+            }
+            else
+            {
+                TextButton(canvas, box, w - 140, (h - 34) / 2f, 124, 34, ColRust,
+                           MenuClaimCommand + " " + view.Token + " " + view.Level + " " + key,
+                           "RESGATAR", 12, ColText);
+            }
+        }
+
+        /// <summary>O estado de uma faixa em palavras. É o par do selo do `Badge`.</summary>
+        private static string DetailStateText(int state)
+        {
+            switch (state)
+            {
+                case StateClaimed: return "JÁ RESGATADO";
+                case StateAvailable: return "PRONTO PARA RESGATAR";
+                case StatePending: return "ESPERANDO O SERVIDOR…";
+                case StateSyncing: return "SINCRONIZANDO…";
+                default: return "BLOQUEADO";
+            }
+        }
+
+        private static string DetailStateColor(int state)
+        {
+            switch (state)
+            {
+                case StateClaimed: return ColOlive;
+                case StateAvailable: return ColAmber;
+                case StatePending: return ColAmber;
+                default: return ColMuted;
+            }
+        }
+
+        // ---- o segundo modal: os itens de uma faixa ----------------
+
+        // ####  ELE É MENOR QUE O MODAL DO NÍVEL, DE PROPÓSITO  ####
+        //
+        // 470 × 390 dentro de 560 × 430: sobram ~45 px de cada lado, e o
+        // modal do nível continua aparecendo ao redor. É assim que a tela
+        // diz "há uma coisa atrás desta" sem gastar elemento nenhum — e é
+        // o que faz o X de cima parecer o que ele é: voltar, e não sair.
+        private const float PartsWidth = 470f;
+        private const float PartsHeight = 390f;
+
+        /// <summary>O quanto ele desce em relação ao centro, para o topo do modal do nível respirar.</summary>
+        private const float PartsDrop = 14f;
+
+        private const float PartsHeadHeight = 52f;
+        private const float PartsRowHeight = 30f;
+
+        /// <summary>O recuo de uma linha que veio de dentro de um kit.</summary>
+        private const float PartsKitIndent = 22f;
+
+        /// <summary>
+        /// O teto de linhas desenhadas.
+        ///
+        /// Um kit vai a 60 itens (`MAX_LOADOUT_ITEMS` do agente) e a faixa
+        /// pode ter mais de uma recompensa. O teto não é estético: cada
+        /// linha custa dois elementos, e sem ele uma faixa absurda viraria
+        /// uma dúzia de `AddUI` no clique de um jogador só.
+        /// </summary>
+        private const int PartsMaxRows = 80;
+
+        /// <summary>
+        /// O modal de itens de UMA faixa.
+        ///
+        /// ####  O QUE ELE RESPONDE  ####
+        ///
+        /// "MetalFacemaskOrigemZ + 2.500 OZCoin +1" é o que o card cabe. O
+        /// que ele esconde: o que é o "+1", e — quando a recompensa é um kit
+        /// — o que tem DENTRO dele. Aqui cada coisa tem a sua linha, com
+        /// ícone, nome e quantidade, e o conteúdo do kit entra recuado sob o
+        /// nome dele.
+        ///
+        /// O ícone de item do jogo custa zero de banda: o cliente já tem a
+        /// arte, e o que viaja é o `itemid`.
+        ///
+        /// ####  AUSENTE NÃO É VAZIO  ####
+        ///
+        /// Enquanto o agente não responde, a tela DIZ que está carregando.
+        /// Um modal em branco pareceria erro — e o jogador clicaria de novo,
+        /// que é justamente o que fecharia a tela que ele está esperando.
+        /// </summary>
+        private static List<string> BuildParts(PartsView view)
+        {
+            Canvas canvas = new Canvas("OZP.P");
+
+            Box frame = RegionRoot(canvas, UiParts, (WinWidth - PartsWidth) / 2f,
+                                   (WinHeight - PartsHeight) / 2f + PartsDrop, PartsWidth, PartsHeight,
+                                   ColBorder);
+
+            string innerName = Panel(canvas, frame, 1, 1, PartsWidth - 2, PartsHeight - 2, ColBg,
+                                     canvas.NextName());
+            Box body = new Box(innerName, PartsWidth - 2, PartsHeight - 2);
+
+            // O acento âmbar (e não o ferrugem do modal do nível) é o que
+            // separa as duas camadas de um olhar só.
+            Panel(canvas, body, 0, 0, body.W, 2, ColAmber);
+
+            Label(canvas, body, 14, 6, body.W - 60, 24, view.Title, 12, ColText, TextAnchor.MiddleLeft, true);
+
+            // O X volta para o modal do nível, e não para a trilha: é o
+            // mesmo comando que abriu, e ele é um interruptor.
+            TextButton(canvas, body, body.W - 38, 8, 24, 24, ColSurface2,
+                       MenuPartsCommand + " " + view.Token + " " + view.Level + " " + view.Lane,
+                       "X", 11, ColText);
+
+            // A linha do agente, inteira. No card ela vem cortada em "+1"; é
+            // o que o jogador clicou, e vale a largura toda.
+            Label(canvas, body, 14, 28, body.W - 28, 20, Shorten(view.Summary, 62), 11, ColMuted,
+                  TextAnchor.MiddleLeft, false);
+
+            Panel(canvas, body, 0, PartsHeadHeight - 1, body.W, 1, ColBorder);
+
+            // O rodapé cresce quando há aviso: a lista encolhe para caber
+            // os dois. Sobrepor um no outro é o que produz texto ilegível
+            // em cima de texto.
+            float footer = view.Note.Length > 0 ? 48f : 24f;
+            float viewport = body.H - PartsHeadHeight - footer;
+
+            if (view.Loading)
+            {
+                Label(canvas, body, 14, PartsHeadHeight, body.W - 28, viewport,
+                      "Carregando o que esta recompensa dá…", 12, ColMuted, TextAnchor.MiddleCenter, false);
+            }
+            else if (view.Failed || view.Rows.Count == 0)
+            {
+                // A recusa não é só a cor: o texto diz o que houve, e o aviso
+                // de baixo (`Note`) diz o porquê.
+                Label(canvas, body, 14, PartsHeadHeight, body.W - 28, viewport,
+                      view.Note.Length > 0 ? view.Note : "Não deu para ler esta recompensa agora.",
+                      12, ColMuted, TextAnchor.MiddleCenter, false);
+            }
+            else
+            {
+                DrawParts(canvas, body, view, viewport);
+            }
+
+            if (view.Note.Length > 0 && !view.Failed && view.Rows.Count > 0)
+            {
+                // ####  O AVISO TEM BORDA, E NÃO SÓ COR  ####
+                //
+                // "este kit saiu do catálogo" muda a decisão de quem está
+                // olhando. A barra âmbar à esquerda é a forma; a cor
+                // acompanha.
+                Panel(canvas, body, 14, body.H - 44, 3, 24, ColAmber);
+                Label(canvas, body, 22, body.H - 44, body.W - 36, 24, Shorten(view.Note, 84), 10, ColText,
+                      TextAnchor.MiddleLeft, false);
+            }
+
+            Label(canvas, body, 14, body.H - 18, body.W - 28, 16,
+                  "Clique de novo na recompensa para voltar ao nível.", 10, ColMuted,
+                  TextAnchor.MiddleLeft, false);
+
+            return canvas.Parts();
+        }
+
+        /// <summary>
+        /// As linhas, com rolagem quando não cabem.
+        ///
+        /// A receita do `ScrollArea` é a medida no jogo em 17/09/2026: quem
+        /// desenha dentro deixa `ScrollGutter` livre à direita, senão a barra
+        /// cobre a quantidade.
+        /// </summary>
+        private static void DrawParts(Canvas canvas, Box body, PartsView view, float viewport)
+        {
+            int shown = Math.Min(view.Rows.Count, PartsMaxRows);
+            int more = view.Rows.Count - shown;
+            float content = (shown + (more > 0 ? 1 : 0)) * PartsRowHeight;
+
+            Box area = body;
+            float rowWidth = body.W - 28;
+            float left = 14f;
+            float top = PartsHeadHeight;
+
+            if (content > viewport)
+            {
+                area = ScrollArea(canvas, body, 14, PartsHeadHeight, body.W - 28, viewport, content, false, 0f);
+                rowWidth = area.W - ScrollGutter;
+                left = 0f;
+                top = 0f;
+            }
+
+            for (int i = 0; i < shown; i++)
+            {
+                PartRow row = view.Rows[i];
+                float y = top + i * PartsRowHeight;
+                float indent = row.InKit ? PartsKitIndent : 0f;
+                float x = left + indent;
+
+                // ####  O KIT É UM CABEÇALHO, E NÃO UMA LINHA COMO AS OUTRAS  ####
+                //
+                // Sem isso, "Kit Inicial" e os seis itens dele se leriam como
+                // sete recompensas. O âmbar e a sigla marcam onde o grupo
+                // começa; o recuo das linhas de baixo mostra até onde ele vai.
+                bool header = row.Kind == "kit" && !row.InKit;
+
+                if (row.ItemId != 0)
+                {
+                    Icon(canvas, area, x, y + 3, 24, 24, row.ItemId, row.SkinId, "1 1 1 1");
+                }
+                else
+                {
+                    Label(canvas, area, x, y, 24, PartsRowHeight, KindMark(row.Kind), header ? 10 : 11,
+                          header ? ColAmber : ColMuted, TextAnchor.MiddleCenter, true);
+                }
+
+                float textX = x + 30;
+                Label(canvas, area, textX, y, rowWidth - textX + left, PartsRowHeight,
+                      Shorten(row.Label, row.InKit ? 46 : 50), header ? 12 : 12,
+                      header ? ColAmber : ColText, TextAnchor.MiddleLeft, header);
+            }
+
+            if (more > 0)
+            {
+                Label(canvas, area, left, top + shown * PartsRowHeight, rowWidth, PartsRowHeight,
+                      "e mais " + more + " itens nesta recompensa", 10, ColMuted, TextAnchor.MiddleLeft, false);
+            }
+        }
+
         // ============================================================
         //  §11  origemz.passe.bytes  -  o pior caso, medido
         //
@@ -3435,6 +4697,11 @@ namespace Oxide.Plugins
                     LevelText = "NÍVEL " + i,
                     Current = i == 17,
                     Milestone = i % 10 == 0,
+
+                    // O pior caso do XP na tarja é o "faltam …": ele tem a
+                    // palavra a mais, e o número grande em todos os cards.
+                    XpText = "faltam 999.999 XP",
+                    XpLive = true,
                 };
 
                 // O pior caso de BYTES é toda faixa com rótulo longo, ícone,
@@ -3470,6 +4737,53 @@ namespace Oxide.Plugins
                 boxView.Rows.Add(new BoxRow { Label = longLabel, Origin = i % 2 == 0 ? "full" : "season" });
             }
 
+            // O modal do pior caso: marco (a moldura âmbar), nível atual, as
+            // duas faixas com rótulo longo, motivo e botão de resgate.
+            DetailView detail = new DetailView
+            {
+                Token = token,
+                Level = 17,
+                Title = "NÍVEL 17",
+                Milestone = true,
+                Current = true,
+                Known = true,
+                StepText = "999.999 XP",
+                TotalText = "9.999.999 XP",
+                GapText = "Faltam 999.999 XP.",
+                StepFill = 0.6f,
+                Icons = icons,
+            };
+
+            FillWorst(detail.Free, longLabel, itemId, skin, false, true, StateAvailable);
+            FillWorst(detail.Paid, longLabel, itemId, skin, true, true, StateLocked);
+            detail.Paid.Tip = "Ative o passe para levar esta recompensa — ela fica guardada até lá.";
+
+            // O modal de itens no pior caso: o teto de linhas, todas com
+            // ícone e rótulo longo, recuadas sob um kit, e ainda devendo — e
+            // com o aviso do kit apagado embaixo, que é o rodapé mais alto.
+            PartsView parts = new PartsView
+            {
+                Token = token,
+                Level = 17,
+                Lane = LanePaid,
+                Title = "NÍVEL 17 · RECOMPENSA DO PASSE",
+                Summary = longLabel + " + 2.500 OZCoin +1",
+                Note = "O kit kit-inicial-de-metal saiu do catálogo deste servidor: fale com um admin antes de resgatar.",
+            };
+
+            parts.Rows.Add(new PartRow { Label = "Kit Inicial de Metal", Kind = "kit" });
+            for (int i = 0; i < PartsMaxRows + 12; i++)
+            {
+                parts.Rows.Add(new PartRow
+                {
+                    Label = longLabel,
+                    Kind = "item",
+                    ItemId = itemId,
+                    SkinId = skin,
+                    InKit = true,
+                });
+            }
+
             string window = BuildWindow(token);
             string headJson = BuildHead(head);
             string footJson = BuildFoot(foot);
@@ -3477,6 +4791,10 @@ namespace Oxide.Plugins
             string boxJson = Pack(boxParts, int.MaxValue)[0];
             List<string> trackParts = BuildTrack(track);
             string trackJson = Pack(trackParts, int.MaxValue)[0];
+            List<string> detailParts = BuildDetail(detail);
+            string detailJson = Pack(detailParts, int.MaxValue)[0];
+            List<string> partsParts = BuildParts(parts);
+            string partsJson = Pack(partsParts, int.MaxValue)[0];
 
             // A abertura como o `Redraw` a manda: a trilha sai elemento por
             // elemento e o `Pack` corta no limite. Medir a região inteira num
@@ -3495,6 +4813,8 @@ namespace Oxide.Plugins
                 ["track"] = Bytes(trackJson),
                 ["foot"] = Bytes(footJson),
                 ["box"] = Bytes(boxJson),
+                ["detail"] = Bytes(detailJson),
+                ["parts"] = Bytes(partsJson),
             };
 
             JArray sends = new JArray();
@@ -3521,6 +4841,11 @@ namespace Oxide.Plugins
                 ["open"] = sends,
                 ["sends"] = sends.Count,
                 ["bytesPerLevel"] = levels > 0 ? Bytes(trackJson) / levels : 0,
+                // O modal de itens NÃO entra na abertura: ele só existe
+                // depois de dois cliques. O que interessa dele é em quantos
+                // `AddUI` o pior caso cai — um kit de 80 linhas passa do
+                // limite e o `Pack` o corta, como já faz com a trilha.
+                ["partsSends"] = Pack(partsParts, AddUiByteLimit).Count,
                 ["openUnderLimit"] = largest < AddUiByteLimit,
             };
 

@@ -959,8 +959,16 @@ function lineOf(view: QuestProgressView): string {
  *
  * "1 pts" também esteve na tela até o dono apontar. O plural sai da
  * quantidade e a palavra é inteira.
+ *
+ * ####  EXPORTADA PORQUE HÁ QUEM PRECISE DELA POR PARTE  ####
+ *
+ * O `rewardLine` aqui embaixo concatena e corta em "+N" — é a linha
+ * do card. O modal de itens do passe mostra UMA linha por
+ * recompensa (game/battlepass.ts), e quem escrevesse um segundo
+ * tradutor lá acabaria com "750 moedas" numa tela e "750 OZCoin" na
+ * outra.
  */
-function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardLine {
+export function rewardLineOf(reward: QuestReward, catalog: QuestsCatalog): QuestRewardLine {
   const plural = (amount: number, one: string, many: string): string =>
     `${amount.toLocaleString('pt-BR')} ${amount === 1 ? one : many}`;
 
