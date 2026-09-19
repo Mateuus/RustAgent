@@ -84,6 +84,20 @@ Configs/*.ini
 !/Plugins/OrigemZ*.cs
 !/Plugins/BetterLoot.cs
 
+#  ####  E A SONDA NAO E CONTRATO: ELA VOLTA PARA FORA  ####
+#
+#  A excecao acima e por PREFIXO, entao todo `OrigemZ*.cs` entra
+#  sozinho -- e foi assim que a `OrigemZDlcProbe.cs` chegou a
+#  producao em 19/09/2026, aparecendo na biblioteca de um servidor
+#  que nunca precisou dela. Ninguem decidiu versiona-la: o nome
+#  decidiu.
+#
+#  Sonda e plugin descartavel: ela mede uma coisa uma vez e some. Nao
+#  e a outra ponta de contrato nenhum, que e a razao inteira da
+#  excecao de cima. O lugar dela e `Plugins/<servidor>/`, junto das
+#  outras nove que sempre viveram fora do git.
+/Plugins/*Probe.cs
+
 #  ####  O BetterLoot E A SEGUNDA EXCECAO, E ELA E NOMEADA  ####
 #
 #  Ele NAO e nosso: e o 4.4.0 do MagicServices.co // TGWA, sem uma
