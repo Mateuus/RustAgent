@@ -310,9 +310,14 @@ describe('modelo -> CUI', () => {
     expect(cuiColor('#FFFFFF')).toBe('1 1 1 1');
   });
 
-  it('emite DOIS elementos por botão', () => {
+  it('emite DOIS elementos por botão com texto, e UM sem', () => {
     // O `CuiButtonComponent` não tem texto. Sem o segundo
     // elemento, o botão sai VAZIO no jogo, sem erro nenhum.
+    //
+    // A exceção é o botão cujo texto é a string vazia — o cartão do
+    // passe e o banner dele, que desenham pelos FILHOS. Ali o
+    // segundo elemento seria um `Text` de ~440 bytes na carga de
+    // ENTRADA para mostrar coisa nenhuma.
     const document = buildMainMenu();
     const entry = document.screens.find((screen) => screen.id === document.entryScreenId);
 
@@ -327,9 +332,29 @@ describe('modelo -> CUI', () => {
 
     expect(buttons.length).toBeGreaterThan(0);
 
+    let comTexto = 0;
+    let semTexto = 0;
+
     for (const button of buttons) {
-      expect(cui.some((element) => element.name === `${button.name}.text`)).toBe(true);
+      const texto = cui.find((element) => element.name === `${button.name}.text`);
+      const escrito = texto?.components.find(
+        (component) => component.type === 'UnityEngine.UI.Text',
+      ) as { readonly text?: string } | undefined;
+
+      if (texto === undefined) {
+        semTexto += 1;
+        continue;
+      }
+
+      comTexto += 1;
+      // O elemento só existe quando há o que escrever nele.
+      expect(escrito?.text).not.toBe('');
     }
+
+    // Os dois casos existem no preset: quase todo botão tem rótulo,
+    // e o cartão do passe — que desenha pelos filhos — não tem.
+    expect(comTexto).toBeGreaterThan(0);
+    expect(semTexto).toBe(1);
   });
 
   it('usa os nomes de campo MINÚSCULOS do RectTransform', () => {

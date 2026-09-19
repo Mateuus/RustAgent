@@ -286,6 +286,21 @@ function emitElement(
       // O `CuiButtonComponent` não tem texto. Sem este segundo
       // elemento o botão sai VAZIO no jogo, sem erro nenhum — e o
       // menu fica com uma fileira de retângulos mudos.
+      //
+      // ####  …MENOS O BOTÃO QUE NÃO TEM TEXTO  ####
+      //
+      // Um `Text` com a string vazia não desenha nada: ele é um
+      // elemento inteiro (~440 bytes na carga, em base64) para
+      // mostrar coisa nenhuma. Quem faz isso é o botão cujo desenho
+      // mora nos FILHOS — o cartão do passe, o banner — e para esses
+      // o texto do CUI nunca teve trabalho.
+      //
+      // O `shellNavStates` atualiza `<botão>.text` à parte, e isto
+      // não o alcança: botão de navegação sem rótulo não existe.
+      if (element.text === '') {
+        break;
+      }
+
       output.push({
         name: `${name}.text`,
         parent: name,

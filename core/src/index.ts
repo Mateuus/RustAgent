@@ -78,6 +78,7 @@ import {
   TEAM_SCREEN_ID,
   withTeamTab,
 } from './game/ui-team-screen.js';
+import { withPassBanner } from './game/ui-pass-banner.js';
 import { withPassCard } from './game/ui-pass-card.js';
 import { withSkinsTab } from './game/ui-skins-tab.js';
 import {
@@ -2022,6 +2023,33 @@ async function main(): Promise<void> {
     logger.info(
       { uiDocument: stored.slug },
       'o cartao do PASSE entrou na home deste menu: ele abre a tela do OrigemZBattlePass',
+    );
+  }
+
+  // ####  E A PROPAGANDA DO PASSE NO CARTAO DE BOAS-VINDAS  ####
+  //
+  // DEPOIS do cartao, e de proposito: sao dois degraus do mesmo
+  // menu antigo, e a home so ganha o banner depois de ja ter o
+  // cartao -- e o `withPassCard` acima e quem a deixa nesse degrau.
+  // Ver game/ui-pass-banner.ts.
+  for (const summary of uiDocuments.list()) {
+    const stored = uiDocuments.get(summary.id);
+
+    if (stored === null) {
+      continue;
+    }
+
+    const upgraded = withPassBanner(stored.document);
+
+    if (upgraded === null) {
+      continue;
+    }
+
+    uiDocuments.update(stored.id, upgraded);
+
+    logger.info(
+      { uiDocument: stored.slug },
+      'o banner do PASSE entrou na home deste menu: a arte no cartao de boas-vindas abre o /passe',
     );
   }
 

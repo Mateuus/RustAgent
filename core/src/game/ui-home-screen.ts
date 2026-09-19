@@ -194,6 +194,21 @@ export const HOME_SLOTS = {
    * o botão.
    */
   passButton: 'hm-passe',
+
+  /**
+   * A PROPAGANDA do passe, no canto direito do cartão de boas-vindas.
+   *
+   * Ela é um slot porque a AÇÃO dela é reposta a cada abertura, como
+   * a de todos os outros botões desta tela: comando gravado no
+   * documento é coisa que o admin pode trocar sem saber que quebra o
+   * clique. Ver `slotsOf`.
+   *
+   * O id NÃO termina em `hm-passe` de propósito: `slotOf` casa pelo
+   * FIM do id, e um `hm-passe-ad` seria confundido com o cartão —
+   * inclusive pelo `{ hide: true }` que esconde o cartão num servidor
+   * sem passe.
+   */
+  passBanner: 'hm-ad-passe',
 } as const;
 
 /**
@@ -217,6 +232,46 @@ export const PASS_CARD_COMMAND = '/passe';
 
 const PASS_CARD_ACTION: UiAction = {
   id: 'hm-passe-a',
+  kind: 'chat',
+  command: PASS_CARD_COMMAND,
+};
+
+/**
+ * A arte do banner do passe: `Assets\ui\passe-banner.png`.
+ *
+ * ####  A CHAVE É O NOME DO ARQUIVO, E SÓ ISSO  ####
+ *
+ * `loadUiImages` varre `Assets\ui`, tira o `.png` e é essa a chave
+ * (ver game/ui-images.ts). O agente NUNCA conhece o CRC: a tela sai
+ * daqui com `{img:passe-banner}` e o OrigemZUI o troca ao desenhar.
+ *
+ * Hífen e não ponto: o `uiDocumentSchema` só aceita
+ * `[a-z0-9][a-z0-9-]*` em chave de imagem gravada, e um
+ * `passe.banner` faria o documento INTEIRO ser recusado — o menu
+ * sumiria do jogo.
+ *
+ * ####  E ELA NÃO ENTRA EM `IMAGE_FAMILIES`  ####
+ *
+ * As famílias existem para PODAR: `store.<id>` e `kit.<slug>` nascem
+ * de linhas do banco que o admin apaga, e sem poda a tabela do
+ * plugin guardaria a arte de uma oferta morta para sempre. Esta aqui
+ * é um arquivo do repositório, uma só, com nome fixo — não há o que
+ * podar, e uma família nova faria `loadUiImages` recusar o próprio
+ * arquivo (ele rejeita nome que caia em família reservada).
+ */
+export const PASS_BANNER_IMAGE_KEY = 'passe-banner';
+
+/**
+ * A ação do banner: o MESMO comando do cartão, com id próprio.
+ *
+ * Reusar `PASS_CARD_ACTION` inteiro sairia de graça na carga — o
+ * índice de ações é um mapa por id —, MAS o `findDocumentProblems`
+ * recusa id repetido: ele é o sintoma de um copiar-colar em que os
+ * dois botões acabam fazendo a coisa do primeiro, e o preço de
+ * deixar passar é um menu que não abre.
+ */
+const PASS_BANNER_ACTION: UiAction = {
+  id: 'hm-adp-a',
   kind: 'chat',
   command: PASS_CARD_COMMAND,
 };
@@ -942,13 +997,19 @@ function card(id: string, rect: Rect, children: readonly UiElement[]): UiElement
   ]);
 }
 
-/** Faixa horizontal com a margem interna do cartão. */
-function band(top: number, height: number, pad = PAD): Rect {
+/**
+ * Faixa horizontal com a margem interna do cartão.
+ *
+ * `right` separado de `pad` por causa do banner do passe: as linhas
+ * da saudação param ANTES dele, senão um nome comprido quebra por
+ * baixo da arte. Ver `welcomeLines`.
+ */
+function band(top: number, height: number, pad = PAD, right = pad): Rect {
   return {
     anchorMin: { x: 0, y: 1 },
     anchorMax: { x: 1, y: 1 },
     offsetMin: { x: pad, y: -(top + height) },
-    offsetMax: { x: -pad, y: -top },
+    offsetMax: { x: -right, y: -top },
   };
 }
 
@@ -978,6 +1039,19 @@ const CARD_GAP = 12;
 /** A altura do botão do pé, e a faixa que ele reserva. */
 const BUTTON_HEIGHT = 26;
 const FOOTER_ROOM = BUTTON_HEIGHT + PAD + 22;
+
+/**
+ * O tamanho do banner do passe, na proporção 8:3 do PNG (512x192).
+ *
+ * Esticar num eixo só deformaria a arte: o CUI não tem
+ * `preserveAspect`, e quem escolhe a proporção é este retângulo.
+ * 90 px de altura deixa 13 px de respiro em cima e embaixo dentro
+ * dos 116 do cartão de boas-vindas.
+ */
+const PASS_BANNER = { width: 240, height: 90 } as const;
+
+/** O que o banner reserva à direita, e onde os textos param. */
+const PASS_BANNER_ROOM = PAD + PASS_BANNER.width + PAD;
 
 function columnRect(index: number, total: number): Rect {
   const width = 1 / total;
@@ -1329,6 +1403,20 @@ export interface BuildHomeScreenOptions {
    * abre existir. Ver `HomeCards`.
    */
   readonly cards?: HomeCards;
+  /**
+   * O banner do passe no cartão de boas-vindas. Ausente = sim.
+   *
+   * ####  ISTO EXISTE PARA OS UPGRADES, E SÓ  ####
+   *
+   * `withPassCard` e `withPassBanner` só tocam na home que está byte
+   * a byte igual ao preset que a gravou — e o preset de ontem não
+   * tinha banner. Sem esta chave, os dois não conseguiriam mais
+   * DESCREVER a home antiga, e quem tem menu gravado nunca ganharia
+   * nem o cartão nem o banner.
+   *
+   * Ninguém mais passa `false`: o desenho de hoje tem o banner.
+   */
+  readonly passBanner?: boolean;
 }
 
 /**
@@ -1356,6 +1444,7 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
 
   const { view } = options;
   const cards = options.cards ?? ALL_CARDS;
+  const withBanner = options.passBanner ?? true;
 
   // Os cartões que sobraram dividem a largura entre si: com a loja
   // escondida, três cartões ocupam a tela inteira em vez de deixarem
@@ -1399,7 +1488,14 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
       // O nome de quem abriu entra pelo `{jogador}` do texto DELE,
       // e não por um rótulo nosso ao lado. Ver `applyVariables`.
       card('hm-banner', topBar(BANNER_HEIGHT), [
-        panel('hm-banner-acento', leftBar(3), C.rust),
+        // ####  O ACENTO SAIU PARA O BANNER CABER  ####
+        //
+        // Três pixels de vermelho na borda esquerda, sem texto e sem
+        // dado: 344 bytes da carga de ENTRADA por decoração pura. A
+        // arte do banner já traz a barra de acento dela, e o cartão
+        // não ficou sem vermelho. A conta inteira das trocas está na
+        // trava, em test/ui-home-screen.test.ts.
+        ...(withBanner ? [] : [panel('hm-banner-acento', leftBar(3), C.rust)]),
 
         // ####  O NOME EM DUAS LINHAS, E A SEGUNDA EM VERMELHO  ####
         //
@@ -1411,12 +1507,27 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
         //
         // Duas linhas, e não um texto com duas cores: o CUI não tem
         // marcação dentro de um `Text` — cor é do elemento inteiro.
-        ...welcomeLines(),
-        label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(78, 20, 20), {
-          size: 12,
-          color: C.textMuted,
-          align: 'MiddleLeft',
-        }),
+        ...welcomeLines(withBanner),
+
+        // ####  A PROPAGANDA ENTROU NO LUGAR DA INSTRUÇÃO  ####
+        //
+        // "Use o menu acima para navegar pelo servidor." era texto
+        // FIXO, que enfeita e não informa — o item 1 da ordem de
+        // saída registrada na trava (test/ui-home-screen.test.ts), e
+        // justamente no cartão em que o banner agora mora. Ele
+        // devolveu 508 dos 1.324 bytes que o banner custa.
+        //
+        // Sem banner, a linha volta: é o desenho de ontem, e é dele
+        // que os upgrades precisam. Ver `passBanner`.
+        ...(withBanner
+          ? [passBanner()]
+          : [
+              label('hm-sub', 'Use o menu acima para navegar pelo servidor.', band(78, 20, 20), {
+                size: 12,
+                color: C.textMuted,
+                align: 'MiddleLeft',
+              }),
+            ]),
         ]),
 
         ...body,
@@ -1446,7 +1557,13 @@ export function buildHomeScreen(options: BuildHomeScreenOptions): UiScreen {
  * vírgula está numa linha e a variável em outra: sem este caso, a
  * tela mostraria "BEM-VINDO DE VOLTA," e uma linha vazia embaixo.
  */
-function welcomeLines(): UiElement[] {
+function welcomeLines(withBanner: boolean): UiElement[] {
+  // Com o banner à direita, as duas linhas param antes dele: o CUI
+  // QUEBRA o texto na largura do retângulo, então um nome comprido
+  // não invadiria a arte — ele desceria para uma segunda linha que a
+  // faixa de 34 px corta pela metade.
+  const right = withBanner ? PASS_BANNER_ROOM : 20;
+
   return [
     // ####  SEM VÍRGULA, DE PROPÓSITO  ####
     //
@@ -1454,18 +1571,80 @@ function welcomeLines(): UiElement[] {
     // (a carga inicial vai sem `steamId`) a linha ficaria com a
     // vírgula pendurada sobre um vazio. Sem ela, a saudação se lê
     // inteira sozinha e o nome é um acréscimo quando existe.
-    label(HOME_SLOTS.welcome, 'BEM-VINDO DE VOLTA', band(22, 20, 20), {
+    label(HOME_SLOTS.welcome, 'BEM-VINDO DE VOLTA', band(22, 20, 20, right), {
       size: 14,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
-    label(HOME_SLOTS.player, PLAYER_VARIABLE, band(40, 34, 20), {
+    label(HOME_SLOTS.player, PLAYER_VARIABLE, band(40, 34, 20, right), {
       size: 28,
       color: C.rust,
       align: 'MiddleLeft',
       font: 'RobotoCondensed-Bold.ttf',
     }),
   ];
+}
+
+/**
+ * A propaganda do passe, no canto direito do cartão de boas-vindas.
+ *
+ * ####  DOIS ELEMENTOS, E NENHUM A MAIS  ####
+ *
+ * O CUI não tem botão com imagem: `button` pinta cor e texto, e a
+ * arte é um `image` separado. Então o mínimo é a RAIZ ser o botão e a
+ * arte morar dentro dela — o clique no filho sobe para o botão, que é
+ * o mesmo arranjo do cartão do passe (`passCard`), medido no jogo.
+ *
+ * Inverter (imagem fora, botão transparente por cima) custaria os
+ * mesmos dois elementos e perderia o desenho de reserva abaixo.
+ *
+ * ####  SE A ARTE NÃO SUBIU, O BOTÃO CONTINUA LEGÍVEL  ####
+ *
+ * Chave sem CRC não dá erro: o `{img:…}` fica no JSON, o
+ * `RawImage` não resolve e o retângulo sai VAZIO (ver
+ * `ResolveImages` no OrigemZUI). Um banner invisível que ainda
+ * clicasse seria uma armadilha — então o botão tem fundo escuro e
+ * diz "PASSE DE BATALHA ›" por baixo da arte.
+ *
+ * Com a arte no lugar nada disso aparece: o PNG é 100% opaco
+ * (medido, alpha mínimo 255) e cobre fundo e texto. Sem ela, o
+ * jogador vê um botão escrito, que é exatamente o que ele deveria
+ * ver.
+ *
+ * ####  E A AÇÃO É A DO CARTÃO, COM ID PRÓPRIO  ####
+ *
+ * O comando é o mesmo (`chat /passe`), mas o id não pode ser: o
+ * `findDocumentProblems` recusa identificador repetido no documento.
+ * Ver `PASS_BANNER_ACTION`.
+ */
+function passBanner(): UiElement {
+  const half = PASS_BANNER.height / 2;
+
+  return {
+    ...button(
+      HOME_SLOTS.passBanner,
+      `${PASS_CARD_TITLE}   ›`,
+      {
+        // Colado à direita e centrado na vertical: o cartão de
+        // boas-vindas tem altura fixa, mas centrar é o que mantém a
+        // arte no eixo se alguém mudar `BANNER_HEIGHT`.
+        anchorMin: { x: 1, y: 0.5 },
+        anchorMax: { x: 1, y: 0.5 },
+        offsetMin: { x: -(PAD + PASS_BANNER.width), y: -half },
+        offsetMax: { x: -PAD, y: half },
+      },
+      PASS_BANNER_ACTION,
+      {
+        // O fundo do desenho de reserva, na cor da moldura da home.
+        color: C.bg,
+        textColor: C.text,
+        fontSize: 13,
+      },
+    ),
+    children: [
+      storedImage(`${HOME_SLOTS.passBanner}-img`, PASS_BANNER_IMAGE_KEY, fill()),
+    ],
+  };
 }
 
 function rankCard(rank: HomeRankView): UiElement[] {
@@ -2124,6 +2303,17 @@ function slotsOf(options: BuildHomeScreenOptions): Record<string, SlotValue> {
     // `{ hide: true }` de `hiddenCards` e o cartão voltaria a
     // aparecer num servidor que não o mostra.
     ...(cards.pass ? { [HOME_SLOTS.passButton]: { action: PASS_CARD_ACTION } } : {}),
+
+    // ####  O BANNER TEM A AÇÃO REPOSTA, COMO TODO BOTÃO DAQUI  ####
+    //
+    // Sem isto, o que abriria o passe seria o comando GRAVADO no
+    // documento — e o admin pode trocá-lo no editor sem saber que o
+    // banner deixou de levar a lugar nenhum.
+    //
+    // Sem condição de cartão: o banner é elemento próprio, e quem o
+    // apagar no editor simplesmente não tem slot para preencher —
+    // `fillTemplate` ignora o que não existe.
+    [HOME_SLOTS.passBanner]: { action: PASS_BANNER_ACTION },
   };
 }
 
