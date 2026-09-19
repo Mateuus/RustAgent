@@ -79,8 +79,9 @@ export interface StoreScreenProviderOptions {
    * tela e não deve aprender o que é uma temporada. Ele pergunta
    * "como está o passe deste jogador?" e pinta a resposta.
    *
-   * Ausente = o modal do passe sai com nome e preço, e o botão
-   * continua lá — a compra confere de novo antes de cobrar.
+   * Ausente = a vitrine e o modal do passe saem com nome e preço, e
+   * o botão continua lá — a compra confere de novo antes de cobrar.
+   * Ver `readPass`.
    */
   readonly passOf?: (serverId: string, steamId: string) => StorePassView | null;
 }
@@ -117,36 +118,60 @@ export function createStoreScreenProvider(
     let vehicleSpace: boolean | null = null;
     let pass: StorePassView | null = null;
 
-    if (target.kind === 'item' && input.steamId !== undefined) {
+    if (input.steamId !== undefined) {
       const steamId = input.steamId;
 
-      try {
-        balance = (await options.wallet.getBalance(steamId)).balance;
-      } catch (error) {
-        // Carteira fora do ar: o modal abre sem a linha do saldo, e
-        // o botão de comprar CONTINUA lá. Escondê-lo diria "você não
-        // tem dinheiro", que é diferente de "não consegui perguntar"
-        // — e a compra em si já sabe recusar com o motivo certo.
-        options.logger?.warn(
-          { err: toError(error), steamId },
-          'não consegui ler o saldo para o modal da loja',
-        );
+      // A oferta clicada, quando o alvo é o modal de uma delas.
+      const offer =
+        target.kind === 'item'
+          ? catalog.flatMap((entry) => entry.offers).find((entry) => entry.id === target.offerId)
+          : undefined;
+
+      if (target.kind === 'item') {
+        try {
+          balance = (await options.wallet.getBalance(steamId)).balance;
+        } catch (error) {
+          // Carteira fora do ar: o modal abre sem a linha do saldo, e
+          // o botão de comprar CONTINUA lá. Escondê-lo diria "você não
+          // tem dinheiro", que é diferente de "não consegui perguntar"
+          // — e a compra em si já sabe recusar com o motivo certo.
+          options.logger?.warn(
+            { err: toError(error), steamId },
+            'não consegui ler o saldo para o modal da loja',
+          );
+        }
+
+        // Só para veículo, e só quando há jogador: perguntar isso ao
+        // abrir o modal de uma AK seria uma ida ao plugin por nada.
+        if (offer?.kind === 'vehicle') {
+          vehicleSpace = await options.store.hasVehicleSpace(input.serverId, steamId);
+        }
       }
 
-      // Só para veículo, e só quando há jogador: perguntar isso ao
-      // abrir o modal de uma AK seria uma ida ao plugin por nada.
-      const offer = catalog
-        .flatMap((entry) => entry.offers)
-        .find((entry) => entry.id === target.offerId);
+      // ####  A VITRINE TAMBÉM PERGUNTA, E NÃO SÓ O MODAL  ####
+      //
+      // Antes só o modal perguntava, e o card da grade continuava
+      // oferecendo COMPRAR a quem a compra ia recusar (04 §7). O
+      // jogador descobria no terceiro clique.
+      //
+      // Perguntar aqui é leitura do banco LOCAL — nada de rede —, e
+      // só acontece quando há uma oferta de passe na tela: no modal,
+      // quando é ELA a oferta aberta; na grade, quando o catálogo tem
+      // alguma.
+      //
+      // Varrer o catálogo inteiro em vez de descobrir qual categoria
+      // está visível é de propósito: a regra de qual delas abre por
+      // padrão mora no desenho, e repeti-la aqui daria duas versões
+      // dela para divergirem.
+      const showsPass =
+        target.kind === 'item'
+          ? offer?.kind === 'pass'
+          : catalog.some((entry) => entry.offers.some((item) => item.kind === 'pass'));
 
-      if (offer?.kind === 'vehicle') {
-        vehicleSpace = await options.store.hasVehicleSpace(input.serverId, steamId);
-      }
-
-      // O mês, o servidor, os dias que restam e o que o retroativo
-      // dá (04 §7). Sem ida à rede: é leitura do banco local.
-      if (offer?.kind === 'pass') {
-        pass = options.passOf?.(input.serverId, steamId) ?? null;
+      if (showsPass) {
+        // O mês, o servidor, os dias que restam e o que o retroativo
+        // dá (04 §7) — e, para o card, se o passe já é dele.
+        pass = readPass(options, input.serverId, steamId);
       }
     }
 
@@ -183,6 +208,38 @@ export function createStoreScreenProvider(
     // de uma categoria ou de uma segunda página.
     return toGeneratedScreenBundle(input.document, screen, STORE_SCREEN_ID);
   };
+}
+
+/**
+ * O passe daquele jogador, ou `null` quando não deu para saber.
+ *
+ * ####  "NÃO SEI" NUNCA PODE VIRAR "JÁ TEM"  ####
+ *
+ * Três coisas chegam aqui como dúvida: o agente sem `passOf` ligado,
+ * o servidor sem passe, e a consulta que estourou. Nos três a
+ * resposta é `null`, e `null` DEIXA o botão de comprar na tela —
+ * esconder por dúvida tiraria uma venda legítima, enquanto mostrá-lo
+ * a quem já tem custa um clique e uma frase.
+ *
+ * O `try` é a parte que faltava: uma exceção aqui derrubaria a tela
+ * inteira da loja, e não só a linha do passe. A última palavra
+ * continua sendo a da compra, que confere de novo antes de cobrar.
+ */
+function readPass(
+  options: StoreScreenProviderOptions,
+  serverId: string,
+  steamId: string,
+): StorePassView | null {
+  try {
+    return options.passOf?.(serverId, steamId) ?? null;
+  } catch (error) {
+    options.logger?.warn(
+      { err: toError(error), serverId, steamId },
+      'não consegui saber se o jogador já tem o passe; a loja segue oferecendo',
+    );
+
+    return null;
+  }
 }
 
 // ============================================================

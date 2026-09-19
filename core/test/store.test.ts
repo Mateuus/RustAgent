@@ -34,13 +34,14 @@ import { WalletsRepository } from '../src/db/wallets-repository.js';
 
 import { collectScreenActions, headerUpdatesToCui } from '../src/game/ui-cui.js';
 import { buildMainMenu } from '../src/game/ui-preset-main-menu.js';
-import { createHeaderProvider } from '../src/game/ui-store-bridge.js';
+import { createHeaderProvider, createStoreScreenProvider } from '../src/game/ui-store-bridge.js';
 import {
   buildResultScreen,
   buildStoreScreen,
   itemScreenId,
   parseStoreScreenId,
   STORE_SCREEN_ID,
+  type StorePassView,
 } from '../src/game/ui-store-screens.js';
 import { storeOfferBody } from '../src/http/routes/store.js';
 import { createLogger } from '../src/logger.js';
@@ -1315,6 +1316,167 @@ describe('o modal do passe', () => {
     });
 
     expect(textsOf(screen)).not.toContain('QUANTIDADE');
+  });
+});
+
+// ============================================================
+//  A VITRINE DO PASSE
+//
+//  O modal já sabia recusar; a GRADE não sabia de nada. Quem já
+//  tinha comprado via COMPRAR no card, clicava, abria o modal e só
+//  ali levava o "você já tem" — três passos para receber um não.
+//
+//  O que este bloco guarda:
+//
+//    1. quem já tem NÃO recebe o botão de comprar, e o lugar dele diz
+//       por quê;
+//    2. quem não tem recebe o botão, e as outras ofertas da mesma
+//       tela não mudam;
+//    3. quando NÃO DÁ PARA SABER — sem `passOf`, ou com ele
+//       estourando — o botão FICA. É o caso que protege a venda, e a
+//       recusa do servidor continua sendo a última palavra.
+// ============================================================
+
+describe('a vitrine do passe', () => {
+  /** Uma categoria com a oferta do passe e uma AK ao lado. */
+  function gridCatalog(): readonly StoreCatalogEntry[] {
+    const harness = setup();
+
+    harness.repository.saveCategory('cat', { name: 'Passe', position: 0, enabled: true }, NOW);
+    harness.repository.saveOffer('of0', offer(passOffer()), NOW);
+    harness.repository.saveOffer('of1', offer({ name: 'Assault Rifle', position: 1 }), NOW);
+
+    return harness.service.catalog();
+  }
+
+  const view = {
+    period: '2026-09',
+    serverName: 'OrigemZ PVP #1',
+    daysLeft: 3,
+    owned: false,
+    level: 17,
+    retroactive: true,
+    seasonReady: true,
+  };
+
+  const grade = { kind: 'catalog', categoryId: 'cat', page: 0 } as const;
+
+  /** O elemento que ocupa o lugar do botão daquele card. */
+  function cardButton(screen: UiScreen, offerId: string): UiElement | undefined {
+    return collect(screen.elements).find((element) => element.id === `b${offerId}`);
+  }
+
+  it('quem já tem NÃO recebe o botão de comprar', () => {
+    const screen = buildStoreScreen({
+      catalog: gridCatalog(),
+      target: grade,
+      pass: { ...view, owned: true },
+    });
+
+    // ####  O LUGAR DO BOTÃO CONTINUA OCUPADO  ####
+    //
+    // Sumir com ele deixaria um buraco no card, e o jogador sem saber
+    // se a oferta quebrou. O `deadButton` fica no mesmo lugar e DIZ.
+    const dead = cardButton(screen, 'of0');
+
+    expect(dead?.type).toBe('panel');
+    expect(textsOf(screen)).toContain('VOCÊ JÁ TEM');
+
+    // E não há para onde clicar: o modal daquela oferta não é aberto
+    // por este card.
+    expect(collectScreenActions(screen)['abof0']).toBeUndefined();
+  });
+
+  it('o card do vizinho não muda por causa do passe', () => {
+    // ####  A REGRA É DA OFERTA, NÃO DA TELA  ####
+    //
+    // Ter o passe não pode apagar o COMPRAR da AK que está ao lado.
+    const screen = buildStoreScreen({
+      catalog: gridCatalog(),
+      target: grade,
+      pass: { ...view, owned: true },
+    });
+
+    const vizinho = cardButton(screen, 'of1');
+
+    expect(vizinho?.type).toBe('button');
+    expect(collectScreenActions(screen)['abof1']).toMatchObject({ kind: 'modal.open' });
+  });
+
+  it('quem não tem recebe o botão', () => {
+    const screen = buildStoreScreen({
+      catalog: gridCatalog(),
+      target: grade,
+      pass: view,
+    });
+
+    expect(cardButton(screen, 'of0')?.type).toBe('button');
+    expect(textsOf(screen)).not.toContain('VOCÊ JÁ TEM');
+  });
+
+  it('sem saber do passe, o card continua oferecendo', () => {
+    // `null` = não há resposta. Esconder o botão por dúvida tiraria
+    // uma venda legítima; mostrá-lo a quem já tem custa um clique.
+    const screen = buildStoreScreen({ catalog: gridCatalog(), target: grade });
+
+    expect(cardButton(screen, 'of0')?.type).toBe('button');
+  });
+
+  /** A tela como o plugin a recebe: passando pela ponte. */
+  async function gridBundle(
+    passOf?: (serverId: string, steamId: string) => StorePassView,
+  ): Promise<string[]> {
+    const harness = setup();
+
+    harness.repository.saveCategory('cat', { name: 'Passe', position: 0, enabled: true }, NOW);
+    harness.repository.saveOffer('of0', offer(passOffer()), NOW);
+
+    const screens = createStoreScreenProvider({
+      store: harness.service,
+      wallet: new LocalWallet(harness.wallets),
+      logger: silent,
+      ...(passOf === undefined ? {} : { passOf }),
+    });
+
+    const bundle = await screens({
+      serverId: SERVER,
+      document: buildMainMenu(),
+      screenId: `${STORE_SCREEN_ID}:cat`,
+      steamId: STEAM_ID,
+    });
+
+    return (bundle?.cui ?? []).flatMap((element) =>
+      element.components.map((component) => String((component as { text?: unknown }).text ?? '')),
+    );
+  }
+
+  it('a ponte pergunta pela GRADE, e não só pelo modal', async () => {
+    // Sem isto a consulta só acontecia no modal — e era exatamente
+    // por isso que o card ficava velho.
+    const texts = await gridBundle(() => ({ ...view, owned: true }));
+
+    expect(texts).toContain('VOCÊ JÁ TEM');
+    expect(texts).not.toContain('COMPRAR');
+  });
+
+  it('com a consulta estourando, o botão FICA', async () => {
+    // ####  "NÃO SEI" NÃO PODE VIRAR "JÁ TEM"  ####
+    //
+    // E a tela inteira não pode cair junto: antes do `readPass`, uma
+    // exceção aqui derrubava a loja, e não só a linha do passe.
+    const texts = await gridBundle(() => {
+      throw new Error('banco fechado');
+    });
+
+    expect(texts).toContain('COMPRAR');
+    expect(texts).not.toContain('VOCÊ JÁ TEM');
+  });
+
+  it('sem o passe ligado no agente, o botão FICA', async () => {
+    const texts = await gridBundle();
+
+    expect(texts).toContain('COMPRAR');
+    expect(texts).not.toContain('VOCÊ JÁ TEM');
   });
 });
 
