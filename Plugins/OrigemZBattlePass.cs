@@ -2705,6 +2705,14 @@ namespace Oxide.Plugins
             /// <summary>O aviso de baixo: kit apagado, ou o motivo da falha.</summary>
             public string Note = "";
 
+            /// <summary>
+            /// Chave -> CRC, a mesma tabela do resto da tela.
+            ///
+            /// A lista de itens precisa dela pelo mesmo motivo do card: a
+            /// linha da moeda mostra a LOGO, e nao a sigla. Ver `DrawParts`.
+            /// </summary>
+            public Dictionary<string, string> Icons;
+
             public readonly List<PartRow> Rows = new List<PartRow>();
         }
 
@@ -3173,6 +3181,7 @@ namespace Oxide.Plugins
                 Loading = session.PartsRequestId.Length > 0,
                 Failed = session.PartsFailed,
                 Note = session.PartsNote,
+                Icons = _icons,
             };
 
             view.Rows.AddRange(session.PartsRows);
@@ -4798,15 +4807,30 @@ namespace Oxide.Plugins
                 {
                     Icon(canvas, area, x, y + 3, 24, 24, row.ItemId, row.SkinId, "1 1 1 1");
                 }
+                else if (row.Kind == "coins")
+                {
+                    // ####  A MOEDA MOSTRA A LOGO, TAMBEM AQUI  ####
+                    //
+                    // Esta linha nasceu com a sigla, pelo argumento de que a
+                    // 24 px a logo vira borrao. O dono viu no jogo e pediu o
+                    // contrario (19/09/2026), e a tela deu razao a ele: as
+                    // linhas de dentro do kit tem ICONE DE ITEM, e so a da
+                    // moeda ficava sem. Duas letras no meio de uma coluna de
+                    // icones nao se leem como "moeda" -- se leem como icone
+                    // que faltou carregar.
+                    //
+                    // O argumento da cor continua valendo para o resto, e por
+                    // isso a troca e SO da moeda: o cabecalho do kit segue
+                    // sendo a sigla em ambar, que e o que o separa das linhas
+                    // recuadas embaixo dele.
+                    KindArt(canvas, area, x, y + 3, 24, row.Kind, 11, false, view.Icons);
+                }
                 else
                 {
-                    // ####  AQUI A SIGLA VENCE A LOGO  ####
-                    //
-                    // Nos 24 px desta linha a logo do OZCoin vira borrão
-                    // (ver `KindArt`), e a COR da sigla é o que separa o
-                    // cabeçalho do kit das linhas de dentro dele — uma arte
-                    // dourada apagaria essa distinção. Chamar `KindArt` aqui
-                    // custaria as duas coisas de uma vez.
+                    // A sigla, e a COR dela e o que separa o cabecalho do kit
+                    // das linhas de dentro. `KIT`, `PTS`, `VIP` e `SKIN` nao
+                    // tem arte no OrigemZImages -- quando tiverem, e uma
+                    // entrada no dicionario e este ramo encolhe.
                     Label(canvas, area, x, y, 24, PartsRowHeight, KindMark(row.Kind), header ? 10 : 11,
                           header ? ColAmber : ColMuted, TextAnchor.MiddleCenter, true);
                 }
