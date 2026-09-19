@@ -62,15 +62,56 @@ const CARDS_BEFORE_PASS = {
 } as const;
 
 /**
+ * Serializa com as chaves em ordem, em qualquer profundidade.
+ *
+ * ####  POR QUE O `JSON.stringify` CRU NÃO SERVE  ####
+ *
+ * Esta função nasceu como `JSON.stringify(a) === JSON.stringify(b)`,
+ * com o argumento de que "os dois lados nascem do mesmo gerador, na
+ * mesma ordem de chaves". **Eles não nascem.** Um lado vem do
+ * gerador; o outro vem do BANCO, e a ida e volta pelo JSON do SQLite
+ * reordena as chaves.
+ *
+ * Medido em 19/09/2026, na home do server01:
+ *
+ *     gravado:  {"id","name","rect","type","color",…}
+ *     gerador:  {"id","name","type","rect","color",…}
+ *
+ * Os dois desenham a MESMA tela. A comparação crua dizia que não, e
+ * o efeito era silencioso e total: `withPassCard` e `withPassBanner`
+ * nunca tocavam documento nenhum, porque todo documento real passou
+ * pelo banco. O cartão do passe jamais apareceu na home de ninguém,
+ * e ninguém percebeu — quem testava abria o passe pelo `/passe`.
+ *
+ * O teste não pegava porque ele compara o que o gerador produz com o
+ * que o gerador produz: os dois lados na mesma ordem, e verde.
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`);
+
+    return `{${entries.join(',')}}`;
+  }
+
+  return JSON.stringify(value) ?? 'null';
+}
+
+/**
  * As duas telas são a mesma coisa?
  *
  * Compara o DESENHO, e não o objeto: `id`, `name` e `generated` são
  * do documento, e o que interessa aqui é se os elementos são os
- * mesmos. `JSON.stringify` serve porque os dois lados nascem do
- * mesmo gerador, na mesma ordem de chaves.
+ * mesmos — em qualquer ordem de chaves. Ver `stableStringify`.
  */
-function sameDrawing(screen: UiScreen, expected: UiScreen): boolean {
-  return JSON.stringify(screen.elements) === JSON.stringify(expected.elements);
+export function sameDrawing(screen: UiScreen, expected: UiScreen): boolean {
+  return stableStringify(screen.elements) === stableStringify(expected.elements);
 }
 
 /**

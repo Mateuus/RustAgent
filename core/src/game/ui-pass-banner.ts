@@ -47,7 +47,7 @@
 //  editor ou resetar o preset (que descarta a edição).
 // ============================================================
 
-import type { UiDocument, UiElement, UiScreen } from '../types/ui-document.js';
+import type { UiDocument, UiElement } from '../types/ui-document.js';
 
 import {
   buildHomeScreen,
@@ -55,20 +55,15 @@ import {
   HOME_SCREEN_ID,
   HOME_SLOTS,
 } from './ui-home-screen.js';
+// A comparação de desenho mora no cartão porque ela nasceu lá, e
+// porque as duas passagens precisam responder à MESMA pergunta: "a
+// home é a que o preset gravou?". Duas cópias divergiriam, e uma
+// delas passaria a tocar documento que a outra recusa.
+import { sameDrawing } from './ui-pass-card.js';
 
 /**
- * As duas telas são a mesma coisa?
- *
- * Compara o DESENHO, e não o objeto: `id`, `name` e `generated` são
- * do documento, e o que interessa aqui é se os elementos são os
- * mesmos. `JSON.stringify` serve porque os dois lados nascem do
- * mesmo gerador, na mesma ordem de chaves.
+ * Há um elemento com este id em alguma tela do documento?
  */
-function sameDrawing(screen: UiScreen, expected: UiScreen): boolean {
-  return JSON.stringify(screen.elements) === JSON.stringify(expected.elements);
-}
-
-/** Há um elemento com este id em alguma tela do documento? */
 function hasElement(document: UiDocument, id: string): boolean {
   const seek = (elements: readonly UiElement[]): boolean =>
     elements.some((element) => element.id === id || seek(element.children));
