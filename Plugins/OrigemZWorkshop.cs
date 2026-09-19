@@ -263,7 +263,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZWorkshop", "OrigemZ", "0.7.0")]
+    [Info("OrigemZWorkshop", "OrigemZ", "0.7.2")]
     [Description("Menu de skins, vestiário com presets, posse por jogador e cadastro de skins do Steam Workshop da OrigemZ.")]
     public class OrigemZWorkshop : RustPlugin
     {
@@ -451,9 +451,13 @@ namespace Oxide.Plugins
             [JsonProperty("WardrobeOffsetMax")]
             public string WardrobeOffsetMax = "-16 262";
 
-            /// <summary>Quanto dura a prova de uma skin bloqueada, em segundos (5 a 120).</summary>
-            [JsonProperty("WardrobePreviewSeconds")]
-            public float WardrobePreviewSeconds = 20f;
+            /// <summary>
+            /// O teto de uma prova, em segundos (10 a 600). A prova acaba ao
+            /// FECHAR o vestiário (pedido do dono, 19/09/2026); o teto só
+            /// existe para quem deixa o inventário aberto e sai andando.
+            /// </summary>
+            [JsonProperty("WardrobePreviewLimitSeconds")]
+            public float WardrobePreviewLimitSeconds = 120f;
         }
 
         private PluginConfig _config;
@@ -727,6 +731,7 @@ namespace Oxide.Plugins
                 CuiHelper.DestroyUi(player, UiRoot);
                 CuiHelper.DestroyUi(player, UiInventoryButton);
                 CuiHelper.DestroyUi(player, UiWardrobeButton);
+                CuiHelper.DestroyUi(player, UiRename);
             }
 
             // Vestiário de quem não estava na lista de ativos (jogador nulo
@@ -824,6 +829,7 @@ namespace Oxide.Plugins
 
             CloseMenu(player, false);
             CloseWardrobe(player, true);
+            _renames.Remove(player.userID);
             _autoSeen.Remove(player.userID);
             _autoPending.Remove(player.userID);
             _nextWardrobeToggle.Remove(player.userID);
@@ -3698,6 +3704,10 @@ namespace Oxide.Plugins
         {
             if (player == null || !player.IsConnected) return;
 
+            // O menu de skins aplica de verdade: nada de prova (nem peça
+            // emprestada) pode estar no corpo quando ele abre.
+            CloseWardrobe(player, true);
+
             if (player.IsDead() || player.IsWounded())
             {
                 Tell(player, "Você não pode abrir o menu de skins agora.");
@@ -6377,6 +6387,11 @@ namespace Oxide.Plugins
         private const string WardrobeAutoCommand = "origemz.wardrobe.auto";
         private const string WardrobeDressCommand = "origemz.wardrobe.dress";
         private const string WardrobeStopCommand = "origemz.wardrobe.stop";
+        private const string WardrobeUseCommand = "origemz.wardrobe.use";
+        private const string WardrobeListCommand = "origemz.wardrobe.list";
+        private const string WardrobeRenameCommand = "origemz.wardrobe.rename";
+        private const string WardrobeCancelNameCommand = "origemz.wardrobe.cancelname";
+        private const string UiWardrobeDrop = "OZWardrobe.Drop";
         private const string WardrobeBytesCommand = "origemz.wardrobe.bytes";
 
         private const string WardrobeFile = "OrigemZWorkshop/wardrobe";
@@ -6442,11 +6457,16 @@ namespace Oxide.Plugins
         private bool _wardrobeDirty;
         private Timer _wardrobeSaveTimer;
 
-        /// <summary>A skin original de um item em prova, gravada para o servidor que cai no meio dela.</summary>
+        /// <summary>
+        /// Uma peça em prova, gravada para o servidor que cai no meio dela:
+        /// a skin original do item do jogador, ou — `Temporary` — um item
+        /// EMPRESTADO, que o boot apaga.
+        /// </summary>
         private class PreviewLedgerEntry
         {
             public string SteamId = "";
             public ulong Original;
+            public bool Temporary;
         }
 
         // ---- o que só existe em memória ------------------------------
@@ -6457,6 +6477,9 @@ namespace Oxide.Plugins
 
             /// <summary>O item escolhido na lista (shortname base); "" = nenhum.</summary>
             public string Shortname = "";
+
+            /// <summary>A lista do seletor de presets está aberta.</summary>
+            public bool PresetListOpen;
 
             public string Message = "";
             public bool MessageOk;
@@ -6470,21 +6493,36 @@ namespace Oxide.Plugins
 
         private readonly Dictionary<ulong, WardrobeSession> _wardrobes = new Dictionary<ulong, WardrobeSession>();
 
-        private class PreviewState
+        /// <summary>
+        /// Uma peça em prova. Ela é UMA de duas coisas:
+        ///
+        ///   - um item DO JOGADOR, vestido, com outra skin por cima
+        ///     (`Temporary` falso): desfazer devolve a `Original`;
+        ///   - um item EMPRESTADO (`Temporary`): o jogador não tinha a peça,
+        ///     e o vestiário a pôs no corpo dele, TRAVADA
+        ///     (`Item.LockUnlock`), para o boneco mostrar. Desfazer a APAGA.
+        /// </summary>
+        private class PreviewPiece
         {
             public ulong ItemUid;
+            public bool Temporary;
             public ulong Original;
+            /// <summary>0 = Padrão.</summary>
             public int EntryId;
+            public string Shortname = "";
             public string Label = "";
             public float EndsAt;
-            public Timer Timer;
         }
 
-        /// <summary>A prova em curso de cada jogador. Uma por vez.</summary>
-        private readonly Dictionary<ulong, PreviewState> _previews = new Dictionary<ulong, PreviewState>();
+        /// <summary>jogador → shortname → a peça em prova. Várias ao mesmo tempo: o set inteiro.</summary>
+        private readonly Dictionary<ulong, Dictionary<string, PreviewPiece>> _previews =
+            new Dictionary<ulong, Dictionary<string, PreviewPiece>>();
 
-        /// <summary>uid do item em prova → o jogador. É o que o `OnItemRemovedFromContainer` consulta.</summary>
+        /// <summary>uid do item em prova → o jogador. É o que os ganchos de item consultam.</summary>
         private readonly Dictionary<ulong, ulong> _previewOwners = new Dictionary<ulong, ulong>();
+
+        /// <summary>O relógio que vence as provas esquecidas. Só existe enquanto há prova.</summary>
+        private Timer _previewClock;
 
         /// <summary>
         /// Os itens que o AUTO já olhou, por jogador. Uma vez por item: sem
@@ -6571,7 +6609,30 @@ namespace Oxide.Plugins
                 WardrobePreset preset = record.Presets[i];
                 if (preset.Skins == null) preset.Skins = new Dictionary<string, ulong>();
                 preset.Name = CleanPresetName(preset.Name);
-                if (preset.Name.Length == 0) preset.Name = "Preset " + (i + 1);
+            }
+
+            // Nome vazio ou REPETIDO ganha o primeiro "Preset N" livre. A
+            // 0.7.0 criava "Preset N" contando os presets, e depois de apagar
+            // um nascia um repetido — quem já tem o repetido gravado é
+            // consertado aqui, ao carregar.
+            for (int i = 0; i < record.Presets.Count; i++)
+            {
+                WardrobePreset preset = record.Presets[i];
+                bool repeated = false;
+                for (int j = 0; j < i; j++)
+                {
+                    if (string.Equals(record.Presets[j].Name, preset.Name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        repeated = true;
+                        break;
+                    }
+                }
+
+                if (preset.Name.Length == 0 || repeated)
+                {
+                    preset.Name = "";
+                    preset.Name = NextPresetName(record);
+                }
             }
 
             if (record.Active < 0 || record.Active >= record.Presets.Count) record.Active = 0;
@@ -6627,13 +6688,17 @@ namespace Oxide.Plugins
         {
             Dictionary<string, PreviewLedgerEntry> data = new Dictionary<string, PreviewLedgerEntry>(_leftoverPreviews);
 
-            foreach (KeyValuePair<ulong, PreviewState> pair in _previews)
+            foreach (KeyValuePair<ulong, Dictionary<string, PreviewPiece>> pair in _previews)
             {
-                data[pair.Value.ItemUid.ToString(CultureInfo.InvariantCulture)] = new PreviewLedgerEntry
+                foreach (PreviewPiece piece in pair.Value.Values)
                 {
-                    SteamId = pair.Key.ToString(CultureInfo.InvariantCulture),
-                    Original = pair.Value.Original,
-                };
+                    data[piece.ItemUid.ToString(CultureInfo.InvariantCulture)] = new PreviewLedgerEntry
+                    {
+                        SteamId = pair.Key.ToString(CultureInfo.InvariantCulture),
+                        Original = piece.Original,
+                        Temporary = piece.Temporary,
+                    };
+                }
             }
 
             try
@@ -6721,7 +6786,15 @@ namespace Oxide.Plugins
                 Item item = owner.inventory.FindItemByUID(new ItemId(uid));
                 if (item == null) continue;
 
-                ApplySkinToItem(item, pair.Value.Original);
+                if (pair.Value.Temporary)
+                {
+                    DestroyBorrowed(item);
+                }
+                else
+                {
+                    ApplySkinToItem(item, pair.Value.Original);
+                }
+
                 undone++;
             }
 
@@ -7020,14 +7093,63 @@ namespace Oxide.Plugins
             int index = arg.GetInt(1, -1);
             if (index < 0 || index >= record.Presets.Count) return;
 
-            StopPreview(player.userID, true);
+            // Escolher o preset só o torna ATIVO (é nele que o USAR grava e
+            // de onde o AUTO lê). Vestir nos itens de verdade é o VESTIR.
+            session.PresetListOpen = false;
             record.Active = index;
             ScheduleWardrobeSave();
 
-            int changed = DressPreset(player, ActivePreset(record));
-            Say(session, "Preset \"" + ActivePreset(record).Name + "\" ativo" +
-                         (changed > 0 ? ": " + Plural(changed, "item trocado", "itens trocados") + "." : "."), true);
+            Say(session, "Preset \"" + ActivePreset(record).Name + "\" ativo. VESTIR o aplica nos seus itens.", true);
             RedrawWardrobe(player, session, WdRegion.AllButRoot);
+        }
+
+        /// <summary>Abre e fecha a lista do seletor de presets.</summary>
+        [ConsoleCommand(WardrobeListCommand)]
+        private void CmdWardrobeList(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            WardrobeSession session = WardrobeSessionOf(arg, out player);
+            if (session == null) return;
+
+            session.PresetListOpen = !session.PresetListOpen;
+            RedrawWardrobe(player, session, WdRegion.Head);
+        }
+
+        [ConsoleCommand(WardrobeUseCommand)]
+        private void CmdWardrobeUse(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player;
+            WardrobeSession session = WardrobeSessionOf(arg, out player);
+            if (session == null) return;
+
+            bool ok;
+            string message = WardrobeUse(player, session, out ok);
+            Say(session, message, ok);
+            RedrawWardrobe(player, session, WdRegion.AllButRoot);
+        }
+
+        /// <summary>
+        /// O primeiro "Preset N" que ninguém usa. Contar os presets dava
+        /// nome repetido depois de apagar um (visto pelo dono em 19/09/2026:
+        /// apagou o 1 e o novo nasceu "Preset 5" ao lado de outro "Preset 5").
+        /// </summary>
+        private static string NextPresetName(WardrobeRecord record)
+        {
+            for (int n = 1; ; n++)
+            {
+                string candidate = "Preset " + n;
+                bool taken = false;
+                foreach (WardrobePreset preset in record.Presets)
+                {
+                    if (string.Equals(preset.Name, candidate, StringComparison.OrdinalIgnoreCase))
+                    {
+                        taken = true;
+                        break;
+                    }
+                }
+
+                if (!taken) return candidate;
+            }
         }
 
         [ConsoleCommand(WardrobeNewCommand)]
@@ -7046,7 +7168,8 @@ namespace Oxide.Plugins
             }
 
             StopPreview(player.userID, true);
-            record.Presets.Add(new WardrobePreset { Name = "Preset " + (record.Presets.Count + 1) });
+            session.PresetListOpen = false;
+            record.Presets.Add(new WardrobePreset { Name = NextPresetName(record) });
             record.Active = record.Presets.Count - 1;
             ScheduleWardrobeSave();
 
@@ -7079,31 +7202,188 @@ namespace Oxide.Plugins
             RedrawWardrobe(player, session, WdRegion.AllButRoot);
         }
 
-        /// <summary>
-        /// O campo do nome. O cliente anexa o texto CRU ao comando (memória:
-        /// como o jogador digita dentro do menu), então o nome é remontado
-        /// do argumento 1 em diante. O botão SALVAR manda o mesmo comando
-        /// sem texto — o texto já chegou pelo campo, ao perder o foco.
-        /// </summary>
-        [ConsoleCommand(WardrobeNameCommand)]
-        private void CmdWardrobeName(ConsoleSystem.Arg arg)
+        // ---- a janela do nome ----------------------------------------
+        //
+        //  Fora do inventário (camada `Overall`, com cursor e teclado),
+        //  porque dentro dele o campo de texto fecha tudo (ver o
+        //  `BuildWardrobeHead`). RENOMEAR fecha o vestiário — as provas
+        //  saem, como em qualquer fechamento —, esta janela pede o nome, e
+        //  SALVAR ou CANCELAR reabre o vestiário no mesmo preset.
+
+        private const string UiRename = "OZWardrobe.Rename";
+
+        private class RenameState
+        {
+            public string Token = "";
+            /// <summary>O índice do preset que está sendo renomeado.</summary>
+            public int Index;
+            public float NextCommand;
+        }
+
+        private readonly Dictionary<ulong, RenameState> _renames = new Dictionary<ulong, RenameState>();
+
+        [ConsoleCommand(WardrobeRenameCommand)]
+        private void CmdWardrobeRename(ConsoleSystem.Arg arg)
         {
             BasePlayer player;
             WardrobeSession session = WardrobeSessionOf(arg, out player);
             if (session == null) return;
 
+            WardrobeRecord record = WardrobeOf(player.UserIDString);
+            RenameState state = new RenameState
+            {
+                Token = Guid.NewGuid().ToString("N").Substring(0, 16),
+                Index = record.Active,
+            };
+
+            CloseWardrobe(player, true);
+            _renames[player.userID] = state;
+            DrawRename(player, state, ActivePreset(record).Name, null);
+        }
+
+        /// <summary>
+        /// O campo e o SALVAR mandam este MESMO comando (memória: como o
+        /// jogador digita dentro do menu): o campo manda o texto ao perder o
+        /// foco, e o clique no botão, que é o que tira o foco, chega logo
+        /// depois, sem texto — e morre aqui porque a janela já fechou.
+        /// </summary>
+        [ConsoleCommand(WardrobeNameCommand)]
+        private void CmdWardrobeName(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = RenameOwner(arg);
+            if (player == null) return;
+
+            RenameState state = _renames[player.userID];
             string name = CleanPresetName(RestOfLine(arg, 1));
-            if (name.Length == 0) return;
+            if (name.Length == 0)
+            {
+                DrawRename(player, state, null, "Escreva o nome no campo antes de salvar.");
+                return;
+            }
 
             WardrobeRecord record = WardrobeOf(player.UserIDString);
-            WardrobePreset preset = ActivePreset(record);
-            if (preset.Name == name) return;
+            if (state.Index < 0 || state.Index >= record.Presets.Count) state.Index = record.Active;
 
-            preset.Name = name;
+            for (int i = 0; i < record.Presets.Count; i++)
+            {
+                if (i != state.Index && string.Equals(record.Presets[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    DrawRename(player, state, name, "Você já tem um preset com esse nome.");
+                    return;
+                }
+            }
+
+            record.Presets[state.Index].Name = name;
             ScheduleWardrobeSave();
 
-            Say(session, "Nome salvo: \"" + name + "\".", true);
-            RedrawWardrobe(player, session, WdRegion.Head | WdRegion.Foot);
+            FinishRename(player, "Nome salvo: “" + name + "”.");
+        }
+
+        [ConsoleCommand(WardrobeCancelNameCommand)]
+        private void CmdWardrobeCancelName(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = RenameOwner(arg);
+            if (player != null) FinishRename(player, null);
+        }
+
+        /// <summary>Quem mandou, se a janela dele está aberta e o token confere. Recusa em silêncio.</summary>
+        private BasePlayer RenameOwner(ConsoleSystem.Arg arg)
+        {
+            if (arg == null || arg.Connection == null) return null;
+
+            BasePlayer player = arg.Player();
+            RenameState state;
+            if (player == null || !_renames.TryGetValue(player.userID, out state)) return null;
+            if (arg.GetString(0) != state.Token) return null;
+
+            float now = Time.realtimeSinceStartup;
+            if (now < state.NextCommand) return null;
+            state.NextCommand = now + CommandCooldownSeconds;
+
+            return player;
+        }
+
+        /// <summary>Fecha a janela e reabre o vestiário, com a mensagem no rodapé.</summary>
+        private void FinishRename(BasePlayer player, string message)
+        {
+            CloseRename(player);
+            OpenWardrobe(player);
+
+            WardrobeSession session;
+            if (message != null && _wardrobes.TryGetValue(player.userID, out session))
+            {
+                Say(session, message, true);
+                RedrawWardrobe(player, session, WdRegion.Foot);
+            }
+        }
+
+        private void CloseRename(BasePlayer player)
+        {
+            if (player == null) return;
+
+            _renames.Remove(player.userID);
+            if (player.IsConnected) CuiHelper.DestroyUi(player, UiRename);
+        }
+
+        private void DrawRename(BasePlayer player, RenameState state, string current, string problem)
+        {
+            CuiHelper.AddUi(player, BuildRename(state.Token, current, problem));
+        }
+
+        private static string BuildRename(string token, string current, string problem)
+        {
+            Canvas canvas = new Canvas("OZWd.N");
+
+            CuiElement veil = new CuiElement { Name = UiRename, Parent = "Overall", DestroyUi = UiRename };
+            veil.Components.Add(new CuiImageComponent { Color = ColVeil, Material = BlurMaterial });
+            veil.Components.Add(new CuiRectTransformComponent { AnchorMin = "0 0", AnchorMax = "1 1" });
+            veil.Components.Add(new CuiNeedsCursorComponent());
+            veil.Components.Add(new CuiNeedsKeyboardComponent());
+            canvas.Ui.Add(veil);
+
+            Box screen = new Box(UiRename, 1280f, 720f);
+            float w = 380f;
+            float h = 164f;
+            string win = Panel(canvas, screen, (1280f - w) / 2f, (720f - h) / 2f, w, h, ColBg, canvas.NextName());
+            Box box = new Box(win, w, h);
+
+            Panel(canvas, box, 0, 0, w, 32, ColSurface);
+            Panel(canvas, box, 0, 0, 2, 32, ColRust);
+            Label(canvas, box, 12, 0, w - 24, 32, "NOME DO PRESET", 13, ColText, TextAnchor.MiddleLeft, true);
+
+            string field = Panel(canvas, box, 14, 46, w - 28, 32, ColSurface2, canvas.NextName());
+            CuiElement input = new CuiElement { Parent = field };
+            input.Components.Add(new CuiInputFieldComponent
+            {
+                Text = current ?? "",
+                FontSize = 13,
+                Font = FontRegular,
+                Align = TextAnchor.MiddleLeft,
+                Color = ColText,
+                CharsLimit = PresetNameMax,
+                Command = WardrobeNameCommand + " " + token,
+                NeedsKeyboard = true,
+                Autofocus = true,
+            });
+            input.Components.Add(new CuiRectTransformComponent
+            {
+                AnchorMin = "0 0",
+                AnchorMax = "1 1",
+                OffsetMin = "10 0",
+                OffsetMax = "-10 0",
+            });
+            canvas.Ui.Add(input);
+
+            Label(canvas, box, 14, 82, w - 28, 22,
+                  problem ?? "Até " + PresetNameMax + " letras. Enter ou SALVAR confirma.", 10,
+                  problem != null ? ColAmber : ColMuted, TextAnchor.MiddleLeft, false);
+
+            TextButton(canvas, box, w - 14 - 110, h - 44, 110, 30, ColRust, WardrobeNameCommand + " " + token,
+                       "SALVAR", 12, ColText);
+            TextButton(canvas, box, w - 14 - 110 - 8 - 110, h - 44, 110, 30, ColSurface2,
+                       WardrobeCancelNameCommand + " " + token, "CANCELAR", 12, ColText);
+
+            return canvas.Json();
         }
 
         [ConsoleCommand(WardrobeAutoCommand)]
@@ -7171,8 +7451,8 @@ namespace Oxide.Plugins
             if (session == null) return;
 
             StopPreview(player.userID, true);
-            Say(session, "Prova encerrada: o item voltou ao que era.", true);
-            RedrawWardrobe(player, session, WdRegion.Body);
+            Say(session, "Prova encerrada: tudo voltou ao que era.", true);
+            RedrawWardrobe(player, session, WdRegion.AllButRoot);
         }
 
         private static string Plural(int count, string one, string many)
@@ -7299,11 +7579,19 @@ namespace Oxide.Plugins
         }
 
         /// <summary>
-        /// O clique numa célula. Três caminhos:
+        /// ####  O CLIQUE NUMA CÉLULA É SEMPRE PROVA  ####
         ///
-        ///   - Padrão (0): tira o item do preset e o veste de fábrica;
-        ///   - skin que ele PODE usar: veste e guarda no preset ativo;
-        ///   - skin BLOQUEADA: prova, por `WardrobePreviewSeconds`.
+        /// Até a primeira versão do 0.7.0, clicar numa skin que o jogador
+        /// possui a aplicava DE VERDADE, no item onde ele estivesse — e o
+        /// dono viu, em 19/09/2026, a skin "ir para o inventário" e ficar
+        /// depois de fechar. O pedido dele: o clique só MOSTRA no corpo, e
+        /// tudo some ao fechar. Aplicar de verdade é o botão USAR
+        /// (`WardrobeUse`), e só para skin que ele pode usar.
+        ///
+        /// A prova vai para o CORPO: a peça vestida, se ele veste uma; senão,
+        /// sendo roupa, uma peça EMPRESTADA e travada; senão (arma,
+        /// ferramenta), a que ele carrega. Várias peças ao mesmo tempo: é
+        /// assim que se vê o set inteiro.
         /// </summary>
         private string WardrobePick(BasePlayer player, WardrobeSession session, int pickId, out bool ok)
         {
@@ -7311,7 +7599,7 @@ namespace Oxide.Plugins
 
             if (player.IsDead() || player.IsSleeping() || player.IsWounded() || player.inventory == null)
             {
-                return "Você não pode trocar de skin agora.";
+                return "Você não pode provar skin agora.";
             }
 
             string shortname = session.Shortname;
@@ -7326,182 +7614,456 @@ namespace Oxide.Plugins
 
             _nextApply[player.userID] = now + ApplyCooldownSeconds;
 
-            WardrobeRecord record = WardrobeOf(player.UserIDString);
-            WardrobePreset preset = ActivePreset(record);
             Viewer viewer = ViewerOf(player);
-            string itemName = DisplayNameOf(ItemManager.FindItemDefinition(shortname));
+            SkinEntry entry = null;
+            Access access = Access.Free;
 
-            if (pickId == 0)
+            if (pickId > 0)
             {
-                StopPreview(player.userID, true);
-
-                if (preset.Skins.Remove(shortname)) ScheduleWardrobeSave();
-
-                int reset = DressShortname(player, viewer, shortname, null);
-                ok = true;
-
-                return reset > 0
-                    ? "Visual padrão. " + itemName + " saiu do preset \"" + preset.Name + "\"."
-                    : itemName + " fica de fora do preset \"" + preset.Name + "\".";
-            }
-
-            SkinEntry entry;
-            if (!_catalog.ById.TryGetValue(pickId, out entry) || entry.Shortname != shortname)
-            {
-                return "Essa skin não está mais neste servidor.";
-            }
-
-            long expiresAt;
-            Access access = AccessOf(viewer, entry, out expiresAt);
-
-            if (IsUsable(access))
-            {
-                StopPreview(player.userID, true);
-
-                if (!preset.Skins.ContainsKey(shortname) && preset.Skins.Count >= MaxPresetEntries)
+                if (!_catalog.ById.TryGetValue(pickId, out entry) || entry.Shortname != shortname)
                 {
-                    return "Este preset já tem " + MaxPresetEntries + " itens.";
+                    return "Essa skin não está mais neste servidor.";
                 }
 
-                preset.Skins[shortname] = entry.SkinId;
-                ScheduleWardrobeSave();
+                long expiresAt;
+                access = AccessOf(viewer, entry, out expiresAt);
 
-                int changed = DressShortname(player, viewer, shortname, entry);
-                ok = true;
+                // Provar uma skin oficial em quem não a tem é o empréstimo
+                // que a Facepunch proíbe (memória: a Facepunch proíbe
+                // conceder DLC). Nem por um segundo.
+                if (access == Access.NeedsDlc) return NeedsDlcReason(entry);
 
                 if (viewer.OnAir && entry.HideInStreamer)
                 {
-                    return "Guardada no preset. Ela aparece quando você desligar o modo streamer.";
+                    return "Com o modo streamer ligado, esta skin (tem logo) não pode ser provada.";
                 }
-
-                return changed > 0 || DressTargets(player, shortname).Count > 0
-                    ? "\"" + entry.Label + "\" vestida e guardada no preset \"" + preset.Name + "\"."
-                    : "Guardada no preset \"" + preset.Name + "\": entra no próximo(a) " + itemName + " que você pegar" +
-                      (record.Auto ? "." : " (ligue o AUTO).");
             }
 
-            if (access == Access.NeedsDlc) return NeedsDlcReason(entry);
+            string problem;
+            PreviewPiece piece = StartPreview(player, shortname, entry, out problem);
+            if (piece == null) return problem;
 
-            if (access == Access.Syncing)
-            {
-                return "Suas skins ainda estão carregando. Tente em instantes.";
-            }
-
-            // ####  BLOQUEADA: PROVAR  ####
-            if (viewer.OnAir && entry.HideInStreamer)
-            {
-                return "Com o modo streamer ligado, esta skin (tem logo) não pode ser provada.";
-            }
-
-            Item target = PreviewTarget(player, shortname);
-            if (target == null)
-            {
-                return "Para provar, você precisa estar com um(a) " + itemName + ".";
-            }
-
-            StartPreview(player, target, entry);
             ok = true;
 
+            string what = entry == null ? "o visual padrão" : "“" + entry.Label + "”";
+            string borrowed = piece.Temporary ? " A peça é emprestada: some quando você fechar." : "";
+
+            if (entry == null || IsUsable(access))
+            {
+                return "Provando " + what + ". Gostou? USAR aplica de verdade e guarda no preset." + borrowed;
+            }
+
             string store = string.IsNullOrEmpty(_catalog.StoreUrl) ? "na loja do site" : "em " + _catalog.StoreUrl;
-            return "Provando \"" + entry.Label + "\" por " + Mathf.RoundToInt(_config.WardrobePreviewSeconds) +
-                   " s. Ela está à venda " + store + ".";
+            return "Provando " + what + " (ainda não é sua: à venda " + store + ")." + borrowed;
         }
 
         /// <summary>
-        /// Onde a prova aparece melhor: a peça VESTIDA (o boneco a mostra),
-        /// senão a da mão, senão a primeira da barra ou do inventário.
+        /// USAR: a prova da peça escolhida vira de verdade — a skin vai para
+        /// os itens DELE (todas as cópias que ele carrega) e para o preset
+        /// ativo. A peça emprestada nunca fica: ela é apagada antes.
         /// </summary>
-        private Item PreviewTarget(BasePlayer player, string shortname)
+        private string WardrobeUse(BasePlayer player, WardrobeSession session, out bool ok)
         {
-            List<Item> targets = DressTargets(player, shortname);
-            if (targets.Count == 0) return null;
+            ok = false;
 
-            foreach (Item item in targets)
+            PreviewPiece piece = PieceOf(player.userID, session.Shortname);
+            if (piece == null) return "Prove uma skin primeiro: clique nela na grade.";
+
+            SkinEntry entry = null;
+            if (piece.EntryId > 0 && !_catalog.ById.TryGetValue(piece.EntryId, out entry))
             {
-                if (item.parent == player.inventory.containerWear) return item;
+                StopPiece(player.userID, piece, true);
+                return "Essa skin não está mais neste servidor.";
             }
 
-            return targets[0];
+            Viewer viewer = ViewerOf(player);
+            if (entry != null && !CanUse(viewer, entry))
+            {
+                string store = string.IsNullOrEmpty(_catalog.StoreUrl) ? "na loja do site" : "em " + _catalog.StoreUrl;
+                return "Esta skin ainda não é sua: ela está à venda " + store + ".";
+            }
+
+            WardrobePreset preset = ActivePreset(WardrobeOf(player.UserIDString));
+            string shortname = piece.Shortname;
+
+            if (entry != null && !preset.Skins.ContainsKey(shortname) && preset.Skins.Count >= MaxPresetEntries)
+            {
+                return "Este preset já tem " + MaxPresetEntries + " itens.";
+            }
+
+            // Primeiro desfaz a prova (apaga a emprestada), e só então pinta
+            // os itens de verdade: nada da prova sobrevive ao USAR.
+            StopPiece(player.userID, piece, true);
+
+            if (entry == null)
+            {
+                if (preset.Skins.Remove(shortname)) ScheduleWardrobeSave();
+            }
+            else
+            {
+                preset.Skins[shortname] = entry.SkinId;
+                ScheduleWardrobeSave();
+            }
+
+            int changed = DressShortname(player, viewer, shortname, entry);
+            ok = true;
+
+            string itemName = DisplayNameOf(ItemManager.FindItemDefinition(shortname));
+            if (entry == null)
+            {
+                return itemName + " saiu do preset “" + preset.Name + "”" +
+                       (changed > 0 ? " e voltou ao visual padrão." : ".");
+            }
+
+            if (viewer.OnAir && entry.HideInStreamer)
+            {
+                return "Guardada no preset. Ela aparece quando você desligar o modo streamer.";
+            }
+
+            return changed > 0 || DressTargets(player, shortname).Count > 0
+                ? "“" + entry.Label + "” aplicada e guardada no preset “" + preset.Name + "”."
+                : "Guardada no preset “" + preset.Name + "”: você não tem um(a) " + itemName +
+                  " de verdade; ela entra no próximo que você pegar.";
         }
 
         // ---- a prova --------------------------------------------------
 
-        private void StartPreview(BasePlayer player, Item item, SkinEntry entry)
+        private PreviewPiece PieceOf(ulong userId, string shortname)
         {
-            StopPreview(player.userID, true);
+            Dictionary<string, PreviewPiece> pieces;
+            PreviewPiece piece;
+            return _previews.TryGetValue(userId, out pieces) && pieces.TryGetValue(shortname ?? "", out piece)
+                ? piece
+                : null;
+        }
+
+        private static bool IsWearable(ItemDefinition def)
+        {
+            return def != null && def.GetComponent<ItemModWearable>() != null;
+        }
+
+        /// <summary>
+        /// Põe a skin (`entry` nulo = Padrão) no corpo do jogador, como
+        /// prova. Devolve a peça, ou nulo com o motivo em `problem`.
+        ///
+        /// Onde ela vai, nesta ordem:
+        ///
+        ///   1. a peça que já está em prova deste item (troca só a skin);
+        ///   2. a peça DELE que está vestida;
+        ///   3. sendo roupa, uma peça EMPRESTADA, criada e vestida agora,
+        ///      travada — ela não sai do corpo: nem arrastada, nem largada;
+        ///   4. não sendo roupa (arma, ferramenta), a que ele carrega.
+        /// </summary>
+        private PreviewPiece StartPreview(BasePlayer player, string shortname, SkinEntry entry, out string problem)
+        {
+            problem = null;
 
             ulong userId = player.userID;
-            float seconds = Mathf.Clamp(_config.WardrobePreviewSeconds, 5f, 120f);
+            ulong skin = entry == null ? 0uL : entry.SkinId;
+            float endsAt = Time.realtimeSinceStartup + Mathf.Clamp(_config.WardrobePreviewLimitSeconds, 10f, 600f);
+            ItemDefinition def = ItemManager.FindItemDefinition(shortname);
+            string label = entry == null ? "Padrão" : entry.Label;
 
-            PreviewState state = new PreviewState
+            // 1. já em prova: só troca a skin.
+            PreviewPiece piece = PieceOf(userId, shortname);
+            if (piece != null)
             {
-                ItemUid = item.uid.Value,
-                Original = item.skin,
-                EntryId = entry.Id,
-                Label = entry.Label,
-                EndsAt = Time.realtimeSinceStartup + seconds,
+                Item current = player.inventory.FindItemByUID(new ItemId(piece.ItemUid));
+                if (current != null)
+                {
+                    piece.EntryId = entry == null ? 0 : entry.Id;
+                    piece.Label = label;
+                    piece.EndsAt = endsAt;
+                    ApplySkinToItem(current, skin);
+                    return piece;
+                }
+
+                // O item sumiu sem passar pelos ganchos: descarta e recomeça.
+                StopPiece(userId, piece, false);
+            }
+
+            // 2. a peça dele, vestida.
+            Item target = null;
+            bool borrow = false;
+
+            foreach (Item item in DressTargets(player, shortname))
+            {
+                if (item.parent == player.inventory.containerWear)
+                {
+                    target = item;
+                    break;
+                }
+            }
+
+            if (target == null)
+            {
+                if (IsWearable(def))
+                {
+                    borrow = true;
+                }
+                else
+                {
+                    // 4. arma, ferramenta: a que ele carrega, de preferência a da mão.
+                    List<Item> carried = DressTargets(player, shortname);
+                    if (carried.Count == 0)
+                    {
+                        problem = "Para provar, você precisa estar com um(a) " + DisplayNameOf(def) + ".";
+                        return null;
+                    }
+
+                    target = carried[0];
+                }
+            }
+
+            piece = new PreviewPiece
+            {
+                Temporary = borrow,
+                EntryId = entry == null ? 0 : entry.Id,
+                Shortname = shortname,
+                Label = label,
+                EndsAt = endsAt,
             };
 
-            _previews[userId] = state;
-            _previewOwners[state.ItemUid] = userId;
+            if (borrow)
+            {
+                // 3. EMPRESTADA. Registrada ANTES de entrar no corpo: o
+                // `OnItemAddedToContainer` (o AUTO) precisa reconhecê-la, e
+                // o registro em disco precisa existir se o servidor cair
+                // entre as linhas.
+                Item created = ItemManager.Create(def, 1, skin);
+                if (created == null)
+                {
+                    problem = "Não consegui criar a peça para provar.";
+                    return null;
+                }
 
-            // No disco ANTES de pintar: se o servidor cair entre as duas
+                created.name = "Prova: " + Shorten(label, 30);
+                piece.ItemUid = created.uid.Value;
+                RegisterPiece(userId, piece);
+
+                if (!created.MoveToContainer(player.inventory.containerWear))
+                {
+                    UnregisterPiece(userId, piece);
+                    created.Remove();
+                    problem = "Não há lugar no corpo para provar: tire a peça que ocupa esse espaço " +
+                              "(ou que não combina com " + DisplayNameOf(def) + ").";
+                    return null;
+                }
+
+                // A trava do próprio jogo: `PlayerInventory` recusa mover e
+                // qualquer ação (largar, abrir) em item com `IsLocked()`.
+                created.LockUnlock(true);
+                player.SendNetworkUpdate();
+                EnsurePreviewClock();
+                return piece;
+            }
+
+            piece.ItemUid = target.uid.Value;
+            piece.Original = target.skin;
+            RegisterPiece(userId, piece);
+
+            ApplySkinToItem(target, skin);
+            EnsurePreviewClock();
+            return piece;
+        }
+
+        private void RegisterPiece(ulong userId, PreviewPiece piece)
+        {
+            Dictionary<string, PreviewPiece> pieces;
+            if (!_previews.TryGetValue(userId, out pieces))
+            {
+                pieces = new Dictionary<string, PreviewPiece>();
+                _previews[userId] = pieces;
+            }
+
+            pieces[piece.Shortname] = piece;
+            _previewOwners[piece.ItemUid] = userId;
+
+            // No disco ANTES de pintar ou vestir: se o servidor cair entre as
             // linhas, o pior caso é desfazer uma prova que não aconteceu.
             SavePreviewLedger();
+        }
 
-            ApplySkinToItem(item, entry.SkinId);
+        private void UnregisterPiece(ulong userId, PreviewPiece piece)
+        {
+            _previewOwners.Remove(piece.ItemUid);
 
-            state.Timer = timer.Once(seconds, () =>
+            Dictionary<string, PreviewPiece> pieces;
+            if (_previews.TryGetValue(userId, out pieces))
             {
-                PreviewState current;
-                if (!_previews.TryGetValue(userId, out current) || current != state) return;
+                PreviewPiece current;
+                if (pieces.TryGetValue(piece.Shortname, out current) && current == piece) pieces.Remove(piece.Shortname);
+                if (pieces.Count == 0) _previews.Remove(userId);
+            }
 
-                StopPreview(userId, true);
+            SavePreviewLedger();
+        }
 
-                BasePlayer again = BasePlayer.FindByID(userId);
-                WardrobeSession session;
-                if (again != null && _wardrobes.TryGetValue(userId, out session))
+        /// <summary>
+        /// Apaga a peça emprestada. Destrava primeiro (o jogo não tira item
+        /// travado do contêiner por conta própria), tira do corpo e destrói.
+        /// Quem chama já tirou o uid do `_previewOwners`: o
+        /// `OnItemRemovedFromContainer` que isto dispara não acha nada.
+        /// </summary>
+        private static void DestroyBorrowed(Item item)
+        {
+            if (item == null) return;
+
+            BasePlayer owner = item.GetOwnerPlayer();
+            item.LockUnlock(false);
+            item.RemoveFromContainer();
+            item.Remove();
+
+            if (owner != null) owner.SendNetworkUpdate();
+        }
+
+        /// <summary>
+        /// Encerra UMA peça. `undo` = desfazer no item: apagar a emprestada,
+        /// ou devolver a skin original à dele. Falso só quando quem chama já
+        /// cuidou do item.
+        /// </summary>
+        private void StopPiece(ulong userId, PreviewPiece piece, bool undo)
+        {
+            UnregisterPiece(userId, piece);
+            if (!undo) return;
+
+            BasePlayer owner = BasePlayer.FindByID(userId);
+            if (owner == null) owner = BasePlayer.FindSleeping(userId);
+
+            Item item = owner != null && owner.inventory != null
+                ? owner.inventory.FindItemByUID(new ItemId(piece.ItemUid))
+                : null;
+
+            if (item == null) return;
+
+            if (piece.Temporary)
+            {
+                DestroyBorrowed(item);
+            }
+            else
+            {
+                ApplySkinToItem(item, piece.Original);
+            }
+        }
+
+        /// <summary>Encerra TODAS as peças do jogador (fechar, morrer, sair, trocar de preset…).</summary>
+        private void StopPreview(ulong userId, bool undo)
+        {
+            Dictionary<string, PreviewPiece> pieces;
+            if (!_previews.TryGetValue(userId, out pieces)) return;
+
+            foreach (PreviewPiece piece in new List<PreviewPiece>(pieces.Values))
+            {
+                StopPiece(userId, piece, undo);
+            }
+        }
+
+        /// <summary>Encerra só as EMPRESTADAS (o dano: elas não podem proteger ninguém).</summary>
+        private bool StopBorrowed(ulong userId)
+        {
+            Dictionary<string, PreviewPiece> pieces;
+            if (!_previews.TryGetValue(userId, out pieces)) return false;
+
+            bool any = false;
+            foreach (PreviewPiece piece in new List<PreviewPiece>(pieces.Values))
+            {
+                if (!piece.Temporary) continue;
+
+                StopPiece(userId, piece, true);
+                any = true;
+            }
+
+            return any;
+        }
+
+        /// <summary>
+        /// Um relógio só, de 1 s, que vence as provas esquecidas (o teto de
+        /// `WardrobePreviewLimitSeconds`). Morre quando não há prova.
+        /// </summary>
+        private void EnsurePreviewClock()
+        {
+            if (_previewClock != null) return;
+
+            _previewClock = timer.Every(1f, () =>
+            {
+                if (_previews.Count == 0)
                 {
-                    Say(session, "A prova acabou: o item voltou ao que era.", true);
-                    RedrawWardrobe(again, session, WdRegion.Body);
+                    _previewClock.Destroy();
+                    _previewClock = null;
+                    return;
+                }
+
+                float now = Time.realtimeSinceStartup;
+                foreach (ulong userId in new List<ulong>(_previews.Keys))
+                {
+                    Dictionary<string, PreviewPiece> pieces;
+                    if (!_previews.TryGetValue(userId, out pieces)) continue;
+
+                    bool expired = false;
+                    foreach (PreviewPiece piece in new List<PreviewPiece>(pieces.Values))
+                    {
+                        if (piece.EndsAt > now) continue;
+
+                        StopPiece(userId, piece, true);
+                        expired = true;
+                    }
+
+                    if (!expired) continue;
+
+                    BasePlayer again = BasePlayer.FindByID(userId);
+                    WardrobeSession session;
+                    if (again != null && _wardrobes.TryGetValue(userId, out session))
+                    {
+                        Say(session, "A prova passou do tempo e saiu.", true);
+                        RedrawWardrobe(again, session, WdRegion.Body);
+                    }
                 }
             });
         }
 
         /// <summary>
-        /// Encerra a prova do jogador. `revert` = devolver a skin original
-        /// ao item, onde quer que ele esteja com o jogador; falso só quando
-        /// quem chama já devolveu (o item saiu do contêiner).
+        /// ####  A PEÇA EMPRESTADA NÃO PROTEGE NINGUÉM  ####
+        ///
+        /// Uma placa de metal emprestada no corpo seria armadura de graça.
+        /// O `IOnBasePlayerHurt` (que chega aqui como `OnEntityTakeDamage`)
+        /// roda ANTES do `ScaleDamage`, que é onde a roupa conta (MEDIDO no
+        /// decompilado, 19/09/2026): tirar a emprestada aqui faz o golpe
+        /// chegar como se ela nunca tivesse existido. Qualquer dano — frio e
+        /// radiação também, porque a roupa protege deles.
         /// </summary>
-        private void StopPreview(ulong userId, bool revert)
+        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
-            PreviewState state;
-            if (!_previews.TryGetValue(userId, out state)) return;
+            if (_previewOwners.Count == 0 || entity == null) return null;
 
-            _previews.Remove(userId);
-            _previewOwners.Remove(state.ItemUid);
-            if (state.Timer != null) state.Timer.Destroy();
+            BasePlayer player = entity as BasePlayer;
+            if (player == null || !_previews.ContainsKey(player.userID)) return null;
 
-            if (revert)
+            if (StopBorrowed(player.userID))
             {
-                BasePlayer owner = BasePlayer.FindByID(userId);
-                if (owner == null) owner = BasePlayer.FindSleeping(userId);
-
-                Item item = owner != null && owner.inventory != null
-                    ? owner.inventory.FindItemByUID(new ItemId(state.ItemUid))
-                    : null;
-
-                if (item != null) ApplySkinToItem(item, state.Original);
+                WardrobeSession session;
+                if (_wardrobes.TryGetValue(player.userID, out session))
+                {
+                    Say(session, "Você levou dano: as peças emprestadas saíram do corpo.", false);
+                    ulong id = player.userID;
+                    NextTick(() =>
+                    {
+                        BasePlayer again = BasePlayer.FindByID(id);
+                        WardrobeSession open;
+                        if (again != null && _wardrobes.TryGetValue(id, out open)) RedrawWardrobe(again, open, WdRegion.Body);
+                    });
+                }
             }
 
-            SavePreviewLedger();
+            return null;
         }
 
         /// <summary>
-        /// A tranca da prova: o item provado SAIU do contêiner em que
-        /// estava — largado, guardado numa caixa, indo para o corpo, ou só
-        /// mudando de casa. A skin volta aqui, antes de o item chegar a
-        /// qualquer outro lugar (o hook roda com `item.parent` já nulo).
+        /// A tranca que pega o resto: o item em prova SAIU do contêiner em
+        /// que estava — a DELE indo para uma caixa ou para o chão, ou a
+        /// emprestada saindo do corpo por um caminho que a trava não cobriu.
+        /// A dele volta à skin original; a emprestada é destruída ali mesmo,
+        /// antes de chegar a qualquer outro lugar (o hook roda com
+        /// `item.parent` já nulo).
         /// </summary>
         private void OnItemRemovedFromContainer(ItemContainer container, Item item)
         {
@@ -7510,13 +8072,37 @@ namespace Oxide.Plugins
             ulong userId;
             if (!_previewOwners.TryGetValue(item.uid.Value, out userId)) return;
 
-            PreviewState state;
-            if (_previews.TryGetValue(userId, out state) && state.ItemUid == item.uid.Value)
+            PreviewPiece found = null;
+            Dictionary<string, PreviewPiece> pieces;
+            if (_previews.TryGetValue(userId, out pieces))
             {
-                ApplySkinToItem(item, state.Original);
+                foreach (PreviewPiece piece in pieces.Values)
+                {
+                    if (piece.ItemUid == item.uid.Value)
+                    {
+                        found = piece;
+                        break;
+                    }
+                }
             }
 
-            StopPreview(userId, false);
+            if (found == null)
+            {
+                _previewOwners.Remove(item.uid.Value);
+                return;
+            }
+
+            UnregisterPiece(userId, found);
+
+            if (found.Temporary)
+            {
+                item.LockUnlock(false);
+                item.Remove();
+            }
+            else
+            {
+                ApplySkinToItem(item, found.Original);
+            }
 
             BasePlayer player = BasePlayer.FindByID(userId);
             WardrobeSession session;
@@ -7762,6 +8348,14 @@ namespace Oxide.Plugins
             string shortname = item.info.shortname;
             if (listed.Contains(shortname) || !Dressable(shortname)) return;
 
+            // A peça emprestada da prova aparece como tal: ela não é dele.
+            ulong owner;
+            if (_previewOwners.TryGetValue(item.uid.Value, out owner))
+            {
+                PreviewPiece piece = PieceOf(owner, shortname);
+                if (piece != null && piece.Temporary && piece.ItemUid == item.uid.Value) where = "Provando (emprestada)";
+            }
+
             listed.Add(shortname);
             rows.Add(new WdRow
             {
@@ -7813,11 +8407,14 @@ namespace Oxide.Plugins
             if (!Dressable(shortname)) return cells;
 
             ItemDefinition def = ItemManager.FindItemDefinition(shortname);
-            List<Item> carried = DressTargets(player, shortname);
-            Item reference = PreviewTarget(player, shortname);
+            Item reference = null;
+            foreach (Item item in DressTargets(player, shortname))
+            {
+                if (reference == null || item.parent == player.inventory.containerWear) reference = item;
+                if (item.parent == player.inventory.containerWear) break;
+            }
 
-            PreviewState preview;
-            _previews.TryGetValue(player.userID, out preview);
+            PreviewPiece preview = PieceOf(player.userID, shortname);
 
             ulong presetSkin;
             bool hasPreset = preset.Skins.TryGetValue(shortname, out presetSkin);
@@ -7830,9 +8427,10 @@ namespace Oxide.Plugins
                 Label = "Padrão",
                 Worn = reference != null && preview == null && Wears(viewer.SteamId, reference, 0uL),
                 InPreset = !hasPreset,
+                Previewing = preview != null && preview.EntryId == 0,
                 Tip = !hasPreset
-                    ? "Padrão · este item não está no preset"
-                    : "Padrão · tira este item do preset e o veste de fábrica",
+                    ? "Padrão · este item não está no preset · clique para provar"
+                    : "Padrão · clique para provar; USAR tira o item do preset",
             });
 
             List<WdCell> usable = new List<WdCell>();
@@ -7863,7 +8461,8 @@ namespace Oxide.Plugins
                 string rarity = RarityLabel(entry.Rarity);
                 if (canUse)
                 {
-                    cell.Tip = entry.Label + " · " + rarity + (cell.InPreset ? " · no preset" : "");
+                    cell.Tip = entry.Label + " · " + rarity + (cell.InPreset ? " · no preset" : "") +
+                               " · clique para provar";
                 }
                 else if (access == Access.NeedsDlc)
                 {
@@ -7875,9 +8474,7 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    cell.Tip = entry.Label + " · " + rarity + (carried.Count > 0
-                        ? " · clique para provar"
-                        : " · bloqueada");
+                    cell.Tip = entry.Label + " · " + rarity + " · não é sua · clique para provar";
                 }
 
                 (canUse ? usable : locked).Add(cell);
@@ -7917,7 +8514,10 @@ namespace Oxide.Plugins
                 List<string> names = new List<string>();
                 foreach (WardrobePreset each in record.Presets) names.Add(each.Name);
 
-                parts.AddRange(BuildWardrobeHead(session.Token, names, record.Active, record.Auto, preset.Skins.Count));
+                parts.AddRange(BuildWardrobeHead(session.Token, names, record.Active, record.Auto, preset.Skins.Count,
+                                                 session.PresetListOpen));
+
+                if (!session.PresetListOpen) CuiHelper.DestroyUi(player, UiWardrobeDrop);
             }
 
             if ((regions & WdRegion.Items) != 0)
@@ -7947,15 +8547,42 @@ namespace Oxide.Plugins
 
             if ((regions & WdRegion.Foot) != 0)
             {
-                PreviewState preview;
                 string previewText = null;
-                if (_previews.TryGetValue(player.userID, out preview))
+                bool canUse = false;
+
+                Dictionary<string, PreviewPiece> pieces;
+                if (_previews.TryGetValue(player.userID, out pieces) && pieces.Count > 0)
                 {
-                    int left = Mathf.Max(1, Mathf.CeilToInt(preview.EndsAt - Time.realtimeSinceStartup));
-                    previewText = "PROVANDO “" + Shorten(preview.Label, 22) + "” · volta em " + left + " s";
+                    int borrowed = 0;
+                    foreach (PreviewPiece each in pieces.Values)
+                    {
+                        if (each.Temporary) borrowed++;
+                    }
+
+                    previewText = "PROVANDO " + Plural(pieces.Count, "peça", "peças") +
+                                  (borrowed > 0 ? " (" + borrowed + " emprestada" + (borrowed == 1 ? ")" : "s)") : "") +
+                                  " · tudo sai ao fechar";
+
+                    PreviewPiece selected = PieceOf(player.userID, session.Shortname);
+                    SkinEntry selectedEntry = null;
+                    canUse = selected != null &&
+                             (selected.EntryId == 0 ||
+                              (_catalog.ById.TryGetValue(selected.EntryId, out selectedEntry) &&
+                               CanUse(viewer, selectedEntry)));
                 }
 
-                parts.AddRange(BuildWardrobeFoot(session.Token, session.Message, session.MessageOk, previewText));
+                parts.AddRange(BuildWardrobeFoot(session.Token, session.Message, session.MessageOk, previewText,
+                                                 canUse));
+            }
+
+            // A lista do seletor por ÚLTIMO: ela cobre a lista de itens, e
+            // uma região redesenhada depois dela ficaria por cima.
+            if (session.PresetListOpen)
+            {
+                List<string> names = new List<string>();
+                foreach (WardrobePreset each in record.Presets) names.Add(each.Name);
+
+                parts.AddRange(BuildWardrobeDrop(session.Token, names, record.Active));
             }
 
             foreach (string json in Pack(parts, AddUiByteLimit)) CuiHelper.AddUi(player, json);
@@ -7990,9 +8617,9 @@ namespace Oxide.Plugins
         private const float WdItemsY = 98f;
         private const float WdItemsH = 200f;
         private const float WdSkinsY = 298f;
-        private const float WdSkinsH = 192f;
-        private const float WdFootY = 490f;
-        private const float WdFootH = 34f;
+        private const float WdSkinsH = 164f;
+        private const float WdFootY = 462f;
+        private const float WdFootH = 62f;
         private const float WdRowH = 30f;
         private const float WdRowGap = 4f;
         private const int WdColumns = 5;
@@ -8039,87 +8666,112 @@ namespace Oxide.Plugins
             return canvas.Parts();
         }
 
+        /// <summary>
+        /// ####  O SELETOR DE PRESETS  ####
+        ///
+        /// Pedido do dono (19/09/2026): as cinco abas lado a lado cortavam o
+        /// nome em 14 letras. Agora é um seletor: o botão mostra o preset
+        /// ativo com o nome inteiro e a seta; clicar abre a lista (região
+        /// `OZWardrobe.Drop`, por cima da lista de itens), e escolher fecha.
+        /// O CUI não tem componente de seleção: são botões.
+        /// </summary>
         private static List<string> BuildWardrobeHead(string token, List<string> names, int active, bool auto,
-                                                      int entries)
+                                                      int entries, bool listOpen)
         {
             Canvas canvas = new Canvas("OZWd.H");
             Box head = WdRegionRoot(canvas, UiWardrobeHead, WdHeadY, WdHeadH);
+            string current = names[Math.Max(0, Math.Min(active, names.Count - 1))];
 
-            // Linha 1: as abas dos presets, e o "+" enquanto couber outro.
-            bool canAdd = names.Count < MaxPresets;
-            float addWidth = canAdd ? 30f : 0f;
-            float gap = 4f;
-            float tabsWidth = WdInner - (canAdd ? addWidth + gap : 0f);
-            float tab = Math.Min(110f, (tabsWidth - (names.Count - 1) * gap) / Math.Max(1, names.Count));
+            // Linha 1: o seletor, NOVO e APAGAR.
+            float selectWidth = 250f;
+            string select = Button(canvas, head, WdPad, 4, selectWidth, 26, listOpen ? ColPicked : ColSurface2,
+                                   WardrobeListCommand + " " + token, canvas.NextName());
+            Box selectBox = new Box(select, selectWidth, 26);
+            Panel(canvas, selectBox, 0, 0, 2, 26, ColRust);
+            Label(canvas, selectBox, 10, 0, selectWidth - 40, 26, current, 11, ColText, TextAnchor.MiddleLeft, true);
+            Label(canvas, selectBox, selectWidth - 34, 0, 28, 26, listOpen ? "▲" : "▼", 10, ColMuted,
+                  TextAnchor.MiddleCenter, false);
+            Tip(canvas, select, "Trocar de preset (" + names.Count + " de " + MaxPresets + ")");
 
-            for (int i = 0; i < names.Count; i++)
+            float x = WdPad + selectWidth + 6;
+            float small = (WdInner - selectWidth - 12) / 2f;
+            if (names.Count < MaxPresets)
             {
-                float x = WdPad + i * (tab + gap);
-                if (i == active)
-                {
-                    string name = Panel(canvas, head, x, 4, tab, 26, ColRust, canvas.NextName());
-                    Label(canvas, new Box(name, tab, 26), 4, 0, tab - 8, 26, Shorten(names[i], 14), 11, ColText,
-                          TextAnchor.MiddleCenter, true);
-                }
-                else
-                {
-                    TextButton(canvas, head, x, 4, tab, 26, ColSurface2, WardrobePresetCommand + " " + token + " " + i,
-                               Shorten(names[i], 14), 11, ColMuted);
-                }
-            }
-
-            if (canAdd)
-            {
-                string add = TextButton(canvas, head, WdPad + names.Count * (tab + gap), 4, addWidth, 26, ColSurface2,
-                                        WardrobeNewCommand + " " + token, "+", 14, ColText);
+                string add = TextButton(canvas, head, x, 4, small, 26, ColSurface2, WardrobeNewCommand + " " + token,
+                                        "+ NOVO", 11, ColText);
                 Tip(canvas, add, "Novo preset (até " + MaxPresets + ")");
             }
-
-            // Linha 2: o nome (campo), VESTIR, AUTO e APAGAR.
-            float y = 36f;
-            string field = Panel(canvas, head, WdPad, y, 150, 26, ColSurface2, canvas.NextName());
-            Box fieldBox = new Box(field, 150, 26);
-            CuiElement input = new CuiElement { Parent = field };
-            input.Components.Add(new CuiInputFieldComponent
+            else
             {
-                Text = Shorten(names[Math.Max(0, Math.Min(active, names.Count - 1))], PresetNameMax),
-                FontSize = 11,
-                Font = FontRegular,
-                Align = TextAnchor.MiddleLeft,
-                Color = ColText,
-                CharsLimit = PresetNameMax,
-                Command = WardrobeNameCommand + " " + token,
-                NeedsKeyboard = true,
-            });
-            input.Components.Add(new CuiRectTransformComponent
-            {
-                AnchorMin = "0 0",
-                AnchorMax = "1 1",
-                OffsetMin = "8 0",
-                OffsetMax = "-8 0",
-            });
-            canvas.Ui.Add(input);
-            Tip(canvas, field, "Clique, escreva o nome e aperte Enter");
-
-            string dress = TextButton(canvas, head, WdPad + 156, y, 78, 26, entries > 0 ? ColSurface2 : ColSurface,
-                                      WardrobeDressCommand + " " + token, "VESTIR", 11, entries > 0 ? ColText : ColMuted);
-            Tip(canvas, dress, "Veste o preset inteiro no que você carrega agora");
-
-            string autoName = TextButton(canvas, head, WdPad + 240, y, 84, 26, auto ? ColOlive : ColSurface2,
-                                         WardrobeAutoCommand + " " + token, auto ? "AUTO: SIM" : "AUTO: NÃO", 11,
-                                         auto ? ColText : ColMuted);
-            Tip(canvas, autoName, "Ligado: todo item que entra no seu inventário (kit ao nascer, craft, saque) " +
-                                  "já recebe a skin do preset ativo");
+                DeadButton(canvas, head, x, 4, small, 26, "+ NOVO", 11);
+            }
 
             if (names.Count > 1)
             {
-                string delete = TextButton(canvas, head, WdPad + 330, y, WdInner - 330, 26, ColSurface2,
+                string delete = TextButton(canvas, head, x + small + 6, 4, small, 26, ColSurface2,
                                            WardrobeDeleteCommand + " " + token, "APAGAR", 11, ColMuted);
                 Tip(canvas, delete, "Apaga este preset. As skins continuam nos itens");
             }
             else
             {
-                DeadButton(canvas, head, WdPad + 330, y, WdInner - 330, 26, "APAGAR", 11);
+                DeadButton(canvas, head, x + small + 6, 4, small, 26, "APAGAR", 11);
+            }
+
+            // Linha 2: RENOMEAR, VESTIR e AUTO.
+            //
+            // ####  NÃO HÁ CAMPO DE TEXTO DENTRO DO INVENTÁRIO  ####
+            //
+            // Visto pelo dono no jogo em 19/09/2026: clicar num InputField
+            // com `needsKeyboard` FECHA o inventário — o cliente toma o
+            // teclado, manda o `inventory.endloot`, e o vestiário fecha junto.
+            // O nome é trocado numa janela própria (`OpenRename`), fora do
+            // inventário, que reabre o vestiário ao salvar.
+            float y = 36f;
+            float third = (WdInner - 12) / 3f;
+
+            string rename = TextButton(canvas, head, WdPad, y, third, 26, ColSurface2,
+                                       WardrobeRenameCommand + " " + token, "RENOMEAR", 11, ColText);
+            Tip(canvas, rename, "Troca o nome deste preset (o vestiário reabre em seguida)");
+
+            string dress = TextButton(canvas, head, WdPad + third + 6, y, third, 26,
+                                      entries > 0 ? ColSurface2 : ColSurface, WardrobeDressCommand + " " + token,
+                                      "VESTIR", 11, entries > 0 ? ColText : ColMuted);
+            Tip(canvas, dress, "Aplica o preset inteiro, de verdade, no que você carrega agora");
+
+            string autoName = TextButton(canvas, head, WdPad + 2 * (third + 6), y, third, 26,
+                                         auto ? ColOlive : ColSurface2, WardrobeAutoCommand + " " + token,
+                                         auto ? "AUTO: SIM" : "AUTO: NÃO", 11, auto ? ColText : ColMuted);
+            Tip(canvas, autoName, "Ligado: todo item que entra no seu inventário (kit ao nascer, craft, saque) " +
+                                  "já recebe a skin do preset ativo");
+
+            return canvas.Parts();
+        }
+
+        /// <summary>A lista aberta do seletor: um botão por preset, o ativo marcado.</summary>
+        private static List<string> BuildWardrobeDrop(string token, List<string> names, int active)
+        {
+            Canvas canvas = new Canvas("OZWd.D");
+            Box root = new Box(UiWardrobe, WdWidth, WdHeight);
+
+            float rowH = 28f;
+            float width = 250f;
+            float height = names.Count * rowH + 4f;
+
+            CuiElement element = new CuiElement { Name = UiWardrobeDrop, Parent = UiWardrobe, DestroyUi = UiWardrobeDrop };
+            element.Components.Add(new CuiImageComponent { Color = ColBorder });
+            element.Components.Add(Rect(root, WdPad, WdHeadY + 32f, width, height));
+            canvas.Ui.Add(element);
+
+            Box drop = new Box(UiWardrobeDrop, width, height);
+            for (int i = 0; i < names.Count; i++)
+            {
+                string name = Button(canvas, drop, 2, 2 + i * rowH, width - 4, rowH - 2,
+                                     i == active ? ColPicked : ColSurface,
+                                     WardrobePresetCommand + " " + token + " " + i, canvas.NextName());
+                Box row = new Box(name, width - 4, rowH - 2);
+                if (i == active) Panel(canvas, row, 0, 0, 2, rowH - 2, ColRust);
+                Label(canvas, row, 10, 0, width - 24, rowH - 2, names[i], 11, i == active ? ColText : ColMuted,
+                      TextAnchor.MiddleLeft, i == active);
             }
 
             return canvas.Parts();
@@ -8242,28 +8894,40 @@ namespace Oxide.Plugins
             Tip(canvas, name, cell.Tip);
         }
 
-        private static List<string> BuildWardrobeFoot(string token, string message, bool ok, string previewText)
+        /// <summary>
+        /// Duas linhas: a mensagem em cima e, com prova no corpo, a faixa
+        /// âmbar embaixo — com USAR (só quando a peça escolhida é uma skin
+        /// que ele pode usar, ou o Padrão) e TIRAR TUDO.
+        /// </summary>
+        private static List<string> BuildWardrobeFoot(string token, string message, bool ok, string previewText,
+                                                      bool canUse)
         {
             Canvas canvas = new Canvas("OZWd.F");
             Box foot = WdRegionRoot(canvas, UiWardrobeFoot, WdFootY, WdFootH);
 
-            if (previewText != null)
-            {
-                string bar = Panel(canvas, foot, WdPad, 4, WdInner, 26, Faded(ColAmber, 0.18f), canvas.NextName());
-                Box box = new Box(bar, WdInner, 26);
-                Panel(canvas, box, 0, 0, 2, 26, ColAmber);
-                Label(canvas, box, 10, 0, WdInner - 90, 26, previewText, 10, ColAmber, TextAnchor.MiddleLeft, true);
-                TextButton(canvas, box, WdInner - 72, 3, 68, 20, ColSurface2, WardrobeStopCommand + " " + token,
-                           "TIRAR", 10, ColText);
-                return canvas.Parts();
-            }
-
             string text = string.IsNullOrEmpty(message)
-                ? "Clique numa skin: se for sua, veste e guarda no preset; se não for, você prova."
+                ? "Clique numa skin para provar no seu personagem. Nada fica: tudo sai ao fechar."
                 : message;
 
-            Label(canvas, foot, WdPad, 0, WdInner, WdFootH, text, 10,
+            Label(canvas, foot, WdPad, 0, WdInner, 30, text, 10,
                   string.IsNullOrEmpty(message) ? ColMuted : ok ? ColText : ColAmber, TextAnchor.MiddleLeft, false);
+
+            if (previewText == null) return canvas.Parts();
+
+            string bar = Panel(canvas, foot, WdPad, 32, WdInner, 26, Faded(ColAmber, 0.18f), canvas.NextName());
+            Box box = new Box(bar, WdInner, 26);
+            Panel(canvas, box, 0, 0, 2, 26, ColAmber);
+            Label(canvas, box, 10, 0, WdInner - 170, 26, previewText, 10, ColAmber, TextAnchor.MiddleLeft, true);
+
+            if (canUse)
+            {
+                string use = TextButton(canvas, box, WdInner - 156, 3, 70, 20, ColOlive,
+                                        WardrobeUseCommand + " " + token, "USAR", 10, ColText);
+                Tip(canvas, use, "Aplica esta skin de verdade nos seus itens e guarda no preset");
+            }
+
+            TextButton(canvas, box, WdInner - 82, 3, 78, 20, ColSurface2, WardrobeStopCommand + " " + token,
+                       "TIRAR TUDO", 10, ColText);
 
             return canvas.Parts();
         }
@@ -8327,10 +8991,12 @@ namespace Oxide.Plugins
             }
 
             int root = SumBytes(BuildWardrobeRoot(token, "1 0.5", "1 0.5", "-436 -262", "-16 262"));
-            int head = SumBytes(BuildWardrobeHead(token, names, 0, true, 10));
+            int head = SumBytes(BuildWardrobeHead(token, names, 0, true, 10, true)) +
+                       SumBytes(BuildWardrobeDrop(token, names, 0));
             int items = SumBytes(BuildWardrobeItems(token, rows));
             int skins = SumBytes(BuildWardrobeSkins(token, "SKINS · SEMI-AUTOMATIC RIFLE", cells, ""));
-            int foot = SumBytes(BuildWardrobeFoot(token, "", true, "PROVANDO \"Skin de nome bem comp…\" · volta em 20 s"));
+            int foot = SumBytes(BuildWardrobeFoot(token, "Provando “Skin de nome bem comprido 00”. Gostou? USAR aplica de verdade e guarda no preset.",
+                                                  true, "PROVANDO 7 peças (7 emprestadas) · tudo sai ao fechar", true));
 
             JObject reply = new JObject
             {

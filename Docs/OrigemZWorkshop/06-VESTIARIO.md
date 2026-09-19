@@ -256,7 +256,7 @@ hora de usar, a skin é conferida contra o catálogo **e** contra o shortname.
 | `WardrobeButtonOffsetMin` / `Max` | `240 -38` / `316 -17` | à direita do SKINS, com as âncoras dele (`InventoryButtonAnchorMin/Max`). Estimado pela captura do dono: o CLÃ começa por volta de 318 |
 | `WardrobeAnchorMin` / `Max` | `1 0.5` / `1 0.5` | a caixa, presa ao meio da borda direita |
 | `WardrobeOffsetMin` / `Max` | `-436 -262` / `-16 262` | 420 × 524, com 16 de margem à direita |
-| `WardrobePreviewSeconds` | `20` | a duração da prova (5 a 120) |
+| `WardrobePreviewLimitSeconds` | `120` | o teto de uma prova (10 a 600). Desde a 0.7.1 a prova acaba ao fechar; o teto é só para quem deixa o inventário aberto |
 
 **A posição da caixa e a do botão não foram vistas no jogo.** Se encavalarem com o inventário, é
 só mexer nestas chaves e recarregar o plugin.
@@ -354,3 +354,95 @@ que ele **veste** (uma roupa) e uma skin **que ele não tem**, do mesmo item.
 
 O 2, o 3 e o 15 são as incógnitas de verdade — posição, o painel `generic` vazio, e o teclado
 dentro do inventário. O resto é lógica que o servidor já executa hoje no menu de skins.
+
+---
+
+## 9. A 0.7.1: o clique é sempre prova (19/09/2026)
+
+**Esta seção vence os §4.2, §4.3 e §5 onde eles discordam.**
+
+### 9.1 O defeito que o dono viu
+
+Na 0.7.0, clicar numa skin **que o jogador possui** a aplicava **de verdade**, em todas as cópias
+do item que ele carregava — inclusive a bota que estava no inventário principal —, e gravava no
+preset. Fechar não desfazia, porque não era prova. O dono viu a skin "ir para o inventário e ficar".
+E a prova de skin bloqueada só pintava um item que ele já tivesse: sem a peça, nada aparecia no
+boneco.
+
+O pedido dele: *"ao apertar para visualizar, equipa nele mesmo se não tiver, mas ao fechar tem que
+apagar, de forma temporária, e o usuário não consegue mover para o inventário"*.
+
+### 9.2 Como ficou
+
+| Na célula | Acontece |
+|---|---|
+| qualquer skin (sua, bloqueada ou Padrão) | **prova no corpo**. Nada fica: tudo sai ao fechar |
+| skin de **DLC** que ele não tem | recusa, como antes. Não há prova |
+| **USAR** (rodapé) | a prova da peça escolhida vira de verdade: a skin vai para as cópias **dele** e para o preset. Só aparece para skin que ele pode usar, ou para o Padrão (que tira o item do preset) |
+| **TIRAR TUDO** | desfaz todas as provas |
+
+**Onde a prova vai**, nesta ordem: a peça que já está em prova daquele item (troca só a skin); a
+peça **dele que está vestida**; sendo roupa, uma **peça emprestada**; não sendo roupa (arma,
+ferramenta), a que ele carrega. **Várias peças ao mesmo tempo**: dá para ver o set inteiro.
+
+### 9.3 A peça emprestada
+
+Quando ele não veste aquela roupa, o vestiário cria uma, com a skin, e a veste nele. Ela se chama
+"Prova: …" e aparece na lista como **"Provando (emprestada)"**.
+
+| Proteção | Como |
+|---|---|
+| não sai do corpo | `Item.LockUnlock(true)`: o `PlayerInventory` recusa **mover** e **qualquer ação** (largar, abrir) em item com `IsLocked()` — MEDIDO no decompilado, `PlayerInventory.cs` linhas 559 e 694 |
+| some ao fechar | `OnPlayerLootEnd` → `StopPreview`, que a destrava e destrói |
+| se sair do corpo por outro caminho (vestir uma peça que a desloca, por exemplo) | `OnItemRemovedFromContainer` a destrói ali mesmo |
+| não protege ninguém | ao primeiro dano, todas as emprestadas saem **antes** de a armadura contar: o `IOnBasePlayerHurt` (que chega como `OnEntityTakeDamage`) roda antes do `ScaleDamage` — MEDIDO no decompilado. Qualquer dano: frio e radiação também, porque roupa protege deles. Item quebrado ainda protegeria 25% (`ConditionProtectionScale`), por isso não bastava quebrá-la |
+| morte, ferimento, saída, unload | fecham o vestiário antes do corpo e do saque |
+| servidor que cai | o `previews.json` marca a peça como `Temporary`; o boot a **apaga** (a dele, a skin volta) |
+| menu de skins | abrir o `/skins` fecha o vestiário primeiro: aquele menu aplica de verdade e não pode enxergar peça emprestada |
+
+Se não há lugar no corpo (uma peça que não combina com ela, ou as 8 casas cheias), a prova recusa e
+diz para tirar a peça que ocupa o lugar.
+
+### 9.4 Presets num seletor
+
+Pedido do dono: as cinco abas cortavam o nome em 14 letras. Agora a linha 1 é um **seletor** (o
+preset ativo com o nome inteiro e ▼; clicar abre a lista por cima da lista de itens), **+ NOVO** e
+**APAGAR**. A linha 2 é o campo do nome (maior), **VESTIR** e **AUTO**.
+
+- **Escolher um preset só o torna ativo.** Na 0.7.0 escolher também vestia. Vestir de verdade é o
+  **VESTIR**.
+- **Nome repetido — corrigido.** O "+" criava "Preset N" contando os presets: apagar o 1 e criar
+  outro dava dois "Preset 5". Agora é o primeiro "Preset N" livre, e quem já tem o repetido gravado é
+  renomeado ao carregar.
+
+Comandos novos: `origemz.wardrobe.use <token>` (USAR) e `origemz.wardrobe.list <token>` (abre e
+fecha o seletor).
+
+**Bytes (0.7.1, server01):** cabeçalho **6.898** com a lista aberta (era 5.343 com as abas), rodapé
+2.330 (duas linhas), abertura no pior caso **87.620**, em 3 `AddUI`.
+
+**Validado:** `pluginlint` com 0 erros; compilado e carregado no server01 (v0.7.1). **Não visto no
+jogo** — o roteiro do §8.1 vale, com estes passos a mais:
+
+| # | O que fazer | O que tem de acontecer |
+|---|---|---|
+| 16 | Sem botas, clicar numa skin de bota | uma bota "Prova: …" aparece **no corpo** |
+| 17 | Tentar arrastar a bota emprestada para o inventário, e largar com o botão direito | não sai do lugar |
+| 18 | Fechar o inventário | a bota some |
+| 19 | Provar uma skin **sua**, clicar USAR | a skin vai para a peça de verdade e para o preset; a emprestada (se havia) some |
+| 20 | Provar uma placa de metal emprestada e levar dano | a placa sai antes do golpe |
+| 21 | Apagar o Preset 1 e criar outro | o novo se chama "Preset 1", sem repetir |
+
+### 9.5 O nome não se digita dentro do inventário (0.7.2)
+
+Visto pelo dono em 19/09/2026: clicar no campo do nome **fechava o vestiário**. Um `InputField` com
+`needsKeyboard` faz o cliente tomar o teclado e fechar o inventário; o fechamento manda o
+`inventory.endloot`, e o vestiário fecha junto. **Não há como digitar com o inventário aberto.**
+
+Agora a linha 2 é **RENOMEAR · VESTIR · AUTO**. RENOMEAR fecha o vestiário (as provas saem, como
+em qualquer fechamento) e abre uma janela própria na camada `Overall`, com cursor e teclado: campo
+com foco, **SALVAR** e **CANCELAR**. Salvar ou cancelar reabre o vestiário sozinho, no mesmo preset.
+Nome repetido é recusado ali, com a frase. Comandos: `origemz.wardrobe.rename <token>`,
+`origemz.wardrobe.name <token do nome> <texto…>` e `origemz.wardrobe.cancelname <token do nome>`.
+
+Vale para qualquer tela futura pendurada no inventário: **campo de texto, só fora dele.**
