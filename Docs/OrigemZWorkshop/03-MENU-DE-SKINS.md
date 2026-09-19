@@ -334,6 +334,11 @@ AK padrão no inventário ao mesmo tempo.
 | aba **SKINS** do menu principal | igual ao `/skins` |
 | botão no inventário | igual ao `/skins` — **A MEDIR** (§8) |
 
+> **O vestiário (v0.7.0, 19/09/2026)** é a tela irmã desta: ver a skin no próprio personagem,
+> provar as bloqueadas e montar presets. Ele tem botão próprio no inventário, ao lado do SKINS, e
+> um atalho **VESTIÁRIO** no cabeçalho deste menu (na faixa entre a frase do streamer e o
+> contador). Tudo em [06-VESTIARIO.md](06-VESTIARIO.md).
+
 **O item "selecionado no inventário" o servidor não vê.** A seleção de casa no inventário é
 estado do cliente: não chega RPC nenhum ao servidor quando o jogador clica numa casa. O que o
 servidor sabe é o **item ativo** (`player.GetActiveItem()`), o da mão. É esse que pré-seleciona.
