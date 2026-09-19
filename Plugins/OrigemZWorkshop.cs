@@ -263,7 +263,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZWorkshop", "OrigemZ", "0.7.2")]
+    [Info("OrigemZWorkshop", "OrigemZ", "0.8.0")]
     [Description("Menu de skins, vestiário com presets, posse por jogador e cadastro de skins do Steam Workshop da OrigemZ.")]
     public class OrigemZWorkshop : RustPlugin
     {
@@ -458,6 +458,15 @@ namespace Oxide.Plugins
             /// </summary>
             [JsonProperty("WardrobePreviewLimitSeconds")]
             public float WardrobePreviewLimitSeconds = 120f;
+
+            /// <summary>
+            /// Item com skin NOSSA que muda de dono — saque de corpo, caixa,
+            /// chão, troca — volta ao visual padrão se o novo dono não pode
+            /// usar a skin (§17). Ligado por padrão, decisão do dono em
+            /// 19/09/2026: "vai ficar na configuração padrão sempre ativado".
+            /// </summary>
+            [JsonProperty("ResetSkinOnNewHolder")]
+            public bool ResetSkinOnNewHolder = true;
         }
 
         private PluginConfig _config;
@@ -699,6 +708,7 @@ namespace Oxide.Plugins
             LoadFavorites();
             LoadWardrobe();
             UndoLeftoverPreviews();
+            SeedHolders();
             StoreIcons();
 
             if (_config.InventoryButton || _config.WardrobeButton)
@@ -1561,6 +1571,14 @@ namespace Oxide.Plugins
                 }
 
                 _owned[steamId] = record;
+
+                // Itens que chegaram a ele enquanto a posse era "não sei"
+                // (§17): agora dá para decidir. Fora do frame do comando.
+                if (_awaitingPosse.Count > 0)
+                {
+                    string forWhom = steamId;
+                    timer.Once(0.1f, () => CheckAwaiting(forWhom));
+                }
 
                 // ####  AS FAVORITAS VÊM NA MESMA CARGA, E TROCAM JUNTO  ####
                 //
@@ -8119,6 +8137,189 @@ namespace Oxide.Plugins
             }
         }
 
+        // ============================================================
+        //  §17  A SKIN QUE MUDA DE DONO
+        //
+        //  Pedido do dono, 19/09/2026: "caso um jogador que tem skin morre e
+        //  outro jogador pega o loot dele, caso esse jogador não tenha essa
+        //  skin liberada, reseta para skin padrão". Sempre ligado por padrão
+        //  (`ResetSkinOnNewHolder`).
+        //
+        //  ####  O GATILHO É MUDAR DE DONO, NÃO "NÃO TER A SKIN"  ####
+        //
+        //  A regra antiga continua de pé (02 §3): posse removida ou vencida
+        //  NÃO despinta o que o dono já pintou. Se o gatilho fosse "entrou
+        //  no inventário de quem não tem a skin", o dono com a posse vencida
+        //  perderia a skin só de mover a arma da barra para o inventário.
+        //
+        //  Então o plugin guarda o PORTADOR de cada item com skin nossa
+        //  (`_holders`, uid → steamId): quem passa a carregá-lo PODENDO usar
+        //  a skin. Mover dentro do próprio inventário não é mudar de dono.
+        //  Um item que entra no inventário de OUTRA pessoa — do corpo, de
+        //  uma caixa, do chão, de uma troca — é conferido contra a posse
+        //  dela: pode usar, vira o novo portador; não pode, volta ao Padrão.
+        //
+        //  No boot, quem já carrega um item com skin nossa (acordado ou
+        //  dormindo) é o portador dele. O que está numa caixa não tem
+        //  portador: quem o tirar de lá é conferido. O único caso áspero é
+        //  o dono cuja posse venceu, depois de um reinício, tirando o
+        //  próprio item de uma caixa — ele volta ao padrão.
+        //
+        //  ####  O QUE NÃO É TOCADO  ####
+        //
+        //  - skin que não é do catálogo (a do Steam do próprio jogador);
+        //  - skin OFICIAL do Rust: ela é da Steam, e no jogo vanilla um item
+        //    saqueado com skin de DLC continua com ela — não é nosso papel;
+        //  - peça em prova no vestiário (§16);
+        //  - posse ainda "não sei" (02 §5.3): o item espera a posse chegar
+        //    (`_awaitingPosse`), e só então é decidido.
+        // ============================================================
+
+        /// <summary>uid do item com skin nossa → quem o carrega legitimamente.</summary>
+        private readonly Dictionary<ulong, ulong> _holders = new Dictionary<ulong, ulong>();
+
+        /// <summary>Conferências da §17 esperando o próximo frame, por jogador.</summary>
+        private readonly Dictionary<ulong, List<ulong>> _holderPending = new Dictionary<ulong, List<ulong>>();
+
+        /// <summary>Itens que chegaram a quem ainda não tem posse carregada: steamId → uids.</summary>
+        private readonly Dictionary<string, List<ulong>> _awaitingPosse = new Dictionary<string, List<ulong>>();
+
+        /// <summary>A skin é nossa e não é oficial? Só essas mudam de dono pela §17.</summary>
+        private SkinEntry HouseSkinOf(Item item)
+        {
+            if (item == null || item.skin == 0uL) return null;
+
+            SkinEntry entry;
+            if (!_catalog.BySkinId.TryGetValue(item.skin, out entry)) return null;
+
+            return entry.InventoryDefinitionId == 0 ? entry : null;
+        }
+
+        /// <summary>Boot: quem carrega um item com skin nossa é o portador dele.</summary>
+        private void SeedHolders()
+        {
+            foreach (BasePlayer player in BasePlayer.allPlayerList)
+            {
+                if (player == null || player.IsNpc || player.inventory == null) continue;
+
+                _scratch.Clear();
+                player.inventory.GetAllItems(_scratch);
+
+                foreach (Item item in _scratch)
+                {
+                    if (HouseSkinOf(item) != null) _holders[item.uid.Value] = player.userID;
+                }
+            }
+
+            _scratch.Clear();
+        }
+
+        /// <summary>
+        /// Um item com skin entrou num contêiner. Só interessa se o contêiner
+        /// é de um JOGADOR diferente do portador — e a conferência vai no
+        /// próximo frame, uma vez por jogador, como a do AUTO.
+        /// </summary>
+        private void WatchNewHolder(ItemContainer container, Item item)
+        {
+            if (_catalog.BySkinId.Count == 0 || !_catalog.BySkinId.ContainsKey(item.skin)) return;
+            if (_previewOwners.ContainsKey(item.uid.Value)) return;
+
+            BasePlayer owner = OwnerOf(container);
+            if (owner == null || owner.IsNpc) return;
+
+            ulong holder;
+            if (_holders.TryGetValue(item.uid.Value, out holder) && holder == owner.userID) return;
+
+            ulong userId = owner.userID;
+            List<ulong> pending;
+            if (!_holderPending.TryGetValue(userId, out pending))
+            {
+                pending = new List<ulong>();
+                _holderPending[userId] = pending;
+                NextTick(() => FlushHolders(userId));
+            }
+
+            pending.Add(item.uid.Value);
+        }
+
+        private void FlushHolders(ulong userId)
+        {
+            List<ulong> pending;
+            if (!_holderPending.TryGetValue(userId, out pending)) return;
+            _holderPending.Remove(userId);
+
+            BasePlayer player = BasePlayer.FindByID(userId);
+            if (player == null) player = BasePlayer.FindSleeping(userId);
+            if (player == null || player.inventory == null) return;
+
+            ResolveHolders(player, pending);
+        }
+
+        /// <summary>A posse de alguém chegou: decide o que chegou a ele enquanto ela era "não sei".</summary>
+        private void CheckAwaiting(string steamId)
+        {
+            List<ulong> uids;
+            if (!_awaitingPosse.TryGetValue(steamId, out uids)) return;
+            _awaitingPosse.Remove(steamId);
+
+            BasePlayer player = FindPlayer(steamId);
+            if (player != null && player.inventory != null) ResolveHolders(player, uids);
+        }
+
+        /// <summary>
+        /// A decisão, item a item: ele pode usar a skin → vira o portador;
+        /// não pode → Padrão; "não sei" → espera a posse.
+        /// </summary>
+        private void ResolveHolders(BasePlayer player, List<ulong> uids)
+        {
+            Viewer viewer = ViewerOf(player);
+            List<string> reset = new List<string>();
+
+            foreach (ulong uid in uids)
+            {
+                // Pode ter saído dele neste meio frame; aí quem o recebeu
+                // passa pela mesma conferência.
+                Item item = player.inventory.FindItemByUID(new ItemId(uid));
+                if (item == null || _previewOwners.ContainsKey(uid)) continue;
+
+                SkinEntry entry = HouseSkinOf(item);
+                if (entry == null) continue;
+
+                long expiresAt;
+                Access access = AccessOf(viewer, entry, out expiresAt);
+
+                if (access == Access.Syncing)
+                {
+                    List<ulong> waiting;
+                    if (!_awaitingPosse.TryGetValue(viewer.SteamId, out waiting))
+                    {
+                        waiting = new List<ulong>();
+                        _awaitingPosse[viewer.SteamId] = waiting;
+                    }
+
+                    if (!waiting.Contains(uid)) waiting.Add(uid);
+                    continue;
+                }
+
+                if (IsUsable(access))
+                {
+                    _holders[uid] = player.userID;
+                    continue;
+                }
+
+                _holders.Remove(uid);
+                ApplySkinToItem(item, 0uL);
+                if (!reset.Contains(entry.Label)) reset.Add(entry.Label);
+            }
+
+            if (reset.Count == 0 || !player.IsConnected) return;
+
+            Tell(player, "<color=#E6B265>Skin</color>: " +
+                         (reset.Count == 1 ? "“" + Escape(reset[0]) + "” voltou" : reset.Count + " skins voltaram") +
+                         " ao visual padrão — ela" + (reset.Count == 1 ? " não é sua" : "s não são suas") +
+                         ". Skins podem ser obtidas em eventos e no nosso site.");
+        }
+
         // ---- o auto ---------------------------------------------------
 
         private HashSet<ulong> SeenOf(ulong userId)
@@ -8179,7 +8380,13 @@ namespace Oxide.Plugins
         /// </summary>
         private void OnItemAddedToContainer(ItemContainer container, Item item)
         {
-            if (container == null || item == null || item.info == null || _wardrobe.Count == 0) return;
+            if (container == null || item == null || item.info == null) return;
+
+            // A skin que mudou de dono (§17) vem antes do AUTO, e não depende
+            // de vestiário nenhum.
+            if (item.skin != 0uL && _config.ResetSkinOnNewHolder) WatchNewHolder(container, item);
+
+            if (_wardrobe.Count == 0) return;
             if (item.info.stackable > 1 || item.info.isRedirectOf != null) return;
 
             BasePlayer owner = OwnerOf(container);
