@@ -90,6 +90,38 @@ daí, o jogador só não consegue aplicar de novo.
 **Aplicar não consome a skin.** Uma posse serve para quantos itens o jogador quiser, quantas
 vezes quiser.
 
+### 3.0 A skin que muda de dono volta ao padrão (v0.8.0)
+
+Decisão do dono, 19/09/2026: *"caso um jogador que tem skin morre e outro jogador pega o loot
+dele, caso esse jogador não tenha essa skin liberada, reseta para skin padrão"* — **sempre ligado
+por padrão** (`"ResetSkinOnNewHolder": true` em `oxide/config/OrigemZWorkshop.json`).
+
+**O gatilho é o item mudar de dono**, e não "estar com quem não tem a skin" — senão a regra de
+cima ("posse vencida não despinta") cairia: o dono com a posse vencida perderia a skin só de mover
+a arma de casa. O plugin guarda o **portador** de cada item com skin nossa (quem passou a
+carregá-lo podendo usar a skin). Quando o item entra no inventário de **outra pessoa** — saque de
+corpo, de caixa, do chão, troca —, a posse dela é conferida:
+
+| Ela pode usar a skin (posse viva ou liberada para todos) | vira a nova portadora; nada muda |
+|---|---|
+| **não pode** | o item volta ao **Padrão**, e ela lê no chat: *"“X” voltou ao visual padrão — ela não é sua."* |
+| a posse dela ainda é "não sei" (§5.3) | o item espera a posse chegar, e então é decidido |
+
+**Não é tocado:** skin que não é do catálogo (a do Steam do próprio jogador), skin **oficial** do
+Rust (é da Steam; no vanilla o item saqueado com skin de DLC continua com ela) e peça em prova no
+vestiário.
+
+**No boot**, quem já carrega um item com skin nossa, acordado ou dormindo, é o portador dele. O que
+está numa caixa não tem portador: quem o tirar de lá é conferido. Único caso áspero: o dono cuja
+posse venceu, depois de um reinício, tirando o próprio item de uma caixa — ele volta ao padrão.
+
+**Kit com skin:** o item do loadout também é conferido quando entra no inventário. Skin posta num
+kit precisa estar **liberada para todos** (como a pedra do §8), ou quem não a tem recebe o item no
+padrão.
+
+**Medido no server01 em 19/09/2026** com uma sonda descartável que entregou ao dono dois moletons:
+o de uma skin que ele possui manteve a skin; o de uma que ele não possui chegou com `skin 0`.
+
 ### 3.1 A skin oficial do Rust — quem manda é a Steam (v0.6.0)
 
 Acima de tudo o que está acima existe um dono que não somos nós. Se a skin cadastrada é uma
