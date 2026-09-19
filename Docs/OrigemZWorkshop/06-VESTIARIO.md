@@ -432,3 +432,17 @@ jogo** — o roteiro do §8.1 vale, com estes passos a mais:
 | 19 | Provar uma skin **sua**, clicar USAR | a skin vai para a peça de verdade e para o preset; a emprestada (se havia) some |
 | 20 | Provar uma placa de metal emprestada e levar dano | a placa sai antes do golpe |
 | 21 | Apagar o Preset 1 e criar outro | o novo se chama "Preset 1", sem repetir |
+
+### 9.5 O nome não se digita dentro do inventário (0.7.2)
+
+Visto pelo dono em 19/09/2026: clicar no campo do nome **fechava o vestiário**. Um `InputField` com
+`needsKeyboard` faz o cliente tomar o teclado e fechar o inventário; o fechamento manda o
+`inventory.endloot`, e o vestiário fecha junto. **Não há como digitar com o inventário aberto.**
+
+Agora a linha 2 é **RENOMEAR · VESTIR · AUTO**. RENOMEAR fecha o vestiário (as provas saem, como
+em qualquer fechamento) e abre uma janela própria na camada `Overall`, com cursor e teclado: campo
+com foco, **SALVAR** e **CANCELAR**. Salvar ou cancelar reabre o vestiário sozinho, no mesmo preset.
+Nome repetido é recusado ali, com a frase. Comandos: `origemz.wardrobe.rename <token>`,
+`origemz.wardrobe.name <token do nome> <texto…>` e `origemz.wardrobe.cancelname <token do nome>`.
+
+Vale para qualquer tela futura pendurada no inventário: **campo de texto, só fora dele.**

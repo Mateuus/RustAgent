@@ -263,7 +263,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZWorkshop", "OrigemZ", "0.7.1")]
+    [Info("OrigemZWorkshop", "OrigemZ", "0.7.2")]
     [Description("Menu de skins, vestiário com presets, posse por jogador e cadastro de skins do Steam Workshop da OrigemZ.")]
     public class OrigemZWorkshop : RustPlugin
     {
@@ -731,6 +731,7 @@ namespace Oxide.Plugins
                 CuiHelper.DestroyUi(player, UiRoot);
                 CuiHelper.DestroyUi(player, UiInventoryButton);
                 CuiHelper.DestroyUi(player, UiWardrobeButton);
+                CuiHelper.DestroyUi(player, UiRename);
             }
 
             // Vestiário de quem não estava na lista de ativos (jogador nulo
@@ -828,6 +829,7 @@ namespace Oxide.Plugins
 
             CloseMenu(player, false);
             CloseWardrobe(player, true);
+            _renames.Remove(player.userID);
             _autoSeen.Remove(player.userID);
             _autoPending.Remove(player.userID);
             _nextWardrobeToggle.Remove(player.userID);
@@ -6387,6 +6389,8 @@ namespace Oxide.Plugins
         private const string WardrobeStopCommand = "origemz.wardrobe.stop";
         private const string WardrobeUseCommand = "origemz.wardrobe.use";
         private const string WardrobeListCommand = "origemz.wardrobe.list";
+        private const string WardrobeRenameCommand = "origemz.wardrobe.rename";
+        private const string WardrobeCancelNameCommand = "origemz.wardrobe.cancelname";
         private const string UiWardrobeDrop = "OZWardrobe.Drop";
         private const string WardrobeBytesCommand = "origemz.wardrobe.bytes";
 
@@ -7198,31 +7202,188 @@ namespace Oxide.Plugins
             RedrawWardrobe(player, session, WdRegion.AllButRoot);
         }
 
-        /// <summary>
-        /// O campo do nome. O cliente anexa o texto CRU ao comando (memória:
-        /// como o jogador digita dentro do menu), então o nome é remontado
-        /// do argumento 1 em diante. O botão SALVAR manda o mesmo comando
-        /// sem texto — o texto já chegou pelo campo, ao perder o foco.
-        /// </summary>
-        [ConsoleCommand(WardrobeNameCommand)]
-        private void CmdWardrobeName(ConsoleSystem.Arg arg)
+        // ---- a janela do nome ----------------------------------------
+        //
+        //  Fora do inventário (camada `Overall`, com cursor e teclado),
+        //  porque dentro dele o campo de texto fecha tudo (ver o
+        //  `BuildWardrobeHead`). RENOMEAR fecha o vestiário — as provas
+        //  saem, como em qualquer fechamento —, esta janela pede o nome, e
+        //  SALVAR ou CANCELAR reabre o vestiário no mesmo preset.
+
+        private const string UiRename = "OZWardrobe.Rename";
+
+        private class RenameState
+        {
+            public string Token = "";
+            /// <summary>O índice do preset que está sendo renomeado.</summary>
+            public int Index;
+            public float NextCommand;
+        }
+
+        private readonly Dictionary<ulong, RenameState> _renames = new Dictionary<ulong, RenameState>();
+
+        [ConsoleCommand(WardrobeRenameCommand)]
+        private void CmdWardrobeRename(ConsoleSystem.Arg arg)
         {
             BasePlayer player;
             WardrobeSession session = WardrobeSessionOf(arg, out player);
             if (session == null) return;
 
+            WardrobeRecord record = WardrobeOf(player.UserIDString);
+            RenameState state = new RenameState
+            {
+                Token = Guid.NewGuid().ToString("N").Substring(0, 16),
+                Index = record.Active,
+            };
+
+            CloseWardrobe(player, true);
+            _renames[player.userID] = state;
+            DrawRename(player, state, ActivePreset(record).Name, null);
+        }
+
+        /// <summary>
+        /// O campo e o SALVAR mandam este MESMO comando (memória: como o
+        /// jogador digita dentro do menu): o campo manda o texto ao perder o
+        /// foco, e o clique no botão, que é o que tira o foco, chega logo
+        /// depois, sem texto — e morre aqui porque a janela já fechou.
+        /// </summary>
+        [ConsoleCommand(WardrobeNameCommand)]
+        private void CmdWardrobeName(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = RenameOwner(arg);
+            if (player == null) return;
+
+            RenameState state = _renames[player.userID];
             string name = CleanPresetName(RestOfLine(arg, 1));
-            if (name.Length == 0) return;
+            if (name.Length == 0)
+            {
+                DrawRename(player, state, null, "Escreva o nome no campo antes de salvar.");
+                return;
+            }
 
             WardrobeRecord record = WardrobeOf(player.UserIDString);
-            WardrobePreset preset = ActivePreset(record);
-            if (preset.Name == name) return;
+            if (state.Index < 0 || state.Index >= record.Presets.Count) state.Index = record.Active;
 
-            preset.Name = name;
+            for (int i = 0; i < record.Presets.Count; i++)
+            {
+                if (i != state.Index && string.Equals(record.Presets[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    DrawRename(player, state, name, "Você já tem um preset com esse nome.");
+                    return;
+                }
+            }
+
+            record.Presets[state.Index].Name = name;
             ScheduleWardrobeSave();
 
-            Say(session, "Nome salvo: \"" + name + "\".", true);
-            RedrawWardrobe(player, session, WdRegion.Head | WdRegion.Foot);
+            FinishRename(player, "Nome salvo: “" + name + "”.");
+        }
+
+        [ConsoleCommand(WardrobeCancelNameCommand)]
+        private void CmdWardrobeCancelName(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = RenameOwner(arg);
+            if (player != null) FinishRename(player, null);
+        }
+
+        /// <summary>Quem mandou, se a janela dele está aberta e o token confere. Recusa em silêncio.</summary>
+        private BasePlayer RenameOwner(ConsoleSystem.Arg arg)
+        {
+            if (arg == null || arg.Connection == null) return null;
+
+            BasePlayer player = arg.Player();
+            RenameState state;
+            if (player == null || !_renames.TryGetValue(player.userID, out state)) return null;
+            if (arg.GetString(0) != state.Token) return null;
+
+            float now = Time.realtimeSinceStartup;
+            if (now < state.NextCommand) return null;
+            state.NextCommand = now + CommandCooldownSeconds;
+
+            return player;
+        }
+
+        /// <summary>Fecha a janela e reabre o vestiário, com a mensagem no rodapé.</summary>
+        private void FinishRename(BasePlayer player, string message)
+        {
+            CloseRename(player);
+            OpenWardrobe(player);
+
+            WardrobeSession session;
+            if (message != null && _wardrobes.TryGetValue(player.userID, out session))
+            {
+                Say(session, message, true);
+                RedrawWardrobe(player, session, WdRegion.Foot);
+            }
+        }
+
+        private void CloseRename(BasePlayer player)
+        {
+            if (player == null) return;
+
+            _renames.Remove(player.userID);
+            if (player.IsConnected) CuiHelper.DestroyUi(player, UiRename);
+        }
+
+        private void DrawRename(BasePlayer player, RenameState state, string current, string problem)
+        {
+            CuiHelper.AddUi(player, BuildRename(state.Token, current, problem));
+        }
+
+        private static string BuildRename(string token, string current, string problem)
+        {
+            Canvas canvas = new Canvas("OZWd.N");
+
+            CuiElement veil = new CuiElement { Name = UiRename, Parent = "Overall", DestroyUi = UiRename };
+            veil.Components.Add(new CuiImageComponent { Color = ColVeil, Material = BlurMaterial });
+            veil.Components.Add(new CuiRectTransformComponent { AnchorMin = "0 0", AnchorMax = "1 1" });
+            veil.Components.Add(new CuiNeedsCursorComponent());
+            veil.Components.Add(new CuiNeedsKeyboardComponent());
+            canvas.Ui.Add(veil);
+
+            Box screen = new Box(UiRename, 1280f, 720f);
+            float w = 380f;
+            float h = 164f;
+            string win = Panel(canvas, screen, (1280f - w) / 2f, (720f - h) / 2f, w, h, ColBg, canvas.NextName());
+            Box box = new Box(win, w, h);
+
+            Panel(canvas, box, 0, 0, w, 32, ColSurface);
+            Panel(canvas, box, 0, 0, 2, 32, ColRust);
+            Label(canvas, box, 12, 0, w - 24, 32, "NOME DO PRESET", 13, ColText, TextAnchor.MiddleLeft, true);
+
+            string field = Panel(canvas, box, 14, 46, w - 28, 32, ColSurface2, canvas.NextName());
+            CuiElement input = new CuiElement { Parent = field };
+            input.Components.Add(new CuiInputFieldComponent
+            {
+                Text = current ?? "",
+                FontSize = 13,
+                Font = FontRegular,
+                Align = TextAnchor.MiddleLeft,
+                Color = ColText,
+                CharsLimit = PresetNameMax,
+                Command = WardrobeNameCommand + " " + token,
+                NeedsKeyboard = true,
+                Autofocus = true,
+            });
+            input.Components.Add(new CuiRectTransformComponent
+            {
+                AnchorMin = "0 0",
+                AnchorMax = "1 1",
+                OffsetMin = "10 0",
+                OffsetMax = "-10 0",
+            });
+            canvas.Ui.Add(input);
+
+            Label(canvas, box, 14, 82, w - 28, 22,
+                  problem ?? "Até " + PresetNameMax + " letras. Enter ou SALVAR confirma.", 10,
+                  problem != null ? ColAmber : ColMuted, TextAnchor.MiddleLeft, false);
+
+            TextButton(canvas, box, w - 14 - 110, h - 44, 110, 30, ColRust, WardrobeNameCommand + " " + token,
+                       "SALVAR", 12, ColText);
+            TextButton(canvas, box, w - 14 - 110 - 8 - 110, h - 44, 110, 30, ColSurface2,
+                       WardrobeCancelNameCommand + " " + token, "CANCELAR", 12, ColText);
+
+            return canvas.Json();
         }
 
         [ConsoleCommand(WardrobeAutoCommand)]
@@ -8556,39 +8717,28 @@ namespace Oxide.Plugins
                 DeadButton(canvas, head, x + small + 6, 4, small, 26, "APAGAR", 11);
             }
 
-            // Linha 2: o nome (campo), VESTIR e AUTO.
+            // Linha 2: RENOMEAR, VESTIR e AUTO.
+            //
+            // ####  NÃO HÁ CAMPO DE TEXTO DENTRO DO INVENTÁRIO  ####
+            //
+            // Visto pelo dono no jogo em 19/09/2026: clicar num InputField
+            // com `needsKeyboard` FECHA o inventário — o cliente toma o
+            // teclado, manda o `inventory.endloot`, e o vestiário fecha junto.
+            // O nome é trocado numa janela própria (`OpenRename`), fora do
+            // inventário, que reabre o vestiário ao salvar.
             float y = 36f;
-            float fieldWidth = 220f;
-            string field = Panel(canvas, head, WdPad, y, fieldWidth, 26, ColSurface2, canvas.NextName());
-            CuiElement input = new CuiElement { Parent = field };
-            input.Components.Add(new CuiInputFieldComponent
-            {
-                Text = Shorten(current, PresetNameMax),
-                FontSize = 11,
-                Font = FontRegular,
-                Align = TextAnchor.MiddleLeft,
-                Color = ColText,
-                CharsLimit = PresetNameMax,
-                Command = WardrobeNameCommand + " " + token,
-                NeedsKeyboard = true,
-            });
-            input.Components.Add(new CuiRectTransformComponent
-            {
-                AnchorMin = "0 0",
-                AnchorMax = "1 1",
-                OffsetMin = "8 0",
-                OffsetMax = "-8 0",
-            });
-            canvas.Ui.Add(input);
-            Tip(canvas, field, "Nome do preset: clique, escreva e aperte Enter");
+            float third = (WdInner - 12) / 3f;
 
-            float half = (WdInner - fieldWidth - 12) / 2f;
-            string dress = TextButton(canvas, head, WdPad + fieldWidth + 6, y, half, 26,
+            string rename = TextButton(canvas, head, WdPad, y, third, 26, ColSurface2,
+                                       WardrobeRenameCommand + " " + token, "RENOMEAR", 11, ColText);
+            Tip(canvas, rename, "Troca o nome deste preset (o vestiário reabre em seguida)");
+
+            string dress = TextButton(canvas, head, WdPad + third + 6, y, third, 26,
                                       entries > 0 ? ColSurface2 : ColSurface, WardrobeDressCommand + " " + token,
                                       "VESTIR", 11, entries > 0 ? ColText : ColMuted);
             Tip(canvas, dress, "Aplica o preset inteiro, de verdade, no que você carrega agora");
 
-            string autoName = TextButton(canvas, head, WdPad + fieldWidth + 12 + half, y, half, 26,
+            string autoName = TextButton(canvas, head, WdPad + 2 * (third + 6), y, third, 26,
                                          auto ? ColOlive : ColSurface2, WardrobeAutoCommand + " " + token,
                                          auto ? "AUTO: SIM" : "AUTO: NÃO", 11, auto ? ColText : ColMuted);
             Tip(canvas, autoName, "Ligado: todo item que entra no seu inventário (kit ao nascer, craft, saque) " +
