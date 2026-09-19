@@ -484,8 +484,11 @@ export class BattlePassSync {
    * `icon` — é o CRC de um PNG do FileStorage, e o agente NUNCA o
    *   conhece: quem guarda os bytes é o plugin de imagens e o número
    *   nasce lá (game/ui-images.ts). Sem ele, o OrigemZBattlePass
-   *   desenha a marca do tipo (`OZ`, `KIT`, `VIP`) — que é a
-   *   informação, e não um quadrado vazio.
+   *   desenha a marca do tipo — que é a informação, e não um
+   *   quadrado vazio. A moeda é a exceção que já tem arte: o plugin
+   *   pergunta o CRC de `ozcoin` ao OrigemZImages por conta própria
+   *   (ver `KindArt`, no .cs) e desenha a logo. `KIT`, `PTS`, `VIP` e
+   *   `SKIN` seguem siglas — não há arte para elas em `Assets\ui`.
    * `dlc` — depende de uma marca no cadastro do Workshop que ainda
    *   não existe (03 §9). Mandar `true` por adivinhação faria a tela
    *   recusar recompensa que o jogador PODE levar; o plugin já lê

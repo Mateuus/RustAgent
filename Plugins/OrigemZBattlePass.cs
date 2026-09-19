@@ -24,6 +24,16 @@
 //  Este arquivo nunca entrega nada. Ele PEDE — e quem decide se cabe
 //  na mochila é o agente, que é o único que sabe (02 §6.2).
 //
+//  ####  DOIS VIZINHOS, NENHUM OBRIGATÓRIO  ####
+//
+//    OrigemZUI       para FECHAR o menu principal antes de abrir este
+//    OrigemZImages   para o CRC da logo do OZCoin (`ResolveSharedIcons`)
+//
+//  Os dois são `[PluginReference]`, e os dois podem estar fora do ar:
+//  sem o primeiro o passe abre por cima do menu, sem o segundo a
+//  moeda vira a sigla "OZ". Nenhum dos dois pode impedir a tela de
+//  existir.
+//
 //  ####  O JOGADOR VÊ O QUE NÃO PODE LEVAR  ####
 //
 //  A faixa paga aparece mesmo para quem não comprou: apagada, com
@@ -620,6 +630,11 @@ namespace Oxide.Plugins
         {
             LoadSeason();
             StoreIcons();
+
+            // A logo da moeda vem de fora (ver `ResolveSharedIcons`). Se o
+            // OrigemZImages ainda não subiu, o `OnPluginLoaded` a busca
+            // quando ele subir.
+            ResolveSharedIcons(_imageLibrary);
 
             // O handshake. Sem segredo de propósito: é ele que PEDE as
             // cargas, e o segredo só existe depois que a temporada chega.
@@ -1418,8 +1433,71 @@ namespace Oxide.Plugins
             { "info", "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAACcElEQVR42u2b/bGDIAzAHYERHMERGMURHMENOoIjMMIboSMwgiPweHfpXe9VIZEkrTW5y19VgV8hHxC6lFJ3Ze0MgHwjLqvPOmcNWX+yrulVVvgtwLMe3j0lgD7rlPWe2uUO3+rPAMDDPyglAdr4OAAepq+W/HCB4JjqIb1PQuvSaBn8uGPMtGWFvqgCWIidjPDOBFO335lNHp5Z4B2KLBoAHMGy//0zt6xDwywb4BsrwWM4KQDYwUeYkpw+3ME3IzcE7sHPwsGLgzbYIGAbviMaHJJeCDsg+8QCYEEYH5f043iH7FsTgFHC8jJrDcJ4FEBfsb6tgx8hkAktfhwBYS0FS6WPBqHB7xnUe+NSWioRIwmA5/S1hI5KgH2IpwAoJTZDYydr4hq9QymBQgHwFT/fmjXWpDXLmynfpqz9yODupGfAo42ItQVblv+QO/kAG4B1330JwFRwJY4xgJHwAv/b2HPhUwnAnhW9CQQwnHHAlt4wITJ2fWrG+Zz5QtXOYCx0PPG+f6x5A4z7kIj3H+cEz+qTXp4wbwEIGKPBpLNAjLGlU80dYqI/f2IAvhYVPj+8YvzmyQD0Bbf+AmBPuhMDqI7LABgAA2BG0NygBUL6obAWAFIorJkMaQEgJUOa6bAGAHI6rLkhogGAvCGitSWmAeDwlpjGpqgGgMObotLb4hoAmrbFpQ9GNAA0H4xIHo29cyMUfTQmfTgqWTDBdjgqeTz+jkIJ8vG4RoGE1uAPF0hcvkTGiqQQIfKzYfzaMjkrlCRCiOkLS2WtWJpoGLdmxZK+oFzeLkwkuzJjl6bs2hxyaVzy4qRdnT2bXh7AL/7cW1W8pf6KAAAAAElFTkSuQmCC" },
         };
 
-        /// <summary>Nome do ícone → CRC no FileStorage. Vazio até o boot.</summary>
+        /// <summary>
+        /// Nome do ícone → CRC no FileStorage. Vazio até o boot.
+        ///
+        /// Duas famílias de chave moram aqui, e de propósito na MESMA tabela:
+        /// as marcas de estado (`lock`, `check`, `bang`, `dot`, `box`,
+        /// `info`), que nascem do `IconPng` acima, e o TIPO da recompensa
+        /// (`coins`, e amanhã `kit` ou `vip`), que vem do OrigemZImages. Quem
+        /// desenha não precisa saber de onde a arte veio: pergunta o CRC pela
+        /// chave e cai no texto quando não há.
+        /// </summary>
         private readonly Dictionary<string, string> _icons = new Dictionary<string, string>();
+
+        // ============================================================
+        //  ####  A LOGO DO OZCOIN NÃO PODE MORAR NESTE ARQUIVO  ####
+        //
+        //  Os ícones do `IconPng` são nossos: seis desenhos de 64×64 que
+        //  nunca mudam, e por isso viajam em base64 aqui dentro.
+        //
+        //  A logo do OZCoin é outra coisa — é a marca da REDE. Ela mora em
+        //  `Assets\ui\ozcoin.png`, quem a troca é o dono, e quem a leva ao
+        //  FileStorage é o agente, pelo OrigemZImages. Colá-la aqui criaria
+        //  uma segunda cópia que envelhece na primeira troca de logo, e o
+        //  jogador veria a moeda velha no passe e a nova no menu principal.
+        //
+        //  Então o passe só PERGUNTA o CRC, como o OrigemZUI já faz
+        //  (`ImageCrc`, OrigemZUI.cs). O CRC nasce do outro lado; aqui ele
+        //  entra na mesma tabela `_icons` dos outros ícones.
+        //
+        //  ####  UMA VEZ POR ABERTURA, E NÃO UMA POR FAIXA  ####
+        //
+        //  A trilha desenha até 80 faixas por carga e redesenha a cada
+        //  clique. Um `Call` por faixa seria pagar hook para saber o que não
+        //  mudou entre uma faixa e a seguinte. A pergunta é feita no boot,
+        //  quando o OrigemZImages carrega, e na abertura do menu — três
+        //  momentos em que a resposta pode ter mudado, e nenhum deles dentro
+        //  do laço de desenho.
+        //
+        //  ####  "AINDA NÃO" NÃO É "NÃO"  ####
+        //
+        //  O OrigemZImages pode subir DEPOIS deste plugin, e o PNG pode
+        //  chegar minutos depois dele (o agente sincroniza as imagens em
+        //  timer). Por isso a resposta negativa nunca é guardada: enquanto
+        //  faltar, a próxima abertura pergunta de novo. E enquanto faltar, a
+        //  moeda aparece como a sigla "OZ" do `KindMark` — que é feia, mas é
+        //  legível. O quadrado vazio, não: ele parece defeito.
+        // ============================================================
+
+        /// <summary>
+        /// A chave da logo da moeda na biblioteca de imagens. A MESMA do
+        /// agente (`COIN_IMAGE_KEY`, core/src/game/ui-store-screens.ts) e o
+        /// mesmo nome do arquivo em `Assets\ui\ozcoin.png`.
+        /// </summary>
+        private const string CoinImageKey = "ozcoin";
+
+        /// <summary>O hook do OrigemZImages: chave → CRC, ou 0 quando ele não a tem.</summary>
+        private const string GetImageHook = "GetImage";
+
+        /// <summary>O nome do plugin da biblioteca, para reconhecê-lo no `OnPluginLoaded`.</summary>
+        private const string ImagesPluginName = "OrigemZImages";
+
+        [PluginReference(ImagesPluginName)]
+        private Plugin _imageLibrary;
+
+        /// <summary>Já avisamos que a logo da moeda não chegou? Um aviso basta.</summary>
+        private bool _warnedNoCoinArt;
 
         private void StoreIcons()
         {
@@ -1439,6 +1517,78 @@ namespace Oxide.Plugins
                     PrintWarning("O ícone " + pair.Key + " não foi guardado: " + cause.Message);
                 }
             }
+        }
+
+        /// <summary>
+        /// Pergunta ao OrigemZImages o CRC da logo da moeda e o guarda.
+        ///
+        /// Recebe o plugin por parâmetro, e não pelo campo, porque o
+        /// `OnPluginLoaded` chega ANTES de o Oxide preencher o
+        /// `[PluginReference]` — ler o campo ali devolveria null e a logo só
+        /// apareceria na abertura seguinte.
+        ///
+        /// Devolve `true` quando a tabela MUDOU: é o que diz a quem chamou
+        /// se vale redesenhar o que já está na tela.
+        /// </summary>
+        private bool ResolveSharedIcons(Plugin library)
+        {
+            // Sem a biblioteca, o que já temos continua valendo: o
+            // FileStorage é do SERVIDOR, e o CRC não morre com o plugin.
+            if (library == null || !library.IsLoaded) return false;
+
+            uint crc;
+
+            try
+            {
+                object raw = library.Call(GetImageHook, CoinImageKey);
+                crc = raw is uint ? (uint)raw : 0U;
+            }
+            catch (Exception cause)
+            {
+                PrintWarning("Não consegui perguntar a logo do OZCoin ao " + ImagesPluginName + ": " +
+                             cause.Message);
+                return false;
+            }
+
+            if (crc == 0U)
+            {
+                if (!_warnedNoCoinArt)
+                {
+                    _warnedNoCoinArt = true;
+                    PrintWarning("a imagem \"" + CoinImageKey + "\" ainda não chegou ao " + ImagesPluginName +
+                                 ": a moeda aparece como a sigla OZ no passe. Confira Assets\\ui\\" +
+                                 CoinImageKey + ".png e a sincronização de imagens do agente.");
+                }
+
+                // Sem remover o que já havia: a chave pode ter sido esquecida
+                // por um instante, e piscar entre a logo e a sigla é pior que
+                // mostrar a logo de um segundo atrás.
+                return false;
+            }
+
+            string text = crc.ToString(CultureInfo.InvariantCulture);
+            string current;
+            if (_icons.TryGetValue(KindCoins, out current) && current == text) return false;
+
+            // Trocar a logo no disco dá um CRC novo, e é este ramo que o
+            // alcança sem exigir reload do passe.
+            _icons[KindCoins] = text;
+            _warnedNoCoinArt = false;
+            return true;
+        }
+
+        /// <summary>
+        /// O OrigemZImages subiu depois de nós: a arte que faltava passa a
+        /// existir, e quem está com o menu aberto vê a troca sem fechá-lo.
+        /// </summary>
+        private void OnPluginLoaded(Plugin plugin)
+        {
+            if (plugin == null || plugin.Name != ImagesPluginName) return;
+
+            // A trilha basta: o `Redraw` já arrasta o modal do nível junto
+            // quando ele está aberto, e o modal de itens não desenha a marca
+            // do tipo (ver `KindArt`).
+            if (ResolveSharedIcons(plugin)) RedrawAllMenus(Region.Track);
         }
 
         // ============================================================
@@ -1679,6 +1829,13 @@ namespace Oxide.Plugins
             _menus[player.userID] = session;
 
             CloseMainMenu(player);
+
+            // A abertura é o único ponto barato para reperguntar a logo: uma
+            // chamada por menu aberto, e nenhuma por faixa desenhada. É o que
+            // alcança a imagem que o agente subiu depois do boot, e a logo
+            // trocada no disco, sem exigir reload do passe.
+            ResolveSharedIcons(_imageLibrary);
+
             Redraw(player, session, Region.All);
 
             // ####  O XP AQUI PODE TER MEIO MINUTO  ####
@@ -3947,11 +4104,9 @@ namespace Oxide.Plugins
             }
             else
             {
-                // Sem item e sem PNG: o tipo vira a arte. É o caso de OZCoin
-                // e de recompensa que o agente ainda não ilustrou — e uma
-                // sigla diz mais que um símbolo genérico.
-                Label(canvas, box, 8, iconY, iconSize, iconSize, KindMark(lane.Kind), 14,
-                      dim ? ColMuted : ColAmber, TextAnchor.MiddleCenter, true);
+                // Sem item e sem PNG: o tipo vira a arte — a logo da rede
+                // quando ela existe, a sigla quando não. Ver `KindArt`.
+                KindArt(canvas, box, 8, iconY, iconSize, lane.Kind, 14, dim, icons);
             }
 
             float textX = 8 + iconSize + 8;
@@ -3982,12 +4137,57 @@ namespace Oxide.Plugins
             }
         }
 
+        /// <summary>O `Kind` da moeda. É também a chave da arte dela em `_icons`.</summary>
+        private const string KindCoins = "coins";
+
+        // ============================================================
+        //  ####  A ARTE DO TIPO, E POR QUE ELA NÃO VAI EM TODO TAMANHO  ####
+        //
+        //  Quando a recompensa não é item do jogo nem traz PNG no catálogo,
+        //  o que sobra para desenhar é o TIPO dela. A logo da rede diz isso
+        //  melhor que duas letras — quando há espaço para ela.
+        //
+        //  Há espaço nos 44 px do card, nos 56 do marco e nos 64 do modal do
+        //  nível. Não há nos 24 px da linha do modal de itens: medida a logo
+        //  reduzida (19/09/2026), a 24 px o anel do "O" e a barra do "Z" se
+        //  fundem num borrão dourado que não se distingue de um ícone de
+        //  item qualquer ao lado — e naquela lista a cor da sigla ainda
+        //  CARREGA sentido (âmbar = cabeçalho do kit, apagado = linha comum),
+        //  sentido que um PNG colorido não tem como carregar. Lá a sigla
+        //  fica, de propósito: ver `DrawParts`.
+        // ============================================================
+
+        /// <summary>
+        /// A arte do tipo: a logo quando ela existe, a sigla quando não.
+        ///
+        /// Chave ausente, OrigemZImages fora do ar ou CRC zerado caem todos
+        /// no `KindMark`. O quadrado vazio não é um desfecho aceitável aqui:
+        /// o jogador o lê como defeito, e não como "esta recompensa é moeda".
+        /// </summary>
+        private static void KindArt(Canvas canvas, Box parent, float x, float y, float size, string kind,
+                                    int font, bool dim, Dictionary<string, string> icons)
+        {
+            string crc = IconCrc(icons, kind);
+
+            if (crc.Length > 0)
+            {
+                // A arte é colorida (a logo do OZCoin é dourada): vai SEM
+                // tingir, e só apagada quando a faixa está apagada — o mesmo
+                // tratamento do PNG que o catálogo manda em `lane.Icon`.
+                Png(canvas, parent, x, y, size, size, crc, dim ? ColIconDim : "1 1 1 1");
+                return;
+            }
+
+            Label(canvas, parent, x, y, size, size, KindMark(kind), font, dim ? ColMuted : ColAmber,
+                  TextAnchor.MiddleCenter, true);
+        }
+
         /// <summary>A sigla de quem não tem ícone. Curta: ela mora num quadrado de 44 px.</summary>
         private static string KindMark(string kind)
         {
             switch (kind)
             {
-                case "coins": return "OZ";
+                case KindCoins: return "OZ";
                 case "kit": return "KIT";
                 case "points": return "PTS";
                 case "vip": return "VIP";
@@ -4365,8 +4565,7 @@ namespace Oxide.Plugins
             }
             else
             {
-                Label(canvas, box, 16, iconY, iconSize, iconSize, KindMark(lane.Kind), 16,
-                      dim ? ColMuted : ColAmber, TextAnchor.MiddleCenter, true);
+                KindArt(canvas, box, 16, iconY, iconSize, lane.Kind, 16, dim, view.Icons);
             }
 
             // ####  O RÓTULO INTEIRO, QUE É METADE DO PORQUÊ DESTE MODAL  ####
@@ -4601,6 +4800,13 @@ namespace Oxide.Plugins
                 }
                 else
                 {
+                    // ####  AQUI A SIGLA VENCE A LOGO  ####
+                    //
+                    // Nos 24 px desta linha a logo do OZCoin vira borrão
+                    // (ver `KindArt`), e a COR da sigla é o que separa o
+                    // cabeçalho do kit das linhas de dentro dele — uma arte
+                    // dourada apagaria essa distinção. Chamar `KindArt` aqui
+                    // custaria as duas coisas de uma vez.
                     Label(canvas, area, x, y, 24, PartsRowHeight, KindMark(row.Kind), header ? 10 : 11,
                           header ? ColAmber : ColMuted, TextAnchor.MiddleCenter, true);
                 }
@@ -4658,6 +4864,12 @@ namespace Oxide.Plugins
             const ulong skin = 3802433262uL;
 
             // CRCs do tamanho dos de verdade: o número é o que viaja.
+            //
+            // A logo da moeda (`coins`) NÃO entra, e isso não é esquecimento:
+            // medido em 19/09/2026, o elemento de `CuiRawImageComponent` do
+            // ícone do tipo dá 194 bytes contra 266 do `Label` que ele
+            // substitui — mesmo número de elementos, 72 bytes a MENOS. Pôr a
+            // logo aqui afrouxaria o pior caso em vez de medi-lo.
             Dictionary<string, string> icons = new Dictionary<string, string>
             {
                 { "lock", "2942806813" },
