@@ -6943,8 +6943,40 @@ namespace Oxide.Plugins
 
         private void Say(WardrobeSession session, string message, bool ok)
         {
-            session.Message = message ?? "";
+            session.Message = CurlyQuotes(message ?? "");
             session.MessageOk = ok;
+        }
+
+        /// <summary>
+        /// ####  ASPA RETA NÃO SAI NO CUI  ####
+        ///
+        /// Visto no jogo pelo dono em 19/09/2026: a mensagem
+        /// `"Brasa" vestida…` apareceu como `\"Brasa\"` — o cliente mostra
+        /// o escape do JSON em vez da aspa. As mensagens do vestiário citam
+        /// nome de skin e de preset o tempo todo, então as aspas retas viram
+        /// tipográficas aqui, alternando abre e fecha.
+        /// </summary>
+        private static string CurlyQuotes(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf('"') < 0) return text;
+
+            StringBuilder result = new StringBuilder(text.Length);
+            bool open = true;
+
+            foreach (char ch in text)
+            {
+                if (ch == '"')
+                {
+                    result.Append(open ? '“' : '”');
+                    open = !open;
+                }
+                else
+                {
+                    result.Append(ch);
+                }
+            }
+
+            return result.ToString();
         }
 
         // ---- os comandos da tela -------------------------------------
@@ -7920,7 +7952,7 @@ namespace Oxide.Plugins
                 if (_previews.TryGetValue(player.userID, out preview))
                 {
                     int left = Mathf.Max(1, Mathf.CeilToInt(preview.EndsAt - Time.realtimeSinceStartup));
-                    previewText = "PROVANDO \"" + Shorten(preview.Label, 22) + "\" · volta em " + left + " s";
+                    previewText = "PROVANDO “" + Shorten(preview.Label, 22) + "” · volta em " + left + " s";
                 }
 
                 parts.AddRange(BuildWardrobeFoot(session.Token, session.Message, session.MessageOk, previewText));
