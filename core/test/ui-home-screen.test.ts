@@ -419,6 +419,39 @@ describe('a HOME dentro do menu', () => {
    *   3. a borda, ~1.950 — a peça mais cara e a única puramente
    *      decorativa.
    *
+   * ####  19/09/2026: O BANNER DO PASSE, E A TROCA QUE O PAGOU  ####
+   *
+   * O cartão de boas-vindas ganhou a propaganda do passe no lado
+   * direito, que estava vazio. Ela custa **1.324 bytes**:
+   *
+   *   o botão ....................... +896  (botão são DOIS
+   *                                   elementos no CUI: o `Button` e
+   *                                   o `Text` do rótulo)
+   *   a arte (`rawImage`) ........... +368
+   *   a ação no índice da tela ...... + 60
+   *
+   * E havia 356 até a trava. A trava NÃO subiu; foram três trocas:
+   *
+   *   o `Text` vazio de botão ....... -440  (ui-cui.ts: um `Text`
+   *                                   com a string vazia é um
+   *                                   elemento inteiro para desenhar
+   *                                   coisa nenhuma. Só o cartão do
+   *                                   passe o tinha)
+   *   "Use o menu acima para…" ...... -508  (item 1 da lista acima:
+   *                                   texto fixo, enfeita e não
+   *                                   informa, e no MESMO cartão
+   *                                   onde o banner entrou)
+   *   a barra de acento do banner ... -344  (3 px de vermelho, sem
+   *                                   texto e sem dado; a arte do
+   *                                   banner já traz a dela)
+   *
+   * 47.444 -> 47.476: **32 bytes líquidos** por uma arte clicável.
+   * A folga até a trava é de 324, e contra o teto REAL sobram 2.524
+   * (5,0%) — o mesmo lugar em que a home já estava.
+   *
+   * A primeira e a terceira saídas da lista continuam de pé, na
+   * mesma ordem: a régua (~1.412) e a borda.
+   *
    * E se o crescimento vier de DADOS, a trava não sobe: encurta-se
    * a lista. Essa não tem exceção, porque o pior caso do teste é
    * sempre menor que o pior caso do mundo.

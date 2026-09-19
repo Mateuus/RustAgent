@@ -93,13 +93,28 @@ export function withPassCard(document: UiDocument): UiDocument | null {
     return null;
   }
 
-  const before = buildHomeScreen({ view: emptyHomeView(), cards: CARDS_BEFORE_PASS });
+  // ####  OS DOIS LADOS SÃO SEM BANNER, E ISSO É PROPOSITAL  ####
+  //
+  // O banner do passe entrou no cartão de boas-vindas DEPOIS desta
+  // passagem. Se `before` o desenhasse, ele deixaria de descrever a
+  // home que está gravada nos menus antigos — e ninguém mais
+  // ganharia o cartão. Se `after` o desenhasse, esta passagem
+  // atropelaria o trabalho do `withPassBanner`.
+  //
+  // Então aqui a home só ganha o CARTÃO, e sai deste passo idêntica
+  // ao preset de 17/09/2026. O banner vem no passo seguinte, que
+  // reconhece exatamente esse desenho. Ver game/ui-pass-banner.ts.
+  const before = buildHomeScreen({
+    view: emptyHomeView(),
+    cards: CARDS_BEFORE_PASS,
+    passBanner: false,
+  });
 
   if (!sameDrawing(home, before)) {
     return null;
   }
 
-  const after = buildHomeScreen({ view: emptyHomeView() });
+  const after = buildHomeScreen({ view: emptyHomeView(), passBanner: false });
 
   return {
     ...document,

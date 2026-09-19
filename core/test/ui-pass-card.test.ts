@@ -341,12 +341,20 @@ describe('o preço do quinto cartão', () => {
 // ------------------------------------------------------------
 
 describe('o cartão entrando num menu que já existe', () => {
-  /** O menu como ele era antes desta frente: a home de quatro cartões. */
+  /**
+   * O menu como ele era antes desta frente: a home de quatro cartões.
+   *
+   * `passBanner: false` porque o banner do passe entrou DEPOIS deste
+   * upgrade: a home gravada lá fora não o tem, e descrevê-la com ele
+   * faria esta passagem deixar de reconhecer o menu que ela existe
+   * para consertar. Ver game/ui-pass-banner.ts.
+   */
   function menuAntigo(): UiDocument {
     const menu = buildMainMenu();
     const quatro = buildHomeScreen({
       view: emptyHomeView(),
       cards: { rank: true, offer: true, wipe: true, quest: true, pass: false },
+      passBanner: false,
     });
 
     return {
