@@ -69,6 +69,7 @@ import { measureSlot } from './ui-template.js';
 import { SLOTS, fillTemplate } from './ui-store-template.js';
 import { CELL, inventoryBlocks } from './ui-inventory.js';
 import {
+  deadButton,
   itemImage as gameItemImage,
   itemRows,
   label as styledLabel,
@@ -340,11 +341,15 @@ export interface BuildStoreScreenOptions {
    */
   readonly vehicleSpace?: boolean | null;
   /**
-   * O passe daquele jogador, para o modal de uma oferta `pass`.
+   * O passe daquele jogador, para a VITRINE e para o modal.
    *
-   * `null` = a oferta não é passe, ou não deu para perguntar. Aí o
-   * modal mostra só o nome e o preço — e o botão continua lá, pelo
-   * mesmo motivo do veículo: recusar sem certeza é pior.
+   * O card da grade usa isto pelo mesmo motivo do modal: quem já tem
+   * não deve ver um COMPRAR que vai recusar depois do clique.
+   *
+   * `null` = não há oferta de passe na tela, ou não deu para
+   * perguntar. Aí o card e o modal saem com nome e preço — e o botão
+   * continua lá, pelo mesmo motivo do veículo: recusar sem certeza é
+   * pior, e a compra confere de novo antes de cobrar.
    */
   readonly pass?: StorePassView | null;
   /**
@@ -377,7 +382,7 @@ export interface BuildStoreScreenOptions {
  */
 export function buildStoreScreen(options: BuildStoreScreenOptions): UiScreen {
   return options.target.kind === 'catalog'
-    ? buildCatalogScreen(options.catalog, options.target, options.screenId)
+    ? buildCatalogScreen(options.catalog, options.target, options.screenId, options.pass ?? null)
     : buildItemScreen(
         options.catalog,
         options.target,
@@ -425,7 +430,8 @@ export interface StorePassView {
 function buildCatalogScreen(
   catalog: readonly StoreCatalogEntry[],
   target: Extract<StoreScreenTarget, { kind: 'catalog' }>,
-  screenId?: string,
+  screenId: string | undefined,
+  pass: StorePassView | null,
 ): UiScreen {
   // O id pedido, sem remontar. Ver `screenId` nas opções.
   const id =
@@ -511,7 +517,7 @@ function buildCatalogScreen(
       fill(0, top, 0, 26),
       '#00000000',
       slice.map((offer, index) =>
-        offerCard(offer, index % GRID.columns, Math.floor(index / GRID.columns)),
+        offerCard(offer, index % GRID.columns, Math.floor(index / GRID.columns), pass),
       ),
     ),
   );
@@ -591,11 +597,37 @@ function pager(categoryId: string, page: number, pages: number): readonly UiElem
   return elements;
 }
 
-function offerCard(offer: StoreOffer, column: number, row: number): UiElement {
+function offerCard(
+  offer: StoreOffer,
+  column: number,
+  row: number,
+  pass: StorePassView | null,
+): UiElement {
   const columnWidth = 1 / GRID.columns;
   const half = GRID.gap / 2;
   // Do TOPO do conteúdo para baixo: é o topo que fica parado.
   const y = row * (GRID.cardHeight + GRID.gap);
+
+  // ####  A VITRINE AVISA ANTES DO CLIQUE  ####
+  //
+  // Quem já comprou o passe do mês seria recusado na hora de cobrar
+  // (store/service.ts, `pass-owned`) — mas só DEPOIS de clicar em
+  // COMPRAR, abrir o modal e confirmar. Três passos para receber um
+  // "não". Aqui o lugar do botão já diz que o passe é dele.
+  //
+  // `null` — não deu para perguntar, o passe não está ligado neste
+  // servidor, ou não há temporada no ar — NÃO esconde nada: o botão
+  // fica, e a recusa do servidor continua sendo a última palavra.
+  // Errar para o lado do clique custa um aviso; errar para o outro
+  // custa uma venda.
+  const owned = offer.kind === 'pass' && pass?.owned === true;
+
+  const buttonRect: Rect = {
+    anchorMin: { x: 0, y: 0 },
+    anchorMax: { x: 1, y: 0 },
+    offsetMin: { x: 8, y: CARD.buttonBottom },
+    offsetMax: { x: -8, y: CARD.buttonTop },
+  };
 
   const children: UiElement[] = [
     // O ícone vem do JOGO: `itemid` + `skinid`, e o cliente resolve o
@@ -634,20 +666,21 @@ function offerCard(offer: StoreOffer, column: number, row: number): UiElement {
       { size: 14, color: C.amber, align: offer.oldPrice === null ? 'center' : 'right' },
     ),
 
-    button(
-      `b${offer.id}`,
-      'COMPRAR',
-      {
-        anchorMin: { x: 0, y: 0 },
-        anchorMax: { x: 1, y: 0 },
-        offsetMin: { x: 8, y: CARD.buttonBottom },
-        offsetMax: { x: -8, y: CARD.buttonTop },
-      },
-      // MODAL: a grade continua atrás, e fechar volta para onde
-      // estava sem recarregar nada.
-      { id: `ab${offer.id}`, kind: 'modal.open', screenId: itemScreenId(offer.id, 1) },
-      { color: C.surface2, textColor: C.text, hoverColor: C.rust, fontSize: 11 },
-    ),
+    owned
+      ? // O botão que não é botão: mesmo lugar, mesma caixa, e o
+        // motivo no lugar do convite. A frase é a MESMA do modal —
+        // duas maneiras de dizer isto fariam o jogador conferir se
+        // são a mesma coisa. Ver `deadButton`.
+        deadButton(`b${offer.id}`, 'VOCÊ JÁ TEM', buttonRect)
+      : button(
+          `b${offer.id}`,
+          'COMPRAR',
+          buttonRect,
+          // MODAL: a grade continua atrás, e fechar volta para onde
+          // estava sem recarregar nada.
+          { id: `ab${offer.id}`, kind: 'modal.open', screenId: itemScreenId(offer.id, 1) },
+          { color: C.surface2, textColor: C.text, hoverColor: C.rust, fontSize: 11 },
+        ),
   ];
 
   // ---- o preço antigo, riscado ----
