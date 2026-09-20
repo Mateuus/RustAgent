@@ -6422,8 +6422,27 @@ namespace Oxide.Plugins
         private const string UiWardrobeFoot = "OZWardrobe.Foot";
         private const string UiWardrobeButton = "OZSkins.WardBtn";
 
-        /// <summary>O painel de saque do cliente que o saque virtual pede (o mesmo do plugin Skins).</summary>
-        private const string WardrobeLootPanel = "generic";
+        /// <summary>
+        /// O painel de saque que o cliente desenha quando o saque virtual abre.
+        ///
+        /// ####  O "generic" DESENHA UMA CAIXA QUE NÃO EXISTE  ####
+        ///
+        /// MEDIDO NO JOGO EM 20/09/2026, com o dono na tela. O `generic` é o
+        /// painel de caixa de tamanho FIXO: ele desenha a moldura de 6×6 à
+        /// esquerda do inventário mesmo com o contêiner de capacidade 0, e o
+        /// jogador vê uma caixa vazia atrás do vestiário. Era o que o plugin
+        /// Skins pedia, e é de lá que vem a cara conhecida — não é resto
+        /// daquele plugin, é o mesmo painel do cliente.
+        ///
+        /// O `generic_resizable` acompanha a capacidade do contêiner: com 0,
+        /// não sobra moldura nenhuma.
+        ///
+        /// Cobrir a moldura com um painel nosso estava fora de questão: ela é
+        /// UI do cliente e escala pela resolução E pela "UI Scale" que cada
+        /// jogador escolhe — a tampa acertaria numa tela e erraria em todas as
+        /// outras. Quem tem de parar de desenhar é o cliente.
+        /// </summary>
+        private const string WardrobeLootPanel = "generic_resizable";
 
         private const int MaxPresets = 5;
         private const int PresetNameMax = 20;

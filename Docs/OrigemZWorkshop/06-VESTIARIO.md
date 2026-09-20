@@ -74,6 +74,8 @@ loot.SendImmediate()
 player.ClientRPC("RPC_OpenLootPanel", "generic")   → o cliente abre o inventário
 ```
 
+> **O painel deixou de ser o `generic` em 20/09/2026.** Ver §10.
+
 **Medido no decompilado do server01 em 19/09/2026** (`ilspycmd` no `Assembly-CSharp.dll`):
 
 - `PlayerLoot.Clear` chama `OnPlayerLootEnd(PlayerLoot)`. É o aviso de "fechou o inventário":
@@ -88,6 +90,8 @@ player.ClientRPC("RPC_OpenLootPanel", "generic")   → o cliente abre o inventá
 
 O que **não** foi medido (sem cliente): como o painel `generic` com capacidade 0 aparece. Ele fica
 atrás do vestiário, que é opaco e está na camada `Overlay`.
+
+> Medido em 20/09/2026: ele aparece, e aparece inteiro. Ver §10.
 
 ---
 
@@ -446,3 +450,59 @@ Nome repetido é recusado ali, com a frase. Comandos: `origemz.wardrobe.rename <
 `origemz.wardrobe.name <token do nome> <texto…>` e `origemz.wardrobe.cancelname <token do nome>`.
 
 Vale para qualquer tela futura pendurada no inventário: **campo de texto, só fora dele.**
+
+---
+
+## 10. A caixa vazia atrás do vestiário (20/09/2026)
+
+**Esta seção vence o §3 e o §8 onde eles discordam.**
+
+### 10.1 O que o dono viu
+
+Com o vestiário aberto, um painel aparecia **atrás** dele, à esquerda: um título grande e uma
+moldura de caixa vazia. A leitura natural foi "sobrou alguma coisa do plugin `Skins.cs` antigo".
+
+Não sobrou nada. O servidor não tem esse plugin carregado (medido pelo `oxide.plugins`: ele só
+existe como referência em `Docs/Skins/Skins.cs`), e nenhuma tela nossa escreve aquele texto. O que
+estava ali é o **painel de saque do próprio cliente** — o que o `RPC_OpenLootPanel` manda desenhar.
+A cara é a do plugin antigo porque o painel é o mesmo: o `Skins.cs` também pede o `generic`
+(`Container Panel Name`), e o §3 copiou a receita inteira, o nome do painel junto.
+
+### 10.2 O que foi medido
+
+A incógnita que o §3 deixou aberta — *como o painel `generic` com capacidade 0 aparece* — foi
+medida no jogo, com uma sonda descartável que abre o mesmo saque virtual trocando só o nome do
+painel:
+
+| painel | contêiner | o que o cliente desenha |
+| --- | --- | --- |
+| `generic` | capacidade 0 | a moldura de 6×6 **inteira**, vazia, à esquerda do inventário |
+| `generic_resizable` | capacidade 0 | nada |
+
+O `generic` tem tamanho fixo: ele não pergunta ao contêiner quantas casinhas existem. O
+`generic_resizable` pergunta — e com 0 não sobra moldura.
+
+São os dois únicos nomes de painel genérico que o jogo conhece (medido nas strings do
+`Assembly-CSharp.dll`; os outros são de alvo específico, como o `player_corpse`).
+
+### 10.3 Por que não foi tapado com CUI
+
+Porque essa moldura é UI **do cliente**. Ela escala com a resolução e também com a *UI Scale* que
+cada jogador ajusta nas opções do jogo — que o servidor não conhece e não controla. Uma tampa
+desenhada por cima acertaria numa tela e erraria em todas as outras.
+
+**A regra que fica:** quando o que atrapalha é UI do cliente, quem tem de parar de desenhar é o
+cliente. Cobrir só transfere o defeito para quem tem outra tela.
+
+### 10.4 O que ainda não foi medido
+
+A **posição** do vestiário continua sendo a incógnita nº 2 do §8, e agora com o motivo escrito: ele
+está ancorado na **borda direita** da tela (`WardrobeAnchorMin = "1 0.5"`), enquanto o inventário e
+o boneco são UI nativa, **centralizada**. Em 16:9 os dois casam. Fora disso a distância entre a
+borda e o centro muda, e o vestiário desgruda do boneco (ultrawide) ou entra por cima do inventário
+(4:3).
+
+A correção provável é ancorar pelo centro (`0.5 0.5`) com deslocamento fixo, que é como a UI nativa
+se posiciona. O que falta para decidir é uma medida que só o cliente dá: **quanto de largura sobra
+em unidades quando a tela não é 16:9**. Se em 4:3 não couberem as 420 unidades ao lado do
+inventário, a saída não é a âncora — é encolher, sobrepor ou trocar de lado.
