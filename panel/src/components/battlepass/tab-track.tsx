@@ -446,6 +446,13 @@ function CellDialog({
       guarded
       escapable
       onClose={onClose}
+      // ####  A CAIXA PADRÃO É ESTREITA DEMAIS PARA ESCOLHER ITEM  ####
+      //
+      // Pedido do dono em 20/09/2026, com o print: nas 30rem do
+      // padrão o campo do item cabia em meia coluna, e cada opção
+      // da busca virava "B… ha… FOOD" — nome truncado em duas
+      // letras. Escolher item assim é adivinhar.
+      className="w-[min(52rem,94vw)]"
     >
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -463,7 +470,22 @@ function CellDialog({
           />
         </div>
 
-        <div className="space-y-2 border-t border-border pt-3">
+        {/* ####  A LISTA DA BUSCA PRECISA DE CHÃO ONDE CAIR  ####
+
+            A lista suspensa do seletor de item é absoluta, e o
+            <dialog> recorta o que passa do fim dele: com a caixa
+            terminando dois dedos abaixo do campo, a busca mostrava
+            duas linhas e o resto ficava atrás da borda.
+
+            O piso só existe quando há alguma recompensa — casa
+            vazia não tem campo de busca, e não merece um palmo de
+            nada embaixo do aviso. */}
+        <div
+          className={cn(
+            'space-y-2 border-t border-border pt-3',
+            rewards.length > 0 && 'min-h-[22rem]',
+          )}
+        >
           <div className="flex items-center justify-between gap-2">
             <span className="font-condensed text-2xs uppercase tracking-wide text-muted">
               O que esta casa dá
