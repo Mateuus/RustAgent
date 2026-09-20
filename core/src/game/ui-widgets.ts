@@ -149,6 +149,15 @@ export function button(
   rect: Rect,
   action: UiAction,
   style: ButtonStyle,
+  /**
+   * O desenho que vai DENTRO do botão.
+   *
+   * O uso é o card clicável: um botão sem texto cujo conteúdo são
+   * os filhos — o cartão do passe, o card de kit. O clique num
+   * filho que também seja botão é do filho, e não deste: no Unity
+   * quem recebe o raio é o elemento da frente.
+   */
+  children: readonly UiElement[] = [],
 ): UiElement {
   return {
     id,
@@ -170,7 +179,7 @@ export function button(
     activeColor: null,
     activeTextColor: null,
     activeOnScreenId: null,
-    children: [],
+    children,
   };
 }
 
@@ -253,7 +262,7 @@ export function deadButton(
  * reservado — o mesmo mecanismo do token da sessão. Ver
  * game/image-library.ts.
  */
-export function storedImage(id: string, key: string, rect: Rect): UiElement {
+export function storedImage(id: string, key: string, rect: Rect, color: string = C.white): UiElement {
   return {
     id,
     name: id,
@@ -261,7 +270,11 @@ export function storedImage(id: string, key: string, rect: Rect): UiElement {
     rect,
     source: { kind: 'stored', key },
     // Branco pelo mesmo motivo do `itemImage`: `color` TINGE.
-    color: C.white,
+    //
+    // E é justamente por TINGIR que os ícones de `Assets\ui\` são
+    // brancos sobre transparente: o mesmo PNG vira cinza no chip
+    // apagado e âmbar no do VIP, sem um arquivo por cor.
+    color,
     children: [],
   };
 }
@@ -338,6 +351,71 @@ export function modalFrame(
       ],
     ),
   ]);
+}
+
+// ============================================================
+//  A ÁREA QUE ROLA, E A DICA
+// ============================================================
+
+/**
+ * A faixa que a barra de rolagem ocupa, à direita.
+ *
+ * Ela é desenhada POR CIMA da área — o `ScrollRect` não encolhe o
+ * conteúdo para abrir espaço. Sem reservar isto, a barra fica em
+ * cima da borda do último card de cada fileira.
+ *
+ * 16 e não 6 (a largura da barra) pelo mesmo motivo do
+ * OrigemZBattlePass: o respiro entre o conteúdo e a barra faz parte
+ * de ela não parecer colada no card.
+ */
+export const SCROLL_GUTTER = 16;
+
+/**
+ * Uma área que rola na vertical.
+ *
+ * `viewport` é a altura VISÍVEL, em px, e `content` a do que vai
+ * dentro. Quando o conteúdo cabe, o elemento continua sendo criado
+ * e simplesmente não rola — é o que evita que a tela mude de forma
+ * entre um servidor com três kits e outro com trinta.
+ *
+ * ####  OS FILHOS SE POSICIONAM NA ALTURA DO CONTEÚDO  ####
+ *
+ * Um card na terceira fileira está a 500 px do topo mesmo que só
+ * 490 sejam visíveis. Quem desenha ancora no TOPO (`anchorMin.y =
+ * anchorMax.y = 1`) e desce em pixels, como a grade já fazia — a
+ * diferença é que agora não há um fundo em que esbarrar.
+ */
+export function scrollArea(
+  id: string,
+  rect: Rect,
+  sizes: { readonly viewport: number; readonly content: number },
+  children: readonly UiElement[] = [],
+): UiElement {
+  return {
+    id,
+    name: id,
+    type: 'scroll',
+    rect,
+    contentScale: Math.max(1, sizes.content / Math.max(1, sizes.viewport)),
+    children,
+  };
+}
+
+/**
+ * A dica que aparece ao passar o mouse.
+ *
+ * Envolve um elemento já pronto em vez de virar um parâmetro em
+ * cada construtor: a dica não é estilo — ela é o texto LONGO de
+ * algo que na tela aparece curto, e quase nenhum elemento tem um.
+ *
+ *     tip(button('k0b', 'RESGATAR', …), 'Pega o kit agora')
+ *
+ * `null` e vazio devolvem o elemento intacto, e é o que permite
+ * passar o resultado de uma função que às vezes não tem o que
+ * dizer.
+ */
+export function tip<T extends UiElement>(element: T, text: string | null): T {
+  return text === null || text === '' ? element : { ...element, tooltip: text };
 }
 
 /** O título no topo de um modal. */

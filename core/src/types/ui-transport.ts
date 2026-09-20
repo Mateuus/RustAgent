@@ -607,6 +607,161 @@ export interface UiScreenPayload {
   readonly requestId: string;
   readonly documentId: string;
   readonly screen: UiScreenBundle;
+  /**
+   * Qual pedaço desta tela é este comando, contando de 1.
+   *
+   * Ausente = a tela veio inteira num comando só, que é o caso de
+   * quase todas. Ver `encodeUiScreenParts`.
+   */
+  readonly part?: number;
+  readonly parts?: number;
+}
+
+/**
+ * Um pedaço do MEIO de uma tela: só mais elementos de CUI.
+ *
+ * Ele não repete o pacote da tela (id, nome, tabela de ações): isso
+ * veio no primeiro, e repeti-lo em cada pedaço gastaria justamente
+ * os bytes que a divisão existe para poupar.
+ */
+export interface UiScreenPartPayload {
+  readonly requestId: string;
+  readonly part: number;
+  readonly parts: number;
+  readonly cui: readonly CuiElement[];
+}
+
+/**
+ * O teto de UM comando, em bytes de JSON.
+ *
+ * O frame do WebRCON são `UI_DOC_MAX_BYTES` (50.000) em base64, que
+ * infla 4/3 — 37.500 de JSON. Daí saem ~10% para o
+ * `origemz.ui.screen ` na frente do comando, o envelope do frame e
+ * o arredondamento do base64.
+ */
+const SCREEN_PART_MAX_BYTES = 33_000;
+
+/**
+ * Quantos pedaços uma tela pode ter.
+ *
+ * Oito são ~264 KB de JSON, ou uma grade de umas cem células. O teto
+ * existe porque o plugin GUARDA os pedaços até o último chegar: uma
+ * tela sem limite seria um pedido só ocupando a memória do servidor
+ * até o timeout.
+ */
+const SCREEN_MAX_PARTS = 8;
+
+/**
+ * A tela, em um ou mais comandos de console.
+ *
+ * ####  POR QUE UMA TELA PRECISA SER PARTIDA  ####
+ *
+ * Ela viaja num comando do WebRCON, e o frame tem 50.000 bytes. A
+ * aba KITS mede ~2.650 bytes por card: doze cards, e acabou. Não
+ * havia erro nisso — havia PAGINAÇÃO, que é o que uma grade rolável
+ * veio justamente substituir. Uma rolagem que mostra três fileiras e
+ * empurra o resto para a página 2 não é uma rolagem.
+ *
+ * O passe (OrigemZBattlePass) já resolve isso do lado dele: o
+ * desenho nasce no plugin e ele parte o `AddUi` em pedaços de 40 KB.
+ * Aqui o desenho nasce no AGENTE, então o corte tem de acontecer
+ * antes do RCON.
+ *
+ * ####  O CORTE É NA LISTA DE ELEMENTOS, E ELA É ORDENADA  ####
+ *
+ * O primeiro comando leva o pacote inteiro da tela com os primeiros
+ * elementos; os seguintes levam só mais elementos. O plugin acumula
+ * e desenha quando o último chega — então a ordem de pai antes de
+ * filho, que o CUI exige, é preservada sem esforço nenhum.
+ *
+ * ####  O QUE NÃO COUBER EM OITO PEDAÇOS É CORTADO, E ISSO É DITO  ####
+ *
+ * Cortar em silêncio faria a tela chegar pela metade e o defeito
+ * aparecer longe daqui. Quem chama recebe o número de elementos
+ * descartados e decide o que dizer.
+ *
+ * MUDAR ISTO EXIGE MUDAR O `CmdScreen` DO OrigemZUI.cs JUNTO.
+ */
+export function encodeUiScreenParts(payload: UiScreenPayload): {
+  readonly commands: readonly string[];
+  readonly dropped: number;
+} {
+  const encode = (value: unknown): string =>
+    Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+
+  const whole = {
+    requestId: payload.requestId,
+    documentId: payload.documentId,
+    screen: payload.screen,
+  };
+
+  // O caso de quase todas as telas: cabe inteira, e o comando sai
+  // exatamente como saía antes de esta função existir — sem `part`
+  // nenhum, e um plugin que não conheça a divisão continua lendo.
+  if (JSON.stringify(whole).length <= SCREEN_PART_MAX_BYTES) {
+    return { commands: [encode(whole)], dropped: 0 };
+  }
+
+  // O que o pacote custa SEM o desenho. É o que sobra para os
+  // elementos no primeiro comando.
+  const header = JSON.stringify({
+    ...whole,
+    screen: { ...payload.screen, cui: [] },
+    part: 1,
+    parts: SCREEN_MAX_PARTS,
+  }).length;
+
+  const elements = payload.screen.cui;
+  const slices: CuiElement[][] = [];
+  let index = 0;
+
+  while (index < elements.length && slices.length < SCREEN_MAX_PARTS) {
+    const room =
+      (slices.length === 0 ? SCREEN_PART_MAX_BYTES - header : SCREEN_PART_MAX_BYTES - 200) - 2;
+
+    const slice: CuiElement[] = [];
+    let spent = 0;
+
+    while (index < elements.length) {
+      const element = elements[index];
+
+      if (element === undefined) {
+        index += 1;
+        continue;
+      }
+
+      const cost = JSON.stringify(element).length + 1;
+
+      // Um elemento sozinho maior que o comando inteiro não existe
+      // neste projeto (o maior é um rótulo de 2 KB), mas se existir
+      // ele vai sozinho, em vez de travar o laço para sempre.
+      if (spent > 0 && spent + cost > room) {
+        break;
+      }
+
+      slice.push(element);
+      spent += cost;
+      index += 1;
+    }
+
+    slices.push(slice);
+  }
+
+  const parts = slices.length;
+
+  return {
+    commands: slices.map((slice, at) =>
+      encode(
+        at === 0
+          ? { ...whole, screen: { ...payload.screen, cui: slice }, part: 1, parts }
+          : { requestId: payload.requestId, part: at + 1, parts, cui: slice },
+      ),
+    ),
+    // O que não coube em `SCREEN_MAX_PARTS`. Quem chama decide o que
+    // dizer — cortar em silêncio faria a tela chegar pela metade e o
+    // defeito aparecer longe daqui.
+    dropped: elements.length - index,
+  };
 }
 
 /**

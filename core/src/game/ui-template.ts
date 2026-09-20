@@ -200,6 +200,13 @@ function applyValue(element: UiElement, slot: SlotValue | undefined): UiElement 
       // dentro do campo, e a ação dele é justamente a que não pode
       // vir de lá (ver o cabeçalho).
       return element;
+
+    case 'scroll':
+      // A área rolável não tem nada que um slot troque: ela não é
+      // texto nem cor, e a altura do conteúdo é conta de quem
+      // MONTA a tela, não do documento. Os filhos dela seguem
+      // sendo visitados por `fillElements`.
+      return element;
   }
 }
 

@@ -66,7 +66,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("OrigemZUI", "OrigemZ", "0.1.1")]
+    [Info("OrigemZUI", "OrigemZ", "0.2.0")]
     [Description("Desenha no jogo as interfaces feitas no painel do RustAgent.")]
     public class OrigemZUI : RustPlugin
     {
@@ -453,6 +453,48 @@ namespace Oxide.Plugins
 
         /// <summary>requestId -> quem pediu. Some quando responde.</summary>
         private readonly Dictionary<string, ulong> _pending = new Dictionary<string, ulong>();
+
+        /// <summary>
+        /// As telas que estao chegando em PEDACOS, pelo requestId.
+        ///
+        /// ####  POR QUE UMA TELA CHEGA PARTIDA  ####
+        ///
+        /// Ela vem num comando de console pelo RCON, e o frame sao
+        /// 50.000 bytes. Uma grade rolavel passa disso: a aba KITS
+        /// custa ~2.650 bytes por card. O agente corta a LISTA DE
+        /// ELEMENTOS em comandos que cabem (ver
+        /// `encodeUiScreenParts` em core/src/types/ui-transport.ts) e
+        /// manda um atras do outro, com o mesmo requestId.
+        ///
+        /// O primeiro traz o pacote da tela com os primeiros
+        /// elementos; os seguintes trazem so mais elementos. Aqui
+        /// eles sao empilhados na ordem em que chegam, e a tela so e
+        /// desenhada quando a ULTIMA parte chega.
+        ///
+        /// ####  ELE NAO CRESCE SOZINHO  ####
+        ///
+        /// Um pedaco perdido deixaria a entrada pendurada para
+        /// sempre. Quem a tira e o `FailPending`, que ja existe e ja
+        /// roda no timeout do pedido.
+        /// </summary>
+        private readonly Dictionary<string, PartialScreen> _partials =
+            new Dictionary<string, PartialScreen>();
+
+        /// <summary>Uma tela em pedacos, esperando o ultimo.</summary>
+        private class PartialScreen
+        {
+            /// <summary>O pacote da tela, do PRIMEIRO pedaco.</summary>
+            public JObject Payload;
+
+            /// <summary>Os elementos ja recebidos, na ordem.</summary>
+            public JArray Cui;
+
+            /// <summary>Quantos pedacos a tela tem, no total.</summary>
+            public int Parts;
+
+            /// <summary>Quantos ja chegaram.</summary>
+            public int Seen;
+        }
 
         /// <summary>O mesmo, para compras. Separado de proposito.</summary>
         private readonly Dictionary<string, ulong> _pendingBuys = new Dictionary<string, ulong>();
@@ -1495,7 +1537,7 @@ namespace Oxide.Plugins
                     batch.Add(screen.Cui[i].DeepClone());
                 }
 
-                CuiHelper.AddUi(player, Personalize(batch, session.Token));
+                AddUiParts(player, Personalize(batch, session.Token));
                 return;
             }
 
@@ -1510,7 +1552,7 @@ namespace Oxide.Plugins
                 // Caminho antigo: a tela traz tudo, entao a raiz
                 // inteira e refeita.
                 CuiHelper.DestroyUi(player, RootName);
-                CuiHelper.AddUi(player, Personalize(screen.Cui, session.Token));
+                AddUiParts(player, Personalize(screen.Cui, session.Token));
                 session.ShellDrawn = false;
                 return;
             }
@@ -1556,7 +1598,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            CuiHelper.AddUi(player, Personalize(screen.Cui, session.Token));
+            AddUiParts(player, Personalize(screen.Cui, session.Token));
 
             // O "voce esta aqui" da navegacao, sem recriar o botao.
             //
@@ -2027,6 +2069,96 @@ namespace Oxide.Plugins
             return ResolveImages(json);
         }
 
+        /// <summary>
+        /// O teto de UM `AddUi`, em bytes.
+        ///
+        /// O mesmo numero do OrigemZBattlePass, e pelo mesmo motivo:
+        /// o `AddUi` vira um comando de console para o CLIENTE
+        /// (`player.SendConsoleCommand("AddUI", json)`), e o limite
+        /// disso nunca foi medido neste projeto. 40.000 e a regua
+        /// curta que dois plugins nossos ja usam no jogo sem derrubar
+        /// ninguem.
+        /// </summary>
+        private const int AddUiByteLimit = 40000;
+
+        /// <summary>
+        /// Desenha a lista, partindo em varios `AddUi` se precisar.
+        ///
+        /// ####  POR QUE UMA TELA PASSA DISSO  ####
+        ///
+        /// Desde que o agente aprendeu a mandar a tela em PEDACOS
+        /// (ver `Assemble`), ela deixou de ter o teto do frame do
+        /// RCON. Uma grade rolavel com trinta cards chega inteira - e
+        /// ai o unico teto que sobra e este, do lado do cliente.
+        ///
+        /// ####  O CLIENTE MONTA NA ORDEM, ENTAO PARTIR E SEGURO  ####
+        ///
+        /// Cada `AddUi` e processado na ordem em que chega, e a lista
+        /// ja vem com pai antes de filho. O corte nao pode e no MEIO
+        /// de um elemento, e e so isso que o laco abaixo respeita.
+        /// </summary>
+        private void AddUiParts(BasePlayer player, string json)
+        {
+            if (string.IsNullOrEmpty(json))
+            {
+                return;
+            }
+
+            if (json.Length <= AddUiByteLimit)
+            {
+                // O caso de quase toda tela: um envio, como sempre.
+                CuiHelper.AddUi(player, json);
+                return;
+            }
+
+            JArray elements;
+
+            try
+            {
+                elements = JArray.Parse(json);
+            }
+            catch (Exception)
+            {
+                // Nao era uma lista (nao deveria acontecer): manda
+                // como esta, que e o comportamento de antes.
+                CuiHelper.AddUi(player, json);
+                return;
+            }
+
+            StringBuilder batch = new StringBuilder();
+            int count = 0;
+            int sent = 0;
+
+            for (int i = 0; i < elements.Count; i++)
+            {
+                string piece = elements[i].ToString(Formatting.None);
+
+                if (count > 0 && batch.Length + piece.Length + 3 > AddUiByteLimit)
+                {
+                    CuiHelper.AddUi(player, "[" + batch + "]");
+                    sent++;
+                    batch.Length = 0;
+                    count = 0;
+                }
+
+                if (count > 0)
+                {
+                    batch.Append(',');
+                }
+
+                batch.Append(piece);
+                count++;
+            }
+
+            if (count > 0)
+            {
+                CuiHelper.AddUi(player, "[" + batch + "]");
+                sent++;
+            }
+
+            Trace("[tela] desenho de " + json.Length + " bytes em " + sent + " envios");
+        }
+
         // ====================================================
         //  PEDIR UMA TELA AO AGENTE
         // ====================================================
@@ -2284,6 +2416,10 @@ namespace Oxide.Plugins
             }
 
             _pending.Remove(requestId);
+            // Os pedacos que chegaram antes do timeout saem junto:
+            // sem isto, uma tela partida cujo ultimo pedaco se
+            // perdeu ficaria na memoria do servidor para sempre.
+            _partials.Remove(requestId);
             CancelPending(session);
 
             BasePlayer player = BasePlayer.FindByID(userId);
@@ -2312,6 +2448,107 @@ namespace Oxide.Plugins
 
             session.PendingRequestId = null;
             session.PendingScreenId = null;
+        }
+
+        /// <summary>
+        /// Junta os pedacos de uma tela partida.
+        ///
+        /// Devolve o pacote COMPLETO quando o ultimo pedaco chega, e
+        /// `null` enquanto faltar algum. Um pacote sem `parts` (ou
+        /// com `parts` 1) passa direto: e a tela que coube inteira
+        /// num comando, que continua sendo a maioria delas.
+        ///
+        /// ####  O QUE ELE NAO FAZ E DE PROPOSITO  ####
+        ///
+        /// Ele nao pede pedaco faltando, nem remonta fora de ordem.
+        /// O RCON entrega na ordem em que o agente mandou, e se um
+        /// pedaco se perder o pedido inteiro morre no timeout - que
+        /// e o mesmo desfecho de uma tela que nunca chegou. Inventar
+        /// reenvio aqui seria protocolo novo para um caso que o
+        /// timeout ja cobre.
+        /// </summary>
+        private JObject Assemble(string requestId, JObject payload)
+        {
+            JToken partsToken = payload["parts"];
+
+            if (partsToken == null || (int)partsToken <= 1)
+            {
+                // Tela inteira, ou uma resposta que nem desenho tem
+                // (erro, "nada mudou"). Os pedacos guardados de um
+                // pedido anterior com o mesmo id, se houver, saem.
+                _partials.Remove(requestId);
+                return payload;
+            }
+
+            int parts = (int)partsToken;
+            int part = payload["part"] == null ? 1 : (int)payload["part"];
+
+            PartialScreen partial;
+
+            if (part == 1)
+            {
+                JObject screen = payload["screen"] as JObject;
+                if (screen == null)
+                {
+                    return null;
+                }
+
+                partial = new PartialScreen
+                {
+                    Payload = payload,
+                    Cui = screen["cui"] as JArray ?? new JArray(),
+                    Parts = parts,
+                    Seen = 1
+                };
+
+                _partials[requestId] = partial;
+
+                Trace("[tela] pedaco 1 de " + parts + " (" + partial.Cui.Count + " elementos)");
+
+                return parts == 1 ? Finish(requestId, partial) : null;
+            }
+
+            if (!_partials.TryGetValue(requestId, out partial))
+            {
+                // O primeiro pedaco nao chegou (ou ja foi descartado
+                // pelo timeout). Sem ele nao ha pacote de tela, e os
+                // elementos sozinhos nao desenham nada.
+                return null;
+            }
+
+            JArray more = payload["cui"] as JArray;
+
+            if (more != null)
+            {
+                for (int i = 0; i < more.Count; i++)
+                {
+                    partial.Cui.Add(more[i]);
+                }
+            }
+
+            partial.Seen++;
+
+            Trace("[tela] pedaco " + part + " de " + partial.Parts +
+                  " (" + partial.Cui.Count + " elementos ate aqui)");
+
+            return partial.Seen < partial.Parts ? null : Finish(requestId, partial);
+        }
+
+        /// <summary>O pacote completo, com o desenho inteiro dentro.</summary>
+        private JObject Finish(string requestId, PartialScreen partial)
+        {
+            _partials.Remove(requestId);
+
+            JObject screen = partial.Payload["screen"] as JObject;
+
+            if (screen == null)
+            {
+                return null;
+            }
+
+            screen["cui"] = partial.Cui;
+
+            return partial.Payload;
         }
 
         // ====================================================
@@ -2352,6 +2589,18 @@ namespace Oxide.Plugins
             {
                 // Pedido que ja expirou, ou resposta repetida. Nao e
                 // erro: o timeout ja avisou o jogador.
+                return;
+            }
+
+            // ####  A TELA PODE VIR EM PEDACOS  ####
+            //
+            // Ver `_partials`. Enquanto faltar pedaco, este comando
+            // so guarda o que chegou e volta - inclusive sem tirar o
+            // pedido do `_pending`, que e o que faz o proximo pedaco
+            // ser aceito.
+            payload = Assemble(requestId, payload);
+            if (payload == null)
+            {
                 return;
             }
 

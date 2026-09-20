@@ -49,7 +49,7 @@ import {
   buildUiScreenCommand,
   encodeUiDocPayload,
   encodeUiScreenError,
-  encodeUiScreenPayload,
+  encodeUiScreenParts,
   toDocumentPayload,
   toScreenBundle,
   uiDocRequestSchema,
@@ -869,18 +869,48 @@ export class UiSync {
 
     this.#remember(key, fingerprint);
 
-    await context.rcon.send(
-      buildUiScreenCommand(
-        encodeUiScreenPayload({
-          requestId: request.requestId,
-          documentId: request.documentId,
-          screen,
-        }),
-      ),
-    );
+    // ####  A TELA PODE NÃO CABER NUM FRAME  ####
+    //
+    // O frame do WebRCON são 50.000 bytes, e uma grade rolável passa
+    // disso com facilidade: a aba KITS custa ~2.650 bytes por card.
+    // `encodeUiScreenParts` corta a LISTA DE ELEMENTOS em comandos
+    // que cabem, e o plugin os junta pelo `requestId` antes de
+    // desenhar — ver `CmdScreen` no OrigemZUI.cs.
+    //
+    // Telas que cabem continuam saindo num comando só, sem `part`
+    // nenhum: o caminho que sempre existiu não muda de forma por
+    // causa de um caso novo.
+    const { commands, dropped } = encodeUiScreenParts({
+      requestId: request.requestId,
+      documentId: request.documentId,
+      screen,
+    });
+
+    if (dropped > 0) {
+      // Não é para acontecer: oito pedaços são ~264 KB, e quem monta
+      // tela grande já tem régua própria (a da aba KITS conta bytes
+      // antes de desenhar). Se acontecer, o jogador vê a tela
+      // incompleta — e isto é o que diz POR QUÊ.
+      this.#deps.logger.warn(
+        { server: serverId, screen: request.screenId, dropped, parts: commands.length },
+        'a tela não coube nos pedaços do RCON; elementos ficaram de fora',
+      );
+    }
+
+    // Em ORDEM, e uma de cada vez: o plugin monta pelo `requestId` e
+    // só desenha quando a última chega, então uma corrida aqui
+    // adiantaria o desenho de uma tela pela metade.
+    for (const command of commands) {
+      await context.rcon.send(buildUiScreenCommand(command));
+    }
 
     this.#deps.logger.debug(
-      { server: serverId, requestId: request.requestId, screen: request.screenId },
+      {
+        server: serverId,
+        requestId: request.requestId,
+        screen: request.screenId,
+        ...(commands.length > 1 ? { parts: commands.length } : {}),
+      },
       'tela servida',
     );
   }
