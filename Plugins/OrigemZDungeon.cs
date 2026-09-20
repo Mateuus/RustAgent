@@ -522,6 +522,17 @@ namespace Oxide.Plugins
             public readonly HashSet<ulong> inside = new HashSet<ulong>();
             /// <summary>Quando cada um ouviu o último "não sai do lugar".</summary>
             public readonly Dictionary<ulong, float> lastRefusal = new Dictionary<ulong, float>();
+            /// <summary>
+            /// Em que frame o anticheat viu cada um "dentro do terreno".
+            ///
+            /// É a única marca que separa o golpe do anticheat de um
+            /// `kill` digitado pelo jogador: os dois são 1000 de dano
+            /// de `Suicide`, sem proteção, com o próprio jogador como
+            /// autor. Ver `IsTerrainKill`.
+            /// </summary>
+            public readonly Dictionary<ulong, int> terrainViolationFrame = new Dictionary<ulong, int>();
+            /// <summary>De quem o golpe barrado já foi registrado no console.</summary>
+            public readonly HashSet<ulong> terrainKillLogged = new HashSet<ulong>();
             /// <summary>A cor sorteada de cada sala. Ver `RoomColor`.</summary>
             public readonly Dictionary<int, string> roomColors = new Dictionary<int, string>();
 
@@ -5199,8 +5210,19 @@ namespace Oxide.Plugins
         /// </summary>
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
-            if (entity == null || entity._name != MarkIndestructible) return null;
-            if (entity is BasePlayer) return null;
+            if (entity == null) return null;
+
+            // ####  O JOGADOR ENTRA POR AQUI, E SÓ POR UM MOTIVO  ####
+            //
+            // Gente não carrega a marca no `_name`, então o teste
+            // abaixo a descartaria — e junto com ela o único golpe que
+            // precisamos interceptar: o anticheat matando quem está a
+            // -90. Ver `IsTerrainKill`, que é quem sabe reconhecê-lo.
+            var victim = entity as BasePlayer;
+
+            if (victim != null) return IsTerrainKill(victim, info) ? (object)true : null;
+
+            if (entity._name != MarkIndestructible) return null;
 
             // ####  O BARRIL E A EXCECAO, E ELA E OBRIGATORIA  ####
             //
@@ -5554,17 +5576,96 @@ namespace Oxide.Plugins
         /// <summary>
         /// Estar a -90 metros é, para o anticheat, estar dentro do
         /// terreno. Sem isto, todo mundo lá dentro leva kick.
+        ///
+        /// ####  CANCELAR A VIOLAÇÃO NÃO SALVA NINGUÉM  ####
+        ///
+        /// Este gancho mora dentro do `AntiHack.AddViolation`, e a
+        /// morte NÃO passa por lá. MEDIDO em 20/09/2026, no
+        /// `Assembly-CSharp.dll` do server01:
+        ///
+        ///     if (IsInsideTerrain(basePlayer)) {
+        ///         flag = true;            // marcado ANTES daqui
+        ///         AddViolation(...);      // este gancho
+        ///     }
+        ///     if (flag &amp;&amp; ConVar.AntiHack.terrain_kill)
+        ///         basePlayer.Hurt(1000f, DamageType.Suicide,
+        ///                         basePlayer, useProtection: false);
+        ///
+        /// O `flag` já estava de pé quando o retorno daqui chegou:
+        /// recusar a violação evita o KICK e não toca no golpe. Quem
+        /// descia morria na hora — e ninguém via, porque admin em
+        /// noclip ou vanish o anticheat nem olha (`ShouldIgnore`).
+        ///
+        /// Então este gancho tem DUAS tarefas: recusar a violação, e
+        /// anotar o frame para o `OnEntityTakeDamage` reconhecer o
+        /// golpe que vem logo em seguida.
         /// </summary>
         private object OnPlayerViolation(BasePlayer player, AntiHackType type)
         {
-            if (active == null) return null;
+            if (active == null || player == null) return null;
             if (type != AntiHackType.InsideTerrain) return null;
-            return active.inside.Contains(player.userID) ? (object)false : null;
+            if (!active.inside.Contains(player.userID)) return null;
+
+            active.terrainViolationFrame[player.userID] = Time.frameCount;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Este dano é o anticheat matando quem está lá embaixo?
+        ///
+        /// ####  O `kill` DO JOGADOR É O MESMO GOLPE  ####
+        ///
+        /// `ConVar.Global.kill` também chama `Hurt(1000f,
+        /// DamageType.Suicide, basePlayer, useProtection: false)` —
+        /// dano, tipo, autor e proteção idênticos. O que os separa é o
+        /// FRAME: o golpe do anticheat sai no mesmo frame da violação,
+        /// no mesmo bloco de código. Um `kill` digitado cai em
+        /// qualquer outro.
+        ///
+        /// Daí a anotação em `terrainViolationFrame`. Sem ela, salvar
+        /// quem está dentro custaria tirar o `kill` de todo mundo lá
+        /// embaixo — e alguém preso numa sala não teria como sair.
+        /// </summary>
+        private bool IsTerrainKill(BasePlayer player, HitInfo info)
+        {
+            if (info == null || active == null) return false;
+            if (!active.inside.Contains(player.userID)) return false;
+
+            int frame;
+
+            if (!active.terrainViolationFrame.TryGetValue(player.userID, out frame)) return false;
+            if (frame != Time.frameCount) return false;
+
+            if (info.UseProtection) return false;
+            if (info.Initiator != player) return false;
+
+            // `Rust.` na frente porque o arquivo não importa o
+            // namespace: um `using Rust` aqui traria junto um monte de
+            // nome curto que este plugin não quer.
+            if (info.damageTypes.Get(Rust.DamageType.Suicide) < 1000f) return false;
+
+            // ####  UMA LINHA POR PESSOA, E NÃO UMA POR SEGUNDO  ####
+            //
+            // O anticheat bate a cada volta do `terrain_timeslice`:
+            // registrar todas encheria o console de quem está só
+            // jogando. A primeira de cada um basta para o dia em que
+            // isto parar de funcionar — e é a prova de que a barreira
+            // está de pé.
+            if (active.terrainKillLogged.Add(player.userID))
+            {
+                Puts("O anticheat tentou matar " + player.displayName
+                    + " dentro da masmorra (a " + player.transform.position.y.ToString("0")
+                    + " m); o golpe foi barrado.");
+            }
+
+            return true;
         }
 
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
             active?.inside.Remove(player.userID);
+            active?.terrainViolationFrame.Remove(player.userID);
         }
 
         /// <summary>
