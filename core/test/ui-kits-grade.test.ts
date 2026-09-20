@@ -212,6 +212,42 @@ describe('a lista de kits', () => {
     }
   });
 
+  it('mostra primeiro o que dá para pegar agora', () => {
+    // ####  A GRADE VINHA NA ORDEM DO BANCO  ####
+    //
+    // Que é a de cadastro, e não diz nada a quem olha. Com a grade
+    // rolando, o kit disponível podia estar abaixo da dobra, atrás
+    // de três cards bloqueados que o jogador já viu ontem.
+    const offers = [
+      offer({ id: 1, slug: 'bloqueado', name: 'Bloqueado', available: false }),
+      offer({ id: 2, slug: 'esperando', name: 'Esperando', available: false,
+        nextAt: '2099-01-01T00:00:00.000Z' }),
+      offer({ id: 3, slug: 'livre', name: 'Livre', available: true }),
+    ];
+
+    // `k0` é o primeiro card da grade, `k2` o último.
+    const nomeDo = (id: string): string => {
+      const found = walk(grid(offers)).find((element) => element.id === id);
+
+      return found !== undefined && found.type === 'label' ? found.text : '';
+    };
+
+    expect(nomeDo('k0t')).toBe('LIVRE');
+    expect(nomeDo('k1t')).toBe('ESPERANDO');
+    expect(nomeDo('k2t')).toBe('BLOQUEADO');
+  });
+
+  it('mas não esconde o que está bloqueado', () => {
+    // Ordenar não é filtrar: um kit que some da lista faz o jogador
+    // achar que ele saiu do servidor.
+    const offers = [
+      offer({ id: 1, slug: 'a', available: true }),
+      offer({ id: 2, slug: 'b', available: false, usesLeft: 0 }),
+    ];
+
+    expect(idsOf(grid(offers)).filter((id) => /^k\dc$/.test(id))).toHaveLength(2);
+  });
+
   it('a categoria aberta não é um botão', () => {
     // Clicar no que já está aberto navegaria para onde já se está.
     const elements = grid(categorized(3), 'categoria-1');

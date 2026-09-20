@@ -566,10 +566,11 @@ function buildGrid(
   const active =
     categories.find((entry) => entry.slug === target.category) ?? categories[0] ?? null;
 
-  const shown =
+  const shown = ordered(
     grouped && active !== null
       ? offers.filter((kit) => categorySlug(kit.category) === active.slug)
-      : offers;
+      : offers,
+  );
 
   const elements: UiElement[] = [
     ...header(shown.length, shown.filter((kit) => kit.available).length),
@@ -628,6 +629,53 @@ function buildGrid(
   }
 
   return { id, name: 'KITS', kind: 'page', elements };
+}
+
+/**
+ * A ordem da vitrine: primeiro o que dá para pegar AGORA.
+ *
+ * ####  A GRADE VINHA NA ORDEM DO BANCO  ####
+ *
+ * Que é a de cadastro, e não diz nada a quem está olhando. Numa
+ * categoria com doze kits, isso põe o que o jogador pode resgatar
+ * espalhado no meio do que ele não pode — e agora que a grade ROLA,
+ * o que ele pode pegar pode estar abaixo da dobra, atrás de três
+ * cards bloqueados que ele já viu ontem.
+ *
+ * A pergunta que a tela responde é "o que eu levo agora?". A ordem
+ * é essa pergunta:
+ *
+ *   1. disponível      — é o que ele veio buscar
+ *   2. esperando       — volta sozinho, e o card diz quando
+ *   3. bloqueado       — exige VIP, acabou, está desligado
+ *
+ * Dentro de cada grupo, o que estava valendo continua valendo: a
+ * ordem do banco. Reordenar por nome faria o admin perder o
+ * controle da vitrine dele.
+ *
+ * ####  E ELA NÃO ESCONDE NADA  ####
+ *
+ * Nenhum kit sai da lista: o bloqueado continua lá, com o motivo.
+ * É o que separa "ordenar" de "filtrar" — e filtrar faria o jogador
+ * achar que o kit sumiu do servidor.
+ */
+function ordered(offers: readonly KitOfferView[]): readonly KitOfferView[] {
+  const rank = (kit: KitOfferView): number => {
+    if (kit.available) {
+      return 0;
+    }
+
+    // Esperar é diferente de não poder: um volta sozinho, o outro
+    // depende de o jogador fazer alguma coisa (comprar VIP, esperar
+    // o wipe). É a mesma distinção que a barra de estado do card
+    // faz em cor — ver `accentColor`.
+    return kit.nextAt === null ? 2 : 1;
+  };
+
+  // `toSorted` não está no Node 20.11, que é o piso do projeto
+  // (package.json), e `sort` mexe no array de quem chamou. A cópia
+  // é o que mantém a lista do serviço intacta.
+  return [...offers].sort((left, right) => rank(left) - rank(right));
 }
 
 // ============================================================

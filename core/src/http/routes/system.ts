@@ -37,6 +37,8 @@ import type { ServerSupervisor } from '../../servers/supervisor.js';
 import { diskUsage } from '../../util/disk.js';
 import { load1Of } from '../../util/machine.js';
 
+import { readCommit } from '../../version.js';
+
 export interface SystemRoutesDeps {
   readonly paths: AgentPaths;
   readonly supervisor: ServerSupervisor;
@@ -84,6 +86,17 @@ export function registerSystemRoutes(app: FastifyInstance, deps: SystemRoutesDep
 
       agent: {
         version: deps.version,
+        // ####  O QUE RESPONDE "JÁ ESTÁ ATUALIZADO?"  ####
+        //
+        // A `version` é um literal que não muda entre commits: duas
+        // máquinas com meses de diferença respondem `1.0.0` as
+        // duas. O commit é o que permite comparar esta instalação
+        // com o `git log` do repositório, sem abrir o jogo para
+        // olhar se a tela mudou.
+        //
+        // `null` = o agente não está rodando de um clone. Ver
+        // `readCommit` em version.ts.
+        commit: readCommit(deps.paths.root),
         startedAt: new Date(deps.startedAt).toISOString(),
         uptimeSeconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         pid: process.pid,
