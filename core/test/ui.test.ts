@@ -1036,7 +1036,12 @@ describe('a página de kits', () => {
     const screen = grid([offer()]);
     const actions = collectScreenActions(screen);
 
-    expect(actions['pedir-kit-inicial']).toEqual({
+    // `p0` é o botão do PRIMEIRO card da página. O id da ação deixou
+    // de carregar o slug: ele viajava no `name` de cada elemento e
+    // no comando do botão, e o que decide quantos kits cabem numa
+    // rolagem é o tamanho do frame. O slug continua inteiro onde
+    // importa — no endereço da tela que o clique abre.
+    expect(actions['p0']).toEqual({
       kind: 'modal.open',
       screenId: 'ozkit:kit-inicial:confirmar',
     });
@@ -1143,22 +1148,48 @@ describe('a página de kits', () => {
     expect(JSON.stringify(screenContentToCui(buildMainMenu(), screen))).toContain('JÁ PEGOU');
   });
 
-  it('pagina quando a grade enche, em vez de sumir com o resto', () => {
-    const many = Array.from({ length: 9 }, (_unused, index) =>
+  it('pagina quando o FRAME enche, em vez de sumir com o resto', () => {
+    // ####  A GRADE ROLA; O QUE NÃO ROLA É O TRANSPORTE  ####
+    //
+    // Antes eram oito por página, e o nono ia para a segunda. Agora
+    // a grade é uma área rolável e o corte é por BYTES: a tela
+    // inteira viaja num comando de RCON, e o teto são 50.000 em
+    // base64.
+    //
+    // Sessenta kits passam desse teto com folga — e é o que faz o
+    // "‹ 1 / 2 ›" reaparecer. Com nove ele não aparece mais: os nove
+    // estão na mesma página, e quem quiser ver o último rola.
+    const many = Array.from({ length: 60 }, (_unused, index) =>
       offer({ slug: `kit-${String(index)}`, name: `Kit ${String(index)}` }),
     );
 
     const json = JSON.stringify(screenContentToCui(buildMainMenu(), grid(many)));
 
-    expect(json).toContain('1 / 2');
+    expect(json).toContain('1 / ');
 
-    // E o nono está na segunda página, e não perdido.
-    const segunda = buildKitsScreen({
-      offers: many,
-      target: { kind: 'grid', category: null, page: 1 },
-    });
+    // E NENHUM kit se perde no caminho: virando as páginas, os
+    // sessenta aparecem. Isto é a promessa que a paginação faz, e
+    // ela não depende de quantos cards cabem numa delas.
+    const vistos = new Set<string>();
 
-    expect(JSON.stringify(screenContentToCui(buildMainMenu(), segunda))).toContain('Kit 8');
+    for (let page = 0; page < 20; page += 1) {
+      const pagina = buildKitsScreen({ offers: many, target: { kind: 'grid', category: null, page } });
+      const json = JSON.stringify(screenContentToCui(buildMainMenu(), pagina));
+
+      for (const kit of many) {
+        // O card escreve o nome em MAIÚSCULAS, como as abas do menu.
+        if (json.includes(`"${kit.name.toUpperCase()}"`)) {
+          vistos.add(kit.name);
+        }
+      }
+    }
+
+    expect(vistos.size).toBe(many.length);
+
+    // Com nove, tudo numa página só.
+    expect(
+      JSON.stringify(screenContentToCui(buildMainMenu(), grid(many.slice(0, 9)))),
+    ).not.toContain('1 / ');
   });
 
   // ####  O TETO QUE DECIDIU O TAMANHO DA GRADE  ####
@@ -1197,11 +1228,14 @@ describe('a página de kits', () => {
     expect(bytes).toBeLessThan(UI_DOC_MAX_BYTES * 0.7);
   });
 
-  it('o "i" abre o modal, e as abas são ENDEREÇOS', () => {
+  it('o CARD abre o modal, e as abas são ENDEREÇOS', () => {
     const screen = grid([offer()]);
     const actions = collectScreenActions(screen);
 
-    expect(actions['akkit-inicialinfo']).toEqual({
+    // Era um "VER" de 50 px no rodapé, ao lado da ação. Virou uma
+    // área transparente sobre o card inteiro (`o0` = o card da
+    // posição 0), e o rodapé ficou só para o resgate.
+    expect(actions['o0']).toEqual({
       kind: 'modal.open',
       screenId: 'ozkit:kit-inicial',
     });

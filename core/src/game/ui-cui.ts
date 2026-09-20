@@ -201,6 +201,97 @@ function skinIdOf(raw: string): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+/**
+ * A largura da barra de rolagem, em pixels.
+ *
+ * Ela fica POR CIMA da borda direita da área — o `ScrollRect` não
+ * encolhe o conteúdo para abrir espaço. Quem desenha dentro deixa
+ * esta faixa livre; é o que `scrollArea` (game/ui-widgets.ts) faz
+ * ao repartir a largura.
+ */
+export const SCROLL_BAR_WIDTH = 5;
+
+/**
+ * O componente da área rolável, com a receita MEDIDA no jogo.
+ *
+ * ####  CADA CAMPO AQUI VEIO DO DECOMPILADO, NÃO DE PALPITE  ####
+ *
+ * Os nomes saíram de `ilspycmd -t
+ * Oxide.Game.Rust.Cui.CuiScrollViewComponent` sobre a Oxide.Rust.dll
+ * do server01, e os VALORES são os mesmos que o OrigemZWorkshop e o
+ * OrigemZBattlePass mandam ao cliente — dois plugins que o dono já
+ * usou no jogo sem derrubar ninguém.
+ *
+ * Foi assim que o projeto anterior caiu: ele montou o JSON a partir
+ * da tabela de strings da DLL, e o `AddUI` derrubou o jogador com
+ * `Object reference not set to an instance of an object`.
+ *
+ * ####  O CONTEÚDO CRESCE PARA BAIXO  ####
+ *
+ * `anchormax` fica em 1 (o topo do conteúdo colado no topo da
+ * caixa) e `anchormin` desce até `1 - escala`. Em fração, e não em
+ * pixels, porque é o que mantém a conta relativa ao pai — ver
+ * `contentScale` no modelo.
+ */
+function scrollView(contentScale: number): CuiComponent {
+  const scale = Math.max(1, contentScale);
+
+  return {
+    type: 'UnityEngine.UI.ScrollView',
+    // Só vertical. Uma grade que rola para os LADOS esconde coluna,
+    // e esconder coluna é o defeito que a rolagem veio resolver.
+    vertical: true,
+    horizontal: false,
+    // `Clamped`: o conteúdo para nas pontas em vez de esticar e
+    // voltar. Elástico numa grade de cards parece defeito de
+    // desenho.
+    movementType: 'Clamped',
+    elasticity: 0.25,
+    inertia: true,
+    decelerationRate: 0.3,
+    scrollSensitivity: 24,
+    contentTransform: {
+      anchormin: `0 ${Number.parseFloat((1 - scale).toFixed(4)).toString()}`,
+      anchormax: '1 1',
+      offsetmin: '0 0',
+      offsetmax: '0 0',
+    },
+    verticalScrollbar: {
+      size: SCROLL_BAR_WIDTH,
+      // ####  ESCONDIDA QUANDO NÃO HÁ O QUE ROLAR  ####
+      //
+      // Com o conteúdo cabendo na caixa, a barra desenha um punho
+      // da altura inteira — uma tira de ponta a ponta da tela que
+      // não se move e não quer dizer nada. Foi o que apareceu na
+      // primeira captura do dono, em vermelho vivo, ao lado de UM
+      // card.
+      //
+      // Quando há o que rolar ela fica VISÍVEL o tempo todo: é a
+      // única coisa na tela que diz "há mais aqui embaixo" antes de
+      // o jogador tocar na roda do mouse.
+      autoHide: scale <= 1,
+      handleColor: cuiColor(C_SCROLL_HANDLE),
+      highlightColor: cuiColor(C_SCROLL_HIGHLIGHT),
+      pressedColor: cuiColor(C_SCROLL_HIGHLIGHT),
+      trackColor: cuiColor(C_SCROLL_TRACK),
+    },
+  };
+}
+
+// As cores da barra. Elas moram aqui, e não em ui-widgets.ts,
+// porque quem as escreve é o conversor: a barra não é um elemento
+// que alguém desenhe.
+//
+// ####  O PUNHO NÃO É VERMELHO  ####
+//
+// Era `--rust-red`, a cor da marca, e no jogo virou um risco
+// berrante colado na borda da tela, mais visível que os cards. A
+// barra é mobília: cinza de `--border` parado, e a cor da marca só
+// quando o cursor a pega — que é quando ela deixa de ser mobília.
+const C_SCROLL_HANDLE = '#3A3A3AFF';
+const C_SCROLL_HIGHLIGHT = '#C43F2CFF';
+const C_SCROLL_TRACK = '#15151580';
+
 function emitElement(
   element: UiElement,
   parentName: string,
@@ -209,6 +300,8 @@ function emitElement(
 ): void {
   const name = `${ROOT_NAME}.${element.id}`;
   const fade = fadeIn > 0 ? { fadeIn } : {};
+  /** Onde o elemento deste `element` vai cair. Ver a dica, no fim. */
+  const at = output.length;
 
   switch (element.type) {
     case 'panel': {
@@ -409,6 +502,34 @@ function emitElement(
       });
       break;
     }
+
+    case 'scroll': {
+      output.push({
+        name,
+        parent: parentName,
+        components: [scrollView(element.contentScale), rectTransform(element)],
+      });
+      break;
+    }
+  }
+
+  // ####  A DICA VAI NO ELEMENTO QUE ACABOU DE SAIR  ####
+  //
+  // Depois do `switch` porque ela serve a qualquer tipo, e no
+  // PRIMEIRO elemento que o tipo emitiu — que é o próprio, já que
+  // todo `case` empurra o seu antes de qualquer acessório.
+  //
+  // Um botão são dois elementos, e a dica fica no de baixo: o
+  // `.text` é um rótulo esticado por dentro dele, e quem recebe o
+  // cursor é o botão.
+  const host = output[at];
+  const tip = element.tooltip;
+
+  if (host !== undefined && tip !== undefined && tip !== null && tip !== '') {
+    output[at] = {
+      ...host,
+      components: [...host.components, { type: 'Tooltip', text: cuiText(tip) }],
+    };
   }
 
   // Filhos DEPOIS do pai: o cliente monta na ordem da lista, e um

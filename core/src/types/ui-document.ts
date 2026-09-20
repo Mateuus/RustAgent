@@ -20,30 +20,31 @@
 //  malformado gravado no banco vira interface quebrada no jogo de
 //  todo mundo que abrir o menu — e o defeito aparece longe daqui.
 //
-//  ####  NÃO EXISTE ÁREA ROLÁVEL NESTE MODELO  ####
+//  ####  A ÁREA ROLÁVEL EXISTE DESDE 20/09/2026  ####
 //
-//  ATUALIZADO EM 17/09/2026: o `CuiScrollViewComponent` do Oxide
-//  2.0.7716 FUNCIONA no cliente. O menu de skins do
-//  OrigemZWorkshop.cs rola uma grade de 90 células com barra
-//  vertical, e o dono testou no jogo sem cair. O JSON que funciona
-//  é o que o Oxide serializa, com `contentTransform` de quatro
-//  campos e `verticalScrollbar` com cores. Este modelo ainda não
-//  oferece o tipo; oferecer é trabalho do editor, e a receita
-//  está no BuildGrid daquele plugin. O registro abaixo é do
-//  projeto anterior.
+//  O `CuiScrollViewComponent` do Oxide 2.0.7716 funciona no
+//  cliente: o menu de skins do OrigemZWorkshop.cs rola uma grade de
+//  90 células com barra vertical, o passe rola a trilha, e o dono
+//  testou os dois no jogo sem cair. O tipo `scroll` daqui emite a
+//  MESMA receita — ver `emitElement` em game/ui-cui.ts.
 //
-//  O projeto anterior tentou emitir `UnityEngine.UI.ScrollView`
-//  com `contentTransform` e barra vertical. O resultado foi
+//  O que o projeto anterior derrubou era outra coisa: ele inventava
+//  os campos a partir da tabela de strings da Oxide.Rust.dll, e o
+//  `AddUI` estourava com
 //
 //      RPC Error in AddUI: Object reference not set to an
 //      instance of an object
 //
-//  e o jogador DESCONECTADO. Os nomes dos campos existem (vieram
-//  da tabela de strings do Oxide.Rust.dll); o que não se sabe é o
-//  que o CLIENTE exige junto. Até isso ser lido no código do
-//  cliente — e não deduzido —, o modelo não oferece o tipo. Uma
-//  lista longa se resolve com paginação por telas, que ninguém
-//  derruba.
+//  desconectando o jogador. A diferença é que agora os nomes vieram
+//  do DECOMPILADO da classe (`ilspycmd -t
+//  Oxide.Game.Rust.Cui.CuiScrollViewComponent`), com os mesmos
+//  valores que dois plugins nossos já mandam ao cliente todo dia.
+//
+//  O EDITOR NÃO CRIA UM: ele não entra em `UI_ELEMENT_TYPES` no
+//  painel, pelo mesmo motivo do campo de texto — quem desenha uma
+//  área rolável é o agente, que sabe a altura do conteúdo. O modelo
+//  o ACEITA para que uma tela montada possa aparecer no editor sem
+//  quebrá-lo.
 // ============================================================
 
 import { z } from 'zod';
@@ -237,6 +238,25 @@ interface UiElementBase {
   readonly name: string;
   readonly rect: z.infer<typeof rectSchema>;
   readonly children: readonly UiElement[];
+  /**
+   * A dica que o cliente mostra ao passar o mouse.
+   *
+   * ####  ELA É UM COMPONENTE, E NÃO UM ELEMENTO  ####
+   *
+   * `CuiTooltipComponent` entra na lista de componentes do PRÓPRIO
+   * elemento — custa uns 40 bytes na carga, contra os ~390 de um
+   * elemento novo. É por isso que ela é o lugar certo para o que
+   * não cabe escrito num card: a régua de bytes de uma tela cheia
+   * não sente a diferença.
+   *
+   * OPCIONAL de propósito: a maioria dos elementos não tem dica, e
+   * um campo obrigatório obrigaria toda tela já escrita a carregar
+   * `tooltip: null` em cada retângulo.
+   *
+   * Uma LINHA. A quebra dentro do tooltip nunca foi medida neste
+   * projeto — ver `PendingTip` no OrigemZBattlePass.
+   */
+  readonly tooltip?: string | null;
 }
 
 export type UiElement = UiElementBase &
@@ -325,12 +345,46 @@ export type UiElement = UiElementBase &
         /** O que fazer com o que ele escreveu. */
         readonly action: UiSubmitAction;
       }
+    // ####  A ÁREA QUE ROLA  ####
+    //
+    // Ela é um LUGAR, e não um desenho: não pinta nada, não tem
+    // cor. Quem quer fundo põe um painel atrás — é o mesmo arranjo
+    // do campo de texto, e pelo mesmo motivo (o componente do CUI
+    // não desenha nem um pixel sozinho).
+    //
+    // Os FILHOS dela são o conteúdo, e eles se posicionam dentro de
+    // um retângulo mais ALTO que o visível — por isso a altura do
+    // conteúdo precisa ser dita aqui.
+    | {
+        readonly type: 'scroll';
+        /**
+         * A altura do conteúdo, em MÚLTIPLOS da altura visível.
+         *
+         * ####  POR QUE NÃO EM PIXELS  ####
+         *
+         * O conversor (game/ui-cui.ts) emite âncoras, e âncora é
+         * fração do pai: ele nunca soube quantos pixels um elemento
+         * tem, e descobrir exigiria resolver a árvore inteira até a
+         * raiz para desenhar UM componente.
+         *
+         * Quem constrói a tela sabe as duas alturas — a da caixa e a
+         * do que vai dentro — e a divisão é dele. `scrollArea` em
+         * game/ui-widgets.ts faz essa conta, e é por lá que as telas
+         * pedem uma área rolável.
+         *
+         * 1 = o conteúdo cabe, e nada rola. Menos que 1 não existe:
+         * um conteúdo mais baixo que a caixa é a caixa.
+         */
+        readonly contentScale: number;
+      }
   );
 
 const baseFields = {
   id: idSchema,
   name: z.string().max(64),
   rect: rectSchema,
+  // Uma linha, e opcional. Ver `tooltip` em `UiElementBase`.
+  tooltip: z.string().max(256).nullable().optional(),
 };
 
 const elementSchema: z.ZodType<UiElement> = z.lazy(() =>
@@ -426,6 +480,15 @@ const elementSchema: z.ZodType<UiElement> = z.lazy(() =>
       // fora o que o jogador escreveu — e o modelo que aceitasse
       // isso deixaria alguém desenhá-lo sem perceber.
       action: submitActionSchema,
+      children: z.array(elementSchema),
+    }),
+    z.object({
+      ...baseFields,
+      type: z.literal('scroll'),
+      // O teto de 40 é o que separa "uma lista longa" de um
+      // documento que pede ao cliente um retângulo de vinte telas de
+      // altura por engano de conta.
+      contentScale: z.number().min(1).max(40),
       children: z.array(elementSchema),
     }),
   ]),

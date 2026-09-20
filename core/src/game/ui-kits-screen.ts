@@ -64,12 +64,16 @@ import {
   paginateRows,
   panel,
   rowsPager,
+  SCROLL_GUTTER,
+  scrollArea,
   storedImage,
   tabsRow,
-  titleBar,
+  tip,
+  topBar,
   type ContentRow,
   type Rect,
 } from './ui-widgets.js';
+import { UI_DOC_MAX_BYTES } from '../types/ui-transport.js';
 
 /**
  * O id da tela de kits no documento.
@@ -83,35 +87,64 @@ export const KITS_SCREEN_ID = 'tela-kits';
 /** O modal de detalhes. `ozkit:<slug>` ou `ozkit:<slug>:itens`. */
 export const KIT_INFO_PREFIX = 'ozkit';
 
-/** A grade, igual à da loja. Ver ui-store-screens.ts. */
+/**
+ * A chave da pedra que marca o kit de VIP, na biblioteca de imagens.
+ *
+ * O arquivo é `Assets\ui\icon-gem.png` — branco sobre transparente,
+ * como todos os de `Assets\menu-icons\`, porque o CUI TINGE a
+ * imagem pela cor: o mesmo PNG serve ao âmbar daqui e a qualquer
+ * outra cor que alguém precise depois.
+ *
+ * Chave que a biblioteca não tem vira um quadrado vazio, e não um
+ * erro — ver `ResolveImages` no OrigemZUI.cs. É por isso que ela
+ * pode ser usada sem o agente conferir antes se o PNG já subiu.
+ */
+const VIP_ICON_KEY = 'icon-gem';
+
+/**
+ * A grade, igual à da loja. Ver ui-store-screens.ts.
+ *
+ * ####  A ALTURA DO CARD CAIU DE 240 PARA 196  ####
+ *
+ * Com paginação, a grade tinha DUAS fileiras e ponto: o que não
+ * coubesse ia para a página seguinte, então o card podia usar toda
+ * a altura disponível. Agora ela ROLA, e a altura do card decide
+ * outra coisa — quanto da terceira fileira aparece embaixo.
+ *
+ * 196 com 12 de respiro: duas fileiras usam 404 dos ~460 visíveis,
+ * e sobram ~56 para uma FATIA da terceira. Essa fatia é o que diz
+ * "tem mais aqui embaixo" antes de o jogador tocar na roda do
+ * mouse — a barra de rolagem sozinha é fina demais para ser a
+ * única a dizer isso.
+ */
 const GRID = {
   columns: 4,
-  gap: 10,
+  gap: 12,
   /**
-   * 240, e não 160.
+   * 230, e o número saiu de duas contas que se cruzam.
    *
-   * ####  A ALTURA ESTAVA SOBRANDO, E O CARD ERA APERTADO  ####
+   * ####  A PRIMEIRA: O CARD ESTAVA DEITADO E VAZIO  ####
    *
-   * A área da grade tem ~516 px. Duas fileiras de 160 usavam 330 e
-   * deixavam 186 de vazio embaixo — enquanto o ícone do kit cabia em
-   * 58 px e o nome disputava espaço com a regra e o botão.
+   * A área da grade tem ~1.048 px, então em quatro colunas cada
+   * card fica com 250 de largura. Com 196 de altura ele é um
+   * retângulo deitado, e a arte de 100 px boiava no meio com 75 de
+   * vazio de cada lado — foi o que o dono viu na captura e chamou
+   * de "não ficou legal". Em 230, com a arte em 130, o card fica
+   * quase quadrado e a figura do kit ocupa mais da metade dele.
    *
-   * Duas de 240 usam 490. O ícone dobrou, o nome ganhou faixa
-   * própria, e o rodapé comporta duas ações lado a lado.
+   * ####  A SEGUNDA: PRECISA SOBRAR O QUE ROLAR  ####
    *
-   * ####  E POR QUE NÃO TRÊS FILEIRAS  ####
+   * Cinco colunas resolveriam a primeira conta melhor ainda (cards
+   * de 200 x 200). Mas o frame do RCON comporta uns doze cards, e
+   * doze em cinco colunas são DUAS FILEIRAS E MEIA — ou seja, tudo
+   * o que cabe no frame cabe também na tela, e a rolagem nunca
+   * apareceria.
    *
-   * Cabiam: 3 x 162 = 506. Mas cada card custa ~3.100 bytes no CUI
-   * (oito elementos, e o CUI repete `name`, `parent` e o
-   * `RectTransform` inteiro em cada um). MEDIDO: doze cards mais a
-   * coluna dão 41.756 bytes, 84% do frame de 50.000 do RCON.
-   *
-   * Oito dão ~28.000 — 56%. A margem importa porque o nome do kit é
-   * do admin, e um mural de nomes longos empurra o número para cima
-   * sem ninguém mexer em código.
+   * Em quatro colunas, os mesmos doze cards são TRÊS fileiras de
+   * 230: 714 px de conteúdo para 460 de área visível. A terceira
+   * fileira fica meio à mostra embaixo, que é o convite a rolar.
    */
-  cardHeight: 240,
-  rows: 2,
+  cardHeight: 230,
 } as const;
 
 /**
@@ -140,26 +173,55 @@ const SIDEBAR = {
   gap: 16,
   /** A altura de um item. Alvo de clique confortável, e não mais. */
   item: 32,
+  /**
+   * A faixa da barra de rolagem, dentro da coluna.
+   *
+   * Metade da que a grade reserva: a coluna tem 190 px de largura, e
+   * 16 deles seriam um décimo do nome da categoria.
+   */
+  gutter: 8,
 } as const;
 
 /**
- * A altura útil da coluna, estimada.
+ * A altura útil da área de conteúdo, em pixels.
  *
- * ####  ESTIMADA, E O ERRO É PARA O LADO SEGURO  ####
+ * ####  ELA ERA 516, E 516 ESTAVA ERRADO  ####
  *
- * A altura real é a do slot de conteúdo do shell, que esta função
- * não conhece — ela desenha uma tela, e quem a encaixa é o
- * documento. 516 px é o que sobra numa tela de 720 com o cabeçalho
- * de 76 e as margens de 30 do preset.
+ * O número vinha de uma estimativa escrita à mão ("720 menos o
+ * cabeçalho de 76 e as margens de 30"). MEDIDO com
+ * `screenViewport` sobre o preset do menu, o slot de conteúdo tem
+ * 493,6 px — e o erro era para o lado PERIGOSO: a coluna
+ * desenhava até a décima quinta categoria, e a última caía fora da
+ * tela sem nada dizendo que existia.
  *
- * Errar para MENOS deixa uma categoria de fora com um "e mais 1..."
- * visível. Errar para mais a desenharia fora da tela, em silêncio —
- * que é exatamente o defeito da fileira de abas que esta coluna
- * substituiu.
+ * Continua sendo uma constante, e não um parâmetro, porque quem
+ * monta esta tela não recebe o documento. O jeito de mantê-la
+ * honesta é o teste: `ui-kits-grade.test.ts` a confere contra
+ * `screenViewport(buildMainMenu(), …)` e quebra no dia em que
+ * alguém mexer nas margens do preset.
  */
-const SIDEBAR_HEIGHT = 516;
+const VIEWPORT_HEIGHT = 493.6;
 
-const PER_PAGE = GRID.columns * GRID.rows;
+/**
+ * A largura útil da área de conteúdo, em pixels.
+ *
+ * Mesma medição e mesmo motivo da altura: a grade precisa dela para
+ * repartir as colunas em PIXELS. Repartir em fração do pai parecia
+ * mais simples — até a barra de rolagem aparecer.
+ *
+ * ####  A BARRA É DESENHADA POR DENTRO  ####
+ *
+ * O `ScrollRect` não encolhe o conteúdo para abrir espaço: a barra
+ * ocupa os últimos pixels da própria área, POR CIMA do que estiver
+ * lá. Com os cards em fração, o último de cada fileira ia até a
+ * borda — e a barra caía em cima dele, que foi o que o dono
+ * fotografou.
+ *
+ * Encolher a ÁREA não resolvia: a barra acompanha a área, e o card
+ * também. O que resolve é o conteúdo ser mais estreito que a área,
+ * e para isso a conta precisa ser em pixels.
+ */
+const VIEWPORT_WIDTH = 1064.4;
 
 /**
  * O que fica onde DENTRO do card.
@@ -209,17 +271,43 @@ const CARD = {
    */
   nameTop: 3,
   nameBottom: 31,
-  iconTop: 50,
-  iconBottom: 166,
-  ruleTop: 174,
-  ruleBottom: 192,
-  /** A linha em âmbar, quando o kit exige VIP. */
-  tierTop: 194,
-  tierBottom: 210,
-  buttonBottom: 10,
-  buttonTop: 40,
-  /** A largura do botão que abre os detalhes, no rodapé. */
-  peek: 50,
+  /**
+   * A arte, 130 x 130 no meio do card.
+   *
+   * Ela era 100 e sobrava vazio dos dois lados. É a figura do kit —
+   * o que identifica um kit à distância —, e não um selo de canto.
+   */
+  iconTop: 38,
+  iconBottom: 168,
+  /**
+   * A linha de meta: quantos itens, e de quanto em quanto tempo.
+   *
+   * ####  ELA ENGOLIU A LINHA DO VIP, QUE FICAVA ATRÁS DO BOTÃO  ####
+   *
+   * Eram duas: a regra (174–192) e o nível exigido (194–210). Num
+   * card de 240 o botão ia de 200 a 230 contados do topo — ou seja,
+   * ele passava POR CIMA dos últimos dez pixels do "EXCLUSIVO VIP
+   * OURO". No jogo o texto aparecia cortado ao meio, e foi assim
+   * que o dono o encontrou.
+   *
+   * Agora o nível não é mais uma linha: é o ÍCONE à direita da
+   * faixa do nome, com a frase inteira no tooltip. Uma informação
+   * que precisa de cor para ser vista não precisa de uma linha
+   * inteira para ser lida.
+   */
+  metaTop: 175,
+  metaBottom: 191,
+  /**
+   * O rodapé, contado do FUNDO do card.
+   *
+   * 8 e 38 deixam o botão entre 158 e 188 do topo, dois pixels
+   * abaixo de onde a meta termina. A conta está escrita aqui de
+   * propósito: foi ela que faltou da última vez.
+   */
+  buttonBottom: 8,
+  buttonTop: 38,
+  /** O quadrado do ícone de VIP, na ponta direita da faixa do nome. */
+  tierIcon: 16,
 } as const;
 
 /**
@@ -453,20 +541,20 @@ function buildGrid(
 ): UiScreen {
   const id = screenId ?? KITS_SCREEN_ID;
 
-  const elements: UiElement[] = [
-    ...titleBar('kits', 'KITS', { subtitle: 'O que a rede entrega, e a regra de cada um.' }),
-  ];
-
   if (offers.length === 0) {
-    elements.push(
-      panel('kits-vazio', fill(0, 42, 0, 0), C.surface, [
-        label('kits-vazio-texto', 'Nenhum kit disponível neste servidor.', fill(20, 20, 20, 20), {
-          color: C.textMuted,
-        }),
-      ]),
-    );
-
-    return { id, name: 'KITS', kind: 'page', elements };
+    return {
+      id,
+      name: 'KITS',
+      kind: 'page',
+      elements: [
+        ...header(0, 0),
+        panel('kits-vazio', fill(0, HEADER_BAR, 0, 0), C.surface, [
+          label('kits-vazio-texto', 'Nenhum kit disponível neste servidor.', fill(20, 20, 20, 20), {
+            color: C.textMuted,
+          }),
+        ]),
+      ],
+    };
   }
 
   // ####  A BARRA SÓ APARECE COM MAIS DE UMA CATEGORIA  ####
@@ -483,37 +571,147 @@ function buildGrid(
       ? offers.filter((kit) => categorySlug(kit.category) === active.slug)
       : offers;
 
-  const top = 42;
+  const elements: UiElement[] = [
+    ...header(shown.length, shown.filter((kit) => kit.available).length),
+  ];
 
   if (grouped) {
-    elements.push(...sidebar(categories, active));
+    elements.push(...sidebar(categories, active, offers));
   }
 
-  const pages = Math.max(1, Math.ceil(shown.length / PER_PAGE));
+  // ####  QUANTOS CABEM NUM FRAME, E NÃO QUANTOS CABEM NA TELA  ####
+  //
+  // A rolagem tirou o teto VISUAL: cabe a fileira que for. O teto
+  // que sobrou é o do transporte — a tela inteira vai num comando
+  // de RCON, e o frame são 50.000 bytes em base64.
+  //
+  // `fitCards` responde quantos cards cabem nesse orçamento. Quando
+  // a categoria tem mais que isso, o resto vai para uma PÁGINA
+  // seguinte, e o "‹ 1 / 2 ›" reaparece embaixo. É rede de
+  // segurança, não o desenho: com kits de nome normal ele só
+  // aparece perto dos vinte, e uma categoria com vinte kits é
+  // incomum.
+  const perPage = fitCards(shown, grouped ? categories.length : 0);
+  const pages = Math.max(1, Math.ceil(shown.length / perPage));
   const current = Math.min(target.page, pages - 1);
-  const slice = shown.slice(current * PER_PAGE, current * PER_PAGE + PER_PAGE);
+  const slice = shown.slice(current * perPage, current * perPage + perPage);
+
+  const rows = Math.max(1, Math.ceil(slice.length / GRID.columns));
+  const contentHeight = rows * GRID.cardHeight + (rows - 1) * GRID.gap;
+  const paged = pages > 1;
+  const width = cardWidth(grouped);
+
+  // A área visível: o que sobra sob o cabeçalho, menos a faixa do
+  // pager quando ele existe.
+  const viewport = VIEWPORT_HEIGHT - HEADER_BAR - (paged ? PAGER_BAR : 0);
 
   elements.push(
-    panel(
-      'kits-grade',
-      // A grade encolhe pela ESQUERDA quando há coluna. Os cards
-      // são ancorados em fração do pai (ver `kitCard`), então eles
-      // se reacomodam sozinhos — nenhuma medida de card muda aqui.
-      fill(grouped ? SIDEBAR.width + SIDEBAR.gap : 0, top, 0, 26),
-      C.none,
+    scrollArea(
+      'kg',
+      // A área encolhe pela ESQUERDA quando há coluna. À direita ela
+      // vai até o fim: a faixa da barra é descontada do CONTEÚDO
+      // (ver `cardWidth`), e não da área, senão a barra continua
+      // caindo sobre o último card de cada fileira.
+      fill(grouped ? SIDEBAR.width + SIDEBAR.gap : 0, HEADER_BAR, 0, paged ? PAGER_BAR : 0),
+      { viewport, content: contentHeight },
       slice.map((kit, index) =>
-        kitCard(kit, index % GRID.columns, Math.floor(index / GRID.columns), itemOf),
+        kitCard(kit, index, index % GRID.columns, Math.floor(index / GRID.columns), width, itemOf),
       ),
     ),
   );
 
-  // Sem isto, o nono kit sumiria sem nada na tela dizer que ele
-  // existe — a pior forma de perder conteúdo, porque ninguém percebe.
-  if (pages > 1) {
+  // Sem isto, o vigésimo primeiro kit sumiria sem nada na tela
+  // dizendo que ele existe — a pior forma de perder conteúdo,
+  // porque ninguém percebe.
+  if (paged) {
     elements.push(...pager(active?.slug ?? NO_CATEGORY, current, pages));
   }
 
   return { id, name: 'KITS', kind: 'page', elements };
+}
+
+// ============================================================
+//  O CABEÇALHO
+// ============================================================
+
+/** A altura da faixa de título, com o respiro. */
+const HEADER_BAR = 34;
+
+/** A faixa do "‹ 1 / 2 ›", quando a categoria não cabe num frame. */
+const PAGER_BAR = 26;
+
+/**
+ * A faixa de título: o nome, a contagem e o "?".
+ *
+ * ####  ELA ERA A `titleBar` COMPARTILHADA, DE 42 PX  ####
+ *
+ * O título em 18 px e, sob ele, "O que a rede entrega, e a regra de
+ * cada um." em 11. Duas linhas para dizer o que a aba acesa lá em
+ * cima já dizia — e 42 px é um quinto da altura de um card.
+ *
+ * Aqui ele é UMA linha de 22 px: o nome, e ao lado a única coisa
+ * que muda de servidor para servidor e de jogador para jogador —
+ * quantos kits há, e quantos dão para pegar AGORA. A frase de antes
+ * virou a dica do "?" à direita: quem nunca viu esta tela pergunta
+ * uma vez, e quem já viu não precisa ler de novo a cada abertura.
+ */
+function header(total: number, ready: number): UiElement[] {
+  const count =
+    total === 0
+      ? 'nenhum kit por aqui'
+      : `${String(total)} ${total === 1 ? 'kit' : 'kits'} · ${
+          ready === 0
+            ? 'nenhum disponível agora'
+            : `${String(ready)} ${ready === 1 ? 'disponível' : 'disponíveis'} agora`
+        }`;
+
+  return [
+    // O acento vermelho, o mesmo de todas as páginas do menu.
+    panel(
+      'kh-a',
+      {
+        anchorMin: { x: 0, y: 1 },
+        anchorMax: { x: 0, y: 1 },
+        offsetMin: { x: 0, y: -22 },
+        offsetMax: { x: 3, y: 0 },
+      },
+      C.rust,
+    ),
+    label('kh-t', 'KITS', topBar(22, 0, 13), {
+      size: 16,
+      align: 'MiddleLeft',
+      font: 'RobotoCondensed-Bold.ttf',
+    }),
+    // A contagem começa depois do nome. 62 px é onde "KITS" em 16
+    // bold termina, com ar — ver `textWidth`.
+    label('kh-c', count, topBar(22, 0, 62), {
+      size: 11,
+      color: C.textMuted,
+      align: 'MiddleLeft',
+    }),
+    // ####  O "?" É UM RÓTULO, E NÃO UM ÍCONE  ####
+    //
+    // Um ícone custaria um PNG na biblioteca e um elemento de
+    // imagem; o "?" custa o mesmo elemento que qualquer texto, e
+    // não depende de o OrigemZImages já ter subido o arquivo. O que
+    // ele precisa ser é DESCOBRÍVEL — e um "?" no canto de uma
+    // barra de título é o sinal mais antigo que existe de "passe o
+    // mouse aqui".
+    tip(
+      label(
+        'kh-i',
+        '?',
+        {
+          anchorMin: { x: 1, y: 1 },
+          anchorMax: { x: 1, y: 1 },
+          offsetMin: { x: -22, y: -22 },
+          offsetMax: { x: 0, y: 0 },
+        },
+        { size: 13, color: C.textMuted, align: 'MiddleCenter' },
+      ),
+      'O que a rede entrega, e a regra de cada um. Passe o mouse num kit para ver a regra dele.',
+    ),
+  ];
 }
 
 /** O endereço de uma página da grade. */
@@ -523,6 +721,21 @@ export function gridScreenId(category: string, page: number): string {
     : `${KITS_SCREEN_ID}:${category}:${String(page)}`;
 }
 
+/**
+ * A largura de um card, em pixels.
+ *
+ * Sai da área da grade menos a faixa da barra de rolagem e os vãos
+ * entre as colunas. É o número que faz a última coluna parar ANTES
+ * da barra em vez de ficar debaixo dela.
+ */
+function cardWidth(grouped: boolean): number {
+  const area =
+    VIEWPORT_WIDTH - (grouped ? SIDEBAR.width + SIDEBAR.gap : 0) - SCROLL_GUTTER;
+
+  return (area - (GRID.columns - 1) * GRID.gap) / GRID.columns;
+}
+
+/** Uma faixa colada no topo do PAI, com altura fixa. */
 function topBarRect(height: number): Rect {
   return {
     anchorMin: { x: 0, y: 1 },
@@ -530,6 +743,136 @@ function topBarRect(height: number): Rect {
     offsetMin: { x: 0, y: -height },
     offsetMax: { x: 0, y: 0 },
   };
+}
+
+// ============================================================
+//  A RÉGUA DE BYTES
+//
+//  ####  O QUE SEGURA ESTA TELA NÃO É A ALTURA  ####
+//
+//  Com rolagem, a grade cresce para baixo o quanto quiser: o
+//  jogador rola. O que não cresce é o TRANSPORTE — a tela inteira
+//  vai ao plugin num comando de console, e o frame do WebRCON são
+//  `UI_DOC_MAX_BYTES` (50.000) em base64.
+//
+//  Estourar isso não dá erro visível: o frame é cortado, o JSON
+//  chega truncado e o menu não abre. É exatamente o tipo de defeito
+//  que aparece no servidor do dono com vinte kits e nunca na
+//  máquina de quem escreveu o código com três.
+//
+//  Por isso a conta acontece ANTES de desenhar, e o que não couber
+//  vira página — que é o mecanismo que esta tela já tinha e que
+//  passa a ser rede de segurança em vez de desenho.
+//
+//  ####  OS NÚMEROS SÃO MEDIDOS, E O TESTE OS MANTÉM HONESTOS  ####
+//
+//  `ui-kits-grade.test.ts` monta a tela cheia, converte para CUI e
+//  confere o tamanho real contra o teto. Quando alguém acrescentar
+//  um elemento ao card, é lá que o número velho aparece.
+// ============================================================
+
+/**
+ * O orçamento da tela, em bytes de JSON.
+ *
+ * ####  ELE ERA UM FRAME, E ISSO ERA O TETO DA ROLAGEM  ####
+ *
+ * A tela viajava num comando de console: 50.000 bytes em base64,
+ * 37.500 de JSON, doze cards. A grade rolava três fileiras e
+ * empurrava o décimo terceiro kit para a página 2 — o que a
+ * rolagem tinha acabado de vir substituir.
+ *
+ * Desde 20/09/2026 o agente PARTE a tela em comandos que cabem, e o
+ * plugin os junta antes de desenhar (ver `encodeUiScreenParts` em
+ * types/ui-transport.ts e `Assemble` no OrigemZUI.cs). O teto
+ * passou a ser outro, e ele é generoso: três frames de JSON.
+ *
+ * ####  POR QUE CONTINUA HAVENDO TETO  ####
+ *
+ * Do outro lado o desenho ainda vira um `AddUi` por jogador, e cada
+ * elemento é um objeto que o cliente monta. Trinta e poucos cards
+ * numa categoria é uma vitrine; trezentos é um servidor mandando o
+ * cliente de cada jogador montar dois mil retângulos toda vez que
+ * alguém abre a aba.
+ *
+ * O que passar disso vira página, como sempre — só que agora a
+ * página comporta nove fileiras em vez de três.
+ */
+const BYTE_BUDGET = Math.floor((UI_DOC_MAX_BYTES * 3) / 4) * 3;
+
+// ------------------------------------------------------------
+//  OS NÚMEROS ABAIXO FORAM MEDIDOS EM 20/09/2026, convertendo a
+//  tela para CUI e contando o JSON do pacote inteiro. Quem mexer no
+//  card muda os dois primeiros; o teste `cabe no frame` é o que
+//  avisa.
+// ------------------------------------------------------------
+
+/** O cabeçalho, a área rolável e o envelope do pacote. */
+const FIXED_BYTES = 2_900;
+
+/** Cada linha da coluna de categorias: um botão são dois elementos. */
+const CATEGORY_BYTES = 930;
+
+/** O card sem nome, sem descrição e sem o ícone de VIP. */
+const CARD_BYTES = 2_650;
+
+/** O ícone de VIP: um elemento a mais, com a dica junto. */
+const CARD_TIER_BYTES = 330;
+
+/**
+ * Quantos cards cabem no orçamento.
+ *
+ * ####  O TEXTO DO ADMIN ENTRA NA CONTA  ####
+ *
+ * "KIT" e "KIT DE SOBREVIVÊNCIA AVANÇADA PARA O WIPE DE SEXTA"
+ * custam bytes diferentes, e a descrição viaja inteira no tooltip.
+ * Um mural de nomes longos é justamente o caso em que uma régua de
+ * "oito por página" erra — e erra para o lado em que o menu não
+ * abre.
+ *
+ * Nunca devolve menos que uma fileira: uma página com dois cards
+ * seria pior que o frame cortado — ela funcionaria, e ninguém
+ * entenderia por que a grade virou aquilo.
+ */
+/**
+ * Quantas categorias a coluna pode desenhar sem comer a grade.
+ *
+ * Uma fileira de cards é reservada antes: uma tela com a coluna
+ * inteira e nenhum kit à direita responderia à pergunta errada.
+ *
+ * O número que sai daqui — trinta e poucas — não é um limite que
+ * alguém alcance cadastrando categorias de verdade. Ele existe
+ * porque a alternativa é o frame estourar em silêncio.
+ */
+function fitCategories(): number {
+  const room = (BYTE_BUDGET - FIXED_BYTES - GRID.columns * CARD_BYTES) / CATEGORY_BYTES;
+
+  return Math.max(1, Math.floor(room));
+}
+
+function fitCards(offers: readonly KitOfferView[], categories: number): number {
+  let spent = FIXED_BYTES + categories * CATEGORY_BYTES;
+  let fit = 0;
+
+  for (const kit of offers) {
+    spent +=
+      CARD_BYTES +
+      // Duas vezes: o rótulo da faixa, e a dica do card.
+      kit.name.length * 2 +
+      Math.min(kit.description?.length ?? 0, TIP_DESCRIPTION_MAX) +
+      // O motivo de não dar para pegar também viaja no tooltip. Ele
+      // é montado aqui (ver `longReason`), então o teto é conhecido:
+      // a frase mais longa que ele escreve tem ~70 caracteres.
+      (kit.available ? 0 : 80) +
+      (kit.requiredTier === null ? 0 : CARD_TIER_BYTES);
+
+    if (spent > BYTE_BUDGET) {
+      break;
+    }
+
+    fit += 1;
+  }
+
+  return Math.max(GRID.columns, fit);
 }
 
 function pager(category: string, page: number, pages: number): UiElement[] {
@@ -605,30 +948,67 @@ function pager(category: string, page: number, pages: number): UiElement[] {
 function sidebar(
   categories: readonly { readonly slug: string; readonly name: string }[],
   active: { readonly slug: string; readonly name: string } | null,
+  offers: readonly KitOfferView[],
 ): UiElement[] {
-  // ####  QUANTAS CABEM  ####
+  // ####  A COLUNA ROLA, COMO A GRADE  ####
   //
-  // A área útil vai de 42 (sob o título) até 26 do fundo (o pager).
-  // Numa tela de 720 com o cabeçalho e as margens do shell, sobram
-  // ~516 px — dezesseis categorias. Passar disso é improvável, e
-  // "improvável" não é o mesmo que "impossível": o que não couber é
-  // CONTADO, como em todo o resto deste menu.
-  const room = Math.max(1, Math.floor((SIDEBAR_HEIGHT - SIDEBAR.item) / SIDEBAR.item));
+  // Ela contava o que não coubesse: treze categorias na tela e um
+  // "e mais 4..." embaixo — o excedente era DITO, mas continuava
+  // inalcançável. Quem tivesse dezessete categorias não tinha como
+  // abrir as quatro últimas.
+  //
+  // Com a rolagem, "quantas cabem NA TELA" deixou de ser uma
+  // pergunta: a coluna desenha todas e rola o que passar da altura.
+  //
+  // O teto que resta é o do FRAME — cada linha custa ~780 bytes, e
+  // uma coluna sem limite come o orçamento dos cards até a grade
+  // não ter o que mostrar. `fitCategories` guarda uma fileira de
+  // cards antes de repartir o resto, e o que passar disso volta a
+  // ser CONTADO, como era.
+  const room = fitCategories();
   const visible = categories.length > room ? categories.slice(0, room) : categories;
   const rest = categories.length - visible.length;
+
+  const height = VIEWPORT_HEIGHT - HEADER_BAR;
+  const content = (visible.length + (rest > 0 ? 1 : 0)) * SIDEBAR.item;
+
+  // ####  A FAIXA DA BARRA SÓ EXISTE QUANDO HÁ BARRA  ####
+  //
+  // Os itens param antes da borda direita para a barra de rolagem
+  // não cair em cima do nome da categoria. Mas com poucas
+  // categorias não há barra nenhuma — a área não rola, e o CUI a
+  // esconde (`autoHide`) — e aí o recuo vira um defeito visível: o
+  // fundo preto do item ABERTO deixava de encostar na borda da
+  // coluna, e ficava com uma tira cinza do lado. Foi o que o dono
+  // fotografou.
+  const rolling = content > height;
+  const gutter = rolling ? -SIDEBAR.gutter : 0;
 
   const items: UiElement[] = [];
 
   for (const [index, entry] of visible.entries()) {
-    const id = `kcat${entry.slug}`;
-    const text = entry.name.toUpperCase();
+    // ####  O ID É O ÍNDICE, E NÃO O SLUG  ####
+    //
+    // `kcatroupa-bronze` viajava duas vezes por elemento (no `name`
+    // e no `parent` do filho) mais uma no comando do botão. `kc3`
+    // diz a mesma coisa para o cliente, que só precisa que seja
+    // único DENTRO desta tela — e a tela é redesenhada inteira a
+    // cada clique. Ver a régua de bytes.
+    const id = `kc${String(index)}`;
+    const count = offers.filter((kit) => categorySlug(kit.category) === entry.slug).length;
+    // A contagem entra no MESMO rótulo, e não num segundo elemento
+    // à direita: ela responde "vale entrar aqui?" e custa os
+    // caracteres, não os ~260 bytes de um elemento novo.
+    const text = `${entry.name.toUpperCase()} · ${String(count)}`;
     const isActive = active !== null && entry.slug === active.slug;
 
     const rect: Rect = {
       anchorMin: { x: 0, y: 1 },
       anchorMax: { x: 1, y: 1 },
       offsetMin: { x: 0, y: -((index + 1) * SIDEBAR.item) },
-      offsetMax: { x: 0, y: -(index * SIDEBAR.item) },
+      // Recuado só quando a coluna ROLA: a barra é desenhada POR
+      // DENTRO da área, como a da grade. Ver `rolling`.
+      offsetMax: { x: gutter, y: -(index * SIDEBAR.item) },
     };
 
     if (isActive) {
@@ -674,7 +1054,7 @@ function sidebar(
   if (rest > 0) {
     items.push(
       label(
-        'kcatmais',
+        'kcmais',
         `e mais ${String(rest)}...`,
         {
           anchorMin: { x: 0, y: 1 },
@@ -698,11 +1078,26 @@ function sidebar(
       {
         anchorMin: { x: 0, y: 0 },
         anchorMax: { x: 0, y: 1 },
-        offsetMin: { x: 0, y: 26 },
-        offsetMax: { x: SIDEBAR.width, y: -42 },
+        offsetMin: { x: 0, y: 0 },
+        offsetMax: { x: SIDEBAR.width, y: -HEADER_BAR },
       },
       C.surface2,
-      items,
+      [
+        // A área rolável ocupa a coluna inteira; os itens se
+        // posicionam dentro dela, na altura do CONTEÚDO. Com poucas
+        // categorias o conteúdo cabe, a barra some e a coluna fica
+        // idêntica à de antes.
+        scrollArea(
+          'kcs',
+          // A área ocupa a coluna inteira; quem recua para a barra
+          // são os ITENS (ver `SIDEBAR.gutter`), e não ela — a barra
+          // acompanha a área, então encolher a área não a tiraria de
+          // cima do texto.
+          fill(),
+          { viewport: height, content },
+          items,
+        ),
+      ],
     ),
   ];
 }
@@ -717,38 +1112,76 @@ function accentRect(): Rect {
   };
 }
 
-function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLookup): UiElement {
-  const columnWidth = 1 / GRID.columns;
-  const half = GRID.gap / 2;
+/**
+ * Um card da grade.
+ *
+ * ####  O CARD INTEIRO É O BOTÃO  ####
+ *
+ * Ele tinha um "VER" de 50 px no rodapé, ao lado do RESGATAR. Dois
+ * botões num card de 200 px de largura, e o da esquerda existia só
+ * para dizer "mostre o que já está escrito aqui, só que completo".
+ *
+ * Agora o card é um `button` cujo desenho mora nos FILHOS — o mesmo
+ * arranjo do cartão do passe. Clicar em qualquer lugar dele abre o
+ * detalhe; o RESGATAR continua por cima, e o clique nele é dele (no
+ * Unity quem recebe o raio é o elemento da frente).
+ *
+ * Isso vale dois elementos por card — um botão são DOIS no CUI, o
+ * retângulo e o rótulo — e é parte do que paga a rolagem: são ~700
+ * bytes que voltam para o orçamento do frame, por card.
+ */
+function kitCard(
+  kit: KitOfferView,
+  index: number,
+  column: number,
+  row: number,
+  width: number,
+  itemOf: ItemLookup,
+): UiElement {
+  // Em PIXELS, e ancorado no canto superior esquerdo da área. Era em
+  // fração do pai, o que dividia a largura INTEIRA entre as colunas
+  // — inclusive a faixa em que a barra de rolagem é desenhada. Ver
+  // `cardWidth`.
+  const x = column * (width + GRID.gap);
   const y = row * (GRID.cardHeight + GRID.gap);
-  const id = `k${kit.slug}`;
+  // Curto de propósito: o id viaja no `name` do elemento, no
+  // `parent` de cada filho e no comando do botão. Ver a régua de
+  // bytes.
+  const id = `k${String(index)}`;
 
   const first = kit.items[0];
   const icon = first === undefined ? null : itemOf(first.shortname);
+  const tier = tierLineOf(kit);
 
   // A arte do kit, grande e no meio. Ela é o que identifica o kit à
   // distância — ver `CARD`.
   const iconRect: Rect = {
     anchorMin: { x: 0.5, y: 1 },
     anchorMax: { x: 0.5, y: 1 },
-    offsetMin: { x: -58, y: -CARD.iconBottom },
-    offsetMax: { x: 58, y: -CARD.iconTop },
+    offsetMin: { x: -65, y: -CARD.iconBottom },
+    offsetMax: { x: 65, y: -CARD.iconTop },
   };
 
   const children: UiElement[] = [
-    // ####  A BARRA DE ESTADO  ####
+    // ####  A BARRA DE ESTADO, TRÊS PIXELS NO TOPO  ####
     //
-    // Dois pixels no topo. É o que responde "o que dá para pegar
-    // agora?" num mural de doze cards, sem ler doze rodapés.
-    panel(`${id}-a`, topBarRect(CARD.accent), accentColor(kit)),
+    // Ela chegou a virar a FAIXA INTEIRA do nome, tingida de
+    // verde-musgo, âmbar-terra ou vinho. Durou uma captura de tela:
+    // o dono olhou e disse que não ficou legal, e ele tem razão —
+    // uma faixa colorida atrás do nome do kit briga com a arte
+    // logo abaixo, e o card inteiro ganha um tom que não é dele.
+    //
+    // A tira fina diz a mesma coisa com a cor CHEIA da paleta, que
+    // é o que se lê à distância, sem tingir nada.
+    panel(`${id}a`, topBarRect(CARD.accent), accentColor(kit)),
 
     // ####  A FAIXA DO NOME  ####
     //
-    // Ela é a primeira coisa que se lê em cada card — e é também o
-    // que dá ao card uma borda visível contra a moldura do menu,
-    // que é da mesma cor dele. Ver `CARD`.
+    // Escura, um tom abaixo do card: ela é a primeira coisa que se
+    // lê, e é o que dá ao card uma borda visível contra a moldura
+    // do menu.
     panel(
-      `${id}-nb`,
+      `${id}n`,
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
@@ -757,12 +1190,23 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
       },
       C.bg,
       [
-        label(`${id}-n`, kit.name, fill(10, 0, 10, 0), {
-          size: 13,
-          color: C.text,
-          align: 'MiddleLeft',
-          font: 'RobotoCondensed-Bold.ttf',
-        }),
+        label(
+          `${id}t`,
+          // MAIÚSCULAS, como as abas do menu e os nomes da coluna de
+          // categorias. "Kit Avancado" no meio de uma tela em caixa
+          // alta parecia texto de outro lugar.
+          kit.name.toUpperCase(),
+          // Com ícone de VIP, o texto para antes dele: um nome longo
+          // passando POR BAIXO do ícone é o mesmo defeito que o
+          // "EXCLUSIVO VIP OURO" atrás do botão, só que menor.
+          fill(10, 0, tier === null ? 10 : CARD.tierIcon + 12, 0),
+          {
+            size: 13,
+            color: C.text,
+            align: 'MiddleLeft',
+            font: 'RobotoCondensed-Bold.ttf',
+          },
+        ),
       ],
     ),
 
@@ -776,107 +1220,136 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
     // Quem leva os bytes ao jogo é game/card-icons.ts; aqui sai só o
     // lugar reservado, que o plugin troca pelo CRC ao desenhar.
     kit.iconFile !== null
-      ? storedImage(`${id}-i`, kitIconKey(kit.slug), iconRect)
+      ? storedImage(`${id}i`, kitIconKey(kit.slug), iconRect)
       : icon === null
         ? // Sem catálogo lido não há itemId, e sem itemId não há
           // ícone. Um retângulo vazio é honesto: ele não finge ser um
           // item que não sabemos qual é.
-          panel(`${id}-i`, iconRect, C.surface2)
-        : itemImage(`${id}-i`, { itemId: icon.itemId, skinId: first?.skinId ?? '0' }, iconRect),
+          panel(`${id}i`, iconRect, C.surface)
+        : itemImage(`${id}i`, { itemId: icon.itemId, skinId: first?.skinId ?? '0' }, iconRect),
 
+    // A linha de meta: quantos itens vêm dentro, e de quanto em
+    // quanto tempo. É o que decide se vale abrir o card.
     label(
-      `${id}-r`,
+      `${id}m`,
       `${String(kit.items.length)} ${kit.items.length === 1 ? 'item' : 'itens'} · ${ruleOf(kit)}`,
       {
         anchorMin: { x: 0, y: 1 },
         anchorMax: { x: 1, y: 1 },
-        offsetMin: { x: CARD.pad, y: -CARD.ruleBottom },
-        offsetMax: { x: -CARD.pad, y: -CARD.ruleTop },
+        offsetMin: { x: CARD.pad, y: -CARD.metaBottom },
+        offsetMax: { x: -CARD.pad, y: -CARD.metaTop },
       },
       { size: 11, color: C.textMuted },
     ),
-
-    // ####  "VER" ABRE O QUE NÃO CABE NO CARD  ####
-    //
-    // A grade do que vem dentro, quando ele pegou pela última vez e
-    // quantas vezes já pegou. Num card de 162 px isso não entra — e
-    // sem isso o jogador clica em RESGATAR para descobrir o que
-    // ganha, o que num resgate único não dá para desfazer.
-    //
-    // Ele era um "i" de 20 px flutuando no canto superior, sobre o
-    // nada. Aqui está no RODAPÉ, ao lado da ação, com o tamanho de
-    // um alvo de clique — o mesmo arranjo de qualquer card que
-    // ofereça "olhar" e "fazer".
-    button(
-      `${id}-info`,
-      'VER',
-      {
-        anchorMin: { x: 0, y: 0 },
-        anchorMax: { x: 0, y: 0 },
-        offsetMin: { x: 8, y: CARD.buttonBottom },
-        offsetMax: { x: 8 + CARD.peek, y: CARD.buttonTop },
-      },
-      { id: `a${id}info`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug) },
-      { color: C.surface2, textColor: C.textMuted, hoverColor: C.border, fontSize: 11 },
-    ),
   ];
 
-  const tier = tierLineOf(kit);
-
+  // ####  O VIP VIROU UM ÍCONE COM DICA  ####
+  //
+  // Em âmbar, na ponta da faixa do nome. A frase inteira —
+  // "EXCLUSIVO VIP OURO" — está no tooltip, e o que fica na tela é
+  // a COR: âmbar é a marca do que é premium em todo o menu, e ela
+  // se lê à distância de um olhar, que é o que um mural de cards
+  // pede. Escrita, ela custava uma linha inteira do card e acabava
+  // atrás do botão.
   if (tier !== null) {
     children.push(
-      label(
-        `${id}-t`,
+      tip(
+        storedImage(
+          `${id}v`,
+          VIP_ICON_KEY,
+          {
+            anchorMin: { x: 1, y: 1 },
+            anchorMax: { x: 1, y: 1 },
+            offsetMin: { x: -(CARD.tierIcon + 8), y: -(CARD.nameTop + 5 + CARD.tierIcon) },
+            offsetMax: { x: -8, y: -(CARD.nameTop + 5) },
+          },
+          C.amber,
+        ),
         tier,
-        {
-          anchorMin: { x: 0, y: 1 },
-          anchorMax: { x: 1, y: 1 },
-          offsetMin: { x: CARD.pad, y: -CARD.tierBottom },
-          offsetMax: { x: -CARD.pad, y: -CARD.tierTop },
-        },
-        { size: 11, color: C.amber, font: 'RobotoCondensed-Bold.ttf' },
       ),
     );
   }
 
+  // ####  O CARD INTEIRO ABRE O DETALHE  ####
+  //
+  // Um botão TRANSPARENTE por cima do desenho, do topo até onde o
+  // rodapé começa. Ele deixa o RESGATAR de fora de propósito: no
+  // Unity quem recebe o clique é o elemento da frente, e dois
+  // botões empilhados no mesmo ponto fariam o de baixo nunca
+  // responder.
+  //
+  // Ele substituiu o "VER" de 50 px que dividia o rodapé com a
+  // ação. O que aquele botão dizia — "mostre o que já está escrito
+  // aqui, só que completo" — não precisava de um rótulo próprio.
+  children.push(
+    tip(
+      button(
+        `${id}o`,
+        '',
+        fill(0, 0, 0, GRID.cardHeight - CARD.metaBottom),
+        { id: `o${String(index)}`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug) },
+        {
+          color: C.none,
+          textColor: C.text,
+          // Um véu claríssimo: o card ACENDE sob o cursor, e é isso
+          // que diz que ele inteiro é clicável.
+          hoverColor: '#FFFFFF14',
+        },
+      ),
+      cardTip(kit),
+    ),
+  );
+
   const buttonRect: Rect = {
     anchorMin: { x: 0, y: 0 },
     anchorMax: { x: 1, y: 0 },
-    offsetMin: { x: 8 + CARD.peek + 4, y: CARD.buttonBottom },
+    offsetMin: { x: 8, y: CARD.buttonBottom },
     offsetMax: { x: -8, y: CARD.buttonTop },
   };
 
   children.push(
     kit.available
-      ? button(
-          `${id}-b`,
+      ? // Sem dica: "RESGATAR" já é a frase inteira, e uma dica que
+        // repete o rótulo em outras palavras gasta bytes do frame
+        // para não dizer nada.
+        button(
+          `${id}b`,
           'RESGATAR',
           buttonRect,
-          // ####  O CARD NÃO RESGATA: ELE PERGUNTA  ####
-          //
-          // Um resgate único é irreversível, e o botão fica a um
-          // clique de distância num card pequeno, ao lado de outros
-          // sete. A confirmação é a diferença entre "peguei o que
-          // queria" e "gastei minha única chance sem querer".
-          { id: `pedir-${kit.slug}`, kind: 'modal.open', screenId: kitInfoScreenId(kit.slug, 'confirmar') },
+            // ####  O CARD NÃO RESGATA: ELE PERGUNTA  ####
+            //
+            // Um resgate único é irreversível, e o botão fica a um
+            // clique de distância num card pequeno, ao lado de
+            // outros sete. A confirmação é a diferença entre "peguei
+            // o que queria" e "gastei minha única chance sem
+            // querer".
+          {
+            id: `p${String(index)}`,
+            kind: 'modal.open',
+            screenId: kitInfoScreenId(kit.slug, 'confirmar'),
+          },
           { color: C.rust, textColor: C.white, hoverColor: '#D4553FFF', fontSize: 12 },
         )
       : // ####  QUEM NÃO PODE PEGAR VÊ O MOTIVO, NÃO UM BOTÃO MORTO  ####
         //
-        // E o motivo é CURTO, montado aqui: a frase do `KitStore` traz
-        // o nome do kit e o SteamID porque serve ao painel e ao
-        // suporte. Num card de 160px ela não cabe — e não coube mesmo:
-        // no jogo ela apareceu cortada no meio.
-        deadButton(`${id}-b`, shortReason(kit), buttonRect, stateColor(kit)),
+        // Na tela vai o motivo CURTO, montado aqui: a frase do
+        // `KitStore` traz o nome do kit e o SteamID porque serve ao
+        // painel e ao suporte, e num card estreito ela apareceu
+        // cortada no meio no jogo.
+        //
+        // A frase inteira não se perde: ela é a dica. É para isso
+        // que o tooltip serve — o que não cabe escrito, e que quem
+        // quer saber pergunta parando o mouse em cima.
+        tip(deadButton(`${id}b`, shortReason(kit), buttonRect, stateColor(kit)), longReason(kit)),
   );
 
   return panel(
-    `${id}-c`,
+    `${id}c`,
     {
-      anchorMin: { x: columnWidth * column, y: 1 },
-      anchorMax: { x: columnWidth * (column + 1), y: 1 },
-      offsetMin: { x: column === 0 ? 0 : half, y: -(y + GRID.cardHeight) },
-      offsetMax: { x: column === GRID.columns - 1 ? 0 : -half, y: -y },
+      anchorMin: { x: 0, y: 1 },
+      anchorMax: { x: 0, y: 1 },
+      offsetMin: { x, y: -(y + GRID.cardHeight) },
+      offsetMax: { x: x + width, y: -y },
     },
     // ####  `--surface-2`, E NÃO `--surface`  ####
     //
@@ -884,9 +1357,113 @@ function kitCard(kit: KitOfferView, column: number, row: number, itemOf: ItemLoo
     // mesma cor não tem borda contra ela — e o CUI não tem borda de
     // verdade para dar. Um tom acima é o que o separa do fundo, que
     // é o mesmo recurso que a coluna de categorias já usa.
+    //
+    // ####  E É UM `panel`, E NÃO UM `button`  ####
+    //
+    // O card já foi um botão, para ser clicável inteiro. No jogo ele
+    // apareceu PRETO: o cliente não pinta um `CuiButton` como pinta
+    // um `CuiPanel` da mesma cor — a cor passa pelo `ColorBlock` do
+    // botão antes de virar pixel, e #262626 vira quase #000000.
+    //
+    // Quem carrega o clique agora é a `área` logo abaixo, que é
+    // transparente e não pinta nada. Assim a cor do card é a cor
+    // que se pediu, e o card inteiro continua abrindo o detalhe.
     C.surface2,
     children,
   );
+}
+
+/**
+ * O quanto da descrição do admin cabe numa dica de uma linha.
+ *
+ * 120 caracteres são ~14 palavras, o que um tooltip do jogo mostra
+ * sem sair da tela num monitor de 1920.
+ */
+const TIP_DESCRIPTION_MAX = 120;
+
+/** Corta um texto no tamanho de uma dica, com reticências. */
+function shorten(text: string): string {
+  return text.length > TIP_DESCRIPTION_MAX
+    ? `${text.slice(0, TIP_DESCRIPTION_MAX).trimEnd()}...`
+    : text;
+}
+
+/**
+ * A dica do card: o que não coube escrito nele.
+ *
+ * A DESCRIÇÃO do admin vem primeiro quando existe — é o texto que
+ * alguém escreveu justamente para explicar aquele kit, e ele não
+ * aparecia em lugar nenhum da grade. Sem ela, a dica diz a regra e
+ * o nível, que é mais do que a linha de meta cabe dizer.
+ */
+function cardTip(kit: KitOfferView): string {
+  const parts: string[] = [kit.name];
+  const description = kit.description ?? '';
+
+  if (description !== '') {
+    // ####  CORTADA, E O CORTE APARECE  ####
+    //
+    // A descrição pode ter 400 caracteres (é o teto do cadastro), e
+    // o tooltip é UMA LINHA: 400 caracteres nela saem da tela pelos
+    // dois lados. O detalhe inteiro está a um clique daqui, no
+    // modal — a dica é a isca, não o texto.
+    parts.push(shorten(description));
+  }
+
+  const tier = tierLineOf(kit);
+
+  if (tier !== null) {
+    parts.push(tier);
+  }
+
+  parts.push('Clique para ver o que vem dentro.');
+
+  return parts.join(' — ');
+}
+
+/**
+ * Por que não dá para pegar, por extenso e na SEGUNDA PESSOA.
+ *
+ * ####  O `reason` DO `KitStore` NÃO SERVE AQUI  ####
+ *
+ * Ele é a frase do PAINEL: "O kit "Kit Avançado" é de resgate
+ * único, e 76561198065694695 já o pegou em 06/09/2026." Ela nomeia
+ * o kit e o SteamID porque quem a lê está no suporte, olhando o
+ * registro de outra pessoa.
+ *
+ * Quem lê ESTA é o dono daquele SteamID, com o nome do kit escrito
+ * dois centímetros acima. O que falta para ele é "você já pegou" —
+ * e foi o dono quem apontou isso, vendo o número da própria conta
+ * numa dica dentro do jogo.
+ */
+function longReason(kit: KitOfferView): string {
+  if (!kit.enabled) {
+    return 'Este kit está desligado no momento.';
+  }
+
+  if (kit.nextAt !== null) {
+    const left = new Date(kit.nextAt).getTime() - Date.now();
+
+    return left > 0
+      ? `Você já pegou este kit. Pode pegar de novo em ${describeWait(left)}.`
+      : 'Já dá para pegar de novo — clique para confirmar.';
+  }
+
+  if (kit.kind === 'resgate' && kit.usesLeft === 0) {
+    return (kit.useLimit ?? 1) === 1
+      ? 'Você já pegou este kit, e ele é de uma vez só.'
+      : `Você já usou as ${String(kit.useLimit ?? 1)} vezes deste kit.`;
+  }
+
+  const tier = tierLineOf(kit);
+
+  if (tier !== null) {
+    return kit.requiredTierExact
+      ? `Este kit é só para quem tem VIP ${(kit.requiredTier ?? '').toUpperCase()}.`
+      : `Este kit pede VIP ${(kit.requiredTier ?? '').toUpperCase()} ou acima.`;
+  }
+
+  return 'Este kit não está disponível para você agora.';
 }
 
 /**
@@ -988,6 +1565,14 @@ function stateColor(kit: KitOfferView): string {
  *
  * A barra pergunta as TRÊS de uma vez, e é lida à distância, sem
  * texto ao lado. Verde é o que diz "vá" sem precisar de legenda.
+ *
+ * ####  AS CORES SÃO AS CHEIAS DA PALETA  ####
+ *
+ * Isto chegou a ser a faixa inteira do nome, e aí as cores tiveram
+ * de ser rebaixadas para o nome caber legível em cima. O resultado
+ * tingia o card todo, e o dono recusou na primeira captura. Numa
+ * tira de três pixels não há nada escrito por cima: ela pode usar
+ * `--olive`, `--amber` e `--rust-red` como eles são.
  */
 function accentColor(kit: KitOfferView): string {
   if (kit.available) {
